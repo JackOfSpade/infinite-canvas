@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import { useReactFlow } from '@xyflow/react';
-import { v4 as uuidv4 } from 'uuid';
+import { createTextNode, createLinkNode, createGroupNode } from '../utils/nodeFactory';
 
 export function useCanvasDragAndDrop({
   nodes,
@@ -8,7 +8,6 @@ export function useCanvasDragAndDrop({
   setEdges,
   setIsDrawingMode,
   setPendingListing,
-  setListingUrlInput,
   takeSnapshot
 }) {
   const { screenToFlowPosition } = useReactFlow();
@@ -30,16 +29,15 @@ export function useCanvasDragAndDrop({
       position.y -= 20;
       if (nodeType === 'text') {
         takeSnapshot();
-        setNodes(nds => nds.concat({ id: uuidv4(), type: 'text', position, data: { text: '', isNew: true } }));
+        setNodes(nds => nds.concat(createTextNode(position)));
       } else if (nodeType === 'link') {
         takeSnapshot();
-        setNodes(nds => nds.concat({ id: uuidv4(), type: 'link', position, data: { url: '', label: '', isNew: true } }));
+        setNodes(nds => nds.concat(createLinkNode(position)));
       } else if (nodeType === 'group') {
         takeSnapshot();
-        setNodes(nds => nds.concat({ id: uuidv4(), type: 'group', dragHandle: '.drag-handle', style: { width: 320 }, position, data: { title: '', nodes: [], edges: [], collapsed: false, isNew: true } }));
+        setNodes(nds => nds.concat(createGroupNode(position)));
       } else if (nodeType.startsWith('listing-')) {
         setPendingListing({ position, platform: nodeType.replace('listing-', '') });
-        setListingUrlInput('');
       }
       return;
     }
@@ -62,10 +60,9 @@ export function useCanvasDragAndDrop({
         }
       }
     }
-  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode, setPendingListing, setListingUrlInput]);
+  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode, setPendingListing]);
 
   const onNodeDragStop = useCallback((_event, draggedNode) => {
-    // Only capture nodes dragged within the main canvas (fixes nested graph bubbling bug)
     const isMainCanvasNode = nodes.some(n => n.id === draggedNode.id);
     if (!isMainCanvasNode) return;
 
@@ -79,19 +76,12 @@ export function useCanvasDragAndDrop({
       const gw = group.measured?.width || group.style?.width || 320;
       const gh = group.measured?.height || 250;
 
-      // Calculate dragged node center
       const dw = draggedNode.measured?.width || 80;
       const dh = draggedNode.measured?.height || 40;
       const cx = draggedNode.position.x + dw / 2;
       const cy = draggedNode.position.y + dh / 2;
 
-      // Does the center of the node fall within the group's content area?
-      if (
-        cx >= gx &&
-        cx <= gx + gw &&
-        cy >= gy + 20 && // Give some leeway for the title bar
-        cy <= gy + gh
-      ) {
+      if (cx >= gx && cx <= gx + gw && cy >= gy + 20 && cy <= gy + gh) {
         const newNode = { ...draggedNode, selected: false };
         newNode.position = {
           x: Math.max(0, draggedNode.position.x - gx - 10),
@@ -104,10 +94,7 @@ export function useCanvasDragAndDrop({
             .filter(n => n.id !== draggedNode.id)
             .map(n => {
               if (n.id === group.id) {
-                return {
-                  ...n,
-                  data: { ...n.data, nodes: [...(n.data.nodes || []), newNode] },
-                };
+                return { ...n, data: { ...n.data, nodes: [...(n.data.nodes || []), newNode] } };
               }
               return n;
             })

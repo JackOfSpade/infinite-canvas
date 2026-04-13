@@ -1,37 +1,6 @@
 import React, { useState } from 'react';
-import { Store, ShoppingCart, Globe, ChevronLeft, ChevronRight } from 'lucide-react';
-
-/**
- * Platform definitions for the marketplace tab.
- * Each platform has a name, color, drag-type, and icon.
- */
-const PLATFORMS = [
-  {
-    id: 'ebay',
-    name: 'eBay',
-    color: '#e53238',
-    // eBay uses a shopping cart-style icon
-    icon: ShoppingCart,
-  },
-  {
-    id: 'amazon',
-    name: 'Amazon',
-    color: '#ff9900',
-    icon: Store,
-  },
-  {
-    id: 'craigslist',
-    name: 'Craigslist',
-    color: '#5a1a8a',
-    icon: Store,
-  },
-  {
-    id: 'custom',
-    name: 'Custom',
-    color: '#10b981',
-    icon: Globe,
-  },
-];
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { PLATFORMS } from '../utils/platforms';
 
 /**
  * Sidebar component with a Marketplace tab.
@@ -106,6 +75,3 @@ export const Sidebar = React.memo(function Sidebar({ onDragStart }) {
     </div>
   );
 });
-
-// Export platform definitions for use in ListingNode
-export { PLATFORMS };
