@@ -3,30 +3,29 @@ import path from 'path';
 import { GoogleAuth } from 'google-auth-library';
 
 /**
- * Monitoring IPC handlers — powered by Gemini AI via Vertex AI.
- * Uses Service Account dynamically to consume Vertex credits.
+ * Gemini AI service — uses Service Account Bearer tokens against the
+ * Generative Language API (generativelanguage.googleapis.com).
+ * This bills through GCP project credits, not AI Studio prepay.
  */
 
-// We will use gemini-1.5-flash-002 as the default fast analysis model on Vertex
-const GEMINI_MODEL = 'gemini-1.5-flash-002';
+const GEMINI_MODEL = 'gemini-2.5-flash';
 const LOCATION = 'us-central1';
 
-// Hardcoded path to the local service account json (git-ignored)
+// Path to the local service account json (git-ignored)
 const KEY_FILE = path.join(process.cwd(), 'service-account.json');
 
-// Memory cache for our auth client
+// Auth cache
 let authClient = null;
 let projectId = null;
 
 /**
- * Initializes the GoogleAuth library using the service-account.json
- * Extracts projectId and configures OAuth 2.0 scopes.
+ * Initialize GoogleAuth from service-account.json
  */
 async function getAuthClient() {
-  if (authClient) return authClient;
+  if (authClient) return { auth: authClient, projectId };
 
   if (!fs.existsSync(KEY_FILE)) {
-    throw new Error('service-account.json not found in the root directory. Missing authentication.');
+    throw new Error('service-account.json not found. Place it in the project root.');
   }
 
   const sa = JSON.parse(fs.readFileSync(KEY_FILE, 'utf8'));
@@ -37,11 +36,11 @@ async function getAuthClient() {
     scopes: ['https://www.googleapis.com/auth/cloud-platform'],
   });
 
-  return authClient;
+  return { auth: authClient, projectId };
 }
 
 /**
- * Fetches the raw HTML of a page via a standard fetch (impersonating a generic browser).
+ * Fetches the raw HTML of a page.
  */
 export async function fetchPageHtml(url) {
   try {
@@ -56,33 +55,31 @@ export async function fetchPageHtml(url) {
     return await res.text();
   } catch (err) {
     if (err.message.includes('fetch failed')) {
-      throw new Error(`Failed to connect to URL: Network error or CORS blocked.`);
+      throw new Error('Failed to connect to URL: Network error or CORS blocked.');
     }
     throw new Error(`Failed to fetch page: ${err.message}`);
   }
 }
 
 /**
- * Sends HTML to Gemini via Vertex AI and asks for structured signals.
+ * Sends HTML to Gemini via Vertex AI (regional endpoint) and extracts signals.
  */
 export async function analyzeWithGemini(html, url, platform) {
-  // 1. Get bearer token dynamically
-  const auth = await getAuthClient();
+  const { auth, projectId } = await getAuthClient();
   const client = await auth.getClient();
   const { token } = await client.getAccessToken();
 
-  if (!token) throw new Error("Failed to generate Vertex AI OAuth token.");
+  if (!token) throw new Error('Failed to generate OAuth token from service account.');
 
-  // 2. Format Vertex AI API endpoint
+  // Use the regional Vertex AI endpoint for Gemini
   const endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent`;
 
-  // 3. Truncate HTML to stay within 1M context safely and fast parsing
-  const MAX_CHARS = 100000; 
-  const trimmedHtml = html.length > MAX_CHARS ? html.substring(0, MAX_CHARS) + "..." : html;
+  // Truncate HTML to 100k chars for fast parsing
+  const MAX_CHARS = 100000;
+  const trimmedHtml = html.length > MAX_CHARS ? html.substring(0, MAX_CHARS) + '...' : html;
 
-  // 4. Construct prompt schema
   const promptText = `
-You are a live marketplace monitoring assistant. 
+You are a live marketplace monitoring assistant.
 Extract real-time status signals from the provided listing HTML.
 
 Marketplace: ${platform}
@@ -95,8 +92,8 @@ Return ONLY a valid JSON object matching this schema exactly. Do NOT wrap it in 
   "signals": [
     {
       "type": "Price Info | Stock Status | Bid Activity | Seller Info | Buyer Interest | Shipping Info | Listing Status | Warning | Review | Message",
-      "description": "A very concise 1-sentence description of the dynamic signal (e.g. 'Price dropped to $40', 'Only 2 items left in stock', 'Listing has 14 bids')",
-      "severity": "info" | "warning" | "alert"
+      "description": "A very concise 1-sentence description of the dynamic signal",
+      "severity": "info | warning | alert"
     }
   ]
 }
@@ -106,57 +103,49 @@ ${trimmedHtml}
 `;
 
   const payload = {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: promptText }]
-      }
-    ],
+    contents: [{ role: 'user', parts: [{ text: promptText }] }],
     generationConfig: {
       temperature: 0.1,
-      responseMimeType: "application/json"
-    }
+      responseMimeType: 'application/json',
+    },
   };
 
   const response = await fetch(endpoint, {
-    method: "POST",
+    method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`
+      Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
     const errText = await response.text();
-    let parsedErr;
+    let errMsg;
     try {
-      parsedErr = JSON.parse(errText);
+      errMsg = JSON.parse(errText)?.error?.message || errText;
     } catch {
-      //
+      errMsg = errText;
     }
-    const errMsg = parsedErr?.error?.message || errText;
     throw new Error(`Vertex AI error ${response.status}: ${errMsg}`);
   }
 
   const data = await response.json();
   const contentText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!contentText) {
-    throw new Error("No textual content returned from Vertex AI.");
-  }
+  if (!contentText) throw new Error('No content returned from Vertex AI.');
 
-  // Safely parse JSON
+  // Clean and parse JSON
   let cleaned = contentText.trim();
-  if (cleaned.startsWith('```json')) cleaned = cleaned.replace('```json', '');
-  if (cleaned.startsWith('```')) cleaned = cleaned.replace('```', '');
-  if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3);
+  if (cleaned.startsWith('\`\`\`json')) cleaned = cleaned.replace('\`\`\`json', '');
+  if (cleaned.startsWith('\`\`\`')) cleaned = cleaned.replace('\`\`\`', '');
+  if (cleaned.endsWith('\`\`\`')) cleaned = cleaned.slice(0, -3);
 
   let result;
   try {
     result = JSON.parse(cleaned.trim());
-  } catch (parseErr) {
-    console.error('[Gemini] RAW response was:', contentText);
-    throw new Error("Vertex AI returned malformed JSON");
+  } catch {
+    console.error('[Gemini] Raw response:', contentText);
+    throw new Error('Vertex AI returned malformed JSON');
   }
 
   return result;
