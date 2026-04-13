@@ -9,12 +9,18 @@ A powerful desktop application built with Electron, React, and Vite. It provides
   - Collapse group nodes into clean minimal icons featuring dynamic item-count badges.
   - Drag items visually onto Group Nodes, where custom spatial boundary math automatically calculates intersections and swallows elements directly into their nested scope coordinate system.
 
+- **Canvas Navigation & Alignment**
+  - Interactive Dark-Mode Minimap provides a global bird's-eye view, keeping you oriented even across thousands of coordinates.
+  - Toggle-able **Snap-To-Grid** magnet tool guarantees pixel-perfect layout and geometric precision across massive boards.
+  - **Frictionless Insertion**: Double-click anywhere on the empty canvas to instantly materialize an active Text Node, skipping toolbar interactions altogether.
+
 - **Desktop Drag-and-Drop Ingestion (Filesystem scanning)**
   - Fully mapped Electron bindings scan dragged-and-dropped system directories, generating matching `GroupNode` structures on the fly.
   - Direct desktop files are mapped seamlessly onto the viewport as `DocumentNodes`.
 
-- **Freehand Geometric Drawing Tools**
+- **Freehand Geometric Drawing Tools & Color Palette**
   - Native SVG path stroke rendering dynamically registers mouse layouts and interpolates paths into physical `drawings` data attached seamlessly to main and nested canvas objects.
+  - Interactive toolbar palette allows hot-swapping between distinct drawing colors (white, red, blue, green, amber), saving isolated stroke formats uniquely per layer.
 
 - **Context Ecosystem & Toolbars**
   - Smart right-click context menus (`ContextMenu.jsx`) utilizing boundary detection to prevent screen clipping.

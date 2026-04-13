@@ -11,7 +11,8 @@ export function useDrawingMode({
   setMousePos,
   setDrawings,
   setNodes,
-  takeSnapshot
+  takeSnapshot,
+  activeColor = 'white'
 }) {
   const { screenToFlowPosition } = useReactFlow();
 
@@ -40,10 +41,10 @@ export function useDrawingMode({
     if (placementMode || !isDrawingMode) return;
     if (currentStroke?.length > 1) {
       takeSnapshot();
-      setDrawings(prev => [...prev, currentStroke]);
+      setDrawings(prev => [...prev, { points: currentStroke, color: activeColor }]);
     }
     setCurrentStroke(null);
-  }, [placementMode, isDrawingMode, currentStroke, takeSnapshot, setDrawings, setCurrentStroke]);
+  }, [placementMode, isDrawingMode, currentStroke, takeSnapshot, setDrawings, setCurrentStroke, activeColor]);
 
   useEffect(() => {
     if (!placementMode) return;

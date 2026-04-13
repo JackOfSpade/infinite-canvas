@@ -6,6 +6,8 @@ import {
   Background,
   Controls,
   ControlButton,
+  MiniMap,
+  useReactFlow
 } from '@xyflow/react';
 
 // Node types
@@ -14,6 +16,7 @@ import { TextNode } from './nodes/TextNode';
 import { CanvasNode } from './nodes/CanvasNode';
 import { LinkNode } from './nodes/LinkNode';
 import { ListingNode } from './nodes/ListingNode';
+import { createTextNode } from './utils/nodeFactory';
 
 // Components
 import { Sidebar } from './components/Sidebar';
@@ -137,8 +140,17 @@ export function Canvas() {
   const [currentStroke, setCurrentStroke] = useState(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [placementMode, setPlacementMode] = useState(null);
+  const [snapToGrid, setSnapToGrid] = useState(false);
+  const [activeColor, setActiveColor] = useState('white');
+  const { screenToFlowPosition } = useReactFlow();
 
-
+  const handlePaneDoubleClick = useCallback((e) => {
+    if (isDrawingMode || placementMode) return;
+    takeSnapshot();
+    const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+    const newNode = createTextNode({ x: pos.x - 100, y: pos.y - 20 });
+    setNodes((nds) => nds.concat(newNode));
+  }, [isDrawingMode, placementMode, screenToFlowPosition, takeSnapshot, setNodes]);
 
   const { handleDrop, handleDragOver, onNodeDragStop } = useCanvasDragAndDrop({
     nodes, setNodes, setEdges, setIsDrawingMode, setPendingListing: triggerPendingListing, takeSnapshot
@@ -149,7 +161,7 @@ export function Canvas() {
   });
 
   const { handlePointerDown, handlePointerMove, handlePointerUp } = useDrawingMode({
-    placementMode, setPlacementMode, isDrawingMode, currentStroke, setCurrentStroke, setMousePos, setDrawings, setNodes, takeSnapshot
+    placementMode, setPlacementMode, isDrawingMode, currentStroke, setCurrentStroke, setMousePos, setDrawings, setNodes, takeSnapshot, activeColor
   });
 
   const interactiveDisabled = isDrawingMode || !!placementMode;
@@ -179,6 +191,9 @@ export function Canvas() {
           onDragOver={handleDragOver}
           nodeTypes={nodeTypes}
           onNodeDragStop={onNodeDragStop}
+          onPaneDoubleClick={handlePaneDoubleClick}
+          snapToGrid={snapToGrid}
+          snapGrid={[40, 40]}
           panOnDrag={!interactiveDisabled}
           selectionOnDrag={!interactiveDisabled}
           nodesDraggable={!interactiveDisabled}
@@ -219,11 +234,30 @@ export function Canvas() {
             </ControlButton>
           </Controls>
 
+          <MiniMap
+            style={{ backgroundColor: '#1a1a1a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px' }}
+            nodeColor={(n) => {
+              if (n.type === 'group') return '#3b82f6';
+              if (n.type === 'document') return '#8b5cf6';
+              if (n.type === 'text') return '#10b981';
+              if (n.type === 'listing') return '#f59e0b';
+              return '#555';
+            }}
+            maskColor="rgba(0, 0, 0, 0.6)"
+            position="bottom-right"
+            zoomable
+            pannable
+          />
+
           <CanvasToolbar
             placementMode={placementMode}
             setPlacementMode={setPlacementMode}
             isDrawingMode={isDrawingMode}
             setIsDrawingMode={setIsDrawingMode}
+            activeColor={activeColor}
+            setActiveColor={setActiveColor}
+            snapToGrid={snapToGrid}
+            setSnapToGrid={setSnapToGrid}
             onDragStart={onDragStart}
             addGroupNode={addGroupNode}
             saveCanvas={saveCanvas}
