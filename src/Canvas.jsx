@@ -22,6 +22,7 @@ import { CanvasToolbar } from './components/CanvasToolbar';
 import { SearchBar } from './components/SearchBar';
 import { StartupWarning } from './components/StartupWarning';
 import { useUndoRedo } from './hooks/useUndoRedo';
+import { toPng } from 'html-to-image';
 
 import { nodeTypes, DEFAULT_EDGE_OPTIONS, EDGE_STYLE } from './utils/constants';
 import { DrawingLayer } from './components/DrawingLayer';
@@ -113,6 +114,21 @@ export function Canvas() {
   useCanvasInitialization({
     nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, saveCanvas, loadCanvas
   });
+
+  const exportCanvasToPNG = useCallback(() => {
+    const viewportNode = document.querySelector('.react-flow__viewport');
+    if (!viewportNode) return;
+    toPng(viewportNode, { backgroundColor: '#0a0a0a' })
+      .then((dataUrl) => {
+        const link = document.createElement('a');
+        link.download = 'canvas-export.png';
+        link.href = dataUrl;
+        link.click();
+      })
+      .catch((err) => {
+        console.error('Failed to export image', err);
+      });
+  }, []);
 
   const { onListingDragStart, triggerPendingListing, listingDialog } = useMarketplaceListings(setNodes, takeSnapshot);
 
@@ -220,6 +236,7 @@ export function Canvas() {
             canUndo={canUndo}
             canRedo={canRedo}
             clearCanvas={clearCanvas}
+            exportCanvasToPNG={exportCanvasToPNG}
           />
         </ReactFlow>
 

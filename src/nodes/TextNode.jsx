@@ -4,6 +4,8 @@ import { ContextMenu } from '../components/ContextMenu';
 import { FontSizeDialog } from '../components/FontSizeDialog';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { useContextMenu } from '../hooks/useContextMenu';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 
 export function TextNode({ id, data }) {
   const { contextMenu, onContextMenu, closeContextMenu } = useContextMenu();
@@ -45,6 +47,10 @@ export function TextNode({ id, data }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.text, isEditing]);
 
+  const htmlContent = React.useMemo(() => {
+    return DOMPurify.sanitize(marked.parse(data.text || ''));
+  }, [data.text]);
+
   // Context menu items
   const menuItems = [
     {
@@ -76,9 +82,21 @@ export function TextNode({ id, data }) {
         onKeyDown={(e) => { if (e.key === 'Escape') inputRef.current.blur(); }}
         onPointerDown={(e) => { if (isEditing) e.stopPropagation(); }}
         onContextMenu={onContextMenu}
-        className={`text-white/90 whitespace-nowrap outline-none min-w-[20px] min-h-[1em] select-none ${isEditing ? 'cursor-text' : 'cursor-default'}`}
+        className={`text-white/90 outline-none min-w-[20px] min-h-[1em] select-none ${
+          isEditing ? 'cursor-text whitespace-nowrap' : 'cursor-default hidden'
+        }`}
         style={{ fontSize: `${fontSize}px`, fontFamily }}
       />
+
+      {!isEditing && (
+        <div
+          onDoubleClick={handleDoubleClick}
+          onContextMenu={onContextMenu}
+          className="text-white/90 outline-none min-w-[20px] min-h-[1em] select-none cursor-default prose-headings:m-0 prose-p:m-0 prose-ul:m-0 [&_a]:text-blue-400 [&_a]:underline"
+          style={{ fontSize: `${fontSize}px`, fontFamily }}
+          dangerouslySetInnerHTML={{ __html: htmlContent }}
+        />
+      )}
 
       <Handle type="source" position={Position.Right} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-white" />
 
