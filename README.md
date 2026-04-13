@@ -29,12 +29,17 @@ A powerful desktop application built with Electron, React, and Vite. It provides
 - **Persistent Native Saves**
   - Leverages secure IPC handshakes to invoke native OS Save/Open windows, serializing whole infinitely nested states as local `.canvas` files.
 
+- **Gemini AI Marketplace Monitoring (On-Demand)**
+  - Create listing nodes for eBay, Amazon, Craigslist, or custom platforms from the Sidebar.
+  - Right-click → "Check Listing" triggers a live Gemini 2.0 Flash analysis of the page HTML.
+  - Gemini extracts actionable signals: price info, stock status, bid activity, seller info, buyer interest, shipping details, warnings, and more.
+  - Signals are displayed as a numbered badge on the node. Click the badge to view the full signal breakdown with severity indicators.
+  - No data is stored — every check is a fresh, live interpretation. No background polling.
+
 ---
 
 ## TBD (To Be Developed) Features
 
-- **Live Marketplace API Subscriptions (TBD)** 
-  - The UI (e.g. `ListingNode.jsx` and `useMarketplaceListings.js`) currently simulates status polling. A physical Node.js backend needs to be connected to the `monitoring.js` IPC bridge to scrape eBay, Amazon, and Craigslist APIs properly.
 - **Rich Text Markdown Binding (TBD)**
   - Updating simple `TextNodes` into formatted Markdown processors. 
 - **Active Directory Watching (TBD)**
