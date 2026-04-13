@@ -31,10 +31,11 @@ A powerful desktop application built with Electron, React, and Vite. It provides
 
 - **Gemini AI Marketplace Monitoring (On-Demand)**
   - Create listing nodes for eBay, Amazon, Craigslist, or custom platforms from the Sidebar.
-  - Right-click → "Check Listing" triggers a live Gemini 2.0 Flash analysis of the page HTML.
+  - Right-click → "Check Listing" triggers a live **Gemini 2.5 Flash** analysis of the page HTML via **Google Cloud Vertex AI**.
   - Gemini extracts actionable signals: price info, stock status, bid activity, seller info, buyer interest, shipping details, warnings, and more.
-  - Signals are displayed as a numbered badge on the node. Click the badge to view the full signal breakdown with severity indicators.
+  - Signals are displayed as a numbered badge on the node. Click the badge to view the full signal breakdown with severity indicators (info / warning / alert).
   - No data is stored — every check is a fresh, live interpretation. No background polling.
+  - **Auth**: Uses a local `service-account.json` (GCP Service Account with Vertex AI User role) for secure OAuth 2.0 token minting. Bills through GCP promotional credits.
 
 ---
 
