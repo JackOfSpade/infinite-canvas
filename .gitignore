@@ -11,7 +11,11 @@ node_modules
 dist
 dist-ssr
 dist-electron
-release
+release/
+
+# Sensitive
+.env
+service-account.json
 *.local
 
 # Editor directories and files

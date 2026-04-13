@@ -3,7 +3,7 @@ import { fetchPageHtml, analyzeWithGemini } from './electron/ipc/gemini.js';
 async function run() {
   try {
     console.log("Fetching eBay listing...");
-    const url = "https://www.ebay.com/itm/404179782522"; // Random active eBay listing (usually a generic charger or phone)
+    const url = "https://www.ebay.com/itm/404179782522";
     let html = "";
     try {
         html = await fetchPageHtml(url);
@@ -12,7 +12,7 @@ async function run() {
     }
     console.log(`Fetched HTML: ${html.length} chars`);
     
-    console.log("Analyzing with Gemini...");
+    console.log("Analyzing with Vertex AI...");
     const result = await analyzeWithGemini(html, url, 'ebay');
     console.log(JSON.stringify(result, null, 2));
   } catch (err) {

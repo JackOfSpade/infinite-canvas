@@ -1,123 +1,163 @@
-/**
- * Gemini AI service for marketplace listing analysis.
- * Fetches page HTML and sends it to Gemini for live interpretation.
- */
-
-const GEMINI_API_KEY = import.meta.env?.VITE_GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
-const GEMINI_MODEL = 'gemini-2.0-flash';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-
-// Maximum HTML characters to send to Gemini (keeps within context limits)
-const MAX_HTML_LENGTH = 60000;
+import fs from 'fs';
+import path from 'path';
+import { GoogleAuth } from 'google-auth-library';
 
 /**
- * Fetch a page's HTML content.
- * @param {string} url - The URL to fetch
- * @returns {Promise<string>} The HTML content
+ * Monitoring IPC handlers — powered by Gemini AI via Vertex AI.
+ * Uses Service Account dynamically to consume Vertex credits.
  */
-export async function fetchPageHtml(url) {
-  const fullUrl = url.startsWith('http') ? url : `https://${url}`;
-  
-  const response = await fetch(fullUrl, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9',
-    },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(15000), // 15s timeout
-  });
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch page: ${response.status} ${response.statusText}`);
+// We will use gemini-1.5-flash-002 as the default fast analysis model on Vertex
+const GEMINI_MODEL = 'gemini-1.5-flash-002';
+const LOCATION = 'us-central1';
+
+// Hardcoded path to the local service account json (git-ignored)
+const KEY_FILE = path.join(process.cwd(), 'service-account.json');
+
+// Memory cache for our auth client
+let authClient = null;
+let projectId = null;
+
+/**
+ * Initializes the GoogleAuth library using the service-account.json
+ * Extracts projectId and configures OAuth 2.0 scopes.
+ */
+async function getAuthClient() {
+  if (authClient) return authClient;
+
+  if (!fs.existsSync(KEY_FILE)) {
+    throw new Error('service-account.json not found in the root directory. Missing authentication.');
   }
 
-  return await response.text();
+  const sa = JSON.parse(fs.readFileSync(KEY_FILE, 'utf8'));
+  projectId = sa.project_id;
+
+  authClient = new GoogleAuth({
+    keyFile: KEY_FILE,
+    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+  });
+
+  return authClient;
 }
 
 /**
- * Send HTML to Gemini for marketplace signal extraction.
- * @param {string} html - The raw HTML of the listing page
- * @param {string} url - The URL for context
- * @param {string} platform - The marketplace platform (ebay, amazon, etc.)
- * @returns {Promise<{title: string, signals: Array}>}
+ * Fetches the raw HTML of a page via a standard fetch (impersonating a generic browser).
+ */
+export async function fetchPageHtml(url) {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return await res.text();
+  } catch (err) {
+    if (err.message.includes('fetch failed')) {
+      throw new Error(`Failed to connect to URL: Network error or CORS blocked.`);
+    }
+    throw new Error(`Failed to fetch page: ${err.message}`);
+  }
+}
+
+/**
+ * Sends HTML to Gemini via Vertex AI and asks for structured signals.
  */
 export async function analyzeWithGemini(html, url, platform) {
-  const truncatedHtml = html.substring(0, MAX_HTML_LENGTH);
+  // 1. Get bearer token dynamically
+  const auth = await getAuthClient();
+  const client = await auth.getClient();
+  const { token } = await client.getAccessToken();
 
-  const prompt = `You are an expert marketplace analyst AI. Analyze this ${platform} listing page and extract all notable marketplace signals.
+  if (!token) throw new Error("Failed to generate Vertex AI OAuth token.");
 
+  // 2. Format Vertex AI API endpoint
+  const endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent`;
+
+  // 3. Truncate HTML to stay within 1M context safely and fast parsing
+  const MAX_CHARS = 100000; 
+  const trimmedHtml = html.length > MAX_CHARS ? html.substring(0, MAX_CHARS) + "..." : html;
+
+  // 4. Construct prompt schema
+  const promptText = `
+You are a live marketplace monitoring assistant. 
+Extract real-time status signals from the provided listing HTML.
+
+Marketplace: ${platform}
 URL: ${url}
 
-Return ONLY valid JSON with this exact structure:
+Return ONLY a valid JSON object matching this schema exactly. Do NOT wrap it in \`\`\`json or any markdown formatting.
+
 {
-  "title": "The listing/product title found on the page",
+  "title": "Clean, human-readable item title (or null if not found)",
   "signals": [
     {
-      "type": "Category of signal",
-      "description": "Brief, human-readable description of what was found",
-      "severity": "info or warning or alert"
+      "type": "Price Info | Stock Status | Bid Activity | Seller Info | Buyer Interest | Shipping Info | Listing Status | Warning | Review | Message",
+      "description": "A very concise 1-sentence description of the dynamic signal (e.g. 'Price dropped to $40', 'Only 2 items left in stock', 'Listing has 14 bids')",
+      "severity": "info" | "warning" | "alert"
     }
   ]
 }
 
-Signal types to look for (use these exact type names):
-- "Price Info" — current price, sale price, price drops, price history
-- "Stock Status" — availability, quantity remaining, sold out, limited stock
-- "Seller Info" — seller rating, seller feedback, seller status
-- "Bid Activity" — current bids, bid count, bid history (for auction sites)
-- "Offer Status" — offers made/received, best offer info
-- "Shipping Info" — shipping cost, delivery estimate, free shipping
-- "Condition" — item condition details, refurbished, used, new
-- "Listing Status" — active, ended, relisted, expired, flagged
-- "Buyer Interest" — watchers, views, favorites, saves count
-- "Review" — ratings, review count, review highlights
-- "Warning" — any issues, policy violations, suspicious indicators
-- "Message" — buyer questions, seller responses, communication
+HTML Content:
+${trimmedHtml}
+`;
 
-Rules:
-- Extract REAL data visible in the HTML — do not fabricate signals
-- Include the actual values (prices, counts, ratings) in descriptions
-- If a signal type isn't present on the page, do NOT include it
-- If the page doesn't appear to be a marketplace listing, return {"title": "Not a listing page", "signals": []}
-- Keep descriptions concise (under 80 characters)
-- Use "alert" severity for urgent items (sold out, ended, warnings)
-- Use "warning" for noteworthy items (low stock, price change)
-- Use "info" for standard information (price, condition, shipping)
+  const payload = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: promptText }]
+      }
+    ],
+    generationConfig: {
+      temperature: 0.1,
+      responseMimeType: "application/json"
+    }
+  };
 
-Page HTML:
-${truncatedHtml}`;
-
-  const response = await fetch(GEMINI_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        temperature: 0.1,
-        maxOutputTokens: 2048,
-      },
-    }),
-    signal: AbortSignal.timeout(30000), // 30s timeout for Gemini
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify(payload)
   });
 
   if (!response.ok) {
-    const errorText = await response.text().catch(() => '');
-    throw new Error(`Gemini API error ${response.status}: ${errorText.substring(0, 200)}`);
+    const errText = await response.text();
+    let parsedErr;
+    try {
+      parsedErr = JSON.parse(errText);
+    } catch {
+      //
+    }
+    const errMsg = parsedErr?.error?.message || errText;
+    throw new Error(`Vertex AI error ${response.status}: ${errMsg}`);
   }
 
   const data = await response.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-  if (!text) {
-    const reason = data?.candidates?.[0]?.finishReason || 'unknown';
-    throw new Error(`Gemini returned no content (reason: ${reason})`);
+  const contentText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!contentText) {
+    throw new Error("No textual content returned from Vertex AI.");
   }
 
+  // Safely parse JSON
+  let cleaned = contentText.trim();
+  if (cleaned.startsWith('```json')) cleaned = cleaned.replace('```json', '');
+  if (cleaned.startsWith('```')) cleaned = cleaned.replace('```', '');
+  if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3);
+
+  let result;
   try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`Failed to parse Gemini response as JSON: ${text.substring(0, 200)}`);
+    result = JSON.parse(cleaned.trim());
+  } catch (parseErr) {
+    console.error('[Gemini] RAW response was:', contentText);
+    throw new Error("Vertex AI returned malformed JSON");
   }
+
+  return result;
 }
