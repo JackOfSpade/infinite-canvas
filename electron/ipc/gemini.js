@@ -3,7 +3,7 @@
  * Fetches page HTML and sends it to Gemini for live interpretation.
  */
 
-const GEMINI_API_KEY = 'AIzaSyDM49pnIwEAHt8FCAB0i2rP8MXFbkjTV8I';
+const GEMINI_API_KEY = import.meta.env?.VITE_GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
 const GEMINI_MODEL = 'gemini-2.0-flash';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
