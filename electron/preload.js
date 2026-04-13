@@ -30,10 +30,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // --- Monitoring channels (Gemini AI-powered) ---
   registerListing: (args) => ipcRenderer.invoke('register-listing', args),
   checkListing: (args) => ipcRenderer.invoke('check-listing', args),
-  startMonitoring: (args) => ipcRenderer.invoke('start-monitoring', args),
-  stopMonitoring: (args) => ipcRenderer.invoke('stop-monitoring', args),
-  getActivityLog: (args) => ipcRenderer.invoke('get-activity-log', args),
-  updateMonitorSettings: (args) => ipcRenderer.invoke('update-monitor-settings', args),
 
   // Push event: main process sends monitoring activity updates
   onMonitoringActivity: (callback) => {

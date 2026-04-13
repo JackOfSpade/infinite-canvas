@@ -24,7 +24,7 @@ import { StartupWarning } from './components/StartupWarning';
 import { useUndoRedo } from './hooks/useUndoRedo';
 import { toPng } from 'html-to-image';
 
-import { nodeTypes, DEFAULT_EDGE_OPTIONS, EDGE_STYLE } from './utils/constants';
+import { nodeTypes, DEFAULT_EDGE_OPTIONS } from './utils/constants';
 import { DrawingLayer } from './components/DrawingLayer';
 import { useCustomFitView } from './hooks/useCustomFitView';
 import { useCanvasDragAndDrop } from './hooks/useCanvasDragAndDrop';
@@ -141,7 +141,7 @@ export function Canvas() {
 
 
   const { handleDrop, handleDragOver, onNodeDragStop } = useCanvasDragAndDrop({
-    nodes, setNodes, setEdges, setIsDrawingMode, setPendingListing: triggerPendingListing, setListingUrlInput: () => {}, takeSnapshot
+    nodes, setNodes, setEdges, setIsDrawingMode, setPendingListing: triggerPendingListing, takeSnapshot
   });
 
   const { onConnect, onDragStart, addGroupNode, clearCanvas } = useCanvasActions({
@@ -153,8 +153,6 @@ export function Canvas() {
   });
 
   const interactiveDisabled = isDrawingMode || !!placementMode;
-
-
 
   // ── Render ───────────────────────────────────────────────────────────────
   return (

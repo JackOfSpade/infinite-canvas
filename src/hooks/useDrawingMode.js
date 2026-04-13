@@ -1,6 +1,6 @@
 import { useCallback, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
-import { v4 as uuidv4 } from 'uuid';
+import { createTextNode, createLinkNode, createGroupNode } from '../utils/nodeFactory';
 
 export function useDrawingMode({
   placementMode,
@@ -20,13 +20,9 @@ export function useDrawingMode({
       const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
       pos.x -= 12; pos.y -= 20;
       takeSnapshot();
-      if (placementMode === 'text') {
-        setNodes(nds => nds.concat({ id: uuidv4(), type: 'text', position: pos, data: { text: '', isNew: true } }));
-      } else if (placementMode === 'link') {
-        setNodes(nds => nds.concat({ id: uuidv4(), type: 'link', position: pos, data: { url: '', label: '', isNew: true } }));
-      } else if (placementMode === 'group') {
-        setNodes(nds => nds.concat({ id: uuidv4(), type: 'group', dragHandle: '.drag-handle', style: { width: 320 }, position: pos, data: { title: '', items: [], collapsed: false, isNew: true } }));
-      }
+      const factories = { text: createTextNode, link: createLinkNode, group: createGroupNode };
+      const factory = factories[placementMode];
+      if (factory) setNodes(nds => nds.concat(factory(pos)));
       setPlacementMode(null);
       return;
     }

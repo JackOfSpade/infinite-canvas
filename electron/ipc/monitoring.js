@@ -63,10 +63,4 @@ export function registerMonitoringHandlers(getMainWindow) {
       };
     }
   });
-
-  // ── Legacy handlers (kept for backward compatibility) ────────────────────
-  ipcMain.handle('start-monitoring', async () => ({ success: true }));
-  ipcMain.handle('stop-monitoring', async () => ({ success: true }));
-  ipcMain.handle('get-activity-log', async () => ({ activities: [] }));
-  ipcMain.handle('update-monitor-settings', async () => ({ success: true }));
 }
