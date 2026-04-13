@@ -5,6 +5,8 @@ import { ipcMain, shell, dialog } from 'electron';
 import path from 'path';
 import fs from 'fs';
 
+const activeWatchers = new Map();
+
 export function registerFilesystemHandlers() {
   ipcMain.handle('scan-directory', async (_event, dirPath) => {
     const scan = (currentPath) => {
@@ -96,5 +98,31 @@ export function registerFilesystemHandlers() {
       console.error('Failed to load workspace:', err);
       return { success: false, error: err.message };
     }
+  });
+
+  ipcMain.handle('start-file-watch', (event, filePath) => {
+    if (activeWatchers.has(filePath)) return { success: true };
+    try {
+      if (!fs.existsSync(filePath)) return { success: false, error: 'File missing' };
+      const watcher = fs.watch(filePath, (eventType) => {
+        if (eventType === 'change') {
+          event.sender.send('file-changed', filePath);
+        }
+      });
+      activeWatchers.set(filePath, watcher);
+      return { success: true };
+    } catch (err) {
+      console.error('Watch error:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('stop-file-watch', (event, filePath) => {
+    const watcher = activeWatchers.get(filePath);
+    if (watcher) {
+      watcher.close();
+      activeWatchers.delete(filePath);
+    }
+    return { success: true };
   });
 }

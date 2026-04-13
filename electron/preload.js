@@ -7,6 +7,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveWorkspace: (data) => ipcRenderer.invoke('save-workspace', data),
   loadWorkspace: () => ipcRenderer.invoke('load-workspace'),
   scanDirectory: (dirPath) => ipcRenderer.invoke('scan-directory', dirPath),
+  startFileWatch: (filePath) => ipcRenderer.invoke('start-file-watch', filePath),
+  stopFileWatch: (filePath) => ipcRenderer.invoke('stop-file-watch', filePath),
+  
+  onFileChanged: (callback) => {
+    const fn = (event, filePath) => callback(filePath);
+    ipcRenderer.on('file-changed', fn);
+    return () => ipcRenderer.removeListener('file-changed', fn);
+  },
   
   onMenuOpen: (callback) => {
     const fn = (event, ...args) => callback(...args);

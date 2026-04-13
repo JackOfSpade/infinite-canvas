@@ -1,6 +1,6 @@
 import React from 'react';
 import { Panel } from '@xyflow/react';
-import { Type, BoxSelect, Trash2, Save, Link2, Check, MoreHorizontal, PenTool, Undo2, Redo2, Folder } from 'lucide-react';
+import { Type, BoxSelect, Trash2, Save, Link2, Check, MoreHorizontal, PenTool, Undo2, Redo2, Folder, Download } from 'lucide-react';
 
 /**
  * Bottom toolbar for the canvas.
@@ -23,6 +23,7 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
   canUndo,
   canRedo,
   clearCanvas,
+  exportCanvasToPNG,
 }) {
   return (
     <Panel position="bottom-center" className="glass-card mb-4 rounded-full p-2 flex gap-2 bg-black/60 border border-white/10 items-center">
@@ -71,6 +72,13 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
         {saveState === 'saving' && <MoreHorizontal size={20} className="animate-pulse" />}
         {saveState === 'saved' && <Check size={20} />}
         {(hasUnsavedChanges && saveState === 'idle') && <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-amber-400 rounded-full" />}
+      </button>
+      <button 
+        onClick={exportCanvasToPNG}
+        className="p-3 rounded-full transition text-white/70 hover:text-white hover:bg-white/10"
+        title="Export to PNG"
+      >
+        <Download size={20} />
       </button>
       <div className="w-px h-6 bg-white/10 mx-1" />
       <button 

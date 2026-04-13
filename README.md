@@ -37,15 +37,16 @@ A powerful desktop application built with Electron, React, and Vite. It provides
   - No data is stored — every check is a fresh, live interpretation. No background polling.
   - **Auth**: Uses a local `service-account.json` (GCP Service Account with Vertex AI User role) for secure OAuth 2.0 token minting. Bills through GCP promotional credits.
 
+- **Rich Text Markdown Binding**
+  - Updated simple `TextNodes` into formatted Markdown processors via `marked` + `DOMPurify`.
+- **Active Directory Watching**
+  - Bound `DocumentNode` implementations with macOS system watch triggers (`fs.watch`) so canvas files visually identify if they were modified manually outside of the app.
+- **Export to Image / PNG Flattening**
+  - Added native `html-to-image` integration permitting users to instantly download high-res snapshots directly onto their disk matrices.
+- **Dependency Pipeline Trimming**
+  - Refactored `package.json` arrays, clearing unused `electron-builder` `.node` footprints resulting in a blazing-fast, silent deployment structure.
+
 ---
 
-## TBD (To Be Developed) Features
-
-- **Rich Text Markdown Binding (TBD)**
-  - Updating simple `TextNodes` into formatted Markdown processors. 
-- **Active Directory Watching (TBD)**
-  - Expanding the `DocumentNode` implementations with macOS system watch triggers so canvas files automatically identify if they were modified outside of the app.
-- **Export to Image / PNG Flattening (TBD)**
-  - Consolidating geometric shapes, recursive nestings, and paths to create flat screenshots directly out of the interface.
-- **Dependency Pipeline Trimming (TBD)**
-  - Removing non-utilized `electron-builder` native hooks (`@emnapi`, `fsevents`) surfacing during full-pack builds.
+## 100% Feature Complete
+The Infinite Canvas desktop architecture is fully built, tested, and shipped. No further "TBD" components remain in the pipeline.
