@@ -40,3 +40,51 @@ export function setupCanvasDragGhost(e) {
   e.dataTransfer.setDragImage(ghost, 12, 12);
   setTimeout(() => document.body.removeChild(ghost), 0);
 }
+
+/**
+ * Processes dropped OS files asynchronously into canvas Node objects.
+ * Handles single files (DocumentNode) and scanned folders (collapsed GroupNode).
+ * Automatically shifts positions diagonally to prevent overlapping drops.
+ */
+export async function processDroppedFiles(files, startPosition) {
+  if (!window.electronAPI) return [];
+  const newItems = [];
+  let currentPos = { ...startPosition };
+  
+  const buildNode = (fsItem, pos) => {
+    if (fsItem.type === 'document') {
+      return {
+        id: fsItem.id,
+        type: 'document',
+        position: { ...pos },
+        data: { filename: fsItem.filename, filePath: fsItem.filePath }
+      };
+    } else {
+      return {
+        id: fsItem.id,
+        type: 'group',
+        position: { ...pos },
+        data: { 
+          title: fsItem.title, 
+          collapsed: true,
+          edges: [],
+          nodes: (fsItem.items || []).map((child, i) => buildNode(child, { x: 20, y: 50 + i * 50 }))
+        }
+      };
+    }
+  };
+
+  for (const file of files) {
+    try {
+      const result = await window.electronAPI.scanDirectory(file.path);
+      const fsItem = result.isFile ? result.file : result;
+      newItems.push(buildNode(fsItem, currentPos));
+      // Offset subsequent items slightly to prevent them stacking flawlessly on each other
+      currentPos = { x: currentPos.x + 40, y: currentPos.y + 40 };
+    } catch (e) {
+      console.error('Failed to read file/folder on drop payload', e);
+    }
+  }
+  
+  return newItems;
+}

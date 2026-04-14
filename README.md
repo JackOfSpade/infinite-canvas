@@ -1,58 +1,121 @@
-# Infinite Canvas
+# Infinite Canvas — AI Workspace
 
-A powerful desktop application built with Electron, React, and Vite. It provides an organically recursive hierarchical canvas space for mapping ideas, monitoring online data streams, and organizing desktop assets directly onto infinite boards.
+Welcome to your new spatial workspace! Infinite Canvas is a powerful, freeform digital whiteboard designed to help you organize your projects, visualize your ideas, and supercharge your workflows using built-in AI modules. 
 
-## Implemented Features
-
-- **Infinite Nested Canvases**
-  - Create completely isolated, fully functional Canvas instances recursively nested inside of one another.
-  - Collapse group nodes into clean minimal icons featuring dynamic item-count badges.
-  - Drag items visually onto Group Nodes, where custom spatial boundary math automatically calculates intersections and swallows elements directly into their nested scope coordinate system.
-
-- **Canvas Navigation & Alignment**
-  - Interactive Dark-Mode Minimap provides a global bird's-eye view, keeping you oriented even across thousands of coordinates.
-  - Toggle-able **Snap-To-Grid** magnet tool guarantees pixel-perfect layout and geometric precision across massive boards.
-  - **Frictionless Insertion**: Double-click anywhere on the empty canvas to instantly materialize an active Text Node, skipping toolbar interactions altogether.
-
-- **Desktop Drag-and-Drop Ingestion (Filesystem scanning)**
-  - Fully mapped Electron bindings scan dragged-and-dropped system directories, generating matching `GroupNode` structures on the fly.
-  - Direct desktop files are mapped seamlessly onto the viewport as `DocumentNodes`.
-
-- **Freehand Geometric Drawing Tools & Color Palette**
-  - Native SVG path stroke rendering dynamically registers mouse layouts and interpolates paths into physical `drawings` data attached seamlessly to main and nested canvas objects.
-  - Interactive toolbar palette allows hot-swapping between distinct drawing colors (white, red, blue, green, amber), saving isolated stroke formats uniquely per layer.
-
-- **Context Ecosystem & Toolbars**
-  - Smart right-click context menus (`ContextMenu.jsx`) utilizing boundary detection to prevent screen clipping.
-  - Dedicated popups for fine-tuning text node formatting (`FontSizeDialog.jsx`).
-  - Active platform monitoring tools accessible from a hideable Sidebar UI.
-
-- **Robust State Persistence (Undo/Redo Engine)**
-  - A robust history stack evaluates and logs delta differences across physical coordinate shifts, text rewrites, generated links, and custom nested dimensions.
-  - Shortcuts support (`Ctrl+Z`, `Ctrl+Y`, `Backspace`).
-  - Advanced screen panning via Custom Fit View constraints.
-
-- **Persistent Native Saves**
-  - Leverages secure IPC handshakes to invoke native OS Save/Open windows, serializing whole infinitely nested states as local `.canvas` files.
-
-- **Gemini AI Marketplace Monitoring (On-Demand)**
-  - Create listing nodes for eBay, Amazon, Craigslist, or custom platforms from the Sidebar.
-  - Right-click → "Check Listing" triggers a live **Gemini 2.5 Flash** analysis of the page HTML via **Google Cloud Vertex AI**.
-  - Gemini extracts actionable signals: price info, stock status, bid activity, seller info, buyer interest, shipping details, warnings, and more.
-  - Signals are displayed as a numbered badge on the node. Click the badge to view the full signal breakdown with severity indicators (info / warning / alert).
-  - No data is stored — every check is a fresh, live interpretation. No background polling.
-  - **Auth**: Uses a local `service-account.json` (GCP Service Account with Vertex AI User role) for secure OAuth 2.0 token minting. Bills through GCP promotional credits.
-
-- **Rich Text Markdown Binding**
-  - Updated simple `TextNodes` into formatted Markdown processors via `marked` + `DOMPurify`.
-- **Active Directory Watching**
-  - Bound `DocumentNode` implementations with macOS system watch triggers (`fs.watch`) so canvas files visually identify if they were modified manually outside of the app.
-- **Export to Image / PNG Flattening**
-  - Added native `html-to-image` integration permitting users to instantly download high-res snapshots directly onto their disk matrices.
-- **Dependency Pipeline Trimming**
-  - Refactored `package.json` arrays, clearing unused `electron-builder` `.node` footprints resulting in a blazing-fast, silent deployment structure.
+Instead of traditional folders and rigid documents, Infinite Canvas gives you unlimited space to lay out text, web links, files from your computer, and even specialized apps—all on the same board.
 
 ---
 
-## 100% Feature Complete
-The Infinite Canvas desktop architecture is fully built, tested, and shipped. No further "TBD" components remain in the pipeline.
+## 🚀 Getting Started
+
+Currently, Infinite Canvas is distributed as source code for early access. Here is how to run it on your Mac:
+
+### 1. Requirements
+- Node.js 18+ installed on your system.
+- macOS (as the app is optimized for desktop interactions).
+
+### 2. Installation
+Open your terminal and run:
+```bash
+git clone <repository-url>
+cd infinite-canvas
+npm install
+```
+
+### 3. Connect the AI
+Infinite Canvas uses AI to power its advanced modules. Create a `.env` file in the project root folder and securely add your API key:
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+### 4. Launch the App
+```bash
+npm run dev
+```
+The application window will open automatically, presenting you with a fresh, empty canvas!
+
+---
+
+## 🧠 Core Concepts
+
+### Nodes
+Everything you place on your canvas is a "Node". You can drag them around, arrange them however you like, and connect them together to map out relationships.
+
+| Type | How to use it |
+|------|-------------|
+| **Text** | Double-click anywhere on the empty canvas to create a text note. It supports full Markdown for easy formatting. |
+| **Link** | Click the 🔗 button in the bottom toolbar to drop a web bookmark. Click the bookmark to open it in your browser! |
+| **Document** | Need to reference a file? Just drag any file or folder from Finder and drop it straight onto your canvas. |
+| **Nested Canvas** | Click the ☐ button to create a folder-like node. Drop other nodes *inside* this node to keep your main canvas clean. |
+
+### Interacting with Nodes
+Once a node is on your canvas, here is how you interact with it:
+- **Text Nodes**: Double-click the text to edit it.
+- **Link Nodes**: Single-click the node to open the web page. Double-click the node to edit its display label. Right-click the node and select "Edit URL" to change the link.
+- **Documents**: Double-click a file node to native-open it in its default app on your computer!
+- **Arranging**: Group nodes together inside nested canvases, or Right-click any node to control its Z-order (Send to Back / Bring to Front) or duplicate it.
+
+### Connecting Your Ideas
+Want to show how two things are related? Hover over any node to reveal small dots on its edges. **Click and drag** from one dot to another node to draw an animated connection line between them.
+
+---
+
+## 🛠️ Essential Tools
+
+### ✏️ Drawing Mode
+Click the **Pen Icon** on the bottom toolbar to start drawing freehand! 
+- Choose your preferred color from the palette that appears.
+- Draw diagrams, underline text, or scribble notes.
+- Click the Pen icon again to return to normal interaction mode.
+
+### 🔍 Powerful Search
+Press **⌘F** to open the search bar at the top of the canvas. Type any word to instantly jump to matching Text Nodes and Documents on your board. Press `Enter` to cycle through the matches!
+
+### ⏳ Time Travel (Undo/Redo)
+Made a mistake? Your canvas remembers every action you take.
+- Press **⌘Z** to Undo.
+- Press **⌘⇧Z** (or **⌘Y**) to Redo.
+- Notice the undo/redo buttons in your bottom toolbar update dynamically as you work!
+
+### 💾 Saving Your Work
+- **Save (⌘S)**: Clicking the floppy disk icon will prompt you to save your canvas as a file on your computer. 
+- **Auto-save**: Once you have saved your canvas once, the app will automatically save your progress 2 seconds after every change. Pay attention to the amber dot on the save icon—it indicates unsaved changes!
+- **Open (⌘O)**: Load a previously saved canvas.
+- **Export to PNG**: Click the download icon (📥) to take a high-res screenshot of your current canvas view.
+
+---
+
+## 🤖 The AI Sidebar Modules
+
+The left sidebar gives you access to powerful AI-driven tasks that run right on your canvas. Click the sidebar to open it, and **drag a module onto your canvas** to get started.
+
+### 1. Job Search Hub
+Looking for a new role? Drag the Job module onto your canvas. 
+- **Drop your Resume (PDF/DOCX)** directly onto the Hub.
+- The AI will read your experience, generate creative career directions, and search across 12 different platforms (including Google, Indeed, and LinkedIn) on your behalf.
+- The Hub will generate matching **Job Card Nodes** arranged beautifully around it, categorized by career paths you might not have considered!
+
+### 2. Marketplace Sell Hub (Coming Soon)
+Drag the Sell module to your canvas and drop product photos onto it. The AI will analyze the images, generate detailed product descriptions, and suggest the best marketplace platforms (like eBay or Marketplace) and optimal pricing out of the box.
+
+---
+
+## ⌨️ Quick Keyboard Shortcuts
+
+To see this list inside the app at any time, just press **`?`** on your keyboard!
+
+| Action | Shortcut / Mouse |
+|--------|------------------|
+| **Add text note** | Double-click canvas |
+| **Pan around** | Drag canvas (or scroll) |
+| **Zoom in/out** | Scroll wheel |
+| **Select multiple** | Shift + Click & Drag |
+| **Delete item** | Select → Press `Delete` or `⌫` |
+| **ContextMenu** | Right-click any node or the canvas |
+| **Search** | `⌘F` |
+| **Save** | `⌘S` |
+| **Open** | `⌘O` |
+
+---
+
+*Enjoy building out your Infinite Canvas! Feel free to drag in menus, structure your systems, and design the ultimate visual workspace.*

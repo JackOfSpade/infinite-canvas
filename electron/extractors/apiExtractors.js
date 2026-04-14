@@ -1,0 +1,733 @@
+/**
+ * API-Based Job Extractors — LinkedIn, Greenhouse, Lever, USAJobs.
+ *
+ * These bypass Puppeteer entirely, using plain HTTP fetch() against
+ * publicly accessible JSON APIs or hidden HTML endpoints.
+ * Zero WAF risk, structured data, no auth needed.
+ *
+ * All functions return the standard job shape:
+ *   { title, company, location, salary, snippet, url, posted, source }
+ */
+import { queueScrape } from '../ipc/browserPool.js';
+import { getRandomUA } from '../ipc/stealthBrowser.js';
+
+// ── LinkedIn Hidden API ─────────────────────────────────────────────────────
+// Public endpoint: linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search
+// Returns HTML snippets of job cards — no auth, no page rendering needed.
+// Paginates in increments of 25 via the `start` parameter.
+
+/**
+ * Fetch jobs from LinkedIn's public API endpoint (no login needed).
+ * This replaces the Puppeteer-based LinkedIn scraper.
+ */
+export async function fetchLinkedInJobs(query) {
+  const allJobs = [];
+
+  // Fetch 2 pages (50 results max) to stay polite
+  for (let start = 0; start < 50; start += 25) {
+    try {
+      const params = new URLSearchParams({
+        keywords: query,
+        start: String(start),
+      });
+
+      const res = await fetch(`https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?${params}`, {
+        headers: {
+          'Accept': 'text/html',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          'Referer': 'https://www.linkedin.com/jobs/search/',
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (!res.ok) {
+        console.warn(`[LinkedIn API] Page ${start / 25} returned ${res.status}`);
+        break;
+      }
+
+      const html = await res.text();
+      if (!html || html.trim().length < 50) break;
+
+      // Parse HTML snippets with regex — LinkedIn returns <li> cards
+      // Each card has: title in <h3>, company in <h4>, location, link, datetime
+      const cardPattern = /<li[\s\S]*?<\/li>/gi;
+      const cards = html.match(cardPattern) || [];
+
+      for (const card of cards) {
+        try {
+          const titleMatch = card.match(/<h3[^>]*class="[^"]*base-search-card__title[^"]*"[^>]*>([\s\S]*?)<\/h3>/i) ||
+                             card.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+          const companyMatch = card.match(/<h4[^>]*class="[^"]*base-search-card__subtitle[^"]*"[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i) ||
+                               card.match(/<h4[^>]*>([\s\S]*?)<\/h4>/i);
+          const locationMatch = card.match(/<span[^>]*class="[^"]*job-search-card__location[^"]*"[^>]*>([\s\S]*?)<\/span>/i);
+          const linkMatch = card.match(/<a[^>]*class="[^"]*base-card__full-link[^"]*"[^>]*href="([^"]+)"/i) ||
+                            card.match(/href="(https:\/\/www\.linkedin\.com\/jobs\/view\/[^"]+)"/i);
+          const dateMatch = card.match(/<time[^>]*datetime="([^"]+)"[^>]*>([\s\S]*?)<\/time>/i);
+
+          const title = stripHtml(titleMatch?.[1] || '').trim();
+          if (!title) continue;
+
+          allJobs.push({
+            title,
+            company: stripHtml(companyMatch?.[1] || companyMatch?.[2] || '').trim(),
+            location: stripHtml(locationMatch?.[1] || '').trim(),
+            salary: '',
+            snippet: '',
+            url: linkMatch?.[1]?.split('?')[0] || '', // Strip tracking params
+            posted: dateMatch?.[2] ? stripHtml(dateMatch[2]).trim() : (dateMatch?.[1] || ''),
+            source: 'linkedin',
+          });
+        } catch {
+          // Skip malformed cards
+        }
+      }
+
+      // Polite delay between pages — report recommends 2-3s minimum for LinkedIn
+      if (start < 25) await new Promise(r => setTimeout(r, 2000));
+    } catch (error) {
+      console.error(`[LinkedIn API] Fetch failed at start=${start}:`, error.message);
+      break;
+    }
+  }
+
+  return allJobs.slice(0, 30);
+}
+
+// ── Greenhouse API ──────────────────────────────────────────────────────────
+// Public JSON endpoint: boards-api.greenhouse.io/v1/boards/{token}/jobs
+// Each company has a unique board token.
+
+/** Curated list of top tech companies using Greenhouse ATS. */
+const GREENHOUSE_BOARDS = [
+  { token: 'figma', company: 'Figma' },
+  { token: 'airbnb', company: 'Airbnb' },
+  { token: 'stripe', company: 'Stripe' },
+  { token: 'discord', company: 'Discord' },
+  { token: 'notion', company: 'Notion' },
+  { token: 'squarespace', company: 'Squarespace' },
+  { token: 'datadog', company: 'Datadog' },
+  { token: 'plaid', company: 'Plaid' },
+  { token: 'brex', company: 'Brex' },
+  { token: 'airtable', company: 'Airtable' },
+  { token: 'gitlab', company: 'GitLab' },
+  { token: 'hashicorp', company: 'HashiCorp' },
+  { token: 'duolingo', company: 'Duolingo' },
+  { token: 'cloudflare', company: 'Cloudflare' },
+  { token: 'doordash', company: 'DoorDash' },
+  { token: 'cockroachlabs', company: 'Cockroach Labs' },
+  { token: 'benchling', company: 'Benchling' },
+  { token: 'affirm', company: 'Affirm' },
+  { token: 'gusto', company: 'Gusto' },
+  { token: 'nerdwallet', company: 'NerdWallet' },
+  { token: 'reddit', company: 'Reddit' },
+  { token: 'robinhood', company: 'Robinhood' },
+  { token: 'mongodb', company: 'MongoDB' },
+  { token: 'twitch', company: 'Twitch' },
+  { token: 'palantir', company: 'Palantir' },
+  { token: 'lyft', company: 'Lyft' },
+  { token: 'okta', company: 'Okta' },
+  { token: 'asana', company: 'Asana' },
+  { token: 'webflow', company: 'Webflow' },
+  { token: 'vercel', company: 'Vercel' },
+];
+
+/**
+ * Fetch jobs from Greenhouse boards matching the query.
+ * Searches board titles client-side (the API doesn't support keyword search).
+ */
+export async function fetchGreenhouseJobs(query) {
+  const queryLower = query.toLowerCase();
+  const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
+  const allJobs = [];
+
+  // Fetch in parallel batches of 10 to avoid overwhelming the API
+  const BATCH = 10;
+  for (let i = 0; i < GREENHOUSE_BOARDS.length; i += BATCH) {
+    const batch = GREENHOUSE_BOARDS.slice(i, i + BATCH);
+    const results = await Promise.allSettled(
+      batch.map(async ({ token, company }) => {
+        try {
+          const res = await fetch(`https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`, {
+            headers: { 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(8000),
+          });
+          if (!res.ok) return [];
+          const data = await res.json();
+          return (data.jobs || []).map(job => ({ ...job, _company: company, _token: token }));
+        } catch {
+          return [];
+        }
+      })
+    );
+
+    for (const r of results) {
+      if (r.status === 'fulfilled') allJobs.push(...r.value);
+    }
+  }
+
+  // Filter by query relevance
+  const matched = allJobs.filter(job => {
+    const text = `${job.title} ${job._company} ${job.location?.name || ''}`.toLowerCase();
+    return queryTerms.some(term => text.includes(term));
+  });
+
+  return matched.slice(0, 30).map(job => ({
+    title: job.title || '',
+    company: job._company || '',
+    location: job.location?.name || '',
+    salary: '',
+    snippet: stripHtml(job.content || '').substring(0, 300),
+    url: `https://boards.greenhouse.io/${job._token}/jobs/${job.id}`,
+    posted: job.updated_at ? new Date(job.updated_at).toLocaleDateString() : '',
+    source: 'greenhouse',
+  }));
+}
+
+
+// ── Lever API ───────────────────────────────────────────────────────────────
+// Public JSON endpoint: api.lever.co/v0/postings/{company}?mode=json
+
+/** Curated list of top tech companies using Lever ATS. */
+const LEVER_COMPANIES = [
+  { slug: 'netflix', company: 'Netflix' },
+  { slug: 'openai', company: 'OpenAI' },
+  { slug: 'anthropic', company: 'Anthropic' },
+  { slug: 'coinbase', company: 'Coinbase' },
+  { slug: 'twilio', company: 'Twilio' },
+  { slug: 'netlify', company: 'Netlify' },
+  { slug: 'postman', company: 'Postman' },
+  { slug: 'samsara', company: 'Samsara' },
+  { slug: 'clearbit', company: 'Clearbit' },
+  { slug: 'grafana', company: 'Grafana Labs' },
+  { slug: 'supabase', company: 'Supabase' },
+  { slug: 'linear', company: 'Linear' },
+  { slug: 'retool', company: 'Retool' },
+  { slug: 'snyk', company: 'Snyk' },
+  { slug: 'mux', company: 'Mux' },
+  { slug: 'fly', company: 'Fly.io' },
+  { slug: 'zapier', company: 'Zapier' },
+  { slug: 'resend', company: 'Resend' },
+  { slug: 'dbt-labs', company: 'dbt Labs' },
+  { slug: 'loom', company: 'Loom' },
+];
+
+/**
+ * Fetch jobs from Lever career pages matching the query.
+ */
+export async function fetchLeverJobs(query) {
+  const queryLower = query.toLowerCase();
+  const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
+  const allJobs = [];
+
+  const BATCH = 10;
+  for (let i = 0; i < LEVER_COMPANIES.length; i += BATCH) {
+    const batch = LEVER_COMPANIES.slice(i, i + BATCH);
+    const results = await Promise.allSettled(
+      batch.map(async ({ slug, company }) => {
+        try {
+          const res = await fetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, {
+            headers: { 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(8000),
+          });
+          if (!res.ok) return [];
+          const data = await res.json();
+          return (Array.isArray(data) ? data : []).map(job => ({ ...job, _company: company }));
+        } catch {
+          return [];
+        }
+      })
+    );
+
+    for (const r of results) {
+      if (r.status === 'fulfilled') allJobs.push(...r.value);
+    }
+  }
+
+  // Filter by query relevance
+  const matched = allJobs.filter(job => {
+    const text = `${job.text} ${job._company} ${job.categories?.location || ''} ${job.categories?.team || ''}`.toLowerCase();
+    return queryTerms.some(term => text.includes(term));
+  });
+
+  return matched.slice(0, 30).map(job => ({
+    title: job.text || '',
+    company: job._company || '',
+    location: job.categories?.location || '',
+    salary: '',
+    snippet: stripHtml(job.descriptionPlain || job.description || '').substring(0, 300),
+    url: job.hostedUrl || job.applyUrl || '',
+    posted: job.createdAt ? new Date(job.createdAt).toLocaleDateString() : '',
+    source: 'lever',
+  }));
+}
+
+
+// ── USAJobs API ─────────────────────────────────────────────────────────────
+// Official API: data.usajobs.gov/api/search
+// Requires free API key from developer.usajobs.gov
+
+/**
+ * Fetch federal jobs from USAJobs.
+ * @param {string} query — search keywords
+ * @param {string} apiKey — USAJobs API key (from .env or config)
+ * @param {string} email — registered email for User-Agent header
+ */
+export async function fetchUSAJobs(query, apiKey, email) {
+  if (!apiKey) {
+    console.warn('[USAJobs] No API key configured — skipping');
+    return [];
+  }
+
+  try {
+    const params = new URLSearchParams({
+      Keyword: query,
+      ResultsPerPage: '25',
+      DatePosted: '30', // Last 30 days
+    });
+
+    const res = await fetch(`https://data.usajobs.gov/api/search?${params}`, {
+      headers: {
+        'Host': 'data.usajobs.gov',
+        'User-Agent': email || 'job-search-app@example.com',
+        'Authorization-Key': apiKey,
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!res.ok) {
+      console.error(`[USAJobs] API returned ${res.status}`);
+      return [];
+    }
+
+    const data = await res.json();
+    const items = data?.SearchResult?.SearchResultItems || [];
+
+    return items.slice(0, 30).map(item => {
+      const pos = item.MatchedObjectDescriptor || {};
+      const salary = pos.PositionRemuneration?.[0];
+      const salaryStr = salary
+        ? `$${salary.MinimumRange} - $${salary.MaximumRange} / ${salary.RateIntervalCode}`
+        : '';
+
+      return {
+        title: pos.PositionTitle || '',
+        company: pos.OrganizationName || pos.DepartmentName || '',
+        location: pos.PositionLocationDisplay || '',
+        salary: salaryStr,
+        snippet: stripHtml(pos.QualificationSummary || pos.UserArea?.Details?.MajorDuties?.[0] || '').substring(0, 300),
+        url: pos.PositionURI || pos.ApplyURI?.[0] || '',
+        posted: pos.PublicationStartDate || '',
+        source: 'usajobs',
+      };
+    });
+  } catch (error) {
+    console.error('[USAJobs] Fetch failed:', error.message);
+    return [];
+  }
+}
+
+
+// ── Shared Utilities ────────────────────────────────────────────────────────
+
+/** Strip HTML tags from a string. */
+function stripHtml(html) {
+  return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+
+// ── RemoteOK Direct API ─────────────────────────────────────────────────────
+// Open JSON endpoint: remoteok.com/api — no auth, no browser, no WAF.
+// Returns a raw JSON array of job objects with salary, tags, and company.
+
+/**
+ * Fetch jobs from RemoteOK's open JSON API (bypasses Puppeteer entirely).
+ */
+export async function fetchRemoteOKJobs(query) {
+  try {
+    const res = await fetch('https://remoteok.com/api', {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!res.ok) {
+      console.warn(`[RemoteOK API] Returned ${res.status}`);
+      return [];
+    }
+
+    const data = await res.json();
+    // First element is metadata, rest are jobs
+    const jobs = Array.isArray(data) ? data.slice(1) : [];
+    const queryLower = query.toLowerCase();
+    const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
+
+    // Filter by query relevance
+    const matched = jobs.filter(job => {
+      const text = `${job.position || ''} ${job.company || ''} ${(job.tags || []).join(' ')} ${job.description || ''}`.toLowerCase();
+      return queryTerms.some(term => text.includes(term));
+    });
+
+    return matched.slice(0, 30).map(job => ({
+      title: job.position || '',
+      company: job.company || '',
+      location: job.location || 'Remote',
+      salary: job.salary || (job.salary_min ? `$${job.salary_min} - $${job.salary_max}` : ''),
+      snippet: (job.tags || []).join(', '),
+      url: job.url ? `https://remoteok.com${job.url}` : '',
+      posted: job.date || '',
+      source: 'remoteok',
+    }));
+  } catch (error) {
+    console.error('[RemoteOK API] Fetch failed:', error.message);
+    return [];
+  }
+}
+
+
+// ── WeWorkRemotely RSS Feed ─────────────────────────────────────────────────
+// RSS/XML feed at weworkremotely.com — no browser, no rate limits, no WAF.
+
+/**
+ * Fetch jobs from WeWorkRemotely's RSS feed (bypasses Puppeteer entirely).
+ */
+export async function fetchWeWorkRemotelyJobs(query) {
+  try {
+    const res = await fetch('https://weworkremotely.com/remote-jobs.rss', {
+      headers: {
+        'Accept': 'application/rss+xml, application/xml, text/xml',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!res.ok) {
+      console.warn(`[WWR RSS] Returned ${res.status}`);
+      return [];
+    }
+
+    const xml = await res.text();
+    const queryLower = query.toLowerCase();
+    const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
+
+    // Parse RSS items with regex (no XML parser dependency needed)
+    const itemPattern = /<item>([\s\S]*?)<\/item>/gi;
+    const items = xml.match(itemPattern) || [];
+    const jobs = [];
+
+    for (const item of items) {
+      const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/i) ||
+                          item.match(/<title>(.*?)<\/title>/i);
+      const linkMatch = item.match(/<link>(.*?)<\/link>/i);
+      const descMatch = item.match(/<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/i) ||
+                         item.match(/<description>([\s\S]*?)<\/description>/i);
+      const pubDateMatch = item.match(/<pubDate>(.*?)<\/pubDate>/i);
+      const regionMatch = item.match(/<region><!\[CDATA\[(.*?)\]\]><\/region>/i) ||
+                           item.match(/<region>(.*?)<\/region>/i);
+
+      const title = titleMatch?.[1]?.trim() || '';
+      if (!title) continue;
+
+      // Extract company from title (WWR formats as "Company: Job Title")
+      const titleParts = title.split(':');
+      const company = titleParts.length > 1 ? titleParts[0].trim() : '';
+      const jobTitle = titleParts.length > 1 ? titleParts.slice(1).join(':').trim() : title;
+
+      // Filter by query relevance
+      const text = `${title} ${stripHtml(descMatch?.[1] || '')}`.toLowerCase();
+      const matches = queryTerms.some(term => text.includes(term));
+      if (!matches) continue;
+
+      jobs.push({
+        title: jobTitle,
+        company,
+        location: regionMatch?.[1]?.trim() || 'Remote',
+        salary: '',
+        snippet: stripHtml(descMatch?.[1] || '').substring(0, 300),
+        url: linkMatch?.[1]?.trim() || '',
+        posted: pubDateMatch?.[1] ? new Date(pubDateMatch[1]).toLocaleDateString() : '',
+        source: 'weworkremotely',
+      });
+    }
+
+    return jobs.slice(0, 30);
+  } catch (error) {
+    console.error('[WWR RSS] Fetch failed:', error.message);
+    return [];
+  }
+}
+
+
+// ── Reverb Internal REST API ────────────────────────────────────────────────
+// Internal endpoint: api.reverb.com/api/listings/all
+// Requires Accept-Version: 3.0 and Accept: application/hal+json headers.
+// Returns structured JSON with instrument pricing, condition, and seller data.
+
+/**
+ * Fetch marketplace listings from Reverb's internal REST API.
+ * Returns the standard comp shape for pricing comparison.
+ */
+export async function fetchReverbListings(query, soldOnly = false) {
+  try {
+    const params = new URLSearchParams({ query });
+    if (soldOnly) params.set('state', 'ended');
+
+    const res = await fetch(`https://api.reverb.com/api/listings/all?${params}`, {
+      headers: {
+        'Accept': 'application/hal+json',
+        'Accept-Version': '3.0',
+        'Content-Type': 'application/hal+json',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+
+    if (!res.ok) {
+      console.warn(`[Reverb API] Returned ${res.status}`);
+      return [];
+    }
+
+    const data = await res.json();
+    const listings = data?.listings || data?._embedded?.listings || [];
+
+    return listings.slice(0, 25).map(listing => {
+      const price = listing.price?.amount ? parseFloat(listing.price.amount) : 0;
+      return {
+        title: listing.title || listing.make_model || '',
+        price,
+        priceText: price > 0 ? `$${price.toFixed(2)}` : '',
+        condition: listing.condition?.display_name || listing.condition?.slug || '',
+        soldDate: listing.state === 'ended' ? (listing.sold_date || 'Sold') : '',
+        seller: listing.seller?.feedback_percentage ? `${listing.seller.feedback_percentage}%` : '',
+        url: listing._links?.web?.href || listing.web_url || '',
+        source: 'reverb',
+      };
+    });
+  } catch (error) {
+    console.error('[Reverb API] Fetch failed:', error.message);
+    return [];
+  }
+}
+
+// ── Dice Public API ─────────────────────────────────────────────────────────
+// DHI Group (Dice's parent) exposes a public job search API used by the Dice
+// frontend. Returns structured JSON with all fields we need.
+// Zero WAF risk — this is a direct API endpoint, no browser needed.
+//
+// Discovered during tier upgrade audit: previously Tier 3 (Puppeteer),
+// now upgraded to Tier 1 (direct API).
+
+const DICE_API_KEY = '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
+
+/**
+ * Fetch job listings from Dice via their public API (Tier 1).
+ * @param {string} query — job search query
+ * @param {string} [location] — optional location filter
+ * @returns {Promise<Array>} — standardized job objects
+ */
+export async function fetchDiceListings(query, location = '') {
+  try {
+    const params = new URLSearchParams({
+      q: query,
+      countryCode2: 'US',
+      radius: '30',
+      radiusUnit: 'mi',
+      page: '1',
+      pageSize: '25',
+      ...(location ? { location } : {}),
+    });
+
+    const res = await fetch(
+      `https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search?${params}`,
+      {
+        headers: {
+          'User-Agent': getRandomUA(),
+          'x-api-key': DICE_API_KEY,
+          'Accept': 'application/json',
+        },
+        signal: AbortSignal.timeout(10000),
+      }
+    );
+
+    if (!res.ok) {
+      console.warn(`[Dice API] Returned ${res.status}`);
+      return [];
+    }
+
+    const data = await res.json();
+    const jobs = data.data || [];
+
+    console.log(`[Dice API] Found ${jobs.length} jobs for "${query}"`);
+
+    return jobs.map(job => ({
+      title: job.title || '',
+      company: job.companyName || '',
+      location: job.jobLocation?.displayName || '',
+      salary: job.salary || '',
+      snippet: (job.summary || '').substring(0, 300),
+      url: job.detailsPageUrl || `https://www.dice.com/job-detail/${job.guid || job.id}`,
+      posted: job.postedDate || '',
+      source: 'dice',
+      remote: job.workFromHomeAvailability === 'TRUE',
+      employmentType: job.employmentType || '',
+      easyApply: job.easyApply || false,
+    }));
+  } catch (error) {
+    console.error('[Dice API] Fetch failed:', error.message);
+    return [];
+  }
+}
+
+
+// ── StockX Algolia API Bypass ───────────────────────────────────────────────
+// StockX outsources search to Algolia. We extract the API keys from the page
+// HTML, then query Algolia directly — bypassing StockX's PerimeterX WAF.
+// Keys rotate, so we extract them fresh each session.
+//
+// Known StockX Algolia Application ID — this is a public, client-facing value
+// embedded in StockX's frontend JS. It's tied to their Algolia account and
+// almost never changes (years). The search API key, however, may rotate.
+const HARDCODED_STOCKX_APP_ID = '2FWOTDVM2O';
+
+// Architecture: Try hardcoded App ID + cached API key first (Tier 1).
+//               If keys expired → Puppeteer stealth bootstrap to extract fresh keys.
+//               All data queries go directly to Algolia API (Tier 1).
+// Plain fetch() WILL NOT WORK for key extraction — PerimeterX serves a JS
+// challenge page that requires full browser rendering to solve.
+
+let algoliaKeys = null; // Cache keys for the session
+
+// Extractor JS that runs inside the Puppeteer page to grab Algolia keys.
+// Searches all <script> tags and window properties for the key/appId pair.
+const STOCKX_KEY_EXTRACTOR = `
+(function() {
+  // Strategy 1: Search inline scripts for Algolia config
+  const scripts = document.querySelectorAll('script');
+  for (const script of scripts) {
+    const text = script.textContent || '';
+    const appIdMatch = text.match(/x-algolia-application-id['":\\s]+([A-Z0-9]+)/i) ||
+                       text.match(/algoliaApplicationId['":\\s]+['"]([A-Z0-9]+)['"]/i) ||
+                       text.match(/"applicationId":\\s*"([A-Z0-9]+)"/i);
+    const apiKeyMatch = text.match(/x-algolia-api-key['":\\s]+([a-f0-9]+)/i) ||
+                        text.match(/algoliaApiKey['":\\s]+['"]([a-f0-9]+)['"]/i) ||
+                        text.match(/"apiKey":\\s*"([a-f0-9]+)"/i);
+    if (appIdMatch && apiKeyMatch) {
+      return { appId: appIdMatch[1], apiKey: apiKeyMatch[1] };
+    }
+  }
+
+  // Strategy 2: Check __NEXT_DATA__ for Algolia config
+  try {
+    const ndEl = document.getElementById('__NEXT_DATA__');
+    if (ndEl) {
+      const nd = JSON.parse(ndEl.textContent);
+      const config = nd?.props?.pageProps?.algoliaConfig ||
+                     nd?.runtimeConfig?.algolia ||
+                     nd?.props?.pageProps?.searchConfig;
+      if (config?.appId && config?.apiKey) {
+        return { appId: config.appId, apiKey: config.apiKey };
+      }
+    }
+  } catch (e) {}
+
+  // Strategy 3: Check global window properties
+  try {
+    if (window.__algoliaConfig) return window.__algoliaConfig;
+    if (window.__STOCKX_CONFIG__?.algolia) return window.__STOCKX_CONFIG__.algolia;
+  } catch (e) {}
+
+  return null;
+})()
+`;
+
+/**
+ * Fetch marketplace listings from StockX via Algolia API bypass.
+ *
+ * Tier escalation:
+ *   1. Try cached Algolia keys (Tier 1 — pure API, zero browser)
+ *   2. If keys missing/expired: extract via Puppeteer stealth (Tier 3 bootstrap, once per session)
+ *   3. All data queries go to Algolia directly (Tier 1)
+ */
+export async function fetchStockXListings(query) {
+  try {
+    // If we don't have keys at all, try Puppeteer extraction
+    if (!algoliaKeys) {
+      console.log('[StockX] No cached keys — extracting via stealth browser...');
+      const keys = await queueScrape(
+        `https://stockx.com/search?s=${encodeURIComponent(query)}`,
+        STOCKX_KEY_EXTRACTOR,
+        {
+          waitMs: 3000,
+          timeoutMs: 20000,
+          scrollFirst: false,
+          dismissCookies: true,
+          referer: 'https://www.google.com/',
+        }
+      );
+
+      if (keys?.appId && keys?.apiKey) {
+        algoliaKeys = keys;
+        console.log(`[StockX] Algolia keys extracted: appId=${keys.appId.substring(0, 4)}... (Tier 1 from now on)`);
+      } else {
+        // Last resort: try hardcoded App ID with empty key (some Algolia configs allow this)
+        algoliaKeys = { appId: HARDCODED_STOCKX_APP_ID, apiKey: '' };
+        console.log('[StockX] Using hardcoded App ID as fallback');
+      }
+    }
+
+    if (!algoliaKeys?.appId) {
+      console.warn('[StockX] Could not obtain Algolia keys');
+      return [];
+    }
+
+    // Phase 2: Query Algolia directly (bypasses PerimeterX entirely)
+    const algoliaRes = await fetch(
+      `https://${algoliaKeys.appId}-dsn.algolia.net/1/indexes/products/query`,
+      {
+        method: 'POST',
+        headers: {
+          'X-Algolia-Application-Id': algoliaKeys.appId,
+          'X-Algolia-API-Key': algoliaKeys.apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query,
+          facets: ['*'],
+          hitsPerPage: 25,
+        }),
+        signal: AbortSignal.timeout(10000),
+      }
+    );
+
+    if (!algoliaRes.ok) {
+      console.warn(`[StockX Algolia] Returned ${algoliaRes.status}`);
+      // Keys may have rotated — clear cache for next attempt
+      algoliaKeys = null;
+      return [];
+    }
+
+    const data = await algoliaRes.json();
+    const hits = data.hits || [];
+
+    return hits.slice(0, 25).map(hit => {
+      const lastSale = hit.last_sale || hit.market?.lastSale || 0;
+      const lowestAsk = hit.lowest_ask || hit.market?.lowestAsk || 0;
+      const price = lastSale || lowestAsk;
+
+      return {
+        title: hit.name || hit.title || '',
+        price,
+        priceText: price > 0 ? `$${price}` : '',
+        lastSale: lastSale > 0 ? `$${lastSale}` : '',
+        lowestAsk: lowestAsk > 0 ? `$${lowestAsk}` : '',
+        condition: 'New / Deadstock',
+        url: hit.url ? `https://stockx.com/${hit.url}` : '',
+        source: 'stockx',
+      };
+    });
+  } catch (error) {
+    console.error('[StockX Algolia] Fetch failed:', error.message);
+    return [];
+  }
+}

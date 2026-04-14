@@ -1,285 +1,288 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
-import { ContextMenu } from '../components/ContextMenu';
-import { Dialog } from '../components/Dialog';
-import { FontSizeDialog } from '../components/FontSizeDialog';
-import { SignalResultsDialog } from '../components/SignalResultsDialog';
-import { useContextMenu } from '../hooks/useContextMenu';
-import { RefreshCw, Loader2, CheckCircle2 } from 'lucide-react';
-import { PLATFORM_COLORS } from '../utils/platforms';
+import { PriceJustification } from '../components/PriceJustification';
+import { EditableField } from '../components/EditableField';
+import { QuickPriceButtons } from '../components/QuickPriceButtons';
+import { PlatformToggles } from '../components/PlatformToggles';
+import { Camera, Loader2, ExternalLink, Copy, Check } from 'lucide-react';
+import { SELL_PLATFORMS } from '../utils/constants';
+import { useListingActions } from '../hooks/useListingActions';
+
+const STATUS_STYLES = {
+  draft: { border: 'border-dashed border-white/20', badge: 'bg-white/10 text-white/50', label: '📝 DRAFT' },
+  confirming: { border: 'border-dashed border-amber-500/30', badge: 'bg-amber-500/20 text-amber-400', label: '⏳ ANALYZING' },
+  priced: { border: 'border-solid border-emerald-500/30', badge: 'bg-emerald-500/20 text-emerald-400', label: '💰 READY' },
+  live: { border: 'border-solid border-green-500/40', badge: 'bg-green-500/20 text-green-400', label: '✅ LISTED' },
+};
+
 
 /**
- * ListingNode — a marketplace listing monitor node powered by Gemini AI.
+ * ListingNode — full lifecycle marketplace listing.
  *
- * data shape:
- *   platform      — 'ebay' | 'amazon' | 'craigslist' | 'custom'
- *   url           — listing URL
- *   label         — display text (scraped title or user-edited)
- *   activityCount — number of unread activities
- *   activities    — array of signals from last Gemini check
- *   lastChecked   — timestamp of last check
- *   error         — { type, message } | null
- *   fontSize      — number
- *   fontFamily    — string
+ * data.status: 'draft' | 'confirming' | 'priced' | 'live'
+ * data.product: { brand, model, category, condition, color, notable_features, generated_title, generated_description }
+ * data.pricing: { recommended_price, quick_sell_price, max_profit_price, justification, market_summary }
+ * data.comps: { sold: [], active: [] }
+ * data.userPrice: number
+ * data.selectedPlatforms: string[]
+ * data.imagePaths: string[]
+ * data.platformStatuses: { ebay: 'listed', facebook: 'draft', ... }
  */
 export function ListingNode({ id, data }) {
-  const platform = data.platform || 'custom';
-  const color = PLATFORM_COLORS[platform] || PLATFORM_COLORS.custom;
-  const activityCount = data.activityCount || 0;
-  const error = data.error || null;
-  const activities = data.activities || [];
-  const lastChecked = data.lastChecked || null;
+  const status = data.status || 'draft';
+  const style = STATUS_STYLES[status] || STATUS_STYLES.draft;
 
-  const [isEditing, setIsEditing] = useState(false);
-  const [isChecking, setIsChecking] = useState(false);
-  const { contextMenu, onContextMenu, closeContextMenu } = useContextMenu();
-  const [showDialog, setShowDialog] = useState(null); // 'font' | 'url' | 'activity'
-  const [urlInput, setUrlInput] = useState(data.url || '');
+  const {
+    product, editing, setEditing, priceInput, justificationExpanded,
+    selectedPlatforms, copied, handleFieldEdit, handlePriceChange,
+    handleQuickPrice, handleCopyListing, togglePlatform, toggleJustification,
+    researchPrice, syncPriceFromBackend,
+  } = useListingActions(id, data);
 
-  const fontSize = data.fontSize || 14;
-  const fontFamily = data.fontFamily || 'sans-serif';
+  const [loginPrompt, setLoginPrompt] = useState(null);
+  const [checkingAuth, setCheckingAuth] = useState(false);
+  const { updateNodeData } = useReactFlow();
 
-  const { updateNodeData, deleteElements } = useReactFlow();
-  const labelRef = useRef(null);
-
-  // Sync label content when data changes externally
   useEffect(() => {
-    if (!isEditing && labelRef.current) {
-      const expected = data.label || data.url || 'Listing';
-      if (labelRef.current.innerText !== expected) {
-        labelRef.current.innerText = expected;
-      }
-    }
-  }, [data.label, data.url, isEditing]);
+    syncPriceFromBackend(data.pricing);
+  }, [data.pricing, syncPriceFromBackend]);
 
-  const handleDoubleClick = (e) => {
-    e.stopPropagation();
-    setIsEditing(true);
-    setTimeout(() => {
-      if (labelRef.current) labelRef.current.focus({ preventScroll: true });
-    }, 0);
-  };
-
-  const handleBlur = () => {
-    setIsEditing(false);
-    const newLabel = labelRef.current?.innerText?.trim() || '';
-    if (newLabel === '') {
-      deleteElements({ nodes: [{ id }] });
-      return;
-    }
-    updateNodeData(id, { label: newLabel });
-  };
-
-  // ── Gemini-powered check ──────────────────────────────────────────────────
-  const checkListing = async () => {
-    if (isChecking || !data.url) return;
-    setIsChecking(true);
-    updateNodeData(id, { error: null });
-
-    try {
-      if (!window.electronAPI?.checkListing) {
-        throw new Error('Check not available outside Electron');
-      }
-
-      const result = await window.electronAPI.checkListing({
-        url: data.url,
-        platform,
-      });
-
-      if (result.success) {
-        // Update title if Gemini found one and user hasn't custom-edited
-        const updates = {
-          activities: result.signals,
-          activityCount: result.signals.length,
-          lastChecked: result.checkedAt,
-          error: null,
-        };
-        if (result.title && result.title !== 'Not a listing page' && !data.label) {
-          updates.label = result.title;
-        }
-        updateNodeData(id, updates);
-      } else {
+  const handleConfirmDraft = async () => {
+    updateNodeData(id, { status: 'confirming' });
+    const result = await researchPrice((state, res) => {
+      if (state === 'priced') {
         updateNodeData(id, {
-          error: { type: 'check-failed', message: result.error },
+          status: 'priced',
+          pricing: res.pricing,
+          comps: res.comps,
+          userPrice: res.pricing.recommended_price || '',
         });
+      } else if (state === 'priced-empty') {
+        updateNodeData(id, { status: 'priced', pricing: { recommended_price: null, justification: res.error } });
+      } else if (state === 'error') {
+        updateNodeData(id, { status: 'draft' });
       }
-    } catch (err) {
-      updateNodeData(id, {
-        error: { type: 'check-failed', message: err.message },
-      });
-    } finally {
-      setIsChecking(false);
-    }
-  };
-
-  const applyUrl = () => {
-    updateNodeData(id, { url: urlInput });
-    setShowDialog(null);
-  };
-
-  const markAllRead = () => {
-    updateNodeData(id, {
-      activityCount: 0,
-      activities: activities.map(a => ({ ...a, read: true })),
     });
+    if (!result) updateNodeData(id, { status: 'draft' });
   };
 
-  const markRead = (activityId) => {
-    const updated = activities.map(a =>
-      a.id === activityId ? { ...a, read: true } : a
-    );
-    const unreadCount = updated.filter(a => !a.read).length;
-    updateNodeData(id, { activities: updated, activityCount: unreadCount });
-  };
-
-  // ── Context menu ──────────────────────────────────────────────────────────
-  const menuItems = [
-    {
-      label: data.url ? '🔍 Check Listing' : '🔗 Set URL first',
-      onClick: data.url ? checkListing : () => setShowDialog('url'),
-    },
-    {
-      label: 'Edit Link URL',
-      onClick: () => setShowDialog('url'),
-    },
-    { divider: true },
-    {
-      label: `📋 View Signals${activities.length > 0 ? ` (${activities.length})` : ''}`,
-      onClick: () => setShowDialog('activity'),
-    },
-    { divider: true },
-    {
-      label: 'Font & Size',
-      onClick: () => setShowDialog('font'),
-    },
-  ];
 
   return (
-    <div className="relative group px-1">
-      <Handle type="target" position={Position.Left} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity" style={{ background: color }} />
+    <div className={`bg-[#1a1a1a] ${style.border} border rounded-lg shadow-lg overflow-hidden group`} style={{ width: 300 }}>
+      <Handle type="target" position={Position.Left} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity" />
 
-      {/* Main label row */}
-      <div className="flex items-center gap-1.5">
-        <div
-          ref={labelRef}
-          contentEditable={isEditing}
-          suppressContentEditableWarning
-          onDoubleClick={handleDoubleClick}
-          onBlur={handleBlur}
-          onKeyDown={(e) => { if (e.key === 'Escape') labelRef.current.blur(); }}
-          onPointerDown={(e) => { if (isEditing) e.stopPropagation(); }}
-          onContextMenu={onContextMenu}
-          className={`whitespace-nowrap outline-none min-w-[10px] select-none ${isEditing ? 'cursor-text' : 'cursor-default'}`}
-          style={{ fontSize: `${fontSize}px`, fontFamily, color }}
-        >
-          {data.label || data.url || 'Listing'}
+      {/* Status badge */}
+      <div className={`px-3 py-1 text-[10px] font-semibold ${style.badge}`}>
+        {style.label}
+      </div>
+
+      {/* Photo preview area */}
+      {data.imagePaths?.length > 0 ? (
+        <div className="h-32 bg-black/30 flex items-center justify-center overflow-hidden">
+          <div className="text-white/20 text-xs flex items-center gap-1">
+            <Camera size={14} />
+            {data.imagePaths.length} photo{data.imagePaths.length !== 1 ? 's' : ''} attached
+          </div>
+        </div>
+      ) : (
+        <div className="h-20 bg-black/20 flex items-center justify-center">
+          <div className="text-white/15 text-xs">No photos</div>
+        </div>
+      )}
+
+      {/* Product details — editable inline */}
+      <div className="px-3 py-2 space-y-1.5" onPointerDown={(e) => e.stopPropagation()}>
+        {/* Title */}
+        <EditableField variant="title" value={product.generated_title} placeholder="Click to set title"
+          isEditing={editing === 'title'} onStartEdit={() => setEditing('title')}
+          onSave={(v) => handleFieldEdit('generated_title', v)} />
+
+        {/* Brand */}
+        <div className="flex gap-2 text-xs">
+          <span className="text-white/30">Brand:</span>
+          <EditableField value={product.brand} placeholder="Unknown"
+            isEditing={editing === 'brand'} onStartEdit={() => setEditing('brand')}
+            onSave={(v) => handleFieldEdit('brand', v)} />
+        </div>
+        {/* Model */}
+        <div className="flex gap-2 text-xs">
+          <span className="text-white/30">Model:</span>
+          <EditableField value={product.model} placeholder="Unknown"
+            isEditing={editing === 'model'} onStartEdit={() => setEditing('model')}
+            onSave={(v) => handleFieldEdit('model', v)} />
         </div>
 
-        {/* Check button — visible on hover */}
-        {data.url && (
-          <button
-            onClick={(e) => { e.stopPropagation(); checkListing(); }}
-            disabled={isChecking}
-            className={`shrink-0 p-0.5 rounded transition-all ${
-              isChecking
-                ? 'opacity-100'
-                : 'opacity-0 group-hover:opacity-70 hover:!opacity-100'
-            }`}
-            title={isChecking ? 'Analyzing with Gemini AI...' : 'Check listing (Gemini AI)'}
-          >
-            {isChecking ? (
-              <Loader2 size={13} className="animate-spin" style={{ color }} />
-            ) : (
-              <RefreshCw size={12} style={{ color: color + '99' }} />
-            )}
-          </button>
+        {/* Condition + Category */}
+        <div className="flex gap-2 text-xs">
+          <span className="text-white/30">Condition:</span>
+          <span className="text-white/60">{product.condition || 'Unknown'}</span>
+        </div>
+
+        {/* Description */}
+        {product.generated_description && (
+          <div className="text-white/40 text-xs leading-relaxed max-h-16 overflow-y-auto custom-scrollbar mt-1">
+            {product.generated_description}
+          </div>
         )}
       </div>
 
-      {/* Badge — shows unread signal count */}
-      {activityCount > 0 && !error && (
-        <button
-          className="absolute -top-2 -right-3 min-w-[18px] h-[18px] rounded-full flex items-center justify-center text-[10px] font-bold text-white leading-none px-1 bg-red-500 hover:bg-red-600 transition-colors cursor-pointer"
-          onClick={(e) => { e.stopPropagation(); setShowDialog('activity'); }}
-          title={`${activityCount} signal${activityCount !== 1 ? 's' : ''} found`}
-        >
-          {activityCount}
-        </button>
-      )}
-
-      {/* Checked indicator — subtle green dot when checked with no signals */}
-      {lastChecked && activityCount === 0 && !error && (
-        <div
-          className="absolute -top-1 -right-2 flex items-center"
-          title={`Last checked at ${lastChecked}`}
-        >
-          <CheckCircle2 size={12} className="text-green-500/60" />
+      {/* ── Draft state: Confirm button ─────────────────────────────────────── */}
+      {status === 'draft' && (
+        <div className="px-3 py-2 border-t border-white/5">
+          <button
+            onClick={(e) => { e.stopPropagation(); handleConfirmDraft(); }}
+            className="w-full py-2 rounded-lg text-sm font-medium bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            Confirm & Research Price
+          </button>
         </div>
       )}
 
-      {/* Error indicator */}
-      {error && (
-        <div
-          className="absolute -top-2 -right-3 min-w-[18px] h-[18px] flex items-center justify-center text-[12px] leading-none cursor-help"
-          title={error.message || 'Check failed'}
-        >
-          ⚠️
+      {/* ── Confirming state: Loading ───────────────────────────────────────── */}
+      {status === 'confirming' && (
+        <div className="px-3 py-3 border-t border-white/5 flex items-center justify-center gap-2 text-amber-400/80 text-sm">
+          <Loader2 size={16} className="animate-spin" />
+          Researching prices...
         </div>
       )}
 
-      <Handle type="source" position={Position.Right} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity" style={{ background: color }} />
+      {/* ── Priced state: Price + platforms ──────────────────────────────────── */}
+      {status === 'priced' && (
+        <div className="border-t border-white/5" onPointerDown={(e) => e.stopPropagation()}>
+          {/* Price recommendation */}
+          <div className="px-3 py-2 space-y-2">
+            {data.pricing?.recommended_price && (
+              <div className="flex items-center justify-between">
+                <span className="text-white/40 text-xs">Recommended:</span>
+                <span className="text-emerald-400 text-sm font-semibold">${data.pricing.recommended_price}</span>
+              </div>
+            )}
 
-      {/* Context Menu */}
-      {contextMenu && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          items={menuItems}
-          onClose={closeContextMenu}
-        />
-      )}
+            {/* User price input */}
+            <div className="flex items-center gap-2">
+              <span className="text-white/50 text-xs">Your Price:</span>
+              <div className="flex-1 flex items-center gap-1">
+                <span className="text-white/50 text-sm">$</span>
+                <input
+                  type="number"
+                  value={priceInput}
+                  onChange={(e) => handlePriceChange(e.target.value)}
+                  className="flex-1 bg-black/30 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none text-right"
+                  placeholder="0"
+                />
+              </div>
+            </div>
 
-      {/* Font & Size Dialog */}
-      {showDialog === 'font' && (
-        <FontSizeDialog
-          fontSize={fontSize}
-          fontFamily={fontFamily}
-          onApply={({ fontSize: fs, fontFamily: ff }) => updateNodeData(id, { fontSize: fs, fontFamily: ff })}
-          onClose={() => setShowDialog(null)}
-        />
-      )}
+            {/* Quick price buttons */}
+            <QuickPriceButtons pricing={data.pricing} onSelect={handleQuickPrice} />
+          </div>
 
-      {/* Edit URL Dialog */}
-      {showDialog === 'url' && (
-        <Dialog title="Edit Listing URL" onClose={() => setShowDialog(null)}>
-          <p className="text-white/40 text-xs mb-2">Paste the listing URL, then right-click → &quot;Check Listing&quot;</p>
-          <input
-            type="text"
-            className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-white font-mono text-sm outline-none"
-            value={urlInput}
-            onChange={(e) => setUrlInput(e.target.value)}
-            placeholder="https://www.ebay.com/itm/..."
-            autoFocus
-            onKeyDown={(e) => { if (e.key === 'Enter') applyUrl(); }}
+          {/* Price Justification */}
+          <PriceJustification
+            pricing={data.pricing}
+            comps={data.comps}
+            expanded={justificationExpanded}
+            onToggle={toggleJustification}
           />
-          <button className="bg-blue-500 hover:bg-blue-600 text-white rounded px-4 py-2 mt-2 font-medium transition-colors" onClick={applyUrl}>Done</button>
-        </Dialog>
+
+          {/* Platform selection */}
+          <div className="px-3 py-2 border-t border-white/5 space-y-1.5">
+            <div className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">List on:</div>
+            <PlatformToggles selected={selectedPlatforms} onToggle={togglePlatform} />
+
+            {/* Login required prompt */}
+            {loginPrompt && (
+              <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 mt-1.5 space-y-1.5">
+                <div className="text-amber-400 text-xs font-medium">
+                  🔒 Login required for {loginPrompt.name}
+                </div>
+                <div className="text-white/40 text-[10px]">
+                  Sell monitoring needs an active session. Log in once — cookies persist for future use.
+                </div>
+                <div className="flex gap-1.5">
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (!window.electronAPI?.checkAndLogin) return;
+                      setCheckingAuth(true);
+                      try {
+                        const result = await window.electronAPI.checkAndLogin({ platformId: loginPrompt.platformId });
+                        if (result.connected) {
+                          setLoginPrompt(null);
+                          // Re-trigger the listing flow now that we're logged in
+                          window.electronAPI?.openExternal?.(loginPrompt.sellerUrl || SELL_PLATFORMS.find(p => p.id === loginPrompt.platformId)?.url);
+                        } else {
+                          // User closed login window without logging in — keep prompt
+                        }
+                      } catch (err) {
+                        console.error('Login failed:', err);
+                      } finally {
+                        setCheckingAuth(false);
+                      }
+                    }}
+                    disabled={checkingAuth}
+                    className="flex-1 py-1 rounded text-xs font-medium bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                    onPointerDown={(e) => e.stopPropagation()}
+                  >
+                    {checkingAuth ? '⏳ Waiting...' : '🔑 Log In'}
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setLoginPrompt(null); }}
+                    className="px-2 py-1 rounded text-xs text-white/30 hover:text-white/50 transition-colors"
+                    onPointerDown={(e) => e.stopPropagation()}
+                  >
+                    Skip
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Copy listing + List on Platforms */}
+            <div className="flex gap-1.5 mt-2">
+              <button
+                onClick={(e) => { e.stopPropagation(); handleCopyListing(); }}
+                className="flex-1 py-1.5 rounded text-xs font-medium flex items-center justify-center gap-1 bg-white/5 text-white/50 hover:bg-white/10 hover:text-white/70 transition-colors"
+              >
+                {copied ? <Check size={12} /> : <Copy size={12} />}
+                {copied ? 'Copied!' : 'Copy Listing'}
+              </button>
+              <button
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  // Platforms that need login for sell monitoring
+                  const needsAuth = ['ebay', 'facebook', 'poshmark', 'mercari', 'swappa'];
+                  
+                  for (const platformId of selectedPlatforms) {
+                    if (needsAuth.includes(platformId) && window.electronAPI?.checkSellMonitorAuth) {
+                      const authStatus = await window.electronAPI.checkSellMonitorAuth({ platformId });
+                      if (!authStatus.connected) {
+                        // Show login prompt for the first unauthenticated platform
+                        setLoginPrompt({
+                          platformId,
+                          name: authStatus.name || platformId,
+                          sellerUrl: authStatus.sellerUrl,
+                        });
+                        return; // Stop — user needs to log in first
+                      }
+                    }
+                    // Platform is authenticated or doesn't need auth — open it
+                    const platform = SELL_PLATFORMS.find(p => p.id === platformId);
+                    if (platform?.postUrl) window.electronAPI?.openExternal?.(platform.postUrl);
+                  }
+                }}
+                className="flex-1 py-1.5 rounded text-xs font-medium flex items-center justify-center gap-1 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition-colors"
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                <ExternalLink size={12} />
+                List on Platforms
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
-      {/* Signal Results Dialog */}
-      {showDialog === 'activity' && (
-        <SignalResultsDialog
-          signals={activities}
-          lastChecked={lastChecked}
-          platform={platform}
-          color={color}
-          onClose={() => setShowDialog(null)}
-          onMarkRead={markRead}
-          onMarkAllRead={markAllRead}
-          onRecheck={checkListing}
-          isChecking={isChecking}
-        />
-      )}
+      <Handle type="source" position={Position.Right} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity" />
     </div>
   );
 }

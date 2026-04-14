@@ -33,7 +33,7 @@ export function LinkNode({ id, data }) {
         inputRef.current.innerText = data.label || data.url || '';
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [data.label, data.url, isEditingLabel]);
 
   const openLink = () => {

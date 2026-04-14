@@ -13,6 +13,18 @@ export default defineConfig({
     electron([
       {
         entry: 'electron/main.js',
+        vite: {
+          build: {
+            rollupOptions: {
+              external: [
+                'google-auth-library',
+                'puppeteer-core',
+                'puppeteer-extra',
+                'puppeteer-extra-plugin-stealth',
+              ]
+            }
+          }
+        }
       },
       {
         entry: 'electron/preload.js',

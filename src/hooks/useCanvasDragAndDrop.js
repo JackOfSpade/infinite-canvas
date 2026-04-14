@@ -1,14 +1,14 @@
 import { useCallback } from 'react';
 import { useReactFlow } from '@xyflow/react';
-import { createTextNode, createLinkNode, createGroupNode } from '../utils/nodeFactory';
+import { NODE_FACTORIES } from '../utils/nodeFactory';
+import { processDroppedFiles } from '../utils/dragUtils';
 
 export function useCanvasDragAndDrop({
   nodes,
   setNodes,
   setEdges,
   setIsDrawingMode,
-  setPendingListing,
-  takeSnapshot
+  takeSnapshot,
 }) {
   const { screenToFlowPosition } = useReactFlow();
 
@@ -19,7 +19,6 @@ export function useCanvasDragAndDrop({
 
   const handleDrop = useCallback(async (event) => {
     event.preventDefault();
-    if (!window.electronAPI) return;
     setIsDrawingMode(false);
     const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
     const nodeType = event.dataTransfer.getData('app/node-type');
@@ -27,40 +26,41 @@ export function useCanvasDragAndDrop({
     if (nodeType) {
       position.x -= 12;
       position.y -= 20;
-      if (nodeType === 'text') {
+      const factory = NODE_FACTORIES[nodeType];
+      if (factory) {
         takeSnapshot();
-        setNodes(nds => nds.concat(createTextNode(position)));
-      } else if (nodeType === 'link') {
-        takeSnapshot();
-        setNodes(nds => nds.concat(createLinkNode(position)));
-      } else if (nodeType === 'group') {
-        takeSnapshot();
-        setNodes(nds => nds.concat(createGroupNode(position)));
-      } else if (nodeType.startsWith('listing-')) {
-        setPendingListing({ position, platform: nodeType.replace('listing-', '') });
+        setNodes(nds => nds.concat(factory(position)));
       }
       return;
     }
 
     if (event.dataTransfer.files?.length > 0) {
+      const files = Array.from(event.dataTransfer.files);
+
+      // Resume files (PDF/DOCX) → auto-create JobHubNode with filePath
+      const resumeFile = files.find(f => f.name.match(/\.(pdf|docx|doc)$/i));
+      if (resumeFile?.path) {
+        takeSnapshot();
+        setNodes(nds => nds.concat(NODE_FACTORIES.jobhub(position, { filePath: resumeFile.path })));
+        return;
+      }
+
+      // Image-only drops → auto-create SellHubNode with imagePaths
+      const imageFiles = files.filter(f => f.name.match(/\.(png|jpg|jpeg|webp|gif)$/i));
+      if (imageFiles.length === files.length && imageFiles.length > 0) {
+        takeSnapshot();
+        setNodes(nds => nds.concat(NODE_FACTORIES.sellhub(position, { imagePaths: imageFiles.map(f => f.path) })));
+        return;
+      }
+
+      // Default: treat as document/folder drops
       takeSnapshot();
-      let currentPos = { ...position };
-      for (const file of event.dataTransfer.files) {
-        try {
-          const result = await window.electronAPI.scanDirectory(file.path);
-          if (result.isFile) {
-            const f = result.file;
-            setNodes(nds => nds.concat({ id: f.id, type: 'document', position: { ...currentPos }, data: { filename: f.filename, filePath: f.filePath } }));
-          } else {
-            setNodes(nds => nds.concat({ id: result.id, type: 'group', position: { ...currentPos }, data: { title: result.title, nodes: [], edges: [], collapsed: true } }));
-          }
-          currentPos = { x: currentPos.x + 40, y: currentPos.y + 40 };
-        } catch (e) {
-          console.error('Failed to read file/folder', e);
-        }
+      const newItems = await processDroppedFiles(event.dataTransfer.files, position);
+      if (newItems.length > 0) {
+        setNodes(nds => nds.concat(newItems));
       }
     }
-  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode, setPendingListing]);
+  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode]);
 
   const onNodeDragStop = useCallback((_event, draggedNode) => {
     const isMainCanvasNode = nodes.some(n => n.id === draggedNode.id);

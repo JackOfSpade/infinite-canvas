@@ -1,7 +1,23 @@
+/* global require */
 const { contextBridge, ipcRenderer } = require('electron');
 
+/**
+ * Creates a listener wrapper for IPC channels.
+ * Returns a cleanup function that removes the listener.
+ */
+function createListener(channel) {
+  return (callback) => {
+    const fn = (_event, data) => callback(data);
+    ipcRenderer.on(channel, fn);
+    return () => ipcRenderer.removeListener(channel, fn);
+  };
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
-  // --- Existing channels ---
+  // Generic IPC invoke — used for channels without a typed helper
+  invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
+
+  // ── Filesystem ──────────────────────────────────────────────────────────
   openFile: (filePath) => ipcRenderer.invoke('open-file', filePath),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   saveWorkspace: (data) => ipcRenderer.invoke('save-workspace', data),
@@ -9,32 +25,45 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scanDirectory: (dirPath) => ipcRenderer.invoke('scan-directory', dirPath),
   startFileWatch: (filePath) => ipcRenderer.invoke('start-file-watch', filePath),
   stopFileWatch: (filePath) => ipcRenderer.invoke('stop-file-watch', filePath),
-  
-  onFileChanged: (callback) => {
-    const fn = (event, filePath) => callback(filePath);
-    ipcRenderer.on('file-changed', fn);
-    return () => ipcRenderer.removeListener('file-changed', fn);
-  },
-  
-  onMenuOpen: (callback) => {
-    const fn = (event, ...args) => callback(...args);
-    ipcRenderer.on('menu-open', fn);
-    return () => ipcRenderer.removeListener('menu-open', fn);
-  },
-  onMenuSave: (callback) => {
-    const fn = (event, ...args) => callback(...args);
-    ipcRenderer.on('menu-save', fn);
-    return () => ipcRenderer.removeListener('menu-save', fn);
-  },
 
-  // --- Monitoring channels (Gemini AI-powered) ---
-  registerListing: (args) => ipcRenderer.invoke('register-listing', args),
-  checkListing: (args) => ipcRenderer.invoke('check-listing', args),
+  onFileChanged: createListener('file-changed'),
+  onMenuOpen: createListener('menu-open'),
+  onMenuSave: createListener('menu-save'),
 
-  // Push event: main process sends monitoring activity updates
-  onMonitoringActivity: (callback) => {
-    const fn = (event, data) => callback(data);
-    ipcRenderer.on('monitoring-activity', fn);
-    return () => ipcRenderer.removeListener('monitoring-activity', fn);
-  },
+  // ── Jobs Module ─────────────────────────────────────────────────────────
+  parseResume: (args) => ipcRenderer.invoke('parse-resume', args),
+  generateJobQueries: (args) => ipcRenderer.invoke('generate-job-queries', args),
+  searchJobs: (args) => ipcRenderer.invoke('search-jobs', args),
+  scoreJobs: (args) => ipcRenderer.invoke('score-jobs', args),
+  generateCoverLetter: (args) => ipcRenderer.invoke('generate-cover-letter', args),
+
+  onJobSourceProgress: createListener('job-source-progress'),
+
+  // ── Marketplace Module ──────────────────────────────────────────────────
+  analyzePhotos: (args) => ipcRenderer.invoke('analyze-photos', args),
+  researchPrice: (args) => ipcRenderer.invoke('research-price', args),
+  getSellPlatforms: () => ipcRenderer.invoke('get-sell-platforms'),
+  checkSellMonitorAuth: (args) => ipcRenderer.invoke('check-sell-monitor-auth', args),
+
+  onPriceSourceProgress: createListener('price-source-progress'),
+
+  // ── Accounts Module ───────────────────────────────────────────────────
+  getPlatforms: () => ipcRenderer.invoke('get-platforms'),
+  getSessionStatuses: () => ipcRenderer.invoke('get-session-statuses'),
+  checkPlatformSession: (args) => ipcRenderer.invoke('check-platform-session', args),
+  openLoginWindow: (args) => ipcRenderer.invoke('open-login-window', args),
+  checkAndLogin: (args) => ipcRenderer.invoke('check-and-login', args),
+
+  // ── Tier 4 Monitor Module ─────────────────────────────────────────────
+  // Human-assisted BrowserView monitors for hostile platforms (Facebook, etc.)
+  openMonitor: (args) => ipcRenderer.invoke('open-monitor', args),
+  startMonitoring: (args) => ipcRenderer.invoke('start-monitoring', args),
+  stopMonitor: (args) => ipcRenderer.invoke('stop-monitor', args),
+  reopenMonitor: (args) => ipcRenderer.invoke('reopen-monitor', args),
+  getMonitors: () => ipcRenderer.invoke('get-monitors'),
+  getMonitorData: (args) => ipcRenderer.invoke('get-monitor-data', args),
+
+  onMonitorDataChanged: createListener('monitor-data-changed'),
+  onMonitorSessionExpired: createListener('monitor-session-expired'),
+  onMonitorPaused: createListener('monitor-paused'),
 });
