@@ -62,6 +62,27 @@ export function registerFilesystemHandlers() {
     }
   });
 
+  ipcMain.handle('fetch-url-title', async (_event, url) => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+      let fetchUrl = url;
+      if (!fetchUrl.startsWith('http://') && !fetchUrl.startsWith('https://')) {
+          fetchUrl = 'https://' + fetchUrl;
+      }
+      const res = await fetch(fetchUrl, {
+        signal: controller.signal,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' }
+      });
+      clearTimeout(timeoutId);
+      const text = await res.text();
+      const match = text.match(/<title[^>]*>([^<]+)<\/title>/i);
+      return match ? match[1].trim() : null;
+    } catch {
+      return null;
+    }
+  });
+
   ipcMain.handle('save-workspace', async (_event, args) => {
     try {
       const { data, filePath } = args;
@@ -124,5 +145,15 @@ export function registerFilesystemHandlers() {
       activeWatchers.delete(filePath);
     }
     return { success: true };
+  });
+
+  ipcMain.handle('delete-os-file', async (event, filePath) => {
+    try {
+      await shell.trashItem(filePath);
+      return { success: true };
+    } catch (err) {
+      console.error('Failed to trash OS file:', err);
+      return { success: false, error: err.message };
+    }
   });
 }

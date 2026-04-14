@@ -1,5 +1,5 @@
 /* global process */
-import { app, BrowserWindow, Menu } from 'electron';
+import { app, BrowserWindow, Menu, protocol } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { registerFilesystemHandlers } from './ipc/filesystem.js';
@@ -8,6 +8,8 @@ import { registerMarketplaceHandlers } from './ipc/marketplace.js';
 import { registerAccountsHandlers } from './ipc/accounts.js';
 import { registerMonitorHandlers, closeAllMonitors } from './ipc/browserViewMonitor.js';
 import { closeStealthBrowser } from './ipc/stealthBrowser.js';
+import { registerGeminiHandlers } from './ipc/gemini.js';
+import { registerBugReportHandlers } from './ipc/bugReport.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -76,11 +78,22 @@ function setupApplicationMenu(win) {
 // ── App lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
+  protocol.registerFileProtocol('local-file', (request, callback) => {
+    const url = request.url.replace(/^local-file:\/\//, '');
+    try {
+      return callback({ path: decodeURIComponent(url) });
+    } catch (error) {
+      console.error('Failed to register local-file protocol', error);
+    }
+  });
+
   registerFilesystemHandlers();
   registerJobsHandlers();
   registerMarketplaceHandlers();
   registerAccountsHandlers();
   registerMonitorHandlers();
+  registerGeminiHandlers();
+  registerBugReportHandlers();
   createWindow();
 
   app.on('activate', () => {

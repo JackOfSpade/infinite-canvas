@@ -20,11 +20,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Filesystem ──────────────────────────────────────────────────────────
   openFile: (filePath) => ipcRenderer.invoke('open-file', filePath),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  fetchUrlTitle: (url) => ipcRenderer.invoke('fetch-url-title', url),
   saveWorkspace: (data) => ipcRenderer.invoke('save-workspace', data),
   loadWorkspace: () => ipcRenderer.invoke('load-workspace'),
   scanDirectory: (dirPath) => ipcRenderer.invoke('scan-directory', dirPath),
   startFileWatch: (filePath) => ipcRenderer.invoke('start-file-watch', filePath),
   stopFileWatch: (filePath) => ipcRenderer.invoke('stop-file-watch', filePath),
+  deleteOSFile: (filePath) => ipcRenderer.invoke('delete-os-file', filePath),
 
   onFileChanged: createListener('file-changed'),
   onMenuOpen: createListener('menu-open'),
@@ -66,4 +68,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onMonitorDataChanged: createListener('monitor-data-changed'),
   onMonitorSessionExpired: createListener('monitor-session-expired'),
   onMonitorPaused: createListener('monitor-paused'),
+
+  // ── AI Tools ────────────────────────────────────────────────────────────
+  aiPolishText: (text) => ipcRenderer.invoke('ai-polish-text', text),
+  exportBugReport: (payload) => ipcRenderer.invoke('export-bug-report', payload),
 });

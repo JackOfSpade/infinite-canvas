@@ -2,6 +2,34 @@ import { useCallback, useState } from 'react';
 import { toPng } from 'html-to-image';
 
 /**
+ * Recursively migrate old group nodes from separate data.nodes/edges/drawings
+ * to the unified data.canvasData structure.
+ */
+function migrateGroupNodes(nodes) {
+  if (!Array.isArray(nodes)) return [];
+  return nodes.map(node => {
+    if (node.type === 'group' && !node.data?.canvasData && (node.data?.nodes || node.data?.edges || node.data?.drawings)) {
+      const { nodes: innerNodes, edges: innerEdges, drawings: innerDrawings,
+              collapsed: _collapsed, pushedNodes: _pushedNodes, items: _items, ...restData } = node.data;
+      const { dragHandle: _dragHandle, ...restNode } = node;
+      return {
+        ...restNode,
+        style: { width: node.style?.width || 180, height: node.style?.height || 130 },
+        data: {
+          ...restData,
+          canvasData: {
+            nodes: migrateGroupNodes(innerNodes || []),
+            edges: innerEdges || [],
+            drawings: innerDrawings || [],
+          },
+        },
+      };
+    }
+    return node;
+  });
+}
+
+/**
  * Encapsulates canvas save/load/export persistence logic.
  * Extracted from Canvas.jsx to keep the main component focused on rendering.
  *
@@ -14,9 +42,11 @@ import { toPng } from 'html-to-image';
  * @param {Function} deps.setDrawings - Setter for drawings
  * @param {Function} deps.customFitView - Fit view callback
  * @param {Function} deps.addToast - Toast notification callback
+ * @param {Function} deps.flushStack - Navigation stack flush (returns root-level data)
  */
 export function useCanvasPersistence({
-  nodes, edges, drawings, setNodes, setEdges, setDrawings, customFitView, addToast
+  nodes, edges, drawings, setNodes, setEdges, setDrawings, customFitView, addToast,
+  flushStack,
 }) {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [currentFile, setCurrentFile] = useState(null);
@@ -26,7 +56,9 @@ export function useCanvasPersistence({
     if (!window.electronAPI || saveState !== 'idle') return;
     setSaveState('saving');
     try {
-      const res = await window.electronAPI.saveWorkspace({ data: { nodes, edges, drawings }, filePath: currentFile });
+      // Flush the navigation stack to get complete root-level data
+      const data = flushStack ? flushStack() : { nodes, edges, drawings };
+      const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFile });
       if (res?.success && res.filePath) {
         setCurrentFile(res.filePath);
         setHasUnsavedChanges(false);
@@ -42,14 +74,16 @@ export function useCanvasPersistence({
       setSaveState('idle');
       addToast({ title: 'Save Error', description: err.message || 'An error occurred while saving.', type: 'error' });
     }
-  }, [nodes, edges, drawings, currentFile, saveState, addToast]);
+  }, [nodes, edges, drawings, currentFile, saveState, addToast, flushStack]);
 
   const loadCanvas = useCallback(async () => {
     if (!window.electronAPI) return;
     try {
       const res = await window.electronAPI.loadWorkspace();
       if (res?.success && res.data) {
-        setNodes(res.data.nodes || []);
+        // Migrate old group nodes on load
+        const migratedNodes = migrateGroupNodes(res.data.nodes || []);
+        setNodes(migratedNodes);
         setEdges(res.data.edges || []);
         setDrawings(res.data.drawings || []);
         setCurrentFile(res.filePath);
@@ -63,7 +97,7 @@ export function useCanvasPersistence({
       console.error('Failed to load canvas:', err);
       addToast({ title: 'Load Error', description: err.message || 'An error occurred while loading.', type: 'error'});
     }
-  }, [setNodes, setEdges, customFitView, addToast]);
+  }, [setNodes, setEdges, setDrawings, customFitView, addToast]);
 
   const exportCanvasToPNG = useCallback(() => {
     const viewportNode = document.querySelector('.react-flow__viewport');

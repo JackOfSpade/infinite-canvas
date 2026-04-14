@@ -19,8 +19,8 @@ export const nodeTypes = {
   sellhub: SellHubNode,
 };
 
-export const DEFAULT_EDGE_OPTIONS = { type: 'smoothstep' };
-export const EDGE_STYLE = { stroke: '#a855f7', strokeWidth: 2 };
+export const DEFAULT_EDGE_OPTIONS = { type: 'bezier', animated: true, style: { strokeWidth: 3, opacity: 0.8 } };
+export const EDGE_STYLE = { stroke: '#a855f7', strokeWidth: 3 };
 
 /** Selling platforms — single source of truth for ListingNode and SellHubNode. */
 export const SELL_PLATFORMS = [
@@ -78,6 +78,7 @@ export const MINIMAP_NODE_COLORS = {
   group: '#3b82f6',
   document: '#8b5cf6',
   text: '#10b981',
+  link: '#60a5fa',
   listing: '#f59e0b',
   jobcard: '#22c55e',
   jobhub: '#4285f4',

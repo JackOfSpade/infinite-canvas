@@ -43,7 +43,7 @@ export function setupCanvasDragGhost(e) {
 
 /**
  * Processes dropped OS files asynchronously into canvas Node objects.
- * Handles single files (DocumentNode) and scanned folders (collapsed GroupNode).
+ * Handles single files (DocumentNode) and scanned folders (CanvasNode with nested children).
  * Automatically shifts positions diagonally to prevent overlapping drops.
  */
 export async function processDroppedFiles(files, startPosition) {
@@ -60,15 +60,20 @@ export async function processDroppedFiles(files, startPosition) {
         data: { filename: fsItem.filename, filePath: fsItem.filePath }
       };
     } else {
+      // Folder drop: create a canvas node with children as nested canvas data
+      const childNodes = (fsItem.items || []).map((child, i) => buildNode(child, { x: 20, y: 50 + i * 50 }));
       return {
         id: fsItem.id,
         type: 'group',
         position: { ...pos },
+        style: { width: 180, height: 130 },
         data: { 
           title: fsItem.title, 
-          collapsed: true,
-          edges: [],
-          nodes: (fsItem.items || []).map((child, i) => buildNode(child, { x: 20, y: 50 + i * 50 }))
+          canvasData: {
+            nodes: childNodes,
+            edges: [],
+            drawings: [],
+          },
         }
       };
     }

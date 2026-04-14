@@ -2,14 +2,12 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { AnimatedSourceRing } from '../components/AnimatedSourceRing';
 import { HubContainer } from '../components/HubContainer';
-import { EditableField } from '../components/EditableField';
-import { QuickPriceButtons } from '../components/QuickPriceButtons';
-import { PlatformToggles } from '../components/PlatformToggles';
-import { Camera, Loader2, Check, Copy } from 'lucide-react';
-import { PriceJustification } from '../components/PriceJustification';
+import { Camera, Loader2 } from 'lucide-react';
 import { SELL_PLATFORMS, PRICE_COMP_SOURCES } from '../utils/constants';
 import { useListingActions } from '../hooks/useListingActions';
 import { useToast } from '../components/ToastProvider';
+import { SellHubDraftState } from './sellhub/SellHubDraftState';
+import { SellHubPricedState } from './sellhub/SellHubPricedState';
 
 /**
  * SellHubNode — draggable canvas module for marketplace selling.
@@ -233,37 +231,13 @@ export function SellHubNode({ id, data }) {
 
         {/* ── Draft: editable product info ───────────────────────────────── */}
         {hubState === 'draft' && (
-          <div className="p-3 space-y-2" onPointerDown={(e) => e.stopPropagation()}>
-            <div className="text-amber-400/60 text-[10px] font-semibold uppercase tracking-wider">📝 Draft</div>
-
-            <EditableField variant="title" value={product.generated_title} placeholder="Click to set title"
-              isEditing={editing === 'title'} onStartEdit={() => setEditing('title')}
-              onSave={(v) => handleFieldEdit('generated_title', v)} />
-
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div>
-                <span className="text-white/30">Brand: </span>
-                <EditableField value={product.brand} isEditing={editing === 'brand'}
-                  onStartEdit={() => setEditing('brand')} onSave={(v) => handleFieldEdit('brand', v)} />
-              </div>
-              <div>
-                <span className="text-white/30">Model: </span>
-                <EditableField value={product.model} isEditing={editing === 'model'}
-                  onStartEdit={() => setEditing('model')} onSave={(v) => handleFieldEdit('model', v)} />
-              </div>
-            </div>
-
-            <div className="text-white/30 text-[10px]">Condition: {product.condition || 'Unknown'}</div>
-
-            {product.generated_description && (
-              <div className="text-white/35 text-[10px] leading-relaxed max-h-12 overflow-hidden">{product.generated_description}</div>
-            )}
-
-            <button onClick={handleConfirmDraft}
-              className="w-full py-2 rounded-lg text-xs font-medium bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors mt-1">
-              Confirm & Research Price
-            </button>
-          </div>
+          <SellHubDraftState 
+            product={product}
+            editing={editing}
+            setEditing={setEditing}
+            handleFieldEdit={handleFieldEdit}
+            handleConfirmDraft={handleConfirmDraft}
+          />
         )}
 
         {/* ── Researching ────────────────────────────────────────────────── */}
@@ -279,51 +253,20 @@ export function SellHubNode({ id, data }) {
 
         {/* ── Priced: price + platform controls ──────────────────────────── */}
         {hubState === 'priced' && (
-          <div className="p-3 space-y-2" onPointerDown={(e) => e.stopPropagation()}>
-            <div className="text-emerald-400/60 text-[10px] font-semibold uppercase tracking-wider">💰 Ready to List</div>
-
-            <div className="text-white/80 text-sm font-semibold truncate">{product.generated_title || 'Item'}</div>
-
-            {/* Price */}
-            {data.pricing?.recommended_price && (
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-white/30">Recommended:</span>
-                <span className="text-emerald-400 font-semibold">${data.pricing.recommended_price}</span>
-              </div>
-            )}
-
-            <div className="flex items-center gap-2">
-              <span className="text-white/40 text-xs">Your Price:</span>
-              <div className="flex-1 flex items-center gap-1">
-                <span className="text-white/40 text-sm">$</span>
-                <input type="number" value={priceInput}
-                  onChange={(e) => handlePriceChange(e.target.value)}
-                  className="flex-1 bg-black/30 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none text-right" placeholder="0" />
-              </div>
-            </div>
-
-            {/* Quick price buttons */}
-            <QuickPriceButtons pricing={data.pricing} onSelect={handleQuickPrice} />
-
-            {/* Price justification */}
-            <PriceJustification pricing={data.pricing} comps={data.comps} expanded={justificationExpanded}
-              onToggle={toggleJustification} />
-
-            {/* Platform toggles */}
-            <div className="pt-1 border-t border-white/5">
-              <div className="text-white/20 text-[9px] font-semibold uppercase tracking-wider mb-1">Click source icon to post →</div>
-              <PlatformToggles selected={selectedPlatforms} onToggle={togglePlatform} />
-            </div>
-
-            {/* Copy + open actions */}
-            <div className="flex gap-1.5">
-              <button onClick={handleCopyListing}
-                className="flex-1 py-1.5 rounded text-[10px] font-medium flex items-center justify-center gap-1 bg-white/5 text-white/50 hover:bg-white/10 transition-colors">
-                {copied ? <Check size={10} /> : <Copy size={10} />}
-                {copied ? 'Copied!' : 'Copy Listing'}
-              </button>
-            </div>
-          </div>
+          <SellHubPricedState 
+            product={product}
+            pricing={data.pricing}
+            comps={data.comps}
+            priceInput={priceInput}
+            handlePriceChange={handlePriceChange}
+            handleQuickPrice={handleQuickPrice}
+            justificationExpanded={justificationExpanded}
+            toggleJustification={toggleJustification}
+            selectedPlatforms={selectedPlatforms}
+            togglePlatform={togglePlatform}
+            copied={copied}
+            handleCopyListing={handleCopyListing}
+          />
         )}
 
         {/* ── Error ──────────────────────────────────────────────────────── */}

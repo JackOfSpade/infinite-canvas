@@ -82,14 +82,25 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
 
   // Stable undo — reads current state from ref
   const undo = useCallback(() => {
-    const past = pastRef.current;
+    let past = pastRef.current;
     if (past.length === 0) return;
 
-    const previous = past[past.length - 1];
-    pastRef.current = past.slice(0, -1);
+    const currentState = deepCloneState();
+    let previous;
+
+    // If the top snapshot matches current state (due to debounce auto-capture),
+    // we need to go back one step further.
+    if (fingerprint(past[past.length - 1]) === fingerprint(currentState)) {
+      if (past.length < 2) return; // Nothing real to undo
+      previous = past[past.length - 2];
+      pastRef.current = past.slice(0, -2);
+    } else {
+      previous = past[past.length - 1];
+      pastRef.current = past.slice(0, -1);
+    }
 
     // Push current state to future before restoring
-    futureRef.current = [...futureRef.current, deepCloneState()];
+    futureRef.current = [...futureRef.current, currentState];
 
     isRestoringRef.current = true;
     setNodes(previous.nodes);
@@ -146,10 +157,19 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undo, redo]);
 
+  // Clear all history (used when navigating between canvas levels)
+  const clearHistory = useCallback(() => {
+    pastRef.current = [];
+    futureRef.current = [];
+    lastFingerprintRef.current = null;
+    syncHistoryLen();
+  }, [syncHistoryLen]);
+
   return {
     undo,
     redo,
     takeSnapshot,
+    clearHistory,
     canUndo: historyLen.past > 0,
     canRedo: historyLen.future > 0,
   };

@@ -1,26 +1,24 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { Search, Store, BarChart3, ChevronLeft, ChevronRight, Briefcase, Camera, GripVertical, UserCircle, Check, Loader2 } from 'lucide-react';
+import { Search, Store, BarChart3, ChevronLeft, ChevronRight, UserCircle } from 'lucide-react';
+import { SELL_PLATFORMS, JOB_SOURCES, PRICE_COMP_SOURCES } from '../utils/constants';
 
-/** Static platform list — hoisted to module scope to avoid re-allocation on each render. */
-const PLATFORMS = [
+import { JobsTab } from './sidebar/JobsTab';
+import { SellTab } from './sidebar/SellTab';
+import { DashboardTab } from './sidebar/DashboardTab';
+import { AccountsTab } from './sidebar/AccountsTab';
+/** Icons specific to the Sidebar connection view. */
+const PLATFORM_ICONS = {
   // Job Platforms
-  { id: 'linkedin', name: 'LinkedIn', icon: '💼', section: 'jobs' },
-  { id: 'indeed', name: 'Indeed', icon: '🔍', section: 'jobs' },
-  { id: 'glassdoor', name: 'Glassdoor', icon: '⭐', section: 'jobs' },
-  { id: 'ziprecruiter', name: 'ZipRecruiter', icon: '🚀', section: 'jobs' },
-  { id: 'dice', name: 'Dice', icon: '🎲', section: 'jobs' },
-  { id: 'wellfound', name: 'Wellfound', icon: '🦄', section: 'jobs' },
-  // Marketplace — Selling Destinations
-  { id: 'ebay', name: 'eBay', icon: '🏷️', section: 'sell' },
-  { id: 'facebook', name: 'Facebook', icon: '📘', section: 'sell' },
-  { id: 'mercari', name: 'Mercari', icon: '🛍️', section: 'sell' },
-  { id: 'poshmark', name: 'Poshmark', icon: '👗', section: 'sell' },
-  { id: 'depop', name: 'Depop', icon: '🔥', section: 'sell' },
-  { id: 'swappa', name: 'Swappa', icon: '📱', section: 'sell' },
-  { id: 'reverb', name: 'Reverb', icon: '🎸', section: 'sell' },
-  { id: 'whatnot', name: 'Whatnot', icon: '🎴', section: 'sell' },
-  // Marketplace — Pricing Data Only
-  { id: 'stockx', name: 'StockX', icon: '👟', section: 'sell' },
+  linkedin: '💼', indeed: '🔍', glassdoor: '⭐', ziprecruiter: '🚀', dice: '🎲', wellfound: '🦄',
+  // Marketplace
+  ebay: '🏷️', facebook: '📘', mercari: '🛍️', poshmark: '👗', depop: '🔥', swappa: '📱', reverb: '🎸', whatnot: '🎴', stockx: '👟',
+};
+
+/** Match existing ids to central sources, adding icon and section tags dynamically */
+const PLATFORMS = [
+  ...JOB_SOURCES.filter(p => PLATFORM_ICONS[p.id]).map(p => ({ id: p.id, name: p.name, icon: PLATFORM_ICONS[p.id], section: 'jobs' })),
+  ...SELL_PLATFORMS.map(p => ({ id: p.id, name: p.name, icon: PLATFORM_ICONS[p.id] || '🏷️', section: 'sell' })),
+  ...PRICE_COMP_SOURCES.filter(p => p.id === 'stockx').map(p => ({ id: p.id, name: p.name, icon: PLATFORM_ICONS[p.id], section: 'sell' })),
 ];
 
 /**
@@ -50,14 +48,15 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [] }) {
     e.dataTransfer.effectAllowed = 'copy';
   }, []);
 
-  // Compute stats from canvas nodes
-  const jobCards = nodes.filter(n => n.type === 'jobcard');
-  const sellHubs = nodes.filter(n => n.type === 'sellhub');
-  const appliedJobs = jobCards.filter(n => n.data?.status === 'Applied');
-  const pricedListings = sellHubs.filter(n => n.data?.hubState === 'priced');
-  const totalValue = pricedListings.reduce((sum, n) => sum + (parseFloat(n.data?.userPrice) || 0), 0);
-
-  // Accounts state
+  // Compute stats from canvas nodes using useMemo for performance
+  const { jobCards, sellHubs, appliedJobs, pricedListings, totalValue } = React.useMemo(() => {
+    const jobs = nodes.filter(n => n.type === 'jobcard');
+    const sells = nodes.filter(n => n.type === 'sellhub');
+    const applied = jobs.filter(n => n.data?.status === 'Applied');
+    const priced = sells.filter(n => n.data?.hubState === 'priced');
+    const value = priced.reduce((sum, n) => sum + (parseFloat(n.data?.userPrice) || 0), 0);
+    return { jobCards: jobs, sellHubs: sells, appliedJobs: applied, pricedListings: priced, totalValue: value };
+  }, [nodes]);
   const [accountStatuses, setAccountStatuses] = useState({});
   const [systemStatuses, setSystemStatuses] = useState(null);
   const [loadingPlatform, setLoadingPlatform] = useState(null);
@@ -162,203 +161,27 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [] }) {
       >
         <div className="w-56 flex flex-col h-full">
 
-          {/* ── Jobs Tab ────────────────────────────────────────────── */}
-          {activeTab === 'jobs' && (
-            <>
-              <div className="px-4 py-3 border-b border-white/5">
-                <h3 className="text-white/80 text-xs font-semibold uppercase tracking-wider">Job Search</h3>
-              </div>
-
-              {/* Draggable module */}
-              <div className="p-3">
-                <div
-                  draggable
-                  onDragStart={(e) => handleModuleDragStart(e, 'jobhub')}
-                  className="border-2 border-dashed border-white/10 rounded-xl p-4 text-center cursor-grab active:cursor-grabbing 
-                             hover:border-blue-500/30 hover:bg-blue-500/5 transition-all group"
-                >
-                  <div className="flex items-center justify-center gap-1.5 mb-2">
-                    <GripVertical size={12} className="text-white/15 group-hover:text-white/30 transition-colors" />
-                    <Briefcase size={22} className="text-blue-400/50" />
-                  </div>
-                  <p className="text-white/50 text-xs font-medium">Job Search Module</p>
-                  <p className="text-white/20 text-[10px] mt-1">Drag to canvas, then drop resume</p>
-                </div>
-
-                <p className="text-white/15 text-[9px] text-center mt-3 leading-relaxed">
-                  Or drop a resume directly on the canvas — a hub will be created automatically
-                </p>
-              </div>
-
-              <div className="flex-1" />
-              <div className="px-4 py-3 border-t border-white/5">
-                <p className="text-white/15 text-[10px] text-center">AI explores career directions you haven't considered</p>
-              </div>
-            </>
-          )}
-
-          {/* ── Sell Tab ────────────────────────────────────────────── */}
-          {activeTab === 'sell' && (
-            <>
-              <div className="px-4 py-3 border-b border-white/5">
-                <h3 className="text-white/80 text-xs font-semibold uppercase tracking-wider">Sell Items</h3>
-              </div>
-
-              {/* Draggable module */}
-              <div className="p-3">
-                <div
-                  draggable
-                  onDragStart={(e) => handleModuleDragStart(e, 'sellhub')}
-                  className="border-2 border-dashed border-white/10 rounded-xl p-4 text-center cursor-grab active:cursor-grabbing 
-                             hover:border-emerald-500/30 hover:bg-emerald-500/5 transition-all group"
-                >
-                  <div className="flex items-center justify-center gap-1.5 mb-2">
-                    <GripVertical size={12} className="text-white/15 group-hover:text-white/30 transition-colors" />
-                    <Camera size={22} className="text-emerald-400/50" />
-                  </div>
-                  <p className="text-white/50 text-xs font-medium">Sell Item Module</p>
-                  <p className="text-white/20 text-[10px] mt-1">Drag to canvas, then drop photos</p>
-                </div>
-
-                <p className="text-white/15 text-[9px] text-center mt-3 leading-relaxed">
-                  Or drop product photos directly on the canvas
-                </p>
-              </div>
-
-              <div className="flex-1" />
-              <div className="px-4 py-3 border-t border-white/5">
-                <p className="text-white/15 text-[10px] text-center">AI generates listing + researches price</p>
-              </div>
-            </>
-          )}
-
-          {/* ── Dashboard Tab ──────────────────────────────────────── */}
+          {/* ── Tabs ─────────────────────────────────────────────────── */}
+          {activeTab === 'jobs' && <JobsTab handleModuleDragStart={handleModuleDragStart} />}
+          {activeTab === 'sell' && <SellTab handleModuleDragStart={handleModuleDragStart} />}
           {activeTab === 'dashboard' && (
-            <>
-              <div className="px-4 py-3 border-b border-white/5">
-                <h3 className="text-white/80 text-xs font-semibold uppercase tracking-wider">Dashboard</h3>
-              </div>
-
-              <div className="p-4 space-y-4">
-                {/* Jobs stats */}
-                <div className="space-y-2">
-                  <div className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">Jobs</div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="bg-black/20 rounded-lg p-2.5 text-center">
-                      <div className="text-blue-400 text-lg font-bold">{jobCards.length}</div>
-                      <div className="text-white/30 text-[10px]">Matches</div>
-                    </div>
-                    <div className="bg-black/20 rounded-lg p-2.5 text-center">
-                      <div className="text-emerald-400 text-lg font-bold">{appliedJobs.length}</div>
-                      <div className="text-white/30 text-[10px]">Applied</div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Marketplace stats */}
-                <div className="space-y-2">
-                  <div className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">Marketplace</div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="bg-black/20 rounded-lg p-2.5 text-center">
-                      <div className="text-amber-400 text-lg font-bold">{sellHubs.length}</div>
-                      <div className="text-white/30 text-[10px]">Listings</div>
-                    </div>
-                    <div className="bg-black/20 rounded-lg p-2.5 text-center">
-                      <div className="text-purple-400 text-lg font-bold">${totalValue}</div>
-                      <div className="text-white/30 text-[10px]">Value</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex-1" />
-              <div className="px-4 py-3 border-t border-white/5">
-                <p className="text-white/15 text-[10px] text-center">Stats update as you use the app</p>
-              </div>
-            </>
+            <DashboardTab 
+              jobCards={jobCards} 
+              appliedJobs={appliedJobs} 
+              sellHubs={sellHubs} 
+              totalValue={totalValue} 
+            />
           )}
-
-          {/* ── Accounts Tab ──────────────────────────────────────── */}
           {activeTab === 'accounts' && (
-            <>
-              <div className="px-4 py-3 border-b border-white/5">
-                <h3 className="text-white/80 text-xs font-semibold uppercase tracking-wider">Connected Accounts</h3>
-              </div>
-
-              <div className="p-3 space-y-2 overflow-y-auto flex-1 custom-scrollbar">
-                <p className="text-white/30 text-[10px] px-1 mb-2 leading-relaxed">
-                  Log in to platforms for better results. Sessions persist across app restarts.
-                </p>
-
-                {/* System Connections */}
-                <div className="mb-4">
-                  <div className="text-white/25 text-[9px] font-semibold uppercase tracking-wider mt-2 mb-1.5 px-1">System APIs</div>
-                  <div className="space-y-1.5">
-                    {systemStatuses && Object.entries(systemStatuses).map(([key, config]) => (
-                      <div key={key} className="flex items-center gap-2.5 p-2.5 rounded-lg bg-black/20 group">
-                        <span className="text-base w-6 text-center">⚙️</span>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-white/70 text-xs font-medium">{config.name}</div>
-                          <div className={`text-[9px] mt-0.5 ${config.connected ? 'text-emerald-400/70' : 'text-amber-400/70'}`}>
-                            {config.connected ? 'Configured' : 'Missing Configuration'}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {['jobs', 'sell'].map(section => (
-                  <div key={section}>
-                    <div className="text-white/25 text-[9px] font-semibold uppercase tracking-wider mt-2 mb-1.5 px-1">
-                      {section === 'jobs' ? 'Job Platforms' : 'Marketplace'}
-                    </div>
-                    {PLATFORMS.filter(p => p.section === section).map(platform => {
-                      const status = accountStatuses[platform.id];
-                      const isConnected = status?.connected;
-                      const isLoading = loadingPlatform === platform.id;
-
-                      return (
-                        <div
-                          key={platform.id}
-                          className="flex items-center gap-2.5 p-2.5 rounded-lg bg-black/20 hover:bg-black/30 transition-colors group mb-1.5"
-                        >
-                          <span className="text-base w-6 text-center">{platform.icon}</span>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-white/70 text-xs font-medium">{platform.name}</div>
-                            <div className={`text-[9px] ${isConnected ? 'text-emerald-400/70' : 'text-white/20'}`}>
-                              {isConnected ? 'Connected' : 'Not connected'}
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => handleConnect(platform.id)}
-                            disabled={isLoading}
-                            className={`px-2 py-1 rounded text-[10px] font-medium transition-all ${
-                              isConnected
-                                ? 'text-white/30 hover:text-white/60 hover:bg-white/5'
-                                : 'bg-white/10 text-white/70 hover:bg-white/15'
-                            }`}
-                          >
-                            {isLoading ? (
-                              <Loader2 size={12} className="animate-spin" />
-                            ) : isConnected ? (
-                              <span className="flex items-center gap-1"><Check size={10} /> Active</span>
-                            ) : (
-                              'Connect'
-                            )}
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
-              </div>
-
-              <div className="px-4 py-3 border-t border-white/5">
-                <p className="text-white/15 text-[10px] text-center">A browser window will open for login</p>
-              </div>
-            </>
+            <AccountsTab 
+              systemStatuses={systemStatuses}
+              accountStatuses={accountStatuses}
+              PLATFORMS={PLATFORMS}
+              loadingPlatform={loadingPlatform}
+              handleConnect={handleConnect}
+            />
           )}
+
         </div>
       </div>
     </div>

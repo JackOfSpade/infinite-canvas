@@ -10,6 +10,36 @@
  */
 import { queueScrape } from '../ipc/browserPool.js';
 import { getRandomUA } from '../ipc/stealthBrowser.js';
+import { htmlToText } from 'html-to-text';
+
+/**
+ * Process a list of items concurrently in batches.
+ * @param {Array} items - The items to process
+ * @param {number} batchSize - Number of items to process concurrently
+ * @param {Function} processFn - Async function to run on each item. Should return an array of results.
+ * @returns {Array} - Flattened array of all successful results.
+ */
+async function processInBatches(items, batchSize, processFn) {
+  const allResults = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const results = await Promise.allSettled(batch.map(processFn));
+    for (const r of results) {
+      if (r.status === 'fulfilled' && Array.isArray(r.value)) {
+        allResults.push(...r.value);
+      }
+    }
+  }
+  return allResults;
+}
+
+/**
+ * A tiny bespoke HTML stripper for snippets (no heavy external dom parser)
+ * Real rendering to markdown is handled in python/gemini stages if needed.
+ */
+function stripHtml(html) {
+  return htmlToText(html, { wordwrap: false, selectors: [] });
+}
 
 // ── LinkedIn Hidden API ─────────────────────────────────────────────────────
 // Public endpoint: linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search
@@ -138,32 +168,19 @@ const GREENHOUSE_BOARDS = [
 export async function fetchGreenhouseJobs(query) {
   const queryLower = query.toLowerCase();
   const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
-  const allJobs = [];
-
-  // Fetch in parallel batches of 10 to avoid overwhelming the API
-  const BATCH = 10;
-  for (let i = 0; i < GREENHOUSE_BOARDS.length; i += BATCH) {
-    const batch = GREENHOUSE_BOARDS.slice(i, i + BATCH);
-    const results = await Promise.allSettled(
-      batch.map(async ({ token, company }) => {
-        try {
-          const res = await fetch(`https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`, {
-            headers: { 'Accept': 'application/json' },
-            signal: AbortSignal.timeout(8000),
-          });
-          if (!res.ok) return [];
-          const data = await res.json();
-          return (data.jobs || []).map(job => ({ ...job, _company: company, _token: token }));
-        } catch {
-          return [];
-        }
-      })
-    );
-
-    for (const r of results) {
-      if (r.status === 'fulfilled') allJobs.push(...r.value);
+  const allJobs = await processInBatches(GREENHOUSE_BOARDS, 10, async ({ token, company }) => {
+    try {
+      const res = await fetch(`https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`, {
+        headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data.jobs || []).map(job => ({ ...job, _company: company, _token: token }));
+    } catch {
+      return [];
     }
-  }
+  });
 
   // Filter by query relevance
   const matched = allJobs.filter(job => {
@@ -217,31 +234,19 @@ const LEVER_COMPANIES = [
 export async function fetchLeverJobs(query) {
   const queryLower = query.toLowerCase();
   const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
-  const allJobs = [];
-
-  const BATCH = 10;
-  for (let i = 0; i < LEVER_COMPANIES.length; i += BATCH) {
-    const batch = LEVER_COMPANIES.slice(i, i + BATCH);
-    const results = await Promise.allSettled(
-      batch.map(async ({ slug, company }) => {
-        try {
-          const res = await fetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, {
-            headers: { 'Accept': 'application/json' },
-            signal: AbortSignal.timeout(8000),
-          });
-          if (!res.ok) return [];
-          const data = await res.json();
-          return (Array.isArray(data) ? data : []).map(job => ({ ...job, _company: company }));
-        } catch {
-          return [];
-        }
-      })
-    );
-
-    for (const r of results) {
-      if (r.status === 'fulfilled') allJobs.push(...r.value);
+  const allJobs = await processInBatches(LEVER_COMPANIES, 10, async ({ slug, company }) => {
+    try {
+      const res = await fetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, {
+        headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (Array.isArray(data) ? data : []).map(job => ({ ...job, _company: company }));
+    } catch {
+      return [];
     }
-  }
+  });
 
   // Filter by query relevance
   const matched = allJobs.filter(job => {
@@ -328,11 +333,6 @@ export async function fetchUSAJobs(query, apiKey, email) {
 
 
 // ── Shared Utilities ────────────────────────────────────────────────────────
-
-/** Strip HTML tags from a string. */
-function stripHtml(html) {
-  return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-}
 
 
 // ── RemoteOK Direct API ─────────────────────────────────────────────────────

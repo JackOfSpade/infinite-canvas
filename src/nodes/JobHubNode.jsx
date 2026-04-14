@@ -6,6 +6,8 @@ import { Briefcase, Loader2 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
 import { useToast } from '../components/ToastProvider';
+import { JobHubProcessingState } from './jobhub/JobHubProcessingState';
+import { JobHubDoneState } from './jobhub/JobHubDoneState';
 
 const STATE_LABELS = {
   empty: null,
@@ -200,30 +202,29 @@ export function JobHubNode({ id, data }) {
         const gy = hubY + Math.sin(angle) * clusterRadius;
 
         const groupId = uuidv4();
+        const groupNodes = [];
+
+        jobs.forEach((job, jobIdx) => {
+          groupNodes.push({
+            id: uuidv4(),
+            type: 'jobcard',
+            position: {
+              x: 20 + (jobIdx % 3) * 290,
+              y: 60 + Math.floor(jobIdx / 3) * 200,
+            },
+            data: { ...job, status: 'New', resumeProfile: profile },
+          });
+        });
+
         newNodes.push({
           id: groupId,
           type: 'group',
           position: { x: gx, y: gy },
-          dragHandle: '.drag-handle',
-          style: { width: Math.max(340, Math.min(jobs.length * 290, 900)) },
+          style: { width: Math.max(340, Math.min(jobs.length * 290, 900)), height: 130 },
           data: {
             title: `${direction} (${jobs.length})`,
-            nodes: [],
-            edges: [],
-            collapsed: false,
+            canvasData: { nodes: groupNodes, edges: [], drawings: [] },
           },
-        });
-
-        jobs.forEach((job, jobIdx) => {
-          newNodes.push({
-            id: uuidv4(),
-            type: 'jobcard',
-            position: {
-              x: gx + 20 + (jobIdx % 3) * 290,
-              y: gy + 60 + Math.floor(jobIdx / 3) * 200,
-            },
-            data: { ...job, status: 'New', resumeProfile: profile },
-          });
         });
       });
 
@@ -283,38 +284,22 @@ export function JobHubNode({ id, data }) {
 
         {/* Processing state */}
         {isProcessing && (
-          <div className="flex flex-col items-center justify-center py-6 px-4">
-            <Loader2 size={22} className="animate-spin text-blue-400 mb-2" />
-            <p className="text-white/60 text-xs font-medium">{statusLabel}</p>
-            {hubState === 'searching' && totalSourceJobs > 0 && (
-              <p className="text-blue-400/60 text-[10px] mt-1">{totalSourceJobs} jobs found so far</p>
-            )}
-            {data.resumeSummary && (
-              <p className="text-white/25 text-[10px] mt-2 text-center truncate max-w-full">{data.resumeSummary}</p>
-            )}
-          </div>
+          <JobHubProcessingState 
+            statusLabel={statusLabel}
+            hubState={hubState}
+            totalSourceJobs={totalSourceJobs}
+            resumeSummary={data.resumeSummary}
+          />
         )}
 
         {/* Done state */}
         {hubState === 'done' && (
-          <div className="flex flex-col items-center justify-center py-6 px-4">
-            <div className="text-emerald-400 text-2xl font-bold">{data.resultCount || 0}</div>
-            <p className="text-white/40 text-xs mt-1">jobs matched</p>
-            {sourceFilter && (
-              <p className="text-blue-400/70 text-[9px] mt-1 font-medium">
-                Filtered: {JOB_SOURCES.find(s => s.id === sourceFilter)?.name || sourceFilter}
-                <button
-
-                  className="ml-1 text-white/30 hover:text-white/60"
-                  onClick={() => toggleSourceFilter(sourceFilter)}
-                  onPointerDown={(e) => e.stopPropagation()}
-                >✕</button>
-              </p>
-            )}
-            {data.resumeSummary && (
-              <p className="text-white/20 text-[10px] mt-2 text-center">{data.resumeSummary}</p>
-            )}
-          </div>
+          <JobHubDoneState 
+            resultCount={data.resultCount}
+            sourceFilter={sourceFilter}
+            toggleSourceFilter={toggleSourceFilter}
+            resumeSummary={data.resumeSummary}
+          />
         )}
 
         {/* Error state */}
