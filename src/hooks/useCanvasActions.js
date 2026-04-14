@@ -12,7 +12,8 @@ export function useCanvasActions({
   setDrawings,
   setCurrentFile,
   setHasUnsavedChanges,
-  takeSnapshot
+  takeSnapshot,
+  requestClearConfirm,
 }) {
   const onConnect = useCallback((params) => {
     takeSnapshot();
@@ -58,16 +59,22 @@ export function useCanvasActions({
     setEdges(edges.filter(e => remainingIds.has(e.source) && remainingIds.has(e.target)));
   }, [nodes, edges, setNodes, setEdges, takeSnapshot]);
 
-  const clearCanvas = useCallback(() => {
-    if (confirm('Are you sure you want to clear the entire canvas?')) {
-      takeSnapshot();
-      setNodes([]);
-      setEdges([]);
-      setDrawings([]);
-      setCurrentFile(null);
-      setHasUnsavedChanges(false);
-    }
+  const doClear = useCallback(() => {
+    takeSnapshot();
+    setNodes([]);
+    setEdges([]);
+    setDrawings([]);
+    setCurrentFile(null);
+    setHasUnsavedChanges(false);
   }, [takeSnapshot, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges]);
+
+  const clearCanvas = useCallback(() => {
+    if (requestClearConfirm) {
+      requestClearConfirm(doClear);
+    } else {
+      doClear();
+    }
+  }, [requestClearConfirm, doClear]);
 
   return { onConnect, onDragStart, addGroupNode, clearCanvas };
 }

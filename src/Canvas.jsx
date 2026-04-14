@@ -10,31 +10,27 @@ import {
   useReactFlow
 } from '@xyflow/react';
 
-// Node types
-import { DocumentNode } from './nodes/DocumentNode';
-import { TextNode } from './nodes/TextNode';
-import { CanvasNode } from './nodes/CanvasNode';
-import { LinkNode } from './nodes/LinkNode';
-import { ListingNode } from './nodes/ListingNode';
 import { createTextNode } from './utils/nodeFactory';
-
-// Components
 import { Sidebar } from './components/Sidebar';
-import { Dialog } from './components/Dialog';
+import { ContextMenu } from './components/ContextMenu';
 import { CanvasToolbar } from './components/CanvasToolbar';
 import { SearchBar } from './components/SearchBar';
-import { StartupWarning } from './components/StartupWarning';
-import { useUndoRedo } from './hooks/useUndoRedo';
-import { toPng } from 'html-to-image';
-
-import { nodeTypes, DEFAULT_EDGE_OPTIONS } from './utils/constants';
+import { OnboardingOverlay } from './components/OnboardingOverlay';
 import { DrawingLayer } from './components/DrawingLayer';
+import { EmptyCanvasHint } from './components/EmptyCanvasHint';
+import { StatusBar } from './components/StatusBar';
+import { ConfirmDialog } from './components/ConfirmDialog';
+import { KeyboardShortcutsPanel, useKeyboardShortcuts } from './components/KeyboardShortcutsPanel';
+import { nodeTypes, DEFAULT_EDGE_OPTIONS, MINIMAP_NODE_COLORS } from './utils/constants';
+import { useUndoRedo } from './hooks/useUndoRedo';
 import { useCustomFitView } from './hooks/useCustomFitView';
+import { useCanvasPersistence } from './hooks/useCanvasPersistence';
 import { useCanvasDragAndDrop } from './hooks/useCanvasDragAndDrop';
 import { useDrawingMode } from './hooks/useDrawingMode';
 import { useCanvasInitialization } from './hooks/useCanvasInitialization';
-import { useMarketplaceListings } from './hooks/useMarketplaceListings';
 import { useCanvasActions } from './hooks/useCanvasActions';
+import { useCanvasContextMenu } from './hooks/useCanvasContextMenu';
+import { useToast } from './components/ToastProvider';
 
 // ── Canvas ───────────────────────────────────────────────────────────────────
 export function Canvas() {
@@ -42,98 +38,53 @@ export function Canvas() {
   const [nodes, setNodes, onNodesChangeBase] = useNodesState([]);
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState([]);
   const [drawings, setDrawings] = useState([]);
+  const { addToast } = useToast();
 
   // ── Undo / Redo ──────────────────────────────────────────────────────────
   const snapshotTakenForDeleteRef = useRef(false);
   const takeSnapshotRef = useRef(null);
 
-  const onNodesChange = useCallback((changes) => {
+  const snapshotOnDelete = useCallback((changes) => {
     if (changes.some(c => c.type === 'remove') && !snapshotTakenForDeleteRef.current) {
       snapshotTakenForDeleteRef.current = true;
       takeSnapshotRef.current?.();
       requestAnimationFrame(() => { snapshotTakenForDeleteRef.current = false; });
     }
+  }, []);
+
+  const onNodesChange = useCallback((changes) => {
+    snapshotOnDelete(changes);
     onNodesChangeBase(changes);
-  }, [onNodesChangeBase]);
+  }, [onNodesChangeBase, snapshotOnDelete]);
 
   const onEdgesChange = useCallback((changes) => {
-    if (changes.some(c => c.type === 'remove') && !snapshotTakenForDeleteRef.current) {
-      snapshotTakenForDeleteRef.current = true;
-      takeSnapshotRef.current?.();
-      requestAnimationFrame(() => { snapshotTakenForDeleteRef.current = false; });
-    }
+    snapshotOnDelete(changes);
     onEdgesChangeBase(changes);
-  }, [onEdgesChangeBase]);
+  }, [onEdgesChangeBase, snapshotOnDelete]);
 
   const { undo, redo, takeSnapshot, canUndo, canRedo } = useUndoRedo({
     nodes, edges, drawings, setNodes, setEdges, setDrawings,
   });
   useEffect(() => { takeSnapshotRef.current = takeSnapshot; }, [takeSnapshot]);
 
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-  const [currentFile, setCurrentFile] = useState(null);
-  const [saveState, setSaveState] = useState('idle');
-
   const customFitView = useCustomFitView(reactFlowWrapper, nodes, drawings);
 
-  const saveCanvas = useCallback(async () => {
-    if (!window.electronAPI || saveState !== 'idle') return;
-    setSaveState('saving');
-    try {
-      const res = await window.electronAPI.saveWorkspace({ data: { nodes, edges, drawings }, filePath: currentFile });
-      if (res?.success && res.filePath) {
-        setCurrentFile(res.filePath);
-        setHasUnsavedChanges(false);
-        setSaveState('saved');
-        setTimeout(() => setSaveState('idle'), 1500);
-      } else {
-        setSaveState('idle');
-      }
-    } catch (err) {
-      console.error('Failed to save canvas:', err);
-      setSaveState('idle');
-    }
-  }, [nodes, edges, drawings, currentFile, saveState]);
-
-  const loadCanvas = useCallback(async () => {
-    if (!window.electronAPI) return;
-    try {
-      const res = await window.electronAPI.loadWorkspace();
-      if (res?.success && res.data) {
-        setNodes(res.data.nodes || []);
-        setEdges(res.data.edges || []);
-        setDrawings(res.data.drawings || []);
-        setCurrentFile(res.filePath);
-        setHasUnsavedChanges(false);
-        setTimeout(() => customFitView(), 50);
-      } else if (!res?.canceled) {
-        alert('Failed to load canvas or invalid file format.');
-      }
-    } catch (err) {
-      console.error('Failed to load canvas:', err);
-    }
-  }, [setNodes, setEdges, customFitView]);
+  const {
+    saveCanvas, loadCanvas, exportCanvasToPNG,
+    saveState, hasUnsavedChanges, setHasUnsavedChanges, currentFile, setCurrentFile,
+  } = useCanvasPersistence({
+    nodes, edges, drawings, setNodes, setEdges, setDrawings, customFitView, addToast,
+  });
 
   useCanvasInitialization({
     nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, saveCanvas, loadCanvas
   });
 
-  const exportCanvasToPNG = useCallback(() => {
-    const viewportNode = document.querySelector('.react-flow__viewport');
-    if (!viewportNode) return;
-    toPng(viewportNode, { backgroundColor: '#0a0a0a' })
-      .then((dataUrl) => {
-        const link = document.createElement('a');
-        link.download = 'canvas-export.png';
-        link.href = dataUrl;
-        link.click();
-      })
-      .catch((err) => {
-        console.error('Failed to export image', err);
-      });
+  // ── Clear Canvas Confirmation ───────────────────────────────────────────
+  const [clearConfirm, setClearConfirm] = useState(null);
+  const requestClearConfirm = useCallback((onConfirm) => {
+    setClearConfirm({ onConfirm });
   }, []);
-
-  const { onListingDragStart, triggerPendingListing, listingDialog } = useMarketplaceListings(setNodes, takeSnapshot);
 
   // ── Canvas interactions ──────────────────────────────────────────────────
   const [isDrawingMode, setIsDrawingMode] = useState(false);
@@ -153,11 +104,16 @@ export function Canvas() {
   }, [isDrawingMode, placementMode, screenToFlowPosition, takeSnapshot, setNodes]);
 
   const { handleDrop, handleDragOver, onNodeDragStop } = useCanvasDragAndDrop({
-    nodes, setNodes, setEdges, setIsDrawingMode, setPendingListing: triggerPendingListing, takeSnapshot
+    nodes, setNodes, setEdges, setIsDrawingMode, takeSnapshot,
   });
 
+  const clearDrawings = useCallback(() => {
+    takeSnapshot();
+    setDrawings([]);
+  }, [takeSnapshot, setDrawings]);
+
   const { onConnect, onDragStart, addGroupNode, clearCanvas } = useCanvasActions({
-    nodes, edges, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, takeSnapshot
+    nodes, edges, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, takeSnapshot, requestClearConfirm
   });
 
   const { handlePointerDown, handlePointerMove, handlePointerUp } = useDrawingMode({
@@ -166,10 +122,24 @@ export function Canvas() {
 
   const interactiveDisabled = isDrawingMode || !!placementMode;
 
+  // ── Context Menu Logic ───────────────────────────────────────────────────
+  const { menu, closeMenu, onPaneContextMenuBase, onNodeContextMenuBase, getContextMenuItems } = useCanvasContextMenu({
+    isDrawingMode,
+    placementMode,
+    takeSnapshot,
+    setNodes,
+    setEdges,
+    screenToFlowPosition,
+    clearCanvas
+  });
+
+  // ── Keyboard Shortcuts Panel ─────────────────────────────────────────────
+  const { isOpen: isShortcutsOpen, toggle: toggleShortcuts, close: closeShortcuts } = useKeyboardShortcuts();
+
   // ── Render ───────────────────────────────────────────────────────────────
   return (
     <div className="w-screen h-screen bg-neutral-950 flex" ref={reactFlowWrapper}>
-      <Sidebar onDragStart={onListingDragStart} />
+      <Sidebar nodes={nodes} />
 
       <div
         className="flex-1 h-full relative"
@@ -191,13 +161,16 @@ export function Canvas() {
           onDragOver={handleDragOver}
           nodeTypes={nodeTypes}
           onNodeDragStop={onNodeDragStop}
-          onPaneDoubleClick={handlePaneDoubleClick}
+          onDoubleClick={handlePaneDoubleClick}
+          onPaneContextMenu={onPaneContextMenuBase}
+          onNodeContextMenu={onNodeContextMenuBase}
           snapToGrid={snapToGrid}
           snapGrid={[40, 40]}
           panOnDrag={!interactiveDisabled}
           selectionOnDrag={!interactiveDisabled}
           nodesDraggable={!interactiveDisabled}
           autoPanOnNodeFocus={false}
+          zoomOnDoubleClick={false}
 
           className="touch-none"
           deleteKeyCode={['Backspace', 'Delete']}
@@ -220,8 +193,9 @@ export function Canvas() {
             </div>
           )}
 
-          <DrawingLayer drawings={drawings} currentStroke={currentStroke} />
-          <Background color="#555" gap={40} size={3} />
+          <DrawingLayer drawings={drawings} currentStroke={currentStroke} activeColor={activeColor} />
+          <EmptyCanvasHint nodeCount={nodes.length} drawingCount={drawings.length} />
+          <Background color="rgba(255,255,255,0.06)" gap={32} size={2} />
           <Controls
             className="border border-white/10 shadow-lg overflow-hidden flex flex-col"
             buttonClassName="!bg-[#1a1a1a] !border-b-white/10 hover:!bg-[#333] transition-colors"
@@ -236,13 +210,7 @@ export function Canvas() {
 
           <MiniMap
             style={{ backgroundColor: '#1a1a1a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px' }}
-            nodeColor={(n) => {
-              if (n.type === 'group') return '#3b82f6';
-              if (n.type === 'document') return '#8b5cf6';
-              if (n.type === 'text') return '#10b981';
-              if (n.type === 'listing') return '#f59e0b';
-              return '#555';
-            }}
+            nodeColor={(n) => MINIMAP_NODE_COLORS[n.type] || '#555'}
             maskColor="rgba(0, 0, 0, 0.6)"
             position="bottom-right"
             zoomable
@@ -268,13 +236,46 @@ export function Canvas() {
             canUndo={canUndo}
             canRedo={canRedo}
             clearCanvas={clearCanvas}
+            clearDrawings={clearDrawings}
             exportCanvasToPNG={exportCanvasToPNG}
+            loadCanvas={loadCanvas}
+            onHelpClick={toggleShortcuts}
+          />
+
+          <StatusBar
+            nodeCount={nodes.length}
+            edgeCount={edges.length}
+            onHelpClick={toggleShortcuts}
           />
         </ReactFlow>
 
-        {listingDialog}
+        {menu && (
+          <ContextMenu
+            x={menu.x}
+            y={menu.y}
+            items={getContextMenuItems()}
+            onClose={closeMenu}
+          />
+        )}
 
-        <StartupWarning />
+        <OnboardingOverlay />
+
+        <KeyboardShortcutsPanel isOpen={isShortcutsOpen} onClose={closeShortcuts} />
+
+        {clearConfirm && (
+          <ConfirmDialog
+            title="Clear Canvas"
+            message="This will remove all nodes, edges, and drawings. This action can be undone with Ctrl+Z."
+            confirmLabel="Clear Everything"
+            cancelLabel="Keep Canvas"
+            variant="danger"
+            onConfirm={() => {
+              clearConfirm.onConfirm();
+              setClearConfirm(null);
+            }}
+            onCancel={() => setClearConfirm(null)}
+          />
+        )}
       </div>
     </div>
   );

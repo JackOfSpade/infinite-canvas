@@ -1,6 +1,6 @@
 import { useCallback, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
-import { createTextNode, createLinkNode, createGroupNode } from '../utils/nodeFactory';
+import { NODE_FACTORIES } from '../utils/nodeFactory';
 
 export function useDrawingMode({
   placementMode,
@@ -21,8 +21,7 @@ export function useDrawingMode({
       const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
       pos.x -= 12; pos.y -= 20;
       takeSnapshot();
-      const factories = { text: createTextNode, link: createLinkNode, group: createGroupNode };
-      const factory = factories[placementMode];
+      const factory = NODE_FACTORIES[placementMode];
       if (factory) setNodes(nds => nds.concat(factory(pos)));
       setPlacementMode(null);
       return;

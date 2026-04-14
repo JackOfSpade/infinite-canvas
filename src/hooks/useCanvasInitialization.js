@@ -10,6 +10,13 @@ export function useCanvasInitialization({
   saveCanvas,
   loadCanvas
 }) {
+  // Keep latest state in a ref so the auto-save timer reads current data
+  // without the effect being torn down on every state change.
+  const stateRef = useRef({ nodes, edges, drawings });
+  useEffect(() => {
+    stateRef.current = { nodes, edges, drawings };
+  }, [nodes, edges, drawings]);
+
   // Track hasUnsavedChanges internally when props change
   useEffect(() => {
     if (nodes.length > 0 || edges.length > 0 || drawings.length > 0) {
@@ -17,15 +24,18 @@ export function useCanvasInitialization({
     }
   }, [nodes, edges, drawings, setHasUnsavedChanges]);
 
-  // Auto-save logic
+  // Auto-save: debounced timer only recreated when the file path changes.
+  // Reads latest state from ref when actually saving.
   useEffect(() => {
     if (!currentFile || !window.electronAPI) return;
+
     const timer = setTimeout(() => {
-      window.electronAPI.saveWorkspace({ data: { nodes, edges, drawings }, filePath: currentFile }).then(res => {
+      const { nodes: n, edges: e, drawings: d } = stateRef.current;
+      window.electronAPI.saveWorkspace({ data: { nodes: n, edges: e, drawings: d }, filePath: currentFile }).then(res => {
         if (res?.success && res.filePath) setCurrentFile(res.filePath);
       });
       setHasUnsavedChanges(false);
-    }, 1000);
+    }, 2000);
     return () => clearTimeout(timer);
   }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges]);
 
@@ -45,3 +55,4 @@ export function useCanvasInitialization({
     return () => { cleanupSave(); cleanupOpen(); };
   }, []);
 }
+

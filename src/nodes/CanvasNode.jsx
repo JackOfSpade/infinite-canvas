@@ -1,10 +1,11 @@
 import React, { useState, useCallback, useRef } from 'react';
 import { NodeResizer, useReactFlow, Handle, Position, ReactFlowProvider, ReactFlow, Background, applyNodeChanges, applyEdgeChanges } from '@xyflow/react';
 import { BoxSelect, X, ArrowUpRight, Minus, Pen } from 'lucide-react';
-import { v4 as uuidv4 } from 'uuid';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { DrawingLayer } from '../components/DrawingLayer';
 import { nodeTypes } from '../utils/constants'; // safe to import here as it's evaluated later
+import { createTextNode, createLinkNode, createGroupNode } from '../utils/nodeFactory';
+import { processDroppedFiles } from '../utils/dragUtils';
 
 // Sub-component that actually uses the nested canvas context
 const InnerCanvasContent = ({ id, data, selected, mainFlow }) => {
@@ -205,11 +206,11 @@ const InnerCanvasContent = ({ id, data, selected, mainFlow }) => {
       position.y -= 20;
       let newNode;
       if (nodeType === 'text') {
-        newNode = { id: uuidv4(), type: 'text', position, data: { text: '', isNew: true } };
+        newNode = createTextNode(position);
       } else if (nodeType === 'link') {
-        newNode = { id: uuidv4(), type: 'link', position, data: { url: '', label: '', isNew: true } };
+        newNode = createLinkNode(position);
       } else if (nodeType === 'group') {
-        newNode = { id: uuidv4(), type: 'group', dragHandle: '.drag-handle', style: { width: 320 }, position, data: { title: '', nodes: [], edges: [], collapsed: false, isNew: true } };
+        newNode = createGroupNode(position);
       }
       
       if (newNode) {
@@ -219,19 +220,7 @@ const InnerCanvasContent = ({ id, data, selected, mainFlow }) => {
     }
 
     if (e.dataTransfer.files?.length > 0 && window.electronAPI) {
-      const newItems = [];
-      let currentPos = { ...position };
-      for (const file of e.dataTransfer.files) {
-        try {
-          const result = await window.electronAPI.scanDirectory(file.path);
-          if (result.isFile) {
-            newItems.push({ id: result.file.id, type: 'document', position: { ...currentPos }, data: { filename: result.file.filename, filePath: result.file.filePath } });
-          } else {
-            newItems.push({ id: result.id, type: 'group', position: { ...currentPos }, data: { title: result.title, nodes: [], edges: [], collapsed: true } });
-          }
-          currentPos = { x: currentPos.x + 40, y: currentPos.y + 40 };
-        } catch (err) { console.error('Drop failed:', err); }
-      }
+      const newItems = await processDroppedFiles(e.dataTransfer.files, position);
       if (newItems.length > 0) {
         mainFlow.setNodes(nds => nds.map(n => n.id === id ? { ...n, data: { ...n.data, nodes: [...(n.data.nodes || []), ...newItems] } } : n));
       }

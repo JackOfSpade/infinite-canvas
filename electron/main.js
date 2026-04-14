@@ -1,8 +1,13 @@
+/* global process */
 import { app, BrowserWindow, Menu } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { registerFilesystemHandlers } from './ipc/filesystem.js';
-import { registerMonitoringHandlers } from './ipc/monitoring.js';
+import { registerJobsHandlers } from './ipc/jobs.js';
+import { registerMarketplaceHandlers } from './ipc/marketplace.js';
+import { registerAccountsHandlers } from './ipc/accounts.js';
+import { registerMonitorHandlers, closeAllMonitors } from './ipc/browserViewMonitor.js';
+import { closeStealthBrowser } from './ipc/stealthBrowser.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -72,7 +77,10 @@ function setupApplicationMenu(win) {
 
 app.whenReady().then(() => {
   registerFilesystemHandlers();
-  registerMonitoringHandlers(() => mainWindow);
+  registerJobsHandlers();
+  registerMarketplaceHandlers();
+  registerAccountsHandlers();
+  registerMonitorHandlers();
   createWindow();
 
   app.on('activate', () => {
@@ -82,4 +90,9 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', async () => {
+  closeAllMonitors();
+  await closeStealthBrowser();
 });

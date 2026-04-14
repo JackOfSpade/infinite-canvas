@@ -15,7 +15,9 @@ export function useCustomFitView(reactFlowWrapper, nodes, drawings) {
     });
 
     drawings.forEach(stroke => {
-      stroke.forEach(p => {
+      // Drawings are stored as { points, color } objects; handle legacy bare arrays defensively
+      const pts = Array.isArray(stroke) ? stroke : stroke.points || [];
+      pts.forEach(p => {
         minX = Math.min(minX, p.x);
         minY = Math.min(minY, p.y);
         maxX = Math.max(maxX, p.x);

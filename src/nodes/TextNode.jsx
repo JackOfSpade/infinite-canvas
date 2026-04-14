@@ -44,7 +44,6 @@ export function TextNode({ id, data }) {
         inputRef.current.innerText = data.text || '';
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.text, isEditing]);
 
   const htmlContent = React.useMemo(() => {

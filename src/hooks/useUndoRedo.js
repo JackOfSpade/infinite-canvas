@@ -47,9 +47,9 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
   const deepCloneState = useCallback(() => {
     const { nodes: n, edges: e, drawings: d } = stateRef.current;
     return {
-      nodes: JSON.parse(JSON.stringify(n)),
-      edges: JSON.parse(JSON.stringify(e)),
-      drawings: JSON.parse(JSON.stringify(d)),
+      nodes: structuredClone(n),
+      edges: structuredClone(e),
+      drawings: structuredClone(d),
     };
   }, []);
 
