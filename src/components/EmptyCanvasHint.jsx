@@ -24,12 +24,15 @@ export const EmptyCanvasHint = React.memo(function EmptyCanvasHint({ nodeCount, 
             { icon: PenTool, label: 'Draw', color: 'text-blue-400/30' },
             { icon: Briefcase, label: 'Jobs', color: 'text-blue-400/30' },
             { icon: Camera, label: 'Sell', color: 'text-emerald-400/30' },
-          ].map(({ icon: Icon, label, color }) => (
-            <div key={label} className="flex flex-col items-center gap-1">
-              <Icon size={18} className={color} />
-              <span className="text-[9px] text-white/20">{label}</span>
-            </div>
-          ))}
+          ].map(({ icon, label, color }) => {
+            const IconComponent = icon;
+            return (
+              <div key={label} className="flex flex-col items-center gap-1">
+                <IconComponent size={18} className={color} />
+                <span className="text-[9px] text-white/20">{label}</span>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

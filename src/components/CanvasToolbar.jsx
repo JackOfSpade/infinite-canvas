@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Panel } from '@xyflow/react';
-import { Type, BoxSelect, Trash2, Save, Link2, Check, MoreHorizontal, PenTool, Undo2, Redo2, Download, Magnet, FolderOpen, HelpCircle } from 'lucide-react';
+import { Type, BoxSelect, Trash2, Save, Link2, Check, MoreHorizontal, PenTool, Eraser, Undo2, Redo2, Download, Magnet, FolderOpen, HelpCircle, Grid3x3, Map, Settings } from 'lucide-react';
 
 const COLORS = [
   { name: 'white', hex: 'white' },
@@ -10,21 +10,22 @@ const COLORS = [
   { name: 'amber', hex: '#fbbf24' }
 ];
 
-/**
- * Bottom toolbar for the canvas.
- * Contains buttons for adding nodes, drawing, save/load, undo/redo, clear, and help.
- */
 export const CanvasToolbar = React.memo(function CanvasToolbar({
   placementMode,
   setPlacementMode,
-  isDrawingMode,
-  setIsDrawingMode,
+  activeTool,
+  setActiveTool,
+  eraserType,
+  setEraserType,
   activeColor,
   setActiveColor,
   snapToGrid,
   setSnapToGrid,
+  bgVariant,
+  setBgVariant,
+  showMiniMap,
+  setShowMiniMap,
   onDragStart,
-  addGroupNode,
   saveCanvas,
   saveState,
   hasUnsavedChanges,
@@ -37,39 +38,29 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
   exportCanvasToPNG,
   loadCanvas,
   onHelpClick,
+  onSettingsClick,
 }) {
+  const [showColorMenu, setShowColorMenu] = useState(false);
+  const [showEraserMenu, setShowEraserMenu] = useState(false);
+
+  // Close popovers if clicking outside or changing tool
+  useEffect(() => {
+    const handleClick = () => {
+      setShowColorMenu(false);
+      setShowEraserMenu(false);
+    };
+    window.addEventListener('click', handleClick);
+    return () => window.removeEventListener('click', handleClick);
+  }, []);
+
   return (
     <Panel position="bottom-center" className="mb-4 flex flex-col items-center gap-2">
-      {/* Color Palette (Visible only in drawing mode) */}
-      {isDrawingMode && (
-        <div className="glass-card rounded-full p-1.5 flex gap-1.5 bg-black/60 border border-white/10 items-center animate-in fade-in slide-in-from-bottom-2">
-          {COLORS.map((c) => (
-            <button
-              key={c.name}
-              onClick={() => setActiveColor(c.hex)}
-              className={`w-6 h-6 rounded-full transition-transform hover:scale-110 ${activeColor === c.hex ? 'ring-2 ring-white scale-110' : 'opacity-70'}`}
-              style={{ backgroundColor: c.hex }}
-              title={`Switch to ${c.name}`}
-            />
-          ))}
-          <div className="w-px h-4 bg-white/20 mx-1" />
-          <button
-            onClick={clearDrawings}
-            className="w-6 h-6 rounded-full flex items-center text-red-400 hover:text-white transition-colors hover:bg-red-500/80 justify-center"
-            title="Erase All Drawings"
-          >
-            <Trash2 size={12} />
-          </button>
-        </div>
-      )}
-
-      {/* Main Toolbar */}
       <div className="glass-card rounded-full p-2 flex gap-1 bg-black/60 border border-white/10 items-center">
         {/* ── Creation Tools ───────────────────────────────────────── */}
         <button 
           draggable
-          onDragStart={(e) => { setIsDrawingMode(false); onDragStart(e, 'text'); }}
-          onClick={() => { setIsDrawingMode(false); setPlacementMode('text'); }} 
+          onDragStart={(e) => { setActiveTool(null); onDragStart(e, 'text'); }}
+          onClick={() => { setActiveTool(null); setPlacementMode('text'); }} 
           className={`p-3 rounded-full transition ${placementMode === 'text' ? 'bg-white/20 text-white' : 'text-white/70 hover:text-white hover:bg-white/10'}`} 
           title="Add Text (drag or click to place)"
         >
@@ -77,24 +68,82 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
         </button>
         <button 
           draggable
-          onDragStart={(e) => { setIsDrawingMode(false); onDragStart(e, 'link'); }}
-          onClick={() => { setIsDrawingMode(false); setPlacementMode('link'); }} 
+          onDragStart={(e) => { setActiveTool(null); onDragStart(e, 'link'); }}
+          onClick={() => { setActiveTool(null); setPlacementMode('link'); }} 
           className={`p-3 rounded-full transition ${placementMode === 'link' ? 'bg-white/20 text-white' : 'text-white/70 hover:text-white hover:bg-white/10'}`} 
           title="Add Link (drag or click to place)"
         >
           <Link2 size={18} />
         </button>
-        <button 
-          onClick={() => setIsDrawingMode(!isDrawingMode)} 
-          className={`p-3 rounded-full transition ${isDrawingMode ? 'text-white bg-blue-500/40 ring-2 ring-blue-500' : 'text-white/70 hover:text-white hover:bg-white/10'}`} 
-          title="Toggle Drawing Mode"
-        >
-          <PenTool size={18} />
-        </button>
+
+        <div className="relative" onClick={e => e.stopPropagation()}>
+          <button 
+            onClick={() => { setShowColorMenu(false); setShowEraserMenu(false); setActiveTool(activeTool === 'pen' ? null : 'pen'); setPlacementMode(null); }} 
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setShowColorMenu(!showColorMenu); setShowEraserMenu(false); }}
+            className={`p-3 rounded-full transition ${activeTool === 'pen' ? 'text-white bg-blue-500/40 ring-2 ring-blue-500' : 'text-white/70 hover:text-white hover:bg-white/10'}`} 
+            title="Pen Tool (Right-click for colors)"
+          >
+            <PenTool size={18} />
+          </button>
+          {showColorMenu && (
+            <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 glass-card p-2 rounded-xl border border-white/10 flex flex-col gap-2 w-[140px] animate-in zoom-in-95 origin-bottom text-xs">
+              <div className="text-white/50 px-1">Pen Color</div>
+              <div className="flex flex-wrap gap-1 px-1">
+                {COLORS.map((c) => (
+                  <button
+                    key={c.name}
+                    onClick={() => { setActiveColor(c.hex); setShowColorMenu(false); setActiveTool('pen'); }}
+                    className={`w-5 h-5 rounded-full transition-transform hover:scale-110 ${activeColor === c.hex ? 'ring-2 ring-white scale-110' : 'opacity-70'}`}
+                    style={{ backgroundColor: c.hex }}
+                    title={`Switch to ${c.name}`}
+                  />
+                ))}
+              </div>
+              <div className="w-full h-px bg-white/10"/>
+              <input type="text" placeholder="#HEX" value={activeColor} onChange={(e) => setActiveColor(e.target.value)} className="w-full text-xs p-1.5 bg-black/50 text-white rounded outline-none border border-white/20 focus:border-blue-400" />
+            </div>
+          )}
+        </div>
+
+        <div className="relative" onClick={e => e.stopPropagation()}>
+          <button 
+            onClick={() => { setShowEraserMenu(false); setShowColorMenu(false); setActiveTool(activeTool === 'eraser' ? null : 'eraser'); setPlacementMode(null); }} 
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setShowEraserMenu(!showEraserMenu); setShowColorMenu(false); }}
+            className={`p-3 rounded-full transition ${activeTool === 'eraser' ? 'text-white bg-red-500/40 ring-2 ring-red-500' : 'text-white/70 hover:text-white hover:bg-white/10'}`} 
+            title="Eraser Tool (Right-click for options)"
+          >
+            <Eraser size={18} />
+          </button>
+          {showEraserMenu && (
+            <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 glass-card p-2 rounded-xl border border-white/10 flex flex-col gap-1 w-[160px] animate-in zoom-in-95 origin-bottom text-xs">
+              <div className="text-white/50 px-1 mb-1">Eraser Mode</div>
+              <button 
+                onClick={() => { setEraserType('object'); setShowEraserMenu(false); setActiveTool('eraser'); }}
+                className={`px-2 py-1.5 rounded text-left transition ${eraserType === 'object' ? 'bg-red-500/30 text-white' : 'text-white/70 hover:bg-white/10'}`}
+              >
+                Erase by Object
+              </button>
+              <button 
+                onClick={() => { setEraserType('pixel'); setShowEraserMenu(false); setActiveTool('eraser'); }}
+                className={`px-2 py-1.5 rounded text-left transition ${eraserType === 'pixel' ? 'bg-red-500/30 text-white' : 'text-white/70 hover:bg-white/10'}`}
+              >
+                Erase by Pixels
+              </button>
+              <div className="w-full h-px bg-white/10 my-1"/>
+              <button 
+                onClick={() => { clearDrawings(); setShowEraserMenu(false); }}
+                className="px-2 py-1.5 rounded text-left text-red-400 hover:bg-red-500/20 transition flex items-center gap-2"
+              >
+                <Trash2 size={12}/> Clear All Drawings
+              </button>
+            </div>
+          )}
+        </div>
+
         <button 
           draggable
-          onDragStart={(e) => { setIsDrawingMode(false); onDragStart(e, 'group'); }}
-          onClick={() => { setIsDrawingMode(false); addGroupNode(); setPlacementMode('group'); }}
+          onDragStart={(e) => { setActiveTool(null); onDragStart(e, 'group'); }}
+          onClick={() => { setActiveTool(null); setPlacementMode('group'); }}
           className={`p-3 rounded-full transition ${placementMode === 'group' ? 'bg-white/20 text-blue-400' : 'text-white/70 hover:text-white hover:bg-white/10'}`}
           title="Add Nested Canvas (drag or click to place)"
         >
@@ -104,6 +153,23 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
         <div className="w-px h-6 bg-white/10 mx-0.5" />
         
         {/* ── Toggle Tools ─────────────────────────────────────────── */}
+        <button 
+          onClick={() => {
+            const next = { dots: 'lines', lines: 'cross', cross: 'none', 'none': 'dots' };
+            setBgVariant(next[bgVariant] || 'dots');
+          }} 
+          className={`p-3 rounded-full transition ${bgVariant !== 'none' ? 'text-white bg-indigo-500/40 ring-2 ring-indigo-500' : 'text-white/70 hover:text-white hover:bg-white/10'}`} 
+          title="Cycle Background Pattern"
+        >
+          <Grid3x3 size={18} />
+        </button>
+        <button 
+          onClick={() => setShowMiniMap(!showMiniMap)} 
+          className={`p-3 rounded-full transition ${showMiniMap ? 'text-white bg-indigo-500/40 ring-2 ring-indigo-500' : 'text-white/70 hover:text-white hover:bg-white/10'}`} 
+          title="Toggle MiniMap"
+        >
+          <Map size={18} />
+        </button>
         <button 
           onClick={() => setSnapToGrid(!snapToGrid)} 
           className={`p-3 rounded-full transition ${snapToGrid ? 'text-white bg-indigo-500/40 ring-2 ring-indigo-500' : 'text-white/70 hover:text-white hover:bg-white/10'}`} 
@@ -165,7 +231,7 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
 
         <div className="w-px h-6 bg-white/10 mx-0.5" />
 
-        {/* ── Destructive + Help ────────────────────────────────────── */}
+        {/* ── Destructive + Help + Settings ─────────────────────────── */}
         <button onClick={clearCanvas} className="p-3 text-red-400/70 hover:text-red-300 hover:bg-red-400/10 rounded-full transition" title="Clear Canvas">
           <Trash2 size={18} />
         </button>
@@ -176,6 +242,15 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
             title="Keyboard Shortcuts (?)"
           >
             <HelpCircle size={18} />
+          </button>
+        )}
+        {onSettingsClick && (
+          <button
+            onClick={onSettingsClick}
+            className="p-3 rounded-full transition text-white/30 hover:text-white/70 hover:bg-white/10"
+            title="Settings"
+          >
+            <Settings size={18} />
           </button>
         )}
       </div>

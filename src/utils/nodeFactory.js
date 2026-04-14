@@ -14,32 +14,15 @@ export function createLinkNode(position) {
 
 export function createGroupNode(position) {
   return {
-    id: uuidv4(), type: 'group', dragHandle: '.drag-handle',
-    style: { width: 320 }, position,
-    data: { title: '', nodes: [], edges: [], collapsed: false, isNew: true },
-  };
-}
-
-export function createDocumentNode(id, position, filename, filePath) {
-  return { id, type: 'document', position, data: { filename, filePath } };
-}
-
-export function createListingNode(position, platform, url, label) {
-  return {
-    id: uuidv4(), type: 'listing', position,
-    data: { platform, url, label, status: 'draft', product: {}, monitoring: false, activityCount: 0, error: null },
-  };
-}
-
-export function createJobCardNode(position, jobData) {
-  return {
-    id: uuidv4(), type: 'jobcard', position,
+    id: uuidv4(), type: 'group', position,
+    style: { width: 180, height: 130 },
     data: {
-      ...jobData,
-      status: 'New',
+      title: '', isNew: true,
+      canvasData: { nodes: [], edges: [], drawings: [] },
     },
   };
 }
+
 
 export function createJobHubNode(position, extra = {}) {
   return {

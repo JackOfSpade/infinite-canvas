@@ -1,12 +1,12 @@
 import React from 'react';
 import { useViewport } from '@xyflow/react';
-import { HelpCircle } from 'lucide-react';
+import { HelpCircle, Bug } from 'lucide-react';
 
 /**
  * Subtle status bar at the bottom-left of the canvas showing node count, zoom level,
  * and a help button for keyboard shortcuts.
  */
-export const StatusBar = React.memo(function StatusBar({ nodeCount, edgeCount, onHelpClick }) {
+export const StatusBar = React.memo(function StatusBar({ nodeCount, edgeCount, onHelpClick, onReportBugClick }) {
   const { zoom } = useViewport();
   const zoomPercent = Math.round(zoom * 100);
 
@@ -27,10 +27,17 @@ export const StatusBar = React.memo(function StatusBar({ nodeCount, edgeCount, o
       <span className="text-[10px] text-white/25 font-mono">{zoomPercent}%</span>
       <button
         onClick={onHelpClick}
-        className="text-white/15 hover:text-white/40 transition-colors"
+        className="text-white/15 hover:text-white/40 transition-colors ml-2"
         title="Keyboard shortcuts (?)"
       >
         <HelpCircle size={12} />
+      </button>
+      <button
+        onClick={onReportBugClick}
+        className="text-red-400/50 hover:text-red-400 transition-colors ml-1"
+        title="Report a Bug"
+      >
+        <Bug size={12} />
       </button>
     </div>
   );

@@ -1,0 +1,228 @@
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { useReactFlow } from '@xyflow/react';
+
+/**
+ * Walk the navigation stack upward from `startIndex` to 0, syncing each
+ * level's canvas data back into its parent's node tree.
+ *
+ * Returns the root-level { nodes, edges, drawings }.
+ * Pure function — does not mutate state.
+ */
+function syncStackUpward(currentNodes, currentEdges, currentDrawings, stack, startIndex) {
+  let nodes = structuredClone(currentNodes);
+  let edges = structuredClone(currentEdges);
+  let drawings = structuredClone(currentDrawings);
+
+  for (let i = startIndex; i >= 0; i--) {
+    const parentState = stack[i];
+    const updatedNodes = parentState.nodes.map(n => {
+      if (n.id === parentState.nodeId) {
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            canvasData: { nodes, edges, drawings },
+          },
+        };
+      }
+      return n;
+    });
+
+    nodes = updatedNodes;
+    edges = parentState.edges;
+    drawings = parentState.drawings;
+  }
+
+  return { nodes, edges, drawings };
+}
+
+/**
+ * Navigation stack for nested canvas dive-in / dive-out.
+ *
+ * Stack entries store the PARENT canvas state when we leave it:
+ *   { nodeId, childTitle, nodes, edges, drawings, viewport }
+ *
+ * The currently-active canvas data is always whatever's in the
+ * live nodes/edges/drawings state (managed by Canvas.jsx).
+ */
+export function useCanvasNavigation({
+  nodes, edges, drawings,
+  setNodes, setEdges, setDrawings,
+  clearHistory,
+  getAnimationDuration,
+}) {
+  const [stack, setStack] = useState([]);
+  const [isAnimating, setIsAnimating] = useState(false);
+  const [animPhase, setAnimPhase] = useState(null); // 'fade-out' | 'fade-in'
+  const reactFlow = useReactFlow();
+
+  const nodesRef = useRef(nodes);
+  const edgesRef = useRef(edges);
+  const drawingsRef = useRef(drawings);
+  const stackRef = useRef(stack);
+
+  useEffect(() => {
+    nodesRef.current = nodes;
+    edgesRef.current = edges;
+    drawingsRef.current = drawings;
+    stackRef.current = stack;
+  }, [nodes, edges, drawings, stack]);
+
+  const depth = stack.length;
+
+  // Build breadcrumbs: [Root, ...each level we navigated into]
+  // Last entry = current level (not clickable)
+  const breadcrumbs = [
+    { id: 'root', title: 'Main Canvas' },
+    ...stack.map(s => ({ id: s.nodeId, title: s.childTitle })),
+  ];
+
+  /**
+   * Resolve canvas data from a node, supporting both old and new data shapes.
+   */
+  const getCanvasData = useCallback((node) => {
+    if (node.data.canvasData) return node.data.canvasData;
+    // Legacy fallback
+    return {
+      nodes: node.data.nodes || [],
+      edges: node.data.edges || [],
+      drawings: node.data.drawings || [],
+    };
+  }, []);
+
+  /**
+   * Dive into a nested canvas node.
+   */
+  const diveIn = useCallback((nodeId) => {
+    if (isAnimating) return;
+
+    const node = reactFlow.getNode(nodeId);
+    if (!node || node.type !== 'group') return;
+
+    const canvasData = getCanvasData(node);
+    const halfDuration = getAnimationDuration() / 2;
+
+    setIsAnimating(true);
+    setAnimPhase('fade-out');
+
+    // Save current state
+    const viewport = reactFlow.getViewport();
+    const parentState = {
+      nodeId,
+      childTitle: node.data.title || 'Sub-Canvas',
+      nodes: structuredClone(nodesRef.current),
+      edges: structuredClone(edgesRef.current),
+      drawings: structuredClone(drawingsRef.current),
+      viewport,
+    };
+
+    // After fade-out completes, swap data
+    setTimeout(() => {
+      setStack(s => [...s, parentState]);
+      setNodes(canvasData.nodes || []);
+      setEdges(canvasData.edges || []);
+      setDrawings(canvasData.drawings || []);
+      clearHistory?.();
+
+      // Let React render the new data, then fit and fade in
+      requestAnimationFrame(() => {
+        reactFlow.fitView({ padding: 0.3, duration: 0 });
+        setAnimPhase('fade-in');
+
+        setTimeout(() => {
+          setIsAnimating(false);
+          setAnimPhase(null);
+        }, halfDuration);
+      });
+    }, halfDuration);
+  }, [isAnimating, reactFlow, getCanvasData, getAnimationDuration, setNodes, setEdges, setDrawings, clearHistory]);
+
+  /**
+   * Jump to a specific breadcrumb level.
+   * targetIndex 0 = root, 1 = first sub-canvas, etc.
+   * Syncs all intermediate canvas data back through the chain.
+   */
+  const jumpTo = useCallback((targetIndex) => {
+    const currentStack = stackRef.current;
+    if (isAnimating || targetIndex >= currentStack.length) return;
+
+    const halfDuration = getAnimationDuration() / 2;
+    setIsAnimating(true);
+    setAnimPhase('fade-out');
+
+    setTimeout(() => {
+      // Actually we need to walk only from current to targetIndex
+      // The synced result gives us root-level data; we need target-level data
+      // Re-walk from currentStack.length-1 down to targetIndex
+      let cn = structuredClone(nodesRef.current);
+      let ce = structuredClone(edgesRef.current);
+      let cd = structuredClone(drawingsRef.current);
+
+      for (let i = currentStack.length - 1; i >= targetIndex; i--) {
+        const parentState = currentStack[i];
+        const updatedNodes = parentState.nodes.map(n => {
+          if (n.id === parentState.nodeId) {
+            return { ...n, data: { ...n.data, canvasData: { nodes: cn, edges: ce, drawings: cd } } };
+          }
+          return n;
+        });
+        cn = updatedNodes;
+        ce = parentState.edges;
+        cd = parentState.drawings;
+      }
+
+      const targetViewport = currentStack[targetIndex].viewport;
+      setStack(s => s.slice(0, targetIndex));
+      setNodes(cn);
+      setEdges(ce);
+      setDrawings(cd);
+      clearHistory?.();
+
+      requestAnimationFrame(() => {
+        reactFlow.setViewport(targetViewport, { duration: 0 });
+        setAnimPhase('fade-in');
+
+        setTimeout(() => {
+          setIsAnimating(false);
+          setAnimPhase(null);
+        }, halfDuration);
+      });
+    }, halfDuration);
+  }, [isAnimating, reactFlow, getAnimationDuration, setNodes, setEdges, setDrawings, clearHistory]);
+
+  /**
+   * Dive out one level (back to parent).
+   */
+  const diveOut = useCallback(() => {
+    if (isAnimating || stackRef.current.length === 0) return;
+    jumpTo(stackRef.current.length - 1);
+  }, [isAnimating, jumpTo]);
+
+  /**
+   * Flush: sync all pending sub-canvas edits back through the stack.
+   * Returns the root-level { nodes, edges, drawings } without mutating state.
+   * Called before saving.
+   */
+  const flushStack = useCallback(() => {
+    const currentStack = stackRef.current;
+    if (currentStack.length === 0) {
+      return { nodes: nodesRef.current, edges: edgesRef.current, drawings: drawingsRef.current };
+    }
+
+    return syncStackUpward(
+      nodesRef.current, edgesRef.current, drawingsRef.current,
+      currentStack, currentStack.length - 1
+    );
+  }, []);
+
+  return {
+    diveIn,
+    diveOut,
+    jumpTo,
+    flushStack,
+    breadcrumbs,
+    depth,
+    isAnimating,
+    animPhase,
+  };
+}

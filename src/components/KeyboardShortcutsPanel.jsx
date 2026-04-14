@@ -121,6 +121,7 @@ export function KeyboardShortcutsPanel({ isOpen, onClose }) {
  * Hook to manage keyboard shortcuts panel state.
  * Returns { isOpen, toggle, open, close } + listens for "?" key to toggle.
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function useKeyboardShortcuts() {
   const [isOpen, setIsOpen] = useState(false);
 

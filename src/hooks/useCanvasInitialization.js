@@ -8,7 +8,8 @@ export function useCanvasInitialization({
   setCurrentFile,
   setHasUnsavedChanges,
   saveCanvas,
-  loadCanvas
+  loadCanvas,
+  flushStack,
 }) {
   // Keep latest state in a ref so the auto-save timer reads current data
   // without the effect being torn down on every state change.
@@ -16,6 +17,9 @@ export function useCanvasInitialization({
   useEffect(() => {
     stateRef.current = { nodes, edges, drawings };
   }, [nodes, edges, drawings]);
+
+  const flushRef = useRef(flushStack);
+  useEffect(() => { flushRef.current = flushStack; }, [flushStack]);
 
   // Track hasUnsavedChanges internally when props change
   useEffect(() => {
@@ -25,13 +29,13 @@ export function useCanvasInitialization({
   }, [nodes, edges, drawings, setHasUnsavedChanges]);
 
   // Auto-save: debounced timer only recreated when the file path changes.
-  // Reads latest state from ref when actually saving.
+  // Uses flushStack to capture nested canvas data.
   useEffect(() => {
     if (!currentFile || !window.electronAPI) return;
 
     const timer = setTimeout(() => {
-      const { nodes: n, edges: e, drawings: d } = stateRef.current;
-      window.electronAPI.saveWorkspace({ data: { nodes: n, edges: e, drawings: d }, filePath: currentFile }).then(res => {
+      const data = flushRef.current ? flushRef.current() : stateRef.current;
+      window.electronAPI.saveWorkspace({ data, filePath: currentFile }).then(res => {
         if (res?.success && res.filePath) setCurrentFile(res.filePath);
       });
       setHasUnsavedChanges(false);
@@ -39,15 +43,12 @@ export function useCanvasInitialization({
     return () => clearTimeout(timer);
   }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges]);
 
-  // Menu IPC — use refs to avoid stale closures in one-time mount effect
   const latestSave = useRef(saveCanvas);
   const latestLoad = useRef(loadCanvas);
-  
-  useEffect(() => { 
-    latestSave.current = saveCanvas; 
-    latestLoad.current = loadCanvas; 
-  });
-  
+  useEffect(() => {
+    latestSave.current = saveCanvas;
+    latestLoad.current = loadCanvas;
+  }, [saveCanvas, loadCanvas]);
   useEffect(() => {
     if (!window.electronAPI) return;
     const cleanupSave = window.electronAPI.onMenuSave(() => latestSave.current());

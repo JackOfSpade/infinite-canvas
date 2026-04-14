@@ -35,6 +35,7 @@ export function ContextMenu({ x, y, items, onClose }) {
       if (rect.bottom > window.innerHeight) {
         newPos.top = window.innerHeight - rect.height - 8;
       }
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setAdjustedPos(newPos);
     }
   }, [x, y]);

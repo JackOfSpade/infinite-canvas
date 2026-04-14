@@ -53,10 +53,17 @@ Once a node is on your canvas, here is how you interact with it:
 - **Text Nodes**: Double-click the text to edit it.
 - **Link Nodes**: Single-click the node to open the web page. Double-click the node to edit its display label. Right-click the node and select "Edit URL" to change the link.
 - **Documents**: Double-click a file node to native-open it in its default app on your computer!
-- **Arranging**: Group nodes together inside nested canvases, or Right-click any node to control its Z-order (Send to Back / Bring to Front) or duplicate it.
+- **Nested Canvas**: Double-click a nested canvas card to dive into its full-screen view. Use the top breadcrumbs to return upward.
+- **Arranging**: Organize nodes neatly inside nested canvases, or Right-click any node to control its Z-order (Send to Back / Bring to Front) or to duplicate it.
 
 ### Connecting Your Ideas
 Want to show how two things are related? Hover over any node to reveal small dots on its edges. **Click and drag** from one dot to another node to draw an animated connection line between them.
+
+### Making it Pop (Sticky Notes)
+Tired of plain text notes? Right-click any Text Node and select **Make Sticky Note**. It will instantly transform into a beautiful, skeuomorphic post-it style note with a hand-written font, slightly rotated and shadowed to look like it's resting on your canvas. Perfect for brainstorming!
+
+### AI Polish
+Your spatial workspace is powered by an AI assistant! Right-click any text node (or Sticky Note) and select **✨ AI Polish Text**. The AI will instantly rewrite your text to make it clear, concise, and professional, maintaining markdown formatting. Make sure you're running the app within the desktop Electron window (not a normal browser) so the AI can securely use your API key!
 
 ---
 
@@ -93,10 +100,37 @@ The left sidebar gives you access to powerful AI-driven tasks that run right on 
 Looking for a new role? Drag the Job module onto your canvas. 
 - **Drop your Resume (PDF/DOCX)** directly onto the Hub.
 - The AI will read your experience, generate creative career directions, and search across 12 different platforms (including Google, Indeed, and LinkedIn) on your behalf.
-- The Hub will generate matching **Job Card Nodes** arranged beautifully around it, categorized by career paths you might not have considered!
+- The Hub will generate **Categorized Folders (Nested Canvases)** arranged beautifully around it. Double-click any category folder to dive into a sub-canvas containing all your matching **Job Card Nodes**.
 
-### 2. Marketplace Sell Hub (Coming Soon)
+### 2. Marketplace Sell Hub
 Drag the Sell module to your canvas and drop product photos onto it. The AI will analyze the images, generate detailed product descriptions, and suggest the best marketplace platforms (like eBay or Marketplace) and optimal pricing out of the box.
+
+---
+
+## ✨ Pro Actions & Polish
+
+- **Animated Flow Lines**: Drawing connections between nodes uses sleek, animated bezier curves to visualize your workflow paths.
+- **Node Selections**: Selected nodes illuminate with a soft blue glassmorphic glow, keeping your active context clear.
+- **Color Coding**: Right-click any node (Text, Link, Nested Canvas, or Document) and select **Color** to apply a beautiful translucent background. Use colors to categorize your thoughts and create visually striking diagrams!
+- **Lock Nodes**: Accidental drags getting in the way? Right-click a node and select **Lock Node**. This displays a padlock icon and prevents it from being moved or deleted until unlocked. Perfect for setting up permanent structural frames or headers.
+- **Tidy Up Nodes**: Messy canvas? Select multiple nodes (Shift+Drag), right-click, and hit **Tidy Selection** (or **Tidy Canvas**) to beautifully snap them into organized algorithmic grids.
+- **Background Scenery**: Tired of the default dots? Click the Grid Pattern icon (🧊) in the bottom toolbar to cycle between transparent Dots, Lines, Crosses, or a completely Clean backdrop.
+- **Smart Link Fetching**: Creating a Link node or adding a URL no longer leaves you with an ugly web address. The app automatically fetches the real `<title>` metadata of the target site to label the bookmark elegantly.
+- **Sticky Note Toggle**: Transform any Text Node into a vibrant, realistic Sticky Note with a single right-click to add character to your boards.
+- **AI Text Polisher**: Select `✨ AI Polish Text` from the context menu of any text node to have the Gemini Assistant effortlessly rewrite and elevate your thoughts into clear, structured markdown.
+
+---
+
+## 🧭 First-Time Workflow Guide
+
+If you're booting up Infinite Canvas for the first time, try this workflow to get the hang of your new spatial workspace:
+
+1. **Brainstorming:** Double click anywhere on the blank canvas to spawn a bare **Text Node**. Jot down some project ideas. Spawn a few more text notes. Use the **Color** context menu option to color-code related ideas (e.g., green for backend, blue for frontend). Right-click and choose **Make Sticky Note** to give your brainstorm some character!
+2. **Structuring:** To make a permanent "frame" for your ideas, create a Text Node, color it, enlarge its font, and position it as a header. Right-click and choose **Lock Node** so you don't accidentally move it.
+3. **Deep Diving:** Click the ☐ button in the toolbar to create a "Sub-Canvas" (Nested Canvas). Double-click the nested canvas to enter it! You're now on a brand new infinite board where you can gather references without cluttering your main layout. Look at the breadcrumbs at the top of the window to navigate back out.
+4. **Connecting the Dots:** Drag from the visual handles (the small dots on the edges of nodes) to draw connecting paths between your thoughts.
+5. **AI Magic:** Drag the "Job Search Hub" or "Marketplace Sell Hub" from the left sidebar directly to the canvas. Drop a PDF resume or product images onto them, and watch the AI seamlessly build out connected node networks containing job listings or product prices based on your personal data.
+6. **Refining Ideas:** If you wrote some messy thoughts on a node, right-click it and hit **✨ AI Polish Text** and watch your rough notes turn into a beautifully formatted summary!
 
 ---
 

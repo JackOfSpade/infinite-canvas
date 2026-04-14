@@ -5,6 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 /* global process */
+import { ipcMain } from 'electron';
 import { GoogleAuth } from 'google-auth-library';
 
 const GEMINI_MODEL = 'gemini-2.5-flash';
@@ -155,5 +156,19 @@ export async function callGeminiDocument(filePath, prompt) {
 
   const raw = await callGemini(parts);
   return parseGeminiJSON(raw);
+}
+
+export function registerGeminiHandlers() {
+  ipcMain.handle('ai-polish-text', async (_event, text) => {
+    try {
+      const prompt = `You are an AI assistant in a visual workspace app. Polish the following text. Make it clear, concise, and professional. Output ONLY the improved text, without quotes or conversational filler. Keep original markdown formatting if any. The text is:\n\n${text}`;
+      const config = { responseMimeType: 'text/plain' }; // or text/plain
+      const raw = await callGemini([{ text: prompt }], config);
+      return { success: true, text: raw.trim() };
+    } catch (e) {
+      console.error('[Gemini] Polish failed:', e);
+      return { success: false, error: e.message };
+    }
+  });
 }
 

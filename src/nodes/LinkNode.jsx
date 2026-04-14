@@ -1,13 +1,11 @@
 import React, { useState, useRef } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
-import { ContextMenu } from '../components/ContextMenu';
 import { Dialog } from '../components/Dialog';
 import { FontSizeDialog } from '../components/FontSizeDialog';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
-import { useContextMenu } from '../hooks/useContextMenu';
+import { Lock } from 'lucide-react';
 
 export function LinkNode({ id, data }) {
-  const { contextMenu, onContextMenu, closeContextMenu } = useContextMenu();
   const [showDialog, setShowDialog] = useState(null); // 'font' | 'url'
   const [urlInput, setUrlInput] = useState(data.url || '');
   const clickTimeoutRef = useRef(null);
@@ -33,8 +31,22 @@ export function LinkNode({ id, data }) {
         inputRef.current.innerText = data.label || data.url || '';
       }
     }
-     
   }, [data.label, data.url, isEditingLabel]);
+
+  // Auto-fetch title if we have a URL but no custom label yet
+  React.useEffect(() => {
+    if (data.url && !data.label && window.electronAPI?.fetchUrlTitle) {
+      // Small delay to prevent rapid fires if user is actively typing a URL
+      const timer = setTimeout(() => {
+        window.electronAPI.fetchUrlTitle(data.url).then(title => {
+          if (title) {
+            updateNodeData(id, { label: title });
+          }
+        }).catch(() => {});
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [data.url, data.label, id, updateNodeData]);
 
   const openLink = () => {
     const targetUrl = data.url || inputRef.current?.innerText || '';
@@ -81,21 +93,34 @@ export function LinkNode({ id, data }) {
   const fontFamily = data.fontFamily || 'sans-serif';
   const isEmpty = !data.label && !data.url;
 
-  // Context menu items
-  const menuItems = [
-    {
-      label: 'Edit URL',
-      onClick: () => { setUrlInput(data.url || ''); setShowDialog('url'); },
-    },
-    {
-      label: 'Font & Size',
-      onClick: () => setShowDialog('font'),
-    },
-  ];
+  // Listen for dialog triggers from global context menu
+  React.useEffect(() => {
+    const handleOpenFont = () => setShowDialog('font');
+    const handleOpenUrl = () => { setUrlInput(data.url || ''); setShowDialog('url'); };
+    
+    document.addEventListener(`edit-node-font-${id}`, handleOpenFont);
+    document.addEventListener(`edit-node-url-${id}`, handleOpenUrl);
+    
+    return () => {
+      document.removeEventListener(`edit-node-font-${id}`, handleOpenFont);
+      document.removeEventListener(`edit-node-url-${id}`, handleOpenUrl);
+    };
+  }, [id, data.url]);
 
   return (
-    <div className="relative group px-1">
+    <div 
+      className="relative group px-1 rounded-md transition-colors"
+      style={{
+        backgroundColor: data.backgroundColor || 'transparent'
+      }}
+    >
       <Handle type="target" position={Position.Left} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
+      
+      {data.locked && (
+        <div className="absolute -top-2 -right-2 bg-black/60 rounded-full p-0.5 text-white/70 backdrop-blur-sm pointer-events-none z-10">
+          <Lock size={10} />
+        </div>
+      )}
       
       {/* Placeholder shown on hover when empty and not editing */}
       {isEmpty && !isEditingLabel && (
@@ -116,21 +141,12 @@ export function LinkNode({ id, data }) {
         onBlur={handleLabelBlur}
         onKeyDown={(e) => { if (e.key === 'Escape') inputRef.current.blur(); }}
         onPointerDown={(e) => { if (isEditingLabel) e.stopPropagation(); }}
-        onContextMenu={onContextMenu}
+        onContextMenu={(e) => { if (isEditingLabel) e.stopPropagation(); }}
         className={`text-blue-400 outline-none whitespace-nowrap min-w-[20px] min-h-[1em] select-none ${isEditingLabel ? 'cursor-text' : 'cursor-pointer hover:underline'}`}
         style={{ fontSize: `${fontSize}px`, fontFamily }}
       />
 
       <Handle type="source" position={Position.Right} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
-
-      {contextMenu && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          items={menuItems}
-          onClose={closeContextMenu}
-        />
-      )}
 
       {showDialog === 'font' && (
         <FontSizeDialog

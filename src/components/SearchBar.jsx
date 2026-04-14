@@ -43,11 +43,14 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
     const deepSearch = (items) => {
       for (const item of items) {
         if (
-          (item.type === 'document' && item.filename?.toLowerCase().includes(q)) ||
-          (item.type === 'group' && item.title?.toLowerCase().includes(q)) ||
-          (item.data?.text && item.data.text.toLowerCase().includes(q))
+          (item.type === 'document' && item.data?.filename?.toLowerCase().includes(q)) ||
+          (item.type === 'group' && item.data?.title?.toLowerCase().includes(q)) ||
+          (item.type === 'text' && item.data?.text?.toLowerCase().includes(q)) ||
+          (item.type === 'link' && (item.data?.label?.toLowerCase().includes(q) || item.data?.url?.toLowerCase().includes(q)))
         ) return true;
-        if (item.items && deepSearch(item.items)) return true;
+        // Recurse into nested canvases
+        const nested = item.data?.canvasData?.nodes;
+        if (nested && deepSearch(nested)) return true;
       }
       return false;
     };
@@ -60,7 +63,9 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
         (n.type === 'link' && (n.data.label?.toLowerCase().includes(q) || n.data.url?.toLowerCase().includes(q))) ||
         (n.type === 'listing' && n.data.label?.toLowerCase().includes(q))
       ) return true;
-      if (n.type === 'group' && n.data.items && deepSearch(n.data.items)) return true;
+      // Search inside nested canvases
+      const nestedNodes = n.data.canvasData?.nodes;
+      if (nestedNodes && deepSearch(nestedNodes)) return true;
       return false;
     });
   }, [searchQuery, nodes]);
@@ -96,9 +101,9 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
     inputRef.current?.blur();
   };
 
-  // Update match count live as user types (after 300ms)
   useEffect(() => {
     if (searchQuery.trim() === '') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setMatchCount(0);
       return;
     }
