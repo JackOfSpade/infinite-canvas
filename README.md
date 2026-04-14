@@ -23,10 +23,9 @@ npm install
 ```
 
 ### 3. Connect the AI
-Infinite Canvas uses AI to power its advanced modules. Create a `.env` file in the project root folder and securely add your API key:
-```env
-GEMINI_API_KEY=your_gemini_api_key_here
-```
+Infinite Canvas uses Vertex AI to power its advanced modules and visual polishing features. Place your Google Cloud Service Account credentials file in the project root folder:
+- Save the file specifically as `service-account.json` in the root of the project.
+- Ensure your Google Cloud Project has the Vertex AI API enabled.
 
 ### 4. Launch the App
 ```bash
@@ -63,7 +62,7 @@ Want to show how two things are related? Hover over any node to reveal small dot
 Tired of plain text notes? Right-click any Text Node and select **Make Sticky Note**. It will instantly transform into a beautiful, skeuomorphic post-it style note with a hand-written font, slightly rotated and shadowed to look like it's resting on your canvas. Perfect for brainstorming!
 
 ### AI Polish
-Your spatial workspace is powered by an AI assistant! Right-click any text node (or Sticky Note) and select **✨ AI Polish Text**. The AI will instantly rewrite your text to make it clear, concise, and professional, maintaining markdown formatting. Make sure you're running the app within the desktop Electron window (not a normal browser) so the AI can securely use your API key!
+Your spatial workspace is powered by an AI assistant! Right-click any text node (or Sticky Note) and select **✨ AI Polish Text**. The AI will instantly rewrite your text to make it clear, concise, and professional, maintaining markdown formatting. Make sure you're running the app within the desktop Electron window (not a normal browser) so the AI can securely use your service account credentials!
 
 ---
 
@@ -71,9 +70,14 @@ Your spatial workspace is powered by an AI assistant! Right-click any text node 
 
 ### ✏️ Drawing Mode
 Click the **Pen Icon** on the bottom toolbar to start drawing freehand! 
-- Choose your preferred color from the palette that appears.
+- **Right-click** the Pen icon to choose your preferred color from the palette, or enter a custom hex code.
 - Draw diagrams, underline text, or scribble notes.
 - Click the Pen icon again to return to normal interaction mode.
+
+### 🧹 Eraser
+Click the **Eraser Icon** (next to the Pen) to erase drawings.
+- **Right-click** the Eraser icon to choose between **Erase by Object** (removes entire strokes) or **Erase by Pixels** (freehand erasing).
+- Use **Clear All Drawings** from the eraser menu to wipe all drawings at once.
 
 ### 🔍 Powerful Search
 Press **⌘F** to open the search bar at the top of the canvas. Type any word to instantly jump to matching Text Nodes and Documents on your board. Press `Enter` to cycle through the matches!
@@ -114,7 +118,10 @@ Drag the Sell module to your canvas and drop product photos onto it. The AI will
 - **Color Coding**: Right-click any node (Text, Link, Nested Canvas, or Document) and select **Color** to apply a beautiful translucent background. Use colors to categorize your thoughts and create visually striking diagrams!
 - **Lock Nodes**: Accidental drags getting in the way? Right-click a node and select **Lock Node**. This displays a padlock icon and prevents it from being moved or deleted until unlocked. Perfect for setting up permanent structural frames or headers.
 - **Tidy Up Nodes**: Messy canvas? Select multiple nodes (Shift+Drag), right-click, and hit **Tidy Selection** (or **Tidy Canvas**) to beautifully snap them into organized algorithmic grids.
-- **Background Scenery**: Tired of the default dots? Click the Grid Pattern icon (🧊) in the bottom toolbar to cycle between transparent Dots, Lines, Crosses, or a completely Clean backdrop.
+- **Background Scenery**: Tired of the default dots? Click the Grid Pattern icon in the bottom toolbar to cycle between transparent Dots, Lines, Crosses, or a completely Clean backdrop.
+- **MiniMap**: Toggle the MiniMap from the toolbar to get a bird's-eye overview of your entire canvas in the bottom-right corner.
+- **Snap to Grid**: Toggle the Magnet icon in the toolbar to snap nodes to a grid for pixel-perfect alignment.
+- **Clear Canvas**: Use the red Trash icon in the toolbar to reset your entire canvas.
 - **Smart Link Fetching**: Creating a Link node or adding a URL no longer leaves you with an ugly web address. The app automatically fetches the real `<title>` metadata of the target site to label the bookmark elegantly.
 - **Sticky Note Toggle**: Transform any Text Node into a vibrant, realistic Sticky Note with a single right-click to add character to your boards.
 - **AI Text Polisher**: Select `✨ AI Polish Text` from the context menu of any text node to have the Gemini Assistant effortlessly rewrite and elevate your thoughts into clear, structured markdown.
@@ -145,10 +152,20 @@ To see this list inside the app at any time, just press **`?`** on your keyboard
 | **Zoom in/out** | Scroll wheel |
 | **Select multiple** | Shift + Click & Drag |
 | **Delete item** | Select → Press `Delete` or `⌫` |
-| **ContextMenu** | Right-click any node or the canvas |
+| **Context menu** | Right-click any node or the canvas |
 | **Search** | `⌘F` |
+| **Next match** | `Enter` (in search bar) |
+| **Prev match** | `Shift+Enter` (in search bar) |
 | **Save** | `⌘S` |
 | **Open** | `⌘O` |
+| **Undo** | `⌘Z` |
+| **Redo** | `⌘⇧Z` or `⌘Y` |
+
+---
+
+## 🐛 Bug Reporting
+
+Notice something off? Click the **bug icon** in the bottom-left status bar to open the issue reporter. Type a brief description of the problem and click **Generate Report**. The app will automatically bundle a comprehensive debugging snapshot — including your canvas state, event log, app metadata, and reproduction steps — into a single file you can share for troubleshooting.
 
 ---
 
