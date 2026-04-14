@@ -35,7 +35,9 @@ const SHORTCUT_GROUPS = [
   {
     title: 'Search',
     shortcuts: [
+      { keys: `${mod} + F`, desc: 'Open search bar' },
       { keys: `Enter`, desc: 'Find next match (in search bar)' },
+      { keys: `Shift + Enter`, desc: 'Find previous match' },
     ],
   },
 ];
