@@ -1,4 +1,4 @@
-/* global process */
+
 /**
  * Jobs IPC handlers — resume parsing, multi-source job search, AI scoring.
  * 12 Sources: Google, Indeed, LinkedIn, RemoteOK, WeWorkRemotely,

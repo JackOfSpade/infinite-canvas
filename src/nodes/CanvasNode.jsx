@@ -1,4 +1,4 @@
-import React, { useContext, useCallback, useState, useRef } from 'react';
+import React, { useContext, useCallback, useState, useRef, useEffect } from 'react';
 import { Handle, Position, NodeResizer, useReactFlow } from '@xyflow/react';
 import { Layers, X, Lock } from 'lucide-react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
@@ -18,6 +18,12 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected })
   const mainFlow = useReactFlow();
   const [title, setTitle] = useState(data.title || '');
   const titleInputRef = useRef(null);
+
+  // Sync local title when data changes externally (e.g. undo/redo)
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTitle(data.title || '');
+  }, [data.title]);
 
   // Resolve canvas data (supports old and new data shape)
   const canvasData = data.canvasData || {
@@ -51,8 +57,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected })
 
   const handleDelete = useCallback((e) => {
     e.stopPropagation();
-    mainFlow.setNodes(nds => nds.filter(n => n.id !== id));
-    mainFlow.setEdges(eds => eds.filter(e => e.source !== id && e.target !== id));
+    mainFlow.deleteElements({ nodes: [{ id }] });
   }, [id, mainFlow]);
 
   return (

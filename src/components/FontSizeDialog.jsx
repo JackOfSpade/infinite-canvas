@@ -51,7 +51,8 @@ export function FontSizeDialog({ fontSize: initialSize, fontFamily: initialFamil
           type="number"
           className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
           value={fontSize}
-          onChange={(e) => setFontSize(Number(e.target.value))}
+          onChange={(e) => setFontSize(Math.max(1, Number(e.target.value) || 1))}
+          min={1}
         />
       </div>
       <button

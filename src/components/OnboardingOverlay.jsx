@@ -47,7 +47,7 @@ const STEPS = [
           </div>
         </div>
         <p className="text-white/40 text-xs text-center mt-1">
-          Drop a resume → AI finds matching jobs across 5 sources<br/>
+          Drop a resume → AI finds matching jobs across 12 sources<br/>
           Drop photos → AI creates a listing with price research
         </p>
       </div>
@@ -61,7 +61,7 @@ const STEPS = [
       <div className="flex flex-col items-center gap-3">
         <div className="grid grid-cols-2 gap-3 w-full max-w-xs">
           {[
-            { icon: '🔍', label: 'Multi-source search', desc: '5 job boards at once' },
+            { icon: '🔍', label: 'Multi-source search', desc: '12 job boards at once' },
             { icon: '🎯', label: 'Smart scoring', desc: 'AI ranks every match' },
             { icon: '💰', label: 'Price research', desc: 'eBay, Amazon, Mercari' },
             { icon: '✉️', label: 'Cover letters', desc: 'One-click generation' },

@@ -19,8 +19,15 @@ export function ContextMenu({ x, y, items, onClose }) {
         onClose();
       }
     };
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); onClose(); }
+    };
     window.addEventListener('pointerdown', handlePointerDown);
-    return () => window.removeEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
   }, [onClose]);
 
   // Clamp menu within viewport bounds
@@ -61,10 +68,11 @@ export function ContextMenu({ x, y, items, onClose }) {
               <button
                 className={`w-full text-left px-3 py-1.5 hover:bg-white/8 flex items-center justify-between gap-4 transition-colors ${
                   isDanger ? 'text-red-400 hover:text-red-300' : ''
-                }`}
+                } ${item.disabled ? 'opacity-40 cursor-default' : ''}`}
+                disabled={item.disabled}
                 onPointerDown={(e) => {
                   e.stopPropagation();
-                  if (!hasSubmenu && item.onClick) {
+                  if (!hasSubmenu && item.onClick && !item.disabled) {
                     item.onClick();
                     onClose();
                   }

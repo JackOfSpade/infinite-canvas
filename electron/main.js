@@ -1,4 +1,3 @@
-/* global process */
 import { app, BrowserWindow, Menu, protocol } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';

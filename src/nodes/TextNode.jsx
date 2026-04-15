@@ -24,6 +24,7 @@ export function TextNode({ id, data }) {
   };
 
   const handleDoubleClick = (e) => {
+    if (data.locked) return; // Locked nodes are not editable
     e.stopPropagation();
     setIsEditing(true);
     setTimeout(() => {
@@ -59,7 +60,7 @@ export function TextNode({ id, data }) {
     <div 
       className={`relative group px-2 py-1 rounded-md transition-colors ${data.isSticky ? 'shadow-xl' : ''}`}
       style={{
-        backgroundColor: data.isSticky ? (data.backgroundColor || '#fef3c7') : (data.backgroundColor || 'transparent'),
+        backgroundColor: data.isSticky ? (data.backgroundColor ? data.backgroundColor.replace(/[\d.]+\)$/, '1)') : '#fef3c7') : (data.backgroundColor || 'transparent'),
         minWidth: data.isSticky ? '150px' : 'auto',
         minHeight: data.isSticky ? '150px' : 'auto',
         transform: data.isSticky && !isEditing ? 'rotate(-2deg)' : 'none',
@@ -68,7 +69,9 @@ export function TextNode({ id, data }) {
         color: data.isSticky ? '#1f2937' : 'inherit'
       }}
     >
-      <Handle type="target" position={Position.Left} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-white" />
+      {!data.isSticky && (
+        <Handle type="target" position={Position.Left} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-white" />
+      )}
       
       {data.isSticky && (
         <div className="absolute bottom-0 right-0 w-6 h-6 rounded-tl-xl transition-all" 

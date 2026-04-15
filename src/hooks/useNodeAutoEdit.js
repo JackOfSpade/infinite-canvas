@@ -48,12 +48,15 @@ export function useNodeAutoEdit(id, isNew, isEmptyPredicate, inputRef) {
   // Handle blurring the input
   const handleBlur = useCallback((dataUpdates = {}) => {
     setIsEditing(false);
-    if (isEmptyPredicate()) {
+    // Never auto-delete locked nodes — the user deliberately locked them
+    const currentNode = store.getState().nodeLookup?.get(id);
+    const isLocked = currentNode?.data?.locked;
+    if (isEmptyPredicate() && !isLocked) {
       setNodes(nds => nds.filter(n => n.id !== id));
     } else {
       updateNodeData(id, dataUpdates);
     }
-  }, [id, isEmptyPredicate, setNodes, updateNodeData]);
+  }, [id, isEmptyPredicate, setNodes, updateNodeData, store]);
 
   return {
     isEditing,

@@ -4,7 +4,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-/* global process */
+
 import { ipcMain } from 'electron';
 import { GoogleAuth } from 'google-auth-library';
 

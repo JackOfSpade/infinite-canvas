@@ -57,6 +57,14 @@ export function useCanvasDragAndDrop({
       if (newItems.length > 0) {
         setNodes(nds => nds.concat(newItems));
       }
+      return;
+    }
+
+    // Handle dropping URLs from the browser address bar
+    const droppedUrl = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain');
+    if (droppedUrl && /^(https?:\/\/|[a-z0-9-]+\.[a-z]{2,}(\/.*)?$)/i.test(droppedUrl.trim())) {
+      takeSnapshot();
+      setNodes(nds => nds.concat(NODE_FACTORIES.link(position, { url: droppedUrl.trim() })));
     }
   }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode]);
 

@@ -27,6 +27,13 @@ Infinite Canvas uses Vertex AI to power its advanced modules and visual polishin
 - Save the file specifically as `service-account.json` in the root of the project.
 - Ensure your Google Cloud Project has the Vertex AI API enabled.
 
+**Advanced Configurations (Optional)**
+For users looking to enable specialized job search integrations (like USAJobs), create an `.env` file in the project root containing:
+```env
+USAJOBS_API_KEY=your_usajobs_api_key
+USAJOBS_EMAIL=your_usajobs_email
+```
+
 ### 4. Launch the App
 ```bash
 npm run dev
@@ -52,7 +59,7 @@ Once a node is on your canvas, here is how you interact with it:
 - **Text Nodes**: Double-click the text to edit it.
 - **Link Nodes**: Single-click the node to open the web page. Double-click the node to edit its display label. Right-click the node and select "Edit URL" to change the link.
 - **Documents**: Double-click a file node to native-open it in its default app on your computer!
-- **Nested Canvas**: Double-click a nested canvas card to dive into its full-screen view. Use the top breadcrumbs to return upward.
+- **Nested Canvas**: Double-click a nested canvas card to dive into its full-screen view. Use the top breadcrumbs to return upward. To move any node out of a sub-canvas, right-click it and select **Move to Parent Canvas**!
 - **Arranging**: Organize nodes neatly inside nested canvases, or Right-click any node to control its Z-order (Send to Back / Bring to Front) or to duplicate it.
 
 ### Connecting Your Ideas
@@ -80,7 +87,7 @@ Click the **Eraser Icon** (next to the Pen) to erase drawings.
 - Use **Clear All Drawings** from the eraser menu to wipe all drawings at once.
 
 ### 🔍 Powerful Search
-Press **⌘F** to open the search bar at the top of the canvas. Type any word to instantly jump to matching Text Nodes and Documents on your board. Press `Enter` to cycle through the matches!
+Press **⌘F** to open the search bar at the top of the canvas. Type any word to instantly find matching nodes — including text notes, documents, links, job cards (by title or company), and product listings. Press `Enter` to cycle through the matches! The search even looks inside nested canvases.
 
 ### ⏳ Time Travel (Undo/Redo)
 Made a mistake? Your canvas remembers every action you take.
@@ -122,6 +129,7 @@ Drag the Sell module to your canvas and drop product photos onto it. The AI will
 - **MiniMap**: Toggle the MiniMap from the toolbar to get a bird's-eye overview of your entire canvas in the bottom-right corner.
 - **Snap to Grid**: Toggle the Magnet icon in the toolbar to snap nodes to a grid for pixel-perfect alignment.
 - **Clear Canvas**: Use the red Trash icon in the toolbar to reset your entire canvas.
+- **Settings Panel**: Click the Settings icon (Gear) in the toolbar to adjust UI preferences, such as the nested canvas animation speed.
 - **Smart Link Fetching**: Creating a Link node or adding a URL no longer leaves you with an ugly web address. The app automatically fetches the real `<title>` metadata of the target site to label the bookmark elegantly.
 - **Sticky Note Toggle**: Transform any Text Node into a vibrant, realistic Sticky Note with a single right-click to add character to your boards.
 - **AI Text Polisher**: Select `✨ AI Polish Text` from the context menu of any text node to have the Gemini Assistant effortlessly rewrite and elevate your thoughts into clear, structured markdown.
