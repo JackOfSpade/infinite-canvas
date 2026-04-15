@@ -8,8 +8,8 @@ export function createTextNode(position) {
   return { id: uuidv4(), type: 'text', position, data: { text: '', isNew: true } };
 }
 
-export function createLinkNode(position) {
-  return { id: uuidv4(), type: 'link', position, data: { url: '', label: '', isNew: true } };
+export function createLinkNode(position, extra = {}) {
+  return { id: uuidv4(), type: 'link', position, data: { url: '', label: '', isNew: true, ...extra } };
 }
 
 export function createGroupNode(position) {
