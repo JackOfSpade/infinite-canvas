@@ -3,7 +3,6 @@ import {
   ReactFlow,
   useNodesState,
   useEdgesState,
-  Background,
   Controls,
   ControlButton,
   MiniMap,
@@ -21,6 +20,7 @@ import { EmptyCanvasHint } from './components/EmptyCanvasHint';
 import { StatusBar } from './components/StatusBar';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { BreadcrumbBar } from './components/BreadcrumbBar';
+import { AlignedBackground } from './components/AlignedBackground';
 import { SettingsPanel } from './components/SettingsPanel';
 import { IssueReporterDialog } from './components/IssueReporterDialog';
 import { KeyboardShortcutsPanel, useKeyboardShortcuts } from './components/KeyboardShortcutsPanel';
@@ -280,7 +280,7 @@ export function Canvas() {
   // ── Render ───────────────────────────────────────────────────────────────
   return (
     <div className="w-screen h-screen bg-neutral-950 flex" ref={reactFlowWrapper}>
-      <Sidebar nodes={nodes} />
+      <Sidebar nodes={nodes} onReportBugClick={() => setIsIssueReporterOpen(true)} />
 
       <div
         className="flex-1 h-full relative"
@@ -374,8 +374,10 @@ export function Canvas() {
                 {placementMode === 'text' && <span className="text-sm font-medium text-white/90">text</span>}
                 {placementMode === 'link' && <span className="text-sm font-medium text-blue-400">link</span>}
                 {placementMode === 'group' && (
-                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="rgb(96,165,250)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-80">
-                    <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgb(96,165,250)" strokeLinecap="round" strokeLinejoin="round" className="opacity-90 drop-shadow-lg">
+                    <circle cx="12" cy="12" r="10" strokeWidth="1.5" />
+                    <circle cx="12" cy="12" r="5.5" strokeWidth="1.5" />
+                    <circle cx="12" cy="12" r="1.5" fill="rgb(96,165,250)" stroke="none" />
                   </svg>
                 )}
               </div>
@@ -383,10 +385,7 @@ export function Canvas() {
 
             <DrawingLayer drawings={drawings} currentStroke={currentStroke} activeColor={activeColor} penSize={penSize} />
             <EmptyCanvasHint nodeCount={nodes.length} drawingCount={drawings.length} />
-            {bgVariant !== 'none' && (
-              // offset={0} on both ensures dots sit exactly on grid-line intersections
-              <Background variant={bgVariant} color="rgba(255,255,255,0.08)" gap={48} size={bgVariant === 'dots' ? 3 : 1} offset={0} />
-            )}
+            {bgVariant !== 'none' && <AlignedBackground variant={bgVariant} />}
 
             <Controls
               className="border border-white/10 shadow-lg overflow-hidden flex flex-col"
@@ -450,12 +449,7 @@ export function Canvas() {
               onSettingsClick={() => setIsSettingsOpen(true)}
             />
 
-            <StatusBar
-              nodeCount={nodes.length}
-              edgeCount={edges.length}
-              onHelpClick={() => setIsSettingsOpen(true)}
-              onReportBugClick={() => setIsIssueReporterOpen(true)}
-            />
+            <StatusBar />
           </ReactFlow>
         </CanvasNavigationContext.Provider>
 

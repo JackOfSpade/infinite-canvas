@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { Search, Store, BarChart3, ChevronLeft, ChevronRight, UserCircle, Briefcase } from 'lucide-react';
+import { Search, Store, BarChart3, ChevronLeft, ChevronRight, UserCircle, Briefcase, Bug } from 'lucide-react';
 import { SELL_PLATFORMS, JOB_SOURCES, PRICE_COMP_SOURCES } from '../utils/constants';
 
 import { JobsTab } from './sidebar/JobsTab';
@@ -29,7 +29,7 @@ const PLATFORMS = [
  * Props:
  *   nodes — current canvas nodes (for dashboard stats)
  */
-export const Sidebar = React.memo(function Sidebar({ nodes = [] }) {
+export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClick }) {
   const [collapsed, setCollapsed] = useState(true);
   const [activeTab, setActiveTab] = useState('jobs');
 
@@ -61,11 +61,12 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [] }) {
   const [systemStatuses, setSystemStatuses] = useState(null);
   const [loadingPlatform, setLoadingPlatform] = useState(null);
 
-  // Fetch session statuses when accounts tab opens
+  // Fetch CACHED statuses when accounts tab opens — instant, no Chrome launch.
+  // The user can click "Refresh" to do a live Chrome-based check.
   useEffect(() => {
     if (activeTab === 'accounts' && !collapsed) {
-      if (window.electronAPI?.getSessionStatuses) {
-        window.electronAPI.getSessionStatuses().then(statuses => {
+      if (window.electronAPI?.getCachedSessionStatuses) {
+        window.electronAPI.getCachedSessionStatuses().then(statuses => {
           const map = {};
           for (const s of statuses) map[s.platform] = s;
           setAccountStatuses(map);
@@ -82,8 +83,9 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [] }) {
     setLoadingPlatform(platformId);
     try {
       await window.electronAPI.openLoginWindow({ platformId });
-      // After login window closes, re-check statuses
-      const statuses = await window.electronAPI.getSessionStatuses();
+      // After login window closes, re-read the cache (which was just written by the main process).
+      // No Chrome launch — the main process already marked it as connected.
+      const statuses = await window.electronAPI.getCachedSessionStatuses();
       const map = {};
       for (const s of statuses) map[s.platform] = s;
       setAccountStatuses(map);
@@ -142,6 +144,14 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [] }) {
           {Object.values(accountStatuses).some(s => s.connected) && (
             <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-500 border border-[#0d0d0d]" />
           )}
+        </button>
+
+        <button
+          onClick={onReportBugClick}
+          className="p-2.5 rounded-lg transition-all text-red-400/35 hover:text-red-400 hover:bg-red-400/10"
+          title="Report a Bug"
+        >
+          <Bug size={16} />
         </button>
 
         <button

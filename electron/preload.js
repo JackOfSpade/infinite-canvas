@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Accounts Module ───────────────────────────────────────────────────
   getPlatforms: () => ipcRenderer.invoke('get-platforms'),
   getSessionStatuses: () => ipcRenderer.invoke('get-session-statuses'),
+  getCachedSessionStatuses: () => ipcRenderer.invoke('get-cached-session-statuses'),
   checkPlatformSession: (args) => ipcRenderer.invoke('check-platform-session', args),
   openLoginWindow: (args) => ipcRenderer.invoke('open-login-window', args),
   checkAndLogin: (args) => ipcRenderer.invoke('check-and-login', args),
