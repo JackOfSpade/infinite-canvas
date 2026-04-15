@@ -49,13 +49,13 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [] }) {
   }, []);
 
   // Compute stats from canvas nodes using useMemo for performance
-  const { jobCards, sellHubs, appliedJobs, pricedListings, totalValue } = React.useMemo(() => {
+  const { jobCards, sellHubs, appliedJobs, totalValue } = React.useMemo(() => {
     const jobs = nodes.filter(n => n.type === 'jobcard');
     const sells = nodes.filter(n => n.type === 'sellhub');
     const applied = jobs.filter(n => n.data?.status === 'Applied');
     const priced = sells.filter(n => n.data?.hubState === 'priced');
     const value = priced.reduce((sum, n) => sum + (parseFloat(n.data?.userPrice) || 0), 0);
-    return { jobCards: jobs, sellHubs: sells, appliedJobs: applied, pricedListings: priced, totalValue: value };
+    return { jobCards: jobs, sellHubs: sells, appliedJobs: applied, totalValue: value };
   }, [nodes]);
   const [accountStatuses, setAccountStatuses] = useState({});
   const [systemStatuses, setSystemStatuses] = useState(null);

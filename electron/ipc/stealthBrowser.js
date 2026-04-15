@@ -32,7 +32,7 @@ export function getUserDataDir() {
 
 // ── Chrome Executable Discovery ─────────────────────────────────────────────
 export function findChromePath() {
-  /* global process */
+  
   const platform = process.platform;
 
   const candidates = platform === 'darwin'

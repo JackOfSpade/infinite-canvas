@@ -11,6 +11,7 @@ export function useCanvasActions({
   setHasUnsavedChanges,
   takeSnapshot,
   requestClearConfirm,
+  resetStack,
 }) {
   const onConnect = useCallback((params) => {
     takeSnapshot();
@@ -29,12 +30,13 @@ export function useCanvasActions({
 
   const doClear = useCallback(() => {
     takeSnapshot();
+    resetStack?.(); // Reset nav stack: clearing while nested would leave stale breadcrumbs
     setNodes([]);
     setEdges([]);
     setDrawings([]);
     setCurrentFile(null);
     setHasUnsavedChanges(false);
-  }, [takeSnapshot, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges]);
+  }, [takeSnapshot, resetStack, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges]);
 
   const clearCanvas = useCallback(() => {
     if (requestClearConfirm) {

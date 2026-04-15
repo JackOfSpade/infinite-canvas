@@ -91,7 +91,7 @@ ${appStateJson}
 
       const { canceled, filePath } = await dialog.showSaveDialog({
         title: 'Save Bug Report',
-        defaultPath: path.join(process.cwd(), `bug_report_${Date.now()}.md`),
+        defaultPath: path.join(app.getPath('desktop'), `bug_report_${Date.now()}.md`),
         filters: [{ name: 'Markdown', extensions: ['md'] }]
       });
 

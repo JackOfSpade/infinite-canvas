@@ -215,11 +215,56 @@ export function useCanvasNavigation({
     );
   }, []);
 
+  /**
+   * Detach a node from the current sub-canvas and move it to the parent canvas.
+   */
+  const extractToParent = useCallback((nodeId) => {
+    if (stackRef.current.length === 0) return;
+    
+    const nodeToExtract = nodesRef.current.find(n => n.id === nodeId);
+    if (!nodeToExtract) return;
+
+    // Remove from current canvas
+    setNodes(nds => nds.filter(n => n.id !== nodeId));
+    setEdges(eds => eds.filter(e => e.source !== nodeId && e.target !== nodeId));
+
+    // Inject into parent's saved state
+    setStack(s => {
+      const newStack = [...s];
+      const parent = newStack[newStack.length - 1];
+      
+      // Place near the parent group container, offset by previous extractions to avoid stacking
+      const parentContainer = parent.nodes.find(n => n.id === parent.nodeId);
+      const extractedCount = parent.nodes.length; // offset by total count to guarantee uniqueness
+      const posX = (parentContainer?.position.x || 0) + (extractedCount % 5) * 40;
+      // offset slightly upward
+      const posY = (parentContainer?.position.y || 100) - 150;
+
+      const newParentNodes = [
+        ...parent.nodes, 
+        { ...nodeToExtract, position: { x: posX, y: posY } }
+      ];
+      
+      newStack[newStack.length - 1] = { ...parent, nodes: newParentNodes };
+      return newStack;
+    });
+  }, [setNodes, setEdges]);
+
+  /**
+   * Reset the navigation stack entirely (e.g. when loading a new workspace).
+   * This ensures we return to root level and discard all stale parent state.
+   */
+  const resetStack = useCallback(() => {
+    setStack([]);
+  }, []);
+
   return {
     diveIn,
     diveOut,
     jumpTo,
     flushStack,
+    extractToParent,
+    resetStack,
     breadcrumbs,
     depth,
     isAnimating,

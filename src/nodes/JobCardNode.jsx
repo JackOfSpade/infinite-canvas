@@ -30,7 +30,7 @@ const STATUS_OPTIONS = ['New', 'Applied', 'Interview', 'Offer', 'Rejected'];
 export function JobCardNode({ id, data }) {
   const [expanded, setExpanded] = useState(false);
   const [generatingCL, setGeneratingCL] = useState(false);
-  const { updateNodeData, setNodes } = useReactFlow();
+  const { updateNodeData, deleteElements } = useReactFlow();
   const { addToast } = useToast();
 
   const score = data.matchScore || 0;
@@ -91,7 +91,7 @@ export function JobCardNode({ id, data }) {
           {data.salary && <div className="text-emerald-400/80 text-xs mt-0.5">{data.salary}</div>}
           
           <button 
-            onClick={() => setNodes(nds => nds.filter(n => n.id !== id))}
+            onClick={() => deleteElements({ nodes: [{ id }] })}
             className="absolute top-0 -right-2 text-white/30 hover:text-red-400 hover:bg-white/10 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all"
             title="Dismiss Job"
           >

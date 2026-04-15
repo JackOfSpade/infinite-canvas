@@ -46,7 +46,11 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
           (item.type === 'document' && item.data?.filename?.toLowerCase().includes(q)) ||
           (item.type === 'group' && item.data?.title?.toLowerCase().includes(q)) ||
           (item.type === 'text' && item.data?.text?.toLowerCase().includes(q)) ||
-          (item.type === 'link' && (item.data?.label?.toLowerCase().includes(q) || item.data?.url?.toLowerCase().includes(q)))
+          (item.type === 'link' && (item.data?.label?.toLowerCase().includes(q) || item.data?.url?.toLowerCase().includes(q))) ||
+          (item.type === 'jobcard' && (item.data?.title?.toLowerCase().includes(q) || item.data?.company?.toLowerCase().includes(q))) ||
+          (item.type === 'listing' && (item.data?.product?.generated_title?.toLowerCase().includes(q) || item.data?.product?.brand?.toLowerCase().includes(q))) ||
+          (item.type === 'jobhub' && item.data?.resumeSummary?.toLowerCase().includes(q)) ||
+          (item.type === 'sellhub' && item.data?.product?.generated_title?.toLowerCase().includes(q))
         ) return true;
         // Recurse into nested canvases
         const nested = item.data?.canvasData?.nodes;
@@ -61,7 +65,10 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
         (n.type === 'text' && n.data.text?.toLowerCase().includes(q)) ||
         (n.type === 'group' && n.data.title?.toLowerCase().includes(q)) ||
         (n.type === 'link' && (n.data.label?.toLowerCase().includes(q) || n.data.url?.toLowerCase().includes(q))) ||
-        (n.type === 'listing' && n.data.label?.toLowerCase().includes(q))
+        (n.type === 'listing' && (n.data.product?.generated_title?.toLowerCase().includes(q) || n.data.product?.brand?.toLowerCase().includes(q) || n.data.product?.model?.toLowerCase().includes(q))) ||
+        (n.type === 'jobcard' && (n.data.title?.toLowerCase().includes(q) || n.data.company?.toLowerCase().includes(q))) ||
+        (n.type === 'jobhub' && n.data.resumeSummary?.toLowerCase().includes(q)) ||
+        (n.type === 'sellhub' && n.data.product?.generated_title?.toLowerCase().includes(q))
       ) return true;
       // Search inside nested canvases
       const nestedNodes = n.data.canvasData?.nodes;
@@ -103,8 +110,7 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
 
   useEffect(() => {
     if (searchQuery.trim() === '') {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setMatchCount(0);
+      setTimeout(() => setMatchCount(0), 0);
       return;
     }
     const timer = setTimeout(() => {

@@ -45,9 +45,12 @@ export function useDrawingMode({
           x: mousePos.x - radius, y: mousePos.y - radius, width: radius * 2, height: radius * 2
         });
         if (nodesHit && nodesHit.length > 0) {
-          const hitIds = new Set(nodesHit.map(n => n.id));
-          setNodes(nds => nds.filter(n => !hitIds.has(n.id)));
-          if (setEdges) setEdges(eds => eds.filter(e => !hitIds.has(e.source) && !hitIds.has(e.target)));
+          // Skip locked nodes — they must be unlocked before erasure
+          const hitIds = new Set(nodesHit.filter(n => !n.data?.locked).map(n => n.id));
+          if (hitIds.size > 0) {
+            setNodes(nds => nds.filter(n => !hitIds.has(n.id)));
+            if (setEdges) setEdges(eds => eds.filter(e => !hitIds.has(e.source) && !hitIds.has(e.target)));
+          }
         }
       }
       

@@ -10,10 +10,15 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
     if (!description.trim()) return;
 
     setIsSubmitting(true);
-    await onSubmit(description);
-    setIsSubmitting(false);
-    setDescription('');
-    onClose();
+    try {
+      await onSubmit(description);
+      setDescription('');
+      onClose();
+    } catch {
+      // onSubmit handles its own error toasts; just reset UI state
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   if (!isOpen) return null;

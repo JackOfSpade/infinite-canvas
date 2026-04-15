@@ -7,8 +7,9 @@ export const DrawingLayer = React.memo(function DrawingLayer({ drawings, current
     <svg className="absolute top-0 left-0 w-full h-full pointer-events-none z-50">
       <g transform={`translate(${x}, ${y}) scale(${zoom})`}>
         {drawings.map((stroke, i) => {
-          const points = Array.isArray(stroke) ? stroke : stroke.points;
-          const color = stroke.color || 'white';
+          const points = Array.isArray(stroke) ? stroke : stroke?.points;
+          if (!Array.isArray(points) || points.length < 2) return null;
+          const color = stroke?.color || 'white';
           return (
             <polyline 
               key={i} 

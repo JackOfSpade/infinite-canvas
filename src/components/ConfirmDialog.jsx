@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle } from 'lucide-react';
 
@@ -24,6 +24,15 @@ const VARIANT_STYLES = {
 
 export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', onConfirm, onCancel, variant = 'danger' }) {
   const style = VARIANT_STYLES[variant] || VARIANT_STYLES.danger;
+
+  // Close on Escape
+  useEffect(() => {
+    const handleKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [onCancel]);
 
   return createPortal(
     <div

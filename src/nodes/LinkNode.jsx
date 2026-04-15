@@ -20,8 +20,16 @@ export function LinkNode({ id, data }) {
   const { isEditing: isEditingLabel, setIsEditing: setIsEditingLabel, handleBlur } = useNodeAutoEdit(id, data.isNew, isEmptyPredicate, inputRef);
 
   const handleLabelBlur = () => {
-    const label = inputRef.current?.innerText || '';
-    handleBlur({ label });
+    const rawText = inputRef.current?.innerText || '';
+    
+    // Auto-detect if user pasted a raw URL directly into a blank link node's label field
+    const isProbablyUrl = /^(https?:\/\/|[a-z0-9-]+\.[a-z]{2,}(\/.*)?$)/i.test(rawText.trim());
+    
+    if (isProbablyUrl && !data.url) {
+      handleBlur({ url: rawText.trim(), label: '' }); // Leave label empty to trigger the auto-fetcher
+    } else {
+      handleBlur({ label: rawText });
+    }
   };
 
   // Sync label content when data changes externally (undo/redo)
@@ -73,6 +81,7 @@ export function LinkNode({ id, data }) {
   };
 
   const handleDoubleClick = (e) => {
+    if (data.locked) return; // Locked nodes are not editable
     e.stopPropagation();
     if (clickTimeoutRef.current !== null) {
       clearTimeout(clickTimeoutRef.current);
@@ -85,7 +94,8 @@ export function LinkNode({ id, data }) {
   };
 
   const applyUrl = () => {
-    updateNodeData(id, { url: urlInput });
+    const urlChanged = urlInput !== data.url;
+    updateNodeData(id, { url: urlInput, ...(urlChanged ? { label: '' } : {}) });
     setShowDialog(null);
   };
 

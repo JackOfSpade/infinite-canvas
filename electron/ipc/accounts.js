@@ -2,7 +2,7 @@
  * Accounts IPC handlers — platform login, session management.
  * Opens visible browser windows for login and checks cookie health.
  */
-/* global process */
+
 import { ipcMain } from 'electron';
 import fs from 'fs';
 import path from 'path';

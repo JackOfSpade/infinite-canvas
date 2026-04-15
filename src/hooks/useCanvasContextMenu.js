@@ -1,7 +1,9 @@
 import { useState, useCallback } from 'react';
+import { useReactFlow } from '@xyflow/react';
 import { v4 as uuidv4 } from 'uuid';
 import { EventLogger } from '../utils/EventLogger';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
+import { useToast } from '../components/ToastProvider';
 
 /** Static color choices for the node color submenu. */
 const NODE_COLORS = [
@@ -19,11 +21,15 @@ export function useCanvasContextMenu({
   placementMode,
   takeSnapshot,
   setNodes,
-  setEdges,
   screenToFlowPosition,
-  clearCanvas
+  clearCanvas,
+  extractToParent,
+  depth
 }) {
   const [menu, setMenu] = useState(null);
+  const reactFlow = useReactFlow();
+  const { deleteElements, getEdges } = reactFlow;
+  const { addToast } = useToast();
 
   const onPaneContextMenuBase = useCallback((e) => {
     if (isDrawingMode || placementMode) return;
@@ -84,6 +90,12 @@ export function useCanvasContextMenu({
     };
     // Clear isNew flag on duplicated nodes so they don't auto-enter edit mode
     if (clone.data) clone.data.isNew = false;
+    // Don't carry over lock state — the clone should be freely editable
+    if (clone.data?.locked) {
+      clone.data.locked = false;
+      delete clone.draggable;
+      delete clone.deletable;
+    }
     setNodes(nds => nds.concat(clone));
     EventLogger.log(`Duplicated node ${original.id}`);
     setMenu(null);
@@ -91,16 +103,12 @@ export function useCanvasContextMenu({
 
   const deleteSelectedNode = useCallback(() => {
     if (!menu?.node) return;
-    if (menu.node.data?.locked) {
-      alert("Cannot delete a locked node. Unlock it first.");
-      return;
-    }
+    if (menu.node.data?.locked) return; // Button is disabled, but guard defensively
     takeSnapshot();
-    setNodes(nds => nds.filter(n => n.id !== menu.node.id));
-    setEdges(eds => eds.filter(e => e.source !== menu.node.id && e.target !== menu.node.id));
+    deleteElements({ nodes: [{ id: menu.node.id }] });
     EventLogger.log(`Deleted node ${menu.node.id}`);
     setMenu(null);
-  }, [menu, setNodes, setEdges, takeSnapshot]);
+  }, [menu, deleteElements, takeSnapshot]);
 
   const toggleLockNode = useCallback(() => {
     if (!menu?.node) return;
@@ -111,6 +119,7 @@ export function useCanvasContextMenu({
         return { 
           ...n, 
           draggable: !isLocked,
+          deletable: !isLocked,
           data: { ...n.data, locked: isLocked } 
         };
       }
@@ -131,7 +140,12 @@ export function useCanvasContextMenu({
   const tidyNodes = useCallback((onlySelected) => {
     takeSnapshot();
     setNodes(nds => {
-      const targets = onlySelected ? nds.filter(n => n.selected) : nds;
+      // Filter out locked nodes from being tidied
+      const targets = nds.filter(n => {
+        if (n.data?.locked) return false;
+        return onlySelected ? n.selected : true;
+      });
+      
       if (targets.length === 0) return nds;
 
       // Sort by approx Y, then X
@@ -146,7 +160,7 @@ export function useCanvasContextMenu({
 
       return nds.map(n => {
         const idx = sorted.findIndex(s => s.id === n.id);
-        if (idx === -1) return n;
+        if (idx === -1) return n; // Keep unchanged (including locked nodes)
         const col = idx % cols;
         const row = Math.floor(idx / cols);
         return {
@@ -176,7 +190,7 @@ export function useCanvasContextMenu({
         setNodes(nds => nds.map(n => n.id === menu.node.id ? { ...n, data: { ...n.data, text: res.text } } : n));
         EventLogger.log(`AI polished text for node ${menu.node.id}`);
       } else {
-        alert("AI Polish failed: " + res.error);
+        addToast({ title: 'AI Polish Failed', description: res.error, type: 'error' });
         EventLogger.log("AI Polish failed: " + res.error);
       }
     } catch (err) {
@@ -184,12 +198,22 @@ export function useCanvasContextMenu({
       EventLogger.log("AI Polish crashed: " + err.message);
     }
     setMenu(null);
-  }, [menu, setNodes, takeSnapshot]);
+  }, [menu, setNodes, takeSnapshot, addToast]);
 
   const toggleStickyNote = useCallback(() => {
     if (!menu?.node) return;
     takeSnapshot();
     const isCurrentlySticky = menu.node.data?.isSticky;
+    
+    // If it's becoming sticky, we must sever any incoming edges to honor the "no edges TO sticky notes" rule
+    if (!isCurrentlySticky) {
+      const allEdges = getEdges();
+      const incomingEdges = allEdges.filter(e => e.target === menu.node.id);
+      if (incomingEdges.length > 0) {
+        deleteElements({ edges: incomingEdges.map(e => ({ id: e.id })) });
+      }
+    }
+
     setNodes(nds => nds.map(n => {
       if (n.id === menu.node.id) {
         return { ...n, data: { ...n.data, isSticky: !isCurrentlySticky } };
@@ -198,7 +222,7 @@ export function useCanvasContextMenu({
     }));
     EventLogger.log(`Toggled Sticky Note ${!isCurrentlySticky ? 'ON' : 'OFF'} for node ${menu.node.id}`);
     setMenu(null);
-  }, [menu, setNodes, takeSnapshot]);
+  }, [menu, setNodes, takeSnapshot, deleteElements, getEdges]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
@@ -229,6 +253,19 @@ export function useCanvasContextMenu({
 
       items.push({ divider: true });
       items.push({ label: 'Duplicate', onClick: duplicateNode });
+      
+      if (depth > 0) {
+        items.push({ 
+          label: 'Move to Parent Canvas', 
+          disabled: isLocked,
+          onClick: () => {
+            takeSnapshot();
+            extractToParent(menu.node.id);
+            setMenu(null);
+          } 
+        });
+      }
+      
       items.push({ label: 'Bring to Front', onClick: bringToFront });
       items.push({ label: 'Send to Back', onClick: sendToBack });
 
@@ -282,7 +319,7 @@ export function useCanvasContextMenu({
       return items;
     }
     return [];
-  }, [menu, spawnNode, duplicateNode, bringToFront, sendToBack, deleteSelectedNode, toggleLockNode, setNodeColor, clearCanvas, tidyNodes, aiPolishText, toggleStickyNote, closeMenu]);
+  }, [menu, spawnNode, duplicateNode, bringToFront, sendToBack, deleteSelectedNode, toggleLockNode, setNodeColor, clearCanvas, tidyNodes, aiPolishText, toggleStickyNote, closeMenu, depth, extractToParent]);
 
   return {
     menu,

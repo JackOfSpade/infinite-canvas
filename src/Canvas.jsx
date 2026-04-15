@@ -96,6 +96,7 @@ export function Canvas() {
   } = useCanvasPersistence({
     nodes, edges, drawings, setNodes, setEdges, setDrawings, customFitView, addToast,
     flushStack: navigation.flushStack,
+    resetStack: navigation.resetStack,
   });
 
   useCanvasInitialization({
@@ -111,7 +112,7 @@ export function Canvas() {
   const requestClearConfirm = useCallback((onConfirm) => {
     setConfirmDialogData({
       title: "Clear Canvas",
-      message: "This will remove all nodes, edges, and drawings. This action can be undone with Ctrl+Z.",
+      message: `This will remove all nodes, edges, and drawings. This action can be undone with ${navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl+'}Z.`,
       confirmLabel: "Clear Everything",
       cancelLabel: "Keep Canvas",
       variant: "danger",
@@ -149,6 +150,9 @@ export function Canvas() {
     setDrawings([]);
   }, [takeSnapshot, setDrawings]);
 
+
+
+
   const onNodesDelete = useCallback((deletedNodes) => {
     const documentNodes = deletedNodes.filter(n => n.type === 'document' && n.data?.filePath);
     if (documentNodes.length > 0 && window.electronAPI) {
@@ -172,7 +176,8 @@ export function Canvas() {
   }, [requestConfirm]);
 
   const { onConnect, onDragStart, clearCanvas } = useCanvasActions({
-    setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, takeSnapshot, requestClearConfirm
+    setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, takeSnapshot, requestClearConfirm,
+    resetStack: navigation.resetStack,
   });
 
   const { handlePointerDown, handlePointerMove, handlePointerUp } = useDrawingMode({
@@ -189,9 +194,10 @@ export function Canvas() {
     placementMode,
     takeSnapshot,
     setNodes,
-    setEdges,
     screenToFlowPosition,
-    clearCanvas
+    clearCanvas,
+    extractToParent: navigation.extractToParent,
+    depth: navigation.depth
   });
 
   // ── Keyboard Shortcuts Panel ─────────────────────────────────────────────
@@ -200,7 +206,7 @@ export function Canvas() {
   // ── Issue Reporter ───────────────────────────────────────────────────────
   const handleIssueSubmit = useCallback(async (description) => {
     if (!window.electronAPI) {
-      addToast({ message: "Not running in Electron, can't save report.", type: "error" });
+      addToast({ title: 'Bug Report', description: "Not running in Electron, can't save report.", type: "error" });
       return;
     }
     try {
@@ -227,12 +233,12 @@ export function Canvas() {
       };
       const res = await window.electronAPI.exportBugReport(payload);
       if (res.success) {
-        addToast({ message: "Bug report saved successfully!", type: "success" });
+        addToast({ title: 'Bug Report Saved', description: 'Your report has been exported successfully.', type: "success" });
       } else if (!res.canceled) {
-        addToast({ message: "Failed to save bug report: " + res.error, type: "error" });
+        addToast({ title: 'Bug Report Failed', description: res.error || 'Could not save the report.', type: "error" });
       }
     } catch (e) {
-      addToast({ message: "Failed: " + e.message, type: "error" });
+      addToast({ title: 'Bug Report Error', description: e.message || 'An unexpected error occurred.', type: "error" });
     }
   }, [nodes, edges, drawings, activeTool, placementMode, eraserType, settings, currentFile, hasUnsavedChanges, navigation.depth, snapToGrid, bgVariant, showMiniMap, addToast]);
 

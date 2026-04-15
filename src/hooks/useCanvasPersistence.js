@@ -25,6 +25,23 @@ function migrateGroupNodes(nodes) {
         },
       };
     }
+    // Ensure locked nodes have deletable: false (added retroactively)
+    if (node.data?.locked && node.deletable !== false) {
+      node = { ...node, deletable: false };
+    }
+    // Recurse into existing canvasData for new-format group nodes
+    if (node.type === 'group' && node.data?.canvasData?.nodes?.length > 0) {
+      const migratedInner = migrateGroupNodes(node.data.canvasData.nodes);
+      if (migratedInner !== node.data.canvasData.nodes) {
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            canvasData: { ...node.data.canvasData, nodes: migratedInner },
+          },
+        };
+      }
+    }
     return node;
   });
 }
@@ -47,6 +64,7 @@ function migrateGroupNodes(nodes) {
 export function useCanvasPersistence({
   nodes, edges, drawings, setNodes, setEdges, setDrawings, customFitView, addToast,
   flushStack,
+  resetStack,
 }) {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [currentFile, setCurrentFile] = useState(null);
@@ -81,13 +99,17 @@ export function useCanvasPersistence({
     try {
       const res = await window.electronAPI.loadWorkspace();
       if (res?.success && res.data) {
+        // Reset navigation stack to root — prevents stale breadcrumbs/stack corruption
+        resetStack?.();
         // Migrate old group nodes on load
         const migratedNodes = migrateGroupNodes(res.data.nodes || []);
         setNodes(migratedNodes);
         setEdges(res.data.edges || []);
         setDrawings(res.data.drawings || []);
         setCurrentFile(res.filePath);
-        setHasUnsavedChanges(false);
+        // Defer: the useCanvasInitialization effect will fire setHasUnsavedChanges(true)
+        // on the next render — we need our false to run *after* that effect.
+        setTimeout(() => setHasUnsavedChanges(false), 0);
         setTimeout(() => customFitView(), 50);
         addToast({ title: 'Workspace Loaded', description: 'Your canvas has been loaded successfully.', type: 'success'});
       } else if (!res?.canceled) {

@@ -36,9 +36,11 @@ export function useCanvasInitialization({
     const timer = setTimeout(() => {
       const data = flushRef.current ? flushRef.current() : stateRef.current;
       window.electronAPI.saveWorkspace({ data, filePath: currentFile }).then(res => {
-        if (res?.success && res.filePath) setCurrentFile(res.filePath);
+        if (res?.success && res.filePath) {
+          setCurrentFile(res.filePath);
+          setHasUnsavedChanges(false);
+        }
       });
-      setHasUnsavedChanges(false);
     }, 2000);
     return () => clearTimeout(timer);
   }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges]);
