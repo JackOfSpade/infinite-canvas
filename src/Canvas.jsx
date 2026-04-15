@@ -49,7 +49,7 @@ export function Canvas() {
   const { addToast } = useToast();
 
   // ── Settings ────────────────────────────────────────────────────────────
-  const { settings, updateSetting, getAnimationDuration } = useSettings();
+  const { settings, updateSetting, updateShortcut, resetShortcuts, getAnimationDuration } = useSettings();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isIssueReporterOpen, setIsIssueReporterOpen] = useState(false);
 
@@ -77,6 +77,7 @@ export function Canvas() {
 
   const { undo, redo, takeSnapshot, clearHistory, canUndo, canRedo } = useUndoRedo({
     nodes, edges, drawings, setNodes, setEdges, setDrawings,
+    shortcuts: settings.shortcuts,
   });
   useEffect(() => { takeSnapshotRef.current = takeSnapshot; }, [takeSnapshot]);
 
@@ -128,8 +129,11 @@ export function Canvas() {
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [placementMode, setPlacementMode] = useState(null);
   const [snapToGrid, setSnapToGrid] = useState(false);
-  const [bgVariant, setBgVariant] = useState('dots');
-  const [showMiniMap, setShowMiniMap] = useState(true);
+  // bgVariant and showMiniMap are persisted in settings
+  const bgVariant    = settings.bgVariant   ?? 'dots';
+  const showMiniMap  = settings.showMiniMap ?? true;
+  const setBgVariant   = (v) => updateSetting('bgVariant', v);
+  const setShowMiniMap = (v) => updateSetting('showMiniMap', v);
   const [activeColor, setActiveColor] = useState('white');
   const { screenToFlowPosition, getIntersectingNodes, getNode } = useReactFlow();
 
@@ -209,7 +213,26 @@ export function Canvas() {
   });
 
   // ── Keyboard Shortcuts Panel ─────────────────────────────────────────────
-  const { isOpen: isShortcutsOpen, toggle: toggleShortcuts, close: closeShortcuts } = useKeyboardShortcuts();
+  // Pressing '?' now opens the Settings panel (shortcuts live there)
+  useEffect(() => {
+    const handleKey = (e) => {
+      const tag = e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+      if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
+        e.preventDefault();
+        setIsSettingsOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, []);
+
+  // ── Export PNG via File menu (⌘⇧E) ───────────────────────────────────────
+  useEffect(() => {
+    if (!window.electronAPI?.onMenuExportPng) return;
+    const remove = window.electronAPI.onMenuExportPng(() => exportCanvasToPNG());
+    return remove;
+  }, [exportCanvasToPNG]);
 
   // ── Issue Reporter ───────────────────────────────────────────────────────
   const handleIssueSubmit = useCallback(async (description) => {
@@ -232,8 +255,8 @@ export function Canvas() {
           hasUnsavedChanges,
           navigationDepth: navigation.depth,
           snapToGrid,
-          bgVariant,
-          showMiniMap,
+          bgVariant: settings.bgVariant,
+          showMiniMap: settings.showMiniMap,
           windowInnerWidth: window.innerWidth,
           windowInnerHeight: window.innerHeight,
         },
@@ -377,30 +400,20 @@ export function Canvas() {
               setActiveColor={setActiveColor}
               snapToGrid={snapToGrid}
               setSnapToGrid={setSnapToGrid}
-              bgVariant={bgVariant}
-              setBgVariant={setBgVariant}
-              showMiniMap={showMiniMap}
-              setShowMiniMap={setShowMiniMap}
               onDragStart={onDragStart}
-              saveCanvas={saveCanvas}
-              saveState={saveState}
-              hasUnsavedChanges={hasUnsavedChanges}
               undo={undo}
               redo={redo}
               canUndo={canUndo}
               canRedo={canRedo}
               clearCanvas={clearCanvas}
               clearDrawings={clearDrawings}
-              exportCanvasToPNG={exportCanvasToPNG}
-              loadCanvas={loadCanvas}
-              onHelpClick={toggleShortcuts}
               onSettingsClick={() => setIsSettingsOpen(true)}
             />
 
             <StatusBar
               nodeCount={nodes.length}
               edgeCount={edges.length}
-              onHelpClick={toggleShortcuts}
+              onHelpClick={() => setIsSettingsOpen(true)}
               onReportBugClick={() => setIsIssueReporterOpen(true)}
             />
           </ReactFlow>
@@ -417,13 +430,13 @@ export function Canvas() {
 
         <OnboardingOverlay />
 
-        <KeyboardShortcutsPanel isOpen={isShortcutsOpen} onClose={closeShortcuts} />
-
         <SettingsPanel
           isOpen={isSettingsOpen}
           onClose={() => setIsSettingsOpen(false)}
           settings={settings}
           updateSetting={updateSetting}
+          updateShortcut={updateShortcut}
+          resetShortcuts={resetShortcuts}
         />
 
         <IssueReporterDialog

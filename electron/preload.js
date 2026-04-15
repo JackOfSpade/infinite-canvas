@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onFileChanged: createListener('file-changed'),
   onMenuOpen: createListener('menu-open'),
   onMenuSave: createListener('menu-save'),
+  onMenuExportPng: createListener('menu-export-png'),
 
   // ── Jobs Module ─────────────────────────────────────────────────────────
   parseResume: (args) => ipcRenderer.invoke('parse-resume', args),
