@@ -5,14 +5,14 @@ import {
   useEdgesState,
   Controls,
   ControlButton,
-  MiniMap,
   useReactFlow
 } from '@xyflow/react';
 
 import { createTextNode } from './utils/nodeFactory';
 import { Sidebar } from './components/Sidebar';
 import { ContextMenu } from './components/ContextMenu';
-import { CanvasToolbar } from './components/CanvasToolbar';
+import { CanvasToolbar, NestedCanvasIcon } from './components/CanvasToolbar';
+import { CustomMiniMap } from './components/CustomMiniMap';
 import { SearchBar } from './components/SearchBar';
 import { OnboardingOverlay } from './components/OnboardingOverlay';
 import { DrawingLayer } from './components/DrawingLayer';
@@ -26,7 +26,7 @@ import { IssueReporterDialog } from './components/IssueReporterDialog';
 import { KeyboardShortcutsPanel, useKeyboardShortcuts } from './components/KeyboardShortcutsPanel';
 import { EventLogger } from './utils/EventLogger';
 import { CanvasNavigationContext } from './contexts/CanvasNavigationContext';
-import { nodeTypes, DEFAULT_EDGE_OPTIONS, MINIMAP_NODE_COLORS } from './utils/constants';
+import { nodeTypes, DEFAULT_EDGE_OPTIONS } from './utils/constants';
 import { useUndoRedo } from './hooks/useUndoRedo';
 import { useCustomFitView } from './hooks/useCustomFitView';
 import { useCanvasPersistence } from './hooks/useCanvasPersistence';
@@ -140,7 +140,8 @@ export function Canvas() {
   const setEraserSize = useCallback((v) => updateSetting('eraserSize', v), [updateSetting]);
   const handleSettingsClick = useCallback(() => setIsSettingsOpen(true), []);
   const [activeColor, setActiveColor] = useState('white');
-  const { screenToFlowPosition, getIntersectingNodes, getNode } = useReactFlow();
+  const [toolMenuOpen, setToolMenuOpen] = useState(false);
+  const { screenToFlowPosition, getIntersectingNodes, getNode, setViewport, getViewport } = useReactFlow();
 
   const handlePaneDoubleClick = useCallback((e) => {
     if (activeTool || placementMode) return;
@@ -229,6 +230,46 @@ export function Canvas() {
     return () => window.removeEventListener('keydown', handleKey);
   }, []);
 
+  // ── WASD canvas navigation ───────────────────────────────────────────────
+  useEffect(() => {
+    const keys = { w: false, a: false, s: false, d: false };
+    let rafId = null;
+    const SPEED = 6; // pixels per frame at zoom=1
+
+    const step = () => {
+      const { w, a, s, d } = keys;
+      if (!w && !a && !s && !d) { rafId = null; return; }
+      const vp = getViewport();
+      setViewport({
+        x: vp.x + (a ? SPEED : d ? -SPEED : 0),
+        y: vp.y + (w ? SPEED : s ? -SPEED : 0),
+        zoom: vp.zoom,
+      });
+      rafId = requestAnimationFrame(step);
+    };
+
+    const onKeyDown = (e) => {
+      const tag = e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+      const k = e.key.toLowerCase();
+      if (k === 'w' || k === 'a' || k === 's' || k === 'd') {
+        keys[k] = true;
+        if (!rafId) rafId = requestAnimationFrame(step);
+      }
+    };
+    const onKeyUp = (e) => {
+      const k = e.key.toLowerCase();
+      if (k in keys) keys[k] = false;
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup',   onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup',   onKeyUp);
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [getViewport, setViewport]);
+
   // ── Export PNG via File menu (⌘⇧E) ───────────────────────────────────────
   useEffect(() => {
     if (!window.electronAPI?.onMenuExportPng) return;
@@ -286,7 +327,18 @@ export function Canvas() {
       <div
         className="flex-1 h-full relative"
         data-drawing-mode={activeTool || undefined}
-        onPointerDown={handlePointerDown}
+        onPointerDown={(e) => {
+          // Never draw through any UI surface — only start drawing on the raw canvas.
+          // 1. Block if a toolbar popup (pen colour/eraser menu) is open.
+          if (toolMenuOpen) return;
+          // 2. Block if the pointer landed on any ReactFlow Panel overlay
+          //    (toolbar dock, minimap, breadcrumb bar, zoom controls, etc.).
+          //    All Panel wrappers carry the "react-flow__panel" class.
+          if (e.target.closest('.react-flow__panel')) return;
+          // 3. Block on the SearchBar (absolutely positioned inside this div, not a portal).
+          if (e.target.closest('[data-search-bar]')) return;
+          handlePointerDown(e);
+        }}
         onPointerMove={(e) => {
           handlePointerMove(e);
           if (activeTool === 'eraser') {
@@ -368,11 +420,9 @@ export function Canvas() {
                 {placementMode === 'text' && <span className="text-sm font-medium text-white/90">text</span>}
                 {placementMode === 'link' && <span className="text-sm font-medium text-blue-400">link</span>}
                 {placementMode === 'group' && (
-                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgb(96,165,250)" strokeLinecap="round" strokeLinejoin="round" className="opacity-90 drop-shadow-lg">
-                    <circle cx="12" cy="12" r="10" strokeWidth="1.5" />
-                    <circle cx="12" cy="12" r="5.5" strokeWidth="1.5" />
-                    <circle cx="12" cy="12" r="1.5" fill="rgb(96,165,250)" stroke="none" />
-                  </svg>
+                  <span className="text-blue-400 opacity-90 drop-shadow-lg">
+                    <NestedCanvasIcon size={28} />
+                  </span>
                 )}
               </div>
             )}
@@ -384,7 +434,7 @@ export function Canvas() {
             <Controls
               className="border border-white/10 shadow-lg overflow-hidden flex flex-col"
               buttonClassName="!bg-[#1a1a1a] !border-b-white/10 hover:!bg-[#333] transition-colors"
-              style={{ display: 'flex', flexDirection: 'column' }}
+              style={{ display: 'flex', flexDirection: 'column', zIndex: 200 }}
               showInteractive={false}
               showFitView={false}
             >
@@ -405,14 +455,7 @@ export function Canvas() {
             </Controls>
 
             {showMiniMap && (
-              <MiniMap
-                style={{ backgroundColor: '#1a1a1a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px' }}
-                nodeColor={(n) => MINIMAP_NODE_COLORS[n.type] || '#555'}
-                maskColor="rgba(0, 0, 0, 0.6)"
-                position="bottom-right"
-                zoomable
-                pannable
-              />
+              <CustomMiniMap nodes={nodes} edges={edges} drawings={drawings} />
             )}
 
             {/* Breadcrumb bar — shown when inside nested canvas */}
@@ -441,6 +484,7 @@ export function Canvas() {
               clearCanvas={clearCanvas}
               clearDrawings={clearDrawings}
               onSettingsClick={handleSettingsClick}
+              onToolMenuChange={setToolMenuOpen}
             />
 
             <StatusBar />

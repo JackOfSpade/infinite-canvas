@@ -3,7 +3,7 @@ import { Panel } from '@xyflow/react';
 import { Type, Trash2, Link2, PenTool, Eraser, Undo2, Redo2, Magnet, Settings } from 'lucide-react';
 
 /** Nested canvas icon — plain circle with inner glow along the inside edge */
-function NestedCanvasIcon({ size = 18 }) {
+export function NestedCanvasIcon({ size = 18 }) {
   return (
     <svg
       width={size}
@@ -96,6 +96,8 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
   clearCanvas,
   clearDrawings,
   onSettingsClick,
+  /** Called with true/false whenever a tool popup (color/eraser menu) opens or closes */
+  onToolMenuChange,
 }) {
   const [showColorMenu,  setShowColorMenu]  = useState(false);
   const [showEraserMenu, setShowEraserMenu] = useState(false);
@@ -103,6 +105,11 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
   // Refs used to suppress tooltips while context menus are open (no re-render needed)
   const penSuppressRef    = useRef(false);
   const eraserSuppressRef = useRef(false);
+
+  // Notify parent whenever a tool popup opens/closes so Canvas can block drawing through it
+  useEffect(() => {
+    onToolMenuChange?.(showColorMenu || showEraserMenu);
+  }, [showColorMenu, showEraserMenu, onToolMenuChange]);
 
   // Close popovers if clicking outside
   useEffect(() => {
@@ -153,8 +160,12 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
   };
 
   return (
-    <Panel position="bottom-center" className="mb-4 flex flex-col items-center gap-2">
-      <div className="glass-card rounded-full p-2 flex gap-1 bg-black/60 border border-white/10 items-center">
+    <Panel position="bottom-center" className="mb-4 flex flex-col items-center gap-2" style={{ zIndex: 200 }}>
+      {/* onPointerDown stop-propagation prevents toolbar clicks from bleeding through to the canvas drawing layer */}
+      <div
+        className="glass-card rounded-full p-2 flex gap-1 bg-black/60 border border-white/10 items-center"
+        onPointerDown={e => e.stopPropagation()}
+      >
 
         {/* ── Creation Tools ───────────────────────────────────────── */}
         <ToolbarTooltip label="Add Text" shortcut="drag or T">

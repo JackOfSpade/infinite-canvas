@@ -29,7 +29,7 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
   const [matchIndex, setMatchIndex] = useState(0);
   const [matchCount, setMatchCount] = useState(0);
   const [isExpanded, setIsExpanded] = useState(false);
-  const { setCenter } = useReactFlow();
+  const { setCenter, getViewport } = useReactFlow();
   const inputRef = useRef(null);
 
   // Cmd+F / Ctrl+F to focus search
@@ -79,7 +79,9 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
     if (matches.length === 0) return;
     const nextIdx = ((matchIndex - 1 + offset) % matches.length + matches.length) % matches.length;
     const target = matches[nextIdx];
-    setCenter(target.position.x + 100, target.position.y + 50, { zoom: 1.5, duration: 600 });
+    // Preserve the user's current zoom level; only pan to the match
+    const { zoom: currentZoom } = getViewport();
+    setCenter(target.position.x + 100, target.position.y + 50, { zoom: currentZoom, duration: 600 });
     setMatchIndex(nextIdx + 1);
   }, [getMatches, matchIndex, setCenter]);
 
@@ -111,7 +113,11 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
   }, [searchQuery, getMatches]);
 
   return (
-    <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
+    <div
+      className="absolute top-4 left-1/2 -translate-x-1/2 z-10"
+      data-search-bar
+      onPointerDown={e => e.stopPropagation()}
+    >
       <div className={`flex items-center gap-0 glass-card bg-black/40 rounded-full border border-white/10 shadow-xl transition-all duration-300 ${isExpanded ? 'w-[420px]' : 'w-80'}`}>
         <Search
           size={16}

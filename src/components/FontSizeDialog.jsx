@@ -12,29 +12,50 @@ const FONT_OPTIONS = [
   { value: 'system-ui', label: 'System UI' },
 ];
 
+/** Quick-pick text colour swatches */
+const TEXT_COLORS = [
+  '#ffffff', '#e5e7eb', '#fbbf24', '#fb923c',
+  '#f87171', '#f472b6', '#c084fc', '#60a5fa',
+  '#22d3ee', '#4ade80', '#1f2937',
+];
+
 /**
  * Reusable Font & Size dialog.
- * Used by TextNode, LinkNode, and ListingNode to avoid duplicating the same UI.
+ * Used by TextNode, LinkNode, and CanvasNode.
  *
  * Props:
- *   fontSize     — current font size (number)
- *   fontFamily   — current font family (string)
- *   onApply({ fontSize, fontFamily }) — called when user clicks Done
- *   onClose      — called to dismiss the dialog
+ *   fontSize      — current font size (number)
+ *   fontFamily    — current font family (string)
+ *   textColor     — current text colour (string, optional)
+ *   titleSpacing  — vertical gap between title and arc (number, optional; only shown when provided)
+ *   onApply({ fontSize, fontFamily, textColor, titleSpacing }) — called when user clicks Done
+ *   onClose       — called to dismiss the dialog
  */
-export function FontSizeDialog({ fontSize: initialSize, fontFamily: initialFamily, onApply, onClose }) {
-  const [fontSize, setFontSize] = useState(initialSize);
-  const [fontFamily, setFontFamily] = useState(initialFamily);
+export function FontSizeDialog({
+  fontSize: initialSize,
+  fontFamily: initialFamily,
+  textColor: initialColor = '#ffffff',
+  titleSpacing: initialSpacing,
+  onApply,
+  onClose,
+}) {
+  const [fontSize,     setFontSize]     = useState(initialSize);
+  const [fontFamily,   setFontFamily]   = useState(initialFamily);
+  const [textColor,    setTextColor]    = useState(initialColor);
+  const [titleSpacing, setTitleSpacing] = useState(initialSpacing ?? 0);
+
+  const showSpacing = initialSpacing !== undefined;
 
   const handleApply = () => {
-    onApply({ fontSize, fontFamily });
+    onApply({ fontSize, fontFamily, textColor, titleSpacing });
     onClose();
   };
 
   return (
     <Dialog title="Font & Size" onClose={onClose} width="w-64">
+      {/* Font family */}
       <div className="flex justify-between items-center gap-2">
-        <label className="text-white/70 text-sm w-12">Font</label>
+        <label className="text-white/70 text-sm w-16 shrink-0">Font</label>
         <select
           className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
           value={fontFamily}
@@ -45,8 +66,10 @@ export function FontSizeDialog({ fontSize: initialSize, fontFamily: initialFamil
           ))}
         </select>
       </div>
+
+      {/* Font size */}
       <div className="flex justify-between items-center gap-2">
-        <label className="text-white/70 text-sm w-12">Size</label>
+        <label className="text-white/70 text-sm w-16 shrink-0">Size</label>
         <input
           type="number"
           className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
@@ -56,6 +79,48 @@ export function FontSizeDialog({ fontSize: initialSize, fontFamily: initialFamil
           max={500}
         />
       </div>
+
+      {/* Title spacing (only for canvas nodes) */}
+      {showSpacing && (
+        <div className="flex justify-between items-center gap-2">
+          <label className="text-white/70 text-sm w-16 shrink-0">Gap</label>
+          <input
+            type="number"
+            className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
+            value={titleSpacing}
+            onChange={(e) => setTitleSpacing(Math.max(-20, Math.min(40, Number(e.target.value) || 0)))}
+            min={-20}
+            max={40}
+            title="Gap between title and circle edge (px)"
+          />
+        </div>
+      )}
+
+      {/* Text colour */}
+      <div>
+        <label className="text-white/70 text-xs mb-1.5 block">Text Color</label>
+        {/* Quick swatches */}
+        <div className="flex flex-wrap gap-1.5 mb-1.5">
+          {TEXT_COLORS.map(c => (
+            <button
+              key={c}
+              onClick={() => setTextColor(c)}
+              className={`w-5 h-5 rounded-full transition-transform hover:scale-110 ${textColor === c ? 'ring-2 ring-white scale-110' : 'opacity-75'}`}
+              style={{ backgroundColor: c, border: c === '#ffffff' ? '1px solid rgba(255,255,255,0.3)' : 'none' }}
+              title={c}
+            />
+          ))}
+        </div>
+        {/* Custom hex input */}
+        <input
+          type="text"
+          placeholder="#HEX or rgba(…)"
+          value={textColor}
+          onChange={(e) => setTextColor(e.target.value)}
+          className="w-full text-xs p-1.5 bg-black/50 text-white rounded outline-none border border-white/20 focus:border-blue-400"
+        />
+      </div>
+
       <button
         className="bg-blue-500 hover:bg-blue-600 text-white rounded px-4 py-2 mt-2 font-medium transition-colors"
         onClick={handleApply}

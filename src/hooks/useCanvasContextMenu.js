@@ -243,8 +243,10 @@ export function useCanvasContextMenu({
       ];
     }
     if (menu.type === 'node') {
-      const isText = menu.node.type === 'text';
-      const isLink = menu.node.type === 'link';
+      const isText  = menu.node.type === 'text';
+      const isLink  = menu.node.type === 'link';
+      const isGroup = menu.node.type === 'group';
+      const isSticky = isText && !!menu.node.data?.isSticky;
       const isLocked = menu.node.data?.locked;
 
       const items = [];
@@ -272,15 +274,18 @@ export function useCanvasContextMenu({
       items.push({ label: 'Bring to Front', onClick: bringToFront, disabled: isLocked });
       items.push({ label: 'Send to Back', onClick: sendToBack, disabled: isLocked });
 
-      items.push({ divider: true });
-      items.push({
-        label: 'Color',
-        disabled: isLocked,
-        submenu: isLocked ? undefined : NODE_COLORS.map(c => ({
-          label: c.label,
-          onClick: () => setNodeColor(c.value),
-        })),
-      });
+      // "Sticky Note Color" only appears when right-clicking a sticky text node
+      if (isSticky) {
+        items.push({ divider: true });
+        items.push({
+          label: 'Sticky Note Color',
+          disabled: isLocked,
+          submenu: isLocked ? undefined : NODE_COLORS.map(c => ({
+            label: c.label,
+            onClick: () => setNodeColor(c.value),
+          })),
+        });
+      }
 
       if (isLink) {
         items.push({ divider: true });
@@ -294,15 +299,15 @@ export function useCanvasContextMenu({
         });
       }
 
-      if (isText || isLink) {
-        if (!isLink) items.push({ divider: true });
-        items.push({ 
-          label: 'Font & Size', 
+      if (isText || isLink || isGroup) {
+        if (!isLink && !isSticky) items.push({ divider: true });
+        items.push({
+          label: 'Font & Size',
           disabled: isLocked,
           onClick: isLocked ? undefined : () => {
             document.dispatchEvent(new CustomEvent(`edit-node-font-${menu.node.id}`));
             closeMenu();
-          } 
+          }
         });
       }
 
@@ -325,6 +330,7 @@ export function useCanvasContextMenu({
       return items;
     }
     return [];
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [menu, spawnNode, duplicateNode, bringToFront, sendToBack, deleteSelectedNode, toggleLockNode, setNodeColor, clearCanvas, tidyNodes, aiPolishText, toggleStickyNote, closeMenu, depth, extractToParent]);
 
   return {

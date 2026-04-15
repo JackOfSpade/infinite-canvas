@@ -296,13 +296,34 @@
 | 110 | authWindows getSessionStatus | `page.cookies(...domains.map(...))` — spreads array correctly; `page.close()` in finally equivalent (inside try block before catch) | ✅ Clean |
 | 111 | marketplace extractors | All card-level parsers wrapped in individual `try/catch` — one malformed card never aborts the rest | ✅ Clean |
 | 112 | main.jsx | `StrictMode` causes effects to fire twice in dev — all effects use cleanup functions; no side-effect leaks | ✅ Clean |
+| 113 | CanvasThumbnail | Non-square viewBox clipped circular shape unevenly — fixed to square viewBox centered on content | ✅ Fixed (Session 9) |
+| 114 | useCanvasContextMenu | 'Color' showed on all text nodes — renamed to 'Sticky Note Color', only shown when `isSticky` | ✅ Fixed (Session 9) |
+| 115 | useCanvasContextMenu | 'Font & Size' option now also available for group (nested canvas) nodes | ✅ Added (Session 9) |
+| 116 | FontSizeDialog | Added `textColor` prop (11 swatches + hex input); added optional `titleSpacing` prop for canvas nodes | ✅ Added (Session 9) |
+| 117 | TextNode / LinkNode | `data.textColor` now applied via inline `color` style, overriding default Tailwind text classes | ✅ Added (Session 9) |
+| 118 | CanvasNode | Font & Size dialog wired via `edit-node-font-${id}` event; `fontSize`, `fontFamily`, `textColor`, `titleSpacing` (`dy`) applied to SVG arc text | ✅ Added (Session 9) |
+| 119 | CanvasNode | NodeResizer `lineStyle` set to transparent — circular `border` on body div serves as selection indicator | ✅ Fixed (Session 9) |
+| 120 | CanvasNode | Double-click to open canvas works regardless of whether a title has been set | ✅ Verified (Session 9) |
+| 121 | CanvasToolbar | `NestedCanvasIcon` exported so Canvas.jsx can use same icon for placement ghost (icon consistency) | ✅ Fixed (Session 9) |
+| 122 | CanvasToolbar | `onPointerDown={e => e.stopPropagation()}` on main inner div — prevents toolbar clicks from starting drawing | ✅ Fixed (Session 9) |
+| 123 | CanvasToolbar | `onToolMenuChange` prop — notifies parent when pen/eraser popup opens/closes | ✅ Added (Session 9) |
+| 124 | CanvasToolbar | Panel `style={{ zIndex: 200 }}` — toolbar always renders above high-z nodes | ✅ Fixed (Session 9) |
+| 125 | Canvas | `toolMenuOpen` state blocks `handlePointerDown` while pen/eraser popup is open | ✅ Fixed (Session 9) |
+| 126 | Canvas | WASD navigation via RAF loop + `setViewport` — skips when focus is in an input/textarea | ✅ Added (Session 9) |
+| 127 | Canvas | Controls z-index raised to 200 — zoom buttons always above nodes | ✅ Fixed (Session 9) |
+| 128 | Canvas | Built-in ReactFlow MiniMap replaced with `CustomMiniMap` — shows actual text, link labels, canvas circles, and freehand drawings | ✅ Added (Session 9) |
+| 129 | CustomMiniMap | Click-to-pan: click a position in the minimap → viewport centers on that flow coordinate | ✅ Added (Session 9) |
+| 130 | SearchBar | Navigation preserves user's current zoom level (was forced to 1.5); uses `getViewport().zoom` | ✅ Fixed (Session 9) |
+| 131 | ContextMenu | Submenu disappear bug on Panel1→canvas→Panel1→Panel2 path — fixed with 120ms `closeTimerRef` delay + `onMouseEnter={cancelClose}` on submenu div | ✅ Fixed (Session 9) |
 
 ---
 
 ## ❓ What Still Needs Checking
 
-All files in `src/` and `electron/` have now been fully audited across Sessions 1–8.
+All files in `src/` and `electron/` have been fully audited across Sessions 1–9.
 The codebase is considered comprehensively hardened.
+
+**New files added in Session 9:** `src/components/CustomMiniMap.jsx` — audit on next session if behavior changes are made.
 
 If new features are added, create entries here for the new files/interactions introduced.
 

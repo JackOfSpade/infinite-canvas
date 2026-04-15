@@ -34,6 +34,8 @@ export function TextNode({ id, data }) {
 
   const fontSize = data.fontSize || 14;
   const fontFamily = data.fontFamily || 'sans-serif';
+  // textColor overrides the default; sticky notes default to dark ink
+  const textColor = data.textColor || (data.isSticky ? '#1f2937' : null);
   const isEmpty = !data.text && !isEditing;
 
   // Sync text content when data changes externally (undo/redo)
@@ -102,7 +104,7 @@ export function TextNode({ id, data }) {
         </div>
       )}
 
-      <div 
+      <div
         ref={inputRef}
         contentEditable={isEditing}
         suppressContentEditableWarning
@@ -113,15 +115,19 @@ export function TextNode({ id, data }) {
         onContextMenu={(e) => { if (isEditing) e.stopPropagation(); }}
         className={`outline-none min-w-[20px] min-h-[1em] select-none ${
           isEditing ? 'cursor-text whitespace-nowrap' : 'cursor-default hidden'
-        } ${data.isSticky ? 'text-gray-900' : 'text-white/90'}`}
-        style={{ fontSize: `${fontSize}px`, fontFamily }}
+        }`}
+        style={{ fontSize: `${fontSize}px`, fontFamily, ...(textColor ? { color: textColor } : {}) }}
       />
 
       {!isEditing && (
         <div
           onDoubleClick={handleDoubleClick}
-          className={`outline-none min-w-[20px] min-h-[1em] select-none cursor-default prose-headings:m-0 prose-p:m-0 prose-ul:m-0 [&_a]:text-blue-500 [&_a]:underline ${data.isSticky ? 'text-gray-900 p-2 font-handwriting' : 'text-white/90'}`}
-          style={{ fontSize: `${fontSize}px`, fontFamily: data.isSticky ? "'Indie Flower', 'Comic Sans MS', cursive" : fontFamily }}
+          className={`outline-none min-w-[20px] min-h-[1em] select-none cursor-default prose-headings:m-0 prose-p:m-0 prose-ul:m-0 [&_a]:text-blue-500 [&_a]:underline ${data.isSticky ? 'p-2 font-handwriting' : ''}`}
+          style={{
+            fontSize: `${fontSize}px`,
+            fontFamily: data.isSticky ? "'Indie Flower', 'Comic Sans MS', cursive" : fontFamily,
+            ...(textColor ? { color: textColor } : {}),
+          }}
           dangerouslySetInnerHTML={{ __html: htmlContent }}
         />
       )}
@@ -132,7 +138,9 @@ export function TextNode({ id, data }) {
         <FontSizeDialog
           fontSize={fontSize}
           fontFamily={fontFamily}
-          onApply={({ fontSize: fs, fontFamily: ff }) => updateNodeData(id, { fontSize: fs, fontFamily: ff })}
+          textColor={data.textColor || (data.isSticky ? '#1f2937' : '#ffffff')}
+          onApply={({ fontSize: fs, fontFamily: ff, textColor: tc }) =>
+            updateNodeData(id, { fontSize: fs, fontFamily: ff, textColor: tc })}
           onClose={() => setShowFontDialog(false)}
         />
       )}

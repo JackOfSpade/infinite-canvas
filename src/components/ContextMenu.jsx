@@ -8,16 +8,20 @@ import { createPortal } from 'react-dom';
  *   x, y        — viewport coordinates to render at
  *   items       — array of { label, onClick?, icon?, submenu?: items[], divider?: boolean, danger?: boolean }
  *   onClose     — called when menu should close
+ *
+ * Submenu hover fix: instead of hiding the submenu the instant the mouse leaves
+ * the parent row (which it does when crossing the gap to the submenu panel),
+ * we delay the close by 120 ms and cancel it if the mouse enters the submenu.
  */
 export function ContextMenu({ x, y, items, onClose }) {
   const [activeSubmenu, setActiveSubmenu] = useState(null);
   const menuRef = useRef(null);
+  const closeTimerRef = useRef(null);
 
+  // ── Global dismissal ──────────────────────────────────────────────────────
   useEffect(() => {
     const handlePointerDown = (e) => {
-      if (menuRef.current && !menuRef.current.contains(e.target)) {
-        onClose();
-      }
+      if (menuRef.current && !menuRef.current.contains(e.target)) onClose();
     };
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') { e.preventDefault(); onClose(); }
@@ -30,21 +34,16 @@ export function ContextMenu({ x, y, items, onClose }) {
     };
   }, [onClose]);
 
-  // Clamp menu within viewport bounds; also track which side has room for submenus.
+  // ── Viewport clamping ─────────────────────────────────────────────────────
   const [adjustedPos, setAdjustedPos] = useState({ left: x, top: y });
   const [submenuDirection, setSubmenuDirection] = useState('right');
   useEffect(() => {
     if (menuRef.current) {
       const rect = menuRef.current.getBoundingClientRect();
       const newPos = { left: x, top: y };
-      if (rect.right > window.innerWidth) {
-        newPos.left = window.innerWidth - rect.width - 8;
-      }
-      if (rect.bottom > window.innerHeight) {
-        newPos.top = window.innerHeight - rect.height - 8;
-      }
-      // Open submenus to the LEFT when there isn't enough room on the right
-      // (submenu min-width is ~180px; use 192 as a safe threshold).
+      if (rect.right > window.innerWidth)  newPos.left = window.innerWidth  - rect.width  - 8;
+      if (rect.bottom > window.innerHeight) newPos.top = window.innerHeight - rect.height - 8;
+      // Open submenus to the left when not enough room on the right (submenu ~180px)
       const spaceOnRight = window.innerWidth - (newPos.left + rect.width);
       setSubmenuDirection(spaceOnRight >= 192 ? 'right' : 'left');
       // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -52,6 +51,20 @@ export function ContextMenu({ x, y, items, onClose }) {
     }
   }, [x, y]);
 
+  // ── Submenu hover helpers (with gap-crossing delay) ───────────────────────
+  const openSubmenu = (i) => {
+    clearTimeout(closeTimerRef.current);
+    setActiveSubmenu(i);
+  };
+  const scheduleClose = () => {
+    clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = setTimeout(() => setActiveSubmenu(null), 120);
+  };
+  const cancelClose = () => clearTimeout(closeTimerRef.current);
+
+  useEffect(() => () => clearTimeout(closeTimerRef.current), []);
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return createPortal(
     <div ref={menuRef} className="fixed z-[9999] context-menu-enter" style={adjustedPos}>
       <div className="bg-[#1a1a1a]/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl py-1 min-w-[180px] text-white/90 text-sm">
@@ -67,8 +80,8 @@ export function ContextMenu({ x, y, items, onClose }) {
             <div
               key={i}
               className="relative"
-              onMouseEnter={() => hasSubmenu && setActiveSubmenu(i)}
-              onMouseLeave={() => hasSubmenu && setActiveSubmenu(null)}
+              onMouseEnter={() => hasSubmenu && openSubmenu(i)}
+              onMouseLeave={() => hasSubmenu && scheduleClose()}
             >
               <button
                 className={`w-full text-left px-3 py-1.5 hover:bg-white/8 flex items-center justify-between gap-4 transition-colors ${
@@ -90,9 +103,15 @@ export function ContextMenu({ x, y, items, onClose }) {
                 {hasSubmenu && <span className="text-white/40 text-xs">▸</span>}
               </button>
 
-              {/* Sub-menu — opens right when space allows, left otherwise */}
+              {/* Sub-menu — opens right when there is room, left otherwise.
+                  onMouseEnter cancels the close timer so moving from parent row
+                  into the submenu across the small gap keeps it open. */}
               {hasSubmenu && activeSubmenu === i && (
-                <div className={`absolute top-0 ${submenuDirection === 'right' ? 'left-full ml-0.5' : 'right-full mr-0.5'} bg-[#1a1a1a]/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl py-1 min-w-[180px] text-white/90 text-sm`}>
+                <div
+                  className={`absolute top-0 ${submenuDirection === 'right' ? 'left-full ml-0.5' : 'right-full mr-0.5'} bg-[#1a1a1a]/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl py-1 min-w-[180px] text-white/90 text-sm`}
+                  onMouseEnter={cancelClose}
+                  onMouseLeave={scheduleClose}
+                >
                   {item.submenu.map((sub, j) => {
                     if (sub.divider) {
                       return <div key={j} className="border-t border-white/8 my-1" />;

@@ -148,6 +148,10 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
     const pad = 20;
     const vbW = maxX - minX + pad * 2;
     const vbH = maxY - minY + pad * 2;
+    // Square viewBox so the circular clip shows balanced content in all directions
+    const sqSize = Math.max(vbW, vbH);
+    const sqMinX = minX - pad - (sqSize - vbW) / 2;
+    const sqMinY = minY - pad - (sqSize - vbH) / 2;
 
     const nodeMap = {};
     nodes.forEach(n => { nodeMap[n.id] = n; });
@@ -170,7 +174,7 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
     }).filter(Boolean);
 
     return {
-      viewBox: `${minX - pad} ${minY - pad} ${vbW} ${vbH}`,
+      viewBox: `${sqMinX} ${sqMinY} ${sqSize} ${sqSize}`,
       nodeRects: rects,
       drawingPaths: paths,
       edgeLines: lines,

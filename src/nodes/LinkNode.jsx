@@ -101,6 +101,8 @@ export function LinkNode({ id, data }) {
 
   const fontSize = data.fontSize || 14;
   const fontFamily = data.fontFamily || 'sans-serif';
+  // textColor overrides the default blue; null means keep the CSS class default
+  const textColor = data.textColor || null;
   const isEmpty = !data.label && !data.url;
 
   // Listen for dialog triggers from global context menu
@@ -149,7 +151,7 @@ export function LinkNode({ id, data }) {
         </div>
       )}
 
-      <div 
+      <div
         ref={inputRef}
         contentEditable={isEditingLabel}
         suppressContentEditableWarning
@@ -159,8 +161,8 @@ export function LinkNode({ id, data }) {
         onKeyDown={(e) => { if (e.key === 'Escape') inputRef.current.blur(); }}
         onPointerDown={(e) => { if (isEditingLabel) e.stopPropagation(); }}
         onContextMenu={(e) => { if (isEditingLabel) e.stopPropagation(); }}
-        className={`text-blue-400 outline-none whitespace-nowrap min-w-[20px] min-h-[1em] select-none ${isEditingLabel ? 'cursor-text' : 'cursor-pointer hover:underline'}`}
-        style={{ fontSize: `${fontSize}px`, fontFamily }}
+        className={`${textColor ? '' : 'text-blue-400'} outline-none whitespace-nowrap min-w-[20px] min-h-[1em] select-none ${isEditingLabel ? 'cursor-text' : 'cursor-pointer hover:underline'}`}
+        style={{ fontSize: `${fontSize}px`, fontFamily, ...(textColor ? { color: textColor } : {}) }}
       />
 
       <Handle type="source" position={Position.Right} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
@@ -169,7 +171,9 @@ export function LinkNode({ id, data }) {
         <FontSizeDialog
           fontSize={fontSize}
           fontFamily={fontFamily}
-          onApply={({ fontSize: fs, fontFamily: ff }) => updateNodeData(id, { fontSize: fs, fontFamily: ff })}
+          textColor={data.textColor || '#60a5fa'}
+          onApply={({ fontSize: fs, fontFamily: ff, textColor: tc }) =>
+            updateNodeData(id, { fontSize: fs, fontFamily: ff, textColor: tc })}
           onClose={() => setShowDialog(null)}
         />
       )}

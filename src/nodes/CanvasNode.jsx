@@ -3,6 +3,7 @@ import { Handle, Position, useReactFlow, NodeResizer } from '@xyflow/react';
 import { Lock, X } from 'lucide-react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { CanvasThumbnail } from '../components/CanvasThumbnail';
+import { FontSizeDialog } from '../components/FontSizeDialog';
 
 /** Minimum and maximum diameter for resizing */
 const MIN_SIZE = 80;
@@ -18,6 +19,8 @@ const DEFAULT_SIZE = 160;
  *   - At startOffset=50% the text baseline lands at (R, R-R) = (80,0) in SVG coords
  *   - y=0 in SVG = the very top edge of the circle  ✓
  *   - Characters extend upward (negative y) → "hugging" the circle from outside
+ *
+ * titleSpacing (dy on <text>): positive = text moves into circle; negative = further outside.
  */
 export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, width, height }) {
   // SIZE comes from ReactFlow's measured/explicit node dimensions.
@@ -28,6 +31,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   const mainFlow = useReactFlow();
   const [title, setTitle]         = useState(data.title || '');
   const [isEditing, setIsEditing] = useState(false);
+  const [showFontDialog, setShowFontDialog] = useState(false);
   const inputRef = useRef(null);
   const pathId   = `tcp-${id}`;
 
@@ -45,10 +49,26 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     if (isEditing) { inputRef.current?.focus(); inputRef.current?.select(); }
   }, [isEditing]);
 
+  // Listen for Font & Size context-menu trigger
+  useEffect(() => {
+    const handleOpenFont = () => {
+      if (data.locked) return;
+      setShowFontDialog(true);
+    };
+    document.addEventListener(`edit-node-font-${id}`, handleOpenFont);
+    return () => document.removeEventListener(`edit-node-font-${id}`, handleOpenFont);
+  }, [id, data.locked]);
+
   const canvasData = data.canvasData || {
     nodes: data.nodes || [], edges: data.edges || [], drawings: data.drawings || [],
   };
   const nodeCount = canvasData.nodes?.length || 0;
+
+  // Font settings (with sensible defaults)
+  const fontSize     = data.fontSize     || 11;
+  const fontFamily   = data.fontFamily   || 'Inter, ui-sans-serif, system-ui, sans-serif';
+  const textColor    = data.textColor    || null;  // null = auto based on title presence
+  const titleSpacing = data.titleSpacing ?? 0;     // dy offset: positive = into circle
 
   const commitTitle = useCallback((val) => {
     const v = (val ?? title).trim();
@@ -58,6 +78,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   }, [id, mainFlow, title]);
 
   const handleDoubleClick = useCallback((e) => {
+    // Allow diving in even without a title — canvas is functional without one
     if (isEditing || data.locked) return;
     e.stopPropagation();
     nav?.diveIn(id);
@@ -72,9 +93,16 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   // At startOffset=50% the baseline is at (R, 0) = circle's top edge. ✓
   const arcPath = `M 0,${R} A ${R},${R} 0 0,1 ${SIZE},${R}`;
 
+  // Derived fill colour for the arc text
+  const titleFill = textColor
+    ? textColor
+    : (title ? 'rgba(255,255,255,0.80)' : 'rgba(255,255,255,0.22)');
+
   return (
     <>
-      {/* Resize handles — corner+edge dots, locked to square aspect ratio */}
+      {/* Resize handles — corner+edge dots, locked to square aspect ratio.
+          lineStyle is transparent so the resize selection box is invisible;
+          the circle body's border provides the circular selection indicator. */}
       <NodeResizer
         minWidth={MIN_SIZE}
         minHeight={MIN_SIZE}
@@ -89,7 +117,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           border: '1px solid rgba(255,255,255,0.6)',
           borderRadius: '50%',
         }}
-        lineStyle={{ borderColor: 'rgba(96,165,250,0.35)' }}
+        lineStyle={{ borderColor: 'transparent' }}
       />
       <div
         className="group"
@@ -148,7 +176,8 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
 
         {/* ── Curved title (SVG overlay) ────────────────────────────────────────
             overflow:visible lets the text poke above y=0 (the circle's top edge).
-            The path top sits at (R,0), characters extend upward → hugs the edge. */}
+            The path top sits at (R,0), characters extend upward → hugs the edge.
+            dy (titleSpacing) shifts text perpendicular to path: + = into circle. */}
         {!isEditing && (
           <svg
             width={SIZE}
@@ -165,11 +194,12 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
               <path id={pathId} d={arcPath} />
             </defs>
             <text
-              fontSize="11"
-              fontFamily="Inter, ui-sans-serif, system-ui, sans-serif"
+              fontSize={fontSize}
+              fontFamily={fontFamily}
               fontWeight="500"
               letterSpacing="0.5"
-              fill={title ? 'rgba(255,255,255,0.80)' : 'rgba(255,255,255,0.22)'}
+              dy={titleSpacing}
+              fill={titleFill}
             >
               <textPath href={`#${pathId}`} startOffset="50%" textAnchor="middle">
                 {title || 'Sub-Canvas'}
@@ -210,6 +240,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
               onBlur={e  => commitTitle(e.target.value)}
               onKeyDown={e => {
                 if (e.key === 'Enter')  commitTitle(e.target.value);
+                // Escape restores original title (may be empty — that's fine)
                 if (e.key === 'Escape') { setTitle(data.title || ''); setIsEditing(false); }
               }}
               placeholder="Sub-Canvas"
@@ -237,6 +268,20 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           </button>
         )}
       </div>
+
+      {/* Font & Size dialog — triggered by context menu */}
+      {showFontDialog && (
+        <FontSizeDialog
+          fontSize={fontSize}
+          fontFamily={fontFamily}
+          textColor={data.textColor || '#ffffff'}
+          titleSpacing={titleSpacing}
+          onApply={({ fontSize: fs, fontFamily: ff, textColor: tc, titleSpacing: ts }) =>
+            mainFlow.updateNodeData(id, { fontSize: fs, fontFamily: ff, textColor: tc, titleSpacing: ts })
+          }
+          onClose={() => setShowFontDialog(false)}
+        />
+      )}
 
       <Handle type="target" position={Position.Left}  id="canvas-target" className="opacity-0" />
       <Handle type="source" position={Position.Right} id="canvas-source" className="opacity-0" />
