@@ -88,6 +88,11 @@
 | `src/components/sidebar/DashboardTab.jsx` | ✅ Clean | Stats display only, `useMemo` correct |
 | `src/components/sidebar/AccountsTab.jsx` | ✅ Clean | Login failure logs to console (acceptable), status re-fetched after login |
 | `src/components/sidebar/DraggableModuleCard.jsx` | ✅ Clean | Drag start sets correct dataTransfer type |
+| `src/components/Dialog.jsx` | ✅ Clean | Escape listener in `useEffect([onClose])` with proper cleanup; backdrop stopPropagation correct |
+| `src/components/EmptyCanvasHint.jsx` | ✅ Clean | Pure display; `nodeCount > 0 \|\| drawingCount > 0` guard correct |
+| `src/components/AlignedBackground.jsx` | ✅ Clean | Positive-modulo phase calc correct; single instance per canvas — pattern ID collision N/A |
+| `src/components/ContextMenu.jsx` | ✅ Fixed (Bug 74) | Submenus now flip left when right-side space < 192px; parent menu viewport clamping already present |
+| `src/components/FontSizeDialog.jsx` | ✅ Fixed (Bug 75) | Font size now capped at 500 (`Math.min(500, ...)` + `max={500}` attr); min=1 already enforced |
 
 | `src/nodes/SellHubNode.jsx` | ✅ Fixed (Bugs 63, 73) | Already listed in Node Components above |
 
@@ -95,6 +100,12 @@
 | File | Status | Notes |
 |------|--------|---------|
 | `src/Canvas.jsx` | ✅ Fixed (Bugs 32, 38, 59) | `isValidConnection` guards sticky notes; `clearHistory` wired; `resetStack` on load; `deleteKeyCode=['Backspace','Delete']` safe (RF v12 checks `isContentEditable`) |
+
+### Entry Points
+| File | Status | Notes |
+|------|--------|-------|
+| `src/main.jsx` | ✅ Clean | Standard React 18 `createRoot` entry; `StrictMode` correct |
+| `src/App.jsx` | ✅ Clean | `ToastProvider` wraps `ReactFlowProvider` wraps `Canvas` — provider nesting correct |
 
 ### Utilities & Electron
 | File | Status | Notes |
@@ -105,6 +116,14 @@
 | `src/utils/constants.js` | ✅ Clean | No issues |
 | `electron/preload.js` | ✅ Acceptable | `contextBridge` used correctly; generic `invoke` is acceptable for trusted desktop app |
 | `electron/main.js` | ✅ Acceptable | `before-quit` handler present; no force-save (accepted 2s window limitation) |
+| `electron/ipc/browser/antiDetectProfiles.js` | ✅ Clean | Session profile picked once per process; `getRandomUA()` delegates to session profile |
+| `electron/ipc/browser/humanEmulation.js` | ✅ Clean | Bézier mouse, momentum scroll, cookie banner dismissal — all guards in place |
+| `electron/ipc/browser/authWindows.js` | ✅ Clean | Closes headless browser before opening visible login window (required — can't share userDataDir simultaneously); resolves on `disconnected` event |
+| `electron/ipc/browserPool.js` | ✅ Fixed (Bug 76) | `gaussianDelay`: `Math.random() \|\| Number.EPSILON` prevents `log(0)=−∞ → NaN → setTimeout bypass` |
+| `electron/extractors/apiExtractors.js` | ✅ Clean | `getRandomUA` import from `stealthBrowser.js` valid (re-exported there); all fetchers have `AbortSignal.timeout` + `try/catch`; `processInBatches` uses `Promise.allSettled` |
+| `electron/extractors/facebookExtractor.js` | ✅ Clean | Pure browser-context IIFE strings; depth guards on Relay recursion prevent infinite loops |
+| `electron/extractors/jobs.js` | ✅ Fixed (Bug 77) | ZipRecruiter `__NEXT_DATA__` strategy: `job.location \|\| job.city ? X : Y` operator-precedence bug fixed to `job.location \|\| (job.city ? X : Y)` |
+| `electron/extractors/marketplace.js` | ✅ Clean | eBay/Poshmark/Swappa/Mercari extractors — all have `try/catch` per card; dedup by URL where needed |
 
 
 ---
@@ -153,6 +172,10 @@
 | 71 | `JobHubNode.jsx`, `useCanvasPersistence.js`, `useCanvasInitialization.js` | `toggleSourceFilter` dim opacity persisted to disk via autosave; on reload filter was active but cards not re-dimmed. Fixed: `sanitizeNodesForSave` strips jobcard opacity before any save; `useEffect` re-applies dim on mount | 6 |
 | 72 | `AnimatedSourceRing.jsx`, `JobHubNode.jsx` | SVG `<marker>` IDs were document-wide — second `JobHubNode` reused first hub's markers (wrong arrow color/opacity). Fixed: IDs namespaced with `nodeId` prop | 6 |
 | 73 | `SellHubNode.jsx` | `AnimatedSourceRing` also used without `nodeId` in `SellHubNode` — identical document-wide ID collision as Bug 72. Fixed: `nodeId={id}` added | 7 |
+| 74 | `ContextMenu.jsx` | Submenus always rendered to the right (`left-full`). When parent menu was clamped near right viewport edge the submenu overflowed off-screen. Fixed: `submenuDirection` state computed in clamping `useEffect`; submenu uses `left-full` or `right-full` based on available space (threshold 192px) | 8 |
+| 75 | `FontSizeDialog.jsx` | No maximum font size — user could type `9999`, creating a node too tall to see or interact with. Fixed: `Math.min(500, ...)` in onChange + `max={500}` attribute on the input | 8 |
+| 76 | `electron/ipc/browserPool.js` | `gaussianDelay`: `Math.random()` can return exactly 0 (probability ~2⁻⁵³). `Math.log(0)=−Infinity` → `Math.sqrt(−Infinity)=NaN` → `Math.max(1000,NaN)=NaN` in JS → `setTimeout(fn,NaN)` fires immediately, bypassing the domain rate-limiter entirely. Fixed: `Math.random() \|\| Number.EPSILON` | 8 |
+| 77 | `electron/extractors/jobs.js` | ZipRecruiter `__NEXT_DATA__` parser: `job.location \|\| job.city ? X : Y` has wrong operator precedence — parsed as `(job.location \|\| job.city) ? X : Y`. When `job.location` is set but `job.city` is `undefined`, location becomes `"undefined"` or `"undefined, CA"`. Fixed: added parentheses → `job.location \|\| (job.city ? X : Y)` | 8 |
 
 ---
 
@@ -256,12 +279,30 @@
 | 93 | extractToParent | Position near parent container: minor overlap risk, user can drag away | ✅ Acceptable |
 | 94 | PNG export | `viewportNode` null guard; `.catch` error handler; success toast | ✅ Clean |
 | 95 | Duplicate hook entries | `debugged-areas.md` cleanup: consolidated all duplicate rows into single canonical entries | ✅ Done |
+| 96 | Dialog | Escape + backdrop click simultaneously both call `onClose` — second call is a no-op state update in parent | ✅ Acceptable |
+| 97 | Dialog | `onClose` not memoized in parent → `useEffect` re-subscribes on every parent render — cleanup fn always removes old listener so no leak | ✅ Clean |
+| 98 | AlignedBackground | Pattern ID `ab-dots` / `ab-lines` would collide if two backgrounds mounted simultaneously — comment confirms single instance; no path creates two | ✅ Clean |
+| 99 | ContextMenu | Initial 1-frame render flash at un-clamped (x,y) before `useEffect` moves it — cosmetic only, sub-16ms on any modern machine | ✅ Acceptable |
+| 100 | ContextMenu | Submenu direction now dynamically computed (right when ≥192px available, left otherwise) | ✅ Fixed (Bug 74) |
+| 101 | FontSizeDialog | Font size 0 / empty string — `Number("") \|\| 1` → 1; `Math.max(1,…)` enforces floor | ✅ Clean |
+| 102 | FontSizeDialog | Font size >500 now clamped before state update AND by `max={500}` HTML attr | ✅ Fixed (Bug 75) |
+| 103 | browserPool gaussianDelay | `Math.random()===0` case (prob ~2⁻⁵³) now safely replaced with `Number.EPSILON` | ✅ Fixed (Bug 76) |
+| 104 | apiExtractors `getRandomUA` import | Imported from `stealthBrowser.js` which re-exports from `antiDetectProfiles.js` — import chain valid | ✅ Clean |
+| 105 | apiExtractors `processInBatches` | Uses `Promise.allSettled` → individual fetch failures don't abort the batch | ✅ Clean |
+| 106 | apiExtractors fetchStockX | `algoliaKeys` module-level cache reset to `null` on 401/403 so next call re-extracts fresh keys | ✅ Clean |
+| 107 | facebookExtractor depth guard | Relay recursion capped at `depth > 8` — prevents infinite loops on circular Relay graphs | ✅ Clean |
+| 108 | ZipRecruiter location precedence | `job.location \|\| job.city ? X : Y` was `(a\|\|b)?X:Y` — fixed to `a\|\|(b?X:Y)` | ✅ Fixed (Bug 77) |
+| 109 | authWindows openLoginWindow | Unknown `platformId` throws synchronously before any async work — caller must handle | ✅ Clean |
+| 110 | authWindows getSessionStatus | `page.cookies(...domains.map(...))` — spreads array correctly; `page.close()` in finally equivalent (inside try block before catch) | ✅ Clean |
+| 111 | marketplace extractors | All card-level parsers wrapped in individual `try/catch` — one malformed card never aborts the rest | ✅ Clean |
+| 112 | main.jsx | `StrictMode` causes effects to fire twice in dev — all effects use cleanup functions; no side-effect leaks | ✅ Clean |
 
 ---
 
 ## ❓ What Still Needs Checking
 
-All previously identified areas have been fully audited. The codebase is considered comprehensively hardened.
+All files in `src/` and `electron/` have now been fully audited across Sessions 1–8.
+The codebase is considered comprehensively hardened.
 
 If new features are added, create entries here for the new files/interactions introduced.
 

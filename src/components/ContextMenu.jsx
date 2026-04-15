@@ -30,8 +30,9 @@ export function ContextMenu({ x, y, items, onClose }) {
     };
   }, [onClose]);
 
-  // Clamp menu within viewport bounds
+  // Clamp menu within viewport bounds; also track which side has room for submenus.
   const [adjustedPos, setAdjustedPos] = useState({ left: x, top: y });
+  const [submenuDirection, setSubmenuDirection] = useState('right');
   useEffect(() => {
     if (menuRef.current) {
       const rect = menuRef.current.getBoundingClientRect();
@@ -42,6 +43,10 @@ export function ContextMenu({ x, y, items, onClose }) {
       if (rect.bottom > window.innerHeight) {
         newPos.top = window.innerHeight - rect.height - 8;
       }
+      // Open submenus to the LEFT when there isn't enough room on the right
+      // (submenu min-width is ~180px; use 192 as a safe threshold).
+      const spaceOnRight = window.innerWidth - (newPos.left + rect.width);
+      setSubmenuDirection(spaceOnRight >= 192 ? 'right' : 'left');
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setAdjustedPos(newPos);
     }
@@ -85,9 +90,9 @@ export function ContextMenu({ x, y, items, onClose }) {
                 {hasSubmenu && <span className="text-white/40 text-xs">▸</span>}
               </button>
 
-              {/* Sub-menu */}
+              {/* Sub-menu — opens right when space allows, left otherwise */}
               {hasSubmenu && activeSubmenu === i && (
-                <div className="absolute left-full top-0 ml-0.5 bg-[#1a1a1a]/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl py-1 min-w-[180px] text-white/90 text-sm">
+                <div className={`absolute top-0 ${submenuDirection === 'right' ? 'left-full ml-0.5' : 'right-full mr-0.5'} bg-[#1a1a1a]/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl py-1 min-w-[180px] text-white/90 text-sm`}>
                   {item.submenu.map((sub, j) => {
                     if (sub.divider) {
                       return <div key={j} className="border-t border-white/8 my-1" />;

@@ -345,7 +345,7 @@ export const ZIPRECRUITER_EXTRACTOR = `
         jobs.push({
           title: job.title || job.name || '',
           company: job.hiring_company?.name || job.companyName || job.hiringOrganization?.name || '',
-          location: job.location || job.city ? (job.city + (job.state ? ', ' + job.state : '')) : '',
+          location: job.location || (job.city ? (job.city + (job.state ? ', ' + job.state : '')) : ''),
           salary: salaryStr || job.salary_text || '',
           snippet: (job.snippet || job.description || '').replace(/<[^>]*>/g, ' ').substring(0, 300),
           url: job.url || job.save_url || '',

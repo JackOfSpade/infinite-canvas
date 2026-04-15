@@ -38,7 +38,10 @@ function extractDomain(url) {
 
 /** Gaussian-distributed random delay (more natural than uniform). */
 function gaussianDelay(mean, stddev) {
-  const u1 = Math.random();
+  // Clamp u1 away from 0: Math.log(0) = -Infinity → sqrt(-Infinity) = NaN →
+  // Math.max(1000, NaN) = NaN in JS → setTimeout(fn, NaN) fires immediately,
+  // bypassing the rate-limiter.  Number.EPSILON (~5e-324) is safe.
+  const u1 = Math.random() || Number.EPSILON;
   const u2 = Math.random();
   const normal = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
   return Math.max(1000, Math.round(mean + normal * stddev));
