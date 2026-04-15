@@ -1,7 +1,7 @@
 import React from 'react';
 import { useViewport } from '@xyflow/react';
 
-export const DrawingLayer = React.memo(function DrawingLayer({ drawings, currentStroke, activeColor = 'white' }) {
+export const DrawingLayer = React.memo(function DrawingLayer({ drawings, currentStroke, activeColor = 'white', penSize = 3 }) {
   const { x, y, zoom } = useViewport();
   return (
     <svg className="absolute top-0 left-0 w-full h-full pointer-events-none z-50">
@@ -9,27 +9,28 @@ export const DrawingLayer = React.memo(function DrawingLayer({ drawings, current
         {drawings.map((stroke, i) => {
           const points = Array.isArray(stroke) ? stroke : stroke?.points;
           if (!Array.isArray(points) || points.length < 2) return null;
-          const color = stroke?.color || 'white';
+          const color     = stroke?.color   || 'white';
+          const thickness = stroke?.penSize ?? 3;
           return (
-            <polyline 
-              key={i} 
-              points={points.map(p => `${p.x},${p.y}`).join(' ')} 
-              fill="none" 
-              stroke={color} 
-              strokeWidth={3} 
-              strokeLinecap="round" 
-              strokeLinejoin="round" 
+            <polyline
+              key={i}
+              points={points.map(p => `${p.x},${p.y}`).join(' ')}
+              fill="none"
+              stroke={color}
+              strokeWidth={thickness}
+              strokeLinecap="round"
+              strokeLinejoin="round"
             />
           );
         })}
         {currentStroke && (
-          <polyline 
-            points={currentStroke.map(p => `${p.x},${p.y}`).join(' ')} 
-            fill="none" 
-            stroke={activeColor} 
-            strokeWidth={3} 
-            strokeLinecap="round" 
-            strokeLinejoin="round" 
+          <polyline
+            points={currentStroke.map(p => `${p.x},${p.y}`).join(' ')}
+            fill="none"
+            stroke={activeColor}
+            strokeWidth={penSize}
+            strokeLinecap="round"
+            strokeLinejoin="round"
           />
         )}
       </g>

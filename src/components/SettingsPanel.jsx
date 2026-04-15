@@ -14,8 +14,7 @@ const SPEED_OPTIONS = [
 
 const BG_OPTIONS = [
   { key: 'dots',  label: 'Dots' },
-  { key: 'lines', label: 'Lines' },
-  { key: 'cross', label: 'Cross' },
+  { key: 'lines', label: 'Grid' },
   { key: 'none',  label: 'None' },
 ];
 
