@@ -4,18 +4,18 @@ import { Layers } from 'lucide-react';
 
 // Approximate default node dimensions by type
 const DEFAULT_DIMS = {
-  text:     { w: 180, h: 36 },
-  link:     { w: 180, h: 50 },
+  text: { w: 180, h: 36 },
+  link: { w: 180, h: 50 },
   document: { w: 180, h: 36 },
-  group:    { w: 160, h: 110 },
-  listing:  { w: 240, h: 180 },
-  jobcard:  { w: 180, h: 90 },
-  jobhub:   { w: 280, h: 350 },
-  sellhub:  { w: 280, h: 350 },
+  group: { w: 160, h: 110 },
+  listing: { w: 240, h: 180 },
+  jobcard: { w: 180, h: 90 },
+  jobhub: { w: 280, h: 350 },
+  sellhub: { w: 280, h: 350 },
 };
 
 function getDims(node) {
-  const w = node.style?.width  || node.measured?.width  || DEFAULT_DIMS[node.type]?.w || 120;
+  const w = node.style?.width || node.measured?.width || DEFAULT_DIMS[node.type]?.w || 120;
   const h = node.style?.height || node.measured?.height || DEFAULT_DIMS[node.type]?.h || 40;
   return { w, h };
 }
@@ -52,7 +52,7 @@ function ThumbnailNode({ r }) {
       .filter(l => l.trim())
       .slice(0, 4);
 
-    const lineH   = Math.min(h / (lines.length || 1), 14);
+    const lineH = Math.min(h / (lines.length || 1), 14);
     const fontSize = Math.max(7, Math.min(11, lineH * 0.8));
 
     return (
@@ -61,12 +61,12 @@ function ThumbnailNode({ r }) {
         <rect x={x} y={y} width={w} height={h} rx={4} fill="rgba(255,255,255,0.05)" />
         {lines.length === 0 ? (
           <text x={x + 6} y={y + 14} fontSize={fontSize} fill="rgba(255,255,255,0.2)"
-                fontFamily="Inter, ui-sans-serif, sans-serif">
+            fontFamily="Inter, ui-sans-serif, sans-serif">
             (empty)
           </text>
         ) : lines.map((line, i) => {
           const maxChars = Math.floor(w / (fontSize * 0.55));
-          const display  = line.length > maxChars ? line.slice(0, maxChars - 1) + '…' : line;
+          const display = line.length > maxChars ? line.slice(0, maxChars - 1) + '…' : line;
           return (
             <text
               key={i}
@@ -85,16 +85,16 @@ function ThumbnailNode({ r }) {
   }
 
   if (type === 'link') {
-    const display  = getLinkDisplay(data);
+    const display = getLinkDisplay(data);
     const maxChars = Math.floor(w / 8);
-    const label    = display.length > maxChars ? display.slice(0, maxChars - 1) + '…' : display;
+    const label = display.length > maxChars ? display.slice(0, maxChars - 1) + '…' : display;
 
     return (
       <g>
         <rect x={x} y={y} width={w} height={h} rx={4} fill="rgba(96,165,250,0.07)"
-              stroke="rgba(96,165,250,0.20)" strokeWidth="1" />
+          stroke="rgba(96,165,250,0.20)" strokeWidth="1" />
         <text x={x + 7} y={y + h / 2 + 4} fontSize={9} fill="rgba(96,165,250,0.75)"
-              fontFamily="Inter, ui-sans-serif, sans-serif">
+          fontFamily="Inter, ui-sans-serif, sans-serif">
           ↗ {label || '—'}
         </text>
       </g>
@@ -128,7 +128,7 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
     const rects = nodes.map(n => {
       const { w, h } = getDims(n);
       const x = n.position.x, y = n.position.y;
-      minX = Math.min(minX, x);    minY = Math.min(minY, y);
+      minX = Math.min(minX, x); minY = Math.min(minY, y);
       maxX = Math.max(maxX, x + w); maxY = Math.max(maxY, y + h);
       return { id: n.id, x, y, w, h, type: n.type, data: n.data };
     });
@@ -163,7 +163,7 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
     }).filter(Boolean);
 
     const paths = drawings.map((stroke, i) => {
-      const pts   = Array.isArray(stroke) ? stroke : stroke?.points;
+      const pts = Array.isArray(stroke) ? stroke : stroke?.points;
       const color = stroke?.color || 'white';
       if (!Array.isArray(pts) || pts.length < 2) return null;
       return { id: i, points: pts.map(p => `${p.x},${p.y}`).join(' '), color };
