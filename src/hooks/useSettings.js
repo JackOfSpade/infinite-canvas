@@ -11,8 +11,10 @@ export const DEFAULT_SHORTCUTS = {
 
 const DEFAULT_SETTINGS = {
   animationSpeed: 'balanced', // 'snappy' | 'balanced' | 'dramatic'
-  bgVariant:      'dots',     // 'dots' | 'lines' | 'cross' | 'none'
+  bgVariant:      'dots',     // 'dots' | 'lines' | 'none'
   showMiniMap:    true,
+  penSize:        3,          // stroke width in flow-space pixels
+  eraserSize:     15,         // eraser radius in flow-space pixels
   shortcuts:      DEFAULT_SHORTCUTS,
 };
 

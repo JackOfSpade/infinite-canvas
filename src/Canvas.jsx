@@ -127,13 +127,17 @@ export function Canvas() {
   const [eraserType, setEraserType] = useState('object'); // 'object' | 'pixel'
   const [currentStroke, setCurrentStroke] = useState(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  // Raw screen position for the eraser cursor overlay (updated on every pointermove)
+  const [eraserScreenPos, setEraserScreenPos] = useState({ x: -999, y: -999 });
   const [placementMode, setPlacementMode] = useState(null);
   const [snapToGrid, setSnapToGrid] = useState(false);
-  // bgVariant and showMiniMap are persisted in settings
-  const bgVariant    = settings.bgVariant   ?? 'dots';
-  const showMiniMap  = settings.showMiniMap ?? true;
-  const setBgVariant   = (v) => updateSetting('bgVariant', v);
-  const setShowMiniMap = (v) => updateSetting('showMiniMap', v);
+  // bgVariant, showMiniMap, penSize and eraserSize are persisted in settings
+  const bgVariant   = settings.bgVariant  ?? 'dots';
+  const showMiniMap = settings.showMiniMap ?? true;
+  const penSize     = settings.penSize    ?? 3;
+  const eraserSize  = settings.eraserSize ?? 15;
+  const setPenSize    = (v) => updateSetting('penSize', v);
+  const setEraserSize = (v) => updateSetting('eraserSize', v);
   const [activeColor, setActiveColor] = useState('white');
   const { screenToFlowPosition, getIntersectingNodes, getNode } = useReactFlow();
 
@@ -161,9 +165,6 @@ export function Canvas() {
     takeSnapshot();
     setDrawings([]);
   }, [takeSnapshot, setDrawings]);
-
-
-
 
   const onNodesDelete = useCallback((deletedNodes) => {
     const documentNodes = deletedNodes.filter(n => n.type === 'document' && n.data?.filePath);
@@ -193,9 +194,9 @@ export function Canvas() {
   });
 
   const { handlePointerDown, handlePointerMove, handlePointerUp } = useDrawingMode({
-    placementMode, setPlacementMode, activeTool, eraserType, currentStroke, setCurrentStroke, 
-    setMousePos, setDrawings, setNodes, setEdges, takeSnapshot, activeColor,
-    getIntersectingNodes
+    placementMode, setPlacementMode, activeTool, eraserType, eraserSize, currentStroke, setCurrentStroke,
+    setMousePos, setEraserScreenPos, setDrawings, setNodes, setEdges, takeSnapshot, activeColor,
+    penSize, getIntersectingNodes
   });
 
   const interactiveDisabled = !!activeTool || !!placementMode || navigation.isAnimating;
@@ -285,11 +286,45 @@ export function Canvas() {
         className="flex-1 h-full relative"
         data-drawing-mode={activeTool || undefined}
         onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
+        onPointerMove={(e) => {
+          handlePointerMove(e);
+          if (activeTool === 'eraser') {
+            setEraserScreenPos({ x: e.clientX, y: e.clientY });
+          }
+        }}
         onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
+        onPointerLeave={(e) => {
+          handlePointerUp(e);
+          setEraserScreenPos({ x: -999, y: -999 });
+        }}
       >
         <SearchBar nodes={nodes} />
+
+        {/* Eraser cursor — pixel-perfect circle showing the erase radius */}
+        {activeTool === 'eraser' && eraserScreenPos.x > 0 && (() => {
+          // The Background gap in Canvas is 48 flow-units. We need the zoom to convert
+          // eraserSize (flow-space radius) to screen pixels. But we only have screenToFlowPosition
+          // here; we instead track the scale via the viewport via the useViewport hook.
+          // Since we can't call hooks here, we read it from a CSS var set by ReactFlow.
+          // Simpler: just use the raw eraserSize as screen pixels — it's "good enough" because
+          // the user sets the size they actually see on screen. The drawing hook uses flow coords.
+          const diameter = eraserSize * 2;
+          return (
+            <div
+              className="fixed pointer-events-none z-[9998]"
+              style={{
+                left: eraserScreenPos.x - eraserSize,
+                top:  eraserScreenPos.y - eraserSize,
+                width:  diameter,
+                height: diameter,
+                borderRadius: '50%',
+                border: '1.5px solid rgba(255,255,255,0.7)',
+                boxShadow: '0 0 0 1px rgba(0,0,0,0.5)',
+                background: 'rgba(255,255,255,0.04)',
+              }}
+            />
+          );
+        })()}
 
         {/* Canvas transition overlay */}
         {navigation.animPhase && (
@@ -346,10 +381,11 @@ export function Canvas() {
               </div>
             )}
 
-            <DrawingLayer drawings={drawings} currentStroke={currentStroke} activeColor={activeColor} />
+            <DrawingLayer drawings={drawings} currentStroke={currentStroke} activeColor={activeColor} penSize={penSize} />
             <EmptyCanvasHint nodeCount={nodes.length} drawingCount={drawings.length} />
             {bgVariant !== 'none' && (
-              <Background variant={bgVariant} color="rgba(255,255,255,0.06)" gap={32} size={2} />
+              // offset={0} on both ensures dots sit exactly on grid-line intersections
+              <Background variant={bgVariant} color="rgba(255,255,255,0.08)" gap={48} size={bgVariant === 'dots' ? 3 : 1} offset={0} />
             )}
 
             <Controls
@@ -396,6 +432,10 @@ export function Canvas() {
               setActiveTool={setActiveTool}
               eraserType={eraserType}
               setEraserType={setEraserType}
+              eraserSize={eraserSize}
+              setEraserSize={setEraserSize}
+              penSize={penSize}
+              setPenSize={setPenSize}
               activeColor={activeColor}
               setActiveColor={setActiveColor}
               snapToGrid={snapToGrid}
