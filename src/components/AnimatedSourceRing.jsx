@@ -25,6 +25,7 @@ import React, { useMemo } from 'react';
  */
 export function AnimatedSourceRing({
   sources,
+  nodeId = 'hub', // unique prefix to namespace SVG IDs per instance
   direction = 'in',
   nodeWidth = 260,
   nodeHeight = 160,
@@ -69,11 +70,11 @@ export function AnimatedSourceRing({
         style={{ overflow: 'visible' }}
       >
         <defs>
-          {/* Arrowhead markers per source (each needs its own color) */}
+          {/* Arrowhead markers per source — prefixed with nodeId to avoid document-wide ID collisions */}
           {sources.map(source => (
             <marker
-              key={`marker-${source.id}`}
-              id={`arrowhead-${source.id}`}
+              key={`marker-${nodeId}-${source.id}`}
+              id={`arrowhead-${nodeId}-${source.id}`}
               markerWidth="8"
               markerHeight="6"
               refX="7"
@@ -89,8 +90,8 @@ export function AnimatedSourceRing({
             </marker>
           ))}
 
-          {/* Glow filter for active sources */}
-          <filter id="activeGlow" x="-50%" y="-50%" width="200%" height="200%">
+          {/* Glow filter for active sources — also namespaced */}
+          <filter id={`activeGlow-${nodeId}`} x="-50%" y="-50%" width="200%" height="200%">
             <feGaussianBlur stdDeviation="3" result="blur" />
             <feMerge>
               <feMergeNode in="blur" />
@@ -172,7 +173,7 @@ export function AnimatedSourceRing({
                 strokeDashoffset={dashOffset}
                 strokeLinecap="round"
                 opacity={isDone ? 0.3 : 0.75}
-                markerEnd={`url(#arrowhead-${source.id})`}
+                markerEnd={`url(#arrowhead-${nodeId}-${source.id})`}
                 style={{
                   transition: `stroke-dashoffset ${transitionDuration} ease-out, stroke-width 0.3s, opacity 0.3s`,
                 }}

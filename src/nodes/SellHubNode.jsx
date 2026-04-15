@@ -205,6 +205,7 @@ export function SellHubNode({ id, data }) {
       extras={
         <AnimatedSourceRing
           sources={getSourceStatuses()}
+          nodeId={id}
           direction={hubState === 'researching' ? 'in' : 'out'}
           nodeWidth={nodeWidth}
           nodeHeight={nodeHeight}
