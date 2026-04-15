@@ -3,6 +3,23 @@ import { useReactFlow } from '@xyflow/react';
 import { Search, X, ChevronUp, ChevronDown } from 'lucide-react';
 
 /**
+ * Returns true if a node's content matches the lowercased query string.
+ * Used for both top-level and deep (nested canvas) searches.
+ */
+function matchesQuery(node, q) {
+  return (
+    (node.type === 'document' && node.data?.filename?.toLowerCase().includes(q)) ||
+    (node.type === 'group'    && node.data?.title?.toLowerCase().includes(q)) ||
+    (node.type === 'text'     && node.data?.text?.toLowerCase().includes(q)) ||
+    (node.type === 'link'     && (node.data?.label?.toLowerCase().includes(q) || node.data?.url?.toLowerCase().includes(q))) ||
+    (node.type === 'jobcard'  && (node.data?.title?.toLowerCase().includes(q) || node.data?.company?.toLowerCase().includes(q))) ||
+    (node.type === 'listing'  && (node.data?.product?.generated_title?.toLowerCase().includes(q) || node.data?.product?.brand?.toLowerCase().includes(q) || node.data?.product?.model?.toLowerCase().includes(q))) ||
+    (node.type === 'jobhub'   && node.data?.resumeSummary?.toLowerCase().includes(q)) ||
+    (node.type === 'sellhub'  && node.data?.product?.generated_title?.toLowerCase().includes(q))
+  );
+}
+
+/**
  * Canvas search bar with match count indicator and navigation.
  * Searches nodes by name/title/text (including deep group search) and pans to the match.
  * Features: match count badge, next/prev arrows, clear button, Cmd+F activation.
@@ -36,45 +53,19 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
   }, [isExpanded]);
 
   const getMatches = useCallback(() => {
-    if (searchQuery.trim() === '') return [];
-
+    if (!searchQuery.trim()) return [];
     const q = searchQuery.toLowerCase();
 
     const deepSearch = (items) => {
       for (const item of items) {
-        if (
-          (item.type === 'document' && item.data?.filename?.toLowerCase().includes(q)) ||
-          (item.type === 'group' && item.data?.title?.toLowerCase().includes(q)) ||
-          (item.type === 'text' && item.data?.text?.toLowerCase().includes(q)) ||
-          (item.type === 'link' && (item.data?.label?.toLowerCase().includes(q) || item.data?.url?.toLowerCase().includes(q))) ||
-          (item.type === 'jobcard' && (item.data?.title?.toLowerCase().includes(q) || item.data?.company?.toLowerCase().includes(q))) ||
-          (item.type === 'listing' && (item.data?.product?.generated_title?.toLowerCase().includes(q) || item.data?.product?.brand?.toLowerCase().includes(q))) ||
-          (item.type === 'jobhub' && item.data?.resumeSummary?.toLowerCase().includes(q)) ||
-          (item.type === 'sellhub' && item.data?.product?.generated_title?.toLowerCase().includes(q))
-        ) return true;
-        // Recurse into nested canvases
+        if (matchesQuery(item, q)) return true;
         const nested = item.data?.canvasData?.nodes;
         if (nested && deepSearch(nested)) return true;
       }
       return false;
     };
 
-    return nodes.filter(n => {
-      if (
-        (n.type === 'document' && n.data.filename?.toLowerCase().includes(q)) ||
-        (n.type === 'text' && n.data.text?.toLowerCase().includes(q)) ||
-        (n.type === 'group' && n.data.title?.toLowerCase().includes(q)) ||
-        (n.type === 'link' && (n.data.label?.toLowerCase().includes(q) || n.data.url?.toLowerCase().includes(q))) ||
-        (n.type === 'listing' && (n.data.product?.generated_title?.toLowerCase().includes(q) || n.data.product?.brand?.toLowerCase().includes(q) || n.data.product?.model?.toLowerCase().includes(q))) ||
-        (n.type === 'jobcard' && (n.data.title?.toLowerCase().includes(q) || n.data.company?.toLowerCase().includes(q))) ||
-        (n.type === 'jobhub' && n.data.resumeSummary?.toLowerCase().includes(q)) ||
-        (n.type === 'sellhub' && n.data.product?.generated_title?.toLowerCase().includes(q))
-      ) return true;
-      // Search inside nested canvases
-      const nestedNodes = n.data.canvasData?.nodes;
-      if (nestedNodes && deepSearch(nestedNodes)) return true;
-      return false;
-    });
+    return nodes.filter(n => matchesQuery(n, q) || deepSearch(n.data?.canvasData?.nodes || []));
   }, [searchQuery, nodes]);
 
   const handleQueryChange = (e) => {
