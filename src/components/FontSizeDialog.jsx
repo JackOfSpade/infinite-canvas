@@ -57,7 +57,7 @@ const TEXT_COLORS = [
 ];
 
 /**
- * Reusable Font & Size dialog.
+ * Reusable Font & Size dialog — changes apply instantly without clicking Done.
  * Used by TextNode, LinkNode, and CanvasNode.
  *
  * Props:
@@ -65,7 +65,7 @@ const TEXT_COLORS = [
  *   fontFamily    — current font family (string)
  *   textColor     — current text colour (string, optional)
  *   titleSpacing  — vertical gap between title and arc (number, optional; only shown when provided)
- *   onApply({ fontSize, fontFamily, textColor, titleSpacing }) — called when user clicks Done
+ *   onApply({ fontSize, fontFamily, textColor, titleSpacing }) — called on every change
  *   onClose       — called to dismiss the dialog
  */
 export function FontSizeDialog({
@@ -83,20 +83,60 @@ export function FontSizeDialog({
 
   const showSpacing = initialSpacing !== undefined;
 
-  const handleApply = () => {
-    onApply({ fontSize, fontFamily, textColor, titleSpacing });
-    onClose();
+  /** Push every change to the caller immediately — no Done button needed. */
+  const emit = (overrides) => {
+    onApply({
+      fontSize,
+      fontFamily,
+      textColor,
+      titleSpacing,
+      ...overrides,
+    });
+  };
+
+  // ── Font family ───────────────────────────────────────────────────────────
+  const handleFamilyChange = (val) => {
+    setFontFamily(val);
+    emit({ fontFamily: val });
+  };
+
+  // ── Font size ─────────────────────────────────────────────────────────────
+  const handleSizeChange = (val) => {
+    const clamped = Math.max(1, Math.min(500, Number(val) || 1));
+    setFontSize(clamped);
+    emit({ fontSize: clamped });
+  };
+
+  // ── Title spacing ─────────────────────────────────────────────────────────
+  const handleSpacingChange = (val) => {
+    const clamped = Math.max(-20, Math.min(40, Number(val) || 0));
+    setTitleSpacing(clamped);
+    emit({ titleSpacing: clamped });
+  };
+
+  // ── Text colour ───────────────────────────────────────────────────────────
+  const handleColorSwatch = (c) => {
+    setTextColor(c);
+    emit({ textColor: c });
+  };
+
+  const handleColorInput = (val) => {
+    setTextColor(val);
+    // Only emit when it looks like a complete colour value
+    if (/^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val)) {
+      emit({ textColor: val });
+    }
   };
 
   return (
-    <Dialog title="Font & Size" onClose={onClose} width="w-64">
+    <Dialog title="Font & Size" onClose={onClose}>
       {/* Font family */}
       <div className="flex justify-between items-center gap-2">
         <label className="text-white/70 text-sm w-16 shrink-0">Font</label>
         <select
           className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
           value={fontFamily}
-          onChange={(e) => setFontFamily(e.target.value)}
+          onChange={(e) => handleFamilyChange(e.target.value)}
           style={{ fontFamily }}
         >
           {FONT_OPTIONS.map(opt => (
@@ -114,7 +154,7 @@ export function FontSizeDialog({
           type="number"
           className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
           value={fontSize}
-          onChange={(e) => setFontSize(Math.max(1, Math.min(500, Number(e.target.value) || 1)))}
+          onChange={(e) => handleSizeChange(e.target.value)}
           min={1}
           max={500}
         />
@@ -128,7 +168,7 @@ export function FontSizeDialog({
             type="number"
             className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
             value={titleSpacing}
-            onChange={(e) => setTitleSpacing(Math.max(-20, Math.min(40, Number(e.target.value) || 0)))}
+            onChange={(e) => handleSpacingChange(e.target.value)}
             min={-20}
             max={40}
             title="Gap between title and circle edge (px)"
@@ -144,7 +184,7 @@ export function FontSizeDialog({
           {TEXT_COLORS.map(c => (
             <button
               key={c}
-              onClick={() => setTextColor(c)}
+              onClick={() => handleColorSwatch(c)}
               className={`w-5 h-5 rounded-full transition-transform hover:scale-110 ${textColor === c ? 'ring-2 ring-white scale-110' : 'opacity-75'}`}
               style={{ backgroundColor: c, border: c === '#ffffff' ? '1px solid rgba(255,255,255,0.3)' : 'none' }}
               title={c}
@@ -156,17 +196,11 @@ export function FontSizeDialog({
           type="text"
           placeholder="#HEX or rgba(…)"
           value={textColor}
-          onChange={(e) => setTextColor(e.target.value)}
+          onChange={(e) => handleColorInput(e.target.value)}
+          onBlur={(e) => emit({ textColor: e.target.value })}
           className="w-full text-xs p-1.5 bg-black/50 text-white rounded outline-none border border-white/20 focus:border-blue-400"
         />
       </div>
-
-      <button
-        className="bg-blue-500 hover:bg-blue-600 text-white rounded px-4 py-2 mt-2 font-medium transition-colors"
-        onClick={handleApply}
-      >
-        Done
-      </button>
     </Dialog>
   );
 }

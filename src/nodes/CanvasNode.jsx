@@ -115,13 +115,16 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       }
       const node = mainFlow.getNode(id);
       if (!node) return;
+      // Use live node dimensions from the store (not the potentially-stale SIZE prop)
+      // to correctly anchor the center during resize.
+      const liveSize = node.style?.width || node.measured?.width || DEFAULT_SIZE;
       resizeCenterRef.current = {
-        flowCx: node.position.x + SIZE / 2,
-        flowCy: node.position.y + SIZE / 2,
+        flowCx: node.position.x + liveSize / 2,
+        flowCy: node.position.y + liveSize / 2,
       };
       setIsResizing(true);
     }
-  }, [data.locked, getDistToEdge, isEditing, mainFlow, id, title, SIZE]);
+  }, [data.locked, getDistToEdge, isEditing, mainFlow, id, title]);
 
   const canvasData = data.canvasData || {
     nodes: data.nodes || [], edges: data.edges || [], drawings: data.drawings || [],
@@ -231,9 +234,9 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         {/* ── Title edit click zone — parallel arc at the text's actual radius ──────── */}
         {!isEditing && !data.locked && (() => {
           // The text sits on arcPath (radius R) with dy={-titleSpacing}.
-          // dy is perpendicular-outward from the arc, so the text lives on a
-          // parallel arc at radius R + titleSpacing from the circle centre.
-          const clickR   = Math.max(R + titleSpacing, 4);
+          // dy={-titleSpacing} shifts the text INWARD (toward center) by titleSpacing px,
+          // so the text lives on a parallel arc at radius R - titleSpacing.
+          const clickR   = Math.max(R - titleSpacing, 4);
           const clickArcD = `M ${R - clickR},${R} A ${clickR},${clickR} 0 0,1 ${R + clickR},${R}`;
           // Stroke width = just enough to cover the glyph height, nothing more
           const clickSW  = Math.max(fontSize + 4, 14);
