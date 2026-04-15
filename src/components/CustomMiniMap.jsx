@@ -165,17 +165,20 @@ export function CustomMiniMap({ nodes, edges, drawings }) {
             const mh  = Math.max(h * scale, 3);
 
             if (n.type === 'text') {
-              const raw  = (n.data?.text || '').replace(/[#*_`>|\[\]]/g, '').trim();
+              const raw     = (n.data?.text || '').replace(/[#*_`>|\[\]]/g, '').trim();
               const preview = raw.slice(0, 28);
-              const bg   = n.data?.isSticky ? 'rgba(254,243,199,0.45)' : 'rgba(255,255,255,0.07)';
-              const fill = n.data?.isSticky ? 'rgba(30,30,30,0.85)' : 'rgba(255,255,255,0.75)';
-              const fs   = Math.max(4, Math.min(mh * 0.65, 7));
+              const bg      = n.data?.isSticky ? 'rgba(254,243,199,0.45)' : 'rgba(255,255,255,0.07)';
+              const fill    = n.data?.isSticky
+                ? 'rgba(30,30,30,0.85)'
+                : (n.data?.textColor || 'rgba(255,255,255,0.75)');
+              const fontFam = n.data?.fontFamily || 'sans-serif';
+              const fs      = Math.max(4, Math.min(mh * 0.65, 7));
               return (
                 <g key={n.id}>
                   <rect x={pos.x} y={pos.y} width={mw} height={mh} rx={2} fill={bg} />
                   {preview && (
                     <text x={pos.x + 2} y={pos.y + fs + 1} fontSize={fs} fill={fill}
-                      fontFamily="sans-serif" style={{ pointerEvents: 'none' }}>
+                      fontFamily={fontFam} style={{ pointerEvents: 'none' }}>
                       {preview}
                     </text>
                   )}
@@ -184,15 +187,17 @@ export function CustomMiniMap({ nodes, edges, drawings }) {
             }
 
             if (n.type === 'link') {
-              const label = (n.data?.label || n.data?.url || '').slice(0, 22);
-              const fs    = Math.max(4, Math.min(mh * 0.65, 7));
+              const label   = (n.data?.label || n.data?.url || '').slice(0, 22);
+              const fs      = Math.max(4, Math.min(mh * 0.65, 7));
+              const fill    = n.data?.textColor || 'rgba(96,165,250,0.85)';
+              const fontFam = n.data?.fontFamily || 'sans-serif';
               return (
                 <g key={n.id}>
                   <rect x={pos.x} y={pos.y} width={mw} height={mh} rx={2}
                     fill="rgba(96,165,250,0.15)" stroke="rgba(96,165,250,0.50)" strokeWidth={0.5} />
                   {label && (
                     <text x={pos.x + 2} y={pos.y + fs + 1} fontSize={fs}
-                      fill="rgba(96,165,250,0.85)" fontFamily="sans-serif"
+                      fill={fill} fontFamily={fontFam}
                       style={{ pointerEvents: 'none' }}>
                       ↗ {label}
                     </text>
@@ -205,15 +210,23 @@ export function CustomMiniMap({ nodes, edges, drawings }) {
               const r  = Math.max(Math.min(mw, mh) / 2, 2);
               const cx = pos.x + mw / 2;
               const cy = pos.y + mh / 2;
+              const fs = Math.max(4, r * 0.3);
+              const titleColor  = n.data?.textColor  || 'rgba(255,255,255,0.55)';
+              const titleFamily = n.data?.fontFamily || 'sans-serif';
+              const maxChars    = Math.max(4, Math.floor((r * 1.8) / (fs * 0.6)));
+              const label = n.data?.title
+                ? (n.data.title.length > maxChars ? n.data.title.slice(0, maxChars - 1) + '…' : n.data.title)
+                : null;
               return (
                 <g key={n.id}>
                   <circle cx={cx} cy={cy} r={r}
                     fill="rgba(96,165,250,0.08)" stroke="rgba(96,165,250,0.50)" strokeWidth={0.5} />
-                  {n.data?.title && r > 6 && (
-                    <text x={cx} y={cy} fontSize={Math.max(4, r * 0.3)}
-                      fill="rgba(255,255,255,0.45)" textAnchor="middle" dominantBaseline="middle"
-                      fontFamily="sans-serif" style={{ pointerEvents: 'none' }}>
-                      {n.data.title.slice(0, 8)}
+                  {label && r > 6 && (
+                    <text x={cx} y={cy} fontSize={fs}
+                      fill={titleColor} textAnchor="middle" dominantBaseline="middle"
+                      fontFamily={titleFamily} fontWeight="500"
+                      style={{ pointerEvents: 'none' }}>
+                      {label}
                     </text>
                   )}
                 </g>

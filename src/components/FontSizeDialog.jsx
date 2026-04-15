@@ -3,13 +3,50 @@ import { Dialog } from './Dialog';
 
 /**
  * Font family options available in the picker.
- * Extend this array to add new fonts globally.
+ * Grouped: Generic → Common cross-platform → macOS-specific → Developer/modern.
  */
 const FONT_OPTIONS = [
-  { value: 'sans-serif', label: 'Sans-Serif' },
-  { value: 'serif', label: 'Serif' },
-  { value: 'monospace', label: 'Monospace' },
-  { value: 'system-ui', label: 'System UI' },
+  // ── Generic (always available) ─────────────────────────────────────────
+  { value: 'system-ui, sans-serif',                          label: 'System UI' },
+  { value: 'sans-serif',                                     label: 'Sans-Serif' },
+  { value: 'serif',                                          label: 'Serif' },
+  { value: 'monospace',                                      label: 'Monospace' },
+  { value: 'cursive',                                        label: 'Cursive' },
+  { value: 'fantasy',                                        label: 'Fantasy' },
+  // ── Common cross-platform ──────────────────────────────────────────────
+  { value: 'Arial, sans-serif',                              label: 'Arial' },
+  { value: '"Helvetica Neue", Helvetica, sans-serif',        label: 'Helvetica' },
+  { value: 'Verdana, Geneva, sans-serif',                    label: 'Verdana' },
+  { value: 'Tahoma, Geneva, sans-serif',                     label: 'Tahoma' },
+  { value: '"Trebuchet MS", Helvetica, sans-serif',          label: 'Trebuchet MS' },
+  { value: 'Impact, Charcoal, sans-serif',                   label: 'Impact' },
+  { value: '"Arial Narrow", Arial, sans-serif',              label: 'Arial Narrow' },
+  { value: 'Georgia, serif',                                 label: 'Georgia' },
+  { value: '"Times New Roman", Times, serif',                label: 'Times New Roman' },
+  { value: '"Palatino Linotype", Palatino, serif',           label: 'Palatino' },
+  { value: 'Garamond, serif',                                label: 'Garamond' },
+  { value: '"Book Antiqua", Palatino, serif',                label: 'Book Antiqua' },
+  { value: '"Courier New", Courier, monospace',              label: 'Courier New' },
+  { value: '"Lucida Console", Monaco, monospace',            label: 'Lucida Console' },
+  { value: '"Lucida Sans Unicode", "Lucida Grande", sans-serif', label: 'Lucida Sans' },
+  { value: '"Comic Sans MS", "Comic Sans", cursive',         label: 'Comic Sans' },
+  // ── macOS / Apple ──────────────────────────────────────────────────────
+  { value: '-apple-system, BlinkMacSystemFont, sans-serif',  label: 'SF Pro (macOS)' },
+  { value: '"SF Mono", "Fira Mono", monospace',              label: 'SF Mono (macOS)' },
+  { value: 'Menlo, Monaco, monospace',                       label: 'Menlo (macOS)' },
+  { value: '"Gill Sans", "Gill Sans MT", sans-serif',        label: 'Gill Sans' },
+  { value: 'Optima, Candara, sans-serif',                    label: 'Optima (macOS)' },
+  { value: 'Futura, "Century Gothic", sans-serif',           label: 'Futura' },
+  { value: 'Baskerville, "Baskerville Old Face", serif',     label: 'Baskerville' },
+  { value: 'Didot, "GFS Didot", serif',                      label: 'Didot (macOS)' },
+  { value: '"Bodoni MT", Bodoni, serif',                     label: 'Bodoni' },
+  { value: '"Cochin", Georgia, serif',                       label: 'Cochin' },
+  // ── Developer / modern ─────────────────────────────────────────────────
+  { value: '"Inter", system-ui, sans-serif',                 label: 'Inter' },
+  { value: '"JetBrains Mono", "Fira Code", monospace',       label: 'JetBrains Mono' },
+  { value: '"Fira Code", "Fira Mono", monospace',            label: 'Fira Code' },
+  { value: '"Source Code Pro", monospace',                   label: 'Source Code Pro' },
+  { value: '"Ubuntu Mono", monospace',                       label: 'Ubuntu Mono' },
 ];
 
 /** Quick-pick text colour swatches */
@@ -60,9 +97,12 @@ export function FontSizeDialog({
           className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
           value={fontFamily}
           onChange={(e) => setFontFamily(e.target.value)}
+          style={{ fontFamily }}
         >
           {FONT_OPTIONS.map(opt => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
+            <option key={opt.value} value={opt.value} style={{ fontFamily: opt.value }}>
+              {opt.label}
+            </option>
           ))}
         </select>
       </div>

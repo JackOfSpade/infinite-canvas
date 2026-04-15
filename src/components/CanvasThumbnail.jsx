@@ -52,16 +52,21 @@ function ThumbnailNode({ r }) {
       .filter(l => l.trim())
       .slice(0, 4);
 
-    const lineH = Math.min(h / (lines.length || 1), 14);
+    const lineH    = Math.min(h / (lines.length || 1), 14);
     const fontSize = Math.max(7, Math.min(11, lineH * 0.8));
+    // Preserve user-chosen color and font family; fall back to sensible defaults
+    const textFill = data?.isSticky
+      ? 'rgba(30,30,30,0.85)'
+      : (data?.textColor || 'rgba(255,255,255,0.70)');
+    const fontFam  = data?.fontFamily || 'Inter, ui-sans-serif, sans-serif';
 
     return (
       <g>
         {/* Faint bg so it's distinguishable from canvas bg */}
         <rect x={x} y={y} width={w} height={h} rx={4} fill="rgba(255,255,255,0.05)" />
         {lines.length === 0 ? (
-          <text x={x + 6} y={y + 14} fontSize={fontSize} fill="rgba(255,255,255,0.2)"
-            fontFamily="Inter, ui-sans-serif, sans-serif">
+          <text x={x + 6} y={y + 14} fontSize={fontSize}
+            fill="rgba(255,255,255,0.2)" fontFamily={fontFam}>
             (empty)
           </text>
         ) : lines.map((line, i) => {
@@ -73,8 +78,8 @@ function ThumbnailNode({ r }) {
               x={x + 6}
               y={y + (i + 1) * lineH - 2}
               fontSize={fontSize}
-              fill="rgba(255,255,255,0.70)"
-              fontFamily="Inter, ui-sans-serif, sans-serif"
+              fill={textFill}
+              fontFamily={fontFam}
             >
               {display}
             </text>
@@ -85,16 +90,18 @@ function ThumbnailNode({ r }) {
   }
 
   if (type === 'link') {
-    const display = getLinkDisplay(data);
+    const display  = getLinkDisplay(data);
     const maxChars = Math.floor(w / 8);
-    const label = display.length > maxChars ? display.slice(0, maxChars - 1) + '…' : display;
+    const label    = display.length > maxChars ? display.slice(0, maxChars - 1) + '…' : display;
+    const linkFill = data?.textColor || 'rgba(96,165,250,0.75)';
+    const fontFam  = data?.fontFamily || 'Inter, ui-sans-serif, sans-serif';
 
     return (
       <g>
         <rect x={x} y={y} width={w} height={h} rx={4} fill="rgba(96,165,250,0.07)"
           stroke="rgba(96,165,250,0.20)" strokeWidth="1" />
-        <text x={x + 7} y={y + h / 2 + 4} fontSize={9} fill="rgba(96,165,250,0.75)"
-          fontFamily="Inter, ui-sans-serif, sans-serif">
+        <text x={x + 7} y={y + h / 2 + 4} fontSize={9}
+          fill={linkFill} fontFamily={fontFam}>
           ↗ {label || '—'}
         </text>
       </g>
@@ -105,6 +112,11 @@ function ThumbnailNode({ r }) {
     const r  = Math.min(w, h) / 2;
     const cx = x + w / 2;
     const cy = y + h / 2;
+    // Scale font to the thumbnail circle size; preserve user's color/family choices
+    const titleColor  = data?.textColor  || 'rgba(255,255,255,0.60)';
+    const titleFamily = data?.fontFamily || 'Inter, ui-sans-serif, sans-serif';
+    const fs = Math.max(4, Math.min(r * 0.28, 9));
+    const maxChars = r > 0 ? Math.max(4, Math.floor((r * 1.8) / (fs * 0.6))) : 8;
     return (
       <g>
         <circle cx={cx} cy={cy} r={r}
@@ -112,16 +124,18 @@ function ThumbnailNode({ r }) {
           stroke="rgba(96,165,250,0.45)"
           strokeWidth={2}
         />
-        {data?.title && r > 8 && (
+        {data?.title && r > 10 && (
           <text
-            x={cx} y={cy + r + 7}
-            fontSize={Math.max(4, Math.min(7, r * 0.25))}
-            fill="rgba(255,255,255,0.35)"
+            x={cx} y={cy}
+            fontSize={fs}
+            fill={titleColor}
+            fontFamily={titleFamily}
+            fontWeight="500"
             textAnchor="middle"
-            fontFamily="Inter, ui-sans-serif, sans-serif"
+            dominantBaseline="middle"
             style={{ pointerEvents: 'none' }}
           >
-            {data.title.slice(0, 12)}
+            {data.title.length > maxChars ? data.title.slice(0, maxChars - 1) + '…' : data.title}
           </text>
         )}
       </g>

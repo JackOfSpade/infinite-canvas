@@ -44,21 +44,18 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     return () => document.removeEventListener(`edit-node-font-${id}`, handleOpenFont);
   }, [id, data.locked]);
 
-  // ── Returns the directional CSS cursor pointing FROM cursor TOWARD circle center ─
+  // ── Continuously-rotating SVG cursor that always points radially toward center ─
   const getResizeCursor = useCallback((clientX, clientY) => {
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return 'ew-resize';
     const cx = rect.left + rect.width  / 2;
     const cy = rect.top  + rect.height / 2;
-    const a  = ((Math.atan2(clientY - cy, clientX - cx) * 180 / Math.PI) + 360) % 360;
-    if (a < 22.5  || a >= 337.5) return 'e-resize';
-    if (a < 67.5)  return 'se-resize';
-    if (a < 112.5) return 's-resize';
-    if (a < 157.5) return 'sw-resize';
-    if (a < 202.5) return 'w-resize';
-    if (a < 247.5) return 'nw-resize';
-    if (a < 292.5) return 'n-resize';
-    return 'ne-resize';
+    const angleDeg = Math.atan2(clientY - cy, clientX - cx) * 180 / Math.PI;
+    // Double-headed arrow SVG rotated to the exact radial angle
+    // +90° because the SVG arrow is vertical by default; rotating by angleDeg alone
+    // would make it tangent to the circle. Adding 90° makes it point radially (toward center).
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><g transform='rotate(${(angleDeg + 90).toFixed(1)},10,10)' stroke-linecap='round' stroke-linejoin='round'><path d='M10 2L10 18M7 5L10 2L13 5M7 15L10 18L13 15' stroke='black' stroke-width='3.5' fill='none'/><path d='M10 2L10 18M7 5L10 2L13 5M7 15L10 18L13 15' stroke='white' stroke-width='2' fill='none'/></g></svg>`;
+    return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 10 10, ew-resize`;
   }, []);
 
   // ── Custom edge resize via window listeners ────────────────────────────────
@@ -106,9 +103,16 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   }, [isResizing, getDistToEdge, getResizeCursor]);
 
   const handleContainerPointerDown = useCallback((e) => {
-    if (isEditing || data.locked) return;
+    if (data.locked) return;
+    // Check edge FIRST — resize takes priority over editing so the initial-drop
+    // auto-editing state never blocks the resize gesture.
     if (getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE) {
       e.stopPropagation();
+      // Commit any in-progress title edit before resizing
+      if (isEditing) {
+        mainFlow.updateNodeData(id, { title: title.trim() });
+        setIsEditing(false);
+      }
       const node = mainFlow.getNode(id);
       if (!node) return;
       resizeCenterRef.current = {
@@ -117,7 +121,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       };
       setIsResizing(true);
     }
-  }, [isEditing, data.locked, getDistToEdge, mainFlow, id, SIZE]);
+  }, [data.locked, getDistToEdge, isEditing, mainFlow, id, title, SIZE]);
 
   const canvasData = data.canvasData || {
     nodes: data.nodes || [], edges: data.edges || [], drawings: data.drawings || [],
@@ -224,15 +228,35 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           </text>
         </svg>
 
-        {/* ── Title edit click zone (single-click above circle) ─────────────── */}
-        {!isEditing && !data.locked && (
-          <div
-            style={{ position: 'absolute', top: -20, left: '15%', width: '70%', height: 20,
-                     cursor: 'text', zIndex: 15 }}
-            onPointerDown={e => e.stopPropagation()}
-            onClick={e => { e.stopPropagation(); setIsEditing(true); }}
-          />
-        )}
+        {/* ── Title edit click zone — parallel arc at the text's actual radius ──────── */}
+        {!isEditing && !data.locked && (() => {
+          // The text sits on arcPath (radius R) with dy={-titleSpacing}.
+          // dy is perpendicular-outward from the arc, so the text lives on a
+          // parallel arc at radius R + titleSpacing from the circle centre.
+          const clickR   = Math.max(R + titleSpacing, 4);
+          const clickArcD = `M ${R - clickR},${R} A ${clickR},${clickR} 0 0,1 ${R + clickR},${R}`;
+          // Stroke width = just enough to cover the glyph height, nothing more
+          const clickSW  = Math.max(fontSize + 4, 14);
+          return (
+            <svg
+              width={SIZE}
+              height={SIZE}
+              style={{ position: 'absolute', inset: 0, overflow: 'visible', zIndex: 15 }}
+            >
+              <path
+                d={clickArcD}
+                fill="none"
+                stroke="transparent"
+                strokeWidth={clickSW}
+                pointerEvents="stroke"
+                onPointerDown={e => e.stopPropagation()}
+                onClick={e => { e.stopPropagation(); setIsEditing(true); }}
+                onDoubleClick={e => e.stopPropagation()}
+                style={{ cursor: 'text' }}
+              />
+            </svg>
+          );
+        })()}
 
         {/* ── Transparent input overlay — sits over the arc, only caret is visible ── */}
         {isEditing && (
