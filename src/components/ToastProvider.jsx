@@ -29,7 +29,11 @@ export function ToastProvider({ children }) {
 
   const addToast = useCallback(({ title, description, type = 'info', duration = 4000 }) => {
     const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);
-    setToasts((prev) => [...prev, { id, title, description, type, duration }]);
+    setToasts((prev) => {
+      const next = [...prev, { id, title, description, type, duration }];
+      // Cap at 5 toasts — discard oldest if over limit
+      return next.length > 5 ? next.slice(next.length - 5) : next;
+    });
     return id;
   }, []);
 

@@ -91,8 +91,11 @@ export function JobCardNode({ id, data }) {
           {data.salary && <div className="text-emerald-400/80 text-xs mt-0.5">{data.salary}</div>}
           
           <button 
-            onClick={() => deleteElements({ nodes: [{ id }] })}
-            className="absolute top-0 -right-2 text-white/30 hover:text-red-400 hover:bg-white/10 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all"
+            onClick={data.locked ? undefined : () => deleteElements({ nodes: [{ id }] })}
+            disabled={!!data.locked}
+            className={`absolute top-0 -right-2 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all ${
+              data.locked ? 'hidden' : 'text-white/30 hover:text-red-400 hover:bg-white/10'
+            }`}
             title="Dismiss Job"
           >
             <X size={14} />
@@ -124,8 +127,9 @@ export function JobCardNode({ id, data }) {
       <div className="px-3 py-1.5 flex items-center justify-between border-t border-white/5">
         <select
           value={status}
-          onChange={(e) => handleStatusChange(e.target.value)}
-          className="bg-transparent text-white/60 text-xs outline-none cursor-pointer hover:text-white/80"
+          onChange={data.locked ? undefined : (e) => handleStatusChange(e.target.value)}
+          disabled={!!data.locked}
+          className={`bg-transparent text-xs outline-none ${data.locked ? 'text-white/30 cursor-default' : 'text-white/60 cursor-pointer hover:text-white/80'}`}
           onPointerDown={(e) => e.stopPropagation()}
         >
           {STATUS_OPTIONS.map(s => <option key={s} value={s} className="bg-[#1a1a1a]">{s}</option>)}
@@ -176,9 +180,13 @@ export function JobCardNode({ id, data }) {
             </div>
           ) : (
             <button
-              onClick={(e) => { e.stopPropagation(); generateCoverLetter(); }}
-              disabled={generatingCL}
-              className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium transition-colors bg-blue-500/10 text-blue-400/80 hover:bg-blue-500/20 hover:text-blue-400 disabled:opacity-50"
+              onClick={data.locked ? undefined : (e) => { e.stopPropagation(); generateCoverLetter(); }}
+              disabled={generatingCL || !!data.locked}
+              className={`w-full flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium transition-colors ${
+                data.locked
+                  ? 'bg-white/5 text-white/20 cursor-default'
+                  : 'bg-blue-500/10 text-blue-400/80 hover:bg-blue-500/20 hover:text-blue-400 disabled:opacity-50'
+              }`}
             >
               <FileText size={12} />
               {generatingCL ? 'Generating...' : 'Generate Cover Letter'}

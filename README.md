@@ -123,7 +123,7 @@ Drag the Sell module to your canvas and drop product photos onto it. The AI will
 - **Animated Flow Lines**: Drawing connections between nodes uses sleek, animated bezier curves to visualize your workflow paths.
 - **Node Selections**: Selected nodes illuminate with a soft blue glassmorphic glow, keeping your active context clear.
 - **Color Coding**: Right-click any node (Text, Link, Nested Canvas, or Document) and select **Color** to apply a beautiful translucent background. Use colors to categorize your thoughts and create visually striking diagrams!
-- **Lock Nodes**: Accidental drags getting in the way? Right-click a node and select **Lock Node**. This displays a padlock icon and prevents it from being moved or deleted until unlocked. Perfect for setting up permanent structural frames or headers.
+- **Lock Nodes**: Accidental drags getting in the way? Right-click a node and select **Lock Node**. This displays a padlock icon and prevents the node from being moved, deleted, edited, renamed, AI-polished, or dropped onto until unlocked. Perfect for setting up permanent structural frames or headers.
 - **Tidy Up Nodes**: Messy canvas? Select multiple nodes (Shift+Drag), right-click, and hit **Tidy Selection** (or **Tidy Canvas**) to beautifully snap them into organized algorithmic grids.
 - **Background Scenery**: Tired of the default dots? Click the Grid Pattern icon in the bottom toolbar to cycle between transparent Dots, Lines, Crosses, or a completely Clean backdrop.
 - **MiniMap**: Toggle the MiniMap from the toolbar to get a bird's-eye overview of your entire canvas in the bottom-right corner.

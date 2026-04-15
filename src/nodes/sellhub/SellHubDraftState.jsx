@@ -6,7 +6,8 @@ export function SellHubDraftState({
   editing,
   setEditing,
   handleFieldEdit,
-  handleConfirmDraft
+  handleConfirmDraft,
+  locked = false,
 }) {
   return (
     <div className="p-3 space-y-2" onPointerDown={(e) => e.stopPropagation()}>
@@ -19,6 +20,7 @@ export function SellHubDraftState({
         isEditing={editing === 'title'} 
         onStartEdit={() => setEditing('title')}
         onSave={(v) => handleFieldEdit('generated_title', v)} 
+        disabled={locked}
       />
 
       <div className="grid grid-cols-2 gap-2 text-xs">
@@ -29,6 +31,7 @@ export function SellHubDraftState({
             isEditing={editing === 'brand'}
             onStartEdit={() => setEditing('brand')} 
             onSave={(v) => handleFieldEdit('brand', v)} 
+            disabled={locked}
           />
         </div>
         <div>
@@ -38,6 +41,7 @@ export function SellHubDraftState({
             isEditing={editing === 'model'}
             onStartEdit={() => setEditing('model')} 
             onSave={(v) => handleFieldEdit('model', v)} 
+            disabled={locked}
           />
         </div>
       </div>
@@ -51,10 +55,15 @@ export function SellHubDraftState({
       )}
 
       <button 
-        onClick={handleConfirmDraft}
-        className="w-full py-2 rounded-lg text-xs font-medium bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors mt-1"
+        onClick={locked ? undefined : handleConfirmDraft}
+        disabled={locked}
+        className={`w-full py-2 rounded-lg text-xs font-medium transition-colors mt-1 ${
+          locked
+            ? 'bg-white/5 text-white/20 cursor-default'
+            : 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30'
+        }`}
       >
-        Confirm & Research Price
+        Confirm &amp; Research Price
       </button>
     </div>
   );

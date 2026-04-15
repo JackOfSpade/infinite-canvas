@@ -105,8 +105,15 @@ export function LinkNode({ id, data }) {
 
   // Listen for dialog triggers from global context menu
   React.useEffect(() => {
-    const handleOpenFont = () => setShowDialog('font');
-    const handleOpenUrl = () => { setUrlInput(data.url || ''); setShowDialog('url'); };
+    const handleOpenFont = () => {
+      if (data.locked) return; // Locked nodes are not editable
+      setShowDialog('font');
+    };
+    const handleOpenUrl = () => {
+      if (data.locked) return; // Locked nodes are not editable
+      setUrlInput(data.url || '');
+      setShowDialog('url');
+    };
     
     document.addEventListener(`edit-node-font-${id}`, handleOpenFont);
     document.addEventListener(`edit-node-url-${id}`, handleOpenUrl);
@@ -115,7 +122,7 @@ export function LinkNode({ id, data }) {
       document.removeEventListener(`edit-node-font-${id}`, handleOpenFont);
       document.removeEventListener(`edit-node-url-${id}`, handleOpenUrl);
     };
-  }, [id, data.url]);
+  }, [id, data.url, data.locked]);
 
   return (
     <div 

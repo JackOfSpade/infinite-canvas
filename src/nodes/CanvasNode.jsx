@@ -49,11 +49,12 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected })
   }, [title, handleBlur]);
 
   const handleDoubleClick = useCallback((e) => {
-    // Don't dive in if clicking on the title input
+    // Don't dive in if clicking on the title input or if the node is locked
     if (e.target.tagName === 'INPUT') return;
+    if (data.locked) return;
     e.stopPropagation();
     nav?.diveIn(id);
-  }, [id, nav]);
+  }, [id, nav, data.locked]);
 
   const handleDelete = useCallback((e) => {
     e.stopPropagation();
@@ -98,12 +99,14 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected })
             </span>
           )}
 
-          {/* Double-click hint on hover */}
-          <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100 pointer-events-none">
-            <span className="text-[10px] text-white/80 bg-black/50 rounded-full px-2.5 py-1 backdrop-blur-sm font-medium">
-              Double-click to open
-            </span>
-          </div>
+          {/* Double-click hint on hover — only shown when unlocked */}
+          {!data.locked && (
+            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100 pointer-events-none">
+              <span className="text-[10px] text-white/80 bg-black/50 rounded-full px-2.5 py-1 backdrop-blur-sm font-medium">
+                Double-click to open
+              </span>
+            </div>
+          )}
 
           {/* Delete button */}
           {!data.locked && (
@@ -123,11 +126,14 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected })
           <input
             ref={titleInputRef}
             type="text"
-            className="flex-1 min-w-0 bg-transparent text-white/80 text-[11px] font-medium focus:outline-none focus:text-white placeholder-white/25 truncate"
+            className={`flex-1 min-w-0 bg-transparent text-[11px] font-medium focus:outline-none placeholder-white/25 truncate ${
+              data.locked ? 'text-white/40 cursor-default' : 'text-white/80 focus:text-white'
+            }`}
             value={title}
-            onChange={handleTitleChange}
-            onBlur={handleTitleBlur}
+            onChange={data.locked ? undefined : handleTitleChange}
+            onBlur={data.locked ? undefined : handleTitleBlur}
             placeholder="Sub-Canvas"
+            disabled={!!data.locked}
             onPointerDown={(e) => e.stopPropagation()}
             onDoubleClick={(e) => e.stopPropagation()}
           />

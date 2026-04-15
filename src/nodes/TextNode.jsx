@@ -51,10 +51,13 @@ export function TextNode({ id, data }) {
 
   // Listen for font dialog trigger from global context menu
   React.useEffect(() => {
-    const handleOpenFont = () => setShowFontDialog(true);
+    const handleOpenFont = () => {
+      if (data.locked) return; // Locked nodes are not editable
+      setShowFontDialog(true);
+    };
     document.addEventListener(`edit-node-font-${id}`, handleOpenFont);
     return () => document.removeEventListener(`edit-node-font-${id}`, handleOpenFont);
-  }, [id]);
+  }, [id, data.locked]);
 
   return (
     <div 
