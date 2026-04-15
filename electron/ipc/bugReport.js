@@ -6,7 +6,7 @@ import os from 'os';
 export function registerBugReportHandlers() {
   ipcMain.handle('export-bug-report', async (event, payload) => {
     try {
-      const { description, nodes, edges, drawings, frontEndState, nodeInternals } = payload;
+      const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates } = payload;
 
       const systemInfo = {
         platform: process.platform,
@@ -33,21 +33,37 @@ export function registerBugReportHandlers() {
       // A mismatch here (e.g. measured growing while style stays constant) is
       // the signature of the ReactFlow ResizeObserver race condition.
       const groupNodes = (nodeInternals || []).filter(n => n.type === 'group');
+
+      // Build a quick lookup of component state by node id
+      const compStateById = {};
+      (nodeComponentStates || []).forEach(s => { compStateById[s.id] = s; });
+
       let nodeDiagMarkdown = '';
       if (groupNodes.length > 0) {
-        const rows = groupNodes.map(n =>
-          `| \`${n.id.slice(0, 8)}\` ` +
-          `| (${n.position?.x?.toFixed(0)}, ${n.position?.y?.toFixed(0)}) ` +
-          `| ${n.width_prop ?? '—'} ` +
-          `| ${n.style_width ?? '—'} ` +
-          `| ${n.measured_width ?? '—'} |`
-        ).join('\n');
+        const rows = groupNodes.map(n => {
+          const cs = compStateById[n.id] || {};
+          const flags = [
+            cs.isEditing   ? 'editing'    : null,
+            cs.isResizing  ? 'resizing'   : null,
+            cs.hasEdgeCursor ? 'edgeCursor' : null,
+          ].filter(Boolean).join(', ') || '—';
+          return (
+            `| \`${n.id.slice(0, 8)}\` ` +
+            `| (${n.position?.x?.toFixed(0)}, ${n.position?.y?.toFixed(0)}) ` +
+            `| ${n.width_prop ?? '—'} ` +
+            `| ${n.style_width ?? '—'} ` +
+            `| ${n.measured_width ?? '—'} ` +
+            `| ${cs.size ?? '—'} ` +
+            `| ${flags} |`
+          );
+        }).join('\n');
         nodeDiagMarkdown = `
 ## Group Node Diagnostics
-> Mismatches between columns reveal ResizeObserver/setNodes race conditions.
+> **Size columns**: mismatches reveal ResizeObserver/setNodes race conditions.
+> **Component state**: React state at the moment the report was generated.
 
-| ID (first 8) | Position | width (prop) | style.width | measured.width |
-|---|---|---|---|---|
+| ID (first 8) | Position | width (prop) | style.width | measured.width | currentSize | state flags |
+|---|---|---|---|---|---|---|
 ${rows}
 `;
       }

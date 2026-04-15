@@ -412,6 +412,9 @@ export function Canvas() {
         // Separate diagnostic table — shows all three RF size fields per group node
         // so the report immediately exposes any style/measured/prop mismatches.
         nodeInternals,
+        // Live React component state per CanvasNode (isEditing, isResizing, etc.)
+        // — things not visible in the Zustand node JSON.
+        nodeComponentStates: EventLogger.getNodeStates(),
         eventLogs: EventLogger.getLogs(),
       };
       const res = await window.electronAPI.exportBugReport(payload);

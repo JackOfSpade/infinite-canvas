@@ -40,6 +40,22 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   const liveRef = useRef(null);
   liveRef.current = { isEditing, title, data, SIZE };
 
+  // Keep the EventLogger registry up-to-date so bug reports show React
+  // component state (isEditing, isResizing, edgeCursorStyle) per node.
+  useEffect(() => {
+    EventLogger.registerNodeState(id, {
+      isEditing,
+      isResizing,
+      hasEdgeCursor: !!edgeCursorStyle,
+      size: SIZE,
+    });
+  }, [id, isEditing, isResizing, edgeCursorStyle, SIZE]);
+
+  useEffect(() => {
+    return () => EventLogger.unregisterNodeState(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
   useEffect(() => { setTitle(data.title || ''); }, [data.title]);
 
   useEffect(() => {

@@ -28,7 +28,28 @@ class EventLoggerSingleton {
    * @param {string} message — Human-readable description of the event
    */
   log(message) {
-    const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
+    const now = new Date();
+    const hms = now.toLocaleTimeString('en-US', { hour12: false });
+    const ms  = String(now.getMilliseconds()).padStart(3, '0');
+    const timestamp = `${hms}.${ms}`;
+
+    // Deduplicate consecutive identical messages (e.g. ResizeObserver floods).
+    // Instead of 40 identical lines, emit one line + a "(×N)" suffix when it stops.
+    if (this._lastMsg === message) {
+      this._lastCount = (this._lastCount || 1) + 1;
+      // Replace the last entry in the ring with the updated count.
+      if (this.logs.length > 0) {
+        const prev = this.logs[this.logs.length - 1];
+        const updated = prev.replace(/ \(×\d+\)$/, '') + ` (×${this._lastCount})`;
+        this.currentBytes -= prev.length;
+        this.logs[this.logs.length - 1] = updated;
+        this.currentBytes += updated.length;
+      }
+      return;
+    }
+    this._lastMsg   = message;
+    this._lastCount = 1;
+
     const entry = `[${timestamp}] ${message}`;
 
     this.logs.push(entry);
@@ -48,6 +69,27 @@ class EventLoggerSingleton {
   /** Returns approximate in-memory byte count of the log buffer. */
   getByteCount() {
     return this.currentBytes;
+  }
+
+  // ── Component state registry ───────────────────────────────────────────────
+  // CanvasNode instances call registerNodeState on every render so the bug
+  // report can snapshot "what was each node's React state at the moment the
+  // user clicked Generate Report" — e.g. isEditing, isResizing, edgeCursorStyle.
+  // This catches things the JSON application state (Zustand) doesn't expose.
+
+  registerNodeState(id, state) {
+    if (!this._nodeStates) this._nodeStates = new Map();
+    this._nodeStates.set(id, state);
+  }
+
+  unregisterNodeState(id) {
+    this._nodeStates?.delete(id);
+  }
+
+  /** Returns a snapshot of all live CanvasNode component states. */
+  getNodeStates() {
+    if (!this._nodeStates) return [];
+    return Array.from(this._nodeStates.entries()).map(([id, s]) => ({ id, ...s }));
   }
 
   /**
