@@ -8,12 +8,12 @@ import { useReactFlow } from '@xyflow/react';
  * Returns the root-level { nodes, edges, drawings }.
  * Pure function — does not mutate state.
  */
-function syncStackUpward(currentNodes, currentEdges, currentDrawings, stack, startIndex) {
+function syncStackUpward(currentNodes, currentEdges, currentDrawings, stack, startIndex, stopIndex = 0) {
   let nodes = structuredClone(currentNodes);
   let edges = structuredClone(currentEdges);
   let drawings = structuredClone(currentDrawings);
 
-  for (let i = startIndex; i >= 0; i--) {
+  for (let i = startIndex; i >= stopIndex; i--) {
     const parentState = stack[i];
     const updatedNodes = parentState.nodes.map(n => {
       if (n.id === parentState.nodeId) {
@@ -151,25 +151,10 @@ export function useCanvasNavigation({
     setAnimPhase('fade-out');
 
     setTimeout(() => {
-      // Actually we need to walk only from current to targetIndex
-      // The synced result gives us root-level data; we need target-level data
-      // Re-walk from currentStack.length-1 down to targetIndex
-      let cn = structuredClone(nodesRef.current);
-      let ce = structuredClone(edgesRef.current);
-      let cd = structuredClone(drawingsRef.current);
-
-      for (let i = currentStack.length - 1; i >= targetIndex; i--) {
-        const parentState = currentStack[i];
-        const updatedNodes = parentState.nodes.map(n => {
-          if (n.id === parentState.nodeId) {
-            return { ...n, data: { ...n.data, canvasData: { nodes: cn, edges: ce, drawings: cd } } };
-          }
-          return n;
-        });
-        cn = updatedNodes;
-        ce = parentState.edges;
-        cd = parentState.drawings;
-      }
+      const { nodes: cn, edges: ce, drawings: cd } = syncStackUpward(
+        nodesRef.current, edgesRef.current, drawingsRef.current,
+        currentStack, currentStack.length - 1, targetIndex
+      );
 
       const targetViewport = currentStack[targetIndex].viewport;
       setStack(s => s.slice(0, targetIndex));

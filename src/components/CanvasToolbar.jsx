@@ -116,6 +116,24 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
     return () => window.removeEventListener('click', handleClick);
   }, []);
 
+  const handlePenClick = () => {
+    setShowColorMenu(false);
+    setShowEraserMenu(false);
+    setActiveTool(activeTool === 'pen' ? null : 'pen');
+    setPlacementMode(null);
+    penSuppressRef.current = false;
+    eraserSuppressRef.current = false;
+  };
+
+  const handleEraserClick = () => {
+    setShowEraserMenu(false);
+    setShowColorMenu(false);
+    setActiveTool(activeTool === 'eraser' ? null : 'eraser');
+    setPlacementMode(null);
+    penSuppressRef.current = false;
+    eraserSuppressRef.current = false;
+  };
+
   const handlePenContextMenu = (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -165,7 +183,7 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
         <div className="relative" onClick={e => e.stopPropagation()}>
         <ToolbarTooltip label="Pen Tool" shortcut="right-click for options" hidden={showColorMenu}>
             <button
-              onClick={() => { setShowColorMenu(false); setShowEraserMenu(false); setActiveTool(activeTool === 'pen' ? null : 'pen'); setPlacementMode(null); penSuppressRef.current = false; eraserSuppressRef.current = false; }}
+              onClick={handlePenClick}
               onContextMenu={handlePenContextMenu}
               className={`p-3 rounded-full transition ${activeTool === 'pen' ? 'text-white bg-blue-500/40 ring-2 ring-blue-500' : 'text-white/70 hover:text-white hover:bg-white/10'}`}
             >
@@ -229,7 +247,7 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
         <div className="relative" onClick={e => e.stopPropagation()}>
           <ToolbarTooltip label="Eraser" shortcut="right-click for options" hidden={showEraserMenu}>
             <button
-              onClick={() => { setShowEraserMenu(false); setShowColorMenu(false); setActiveTool(activeTool === 'eraser' ? null : 'eraser'); setPlacementMode(null); penSuppressRef.current = false; eraserSuppressRef.current = false; }}
+              onClick={handleEraserClick}
               onContextMenu={handleEraserContextMenu}
               className={`p-3 rounded-full transition ${activeTool === 'eraser' ? 'text-white bg-red-500/40 ring-2 ring-red-500' : 'text-white/70 hover:text-white hover:bg-white/10'}`}
             >

@@ -136,8 +136,9 @@ export function Canvas() {
   const showMiniMap = settings.showMiniMap ?? true;
   const penSize     = settings.penSize    ?? 3;
   const eraserSize  = settings.eraserSize ?? 15;
-  const setPenSize    = (v) => updateSetting('penSize', v);
-  const setEraserSize = (v) => updateSetting('eraserSize', v);
+  const setPenSize    = useCallback((v) => updateSetting('penSize', v),    [updateSetting]);
+  const setEraserSize = useCallback((v) => updateSetting('eraserSize', v), [updateSetting]);
+  const handleSettingsClick = useCallback(() => setIsSettingsOpen(true), []);
   const [activeColor, setActiveColor] = useState('white');
   const { screenToFlowPosition, getIntersectingNodes, getNode } = useReactFlow();
 
@@ -272,7 +273,7 @@ export function Canvas() {
     } catch (e) {
       addToast({ title: 'Bug Report Error', description: e.message || 'An unexpected error occurred.', type: "error" });
     }
-  }, [nodes, edges, drawings, activeTool, placementMode, eraserType, settings, currentFile, hasUnsavedChanges, navigation.depth, snapToGrid, bgVariant, showMiniMap, addToast]);
+  }, [nodes, edges, drawings, activeTool, placementMode, eraserType, settings, currentFile, hasUnsavedChanges, navigation.depth, snapToGrid, addToast]);
 
   // ── Animation overlay style ──────────────────────────────────────────────
   const animDuration = getAnimationDuration();
@@ -300,31 +301,24 @@ export function Canvas() {
       >
         <SearchBar nodes={nodes} />
 
-        {/* Eraser cursor — pixel-perfect circle showing the erase radius */}
-        {activeTool === 'eraser' && eraserScreenPos.x > 0 && (() => {
-          // The Background gap in Canvas is 48 flow-units. We need the zoom to convert
-          // eraserSize (flow-space radius) to screen pixels. But we only have screenToFlowPosition
-          // here; we instead track the scale via the viewport via the useViewport hook.
-          // Since we can't call hooks here, we read it from a CSS var set by ReactFlow.
-          // Simpler: just use the raw eraserSize as screen pixels — it's "good enough" because
-          // the user sets the size they actually see on screen. The drawing hook uses flow coords.
-          const diameter = eraserSize * 2;
-          return (
-            <div
-              className="fixed pointer-events-none z-[9998]"
-              style={{
-                left: eraserScreenPos.x - eraserSize,
-                top:  eraserScreenPos.y - eraserSize,
-                width:  diameter,
-                height: diameter,
-                borderRadius: '50%',
-                border: '1.5px solid rgba(255,255,255,0.7)',
-                boxShadow: '0 0 0 1px rgba(0,0,0,0.5)',
-                background: 'rgba(255,255,255,0.04)',
-              }}
-            />
-          );
-        })()}
+        {/* Eraser cursor — pixel-perfect circle showing the erase radius.
+            eraserSize is used directly as screen pixels — "good enough" because the user
+            sets the size they see on screen; the drawing hook converts to flow coords. */}
+        {activeTool === 'eraser' && eraserScreenPos.x > 0 && (
+          <div
+            className="fixed pointer-events-none z-[9998]"
+            style={{
+              left:   eraserScreenPos.x - eraserSize,
+              top:    eraserScreenPos.y - eraserSize,
+              width:  eraserSize * 2,
+              height: eraserSize * 2,
+              borderRadius: '50%',
+              border: '1.5px solid rgba(255,255,255,0.7)',
+              boxShadow: '0 0 0 1px rgba(0,0,0,0.5)',
+              background: 'rgba(255,255,255,0.04)',
+            }}
+          />
+        )}
 
         {/* Canvas transition overlay */}
         {navigation.animPhase && (
@@ -446,7 +440,7 @@ export function Canvas() {
               canRedo={canRedo}
               clearCanvas={clearCanvas}
               clearDrawings={clearDrawings}
-              onSettingsClick={() => setIsSettingsOpen(true)}
+              onSettingsClick={handleSettingsClick}
             />
 
             <StatusBar />
