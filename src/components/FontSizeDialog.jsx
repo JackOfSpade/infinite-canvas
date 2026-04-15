@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Dialog } from './Dialog';
 
 /**
@@ -83,15 +83,14 @@ export function FontSizeDialog({
 
   const showSpacing = initialSpacing !== undefined;
 
+  // Always-fresh ref so emit() never reads a stale closure value, regardless of
+  // how React batches state updates between the setter and the callback.
+  const latest = useRef({ fontSize, fontFamily, textColor, titleSpacing });
+  latest.current = { fontSize, fontFamily, textColor, titleSpacing };
+
   /** Push every change to the caller immediately — no Done button needed. */
   const emit = (overrides) => {
-    onApply({
-      fontSize,
-      fontFamily,
-      textColor,
-      titleSpacing,
-      ...overrides,
-    });
+    onApply({ ...latest.current, ...overrides });
   };
 
   // ── Font family ───────────────────────────────────────────────────────────

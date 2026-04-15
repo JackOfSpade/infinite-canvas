@@ -67,11 +67,27 @@ export function Canvas() {
 
   const onNodesChange = useCallback((changes) => {
     snapshotOnDelete(changes);
+    // Log notable changes for bug reports
+    changes.forEach(ch => {
+      if (ch.type === 'remove')   EventLogger.log(`node removed id=${ch.id}`);
+      if (ch.type === 'add')      EventLogger.log(`node added type=${ch.item?.type} id=${ch.item?.id}`);
+      if (ch.type === 'position' && ch.dragging === false) {
+        // Log final resting position after a drag (not every intermediate move)
+        EventLogger.log(`node moved id=${ch.id} x=${ch.position?.x?.toFixed(1)} y=${ch.position?.y?.toFixed(1)}`);
+      }
+      if (ch.type === 'dimensions') {
+        EventLogger.log(`node resized id=${ch.id} w=${ch.dimensions?.width} h=${ch.dimensions?.height}`);
+      }
+    });
     onNodesChangeBase(changes);
   }, [onNodesChangeBase, snapshotOnDelete]);
 
   const onEdgesChange = useCallback((changes) => {
     snapshotOnDelete(changes);
+    changes.forEach(ch => {
+      if (ch.type === 'remove') EventLogger.log(`edge removed id=${ch.id}`);
+      if (ch.type === 'add')    EventLogger.log(`edge added id=${ch.item?.id}`);
+    });
     onEdgesChangeBase(changes);
   }, [onEdgesChangeBase, snapshotOnDelete]);
 

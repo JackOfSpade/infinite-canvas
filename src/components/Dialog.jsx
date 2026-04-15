@@ -2,15 +2,19 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 /**
- * Reusable floating dialog — no backdrop overlay, draggable by header.
+ * Reusable floating dialog.
+ * - No dark backdrop overlay — canvas stays fully visible.
+ * - Clicking outside the dialog closes it (invisible backdrop catch).
+ * - Draggable by header; clamped to window bounds so it can't be dragged off-screen.
+ * - Escape key closes it.
  *
  * Props:
  *   title    — dialog title string
  *   children — dialog body content
- *   onClose  — called when Escape pressed or × clicked
+ *   onClose  — called when Escape pressed or outside clicked
  */
 export function Dialog({ title, children, onClose }) {
-  // null = centered via CSS transform; once dragged, holds absolute {x,y}
+  // null = centered via CSS transform; once dragged, holds { x, y } top-left
   const [pos, setPos] = useState(null);
   const dialogRef = useRef(null);
 
@@ -20,7 +24,7 @@ export function Dialog({ title, children, onClose }) {
     return () => window.removeEventListener('keydown', handleKey);
   }, [onClose]);
 
-  // ── Drag-to-move via header ───────────────────────────────────────────────
+  // ── Drag-to-move, clamped to window ──────────────────────────────────────
   const handleHeaderPointerDown = (e) => {
     if (e.button !== 0) return;
     e.stopPropagation();
@@ -31,14 +35,19 @@ export function Dialog({ title, children, onClose }) {
     const offY = e.clientY - rect.top;
 
     const onMove = (ev) => {
-      setPos({ x: ev.clientX - offX, y: ev.clientY - offY });
+      const dRect = dialogRef.current?.getBoundingClientRect();
+      const dW = dRect?.width  || 0;
+      const dH = dRect?.height || 0;
+      const x = Math.max(0, Math.min(window.innerWidth  - dW, ev.clientX - offX));
+      const y = Math.max(0, Math.min(window.innerHeight - dH, ev.clientY - offY));
+      setPos({ x, y });
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointerup',   onUp);
     };
     window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointerup',   onUp);
   };
 
   const dialogStyle = pos
@@ -46,34 +55,37 @@ export function Dialog({ title, children, onClose }) {
     : { position: 'fixed', zIndex: 10000, top: '50%', left: '50%', transform: 'translate(-50%, -50%)' };
 
   return createPortal(
-    <div
-      ref={dialogRef}
-      style={dialogStyle}
-      className="bg-neutral-900 border border-white/20 rounded-xl shadow-2xl flex flex-col min-w-[240px]"
-      onPointerDown={(e) => e.stopPropagation()}
-    >
-      {/* ── Draggable header ─────────────────────────────────────────────── */}
-      {title && (
-        <div
-          className="flex items-center justify-between px-4 py-2.5 border-b border-white/10
-                     cursor-grab active:cursor-grabbing select-none rounded-t-xl"
-          onPointerDown={handleHeaderPointerDown}
-        >
-          <h3 className="text-white font-medium text-sm">{title}</h3>
-          <button
-            onClick={(e) => { e.stopPropagation(); onClose(); }}
-            className="text-white/40 hover:text-white/80 transition-colors ml-4 text-base leading-none"
-          >
-            ✕
-          </button>
-        </div>
-      )}
+    <>
+      {/* Invisible backdrop — captures outside clicks to dismiss, no visual overlay */}
+      <div
+        style={{ position: 'fixed', inset: 0, zIndex: 9999 }}
+        onPointerDown={(e) => { e.stopPropagation(); onClose(); }}
+      />
 
-      {/* ── Body ─────────────────────────────────────────────────────────── */}
-      <div className="p-4 flex flex-col gap-4">
-        {children}
+      {/* Dialog panel */}
+      <div
+        ref={dialogRef}
+        style={dialogStyle}
+        className="bg-neutral-900 border border-white/20 rounded-xl shadow-2xl flex flex-col min-w-[220px]"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        {/* ── Draggable header ─────────────────────────────────────────────── */}
+        {title && (
+          <div
+            className="px-3 py-2 border-b border-white/10
+                       cursor-grab active:cursor-grabbing select-none rounded-t-xl"
+            onPointerDown={handleHeaderPointerDown}
+          >
+            <h3 className="text-white font-medium text-sm">{title}</h3>
+          </div>
+        )}
+
+        {/* ── Body ─────────────────────────────────────────────────────────── */}
+        <div className="p-3 flex flex-col gap-3">
+          {children}
+        </div>
       </div>
-    </div>,
+    </>,
     document.body
   );
 }

@@ -3,24 +3,29 @@ import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { Lock, X } from 'lucide-react';
 import { CanvasThumbnail } from '../components/CanvasThumbnail';
 import { FontSizeDialog } from '../components/FontSizeDialog';
+import { EventLogger } from '../utils/EventLogger';
 
-const MIN_SIZE = 80;
-const MAX_SIZE = 600;
+const MIN_SIZE    = 80;
+const MAX_SIZE    = 600;
 const DEFAULT_SIZE = 160;
-const EDGE_ZONE = 12; // screen-px from circle edge that activates resize cursor
+const EDGE_ZONE   = 12; // screen-px from circle edge that activates resize cursor
 
 export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, width, height }) {
   const SIZE = Math.round(width || DEFAULT_SIZE);
   const R    = SIZE / 2;
   const mainFlow = useReactFlow();
-  const [title, setTitle]           = useState(data.title || '');
-  const [isEditing, setIsEditing]   = useState(false);
+
+  const [title, setTitle]                 = useState(data.title || '');
+  const [isEditing, setIsEditing]         = useState(false);
   const [showFontDialog, setShowFontDialog] = useState(false);
-  const [edgeCursorStyle, setEdgeCursorStyle] = useState(null); // null | CSS cursor string
-  const [isResizing, setIsResizing] = useState(false);
+  const [edgeCursorStyle, setEdgeCursorStyle] = useState(null);
+  // isResizing state = visual signal only (hint text, etc.)
+  // isResizingRef = synchronous flag used inside pointer handlers (no re-render lag)
+  const [isResizing, setIsResizing]       = useState(false);
+  const isResizingRef   = useRef(false);
+  const resizeCenterRef = useRef(null); // { flowCx, flowCy }
   const inputRef        = useRef(null);
   const containerRef    = useRef(null);
-  const resizeCenterRef = useRef(null); // { flowCx, flowCy }
   const pathId = `tcp-${id}`;
 
   useEffect(() => { setTitle(data.title || ''); }, [data.title]);
@@ -37,56 +42,24 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     if (isEditing) { inputRef.current?.focus(); inputRef.current?.select(); }
   }, [isEditing]);
 
-  // Font & Size dialog trigger
+  // Font & Size dialog trigger (from context menu)
   useEffect(() => {
     const handleOpenFont = () => { if (!data.locked) setShowFontDialog(true); };
     document.addEventListener(`edit-node-font-${id}`, handleOpenFont);
     return () => document.removeEventListener(`edit-node-font-${id}`, handleOpenFont);
   }, [id, data.locked]);
 
-  // ── Continuously-rotating SVG cursor that always points radially toward center ─
+  // ── Continuously-rotating SVG resize cursor ───────────────────────────────
   const getResizeCursor = useCallback((clientX, clientY) => {
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return 'ew-resize';
     const cx = rect.left + rect.width  / 2;
     const cy = rect.top  + rect.height / 2;
     const angleDeg = Math.atan2(clientY - cy, clientX - cx) * 180 / Math.PI;
-    // Double-headed arrow SVG rotated to the exact radial angle
-    // +90° because the SVG arrow is vertical by default; rotating by angleDeg alone
-    // would make it tangent to the circle. Adding 90° makes it point radially (toward center).
+    // +90° so the double-headed arrow points radially (toward/away from center)
     const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><g transform='rotate(${(angleDeg + 90).toFixed(1)},10,10)' stroke-linecap='round' stroke-linejoin='round'><path d='M10 2L10 18M7 5L10 2L13 5M7 15L10 18L13 15' stroke='black' stroke-width='3.5' fill='none'/><path d='M10 2L10 18M7 5L10 2L13 5M7 15L10 18L13 15' stroke='white' stroke-width='2' fill='none'/></g></svg>`;
     return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 10 10, ew-resize`;
   }, []);
-
-  // ── Custom edge resize via window listeners ────────────────────────────────
-  useEffect(() => {
-    if (!isResizing) return;
-    const onMove = (e) => {
-      if (!resizeCenterRef.current) return;
-      const { flowCx, flowCy } = resizeCenterRef.current;
-      const fp = mainFlow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
-      const flowDist = Math.sqrt((fp.x - flowCx) ** 2 + (fp.y - flowCy) ** 2);
-      const newSize = Math.round(Math.max(MIN_SIZE, Math.min(MAX_SIZE, flowDist * 2)));
-      mainFlow.setNodes(nds => nds.map(n =>
-        n.id === id ? {
-          ...n,
-          position: { x: flowCx - newSize / 2, y: flowCy - newSize / 2 },
-          width: newSize,
-          height: newSize,
-          style: { ...(n.style || {}), width: newSize, height: newSize },
-        } : n
-      ));
-      // Keep cursor direction updating during resize
-      setEdgeCursorStyle(getResizeCursor(e.clientX, e.clientY));
-    };
-    const onUp = () => { setIsResizing(false); resizeCenterRef.current = null; };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup',   onUp);
-    return () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup',   onUp);
-    };
-  }, [isResizing, id, mainFlow, getResizeCursor]);
 
   const getDistToEdge = useCallback((clientX, clientY) => {
     const rect = containerRef.current?.getBoundingClientRect();
@@ -96,41 +69,78 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     return Math.abs(Math.sqrt((clientX - cx) ** 2 + (clientY - cy) ** 2) - rect.width / 2);
   }, []);
 
-  const handleContainerMouseMove = useCallback((e) => {
-    if (isResizing) return;
-    const near = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
-    setEdgeCursorStyle(near ? getResizeCursor(e.clientX, e.clientY) : null);
-  }, [isResizing, getDistToEdge, getResizeCursor]);
+  // ── Pointer handlers (pointer-capture approach — no useEffect race condition) ─
+  //
+  // setPointerCapture ensures the element receives ALL pointermove/pointerup
+  // events even if the pointer leaves the element bounds, and fires them
+  // synchronously in the same event loop (no React re-render gap).
 
   const handleContainerPointerDown = useCallback((e) => {
     if (data.locked) return;
-    // Check edge FIRST — resize takes priority over editing so the initial-drop
-    // auto-editing state never blocks the resize gesture.
+    // Edge check FIRST — resize takes priority over click-to-edit.
     if (getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE) {
       e.stopPropagation();
-      // Commit any in-progress title edit before resizing
       if (isEditing) {
         mainFlow.updateNodeData(id, { title: title.trim() });
         setIsEditing(false);
       }
-      const node = mainFlow.getNode(id);
-      if (!node) return;
-      // Use live node dimensions from the store (not the potentially-stale SIZE prop)
-      // to correctly anchor the center during resize.
-      const liveSize = node.style?.width || node.measured?.width || DEFAULT_SIZE;
-      resizeCenterRef.current = {
-        flowCx: node.position.x + liveSize / 2,
-        flowCy: node.position.y + liveSize / 2,
-      };
+      // Capture all subsequent pointer events on this element (even outside bounds).
+      containerRef.current?.setPointerCapture(e.pointerId);
+      // Measure screen center from DOM → convert to flow coords.
+      // Using the DOM rect avoids any stale React prop / store values.
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const screenCx = rect.left + rect.width  / 2;
+      const screenCy = rect.top  + rect.height / 2;
+      const fc = mainFlow.screenToFlowPosition({ x: screenCx, y: screenCy });
+      resizeCenterRef.current = { flowCx: fc.x, flowCy: fc.y };
+      isResizingRef.current = true;
       setIsResizing(true);
+      EventLogger.log(`canvas-node resize start id=${id} size=${SIZE}`);
     }
-  }, [data.locked, getDistToEdge, isEditing, mainFlow, id, title]);
+  }, [data.locked, getDistToEdge, isEditing, mainFlow, id, title, SIZE]);
 
+  const handleContainerPointerMove = useCallback((e) => {
+    // ── Active resize ─────────────────────────────────────────────────────
+    if (isResizingRef.current && resizeCenterRef.current) {
+      const { flowCx, flowCy } = resizeCenterRef.current;
+      const fp = mainFlow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      const flowDist = Math.sqrt((fp.x - flowCx) ** 2 + (fp.y - flowCy) ** 2);
+      const newSize  = Math.round(Math.max(MIN_SIZE, Math.min(MAX_SIZE, flowDist * 2)));
+      mainFlow.setNodes(nds => nds.map(n =>
+        n.id === id ? {
+          ...n,
+          position: { x: flowCx - newSize / 2, y: flowCy - newSize / 2 },
+          width:  newSize,
+          height: newSize,
+          style:  { ...(n.style || {}), width: newSize, height: newSize },
+        } : n
+      ));
+      setEdgeCursorStyle(getResizeCursor(e.clientX, e.clientY));
+      return;
+    }
+    // ── Hover: update edge cursor ─────────────────────────────────────────
+    const near = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
+    setEdgeCursorStyle(near ? getResizeCursor(e.clientX, e.clientY) : null);
+  }, [id, mainFlow, getResizeCursor, getDistToEdge]);
+
+  const handleContainerPointerUp = useCallback((e) => {
+    if (!isResizingRef.current) return;
+    containerRef.current?.releasePointerCapture(e.pointerId);
+    isResizingRef.current = false;
+    resizeCenterRef.current = null;
+    setIsResizing(false);
+    EventLogger.log(`canvas-node resize end id=${id}`);
+    // Restore hover cursor
+    const near = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
+    setEdgeCursorStyle(near ? getResizeCursor(e.clientX, e.clientY) : null);
+  }, [id, getDistToEdge, getResizeCursor]);
+
+  // ── Derived values ────────────────────────────────────────────────────────
   const canvasData = data.canvasData || {
     nodes: data.nodes || [], edges: data.edges || [], drawings: data.drawings || [],
   };
-  const nodeCount = canvasData.nodes?.length || 0;
-
+  const nodeCount    = canvasData.nodes?.length || 0;
   const fontSize     = data.fontSize     || 11;
   const fontFamily   = data.fontFamily   || 'Inter, ui-sans-serif, system-ui, sans-serif';
   const textColor    = data.textColor    || null;
@@ -148,7 +158,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     mainFlow.deleteElements({ nodes: [{ id }] });
   }, [id, mainFlow]);
 
-  const arcPath  = `M 0,${R} A ${R},${R} 0 0,1 ${SIZE},${R}`;
+  const arcPath   = `M 0,${R} A ${R},${R} 0 0,1 ${SIZE},${R}`;
   const titleFill = textColor ?? (title ? 'rgba(255,255,255,0.80)' : 'rgba(255,255,255,0.22)');
   const edgeCursor = edgeCursorStyle || undefined;
 
@@ -158,9 +168,10 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         ref={containerRef}
         className="group"
         style={{ width: SIZE, height: SIZE, position: 'relative', cursor: edgeCursor }}
-        onMouseMove={handleContainerMouseMove}
-        onMouseLeave={() => { if (!isResizing) setEdgeCursorStyle(null); }}
         onPointerDown={handleContainerPointerDown}
+        onPointerMove={handleContainerPointerMove}
+        onPointerUp={handleContainerPointerUp}
+        onPointerLeave={() => { if (!isResizingRef.current) setEdgeCursorStyle(null); }}
       >
         {/* ── Circle body ──────────────────────────────────────────────────── */}
         <div
@@ -211,7 +222,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           )}
         </div>
 
-        {/* ── Curved title — always visible, updates live during edit ──────── */}
+        {/* ── Curved title — always visible, turns blue while editing ──────── */}
         <svg width={SIZE} height={SIZE} style={{
           position: 'absolute', inset: 0, overflow: 'visible',
           pointerEvents: 'none', zIndex: 10,
@@ -231,37 +242,34 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           </text>
         </svg>
 
-        {/* ── Title edit click zone — parallel arc at the text's actual radius ──────── */}
+        {/* ── Title edit click zone ─────────────────────────────────────────── */}
+        {/* Positioned at the exact location of the arc text so the text cursor  */}
+        {/* only appears when hovering directly over the title glyphs.            */}
+        {/* dy={-titleSpacing} moves the text UP by titleSpacing from the arc     */}
+        {/* bottom (y = SIZE). Estimated width from title length × font size.      */}
         {!isEditing && !data.locked && (() => {
-          // The text sits on arcPath (radius R) with dy={-titleSpacing}.
-          // dy={-titleSpacing} shifts the text INWARD (toward center) by titleSpacing px,
-          // so the text lives on a parallel arc at radius R - titleSpacing.
-          const clickR   = Math.max(R - titleSpacing, 4);
-          const clickArcD = `M ${R - clickR},${R} A ${clickR},${clickR} 0 0,1 ${R + clickR},${R}`;
-          // Stroke width = just enough to cover the glyph height, nothing more
-          const clickSW  = Math.max(fontSize + 4, 14);
+          const titleText = title || 'Sub-Canvas';
+          const estWidth  = Math.min(SIZE * 0.88, Math.max(56, titleText.length * fontSize * 0.58 + 12));
+          const zoneTop   = SIZE - titleSpacing - fontSize - 4;
           return (
-            <svg
-              width={SIZE}
-              height={SIZE}
-              style={{ position: 'absolute', inset: 0, overflow: 'visible', zIndex: 15 }}
-            >
-              <path
-                d={clickArcD}
-                fill="none"
-                stroke="transparent"
-                strokeWidth={clickSW}
-                pointerEvents="stroke"
-                onPointerDown={e => e.stopPropagation()}
-                onClick={e => { e.stopPropagation(); setIsEditing(true); }}
-                onDoubleClick={e => e.stopPropagation()}
-                style={{ cursor: 'text' }}
-              />
-            </svg>
+            <div
+              style={{
+                position: 'absolute',
+                top:    zoneTop,
+                left:   (SIZE - estWidth) / 2,
+                width:  estWidth,
+                height: fontSize + 10,
+                cursor: 'text',
+                zIndex: 15,
+              }}
+              onPointerDown={e => e.stopPropagation()}
+              onClick={e => { e.stopPropagation(); setIsEditing(true); }}
+              onDoubleClick={e => e.stopPropagation()}
+            />
           );
         })()}
 
-        {/* ── Transparent input overlay — sits over the arc, only caret is visible ── */}
+        {/* ── Transparent input overlay — only the caret is visible ────────── */}
         {isEditing && (
           <div
             style={{
@@ -284,17 +292,17 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
               }}
               placeholder="Sub-Canvas"
               style={{
-                background: 'transparent',
-                color: 'transparent',
-                caretColor: 'rgba(96, 165, 250, 0.95)',
-                border: 'none',
-                outline: 'none',
-                width: '100%',
-                textAlign: 'center',
-                fontSize: `${fontSize}px`,
+                background:  'transparent',
+                color:       'transparent',
+                caretColor:  'rgba(96, 165, 250, 0.95)',
+                border:      'none',
+                outline:     'none',
+                width:       '100%',
+                textAlign:   'center',
+                fontSize:    `${fontSize}px`,
                 fontFamily,
-                padding: 0,
-                cursor: 'text',
+                padding:     0,
+                cursor:      'text',
               }}
             />
           </div>
