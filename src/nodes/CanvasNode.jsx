@@ -1,7 +1,6 @@
-import React, { useContext, useCallback, useState, useRef, useEffect } from 'react';
+import React, { useCallback, useState, useRef, useEffect } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { Lock, X } from 'lucide-react';
-import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { CanvasThumbnail } from '../components/CanvasThumbnail';
 import { FontSizeDialog } from '../components/FontSizeDialog';
 
@@ -13,15 +12,14 @@ const EDGE_ZONE = 12; // screen-px from circle edge that activates resize cursor
 export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, width, height }) {
   const SIZE = Math.round(width || DEFAULT_SIZE);
   const R    = SIZE / 2;
-  const nav      = useContext(CanvasNavigationContext);
   const mainFlow = useReactFlow();
-  const [title, setTitle]         = useState(data.title || '');
-  const [isEditing, setIsEditing] = useState(false);
+  const [title, setTitle]           = useState(data.title || '');
+  const [isEditing, setIsEditing]   = useState(false);
   const [showFontDialog, setShowFontDialog] = useState(false);
-  const [nearEdge, setNearEdge]   = useState(false);
+  const [edgeCursorStyle, setEdgeCursorStyle] = useState(null); // null | CSS cursor string
   const [isResizing, setIsResizing] = useState(false);
-  const inputRef       = useRef(null);
-  const containerRef   = useRef(null);
+  const inputRef        = useRef(null);
+  const containerRef    = useRef(null);
   const resizeCenterRef = useRef(null); // { flowCx, flowCy }
   const pathId = `tcp-${id}`;
 
@@ -46,6 +44,23 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     return () => document.removeEventListener(`edit-node-font-${id}`, handleOpenFont);
   }, [id, data.locked]);
 
+  // ── Returns the directional CSS cursor pointing FROM cursor TOWARD circle center ─
+  const getResizeCursor = useCallback((clientX, clientY) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return 'ew-resize';
+    const cx = rect.left + rect.width  / 2;
+    const cy = rect.top  + rect.height / 2;
+    const a  = ((Math.atan2(clientY - cy, clientX - cx) * 180 / Math.PI) + 360) % 360;
+    if (a < 22.5  || a >= 337.5) return 'e-resize';
+    if (a < 67.5)  return 'se-resize';
+    if (a < 112.5) return 's-resize';
+    if (a < 157.5) return 'sw-resize';
+    if (a < 202.5) return 'w-resize';
+    if (a < 247.5) return 'nw-resize';
+    if (a < 292.5) return 'n-resize';
+    return 'ne-resize';
+  }, []);
+
   // ── Custom edge resize via window listeners ────────────────────────────────
   useEffect(() => {
     if (!isResizing) return;
@@ -64,6 +79,8 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           style: { ...(n.style || {}), width: newSize, height: newSize },
         } : n
       ));
+      // Keep cursor direction updating during resize
+      setEdgeCursorStyle(getResizeCursor(e.clientX, e.clientY));
     };
     const onUp = () => { setIsResizing(false); resizeCenterRef.current = null; };
     window.addEventListener('pointermove', onMove);
@@ -72,7 +89,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup',   onUp);
     };
-  }, [isResizing, id, mainFlow]);
+  }, [isResizing, id, mainFlow, getResizeCursor]);
 
   const getDistToEdge = useCallback((clientX, clientY) => {
     const rect = containerRef.current?.getBoundingClientRect();
@@ -85,8 +102,8 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   const handleContainerMouseMove = useCallback((e) => {
     if (isResizing) return;
     const near = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
-    setNearEdge(prev => prev === near ? prev : near);
-  }, [isResizing, getDistToEdge]);
+    setEdgeCursorStyle(near ? getResizeCursor(e.clientX, e.clientY) : null);
+  }, [isResizing, getDistToEdge, getResizeCursor]);
 
   const handleContainerPointerDown = useCallback((e) => {
     if (isEditing || data.locked) return;
@@ -119,20 +136,14 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     setIsEditing(false);
   }, [id, mainFlow, title]);
 
-  const handleDoubleClick = useCallback((e) => {
-    if (isEditing || data.locked || isResizing) return;
-    e.stopPropagation();
-    nav?.diveIn(id);
-  }, [id, nav, data.locked, isEditing, isResizing]);
-
   const handleDelete = useCallback((e) => {
     e.stopPropagation();
     mainFlow.deleteElements({ nodes: [{ id }] });
   }, [id, mainFlow]);
 
-  const arcPath = `M 0,${R} A ${R},${R} 0 0,1 ${SIZE},${R}`;
+  const arcPath  = `M 0,${R} A ${R},${R} 0 0,1 ${SIZE},${R}`;
   const titleFill = textColor ?? (title ? 'rgba(255,255,255,0.80)' : 'rgba(255,255,255,0.22)');
-  const edgeCursor = (nearEdge || isResizing) ? 'nwse-resize' : undefined;
+  const edgeCursor = edgeCursorStyle || undefined;
 
   return (
     <>
@@ -141,24 +152,27 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         className="group"
         style={{ width: SIZE, height: SIZE, position: 'relative', cursor: edgeCursor }}
         onMouseMove={handleContainerMouseMove}
-        onMouseLeave={() => { if (!isResizing) setNearEdge(false); }}
+        onMouseLeave={() => { if (!isResizing) setEdgeCursorStyle(null); }}
         onPointerDown={handleContainerPointerDown}
       >
         {/* ── Circle body ──────────────────────────────────────────────────── */}
         <div
-          onDoubleClick={handleDoubleClick}
           style={{
             position:        'absolute',
             inset:           0,
             borderRadius:    '50%',
             overflow:        'hidden',
-            border:          selected
-              ? '2px solid rgba(96,165,250,0.85)'
-              : '2px solid rgba(255,255,255,0.10)',
+            border:          isEditing
+              ? '2px solid rgba(96,165,250,0.70)'
+              : selected
+                ? '2px solid rgba(96,165,250,0.85)'
+                : '2px solid rgba(255,255,255,0.10)',
             backgroundColor: data.backgroundColor || 'rgba(12,12,18,0.97)',
-            boxShadow:       selected
-              ? '0 0 0 4px rgba(96,165,250,0.15), 0 8px 40px rgba(0,0,0,0.65)'
-              : '0 4px 28px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.04)',
+            boxShadow:       isEditing
+              ? '0 0 0 3px rgba(96,165,250,0.15), 0 8px 40px rgba(0,0,0,0.65)'
+              : selected
+                ? '0 0 0 4px rgba(96,165,250,0.15), 0 8px 40px rgba(0,0,0,0.65)'
+                : '0 4px 28px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.04)',
             cursor: edgeCursor || 'pointer',
           }}
         >
@@ -167,7 +181,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
             position: 'absolute', inset: 0, borderRadius: '50%', pointerEvents: 'none',
             background: 'radial-gradient(circle, transparent 55%, rgba(0,0,0,0.35) 100%)',
           }} />
-          {!data.locked && !isResizing && (
+          {!data.locked && !isResizing && !isEditing && (
             <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-all
                             bg-black/0 group-hover:bg-black/45 flex items-center justify-center
                             pointer-events-none">
@@ -190,29 +204,27 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           )}
         </div>
 
-        {/* ── Curved title ─────────────────────────────────────────────────── */}
-        {!isEditing && (
-          <svg width={SIZE} height={SIZE} style={{
-            position: 'absolute', inset: 0, overflow: 'visible',
-            pointerEvents: 'none', zIndex: 10,
-          }}>
-            <defs><path id={pathId} d={arcPath} /></defs>
-            <text
-              fontSize={fontSize}
-              fontFamily={fontFamily}
-              fontWeight="500"
-              letterSpacing="0.5"
-              dy={-titleSpacing}
-              fill={titleFill}
-            >
-              <textPath href={`#${pathId}`} startOffset="50%" textAnchor="middle">
-                {title || 'Sub-Canvas'}
-              </textPath>
-            </text>
-          </svg>
-        )}
+        {/* ── Curved title — always visible, updates live during edit ──────── */}
+        <svg width={SIZE} height={SIZE} style={{
+          position: 'absolute', inset: 0, overflow: 'visible',
+          pointerEvents: 'none', zIndex: 10,
+        }}>
+          <defs><path id={pathId} d={arcPath} /></defs>
+          <text
+            fontSize={fontSize}
+            fontFamily={fontFamily}
+            fontWeight="500"
+            letterSpacing="0.5"
+            dy={-titleSpacing}
+            fill={isEditing ? 'rgba(96,165,250,0.90)' : titleFill}
+          >
+            <textPath href={`#${pathId}`} startOffset="50%" textAnchor="middle">
+              {title || 'Sub-Canvas'}
+            </textPath>
+          </text>
+        </svg>
 
-        {/* ── Title edit click zone ─────────────────────────────────────────── */}
+        {/* ── Title edit click zone (single-click above circle) ─────────────── */}
         {!isEditing && !data.locked && (
           <div
             style={{ position: 'absolute', top: -20, left: '15%', width: '70%', height: 20,
@@ -222,9 +234,14 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           />
         )}
 
-        {/* ── Edit input ───────────────────────────────────────────────────── */}
+        {/* ── Transparent input overlay — sits over the arc, only caret is visible ── */}
         {isEditing && (
-          <div style={{ position: 'absolute', top: -26, left: 0, width: SIZE, zIndex: 20 }}
+          <div
+            style={{
+              position: 'absolute',
+              top: -(Math.max(fontSize, 14) + titleSpacing + 2),
+              left: 0, width: SIZE, zIndex: 20,
+            }}
             onPointerDown={e => e.stopPropagation()}
             onClick={e => e.stopPropagation()}
           >
@@ -239,9 +256,19 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
                 if (e.key === 'Escape') { setTitle(data.title || ''); setIsEditing(false); }
               }}
               placeholder="Sub-Canvas"
-              className="w-full text-center text-[11px] font-medium bg-black/75 text-white/90
-                         placeholder-white/25 border border-blue-400/50 rounded-full px-2.5 py-0.5
-                         focus:outline-none backdrop-blur-sm"
+              style={{
+                background: 'transparent',
+                color: 'transparent',
+                caretColor: 'rgba(96, 165, 250, 0.95)',
+                border: 'none',
+                outline: 'none',
+                width: '100%',
+                textAlign: 'center',
+                fontSize: `${fontSize}px`,
+                fontFamily,
+                padding: 0,
+                cursor: 'text',
+              }}
             />
           </div>
         )}

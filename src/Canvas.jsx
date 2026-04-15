@@ -8,7 +8,7 @@ import {
   useReactFlow
 } from '@xyflow/react';
 
-import { createTextNode } from './utils/nodeFactory';
+import { createTextNode, NODE_FACTORIES } from './utils/nodeFactory';
 import { Sidebar } from './components/Sidebar';
 import { ContextMenu } from './components/ContextMenu';
 import { CanvasToolbar, NestedCanvasIcon } from './components/CanvasToolbar';
@@ -141,6 +141,9 @@ export function Canvas() {
   const handleSettingsClick = useCallback(() => setIsSettingsOpen(true), []);
   const [activeColor, setActiveColor] = useState('white');
   const [toolMenuOpen, setToolMenuOpen] = useState(false);
+  // Custom pointer-drag for Nested Canvas button (bypasses HTML5 drag so ghost matches click-place ghost)
+  const [nestedDragPos, setNestedDragPos] = useState(null); // {x,y} screen coords while dragging
+  const nestedDragRef = useRef(null); // { dragging: bool, startX, startY }
   const { screenToFlowPosition, getIntersectingNodes, getNode, setViewport, getViewport } = useReactFlow();
 
   const handlePaneDoubleClick = useCallback((e) => {
@@ -151,6 +154,45 @@ export function Canvas() {
     setNodes((nds) => nds.concat(newNode));
     EventLogger.log(`Double-clicked canvas to create new Text Node`);
   }, [activeTool, placementMode, screenToFlowPosition, takeSnapshot, setNodes]);
+
+  // ── Custom pointer-drag for Nested Canvas button ─────────────────────────
+  const onNestedCanvasDragStart = useCallback((startX, startY) => {
+    nestedDragRef.current = { dragging: false, startX, startY };
+
+    const onMove = (e) => {
+      const ref = nestedDragRef.current;
+      if (!ref) return;
+      if (!ref.dragging) {
+        const dx = e.clientX - ref.startX;
+        const dy = e.clientY - ref.startY;
+        if (dx * dx + dy * dy < 25) return; // < 5px threshold
+        ref.dragging = true;
+      }
+      setNestedDragPos({ x: e.clientX, y: e.clientY });
+    };
+
+    const onUp = (e) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      const ref = nestedDragRef.current;
+      nestedDragRef.current = null;
+      setNestedDragPos(null);
+
+      if (ref?.dragging) {
+        // Place node at drop position — same offset as handleDrop uses for node-type drops
+        const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+        const factory = NODE_FACTORIES['group'];
+        if (factory) {
+          takeSnapshot();
+          setNodes(nds => nds.concat(factory({ x: pos.x - 12, y: pos.y - 20 })));
+        }
+      }
+      // If not dragging, onClick on the button fires naturally → setPlacementMode('group')
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [screenToFlowPosition, takeSnapshot, setNodes]);
 
   // Prevent drawing edges TO sticky notes — sticky notes are output-only anchors
   const isValidConnection = useCallback((connection) => {
@@ -232,17 +274,18 @@ export function Canvas() {
 
   // ── WASD canvas navigation ───────────────────────────────────────────────
   useEffect(() => {
-    const keys = { w: false, a: false, s: false, d: false };
+    const keys = { w: false, a: false, s: false, d: false, shift: false };
     let rafId = null;
-    const SPEED = 6; // pixels per frame at zoom=1
+    const BASE_SPEED = 6; // pixels per frame at zoom=1
 
     const step = () => {
-      const { w, a, s, d } = keys;
+      const { w, a, s, d, shift } = keys;
       if (!w && !a && !s && !d) { rafId = null; return; }
+      const speed = shift ? BASE_SPEED * 5 : BASE_SPEED;
       const vp = getViewport();
       setViewport({
-        x: vp.x + (a ? SPEED : d ? -SPEED : 0),
-        y: vp.y + (w ? SPEED : s ? -SPEED : 0),
+        x: vp.x + (a ? speed : d ? -speed : 0),
+        y: vp.y + (w ? speed : s ? -speed : 0),
         zoom: vp.zoom,
       });
       rafId = requestAnimationFrame(step);
@@ -254,12 +297,15 @@ export function Canvas() {
       const k = e.key.toLowerCase();
       if (k === 'w' || k === 'a' || k === 's' || k === 'd') {
         keys[k] = true;
+        keys.shift = e.shiftKey;
         if (!rafId) rafId = requestAnimationFrame(step);
       }
+      if (k === 'shift') keys.shift = true;
     };
     const onKeyUp = (e) => {
       const k = e.key.toLowerCase();
       if (k in keys) keys[k] = false;
+      if (k === 'shift') keys.shift = false;
     };
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup',   onKeyUp);
@@ -365,6 +411,18 @@ export function Canvas() {
           />
         )}
 
+        {/* Nested canvas drag ghost — identical to the click-place ghost */}
+        {nestedDragPos && (
+          <div
+            className="fixed pointer-events-none z-50 flex flex-col items-center"
+            style={{ left: nestedDragPos.x, top: nestedDragPos.y, transform: 'translate(-50%, -100%)' }}
+          >
+            <span className="text-blue-400 opacity-90 drop-shadow-lg">
+              <NestedCanvasIcon size={28} />
+            </span>
+          </div>
+        )}
+
         {/* Canvas transition overlay */}
         {navigation.animPhase && (
           <div
@@ -389,6 +447,11 @@ export function Canvas() {
             onDragOver={handleDragOver}
             nodeTypes={nodeTypes}
             onDoubleClick={handlePaneDoubleClick}
+            onNodeDoubleClick={(e, node) => {
+                if (node.type === 'group' && !node.data?.locked && !navigation.isAnimating) {
+                  navigation.diveIn(node.id);
+                }
+              }}
             onPaneContextMenu={onPaneContextMenuBase}
             onNodeContextMenu={onNodeContextMenuBase}
             snapToGrid={snapToGrid}
@@ -470,6 +533,7 @@ export function Canvas() {
               snapToGrid={snapToGrid}
               setSnapToGrid={setSnapToGrid}
               onDragStart={onDragStart}
+              onNestedCanvasDragStart={onNestedCanvasDragStart}
               undo={undo}
               redo={redo}
               canUndo={canUndo}

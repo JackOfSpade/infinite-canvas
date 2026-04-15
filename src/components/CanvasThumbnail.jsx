@@ -101,6 +101,33 @@ function ThumbnailNode({ r }) {
     );
   }
 
+  if (type === 'group') {
+    const r  = Math.min(w, h) / 2;
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    return (
+      <g>
+        <circle cx={cx} cy={cy} r={r}
+          fill="rgba(96,165,250,0.06)"
+          stroke="rgba(96,165,250,0.45)"
+          strokeWidth={2}
+        />
+        {data?.title && r > 8 && (
+          <text
+            x={cx} y={cy + r + 7}
+            fontSize={Math.max(4, Math.min(7, r * 0.25))}
+            fill="rgba(255,255,255,0.35)"
+            textAnchor="middle"
+            fontFamily="Inter, ui-sans-serif, sans-serif"
+            style={{ pointerEvents: 'none' }}
+          >
+            {data.title.slice(0, 12)}
+          </text>
+        )}
+      </g>
+    );
+  }
+
   // All other node types: solid rectangle (minimap palette)
   return (
     <rect

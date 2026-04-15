@@ -89,6 +89,7 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
   snapToGrid,
   setSnapToGrid,
   onDragStart,
+  onNestedCanvasDragStart,
   undo,
   redo,
   canUndo,
@@ -327,19 +328,10 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
 
         <ToolbarTooltip label="Nested Canvas" shortcut="drag or click">
           <button
-            draggable
-            onDragStart={(e) => {
-              setActiveTool(null);
-              onDragStart(e, 'group');
-              // Use a simple circle ghost matching the placement cursor
-              const ghost = document.createElement('div');
-              ghost.style.cssText =
-                'position:fixed;top:-200px;left:-200px;width:28px;height:28px;border-radius:50%;' +
-                'border:1.5px solid rgb(96,165,250);background:rgba(96,165,250,0.1);' +
-                'box-shadow:0 0 4px rgb(96,165,250);';
-              document.body.appendChild(ghost);
-              e.dataTransfer.setDragImage(ghost, 14, 14);
-              setTimeout(() => { if (document.body.contains(ghost)) document.body.removeChild(ghost); }, 0);
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              e.stopPropagation();
+              onNestedCanvasDragStart?.(e.clientX, e.clientY);
             }}
             onClick={() => { setActiveTool(null); setPlacementMode('group'); }}
             className={`p-3 rounded-full transition ${placementMode === 'group' ? 'bg-white/20 text-blue-400' : 'text-white/70 hover:text-white hover:bg-white/10'}`}

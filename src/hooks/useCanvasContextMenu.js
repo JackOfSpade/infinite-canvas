@@ -17,7 +17,7 @@ const NODE_COLORS = [
 ];
 
 export function useCanvasContextMenu({
-  isDrawingMode,
+  isDrawingMode, // eslint-disable-line no-unused-vars
   placementMode,
   takeSnapshot,
   setNodes,
@@ -32,16 +32,16 @@ export function useCanvasContextMenu({
   const { addToast } = useToast();
 
   const onPaneContextMenuBase = useCallback((e) => {
-    if (isDrawingMode || placementMode) return;
+    if (placementMode) return;
     e.preventDefault();
     setMenu({ x: e.clientX, y: e.clientY, type: 'pane' });
-  }, [isDrawingMode, placementMode]);
+  }, [placementMode]);
 
   const onNodeContextMenuBase = useCallback((e, node) => {
-    if (isDrawingMode || placementMode) return;
+    if (placementMode) return;
     e.preventDefault();
     setMenu({ x: e.clientX, y: e.clientY, type: 'node', node });
-  }, [isDrawingMode, placementMode]);
+  }, [placementMode]);
 
   const bringToFront = useCallback(() => {
     if (!menu?.node) return;

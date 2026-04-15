@@ -37,6 +37,12 @@ body {
   padding: 0 !important;
 }
 
+/* Circle nodes handle their own selection styling — suppress ReactFlow's square outline */
+.react-flow__node-group.selected {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
 /* Make handles more visible but aesthetic */
 .react-flow__handle {
   width: 10px;
