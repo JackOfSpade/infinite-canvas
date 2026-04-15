@@ -145,14 +145,6 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
     if (maxX - minX < 50) { minX -= 25; maxX += 25; }
     if (maxY - minY < 50) { minY -= 25; maxY += 25; }
 
-    const pad = 20;
-    const vbW = maxX - minX + pad * 2;
-    const vbH = maxY - minY + pad * 2;
-    // Square viewBox so the circular clip shows balanced content in all directions
-    const sqSize = Math.max(vbW, vbH);
-    const sqMinX = minX - pad - (sqSize - vbW) / 2;
-    const sqMinY = minY - pad - (sqSize - vbH) / 2;
-
     const nodeMap = {};
     nodes.forEach(n => { nodeMap[n.id] = n; });
     const lines = edges.map(e => {
@@ -172,6 +164,44 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
       if (!Array.isArray(pts) || pts.length < 2) return null;
       return { id: i, points: pts.map(p => `${p.x},${p.y}`).join(' '), color };
     }).filter(Boolean);
+
+    const pad = 20;
+
+    // Collect all significant points (node corners + drawing vertices)
+    const allPts = [];
+    let sumX = 0, sumY = 0, ptCount = 0;
+    rects.forEach(r => {
+      [[r.x, r.y], [r.x + r.w, r.y], [r.x, r.y + r.h], [r.x + r.w, r.y + r.h]].forEach(([px, py]) => {
+        allPts.push({ x: px, y: py });
+        sumX += px; sumY += py; ptCount++;
+      });
+    });
+    paths.forEach(p => {
+      p.points.split(' ').forEach(pt => {
+        const [px, py] = pt.split(',').map(Number);
+        if (!isNaN(px) && !isNaN(py)) {
+          allPts.push({ x: px, y: py });
+          sumX += px; sumY += py; ptCount++;
+        }
+      });
+    });
+
+    // Centroid
+    const centX = ptCount > 0 ? sumX / ptCount : (minX + maxX) / 2;
+    const centY = ptCount > 0 ? sumY / ptCount : (minY + maxY) / 2;
+
+    // Max distance from centroid to any corner → bounding circle radius
+    let maxDist = 0;
+    allPts.forEach(p => {
+      const d = Math.sqrt((p.x - centX) ** 2 + (p.y - centY) ** 2);
+      maxDist = Math.max(maxDist, d);
+    });
+    if (maxDist === 0) maxDist = 50;
+
+    const sqHalf = maxDist + pad;
+    const sqSize = sqHalf * 2;
+    const sqMinX = centX - sqHalf;
+    const sqMinY = centY - sqHalf;
 
     return {
       viewBox: `${sqMinX} ${sqMinY} ${sqSize} ${sqSize}`,

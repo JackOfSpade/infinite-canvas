@@ -328,15 +328,8 @@ export function Canvas() {
         className="flex-1 h-full relative"
         data-drawing-mode={activeTool || undefined}
         onPointerDown={(e) => {
-          // Never draw through any UI surface — only start drawing on the raw canvas.
-          // 1. Block if a toolbar popup (pen colour/eraser menu) is open.
-          if (toolMenuOpen) return;
-          // 2. Block if the pointer landed on any ReactFlow Panel overlay
-          //    (toolbar dock, minimap, breadcrumb bar, zoom controls, etc.).
-          //    All Panel wrappers carry the "react-flow__panel" class.
-          if (e.target.closest('.react-flow__panel')) return;
-          // 3. Block on the SearchBar (absolutely positioned inside this div, not a portal).
-          if (e.target.closest('[data-search-bar]')) return;
+          // Only block drawing while a popup/context-menu is open
+          if (toolMenuOpen || menu) return;
           handlePointerDown(e);
         }}
         onPointerMove={(e) => {

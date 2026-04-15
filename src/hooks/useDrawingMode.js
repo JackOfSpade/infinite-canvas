@@ -44,21 +44,21 @@ function segmentCircleIntersections(a, b, C, R) {
  * Uses true line-circle intersections so erasure is continuous (not chunk-like).
  * Returns an array of sub-strokes (each is { ...stroke, points: [...] }).
  */
-function pixelEraseStroke(stroke, C, R) {
+function pixelEraseStroke(stroke, C, R, halfStroke = 0) {
   const pts = Array.isArray(stroke) ? stroke : stroke.points;
   if (!pts || pts.length < 2) return [stroke];
 
   const result  = [];
   let current   = [];   // points accumulating outside the circle
 
-  const insideCircle = (p) => sqr(p.x - C.x) + sqr(p.y - C.y) <= R * R;
+  const insideCircle = (p) => sqr(p.x - C.x) + sqr(p.y - C.y) <= sqr(R + halfStroke);
 
   let prevInside = insideCircle(pts[0]);
   if (!prevInside) current.push(pts[0]);
 
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i], b = pts[i + 1];
-    const ts = segmentCircleIntersections(a, b, C, R);
+    const ts = segmentCircleIntersections(a, b, C, R + halfStroke);
 
     if (ts.length === 0) {
       // Segment entirely inside or entirely outside
@@ -159,7 +159,7 @@ export function useDrawingMode({
         let changed = false;
         const next = [];
         for (const stroke of prev) {
-          const subs = pixelEraseStroke(stroke, C, R);
+          const subs = pixelEraseStroke(stroke, C, R, (stroke.penSize || 3) / 2);
           if (subs.length !== 1 || subs[0] !== stroke) changed = true;
           next.push(...subs);
         }
@@ -170,6 +170,7 @@ export function useDrawingMode({
       setNodes, setEdges, setDrawings]);
 
   const handlePointerDown = useCallback((e) => {
+    if (e.button !== 0) return;
     if (placementMode) {
       const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
       pos.x -= 12; pos.y -= 20;

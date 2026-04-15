@@ -1,30 +1,16 @@
 import React, { useContext, useCallback, useState, useRef, useEffect } from 'react';
-import { Handle, Position, useReactFlow, NodeResizer } from '@xyflow/react';
+import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { Lock, X } from 'lucide-react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { CanvasThumbnail } from '../components/CanvasThumbnail';
 import { FontSizeDialog } from '../components/FontSizeDialog';
 
-/** Minimum and maximum diameter for resizing */
 const MIN_SIZE = 80;
-const MAX_SIZE = 400;
+const MAX_SIZE = 600;
 const DEFAULT_SIZE = 160;
+const EDGE_ZONE = 12; // screen-px from circle edge that activates resize cursor
 
-/**
- * CanvasNode — circular portal node.
- *
- * Title positioning math:
- *   - SVG is SIZE×SIZE, overlaid at inset:0 with overflow:visible
- *   - Arc path = upper semicircle: M(0,R) A(R,R,0,0,0,SIZE,R)
- *   - At startOffset=50% the text baseline lands at (R, R-R) = (80,0) in SVG coords
- *   - y=0 in SVG = the very top edge of the circle  ✓
- *   - Characters extend upward (negative y) → "hugging" the circle from outside
- *
- * titleSpacing (dy on <text>): positive = text moves into circle; negative = further outside.
- */
 export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, width, height }) {
-  // SIZE comes from ReactFlow's measured/explicit node dimensions.
-  // Falls back to DEFAULT_SIZE for the first render before measurement.
   const SIZE = Math.round(width || DEFAULT_SIZE);
   const R    = SIZE / 2;
   const nav      = useContext(CanvasNavigationContext);
@@ -32,8 +18,12 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   const [title, setTitle]         = useState(data.title || '');
   const [isEditing, setIsEditing] = useState(false);
   const [showFontDialog, setShowFontDialog] = useState(false);
-  const inputRef = useRef(null);
-  const pathId   = `tcp-${id}`;
+  const [nearEdge, setNearEdge]   = useState(false);
+  const [isResizing, setIsResizing] = useState(false);
+  const inputRef       = useRef(null);
+  const containerRef   = useRef(null);
+  const resizeCenterRef = useRef(null); // { flowCx, flowCy }
+  const pathId = `tcp-${id}`;
 
   useEffect(() => { setTitle(data.title || ''); }, [data.title]);
 
@@ -49,26 +39,78 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     if (isEditing) { inputRef.current?.focus(); inputRef.current?.select(); }
   }, [isEditing]);
 
-  // Listen for Font & Size context-menu trigger
+  // Font & Size dialog trigger
   useEffect(() => {
-    const handleOpenFont = () => {
-      if (data.locked) return;
-      setShowFontDialog(true);
-    };
+    const handleOpenFont = () => { if (!data.locked) setShowFontDialog(true); };
     document.addEventListener(`edit-node-font-${id}`, handleOpenFont);
     return () => document.removeEventListener(`edit-node-font-${id}`, handleOpenFont);
   }, [id, data.locked]);
+
+  // ── Custom edge resize via window listeners ────────────────────────────────
+  useEffect(() => {
+    if (!isResizing) return;
+    const onMove = (e) => {
+      if (!resizeCenterRef.current) return;
+      const { flowCx, flowCy } = resizeCenterRef.current;
+      const fp = mainFlow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      const flowDist = Math.sqrt((fp.x - flowCx) ** 2 + (fp.y - flowCy) ** 2);
+      const newSize = Math.round(Math.max(MIN_SIZE, Math.min(MAX_SIZE, flowDist * 2)));
+      mainFlow.setNodes(nds => nds.map(n =>
+        n.id === id ? {
+          ...n,
+          position: { x: flowCx - newSize / 2, y: flowCy - newSize / 2 },
+          width: newSize,
+          height: newSize,
+          style: { ...(n.style || {}), width: newSize, height: newSize },
+        } : n
+      ));
+    };
+    const onUp = () => { setIsResizing(false); resizeCenterRef.current = null; };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup',   onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup',   onUp);
+    };
+  }, [isResizing, id, mainFlow]);
+
+  const getDistToEdge = useCallback((clientX, clientY) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return Infinity;
+    const cx = rect.left + rect.width  / 2;
+    const cy = rect.top  + rect.height / 2;
+    return Math.abs(Math.sqrt((clientX - cx) ** 2 + (clientY - cy) ** 2) - rect.width / 2);
+  }, []);
+
+  const handleContainerMouseMove = useCallback((e) => {
+    if (isResizing) return;
+    const near = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
+    setNearEdge(prev => prev === near ? prev : near);
+  }, [isResizing, getDistToEdge]);
+
+  const handleContainerPointerDown = useCallback((e) => {
+    if (isEditing || data.locked) return;
+    if (getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE) {
+      e.stopPropagation();
+      const node = mainFlow.getNode(id);
+      if (!node) return;
+      resizeCenterRef.current = {
+        flowCx: node.position.x + SIZE / 2,
+        flowCy: node.position.y + SIZE / 2,
+      };
+      setIsResizing(true);
+    }
+  }, [isEditing, data.locked, getDistToEdge, mainFlow, id, SIZE]);
 
   const canvasData = data.canvasData || {
     nodes: data.nodes || [], edges: data.edges || [], drawings: data.drawings || [],
   };
   const nodeCount = canvasData.nodes?.length || 0;
 
-  // Font settings (with sensible defaults)
   const fontSize     = data.fontSize     || 11;
   const fontFamily   = data.fontFamily   || 'Inter, ui-sans-serif, system-ui, sans-serif';
-  const textColor    = data.textColor    || null;  // null = auto based on title presence
-  const titleSpacing = data.titleSpacing ?? 0;     // dy offset: positive = into circle
+  const textColor    = data.textColor    || null;
+  const titleSpacing = data.titleSpacing ?? 0;
 
   const commitTitle = useCallback((val) => {
     const v = (val ?? title).trim();
@@ -78,52 +120,31 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   }, [id, mainFlow, title]);
 
   const handleDoubleClick = useCallback((e) => {
-    // Allow diving in even without a title — canvas is functional without one
-    if (isEditing || data.locked) return;
+    if (isEditing || data.locked || isResizing) return;
     e.stopPropagation();
     nav?.diveIn(id);
-  }, [id, nav, data.locked, isEditing]);
+  }, [id, nav, data.locked, isEditing, isResizing]);
 
   const handleDelete = useCallback((e) => {
     e.stopPropagation();
     mainFlow.deleteElements({ nodes: [{ id }] });
   }, [id, mainFlow]);
 
-  // sweep-flag=1 → clockwise in SVG screen space (Y-down) → traces the UPPER semicircle.
-  // At startOffset=50% the baseline is at (R, 0) = circle's top edge. ✓
   const arcPath = `M 0,${R} A ${R},${R} 0 0,1 ${SIZE},${R}`;
-
-  // Derived fill colour for the arc text
-  const titleFill = textColor
-    ? textColor
-    : (title ? 'rgba(255,255,255,0.80)' : 'rgba(255,255,255,0.22)');
+  const titleFill = textColor ?? (title ? 'rgba(255,255,255,0.80)' : 'rgba(255,255,255,0.22)');
+  const edgeCursor = (nearEdge || isResizing) ? 'nwse-resize' : undefined;
 
   return (
     <>
-      {/* Resize handles — corner+edge dots, locked to square aspect ratio.
-          lineStyle is transparent so the resize selection box is invisible;
-          the circle body's border provides the circular selection indicator. */}
-      <NodeResizer
-        minWidth={MIN_SIZE}
-        minHeight={MIN_SIZE}
-        maxWidth={MAX_SIZE}
-        maxHeight={MAX_SIZE}
-        keepAspectRatio
-        isVisible={selected}
-        handleStyle={{
-          width: 10,
-          height: 10,
-          background: 'rgba(96,165,250,0.9)',
-          border: '1px solid rgba(255,255,255,0.6)',
-          borderRadius: '50%',
-        }}
-        lineStyle={{ borderColor: 'transparent' }}
-      />
       <div
+        ref={containerRef}
         className="group"
-        style={{ width: SIZE, height: SIZE, position: 'relative' }}
+        style={{ width: SIZE, height: SIZE, position: 'relative', cursor: edgeCursor }}
+        onMouseMove={handleContainerMouseMove}
+        onMouseLeave={() => { if (!isResizing) setNearEdge(false); }}
+        onPointerDown={handleContainerPointerDown}
       >
-        {/* ── Circle body ──────────────────────────────────────────────────────── */}
+        {/* ── Circle body ──────────────────────────────────────────────────── */}
         <div
           onDoubleClick={handleDoubleClick}
           style={{
@@ -138,19 +159,15 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
             boxShadow:       selected
               ? '0 0 0 4px rgba(96,165,250,0.15), 0 8px 40px rgba(0,0,0,0.65)'
               : '0 4px 28px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.04)',
-            cursor: 'pointer',
+            cursor: edgeCursor || 'pointer',
           }}
         >
           <CanvasThumbnail canvasData={canvasData} width="100%" height="100%" />
-
-          {/* Vignette */}
           <div style={{
             position: 'absolute', inset: 0, borderRadius: '50%', pointerEvents: 'none',
             background: 'radial-gradient(circle, transparent 55%, rgba(0,0,0,0.35) 100%)',
           }} />
-
-          {/* Hover "open" hint */}
-          {!data.locked && (
+          {!data.locked && !isResizing && (
             <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-all
                             bg-black/0 group-hover:bg-black/45 flex items-center justify-center
                             pointer-events-none">
@@ -160,7 +177,6 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
               </span>
             </div>
           )}
-
           {nodeCount > 0 && (
             <span className="absolute top-3 right-3 bg-blue-500/90 text-white text-[9px] font-bold
                              rounded-full min-w-[16px] h-[16px] px-1 flex items-center justify-center shadow-md">
@@ -174,31 +190,19 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           )}
         </div>
 
-        {/* ── Curved title (SVG overlay) ────────────────────────────────────────
-            overflow:visible lets the text poke above y=0 (the circle's top edge).
-            The path top sits at (R,0), characters extend upward → hugs the edge.
-            dy (titleSpacing) shifts text perpendicular to path: + = into circle. */}
+        {/* ── Curved title ─────────────────────────────────────────────────── */}
         {!isEditing && (
-          <svg
-            width={SIZE}
-            height={SIZE}
-            style={{
-              position:      'absolute',
-              inset:         0,
-              overflow:      'visible',
-              pointerEvents: 'none',
-              zIndex:        10,
-            }}
-          >
-            <defs>
-              <path id={pathId} d={arcPath} />
-            </defs>
+          <svg width={SIZE} height={SIZE} style={{
+            position: 'absolute', inset: 0, overflow: 'visible',
+            pointerEvents: 'none', zIndex: 10,
+          }}>
+            <defs><path id={pathId} d={arcPath} /></defs>
             <text
               fontSize={fontSize}
               fontFamily={fontFamily}
               fontWeight="500"
               letterSpacing="0.5"
-              dy={titleSpacing}
+              dy={-titleSpacing}
               fill={titleFill}
             >
               <textPath href={`#${pathId}`} startOffset="50%" textAnchor="middle">
@@ -208,27 +212,19 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           </svg>
         )}
 
-        {/* ── Invisible click zone above circle for title editing ─────────────── */}
+        {/* ── Title edit click zone ─────────────────────────────────────────── */}
         {!isEditing && !data.locked && (
           <div
-            style={{
-              position:      'absolute',
-              top:           -20,
-              left:          '15%',
-              width:         '70%',
-              height:        20,
-              cursor:        'text',
-              zIndex:        15,
-            }}
+            style={{ position: 'absolute', top: -20, left: '15%', width: '70%', height: 20,
+                     cursor: 'text', zIndex: 15 }}
             onPointerDown={e => e.stopPropagation()}
             onClick={e => { e.stopPropagation(); setIsEditing(true); }}
           />
         )}
 
-        {/* ── Edit input (appears above circle when editing) ────────────────── */}
+        {/* ── Edit input ───────────────────────────────────────────────────── */}
         {isEditing && (
-          <div
-            style={{ position: 'absolute', top: -26, left: 0, width: SIZE, zIndex: 20 }}
+          <div style={{ position: 'absolute', top: -26, left: 0, width: SIZE, zIndex: 20 }}
             onPointerDown={e => e.stopPropagation()}
             onClick={e => e.stopPropagation()}
           >
@@ -240,7 +236,6 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
               onBlur={e  => commitTitle(e.target.value)}
               onKeyDown={e => {
                 if (e.key === 'Enter')  commitTitle(e.target.value);
-                // Escape restores original title (may be empty — that's fine)
                 if (e.key === 'Escape') { setTitle(data.title || ''); setIsEditing(false); }
               }}
               placeholder="Sub-Canvas"
@@ -251,7 +246,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           </div>
         )}
 
-        {/* ── Delete button ────────────────────────────────────────────────────── */}
+        {/* ── Delete button ─────────────────────────────────────────────────── */}
         {!data.locked && (
           <button
             onClick={handleDelete}
@@ -269,7 +264,6 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         )}
       </div>
 
-      {/* Font & Size dialog — triggered by context menu */}
       {showFontDialog && (
         <FontSizeDialog
           fontSize={fontSize}

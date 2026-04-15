@@ -36,10 +36,9 @@ export function CustomMiniMap({ nodes, edges, drawings }) {
   const { setViewport } = useReactFlow();
   const svgRef = useRef(null);
 
-  // ── Compute bounding box of all content ──────────────────────────────────
-  const { minX, minY, contentW, contentH, isEmpty } = useMemo(() => {
+  // ── Part A: content bounds (memo on nodes + drawings only) ──────────────
+  const { cMinX, cMinY, cMaxX, cMaxY, isEmpty } = useMemo(() => {
     let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
-
     nodes.forEach(n => {
       const { w, h } = getNodeDims(n);
       mnX = Math.min(mnX, n.position.x);
@@ -47,7 +46,6 @@ export function CustomMiniMap({ nodes, edges, drawings }) {
       mxX = Math.max(mxX, n.position.x + w);
       mxY = Math.max(mxY, n.position.y + h);
     });
-
     (drawings || []).forEach(stroke => {
       const pts = Array.isArray(stroke) ? stroke : stroke?.points;
       if (!Array.isArray(pts)) return;
@@ -56,20 +54,22 @@ export function CustomMiniMap({ nodes, edges, drawings }) {
         mxX = Math.max(mxX, p.x); mxY = Math.max(mxY, p.y);
       });
     });
-
-    if (!isFinite(mnX)) {
-      return { minX: -200, minY: -200, contentW: 400, contentH: 300, isEmpty: true };
-    }
-
-    const px = CONTENT_PAD;
-    return {
-      minX: mnX - px,
-      minY: mnY - px,
-      contentW: mxX - mnX + px * 2,
-      contentH: mxY - mnY + px * 2,
-      isEmpty: false,
-    };
+    if (!isFinite(mnX)) return { cMinX: -200, cMinY: -200, cMaxX: 200, cMaxY: 200, isEmpty: true };
+    return { cMinX: mnX - CONTENT_PAD, cMinY: mnY - CONTENT_PAD, cMaxX: mxX + CONTENT_PAD, cMaxY: mxY + CONTENT_PAD, isEmpty: false };
   }, [nodes, drawings]);
+
+  // ── Part B: display bounds (content + current viewport, no memo) ─────────
+  const vpFlowX = -viewport.x / viewport.zoom;
+  const vpFlowY = -viewport.y / viewport.zoom;
+  const vpFlowW = window.innerWidth  / viewport.zoom;
+  const vpFlowH = window.innerHeight / viewport.zoom;
+
+  const minX = Math.min(cMinX, vpFlowX - CONTENT_PAD);
+  const minY = Math.min(cMinY, vpFlowY - CONTENT_PAD);
+  const maxX = Math.max(cMaxX, vpFlowX + vpFlowW + CONTENT_PAD);
+  const maxY = Math.max(cMaxY, vpFlowY + vpFlowH + CONTENT_PAD);
+  const contentW = maxX - minX;
+  const contentH = maxY - minY;
 
   // ── Scale to fit minimap while preserving aspect ratio ───────────────────
   const scale = Math.min(MINIMAP_W / contentW, MINIMAP_H / contentH);
@@ -82,14 +82,6 @@ export function CustomMiniMap({ nodes, edges, drawings }) {
     x: (fx - minX) * scale + offsetX,
     y: (fy - minY) * scale + offsetY,
   }), [minX, minY, scale, offsetX, offsetY]);
-
-  // ── Viewport indicator rectangle ─────────────────────────────────────────
-  // The ReactFlow viewport tells us: screen origin maps to flow coord (-vp.x/zoom, -vp.y/zoom).
-  // We use window dimensions as an approximation for the canvas area size.
-  const vpFlowX = -viewport.x / viewport.zoom;
-  const vpFlowY = -viewport.y / viewport.zoom;
-  const vpFlowW = window.innerWidth  / viewport.zoom;
-  const vpFlowH = window.innerHeight / viewport.zoom;
   const vpTL    = toM(vpFlowX, vpFlowY);
   const vpMiniW = vpFlowW * scale;
   const vpMiniH = vpFlowH * scale;

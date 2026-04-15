@@ -124,9 +124,25 @@ export function useCanvasNavigation({
       setDrawings(canvasData.drawings || []);
       clearHistory?.();
 
-      // Let React render the new data, then fit and fade in
+      // Let React render the new data, then center and fade in
       requestAnimationFrame(() => {
-        reactFlow.fitView({ padding: 0.3, duration: 0 });
+        // Centre on child content at current zoom — never change zoom
+        const currentVp = reactFlow.getViewport();
+        const childNodes = canvasData.nodes || [];
+        if (childNodes.length > 0) {
+          let sumX = 0, sumY = 0;
+          childNodes.forEach(n => {
+            sumX += n.position.x + (n.measured?.width  || 150) / 2;
+            sumY += n.position.y + (n.measured?.height ||  50) / 2;
+          });
+          const cx = sumX / childNodes.length;
+          const cy = sumY / childNodes.length;
+          reactFlow.setViewport({
+            x: window.innerWidth  / 2 - cx * currentVp.zoom,
+            y: window.innerHeight / 2 - cy * currentVp.zoom,
+            zoom: currentVp.zoom,
+          }, { duration: 0 });
+        }
         setAnimPhase('fade-in');
 
         setTimeout(() => {
