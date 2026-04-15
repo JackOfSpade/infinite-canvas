@@ -45,6 +45,23 @@ function migrateGroupNodes(nodes) {
     return node;
   });
 }
+/**
+ * Strip transient visual properties from nodes before saving.
+ * Prevents runtime-only state (e.g. source-filter dim opacity) from
+ * being persisted to disk and corrupting the loaded workspace.
+ */
+export function sanitizeNodesForSave(nodes) {
+  if (!Array.isArray(nodes)) return nodes;
+  return nodes.map(n => {
+    // Strip opacity from jobcard nodes — it's set transiently by toggleSourceFilter
+    // and should never be persisted (the hub's sourceFilter is saved separately).
+    if (n.type === 'jobcard' && n.style?.opacity !== undefined) {
+      const { opacity: _opacity, ...restStyle } = n.style || {};
+      return { ...n, style: Object.keys(restStyle).length ? restStyle : undefined };
+    }
+    return n;
+  });
+}
 
 /**
  * Encapsulates canvas save/load/export persistence logic.
@@ -76,7 +93,9 @@ export function useCanvasPersistence({
     setSaveState('saving');
     try {
       // Flush the navigation stack to get complete root-level data
-      const data = flushStack ? flushStack() : { nodes, edges, drawings };
+      const rawData = flushStack ? flushStack() : { nodes, edges, drawings };
+      // Strip transient visual properties (e.g. source-filter opacity on job cards)
+      const data = { ...rawData, nodes: sanitizeNodesForSave(rawData.nodes) };
       const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFile });
       if (res?.success && res.filePath) {
         setCurrentFile(res.filePath);

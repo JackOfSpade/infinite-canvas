@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { sanitizeNodesForSave } from './useCanvasPersistence';
 
 export function useCanvasInitialization({
   nodes,
@@ -34,7 +35,9 @@ export function useCanvasInitialization({
     if (!currentFile || !window.electronAPI) return;
 
     const timer = setTimeout(() => {
-      const data = flushRef.current ? flushRef.current() : stateRef.current;
+      const rawData = flushRef.current ? flushRef.current() : stateRef.current;
+      // Strip transient visual properties (e.g. source-filter opacity on job cards)
+      const data = { ...rawData, nodes: sanitizeNodesForSave(rawData.nodes) };
       window.electronAPI.saveWorkspace({ data, filePath: currentFile }).then(res => {
         if (res?.success && res.filePath) {
           setCurrentFile(res.filePath);

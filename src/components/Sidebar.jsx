@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { Search, Store, BarChart3, ChevronLeft, ChevronRight, UserCircle } from 'lucide-react';
+import { Search, Store, BarChart3, ChevronLeft, ChevronRight, UserCircle, Briefcase } from 'lucide-react';
 import { SELL_PLATFORMS, JOB_SOURCES, PRICE_COMP_SOURCES } from '../utils/constants';
 
 import { JobsTab } from './sidebar/JobsTab';
@@ -94,7 +94,7 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [] }) {
   }, []);
 
   const tabs = [
-    { id: 'jobs', icon: Search, label: 'Jobs', badge: jobCards.length > 0 ? jobCards.length : null },
+    { id: 'jobs', icon: Briefcase, label: 'Jobs', badge: jobCards.length > 0 ? jobCards.length : null },
     { id: 'sell', icon: Store, label: 'Sell', badge: sellHubs.length > 0 ? sellHubs.length : null },
     { id: 'dashboard', icon: BarChart3, label: 'Stats' },
   ];

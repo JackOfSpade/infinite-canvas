@@ -129,6 +129,7 @@ export function JobHubNode({ id, data }) {
     updateNodeData(id, { sourceFilter: newFilter });
 
     // Dim/undim JobCard nodes based on source filter
+    // Note: opacity changes are transient (stripped before saves by sanitizeNodesForSave)
     setNodes(nodes => nodes.map(n => {
       if (n.type !== 'jobcard') return n;
       if (!newFilter) {
@@ -137,6 +138,17 @@ export function JobHubNode({ id, data }) {
       return { ...n, style: { ...n.style, opacity: n.data?.source === newFilter ? 1 : 0.2 } };
     }));
   }, [sourceFilter, id, updateNodeData, setNodes]);
+
+  // Re-apply source filter dim on mount — in case the filter was persisted
+  // but the opacity was stripped from the save file (which prevents stale opacity on reload).
+  useEffect(() => {
+    if (!sourceFilter) return;
+    setNodes(nodes => nodes.map(n => {
+      if (n.type !== 'jobcard') return n;
+      return { ...n, style: { ...n.style, opacity: n.data?.source === sourceFilter ? 1 : 0.2 } };
+    }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally runs once on mount only
 
   // Auto-start if filePath was provided (canvas-level drop created this node)
   useEffect(() => {
@@ -267,6 +279,7 @@ export function JobHubNode({ id, data }) {
       extras={
         <AnimatedSourceRing
           sources={getSourceStatuses()}
+          nodeId={id}
           direction="in"
           nodeWidth={260}
           nodeHeight={hubState === 'empty' ? 140 : 100}
