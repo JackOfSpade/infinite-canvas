@@ -60,8 +60,10 @@ function setupApplicationMenu(win) {
     {
       label: 'File',
       submenu: [
-        { label: 'Open Canvas', accelerator: 'CmdOrCtrl+O', click: () => win.webContents.send('menu-open') },
-        { label: 'Save Canvas', accelerator: 'CmdOrCtrl+S', click: () => win.webContents.send('menu-save') },
+        { label: 'Open Canvas',   accelerator: 'CmdOrCtrl+O',       click: () => win.webContents.send('menu-open') },
+        { label: 'Save Canvas',   accelerator: 'CmdOrCtrl+S',       click: () => win.webContents.send('menu-save') },
+        { type: 'separator' },
+        { label: 'Export as PNG', accelerator: 'CmdOrCtrl+Shift+E', click: () => win.webContents.send('menu-export-png') },
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
       ],

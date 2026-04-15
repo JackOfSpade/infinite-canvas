@@ -1,18 +1,31 @@
 import { useCallback, useRef, useEffect, useState } from 'react';
+import { DEFAULT_SHORTCUTS } from './useSettings';
 
 const MAX_HISTORY = 100;
 
 /**
- * A generic undo/redo hook for the canvas.
- * Tracks snapshots of { nodes, edges, drawings } and restores them on Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y.
- *
- * To avoid capturing every intermediate React Flow drag-frame, we debounce snapshot capture.
- * The hook exposes `takeSnapshot` which the Canvas calls at meaningful moments (drop, connect, delete, etc.),
- * plus an auto-capture via a debounced effect on the state itself as a safety net.
- *
- * All callbacks are stable (never recreated) by reading current state from refs.
+ * Returns true if the keyboard event matches a shortcut binding.
  */
-export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDrawings }) {
+function matchesShortcut(e, binding) {
+  if (!binding) return false;
+  const isMod = e.ctrlKey || e.metaKey;
+  if (binding.meta && !isMod)    return false;
+  if (!binding.meta && isMod)    return false;
+  if (binding.shift !== e.shiftKey) return false;
+  if (binding.alt   !== e.altKey)   return false;
+  return e.key.toLowerCase() === binding.key.toLowerCase();
+}
+
+/**
+ * A generic undo/redo hook for the canvas.
+ * Accepts an optional `shortcuts` config (from useSettings) to allow
+ * user-customisable key bindings. Falls back to DEFAULT_SHORTCUTS.
+ *
+ * Tracks snapshots of { nodes, edges, drawings } and restores them.
+ * Debounces auto-capture; exposes `takeSnapshot` for explicit moments.
+ */
+export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDrawings, shortcuts }) {
+  const sc = shortcuts || DEFAULT_SHORTCUTS;
   const pastRef = useRef([]);          // stack of past snapshots
   const futureRef = useRef([]);        // stack of future snapshots (for redo)
   const isRestoringRef = useRef(false);
@@ -143,27 +156,25 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     });
   }, [deepCloneState, fingerprint, setNodes, setEdges, setDrawings, syncHistoryLen]);
 
-  // Keyboard listener — stable undo/redo means this effect rarely re-attaches
+  // Keyboard listener — uses the customisable shortcuts config
   useEffect(() => {
     const handleKeyDown = (e) => {
       const isMod = e.ctrlKey || e.metaKey;
       if (!isMod) return;
-
-      // Don't intercept if user is typing in an input/textarea/contenteditable
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
 
-      if (e.key === 'z' && !e.shiftKey) {
+      if (matchesShortcut(e, sc.undo)) {
         e.preventDefault();
         undo();
-      } else if ((e.key === 'z' && e.shiftKey) || e.key === 'y') {
+      } else if (matchesShortcut(e, sc.redo) || matchesShortcut(e, sc.redoAlt)) {
         e.preventDefault();
         redo();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo]);
+  }, [undo, redo, sc]);
 
   // Clear all history (used when navigating between canvas levels)
   const clearHistory = useCallback(() => {
