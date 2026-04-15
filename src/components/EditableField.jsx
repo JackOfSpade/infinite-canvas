@@ -11,11 +11,11 @@ import React from 'react';
  * @param {function} onSave      - Called with new value on blur or Enter
  * @param {string}   [variant]   - 'title' (larger) or 'inline' (compact)
  */
-export function EditableField({ value, placeholder, isEditing, onStartEdit, onSave, variant = 'inline' }) {
+export function EditableField({ value, placeholder, isEditing, onStartEdit, onSave, variant = 'inline', disabled = false }) {
   const handleBlur = (e) => onSave(e.target.value);
   const handleKeyDown = (e) => { if (e.key === 'Enter') onSave(e.target.value); };
 
-  if (isEditing) {
+  if (isEditing && !disabled) {
     const inputClass = variant === 'title'
       ? 'w-full bg-black/30 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none'
       : 'w-16 bg-black/30 border border-white/10 rounded px-1 text-white text-xs outline-none inline-block';
@@ -34,8 +34,10 @@ export function EditableField({ value, placeholder, isEditing, onStartEdit, onSa
   if (variant === 'title') {
     return (
       <div
-        className="text-white/90 text-sm font-semibold leading-tight cursor-text hover:bg-white/5 rounded px-1 -mx-1 py-0.5"
-        onClick={onStartEdit}
+        className={`text-white/90 text-sm font-semibold leading-tight rounded px-1 -mx-1 py-0.5 ${
+          disabled ? 'cursor-default' : 'cursor-text hover:bg-white/5'
+        }`}
+        onClick={disabled ? undefined : onStartEdit}
       >
         {value || placeholder || 'Click to edit'}
       </div>
@@ -44,8 +46,8 @@ export function EditableField({ value, placeholder, isEditing, onStartEdit, onSa
 
   return (
     <span
-      className="text-white/60 cursor-text hover:text-white/80"
-      onClick={onStartEdit}
+      className={`text-white/60 ${disabled ? 'cursor-default' : 'cursor-text hover:text-white/80'}`}
+      onClick={disabled ? undefined : onStartEdit}
     >
       {value || placeholder || '?'}
     </span>

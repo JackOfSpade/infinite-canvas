@@ -97,6 +97,7 @@ export function Canvas() {
     nodes, edges, drawings, setNodes, setEdges, setDrawings, customFitView, addToast,
     flushStack: navigation.flushStack,
     resetStack: navigation.resetStack,
+    clearHistory,
   });
 
   useCanvasInitialization({
@@ -130,7 +131,7 @@ export function Canvas() {
   const [bgVariant, setBgVariant] = useState('dots');
   const [showMiniMap, setShowMiniMap] = useState(true);
   const [activeColor, setActiveColor] = useState('white');
-  const { screenToFlowPosition, getIntersectingNodes } = useReactFlow();
+  const { screenToFlowPosition, getIntersectingNodes, getNode } = useReactFlow();
 
   const handlePaneDoubleClick = useCallback((e) => {
     if (activeTool || placementMode) return;
@@ -140,6 +141,13 @@ export function Canvas() {
     setNodes((nds) => nds.concat(newNode));
     EventLogger.log(`Double-clicked canvas to create new Text Node`);
   }, [activeTool, placementMode, screenToFlowPosition, takeSnapshot, setNodes]);
+
+  // Prevent drawing edges TO sticky notes — sticky notes are output-only anchors
+  const isValidConnection = useCallback((connection) => {
+    const target = getNode(connection.target);
+    if (target?.data?.isSticky) return false;
+    return true;
+  }, [getNode]);
 
   const { handleDrop, handleDragOver } = useCanvasDragAndDrop({
     setNodes, setIsDrawingMode: (v) => setActiveTool(v ? 'pen' : null), takeSnapshot,
@@ -279,6 +287,7 @@ export function Canvas() {
             onEdgesChange={onEdgesChange}
             onNodesDelete={onNodesDelete}
             onConnect={onConnect}
+            isValidConnection={isValidConnection}
             onDrop={handleDrop}
             onDragOver={handleDragOver}
             nodeTypes={nodeTypes}

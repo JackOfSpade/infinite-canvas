@@ -95,21 +95,21 @@ export function ListingNode({ id, data }) {
         {/* Title */}
         <EditableField variant="title" value={product.generated_title} placeholder="Click to set title"
           isEditing={editing === 'title'} onStartEdit={() => setEditing('title')}
-          onSave={(v) => handleFieldEdit('generated_title', v)} />
+          onSave={(v) => handleFieldEdit('generated_title', v)} disabled={!!data.locked} />
 
         {/* Brand */}
         <div className="flex gap-2 text-xs">
           <span className="text-white/30">Brand:</span>
           <EditableField value={product.brand} placeholder="Unknown"
             isEditing={editing === 'brand'} onStartEdit={() => setEditing('brand')}
-            onSave={(v) => handleFieldEdit('brand', v)} />
+            onSave={(v) => handleFieldEdit('brand', v)} disabled={!!data.locked} />
         </div>
         {/* Model */}
         <div className="flex gap-2 text-xs">
           <span className="text-white/30">Model:</span>
           <EditableField value={product.model} placeholder="Unknown"
             isEditing={editing === 'model'} onStartEdit={() => setEditing('model')}
-            onSave={(v) => handleFieldEdit('model', v)} />
+            onSave={(v) => handleFieldEdit('model', v)} disabled={!!data.locked} />
         </div>
 
         {/* Condition + Category */}
@@ -130,8 +130,11 @@ export function ListingNode({ id, data }) {
       {status === 'draft' && (
         <div className="px-3 py-2 border-t border-white/5">
           <button
-            onClick={(e) => { e.stopPropagation(); handleConfirmDraft(); }}
-            className="w-full py-2 rounded-lg text-sm font-medium bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
+            onClick={data.locked ? undefined : (e) => { e.stopPropagation(); handleConfirmDraft(); }}
+            disabled={!!data.locked}
+            className={`w-full py-2 rounded-lg text-sm font-medium transition-colors ${
+              data.locked ? 'bg-white/5 text-white/20 cursor-default' : 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30'
+            }`}
             onPointerDown={(e) => e.stopPropagation()}
           >
             Confirm & Research Price
@@ -167,15 +170,16 @@ export function ListingNode({ id, data }) {
                 <input
                   type="number"
                   value={priceInput}
-                  onChange={(e) => handlePriceChange(e.target.value)}
-                  className="flex-1 bg-black/30 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none text-right"
+                  onChange={data.locked ? undefined : (e) => handlePriceChange(e.target.value)}
+                  disabled={!!data.locked}
+                  className={`flex-1 bg-black/30 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none text-right ${data.locked ? 'opacity-50 cursor-default' : ''}`}
                   placeholder="0"
                 />
               </div>
             </div>
 
             {/* Quick price buttons */}
-            <QuickPriceButtons pricing={data.pricing} onSelect={handleQuickPrice} />
+            <QuickPriceButtons pricing={data.pricing} onSelect={data.locked ? undefined : handleQuickPrice} disabled={!!data.locked} />
           </div>
 
           {/* Price Justification */}
@@ -189,7 +193,7 @@ export function ListingNode({ id, data }) {
           {/* Platform selection */}
           <div className="px-3 py-2 border-t border-white/5 space-y-1.5">
             <div className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">List on:</div>
-            <PlatformToggles selected={selectedPlatforms} onToggle={togglePlatform} />
+            <PlatformToggles selected={selectedPlatforms} onToggle={data.locked ? undefined : togglePlatform} disabled={!!data.locked} />
 
             {/* Login required prompt */}
             {loginPrompt && (
@@ -241,14 +245,17 @@ export function ListingNode({ id, data }) {
             {/* Copy listing + List on Platforms */}
             <div className="flex gap-1.5 mt-2">
               <button
-                onClick={(e) => { e.stopPropagation(); handleCopyListing(); }}
-                className="flex-1 py-1.5 rounded text-xs font-medium flex items-center justify-center gap-1 bg-white/5 text-white/50 hover:bg-white/10 hover:text-white/70 transition-colors"
+                onClick={data.locked ? undefined : (e) => { e.stopPropagation(); handleCopyListing(); }}
+                disabled={!!data.locked}
+                className={`flex-1 py-1.5 rounded text-xs font-medium flex items-center justify-center gap-1 transition-colors ${
+                  data.locked ? 'bg-white/5 text-white/20 cursor-default' : 'bg-white/5 text-white/50 hover:bg-white/10 hover:text-white/70'
+                }`}
               >
                 {copied ? <Check size={12} /> : <Copy size={12} />}
                 {copied ? 'Copied!' : 'Copy Listing'}
               </button>
               <button
-                onClick={async (e) => {
+                onClick={data.locked ? undefined : async (e) => {
                   e.stopPropagation();
                   // Platforms that need login for sell monitoring
                   const needsAuth = ['ebay', 'facebook', 'poshmark', 'mercari', 'swappa'];
@@ -257,21 +264,22 @@ export function ListingNode({ id, data }) {
                     if (needsAuth.includes(platformId) && window.electronAPI?.checkSellMonitorAuth) {
                       const authStatus = await window.electronAPI.checkSellMonitorAuth({ platformId });
                       if (!authStatus.connected) {
-                        // Show login prompt for the first unauthenticated platform
                         setLoginPrompt({
                           platformId,
                           name: authStatus.name || platformId,
                           sellerUrl: authStatus.sellerUrl,
                         });
-                        return; // Stop — user needs to log in first
+                        return;
                       }
                     }
-                    // Platform is authenticated or doesn't need auth — open it
                     const platform = SELL_PLATFORMS.find(p => p.id === platformId);
                     if (platform?.postUrl) window.electronAPI?.openExternal?.(platform.postUrl);
                   }
                 }}
-                className="flex-1 py-1.5 rounded text-xs font-medium flex items-center justify-center gap-1 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition-colors"
+                disabled={!!data.locked}
+                className={`flex-1 py-1.5 rounded text-xs font-medium flex items-center justify-center gap-1 transition-colors ${
+                  data.locked ? 'bg-white/5 text-white/20 cursor-default' : 'bg-blue-500/10 text-blue-400 hover:bg-blue-500/20'
+                }`}
                 onPointerDown={(e) => e.stopPropagation()}
               >
                 <ExternalLink size={12} />

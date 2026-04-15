@@ -131,6 +131,7 @@ export function useCanvasContextMenu({
 
   const setNodeColor = useCallback((color) => {
     if (!menu?.node) return;
+    if (menu.node.data?.locked) return; // Cannot modify locked nodes
     takeSnapshot();
     setNodes(nds => nds.map(n => n.id === menu.node.id ? { ...n, data: { ...n.data, backgroundColor: color } } : n));
     EventLogger.log(`Node ${menu.node.id} color changed`);
@@ -178,6 +179,7 @@ export function useCanvasContextMenu({
 
   const aiPolishText = useCallback(async () => {
     if (!menu?.node || !window.electronAPI) return;
+    if (menu.node.data?.locked) return; // Cannot modify locked nodes
     const text = menu.node.data?.text || '';
     if (!text.trim()) {
        setMenu(null);
@@ -202,6 +204,7 @@ export function useCanvasContextMenu({
 
   const toggleStickyNote = useCallback(() => {
     if (!menu?.node) return;
+    if (menu.node.data?.locked) return; // Cannot modify locked nodes
     takeSnapshot();
     const isCurrentlySticky = menu.node.data?.isSticky;
     
@@ -266,13 +269,14 @@ export function useCanvasContextMenu({
         });
       }
       
-      items.push({ label: 'Bring to Front', onClick: bringToFront });
-      items.push({ label: 'Send to Back', onClick: sendToBack });
+      items.push({ label: 'Bring to Front', onClick: bringToFront, disabled: isLocked });
+      items.push({ label: 'Send to Back', onClick: sendToBack, disabled: isLocked });
 
       items.push({ divider: true });
       items.push({
         label: 'Color',
-        submenu: NODE_COLORS.map(c => ({
+        disabled: isLocked,
+        submenu: isLocked ? undefined : NODE_COLORS.map(c => ({
           label: c.label,
           onClick: () => setNodeColor(c.value),
         })),
@@ -282,7 +286,8 @@ export function useCanvasContextMenu({
         items.push({ divider: true });
         items.push({ 
           label: 'Edit URL', 
-          onClick: () => {
+          disabled: isLocked,
+          onClick: isLocked ? undefined : () => {
             document.dispatchEvent(new CustomEvent(`edit-node-url-${menu.node.id}`));
             closeMenu();
           } 
@@ -293,7 +298,8 @@ export function useCanvasContextMenu({
         if (!isLink) items.push({ divider: true });
         items.push({ 
           label: 'Font & Size', 
-          onClick: () => {
+          disabled: isLocked,
+          onClick: isLocked ? undefined : () => {
             document.dispatchEvent(new CustomEvent(`edit-node-font-${menu.node.id}`));
             closeMenu();
           } 

@@ -138,7 +138,7 @@ export function OnboardingOverlay() {
   return createPortal(
     <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/70 backdrop-blur-sm">
       <div
-        className="onboarding-panel w-[380px] bg-neutral-900/95 border border-white/10 rounded-2xl shadow-2xl overflow-hidden"
+        className="onboarding-panel relative w-[380px] bg-neutral-900/95 border border-white/10 rounded-2xl shadow-2xl overflow-hidden"
       >
         {/* Content area */}
         <div

@@ -20,6 +20,7 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
   }, [data.filePath]);
 
   const handleDoubleClick = async () => {
+    if (data.locked) return; // Locked nodes are fully inert
     setUpdated(false);
     if (data.filePath && window.electronAPI) {
       try {

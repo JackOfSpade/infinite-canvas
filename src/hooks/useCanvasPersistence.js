@@ -65,6 +65,7 @@ export function useCanvasPersistence({
   nodes, edges, drawings, setNodes, setEdges, setDrawings, customFitView, addToast,
   flushStack,
   resetStack,
+  clearHistory,
 }) {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [currentFile, setCurrentFile] = useState(null);
@@ -107,6 +108,8 @@ export function useCanvasPersistence({
         setEdges(res.data.edges || []);
         setDrawings(res.data.drawings || []);
         setCurrentFile(res.filePath);
+        // Clear undo history — a freshly-loaded workspace should start with a blank slate
+        clearHistory?.();
         // Defer: the useCanvasInitialization effect will fire setHasUnsavedChanges(true)
         // on the next render — we need our false to run *after* that effect.
         setTimeout(() => setHasUnsavedChanges(false), 0);
@@ -119,7 +122,7 @@ export function useCanvasPersistence({
       console.error('Failed to load canvas:', err);
       addToast({ title: 'Load Error', description: err.message || 'An error occurred while loading.', type: 'error'});
     }
-  }, [setNodes, setEdges, setDrawings, customFitView, addToast]);
+  }, [setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, customFitView, addToast, resetStack, clearHistory]);
 
   const exportCanvasToPNG = useCallback(() => {
     const viewportNode = document.querySelector('.react-flow__viewport');

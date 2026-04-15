@@ -244,11 +244,12 @@ export function JobHubNode({ id, data }) {
   const handleDrop = useCallback((e) => {
     e.preventDefault();
     e.stopPropagation();
+    if (data.locked) return; // Locked nodes don't accept new drops
     const files = Array.from(e.dataTransfer?.files || []);
     const resume = files.find(f => f.name.match(/\.(pdf|docx|doc|txt|png|jpg|jpeg)$/i));
     if (resume?.path) startProcessing(resume.path);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [data.locked]);
 
   const isProcessing = ['parsing', 'querying', 'searching', 'scoring'].includes(hubState);
 
@@ -308,8 +309,9 @@ export function JobHubNode({ id, data }) {
             <p className="text-red-400 text-xs font-medium mb-1">Search failed</p>
             <p className="text-white/30 text-[10px] text-center">{data.errorMessage}</p>
             <button
-              onClick={() => { updateNodeData(id, { hubState: 'empty', errorMessage: null }); setSourceProgress({}); }}
-              className="mt-2 px-3 py-1 rounded text-[10px] bg-white/5 text-white/50 hover:bg-white/10 transition-colors"
+              onClick={data.locked ? undefined : () => { updateNodeData(id, { hubState: 'empty', errorMessage: null }); setSourceProgress({}); }}
+              disabled={!!data.locked}
+              className={`mt-2 px-3 py-1 rounded text-[10px] transition-colors ${data.locked ? 'bg-white/5 text-white/20 cursor-default' : 'bg-white/5 text-white/50 hover:bg-white/10'}`}
               onPointerDown={(e) => e.stopPropagation()}
             >
               Try again

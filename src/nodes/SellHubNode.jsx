@@ -180,11 +180,12 @@ export function SellHubNode({ id, data }) {
   const handleDrop = useCallback((e) => {
     e.preventDefault();
     e.stopPropagation();
+    if (data.locked) return; // Locked nodes don't accept new drops
     const files = Array.from(e.dataTransfer?.files || []);
     const images = files.filter(f => f.name.match(/\.(png|jpg|jpeg|webp|gif)$/i));
     if (images.length > 0) startAnalysis(images.map(f => f.path));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [data.locked]);
 
   const nodeWidth = 280;
   const nodeHeight = hubState === 'empty' ? 140 : hubState === 'draft' || hubState === 'priced' ? 320 : 120;
@@ -237,6 +238,7 @@ export function SellHubNode({ id, data }) {
             setEditing={setEditing}
             handleFieldEdit={handleFieldEdit}
             handleConfirmDraft={handleConfirmDraft}
+            locked={!!data.locked}
           />
         )}
 
@@ -266,6 +268,7 @@ export function SellHubNode({ id, data }) {
             togglePlatform={togglePlatform}
             copied={copied}
             handleCopyListing={handleCopyListing}
+            locked={!!data.locked}
           />
         )}
 
@@ -274,8 +277,9 @@ export function SellHubNode({ id, data }) {
           <div className="flex flex-col items-center justify-center py-6 px-4">
             <p className="text-red-400 text-xs font-medium mb-1">Analysis failed</p>
             <p className="text-white/30 text-[10px] text-center">{data.errorMessage}</p>
-            <button onClick={() => { updateNodeData(id, { hubState: 'empty', errorMessage: null }); setCompProgress({}); }}
-              className="mt-2 px-3 py-1 rounded text-[10px] bg-white/5 text-white/50 hover:bg-white/10 transition-colors"
+            <button onClick={data.locked ? undefined : () => { updateNodeData(id, { hubState: 'empty', errorMessage: null }); setCompProgress({}); }}
+              disabled={!!data.locked}
+              className={`mt-2 px-3 py-1 rounded text-[10px] transition-colors ${data.locked ? 'bg-white/5 text-white/20 cursor-default' : 'bg-white/5 text-white/50 hover:bg-white/10'}`}
               onPointerDown={(e) => e.stopPropagation()}>
               Try again
             </button>
