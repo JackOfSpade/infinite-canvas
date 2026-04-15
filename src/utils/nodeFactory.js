@@ -15,7 +15,7 @@ export function createLinkNode(position) {
 export function createGroupNode(position) {
   return {
     id: uuidv4(), type: 'group', position,
-    style: { width: 180, height: 130 },
+    style: { width: 160, height: 160 },
     data: {
       title: '', isNew: true,
       canvasData: { nodes: [], edges: [], drawings: [] },

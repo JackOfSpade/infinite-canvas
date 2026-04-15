@@ -1,6 +1,26 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Panel } from '@xyflow/react';
-import { Type, BoxSelect, Trash2, Link2, PenTool, Eraser, Undo2, Redo2, Magnet, Settings } from 'lucide-react';
+import { Type, Trash2, Link2, PenTool, Eraser, Undo2, Redo2, Magnet, Settings } from 'lucide-react';
+
+/** Nested canvas icon — plain circle with inner glow along the inside edge */
+function NestedCanvasIcon({ size = 18 }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      style={{ filter: 'drop-shadow(0 0 2px currentColor)' }}
+    >
+      {/* Outer soft halo */}
+      <circle cx="12" cy="12" r="9.5" stroke="currentColor" strokeWidth="5" opacity="0.10" />
+      {/* Inner glow ring — thicker, inside the main circle edge */}
+      <circle cx="12" cy="12" r="7.5" stroke="currentColor" strokeWidth="4" opacity="0.15" />
+      {/* Crisp main edge */}
+      <circle cx="12" cy="12" r="9.5" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  );
+}
 
 const COLORS = [
   { name: 'white', hex: 'white' },
@@ -14,30 +34,20 @@ const PEN_SIZES   = [2, 4, 8, 14, 22];
 const ERASER_SIZES = [10, 20, 40, 70, 110];
 
 /**
- * Tooltip that appears on hover but immediately hides when the button is right-clicked.
- * `suppressRef` is a ref whose `.current` === true while the context menu is open.
+ * Tooltip that shows on hover.
+ * Pass `hidden={true}` to instantly suppress it — the inline style overrides
+ * the CSS group-hover opacity in the same render tick, no polling needed.
  */
-function ToolbarTooltip({ label, shortcut, suppressRef, children }) {
+function ToolbarTooltip({ label, shortcut, hidden = false, children }) {
   return (
     <div className="relative group/tip">
       {children}
-      {/* The tooltip uses CSS for hover, but we also check the suppress ref via a CSS trick:
-          we overlay a transparent blocker when suppressed so CSS hover sees no pointer. */}
       <div
         className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 pointer-events-none z-50
                    opacity-0 group-hover/tip:opacity-100
                    transition-opacity duration-150 delay-300
                    flex flex-col items-center"
-        ref={(el) => {
-          // Imperatively hide when suppressed (avoids extra re-renders)
-          if (!el) return;
-          const update = () => {
-            el.style.opacity = suppressRef?.current ? '0' : '';
-          };
-          // Poll while mounted — cheap because it's just a style write
-          const id = setInterval(update, 50);
-          el._clearTip = () => clearInterval(id);
-        }}
+        style={hidden ? { opacity: 0, transitionDelay: '0ms', transition: 'none' } : undefined}
       >
         <div
           className="bg-[#1c1c1e] border border-white/[0.12] shadow-2xl rounded-lg
@@ -153,7 +163,7 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
 
         {/* ── Pen Tool ─────────────────────────────────────────────── */}
         <div className="relative" onClick={e => e.stopPropagation()}>
-          <ToolbarTooltip label="Pen Tool" shortcut="right-click for options" suppressRef={penSuppressRef}>
+        <ToolbarTooltip label="Pen Tool" shortcut="right-click for options" hidden={showColorMenu}>
             <button
               onClick={() => { setShowColorMenu(false); setShowEraserMenu(false); setActiveTool(activeTool === 'pen' ? null : 'pen'); setPlacementMode(null); penSuppressRef.current = false; eraserSuppressRef.current = false; }}
               onContextMenu={handlePenContextMenu}
@@ -217,7 +227,7 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
 
         {/* ── Eraser Tool ──────────────────────────────────────────── */}
         <div className="relative" onClick={e => e.stopPropagation()}>
-          <ToolbarTooltip label="Eraser" shortcut="right-click for options" suppressRef={eraserSuppressRef}>
+          <ToolbarTooltip label="Eraser" shortcut="right-click for options" hidden={showEraserMenu}>
             <button
               onClick={() => { setShowEraserMenu(false); setShowColorMenu(false); setActiveTool(activeTool === 'eraser' ? null : 'eraser'); setPlacementMode(null); penSuppressRef.current = false; eraserSuppressRef.current = false; }}
               onContextMenu={handleEraserContextMenu}
@@ -293,7 +303,7 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
             onClick={() => { setActiveTool(null); setPlacementMode('group'); }}
             className={`p-3 rounded-full transition ${placementMode === 'group' ? 'bg-white/20 text-blue-400' : 'text-white/70 hover:text-white hover:bg-white/10'}`}
           >
-            <BoxSelect size={18} />
+            <NestedCanvasIcon size={18} />
           </button>
         </ToolbarTooltip>
 

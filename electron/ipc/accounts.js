@@ -3,7 +3,7 @@
  * Opens visible browser windows for login and checks cookie health.
  */
 
-import { ipcMain } from 'electron';
+import { ipcMain, app } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -20,10 +20,41 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '../../');
 
+// ── Session status disk cache ────────────────────────────────────────────────
+// Avoids launching Chrome just to display status on panel open.
+function getStatusCachePath() {
+  return path.join(app.getPath('userData'), 'session-status-cache.json');
+}
+function readStatusCache() {
+  try {
+    const p = getStatusCachePath();
+    if (!fs.existsSync(p)) return {};
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch { return {}; }
+}
+function writeStatusCache(platformId, connected) {
+  try {
+    const cache = readStatusCache();
+    cache[platformId] = { connected, ts: Date.now() };
+    fs.writeFileSync(getStatusCachePath(), JSON.stringify(cache));
+  } catch (e) {
+    console.warn('[Accounts] Cache write failed:', e.message);
+  }
+}
+
 /**
  * Register all Accounts IPC handlers.
  */
 export function registerAccountsHandlers() {
+  // Get CACHED session statuses — instant, no Chrome launch.
+  // Use this for panel display. The full (Chrome-based) check is get-session-statuses.
+  ipcMain.handle('get-cached-session-statuses', () => {
+    const cache = readStatusCache();
+    return Object.entries(cache).map(([platform, v]) => ({
+      platform, connected: v.connected,
+    }));
+  });
+
   // Get system config status (Gemini, USAJobs, etc)
   ipcMain.handle('get-system-config-status', () => {
     // We can infer existence from process.env if loaded, but safer to check explicitly
@@ -80,7 +111,12 @@ export function registerAccountsHandlers() {
   // Open a visible login window for a specific platform
   ipcMain.handle('open-login-window', async (_event, { platformId }) => {
     try {
-      return await openLoginWindow(platformId);
+      const result = await openLoginWindow(platformId);
+      // After the login window closes, optimistically mark as connected.
+      // The user manually closed the window after logging in, so we trust they succeeded.
+      // Avoids a second Chrome launch just for verification.
+      writeStatusCache(platformId, true);
+      return result;
     } catch (error) {
       console.error(`[Accounts] Login window failed for ${platformId}:`, error.message);
       return { success: false, error: error.message };
