@@ -11,22 +11,34 @@ const DEFAULT_SIZE = 160;
 const EDGE_ZONE   = 12; // screen-px from circle edge that activates resize cursor
 
 export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, width, height }) {
-  const SIZE = Math.round(width || DEFAULT_SIZE);
+  // currentSize is updated both from the width prop (via useEffect) AND synchronously
+  // during active resize so SIZE is always fresh without waiting for ResizeObserver.
+  const [currentSize, setCurrentSize] = useState(() => Math.round(width || DEFAULT_SIZE));
+  useEffect(() => { setCurrentSize(Math.round(width || DEFAULT_SIZE)); }, [width]);
+  const SIZE = currentSize;
   const R    = SIZE / 2;
   const mainFlow = useReactFlow();
 
-  const [title, setTitle]                 = useState(data.title || '');
-  const [isEditing, setIsEditing]         = useState(false);
+  const [title, setTitle]                   = useState(data.title || '');
+  const [isEditing, setIsEditing]           = useState(false);
   const [showFontDialog, setShowFontDialog] = useState(false);
   const [edgeCursorStyle, setEdgeCursorStyle] = useState(null);
-  // isResizing state = visual signal only (hint text, etc.)
-  // isResizingRef = synchronous flag used inside pointer handlers (no re-render lag)
-  const [isResizing, setIsResizing]       = useState(false);
+  const [isResizing, setIsResizing]         = useState(false);
+
+  // Synchronous refs — read inside native pointer handlers without re-render lag
   const isResizingRef   = useRef(false);
-  const resizeCenterRef = useRef(null); // { flowCx, flowCy }
-  const inputRef        = useRef(null);
-  const containerRef    = useRef(null);
+  const resizeCenterRef = useRef(null);  // { flowCx, flowCy }
+  const resizeMoveCount = useRef(0);     // pointermove count per session (0 = phantom RF drag)
+
+  const inputRef     = useRef(null);
+  const containerRef = useRef(null);
   const pathId = `tcp-${id}`;
+
+  // liveRef gives the stable native-listener useEffect access to values that
+  // change between renders (isEditing, title, data, SIZE) without needing to
+  // re-register the listeners every render.
+  const liveRef = useRef(null);
+  liveRef.current = { isEditing, title, data, SIZE };
 
   useEffect(() => { setTitle(data.title || ''); }, [data.title]);
 
@@ -56,7 +68,6 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     const cx = rect.left + rect.width  / 2;
     const cy = rect.top  + rect.height / 2;
     const angleDeg = Math.atan2(clientY - cy, clientX - cx) * 180 / Math.PI;
-    // +90° so the double-headed arrow points radially (toward/away from center)
     const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'><g transform='rotate(${(angleDeg + 90).toFixed(1)},10,10)' stroke-linecap='round' stroke-linejoin='round'><path d='M10 2L10 18M7 5L10 2L13 5M7 15L10 18L13 15' stroke='black' stroke-width='3.5' fill='none'/><path d='M10 2L10 18M7 5L10 2L13 5M7 15L10 18L13 15' stroke='white' stroke-width='2' fill='none'/></g></svg>`;
     return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 10 10, ew-resize`;
   }, []);
@@ -69,72 +80,141 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     return Math.abs(Math.sqrt((clientX - cx) ** 2 + (clientY - cy) ** 2) - rect.width / 2);
   }, []);
 
-  // ── Pointer handlers (pointer-capture approach — no useEffect race condition) ─
+  // ── Native pointer listeners ──────────────────────────────────────────────
   //
-  // setPointerCapture ensures the element receives ALL pointermove/pointerup
-  // events even if the pointer leaves the element bounds, and fires them
-  // synchronously in the same event loop (no React re-render gap).
+  // WHY NATIVE instead of React onPointerXxx props:
+  //
+  // ReactFlow adds its node-drag handler as a native addEventListener on the
+  // node wrapper div (parent of our container). Native listeners on a PARENT
+  // element fire AFTER the event has already bubbled through child elements,
+  // BUT React synthetic events use delegation at the React root — they fire
+  // even later, after the entire bubble chain. This means:
+  //
+  //   pointerdown fires → bubbles → RF's native handler on wrapper fires → drag starts
+  //                     → reaches React root → our synthetic onPointerDown fires
+  //                     → e.stopPropagation() → too late, RF already started the drag
+  //
+  // By attaching native listeners to OUR inner div, our handler fires BEFORE
+  // the event reaches RF's wrapper. e.stopPropagation() here actually works.
+  //
+  // For the title zone: data-no-resize="true" on child elements lets us skip
+  // resize initiation without relying on React synthetic stopPropagation.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
 
-  const handleContainerPointerDown = useCallback((e) => {
-    if (data.locked) return;
-    // Edge check FIRST — resize takes priority over click-to-edit.
-    if (getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE) {
-      e.stopPropagation();
-      if (isEditing) {
-        mainFlow.updateNodeData(id, { title: title.trim() });
-        setIsEditing(false);
+    const onDown = (e) => {
+      // Let interactive children (title zone, delete button) handle their own clicks.
+      if (e.target.closest('[data-no-resize]')) return;
+
+      if (liveRef.current.data.locked) return;
+
+      const dist = getDistToEdge(e.clientX, e.clientY);
+      if (dist < EDGE_ZONE) {
+        // ── NATIVE stopPropagation ────────────────────────────────────────
+        // This fires before the event bubbles to RF's wrapper div native
+        // listener. RF never sees this pointerdown → no drag tracking starts.
+        e.stopPropagation();
+
+        if (liveRef.current.isEditing) {
+          mainFlow.updateNodeData(id, { title: liveRef.current.title.trim() });
+          setIsEditing(false);
+        }
+
+        el.setPointerCapture(e.pointerId);
+
+        // Read center from Zustand store — always synchronous and up-to-date.
+        const node = mainFlow.getNode(id);
+        if (!node) return;
+        const liveSize = node.style?.width || node.measured?.width || node.width || DEFAULT_SIZE;
+        resizeCenterRef.current = {
+          flowCx: node.position.x + liveSize / 2,
+          flowCy: node.position.y + liveSize / 2,
+        };
+        isResizingRef.current = true;
+        resizeMoveCount.current = 0;
+        setIsResizing(true);
+        EventLogger.log(`canvas-node resize start id=${id} size=${liveRef.current.SIZE} distToEdge=${dist.toFixed(1)}`);
       }
-      // Capture all subsequent pointer events on this element (even outside bounds).
-      containerRef.current?.setPointerCapture(e.pointerId);
-      // Measure screen center from DOM → convert to flow coords.
-      // Using the DOM rect avoids any stale React prop / store values.
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const screenCx = rect.left + rect.width  / 2;
-      const screenCy = rect.top  + rect.height / 2;
-      const fc = mainFlow.screenToFlowPosition({ x: screenCx, y: screenCy });
-      resizeCenterRef.current = { flowCx: fc.x, flowCy: fc.y };
-      isResizingRef.current = true;
-      setIsResizing(true);
-      EventLogger.log(`canvas-node resize start id=${id} size=${SIZE}`);
-    }
-  }, [data.locked, getDistToEdge, isEditing, mainFlow, id, title, SIZE]);
+    };
 
-  const handleContainerPointerMove = useCallback((e) => {
-    // ── Active resize ─────────────────────────────────────────────────────
-    if (isResizingRef.current && resizeCenterRef.current) {
-      const { flowCx, flowCy } = resizeCenterRef.current;
-      const fp = mainFlow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
-      const flowDist = Math.sqrt((fp.x - flowCx) ** 2 + (fp.y - flowCy) ** 2);
-      const newSize  = Math.round(Math.max(MIN_SIZE, Math.min(MAX_SIZE, flowDist * 2)));
-      mainFlow.setNodes(nds => nds.map(n =>
-        n.id === id ? {
-          ...n,
-          position: { x: flowCx - newSize / 2, y: flowCy - newSize / 2 },
-          width:  newSize,
-          height: newSize,
-          style:  { ...(n.style || {}), width: newSize, height: newSize },
-        } : n
-      ));
-      setEdgeCursorStyle(getResizeCursor(e.clientX, e.clientY));
-      return;
-    }
-    // ── Hover: update edge cursor ─────────────────────────────────────────
-    const near = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
-    setEdgeCursorStyle(near ? getResizeCursor(e.clientX, e.clientY) : null);
-  }, [id, mainFlow, getResizeCursor, getDistToEdge]);
+    const onMove = (e) => {
+      if (isResizingRef.current && resizeCenterRef.current) {
+        // ── NATIVE stopPropagation during resize ──────────────────────────
+        // Prevents RF from seeing pointermove events and tracking a drag
+        // that would override our center-anchored position on pointerup.
+        e.stopPropagation();
 
-  const handleContainerPointerUp = useCallback((e) => {
-    if (!isResizingRef.current) return;
-    containerRef.current?.releasePointerCapture(e.pointerId);
-    isResizingRef.current = false;
-    resizeCenterRef.current = null;
-    setIsResizing(false);
-    EventLogger.log(`canvas-node resize end id=${id}`);
-    // Restore hover cursor
-    const near = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
-    setEdgeCursorStyle(near ? getResizeCursor(e.clientX, e.clientY) : null);
-  }, [id, getDistToEdge, getResizeCursor]);
+        const { flowCx, flowCy } = resizeCenterRef.current;
+        const fp = mainFlow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+        const flowDist = Math.sqrt((fp.x - flowCx) ** 2 + (fp.y - flowCy) ** 2);
+        const newSize  = Math.round(Math.max(MIN_SIZE, Math.min(MAX_SIZE, flowDist * 2)));
+        mainFlow.setNodes(nds => nds.map(n =>
+          n.id === id ? {
+            ...n,
+            position: { x: flowCx - newSize / 2, y: flowCy - newSize / 2 },
+            width:    newSize,
+            height:   newSize,
+            // Do NOT set measured — it races with RF's ResizeObserver and
+            // causes size to compound between sessions.
+            style:    { ...(n.style || {}), width: newSize, height: newSize },
+          } : n
+        ));
+        resizeMoveCount.current++;
+        setCurrentSize(newSize);
+        setEdgeCursorStyle(getResizeCursor(e.clientX, e.clientY));
+        return;
+      }
+      // ── Hover: show edge cursor ─────────────────────────────────────────
+      const near = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
+      setEdgeCursorStyle(near ? getResizeCursor(e.clientX, e.clientY) : null);
+    };
+
+    const onUp = (e) => {
+      if (!isResizingRef.current) return;
+      // ── NATIVE stopPropagation on pointerup ───────────────────────────
+      // Prevents RF from finalizing a drag to the wrong position on resize end.
+      e.stopPropagation();
+      el.releasePointerCapture(e.pointerId);
+      isResizingRef.current = false;
+      resizeCenterRef.current = null;
+      setIsResizing(false);
+      EventLogger.log(`canvas-node resize end id=${id} moves=${resizeMoveCount.current}`);
+      const near = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
+      setEdgeCursorStyle(near ? getResizeCursor(e.clientX, e.clientY) : null);
+    };
+
+    const onLeave = () => {
+      if (!isResizingRef.current) setEdgeCursorStyle(null);
+    };
+
+    const onCancel = (e) => {
+      if (!isResizingRef.current) return;
+      el.releasePointerCapture(e.pointerId);
+      isResizingRef.current = false;
+      resizeCenterRef.current = null;
+      setIsResizing(false);
+      setEdgeCursorStyle(null);
+    };
+
+    el.addEventListener('pointerdown',  onDown);
+    el.addEventListener('pointermove',  onMove);
+    el.addEventListener('pointerup',    onUp);
+    el.addEventListener('pointerleave', onLeave);
+    el.addEventListener('pointercancel', onCancel);
+
+    return () => {
+      el.removeEventListener('pointerdown',  onDown);
+      el.removeEventListener('pointermove',  onMove);
+      el.removeEventListener('pointerup',    onUp);
+      el.removeEventListener('pointerleave', onLeave);
+      el.removeEventListener('pointercancel', onCancel);
+    };
+  // getDistToEdge, getResizeCursor, mainFlow are all stable across renders.
+  // id is stable for the component's lifetime. State setters are stable.
+  // liveRef gives us fresh isEditing/title/data/SIZE inside the closure.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, mainFlow, getDistToEdge, getResizeCursor]);
 
   // ── Derived values ────────────────────────────────────────────────────────
   const canvasData = data.canvasData || {
@@ -166,12 +246,13 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     <>
       <div
         ref={containerRef}
-        className="group"
+        // noDrag: when the cursor is near the edge, tell RF's drag system
+        // to skip this element. Belt-and-suspenders on top of native stopPropagation.
+        className={`group${edgeCursorStyle ? ' noDrag' : ''}`}
         style={{ width: SIZE, height: SIZE, position: 'relative', cursor: edgeCursor }}
-        onPointerDown={handleContainerPointerDown}
-        onPointerMove={handleContainerPointerMove}
-        onPointerUp={handleContainerPointerUp}
-        onPointerLeave={() => { if (!isResizingRef.current) setEdgeCursorStyle(null); }}
+        // No React onPointerXxx props — all resize pointer handling is done via
+        // native addEventListener in the useEffect above so that stopPropagation
+        // fires before ReactFlow's parent-wrapper native drag listener.
       >
         {/* ── Circle body ──────────────────────────────────────────────────── */}
         <div
@@ -243,26 +324,26 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         </svg>
 
         {/* ── Title edit click zone ─────────────────────────────────────────── */}
-        {/* Positioned at the exact location of the arc text so the text cursor  */}
-        {/* only appears when hovering directly over the title glyphs.            */}
-        {/* dy={-titleSpacing} moves the text UP by titleSpacing from the arc     */}
-        {/* bottom (y = SIZE). Estimated width from title length × font size.      */}
+        {/* data-no-resize tells the native pointerdown handler to skip resize   */}
+        {/* initiation when the click originates from this element, so clicking  */}
+        {/* the title text doesn't accidentally trigger resize (the title sits   */}
+        {/* on the circle rim where distToEdge ≈ 0).                             */}
         {!isEditing && !data.locked && (() => {
           const titleText = title || 'Sub-Canvas';
-          const estWidth  = Math.min(SIZE * 0.88, Math.max(56, titleText.length * fontSize * 0.58 + 12));
-          const zoneTop   = SIZE - titleSpacing - fontSize - 4;
+          const estWidth  = Math.min(SIZE * 0.85, Math.max(SIZE * 0.45, titleText.length * fontSize * 0.65 + 24));
+          const zoneTop   = SIZE - titleSpacing - fontSize - 6;
           return (
             <div
+              data-no-resize="true"
               style={{
                 position: 'absolute',
                 top:    zoneTop,
                 left:   (SIZE - estWidth) / 2,
                 width:  estWidth,
-                height: fontSize + 10,
+                height: fontSize + 14,
                 cursor: 'text',
                 zIndex: 15,
               }}
-              onPointerDown={e => e.stopPropagation()}
               onClick={e => { e.stopPropagation(); setIsEditing(true); }}
               onDoubleClick={e => e.stopPropagation()}
             />
@@ -272,12 +353,12 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         {/* ── Transparent input overlay — only the caret is visible ────────── */}
         {isEditing && (
           <div
+            data-no-resize="true"
             style={{
               position: 'absolute',
               top: -(Math.max(fontSize, 14) + titleSpacing + 2),
               left: 0, width: SIZE, zIndex: 20,
             }}
-            onPointerDown={e => e.stopPropagation()}
             onClick={e => e.stopPropagation()}
           >
             <input
@@ -311,6 +392,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         {/* ── Delete button ─────────────────────────────────────────────────── */}
         {!data.locked && (
           <button
+            data-no-resize="true"
             onClick={handleDelete}
             onPointerDown={e => e.stopPropagation()}
             title="Delete canvas"

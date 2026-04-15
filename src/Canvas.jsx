@@ -82,6 +82,20 @@ export function Canvas() {
     onNodesChangeBase(changes);
   }, [onNodesChangeBase, snapshotOnDelete]);
 
+  // ── ReactFlow drag event logging ─────────────────────────────────────────
+  // These fire from ReactFlow's own window-level drag system, independently of
+  // our pointer handlers. If "rf-drag-start" appears alongside "canvas-node
+  // resize start" in a bug report, it means RF's drag system is interfering
+  // with our resize (missing noDrag class, or stopPropagation not reaching
+  // window listeners).
+  const onNodeDragStart = useCallback((e, node) => {
+    EventLogger.log(`rf-drag-start id=${node.id} type=${node.type} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
+  }, []);
+
+  const onNodeDragStop = useCallback((e, node) => {
+    EventLogger.log(`rf-drag-stop id=${node.id} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
+  }, []);
+
   const onEdgesChange = useCallback((changes) => {
     snapshotOnDelete(changes);
     changes.forEach(ch => {
@@ -346,6 +360,29 @@ export function Canvas() {
       return;
     }
     try {
+      // Snapshot the viewport so resize/position math can be verified in reports.
+      const viewport = getViewport();
+
+      // For group nodes (CanvasNode), capture all three size fields separately.
+      // Discrepancies between style.width / measured.width / width reveal the
+      // ReactFlow ResizeObserver race that caused the "size grows between sessions" bug.
+      const nodeInternals = nodes.map(n => {
+        const base = { id: n.id, type: n.type };
+        if (n.type === 'group') {
+          return {
+            ...base,
+            position:       n.position,
+            width_prop:     n.width,
+            height_prop:    n.height,
+            style_width:    n.style?.width,
+            style_height:   n.style?.height,
+            measured_width:  n.measured?.width,
+            measured_height: n.measured?.height,
+          };
+        }
+        return base;
+      });
+
       const payload = {
         description,
         nodes,
@@ -364,7 +401,17 @@ export function Canvas() {
           showMiniMap: settings.showMiniMap,
           windowInnerWidth: window.innerWidth,
           windowInnerHeight: window.innerHeight,
+          // Viewport transform — zoom level is critical for diagnosing
+          // screenToFlowPosition math in resize/placement bugs.
+          viewport: {
+            x:    parseFloat(viewport.x.toFixed(2)),
+            y:    parseFloat(viewport.y.toFixed(2)),
+            zoom: parseFloat(viewport.zoom.toFixed(4)),
+          },
         },
+        // Separate diagnostic table — shows all three RF size fields per group node
+        // so the report immediately exposes any style/measured/prop mismatches.
+        nodeInternals,
         eventLogs: EventLogger.getLogs(),
       };
       const res = await window.electronAPI.exportBugReport(payload);
@@ -376,7 +423,7 @@ export function Canvas() {
     } catch (e) {
       addToast({ title: 'Bug Report Error', description: e.message || 'An unexpected error occurred.', type: "error" });
     }
-  }, [nodes, edges, drawings, activeTool, placementMode, eraserType, settings, currentFile, hasUnsavedChanges, navigation.depth, snapToGrid, addToast]);
+  }, [nodes, edges, drawings, activeTool, placementMode, eraserType, settings, currentFile, hasUnsavedChanges, navigation.depth, snapToGrid, addToast, getViewport]);
 
   // ── Animation overlay style ──────────────────────────────────────────────
   const animDuration = getAnimationDuration();
@@ -457,6 +504,8 @@ export function Canvas() {
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onNodesDelete={onNodesDelete}
+            onNodeDragStart={onNodeDragStart}
+            onNodeDragStop={onNodeDragStop}
             onConnect={onConnect}
             isValidConnection={isValidConnection}
             onDrop={handleDrop}
