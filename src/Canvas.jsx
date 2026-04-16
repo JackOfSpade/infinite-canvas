@@ -356,12 +356,15 @@ export function Canvas() {
     depth: navigation.depth
   });
 
-  // ── Keyboard Shortcuts Panel ─────────────────────────────────────────────
-  // Pressing '?' now opens the Settings panel (shortcuts live there)
+  // ── Keyboard Shortcuts Panel + Escape to cancel placement/tool ──────────
   useEffect(() => {
     const handleKey = (e) => {
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+      if (e.key === 'Escape') {
+        if (placementMode) { setPlacementMode(null); return; }
+        if (activeTool)    { setActiveTool(null);    return; }
+      }
       if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
         e.preventDefault();
         setIsSettingsOpen(true);
@@ -369,7 +372,7 @@ export function Canvas() {
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, []);
+  }, [placementMode, activeTool]);
 
   // ── WASD canvas navigation ───────────────────────────────────────────────
   useEffect(() => {

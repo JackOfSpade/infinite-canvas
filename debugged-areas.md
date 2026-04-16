@@ -50,7 +50,7 @@
 |------|--------|-------|
 | `src/nodes/TextNode.jsx` | ✅ Fixed (Bugs 40, 70) | Font dialog + double-click guarded; locked nodes not edited |
 | `src/nodes/LinkNode.jsx` | ✅ Fixed (Bugs 41, 70b) | Font + URL dialog guarded; URL fetch on paste correct |
-| `src/nodes/CanvasNode.jsx` | ✅ Clean | Dive-in blocked when locked; title input disabled; delete button hidden; lock icon shown |
+| `src/nodes/CanvasNode.jsx` | ✅ Fixed (Bugs 78–81, Session 10) | SVG-text click now uses same TitleZoneCorrection/Active path as rim click; click-zone div uses `getComputedTextLength()` so width matches actual text; title-zone cursor zone uses measured text length; off-screen input with deferred refocus fixes RF focus-steal on new node creation |
 | `src/nodes/DocumentNode.jsx` | ✅ Clean | Double-click file-open blocked when locked; file watcher correctly cleaned up |
 | `src/nodes/JobCardNode.jsx` | ✅ Fixed (Bug 65) | Dismiss button hidden, status select disabled, cover letter button disabled when locked |
 | `src/nodes/JobHubNode.jsx` | ✅ Fixed (Bug 62) | Resume drop + error retry blocked when locked |
@@ -176,6 +176,11 @@
 | 75 | `FontSizeDialog.jsx` | No maximum font size — user could type `9999`, creating a node too tall to see or interact with. Fixed: `Math.min(500, ...)` in onChange + `max={500}` attribute on the input | 8 |
 | 76 | `electron/ipc/browserPool.js` | `gaussianDelay`: `Math.random()` can return exactly 0 (probability ~2⁻⁵³). `Math.log(0)=−Infinity` → `Math.sqrt(−Infinity)=NaN` → `Math.max(1000,NaN)=NaN` in JS → `setTimeout(fn,NaN)` fires immediately, bypassing the domain rate-limiter entirely. Fixed: `Math.random() \|\| Number.EPSILON` | 8 |
 | 77 | `electron/extractors/jobs.js` | ZipRecruiter `__NEXT_DATA__` parser: `job.location \|\| job.city ? X : Y` has wrong operator precedence — parsed as `(job.location \|\| job.city) ? X : Y`. When `job.location` is set but `job.city` is `undefined`, location becomes `"undefined"` or `"undefined, CA"`. Fixed: added parentheses → `job.location \|\| (job.city ? X : Y)` | 8 |
+| 78 | `src/nodes/CanvasNode.jsx` | SVG title-text click path (dist ≥ EDGE_ZONE) called `setIsEditing(true)` directly without recording `TitleZoneCorrection` or setting `TitleZoneActive`. RF's capture-phase drag listener had already started tracking a drag; if the user held and moved, the node was displaced with no snap-back. Fixed: merged into the normal title-zone path (pointer capture + refs + TitleZoneCorrection), letting `onUp` handle editing start with full cleanup | 10 |
+| 79 | `src/nodes/CanvasNode.jsx` | Same path above: `TitleZoneActive.add(id)` was never called, so `TitleZoneActive.delete(id)` in `onUp` was never reached — leaving a stale entry if the node was clicked again. Fixed: same merge as Bug 78 | 10 |
+| 80 | `src/nodes/CanvasNode.jsx` | Title-zone click-zone div used `Math.max(SIZE * 0.45, …)` as a minimum width — on a SIZE=438 circle with a 2-char title it produced 197px even though the text was ~38px wide, causing the transparent div to intercept clicks on the circle body. Fixed: replaced with `textRef.current.getComputedTextLength()` (exact DOM measurement) + `fontSize * 1.2` padding, falling back to character-count estimate when DOM measurement unavailable | 10 |
+| 81 | `src/nodes/CanvasNode.jsx` | `isInTitleArc` (cursor + click routing) used character-count estimate for arc half-angle. This made the I-beam and editing zones wider/narrower than the actual rendered text. Fixed: `liveRef.current.measuredTextLen` (set from `textRef.getComputedTextLength()` each render) used instead; `isInTitleArc` and SVG highlight now share the same pixel-accurate measurement | 10 |
+| 82 | `src/components/CustomMiniMap.jsx` | Edge rendering used `nodes.find(n => n.id === e.source)` — O(n) per edge, called on every viewport change (60fps). With 50 nodes and 50 edges: 5,000 `.find()` calls per frame. Fixed: added `useMemo`-cached `nodeById` Map; edge lookup is now O(1) | 10 |
 
 ---
 
@@ -315,15 +320,26 @@
 | 129 | CustomMiniMap | Click-to-pan: click a position in the minimap → viewport centers on that flow coordinate | ✅ Added (Session 9) |
 | 130 | SearchBar | Navigation preserves user's current zoom level (was forced to 1.5); uses `getViewport().zoom` | ✅ Fixed (Session 9) |
 | 131 | ContextMenu | Submenu disappear bug on Panel1→canvas→Panel1→Panel2 path — fixed with 120ms `closeTimerRef` delay + `onMouseEnter={cancelClose}` on submenu div | ✅ Fixed (Session 9) |
+| 132 | CanvasNode | SVG title-text click (dist ≥ EDGE_ZONE) — node displacement if user held and moved after clicking text glyph | ✅ Fixed (Bug 78/79) |
+| 133 | CanvasNode | Click-zone div intercepting circle-body clicks on large circles with short titles (SIZE * 0.45 floor too wide) | ✅ Fixed (Bug 80) |
+| 134 | CanvasNode | `isInTitleArc` and highlight arc using different width sources (estimate vs DOM measurement) causing cursor/highlight zone mismatch | ✅ Fixed (Bug 81) |
+| 135 | CanvasNode | `data.isNew` auto-edit losing focus to RF selection — deferred `setTimeout(0)` refocus wins the race | ✅ Fixed (session 10) |
+| 136 | CanvasNode | Title zone tap while already editing (e.g. after `data.isNew` auto-start) did nothing — now calls `inputRef.current.focus()` to reclaim focus | ✅ Fixed (session 10) |
+| 137 | CanvasNode | Click-outside-to-commit: off-screen input never gets `onBlur` from canvas clicks — document capture-phase `pointerdown` listener handles it | ✅ Fixed (session 10) |
+| 138 | CustomMiniMap | Edge source/target lookup O(n²) at 60fps — replaced with O(1) `nodeById` Map | ✅ Fixed (Bug 82) |
+| 139 | CustomMiniMap | Click-to-pan math: `(mx - offsetX) / scale + minX` correctly inverts the minimap-to-flow transform | ✅ Clean |
+| 140 | CustomMiniMap | Viewport indicator rect can go outside minimap bounds if viewport is panned far — clipped by `overflow:hidden` on the wrapper div | ✅ Acceptable |
+| 141 | useCanvasContextMenu | `isDrawingMode` dead prop removed (was passed from Canvas.jsx and immediately suppressed with `eslint-disable-line no-unused-vars` inside hook) | ✅ Fixed (Session 10 refactor) |
+| 142 | useCanvasInitialization | Auto-save promise now has `.catch()` — previously silent failures only appeared in the global `UNHANDLED-PROMISE` logger | ✅ Fixed (Session 10 refactor) |
+| 143 | EventLogger | `_lastMsg`, `_lastCount`, `_nodeStates` now initialized in constructor; removed per-call defensive guards | ✅ Fixed (Session 10 refactor) |
+| 144 | Canvas | Escape key did not cancel placement mode (`text`/`link`/`group`) — only drawing mode had Escape handling | ✅ Fixed (Bug 83, Session 11) |
 
 ---
 
 ## ❓ What Still Needs Checking
 
-All files in `src/` and `electron/` have been fully audited across Sessions 1–9.
+All files in `src/` and `electron/` have been fully audited across Sessions 1–11.
 The codebase is considered comprehensively hardened.
-
-**New files added in Session 9:** `src/components/CustomMiniMap.jsx` — audit on next session if behavior changes are made.
 
 If new features are added, create entries here for the new files/interactions introduced.
 

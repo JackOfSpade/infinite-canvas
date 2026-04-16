@@ -58,6 +58,13 @@ export function CustomMiniMap({ nodes, edges, drawings }) {
     return { cMinX: mnX - CONTENT_PAD, cMinY: mnY - CONTENT_PAD, cMaxX: mxX + CONTENT_PAD, cMaxY: mxY + CONTENT_PAD, isEmpty: false };
   }, [nodes, drawings]);
 
+  // ── Part A2: O(1) node lookup by id ─────────────────────────────────────
+  const nodeById = useMemo(() => {
+    const m = new Map();
+    nodes.forEach(n => m.set(n.id, n));
+    return m;
+  }, [nodes]);
+
   // ── Part B: display bounds (content + current viewport, no memo) ─────────
   const vpFlowX = -viewport.x / viewport.zoom;
   const vpFlowY = -viewport.y / viewport.zoom;
@@ -129,8 +136,8 @@ export function CustomMiniMap({ nodes, edges, drawings }) {
         >
           {/* ── Edges ────────────────────────────────────────────────── */}
           {edges.map(e => {
-            const src = nodes.find(n => n.id === e.source);
-            const tgt = nodes.find(n => n.id === e.target);
+            const src = nodeById.get(e.source);
+            const tgt = nodeById.get(e.target);
             if (!src || !tgt) return null;
             const sd = getNodeDims(src), td = getNodeDims(tgt);
             const p1 = toM(src.position.x + sd.w / 2, src.position.y + sd.h / 2);

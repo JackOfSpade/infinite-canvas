@@ -281,11 +281,17 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         const isSvgText = tgt.nodeName === 'text' || tgt.nodeName === 'textPath' ||
                           tgt.nodeName === 'tspan' || !!tgt.closest('text');
         if (isSvgText && !liveRef.current.isEditing && isInTitleZone(e.clientX, e.clientY)) {
+          // RF's capture-phase drag listener already fired. Mirror the normal title-zone
+          // path: capture the pointer so onUp fires reliably, record position for
+          // snap-back, and let onUp start editing (so TitleZoneActive is always cleaned up).
           e.stopPropagation();
-          setIsEditing(true);
-          return;
+          el.setPointerCapture(e.pointerId);
+          titleZoneDownRef.current = true;
+          TitleZoneActive.add(id);
+          const node = mainFlow.getNode(id);
+          if (node) TitleZoneCorrection.set(id, { x: node.position.x, y: node.position.y });
         }
-        return; // pointer is not near the rim and not on title text — ignore
+        return; // pointer is not near the rim — ignore (onUp handles editing start)
       }
 
       // ── Describe the click target for diagnostics ─────────────────────────
@@ -704,7 +710,10 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         {/*   2. onClick fallback for clicks well inside the circle (dist ≥ EDGE_ZONE) */}
         {!isEditing && !data.locked && (() => {
           const titleText = title || 'Sub-Canvas';
-          const estWidth  = Math.min(SIZE * 0.85, Math.max(SIZE * 0.45, titleText.length * fontSize * 0.65 + 24));
+          const measured  = textRef.current?.getComputedTextLength?.() ?? 0;
+          const estWidth  = measured > 0
+            ? Math.min(SIZE * 0.85, measured + fontSize * 1.2)
+            : Math.min(SIZE * 0.85, titleText.length * fontSize * 0.65 + 24);
           // Title text is at the TOP arc (sweep=1). The arc baseline sits at y=0
           // (container top edge). This div covers the zone just inside the top
           // of the container — for inside-circle clicks (dist ≥ EDGE_ZONE) that
