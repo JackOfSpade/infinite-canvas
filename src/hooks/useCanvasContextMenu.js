@@ -17,7 +17,6 @@ const NODE_COLORS = [
 ];
 
 export function useCanvasContextMenu({
-  isDrawingMode, // eslint-disable-line no-unused-vars
   placementMode,
   takeSnapshot,
   setNodes,

@@ -84,7 +84,7 @@ export async function processDroppedFiles(files, startPosition) {
       const result = await window.electronAPI.scanDirectory(file.path);
       const fsItem = result.isFile ? result.file : result;
       newItems.push(buildNode(fsItem, currentPos));
-      // Offset subsequent items slightly to prevent them stacking flawlessly on each other
+      // Offset subsequent items slightly to prevent them stacking perfectly on top of each other
       currentPos = { x: currentPos.x + 40, y: currentPos.y + 40 };
     } catch (e) {
       console.error('Failed to read file/folder on drop payload', e);

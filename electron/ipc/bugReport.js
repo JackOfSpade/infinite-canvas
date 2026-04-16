@@ -3,61 +3,60 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-export function registerBugReportHandlers() {
-  ipcMain.handle('export-bug-report', async (event, payload) => {
-    try {
-      const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates } = payload;
+// ── Shared markdown generation ────────────────────────────────────────────────
+// Used by both the "save to file" and "copy to clipboard" handlers so the
+// report content is identical regardless of how the user chooses to export it.
+function generateMarkdown(payload) {
+  const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates } = payload;
 
-      const systemInfo = {
-        platform: process.platform,
-        arch: process.arch,
-        osRelease: os.release(),
-        appVersion: app.getVersion(),
-        nodeVersion: process.versions.node,
-        electronVersion: process.versions.electron,
-        totalMemMB: Math.round(os.totalmem() / 1024 / 1024),
-        freeMemMB: Math.round(os.freemem() / 1024 / 1024)
-      };
+  const systemInfo = {
+    platform:        process.platform,
+    arch:            process.arch,
+    osRelease:       os.release(),
+    appVersion:      app.getVersion(),
+    nodeVersion:     process.versions.node,
+    electronVersion: process.versions.electron,
+    totalMemMB:      Math.round(os.totalmem() / 1024 / 1024),
+    freeMemMB:       Math.round(os.freemem()  / 1024 / 1024),
+  };
 
-      const appState = {
-        systemInfo,
-        frontEndState,
-        nodes,
-        edges,
-        drawings,
-        timestamp: new Date().toISOString()
-      };
+  const appState = {
+    systemInfo,
+    frontEndState,
+    nodes,
+    edges,
+    drawings,
+    timestamp: new Date().toISOString(),
+  };
 
-      // ── Diagnostic section: group node size fields ───────────────────────
-      // Shows style.width / measured.width / width prop separately.
-      // A mismatch here (e.g. measured growing while style stays constant) is
-      // the signature of the ReactFlow ResizeObserver race condition.
-      const groupNodes = (nodeInternals || []).filter(n => n.type === 'group');
+  // ── Diagnostic section: group node size fields ─────────────────────────────
+  // Shows style.width / measured.width / width prop separately.
+  // A mismatch here (e.g. measured growing while style stays constant) is
+  // the signature of the ReactFlow ResizeObserver race condition.
+  const groupNodes = (nodeInternals || []).filter(n => n.type === 'group');
+  const compStateById = {};
+  (nodeComponentStates || []).forEach(s => { compStateById[s.id] = s; });
 
-      // Build a quick lookup of component state by node id
-      const compStateById = {};
-      (nodeComponentStates || []).forEach(s => { compStateById[s.id] = s; });
-
-      let nodeDiagMarkdown = '';
-      if (groupNodes.length > 0) {
-        const rows = groupNodes.map(n => {
-          const cs = compStateById[n.id] || {};
-          const flags = [
-            cs.isEditing   ? 'editing'    : null,
-            cs.isResizing  ? 'resizing'   : null,
-            cs.hasEdgeCursor ? 'edgeCursor' : null,
-          ].filter(Boolean).join(', ') || '—';
-          return (
-            `| \`${n.id.slice(0, 8)}\` ` +
-            `| (${n.position?.x?.toFixed(0)}, ${n.position?.y?.toFixed(0)}) ` +
-            `| ${n.width_prop ?? '—'} ` +
-            `| ${n.style_width ?? '—'} ` +
-            `| ${n.measured_width ?? '—'} ` +
-            `| ${cs.size ?? '—'} ` +
-            `| ${flags} |`
-          );
-        }).join('\n');
-        nodeDiagMarkdown = `
+  let nodeDiagMarkdown = '';
+  if (groupNodes.length > 0) {
+    const rows = groupNodes.map(n => {
+      const cs = compStateById[n.id] || {};
+      const flags = [
+        cs.isEditing     ? 'editing'    : null,
+        cs.isResizing    ? 'resizing'   : null,
+        cs.hasEdgeCursor ? 'edgeCursor' : null,
+      ].filter(Boolean).join(', ') || '—';
+      return (
+        `| \`${n.id.slice(0, 8)}\` ` +
+        `| (${n.position?.x?.toFixed(0)}, ${n.position?.y?.toFixed(0)}) ` +
+        `| ${n.width_prop    ?? '—'} ` +
+        `| ${n.style_width   ?? '—'} ` +
+        `| ${n.measured_width ?? '—'} ` +
+        `| ${cs.size         ?? '—'} ` +
+        `| ${flags} |`
+      );
+    }).join('\n');
+    nodeDiagMarkdown = `
 ## Group Node Diagnostics
 > **Size columns**: mismatches reveal ResizeObserver/setNodes race conditions.
 > **Component state**: React state at the moment the report was generated.
@@ -66,21 +65,16 @@ export function registerBugReportHandlers() {
 |---|---|---|---|---|---|---|
 ${rows}
 `;
-      }
+  }
 
-      // ── Viewport section ─────────────────────────────────────────────────
-      const vp = frontEndState?.viewport;
-      const viewportLine = vp
-        ? `- Viewport: zoom=${vp.zoom} x=${vp.x} y=${vp.y}`
-        : '';
+  // ── Viewport section ───────────────────────────────────────────────────────
+  const vp = frontEndState?.viewport;
+  const viewportLine = vp ? `- Viewport: zoom=${vp.zoom} x=${vp.x} y=${vp.y}` : '';
 
-      const MAX_BUDGET_BYTES = 500 * 1024; // 500 KB — the actual useful event content
-      // in a typical immediate-report session is 20–50 lines (~4 KB). Even a heavy
-      // session generates <50 KB of signal. 10 MB was 200× too large; actual files
-      // were 21–52 KB total including the JSON state dump.
-      const appStateJson = JSON.stringify(appState, null, 2);
+  const MAX_BUDGET_BYTES = 500 * 1024;
+  const appStateJson = JSON.stringify(appState, null, 2);
 
-      let baseMarkdown = `# Bug Report
+  let baseMarkdown = `# Bug Report
 
 ## Issue Description
 ${description}
@@ -105,44 +99,51 @@ ${appStateJson}
 ## Event History
 `;
 
-      const bufferBytes = Buffer.byteLength(baseMarkdown, 'utf8');
-      const events = payload.eventLogs || [];
-      const remainingBytes = MAX_BUDGET_BYTES - bufferBytes;
+  const bufferBytes    = Buffer.byteLength(baseMarkdown, 'utf8');
+  const events         = payload.eventLogs || [];
+  const remainingBytes = MAX_BUDGET_BYTES - bufferBytes;
 
-      let trimmedEventsMarkdown = '';
-      if (remainingBytes > 0 && events.length > 0) {
-        const eventsBlockOpen = `\`\`\`text\n`;
-        const eventsBlockClose = `\n\`\`\`\n`;
-        let eventsBytes = Buffer.byteLength(eventsBlockOpen) + Buffer.byteLength(eventsBlockClose);
+  let trimmedEventsMarkdown = '';
+  if (remainingBytes > 0 && events.length > 0) {
+    const eventsBlockOpen  = `\`\`\`text\n`;
+    const eventsBlockClose = `\n\`\`\`\n`;
+    let eventsBytes = Buffer.byteLength(eventsBlockOpen) + Buffer.byteLength(eventsBlockClose);
 
-        const includedEvents = [];
-        // Walk backwards to prioritize the most recent events
-        for (let i = events.length - 1; i >= 0; i--) {
-          const eventStr = events[i] + '\n';
-          const eventBytes = Buffer.byteLength(eventStr, 'utf8');
-          if (eventsBytes + eventBytes < remainingBytes) {
-            eventsBytes += eventBytes;
-            includedEvents.push(eventStr);
-          } else {
-            break;
-          }
-        }
-        // Reverse to restore chronological order (push was newest-first)
-        includedEvents.reverse();
-
-        trimmedEventsMarkdown = eventsBlockOpen + includedEvents.join('') + eventsBlockClose;
-      } else if (remainingBytes <= 0) {
-        trimmedEventsMarkdown = `*(Event history omitted due to 10MB payload size limit)*\n`;
+    const includedEvents = [];
+    for (let i = events.length - 1; i >= 0; i--) {
+      const eventStr   = events[i] + '\n';
+      const eventBytes = Buffer.byteLength(eventStr, 'utf8');
+      if (eventsBytes + eventBytes < remainingBytes) {
+        eventsBytes += eventBytes;
+        includedEvents.push(eventStr);
       } else {
-        trimmedEventsMarkdown = `*(No events recorded)*\n`;
+        break;
       }
+    }
+    includedEvents.reverse(); // restore chronological order
 
-      const markdownContent = baseMarkdown + trimmedEventsMarkdown;
+    trimmedEventsMarkdown = eventsBlockOpen + includedEvents.join('') + eventsBlockClose;
+  } else if (remainingBytes <= 0) {
+    trimmedEventsMarkdown = `*(Event history omitted due to size limit)*\n`;
+  } else {
+    trimmedEventsMarkdown = `*(No events recorded)*\n`;
+  }
+
+  return baseMarkdown + trimmedEventsMarkdown;
+}
+
+// ── IPC handlers ──────────────────────────────────────────────────────────────
+export function registerBugReportHandlers() {
+
+  // Save report to a file chosen by the user via a native save dialog.
+  ipcMain.handle('export-bug-report', async (event, payload) => {
+    try {
+      const markdownContent = generateMarkdown(payload);
 
       const { canceled, filePath } = await dialog.showSaveDialog({
         title: 'Save Bug Report',
         defaultPath: path.join(app.getPath('desktop'), `bug_report_${Date.now()}.md`),
-        filters: [{ name: 'Markdown', extensions: ['md'] }]
+        filters: [{ name: 'Markdown', extensions: ['md'] }],
       });
 
       if (canceled || !filePath) return { success: false, canceled: true };
@@ -151,6 +152,18 @@ ${appStateJson}
       return { success: true, filePath };
     } catch (err) {
       console.error('[BugReport] Failed to export bug report:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  // Return the report as a string so the renderer can copy it to the clipboard.
+  // No file dialog, no disk I/O — just generate and return the markdown.
+  ipcMain.handle('generate-bug-report-markdown', async (event, payload) => {
+    try {
+      const markdownContent = generateMarkdown(payload);
+      return { success: true, markdown: markdownContent };
+    } catch (err) {
+      console.error('[BugReport] Failed to generate bug report markdown:', err);
       return { success: false, error: err.message };
     }
   });

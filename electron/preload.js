@@ -72,5 +72,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── AI Tools ────────────────────────────────────────────────────────────
   aiPolishText: (text) => ipcRenderer.invoke('ai-polish-text', text),
-  exportBugReport: (payload) => ipcRenderer.invoke('export-bug-report', payload),
+  exportBugReport:             (payload) => ipcRenderer.invoke('export-bug-report', payload),
+  generateBugReportMarkdown:   (payload) => ipcRenderer.invoke('generate-bug-report-markdown', payload),
 });

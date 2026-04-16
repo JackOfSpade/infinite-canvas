@@ -23,7 +23,6 @@ import { BreadcrumbBar } from './components/BreadcrumbBar';
 import { AlignedBackground } from './components/AlignedBackground';
 import { SettingsPanel } from './components/SettingsPanel';
 import { IssueReporterDialog } from './components/IssueReporterDialog';
-import { KeyboardShortcutsPanel, useKeyboardShortcuts } from './components/KeyboardShortcutsPanel';
 import { EventLogger } from './utils/EventLogger';
 import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from './nodes/CanvasNode';
 import { CanvasNavigationContext } from './contexts/CanvasNavigationContext';
@@ -348,7 +347,6 @@ export function Canvas() {
 
   // ── Context Menu Logic ───────────────────────────────────────────────────
   const { menu, closeMenu, onPaneContextMenuBase, onNodeContextMenuBase, getContextMenuItems } = useCanvasContextMenu({
-    isDrawingMode: activeTool === 'pen',
     placementMode,
     takeSnapshot,
     setNodes,
@@ -425,9 +423,9 @@ export function Canvas() {
   }, [exportCanvasToPNG]);
 
   // ── Issue Reporter ───────────────────────────────────────────────────────
-  const handleIssueSubmit = useCallback(async (description) => {
+  const handleIssueSubmit = useCallback(async (description, mode = 'file') => {
     if (!window.electronAPI) {
-      addToast({ title: 'Bug Report', description: "Not running in Electron, can't save report.", type: "error" });
+      addToast({ title: 'Bug Report', description: "Not running in Electron, can't generate report.", type: "error" });
       return;
     }
     try {
@@ -488,11 +486,24 @@ export function Canvas() {
         nodeComponentStates: EventLogger.getNodeStates(),
         eventLogs: EventLogger.getLogs(),
       };
-      const res = await window.electronAPI.exportBugReport(payload);
-      if (res.success) {
-        addToast({ title: 'Bug Report Saved', description: 'Your report has been exported successfully.', type: "success" });
-      } else if (!res.canceled) {
-        addToast({ title: 'Bug Report Failed', description: res.error || 'Could not save the report.', type: "error" });
+      if (mode === 'clipboard') {
+        // Generate the markdown in the main process (needs system info / os module),
+        // then copy the returned string to the clipboard in the renderer.
+        const res = await window.electronAPI.generateBugReportMarkdown(payload);
+        if (res.success) {
+          await navigator.clipboard.writeText(res.markdown);
+          addToast({ title: 'Bug Report Copied', description: 'Report copied to clipboard.', type: "success" });
+        } else {
+          addToast({ title: 'Bug Report Failed', description: res.error || 'Could not generate the report.', type: "error" });
+        }
+      } else {
+        // Save to file via native save dialog.
+        const res = await window.electronAPI.exportBugReport(payload);
+        if (res.success) {
+          addToast({ title: 'Bug Report Saved', description: 'Your report has been exported successfully.', type: "success" });
+        } else if (!res.canceled) {
+          addToast({ title: 'Bug Report Failed', description: res.error || 'Could not save the report.', type: "error" });
+        }
       }
     } catch (e) {
       addToast({ title: 'Bug Report Error', description: e.message || 'An unexpected error occurred.', type: "error" });

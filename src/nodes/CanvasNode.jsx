@@ -66,13 +66,21 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
 
   const inputRef     = useRef(null);
   const containerRef = useRef(null);
+  const textRef      = useRef(null); // ref to the SVG <text> element for getComputedTextLength()
   const pathId = `tcp-${id}`;
 
   // liveRef gives the stable native-listener useEffect access to values that
   // change between renders (isEditing, title, data, SIZE) without needing to
   // re-register the listeners every render.
   const liveRef = useRef(null);
-  liveRef.current = { isEditing, title, data, SIZE };
+  // measuredTextLen: exact SVG advance width of the title text in local units.
+  // Stored in liveRef so the native pointer handlers (isInTitleArc) can use it
+  // without being re-registered every time the title changes.
+  // textRef.current is always populated because <text> renders unconditionally.
+  liveRef.current = {
+    isEditing, title, data, SIZE,
+    measuredTextLen: textRef.current?.getComputedTextLength?.() ?? 0,
+  };
 
   // Keep the EventLogger registry up-to-date so bug reports show React
   // component state (isEditing, isResizing, edgeCursorStyle) per node.
@@ -94,7 +102,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
 
   // While the title is being edited, make the node non-draggable so RF won't
   // drag it when the user clicks the input field. The input is positioned near
-  // the circle's bottom rim (dist < EDGE_ZONE), so RF's capture-phase drag listener
+  // the circle's top rim (dist < EDGE_ZONE), so RF's capture-phase drag listener
   // would otherwise intercept the click and drag the node, causing onBlur on
   // the input and ending editing before the user can type anything.
   useEffect(() => {
@@ -113,8 +121,44 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   }, []);
 
   useEffect(() => {
-    if (isEditing) { inputRef.current?.focus(); inputRef.current?.select(); }
+    if (isEditing) {
+      // Immediate focus so keystrokes land in the off-screen input.
+      inputRef.current?.focus();
+      const len = inputRef.current?.value?.length ?? 0;
+      inputRef.current?.setSelectionRange(len, len);
+      // Deferred re-focus: ReactFlow's selection-focus management sometimes fires
+      // synchronously after a node is created/selected and steals focus back.
+      // A zero-timeout re-grab wins that race without fighting RF's event loop.
+      const t = setTimeout(() => {
+        inputRef.current?.focus();
+        const l = inputRef.current?.value?.length ?? 0;
+        inputRef.current?.setSelectionRange(l, l);
+      }, 0);
+      return () => clearTimeout(t);
+    }
   }, [isEditing]);
+
+  // ── Click-outside-to-commit ────────────────────────────────────────────────
+  // The input is off-screen (position:fixed; top:-9999px) so the browser never
+  // reassigns focus to the canvas pane on a click — onBlur never fires. We
+  // listen for pointerdown on the document (capture phase, so nothing can swallow
+  // it) and commit + exit editing whenever the tap lands outside our container.
+  useEffect(() => {
+    if (!isEditing) return;
+    const onDocPointerDown = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        // Read the live input value so any pending keystrokes are captured.
+        const v = (inputRef.current?.value ?? liveRef.current.title).trim();
+        setTitle(v);
+        mainFlow.updateNodeData(id, { title: v });
+        setIsEditing(false);
+      }
+    };
+    document.addEventListener('pointerdown', onDocPointerDown, { capture: true });
+    return () => document.removeEventListener('pointerdown', onDocPointerDown, { capture: true });
+  // id and mainFlow are stable; isEditing is the trigger; liveRef/inputRef/containerRef are refs.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEditing, id, mainFlow]);
 
   // Font & Size dialog trigger (from context menu)
   useEffect(() => {
@@ -144,7 +188,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
 
   // Angle (degrees) from circle center to pointer, in Math.atan2 convention:
   //   0° = right,  90° = bottom,  ±180° = left,  -90° = top.
-  // Shared by isInTitleZone, getResizeCursor, and event logging.
+  // Used by isInTitleZone, getResizeCursor, and event logging.
   const getAngleFromCenter = useCallback((clientX, clientY) => {
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return 0;
@@ -163,17 +207,18 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     return { cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2 };
   }, []);
 
-  // Returns true when the pointer is in the "title zone" — the bottom arc of
-  // the circle where the curved title text lives.
+  // Returns true when the pointer is in the "title zone" — the top arc of the
+  // circle where the curved title text lives.
   //
-  // The arc path `M 0,R A R,R 0 0,1 SIZE,R` spans the FULL bottom semicircle:
-  // from the left equator (Math.atan2 angle ≈ 180°) through the bottom (90°)
-  // to the right equator (0°). A user can click anywhere along that arc to edit,
-  // so we guard the full 0°–180° range (positive-Y half-plane in screen coords).
-  // Resize is only triggered from the top half (negative angles, -1° to -180°).
+  // The arc path `M 0,R A R,R 0 0,1 SIZE,R` with sweep=1 (clockwise in SVG
+  // screen coords) traces the TOP semicircle: left equator → top (R, 0) → right
+  // equator. In Math.atan2 convention (y increases downward):
+  //   • right equator = 0°,  top = -90°,  left equator ≈ ±180°
+  // The title text lives at negative angles (top half-plane, clientY < center).
+  // Resize is triggered from the bottom half (positive angles, 0° to 180°).
   const isInTitleZone = useCallback((clientX, clientY) => {
     const a = getAngleFromCenter(clientX, clientY);
-    return a >= 0 && a <= 180;
+    return a <= 0;   // top half-plane: right equator (0°) → top (-90°) → left equator (-180°)
   }, [getAngleFromCenter]);
 
   // ── Native pointer listeners ──────────────────────────────────────────────
@@ -199,11 +244,49 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     const el = containerRef.current;
     if (!el) return;
 
+    // ── Text-arc zone helper ─────────────────────────────────────────────────
+    // Returns true when (clientX, clientY) falls within the angular band of the
+    // top arc where the title text is actually rendered.
+    //
+    // Uses liveRef.measuredTextLen (= textRef.getComputedTextLength()) so the
+    // zone matches the exact rendered text width — no hardcoded padding.
+    // Falls back to the char-count estimate when the DOM measurement isn't ready.
+    const isInTitleArc = (clientX, clientY) => {
+      const { title: t, data: d, SIZE: s, measuredTextLen: ml } = liveRef.current;
+      const fSize    = d.fontSize || 11;
+      const arcPad   = fSize * 0.60; // 1 space-width (~0.30×fontSize) on each side = 2 spaces total
+      const totalArc = Math.PI * (s / 2);
+      const textArc  = ml > 0
+        ? Math.min(totalArc * 0.95, ml + arcPad)
+        : Math.min(totalArc * 0.90, (t || 'Sub-Canvas').length * fSize * 0.62 + 16 + arcPad);
+      const halfDeg  = (textArc / totalArc) * 90;
+      const a        = getAngleFromCenter(clientX, clientY);
+      return a >= (-90 - halfDeg) && a <= (-90 + halfDeg);
+    };
+
     const onDown = (e) => {
       if (liveRef.current.data.locked) return;
 
       const dist = getDistToEdge(e.clientX, e.clientY);
-      if (dist >= EDGE_ZONE) return; // pointer is not near the rim — ignore
+
+      // ── SVG title-text click (inside circle, not near rim) ────────────────
+      // The <text> element has pointerEvents:'all' so clicks on the glyphs
+      // bubble to containerRef. When dist >= EDGE_ZONE the pointer is well
+      // inside the circle — not near the rim — so normally we'd return early.
+      // BUT if the click landed on the SVG text/textPath/tspan itself (or any
+      // element whose nearest SVG text ancestor is within the title zone), we
+      // should open editing rather than ignoring the click.
+      if (dist >= EDGE_ZONE) {
+        const tgt = e.target;
+        const isSvgText = tgt.nodeName === 'text' || tgt.nodeName === 'textPath' ||
+                          tgt.nodeName === 'tspan' || !!tgt.closest('text');
+        if (isSvgText && !liveRef.current.isEditing && isInTitleZone(e.clientX, e.clientY)) {
+          e.stopPropagation();
+          setIsEditing(true);
+          return;
+        }
+        return; // pointer is not near the rim and not on title text — ignore
+      }
 
       // ── Describe the click target for diagnostics ─────────────────────────
       // Identifies exactly which DOM element received the click.
@@ -217,14 +300,14 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         const cls = tgt.className && typeof tgt.className === 'string'
           ? tgt.className.trim().split(/\s+/)[0] : '';
         return cls ? `.${cls.slice(0, 18)}` : '';
-      });
+      })();
       const targetDesc = tgt === el                              ? 'container'
                        : tgt.dataset?.noResize                  ? `no-resize(${tgt.nodeName.toLowerCase()})`
                        : tgt.nodeName === 'svg' || tgt.nodeName === 'SVG' ? 'svg'
                        : tgt.nodeName === 'path' || tgt.nodeName === 'textPath'
                          || tgt.nodeName === 'text'             ? 'svg-text'
                        : tgt.nodeName === 'INPUT'               ? 'input'
-                       : tgt.nodeName === 'DIV'                 ? `div${divDetail()}`
+                       : tgt.nodeName === 'DIV'                 ? `div${divDetail}`
                        :                                          tgt.nodeName.toLowerCase();
 
       const angle = getAngleFromCenter(e.clientX, e.clientY);
@@ -259,15 +342,12 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       // compensate via ResizeCorrection in onNodeDragStop.
       e.stopPropagation();
 
-      // ── Title zone: full bottom semicircle (0°–180°) ──────────────────────
-      // The arc path spans the whole bottom half: right equator (0°) →
-      // bottom (90°) → left equator (180°). Clicks anywhere on that arc
-      // should open editing. We setPointerCapture so onUp fires reliably.
-      //
-      // RF's capture-phase drag listener fires before our bubble-phase handler,
-      // so RF will start tracking a drag even here. We record the node's current
-      // position so Canvas.jsx can snap it back if RF displaces it.
-      if (isInTitleZone(e.clientX, e.clientY)) {
+      // ── Title arc: the angular band where the text is rendered ──────────────
+      // Computed from the same formula as the SVG highlight arc so the zone the
+      // cursor changes in exactly matches the zone that triggers editing.
+      // RF's capture-phase listener fires before ours; we record position so
+      // Canvas.jsx can snap back if RF displaces the node during the hold.
+      if (isInTitleArc(e.clientX, e.clientY)) {
         el.setPointerCapture(e.pointerId);
         titleZoneDownRef.current = true;
         TitleZoneActive.add(id);
@@ -350,10 +430,13 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         return;
       }
 
-      // ── Hover: show edge cursor — but never in the title zone ─────────────
+      // ── Hover cursor on the rim ──────────────────────────────────────────────
+      // near rim + title arc  → 'text'   (no hand gap between edit and resize)
+      // near rim + elsewhere  → resize cursor
+      // not near rim          → null (default pointer outside the edge zone)
       const near    = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
-      const inTitle = near && isInTitleZone(e.clientX, e.clientY);
-      setEdgeCursorStyle(near && !inTitle ? getResizeCursor(e.clientX, e.clientY) : null);
+      const inTitle = near && isInTitleArc(e.clientX, e.clientY);
+      setEdgeCursorStyle(!near ? null : inTitle ? 'text' : getResizeCursor(e.clientX, e.clientY));
     };
 
     const onUp = (e) => {
@@ -367,6 +450,13 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         if (!liveRef.current.isEditing) {
           EventLogger.log(`canvas-node title-zone tap → editing id=${id}`);
           setIsEditing(true);
+          // focus handled by the isEditing useEffect after next render
+        } else {
+          // Already editing (e.g. auto-started by data.isNew) but user tapped
+          // the title zone — re-focus the off-screen input so keystrokes land.
+          // RF may have stolen focus after node creation; this reclaims it.
+          EventLogger.log(`canvas-node title-zone tap (already editing) → refocus id=${id}`);
+          inputRef.current?.focus();
         }
         return;
       }
@@ -394,8 +484,8 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       EventLogger.log(`canvas-node resize end id=${id} moves=${resizeMoveCount.current}`);
 
       const near    = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
-      const inTitle = near && isInTitleZone(e.clientX, e.clientY);
-      setEdgeCursorStyle(near && !inTitle ? getResizeCursor(e.clientX, e.clientY) : null);
+      const inTitle = near && isInTitleArc(e.clientX, e.clientY);
+      setEdgeCursorStyle(!near ? null : inTitle ? 'text' : getResizeCursor(e.clientX, e.clientY));
     };
 
     const onLeave = () => {
@@ -462,6 +552,13 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     mainFlow.deleteElements({ nodes: [{ id }] });
   }, [id, mainFlow]);
 
+  // sweep-flag=1 (clockwise in SVG screen coords) traces the TOP semicircle:
+  // left equator → top (R, 0) → right equator. This places the title text at
+  // the top of the circle (angle ≈ -90°), consistent with:
+  //   • isInTitleZone (a <= 0 = negative-Y half-plane = top)
+  //   • the input overlay (top: -(fontSize + spacing) — above the container)
+  //   • the title click zone div (top: 0 — at the container's top edge)
+  // sweep=0 (counterclockwise) would trace the BOTTOM arc instead.
   const arcPath   = `M 0,${R} A ${R},${R} 0 0,1 ${SIZE},${R}`;
   const titleFill = textColor ?? (title ? 'rgba(255,255,255,0.80)' : 'rgba(255,255,255,0.22)');
   const edgeCursor = edgeCursorStyle || undefined;
@@ -528,18 +625,69 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         </div>
 
         {/* ── Curved title — always visible, turns blue while editing ──────── */}
+        {/* The SVG has pointerEvents:'none' so it doesn't block clicks on the    */}
+        {/* circle body or container. But the <text> element opts back IN with     */}
+        {/* pointerEvents:'all' so clicks directly on the glyph shapes are         */}
+        {/* captured — even if the glyphs extend below the container rect due to   */}
+        {/* SVG overflow:visible. Those clicks bubble to our container's native    */}
+        {/* onDown, which routes them to the title-zone tap → editing flow.        */}
         <svg width={SIZE} height={SIZE} style={{
           position: 'absolute', inset: 0, overflow: 'visible',
           pointerEvents: 'none', zIndex: 10,
         }}>
           <defs><path id={pathId} d={arcPath} /></defs>
+
+          {/* ── Curved editing highlight ──────────────────────────────────────── */}
+          {/* A blue stroke arc centered on the top of the circle, sized to the   */}
+          {/* estimated text width. Replaces the flat browser selection rectangle. */}
+          {isEditing && (() => {
+            const totalArcLen = Math.PI * R;
+            const sw          = fontSize + 10;   // strokeWidth of the glow band
+            const arcPad      = fontSize * 0.60; // 1 space-width (~0.30×fs) on each side
+            // getComputedTextLength() gives the exact advance width of the title
+            // text in SVG user units — same coordinate space as the arc path.
+            // With strokeLinecap="round" each endpoint gets a sw/2 semicircle cap, so:
+            //   visual half-width = textArcLen/2 + sw/2
+            // We want visual extent = measured + arcPad (1 space each side), so:
+            //   textArcLen = measured + arcPad - sw
+            // which gives  (measured+arcPad-sw)/2 + sw/2 = (measured+arcPad)/2  ✓
+            const measured   = textRef.current?.getComputedTextLength?.() ?? 0;
+            const textArcLen = measured > 0
+              ? Math.min(totalArcLen * 0.95, Math.max(0, measured + arcPad - sw))
+              : Math.min(totalArcLen * 0.90,
+                  (title || 'Sub-Canvas').length * fontSize * 0.62 + 16 + arcPad);
+            // Negative dashoffset shifts the start of the dash backwards by half
+            // the gap, centering the highlighted segment at the arc's midpoint (top).
+            const dashOffset  = -((totalArcLen - textArcLen) / 2);
+            return (
+              <path
+                d={arcPath}
+                fill="none"
+                stroke="rgba(96,165,250,0.20)"
+                strokeWidth={sw}
+                strokeLinecap="round"
+                strokeDasharray={`${textArcLen.toFixed(1)} ${(totalArcLen * 2).toFixed(1)}`}
+                strokeDashoffset={dashOffset.toFixed(1)}
+                style={{ pointerEvents: 'none' }}
+              />
+            );
+          })()}
+
           <text
+            ref={textRef}
             fontSize={fontSize}
             fontFamily={fontFamily}
             fontWeight="500"
             letterSpacing="0.5"
             dy={-titleSpacing}
-            fill={isEditing ? 'rgba(96,165,250,0.90)' : titleFill}
+            fill={titleFill}
+            style={{
+              // Allow clicks on the text glyphs themselves (including glyphs that
+              // overflow below the container boundary). Disabled when locked (no
+              // interactions) or while editing (input overlay handles events at zIndex 20).
+              pointerEvents: data.locked || isEditing ? 'none' : 'all',
+              cursor: 'text',
+            }}
           >
             <textPath href={`#${pathId}`} startOffset="50%" textAnchor="middle">
               {title || 'Sub-Canvas'}
@@ -557,7 +705,11 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         {!isEditing && !data.locked && (() => {
           const titleText = title || 'Sub-Canvas';
           const estWidth  = Math.min(SIZE * 0.85, Math.max(SIZE * 0.45, titleText.length * fontSize * 0.65 + 24));
-          const zoneTop   = SIZE - titleSpacing - fontSize - 6;
+          // Title text is at the TOP arc (sweep=1). The arc baseline sits at y=0
+          // (container top edge). This div covers the zone just inside the top
+          // of the container — for inside-circle clicks (dist ≥ EDGE_ZONE) that
+          // land near the top where the text visually appears.
+          const zoneTop   = 0;
           return (
             <div
               style={{
@@ -575,48 +727,34 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           );
         })()}
 
-        {/* ── Transparent input overlay — only the caret is visible ────────── */}
-        {/* Positioned at the BOTTOM of the circle to match where the curved arc  */}
-        {/* title text is rendered (bottom semicircle, ~90°). Uses the same        */}
-        {/* zoneTop formula as the title click zone div so the caret appears       */}
-        {/* directly over the arc text and in the title zone (0°–180°), not the   */}
-        {/* resize zone (negative angles = top half).                              */}
+        {/* ── Off-screen keyboard capture input ───────────────────────────────── */}
+        {/* Positioned off-screen so no browser chrome (focus ring, selection     */}
+        {/* rectangle, autofill overlay) is ever visible. The SVG arc highlight   */}
+        {/* and blue arc text provide all visual editing feedback instead.         */}
         {isEditing && (
-          <div
+          <input
+            ref={inputRef}
             data-no-resize="true"
-            style={{
-              position: 'absolute',
-              top: SIZE - Math.max(fontSize, 14) - titleSpacing - 6,
-              left: 0, width: SIZE, zIndex: 20,
+            type="text"
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            onBlur={e  => commitTitle(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter')  commitTitle(e.target.value);
+              if (e.key === 'Escape') { setTitle(data.title || ''); setIsEditing(false); }
             }}
-            onClick={e => e.stopPropagation()}
-          >
-            <input
-              ref={inputRef}
-              type="text"
-              value={title}
-              onChange={e => setTitle(e.target.value)}
-              onBlur={e  => commitTitle(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter')  commitTitle(e.target.value);
-                if (e.key === 'Escape') { setTitle(data.title || ''); setIsEditing(false); }
-              }}
-              placeholder="Sub-Canvas"
-              style={{
-                background:  'transparent',
-                color:       'transparent',
-                caretColor:  'rgba(96, 165, 250, 0.95)',
-                border:      'none',
-                outline:     'none',
-                width:       '100%',
-                textAlign:   'center',
-                fontSize:    `${fontSize}px`,
-                fontFamily,
-                padding:     0,
-                cursor:      'text',
-              }}
-            />
-          </div>
+            style={{
+              position: 'fixed',
+              top:      '-9999px',
+              left:     '-9999px',
+              opacity:  0,
+              width:    1,
+              height:   1,
+              padding:  0,
+              border:   'none',
+              outline:  'none',
+            }}
+          />
         )}
 
         {/* ── Delete button ─────────────────────────────────────────────────── */}

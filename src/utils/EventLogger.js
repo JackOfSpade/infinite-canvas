@@ -21,6 +21,9 @@ class EventLoggerSingleton {
     this.logs = [];
     this.currentBytes = 0;
     this.bootTimestamp = new Date().toISOString();
+    this._lastMsg   = null;
+    this._lastCount = 0;
+    this._nodeStates = new Map();
     this._installErrorCapture();
     this.log('Application started');
   }
@@ -80,17 +83,15 @@ class EventLoggerSingleton {
   // This catches things the JSON application state (Zustand) doesn't expose.
 
   registerNodeState(id, state) {
-    if (!this._nodeStates) this._nodeStates = new Map();
     this._nodeStates.set(id, state);
   }
 
   unregisterNodeState(id) {
-    this._nodeStates?.delete(id);
+    this._nodeStates.delete(id);
   }
 
   /** Returns a snapshot of all live CanvasNode component states. */
   getNodeStates() {
-    if (!this._nodeStates) return [];
     return Array.from(this._nodeStates.entries()).map(([id, s]) => ({ id, ...s }));
   }
 

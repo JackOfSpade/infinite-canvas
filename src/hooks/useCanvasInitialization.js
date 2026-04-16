@@ -43,7 +43,7 @@ export function useCanvasInitialization({
           setCurrentFile(res.filePath);
           setHasUnsavedChanges(false);
         }
-      });
+      }).catch(err => console.error('[auto-save] saveWorkspace failed:', err));
     }, 2000);
     return () => clearTimeout(timer);
   }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges]);
@@ -61,4 +61,3 @@ export function useCanvasInitialization({
     return () => { cleanupSave(); cleanupOpen(); };
   }, []);
 }
-
