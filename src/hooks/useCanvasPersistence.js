@@ -97,13 +97,22 @@ export function useCanvasPersistence({
   flushStack,
   resetStack,
   clearHistory,
+  isAnimatingRef,
 }) {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [currentFile, setCurrentFile] = useState(null);
   const [saveState, setSaveState] = useState('idle');
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const saveCanvas = useCallback(async () => {
-    if (!window.electronAPI || saveState !== 'idle') return;
+    if (!window.electronAPI || saveState !== 'idle' || isAnimatingRef?.current) return;
     setSaveState('saving');
     try {
       // Flush the navigation stack to get complete root-level data
@@ -111,12 +120,13 @@ export function useCanvasPersistence({
       // Strip transient visual properties (e.g. source-filter opacity on job cards)
       const data = { ...rawData, nodes: sanitizeNodesForSave(rawData.nodes) };
       const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFile });
+      if (!isMountedRef.current) return;
       if (res?.success && res.filePath) {
         setCurrentFile(res.filePath);
         setHasUnsavedChanges(false);
         setSaveState('saved');
         addToast({ title: 'Workspace Saved', description: 'Your canvas has been saved successfully.', type: 'success' });
-        setTimeout(() => setSaveState('idle'), 1500);
+        setTimeout(() => { if (isMountedRef.current) setSaveState('idle'); }, 1500);
       } else {
         setSaveState('idle');
         addToast({ title: 'Save Failed', description: 'Could not save the workspace.', type: 'error' });
@@ -126,12 +136,13 @@ export function useCanvasPersistence({
       setSaveState('idle');
       addToast({ title: 'Save Error', description: err.message || 'An error occurred while saving.', type: 'error' });
     }
-  }, [nodes, edges, drawings, currentFile, saveState, addToast, flushStack]);
+  }, [nodes, edges, drawings, currentFile, saveState, addToast, flushStack, isAnimatingRef]);
 
   const loadCanvas = useCallback(async () => {
-    if (!window.electronAPI) return;
+    if (!window.electronAPI || isAnimatingRef?.current) return;
     try {
       const res = await window.electronAPI.loadWorkspace();
+      if (!isMountedRef.current) return;
       if (res?.success && res.data) {
         // Reset navigation stack to root — prevents stale breadcrumbs/stack corruption
         resetStack?.();
@@ -145,8 +156,8 @@ export function useCanvasPersistence({
         clearHistory?.();
         // Defer: the useCanvasInitialization effect will fire setHasUnsavedChanges(true)
         // on the next render — we need our false to run *after* that effect.
-        setTimeout(() => setHasUnsavedChanges(false), 0);
-        setTimeout(() => customFitView(), 50);
+        setTimeout(() => { if (isMountedRef.current) setHasUnsavedChanges(false); }, 0);
+        setTimeout(() => { if (isMountedRef.current) customFitView(); }, 50);
         addToast({ title: 'Workspace Loaded', description: 'Your canvas has been loaded successfully.', type: 'success'});
       } else if (!res?.canceled) {
         addToast({ title: 'Load Failed', description: 'Failed to load canvas or invalid file format.', type: 'error'});
@@ -155,13 +166,15 @@ export function useCanvasPersistence({
       console.error('Failed to load canvas:', err);
       addToast({ title: 'Load Error', description: err.message || 'An error occurred while loading.', type: 'error'});
     }
-  }, [setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, customFitView, addToast, resetStack, clearHistory]);
+  }, [setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, customFitView, addToast, resetStack, clearHistory, isAnimatingRef]);
 
   const exportCanvasToPNG = useCallback(() => {
+    if (isAnimatingRef?.current) return;
     const viewportNode = document.querySelector('.react-flow__viewport');
     if (!viewportNode) return;
     toPng(viewportNode, { backgroundColor: '#0a0a0a' })
       .then((dataUrl) => {
+        if (!isMountedRef.current) return;
         const link = document.createElement('a');
         link.download = 'canvas-export.png';
         link.href = dataUrl;
@@ -172,7 +185,7 @@ export function useCanvasPersistence({
         console.error('Failed to export image', err);
         addToast({ title: 'Export Failed', description: 'There was an error generating the PNG.', type: 'error'});
       });
-  }, [addToast]);
+  }, [addToast, isAnimatingRef]);
 
   return {
     saveCanvas,

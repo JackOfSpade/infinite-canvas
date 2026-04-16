@@ -30,11 +30,17 @@ const STATUS_OPTIONS = ['New', 'Applied', 'Interview', 'Offer', 'Rejected'];
 export function JobCardNode({ id, data }) {
   const [expanded, setExpanded] = useState(false);
   const [generatingCL, setGeneratingCL] = useState(false);
-  const { updateNodeData, deleteElements } = useReactFlow();
+  const { updateNodeData, deleteElements, getNode } = useReactFlow();
   const { addToast } = useToast();
 
   const score = data.matchScore || 0;
   const strength = data.strengthLabel || 'exploring';
+
+  const isMountedRef = React.useRef(true);
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
   const accentColor = STRENGTH_COLORS[strength] || '#888';
   const status = data.status || 'New';
 
@@ -50,6 +56,8 @@ export function JobCardNode({ id, data }) {
         profile: data.resumeProfile,
         job: { title: data.title, company: data.company, snippet: data.snippet },
       });
+      // Guard: card may have been dismissed while awaiting the IPC response
+      if (!getNode(id)) return;
       if (result.success) {
         updateNodeData(id, { coverLetter: result.coverLetter });
         addToast({ title: 'Cover Letter Ready', description: `Generated for ${data.company}`, type: 'success' });
@@ -60,7 +68,7 @@ export function JobCardNode({ id, data }) {
       console.error('Cover letter generation failed:', e);
       addToast({ title: 'Generation Error', description: e.message, type: 'error' });
     } finally {
-      setGeneratingCL(false);
+      if (isMountedRef.current) setGeneratingCL(false);
     }
   };
 

@@ -9,9 +9,20 @@ export function LinkNode({ id, data }) {
   const [showDialog, setShowDialog] = useState(null); // 'font' | 'url'
   const [urlInput, setUrlInput] = useState(data.url || '');
   const clickTimeoutRef = useRef(null);
-  const { updateNodeData } = useReactFlow();
+  const { updateNodeData, getNode } = useReactFlow();
 
   const inputRef = useRef(null);
+  const isMountedRef = useRef(true);
+
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      if (clickTimeoutRef.current !== null) {
+        clearTimeout(clickTimeoutRef.current);
+      }
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const isEmptyPredicate = () => {
     return !inputRef.current?.innerText?.trim();
@@ -47,14 +58,16 @@ export function LinkNode({ id, data }) {
       // Small delay to prevent rapid fires if user is actively typing a URL
       const timer = setTimeout(() => {
         window.electronAPI.fetchUrlTitle(data.url).then(title => {
-          if (title) {
+          // Guard: node may have been deleted before the title fetch resolved
+          if (!isMountedRef.current) return;
+          if (title && getNode(id)) {
             updateNodeData(id, { label: title });
           }
         }).catch(() => {});
       }, 500);
       return () => clearTimeout(timer);
     }
-  }, [data.url, data.label, id, updateNodeData]);
+  }, [data.url, data.label, id, updateNodeData, getNode]);
 
   const openLink = () => {
     const targetUrl = data.url || inputRef.current?.innerText || '';
@@ -88,7 +101,7 @@ export function LinkNode({ id, data }) {
       clickTimeoutRef.current = null;
     }
     setIsEditingLabel(true);
-    setTimeout(() => {
+    clickTimeoutRef.current = setTimeout(() => {
       if (inputRef.current) inputRef.current.focus({ preventScroll: true });
     }, 0);
   };

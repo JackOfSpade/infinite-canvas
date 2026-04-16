@@ -23,7 +23,7 @@ import { SellHubPricedState } from './sellhub/SellHubPricedState';
  * data.selectedPlatforms: string[]
  */
 export function SellHubNode({ id, data }) {
-  const { updateNodeData } = useReactFlow();
+  const { updateNodeData, getNode } = useReactFlow();
   const { addToast } = useToast();
   const processingRef = useRef(false);
 
@@ -38,6 +38,13 @@ export function SellHubNode({ id, data }) {
   const [compProgress, setCompProgress] = useState({});
   // Track which posting platforms have been "opened" (animated outward arrow)
   const [postingPlatforms, setPostingPlatforms] = useState({});
+  const postingTimeoutsRef = useRef({});
+
+  useEffect(() => {
+    return () => {
+      Object.values(postingTimeoutsRef.current).forEach(clearTimeout);
+    };
+  }, []);
 
   const hubState = data.hubState || 'empty';
 
@@ -87,7 +94,10 @@ export function SellHubNode({ id, data }) {
           if (window.electronAPI?.openExternal) {
             // Animate outward arrow briefly
             setPostingPlatforms(prev => ({ ...prev, [p.id]: 'active' }));
-            setTimeout(() => setPostingPlatforms(prev => ({ ...prev, [p.id]: 'done' })), 2000);
+            if (postingTimeoutsRef.current[p.id]) clearTimeout(postingTimeoutsRef.current[p.id]);
+            postingTimeoutsRef.current[p.id] = setTimeout(() => {
+              setPostingPlatforms(prev => ({ ...prev, [p.id]: 'done' }));
+            }, 2000);
             window.electronAPI.openExternal(p.postUrl);
           }
         };
@@ -127,6 +137,8 @@ export function SellHubNode({ id, data }) {
     try {
       updateNodeData(id, { hubState: 'analyzing' });
       const result = await window.electronAPI.analyzePhotos({ imagePaths });
+      // Guard: node may have been deleted while awaiting the IPC response
+      if (!getNode(id)) { processingRef.current = false; return; }
       if (!result.success) throw new Error(result.error);
       updateNodeData(id, {
         hubState: 'draft',
@@ -135,7 +147,7 @@ export function SellHubNode({ id, data }) {
       });
     } catch (error) {
       console.error('[SellHub] Analysis failed:', error);
-      updateNodeData(id, { hubState: 'error', errorMessage: error.message });
+      if (getNode(id)) updateNodeData(id, { hubState: 'error', errorMessage: error.message });
     } finally {
       processingRef.current = false;
     }
@@ -149,6 +161,8 @@ export function SellHubNode({ id, data }) {
     try {
       updateNodeData(id, { hubState: 'researching' });
       const result = await researchPrice((state, res) => {
+        // Guard: node may have been deleted while price research was running
+        if (!getNode(id)) return;
         if (state === 'priced') {
           updateNodeData(id, {
             hubState: 'priced',
@@ -165,12 +179,12 @@ export function SellHubNode({ id, data }) {
           addToast({ title: 'Pricing Failed', description: res.error || 'Could not determine a price.', type: 'error' });
         }
       });
-      if (!result) {
+      if (!result && getNode(id)) {
         updateNodeData(id, { hubState: 'draft' });
       }
     } catch (err) {
       console.error('[SellHub] Price research failed:', err);
-      updateNodeData(id, { hubState: 'draft' });
+      if (getNode(id)) updateNodeData(id, { hubState: 'draft' });
       addToast({ title: 'Pricing Error', description: err.message, type: 'error' });
     } finally {
       processingRef.current = false;

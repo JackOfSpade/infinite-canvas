@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { processDroppedFiles } from '../utils/dragUtils';
@@ -7,7 +7,21 @@ export function useCanvasDragAndDrop({
   setNodes,
   setIsDrawingMode,
   takeSnapshot,
+  depth,
 }) {
+  const depthRef = useRef(depth);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    depthRef.current = depth;
+  }, [depth]);
   const { screenToFlowPosition } = useReactFlow();
 
   const handleDragOver = useCallback((event) => {
@@ -53,7 +67,11 @@ export function useCanvasDragAndDrop({
 
       // Default: treat as document/folder drops
       takeSnapshot();
+      const dropDepth = depthRef.current;
       const newItems = await processDroppedFiles(event.dataTransfer.files, position);
+      if (!isMountedRef.current) return;
+      if (depthRef.current !== dropDepth) return; // Canvas changed during processing
+
       if (newItems.length > 0) {
         setNodes(nds => nds.concat(newItems));
       }

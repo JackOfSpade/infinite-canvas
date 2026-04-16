@@ -1,6 +1,7 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useContext } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { Search, X, ChevronUp, ChevronDown } from 'lucide-react';
+import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 
 /**
  * Returns true if a node's content matches the lowercased query string.
@@ -31,6 +32,8 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const { setCenter, getViewport } = useReactFlow();
   const inputRef = useRef(null);
+  const nav = useContext(CanvasNavigationContext);
+  const isAnimating = nav?.isAnimating || false;
 
   // Cmd+F / Ctrl+F to focus search
   useEffect(() => {
@@ -74,6 +77,7 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
   };
 
   const navigateBy = useCallback((offset) => {
+    if (isAnimating) return;
     const matches = getMatches();
     setMatchCount(matches.length);
     if (matches.length === 0) return;
@@ -103,8 +107,8 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
 
   useEffect(() => {
     if (searchQuery.trim() === '') {
-      setTimeout(() => setMatchCount(0), 0);
-      return;
+      const timer = setTimeout(() => setMatchCount(0), 0);
+      return () => clearTimeout(timer);
     }
     const timer = setTimeout(() => {
       setMatchCount(getMatches().length);

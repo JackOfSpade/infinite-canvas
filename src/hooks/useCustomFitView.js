@@ -1,10 +1,11 @@
 import { useCallback } from 'react';
 import { useReactFlow } from '@xyflow/react';
 
-export function useCustomFitView(reactFlowWrapper, nodes, drawings) {
+export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingRef) {
   const { setViewport } = useReactFlow();
 
   const customFitView = useCallback(() => {
+    if (isAnimatingRef?.current) return;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     
     nodes.forEach(n => {
@@ -47,7 +48,7 @@ export function useCustomFitView(reactFlowWrapper, nodes, drawings) {
       y: containerHeight / 2 - cy * zoom,
       zoom
     }, { duration: 800 });
-  }, [nodes, drawings, setViewport, reactFlowWrapper]);
+  }, [nodes, drawings, setViewport, reactFlowWrapper, isAnimatingRef]);
 
   return customFitView;
 }

@@ -2,8 +2,8 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
-import { registerJobsHandlers } from './electron/ipc/jobs.js';
-import { registerMarketplaceHandlers } from './electron/ipc/marketplace.js';
+import { registerJobsHandlers } from '../electron/ipc/jobs.js';
+import { registerMarketplaceHandlers } from '../electron/ipc/marketplace.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,7 +17,7 @@ async function runTests() {
   const win = new BrowserWindow({
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, 'electron', 'preload.js'),
+      preload: path.join(__dirname, '..', 'electron', 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
     }

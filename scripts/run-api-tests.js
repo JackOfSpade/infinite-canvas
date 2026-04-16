@@ -7,7 +7,7 @@ import {
   fetchDiceListings,
   fetchStockXListings,
   fetchReverbListings
-} from './electron/extractors/apiExtractors.js';
+} from '../electron/extractors/apiExtractors.js';
 
 app.whenReady().then(async () => {
   console.log('Testing Api Extractors (Electron Context)...');

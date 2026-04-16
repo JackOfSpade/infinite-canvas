@@ -31,7 +31,7 @@ function getNodeDims(node) {
  *
  * Rendered inside ReactFlow so it has access to useViewport / useReactFlow.
  */
-export function CustomMiniMap({ nodes, edges, drawings }) {
+export function CustomMiniMap({ nodes, edges, drawings, isAnimating }) {
   const viewport    = useViewport();
   const { setViewport } = useReactFlow();
   const svgRef = useRef(null);
@@ -95,6 +95,7 @@ export function CustomMiniMap({ nodes, edges, drawings }) {
 
   // ── Click-to-pan ──────────────────────────────────────────────────────────
   const handleClick = useCallback((e) => {
+    if (isAnimating) return;
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect) return;
     const mx = e.clientX - rect.left;

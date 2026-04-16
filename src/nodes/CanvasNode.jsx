@@ -528,6 +528,14 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       el.removeEventListener('pointerup',    onUp);
       el.removeEventListener('pointerleave', onLeave);
       el.removeEventListener('pointercancel', onCancel);
+      // Purge stale entries if the node is deleted mid-drag/mid-resize.
+      // Without this, module-level maps accumulate entries for deleted IDs,
+      // and if a new node is created with the same ID (e.g. via undo), it
+      // would inherit corrupted position/size corrections.
+      ResizeCorrection.delete(id);
+      ResizeActive.delete(id);
+      TitleZoneCorrection.delete(id);
+      TitleZoneActive.delete(id);
     };
   // All callbacks (getDistToEdge, getAngleFromCenter, getCircleCenter, getResizeCursor,
   // isInTitleZone, mainFlow) are stable across renders (useCallback with no deps or

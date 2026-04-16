@@ -167,6 +167,7 @@ export function JobHubNode({ id, data }) {
       // Step 1: Parse resume
       updateNodeData(id, { hubState: 'parsing' });
       const parseResult = await window.electronAPI.parseResume({ filePath });
+      if (!getNode(id)) { processingRef.current = false; return; }
       if (!parseResult.success) throw new Error(parseResult.error);
       const profile = parseResult.profile;
 
@@ -177,6 +178,7 @@ export function JobHubNode({ id, data }) {
 
       // Step 2: Generate queries
       const queryResult = await window.electronAPI.generateJobQueries({ profile });
+      if (!getNode(id)) { processingRef.current = false; return; }
       if (!queryResult.success) throw new Error(queryResult.error);
       const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queryResult.queries;
       const allQueries = [...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
@@ -184,6 +186,7 @@ export function JobHubNode({ id, data }) {
       // Step 3: Search (multi-source — backend sends per-source progress events)
       updateNodeData(id, { hubState: 'searching', queryCount: allQueries.length });
       const searchResult = await window.electronAPI.searchJobs({ queries: allQueries });
+      if (!getNode(id)) { processingRef.current = false; return; }
       if (!searchResult.success) throw new Error(searchResult.error);
 
       if (searchResult.jobs.length === 0) {
@@ -195,6 +198,7 @@ export function JobHubNode({ id, data }) {
       // Step 4: Score
       updateNodeData(id, { hubState: 'scoring', jobCount: searchResult.jobs.length });
       const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile });
+      if (!getNode(id)) { processingRef.current = false; return; }
       if (!scoreResult.success) throw new Error(scoreResult.error);
 
       // Step 5: Spawn career direction clusters
@@ -253,7 +257,7 @@ export function JobHubNode({ id, data }) {
       addToast({ title: 'Job Search Complete', description: `Found and scored ${scoreResult.scoredJobs.length} jobs.`, type: 'success' });
     } catch (error) {
       console.error('[JobHub] Failed:', error);
-      updateNodeData(id, { hubState: 'error', errorMessage: error.message });
+      if (getNode(id)) updateNodeData(id, { hubState: 'error', errorMessage: error.message });
       addToast({ title: 'Job Search Failed', description: error.message, type: 'error' });
     } finally {
       processingRef.current = false;

@@ -23,11 +23,19 @@ export function TextNode({ id, data }) {
     handleBlur({ text });
   };
 
+  const focusTimeoutRef = useRef(null);
+
+  React.useEffect(() => {
+    return () => {
+      if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
+    };
+  }, []);
+
   const handleDoubleClick = (e) => {
     if (data.locked) return; // Locked nodes are not editable
     e.stopPropagation();
     setIsEditing(true);
-    setTimeout(() => {
+    focusTimeoutRef.current = setTimeout(() => {
       if (inputRef.current) inputRef.current.focus({ preventScroll: true });
     }, 0);
   };

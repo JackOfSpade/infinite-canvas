@@ -25,6 +25,17 @@ export function Dialog({ title, children, onClose }) {
   }, [onClose]);
 
   // ── Drag-to-move, clamped to window ──────────────────────────────────────
+  const dragListenersRef = useRef(null);
+  
+  useEffect(() => {
+    return () => {
+      if (dragListenersRef.current) {
+        window.removeEventListener('pointermove', dragListenersRef.current.onMove);
+        window.removeEventListener('pointerup', dragListenersRef.current.onUp);
+      }
+    };
+  }, []);
+
   const handleHeaderPointerDown = (e) => {
     if (e.button !== 0) return;
     e.stopPropagation();
@@ -45,7 +56,10 @@ export function Dialog({ title, children, onClose }) {
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup',   onUp);
+      dragListenersRef.current = null;
     };
+    
+    dragListenersRef.current = { onMove, onUp };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup',   onUp);
   };

@@ -18,11 +18,14 @@ export function useNodeAutoEdit(id, isNew, isEmptyPredicate, inputRef) {
 
   // Auto-edit on initial placement
   useEffect(() => {
+    let timeoutId;
+    let rafId;
+
     if (isNewInitial && !hasFocusedRef.current) {
       hasFocusedRef.current = true;
       updateNodeData(id, { isNew: undefined });
       
-      setTimeout(() => {
+      timeoutId = setTimeout(() => {
         if (inputRef.current) {
           // Capture viewport state before focus to prevent any auto-zoom/pan
           const { transform } = store.getState();
@@ -37,12 +40,17 @@ export function useNodeAutoEdit(id, isNew, isEmptyPredicate, inputRef) {
           inputRef.current.focus({ preventScroll: true });
 
           // Restore viewport immediately after focus to undo any shift
-          requestAnimationFrame(() => {
+          rafId = requestAnimationFrame(() => {
             setViewport(savedViewport);
           });
         }
       }, 50);
     }
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (rafId) cancelAnimationFrame(rafId);
+    };
   }, [id, updateNodeData, store, setViewport, isNewInitial, inputRef]);
 
   // Handle blurring the input

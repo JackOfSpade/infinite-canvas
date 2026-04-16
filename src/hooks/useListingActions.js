@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 
 /**
@@ -24,6 +24,16 @@ export function useListingActions(id, data) {
   const [justificationExpanded, setJustificationExpanded] = useState(false);
   const [selectedPlatforms, setSelectedPlatforms] = useState(data.selectedPlatforms || ['ebay', 'facebook', 'craigslist']);
   const [copied, setCopied] = useState(false);
+  const copiedTimeoutRef = useRef(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current);
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // ── Field editing ──────────────────────────────────────────────────────────
 
@@ -58,7 +68,8 @@ export function useListingActions(id, data) {
     const text = `${product.generated_title || ''}\n\nPrice: $${priceInput}\nCondition: ${product.condition || ''}\n\n${product.generated_description || ''}`;
     navigator.clipboard.writeText(text);
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current);
+    copiedTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
   }, [product, priceInput]);
 
   // ── Platform selection ─────────────────────────────────────────────────────
@@ -83,6 +94,8 @@ export function useListingActions(id, data) {
         query,
         condition: product.condition || 'Used - Good',
       });
+
+      if (!isMountedRef.current) return result;
 
       if (result.success) {
         setPriceInput(result.pricing.recommended_price || '');

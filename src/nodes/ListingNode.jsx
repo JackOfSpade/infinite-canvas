@@ -41,7 +41,7 @@ export function ListingNode({ id, data }) {
 
   const [loginPrompt, setLoginPrompt] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(false);
-  const { updateNodeData } = useReactFlow();
+  const { updateNodeData, getNode } = useReactFlow();
 
   useEffect(() => {
     syncPriceFromBackend(data.pricing);
@@ -50,6 +50,8 @@ export function ListingNode({ id, data }) {
   const handleConfirmDraft = async () => {
     updateNodeData(id, { status: 'confirming' });
     const result = await researchPrice((state, res) => {
+      // Guard: node may have been deleted while awaiting price research
+      if (!getNode(id)) return;
       if (state === 'priced') {
         updateNodeData(id, {
           status: 'priced',
@@ -63,7 +65,7 @@ export function ListingNode({ id, data }) {
         updateNodeData(id, { status: 'draft' });
       }
     });
-    if (!result) updateNodeData(id, { status: 'draft' });
+    if (!result && getNode(id)) updateNodeData(id, { status: 'draft' });
   };
 
 
@@ -212,6 +214,10 @@ export function ListingNode({ id, data }) {
                       setCheckingAuth(true);
                       try {
                         const result = await window.electronAPI.checkAndLogin({ platformId: loginPrompt.platformId });
+                        if (!getNode(id)) {
+                          setCheckingAuth(false);
+                          return;
+                        }
                         if (result.connected) {
                           setLoginPrompt(null);
                           // Re-trigger the listing flow now that we're logged in
@@ -263,6 +269,7 @@ export function ListingNode({ id, data }) {
                   for (const platformId of selectedPlatforms) {
                     if (needsAuth.includes(platformId) && window.electronAPI?.checkSellMonitorAuth) {
                       const authStatus = await window.electronAPI.checkSellMonitorAuth({ platformId });
+                      if (!getNode(id)) return;
                       if (!authStatus.connected) {
                         setLoginPrompt({
                           platformId,

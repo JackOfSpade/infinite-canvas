@@ -11,10 +11,18 @@ export function useCanvasInitialization({
   saveCanvas,
   loadCanvas,
   flushStack,
+  isAnimatingRef,
 }) {
   // Keep latest state in a ref so the auto-save timer reads current data
   // without the effect being torn down on every state change.
   const stateRef = useRef({ nodes, edges, drawings });
+  const isMountedRef = useRef(true);
+  
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+
   useEffect(() => {
     stateRef.current = { nodes, edges, drawings };
   }, [nodes, edges, drawings]);
@@ -35,10 +43,12 @@ export function useCanvasInitialization({
     if (!currentFile || !window.electronAPI) return;
 
     const timer = setTimeout(() => {
+      if (isAnimatingRef?.current) return;
       const rawData = flushRef.current ? flushRef.current() : stateRef.current;
       // Strip transient visual properties (e.g. source-filter opacity on job cards)
       const data = { ...rawData, nodes: sanitizeNodesForSave(rawData.nodes) };
       window.electronAPI.saveWorkspace({ data, filePath: currentFile }).then(res => {
+        if (!isMountedRef.current) return;
         if (res?.success && res.filePath) {
           setCurrentFile(res.filePath);
           setHasUnsavedChanges(false);
@@ -46,7 +56,7 @@ export function useCanvasInitialization({
       }).catch(err => console.error('[auto-save] saveWorkspace failed:', err));
     }, 2000);
     return () => clearTimeout(timer);
-  }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges]);
+  }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef]);
 
   const latestSave = useRef(saveCanvas);
   const latestLoad = useRef(loadCanvas);

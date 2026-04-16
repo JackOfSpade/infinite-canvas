@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { v4 as uuidv4 } from 'uuid';
 import { EventLogger } from '../utils/EventLogger';
@@ -73,6 +73,14 @@ export function useCanvasContextMenu({
   const reactFlow = useReactFlow();
   const { deleteElements, getEdges } = reactFlow;
   const { addToast } = useToast();
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const onPaneContextMenuBase = useCallback((e) => {
     if (placementMode) return;
@@ -232,6 +240,7 @@ export function useCanvasContextMenu({
     takeSnapshot();
     try {
       const res = await window.electronAPI.aiPolishText(text);
+      if (!isMountedRef.current) return;
       if (res.success) {
         setNodes(nds => nds.map(n => n.id === menu.node.id ? { ...n, data: { ...n.data, text: res.text } } : n));
         EventLogger.log(`AI polished text for node ${menu.node.id}`);
@@ -240,6 +249,7 @@ export function useCanvasContextMenu({
         EventLogger.log("AI Polish failed: " + res.error);
       }
     } catch (err) {
+      if (!isMountedRef.current) return;
       console.error(err);
       EventLogger.log("AI Polish crashed: " + err.message);
     }
@@ -357,8 +367,8 @@ export function useCanvasContextMenu({
 
       if (isText) {
         items.push({ divider: true });
-        items.push({ label: '✨ AI Polish Text', onClick: aiPolishText });
-        items.push({ label: menu.node.data?.isSticky ? 'Remove Sticky Style' : 'Make Sticky Note', onClick: toggleStickyNote });
+        items.push({ label: '✨ AI Polish Text', onClick: aiPolishText, disabled: isLocked });
+        items.push({ label: menu.node.data?.isSticky ? 'Remove Sticky Style' : 'Make Sticky Note', onClick: toggleStickyNote, disabled: isLocked });
       }
 
       items.push({ divider: true });

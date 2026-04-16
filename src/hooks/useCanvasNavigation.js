@@ -60,6 +60,14 @@ export function useCanvasNavigation({
   const edgesRef = useRef(edges);
   const drawingsRef = useRef(drawings);
   const stackRef = useRef(stack);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     nodesRef.current = nodes;
@@ -118,6 +126,7 @@ export function useCanvasNavigation({
 
     // After fade-out completes, swap data
     setTimeout(() => {
+      if (!isMountedRef.current) return;
       setStack(s => [...s, parentState]);
       setNodes(canvasData.nodes || []);
       setEdges(canvasData.edges || []);
@@ -126,6 +135,7 @@ export function useCanvasNavigation({
 
       // Let React render the new data, then center and fade in
       requestAnimationFrame(() => {
+        if (!isMountedRef.current) return;
         // Centre on child content at current zoom — never change zoom
         const currentVp = reactFlow.getViewport();
         const childNodes = canvasData.nodes || [];
@@ -146,6 +156,7 @@ export function useCanvasNavigation({
         setAnimPhase('fade-in');
 
         setTimeout(() => {
+          if (!isMountedRef.current) return;
           setIsAnimating(false);
           setAnimPhase(null);
         }, halfDuration);
@@ -167,6 +178,7 @@ export function useCanvasNavigation({
     setAnimPhase('fade-out');
 
     setTimeout(() => {
+      if (!isMountedRef.current) return;
       const { nodes: cn, edges: ce, drawings: cd } = syncStackUpward(
         nodesRef.current, edgesRef.current, drawingsRef.current,
         currentStack, currentStack.length - 1, targetIndex
@@ -180,10 +192,12 @@ export function useCanvasNavigation({
       clearHistory?.();
 
       requestAnimationFrame(() => {
+        if (!isMountedRef.current) return;
         reactFlow.setViewport(targetViewport, { duration: 0 });
         setAnimPhase('fade-in');
 
         setTimeout(() => {
+          if (!isMountedRef.current) return;
           setIsAnimating(false);
           setAnimPhase(null);
         }, halfDuration);

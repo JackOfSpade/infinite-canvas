@@ -184,7 +184,7 @@ export function Canvas() {
   });
   useEffect(() => { takeSnapshotRef.current = takeSnapshot; }, [takeSnapshot]);
 
-  const customFitView = useCustomFitView(reactFlowWrapper, nodes, drawings);
+  const customFitView = useCustomFitView(reactFlowWrapper, nodes, drawings, isNavigationAnimatingRef);
 
   // ── Canvas Navigation (nested canvases) ─────────────────────────────────
   const navigation = useCanvasNavigation({
@@ -205,11 +205,13 @@ export function Canvas() {
     flushStack: navigation.flushStack,
     resetStack: navigation.resetStack,
     clearHistory,
+    isAnimatingRef: isNavigationAnimatingRef,
   });
 
   useCanvasInitialization({
     nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, saveCanvas, loadCanvas,
     flushStack: navigation.flushStack,
+    isAnimatingRef: isNavigationAnimatingRef,
   });
 
   // ── Generic Confirmation Dialog ───────────────────────────────────────────
@@ -262,6 +264,17 @@ export function Canvas() {
   }, [activeTool, placementMode, navigation.isAnimating, screenToFlowPosition, takeSnapshot, setNodes]);
 
   // ── Custom pointer-drag for Nested Canvas button ─────────────────────────
+  const nestedDragListenersRef = useRef(null);
+  
+  useEffect(() => {
+    return () => {
+      if (nestedDragListenersRef.current) {
+        window.removeEventListener('pointermove', nestedDragListenersRef.current.onMove);
+        window.removeEventListener('pointerup', nestedDragListenersRef.current.onUp);
+      }
+    };
+  }, []);
+
   const onNestedCanvasDragStart = useCallback((startX, startY) => {
     nestedDragRef.current = { dragging: false, startX, startY };
 
@@ -280,11 +293,13 @@ export function Canvas() {
     const onUp = (e) => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      nestedDragListenersRef.current = null;
       const ref = nestedDragRef.current;
       nestedDragRef.current = null;
       setNestedDragPos(null);
 
       if (ref?.dragging) {
+        if (isNavigationAnimatingRef.current) return;
         // Place node at drop position — same offset as handleDrop uses for node-type drops
         const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
         const factory = NODE_FACTORIES['group'];
@@ -296,6 +311,7 @@ export function Canvas() {
       // If not dragging, onClick on the button fires naturally → setPlacementMode('group')
     };
 
+    nestedDragListenersRef.current = { onMove, onUp };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
   }, [screenToFlowPosition, takeSnapshot, setNodes]);
@@ -308,7 +324,7 @@ export function Canvas() {
   }, [getNode]);
 
   const { handleDrop: handleDropBase, handleDragOver } = useCanvasDragAndDrop({
-    setNodes, setIsDrawingMode: (v) => setActiveTool(v ? 'pen' : null), takeSnapshot,
+    setNodes, setIsDrawingMode: (v) => setActiveTool(v ? 'pen' : null), takeSnapshot, depth: navigation.depth
   });
   // Guard drops during navigation animations — a drop during the ~300ms fade would
   // append a node to the old canvas state and then the animation's setNodes would
@@ -319,9 +335,10 @@ export function Canvas() {
   }, [navigation.isAnimating, handleDropBase]);
 
   const clearDrawings = useCallback(() => {
+    if (navigation.isAnimating) return;
     takeSnapshot();
     setDrawings([]);
-  }, [takeSnapshot, setDrawings]);
+  }, [takeSnapshot, setDrawings, navigation.isAnimating]);
 
   const onNodesDelete = useCallback((deletedNodes) => {
     const documentNodes = deletedNodes.filter(n => n.type === 'document' && n.data?.filePath);
@@ -348,12 +365,14 @@ export function Canvas() {
   const { onConnect, onDragStart, clearCanvas } = useCanvasActions({
     setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, takeSnapshot, requestClearConfirm,
     resetStack: navigation.resetStack,
+    depth: navigation.depth,
+    isAnimatingRef: isNavigationAnimatingRef,
   });
 
   const { handlePointerDown, handlePointerMove, handlePointerUp } = useDrawingMode({
     placementMode, setPlacementMode, activeTool, eraserType, eraserSize, currentStroke, setCurrentStroke,
     setMousePos, setEraserScreenPos, setDrawings, setNodes, setEdges, takeSnapshot, activeColor,
-    penSize, getIntersectingNodes
+    penSize, getIntersectingNodes, isAnimatingRef: isNavigationAnimatingRef
   });
 
   const interactiveDisabled = !!activeTool || !!placementMode || navigation.isAnimating;
@@ -642,13 +661,17 @@ export function Canvas() {
             panOnDrag={!interactiveDisabled}
             selectionOnDrag={!interactiveDisabled}
             nodesDraggable={!interactiveDisabled}
+            elementsSelectable={!interactiveDisabled}
+            zoomOnScroll={!interactiveDisabled}
+            zoomOnPinch={!interactiveDisabled}
+            panOnScroll={!interactiveDisabled}
             autoPanOnNodeFocus={false}
             zoomOnDoubleClick={false}
 
             className="touch-none"
-            deleteKeyCode={['Backspace', 'Delete']}
-            selectionKeyCode={['Shift']}
-            multiSelectionKeyCode={['Control', 'Meta']}
+            deleteKeyCode={interactiveDisabled ? null : ['Backspace', 'Delete']}
+            selectionKeyCode={interactiveDisabled ? null : ['Shift']}
+            multiSelectionKeyCode={interactiveDisabled ? null : ['Control', 'Meta']}
             defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
           >
             {placementMode && (
@@ -694,7 +717,7 @@ export function Canvas() {
             </Controls>
 
             {showMiniMap && (
-              <CustomMiniMap nodes={nodes} edges={edges} drawings={drawings} />
+              <CustomMiniMap nodes={nodes} edges={edges} drawings={drawings} isAnimating={navigation.isAnimating} />
             )}
 
             {/* Breadcrumb bar — shown when inside nested canvas */}

@@ -122,11 +122,13 @@ export function useDrawingMode({
   activeColor = 'white',
   penSize = 3,
   getIntersectingNodes,
+  isAnimatingRef,
 }) {
   const { screenToFlowPosition, getViewport } = useReactFlow();
   const isErasingRef = useRef(false);
 
   const handleEraser = useCallback((e) => {
+    if (isAnimatingRef?.current) return;
     const C     = screenToFlowPosition({ x: e.clientX, y: e.clientY });
     const { zoom } = getViewport();
     const R     = eraserSize / zoom;  // convert screen px → flow units
@@ -196,6 +198,8 @@ export function useDrawingMode({
     // Always update mousePos — so placement ghost is at cursor immediately on mode activation
     setMousePos({ x: e.clientX, y: e.clientY });
 
+    if (isAnimatingRef?.current) return;
+
     if (activeTool === 'eraser' && isErasingRef.current) {
       handleEraser(e);
       return;
@@ -204,7 +208,7 @@ export function useDrawingMode({
       setCurrentStroke(prev => [...prev, screenToFlowPosition({ x: e.clientX, y: e.clientY })]);
     }
   }, [activeTool, currentStroke, screenToFlowPosition,
-      setMousePos, setCurrentStroke, handleEraser]);
+      setMousePos, setCurrentStroke, handleEraser, isAnimatingRef]);
 
   const handlePointerUp = useCallback(() => {
     if (placementMode) return;
@@ -213,12 +217,14 @@ export function useDrawingMode({
       return;
     }
     if (activeTool === 'pen' && currentStroke?.length > 1) {
-      takeSnapshot();
-      setDrawings(prev => [...prev, { points: currentStroke, color: activeColor, penSize }]);
+      if (!isAnimatingRef?.current) {
+        takeSnapshot();
+        setDrawings(prev => [...prev, { points: currentStroke, color: activeColor, penSize }]);
+      }
     }
     setCurrentStroke(null);
   }, [placementMode, activeTool, currentStroke, takeSnapshot,
-      setDrawings, setCurrentStroke, activeColor, penSize]);
+      setDrawings, setCurrentStroke, activeColor, penSize, isAnimatingRef]);
 
   useEffect(() => {
     if (!placementMode) return;
