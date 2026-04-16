@@ -22,7 +22,7 @@ function matchesShortcut(e, binding) {
  * a future exists and *immediately* clear it + re-sync, making the redo button
  * disable instantly.
  */
-export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDrawings, shortcuts }) {
+export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDrawings, shortcuts, isAnimatingRef }) {
   const sc = shortcuts || DEFAULT_SHORTCUTS;
   const pastRef   = useRef([]);
   const futureRef = useRef([]);
@@ -109,6 +109,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
   }, [nodes, edges, drawings, takeSnapshot]);
 
   const undo = useCallback(() => {
+    if (isAnimatingRef?.current) return;
     let past = pastRef.current;
     if (past.length === 0) return;
 
@@ -136,6 +137,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
   }, [deepCloneState, fingerprint, setNodes, setEdges, setDrawings, syncHistoryLen]);
 
   const redo = useCallback(() => {
+    if (isAnimatingRef?.current) return;
     const future = futureRef.current;
     if (future.length === 0) return;
 

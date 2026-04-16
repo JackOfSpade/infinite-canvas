@@ -27,12 +27,12 @@
 ### Hooks
 | File | Status | Notes |
 |------|--------|---------|
-| `src/hooks/useUndoRedo.js` | ✅ Clean | `clearHistory` correct; `isRestoringRef` blocks debounce during undo/redo — no undo loops |
-| `src/hooks/useCanvasPersistence.js` | ✅ Fixed (Bugs 36, 55, 56) | `resetStack` & `clearHistory` called on load; `sanitizeNodesForSave` strips transient opacity |
+| `src/hooks/useUndoRedo.js` | ✅ Fixed (Bug 153, Session 17) | `clearHistory` correct; `isRestoringRef` blocks debounce during undo/redo; keyboard handlers (`undo`/`redo`) guarded against `isAnimatingRef.current` to prevent jumping the state while `navigation` is animating. |
+| `src/hooks/useCanvasPersistence.js` | ✅ Fixed (Bugs 36, 55, 56) + ✅ Fixed (Bug 150, Session 15) | `resetStack` & `clearHistory` called on load; `sanitizeNodesForSave` now recursive — strips transient jobcard opacity from all nested canvas levels, not just root |
 | `src/hooks/useCanvasNavigation.js` | ✅ Fixed | `clearHistory` on level transitions; BreadcrumbBar stale ID safe; `extractToParent` position offset correct |
 | `src/hooks/useCanvasContextMenu.js` | ✅ Fixed (Bugs 52, 53, 67–70b) | All locked-node menu items disabled; guards in `setNodeColor`, `aiPolishText`, `toggleStickyNote`; `depth>0` guard on Move to Parent |
 | `src/hooks/useCanvasActions.js` | ✅ Fixed (Bug 38) | `doClear` calls `resetStack` + `takeSnapshot` before clearing |
-| `src/hooks/useCanvasDragAndDrop.js` | ✅ Fixed (Bug 29) | URL drag handled; all drag paths take snapshot; animation-window drop is accepted minor risk |
+| `src/hooks/useCanvasDragAndDrop.js` | ✅ Fixed (Bug 29) + ✅ Fixed (Session 14) | URL drag handled; all drag paths take snapshot; animation-window drop now guarded by `handleDrop` wrapper in Canvas.jsx (Bug 148) |
 | `src/hooks/useDrawingMode.js` | ✅ Clean | Object eraser skips locked nodes; `takeSnapshot` at correct gesture boundaries; Escape cleanup correct |
 | `src/hooks/useCustomFitView.js` | ✅ Clean | Display utility only — no edge cases |
 | `src/hooks/useNodeAutoEdit.js` | ✅ Clean | `isNew` cleared on mount; duplicates get `isNew:false`; locked nodes not auto-deleted on empty blur |
@@ -48,12 +48,12 @@
 ### Node Components
 | File | Status | Notes |
 |------|--------|-------|
-| `src/nodes/TextNode.jsx` | ✅ Fixed (Bugs 40, 70) | Font dialog + double-click guarded; locked nodes not edited |
-| `src/nodes/LinkNode.jsx` | ✅ Fixed (Bugs 41, 70b) | Font + URL dialog guarded; URL fetch on paste correct |
+| `src/nodes/TextNode.jsx` | ✅ Fixed (Bugs 40, 70, 145) | Font dialog + double-click guarded; locked nodes not edited; `userSelect:'text'` inline override restores selection while editing |
+| `src/nodes/LinkNode.jsx` | ✅ Fixed (Bugs 41, 70b, 146) | Font + URL dialog guarded; URL fetch on paste correct; `userSelect:'text'` inline override restores selection while editing |
 | `src/nodes/CanvasNode.jsx` | ✅ Fixed (Bugs 78–81, Session 10) + ✅ Verified (Session 12) | SVG-text click uses TitleZoneCorrection/Active path; `getComputedTextLength()` for exact click-zone width; off-screen input with deferred refocus; `ResizeCorrection` + `TitleZoneCorrection` snap-back verified live; 0-move phantom correction cleanup verified; `isInTitleArc` geometry verified (top=-90° in zone, bottom=+90° out of zone) |
 | `src/nodes/DocumentNode.jsx` | ✅ Clean | Double-click file-open blocked when locked; file watcher correctly cleaned up |
 | `src/nodes/JobCardNode.jsx` | ✅ Fixed (Bug 65) | Dismiss button hidden, status select disabled, cover letter button disabled when locked |
-| `src/nodes/JobHubNode.jsx` | ✅ Fixed (Bug 62) | Resume drop + error retry blocked when locked |
+| `src/nodes/JobHubNode.jsx` | ✅ Fixed (Bug 62) + ✅ Fixed (Bug 152, Session 16) | Resume drop + error retry blocked when locked; orphan cluster spawn now guarded — if hub deleted during processing, skip addNodes |
 | `src/nodes/SellHubNode.jsx` | ✅ Fixed (Bugs 63, 73) | Image drop + error retry blocked when locked; `AnimatedSourceRing` receives `nodeId={id}` |
 | `src/nodes/ListingNode.jsx` | ✅ Fixed (Bugs 47, 66) | All priced-state controls disabled when locked; confirm draft blocked |
 | `src/nodes/sellhub/SellHubDraftState.jsx` | ✅ Fixed (Bug 48) | EditableField + confirm disabled when locked |
@@ -99,7 +99,7 @@
 ### Canvas Core
 | File | Status | Notes |
 |------|--------|---------|
-| `src/Canvas.jsx` | ✅ Fixed (Bugs 32, 38, 59) + ✅ Verified (Session 12) | `isValidConnection` guards sticky notes; `clearHistory` wired; `resetStack` on load; `onNodeDragStart` tags resize/title-zone drags; `onNodeDragStop` applies `ResizeCorrection`/`TitleZoneCorrection` and clears maps; WASD pan confirmed working (6px/frame at zoom=1, blocked when INPUT focused) |
+| `src/Canvas.jsx` | ✅ Fixed (Bugs 32, 38, 59) + ✅ Verified (Session 12) + ✅ Fixed (Bugs 147-149, Session 14) + ✅ Fixed (Bug 151, Session 16) + ✅ Fixed (Bug 154, Session 17) | `isValidConnection` guards sticky notes; `clearHistory` wired; `resetStack` on load; `onNodeDragStart` tags resize/title-zone drags; `onNodeDragStop` applies `ResizeCorrection`/`TitleZoneCorrection` and clears maps; WASD pan polling now suspends during `navigation.isAnimating`; `handlePaneDoubleClick`, `handleDrop`, `onPointerDown`, `onPaneContextMenu`, `onNodeContextMenu` all now guard `navigation.isAnimating` |
 
 ### Entry Points
 | File | Status | Notes |
@@ -273,7 +273,7 @@
 | 82 | Context menu | Move to Parent Canvas at root (depth=0) | ✅ Safe (wrapped in `if (depth > 0)`) |
 | 83 | preload.js | Generic `invoke` exposes all IPC channels | ✅ Acceptable (trusted desktop app) |
 | 84 | ReactFlow v12 | Multi-select drag respects `draggable:false` on locked nodes | ✅ Clean |
-| 85 | useCanvasDragAndDrop | Drop during dive-in animation — node loss risk | ⚠️ Accepted (150-300ms window, physically improbable) |
+| 85 | useCanvasDragAndDrop | Drop during dive-in animation — node loss risk | ✅ Fixed (Session 14, Bug 148 — Canvas.jsx wraps handleDrop with isAnimating guard) |
 | 86 | deleteKeyCode | Delete key respects `deletable:false` on locked nodes | ✅ Clean |
 | 87 | CanvasNavigationContext | Context file has no logic — just `createContext(null)` | ✅ Clean |
 | 88 | deleteKeyCode=['Backspace','Delete'] | Backspace during text edit won't delete node — RF v12 checks `isContentEditable` | ✅ Clean |
@@ -301,6 +301,8 @@
 | 110 | authWindows getSessionStatus | `page.cookies(...domains.map(...))` — spreads array correctly; `page.close()` in finally equivalent (inside try block before catch) | ✅ Clean |
 | 111 | marketplace extractors | All card-level parsers wrapped in individual `try/catch` — one malformed card never aborts the rest | ✅ Clean |
 | 112 | main.jsx | `StrictMode` causes effects to fire twice in dev — all effects use cleanup functions; no side-effect leaks | ✅ Clean |
+| 113b | TextNode / LinkNode | `select-none` always applied to contenteditable div → `user-select:none` even while editing (ReactFlow also inherits this) → confirmed via computed style check in browser | Escalated to Bug 145/146 |
+| 113c | Canvas | `handlePaneDoubleClick`, `handleDrop`, `onPointerDown` had no `navigation.isAnimating` check — all three could create/modify state during the ~300ms dive-in/out fade that would be immediately overwritten. While `onNodeDoubleClick` already had this guard, the pane-level handlers did not. | Escalated to Bugs 147-149 |
 | 113 | CanvasThumbnail | Non-square viewBox clipped circular shape unevenly — fixed to square viewBox centered on content | ✅ Fixed (Session 9) |
 | 114 | useCanvasContextMenu | 'Color' showed on all text nodes — renamed to 'Sticky Note Color', only shown when `isSticky` | ✅ Fixed (Session 9) |
 | 115 | useCanvasContextMenu | 'Font & Size' option now also available for group (nested canvas) nodes | ✅ Added (Session 9) |
@@ -333,12 +335,23 @@
 | 142 | useCanvasInitialization | Auto-save promise now has `.catch()` — previously silent failures only appeared in the global `UNHANDLED-PROMISE` logger | ✅ Fixed (Session 10 refactor) |
 | 143 | EventLogger | `_lastMsg`, `_lastCount`, `_nodeStates` now initialized in constructor; removed per-call defensive guards | ✅ Fixed (Session 10 refactor) |
 | 144 | Canvas | Escape key did not cancel placement mode (`text`/`link`/`group`) — only drawing mode had Escape handling | ✅ Fixed (Bug 83, Session 11) |
+| 145 | TextNode | `select-none` class always applied to the contenteditable div (including while editing), and ReactFlow also inherits `user-select:none` on all node containers — text highlighting/copy was impossible. Fixed: `select-none` moved to non-editing branch only; `userSelect:'text'` inline style added when `isEditing` to override RF's inherited value | ✅ Fixed (Session 13) |
+| 146 | LinkNode | Same `select-none` / `user-select` inheritance issue as Bug 145, in the link label edit field. Fixed identically. | ✅ Fixed (Session 13) |
+| 147 | Canvas | `handlePaneDoubleClick` missing `navigation.isAnimating` guard — double-clicking the pane during a dive-in/dive-out animation (~300ms) called `setNodes(old + newNode)`; then the animation's own `setNodes(childCanvas.nodes)` fired and silently discarded the new node. Fixed: added `|| navigation.isAnimating` to the early-return guard. | ✅ Fixed (Session 14) |
+| 148 | Canvas | `handleDrop` (sidebar + OS file drops) same animation-window corruption as Bug 147 — a drop during navigation overwrote the dropped node. Fixed: wrapped `handleDropBase` with `if (navigation.isAnimating) return;`. | ✅ Fixed (Session 14) |
+| 149 | Canvas | `onPointerDown` (drawing/placement) same animation-window issue — starting a pen stroke or node placement during animation produced state mutations that were immediately overwritten. Fixed: added `|| navigation.isAnimating` guard to the `onPointerDown` handler. | ✅ Fixed (Session 14) |
+| 150 | useCanvasPersistence | `sanitizeNodesForSave` was flat — only stripped jobcard `style.opacity` from the root-level nodes array. A user who places a JobHubNode (with its JobCards) inside a CanvasNode would have those inner jobcards missed during sanitization. The filter-dim opacity would persist to disk, causing the same reload corruption as Bug 71 but one level deeper. Fixed: added a recursive branch for `type === 'group'` nodes that descends into `canvasData.nodes`. | ✅ Fixed (Session 15) |
+| 151 | Canvas | `onPaneContextMenu` and `onNodeContextMenu` were not guarded by `navigation.isAnimating`. A right-click during the ~300ms dive-in/out animation would open a context menu; any subsequent mutation action (Add Text, Delete, etc.) would be immediately overwritten by the animation's final `setNodes` call. Fixed: both handlers wrapped with `if (navigation.isAnimating) return` guards in Canvas.jsx. | ✅ Fixed (Session 16) |
+| 152 | JobHubNode | If the user deletes the hub node during the multi-step async search pipeline (steps can take 30+ seconds), `addNodes(newNodes)` still fired at Step 5, spawning orphan cluster CanvasNodes at position (0, 0) with no hub to relate to. Fixed: check `getNodes().find(n.id === id)` before spawning; bail early with `processingRef.current = false` if the hub is gone. | ✅ Fixed (Session 16) |
+| 153 | useUndoRedo | Keyboard shortcut listeners for `undo` / `redo` (Cmd+Z, Cmd+Shift+Z) were not checked against the navigation animation window. Pressing Undo during the 300ms dive sequence would restore previous nodes while `jumpTo` was trying to stitch the navigation stack together, causing node tree swaps and visual corruption. Fixed: passed `isNavigationAnimatingRef` from Canvas downwards and guarded `undo` / `redo` internals. | ✅ Fixed (Session 17) |
+| 154 | Canvas | WASD panning uses a `requestAnimationFrame` polling loop that mutates `reactFlow.setViewport()` every frame. If the user held 'W' during the dive-in/out transition, the RAF loop fought with the jump animation's own viewport targeting, causing the final dive target to jump radically off-screen. Fixed: `step` polling loop suspends itself if `isNavigationAnimatingRef.current` is true. | ✅ Fixed (Session 17) |
+| 155 | Context Menu | `duplicateNode` copied group nodes (Nested Canvases) via a raw `structuredClone`. If the user duplicated a nested canvas, its internal child nodes maintained identical IDs to the original. If identical-ID nodes were later extracted out of the nested canvases to a shared parent canvas, React array keys crashed. Fixed: Built a recursive `reassignCanvasDataIDs` helper to scramble inner node/edge/drawing IDs on duplication. | ✅ Fixed (Session 18) |
 
 ---
 
 ## ❓ What Still Needs Checking
 
-All files in `src/` and `electron/` have been fully audited across Sessions 1–12.
+All files in `src/` and `electron/` have been fully audited across Sessions 1–17.
 The codebase is considered comprehensively hardened.
 
 **Session 12 (2026-04-16):** Verification-only pass. No new bugs found. Confirmed all final-commit behaviors:
@@ -349,6 +362,35 @@ The codebase is considered comprehensively hardened.
 - `CustomMiniMap` renders SVG `<circle>` per canvas node + viewport rect ✅  
 - WASD pan: 6px/frame at zoom=1, blocked when INPUT focused ✅  
 - Zero console errors throughout ✅
+
+**Session 13 (2026-04-16):** Full codebase re-audit. All files re-read. Two bugs found and fixed:
+- Bug 145/146: `select-none` + ReactFlow's inherited `user-select:none` silently blocked all text selection in TextNode and LinkNode editing divs. Fixed with `userSelect:'text'` inline style override.
+
+**Session 14 (2026-04-16):** Full codebase re-read. Investigated ~20 candidate edge cases. Three bugs found across `Canvas.jsx` — all of the same class (animation-window state corruption). No bugs found in any other file.
+- Bug 147: `handlePaneDoubleClick` missing `navigation.isAnimating` guard.
+- Bug 148: `handleDrop` (sidebar/OS drops) missing animation guard.
+- Bug 149: `onPointerDown` (drawing/placement) missing animation guard.
+- All three fixed with simple `navigation.isAnimating` guards; confirmed zero console errors post-fix.
+
+**Session 15 (2026-04-16):** Full codebase re-read of all sources not read in previous sessions (`useSettings`, `useCustomFitView`, `BreadcrumbBar`, `IssueReporterDialog`, `OnboardingOverlay`, `SettingsPanel`, `SearchBar`, `AnimatedSourceRing`, `useCanvasDragAndDrop`, `useCanvasNavigation`, `useCanvasPersistence`, `useCanvasInitialization`, `useUndoRedo`, `dragUtils`, `constants`, `nodeFactory`). ~25 edge cases investigated. One bug found:
+- Bug 150: `sanitizeNodesForSave` was flat — missed jobcard opacity inside nested canvas nodes. Fixed with recursion into `group.data.canvasData.nodes`.
+- Updated `useCanvasDragAndDrop` audit entry: animation-window drop is now fixed (Bug 148), no longer 'accepted risk'.
+- Zero console errors confirmed post-fix.
+
+**Session 16 (2026-04-16):** Full cross-cutting interaction audit. ~20 edge cases investigated. Two bugs found:
+- Bug 151: `onPaneContextMenu` / `onNodeContextMenu` not guarded by `navigation.isAnimating` — right-clicking during dive animation then executing any action (Add Text, Delete) would be overwritten. Fixed: both wrapped with `isAnimating` guard in Canvas.jsx. This completes the full suite of animation-window guards (alongside Bugs 147-149).
+- Bug 152: `JobHubNode.startProcessing` — if hub is deleted during the async search pipeline, Step 5 still called `addNodes(newNodes)`, spawning orphan cluster CanvasNodes at (0, 0). Fixed: bail early if `getNodes()` no longer finds the hub node.
+- `SellHubNode` checked for the same issue — no equivalent (no `addNodes` call in its pipeline). ✅
+- All context-menu actions reviewed for stale-node risks — all safe (no-op on nonexistent IDs). ✅
+- Zero console errors confirmed post-fix.
+
+**Session 17 (2026-04-16):** Final check over global listeners and concurrent non-React systems.
+- Bug 153: `useUndoRedo` global keyboard listener (`Cmd+Z` / `Cmd+Shift+Z`) mutated state oblivion to `navigation.isAnimating`. Fixed by passing a React Ref (`isNavigationAnimatingRef`) down into `useUndoRedo` to safely disable the logic during dives.
+- Bug 154: Canvas WASD pan polling loop continued blasting 60fps `setViewport` calls while the dive animation was itself calculating and updating the viewport target. Fixed by suspending the WASD `step()` if `isAnimating` is active.
+- Verified auto-save `flushStackAndSave` executes flawlessly independent of `isAnimating` (re-relies purely on current nodes and stack sync, which natively capture partial mid-dive states).
+
+**Session 18 (2026-04-16):** Final deep-data clone validation test.
+- Bug 155: `duplicateNode` produced identical nested IDs. When duplicate nested canvases were placed side-by-side, any operation that combined their internal data (via `extractToParent`) would crash React Flow from duplicate array keys. Fixed via recursive UUID remapping across nested groups.
 
 If new features are added, create entries here for the new files/interactions introduced.
 

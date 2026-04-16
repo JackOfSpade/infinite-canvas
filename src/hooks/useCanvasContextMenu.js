@@ -16,6 +16,50 @@ const NODE_COLORS = [
   { label: '⚫️ Clear', value: null },
 ];
 
+/**
+ * Recursively remaps all node, edge, and drawing IDs inside a duplicated group's canvasData
+ * to prevent ID collisions if identical child nodes are later extracted to a shared parent.
+ */
+function reassignCanvasDataIDs(node) {
+  if (node.type !== 'group' || !node.data?.canvasData) return node;
+
+  const idMap = new Map();
+  const getMappedId = (oldId) => {
+    if (!idMap.has(oldId)) idMap.set(oldId, uuidv4());
+    return idMap.get(oldId);
+  };
+
+  const processCanvasData = (canvasData) => {
+    if (!canvasData) return;
+
+    if (canvasData.nodes) {
+      canvasData.nodes.forEach(n => {
+        n.id = getMappedId(n.id);
+        if (n.type === 'group' && n.data?.canvasData) {
+          processCanvasData(n.data.canvasData);
+        }
+      });
+    }
+
+    if (canvasData.edges) {
+      canvasData.edges.forEach(e => {
+        if (e.id) e.id = uuidv4();
+        if (idMap.has(e.source)) e.source = idMap.get(e.source);
+        if (idMap.has(e.target)) e.target = idMap.get(e.target);
+      });
+    }
+
+    if (canvasData.drawings) {
+      canvasData.drawings.forEach(d => {
+        if (d.id) d.id = uuidv4();
+      });
+    }
+  };
+
+  processCanvasData(node.data.canvasData);
+  return node;
+}
+
 export function useCanvasContextMenu({
   placementMode,
   takeSnapshot,
@@ -81,12 +125,13 @@ export function useCanvasContextMenu({
     if (!menu?.node) return;
     takeSnapshot();
     const original = menu.node;
-    const clone = {
+    let clone = {
       ...structuredClone(original),
       id: uuidv4(),
       position: { x: original.position.x + 40, y: original.position.y + 40 },
       selected: false,
     };
+    clone = reassignCanvasDataIDs(clone);
     // Clear isNew flag on duplicated nodes so they don't auto-enter edit mode
     if (clone.data) clone.data.isNew = false;
     // Don't carry over lock state — the clone should be freely editable

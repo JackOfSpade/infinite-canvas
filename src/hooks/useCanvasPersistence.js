@@ -49,6 +49,9 @@ function migrateGroupNodes(nodes) {
  * Strip transient visual properties from nodes before saving.
  * Prevents runtime-only state (e.g. source-filter dim opacity) from
  * being persisted to disk and corrupting the loaded workspace.
+ *
+ * This is recursive: group (CanvasNode) nodes can contain arbitrary
+ * nested canvases, so we must sanitize down every level.
  */
 export function sanitizeNodesForSave(nodes) {
   if (!Array.isArray(nodes)) return nodes;
@@ -58,6 +61,17 @@ export function sanitizeNodesForSave(nodes) {
     if (n.type === 'jobcard' && n.style?.opacity !== undefined) {
       const { opacity: _opacity, ...restStyle } = n.style || {};
       return { ...n, style: Object.keys(restStyle).length ? restStyle : undefined };
+    }
+    // Recurse into nested canvas nodes so deeply-nested jobcards are also sanitized
+    if (n.type === 'group' && n.data?.canvasData?.nodes?.length > 0) {
+      const sanitizedInner = sanitizeNodesForSave(n.data.canvasData.nodes);
+      return {
+        ...n,
+        data: {
+          ...n.data,
+          canvasData: { ...n.data.canvasData, nodes: sanitizedInner },
+        },
+      };
     }
     return n;
   });

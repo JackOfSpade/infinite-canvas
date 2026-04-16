@@ -175,9 +175,12 @@ export function Canvas() {
     onEdgesChangeBase(changes);
   }, [onEdgesChangeBase, snapshotOnDelete]);
 
+  const isNavigationAnimatingRef = useRef(false);
+
   const { undo, redo, takeSnapshot, clearHistory, canUndo, canRedo } = useUndoRedo({
     nodes, edges, drawings, setNodes, setEdges, setDrawings,
     shortcuts: settings.shortcuts,
+    isAnimatingRef: isNavigationAnimatingRef,
   });
   useEffect(() => { takeSnapshotRef.current = takeSnapshot; }, [takeSnapshot]);
 
@@ -190,6 +193,9 @@ export function Canvas() {
     clearHistory,
     getAnimationDuration,
   });
+  useEffect(() => {
+    isNavigationAnimatingRef.current = navigation.isAnimating;
+  }, [navigation.isAnimating]);
 
   const {
     saveCanvas, loadCanvas, exportCanvasToPNG,
@@ -247,13 +253,13 @@ export function Canvas() {
   const { screenToFlowPosition, getIntersectingNodes, getNode, setViewport, getViewport } = useReactFlow();
 
   const handlePaneDoubleClick = useCallback((e) => {
-    if (activeTool || placementMode) return;
+    if (activeTool || placementMode || navigation.isAnimating) return;
     takeSnapshot();
     const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
     const newNode = createTextNode({ x: pos.x - 100, y: pos.y - 20 });
     setNodes((nds) => nds.concat(newNode));
     EventLogger.log(`Double-clicked canvas to create new Text Node`);
-  }, [activeTool, placementMode, screenToFlowPosition, takeSnapshot, setNodes]);
+  }, [activeTool, placementMode, navigation.isAnimating, screenToFlowPosition, takeSnapshot, setNodes]);
 
   // ── Custom pointer-drag for Nested Canvas button ─────────────────────────
   const onNestedCanvasDragStart = useCallback((startX, startY) => {
@@ -301,9 +307,16 @@ export function Canvas() {
     return true;
   }, [getNode]);
 
-  const { handleDrop, handleDragOver } = useCanvasDragAndDrop({
+  const { handleDrop: handleDropBase, handleDragOver } = useCanvasDragAndDrop({
     setNodes, setIsDrawingMode: (v) => setActiveTool(v ? 'pen' : null), takeSnapshot,
   });
+  // Guard drops during navigation animations — a drop during the ~300ms fade would
+  // append a node to the old canvas state and then the animation's setNodes would
+  // overwrite everything, silently losing the dropped node.
+  const handleDrop = useCallback((e) => {
+    if (navigation.isAnimating) return;
+    handleDropBase(e);
+  }, [navigation.isAnimating, handleDropBase]);
 
   const clearDrawings = useCallback(() => {
     takeSnapshot();
@@ -356,6 +369,19 @@ export function Canvas() {
     depth: navigation.depth
   });
 
+  // Guard context menu during navigation animations — opening a menu during the ~300ms
+  // fade and then executing an action (Add Text, Delete, etc.) would mutate state that
+  // is immediately overwritten by the animation's own setNodes/setEdges call.
+  const onPaneContextMenu = useCallback((e) => {
+    if (navigation.isAnimating) return;
+    onPaneContextMenuBase(e);
+  }, [navigation.isAnimating, onPaneContextMenuBase]);
+
+  const onNodeContextMenu = useCallback((e, node) => {
+    if (navigation.isAnimating) return;
+    onNodeContextMenuBase(e, node);
+  }, [navigation.isAnimating, onNodeContextMenuBase]);
+
   // ── Keyboard Shortcuts Panel + Escape to cancel placement/tool ──────────
   useEffect(() => {
     const handleKey = (e) => {
@@ -383,13 +409,17 @@ export function Canvas() {
     const step = () => {
       const { w, a, s, d, shift } = keys;
       if (!w && !a && !s && !d) { rafId = null; return; }
-      const speed = shift ? BASE_SPEED * 5 : BASE_SPEED;
-      const vp = getViewport();
-      setViewport({
-        x: vp.x + (a ? speed : d ? -speed : 0),
-        y: vp.y + (w ? speed : s ? -speed : 0),
-        zoom: vp.zoom,
-      });
+      
+      // Suspend WASD viewport updates during dive-in/dive-out animations
+      if (!isNavigationAnimatingRef.current) {
+        const speed = shift ? BASE_SPEED * 5 : BASE_SPEED;
+        const vp = getViewport();
+        setViewport({
+          x: vp.x + (a ? speed : d ? -speed : 0),
+          y: vp.y + (w ? speed : s ? -speed : 0),
+          zoom: vp.zoom,
+        });
+      }
       rafId = requestAnimationFrame(step);
     };
 
@@ -525,8 +555,8 @@ export function Canvas() {
         className="flex-1 h-full relative"
         data-drawing-mode={activeTool || undefined}
         onPointerDown={(e) => {
-          // Only block drawing while a popup/context-menu is open
-          if (toolMenuOpen || menu) return;
+          // Only block drawing while a popup/context-menu is open or animation is running
+          if (toolMenuOpen || menu || navigation.isAnimating) return;
           handlePointerDown(e);
         }}
         onPointerMove={(e) => {
@@ -605,8 +635,8 @@ export function Canvas() {
                   navigation.diveIn(node.id);
                 }
               }}
-            onPaneContextMenu={onPaneContextMenuBase}
-            onNodeContextMenu={onNodeContextMenuBase}
+            onPaneContextMenu={onPaneContextMenu}
+            onNodeContextMenu={onNodeContextMenu}
             snapToGrid={snapToGrid}
             snapGrid={[40, 40]}
             panOnDrag={!interactiveDisabled}

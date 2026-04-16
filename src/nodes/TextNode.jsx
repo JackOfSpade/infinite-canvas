@@ -113,10 +113,10 @@ export function TextNode({ id, data }) {
         onKeyDown={(e) => { if (e.key === 'Escape') inputRef.current.blur(); }}
         onPointerDown={(e) => { if (isEditing) e.stopPropagation(); }}
         onContextMenu={(e) => { if (isEditing) e.stopPropagation(); }}
-        className={`outline-none min-w-[20px] min-h-[1em] select-none ${
-          isEditing ? 'cursor-text whitespace-nowrap' : 'cursor-default hidden'
+        className={`outline-none min-w-[20px] min-h-[1em] ${
+          isEditing ? 'cursor-text whitespace-nowrap' : 'select-none cursor-default hidden'
         }`}
-        style={{ fontSize: `${fontSize}px`, fontFamily, ...(textColor ? { color: textColor } : {}) }}
+        style={{ fontSize: `${fontSize}px`, fontFamily, ...(textColor ? { color: textColor } : {}), ...(isEditing ? { userSelect: 'text' } : {}) }}
       />
 
       {!isEditing && (

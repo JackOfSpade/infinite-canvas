@@ -201,8 +201,16 @@ export function JobHubNode({ id, data }) {
       const { clusters } = scoreResult;
       const hubNodes = getNodes();
       const hubNode = hubNodes.find(n => n.id === id);
-      const hubX = hubNode?.position?.x || 0;
-      const hubY = hubNode?.position?.y || 0;
+
+      // If the hub was deleted while processing (user deleted it mid-search),
+      // skip spawning orphan cluster nodes on the canvas.
+      if (!hubNode) {
+        processingRef.current = false;
+        return;
+      }
+
+      const hubX = hubNode.position.x;
+      const hubY = hubNode.position.y;
 
       const newNodes = [];
       const clusterEntries = Object.entries(clusters);

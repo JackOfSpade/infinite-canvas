@@ -161,8 +161,8 @@ export function LinkNode({ id, data }) {
         onKeyDown={(e) => { if (e.key === 'Escape') inputRef.current.blur(); }}
         onPointerDown={(e) => { if (isEditingLabel) e.stopPropagation(); }}
         onContextMenu={(e) => { if (isEditingLabel) e.stopPropagation(); }}
-        className={`${textColor ? '' : 'text-blue-400'} outline-none whitespace-nowrap min-w-[20px] min-h-[1em] select-none ${isEditingLabel ? 'cursor-text' : 'cursor-pointer hover:underline'}`}
-        style={{ fontSize: `${fontSize}px`, fontFamily, ...(textColor ? { color: textColor } : {}) }}
+        className={`${textColor ? '' : 'text-blue-400'} outline-none whitespace-nowrap min-w-[20px] min-h-[1em] ${isEditingLabel ? 'cursor-text' : 'select-none cursor-pointer hover:underline'}`}
+        style={{ fontSize: `${fontSize}px`, fontFamily, ...(textColor ? { color: textColor } : {}), ...(isEditingLabel ? { userSelect: 'text' } : {}) }}
       />
 
       <Handle type="source" position={Position.Right} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
