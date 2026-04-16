@@ -4,15 +4,17 @@
  * Records semantic user actions as timestamped strings.
  * Used by the Bug Report feature to reconstruct reproduction steps.
  *
- * Memory safety: enforces a generous 15 MB internal ceiling.
- * At export time, the Bug Report handler dynamically budgets how many
- * events fit within the 10 MB file cap (see electron/ipc/bugReport.js).
+ * Memory safety: enforces a 500 KB ring buffer (~6,000 lines).
+ * At export time, the Bug Report handler budgets up to 500 KB for events
+ * within the file (see electron/ipc/bugReport.js).
  *
  * Also auto-captures JS errors and unhandled promise rejections so they
  * appear in the event timeline alongside user actions.
  */
 
-const MAX_BYTES = 15 * 1024 * 1024; // 15 MB internal ceiling
+const MAX_BYTES = 500 * 1024; // 500 KB — covers ~6,000 lines at avg 85 bytes/line.
+// The entire useful event history for an immediate-report workflow is 20–50 lines;
+// even a 1-hour heavy session generates <3,000 lines. 15 MB was 200× too large.
 
 class EventLoggerSingleton {
   constructor() {
@@ -102,6 +104,12 @@ class EventLoggerSingleton {
     if (typeof window === 'undefined') return;
 
     window.addEventListener('error', (e) => {
+      // "ResizeObserver loop completed with undelivered notifications" is a
+      // harmless Chromium quirk — it fires whenever our setNodes call interrupts
+      // a ResizeObserver batch mid-loop. It is NOT a real error and alternates
+      // with every "node resized" line during resize, making it 40-50% of the
+      // entire log buffer and burying the actual signal. Suppress it entirely.
+      if (e.message?.startsWith('ResizeObserver loop')) return;
       const loc = e.filename ? ` (${e.filename.split('/').pop()}:${e.lineno})` : '';
       this.log(`JS-ERROR: ${e.message}${loc}`);
     });

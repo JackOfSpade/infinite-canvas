@@ -25,6 +25,7 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { IssueReporterDialog } from './components/IssueReporterDialog';
 import { KeyboardShortcutsPanel, useKeyboardShortcuts } from './components/KeyboardShortcutsPanel';
 import { EventLogger } from './utils/EventLogger';
+import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from './nodes/CanvasNode';
 import { CanvasNavigationContext } from './contexts/CanvasNavigationContext';
 import { nodeTypes, DEFAULT_EDGE_OPTIONS } from './utils/constants';
 import { useUndoRedo } from './hooks/useUndoRedo';
@@ -76,25 +77,95 @@ export function Canvas() {
         EventLogger.log(`node moved id=${ch.id} x=${ch.position?.x?.toFixed(1)} y=${ch.position?.y?.toFixed(1)}`);
       }
       if (ch.type === 'dimensions') {
-        EventLogger.log(`node resized id=${ch.id} w=${ch.dimensions?.width} h=${ch.dimensions?.height}`);
+        // During a CanvasNode resize session, RF's ResizeObserver echoes back every
+        // pixel we set via setNodes — one "node resized" line per frame. That was
+        // 50% of the entire log buffer and pure noise (the signal is canvas-node
+        // resize start/end + moves count). Only log outside of active resize sessions.
+        if (ResizeCorrection.size === 0) {
+          EventLogger.log(`node resized id=${ch.id} w=${ch.dimensions?.width} h=${ch.dimensions?.height}`);
+        }
       }
     });
     onNodesChangeBase(changes);
   }, [onNodesChangeBase, snapshotOnDelete]);
 
-  // ── ReactFlow drag event logging ─────────────────────────────────────────
-  // These fire from ReactFlow's own window-level drag system, independently of
-  // our pointer handlers. If "rf-drag-start" appears alongside "canvas-node
-  // resize start" in a bug report, it means RF's drag system is interfering
-  // with our resize (missing noDrag class, or stopPropagation not reaching
-  // window listeners).
+  // ── ReactFlow drag event logging + resize-drag tagging ───────────────────
+  // These fire from ReactFlow's own drag system, independently of our pointer
+  // handlers. We use ResizeActive to detect if the drag was initiated during a
+  // CanvasNode resize session — only resize-tagged drags apply a ResizeCorrection.
+  //
+  // Without this gating, stale ResizeCorrection entries (left by 0-moves phantom
+  // resizes where RF never fires onNodeDragStop) would wrongly snap the node
+  // whenever the user later does any drag (normal move, input click, etc.).
+  const resizeDragActiveRef    = useRef(new Set());
+  const titleZoneDragActiveRef = useRef(new Set());
+
   const onNodeDragStart = useCallback((e, node) => {
     EventLogger.log(`rf-drag-start id=${node.id} type=${node.type} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
+    // Tag this RF drag as resize-initiated if a resize is currently active.
+    // ResizeActive is set in CanvasNode onDown (resize path) and cleared in onUp.
+    // Tagging happens here (onNodeDragStart) because that's after our onDown runs.
+    if (ResizeActive.has(node.id)) {
+      resizeDragActiveRef.current.add(node.id);
+    }
+    // Tag as title-zone-initiated if a title-zone press is currently active.
+    // RF's capture-phase listener fires before our onDown bubble handler, so by the
+    // time onNodeDragStart fires, our onDown has already set TitleZoneActive.
+    if (TitleZoneActive.has(node.id)) {
+      titleZoneDragActiveRef.current.add(node.id);
+    }
   }, []);
 
   const onNodeDragStop = useCallback((e, node) => {
     EventLogger.log(`rf-drag-stop id=${node.id} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
-  }, []);
+
+    const wasResizeDrag    = resizeDragActiveRef.current.has(node.id);
+    const wasTitleZoneDrag = titleZoneDragActiveRef.current.has(node.id);
+    resizeDragActiveRef.current.delete(node.id);
+    titleZoneDragActiveRef.current.delete(node.id);
+
+    const correction   = ResizeCorrection.get(node.id);
+    const tzCorrection = TitleZoneCorrection.get(node.id);
+    ResizeCorrection.delete(node.id);   // always clear, regardless of whether we apply it
+    TitleZoneCorrection.delete(node.id);
+
+    if (correction && wasResizeDrag) {
+      // ── ResizeCorrection ───────────────────────────────────────────────────
+      // This drag-stop was caused by a CanvasNode resize session. RF finalized
+      // the node at a wrong drag-offset position. Apply the center-anchored
+      // correction. React 18 batches this with RF's own position update so both
+      // land in a single render with no visible jump.
+      const { flowCx, flowCy, size } = correction;
+      const correctX = flowCx - size / 2;
+      const correctY = flowCy - size / 2;
+      EventLogger.log(`resize-correction id=${node.id} pos=(${correctX.toFixed(1)},${correctY.toFixed(1)}) size=${size}`);
+      setNodes(nds => nds.map(n =>
+        n.id === node.id ? {
+          ...n,
+          position: { x: correctX, y: correctY },
+          width:  size,
+          height: size,
+          style:  { ...(n.style || {}), width: size, height: size },
+        } : n
+      ));
+    } else if (correction) {
+      // Stale correction from a phantom resize (0 moves, RF never started a drag
+      // for that session). Discard it — this drag was unrelated to any resize.
+      EventLogger.log(`resize-correction DISCARDED (stale) id=${node.id}`);
+    }
+
+    if (tzCorrection && wasTitleZoneDrag) {
+      // ── TitleZoneCorrection ────────────────────────────────────────────────
+      // RF's capture-phase drag listener fires before our bubble-phase onDown,
+      // so RF starts tracking a drag even during a title-zone press. If the user
+      // holds and moves slightly, RF displaces the node before our onUp fires to
+      // start editing. Snap the node back to where it was before the press.
+      EventLogger.log(`title-zone-correction id=${node.id} pos=(${tzCorrection.x.toFixed(1)},${tzCorrection.y.toFixed(1)})`);
+      setNodes(nds => nds.map(n =>
+        n.id === node.id ? { ...n, position: { x: tzCorrection.x, y: tzCorrection.y } } : n
+      ));
+    }
+  }, [setNodes]);
 
   const onEdgesChange = useCallback((changes) => {
     snapshotOnDelete(changes);

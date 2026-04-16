@@ -74,7 +74,10 @@ ${rows}
         ? `- Viewport: zoom=${vp.zoom} x=${vp.x} y=${vp.y}`
         : '';
 
-      const MAX_BUDGET_BYTES = 10 * 1024 * 1024; // 10MB
+      const MAX_BUDGET_BYTES = 500 * 1024; // 500 KB — the actual useful event content
+      // in a typical immediate-report session is 20–50 lines (~4 KB). Even a heavy
+      // session generates <50 KB of signal. 10 MB was 200× too large; actual files
+      // were 21–52 KB total including the JSON state dump.
       const appStateJson = JSON.stringify(appState, null, 2);
 
       let baseMarkdown = `# Bug Report
