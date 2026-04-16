@@ -50,7 +50,7 @@
 |------|--------|-------|
 | `src/nodes/TextNode.jsx` | ✅ Fixed (Bugs 40, 70) | Font dialog + double-click guarded; locked nodes not edited |
 | `src/nodes/LinkNode.jsx` | ✅ Fixed (Bugs 41, 70b) | Font + URL dialog guarded; URL fetch on paste correct |
-| `src/nodes/CanvasNode.jsx` | ✅ Fixed (Bugs 78–81, Session 10) | SVG-text click now uses same TitleZoneCorrection/Active path as rim click; click-zone div uses `getComputedTextLength()` so width matches actual text; title-zone cursor zone uses measured text length; off-screen input with deferred refocus fixes RF focus-steal on new node creation |
+| `src/nodes/CanvasNode.jsx` | ✅ Fixed (Bugs 78–81, Session 10) + ✅ Verified (Session 12) | SVG-text click uses TitleZoneCorrection/Active path; `getComputedTextLength()` for exact click-zone width; off-screen input with deferred refocus; `ResizeCorrection` + `TitleZoneCorrection` snap-back verified live; 0-move phantom correction cleanup verified; `isInTitleArc` geometry verified (top=-90° in zone, bottom=+90° out of zone) |
 | `src/nodes/DocumentNode.jsx` | ✅ Clean | Double-click file-open blocked when locked; file watcher correctly cleaned up |
 | `src/nodes/JobCardNode.jsx` | ✅ Fixed (Bug 65) | Dismiss button hidden, status select disabled, cover letter button disabled when locked |
 | `src/nodes/JobHubNode.jsx` | ✅ Fixed (Bug 62) | Resume drop + error retry blocked when locked |
@@ -72,7 +72,7 @@
 | `src/components/CanvasToolbar.jsx` | ✅ Clean | Save state guard correct, undo/redo disabled states correct, HEX color input low-risk |
 | `src/components/CanvasThumbnail.jsx` | ✅ Clean | Empty guard, bounding box calc, edge/drawing fallbacks all correct |
 | `src/components/SettingsPanel.jsx` | ✅ Clean | Escape closes, click-outside closes, localStorage try-catch in `useSettings` |
-| `src/components/KeyboardShortcutsPanel.jsx` | ✅ Clean | `?` toggle, Escape close, contentEditable guard all correct |
+| `src/components/KeyboardShortcutsPanel.jsx` | 🗑️ Deleted | File removed in commit `ca303ba` (Session 12); functionality was superseded by `SettingsPanel.jsx` |
 | `src/components/IssueReporterDialog.jsx` | ✅ Clean | Empty guard on submit, isSubmitting prevents double-send |
 | `src/components/PriceJustification.jsx` | ✅ Clean | Expand/collapse is local UI state only — does not mutate persisted data |
 | `src/components/HubContainer.jsx` | ✅ Clean | `onDrop` guard is in parent; `onDragOver` visual feedback only — acceptable |
@@ -99,7 +99,7 @@
 ### Canvas Core
 | File | Status | Notes |
 |------|--------|---------|
-| `src/Canvas.jsx` | ✅ Fixed (Bugs 32, 38, 59) | `isValidConnection` guards sticky notes; `clearHistory` wired; `resetStack` on load; `deleteKeyCode=['Backspace','Delete']` safe (RF v12 checks `isContentEditable`) |
+| `src/Canvas.jsx` | ✅ Fixed (Bugs 32, 38, 59) + ✅ Verified (Session 12) | `isValidConnection` guards sticky notes; `clearHistory` wired; `resetStack` on load; `onNodeDragStart` tags resize/title-zone drags; `onNodeDragStop` applies `ResizeCorrection`/`TitleZoneCorrection` and clears maps; WASD pan confirmed working (6px/frame at zoom=1, blocked when INPUT focused) |
 
 ### Entry Points
 | File | Status | Notes |
@@ -338,8 +338,17 @@
 
 ## ❓ What Still Needs Checking
 
-All files in `src/` and `electron/` have been fully audited across Sessions 1–11.
+All files in `src/` and `electron/` have been fully audited across Sessions 1–12.
 The codebase is considered comprehensively hardened.
+
+**Session 12 (2026-04-16):** Verification-only pass. No new bugs found. Confirmed all final-commit behaviors:
+- Sub-canvas placement → circle renders with curved title ✅
+- Title auto-edit on `isNew`, click-away commits via doc `pointerdown` capture ✅  
+- Title click zone div appears at correct position/size after commit ✅  
+- `isInTitleArc` geometry correct (top=-90°→zone, bottom=+90°→resize) ✅  
+- `CustomMiniMap` renders SVG `<circle>` per canvas node + viewport rect ✅  
+- WASD pan: 6px/frame at zoom=1, blocked when INPUT focused ✅  
+- Zero console errors throughout ✅
 
 If new features are added, create entries here for the new files/interactions introduced.
 
