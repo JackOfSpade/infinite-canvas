@@ -149,7 +149,7 @@ export function registerBugReportHandlers() {
 
       if (canceled || !filePath) return { success: false, canceled: true };
 
-      fs.writeFileSync(filePath, markdownContent, 'utf8');
+      await fs.promises.writeFile(filePath, markdownContent, 'utf8');
       return { success: true, filePath };
     } catch (err) {
       console.error('[BugReport] Failed to export bug report:', err);

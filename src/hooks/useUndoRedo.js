@@ -46,13 +46,11 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
   const debounceTimerRef   = useRef(null);
   const lastFingerprintRef = useRef(null);
 
-  const [historyLens, setHistoryLens] = useState({ past: 0, future: 0, topPastFp: null });
+  const [historyLens, setHistoryLens] = useState({ past: 0, future: 0 });
+  const [isStateDirty, setIsStateDirty] = useState(false);
 
   const syncHistoryLen = useCallback(() => {
-    const topPastFp = pastRef.current.length > 0
-      ? fingerprint(pastRef.current[pastRef.current.length - 1])
-      : null;
-    setHistoryLens({ past: pastRef.current.length, future: futureRef.current.length, topPastFp });
+    setHistoryLens({ past: pastRef.current.length, future: futureRef.current.length });
   }, []);
 
   const stateRef = useRef({ nodes, edges, drawings });
@@ -71,34 +69,44 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     if (isRestoringRef.current) return;
     const snap = deepCloneState();
     const fp   = fingerprint(snap);
-    if (fp === lastFingerprintRef.current) return;
+    if (fp === lastFingerprintRef.current) {
+      if (isStateDirty) setIsStateDirty(false);
+      return;
+    }
     lastFingerprintRef.current = fp;
 
     pastRef.current   = [...pastRef.current.slice(-(MAX_HISTORY - 1)), snap];
     futureRef.current = []; // any new action clears redo
     syncHistoryLen();
-  }, [deepCloneState, syncHistoryLen]);
+    setIsStateDirty(false); // State is freshly saved, no longer dirty
+  }, [deepCloneState, syncHistoryLen, isStateDirty]);
 
   // ── KEY FIX ─────────────────────────────────────────────────────────────────
   // When state changes while we have redo entries AND we're not restoring,
   // immediately clear the future so canRedo becomes false right away.
   // We do this check synchronously (no debounce) so the UI responds instantly.
   //
-  // Both the future-wipe check and the prevFpRef sync depend on the same rendered
-  // state, so we merge them into one effect to compute fingerprint() only once.
-  const prevFpRef = useRef(null);
+  // PERFORMANCE FIX: We avoid running `fingerprint` (a heavy JSON.stringify) on
+  // every 60fps drag tick by tracking `isStateDirty` and fast-returning if there's
+  // no future array to clear.
   useEffect(() => {
-    const currentFp = fingerprint({ nodes, edges, drawings });
+    if (isRestoringRef.current) return;
 
-    if (!isRestoringRef.current && futureRef.current.length > 0) {
-      if (currentFp !== prevFpRef.current && currentFp !== lastFingerprintRef.current) {
-        // State changed since last snapshot — wipe the future immediately
-        futureRef.current = [];
-        syncHistoryLen();
-      }
+    // Fast path: if state is already known to be dirty and we don't have future to clear, skip fingerprinting!
+    if (isStateDirty && futureRef.current.length === 0) return;
+
+    const currentFp = fingerprint({ nodes, edges, drawings });
+    const isCurrentlyDirty = currentFp !== lastFingerprintRef.current;
+
+    if (isCurrentlyDirty !== isStateDirty) {
+      setIsStateDirty(isCurrentlyDirty);
     }
 
-    prevFpRef.current = currentFp;
+    if (isCurrentlyDirty && futureRef.current.length > 0) {
+      // State changed since last snapshot — wipe the future immediately
+      futureRef.current = [];
+      syncHistoryLen();
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, edges, drawings]); // intentionally tight deps for instant reaction
 
@@ -135,6 +143,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     setDrawings(previous.drawings);
     lastFingerprintRef.current = fingerprint(previous);
     syncHistoryLen();
+    setIsStateDirty(false);
     requestAnimationFrame(() => { isRestoringRef.current = false; });
   }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef]);
 
@@ -153,6 +162,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     setDrawings(next.drawings);
     lastFingerprintRef.current = fingerprint(next);
     syncHistoryLen();
+    setIsStateDirty(false);
     requestAnimationFrame(() => { isRestoringRef.current = false; });
   }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef]);
 
@@ -180,15 +190,14 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     futureRef.current = [];
     lastFingerprintRef.current = null;
     syncHistoryLen();
+    setIsStateDirty(false);
   }, [syncHistoryLen]);
 
-  const currentStateStr    = fingerprint({ nodes, edges, drawings });
-  const isTopSameAsCurrent = historyLens.past > 0 && historyLens.topPastFp === currentStateStr;
-  const effectivePastLength = isTopSameAsCurrent ? historyLens.past - 1 : historyLens.past;
+  const canUndo = historyLens.past > 0 && (historyLens.past > 1 || isStateDirty);
 
   return {
     undo, redo, takeSnapshot, clearHistory,
-    canUndo: effectivePastLength > 0,
+    canUndo,
     canRedo: historyLens.future > 0,
   };
 }

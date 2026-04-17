@@ -26,11 +26,40 @@ let activeCount = 0;
 const activeDomains = new Map(); // domain -> count of active pages
 const queue = [];
 
+// Domain-specific RPM policies (per deep research report, P6).
+// LinkedIn is aggressively defended; StockX uses PerimeterX; eBay is moderate.
+const DOMAIN_POLICIES = {
+  'linkedin.com': { rpm: 1, baseCooldownMs: 60000 },   // ~1 req/min, daily cap
+  'indeed.com': { rpm: 5, baseCooldownMs: 12000 },   // 5 req/min
+  'glassdoor.com': { rpm: 3, baseCooldownMs: 20000 },   // Cloudflare-heavy
+  'stockx.com': { rpm: 3, baseCooldownMs: 20000 },   // PerimeterX
+  'ebay.com': { rpm: 15, baseCooldownMs: 4000 },   // Moderate tolerance
+  'poshmark.com': { rpm: 5, baseCooldownMs: 12000 },
+  'mercari.com': { rpm: 8, baseCooldownMs: 8000 },
+  'reverb.com': { rpm: 10, baseCooldownMs: 6000 },
+  'swappa.com': { rpm: 10, baseCooldownMs: 6000 },
+  'depop.com': { rpm: 5, baseCooldownMs: 12000 },
+};
+const DEFAULT_POLICY = { rpm: 5, baseCooldownMs: 12000 };
+
+// Pre-built entry list — avoids recreating the array on every getDomainPolicy call.
+const DOMAIN_POLICY_ENTRIES = Object.entries(DOMAIN_POLICIES);
+
 // ── Utility Functions ───────────────────────────────────────────────────────
 
+/** Canonicalize a raw domain name against known policies */
+function getCanonicalDomain(rawDomain) {
+  for (const [key] of DOMAIN_POLICY_ENTRIES) {
+    if (rawDomain.includes(key)) return key;
+  }
+  return rawDomain;
+}
+
+/** Returns the canonical policy key for a URL (e.g., 'ebay.com' even for 'm.ebay.com') */
 function extractDomain(url) {
   try {
-    return new URL(url).hostname.replace(/^www\./, '');
+    const rawDomain = new URL(url).hostname.replace(/^www\./, '');
+    return getCanonicalDomain(rawDomain);
   } catch {
     return 'unknown';
   }
@@ -51,30 +80,8 @@ function gaussianDelay(mean, stddev) {
 const domainLastRequest = new Map();
 const domainBackoff = new Map();
 
-// Domain-specific RPM policies (per deep research report, P6).
-// LinkedIn is aggressively defended; StockX uses PerimeterX; eBay is moderate.
-const DOMAIN_POLICIES = {
-  'linkedin.com':     { rpm: 1, baseCooldownMs: 60000 },   // ~1 req/min, daily cap
-  'indeed.com':       { rpm: 5, baseCooldownMs: 12000 },   // 5 req/min
-  'glassdoor.com':    { rpm: 3, baseCooldownMs: 20000 },   // Cloudflare-heavy
-  'stockx.com':       { rpm: 3, baseCooldownMs: 20000 },   // PerimeterX
-  'ebay.com':         { rpm: 15, baseCooldownMs: 4000 },   // Moderate tolerance
-  'poshmark.com':     { rpm: 5, baseCooldownMs: 12000 },
-  'mercari.com':      { rpm: 8, baseCooldownMs: 8000 },
-  'reverb.com':       { rpm: 10, baseCooldownMs: 6000 },
-  'swappa.com':       { rpm: 10, baseCooldownMs: 6000 },
-  'depop.com':        { rpm: 5, baseCooldownMs: 12000 },
-};
-const DEFAULT_POLICY = { rpm: 5, baseCooldownMs: 12000 };
-
-// Pre-built entry list — avoids recreating the array on every getDomainPolicy call.
-const DOMAIN_POLICY_ENTRIES = Object.entries(DOMAIN_POLICIES);
-
 function getDomainPolicy(domain) {
-  for (const [key, policy] of DOMAIN_POLICY_ENTRIES) {
-    if (domain.includes(key)) return policy;
-  }
-  return DEFAULT_POLICY;
+  return DOMAIN_POLICIES[domain] || DEFAULT_POLICY;
 }
 
 /** Wait until it’s safe to hit a domain again, using domain-specific RPM. */
@@ -169,6 +176,7 @@ async function executeScrape(url, extractorJS, options = {}) {
   const domain = extractDomain(url);
   let page = null;
   let timeoutId = null;
+  let isSettled = false;
 
   try {
     // Per-domain rate limiting — wait for cooldown before proceeding
@@ -180,63 +188,74 @@ async function executeScrape(url, extractorJS, options = {}) {
     });
 
     const scrapePromise = (async () => {
-      page = await createStealthPage();
-
-      // Set page-level timeout
-      page.setDefaultNavigationTimeout(timeoutMs - 2000);
-
-      // Set referrer organically if specified
-      if (referer) {
-        await page.evaluateOnNewDocument((ref) => {
-          Object.defineProperty(document, 'referrer', { get: () => ref });
-        }, referer);
-      }
-
-      // Navigate with network wait
       try {
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: timeoutMs - 5000 });
-      } catch (e) {
-        if (!e?.message?.includes('ERR_ABORTED') && !e?.message?.includes('net::ERR_')) {
-          throw e;
+        page = await createStealthPage();
+
+        // If the outer operation already timed out before we got the page, abort.
+        if (isSettled) {
+          return null;
         }
-      }
 
-      // Dismiss cookie/privacy banners
-      if (dismissCookies) {
-        await dismissCookieBanner(page);
-      }
+        // Set page-level timeout
+        page.setDefaultNavigationTimeout(timeoutMs - 2000);
 
-      // Wait for specific content selector if provided
-      if (waitFor) {
+        // Set referrer organically if specified
+        if (referer) {
+          await page.evaluateOnNewDocument((ref) => {
+            Object.defineProperty(document, 'referrer', { get: () => ref });
+          }, referer);
+        }
+
+        // Navigate with network wait
         try {
-          await page.waitForSelector(waitFor, { timeout: Math.min(waitMs + 3000, 8000) });
-        } catch {
-          // Selector didn't appear — continue anyway, extractor may still find content
+          await page.goto(url, { waitUntil: 'networkidle2', timeout: timeoutMs - 5000 });
+        } catch (e) {
+          if (!e?.message?.includes('ERR_ABORTED') && !e?.message?.includes('net::ERR_')) {
+            throw e;
+          }
+        }
+
+        // Dismiss cookie/privacy banners
+        if (dismissCookies) {
+          await dismissCookieBanner(page);
+        }
+
+        // Wait for specific content selector if provided
+        if (waitFor) {
+          try {
+            await page.waitForSelector(waitFor, { timeout: Math.min(waitMs + 3000, 8000) });
+          } catch {
+            // Selector didn't appear — continue anyway, extractor may still find content
+          }
+        }
+
+        // Human-like behavior: mouse movement + scrolling
+        if (scrollFirst) {
+          await humanScroll(page, 3);
+        } else {
+          // Even without scrolling, do a quick mouse wiggle to look human
+          await humanMouseMove(page);
+        }
+
+        // Extra settle time for JS-rendered content (add randomized jitter)
+        if (waitMs > 0) {
+          const jitteredWait = waitMs + Math.floor(Math.random() * 1000) - 500;
+          await new Promise(r => setTimeout(r, Math.max(500, jitteredWait)));
+        }
+
+        // Execute the extractor in page context
+        return await page.evaluate(extractorJS);
+      } finally {
+        if (page) {
+          try { await page.close(); } catch { /* already closed */ }
         }
       }
-
-      // Human-like behavior: mouse movement + scrolling
-      if (scrollFirst) {
-        await humanScroll(page, 3);
-      } else {
-        // Even without scrolling, do a quick mouse wiggle to look human
-        await humanMouseMove(page);
-      }
-
-      // Extra settle time for JS-rendered content (add randomized jitter)
-      if (waitMs > 0) {
-        const jitteredWait = waitMs + Math.floor(Math.random() * 1000) - 500;
-        await new Promise(r => setTimeout(r, Math.max(500, jitteredWait)));
-      }
-
-      // Execute the extractor in page context
-      return await page.evaluate(extractorJS);
     })();
 
     // Prevent unhandled promise rejection if timeout wins and scrapePromise later rejects
-    scrapePromise.catch(() => {});
+    scrapePromise.catch(() => { });
 
-    const result = await Promise.race([ scrapePromise, timeoutPromise ]);
+    const result = await Promise.race([scrapePromise, timeoutPromise]);
 
     markDomainSuccess(domain);
     return result;
@@ -244,6 +263,7 @@ async function executeScrape(url, extractorJS, options = {}) {
     markDomainError(domain);
     throw error;
   } finally {
+    isSettled = true;
     if (timeoutId) clearTimeout(timeoutId);
     if (page) {
       try { await page.close(); } catch { /* already closed */ }
@@ -312,15 +332,10 @@ export function getDomainHealth(domain) {
   // Normalize: accept either 'glassdoor' or 'glassdoor.com'
   const normalizedDomain = domain.includes('.') ? domain : `${domain}.com`;
 
-  // Find matching history via DOMAIN_POLICY_ENTRIES (same key-search as getDomainPolicy)
-  // so domain resolution is identical in both functions — no bidirectional false-positives.
-  let matchedHistory = null;
-  for (const [key] of DOMAIN_POLICY_ENTRIES) {
-    if (normalizedDomain.includes(key)) {
-      matchedHistory = domainHistory.get(key) ?? null;
-      break;
-    }
-  }
+  // Find canonical key
+  const canonicalKey = getCanonicalDomain(normalizedDomain);
+
+  const matchedHistory = domainHistory.get(canonicalKey) ?? null;
 
   if (!matchedHistory || matchedHistory.length === 0) {
     return { attempts: 0, failures: 0, successRate: 1, shouldEscalate: false };

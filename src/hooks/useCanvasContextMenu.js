@@ -19,6 +19,7 @@ const NODE_COLORS = [
 /**
  * Recursively remaps all node, edge, and drawing IDs inside a duplicated group's canvasData
  * to prevent ID collisions if identical child nodes are later extracted to a shared parent.
+ * Pure function — returns a new object tree; does not mutate the input.
  */
 function reassignCanvasDataIDs(node) {
   if (node.type !== 'group' || !node.data?.canvasData) return node;
@@ -30,34 +31,31 @@ function reassignCanvasDataIDs(node) {
   };
 
   const processCanvasData = (canvasData) => {
-    if (!canvasData) return;
-
-    if (canvasData.nodes) {
-      canvasData.nodes.forEach(n => {
-        n.id = getMappedId(n.id);
-        if (n.type === 'group' && n.data?.canvasData) {
-          processCanvasData(n.data.canvasData);
-        }
-      });
-    }
-
-    if (canvasData.edges) {
-      canvasData.edges.forEach(e => {
-        if (e.id) e.id = uuidv4();
-        if (idMap.has(e.source)) e.source = idMap.get(e.source);
-        if (idMap.has(e.target)) e.target = idMap.get(e.target);
-      });
-    }
-
-    if (canvasData.drawings) {
-      canvasData.drawings.forEach(d => {
-        if (d.id) d.id = uuidv4();
-      });
-    }
+    if (!canvasData) return canvasData;
+    const newNodes = (canvasData.nodes || []).map(n => {
+      const newNode = { ...n, id: getMappedId(n.id) };
+      if (newNode.type === 'group' && newNode.data?.canvasData) {
+        newNode.data = { ...newNode.data, canvasData: processCanvasData(newNode.data.canvasData) };
+      }
+      return newNode;
+    });
+    const newEdges = (canvasData.edges || []).map(e => ({
+      ...e,
+      id: uuidv4(),
+      source: idMap.has(e.source) ? idMap.get(e.source) : e.source,
+      target: idMap.has(e.target) ? idMap.get(e.target) : e.target,
+    }));
+    const newDrawings = (canvasData.drawings || []).map(d => d.id ? { ...d, id: uuidv4() } : d);
+    return { nodes: newNodes, edges: newEdges, drawings: newDrawings };
   };
 
-  processCanvasData(node.data.canvasData);
-  return node;
+  return {
+    ...node,
+    data: {
+      ...node.data,
+      canvasData: processCanvasData(node.data.canvasData),
+    },
+  };
 }
 
 export function useCanvasContextMenu({
@@ -71,7 +69,7 @@ export function useCanvasContextMenu({
 }) {
   const [menu, setMenu] = useState(null);
   const reactFlow = useReactFlow();
-  const { deleteElements, getEdges } = reactFlow;
+  const { deleteElements, getEdges, getNode } = reactFlow;
   const { addToast } = useToast();
   const isMountedRef = useRef(true);
 
@@ -238,12 +236,19 @@ export function useCanvasContextMenu({
        return;
     }
     takeSnapshot();
+    const nodeId = menu.node.id;
     try {
       const res = await window.electronAPI.aiPolishText(text);
       if (!isMountedRef.current) return;
+      // Guard: node may have been deleted while the AI call was in-flight
+      if (!getNode(nodeId)) {
+        EventLogger.log(`AI Polish complete but node ${nodeId} no longer exists — discarding`);
+        setMenu(null);
+        return;
+      }
       if (res.success) {
-        setNodes(nds => nds.map(n => n.id === menu.node.id ? { ...n, data: { ...n.data, text: res.text } } : n));
-        EventLogger.log(`AI polished text for node ${menu.node.id}`);
+        setNodes(nds => nds.map(n => n.id === nodeId ? { ...n, data: { ...n.data, text: res.text } } : n));
+        EventLogger.log(`AI polished text for node ${nodeId}`);
       } else {
         addToast({ title: 'AI Polish Failed', description: res.error, type: 'error' });
         EventLogger.log("AI Polish failed: " + res.error);
@@ -254,7 +259,7 @@ export function useCanvasContextMenu({
       EventLogger.log("AI Polish crashed: " + (err?.message || String(err)));
     }
     setMenu(null);
-  }, [menu, setNodes, takeSnapshot, addToast]);
+  }, [menu, setNodes, takeSnapshot, addToast, getNode]);
 
   const toggleStickyNote = useCallback(() => {
     if (!menu?.node) return;

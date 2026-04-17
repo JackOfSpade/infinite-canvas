@@ -50,7 +50,8 @@ export function useCanvasInitialization({
       window.electronAPI.saveWorkspace({ data, filePath: currentFile }).then(res => {
         if (!isMountedRef.current) return;
         if (res?.success && res.filePath) {
-          setCurrentFile(res.filePath);
+          // Only update currentFile if the path changed (e.g. first save via dialog)
+          if (res.filePath !== currentFile) setCurrentFile(res.filePath);
           setHasUnsavedChanges(false);
         }
       }).catch(err => console.error('[auto-save] saveWorkspace failed:', err));

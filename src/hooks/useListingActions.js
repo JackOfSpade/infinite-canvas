@@ -107,6 +107,7 @@ export function useListingActions(id, data) {
       }
       return result;
     } catch (err) {
+      if (!isMountedRef.current) return null;
       console.error('Price research failed:', err);
       onStateChange?.('error', err);
       return null;

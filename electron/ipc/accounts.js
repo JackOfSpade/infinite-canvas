@@ -28,21 +28,22 @@ function getStatusCachePath() {
   if (!_statusCachePath) _statusCachePath = path.join(app.getPath('userData'), 'session-status-cache.json');
   return _statusCachePath;
 }
-function readStatusCache() {
+async function readStatusCache() {
   if (_statusCache) return _statusCache;
   try {
     const p = getStatusCachePath();
-    if (!fs.existsSync(p)) { _statusCache = {}; return _statusCache; }
-    _statusCache = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const data = await fs.promises.readFile(p, 'utf8').catch(() => null);
+    if (!data) { _statusCache = {}; return _statusCache; }
+    _statusCache = JSON.parse(data);
     return _statusCache;
   } catch { _statusCache = {}; return _statusCache; }
 }
-function writeStatusCache(platformId, connected) {
+async function writeStatusCache(platformId, connected) {
   try {
-    const cache = readStatusCache(); // returns the in-memory object
+    const cache = await readStatusCache(); // returns the in-memory object
     cache[platformId] = { connected, ts: Date.now() };
     // _statusCache is already mutated (same object reference); persist to disk.
-    fs.writeFileSync(getStatusCachePath(), JSON.stringify(cache));
+    await fs.promises.writeFile(getStatusCachePath(), JSON.stringify(cache));
   } catch (e) {
     console.warn('[Accounts] Cache write failed:', e?.message || String(e));
   }
@@ -54,19 +55,19 @@ function writeStatusCache(platformId, connected) {
 export function registerAccountsHandlers() {
   // Get CACHED session statuses — instant, no Chrome launch.
   // Use this for panel display. The full (Chrome-based) check is get-session-statuses.
-  ipcMain.handle('get-cached-session-statuses', () => {
-    const cache = readStatusCache();
+  ipcMain.handle('get-cached-session-statuses', async () => {
+    const cache = await readStatusCache();
     return Object.entries(cache).map(([platform, v]) => ({
       platform, connected: v.connected,
     }));
   });
 
   // Get system config status (Gemini, USAJobs, etc)
-  ipcMain.handle('get-system-config-status', () => {
+  ipcMain.handle('get-system-config-status', async () => {
     let hasGemini = !!process.env.GEMINI_API_KEY;
     if (!hasGemini) {
       try {
-        const content = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf8');
+        const content = await fs.promises.readFile(path.join(process.cwd(), '.env'), 'utf8');
         // Use a start-of-line anchor so commented-out lines (e.g. #GEMINI_API_KEY=) aren't matched.
         hasGemini = /^GEMINI_API_KEY=/m.test(content);
       } catch { /* env file absent */ }
@@ -74,8 +75,9 @@ export function registerAccountsHandlers() {
 
     let hasServiceAccount = false;
     try {
-      hasServiceAccount = fs.existsSync(path.join(process.cwd(), 'service-account.json'));
-    } catch { /* fs.existsSync shouldn't throw, but guard anyway */ }
+      await fs.promises.stat(path.join(process.cwd(), 'service-account.json'));
+      hasServiceAccount = true;
+    } catch { /* stat fails if absent */ }
 
     return {
       gemini:         { connected: hasGemini,          name: 'Gemini AI API' },
@@ -115,7 +117,7 @@ export function registerAccountsHandlers() {
       // After the login window closes, optimistically mark as connected.
       // The user manually closed the window after logging in, so we trust they succeeded.
       // Avoids a second Chrome launch just for verification.
-      writeStatusCache(platformId, true);
+      await writeStatusCache(platformId, true);
       return result;
     } catch (error) {
       console.error(`[Accounts] Login window failed for ${platformId}:`, error?.message || String(error));

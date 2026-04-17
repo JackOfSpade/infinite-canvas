@@ -31,7 +31,7 @@ function getNodeDims(node) {
  *
  * Rendered inside ReactFlow so it has access to useViewport / useReactFlow.
  */
-export function CustomMiniMap({ nodes, edges, drawings, isAnimating }) {
+export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, drawings, isAnimating }) {
   const viewport    = useViewport();
   const { setViewport } = useReactFlow();
   const svgRef = useRef(null);
@@ -268,4 +268,20 @@ export function CustomMiniMap({ nodes, edges, drawings, isAnimating }) {
       </div>
     </Panel>
   );
-}
+}, (prev, next) => {
+  if (prev.isAnimating !== next.isAnimating) return false;
+  if (prev.nodes.length !== next.nodes.length) return false;
+  if (prev.edges.length !== next.edges.length) return false;
+  if ((prev.drawings || []).length !== (next.drawings || []).length) return false;
+  
+  // Custom check: only re-render if nodes' coordinates have meaningfully changed
+  for (let i = 0; i < prev.nodes.length; i++) {
+    const p = prev.nodes[i];
+    const n = next.nodes[i];
+    if (p.id !== n.id) return false;
+    // Don't re-render for ultra-micro positional changes to save SVG compute
+    if (Math.abs(p.position.x - n.position.x) > 2) return false;
+    if (Math.abs(p.position.y - n.position.y) > 2) return false;
+  }
+  return true;
+});

@@ -38,7 +38,19 @@ import { useCanvasContextMenu } from './hooks/useCanvasContextMenu';
 import { useCanvasNavigation } from './hooks/useCanvasNavigation';
 import { useSettings } from './hooks/useSettings';
 import { useToast } from './components/ToastProvider';
+import { useCanvasWASD } from './hooks/useCanvasWASD';
+import { useIssueReporter } from './hooks/useIssueReporter';
+import { useDragCorrections } from './hooks/useDragCorrections';
+import { useNestedCanvasDrag } from './hooks/useNestedCanvasDrag';
+import { useCanvasKeyboardShortcuts } from './hooks/useCanvasKeyboardShortcuts';
+import { useCanvasOSDeletion } from './hooks/useCanvasOSDeletion';
 import { ArrowUpLeft } from 'lucide-react';
+
+// ── One-time platform detection (Mac vs non-Mac key label) ─────────────────
+const IS_MAC = (() => {
+  const p = navigator.userAgentData?.platform ?? navigator.platform ?? '';
+  return p.toLowerCase().includes('mac');
+})();
 
 // ── Canvas ───────────────────────────────────────────────────────────────────
 export function Canvas() {
@@ -92,79 +104,7 @@ export function Canvas() {
   // These fire from ReactFlow's own drag system, independently of our pointer
   // handlers. We use ResizeActive to detect if the drag was initiated during a
   // CanvasNode resize session — only resize-tagged drags apply a ResizeCorrection.
-  //
-  // Without this gating, stale ResizeCorrection entries (left by 0-moves phantom
-  // resizes where RF never fires onNodeDragStop) would wrongly snap the node
-  // whenever the user later does any drag (normal move, input click, etc.).
-  const resizeDragActiveRef    = useRef(new Set());
-  const titleZoneDragActiveRef = useRef(new Set());
-
-  const onNodeDragStart = useCallback((e, node) => {
-    EventLogger.log(`rf-drag-start id=${node.id} type=${node.type} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
-    // Tag this RF drag as resize-initiated if a resize is currently active.
-    // ResizeActive is set in CanvasNode onDown (resize path) and cleared in onUp.
-    // Tagging happens here (onNodeDragStart) because that's after our onDown runs.
-    if (ResizeActive.has(node.id)) {
-      resizeDragActiveRef.current.add(node.id);
-    }
-    // Tag as title-zone-initiated if a title-zone press is currently active.
-    // RF's capture-phase listener fires before our onDown bubble handler, so by the
-    // time onNodeDragStart fires, our onDown has already set TitleZoneActive.
-    if (TitleZoneActive.has(node.id)) {
-      titleZoneDragActiveRef.current.add(node.id);
-    }
-  }, []);
-
-  const onNodeDragStop = useCallback((e, node) => {
-    EventLogger.log(`rf-drag-stop id=${node.id} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
-
-    const wasResizeDrag    = resizeDragActiveRef.current.has(node.id);
-    const wasTitleZoneDrag = titleZoneDragActiveRef.current.has(node.id);
-    resizeDragActiveRef.current.delete(node.id);
-    titleZoneDragActiveRef.current.delete(node.id);
-
-    const correction   = ResizeCorrection.get(node.id);
-    const tzCorrection = TitleZoneCorrection.get(node.id);
-    ResizeCorrection.delete(node.id);   // always clear, regardless of whether we apply it
-    TitleZoneCorrection.delete(node.id);
-
-    if (correction && wasResizeDrag) {
-      // ── ResizeCorrection ───────────────────────────────────────────────────
-      // This drag-stop was caused by a CanvasNode resize session. RF finalized
-      // the node at a wrong drag-offset position. Apply the center-anchored
-      // correction. React 18 batches this with RF's own position update so both
-      // land in a single render with no visible jump.
-      const { flowCx, flowCy, size } = correction;
-      const correctX = flowCx - size / 2;
-      const correctY = flowCy - size / 2;
-      EventLogger.log(`resize-correction id=${node.id} pos=(${correctX.toFixed(1)},${correctY.toFixed(1)}) size=${size}`);
-      setNodes(nds => nds.map(n =>
-        n.id === node.id ? {
-          ...n,
-          position: { x: correctX, y: correctY },
-          width:  size,
-          height: size,
-          style:  { ...(n.style || {}), width: size, height: size },
-        } : n
-      ));
-    } else if (correction) {
-      // Stale correction from a phantom resize (0 moves, RF never started a drag
-      // for that session). Discard it — this drag was unrelated to any resize.
-      EventLogger.log(`resize-correction DISCARDED (stale) id=${node.id}`);
-    }
-
-    if (tzCorrection && wasTitleZoneDrag) {
-      // ── TitleZoneCorrection ────────────────────────────────────────────────
-      // RF's capture-phase drag listener fires before our bubble-phase onDown,
-      // so RF starts tracking a drag even during a title-zone press. If the user
-      // holds and moves slightly, RF displaces the node before our onUp fires to
-      // start editing. Snap the node back to where it was before the press.
-      EventLogger.log(`title-zone-correction id=${node.id} pos=(${tzCorrection.x.toFixed(1)},${tzCorrection.y.toFixed(1)})`);
-      setNodes(nds => nds.map(n =>
-        n.id === node.id ? { ...n, position: { x: tzCorrection.x, y: tzCorrection.y } } : n
-      ));
-    }
-  }, [setNodes]);
+  const { onNodeDragStart, onNodeDragStop } = useDragCorrections({ setNodes });
 
   const onEdgesChange = useCallback((changes) => {
     snapshotOnDelete(changes);
@@ -222,7 +162,7 @@ export function Canvas() {
   const requestClearConfirm = useCallback((onConfirm) => {
     setConfirmDialogData({
       title: "Clear Canvas",
-      message: `This will remove all nodes, edges, and drawings. This action can be undone with ${navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl+'}Z.`,
+      message: `This will remove all nodes, edges, and drawings. This action can be undone with ${IS_MAC ? '⌘' : 'Ctrl+'}Z.`,
       confirmLabel: "Clear Everything",
       cancelLabel: "Keep Canvas",
       variant: "danger",
@@ -249,10 +189,15 @@ export function Canvas() {
   const handleSettingsClick = useCallback(() => setIsSettingsOpen(true), []);
   const [activeColor, setActiveColor] = useState('white');
   const [toolMenuOpen, setToolMenuOpen] = useState(false);
-  // Custom pointer-drag for Nested Canvas button (bypasses HTML5 drag so ghost matches click-place ghost)
-  const [nestedDragPos, setNestedDragPos] = useState(null); // {x,y} screen coords while dragging
-  const nestedDragRef = useRef(null); // { dragging: bool, startX, startY }
   const { screenToFlowPosition, getIntersectingNodes, getNode, setViewport, getViewport } = useReactFlow();
+
+  // Custom pointer-drag for Nested Canvas button (bypasses HTML5 drag so ghost matches click-place ghost)
+  const { nestedDragPos, onNestedCanvasDragStart } = useNestedCanvasDrag({
+    isAnimatingRef: isNavigationAnimatingRef,
+    screenToFlowPosition,
+    takeSnapshot,
+    setNodes
+  });
 
   const handlePaneDoubleClick = useCallback((e) => {
     if (activeTool || placementMode || navigation.isAnimating) return;
@@ -268,59 +213,6 @@ export function Canvas() {
       navigation.diveIn(node.id);
     }
   }, [navigation]);
-
-  // ── Custom pointer-drag for Nested Canvas button ─────────────────────────
-  const nestedDragListenersRef = useRef(null);
-  
-  useEffect(() => {
-    return () => {
-      if (nestedDragListenersRef.current) {
-        window.removeEventListener('pointermove', nestedDragListenersRef.current.onMove);
-        window.removeEventListener('pointerup', nestedDragListenersRef.current.onUp);
-      }
-    };
-  }, []);
-
-  const onNestedCanvasDragStart = useCallback((startX, startY) => {
-    nestedDragRef.current = { dragging: false, startX, startY };
-
-    const onMove = (e) => {
-      const ref = nestedDragRef.current;
-      if (!ref) return;
-      if (!ref.dragging) {
-        const dx = e.clientX - ref.startX;
-        const dy = e.clientY - ref.startY;
-        if (dx * dx + dy * dy < 25) return; // < 5px threshold
-        ref.dragging = true;
-      }
-      setNestedDragPos({ x: e.clientX, y: e.clientY });
-    };
-
-    const onUp = (e) => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      nestedDragListenersRef.current = null;
-      const ref = nestedDragRef.current;
-      nestedDragRef.current = null;
-      setNestedDragPos(null);
-
-      if (ref?.dragging) {
-        if (isNavigationAnimatingRef.current) return;
-        // Place node at drop position — same offset as handleDrop uses for node-type drops
-        const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
-        const factory = NODE_FACTORIES['group'];
-        if (factory) {
-          takeSnapshot();
-          setNodes(nds => nds.concat(factory({ x: pos.x - 12, y: pos.y - 20 })));
-        }
-      }
-      // If not dragging, onClick on the button fires naturally → setPlacementMode('group')
-    };
-
-    nestedDragListenersRef.current = { onMove, onUp };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }, [screenToFlowPosition, takeSnapshot, setNodes]);
 
   // Prevent drawing edges TO sticky notes — sticky notes are output-only anchors
   const isValidConnection = useCallback((connection) => {
@@ -346,27 +238,7 @@ export function Canvas() {
     setDrawings([]);
   }, [takeSnapshot, setDrawings, navigation.isAnimating]);
 
-  const onNodesDelete = useCallback((deletedNodes) => {
-    const documentNodes = deletedNodes.filter(n => n.type === 'document' && n.data?.filePath);
-    if (documentNodes.length > 0 && window.electronAPI) {
-      requestConfirm({
-        title: 'Delete from OS?',
-        message: 'Do you also want to move the actual linked file(s) to trash?',
-        confirmLabel: 'Move to Trash',
-        cancelLabel: 'Keep OS File',
-        variant: 'warning',
-        onConfirm: async () => {
-          for (const node of documentNodes) {
-            try {
-              await window.electronAPI.deleteOSFile(node.data.filePath);
-            } catch (err) {
-              console.error('Failed to trash file:', err);
-            }
-          }
-        }
-      });
-    }
-  }, [requestConfirm]);
+  const { onNodesDelete } = useCanvasOSDeletion({ requestConfirm });
 
   const { onConnect, onDragStart, clearCanvas } = useCanvasActions({
     setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, takeSnapshot, requestClearConfirm,
@@ -377,7 +249,7 @@ export function Canvas() {
 
   const { handlePointerDown, handlePointerMove, handlePointerUp } = useDrawingMode({
     placementMode, setPlacementMode, activeTool, eraserType, eraserSize, currentStroke, setCurrentStroke,
-    setMousePos, setEraserScreenPos, setDrawings, setNodes, setEdges, takeSnapshot, activeColor,
+    setMousePos, setDrawings, setNodes, setEdges, takeSnapshot, activeColor,
     penSize, getIntersectingNodes, isAnimatingRef: isNavigationAnimatingRef
   });
 
@@ -408,70 +280,10 @@ export function Canvas() {
   }, [navigation.isAnimating, onNodeContextMenuBase]);
 
   // ── Keyboard Shortcuts Panel + Escape to cancel placement/tool ──────────
-  useEffect(() => {
-    const handleKey = (e) => {
-      const tag = e.target.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
-      if (e.key === 'Escape') {
-        if (placementMode) { setPlacementMode(null); return; }
-        if (activeTool)    { setActiveTool(null);    return; }
-      }
-      if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
-        e.preventDefault();
-        setIsSettingsOpen(true);
-      }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [placementMode, activeTool]);
+  useCanvasKeyboardShortcuts({ placementMode, setPlacementMode, activeTool, setActiveTool, setIsSettingsOpen });
 
   // ── WASD canvas navigation ───────────────────────────────────────────────
-  useEffect(() => {
-    const keys = { w: false, a: false, s: false, d: false, shift: false };
-    let rafId = null;
-    const BASE_SPEED = 6; // pixels per frame at zoom=1
-
-    const step = () => {
-      const { w, a, s, d, shift } = keys;
-      if (!w && !a && !s && !d) { rafId = null; return; }
-      
-      // Suspend WASD viewport updates during dive-in/dive-out animations
-      if (!isNavigationAnimatingRef.current) {
-        const speed = shift ? BASE_SPEED * 5 : BASE_SPEED;
-        const vp = getViewport();
-        setViewport({
-          x: vp.x + (a ? speed : d ? -speed : 0),
-          y: vp.y + (w ? speed : s ? -speed : 0),
-          zoom: vp.zoom,
-        });
-      }
-      rafId = requestAnimationFrame(step);
-    };
-
-    const onKeyDown = (e) => {
-      const tag = e.target.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
-      const k = e.key.toLowerCase();
-      if (k === 'w' || k === 'a' || k === 's' || k === 'd') {
-        keys[k] = true;
-        keys.shift = e.shiftKey;
-        if (!rafId) rafId = requestAnimationFrame(step);
-      }
-      if (k === 'shift') keys.shift = true;
-    };
-    const onKeyUp = (e) => {
-      const k = e.key.toLowerCase();
-      if (k in keys) keys[k] = false;
-      if (k === 'shift') keys.shift = false;
-    };
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup',   onKeyUp);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup',   onKeyUp);
-      if (rafId) cancelAnimationFrame(rafId);
-    };
-  }, [getViewport, setViewport]);
+  useCanvasWASD({ isAnimatingRef: isNavigationAnimatingRef });
 
   // ── Export PNG via File menu (⌘⇧E) ───────────────────────────────────────
   useEffect(() => {
@@ -481,90 +293,11 @@ export function Canvas() {
   }, [exportCanvasToPNG]);
 
   // ── Issue Reporter ───────────────────────────────────────────────────────
-  const handleIssueSubmit = useCallback(async (description, mode = 'file') => {
-    if (!window.electronAPI) {
-      addToast({ title: 'Bug Report', description: "Not running in Electron, can't generate report.", type: "error" });
-      return;
-    }
-    try {
-      // Snapshot the viewport so resize/position math can be verified in reports.
-      const viewport = getViewport();
-
-      // For group nodes (CanvasNode), capture all three size fields separately.
-      // Discrepancies between style.width / measured.width / width reveal the
-      // ReactFlow ResizeObserver race that caused the "size grows between sessions" bug.
-      const nodeInternals = nodes.map(n => {
-        const base = { id: n.id, type: n.type };
-        if (n.type === 'group') {
-          return {
-            ...base,
-            position:       n.position,
-            width_prop:     n.width,
-            height_prop:    n.height,
-            style_width:    n.style?.width,
-            style_height:   n.style?.height,
-            measured_width:  n.measured?.width,
-            measured_height: n.measured?.height,
-          };
-        }
-        return base;
-      });
-
-      const payload = {
-        description,
-        nodes,
-        edges,
-        drawings,
-        frontEndState: {
-          activeTool,
-          placementMode,
-          eraserType,
-          settings,
-          currentFile,
-          hasUnsavedChanges,
-          navigationDepth: navigation.depth,
-          snapToGrid,
-          windowInnerWidth: window.innerWidth,
-          windowInnerHeight: window.innerHeight,
-          // Viewport transform — zoom level is critical for diagnosing
-          // screenToFlowPosition math in resize/placement bugs.
-          viewport: {
-            x:    parseFloat(viewport.x.toFixed(2)),
-            y:    parseFloat(viewport.y.toFixed(2)),
-            zoom: parseFloat(viewport.zoom.toFixed(4)),
-          },
-        },
-        // Separate diagnostic table — shows all three RF size fields per group node
-        // so the report immediately exposes any style/measured/prop mismatches.
-        nodeInternals,
-        // Live React component state per CanvasNode (isEditing, isResizing, etc.)
-        // — things not visible in the Zustand node JSON.
-        nodeComponentStates: EventLogger.getNodeStates(),
-        eventLogs: EventLogger.getLogs(),
-      };
-      if (mode === 'clipboard') {
-        // Generate the markdown in the main process (needs system info / os module),
-        // then copy the returned string to the clipboard in the renderer.
-        const res = await window.electronAPI.generateBugReportMarkdown(payload);
-        if (res.success) {
-          await navigator.clipboard.writeText(res.markdown);
-          addToast({ title: 'Bug Report Copied', description: 'Report copied to clipboard.', type: "success" });
-        } else {
-          addToast({ title: 'Bug Report Failed', description: res.error || 'Could not generate the report.', type: "error" });
-        }
-      } else {
-        // Save to file via native save dialog.
-        const res = await window.electronAPI.exportBugReport(payload);
-        if (res.success) {
-          addToast({ title: 'Bug Report Saved', description: 'Your report has been exported successfully.', type: "success" });
-        } else if (!res.canceled) {
-          addToast({ title: 'Bug Report Failed', description: res.error || 'Could not save the report.', type: "error" });
-        }
-      }
-    } catch (e) {
-      addToast({ title: 'Bug Report Error', description: e?.message || String(e) || 'An unexpected error occurred.', type: "error" });
-    }
-  }, [nodes, edges, drawings, activeTool, placementMode, eraserType, settings, currentFile, hasUnsavedChanges, navigation.depth, snapToGrid, addToast, getViewport]);
+  const { handleIssueSubmit } = useIssueReporter({
+    nodes, edges, drawings, activeTool, placementMode, eraserType, 
+    settings, currentFile, hasUnsavedChanges, navigationDepth: navigation.depth, 
+    snapToGrid, addToast
+  });
 
   // ── Animation overlay style ──────────────────────────────────────────────
   const animDuration = getAnimationDuration();
@@ -594,7 +327,7 @@ export function Canvas() {
           setEraserScreenPos({ x: -999, y: -999 });
         }}
       >
-        <SearchBar nodes={nodes} />
+        <SearchBar />
 
         {/* Eraser cursor — pixel-perfect circle showing the erase radius.
             eraserSize is used directly as screen pixels — "good enough" because the user

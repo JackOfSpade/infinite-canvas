@@ -119,6 +119,21 @@ class EventLoggerSingleton {
       const msg = e.reason?.message || String(e.reason) || 'unknown rejection';
       this.log(`UNHANDLED-PROMISE: ${msg}`);
     });
+
+    // Capture explicitly handled errors logged via console.error/warn
+    const origError = console.error;
+    console.error = (...args) => {
+      const msg = args.map(a => (a instanceof Error ? a.message : (typeof a === 'object' ? JSON.stringify(a) : String(a)))).join(' ');
+      this.log(`CONSOLE-ERROR: ${msg}`);
+      origError.apply(console, args);
+    };
+
+    const origWarn = console.warn;
+    console.warn = (...args) => {
+      const msg = args.map(a => (a instanceof Error ? a.message : (typeof a === 'object' ? JSON.stringify(a) : String(a)))).join(' ');
+      this.log(`CONSOLE-WARN: ${msg}`);
+      origWarn.apply(console, args);
+    };
   }
 }
 

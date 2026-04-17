@@ -9,48 +9,53 @@ import { randomUUID } from 'crypto';
 
 const activeWatchers = new Map();
 
+// ── Module-level recursive directory scanner ──────────────────────────────────
+// Defined at module scope (not inside the IPC handler) so it is only allocated
+// once. `visited` is passed per-call to keep isolation between concurrent requests.
+async function scanPath(currentPath, visited, depth = 0) {
+  // Prevent infinite recursion from symlink loops or massive trees
+  if (depth > 5) return null;
+
+  let realPath = currentPath;
+  try { realPath = await fs.promises.realpath(currentPath); } catch {}
+  if (visited.has(realPath)) return null;
+  visited.add(realPath);
+
+  // Skip notoriously large known directories to prevent thread lock
+  const base = path.basename(currentPath);
+  if (base === 'node_modules' || base === '.git') return null;
+
+  const stats = await fs.promises.stat(currentPath);
+  if (stats.isDirectory()) {
+    const dirItems = await fs.promises.readdir(currentPath);
+    const childrenPromises = dirItems.map(async item => {
+      try { return await scanPath(path.join(currentPath, item), visited, depth + 1); }
+      catch { return null; }
+    });
+    const childrenRaw = await Promise.all(childrenPromises);
+    const children = childrenRaw.filter(Boolean);
+    
+    return {
+      id: 'group-' + randomUUID(),
+      type: 'group',
+      title: base || currentPath,
+      collapsed: true,
+      items: children,
+    };
+  }
+  return {
+    id: 'doc-' + randomUUID(),
+    type: 'document',
+    filename: base,
+    filePath: currentPath,
+  };
+}
+
 export function registerFilesystemHandlers() {
   ipcMain.handle('scan-directory', async (_event, dirPath) => {
     const visited = new Set();
-    const scan = (currentPath, depth = 0) => {
-      // Prevent infinite recursion from symlink loops or massive trees
-      if (depth > 5) return null;
-      
-      let realPath = currentPath;
-      try { realPath = fs.realpathSync(currentPath); } catch {}
-      if (visited.has(realPath)) return null;
-      visited.add(realPath);
-
-      // Skip notoriously large known directories to prevent thread lock
-      const base = path.basename(currentPath);
-      if (base === 'node_modules' || base === '.git') return null;
-
-      const stats = fs.statSync(currentPath);
-      if (stats.isDirectory()) {
-        const children = fs.readdirSync(currentPath)
-          .map(item => {
-            try { return scan(path.join(currentPath, item), depth + 1); }
-            catch { return null; }
-          })
-          .filter(Boolean);
-        return {
-          id: 'group-' + randomUUID(),
-          type: 'group',
-          title: base || currentPath,
-          collapsed: true,
-          items: children,
-        };
-      }
-      return {
-        id: 'doc-' + randomUUID(),
-        type: 'document',
-        filename: base,
-        filePath: currentPath,
-      };
-    };
-
     try {
-      const result = scan(dirPath);
+      const result = await scanPath(dirPath, visited);
       // Result could be null if the root was ignored (e.g. depth limit or node_modules)
       if (!result) return { success: false, error: 'Directory skip or unreadable' };
       // scan() returns { type: 'group', ... } for directories and { type: 'document', ... } for files.
@@ -58,7 +63,7 @@ export function registerFilesystemHandlers() {
       return result.type === 'document' ? { isFile: true, file: result } : result;
     } catch (error) {
       console.error('Error scanning directory:', error);
-      throw error;
+      return { success: false, error: error?.message || String(error) };
     }
   });
 
@@ -112,7 +117,7 @@ export function registerFilesystemHandlers() {
         if (canceled || !dialogPath) return { success: false, canceled: true };
         targetPath = dialogPath;
       }
-      fs.writeFileSync(targetPath, JSON.stringify(data), 'utf-8');
+      await fs.promises.writeFile(targetPath, JSON.stringify(data), 'utf-8');
       return { success: true, filePath: targetPath };
     } catch (err) {
       console.error('Failed to save workspace:', err);
@@ -129,7 +134,7 @@ export function registerFilesystemHandlers() {
       });
       if (canceled || filePaths.length === 0) return { success: false, canceled: true };
       const targetPath = filePaths[0];
-      const data = fs.readFileSync(targetPath, 'utf-8');
+      const data = await fs.promises.readFile(targetPath, 'utf-8');
       return { success: true, data: JSON.parse(data), filePath: targetPath };
     } catch (err) {
       console.error('Failed to load workspace:', err);
@@ -137,10 +142,11 @@ export function registerFilesystemHandlers() {
     }
   });
 
-  ipcMain.handle('start-file-watch', (event, filePath) => {
+  ipcMain.handle('start-file-watch', async (event, filePath) => {
     if (activeWatchers.has(filePath)) {
       const existing = activeWatchers.get(filePath);
       if (!existing.sender.isDestroyed() && existing.sender === event.sender) {
+        existing.refCount = (existing.refCount || 1) + 1;
         return { success: true };
       }
       // If same file but different/destroyed sender, clean up old watcher
@@ -148,7 +154,11 @@ export function registerFilesystemHandlers() {
       activeWatchers.delete(filePath);
     }
     try {
-      if (!fs.existsSync(filePath)) return { success: false, error: 'File missing' };
+      try {
+        await fs.promises.access(filePath);
+      } catch {
+        return { success: false, error: 'File missing' };
+      }
       const watcher = fs.watch(filePath, (eventType) => {
         if (eventType === 'change') {
           if (!event.sender.isDestroyed()) {
@@ -156,7 +166,7 @@ export function registerFilesystemHandlers() {
           }
         }
       });
-      activeWatchers.set(filePath, { watcher, sender: event.sender });
+      activeWatchers.set(filePath, { watcher, sender: event.sender, refCount: 1 });
 
       if (!event.sender.__fsWatchCleanupAttached) {
         event.sender.__fsWatchCleanupAttached = true;
@@ -179,11 +189,13 @@ export function registerFilesystemHandlers() {
 
   ipcMain.handle('stop-file-watch', (event, filePath) => {
     const obj = activeWatchers.get(filePath);
-    // Only allow the sender that registered the watcher to close it — avoids
-    // a second node watching the same path from killing the first's watcher.
+    // Use ref counting so multiple nodes watching same path don't break each other
     if (obj && obj.sender === event.sender) {
-      obj.watcher.close();
-      activeWatchers.delete(filePath);
+      obj.refCount = (obj.refCount || 1) - 1;
+      if (obj.refCount <= 0) {
+        obj.watcher.close();
+        activeWatchers.delete(filePath);
+      }
     }
     return { success: true };
   });

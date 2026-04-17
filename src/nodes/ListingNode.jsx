@@ -220,7 +220,7 @@ export function ListingNode({ id, data }) {
                       setCheckingAuth(true);
                       try {
                         const result = await window.electronAPI.checkAndLogin({ platformId: loginPrompt.platformId });
-                        if (!getNode(id)) return;
+                        if (!isMountedRef.current || !getNode(id)) return;
                         if (result.connected) {
                           setLoginPrompt(null);
                           // Re-trigger the listing flow now that we're logged in
@@ -272,7 +272,7 @@ export function ListingNode({ id, data }) {
                   for (const platformId of selectedPlatforms) {
                     if (needsAuth.includes(platformId) && window.electronAPI?.checkSellMonitorAuth) {
                       const authStatus = await window.electronAPI.checkSellMonitorAuth({ platformId });
-                      if (!getNode(id)) return;
+                      if (!isMountedRef.current || !getNode(id)) return;
                       if (!authStatus.connected) {
                         setLoginPrompt({
                           platformId,

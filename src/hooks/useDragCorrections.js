@@ -1,0 +1,61 @@
+import { useCallback, useRef } from 'react';
+import { EventLogger } from '../utils/EventLogger';
+import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from '../nodes/CanvasNode';
+
+export function useDragCorrections({ setNodes }) {
+  const resizeDragActiveRef    = useRef(new Set());
+  const titleZoneDragActiveRef = useRef(new Set());
+
+  const onNodeDragStart = useCallback((e, node) => {
+    EventLogger.log(`rf-drag-start id=${node.id} type=${node.type} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
+    // Tag this RF drag as resize-initiated if a resize is currently active.
+    if (ResizeActive.has(node.id)) {
+      resizeDragActiveRef.current.add(node.id);
+    }
+    // Tag as title-zone-initiated if a title-zone press is currently active.
+    if (TitleZoneActive.has(node.id)) {
+      titleZoneDragActiveRef.current.add(node.id);
+    }
+  }, []);
+
+  const onNodeDragStop = useCallback((e, node) => {
+    EventLogger.log(`rf-drag-stop id=${node.id} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
+
+    const wasResizeDrag    = resizeDragActiveRef.current.has(node.id);
+    const wasTitleZoneDrag = titleZoneDragActiveRef.current.has(node.id);
+    resizeDragActiveRef.current.delete(node.id);
+    titleZoneDragActiveRef.current.delete(node.id);
+
+    const correction   = ResizeCorrection.get(node.id);
+    const tzCorrection = TitleZoneCorrection.get(node.id);
+    ResizeCorrection.delete(node.id);
+    TitleZoneCorrection.delete(node.id);
+
+    if (correction && wasResizeDrag) {
+      const { flowCx, flowCy, size } = correction;
+      const correctX = flowCx - size / 2;
+      const correctY = flowCy - size / 2;
+      EventLogger.log(`resize-correction id=${node.id} pos=(${correctX.toFixed(1)},${correctY.toFixed(1)}) size=${size}`);
+      setNodes(nds => nds.map(n =>
+        n.id === node.id ? {
+          ...n,
+          position: { x: correctX, y: correctY },
+          width:  size,
+          height: size,
+          style:  { ...(n.style || {}), width: size, height: size },
+        } : n
+      ));
+    } else if (correction) {
+      EventLogger.log(`resize-correction DISCARDED (stale) id=${node.id}`);
+    }
+
+    if (tzCorrection && wasTitleZoneDrag) {
+      EventLogger.log(`title-zone-correction id=${node.id} pos=(${tzCorrection.x.toFixed(1)},${tzCorrection.y.toFixed(1)})`);
+      setNodes(nds => nds.map(n =>
+        n.id === node.id ? { ...n, position: { x: tzCorrection.x, y: tzCorrection.y } } : n
+      ));
+    }
+  }, [setNodes]);
+
+  return { onNodeDragStart, onNodeDragStop };
+}

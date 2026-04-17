@@ -53,14 +53,14 @@ export async function openLoginWindow(platformId) {
   const url = PLATFORM_LOGIN_URLS[platformId];
   if (!url) throw new Error(`Unknown platform: ${platformId}`);
 
-  const executablePath = process.env.CHROME_PATH || findChromePath();
+  const executablePath = process.env.CHROME_PATH || await findChromePath();
   console.log(`[StealthBrowser] Opening login window for ${platformId}`);
 
   // Launch a SEPARATE visible browser for login (shares the same userDataDir)
   const loginBrowser = await puppeteer.launch({
     headless: false,
     executablePath,
-    userDataDir: getUserDataDir(),
+    userDataDir: await getUserDataDir(),
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',

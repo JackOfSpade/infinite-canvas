@@ -105,6 +105,7 @@ export function useCanvasPersistence({
   const [currentFile, setCurrentFile] = useState(null);
   const [saveState, setSaveState] = useState('idle');
   const isMountedRef = useRef(true);
+  const isExportingRef = useRef(false);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -134,6 +135,7 @@ export function useCanvasPersistence({
         addToast({ title: 'Save Failed', description: 'Could not save the workspace.', type: 'error' });
       }
     } catch (err) {
+      if (!isMountedRef.current) return;
       console.error('Failed to save canvas:', err);
       setSaveState('idle');
       addToast({ title: 'Save Error', description: err?.message || String(err) || 'An error occurred while saving.', type: 'error' });
@@ -165,15 +167,17 @@ export function useCanvasPersistence({
         addToast({ title: 'Load Failed', description: 'Failed to load canvas or invalid file format.', type: 'error'});
       }
     } catch (err) {
+      if (!isMountedRef.current) return;
       console.error('Failed to load canvas:', err);
       addToast({ title: 'Load Error', description: err?.message || String(err) || 'An error occurred while loading.', type: 'error'});
     }
   }, [setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, customFitView, addToast, resetStack, clearHistory, isAnimatingRef]);
 
   const exportCanvasToPNG = useCallback(() => {
-    if (isAnimatingRef?.current) return;
+    if (isAnimatingRef?.current || isExportingRef.current) return;
     const viewportNode = document.querySelector('.react-flow__viewport');
     if (!viewportNode) return;
+    isExportingRef.current = true;
     toPng(viewportNode, { backgroundColor: '#0a0a0a' })
       .then((dataUrl) => {
         if (!isMountedRef.current) return;
@@ -187,6 +191,9 @@ export function useCanvasPersistence({
         if (!isMountedRef.current) return;
         console.error('Failed to export image', err);
         addToast({ title: 'Export Failed', description: 'There was an error generating the PNG.', type: 'error'});
+      })
+      .finally(() => {
+        isExportingRef.current = false;
       });
   }, [addToast, isAnimatingRef]);
 

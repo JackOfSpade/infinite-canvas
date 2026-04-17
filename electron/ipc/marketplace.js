@@ -82,7 +82,7 @@ async function fetchApiMarketplaceSources(query) {
     { sourceId: 'stockx',  fn: () => fetchStockXListings(query) },
   ];
 
-  const results = await Promise.allSettled(apiTasks.map(async ({ sourceId, fn }) => {
+  return Promise.all(apiTasks.map(async ({ sourceId, fn }) => {
     try {
       const items = await fn();
       return { sourceId, items };
@@ -90,8 +90,6 @@ async function fetchApiMarketplaceSources(query) {
       return { sourceId, items: [], error: error?.message || String(error) };
     }
   }));
-
-  return results.map(r => r.status === 'fulfilled' ? r.value : { sourceId: 'unknown', items: [], error: 'Rejected' });
 }
 
 /**
@@ -143,8 +141,8 @@ Be specific about what you can clearly see. If you can't identify brand or model
         }
       }
 
-      // Run all scrapes concurrently through the pool
-      const scrapeResults = await Promise.allSettled(
+      // Run all scrapes concurrently through the pool AND start API tasks
+      const scrapeResultsPromise = Promise.allSettled(
         tasks.map(async (task) => {
           try {
             const data = await queueScrape(task.url, task.extractorJS, task.options);
@@ -167,6 +165,10 @@ Be specific about what you can clearly see. If you can't identify brand or model
         })
       );
 
+      const apiResultsPromise = fetchApiMarketplaceSources(query);
+
+      const [scrapeResults, apiResults] = await Promise.all([scrapeResultsPromise, apiResultsPromise]);
+
       // Aggregate all comps by type — category comes from the task definition,
       // so there's no separate list to keep in sync with buildCompTasks.
       const taskCategoryMap = buildTaskCategoryMap(tasks);
@@ -186,7 +188,6 @@ Be specific about what you can clearly see. If you can't identify brand or model
       }
 
       // 2. API-based sources (Reverb REST API, StockX Algolia bypass)
-      const apiResults = await fetchApiMarketplaceSources(query);
       for (const res of apiResults) {
         if (res.items.length > 0) {
           allComps.sold.push(...res.items);

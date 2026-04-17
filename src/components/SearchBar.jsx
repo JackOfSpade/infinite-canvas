@@ -25,12 +25,12 @@ function matchesQuery(node, q) {
  * Searches nodes by name/title/text (including deep group search) and pans to the match.
  * Features: match count badge, next/prev arrows, clear button, Cmd+F activation.
  */
-export const SearchBar = React.memo(function SearchBar({ nodes }) {
+export const SearchBar = React.memo(function SearchBar() {
   const [searchQuery, setSearchQuery] = useState('');
   const [matchIndex, setMatchIndex] = useState(0);
   const [matchCount, setMatchCount] = useState(0);
   const [isExpanded, setIsExpanded] = useState(false);
-  const { setCenter, getViewport } = useReactFlow();
+  const { setCenter, getViewport, getNodes } = useReactFlow();
   const inputRef = useRef(null);
   const nav = useContext(CanvasNavigationContext);
   const isAnimating = nav?.isAnimating || false;
@@ -58,18 +58,24 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
   const getMatches = useCallback(() => {
     if (!searchQuery.trim()) return [];
     const q = searchQuery.toLowerCase();
+    const currentNodes = getNodes();
 
     const deepSearch = (items) => {
+      if (!items || items.length === 0) return false;
       for (const item of items) {
         if (matchesQuery(item, q)) return true;
         const nested = item.data?.canvasData?.nodes;
-        if (nested && deepSearch(nested)) return true;
+        if (nested && nested.length > 0 && deepSearch(nested)) return true;
       }
       return false;
     };
 
-    return nodes.filter(n => matchesQuery(n, q) || deepSearch(n.data?.canvasData?.nodes || []));
-  }, [searchQuery, nodes]);
+    return currentNodes.filter(n => {
+      if (matchesQuery(n, q)) return true;
+      const nested = n.data?.canvasData?.nodes;
+      return nested && nested.length > 0 && deepSearch(nested);
+    });
+  }, [searchQuery, getNodes]);
 
   const handleQueryChange = (e) => {
     setSearchQuery(e.target.value);
@@ -153,7 +159,7 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
         {isExpanded && searchQuery.trim() !== '' && matchCount > 0 && (
           <div className="flex items-center gap-0.5 mr-1">
             <button
-              onClick={handlePrev}
+               onClick={handlePrev}
               className="p-1 text-white/30 hover:text-white/70 transition-colors rounded"
               title="Previous match (Shift+Enter)"
             >

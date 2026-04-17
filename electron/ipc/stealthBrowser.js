@@ -31,17 +31,21 @@ const IMAGE_TRACKER_PATTERNS = ['pixel', 'tracker', 'beacon', '1x1'];
 
 // ── Persistent Session Directory ────────────────────────────────────────────
 let _userDataDir = null;
-export function getUserDataDir() {
+export async function getUserDataDir() {
   if (_userDataDir) return _userDataDir;
   const base = app?.getPath?.('userData') || path.join(process.env.HOME || process.env.USERPROFILE || '.', '.infinite-canvas');
   const dir = path.join(base, 'browser-data');
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  try {
+    await fs.promises.access(dir);
+  } catch {
+    await fs.promises.mkdir(dir, { recursive: true });
+  }
   _userDataDir = dir;
   return _userDataDir;
 }
 
 // ── Chrome Executable Discovery ─────────────────────────────────────────────
-export function findChromePath() {
+export async function findChromePath() {
   const platform = process.platform;
 
   const candidates = platform === 'darwin'
@@ -62,7 +66,12 @@ export function findChromePath() {
         ];
 
   for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
+    try {
+      await fs.promises.access(p);
+      return p;
+    } catch {
+      // Ignored
+    }
   }
 
   // No suitable Chrome/Chromium found. Electron's own executable cannot be used
@@ -86,14 +95,14 @@ export async function getStealthBrowser() {
   if (browserLaunchPromise) return browserLaunchPromise;
 
   browserLaunchPromise = (async () => {
-    const executablePath = process.env.CHROME_PATH || findChromePath();
+    const executablePath = process.env.CHROME_PATH || await findChromePath();
     console.log('[StealthBrowser] Launching with:', path.basename(executablePath));
 
     try {
       browserInstance = await puppeteer.launch({
         headless: 'new',
         executablePath,
-        userDataDir: getUserDataDir(),
+        userDataDir: await getUserDataDir(),
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',

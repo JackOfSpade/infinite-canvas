@@ -57,7 +57,7 @@ export function JobCardNode({ id, data }) {
         job: { title: data.title, company: data.company, snippet: data.snippet },
       });
       // Guard: card may have been dismissed while awaiting the IPC response
-      if (!getNode(id)) return;
+      if (!isMountedRef.current || !getNode(id)) return;
       if (result.success) {
         updateNodeData(id, { coverLetter: result.coverLetter });
         addToast({ title: 'Cover Letter Ready', description: `Generated for ${data.company}`, type: 'success' });

@@ -14,6 +14,18 @@ import { registerBugReportHandlers } from './ipc/bugReport.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ── Global Exception Handlers ────────────────────────────────────────────────
+// Prevents the main process from crashing unexpectedly in production due to 
+// unhandled promise rejections or rogue callbacks from external dependencies.
+process.on('uncaughtException', (err) => {
+  console.error('[Main Process] Uncaught Exception:', err);
+  // Log but do not exit — keeps the window alive even if a background task fails
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Main Process] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 let mainWindow = null;
 
 // ── Window creation ──────────────────────────────────────────────────────────
@@ -90,8 +102,13 @@ app.on('web-contents-created', (_, contents) => {
   contents.setWindowOpenHandler(() => ({ action: 'deny' }));
   contents.on('will-attach-webview', (event) => event.preventDefault());
   contents.on('will-navigate', (event, navigationUrl) => {
-    const parsedUrl = new URL(navigationUrl);
-    if (!parsedUrl.protocol.startsWith('file:') && !parsedUrl.origin.includes('localhost')) {
+    try {
+      const parsedUrl = new URL(navigationUrl);
+      if (!parsedUrl.protocol.startsWith('file:') && !parsedUrl.origin.includes('localhost')) {
+        event.preventDefault();
+      }
+    } catch {
+      // Malformed or non-http URL (e.g. about:blank, javascript:) — block navigation
       event.preventDefault();
     }
   });

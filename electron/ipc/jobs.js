@@ -94,7 +94,7 @@ async function fetchApiSources(queries, sender) {
     }
   }
 
-  const results = await Promise.allSettled(apiTasks.map(async ({ sourceId, fn }) => {
+  return Promise.all(apiTasks.map(async ({ sourceId, fn }) => {
     try {
       const jobs = await fn();
       return { sourceId, jobs };
@@ -102,8 +102,6 @@ async function fetchApiSources(queries, sender) {
       return { sourceId, jobs: [], error: error?.message || String(error) };
     }
   }));
-
-  return results.map(r => r.status === 'fulfilled' ? r.value : { sourceId: 'unknown', jobs: [], error: 'Promise rejected' });
 }
 
 /**
@@ -187,8 +185,13 @@ Be creative with suggestedRoleQueries — think about what career directions the
       const allJobs = [];
       const sourceResults = {};
       
-      // 1. Run Scraper Tasks
-      const results = await scrapeMultiple(tasks);
+      // 1. Run Scraper Tasks and API Tasks concurrently
+      const [results, apiResults] = await Promise.all([
+        scrapeMultiple(tasks),
+        fetchApiSources(queries, event.sender)
+      ]);
+
+      // Process Scraper Results
       for (const result of results) {
         const sourceId = result.id.replace(/-\d+$/, '');
         if (!sourceResults[sourceId]) sourceResults[sourceId] = { jobs: [], errors: 0 };
@@ -203,8 +206,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
         }
       }
 
-      // 2. Run API Tasks
-      const apiResults = await fetchApiSources(queries, event.sender);
+      // Process API Results
       for (const res of apiResults) {
         if (!sourceResults[res.sourceId]) sourceResults[res.sourceId] = { jobs: [], errors: 0 };
         if (res.jobs.length > 0) {

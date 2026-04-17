@@ -82,6 +82,10 @@ export async function processDroppedFiles(files, startPosition) {
   for (const file of files) {
     try {
       const result = await window.electronAPI.scanDirectory(file.path);
+      if (result && result.success === false) {
+        console.warn('Skipping dropped file/folder:', file.path, result.error);
+        continue;
+      }
       const fsItem = result.isFile ? result.file : result;
       newItems.push(buildNode(fsItem, currentPos));
       // Offset subsequent items slightly to prevent them stacking perfectly on top of each other

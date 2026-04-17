@@ -18,10 +18,16 @@ let projectId = null;
 
 async function getAuthClient() {
   if (authClient) return { auth: authClient, projectId };
-  if (!fs.existsSync(KEY_FILE)) {
-    throw new Error('service-account.json not found. Place it in the project root.');
+  let saRaw;
+  try {
+    saRaw = await fs.promises.readFile(KEY_FILE, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      throw new Error('service-account.json not found. Place it in the project root.');
+    }
+    throw err;
   }
-  const sa = JSON.parse(fs.readFileSync(KEY_FILE, 'utf8'));
+  const sa = JSON.parse(saRaw);
   projectId = sa.project_id;
   authClient = new GoogleAuth({
     keyFile: KEY_FILE,
@@ -93,8 +99,20 @@ async function callGemini(parts, genConfig = {}) {
  * Handles both ```json and bare ``` wrappers.
  */
 function parseGeminiJSON(raw) {
-  const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  return JSON.parse(cleaned.trim());
+  try {
+    let cleaned = raw.trim();
+    // Safely extract the JSON block if wrapped in markdown
+    const match = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (match) {
+      cleaned = match[1];
+    } else {
+      // Fallback for partial markers or no markdown
+      cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    }
+    return JSON.parse(cleaned.trim());
+  } catch (error) {
+    throw new Error(`Failed to parse Gemini JSON output: ${error.message}. Received: ${raw.substring(0, 500)}`);
+  }
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -128,16 +146,14 @@ export async function callGeminiText(prompt) {
  * @returns {Promise<object>} — Parsed JSON response
  */
 export async function callGeminiVision(imagePaths, prompt) {
-  const parts = [];
-
-  for (const imgPath of imagePaths) {
-    const buffer = fs.readFileSync(imgPath);
+  const imageParts = await Promise.all(imagePaths.map(async (imgPath) => {
+    const buffer = await fs.promises.readFile(imgPath);
     const ext = path.extname(imgPath).toLowerCase();
     const mimeType = IMAGE_MIME_MAP[ext] || 'image/jpeg';
-    parts.push({ inlineData: { mimeType, data: buffer.toString('base64') } });
-  }
+    return { inlineData: { mimeType, data: buffer.toString('base64') } };
+  }));
 
-  parts.push({ text: prompt });
+  const parts = [...imageParts, { text: prompt }];
   const raw = await callGemini(parts);
   return parseGeminiJSON(raw);
 }
@@ -149,7 +165,7 @@ export async function callGeminiVision(imagePaths, prompt) {
  * @returns {Promise<object>} — Parsed JSON response
  */
 export async function callGeminiDocument(filePath, prompt) {
-  const buffer = fs.readFileSync(filePath);
+  const buffer = await fs.promises.readFile(filePath);
   const ext = path.extname(filePath).toLowerCase();
   const mimeType = DOCUMENT_MIME_MAP[ext];
 

@@ -24,15 +24,15 @@ function distToSegment(p, a, b) {
 function segmentCircleIntersections(a, b, C, R) {
   const dx = b.x - a.x, dy = b.y - a.y;
   const fx = a.x - C.x, fy = a.y - C.y;
-  const A_ = dx * dx + dy * dy;
-  if (A_ === 0) return [];               // degenerate segment
-  const B_ = 2 * (fx * dx + fy * dy);
-  const C_ = fx * fx + fy * fy - R * R;
-  const disc = B_ * B_ - 4 * A_ * C_;
+  const segLen2 = dx * dx + dy * dy;
+  if (segLen2 === 0) return [];               // degenerate segment
+  const segDot  = 2 * (fx * dx + fy * dy);
+  const segConst = fx * fx + fy * fy - R * R;
+  const disc = segDot * segDot - 4 * segLen2 * segConst;
   if (disc < 0) return [];
   const sq = Math.sqrt(disc);
-  const t1 = (-B_ - sq) / (2 * A_);
-  const t2 = (-B_ + sq) / (2 * A_);
+  const t1 = (-segDot - sq) / (2 * segLen2);
+  const t2 = (-segDot + sq) / (2 * segLen2);
   const ts = [];
   if (t1 >= 0 && t1 <= 1) ts.push(t1);
   if (t2 >= 0 && t2 <= 1 && Math.abs(t2 - t1) > 1e-6) ts.push(t2);
@@ -194,8 +194,9 @@ export function useDrawingMode({
       setNodes, setPlacementMode, setCurrentStroke, handleEraser]);
 
   const handlePointerMove = useCallback((e) => {
-    // Always update mousePos — so placement ghost is at cursor immediately on mode activation
-    setMousePos({ x: e.clientX, y: e.clientY });
+    if (placementMode) {
+      setMousePos({ x: e.clientX, y: e.clientY });
+    }
 
     if (isAnimatingRef?.current) return;
 
@@ -206,7 +207,7 @@ export function useDrawingMode({
     if (activeTool === 'pen' && currentStroke) {
       setCurrentStroke(prev => [...prev, screenToFlowPosition({ x: e.clientX, y: e.clientY })]);
     }
-  }, [activeTool, currentStroke, screenToFlowPosition,
+  }, [placementMode, activeTool, currentStroke, screenToFlowPosition,
       setMousePos, setCurrentStroke, handleEraser, isAnimatingRef]);
 
   const handlePointerUp = useCallback(() => {
