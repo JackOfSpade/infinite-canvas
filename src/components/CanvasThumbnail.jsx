@@ -208,35 +208,12 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
 
     const pad = 20;
 
-    // Collect all significant points (node corners + drawing vertices)
-    const allPts = [];
-    let sumX = 0, sumY = 0, ptCount = 0;
-    rects.forEach(r => {
-      [[r.x, r.y], [r.x + r.w, r.y], [r.x, r.y + r.h], [r.x + r.w, r.y + r.h]].forEach(([px, py]) => {
-        allPts.push({ x: px, y: py });
-        sumX += px; sumY += py; ptCount++;
-      });
-    });
-    paths.forEach(p => {
-      p.points.split(' ').forEach(pt => {
-        const [px, py] = pt.split(',').map(Number);
-        if (!isNaN(px) && !isNaN(py)) {
-          allPts.push({ x: px, y: py });
-          sumX += px; sumY += py; ptCount++;
-        }
-      });
-    });
+    // Centroid of the bounding box
+    const centX = (minX + maxX) / 2;
+    const centY = (minY + maxY) / 2;
 
-    // Centroid
-    const centX = ptCount > 0 ? sumX / ptCount : (minX + maxX) / 2;
-    const centY = ptCount > 0 ? sumY / ptCount : (minY + maxY) / 2;
-
-    // Max distance from centroid to any corner → bounding circle radius
-    let maxDist = 0;
-    allPts.forEach(p => {
-      const d = Math.sqrt((p.x - centX) ** 2 + (p.y - centY) ** 2);
-      maxDist = Math.max(maxDist, d);
-    });
+    // Max distance from centroid is just half the diagonal of the bounding box
+    let maxDist = Math.sqrt(((maxX - minX) / 2) ** 2 + ((maxY - minY) / 2) ** 2);
     if (maxDist === 0) maxDist = 50;
 
     const sqHalf = maxDist + pad;

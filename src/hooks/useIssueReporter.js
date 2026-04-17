@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 
@@ -17,6 +17,12 @@ export function useIssueReporter({
   addToast,
 }) {
   const { getViewport } = useReactFlow();
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   const handleIssueSubmit = useCallback(async (description, mode = 'file') => {
     if (!window.electronAPI) {
@@ -28,8 +34,6 @@ export function useIssueReporter({
       const viewport = getViewport();
 
       // For group nodes (CanvasNode), capture all three size fields separately.
-      // Discrepancies between style.width / measured.width / width reveal the
-      // ReactFlow ResizeObserver race that caused the "size grows between sessions" bug.
       const nodeInternals = nodes.map(n => {
         const base = { id: n.id, type: n.type };
         if (n.type === 'group') {
@@ -63,35 +67,38 @@ export function useIssueReporter({
           snapToGrid,
           windowInnerWidth: window.innerWidth,
           windowInnerHeight: window.innerHeight,
-          // Viewport transform — zoom level is critical for diagnosing
-          // screenToFlowPosition math in resize/placement bugs.
           viewport: {
             x:    parseFloat(viewport.x.toFixed(2)),
             y:    parseFloat(viewport.y.toFixed(2)),
             zoom: parseFloat(viewport.zoom.toFixed(4)),
           },
         },
-        // Separate diagnostic table — shows all three RF size fields per group node
-        // so the report immediately exposes any style/measured/prop mismatches.
         nodeInternals,
-        // Live React component state per CanvasNode (isEditing, isResizing, etc.)
-        // — things not visible in the Zustand node JSON.
         nodeComponentStates: EventLogger.getNodeStates(),
         eventLogs: EventLogger.getLogs(),
       };
+
       if (mode === 'clipboard') {
-        // Generate the markdown in the main process (needs system info / os module),
-        // then copy the returned string to the clipboard in the renderer.
         const res = await window.electronAPI.generateBugReportMarkdown(payload);
+        if (!isMountedRef.current) return;
+
         if (res.success) {
-          await navigator.clipboard.writeText(res.markdown);
-          addToast({ title: 'Bug Report Copied', description: 'Report copied to clipboard.', type: "success" });
+          try {
+            await navigator.clipboard.writeText(res.markdown);
+            if (!isMountedRef.current) return;
+            addToast({ title: 'Bug Report Copied', description: 'Report copied to clipboard.', type: "success" });
+          } catch (clipErr) {
+            console.error('Clipboard failed:', clipErr);
+            if (!isMountedRef.current) return;
+            addToast({ title: 'Clipboard Error', description: 'Generated report but could not copy to clipboard automatically.', type: "warning" });
+          }
         } else {
           addToast({ title: 'Bug Report Failed', description: res.error || 'Could not generate the report.', type: "error" });
         }
       } else {
-        // Save to file via native save dialog.
         const res = await window.electronAPI.exportBugReport(payload);
+        if (!isMountedRef.current) return;
+
         if (res.success) {
           addToast({ title: 'Bug Report Saved', description: 'Your report has been exported successfully.', type: "success" });
         } else if (!res.canceled) {
@@ -99,6 +106,7 @@ export function useIssueReporter({
         }
       }
     } catch (e) {
+      if (!isMountedRef.current) return;
       addToast({ title: 'Bug Report Error', description: e?.message || String(e) || 'An unexpected error occurred.', type: "error" });
     }
   }, [

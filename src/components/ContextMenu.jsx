@@ -110,33 +110,13 @@ export function ContextMenu({ x, y, items, onClose }) {
                   onMouseEnter cancels the close timer so moving from parent row
                   into the submenu across the small gap keeps it open. */}
               {hasSubmenu && activeSubmenu === i && (
-                <div
-                  className={`absolute top-0 ${submenuDirection === 'right' ? 'left-full ml-0.5' : 'right-full mr-0.5'} bg-[#1a1a1a]/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl py-1 min-w-[180px] text-white/90 text-sm`}
+                <SubmenuPanel
+                  items={item.submenu}
+                  direction={submenuDirection}
                   onMouseEnter={cancelClose}
                   onMouseLeave={scheduleClose}
-                >
-                  {item.submenu.map((sub, j) => {
-                    if (sub.divider) {
-                      return <div key={j} className="border-t border-white/8 my-1" />;
-                    }
-                    return (
-                      <button
-                        key={j}
-                        className={`w-full text-left px-3 py-1.5 hover:bg-white/8 transition-colors ${sub.disabled ? 'opacity-40 cursor-default' : ''}`}
-                        disabled={sub.disabled}
-                        onPointerDown={(e) => {
-                          e.stopPropagation();
-                          if (sub.onClick && !sub.disabled) {
-                            sub.onClick();
-                            onClose();
-                          }
-                        }}
-                      >
-                        <span className="text-[13px]">{sub.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
+                  onClose={onClose}
+                />
               )}
             </div>
           );
@@ -144,5 +124,54 @@ export function ContextMenu({ x, y, items, onClose }) {
       </div>
     </div>,
     document.body
+  );
+}
+
+/** Internal component to handle sub-menu positioning and clamping */
+function SubmenuPanel({ items, direction, onMouseEnter, onMouseLeave, onClose }) {
+  const ref = useRef(null);
+  const [verticalOffset, setVerticalOffset] = useState(0);
+
+  useEffect(() => {
+    if (ref.current) {
+      const rect = ref.current.getBoundingClientRect();
+      const overflow = rect.bottom - window.innerHeight;
+      if (overflow > 0) {
+        // Shift up by the overflow amount plus a small padding
+        setVerticalOffset(-overflow - 8);
+      }
+    }
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      className={`absolute top-0 ${direction === 'right' ? 'left-full ml-0.5' : 'right-full mr-0.5'} bg-[#1a1a1a]/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl py-1 min-w-[180px] text-white/90 text-sm`}
+      style={{ transform: `translateY(${verticalOffset}px)`, opacity: verticalOffset === 0 && ref.current ? 0 : 1 }}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+    >
+      {items.map((sub, j) => {
+        if (sub.divider) {
+          return <div key={j} className="border-t border-white/8 my-1" />;
+        }
+        return (
+          <button
+            key={j}
+            className={`w-full text-left px-3 py-1.5 hover:bg-white/8 transition-colors ${sub.disabled ? 'opacity-40 cursor-default' : ''}`}
+            disabled={sub.disabled}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              if (sub.onClick && !sub.disabled) {
+                sub.onClick();
+                onClose();
+              }
+            }}
+          >
+            <span className="text-[13px]">{sub.label}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }

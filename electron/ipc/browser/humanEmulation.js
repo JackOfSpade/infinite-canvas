@@ -15,10 +15,13 @@ export async function humanMouseMove(page) {
 
   const steps = 15 + Math.floor(Math.random() * 10);
   for (let i = 0; i <= steps; i++) {
+    if (page.isClosed()) return;
     const t = i / steps;
     const x = Math.round((1 - t) ** 2 * startX + 2 * (1 - t) * t * cpX + t ** 2 * endX);
     const y = Math.round((1 - t) ** 2 * startY + 2 * (1 - t) * t * cpY + t ** 2 * endY);
-    await page.mouse.move(x, y);
+    try {
+      await page.mouse.move(x, y);
+    } catch { return; }
     const delay = 10 + Math.random() * 20 * (1 + Math.sin(Math.PI * t));
     await new Promise(r => setTimeout(r, delay));
   }
@@ -34,8 +37,11 @@ export async function humanScroll(page, scrolls = 3) {
     const distance = 200 + Math.floor(Math.random() * 400);
     const steps = 3 + Math.floor(Math.random() * 3);
     for (let s = 0; s < steps; s++) {
+      if (page.isClosed()) return;
       const fraction = distance / steps * (1 - s / (steps * 2));
-      await page.evaluate((d) => window.scrollBy(0, d), Math.round(fraction));
+      try {
+        await page.evaluate((d) => window.scrollBy(0, d), Math.round(fraction));
+      } catch { return; }
       await new Promise(r => setTimeout(r, 30 + Math.random() * 60));
     }
 

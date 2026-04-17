@@ -116,11 +116,15 @@ app.on('web-contents-created', (_, contents) => {
 
 app.whenReady().then(() => {
   protocol.registerFileProtocol('local-file', (request, callback) => {
-    const url = request.url.replace(/^local-file:\/\//, '');
+    let url = request.url.replace(/^local-file:\/\//, '');
     try {
-      return callback({ path: decodeURIComponent(url) });
+      const decodedPath = decodeURIComponent(url);
+      const normalizedPath = path.normalize(decodedPath);
+      
+      return callback({ path: normalizedPath });
     } catch (error) {
       console.error('Failed to register local-file protocol', error);
+      return callback({ error: -2 }); // net::ERR_FAILED
     }
   });
 
@@ -147,7 +151,22 @@ app.on('before-quit', async (event) => {
   if (isQuitting) return;
   event.preventDefault();
   isQuitting = true;
-  closeAllMonitors();
-  await closeStealthBrowser();
-  app.quit();
+
+  // Cleanup with safety timeout
+  try {
+    const cleanup = async () => {
+      closeAllMonitors();
+      await closeStealthBrowser();
+    };
+    
+    // Give cleanup 2 seconds to finish, then force quit
+    await Promise.race([
+      cleanup(),
+      new Promise(resolve => setTimeout(resolve, 2000))
+    ]);
+  } catch (err) {
+    console.error('[Main] Error during cleanup:', err);
+  } finally {
+    app.quit();
+  }
 });

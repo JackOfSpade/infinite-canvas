@@ -43,10 +43,16 @@ export function useCanvasInitialization({
     if (!currentFile || !window.electronAPI) return;
 
     const timer = setTimeout(() => {
+      // Safety guard: never auto-save while navigation animations are active 
+      // as the stack/nodes state may be transient or intermediate.
       if (isAnimatingRef?.current) return;
+      
       const rawData = flushRef.current ? flushRef.current() : stateRef.current;
+      if (!rawData.nodes || !Array.isArray(rawData.nodes)) return;
+
       // Strip transient visual properties (e.g. source-filter opacity on job cards)
       const data = { ...rawData, nodes: sanitizeNodesForSave(rawData.nodes) };
+      
       window.electronAPI.saveWorkspace({ data, filePath: currentFile }).then(res => {
         if (!isMountedRef.current) return;
         if (res?.success && res.filePath) {

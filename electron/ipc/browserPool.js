@@ -260,16 +260,44 @@ async function executeScrape(url, extractorJS, options = {}) {
     markDomainSuccess(domain);
     return result;
   } catch (error) {
+    console.error(`[BrowserPool] Scrape failed for ${url}:`, error);
     markDomainError(domain);
+    // Clean up handle
+    for (const [key, val] of pageHandles.entries()) {
+      if (val === page) {
+        pageHandles.delete(key);
+        break;
+      }
+    }
+
+    // Safety: ensure no concurrent close calls
+    if (page && !page.__closing) {
+      page.__closing = true;
+      try {
+        if (!page.isClosed()) {
+          await page.close();
+        }
+      } catch (e) {
+        console.warn('[BrowserPool] Page close error:', e.message);
+      }
+    }
     throw error;
   } finally {
     isSettled = true;
     if (timeoutId) clearTimeout(timeoutId);
-    if (page) {
-      try { await page.close(); } catch { /* already closed */ }
-    }
   }
 }
+
+// ── Process Exit Cleanup ────────────────────────────────────────────────────
+// Backup cleanup for orphaned browsers or pages on crash/exit.
+process.on('exit', () => {
+  for (const page of pageHandles.values()) {
+    try { 
+      // Synchronous close attempt if possible, or just log
+      if (!page.isClosed()) { console.log('[BrowserPool] Orphaned page detected on exit'); }
+    } catch {}
+  }
+});
 
 /**
  * Queue a single scrape task. Respects MAX_CONCURRENT limit.

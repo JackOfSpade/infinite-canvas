@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useCallback } from 'react';
-import { Panel, useViewport, useReactFlow } from '@xyflow/react';
+import { Panel, useReactFlow, useStore } from '@xyflow/react';
 import { MINIMAP_NODE_COLORS } from '../utils/constants';
 
 const MINIMAP_W = 200;
@@ -31,9 +31,39 @@ function getNodeDims(node) {
  *
  * Rendered inside ReactFlow so it has access to useViewport / useReactFlow.
  */
+const vpTransformSelector = (s) => s.transform;
+const vpSizeSelector = (s) => ({ width: s.width, height: s.height });
+
+const ViewportIndicator = React.memo(({ scale, minX, minY, offsetX, offsetY }) => {
+  const transform = useStore(vpTransformSelector);
+  const size = useStore(vpSizeSelector);
+
+  const vpZoom = transform[2];
+  const vpFlowX = -transform[0] / vpZoom;
+  const vpFlowY = -transform[1] / vpZoom;
+  const vpFlowW = size.width / vpZoom;
+  const vpFlowH = size.height / vpZoom;
+
+  const x = (vpFlowX - minX) * scale + offsetX;
+  const y = (vpFlowY - minY) * scale + offsetY;
+  const w = vpFlowW * scale;
+  const h = vpFlowH * scale;
+
+  return (
+    <rect
+      x={x} y={y}
+      width={w} height={h}
+      fill="rgba(255,255,255,0.04)"
+      stroke="rgba(255,255,255,0.35)"
+      strokeWidth={1}
+      rx={1}
+      style={{ pointerEvents: 'none' }}
+    />
+  );
+});
+
 export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, drawings, isAnimating }) {
-  const viewport    = useViewport();
-  const { setViewport } = useReactFlow();
+  const { setViewport, getViewport } = useReactFlow();
   const svgRef = useRef(null);
 
   // ── Part A: content bounds (memo on nodes + drawings only) ──────────────
@@ -65,11 +95,13 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
     return m;
   }, [nodes]);
 
-  // ── Part B: display bounds (content + current viewport, no memo) ─────────
-  const vpFlowX = -viewport.x / viewport.zoom;
-  const vpFlowY = -viewport.y / viewport.zoom;
-  const vpFlowW = window.innerWidth  / viewport.zoom;
-  const vpFlowH = window.innerHeight / viewport.zoom;
+  // ── Part B: display bounds (fixed arbitrary vpFlow overlay for scale math)
+  // We use current viewport for scaling but we don't react to it continuously.
+  const currentVp = getViewport();
+  const vpFlowX = -currentVp.x / currentVp.zoom;
+  const vpFlowY = -currentVp.y / currentVp.zoom;
+  const vpFlowW = window.innerWidth / currentVp.zoom;
+  const vpFlowH = window.innerHeight / currentVp.zoom;
 
   const minX = Math.min(cMinX, vpFlowX - CONTENT_PAD);
   const minY = Math.min(cMinY, vpFlowY - CONTENT_PAD);
@@ -89,9 +121,6 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
     x: (fx - minX) * scale + offsetX,
     y: (fy - minY) * scale + offsetY,
   }), [minX, minY, scale, offsetX, offsetY]);
-  const vpTL    = toM(vpFlowX, vpFlowY);
-  const vpMiniW = vpFlowW * scale;
-  const vpMiniH = vpFlowH * scale;
 
   // ── Click-to-pan ──────────────────────────────────────────────────────────
   const handleClick = useCallback((e) => {
@@ -104,15 +133,16 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
     const fx = (mx - offsetX) / scale + minX;
     const fy = (my - offsetY) / scale + minY;
     // Center that flow point in the screen
+    const liveVp = getViewport();
     setViewport(
       {
-        x: window.innerWidth  / 2 - fx * viewport.zoom,
-        y: window.innerHeight / 2 - fy * viewport.zoom,
-        zoom: viewport.zoom,
+        x: window.innerWidth  / 2 - fx * liveVp.zoom,
+        y: window.innerHeight / 2 - fy * liveVp.zoom,
+        zoom: liveVp.zoom,
       },
       { duration: 300 }
     );
-  }, [minX, minY, scale, offsetX, offsetY, viewport, setViewport, isAnimating]);
+  }, [minX, minY, scale, offsetX, offsetY, setViewport, getViewport, isAnimating]);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -255,15 +285,7 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
             );
           })}
 
-          {/* ── Viewport indicator ────────────────────────────────── */}
-          <rect
-            x={vpTL.x} y={vpTL.y}
-            width={vpMiniW} height={vpMiniH}
-            fill="rgba(255,255,255,0.04)"
-            stroke="rgba(255,255,255,0.35)"
-            strokeWidth={1}
-            rx={1}
-          />
+          <ViewportIndicator scale={scale} minX={minX} minY={minY} offsetX={offsetX} offsetY={offsetY} />
         </svg>
       </div>
     </Panel>
@@ -274,11 +296,15 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
   if (prev.edges.length !== next.edges.length) return false;
   if ((prev.drawings || []).length !== (next.drawings || []).length) return false;
   
-  // Custom check: only re-render if nodes' coordinates have meaningfully changed
+  // Custom check: only re-render if nodes' coordinates or data have meaningfully changed
   for (let i = 0; i < prev.nodes.length; i++) {
     const p = prev.nodes[i];
     const n = next.nodes[i];
     if (p.id !== n.id) return false;
+    if (p.data !== n.data) return false; // Text, label, or color changed
+    if (p.measured?.width !== n.measured?.width || p.measured?.height !== n.measured?.height) return false;
+    if (p.style?.width !== n.style?.width || p.style?.height !== n.style?.height) return false;
+    
     // Don't re-render for ultra-micro positional changes to save SVG compute
     if (Math.abs(p.position.x - n.position.x) > 2) return false;
     if (Math.abs(p.position.y - n.position.y) > 2) return false;

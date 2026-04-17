@@ -66,12 +66,25 @@ export function useListingActions(id, data) {
 
   const handleCopyListing = useCallback(() => {
     const text = `${product.generated_title || ''}\n\nPrice: $${priceInput}\nCondition: ${product.condition || ''}\n\n${product.generated_description || ''}`;
-    navigator.clipboard.writeText(text).catch((err) => {
-      console.warn('Clipboard write failed:', err);
-    });
-    setCopied(true);
-    if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current);
-    copiedTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
+    
+    // Explicitly check for clipboard API availability
+    if (!navigator.clipboard?.writeText) {
+      console.warn('Clipboard API not available');
+      return;
+    }
+
+    navigator.clipboard.writeText(text)
+      .then(() => {
+        if (!isMountedRef.current) return;
+        setCopied(true);
+        if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current);
+        copiedTimeoutRef.current = setTimeout(() => {
+          if (isMountedRef.current) setCopied(false);
+        }, 2000);
+      })
+      .catch((err) => {
+        console.warn('Clipboard write failed:', err);
+      });
   }, [product, priceInput]);
 
   // ── Platform selection ─────────────────────────────────────────────────────

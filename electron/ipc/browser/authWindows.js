@@ -101,26 +101,29 @@ export async function getSessionStatus(platformId) {
     const browser = await getStealthBrowser();
     const page = await browser.newPage();
 
-    // Check cookies for this domain
-    const cookies = await page.cookies(...domains.map(d => `https://${d.replace(/^\./, '')}`));
-    await page.close();
+    try {
+      // Check cookies for this domain
+      const cookies = await page.cookies(...domains.map(d => `https://${d.replace(/^\./, '')}`));
 
-    // Simple heuristic: if there are session/auth cookies, we're logged in
-    const hasSession = cookies.some(c =>
-      c.name.toLowerCase().includes('session') ||
-      c.name.toLowerCase().includes('token') ||
-      c.name.toLowerCase().includes('auth') ||
-      c.name.toLowerCase().includes('li_at') ||      // LinkedIn
-      c.name.toLowerCase().includes('jses') ||        // Indeed  
-      c.name.toLowerCase().includes('dp1') ||          // eBay
-      c.name.toLowerCase().includes('session-id')      // Amazon
-    );
+      // Simple heuristic: if there are session/auth cookies, we're logged in
+      const hasSession = cookies.some(c =>
+        c.name.toLowerCase().includes('session') ||
+        c.name.toLowerCase().includes('token') ||
+        c.name.toLowerCase().includes('auth') ||
+        c.name.toLowerCase().includes('li_at') ||      // LinkedIn
+        c.name.toLowerCase().includes('jses') ||        // Indeed  
+        c.name.toLowerCase().includes('dp1') ||          // eBay
+        c.name.toLowerCase().includes('session-id')      // Amazon
+      );
 
-    return {
-      platform: platformId,
-      connected: hasSession,
-      cookieCount: cookies.length,
-    };
+      return {
+        platform: platformId,
+        connected: hasSession,
+        cookieCount: cookies.length,
+      };
+    } finally {
+      await page.close().catch(() => {});
+    }
   } catch {
     return { platform: platformId, connected: false };
   }

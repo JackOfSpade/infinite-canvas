@@ -82,21 +82,25 @@ export const EBAY_SOLD_EXTRACTOR = `
         const match = text.match(/"itemSummaries"\\s*:\\s*(\\[.+?\\])\\s*[,}]/s) ||
                       text.match(/"listingItems"\\s*:\\s*(\\[.+?\\])\\s*[,}]/s);
         if (match) {
-          const listings = JSON.parse(match[1]);
-          listings.forEach(item => {
-            const price = item.price?.value || item.currentBidPrice?.value || 0;
-            if (!price || !item.title) return;
-            items.push({
-              title: item.title || '',
-              price: parseFloat(price),
-              priceText: '$' + parseFloat(price).toFixed(2),
-              soldDate: item.endDate || item.listingInfo?.endTime || '',
-              condition: item.condition?.conditionDisplayName || item.conditionDisplayName || '',
-              url: item.itemWebUrl || item.viewItemURL || '',
-              source: 'ebay-sold',
-            });
-          });
-          if (items.length > 0) return items.slice(0, 25);
+          try {
+            const listings = JSON.parse(match[1]);
+            if (Array.isArray(listings)) {
+              listings.forEach(item => {
+                const price = item.price?.value || item.currentBidPrice?.value || 0;
+                if (!price || !item.title) return;
+                items.push({
+                  title: item.title || '',
+                  price: parseFloat(price),
+                  priceText: '$' + parseFloat(price).toFixed(2),
+                  soldDate: item.endDate || item.listingInfo?.endTime || '',
+                  condition: item.condition?.conditionDisplayName || item.conditionDisplayName || '',
+                  url: item.itemWebUrl || item.viewItemURL || '',
+                  source: 'ebay-sold',
+                });
+              });
+            }
+            if (items.length > 0) return items.slice(0, 25);
+          } catch {}
         }
       }
     }
@@ -177,34 +181,36 @@ export const POSHMARK_SOLD_EXTRACTOR = `
       const text = script.textContent || '';
       const match = text.match(/window\\.__PRELOADED_STATE__\\s*=\\s*(\\{.+?\\});\\s*(?:<|window|$)/s);
       if (match) {
-        const state = JSON.parse(match[1]);
-        // Navigate Redux state tree to find listings
-        const listings = state?.search?.searchResults ||
-                         state?.closet?.listings ||
-                         state?.listing?.listings ||
-                         (state?.data ? Object.values(state.data).filter(v => v?.title && v?.price_amount) : []) ||
-                         [];
-        
-        const listArr = Array.isArray(listings) ? listings : Object.values(listings);
-        
-        listArr.forEach(listing => {
-          if (!listing.title) return;
-          const price = listing.price_amount?.val || listing.sold_price || listing.price || 0;
-          const priceNum = typeof price === 'string' ? parseFloat(price.replace(/[^0-9.]/g, '')) : price;
-          if (priceNum === 0) return;
+        try {
+          const state = JSON.parse(match[1]);
+          // Navigate Redux state tree to find listings
+          const listings = state?.search?.searchResults ||
+                           state?.closet?.listings ||
+                           state?.listing?.listings ||
+                           (state?.data ? Object.values(state.data).filter(v => v?.title && v?.price_amount) : []) ||
+                           [];
           
-          items.push({
-            title: listing.title || '',
-            price: priceNum,
-            priceText: '$' + priceNum.toFixed(2),
-            soldDate: listing.sold_at || listing.updated_at || '',
-            condition: listing.condition || '',
-            seller: listing.creator_username || '',
-            url: listing.id ? ('https://poshmark.com/listing/' + listing.id) : '',
-            source: 'poshmark',
+          const listArr = Array.isArray(listings) ? listings : Object.values(listings || {});
+          
+          listArr.forEach(listing => {
+            if (!listing || !listing.title) return;
+            const price = listing.price_amount?.val || listing.sold_price || listing.price || 0;
+            const priceNum = typeof price === 'string' ? parseFloat(price.replace(/[^0-9.]/g, '')) : price;
+            if (priceNum === 0) return;
+            
+            items.push({
+              title: listing.title || '',
+              price: priceNum,
+              priceText: '$' + priceNum.toFixed(2),
+              soldDate: listing.sold_at || listing.updated_at || '',
+              condition: listing.condition || '',
+              seller: listing.creator_username || '',
+              url: listing.id ? ('https://poshmark.com/listing/' + listing.id) : '',
+              source: 'poshmark',
+            });
           });
-        });
-        if (items.length > 0) return items.slice(0, 25);
+          if (items.length > 0) return items.slice(0, 25);
+        } catch {}
       }
     }
   } catch {}
@@ -254,30 +260,33 @@ export const SWAPPA_EXTRACTOR = `
       const text = script.textContent || '';
       const match = text.match(/window\\.__PRELOADED_STATE__\\s*=\\s*(\\{.+?\\});\\s*(?:<|window|$)/s);
       if (match) {
-        const state = JSON.parse(match[1]);
-        // Navigate to listings/pricing data in Redux tree
-        const listings = state?.search?.results ||
-                         state?.listings?.items ||
-                         state?.catalog?.listings ||
-                         [];
-        
-        const listArr = Array.isArray(listings) ? listings : Object.values(listings);
-        
-        listArr.forEach(item => {
-          const price = item.price || item.asking_price || 0;
-          const priceNum = typeof price === 'string' ? parseFloat(price.replace(/[^0-9.]/g, '')) : price;
-          if (priceNum === 0 || !item.title) return;
+        try {
+          const state = JSON.parse(match[1]);
+          // Navigate to listings/pricing data in Redux tree
+          const listings = state?.search?.results ||
+                           state?.listings?.items ||
+                           state?.catalog?.listings ||
+                           [];
           
-          items.push({
-            title: item.title || item.device_name || '',
-            price: priceNum,
-            priceText: '$' + priceNum.toFixed(2),
-            condition: item.condition || item.condition_name || '',
-            url: item.url || item.listing_url ? ('https://swappa.com' + (item.url || item.listing_url)) : '',
-            source: 'swappa',
+          const listArr = Array.isArray(listings) ? listings : Object.values(listings || {});
+          
+          listArr.forEach(item => {
+            if (!item) return;
+            const price = item.price || item.asking_price || 0;
+            const priceNum = typeof price === 'string' ? parseFloat(price.replace(/[^0-9.]/g, '')) : price;
+            if (priceNum === 0 || !item.title) return;
+            
+            items.push({
+              title: item.title || item.device_name || '',
+              price: priceNum,
+              priceText: '$' + priceNum.toFixed(2),
+              condition: item.condition || item.condition_name || '',
+              url: (item.url || item.listing_url) ? ('https://swappa.com' + (item.url || item.listing_url)) : '',
+              source: 'swappa',
+            });
           });
-        });
-        if (items.length > 0) return items.slice(0, 25);
+          if (items.length > 0) return items.slice(0, 25);
+        } catch {}
       }
     }
   } catch {}
@@ -329,30 +338,35 @@ export const MERCARI_SOLD_EXTRACTOR = `
   try {
     const ndEl = document.getElementById('__NEXT_DATA__');
     if (ndEl) {
-      const nd = JSON.parse(ndEl.textContent);
-      const results = nd?.props?.pageProps?.searchResults ||
-                      nd?.props?.pageProps?.items ||
-                      nd?.props?.pageProps?.data?.search?.itemsList ||
-                      [];
-      
-      results.forEach(item => {
-        const price = item.price || item.currentPrice || 0;
-        const priceNum = typeof price === 'string' ? parseFloat(price.replace(/[^0-9.]/g, '')) : price;
-        if (priceNum === 0 || !item.name) return;
+      try {
+        const nd = JSON.parse(ndEl.textContent);
+        const results = nd?.props?.pageProps?.searchResults ||
+                        nd?.props?.pageProps?.items ||
+                        nd?.props?.pageProps?.data?.search?.itemsList ||
+                        [];
         
-        items.push({
-          title: item.name || item.itemName || '',
-          price: priceNum,
-          priceText: '$' + priceNum.toFixed(2),
-          soldDate: item.updated || item.sold_at || '',
-          url: item.id ? ('https://www.mercari.com/item/' + item.id + '/') : '',
-          source: 'mercari',
+        const resArr = Array.isArray(results) ? results : Object.values(results || {});
+
+        resArr.forEach(item => {
+          if (!item) return;
+          const price = item.price || item.currentPrice || 0;
+          const priceNum = typeof price === 'string' ? parseFloat(price.replace(/[^0-9.]/g, '')) : price;
+          if (priceNum === 0 || !item.name) return;
+          
+          items.push({
+            title: item.name || item.itemName || '',
+            price: priceNum,
+            priceText: '$' + priceNum.toFixed(2),
+            soldDate: item.updated || item.sold_at || '',
+            url: item.id ? ('https://www.mercari.com/item/' + item.id + '/') : '',
+            source: 'mercari',
+          });
         });
-      });
-      if (items.length > 0) {
-        const seen = new Set();
-        return items.filter(i => { if (seen.has(i.url)) return false; seen.add(i.url); return true; }).slice(0, 20);
-      }
+        if (items.length > 0) {
+          const seen = new Set();
+          return items.filter(i => { if (seen.has(i.url)) return false; seen.add(i.url); return true; }).slice(0, 20);
+        }
+      } catch {}
     }
   } catch {}
 

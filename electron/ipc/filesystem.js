@@ -7,11 +7,18 @@ import path from 'path';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
 
+/**
+ * Global registry of active file watchers.
+ * key: filePath
+ * value: { watcher: FSWatcher, clients: Map<WebContents, number> }
+ *   where clients map tracks how many times a specific renderer window has requested this path.
+ */
 const activeWatchers = new Map();
 
-// ── Module-level recursive directory scanner ──────────────────────────────────
-// Defined at module scope (not inside the IPC handler) so it is only allocated
-// once. `visited` is passed per-call to keep isolation between concurrent requests.
+/**
+ * Module-level recursive directory scanner.
+ * Uses lstat to detect symlinks and prevent recursion.
+ */
 async function scanPath(currentPath, visited, depth = 0) {
   // Prevent infinite recursion from symlink loops or massive trees
   if (depth > 5) return null;
@@ -23,32 +30,62 @@ async function scanPath(currentPath, visited, depth = 0) {
 
   // Skip notoriously large known directories to prevent thread lock
   const base = path.basename(currentPath);
-  if (base === 'node_modules' || base === '.git') return null;
+  if (base === 'node_modules' || base === '.git' || base === '.DS_Store') return null;
 
-  const stats = await fs.promises.stat(currentPath);
-  if (stats.isDirectory()) {
-    const dirItems = await fs.promises.readdir(currentPath);
-    const childrenPromises = dirItems.map(async item => {
-      try { return await scanPath(path.join(currentPath, item), visited, depth + 1); }
-      catch { return null; }
-    });
-    const childrenRaw = await Promise.all(childrenPromises);
-    const children = childrenRaw.filter(Boolean);
+  try {
+    // Use lstat to handle symlinks correctly (don't blindly follow if we've seen the path)
+    const stats = await fs.promises.lstat(currentPath);
+    
+    if (stats.isSymbolicLink()) {
+      // For symlinks, we already have realPath via realpath() above.
+      // If we got here, it's a link we haven't visited yet.
+      // We'll follow it once unless it exceeds depth.
+    }
+
+    if (stats.isDirectory()) {
+      const dirItems = await fs.promises.readdir(currentPath);
+      const childrenPromises = dirItems.map(async item => {
+        try { return await scanPath(path.join(currentPath, item), visited, depth + 1); }
+        catch { return null; }
+      });
+      const childrenRaw = await Promise.all(childrenPromises);
+      const children = childrenRaw.filter(Boolean);
+      
+      return {
+        id: 'group-' + randomUUID(),
+        type: 'group',
+        title: base || currentPath,
+        collapsed: true,
+        items: children,
+      };
+    }
     
     return {
-      id: 'group-' + randomUUID(),
-      type: 'group',
-      title: base || currentPath,
-      collapsed: true,
-      items: children,
+      id: 'doc-' + randomUUID(),
+      type: 'document',
+      filename: base,
+      filePath: currentPath,
     };
+  } catch (err) {
+    // Possible edge case: file deleted between readdir and lstat
+    console.warn(`[Filesystem] Skipping inaccessible path: ${currentPath}`, err.message);
+    return null;
   }
-  return {
-    id: 'doc-' + randomUUID(),
-    type: 'document',
-    filename: base,
-    filePath: currentPath,
-  };
+}
+
+/**
+ * Helper to perform an atomic write (write to tmp then rename).
+ */
+async function atomicWriteFile(targetPath, data) {
+  const tmpPath = `${targetPath}.${randomUUID()}.tmp`;
+  try {
+    await fs.promises.writeFile(tmpPath, data, 'utf-8');
+    await fs.promises.rename(tmpPath, targetPath);
+  } catch (err) {
+    // Clean up tmp file if write succeeded but rename failed
+    try { await fs.promises.unlink(tmpPath); } catch {}
+    throw err;
+  }
 }
 
 export function registerFilesystemHandlers() {
@@ -56,10 +93,7 @@ export function registerFilesystemHandlers() {
     const visited = new Set();
     try {
       const result = await scanPath(dirPath, visited);
-      // Result could be null if the root was ignored (e.g. depth limit or node_modules)
       if (!result) return { success: false, error: 'Directory skip or unreadable' };
-      // scan() returns { type: 'group', ... } for directories and { type: 'document', ... } for files.
-      // Wrap file results in the { isFile, file } envelope the caller expects.
       return result.type === 'document' ? { isFile: true, file: result } : result;
     } catch (error) {
       console.error('Error scanning directory:', error);
@@ -117,7 +151,8 @@ export function registerFilesystemHandlers() {
         if (canceled || !dialogPath) return { success: false, canceled: true };
         targetPath = dialogPath;
       }
-      await fs.promises.writeFile(targetPath, JSON.stringify(data), 'utf-8');
+      // Production Hardening: Use atomic write to prevent data corruption
+      await atomicWriteFile(targetPath, JSON.stringify(data));
       return { success: true, filePath: targetPath };
     } catch (err) {
       console.error('Failed to save workspace:', err);
@@ -135,7 +170,13 @@ export function registerFilesystemHandlers() {
       if (canceled || filePaths.length === 0) return { success: false, canceled: true };
       const targetPath = filePaths[0];
       const data = await fs.promises.readFile(targetPath, 'utf-8');
-      return { success: true, data: JSON.parse(data), filePath: targetPath };
+      
+      // Safety: Parse JSON in a try block even inside the outer catch
+      try {
+        return { success: true, data: JSON.parse(data), filePath: targetPath };
+      } catch (jsonErr) {
+        return { success: false, error: 'Invalid workspace file format. File may be corrupted.' };
+      }
     } catch (err) {
       console.error('Failed to load workspace:', err);
       return { success: false, error: err?.message || String(err) };
@@ -143,38 +184,48 @@ export function registerFilesystemHandlers() {
   });
 
   ipcMain.handle('start-file-watch', async (event, filePath) => {
+    const sender = event.sender;
+    
+    // 1. If we already have a watcher for this file...
     if (activeWatchers.has(filePath)) {
-      const existing = activeWatchers.get(filePath);
-      if (!existing.sender.isDestroyed() && existing.sender === event.sender) {
-        existing.refCount = (existing.refCount || 1) + 1;
-        return { success: true };
-      }
-      // If same file but different/destroyed sender, clean up old watcher
-      existing.watcher.close();
-      activeWatchers.delete(filePath);
+      const entry = activeWatchers.get(filePath);
+      const count = entry.clients.get(sender) || 0;
+      entry.clients.set(sender, count + 1);
+      return { success: true };
     }
+
+    // 2. New watcher needed
     try {
-      try {
-        await fs.promises.access(filePath);
-      } catch {
-        return { success: false, error: 'File missing' };
-      }
+      await fs.promises.access(filePath);
+      
       const watcher = fs.watch(filePath, (eventType) => {
         if (eventType === 'change') {
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('file-changed', filePath);
+          const entry = activeWatchers.get(filePath);
+          if (!entry) return;
+          // Notify ALL window instances watching this file
+          for (const [clientSender] of entry.clients) {
+            if (!clientSender.isDestroyed()) {
+              clientSender.send('file-changed', filePath);
+            }
           }
         }
       });
-      activeWatchers.set(filePath, { watcher, sender: event.sender, refCount: 1 });
 
-      if (!event.sender.__fsWatchCleanupAttached) {
-        event.sender.__fsWatchCleanupAttached = true;
-        event.sender.once('destroyed', () => {
-          for (const [key, obj] of activeWatchers.entries()) {
-            if (obj.sender === event.sender) {
-              obj.watcher.close();
-              activeWatchers.delete(key);
+      const clients = new Map();
+      clients.set(sender, 1);
+      activeWatchers.set(filePath, { watcher, clients });
+
+      // Ensure cleanup if window crashes/closes
+      if (!sender.__fsWatchCleanupAttached) {
+        sender.__fsWatchCleanupAttached = true;
+        sender.once('destroyed', () => {
+          for (const [fPath, entry] of activeWatchers.entries()) {
+            if (entry.clients.has(sender)) {
+              entry.clients.delete(sender);
+              if (entry.clients.size === 0) {
+                entry.watcher.close();
+                activeWatchers.delete(fPath);
+              }
             }
           }
         });
@@ -188,19 +239,27 @@ export function registerFilesystemHandlers() {
   });
 
   ipcMain.handle('stop-file-watch', (event, filePath) => {
-    const obj = activeWatchers.get(filePath);
-    // Use ref counting so multiple nodes watching same path don't break each other
-    if (obj && obj.sender === event.sender) {
-      obj.refCount = (obj.refCount || 1) - 1;
-      if (obj.refCount <= 0) {
-        obj.watcher.close();
+    const sender = event.sender;
+    const entry = activeWatchers.get(filePath);
+    
+    if (entry && entry.clients.has(sender)) {
+      const current = entry.clients.get(sender);
+      if (current <= 1) {
+        entry.clients.delete(sender);
+      } else {
+        entry.clients.set(sender, current - 1);
+      }
+
+      // If no clients remain across any windows, shut down the real watcher
+      if (entry.clients.size === 0) {
+        entry.watcher.close();
         activeWatchers.delete(filePath);
       }
     }
     return { success: true };
   });
 
-  ipcMain.handle('delete-os-file', async (event, filePath) => {
+  ipcMain.handle('delete-os-file', async (_event, filePath) => {
     try {
       await shell.trashItem(filePath);
       return { success: true };

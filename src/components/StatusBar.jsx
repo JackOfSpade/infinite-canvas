@@ -1,11 +1,14 @@
 import React from 'react';
-import { useViewport } from '@xyflow/react';
+import { useStore } from '@xyflow/react';
+
+const zoomSelector = (s) => s.transform[2];
 
 /**
  * Minimal status bar showing only the current zoom level.
+ * Optimized via useStore selector to avoid re-rendering 60 times a second during panning.
  */
 export const StatusBar = React.memo(function StatusBar() {
-  const { zoom } = useViewport();
+  const zoom = useStore(zoomSelector);
   const zoomPercent = Math.round(zoom * 100);
 
   return (

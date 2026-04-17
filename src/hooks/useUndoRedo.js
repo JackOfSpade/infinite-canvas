@@ -15,16 +15,23 @@ function matchesShortcut(e, binding) {
 
 /** Stable, pure snapshot fingerprint — no hook needed. */
 function fingerprint(snap) {
-  const n = snap.nodes;
-  const e = snap.edges;
+  if (!snap || !snap.nodes) return '';
+  const n = snap.nodes || [];
+  const e = snap.edges || [];
+  const d = snap.drawings || [];
   return JSON.stringify({
-    n: n.map(x => ({ id: x.id, x: x.position?.x, y: x.position?.y, d: x.data, s: x.style })),
+    n: n.map(x => {
+      // Optimization: skip heavy recursive canvasData for groups in the fingerprint.
+      // Changes inside groups are managed by their own local undo/redo stacks.
+      const data = x.type === 'group' ? { ...x.data, canvasData: undefined } : x.data;
+      return { id: x.id, x: x.position?.x, y: x.position?.y, t: x.type, d: data, s: x.style };
+    }),
     e: e.map(x => ({ id: x.id, s: x.source, t: x.target })),
-    dl: snap.drawings.map(d => {
-      const pts   = Array.isArray(d) ? d : d.points || [];
+    dl: d.map(x => {
+      const pts   = Array.isArray(x) ? x : x.points || [];
       const first = pts[0];
       const last  = pts[pts.length - 1];
-      return { c: d.color, pl: pts.length, f: first && [first.x, first.y], l: last && [last.x, last.y] };
+      return { c: x.color, pl: pts.length, f: first && [first.x, first.y], l: last && [last.x, last.y] };
     }),
   });
 }
@@ -45,6 +52,12 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
   const isRestoringRef     = useRef(false);
   const debounceTimerRef   = useRef(null);
   const lastFingerprintRef = useRef(null);
+
+  const isMountedRef       = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   const [historyLens, setHistoryLens] = useState({ past: 0, future: 0 });
   const [isStateDirty, setIsStateDirty] = useState(false);
@@ -88,9 +101,15 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
   //
   // PERFORMANCE FIX: We avoid running `fingerprint` (a heavy JSON.stringify) on
   // every 60fps drag tick by tracking `isStateDirty` and fast-returning if there's
-  // no future array to clear.
+  // no future array to clear OR if an interaction is actively happening.
   useEffect(() => {
     if (isRestoringRef.current) return;
+
+    // ── NEW PERFORMANCE GUARD ────────────────────────────────────────────────
+    // If we're in the middle of a high-frequency interaction (drag, draw, etc.)
+    // skip the full fingerprinting. We'll catch the final state via the 
+    // debounced takeSnapshot once the interaction settles.
+    if (isInteractionRef?.current) return;
 
     // Fast path: if state is already known to be dirty and we don't have future to clear, skip fingerprinting!
     if (isStateDirty && futureRef.current.length === 0) return;
@@ -114,7 +133,10 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
   useEffect(() => {
     if (isRestoringRef.current) return;
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-    debounceTimerRef.current = setTimeout(() => { takeSnapshot(); }, 500);
+    debounceTimerRef.current = setTimeout(() => { 
+      if (!isMountedRef.current) return;
+      takeSnapshot(); 
+    }, 500);
     return () => { if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current); };
   }, [nodes, edges, drawings, takeSnapshot]);
 

@@ -99,19 +99,13 @@ async function callGemini(parts, genConfig = {}) {
  * Handles both ```json and bare ``` wrappers.
  */
 function parseGeminiJSON(raw) {
+  if (!raw) return null;
   try {
-    let cleaned = raw.trim();
-    // Safely extract the JSON block if wrapped in markdown
-    const match = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (match) {
-      cleaned = match[1];
-    } else {
-      // Fallback for partial markers or no markdown
-      cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-    }
-    return JSON.parse(cleaned.trim());
-  } catch (error) {
-    throw new Error(`Failed to parse Gemini JSON output: ${error.message}. Received: ${raw.substring(0, 500)}`);
+    const clean = raw.replace(/```json/g, '').replace(/```/g, '').trim();
+    return JSON.parse(clean);
+  } catch (e) {
+    console.error('[Gemini] JSON Parse Failure:', e.message);
+    return null;
   }
 }
 
@@ -165,15 +159,16 @@ export async function callGeminiVision(imagePaths, prompt) {
  * @returns {Promise<object>} — Parsed JSON response
  */
 export async function callGeminiDocument(filePath, prompt) {
-  const buffer = await fs.promises.readFile(filePath);
   const ext = path.extname(filePath).toLowerCase();
   const mimeType = DOCUMENT_MIME_MAP[ext];
 
   if (!mimeType) {
-    // Fall back to treating as an image (screenshot of a resume)
+    // Fall back to treating as an image (e.g. screenshot of a resume).
+    // callGeminiVision will handle its own file reading.
     return callGeminiVision([filePath], prompt);
   }
 
+  const buffer = await fs.promises.readFile(filePath);
   const parts = [
     { inlineData: { mimeType, data: buffer.toString('base64') } },
     { text: prompt },

@@ -1,6 +1,12 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 
 export function useCanvasOSDeletion({ requestConfirm }) {
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+
   const onNodesDelete = useCallback((deletedNodes) => {
     const documentNodes = deletedNodes.filter(n => n.type === 'document' && n.data?.filePath);
     if (documentNodes.length > 0 && window.electronAPI) {
@@ -12,6 +18,7 @@ export function useCanvasOSDeletion({ requestConfirm }) {
         variant: 'warning',
         onConfirm: async () => {
           for (const node of documentNodes) {
+            if (!isMountedRef.current) break;
             try {
               await window.electronAPI.deleteOSFile(node.data.filePath);
             } catch (err) {

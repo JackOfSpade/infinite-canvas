@@ -18,7 +18,10 @@ const BG_OPTIONS = [
   { key: 'none',  label: 'None' },
 ];
 
-const isMac = navigator.platform?.includes('Mac');
+const isMac = (() => {
+  const p = navigator.userAgentData?.platform ?? navigator.platform ?? '';
+  return p.toLowerCase().includes('mac');
+})();
 
 /** Format a shortcut binding into a human-readable string like ⌘⇧Z */
 function formatBinding(binding) {

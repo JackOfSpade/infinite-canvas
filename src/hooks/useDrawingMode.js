@@ -111,9 +111,6 @@ export function useDrawingMode({
   activeTool,
   eraserType,
   eraserSize = 15,
-  currentStroke,
-  setCurrentStroke,
-  setMousePos,
   setDrawings,
   setNodes,
   setEdges,
@@ -122,9 +119,12 @@ export function useDrawingMode({
   penSize = 3,
   getIntersectingNodes,
   isAnimatingRef,
+  cursorsRef,
+  drawingLayerRef,
 }) {
   const { screenToFlowPosition, getViewport } = useReactFlow();
   const isErasingRef = useRef(false);
+  const currentStrokeRef = useRef(null);
 
   const handleEraser = useCallback((e) => {
     if (isAnimatingRef?.current) return;
@@ -188,14 +188,16 @@ export function useDrawingMode({
       return;
     }
     if (activeTool === 'pen') {
-      setCurrentStroke([screenToFlowPosition({ x: e.clientX, y: e.clientY })]);
+      const newStroke = [screenToFlowPosition({ x: e.clientX, y: e.clientY })];
+      currentStrokeRef.current = newStroke;
+      drawingLayerRef.current?.updateCurrentStroke(newStroke);
     }
   }, [placementMode, activeTool, screenToFlowPosition, takeSnapshot,
-      setNodes, setPlacementMode, setCurrentStroke, handleEraser]);
+      setNodes, setPlacementMode, handleEraser, drawingLayerRef]);
 
   const handlePointerMove = useCallback((e) => {
     if (placementMode) {
-      setMousePos({ x: e.clientX, y: e.clientY });
+      cursorsRef.current?.updateMouse({ x: e.clientX, y: e.clientY });
     }
 
     if (isAnimatingRef?.current) return;
@@ -204,11 +206,11 @@ export function useDrawingMode({
       handleEraser(e);
       return;
     }
-    if (activeTool === 'pen' && currentStroke) {
-      setCurrentStroke(prev => [...prev, screenToFlowPosition({ x: e.clientX, y: e.clientY })]);
+    if (activeTool === 'pen' && currentStrokeRef.current) {
+      currentStrokeRef.current.push(screenToFlowPosition({ x: e.clientX, y: e.clientY }));
+      drawingLayerRef.current?.updateCurrentStroke([...currentStrokeRef.current]);
     }
-  }, [placementMode, activeTool, currentStroke, screenToFlowPosition,
-      setMousePos, setCurrentStroke, handleEraser, isAnimatingRef]);
+  }, [placementMode, activeTool, screenToFlowPosition, cursorsRef, drawingLayerRef, handleEraser, isAnimatingRef]);
 
   const handlePointerUp = useCallback(() => {
     if (placementMode) return;
@@ -216,22 +218,25 @@ export function useDrawingMode({
       isErasingRef.current = false;
       return;
     }
-    if (activeTool === 'pen' && currentStroke?.length > 1) {
+    if (activeTool === 'pen' && currentStrokeRef.current?.length > 1) {
       if (!isAnimatingRef?.current) {
         takeSnapshot();
-        setDrawings(prev => [...prev, { points: currentStroke, color: activeColor, penSize }]);
+        setDrawings(prev => [...prev, { points: currentStrokeRef.current, color: activeColor, penSize }]);
       }
     }
-    setCurrentStroke(null);
-  }, [placementMode, activeTool, currentStroke, takeSnapshot,
-      setDrawings, setCurrentStroke, activeColor, penSize, isAnimatingRef]);
+    currentStrokeRef.current = null;
+    drawingLayerRef.current?.clearCurrentStroke();
+  }, [placementMode, activeTool, takeSnapshot, setDrawings, activeColor, penSize, isAnimatingRef, drawingLayerRef]);
 
   useEffect(() => {
-    if (!placementMode) return;
+    if (!placementMode) {
+      cursorsRef.current?.updateMouse({ x: 0, y: 0 });
+      return;
+    }
     const onKey = (e) => { if (e.key === 'Escape') setPlacementMode(null); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [placementMode, setPlacementMode]);
+  }, [placementMode, setPlacementMode, cursorsRef]);
 
   return { handlePointerDown, handlePointerMove, handlePointerUp };
 }

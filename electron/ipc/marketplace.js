@@ -31,19 +31,19 @@ function buildCompTasks(query) {
   return [
     // Tier 1 — Sold comps (gold standard)
     {
-      id: 'ebay-sold',   category: 'sold',
+      id: 'ebay-sold', category: 'sold',
       url: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Complete=1&LH_Sold=1&_sop=13`,
       extractorJS: EBAY_SOLD_EXTRACTOR,
       options: EBAY_SOLD_CONFIG,
     },
     {
-      id: 'poshmark',    category: 'sold',
+      id: 'poshmark', category: 'sold',
       url: `https://poshmark.com/search?query=${encodeURIComponent(query)}&availability=sold_out&type=listings`,
       extractorJS: POSHMARK_SOLD_EXTRACTOR,
       options: POSHMARK_CONFIG,
     },
     {
-      id: 'swappa',      category: 'sold',
+      id: 'swappa', category: 'sold',
       url: `https://swappa.com/search?q=${encodeURIComponent(query)}`,
       extractorJS: SWAPPA_EXTRACTOR,
       options: SWAPPA_CONFIG,
@@ -57,7 +57,7 @@ function buildCompTasks(query) {
     },
     // Tier 2 — Supplementary sold (Mercari: use %20 not + for cleaner sold results)
     {
-      id: 'mercari',     category: 'sold',
+      id: 'mercari', category: 'sold',
       url: `https://www.mercari.com/search/?keyword=${query.replace(/\s+/g, '%20')}&status=sold_out`,
       extractorJS: MERCARI_SOLD_EXTRACTOR,
       options: MERCARI_CONFIG,
@@ -78,8 +78,8 @@ function buildTaskCategoryMap(tasks) {
  */
 async function fetchApiMarketplaceSources(query) {
   const apiTasks = [
-    { sourceId: 'reverb',  fn: () => fetchReverbListings(query, true) },
-    { sourceId: 'stockx',  fn: () => fetchStockXListings(query) },
+    { sourceId: 'reverb', fn: () => fetchReverbListings(query, true) },
+    { sourceId: 'stockx', fn: () => fetchStockXListings(query) },
   ];
 
   return Promise.all(apiTasks.map(async ({ sourceId, fn }) => {
@@ -101,7 +101,7 @@ export function registerMarketplaceHandlers() {
   ipcMain.handle('analyze-photos', async (_event, { imagePaths }) => {
     try {
       console.log('[Marketplace] Analyzing', imagePaths.length, 'photos');
-      
+
       const result = await callGeminiVision(imagePaths, `
 You are a marketplace listing expert. Analyze these product photos and identify what is being sold.
 
@@ -150,7 +150,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
             if (!event.sender.isDestroyed()) {
               event.sender.send('price-source-progress', {
                 sourceId: task.id,
-                status: items.length > 0 ? 'done' : 'error',
+                status: 'done',
                 count: items.length,
               });
             }

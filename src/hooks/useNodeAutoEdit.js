@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useReactFlow, useStoreApi } from '@xyflow/react';
 
 /**
@@ -15,6 +15,12 @@ export function useNodeAutoEdit(id, isNew, isEmptyPredicate, inputRef) {
   const { updateNodeData, setNodes, setViewport } = useReactFlow();
   const store = useStoreApi();
   const hasFocusedRef = useRef(false);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   // Auto-edit on initial placement
   useEffect(() => {
@@ -32,15 +38,16 @@ export function useNodeAutoEdit(id, isNew, isEmptyPredicate, inputRef) {
           const savedViewport = { x: transform[0], y: transform[1], zoom: transform[2] };
 
           if (typeof inputRef.current.select === 'function') {
-             inputRef.current.select();
+            inputRef.current.select();
           }
           if (inputRef.current.isContentEditable) {
-             inputRef.current.innerText = '';
+            inputRef.current.innerText = '';
           }
           inputRef.current.focus({ preventScroll: true });
 
           // Restore viewport immediately after focus to undo any shift
           rafId = requestAnimationFrame(() => {
+            if (!isMountedRef.current) return;
             setViewport(savedViewport);
           });
         }

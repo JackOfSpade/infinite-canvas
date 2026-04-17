@@ -12,6 +12,7 @@ import { createTextNode, NODE_FACTORIES } from './utils/nodeFactory';
 import { Sidebar } from './components/Sidebar';
 import { ContextMenu } from './components/ContextMenu';
 import { CanvasToolbar, NestedCanvasIcon } from './components/CanvasToolbar';
+import { CanvasCursors } from './components/CanvasCursors';
 import { CustomMiniMap } from './components/CustomMiniMap';
 import { SearchBar } from './components/SearchBar';
 import { OnboardingOverlay } from './components/OnboardingOverlay';
@@ -55,6 +56,8 @@ const IS_MAC = (() => {
 // ── Canvas ───────────────────────────────────────────────────────────────────
 export function Canvas() {
   const reactFlowWrapper = useRef(null);
+  const cursorsRef = useRef(null);
+  const drawingLayerRef = useRef(null);
   const [nodes, setNodes, onNodesChangeBase] = useNodesState([]);
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState([]);
   const [drawings, setDrawings] = useState([]);
@@ -173,10 +176,6 @@ export function Canvas() {
   // ── Canvas interactions ──────────────────────────────────────────────────
   const [activeTool, setActiveTool] = useState(null); // 'pen' | 'eraser' | null
   const [eraserType, setEraserType] = useState('object'); // 'object' | 'pixel'
-  const [currentStroke, setCurrentStroke] = useState(null);
-  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
-  // Raw screen position for the eraser cursor overlay (updated on every pointermove)
-  const [eraserScreenPos, setEraserScreenPos] = useState({ x: -999, y: -999 });
   const [placementMode, setPlacementMode] = useState(null);
   const [snapToGrid, setSnapToGrid] = useState(false);
   // bgVariant, showMiniMap, penSize and eraserSize are persisted in settings
@@ -192,11 +191,12 @@ export function Canvas() {
   const { screenToFlowPosition, getIntersectingNodes, getNode, setViewport, getViewport } = useReactFlow();
 
   // Custom pointer-drag for Nested Canvas button (bypasses HTML5 drag so ghost matches click-place ghost)
-  const { nestedDragPos, onNestedCanvasDragStart } = useNestedCanvasDrag({
+  const { onNestedCanvasDragStart } = useNestedCanvasDrag({
     isAnimatingRef: isNavigationAnimatingRef,
     screenToFlowPosition,
     takeSnapshot,
-    setNodes
+    setNodes,
+    cursorsRef,
   });
 
   const handlePaneDoubleClick = useCallback((e) => {
@@ -248,9 +248,10 @@ export function Canvas() {
   });
 
   const { handlePointerDown, handlePointerMove, handlePointerUp } = useDrawingMode({
-    placementMode, setPlacementMode, activeTool, eraserType, eraserSize, currentStroke, setCurrentStroke,
-    setMousePos, setDrawings, setNodes, setEdges, takeSnapshot, activeColor,
-    penSize, getIntersectingNodes, isAnimatingRef: isNavigationAnimatingRef
+    placementMode, setPlacementMode, activeTool, eraserType, eraserSize,
+    setDrawings, setNodes, setEdges, takeSnapshot, activeColor,
+    penSize, getIntersectingNodes, isAnimatingRef: isNavigationAnimatingRef,
+    cursorsRef, drawingLayerRef
   });
 
   const interactiveDisabled = !!activeTool || !!placementMode || navigation.isAnimating;
@@ -302,10 +303,12 @@ export function Canvas() {
   // ── Animation overlay style ──────────────────────────────────────────────
   const animDuration = getAnimationDuration();
 
+  const handleReportBugClick = useCallback(() => setIsIssueReporterOpen(true), []);
+
   // ── Render ───────────────────────────────────────────────────────────────
   return (
     <div className="w-screen h-screen bg-neutral-950 flex" ref={reactFlowWrapper}>
-      <Sidebar nodes={nodes} onReportBugClick={() => setIsIssueReporterOpen(true)} />
+      <Sidebar nodes={nodes} onReportBugClick={handleReportBugClick} />
 
       <div
         className="flex-1 h-full relative"
@@ -318,47 +321,23 @@ export function Canvas() {
         onPointerMove={(e) => {
           handlePointerMove(e);
           if (activeTool === 'eraser') {
-            setEraserScreenPos({ x: e.clientX, y: e.clientY });
+            cursorsRef.current?.updateMouse({ x: e.clientX, y: e.clientY });
           }
         }}
         onPointerUp={handlePointerUp}
         onPointerLeave={(e) => {
           handlePointerUp(e);
-          setEraserScreenPos({ x: -999, y: -999 });
+          cursorsRef.current?.updateMouse({ x: -999, y: -999 });
         }}
       >
         <SearchBar />
 
-        {/* Eraser cursor — pixel-perfect circle showing the erase radius.
-            eraserSize is used directly as screen pixels — "good enough" because the user
-            sets the size they see on screen; the drawing hook converts to flow coords. */}
-        {activeTool === 'eraser' && eraserScreenPos.x > 0 && (
-          <div
-            className="fixed pointer-events-none z-[9998]"
-            style={{
-              left:   eraserScreenPos.x - eraserSize,
-              top:    eraserScreenPos.y - eraserSize,
-              width:  eraserSize * 2,
-              height: eraserSize * 2,
-              borderRadius: '50%',
-              border: '1.5px solid rgba(255,255,255,0.7)',
-              boxShadow: '0 0 0 1px rgba(0,0,0,0.5)',
-              background: 'rgba(255,255,255,0.04)',
-            }}
-          />
-        )}
-
-        {/* Nested canvas drag ghost — identical to the click-place ghost */}
-        {nestedDragPos && (
-          <div
-            className="fixed pointer-events-none z-50 flex flex-col items-center"
-            style={{ left: nestedDragPos.x, top: nestedDragPos.y, transform: 'translate(-50%, -100%)' }}
-          >
-            <span className="text-blue-400 opacity-90 drop-shadow-lg">
-              <NestedCanvasIcon size={28} />
-            </span>
-          </div>
-        )}
+        <CanvasCursors
+          ref={cursorsRef}
+          eraserSize={eraserSize}
+          activeTool={activeTool}
+          placementMode={placementMode}
+        />
 
         {/* Canvas transition overlay */}
         {navigation.animPhase && (
@@ -407,22 +386,7 @@ export function Canvas() {
             multiSelectionKeyCode={interactiveDisabled ? null : ['Control', 'Meta']}
             defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
           >
-            {placementMode && (
-              <div
-                className="fixed pointer-events-none z-50 flex flex-col items-center"
-                style={{ left: mousePos.x, top: mousePos.y, transform: 'translate(-50%, -100%)' }}
-              >
-                {placementMode === 'text' && <span className="text-sm font-medium text-white/90">text</span>}
-                {placementMode === 'link' && <span className="text-sm font-medium text-blue-400">link</span>}
-                {placementMode === 'group' && (
-                  <span className="text-blue-400 opacity-90 drop-shadow-lg">
-                    <NestedCanvasIcon size={28} />
-                  </span>
-                )}
-              </div>
-            )}
-
-            <DrawingLayer drawings={drawings} currentStroke={currentStroke} activeColor={activeColor} penSize={penSize} />
+            <DrawingLayer ref={drawingLayerRef} drawings={drawings} activeColor={activeColor} penSize={penSize} />
             <EmptyCanvasHint nodeCount={nodes.length} drawingCount={drawings.length} />
             {bgVariant !== 'none' && <AlignedBackground variant={bgVariant} />}
 

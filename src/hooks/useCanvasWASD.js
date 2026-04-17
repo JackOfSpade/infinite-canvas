@@ -44,12 +44,18 @@ export function useCanvasWASD({ isAnimatingRef }) {
       if (k === 'shift') keys.shift = false;
     };
     
+    const onBlur = () => {
+      for (const k in keys) keys[k] = false;
+    };
+    
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup',   onKeyUp);
+    window.addEventListener('blur',    onBlur);
     
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup',   onKeyUp);
+      window.removeEventListener('blur',    onBlur);
       if (rafId) cancelAnimationFrame(rafId);
     };
   }, [getViewport, setViewport, isAnimatingRef]);

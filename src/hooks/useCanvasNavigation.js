@@ -75,11 +75,15 @@ export function useCanvasNavigation({
   const drawingsRef = useRef(drawings);
   const stackRef = useRef(stack);
   const isMountedRef = useRef(true);
+  const isNavigatingRef = useRef(false);
 
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
+      // Safety: ensure navigation flag is reset on unmount to prevent 
+      // stuck UI states if the component is yanked during a transition.
+      isNavigatingRef.current = false;
     };
   }, []);
 
@@ -103,7 +107,8 @@ export function useCanvasNavigation({
    * Dive into a nested canvas node.
    */
   const diveIn = useCallback((nodeId) => {
-    if (isAnimating) return;
+    if (isAnimating || isNavigatingRef.current) return;
+    isNavigatingRef.current = true;
 
     const node = reactFlow.getNode(nodeId);
     if (!node || node.type !== 'group') return;
@@ -160,6 +165,7 @@ export function useCanvasNavigation({
           if (!isMountedRef.current) return;
           setIsAnimating(false);
           setAnimPhase(null);
+          isNavigatingRef.current = false;
         }, halfDuration);
       });
     }, halfDuration);
@@ -172,7 +178,8 @@ export function useCanvasNavigation({
    */
   const jumpTo = useCallback((targetIndex) => {
     const currentStack = stackRef.current;
-    if (isAnimating || targetIndex >= currentStack.length) return;
+    if (isAnimating || isNavigatingRef.current || targetIndex >= currentStack.length) return;
+    isNavigatingRef.current = true;
 
     const halfDuration = getAnimationDuration() / 2;
     setIsAnimating(true);
@@ -201,6 +208,7 @@ export function useCanvasNavigation({
           if (!isMountedRef.current) return;
           setIsAnimating(false);
           setAnimPhase(null);
+          isNavigatingRef.current = false;
         }, halfDuration);
       });
     }, halfDuration);
@@ -246,14 +254,17 @@ export function useCanvasNavigation({
 
     // Inject into parent's saved state
     setStack(s => {
+      if (s.length === 0) return s; // Secondary check inside setter
+      
       const newStack = [...s];
       const parent = newStack[newStack.length - 1];
+      if (!parent) return s;
 
       // Place near the parent group container, offset by previous extractions to avoid stacking
       const parentContainer = parent.nodes.find(n => n.id === parent.nodeId);
-      const extractedCount = parent.nodes.length; // offset by total count to guarantee uniqueness
+      const extractedCount = parent.nodes.length;
       const posX = (parentContainer?.position.x || 0) + (extractedCount % 5) * 40;
-      const posY = (parentContainer?.position.y || 100) - 150; // offset slightly upward
+      const posY = (parentContainer?.position.y || 100) - 150;
 
       const newParentNodes = [
         ...parent.nodes,
