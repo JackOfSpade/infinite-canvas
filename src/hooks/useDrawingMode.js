@@ -99,7 +99,9 @@ function pixelEraseStroke(stroke, C, R, halfStroke = 0) {
     }
   }
 
-  if (current.length >= 2) result.push({ ...stroke, points: current });
+  const strokeId = stroke.id || `${Date.now()}-${Math.random()}`;
+
+  if (current.length >= 2) result.push({ ...stroke, id: `${strokeId}-${result.length}`, points: current });
   return result;
 }
 
@@ -121,6 +123,7 @@ export function useDrawingMode({
   isAnimatingRef,
   cursorsRef,
   drawingLayerRef,
+  isInteractionRef,
 }) {
   const { screenToFlowPosition, getViewport } = useReactFlow();
   const isErasingRef = useRef(false);
@@ -128,6 +131,7 @@ export function useDrawingMode({
 
   const handleEraser = useCallback((e) => {
     if (isAnimatingRef?.current) return;
+    if (isInteractionRef) isInteractionRef.current = true;
     const C     = screenToFlowPosition({ x: e.clientX, y: e.clientY });
     const { zoom } = getViewport();
     const R     = eraserSize / zoom;  // convert screen px → flow units
@@ -188,12 +192,13 @@ export function useDrawingMode({
       return;
     }
     if (activeTool === 'pen') {
+      if (isInteractionRef) isInteractionRef.current = true;
       const newStroke = [screenToFlowPosition({ x: e.clientX, y: e.clientY })];
       currentStrokeRef.current = newStroke;
       drawingLayerRef.current?.updateCurrentStroke(newStroke);
     }
   }, [placementMode, activeTool, screenToFlowPosition, takeSnapshot,
-      setNodes, setPlacementMode, handleEraser, drawingLayerRef]);
+      setNodes, setPlacementMode, handleEraser, drawingLayerRef, isInteractionRef]);
 
   const handlePointerMove = useCallback((e) => {
     if (placementMode) {
@@ -207,12 +212,21 @@ export function useDrawingMode({
       return;
     }
     if (activeTool === 'pen' && currentStrokeRef.current) {
-      currentStrokeRef.current.push(screenToFlowPosition({ x: e.clientX, y: e.clientY }));
-      drawingLayerRef.current?.updateCurrentStroke([...currentStrokeRef.current]);
+      const newPt = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      const lastPt = currentStrokeRef.current[currentStrokeRef.current.length - 1];
+      
+      // Only add point if it moved at least 1.5 units (flow space) 
+      // or if it's the second point (to ensure we have at least one segment)
+      const distSq = lastPt ? (sqr(newPt.x - lastPt.x) + sqr(newPt.y - lastPt.y)) : 100;
+      if (distSq > 2.25 || currentStrokeRef.current.length < 2) {
+        currentStrokeRef.current.push(newPt);
+        drawingLayerRef.current?.updateCurrentStroke([...currentStrokeRef.current]);
+      }
     }
   }, [placementMode, activeTool, screenToFlowPosition, cursorsRef, drawingLayerRef, handleEraser, isAnimatingRef]);
 
   const handlePointerUp = useCallback(() => {
+    if (isInteractionRef) isInteractionRef.current = false;
     if (placementMode) return;
     if (activeTool === 'eraser') {
       isErasingRef.current = false;
@@ -221,12 +235,17 @@ export function useDrawingMode({
     if (activeTool === 'pen' && currentStrokeRef.current?.length > 1) {
       if (!isAnimatingRef?.current) {
         takeSnapshot();
-        setDrawings(prev => [...prev, { points: currentStrokeRef.current, color: activeColor, penSize }]);
+        setDrawings(prev => [...prev, { 
+          id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+          points: currentStrokeRef.current, 
+          color: activeColor, 
+          penSize 
+        }]);
       }
     }
     currentStrokeRef.current = null;
     drawingLayerRef.current?.clearCurrentStroke();
-  }, [placementMode, activeTool, takeSnapshot, setDrawings, activeColor, penSize, isAnimatingRef, drawingLayerRef]);
+  }, [placementMode, activeTool, takeSnapshot, setDrawings, activeColor, penSize, isAnimatingRef, drawingLayerRef, isInteractionRef]);
 
   useEffect(() => {
     if (!placementMode) {

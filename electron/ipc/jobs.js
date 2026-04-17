@@ -72,19 +72,19 @@ function buildJobTasks(queries) {
  * Fetch API-based sources in parallel (no Puppeteer needed).
  * @returns {{ sourceId: string, jobs: object[], error?: string }[]}
  */
-async function fetchApiSources(queries, sender) {
+async function fetchApiSources(queries, sender, signal = null) {
   const firstQuery = queries[0] || '';
   const apiKey = process.env.USAJOBS_API_KEY || '';
   const email = process.env.USAJOBS_EMAIL || '';
 
   const apiTasks = [
-    { sourceId: 'linkedin',       fn: () => fetchLinkedInJobs(firstQuery) },
-    { sourceId: 'greenhouse',     fn: () => fetchGreenhouseJobs(firstQuery) },
-    { sourceId: 'lever',          fn: () => fetchLeverJobs(firstQuery) },
-    { sourceId: 'usajobs',        fn: () => fetchUSAJobs(firstQuery, apiKey, email) },
-    { sourceId: 'remoteok',       fn: () => fetchRemoteOKJobs(firstQuery) },
-    { sourceId: 'weworkremotely', fn: () => fetchWeWorkRemotelyJobs(firstQuery) },
-    { sourceId: 'dice',           fn: () => fetchDiceListings(firstQuery) },
+    { sourceId: 'linkedin',       fn: (s) => fetchLinkedInJobs(firstQuery, s) },
+    { sourceId: 'greenhouse',     fn: (s) => fetchGreenhouseJobs(firstQuery, s) },
+    { sourceId: 'lever',          fn: (s) => fetchLeverJobs(firstQuery, s) },
+    { sourceId: 'usajobs',        fn: (s) => fetchUSAJobs(firstQuery, apiKey, email, s) },
+    { sourceId: 'remoteok',       fn: (s) => fetchRemoteOKJobs(firstQuery, s) },
+    { sourceId: 'weworkremotely', fn: (s) => fetchWeWorkRemotelyJobs(firstQuery, s) },
+    { sourceId: 'dice',           fn: (s) => fetchDiceListings(firstQuery, '', s) },
   ];
 
   // Notify frontend that API sources are starting
@@ -96,7 +96,8 @@ async function fetchApiSources(queries, sender) {
 
   return Promise.all(apiTasks.map(async ({ sourceId, fn }) => {
     try {
-      const jobs = await fn();
+      if (signal?.aborted) throw new Error('Aborted');
+      const jobs = await fn(signal);
       return { sourceId, jobs };
     } catch (error) {
       return { sourceId, jobs: [], error: error?.message || String(error) };
@@ -128,6 +129,10 @@ Analyze this resume/CV thoroughly. Return a JSON object with:
 Extract everything you can find. Be thorough.`);
 
       console.log('[Jobs] Resume parsed:', profile.titles?.join(', '));
+      
+      // Guard: Resume parsing takes ~5s.
+      if (_event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
+
       return { success: true, profile };
     } catch (error) {
       console.error('[Jobs] Resume parse failed:', error?.message || String(error));
@@ -135,8 +140,7 @@ Extract everything you can find. Be thorough.`);
     }
   });
 
-  // ── Generate Search Queries (Three-Prong Strategy) ────────────────────────
-  ipcMain.handle('generate-job-queries', async (_event, { profile }) => {
+  ipcMain.handle('generate-job-queries', async (event, { profile }) => {
     try {
       const result = await callGeminiText(`
 You are a career strategist. Given this professional profile, generate search queries for a job search.
@@ -153,6 +157,8 @@ Return a JSON object with three arrays of search query strings:
 }
 
 Be creative with suggestedRoleQueries — think about what career directions their skills unlock that they might not have considered.`);
+      
+      if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
 
       return { success: true, queries: result };
     } catch (error) {
@@ -184,11 +190,24 @@ Be creative with suggestedRoleQueries — think about what career directions the
 
       const allJobs = [];
       const sourceResults = {};
+      const abortCtrl = new AbortController();
+
+      // If the window is closed, abort all pending API requests
+      event.sender.once('destroyed', () => abortCtrl.abort());
       
       // 1. Run Scraper Tasks and API Tasks concurrently
       const [results, apiResults] = await Promise.all([
-        scrapeMultiple(tasks),
-        fetchApiSources(queries, event.sender)
+        scrapeMultiple(tasks, (res) => {
+          if (event.sender.isDestroyed()) return;
+          const sourceId = res.id.replace(/-\d+$/, '');
+          const count = Array.isArray(res.data) ? res.data.length : 0;
+          event.sender.send('job-source-progress', {
+            sourceId,
+            status: res.success ? 'done' : 'error',
+            count
+          });
+        }, abortCtrl.signal),
+        fetchApiSources(queries, event.sender, abortCtrl.signal)
       ]);
 
       // Process Scraper Results
@@ -260,6 +279,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
       const scoredJobs = [];
 
       for (let i = 0; i < jobs.length; i += BATCH_SIZE) {
+        // Guard: Check if window was closed between batches
+        if (_event.sender.isDestroyed()) break;
+
         const batch = jobs.slice(i, i + BATCH_SIZE);
         const batchResult = await callGeminiText(`
 You are a career matching expert. Score each job against this candidate's profile.
@@ -309,6 +331,9 @@ IMPORTANT SCORING RULES:
       }
 
       console.log(`[Jobs] Scored ${scoredJobs.length} jobs across ${Object.keys(clusters).length} career directions`);
+      
+      if (_event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
+
       return { success: true, scoredJobs, clusters };
     } catch (error) {
       console.error('[Jobs] Scoring failed:', error?.message || String(error));
@@ -336,6 +361,8 @@ Return a JSON object:
 }
 
 Don't be generic. Reference specific skills from the resume that match specific requirements from the job.`);
+
+      if (_event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
 
       return { success: true, coverLetter: result.coverLetter };
     } catch (error) {

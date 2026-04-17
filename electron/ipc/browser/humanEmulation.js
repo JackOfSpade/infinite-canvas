@@ -74,6 +74,7 @@ export async function dismissCookieBanner(page) {
   ];
 
   for (const sel of selectors) {
+    if (page.isClosed()) return false;
     try {
       const btn = await page.$(sel);
       if (btn) {
@@ -81,7 +82,7 @@ export async function dismissCookieBanner(page) {
         await new Promise(r => setTimeout(r, 500));
         return true;
       }
-    } catch { /* selector not found, continue */ }
+    } catch { /* selector not found or action failed, continue */ }
   }
   return false;
 }

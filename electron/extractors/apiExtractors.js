@@ -19,9 +19,10 @@ import { htmlToText } from 'html-to-text';
  * @param {Function} processFn - Async function to run on each item. Should return an array of results.
  * @returns {Array} - Flattened array of all successful results.
  */
-async function processInBatches(items, batchSize, processFn) {
+async function processInBatches(items, batchSize, processFn, signal = null) {
   const allResults = [];
   for (let i = 0; i < items.length; i += batchSize) {
+    if (signal?.aborted) break;
     const batch = items.slice(i, i + batchSize);
     const results = await Promise.allSettled(batch.map(processFn));
     for (const r of results) {
@@ -38,7 +39,12 @@ async function processInBatches(items, batchSize, processFn) {
  * Real rendering to markdown is handled in python/gemini stages if needed.
  */
 function stripHtml(html) {
-  return htmlToText(html, { wordwrap: false, selectors: [] });
+  if (!html || typeof html !== 'string') return '';
+  try {
+    return htmlToText(html, { wordwrap: false, selectors: [] });
+  } catch {
+    return String(html).replace(/<[^>]*>?/gm, ''); // Fallback regex stripping
+  }
 }
 
 // ── LinkedIn Hidden API ─────────────────────────────────────────────────────
@@ -50,7 +56,7 @@ function stripHtml(html) {
  * Fetch jobs from LinkedIn's public API endpoint (no login needed).
  * This replaces the Puppeteer-based LinkedIn scraper.
  */
-export async function fetchLinkedInJobs(query) {
+export async function fetchLinkedInJobs(query, signal = null) {
   const allJobs = [];
 
   // Fetch 2 pages (50 results max) to stay polite
@@ -67,7 +73,7 @@ export async function fetchLinkedInJobs(query) {
           'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
           'Referer': 'https://www.linkedin.com/jobs/search/',
         },
-        signal: AbortSignal.timeout(10000),
+        signal: signal || AbortSignal.timeout(10000),
       });
 
       if (!res.ok) {
@@ -165,14 +171,14 @@ const GREENHOUSE_BOARDS = [
  * Fetch jobs from Greenhouse boards matching the query.
  * Searches board titles client-side (the API doesn't support keyword search).
  */
-export async function fetchGreenhouseJobs(query) {
+export async function fetchGreenhouseJobs(query, signal = null) {
   const queryLower = query.toLowerCase();
   const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
   const allJobs = await processInBatches(GREENHOUSE_BOARDS, 10, async ({ token, company }) => {
     try {
       const res = await fetch(`https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`, {
         headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(8000),
+        signal: signal || AbortSignal.timeout(8000),
       });
       if (!res.ok) return [];
       const data = await res.json();
@@ -180,7 +186,7 @@ export async function fetchGreenhouseJobs(query) {
     } catch {
       return [];
     }
-  });
+  }, signal);
 
   // Filter by query relevance
   const matched = allJobs.filter(job => {
@@ -231,14 +237,14 @@ const LEVER_COMPANIES = [
 /**
  * Fetch jobs from Lever career pages matching the query.
  */
-export async function fetchLeverJobs(query) {
+export async function fetchLeverJobs(query, signal = null) {
   const queryLower = query.toLowerCase();
   const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
   const allJobs = await processInBatches(LEVER_COMPANIES, 10, async ({ slug, company }) => {
     try {
       const res = await fetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, {
         headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(8000),
+        signal: signal || AbortSignal.timeout(8000),
       });
       if (!res.ok) return [];
       const data = await res.json();
@@ -246,7 +252,7 @@ export async function fetchLeverJobs(query) {
     } catch {
       return [];
     }
-  });
+  }, signal);
 
   // Filter by query relevance
   const matched = allJobs.filter(job => {
@@ -277,7 +283,7 @@ export async function fetchLeverJobs(query) {
  * @param {string} apiKey — USAJobs API key (from .env or config)
  * @param {string} email — registered email for User-Agent header
  */
-export async function fetchUSAJobs(query, apiKey, email) {
+export async function fetchUSAJobs(query, apiKey, email, signal = null) {
   if (!apiKey) {
     console.warn('[USAJobs] No API key configured — skipping');
     return [];
@@ -296,7 +302,7 @@ export async function fetchUSAJobs(query, apiKey, email) {
         'User-Agent': email || 'job-search-app@example.com',
         'Authorization-Key': apiKey,
       },
-      signal: AbortSignal.timeout(10000),
+      signal: signal || AbortSignal.timeout(10000),
     });
 
     if (!res.ok) {
@@ -342,14 +348,14 @@ export async function fetchUSAJobs(query, apiKey, email) {
 /**
  * Fetch jobs from RemoteOK's open JSON API (bypasses Puppeteer entirely).
  */
-export async function fetchRemoteOKJobs(query) {
+export async function fetchRemoteOKJobs(query, signal = null) {
   try {
     const res = await fetch('https://remoteok.com/api', {
       headers: {
         'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       },
-      signal: AbortSignal.timeout(10000),
+      signal: signal || AbortSignal.timeout(10000),
     });
 
     if (!res.ok) {
@@ -392,14 +398,14 @@ export async function fetchRemoteOKJobs(query) {
 /**
  * Fetch jobs from WeWorkRemotely's RSS feed (bypasses Puppeteer entirely).
  */
-export async function fetchWeWorkRemotelyJobs(query) {
+export async function fetchWeWorkRemotelyJobs(query, signal = null) {
   try {
     const res = await fetch('https://weworkremotely.com/remote-jobs.rss', {
       headers: {
         'Accept': 'application/rss+xml, application/xml, text/xml',
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       },
-      signal: AbortSignal.timeout(10000),
+      signal: signal || AbortSignal.timeout(10000),
     });
 
     if (!res.ok) {
@@ -468,7 +474,7 @@ export async function fetchWeWorkRemotelyJobs(query) {
  * Fetch marketplace listings from Reverb's internal REST API.
  * Returns the standard comp shape for pricing comparison.
  */
-export async function fetchReverbListings(query, soldOnly = false) {
+export async function fetchReverbListings(query, soldOnly = false, signal = null) {
   try {
     const params = new URLSearchParams({ query });
     if (soldOnly) params.set('state', 'ended');
@@ -480,7 +486,7 @@ export async function fetchReverbListings(query, soldOnly = false) {
         'Content-Type': 'application/hal+json',
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       },
-      signal: AbortSignal.timeout(12000),
+      signal: signal || AbortSignal.timeout(12000),
     });
 
     if (!res.ok) {
@@ -526,7 +532,7 @@ const DICE_API_KEY = '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
  * @param {string} [location] — optional location filter
  * @returns {Promise<Array>} — standardized job objects
  */
-export async function fetchDiceListings(query, location = '') {
+export async function fetchDiceListings(query, location = '', signal = null) {
   try {
     const params = new URLSearchParams({
       q: query,
@@ -546,7 +552,7 @@ export async function fetchDiceListings(query, location = '') {
           'x-api-key': DICE_API_KEY,
           'Accept': 'application/json',
         },
-        signal: AbortSignal.timeout(10000),
+        signal: signal || AbortSignal.timeout(10000),
       }
     );
 
@@ -597,6 +603,7 @@ const HARDCODED_STOCKX_APP_ID = '2FWOTDVM2O';
 // challenge page that requires full browser rendering to solve.
 
 let algoliaKeys = null; // Cache keys for the session
+let lastStockXErrorTime = 0; // Cooldown for extraction failures
 
 // Extractor JS that runs inside the Puppeteer page to grab Algolia keys.
 // Searches all <script> tags and window properties for the key/appId pair.
@@ -649,39 +656,47 @@ const STOCKX_KEY_EXTRACTOR = `
  *   2. If keys missing/expired: extract via Puppeteer stealth (Tier 3 bootstrap, once per session)
  *   3. All data queries go to Algolia directly (Tier 1)
  */
-export async function fetchStockXListings(query) {
+export async function fetchStockXListings(query, signal = null) {
   try {
-    // If we don't have keys at all, try Puppeteer extraction
+    // Phase 1: Key Extraction Bootstrap (once per session)
     if (!algoliaKeys) {
-      console.log('[StockX] No cached keys — extracting via stealth browser...');
-      const keys = await queueScrape(
-        `https://stockx.com/search?s=${encodeURIComponent(query)}`,
-        STOCKX_KEY_EXTRACTOR,
-        {
-          waitMs: 3000,
-          timeoutMs: 20000,
-          scrollFirst: false,
-          dismissCookies: true,
-          referer: 'https://www.google.com/',
-        }
-      );
+      if (Date.now() - lastStockXErrorTime < 300000) {
+        console.warn('[StockX] Bootstrap cooldown active — skipping');
+        return [];
+      }
 
-      if (keys?.appId && keys?.apiKey) {
-        algoliaKeys = keys;
-        console.log(`[StockX] Algolia keys extracted: appId=${keys.appId.substring(0, 4)}... (Tier 1 from now on)`);
-      } else {
-        // Last resort: try hardcoded App ID with empty key (some Algolia configs allow this)
-        algoliaKeys = { appId: HARDCODED_STOCKX_APP_ID, apiKey: '' };
-        console.log('[StockX] Using hardcoded App ID as fallback');
+      console.log('[StockX] No cached keys — extracting via stealth browser...');
+      try {
+        const keys = await queueScrape(
+          `https://stockx.com/search?s=${encodeURIComponent(query)}`,
+          STOCKX_KEY_EXTRACTOR,
+          {
+            waitMs: 3000,
+            timeoutMs: 15000,
+            scrollFirst: false,
+            dismissCookies: true,
+            referer: 'https://www.google.com/',
+          }
+        );
+
+        if (keys?.appId && keys?.apiKey) {
+          algoliaKeys = keys;
+          console.log(`[StockX] Algolia keys extracted: appId=${keys.appId.substring(0, 4)}...`);
+        } else {
+          lastStockXErrorTime = Date.now();
+          algoliaKeys = { appId: HARDCODED_STOCKX_APP_ID, apiKey: '' };
+          console.warn('[StockX] Bootstrap failed — using hardcoded fallback. Cooldown active.');
+        }
+      } catch (err) {
+        lastStockXErrorTime = Date.now();
+        console.error('[StockX] Extraction error:', err.message);
+        return [];
       }
     }
 
-    if (!algoliaKeys?.appId) {
-      console.warn('[StockX] Could not obtain Algolia keys');
-      return [];
-    }
+    if (!algoliaKeys?.appId) return [];
 
-    // Phase 2: Query Algolia directly (bypasses PerimeterX entirely)
+    // Phase 2: Query Algolia directly
     const algoliaRes = await fetch(
       `https://${algoliaKeys.appId}-dsn.algolia.net/1/indexes/products/query`,
       {
@@ -693,16 +708,14 @@ export async function fetchStockXListings(query) {
         },
         body: JSON.stringify({
           query,
-          facets: ['*'],
           hitsPerPage: 25,
         }),
-        signal: AbortSignal.timeout(10000),
+        signal: signal || AbortSignal.timeout(10000),
       }
     );
 
     if (!algoliaRes.ok) {
       console.warn(`[StockX Algolia] Returned ${algoliaRes.status}`);
-      // Keys may have rotated — clear cache for next attempt
       algoliaKeys = null;
       return [];
     }

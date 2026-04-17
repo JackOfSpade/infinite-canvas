@@ -65,16 +65,4 @@ export function useCanvasInitialization({
     return () => clearTimeout(timer);
   }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef]);
 
-  const latestSave = useRef(saveCanvas);
-  const latestLoad = useRef(loadCanvas);
-  useEffect(() => {
-    latestSave.current = saveCanvas;
-    latestLoad.current = loadCanvas;
-  }, [saveCanvas, loadCanvas]);
-  useEffect(() => {
-    if (!window.electronAPI) return;
-    const cleanupSave = window.electronAPI.onMenuSave(() => latestSave.current());
-    const cleanupOpen = window.electronAPI.onMenuOpen(() => latestLoad.current());
-    return () => { cleanupSave(); cleanupOpen(); };
-  }, []);
 }

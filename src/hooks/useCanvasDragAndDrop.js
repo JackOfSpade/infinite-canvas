@@ -65,10 +65,13 @@ export function useCanvasDragAndDrop({
         return;
       }
 
-      // Default: treat as document/folder drops
+      // Default: treat as document/folder drops — only process items with valid system paths
+      const validFiles = files.filter(f => f.path);
+      if (validFiles.length === 0) return;
+
       takeSnapshot();
       const dropDepth = depthRef.current;
-      const newItems = await processDroppedFiles(event.dataTransfer.files, position);
+      const newItems = await processDroppedFiles(validFiles, position);
       if (!isMountedRef.current) return;
       if (depthRef.current !== dropDepth) return; // Canvas changed during processing
 

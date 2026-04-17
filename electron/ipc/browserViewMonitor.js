@@ -217,10 +217,12 @@ async function refreshMonitor(id) {
   try {
     // Guard: the window may have been destroyed externally between the status check above
     // and this point (e.g. OS force-quit during a scheduled refresh).
-    if (monitor.window.isDestroyed()) return;
+    if (!monitor.window || monitor.window.isDestroyed()) return;
 
     // Reload the page
     const wc = monitor.window.webContents;
+    if (!wc || wc.isDestroyed()) return;
+
     await wc.loadURL(monitor.url);
     if (!monitors.has(id)) return;
 
@@ -354,10 +356,12 @@ function reopenMonitor(id) {
   monitor.refreshIntervalMs = monitor.baseRefreshMs;
 
   // Show the window for re-auth
-  monitor.window.show();
-  monitor.window.loadURL(monitor.url).catch(err => {
-    console.error(`[Monitor ${id}] Failed to reload URL for re-auth:`, err?.message || String(err));
-  });
+  if (monitor.window && !monitor.window.isDestroyed()) {
+    monitor.window.show();
+    monitor.window.loadURL(monitor.url).catch(err => {
+      console.error(`[Monitor ${id}] Failed to reload URL for re-auth:`, err?.message || String(err));
+    });
+  }
 
   console.log(`[Monitor ${id}] Reopened for re-authentication`);
 }

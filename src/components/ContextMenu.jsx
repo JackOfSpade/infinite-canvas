@@ -45,8 +45,7 @@ export function ContextMenu({ x, y, items, onClose }) {
       if (rect.bottom > window.innerHeight) newPos.top = window.innerHeight - rect.height - 8;
       // Open submenus to the left when not enough room on the right (submenu ~180px)
       const spaceOnRight = window.innerWidth - (newPos.left + rect.width);
-      let rafId;
-      rafId = requestAnimationFrame(() => {
+      const rafId = requestAnimationFrame(() => {
         setSubmenuDirection(spaceOnRight >= 192 ? 'right' : 'left');
         setAdjustedPos(newPos);
       });
@@ -69,7 +68,15 @@ export function ContextMenu({ x, y, items, onClose }) {
 
   // ── Render ────────────────────────────────────────────────────────────────
   return createPortal(
-    <div ref={menuRef} className="fixed z-[9999] context-menu-enter" style={adjustedPos}>
+    <div 
+      ref={menuRef} 
+      className="fixed z-[9999] context-menu-enter" 
+      style={{
+        ...adjustedPos,
+        maxHeight: 'calc(100vh - 20px)',
+        overflowY: 'auto'
+      }}
+    >
       <div className="bg-[#1a1a1a]/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl py-1 min-w-[180px] text-white/90 text-sm">
         {items.map((item, i) => {
           if (item.divider) {
@@ -130,6 +137,7 @@ export function ContextMenu({ x, y, items, onClose }) {
 /** Internal component to handle sub-menu positioning and clamping */
 function SubmenuPanel({ items, direction, onMouseEnter, onMouseLeave, onClose }) {
   const ref = useRef(null);
+  const [measured, setMeasured] = useState(false);
   const [verticalOffset, setVerticalOffset] = useState(0);
 
   useEffect(() => {
@@ -140,6 +148,7 @@ function SubmenuPanel({ items, direction, onMouseEnter, onMouseLeave, onClose })
         // Shift up by the overflow amount plus a small padding
         setVerticalOffset(-overflow - 8);
       }
+      setMeasured(true);
     }
   }, []);
 
@@ -147,9 +156,13 @@ function SubmenuPanel({ items, direction, onMouseEnter, onMouseLeave, onClose })
     <div
       ref={ref}
       className={`absolute top-0 ${direction === 'right' ? 'left-full ml-0.5' : 'right-full mr-0.5'} bg-[#1a1a1a]/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl py-1 min-w-[180px] text-white/90 text-sm`}
-      style={{ transform: `translateY(${verticalOffset}px)`, opacity: verticalOffset === 0 && ref.current ? 0 : 1 }}
+      style={{ 
+        transform: `translateY(${verticalOffset}px)`, 
+        opacity: measured ? 1 : 0 
+      }}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
+      onClose={onClose}
     >
       {items.map((sub, j) => {
         if (sub.divider) {

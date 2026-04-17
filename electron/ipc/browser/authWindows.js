@@ -48,8 +48,11 @@ export const PLATFORM_COOKIE_DOMAINS = {
  * Open a VISIBLE browser window for the user to log into a platform.
  * Uses the same persistent userDataDir so cookies are shared with scraping.
  * Returns when the user closes the window.
+ * 
+ * Hardening: Monitors the IPC sender; if the sender is destroyed (e.g. window closed),
+ * the login browser is closed immediately to prevent process leaks.
  */
-export async function openLoginWindow(platformId) {
+export async function openLoginWindow(platformId, sender = null) {
   const url = PLATFORM_LOGIN_URLS[platformId];
   if (!url) throw new Error(`Unknown platform: ${platformId}`);
 
@@ -80,12 +83,29 @@ export async function openLoginWindow(platformId) {
   const page = pages[0] || await loginBrowser.newPage();
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
 
-  // Wait for the user to close the browser window
+  // Wait for the user to close the browser window or the app window to be destroyed
   return new Promise((resolve) => {
-    loginBrowser.on('disconnected', () => {
-      console.log(`[StealthBrowser] Login window closed for ${platformId}`);
-      resolve({ success: true, platform: platformId });
-    });
+    let isTerminated = false;
+
+    const cleanup = async () => {
+      if (isTerminated) return;
+      isTerminated = true;
+      if (sender) sender.removeListener('destroyed', cleanup);
+      try {
+        await loginBrowser.close();
+      } catch { /* ignored */ }
+      resolve({ success: true, platform: platformId, closedByApp: sender?.isDestroyed?.() });
+    };
+
+    if (sender) {
+      if (sender.isDestroyed()) {
+        cleanup();
+        return;
+      }
+      sender.once('destroyed', cleanup);
+    }
+
+    loginBrowser.on('disconnected', cleanup);
   });
 }
 
@@ -122,7 +142,9 @@ export async function getSessionStatus(platformId) {
         cookieCount: cookies.length,
       };
     } finally {
-      await page.close().catch(() => {});
+      if (page && !page.isClosed()) {
+        await page.close().catch(() => {});
+      }
     }
   } catch {
     return { platform: platformId, connected: false };

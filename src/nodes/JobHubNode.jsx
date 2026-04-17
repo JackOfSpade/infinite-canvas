@@ -35,9 +35,18 @@ export function JobHubNode({ id, data }) {
   const { addToast } = useToast();
   const processingRef = useRef(false);
   const cleanupRef = useRef(null);
+  const isMountedRef = useRef(true);
 
   // Per-source progress state: { google: { status, count }, indeed: { status, count }, ... }
   const [sourceProgress, setSourceProgress] = useState({});
+  const [lastActiveSource, setLastActiveSource] = useState(null);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const hubState = data.hubState || 'empty';
   const statusLabel = STATE_LABELS[hubState];
@@ -48,6 +57,7 @@ export function JobHubNode({ id, data }) {
     if (!window.electronAPI?.onJobSourceProgress) return;
     const cleanup = window.electronAPI.onJobSourceProgress(({ sourceId, status, count }) => {
       setSourceProgress(prev => ({ ...prev, [sourceId]: { status, count } }));
+      if (status === 'searching') setLastActiveSource(sourceId);
     });
      
     cleanupRef.current = cleanup;
@@ -167,6 +177,7 @@ export function JobHubNode({ id, data }) {
       // Step 1: Parse resume
       updateNodeData(id, { hubState: 'parsing' });
       const parseResult = await window.electronAPI.parseResume({ filePath });
+      if (!isMountedRef.current) return;
       if (!getNode(id)) { processingRef.current = false; return; }
       if (!parseResult.success) throw new Error(parseResult.error);
       const profile = parseResult.profile;
@@ -178,6 +189,7 @@ export function JobHubNode({ id, data }) {
 
       // Step 2: Generate queries
       const queryResult = await window.electronAPI.generateJobQueries({ profile });
+      if (!isMountedRef.current) return;
       if (!getNode(id)) { processingRef.current = false; return; }
       if (!queryResult.success) throw new Error(queryResult.error);
       const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queryResult.queries;
@@ -186,6 +198,7 @@ export function JobHubNode({ id, data }) {
       // Step 3: Search (multi-source — backend sends per-source progress events)
       updateNodeData(id, { hubState: 'searching', queryCount: allQueries.length });
       const searchResult = await window.electronAPI.searchJobs({ queries: allQueries });
+      if (!isMountedRef.current) return;
       if (!getNode(id)) { processingRef.current = false; return; }
       if (!searchResult.success) throw new Error(searchResult.error);
 
@@ -198,6 +211,7 @@ export function JobHubNode({ id, data }) {
       // Step 4: Score
       updateNodeData(id, { hubState: 'scoring', jobCount: searchResult.jobs.length });
       const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile });
+      if (!isMountedRef.current) return;
       if (!getNode(id)) { processingRef.current = false; return; }
       if (!scoreResult.success) throw new Error(scoreResult.error);
 
@@ -257,10 +271,10 @@ export function JobHubNode({ id, data }) {
       addToast({ title: 'Job Search Complete', description: `Found and scored ${scoreResult.scoredJobs.length} jobs.`, type: 'success' });
     } catch (error) {
       console.error('[JobHub] Failed:', error);
-      if (getNode(id)) updateNodeData(id, { hubState: 'error', errorMessage: error?.message || String(error) });
-      addToast({ title: 'Job Search Failed', description: error?.message || String(error), type: 'error' });
+      if (isMountedRef.current && getNode(id)) updateNodeData(id, { hubState: 'error', errorMessage: error?.message || String(error) });
+      if (isMountedRef.current) addToast({ title: 'Job Search Failed', description: error?.message || String(error), type: 'error' });
     } finally {
-      processingRef.current = false;
+      if (isMountedRef.current) processingRef.current = false;
     }
   };
 
@@ -315,6 +329,7 @@ export function JobHubNode({ id, data }) {
             hubState={hubState}
             totalSourceJobs={totalSourceJobs}
             resumeSummary={data.resumeSummary}
+            activeSourceId={lastActiveSource}
           />
         )}
 

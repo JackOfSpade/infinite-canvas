@@ -5,12 +5,16 @@ import { Canvas } from './Canvas';
 import { ToastProvider } from './components/ToastProvider';
 import './index.css';
 
+import { ErrorBoundary } from './components/ErrorBoundary';
+
 export default function App() {
   return (
-    <ToastProvider>
-      <ReactFlowProvider>
-        <Canvas />
-      </ReactFlowProvider>
-    </ToastProvider>
+    <ErrorBoundary>
+      <ToastProvider>
+        <ReactFlowProvider>
+          <Canvas />
+        </ReactFlowProvider>
+      </ToastProvider>
+    </ErrorBoundary>
   );
 }

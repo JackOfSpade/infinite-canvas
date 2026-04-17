@@ -18,8 +18,16 @@ export function Dialog({ title, children, onClose }) {
   const [pos, setPos] = useState(null);
   const dialogRef = useRef(null);
 
+  const closingRef = useRef(false);
+
   useEffect(() => {
-    const handleKey = (e) => { if (e.key === 'Escape') onClose(); };
+    const handleKey = (e) => { 
+      if (e.key === 'Escape') {
+        if (closingRef.current) return;
+        closingRef.current = true;
+        onClose(); 
+      }
+    };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
   }, [onClose]);
@@ -73,7 +81,12 @@ export function Dialog({ title, children, onClose }) {
       {/* Invisible backdrop — captures outside clicks to dismiss, no visual overlay */}
       <div
         style={{ position: 'fixed', inset: 0, zIndex: 9999 }}
-        onPointerDown={(e) => { e.stopPropagation(); onClose(); }}
+        onPointerDown={(e) => { 
+          e.stopPropagation(); 
+          if (closingRef.current) return;
+          closingRef.current = true;
+          onClose(); 
+        }}
       />
 
       {/* Dialog panel */}

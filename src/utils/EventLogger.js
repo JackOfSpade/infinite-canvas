@@ -16,6 +16,27 @@ const MAX_BYTES = 500 * 1024; // 500 KB — covers ~6,000 lines at avg 85 bytes/
 // The entire useful event history for an immediate-report workflow is 20–50 lines;
 // even a 1-hour heavy session generates <3,000 lines. 15 MB was 200× too large.
 
+/**
+ * Safe object-to-string for logging. Prevents JSON.stringify circular ref crashes.
+ */
+function safeStringify(obj) {
+  if (obj instanceof Error) return obj.message;
+  if (typeof obj !== 'object' || obj === null) return String(obj);
+  try {
+    return JSON.stringify(obj);
+  } catch (e) {
+    // If it fails (likely circular or complex), fall back to basic type summary.
+    // Wrap property access in try-catch in case 'obj' is a proxy that throws on access.
+    try {
+      if (Array.isArray(obj)) return `Array(${obj.length})`;
+      const keys = Object.keys(obj);
+      return `Object(${keys.slice(0, 5).join(',')}${keys.length > 5 ? '...' : ''})`;
+    } catch {
+      return 'Object(unreadable)';
+    }
+  }
+}
+
 class EventLoggerSingleton {
   constructor() {
     this.logs = [];
@@ -123,14 +144,14 @@ class EventLoggerSingleton {
     // Capture explicitly handled errors logged via console.error/warn
     const origError = console.error;
     console.error = (...args) => {
-      const msg = args.map(a => (a instanceof Error ? a.message : (typeof a === 'object' ? JSON.stringify(a) : String(a)))).join(' ');
+      const msg = args.map(a => safeStringify(a)).join(' ');
       this.log(`CONSOLE-ERROR: ${msg}`);
       origError.apply(console, args);
     };
 
     const origWarn = console.warn;
     console.warn = (...args) => {
-      const msg = args.map(a => (a instanceof Error ? a.message : (typeof a === 'object' ? JSON.stringify(a) : String(a)))).join(' ');
+      const msg = args.map(a => safeStringify(a)).join(' ');
       this.log(`CONSOLE-WARN: ${msg}`);
       origWarn.apply(console, args);
     };

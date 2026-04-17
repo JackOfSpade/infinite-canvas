@@ -38,15 +38,18 @@ export const DrawingLayer = React.memo(forwardRef(function DrawingLayer({ drawin
     getCurrentStroke: () => currentStroke,
   }), [currentStroke]);
 
+  // Pre-join points to avoid repeating the work on every sub-render
+  const currentStrokePoints = currentStroke?.map(p => `${p.x},${p.y}`).join(' ');
+
   return (
     <svg className="absolute top-0 left-0 w-full h-full pointer-events-none z-[60]">
       <ViewportG>
         {drawings.map((stroke, i) => (
-          <DrawingStroke key={i} stroke={stroke} />
+          <DrawingStroke key={stroke.id || i} stroke={stroke} />
         ))}
         {currentStroke && (
           <polyline
-            points={currentStroke.map(p => `${p.x},${p.y}`).join(' ')}
+            points={currentStrokePoints}
             fill="none"
             stroke={activeColor}
             strokeWidth={penSize}

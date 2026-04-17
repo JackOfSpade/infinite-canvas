@@ -113,13 +113,20 @@ export const SearchBar = React.memo(function SearchBar() {
 
   useEffect(() => {
     if (searchQuery.trim() === '') {
-      const timer = setTimeout(() => setMatchCount(0), 0);
-      return () => clearTimeout(timer);
+      setMatchCount(0);
+      return;
     }
+
+    const abortController = new AbortController();
     const timer = setTimeout(() => {
+      if (abortController.signal.aborted) return;
       setMatchCount(getMatches().length);
     }, 200);
-    return () => clearTimeout(timer);
+
+    return () => {
+      abortController.abort();
+      clearTimeout(timer);
+    };
   }, [searchQuery, getMatches]);
 
   return (

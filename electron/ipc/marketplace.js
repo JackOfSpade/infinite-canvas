@@ -76,15 +76,16 @@ function buildTaskCategoryMap(tasks) {
  * Fetch API-based marketplace sources in parallel (no Puppeteer needed).
  * Reverb uses internal REST API, StockX uses Algolia bypass.
  */
-async function fetchApiMarketplaceSources(query) {
+async function fetchApiMarketplaceSources(query, signal = null) {
   const apiTasks = [
-    { sourceId: 'reverb', fn: () => fetchReverbListings(query, true) },
-    { sourceId: 'stockx', fn: () => fetchStockXListings(query) },
+    { sourceId: 'reverb', fn: (s) => fetchReverbListings(query, true, s) },
+    { sourceId: 'stockx', fn: (s) => fetchStockXListings(query, s) },
   ];
 
   return Promise.all(apiTasks.map(async ({ sourceId, fn }) => {
     try {
-      const items = await fn();
+      if (signal?.aborted) throw new Error('Aborted');
+      const items = await fn(signal);
       return { sourceId, items };
     } catch (error) {
       return { sourceId, items: [], error: error?.message || String(error) };
@@ -120,6 +121,10 @@ Return a JSON object:
 Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`);
 
       console.log('[Marketplace] Product identified:', result.generated_title);
+      
+      // Guard: Gemini Vision analysis can be slow (8-15s).
+      if (_event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
+
       return { success: true, product: result };
     } catch (error) {
       console.error('[Marketplace] Photo analysis failed:', error?.message || String(error));
@@ -141,31 +146,28 @@ Be specific about what you can clearly see. If you can't identify brand or model
         }
       }
 
-      // Run all scrapes concurrently through the pool AND start API tasks
-      const scrapeResultsPromise = Promise.allSettled(
-        tasks.map(async (task) => {
-          try {
-            const data = await queueScrape(task.url, task.extractorJS, task.options);
-            const items = Array.isArray(data) ? data : [];
-            if (!event.sender.isDestroyed()) {
-              event.sender.send('price-source-progress', {
-                sourceId: task.id,
-                status: 'done',
-                count: items.length,
-              });
-            }
-            return { id: task.id, items };
-          } catch (e) {
-            console.warn(`[Marketplace] Source ${task.id} failed:`, e?.message || String(e));
-            if (!event.sender.isDestroyed()) {
-              event.sender.send('price-source-progress', { sourceId: task.id, status: 'error', count: 0 });
-            }
-            return { id: task.id, items: [] };
-          }
-        })
-      );
+      const abortCtrl = new AbortController();
+      event.sender.once('destroyed', () => abortCtrl.abort());
 
-      const apiResultsPromise = fetchApiMarketplaceSources(query);
+      const scrapeResultsPromise = scrapeMultiple(tasks, (res) => {
+        if (event.sender.isDestroyed()) return;
+        const items = Array.isArray(res.data) ? res.data : [];
+        event.sender.send('price-source-progress', {
+          sourceId: res.id,
+          status: res.success ? 'done' : 'error',
+          count: items.length,
+        });
+      }, abortCtrl.signal);
+
+      const apiResultsPromise = (async () => {
+        const apiSourceIds = ['reverb', 'stockx'];
+        for (const sourceId of apiSourceIds) {
+          if (!event.sender.isDestroyed()) {
+            event.sender.send('price-source-progress', { sourceId, status: 'searching', count: 0 });
+          }
+        }
+        return fetchApiMarketplaceSources(query, abortCtrl.signal);
+      })();
 
       const [scrapeResults, apiResults] = await Promise.all([scrapeResultsPromise, apiResultsPromise]);
 
@@ -176,15 +178,15 @@ Be specific about what you can clearly see. If you can't identify brand or model
 
       // 1. Browser pool results
       for (const r of scrapeResults) {
-        if (r.status !== 'fulfilled') {
-          // Rare: the outer map callback itself threw — there is no task.id available
-          // here (the task object is opaque at this point), so emit a generic error.
-          console.warn('[Marketplace] A scrape task promise was rejected unexpectedly.');
+        if (!r.success) {
+          console.warn(`[Marketplace] A scrape task for ${r.id} was rejected: ${r.error}`);
           continue;
         }
-        const { id, items } = r.value;
+        const { id, data: items } = r;
         const category = taskCategoryMap[id] ?? 'sold'; // API sources (reverb, stockx) are sold
-        allComps[category].push(...items);
+        if (Array.isArray(items)) {
+          allComps[category].push(...items);
+        }
       }
 
       // 2. API-based sources (Reverb REST API, StockX Algolia bypass)
@@ -203,6 +205,11 @@ Be specific about what you can clearly see. If you can't identify brand or model
 
       const totalComps = allComps.sold.length + allComps.active.length;
       console.log(`[Marketplace] Found ${allComps.sold.length} sold, ${allComps.active.length} active comps across all sources`);
+
+      // Guard: Research process is long. Check before heavy synthesis.
+      if (event.sender.isDestroyed() || abortCtrl.signal.aborted) {
+        return { success: false, error: 'Window closed' };
+      }
 
       // If we have comp data, ask Gemini to synthesize pricing + routing
       if (totalComps > 0) {
@@ -255,12 +262,17 @@ Platform routing rules for recommended_platforms (pick 2-4 most relevant):
 
 Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, whatnot`);
 
+        if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
+
         return {
           success: true,
           pricing,
           comps: allComps,
         };
       }
+
+      // Guard: Research process is the longest async operation (~30s).
+      if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
 
       // No comps found — return empty with message
       return {

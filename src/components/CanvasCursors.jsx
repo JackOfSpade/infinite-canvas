@@ -38,7 +38,7 @@ export const CanvasCursors = forwardRef(({ eraserSize, placementMode }, ref) => 
         </div>
       )}
 
-      {eraserPos.x > 0 && (
+      {eraserPos.x !== -999 && (
         <div
           className="fixed pointer-events-none z-[9998]"
           style={{

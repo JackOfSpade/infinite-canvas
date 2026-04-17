@@ -113,7 +113,7 @@ export function registerAccountsHandlers() {
   // Open a visible login window for a specific platform
   ipcMain.handle('open-login-window', async (_event, { platformId }) => {
     try {
-      const result = await openLoginWindow(platformId);
+      const result = await openLoginWindow(platformId, _event.sender);
       // After the login window closes, optimistically mark as connected.
       // The user manually closed the window after logging in, so we trust they succeeded.
       // Avoids a second Chrome launch just for verification.
@@ -137,10 +137,15 @@ export function registerAccountsHandlers() {
 
       // Step 2: Not logged in — open login window (blocks until user closes it)
       console.log(`[Accounts] ${platformId} not logged in — opening login window`);
-      await openLoginWindow(platformId);
+      await openLoginWindow(platformId, _event.sender);
 
       // Step 3: Re-check session after login window closed
       const postLogin = await getSessionStatus(platformId);
+      
+      if (_event.sender.isDestroyed()) {
+        return { platform: platformId, connected: postLogin.connected, loginOpened: true };
+      }
+
       return { ...postLogin, loginOpened: true };
     } catch (error) {
       console.error(`[Accounts] Check-and-login failed for ${platformId}:`, error?.message || String(error));

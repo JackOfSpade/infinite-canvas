@@ -1,4 +1,1 @@
-
-> infinite-canvas@0.0.0 lint
-> eslint .
-
+zsh:1: command not found: npm

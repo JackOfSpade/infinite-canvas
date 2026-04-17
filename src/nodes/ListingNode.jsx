@@ -41,6 +41,7 @@ export function ListingNode({ id, data }) {
 
   const [loginPrompt, setLoginPrompt] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(false);
+  const [statusText, setStatusText] = useState('Researching prices...');
   const { updateNodeData, getNode } = useReactFlow();
 
   const isMountedRef = React.useRef(true);
@@ -48,6 +49,34 @@ export function ListingNode({ id, data }) {
     isMountedRef.current = true;
     return () => { isMountedRef.current = false; };
   }, []);
+
+  // Listen for granular pricing progress (Scanning eBay, etc.)
+  useEffect(() => {
+    if (!window.electronAPI?.onPriceSourceProgress || status !== 'confirming') return;
+
+    const cleanup = window.electronAPI.onPriceSourceProgress(({ sourceId, status: pStatus, count }) => {
+      if (!isMountedRef.current || !getNode(id)) return;
+      
+      const names = {
+        'ebay-sold': 'eBay Sold',
+        'poshmark': 'Poshmark',
+        'swappa': 'Swappa',
+        'ebay-active': 'eBay Active',
+        'mercari': 'Mercari',
+        'reverb': 'Reverb',
+        'stockx': 'StockX'
+      };
+      
+      const name = names[sourceId] || sourceId;
+      if (pStatus === 'searching') {
+        setStatusText(`Scanning ${name}...`);
+      } else if (pStatus === 'done' && count > 0) {
+        setStatusText(`Found ${count} on ${name}`);
+      }
+    });
+
+    return () => cleanup?.();
+  }, [id, status, getNode]);
 
   useEffect(() => {
     syncPriceFromBackend(data.pricing);
@@ -154,7 +183,7 @@ export function ListingNode({ id, data }) {
       {status === 'confirming' && (
         <div className="px-3 py-3 border-t border-white/5 flex items-center justify-center gap-2 text-amber-400/80 text-sm">
           <Loader2 size={16} className="animate-spin" />
-          Researching prices...
+          {statusText}
         </div>
       )}
 

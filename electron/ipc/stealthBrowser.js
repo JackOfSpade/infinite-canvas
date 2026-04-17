@@ -85,8 +85,10 @@ export async function findChromePath() {
 // ── Singleton Browser Instance ──────────────────────────────────────────────
 let browserInstance = null;
 let browserLaunchPromise = null;
+let isShuttingDown = false;
 
 export async function getStealthBrowser() {
+  if (isShuttingDown) throw new Error('[StealthBrowser] Cannot get browser during shutdown');
   if (browserInstance?.isConnected?.()) return browserInstance;
 
   // Clear a dead/crashed instance so it can be garbage collected.
@@ -195,7 +197,11 @@ export async function createStealthPage() {
   return page;
 }
 
-export async function closeStealthBrowser() {
+export async function closeStealthBrowser(forShutdown = false) {
+  if (forShutdown) {
+    isShuttingDown = true;
+  }
+  browserLaunchPromise = null; // Prevent anyone from waiting on a pending launch
   if (browserInstance) {
     try {
       await browserInstance.close();

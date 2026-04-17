@@ -60,6 +60,17 @@ async function getToken() {
  * @returns {Promise<string>} — Raw text response from Gemini
  */
 async function callGemini(parts, genConfig = {}) {
+  // Hardening: Prevent "Payload Too Large" errors by capping total prompt text.
+  // Vertex AI has token limits, but 100k chars is a safe "fail-fast" boundary for
+  // strings to prevent massive JSON stringification from crashing the process.
+  let totalTextLen = 0;
+  for (const part of parts) {
+    if (part.text) totalTextLen += part.text.length;
+  }
+  if (totalTextLen > 100000) {
+    throw new Error(`AI prompt too large (${totalTextLen} chars). Please select fewer nodes or a smaller group.`);
+  }
+
   const token = await getToken();
   const endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent`;
 
@@ -74,7 +85,7 @@ async function callGemini(parts, genConfig = {}) {
 
   const response = await fetch(endpoint, {
     method: 'POST',
-    signal: AbortSignal.timeout(60000),
+    signal: genConfig.signal || AbortSignal.timeout(60000),
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   });
@@ -100,12 +111,27 @@ async function callGemini(parts, genConfig = {}) {
  */
 function parseGeminiJSON(raw) {
   if (!raw) return null;
+  
+  // Resilient JSON extraction: Find the first code block or the outer-most { } pair.
+  // This handles instances where Gemini adds markdown fences OR conversational text.
+  let jsonStr = raw;
+  const match = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (match) {
+    jsonStr = match[1];
+  } else {
+    // If no markdown block, try to find the first { and the last }
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end > start) {
+      jsonStr = raw.substring(start, end + 1);
+    }
+  }
+
   try {
-    const clean = raw.replace(/```json/g, '').replace(/```/g, '').trim();
-    return JSON.parse(clean);
-  } catch (e) {
-    console.error('[Gemini] JSON Parse Failure:', e.message);
-    return null;
+    return JSON.parse(jsonStr.trim());
+  } catch (error) {
+    console.error('[Gemini] Failed to parse JSON response:', error.message, '\nRaw Segment:', jsonStr.substring(0, 100));
+    return { error: 'Parse failed', raw: raw.substring(0, 200) };
   }
 }
 
@@ -119,8 +145,11 @@ const IMAGE_MIME_MAP = {
 const DOCUMENT_MIME_MAP = {
   '.pdf':  'application/pdf',
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  '.doc':  'application/msword',
   '.txt':  'text/plain',
+  '.md':   'text/plain',
+  '.json': 'text/plain',
+  '.js':   'text/plain',
+  '.py':   'text/plain',
 };
 
 /**
@@ -128,8 +157,8 @@ const DOCUMENT_MIME_MAP = {
  * @param {string} prompt
  * @returns {Promise<object>} — Parsed JSON response
  */
-export async function callGeminiText(prompt) {
-  const raw = await callGemini([{ text: prompt }]);
+export async function callGeminiText(prompt, signal = null) {
+  const raw = await callGemini([{ text: prompt }], { signal });
   return parseGeminiJSON(raw);
 }
 
@@ -139,8 +168,15 @@ export async function callGeminiText(prompt) {
  * @param {string} prompt — Text prompt
  * @returns {Promise<object>} — Parsed JSON response
  */
-export async function callGeminiVision(imagePaths, prompt) {
+export async function callGeminiVision(imagePaths, prompt, signal = null) {
   const imageParts = await Promise.all(imagePaths.map(async (imgPath) => {
+    const stats = await fs.promises.stat(imgPath);
+    // Vertex AI inlineData limit is 20MB. Base64 encoding adds ~33% overhead,
+    // so we cap the raw file size at 15MB to be safe and provide a clear error.
+    if (stats.size > 15 * 1024 * 1024) {
+      throw new Error(`Image file too large: ${path.basename(imgPath)} (${(stats.size / 1024 / 1024).toFixed(1)}MB). Max 15MB for AI analysis.`);
+    }
+
     const buffer = await fs.promises.readFile(imgPath);
     const ext = path.extname(imgPath).toLowerCase();
     const mimeType = IMAGE_MIME_MAP[ext] || 'image/jpeg';
@@ -148,7 +184,7 @@ export async function callGeminiVision(imagePaths, prompt) {
   }));
 
   const parts = [...imageParts, { text: prompt }];
-  const raw = await callGemini(parts);
+  const raw = await callGemini(parts, { signal });
   return parseGeminiJSON(raw);
 }
 
@@ -158,14 +194,21 @@ export async function callGeminiVision(imagePaths, prompt) {
  * @param {string} prompt — Analysis prompt
  * @returns {Promise<object>} — Parsed JSON response
  */
-export async function callGeminiDocument(filePath, prompt) {
+export async function callGeminiDocument(filePath, prompt, signal = null) {
   const ext = path.extname(filePath).toLowerCase();
   const mimeType = DOCUMENT_MIME_MAP[ext];
 
   if (!mimeType) {
     // Fall back to treating as an image (e.g. screenshot of a resume).
     // callGeminiVision will handle its own file reading.
-    return callGeminiVision([filePath], prompt);
+    return callGeminiVision([filePath], prompt, signal);
+  }
+
+  const stats = await fs.promises.stat(filePath);
+  // Vertex AI inlineData limit is 20MB. Base64 encoding adds ~33% overhead,
+  // so we cap the raw file size at 15MB to be safe and prevent OOM crashes.
+  if (stats.size > 15 * 1024 * 1024) {
+    throw new Error(`Document file too large: ${path.basename(filePath)} (${(stats.size / 1024 / 1024).toFixed(1)}MB). Max 15MB for AI analysis.`);
   }
 
   const buffer = await fs.promises.readFile(filePath);
@@ -174,16 +217,20 @@ export async function callGeminiDocument(filePath, prompt) {
     { text: prompt },
   ];
 
-  const raw = await callGemini(parts);
+  const raw = await callGemini(parts, { signal });
   return parseGeminiJSON(raw);
 }
 
 export function registerGeminiHandlers() {
-  ipcMain.handle('ai-polish-text', async (_event, text) => {
+  ipcMain.handle('ai-polish-text', async (event, text) => {
     try {
       const prompt = `You are an AI assistant in a visual workspace app. Polish the following text. Make it clear, concise, and professional. Output ONLY the improved text, without quotes or conversational filler. Keep original markdown formatting if any. The text is:\n\n${text}`;
       const config = { responseMimeType: 'text/plain' };
       const raw = await callGemini([{ text: prompt }], config);
+      
+      // Guard: Gemini calls can take 5s-20s. Window may be gone.
+      if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
+
       return { success: true, text: raw.trim() };
     } catch (e) {
       console.error('[Gemini] Polish failed:', e);

@@ -107,7 +107,17 @@ export function Canvas() {
   // These fire from ReactFlow's own drag system, independently of our pointer
   // handlers. We use ResizeActive to detect if the drag was initiated during a
   // CanvasNode resize session — only resize-tagged drags apply a ResizeCorrection.
-  const { onNodeDragStart, onNodeDragStop } = useDragCorrections({ setNodes });
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+
+  const { onNodeDragStart, onNodeDragStop } = useDragCorrections({ 
+    setNodes, 
+    isInteractionRef,
+    isMountedRef 
+  });
 
   const onEdgesChange = useCallback((changes) => {
     snapshotOnDelete(changes);
@@ -119,11 +129,13 @@ export function Canvas() {
   }, [onEdgesChangeBase, snapshotOnDelete]);
 
   const isNavigationAnimatingRef = useRef(false);
+  const isInteractionRef = useRef(false);
 
   const { undo, redo, takeSnapshot, clearHistory, canUndo, canRedo } = useUndoRedo({
     nodes, edges, drawings, setNodes, setEdges, setDrawings,
     shortcuts: settings.shortcuts,
     isAnimatingRef: isNavigationAnimatingRef,
+    isInteractionRef,
   });
   useEffect(() => { takeSnapshotRef.current = takeSnapshot; }, [takeSnapshot]);
 
@@ -156,6 +168,27 @@ export function Canvas() {
     flushStack: navigation.flushStack,
     isAnimatingRef: isNavigationAnimatingRef,
   });
+
+  // ── Native Menu Wiring ───────────────────────────────────────────────────
+  // Binds the native macOS/Windows application menu items (File -> Save, Open, etc.)
+  // to the React-managed canvas state inside this window.
+  useEffect(() => {
+    const unlistenSave = window.electronAPI?.onMenuSave?.(() => {
+      if (!isNavigationAnimatingRef.current) saveCanvas();
+    });
+    const unlistenOpen = window.electronAPI?.onMenuOpen?.(() => {
+      if (!isNavigationAnimatingRef.current) loadCanvas();
+    });
+    const unlistenExport = window.electronAPI?.onMenuExportPng?.(() => {
+      if (!isNavigationAnimatingRef.current) exportCanvasToPNG();
+    });
+    
+    return () => {
+      unlistenSave?.();
+      unlistenOpen?.();
+      unlistenExport?.();
+    };
+  }, [saveCanvas, loadCanvas, exportCanvasToPNG]);
 
   // ── Generic Confirmation Dialog ───────────────────────────────────────────
   const [confirmDialogData, setConfirmDialogData] = useState(null);
@@ -251,7 +284,7 @@ export function Canvas() {
     placementMode, setPlacementMode, activeTool, eraserType, eraserSize,
     setDrawings, setNodes, setEdges, takeSnapshot, activeColor,
     penSize, getIntersectingNodes, isAnimatingRef: isNavigationAnimatingRef,
-    cursorsRef, drawingLayerRef
+    cursorsRef, drawingLayerRef, isInteractionRef
   });
 
   const interactiveDisabled = !!activeTool || !!placementMode || navigation.isAnimating;
@@ -281,17 +314,14 @@ export function Canvas() {
   }, [navigation.isAnimating, onNodeContextMenuBase]);
 
   // ── Keyboard Shortcuts Panel + Escape to cancel placement/tool ──────────
-  useCanvasKeyboardShortcuts({ placementMode, setPlacementMode, activeTool, setActiveTool, setIsSettingsOpen });
+  useCanvasKeyboardShortcuts({ 
+    placementMode, setPlacementMode, activeTool, setActiveTool, setIsSettingsOpen,
+    isAnimatingRef: isNavigationAnimatingRef 
+  });
 
   // ── WASD canvas navigation ───────────────────────────────────────────────
   useCanvasWASD({ isAnimatingRef: isNavigationAnimatingRef });
 
-  // ── Export PNG via File menu (⌘⇧E) ───────────────────────────────────────
-  useEffect(() => {
-    if (!window.electronAPI?.onMenuExportPng) return;
-    const remove = window.electronAPI.onMenuExportPng(() => exportCanvasToPNG());
-    return remove;
-  }, [exportCanvasToPNG]);
 
   // ── Issue Reporter ───────────────────────────────────────────────────────
   const { handleIssueSubmit } = useIssueReporter({

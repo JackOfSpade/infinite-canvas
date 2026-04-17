@@ -18,6 +18,7 @@ import {
   dismissCookieBanner,
   humanScroll,
 } from './stealthBrowser.js';
+import { randomUUID } from 'crypto';
 
 const MAX_CONCURRENT = 3;
 const MAX_PER_DOMAIN = 1; // Only 1 concurrent page per domain
@@ -25,6 +26,9 @@ const MAX_PER_DOMAIN = 1; // Only 1 concurrent page per domain
 let activeCount = 0;
 const activeDomains = new Map(); // domain -> count of active pages
 const queue = [];
+const activeTasks = new Map(); // cacheKey -> Promise (deduplicates both queued and running tasks)
+const pageHandles = new Map(); // uuid -> { page, startTime }
+let isShuttingDown = false;
 
 // Domain-specific RPM policies (per deep research report, P6).
 // LinkedIn is aggressively defended; StockX uses PerimeterX; eBay is moderate.
@@ -77,28 +81,29 @@ function gaussianDelay(mean, stddev) {
 }
 
 // ── Per-Domain Rate Limiter ─────────────────────────────────────────────────
-const domainLastRequest = new Map();
+const domainNextAllowed = new Map();
 const domainBackoff = new Map();
 
 function getDomainPolicy(domain) {
   return DOMAIN_POLICIES[domain] || DEFAULT_POLICY;
 }
 
-/** Wait until it’s safe to hit a domain again, using domain-specific RPM. */
-async function waitForDomainCooldown(domain) {
-  const lastReq = domainLastRequest.get(domain) || 0;
+function isDomainCoolingDown(domain) {
+  const next = domainNextAllowed.get(domain);
+  return next ? Date.now() < next : false;
+}
+
+/** 
+ * Updates the cooldown timer for a domain.
+ * Called after each successful or failed request.
+ */
+function updateDomainCooldown(domain) {
   const backoffMult = domainBackoff.get(domain) || 1;
   const policy = getDomainPolicy(domain);
   const baseCooldown = gaussianDelay(policy.baseCooldownMs, policy.baseCooldownMs * 0.3);
   const cooldown = baseCooldown * backoffMult;
-  const elapsed = Date.now() - lastReq;
-
-  if (elapsed < cooldown) {
-    const waitMs = cooldown - elapsed;
-    await new Promise(r => setTimeout(r, waitMs));
-  }
-
-  domainLastRequest.set(domain, Date.now());
+  
+  domainNextAllowed.set(domain, Date.now() + cooldown);
 }
 
 /** Mark a domain as having encountered an error (triggers exponential backoff). */
@@ -106,17 +111,19 @@ function markDomainError(domain) {
   const current = domainBackoff.get(domain) || 1;
   const next = Math.min(current * 2, 16); // Max 16x = ~64s cooldown
   domainBackoff.set(domain, next);
-  console.warn(`[BrowserPool] Domain ${domain} backoff increased to ${next}x`);
+  updateDomainCooldown(domain); // Trigger immediate cooldown on error
+  
   // Record for Tier 4 escalation tracking
   recordDomainAttempt(domain, false);
 }
 
-/** Mark a domain as successful (gradually reduces backoff). */
+/** Mark a domain as having succeeded (halves backoff). */
 function markDomainSuccess(domain) {
   const current = domainBackoff.get(domain) || 1;
   if (current > 1) {
     domainBackoff.set(domain, Math.max(1, current * 0.5)); // Halve backoff on success
   }
+  updateDomainCooldown(domain);
   // Record for Tier 4 escalation tracking
   recordDomainAttempt(domain, true);
 }
@@ -124,7 +131,10 @@ function markDomainSuccess(domain) {
 function canProcessTask(task) {
   const domain = extractDomain(task.url);
   const domainActive = activeDomains.get(domain) || 0;
-  return domainActive < MAX_PER_DOMAIN;
+  // Per-domain concurrency limit AND per-domain cooldown check.
+  // This allows processQueue to skip tasks that are still in cooldown
+  // and process others, maximizing global slot utilization.
+  return domainActive < MAX_PER_DOMAIN && !isDomainCoolingDown(domain);
 }
 
 function processQueue() {
@@ -133,7 +143,8 @@ function processQueue() {
     const taskIdx = queue.findIndex(t => canProcessTask(t));
     if (taskIdx === -1) break; // All queued tasks are for busy domains
 
-    const { url, extractorJS, options, resolve, reject } = queue.splice(taskIdx, 1)[0];
+    const task = queue.splice(taskIdx, 1)[0];
+    const { url, extractorJS, options, resolve, reject } = task;
     const domain = extractDomain(url);
 
     activeCount++;
@@ -141,13 +152,17 @@ function processQueue() {
 
     executeScrape(url, extractorJS, options)
       .then(resolve)
-      .catch(reject)
+      .catch((err) => {
+        if (!isShuttingDown) reject(err);
+      })
       .finally(() => {
         activeCount--;
         const count = activeDomains.get(domain) || 1;
         if (count <= 1) activeDomains.delete(domain);
         else activeDomains.set(domain, count - 1);
-        processQueue();
+        
+        // Schedule another check soon in case of domain cooldowns
+        setTimeout(processQueue, 500); 
       });
   }
 }
@@ -174,22 +189,42 @@ async function executeScrape(url, extractorJS, options = {}) {
   } = options;
 
   const domain = extractDomain(url);
+  const pageId = randomUUID(); // Track this specific page instance
   let page = null;
   let timeoutId = null;
   let isSettled = false;
 
-  try {
-    // Per-domain rate limiting — wait for cooldown before proceeding
-    // This runs BEFORE the timeout race so cooldown doesn't eat into scrape time
-    await waitForDomainCooldown(domain);
+  if (isShuttingDown) {
+    throw new Error('Browser pool is shutting down');
+  }
 
+  try {
     const timeoutPromise = new Promise((_, reject) => {
       timeoutId = setTimeout(() => reject(new Error(`Scrape timed out after ${timeoutMs}ms for ${url}`)), timeoutMs);
     });
 
     const scrapePromise = (async () => {
+      let abortHandler = null;
       try {
         page = await createStealthPage();
+        if (isShuttingDown || isSettled || options.signal?.aborted) {
+          if (page) {
+            await page.close().catch(() => {});
+          }
+          if (options.signal?.aborted) throw new Error('Aborted');
+          return null;
+        }
+        pageHandles.set(pageId, { page, startTime: Date.now() });
+
+        if (options.signal) {
+          abortHandler = () => {
+            if (page && !page.__closing) {
+              page.__closing = true;
+              page.close().catch(() => {});
+            }
+          };
+          options.signal.addEventListener('abort', abortHandler, { once: true });
+        }
 
         // If the outer operation already timed out before we got the page, abort.
         if (isSettled) {
@@ -246,8 +281,16 @@ async function executeScrape(url, extractorJS, options = {}) {
         // Execute the extractor in page context
         return await page.evaluate(extractorJS);
       } finally {
-        if (page) {
-          try { await page.close(); } catch { /* already closed */ }
+        if (options.signal && abortHandler) {
+          options.signal.removeEventListener('abort', abortHandler);
+        }
+        isSettled = true; // Ensure inner settle happens even on errors
+        pageHandles.delete(pageId);
+        if (page && !page.__closing) {
+          page.__closing = true;
+          try {
+            if (!page.isClosed()) await page.close();
+          } catch { /* already closed */ }
         }
       }
     })();
@@ -262,13 +305,9 @@ async function executeScrape(url, extractorJS, options = {}) {
   } catch (error) {
     console.error(`[BrowserPool] Scrape failed for ${url}:`, error);
     markDomainError(domain);
+    
     // Clean up handle
-    for (const [key, val] of pageHandles.entries()) {
-      if (val === page) {
-        pageHandles.delete(key);
-        break;
-      }
-    }
+    pageHandles.delete(pageId);
 
     // Safety: ensure no concurrent close calls
     if (page && !page.__closing) {
@@ -289,12 +328,39 @@ async function executeScrape(url, extractorJS, options = {}) {
 }
 
 // ── Process Exit Cleanup ────────────────────────────────────────────────────
+/**
+ * Forcefully close all active pages in the pool.
+ * Called during application shutdown.
+ */
+export async function closeAllPages() {
+  isShuttingDown = true;
+  const handles = Array.from(pageHandles.values());
+  pageHandles.clear();
+
+  console.log(`[BrowserPool] Closing ${handles.length} active pages during shutdown...`);
+
+  await Promise.allSettled(handles.map(async ({ page }) => {
+    try {
+      if (page && !page.isClosed()) {
+        // Use a race to avoid hanging the entire app shutdown if one page is stuck
+        await Promise.race([
+          page.close(),
+          new Promise(r => setTimeout(r, 1000))
+        ]);
+      }
+    } catch (e) {
+      // Ignored during shutdown
+    }
+  }));
+}
+
 // Backup cleanup for orphaned browsers or pages on crash/exit.
 process.on('exit', () => {
-  for (const page of pageHandles.values()) {
+  for (const { page } of pageHandles.values()) {
     try { 
-      // Synchronous close attempt if possible, or just log
-      if (!page.isClosed()) { console.log('[BrowserPool] Orphaned page detected on exit'); }
+      if (!page.isClosed()) {
+        console.log('[BrowserPool] Orphaned page detected on exit');
+      }
     } catch {}
   }
 });
@@ -307,10 +373,36 @@ process.on('exit', () => {
  * @returns {Promise<any>}
  */
 export function queueScrape(url, extractorJS, options = {}) {
-  return new Promise((resolve, reject) => {
+  // Deduplication: if an identical task is already processing (queued OR active), reuse its promise.
+  const cacheKey = `${url}|${extractorJS}|${options.waitMs || 0}|${options.scrollFirst || false}`;
+  
+  if (activeTasks.has(cacheKey)) {
+    return activeTasks.get(cacheKey);
+  }
+
+  const promise = new Promise((resolve, reject) => {
+    if (options.signal?.aborted) return reject(new Error('Aborted'));
+    
+    const onAbort = () => {
+      const idx = queue.findIndex(t => t.resolve === resolve);
+      if (idx !== -1) {
+        queue.splice(idx, 1);
+        reject(new Error('Aborted'));
+      }
+    };
+    if (options.signal) options.signal.addEventListener('abort', onAbort, { once: true });
+
+    // We intentionally don't handle chained resolves manually anymore,
+    // since everyone shares this one root promise returned from the map!
     queue.push({ url, extractorJS, options, resolve, reject });
     processQueue();
+  }).finally(() => {
+    // Once settled (success or failure), remove from active map so future requests run fresh.
+    activeTasks.delete(cacheKey);
   });
+
+  activeTasks.set(cacheKey, promise);
+  return promise;
 }
 
 /**
@@ -318,11 +410,20 @@ export function queueScrape(url, extractorJS, options = {}) {
  * @param {Array<{id: string, url: string, extractorJS: string, options?: object}>} tasks
  * @returns {Promise<Array<{id: string, success: boolean, data?: any, error?: string}>>}
  */
-export async function scrapeMultiple(tasks) {
+export async function scrapeMultiple(tasks, onProgress = null, signal = null) {
   const results = await Promise.allSettled(
     tasks.map(async (task) => {
-      const data = await queueScrape(task.url, task.extractorJS, task.options);
-      return { id: task.id, success: true, data };
+      try {
+        if (signal?.aborted) throw new Error('Aborted');
+        const data = await queueScrape(task.url, task.extractorJS, { ...task.options, signal });
+        const result = { id: task.id, success: true, data };
+        onProgress?.(result);
+        return result;
+      } catch (err) {
+        const result = { id: task.id, success: false, error: err?.message || 'Unknown error' };
+        onProgress?.(result);
+        throw err;
+      }
     })
   );
 

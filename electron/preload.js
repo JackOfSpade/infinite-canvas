@@ -13,8 +13,6 @@ function createListener(channel) {
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Generic IPC invoke — used for channels without a typed helper
-  invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
 
   // ── Filesystem ──────────────────────────────────────────────────────────
   openFile: (filePath) => ipcRenderer.invoke('open-file', filePath),
@@ -31,6 +29,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onMenuOpen: createListener('menu-open'),
   onMenuSave: createListener('menu-save'),
   onMenuExportPng: createListener('menu-export-png'),
+  onQuitRequest: createListener('quit-request'),
+  sendQuitResponse: (hasUnsavedChanges) => ipcRenderer.send('quit-response', { hasUnsavedChanges }),
 
   // ── Jobs Module ─────────────────────────────────────────────────────────
   parseResume: (args) => ipcRenderer.invoke('parse-resume', args),

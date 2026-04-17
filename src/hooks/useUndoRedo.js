@@ -28,10 +28,18 @@ function fingerprint(snap) {
     }),
     e: e.map(x => ({ id: x.id, s: x.source, t: x.target })),
     dl: d.map(x => {
-      const pts   = Array.isArray(x) ? x : x.points || [];
+      if (!x) return null;
+      const pts   = Array.isArray(x) ? x : (x.points || []);
       const first = pts[0];
       const last  = pts[pts.length - 1];
-      return { c: x.color, pl: pts.length, f: first && [first.x, first.y], l: last && [last.x, last.y] };
+      // Defensive: only record coords if they exist
+      const fCoord = first ? [first.x, first.y] : null;
+      const lCoord = last ? [last.x, last.y] : null;
+      // Also sample the middle point to detect shape changes that preserve first/last/length
+      const mid = pts.length > 2 ? pts[Math.floor(pts.length / 2)] : null;
+      const mCoord = mid ? [mid.x, mid.y] : null;
+
+      return { c: x.color, pl: pts.length, f: fCoord, l: lCoord, m: mCoord };
     }),
   });
 }
@@ -45,7 +53,7 @@ function fingerprint(snap) {
  * a future exists and *immediately* clear it + re-sync, making the redo button
  * disable instantly.
  */
-export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDrawings, shortcuts, isAnimatingRef }) {
+export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDrawings, shortcuts, isAnimatingRef, isInteractionRef }) {
   const sc = shortcuts || DEFAULT_SHORTCUTS;
   const pastRef   = useRef([]);
   const futureRef = useRef([]);
@@ -71,11 +79,18 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
 
   const deepCloneState = useCallback(() => {
     const { nodes: n, edges: e, drawings: d } = stateRef.current;
-    return {
-      nodes:    structuredClone(n),
-      edges:    structuredClone(e),
-      drawings: structuredClone(d),
-    };
+    try {
+      return {
+        nodes:    structuredClone(n),
+        edges:    structuredClone(e),
+        drawings: structuredClone(d),
+      };
+    } catch (err) {
+      // Fallback: if structuredClone fails (due to non-serializable data in 'data' fields),
+      // we use a JSON-based clone which is safer for standard React Flow data.
+      console.warn('[undo-redo] structuredClone failed, falling back to JSON clone:', err.message);
+      return JSON.parse(JSON.stringify({ nodes: n, edges: e, drawings: d }));
+    }
   }, []);
 
   const takeSnapshot = useCallback(() => {

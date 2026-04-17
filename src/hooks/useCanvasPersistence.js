@@ -109,10 +109,30 @@ export function useCanvasPersistence({
 
   useEffect(() => {
     isMountedRef.current = true;
+    
+    // ── Quit Handshake ──────────────────────────────────────────────────────
+    // Listens for the main process signaling a quit intent (e.g., Cmd+Q).
+    const unlistenQuit = window.electronAPI?.onQuitRequest?.(() => {
+      if (!isMountedRef.current) return;
+      window.electronAPI.sendQuitResponse(hasUnsavedChanges);
+    });
+
+    // ── Window Unload Guard ──────────────────────────────────────────────────
+    // Standard browser/electron safety for closing the window tab directly.
+    const handleBeforeUnload = (e) => {
+      if (hasUnsavedChanges) {
+        e.preventDefault();
+        e.returnValue = ''; // Required for Chrome/Electron to show the prompt
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
     return () => {
       isMountedRef.current = false;
+      unlistenQuit?.();
+      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-  }, []);
+  }, [hasUnsavedChanges]);
 
   const saveCanvas = useCallback(async () => {
     if (!window.electronAPI || saveState !== 'idle' || isAnimatingRef?.current) return;
@@ -142,8 +162,17 @@ export function useCanvasPersistence({
     }
   }, [nodes, edges, drawings, currentFile, saveState, addToast, flushStack, isAnimatingRef]);
 
+  const confirmDiscardChanges = useCallback(() => {
+    if (!hasUnsavedChanges) return true;
+    return window.confirm('You have unsaved changes. Loading another workspace will discard them. Continue?');
+  }, [hasUnsavedChanges]);
+
   const loadCanvas = useCallback(async () => {
     if (!window.electronAPI || isAnimatingRef?.current) return;
+    
+    // Security/UX Guard: Prevent overwriting unsaved work
+    if (!confirmDiscardChanges()) return;
+
     try {
       const res = await window.electronAPI.loadWorkspace();
       if (!isMountedRef.current) return;

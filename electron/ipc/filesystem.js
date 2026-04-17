@@ -19,37 +19,51 @@ const activeWatchers = new Map();
  * Module-level recursive directory scanner.
  * Uses lstat to detect symlinks and prevent recursion.
  */
-async function scanPath(currentPath, visited, depth = 0) {
+/**
+ * Module-level recursive directory scanner.
+ * Uses lstat to detect symlinks and prevent recursion.
+ * Hardened: Max 10 simultaneous directory reads to prevent EMFILE errors.
+ */
+let activeScans = 0;
+const MAX_SCAN_CONCURRENCY = 10;
+
+async function scanPath(currentPath, visited, sender = null, depth = 0) {
   // Prevent infinite recursion from symlink loops or massive trees
-  if (depth > 5) return null;
+  if (depth > 15) return null;
 
-  let realPath = currentPath;
-  try { realPath = await fs.promises.realpath(currentPath); } catch {}
-  if (visited.has(realPath)) return null;
-  visited.add(realPath);
+  // Guard: Abort recursion if the window that requested it was closed
+  if (sender && sender.isDestroyed()) return null;
 
-  // Skip notoriously large known directories to prevent thread lock
-  const base = path.basename(currentPath);
-  if (base === 'node_modules' || base === '.git' || base === '.DS_Store') return null;
+  // Manage concurrency
+  while (activeScans >= MAX_SCAN_CONCURRENCY) {
+    await new Promise(r => setTimeout(r, 50));
+    if (sender && sender.isDestroyed()) return null;
+  }
 
+  activeScans++;
   try {
+    let realPath = currentPath;
+    try { realPath = await fs.promises.realpath(currentPath); } catch {}
+    if (visited.has(realPath)) return null;
+    visited.add(realPath);
+
+    // Skip notoriously large or transient directories/files to prevent thread lock/pollution
+    const base = path.basename(currentPath);
+    if (base === 'node_modules' || base === '.git' || base === '.DS_Store' || base.endsWith('.tmp')) return null;
+
     // Use lstat to handle symlinks correctly (don't blindly follow if we've seen the path)
     const stats = await fs.promises.lstat(currentPath);
     
-    if (stats.isSymbolicLink()) {
-      // For symlinks, we already have realPath via realpath() above.
-      // If we got here, it's a link we haven't visited yet.
-      // We'll follow it once unless it exceeds depth.
-    }
-
     if (stats.isDirectory()) {
       const dirItems = await fs.promises.readdir(currentPath);
-      const childrenPromises = dirItems.map(async item => {
-        try { return await scanPath(path.join(currentPath, item), visited, depth + 1); }
-        catch { return null; }
-      });
-      const childrenRaw = await Promise.all(childrenPromises);
-      const children = childrenRaw.filter(Boolean);
+      
+      // Process sub-directories sequentially or in small batches to preserve concurrency limit
+      const children = [];
+      for (const item of dirItems) {
+        const child = await scanPath(path.join(currentPath, item), visited, sender, depth + 1);
+        if (child) children.push(child);
+        if (sender && sender.isDestroyed()) return null;
+      }
       
       return {
         id: 'group-' + randomUUID(),
@@ -68,8 +82,10 @@ async function scanPath(currentPath, visited, depth = 0) {
     };
   } catch (err) {
     // Possible edge case: file deleted between readdir and lstat
-    console.warn(`[Filesystem] Skipping inaccessible path: ${currentPath}`, err.message);
+    console.warn(`[Filesystem] Skipping inaccessible path: ${currentPath}`, err?.message || String(err));
     return null;
+  } finally {
+    activeScans--;
   }
 }
 
@@ -89,10 +105,14 @@ async function atomicWriteFile(targetPath, data) {
 }
 
 export function registerFilesystemHandlers() {
-  ipcMain.handle('scan-directory', async (_event, dirPath) => {
+  ipcMain.handle('scan-directory', async (event, dirPath) => {
     const visited = new Set();
     try {
-      const result = await scanPath(dirPath, visited);
+      const result = await scanPath(dirPath, visited, event.sender);
+      
+      // Guard: If window reload/close happened during deep file scan, abort early.
+      if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
+
       if (!result) return { success: false, error: 'Directory skip or unreadable' };
       return result.type === 'document' ? { isFile: true, file: result } : result;
     } catch (error) {
@@ -113,6 +133,10 @@ export function registerFilesystemHandlers() {
 
   ipcMain.handle('open-external', async (_event, url) => {
     try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return { success: false, error: `Invalid protocol: ${parsed.protocol}. Only http and https are allowed for external links.` };
+      }
       await shell.openExternal(url);
       return { success: true };
     } catch (err) {
@@ -120,7 +144,7 @@ export function registerFilesystemHandlers() {
     }
   });
 
-  ipcMain.handle('fetch-url-title', async (_event, url) => {
+  ipcMain.handle('fetch-url-title', async (event, url) => {
     try {
       let fetchUrl = url;
       if (!fetchUrl.startsWith('http://') && !fetchUrl.startsWith('https://')) {
@@ -130,9 +154,40 @@ export function registerFilesystemHandlers() {
         signal: AbortSignal.timeout(3000),
         headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' },
       });
-      const text = await res.text();
+      
+      if (!res.body) return null;
+
+      // Hardening: Read only the first 1MB of the response to avoid memory bloat
+      const MAX_SIZE = 1024 * 1024; // 1MB
+      const reader = res.body.getReader();
+      let decoder = new TextDecoder();
+      let text = '';
+      let bytesRead = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+        bytesRead += value.length;
+        if (bytesRead >= MAX_SIZE) {
+          await reader.cancel();
+          break;
+        }
+      }
+      
+      // Guard: network fetch could be slow; window might be gone.
+      if (event.sender.isDestroyed()) return null;
+
       const match = text.match(/<title[^>]*>([^<]+)<\/title>/i);
-      return match ? match[1].trim() : null;
+      if (!match) return null;
+      let title = match[1].trim();
+      // Simple HTML entity decode for common characters
+      title = title.replace(/&amp;/g, '&')
+                   .replace(/&lt;/g, '<')
+                   .replace(/&gt;/g, '>')
+                   .replace(/&quot;/g, '"')
+                   .replace(/&#39;/g, "'");
+      return title;
     } catch {
       return null;
     }
@@ -160,25 +215,41 @@ export function registerFilesystemHandlers() {
     }
   });
 
-  ipcMain.handle('load-workspace', async () => {
+  ipcMain.handle('load-workspace', async (_event, opts) => {
     try {
-      const { canceled, filePaths } = await dialog.showOpenDialog({
-        title: 'Open Canvas',
-        properties: ['openFile'],
-        filters: [{ name: 'JSON Files', extensions: ['json'] }],
-      });
-      if (canceled || filePaths.length === 0) return { success: false, canceled: true };
-      const targetPath = filePaths[0];
-      const data = await fs.promises.readFile(targetPath, 'utf-8');
+      let targetPath = opts?.filePath;
       
-      // Safety: Parse JSON in a try block even inside the outer catch
+      if (!targetPath) {
+        const { canceled, filePaths } = await dialog.showOpenDialog({
+          title: 'Open Canvas',
+          properties: ['openFile'],
+          filters: [{ name: 'JSON Files', extensions: ['json'] }],
+        });
+        if (canceled || filePaths.length === 0) return { success: false, canceled: true };
+        targetPath = filePaths[0];
+      }
+
+      if (!fs.existsSync(targetPath)) {
+        return { success: false, error: 'File does not exist' };
+      }
+
+      const stats = fs.statSync(targetPath);
+      if (stats.size === 0) {
+        return { success: false, error: 'Workspace file is empty (0 bytes)' };
+      }
+
+      const content = await fs.promises.readFile(targetPath, 'utf-8');
+      
       try {
-        return { success: true, data: JSON.parse(data), filePath: targetPath };
+        const data = JSON.parse(content);
+        console.log(`[FileSystem] Loaded workspace: ${targetPath} (${stats.size} bytes)`);
+        return { success: true, data, filePath: targetPath };
       } catch (jsonErr) {
-        return { success: false, error: 'Invalid workspace file format. File may be corrupted.' };
+        console.error(`[FileSystem] Failed to parse workspace JSON at ${targetPath}:`, jsonErr);
+        return { success: false, error: 'Invalid workspace file format. File may be corrupted or malformed.' };
       }
     } catch (err) {
-      console.error('Failed to load workspace:', err);
+      console.error('[FileSystem] Unexpected error loading workspace:', err);
       return { success: false, error: err?.message || String(err) };
     }
   });
@@ -208,6 +279,15 @@ export function registerFilesystemHandlers() {
               clientSender.send('file-changed', filePath);
             }
           }
+        }
+      });
+
+      watcher.on('error', (err) => {
+        console.warn(`[FileSystem] Watcher error for ${filePath}:`, err);
+        const entry = activeWatchers.get(filePath);
+        if (entry) {
+          entry.watcher.close();
+          activeWatchers.delete(filePath);
         }
       });
 
@@ -268,4 +348,27 @@ export function registerFilesystemHandlers() {
       return { success: false, error: err?.message || String(err) };
     }
   });
+}
+
+/**
+ * Startup Cleanup Logic: Finds and deletes orphaned .tmp files left over from
+ * previous sessions (atomic write failures or app crashes).
+ */
+export async function cleanupTempFiles() {
+  const cwd = process.cwd();
+  try {
+    const files = await fs.promises.readdir(cwd);
+    const tmpFiles = files.filter(f => f.endsWith('.tmp') && f.includes('-'));
+    for (const f of tmpFiles) {
+      try {
+        const stats = await fs.promises.stat(path.join(cwd, f));
+        // Only delete if older than 1 hour (safety against concurrent writes from active run)
+        if (Date.now() - stats.mtimeMs > 60 * 60 * 1000) {
+          await fs.promises.unlink(path.join(cwd, f));
+        }
+      } catch {}
+    }
+  } catch (err) {
+    console.warn('[Filesystem] Startup cleanup failed:', err?.message || String(err));
+  }
 }

@@ -2,14 +2,16 @@ import electronPkg from 'electron';
 const { app, BrowserWindow, Menu, protocol } = electronPkg;
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { registerFilesystemHandlers } from './ipc/filesystem.js';
+import { registerFilesystemHandlers, cleanupTempFiles } from './ipc/filesystem.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
 import { registerAccountsHandlers } from './ipc/accounts.js';
 import { registerMonitorHandlers, closeAllMonitors } from './ipc/browserViewMonitor.js';
+import { closeAllPages } from './ipc/browserPool.js';
 import { closeStealthBrowser } from './ipc/stealthBrowser.js';
 import { registerGeminiHandlers } from './ipc/gemini.js';
 import { registerBugReportHandlers } from './ipc/bugReport.js';
+import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,6 +29,7 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 let mainWindow = null;
+const gotTheLock = app.requestSingleInstanceLock();
 
 // ── Window creation ──────────────────────────────────────────────────────────
 
@@ -46,6 +49,37 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html')).catch(err => console.error('Failed to load local file:', err));
   }
+
+  mainWindow.on('close', async (event) => {
+    if (isQuitting) return; // Let before-quit handle it
+
+    event.preventDefault();
+    
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('quit-request');
+      
+      const rendererState = await Promise.race([
+        new Promise(resolve => {
+          electronPkg.ipcMain.once('quit-response', (_e, { hasUnsavedChanges }) => resolve({ hasUnsavedChanges }));
+        }),
+        new Promise(resolve => setTimeout(() => resolve({ timeout: true }), 1500))
+      ]);
+
+      if (rendererState.hasUnsavedChanges) {
+        const choice = electronPkg.dialog.showMessageBoxSync(mainWindow, {
+          type: 'warning',
+          buttons: ['Close Without Saving', 'Cancel'],
+          defaultId: 1,
+          cancelId: 1,
+          title: 'Unsaved Changes',
+          message: 'You have unsaved changes. Are you sure you want to close this window? Your unsaved work will be lost.'
+        });
+        if (choice === 1) return; // User clicked Cancel
+      }
+    }
+    
+    mainWindow.destroy(); // Safe to destroy now
+  });
 
   setupApplicationMenu(mainWindow);
 }
@@ -89,7 +123,16 @@ function setupApplicationMenu(win) {
       ],
     },
     { role: 'editMenu' },
-    { role: 'viewMenu' },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
     { role: 'windowMenu' },
   ];
 
@@ -104,7 +147,8 @@ app.on('web-contents-created', (_, contents) => {
   contents.on('will-navigate', (event, navigationUrl) => {
     try {
       const parsedUrl = new URL(navigationUrl);
-      if (!parsedUrl.protocol.startsWith('file:') && !parsedUrl.origin.includes('localhost')) {
+      const isAllowedLocalhost = parsedUrl.hostname === 'localhost' || parsedUrl.hostname === '127.0.0.1';
+      if (!parsedUrl.protocol.startsWith('file:') && !isAllowedLocalhost) {
         event.preventDefault();
       }
     } catch {
@@ -114,49 +158,129 @@ app.on('web-contents-created', (_, contents) => {
   });
 });
 
-app.whenReady().then(() => {
-  protocol.registerFileProtocol('local-file', (request, callback) => {
-    let url = request.url.replace(/^local-file:\/\//, '');
-    try {
-      const decodedPath = decodeURIComponent(url);
-      const normalizedPath = path.normalize(decodedPath);
-      
-      return callback({ path: normalizedPath });
-    } catch (error) {
-      console.error('Failed to register local-file protocol', error);
-      return callback({ error: -2 }); // net::ERR_FAILED
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (event, commandLine, workingDirectory) => {
+    // Someone tried to run a second instance, we should focus our window.
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
     }
   });
 
-  registerFilesystemHandlers();
-  registerJobsHandlers();
-  registerMarketplaceHandlers();
-  registerAccountsHandlers();
-  registerMonitorHandlers();
-  registerGeminiHandlers();
-  registerBugReportHandlers();
-  createWindow();
+  app.whenReady().then(() => {
+    protocol.registerFileProtocol('local-file', (request, callback) => {
+      let url = request.url.replace(/^local-file:\/\//, '');
+      try {
+        const decodedPath = decodeURIComponent(url);
+        const normalizedPath = path.normalize(decodedPath);
+        
+        // ── Protocol Security Hardening ──────────────────────────────────────────
+        // Resolve real path to prevent symlink-based blocklist bypasses.
+        let targetPath = normalizedPath;
+        try { targetPath = fs.realpathSync(normalizedPath); } catch {}
+        
+        // Convert to Unix-style separators for consistent verification across platforms
+        const verificationPath = targetPath.split(path.sep).join('/').toLowerCase();
+        
+        // Block sensitive system roots and configuration files
+        const sensitivePatterns = [
+          '/etc/', '/var/', '/proc/', '/sys/', '/dev/', 
+          '/.ssh/', '/.aws/', '/.config/', '/.env',
+          'ntuser.dat', 'system32', 'windows/debug',
+          '/users/shared/', '/volumes/'
+        ];
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+        // Explicitly block accessing the root directory directly
+        const isUnixRoot = targetPath === '/';
+        const isWindowsRoot = !!targetPath.match(/^[a-zA-Z]:\\?$/);
+        
+        if (isUnixRoot || isWindowsRoot) {
+          console.warn(`[Security] Blocked direct root access via local-file: ${targetPath}`);
+          return callback({ error: -10 });
+        }
+        
+        // Recursive/Inclusive blocklist check:
+        // We block if the sensitive pattern exists ANYWHERE in the normalized path.
+        if (sensitivePatterns.some(p => verificationPath.includes(p))) {
+          console.warn(`[Security] Blocked access to sensitive path via local-file: ${targetPath}`);
+          return callback({ error: -10 /* net::ERR_ACCESS_DENIED */ });
+        }
+
+        return callback({ path: targetPath });
+      } catch (error) {
+        console.error('Failed to register local-file protocol', error);
+        return callback({ error: -2 }); // net::ERR_FAILED
+      }
+    });
+
+    // Cleanup orphaned .tmp files from previous sessions
+    cleanupTempFiles().catch(err => console.error('[Main] Cleanup failed:', err));
+
+    registerFilesystemHandlers();
+    registerJobsHandlers();
+    registerMarketplaceHandlers();
+    registerAccountsHandlers();
+    registerMonitorHandlers();
+    registerGeminiHandlers();
+    registerBugReportHandlers();
+    createWindow();
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
-});
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+}
 
 let isQuitting = false;
 app.on('before-quit', async (event) => {
   if (isQuitting) return;
   event.preventDefault();
+
+  // 1. Handshake with renderer to check for unsaved changes.
+  // We give the renderer 1.5 seconds to respond. If it doesn't, we assume it's
+  // hung or no listeners are active and proceed with a safe quit.
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send('quit-request');
+    
+    // We wait for the renderer to report if it has unsaved changes.
+    const rendererState = await Promise.race([
+      new Promise(resolve => {
+        electronPkg.ipcMain.once('quit-response', (_e, { hasUnsavedChanges }) => resolve({ hasUnsavedChanges }));
+      }),
+      new Promise(resolve => setTimeout(() => resolve({ timeout: true }), 1500))
+    ]);
+
+    if (rendererState.hasUnsavedChanges) {
+      const choice = electronPkg.dialog.showMessageBoxSync(mainWindow, {
+        type: 'warning',
+        buttons: ['Quit Without Saving', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        title: 'Unsaved Changes',
+        message: 'You have unsaved changes. Are you sure you want to quit? Your unsaved work will be lost.'
+      });
+      if (choice === 1) {
+        return; // User clicked Cancel
+      }
+    }
+  }
+
   isQuitting = true;
 
   // Cleanup with safety timeout
   try {
     const cleanup = async () => {
-      closeAllMonitors();
-      await closeStealthBrowser();
+      await Promise.allSettled([
+        closeAllMonitors(),
+        closeAllPages(),
+        closeStealthBrowser(true)
+      ]);
     };
     
     // Give cleanup 2 seconds to finish, then force quit

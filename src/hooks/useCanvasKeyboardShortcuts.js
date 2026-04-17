@@ -10,6 +10,10 @@ export function useCanvasKeyboardShortcuts({
     const handleKey = (e) => {
       if (isAnimatingRef?.current) return;
       
+      // Ignore if any modifier keys are pressed (to avoid colliding with OS/Browser shortcuts)
+      // Exception: Escape is allowed to fire regardless of modifiers for emergency cancellation.
+      if (e.key !== 'Escape' && (e.metaKey || e.ctrlKey || e.altKey)) return;
+
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
       
