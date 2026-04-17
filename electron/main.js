@@ -1,4 +1,5 @@
-import { app, BrowserWindow, Menu, protocol } from 'electron';
+import electronPkg from 'electron';
+const { app, BrowserWindow, Menu, protocol } = electronPkg;
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { registerFilesystemHandlers } from './ipc/filesystem.js';
@@ -29,15 +30,22 @@ function createWindow() {
   });
 
   if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL).catch(err => console.error('Failed to load dev server:', err));
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    mainWindow.loadFile(path.join(__dirname, '../dist/index.html')).catch(err => console.error('Failed to load local file:', err));
   }
 
   setupApplicationMenu(mainWindow);
 }
 
 // ── Application menu ─────────────────────────────────────────────────────────
+
+/** Send a channel to a window's renderer only if it is alive. */
+function safeMenuSend(win, channel) {
+  if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
+    win.webContents.send(channel);
+  }
+}
 
 function setupApplicationMenu(win) {
   const isMac = process.platform === 'darwin';
@@ -60,10 +68,10 @@ function setupApplicationMenu(win) {
     {
       label: 'File',
       submenu: [
-        { label: 'Open Canvas',   accelerator: 'CmdOrCtrl+O',       click: () => win.webContents.send('menu-open') },
-        { label: 'Save Canvas',   accelerator: 'CmdOrCtrl+S',       click: () => win.webContents.send('menu-save') },
+        { label: 'Open Canvas',   accelerator: 'CmdOrCtrl+O',       click: () => safeMenuSend(win, 'menu-open') },
+        { label: 'Save Canvas',   accelerator: 'CmdOrCtrl+S',       click: () => safeMenuSend(win, 'menu-save') },
         { type: 'separator' },
-        { label: 'Export as PNG', accelerator: 'CmdOrCtrl+Shift+E', click: () => win.webContents.send('menu-export-png') },
+        { label: 'Export as PNG', accelerator: 'CmdOrCtrl+Shift+E', click: () => safeMenuSend(win, 'menu-export-png') },
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
       ],
@@ -77,6 +85,17 @@ function setupApplicationMenu(win) {
 }
 
 // ── App lifecycle ────────────────────────────────────────────────────────────
+
+app.on('web-contents-created', (_, contents) => {
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+  contents.on('will-navigate', (event, navigationUrl) => {
+    const parsedUrl = new URL(navigationUrl);
+    if (!parsedUrl.protocol.startsWith('file:') && !parsedUrl.origin.includes('localhost')) {
+      event.preventDefault();
+    }
+  });
+});
 
 app.whenReady().then(() => {
   protocol.registerFileProtocol('local-file', (request, callback) => {
@@ -106,7 +125,12 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', async () => {
+let isQuitting = false;
+app.on('before-quit', async (event) => {
+  if (isQuitting) return;
+  event.preventDefault();
+  isQuitting = true;
   closeAllMonitors();
   await closeStealthBrowser();
+  app.quit();
 });

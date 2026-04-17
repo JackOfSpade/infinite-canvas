@@ -1,4 +1,5 @@
-import { ipcMain, dialog, app } from 'electron';
+import electronPkg from 'electron';
+const { ipcMain, dialog, app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -152,7 +153,7 @@ export function registerBugReportHandlers() {
       return { success: true, filePath };
     } catch (err) {
       console.error('[BugReport] Failed to export bug report:', err);
-      return { success: false, error: err.message };
+      return { success: false, error: err?.message || String(err) };
     }
   });
 
@@ -164,7 +165,7 @@ export function registerBugReportHandlers() {
       return { success: true, markdown: markdownContent };
     } catch (err) {
       console.error('[BugReport] Failed to generate bug report markdown:', err);
-      return { success: false, error: err.message };
+      return { success: false, error: err?.message || String(err) };
     }
   });
 }

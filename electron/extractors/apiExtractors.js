@@ -115,7 +115,7 @@ export async function fetchLinkedInJobs(query) {
       // Polite delay between pages — report recommends 2-3s minimum for LinkedIn
       if (start < 25) await new Promise(r => setTimeout(r, 2000));
     } catch (error) {
-      console.error(`[LinkedIn API] Fetch failed at start=${start}:`, error.message);
+      console.error(`[LinkedIn API] Fetch failed at start=${start}:`, error?.message || String(error));
       break;
     }
   }
@@ -326,7 +326,7 @@ export async function fetchUSAJobs(query, apiKey, email) {
       };
     });
   } catch (error) {
-    console.error('[USAJobs] Fetch failed:', error.message);
+    console.error('[USAJobs] Fetch failed:', error?.message || String(error));
     return [];
   }
 }
@@ -380,7 +380,7 @@ export async function fetchRemoteOKJobs(query) {
       source: 'remoteok',
     }));
   } catch (error) {
-    console.error('[RemoteOK API] Fetch failed:', error.message);
+    console.error('[RemoteOK API] Fetch failed:', error?.message || String(error));
     return [];
   }
 }
@@ -453,7 +453,7 @@ export async function fetchWeWorkRemotelyJobs(query) {
 
     return jobs.slice(0, 30);
   } catch (error) {
-    console.error('[WWR RSS] Fetch failed:', error.message);
+    console.error('[WWR RSS] Fetch failed:', error?.message || String(error));
     return [];
   }
 }
@@ -505,7 +505,7 @@ export async function fetchReverbListings(query, soldOnly = false) {
       };
     });
   } catch (error) {
-    console.error('[Reverb API] Fetch failed:', error.message);
+    console.error('[Reverb API] Fetch failed:', error?.message || String(error));
     return [];
   }
 }
@@ -574,7 +574,7 @@ export async function fetchDiceListings(query, location = '') {
       easyApply: job.easyApply || false,
     }));
   } catch (error) {
-    console.error('[Dice API] Fetch failed:', error.message);
+    console.error('[Dice API] Fetch failed:', error?.message || String(error));
     return [];
   }
 }
@@ -629,13 +629,13 @@ const STOCKX_KEY_EXTRACTOR = `
         return { appId: config.appId, apiKey: config.apiKey };
       }
     }
-  } catch (e) {}
+  } catch {}
 
   // Strategy 3: Check global window properties
   try {
     if (window.__algoliaConfig) return window.__algoliaConfig;
     if (window.__STOCKX_CONFIG__?.algolia) return window.__STOCKX_CONFIG__.algolia;
-  } catch (e) {}
+  } catch {}
 
   return null;
 })()
@@ -727,7 +727,7 @@ export async function fetchStockXListings(query) {
       };
     });
   } catch (error) {
-    console.error('[StockX Algolia] Fetch failed:', error.message);
+    console.error('[StockX Algolia] Fetch failed:', error?.message || String(error));
     return [];
   }
 }

@@ -1,42 +1,61 @@
 /**
  * Filesystem IPC handlers — scan directories, open files/URLs, save/load workspaces.
  */
-import { ipcMain, shell, dialog } from 'electron';
+import electronPkg from 'electron';
+const { ipcMain, shell, dialog } = electronPkg;
 import path from 'path';
 import fs from 'fs';
+import { randomUUID } from 'crypto';
 
 const activeWatchers = new Map();
 
 export function registerFilesystemHandlers() {
   ipcMain.handle('scan-directory', async (_event, dirPath) => {
-    const scan = (currentPath) => {
+    const visited = new Set();
+    const scan = (currentPath, depth = 0) => {
+      // Prevent infinite recursion from symlink loops or massive trees
+      if (depth > 5) return null;
+      
+      let realPath = currentPath;
+      try { realPath = fs.realpathSync(currentPath); } catch {}
+      if (visited.has(realPath)) return null;
+      visited.add(realPath);
+
+      // Skip notoriously large known directories to prevent thread lock
+      const base = path.basename(currentPath);
+      if (base === 'node_modules' || base === '.git') return null;
+
       const stats = fs.statSync(currentPath);
       if (stats.isDirectory()) {
         const children = fs.readdirSync(currentPath)
           .map(item => {
-            try { return scan(path.join(currentPath, item)); }
+            try { return scan(path.join(currentPath, item), depth + 1); }
             catch { return null; }
           })
           .filter(Boolean);
         return {
-          id: 'group-' + Math.random().toString(36).substr(2, 9),
+          id: 'group-' + randomUUID(),
           type: 'group',
-          title: path.basename(currentPath) || currentPath,
+          title: base || currentPath,
           collapsed: true,
           items: children,
         };
       }
       return {
-        id: 'doc-' + Math.random().toString(36).substr(2, 9),
+        id: 'doc-' + randomUUID(),
         type: 'document',
-        filename: path.basename(currentPath),
+        filename: base,
         filePath: currentPath,
       };
     };
 
     try {
-      const stats = fs.statSync(dirPath);
-      return stats.isDirectory() ? scan(dirPath) : { isFile: true, file: scan(dirPath) };
+      const result = scan(dirPath);
+      // Result could be null if the root was ignored (e.g. depth limit or node_modules)
+      if (!result) return { success: false, error: 'Directory skip or unreadable' };
+      // scan() returns { type: 'group', ... } for directories and { type: 'document', ... } for files.
+      // Wrap file results in the { isFile, file } envelope the caller expects.
+      return result.type === 'document' ? { isFile: true, file: result } : result;
     } catch (error) {
       console.error('Error scanning directory:', error);
       throw error;
@@ -49,7 +68,7 @@ export function registerFilesystemHandlers() {
       if (err) return { success: false, error: err };
       return { success: true };
     } catch (err) {
-      return { success: false, error: err.message };
+      return { success: false, error: err?.message || String(err) };
     }
   });
 
@@ -58,23 +77,20 @@ export function registerFilesystemHandlers() {
       await shell.openExternal(url);
       return { success: true };
     } catch (err) {
-      return { success: false, error: err.message };
+      return { success: false, error: err?.message || String(err) };
     }
   });
 
   ipcMain.handle('fetch-url-title', async (_event, url) => {
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000);
       let fetchUrl = url;
       if (!fetchUrl.startsWith('http://') && !fetchUrl.startsWith('https://')) {
-          fetchUrl = 'https://' + fetchUrl;
+        fetchUrl = 'https://' + fetchUrl;
       }
       const res = await fetch(fetchUrl, {
-        signal: controller.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' }
+        signal: AbortSignal.timeout(3000),
+        headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' },
       });
-      clearTimeout(timeoutId);
       const text = await res.text();
       const match = text.match(/<title[^>]*>([^<]+)<\/title>/i);
       return match ? match[1].trim() : null;
@@ -100,7 +116,7 @@ export function registerFilesystemHandlers() {
       return { success: true, filePath: targetPath };
     } catch (err) {
       console.error('Failed to save workspace:', err);
-      return { success: false, error: err.message };
+      return { success: false, error: err?.message || String(err) };
     }
   });
 
@@ -117,31 +133,56 @@ export function registerFilesystemHandlers() {
       return { success: true, data: JSON.parse(data), filePath: targetPath };
     } catch (err) {
       console.error('Failed to load workspace:', err);
-      return { success: false, error: err.message };
+      return { success: false, error: err?.message || String(err) };
     }
   });
 
   ipcMain.handle('start-file-watch', (event, filePath) => {
-    if (activeWatchers.has(filePath)) return { success: true };
+    if (activeWatchers.has(filePath)) {
+      const existing = activeWatchers.get(filePath);
+      if (!existing.sender.isDestroyed() && existing.sender === event.sender) {
+        return { success: true };
+      }
+      // If same file but different/destroyed sender, clean up old watcher
+      existing.watcher.close();
+      activeWatchers.delete(filePath);
+    }
     try {
       if (!fs.existsSync(filePath)) return { success: false, error: 'File missing' };
       const watcher = fs.watch(filePath, (eventType) => {
         if (eventType === 'change') {
-          event.sender.send('file-changed', filePath);
+          if (!event.sender.isDestroyed()) {
+            event.sender.send('file-changed', filePath);
+          }
         }
       });
-      activeWatchers.set(filePath, watcher);
+      activeWatchers.set(filePath, { watcher, sender: event.sender });
+
+      if (!event.sender.__fsWatchCleanupAttached) {
+        event.sender.__fsWatchCleanupAttached = true;
+        event.sender.once('destroyed', () => {
+          for (const [key, obj] of activeWatchers.entries()) {
+            if (obj.sender === event.sender) {
+              obj.watcher.close();
+              activeWatchers.delete(key);
+            }
+          }
+        });
+      }
+
       return { success: true };
     } catch (err) {
       console.error('Watch error:', err);
-      return { success: false, error: err.message };
+      return { success: false, error: err?.message || String(err) };
     }
   });
 
   ipcMain.handle('stop-file-watch', (event, filePath) => {
-    const watcher = activeWatchers.get(filePath);
-    if (watcher) {
-      watcher.close();
+    const obj = activeWatchers.get(filePath);
+    // Only allow the sender that registered the watcher to close it — avoids
+    // a second node watching the same path from killing the first's watcher.
+    if (obj && obj.sender === event.sender) {
+      obj.watcher.close();
       activeWatchers.delete(filePath);
     }
     return { success: true };
@@ -153,7 +194,7 @@ export function registerFilesystemHandlers() {
       return { success: true };
     } catch (err) {
       console.error('Failed to trash OS file:', err);
-      return { success: false, error: err.message };
+      return { success: false, error: err?.message || String(err) };
     }
   });
 }

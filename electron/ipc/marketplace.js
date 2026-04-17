@@ -6,7 +6,8 @@
  *   Tier 1 Active: eBay Active
  *   Tier 2 Sold:  Mercari Sold
  */
-import { ipcMain } from 'electron';
+import electronPkg from 'electron';
+const { ipcMain } = electronPkg;
 import { callGeminiVision, callGeminiText } from './gemini.js';
 import { queueScrape } from './browserPool.js';
 import {
@@ -23,42 +24,52 @@ import {
 
 // ── Source → URL + Extractor mapping (browser pool sources only) ────────────
 // Reverb and StockX have been moved to fetchApiMarketplaceSources (direct HTTP).
+//
+// Each task has a `category: 'sold' | 'active'` field so the aggregate loop can
+// classify results without a separately-maintained hardcoded ID list.
 function buildCompTasks(query) {
   return [
     // Tier 1 — Sold comps (gold standard)
     {
-      id: 'ebay-sold',
+      id: 'ebay-sold',   category: 'sold',
       url: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Complete=1&LH_Sold=1&_sop=13`,
       extractorJS: EBAY_SOLD_EXTRACTOR,
       options: EBAY_SOLD_CONFIG,
     },
     {
-      id: 'poshmark',
+      id: 'poshmark',    category: 'sold',
       url: `https://poshmark.com/search?query=${encodeURIComponent(query)}&availability=sold_out&type=listings`,
       extractorJS: POSHMARK_SOLD_EXTRACTOR,
       options: POSHMARK_CONFIG,
     },
     {
-      id: 'swappa',
+      id: 'swappa',      category: 'sold',
       url: `https://swappa.com/search?q=${encodeURIComponent(query)}`,
       extractorJS: SWAPPA_EXTRACTOR,
       options: SWAPPA_CONFIG,
     },
     // Tier 1 — Active competition
     {
-      id: 'ebay-active',
+      id: 'ebay-active', category: 'active',
       url: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&_sop=15`,
       extractorJS: EBAY_ACTIVE_EXTRACTOR,
       options: EBAY_ACTIVE_CONFIG,
     },
     // Tier 2 — Supplementary sold (Mercari: use %20 not + for cleaner sold results)
     {
-      id: 'mercari',
+      id: 'mercari',     category: 'sold',
       url: `https://www.mercari.com/search/?keyword=${query.replace(/\s+/g, '%20')}&status=sold_out`,
       extractorJS: MERCARI_SOLD_EXTRACTOR,
       options: MERCARI_CONFIG,
     },
   ];
+}
+
+/** Build a lookup map from task ID → category, derived once per price research call. */
+function buildTaskCategoryMap(tasks) {
+  const map = {};
+  for (const t of tasks) map[t.id] = t.category;
+  return map;
 }
 
 /**
@@ -76,7 +87,7 @@ async function fetchApiMarketplaceSources(query) {
       const items = await fn();
       return { sourceId, items };
     } catch (error) {
-      return { sourceId, items: [], error: error.message };
+      return { sourceId, items: [], error: error?.message || String(error) };
     }
   }));
 
@@ -113,8 +124,8 @@ Be specific about what you can clearly see. If you can't identify brand or model
       console.log('[Marketplace] Product identified:', result.generated_title);
       return { success: true, product: result };
     } catch (error) {
-      console.error('[Marketplace] Photo analysis failed:', error.message);
-      return { success: false, error: error.message };
+      console.error('[Marketplace] Photo analysis failed:', error?.message || String(error));
+      return { success: false, error: error?.message || String(error) };
     }
   });
 
@@ -127,7 +138,9 @@ Be specific about what you can clearly see. If you can't identify brand or model
 
       // Notify frontend that all sources are starting
       for (const t of tasks) {
-        event.sender.send('price-source-progress', { sourceId: t.id, status: 'searching', count: 0 });
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('price-source-progress', { sourceId: t.id, status: 'searching', count: 0 });
+        }
       }
 
       // Run all scrapes concurrently through the pool
@@ -136,33 +149,40 @@ Be specific about what you can clearly see. If you can't identify brand or model
           try {
             const data = await queueScrape(task.url, task.extractorJS, task.options);
             const items = Array.isArray(data) ? data : [];
-            event.sender.send('price-source-progress', {
-              sourceId: task.id,
-              status: items.length > 0 ? 'done' : 'error',
-              count: items.length,
-            });
+            if (!event.sender.isDestroyed()) {
+              event.sender.send('price-source-progress', {
+                sourceId: task.id,
+                status: items.length > 0 ? 'done' : 'error',
+                count: items.length,
+              });
+            }
             return { id: task.id, items };
           } catch (e) {
-            console.warn(`[Marketplace] Source ${task.id} failed:`, e.message);
-            event.sender.send('price-source-progress', { sourceId: task.id, status: 'error', count: 0 });
+            console.warn(`[Marketplace] Source ${task.id} failed:`, e?.message || String(e));
+            if (!event.sender.isDestroyed()) {
+              event.sender.send('price-source-progress', { sourceId: task.id, status: 'error', count: 0 });
+            }
             return { id: task.id, items: [] };
           }
         })
       );
 
-      // Aggregate all comps by type
-      const soldSourceIds = ['ebay-sold', 'poshmark', 'swappa', 'reverb', 'stockx', 'mercari'];
+      // Aggregate all comps by type — category comes from the task definition,
+      // so there's no separate list to keep in sync with buildCompTasks.
+      const taskCategoryMap = buildTaskCategoryMap(tasks);
       const allComps = { sold: [], active: [] };
 
       // 1. Browser pool results
       for (const r of scrapeResults) {
-        if (r.status !== 'fulfilled') continue;
-        const { id, items } = r.value;
-        if (soldSourceIds.includes(id)) {
-          allComps.sold.push(...items);
-        } else {
-          allComps.active.push(...items);
+        if (r.status !== 'fulfilled') {
+          // Rare: the outer map callback itself threw — there is no task.id available
+          // here (the task object is opaque at this point), so emit a generic error.
+          console.warn('[Marketplace] A scrape task promise was rejected unexpectedly.');
+          continue;
         }
+        const { id, items } = r.value;
+        const category = taskCategoryMap[id] ?? 'sold'; // API sources (reverb, stockx) are sold
+        allComps[category].push(...items);
       }
 
       // 2. API-based sources (Reverb REST API, StockX Algolia bypass)
@@ -170,9 +190,13 @@ Be specific about what you can clearly see. If you can't identify brand or model
       for (const res of apiResults) {
         if (res.items.length > 0) {
           allComps.sold.push(...res.items);
-          event.sender.send('price-source-progress', { sourceId: res.sourceId, status: 'done', count: res.items.length });
+          if (!event.sender.isDestroyed()) {
+            event.sender.send('price-source-progress', { sourceId: res.sourceId, status: 'done', count: res.items.length });
+          }
         } else {
-          event.sender.send('price-source-progress', { sourceId: res.sourceId, status: res.error ? 'error' : 'done', count: 0 });
+          if (!event.sender.isDestroyed()) {
+            event.sender.send('price-source-progress', { sourceId: res.sourceId, status: res.error ? 'error' : 'done', count: 0 });
+          }
         }
       }
 
@@ -249,8 +273,8 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
         comps: { sold: [], active: [] },
       };
     } catch (error) {
-      console.error('[Marketplace] Price research failed:', error.message);
-      return { success: false, error: error.message };
+      console.error('[Marketplace] Price research failed:', error?.message || String(error));
+      return { success: false, error: error?.message || String(error) };
     }
   });
 

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { Dialog } from '../components/Dialog';
 import { FontSizeDialog } from '../components/FontSizeDialog';
@@ -24,9 +24,9 @@ export function LinkNode({ id, data }) {
     };
   }, []);
 
-  const isEmptyPredicate = () => {
+  const isEmptyPredicate = useCallback(() => {
     return !inputRef.current?.innerText?.trim();
-  };
+  }, []);
 
   const { isEditing: isEditingLabel, setIsEditing: setIsEditingLabel, handleBlur } = useNodeAutoEdit(id, data.isNew, isEmptyPredicate, inputRef);
 

@@ -66,7 +66,7 @@ export function JobCardNode({ id, data }) {
       }
     } catch (e) {
       console.error('Cover letter generation failed:', e);
-      addToast({ title: 'Generation Error', description: e.message, type: 'error' });
+      addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
     } finally {
       if (isMountedRef.current) setGeneratingCL(false);
     }
@@ -180,7 +180,10 @@ export function JobCardNode({ id, data }) {
                 {data.coverLetter}
               </div>
               <button
-                onClick={() => navigator.clipboard.writeText(data.coverLetter)}
+                onClick={() => navigator.clipboard.writeText(data.coverLetter).catch(err => {
+                  console.error('Clipboard write failed:', err);
+                  addToast({ title: 'Clipboard Error', description: 'Failed to copy text', type: 'error' });
+                })}
                 className="text-blue-400/80 text-[10px] hover:text-blue-400 transition-colors"
               >
                 Copy to clipboard

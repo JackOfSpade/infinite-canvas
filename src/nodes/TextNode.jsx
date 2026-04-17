@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { FontSizeDialog } from '../components/FontSizeDialog';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
@@ -12,9 +12,9 @@ export function TextNode({ id, data }) {
 
   const inputRef = useRef(null);
 
-  const isEmptyPredicate = () => {
+  const isEmptyPredicate = useCallback(() => {
     return !inputRef.current?.innerText?.trim();
-  };
+  }, []);
 
   const { isEditing, setIsEditing, handleBlur } = useNodeAutoEdit(id, data.isNew, isEmptyPredicate, inputRef);
 

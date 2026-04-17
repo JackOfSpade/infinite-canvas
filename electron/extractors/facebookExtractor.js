@@ -75,7 +75,7 @@ export const FB_MARKETPLACE_SEARCH_EXTRACTOR = `
         };
         
         extractFromRelay(data);
-      } catch (e) {}
+      } catch {}
     }
     
     if (listings.length > 0) {
@@ -88,7 +88,7 @@ export const FB_MARKETPLACE_SEARCH_EXTRACTOR = `
       });
       return unique.slice(0, 30);
     }
-  } catch (e) {}
+  } catch {}
   
   // Strategy 2: Parse __comet_data__ or similar Facebook state blobs
   try {
@@ -134,11 +134,11 @@ export const FB_MARKETPLACE_SEARCH_EXTRACTOR = `
                 return true;
               }).slice(0, 30);
             }
-          } catch (e) {}
+          } catch {}
         }
       }
     }
-  } catch (e) {}
+  } catch {}
 
   // Strategy 3: Last resort — try to extract from aria labels and data attributes
   // Facebook uses randomized class names but aria-labels are human-readable
@@ -181,7 +181,7 @@ export const FB_MARKETPLACE_SEARCH_EXTRACTOR = `
         return true;
       }).slice(0, 30);
     }
-  } catch (e) {}
+  } catch {}
   
   return [];
 })()
@@ -212,7 +212,7 @@ export const FB_MARKETPLACE_ITEM_EXTRACTOR = `
         };
       }
     }
-  } catch (e) {}
+  } catch {}
   
   // Strategy 2: Parse from Relay store / inline JSON
   try {
@@ -259,9 +259,9 @@ export const FB_MARKETPLACE_ITEM_EXTRACTOR = `
             source: 'facebook',
           };
         }
-      } catch (e) {}
+      } catch {}
     }
-  } catch (e) {}
+  } catch {}
 
   return null;
 })()

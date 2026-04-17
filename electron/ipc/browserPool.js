@@ -67,8 +67,11 @@ const DOMAIN_POLICIES = {
 };
 const DEFAULT_POLICY = { rpm: 5, baseCooldownMs: 12000 };
 
+// Pre-built entry list — avoids recreating the array on every getDomainPolicy call.
+const DOMAIN_POLICY_ENTRIES = Object.entries(DOMAIN_POLICIES);
+
 function getDomainPolicy(domain) {
-  for (const [key, policy] of Object.entries(DOMAIN_POLICIES)) {
+  for (const [key, policy] of DOMAIN_POLICY_ENTRIES) {
     if (domain.includes(key)) return policy;
   }
   return DEFAULT_POLICY;
@@ -94,8 +97,9 @@ async function waitForDomainCooldown(domain) {
 /** Mark a domain as having encountered an error (triggers exponential backoff). */
 function markDomainError(domain) {
   const current = domainBackoff.get(domain) || 1;
-  domainBackoff.set(domain, Math.min(current * 2, 16)); // Max 16x = ~64s cooldown
-  console.warn(`[BrowserPool] Domain ${domain} backoff increased to ${domainBackoff.get(domain)}x`);
+  const next = Math.min(current * 2, 16); // Max 16x = ~64s cooldown
+  domainBackoff.set(domain, next);
+  console.warn(`[BrowserPool] Domain ${domain} backoff increased to ${next}x`);
   // Record for Tier 4 escalation tracking
   recordDomainAttempt(domain, false);
 }
@@ -164,71 +168,75 @@ async function executeScrape(url, extractorJS, options = {}) {
 
   const domain = extractDomain(url);
   let page = null;
+  let timeoutId = null;
 
   try {
     // Per-domain rate limiting — wait for cooldown before proceeding
     // This runs BEFORE the timeout race so cooldown doesn't eat into scrape time
     await waitForDomainCooldown(domain);
 
-    const result = await Promise.race([
-      (async () => {
-        page = await createStealthPage();
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(`Scrape timed out after ${timeoutMs}ms for ${url}`)), timeoutMs);
+    });
 
-        // Set page-level timeout
-        page.setDefaultNavigationTimeout(timeoutMs - 2000);
+    const scrapePromise = (async () => {
+      page = await createStealthPage();
 
-        // Set referrer organically if specified
-        if (referer) {
-          await page.evaluateOnNewDocument((ref) => {
-            Object.defineProperty(document, 'referrer', { get: () => ref });
-          }, referer);
+      // Set page-level timeout
+      page.setDefaultNavigationTimeout(timeoutMs - 2000);
+
+      // Set referrer organically if specified
+      if (referer) {
+        await page.evaluateOnNewDocument((ref) => {
+          Object.defineProperty(document, 'referrer', { get: () => ref });
+        }, referer);
+      }
+
+      // Navigate with network wait
+      try {
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: timeoutMs - 5000 });
+      } catch (e) {
+        if (!e?.message?.includes('ERR_ABORTED') && !e?.message?.includes('net::ERR_')) {
+          throw e;
         }
+      }
 
-        // Navigate with network wait
+      // Dismiss cookie/privacy banners
+      if (dismissCookies) {
+        await dismissCookieBanner(page);
+      }
+
+      // Wait for specific content selector if provided
+      if (waitFor) {
         try {
-          await page.goto(url, { waitUntil: 'networkidle2', timeout: timeoutMs - 5000 });
-        } catch (e) {
-          if (!e.message.includes('ERR_ABORTED') && !e.message.includes('net::ERR_')) {
-            throw e;
-          }
+          await page.waitForSelector(waitFor, { timeout: Math.min(waitMs + 3000, 8000) });
+        } catch {
+          // Selector didn't appear — continue anyway, extractor may still find content
         }
+      }
 
-        // Dismiss cookie/privacy banners
-        if (dismissCookies) {
-          await dismissCookieBanner(page);
-        }
+      // Human-like behavior: mouse movement + scrolling
+      if (scrollFirst) {
+        await humanScroll(page, 3);
+      } else {
+        // Even without scrolling, do a quick mouse wiggle to look human
+        await humanMouseMove(page);
+      }
 
-        // Wait for specific content selector if provided
-        if (waitFor) {
-          try {
-            await page.waitForSelector(waitFor, { timeout: Math.min(waitMs + 3000, 8000) });
-          } catch {
-            // Selector didn't appear — continue anyway, extractor may still find content
-          }
-        }
+      // Extra settle time for JS-rendered content (add randomized jitter)
+      if (waitMs > 0) {
+        const jitteredWait = waitMs + Math.floor(Math.random() * 1000) - 500;
+        await new Promise(r => setTimeout(r, Math.max(500, jitteredWait)));
+      }
 
-        // Human-like behavior: mouse movement + scrolling
-        if (scrollFirst) {
-          await humanScroll(page, 3);
-        } else {
-          // Even without scrolling, do a quick mouse wiggle to look human
-          await humanMouseMove(page);
-        }
+      // Execute the extractor in page context
+      return await page.evaluate(extractorJS);
+    })();
 
-        // Extra settle time for JS-rendered content (add randomized jitter)
-        if (waitMs > 0) {
-          const jitteredWait = waitMs + Math.floor(Math.random() * 1000) - 500;
-          await new Promise(r => setTimeout(r, Math.max(500, jitteredWait)));
-        }
+    // Prevent unhandled promise rejection if timeout wins and scrapePromise later rejects
+    scrapePromise.catch(() => {});
 
-        // Execute the extractor in page context
-        return await page.evaluate(extractorJS);
-      })(),
-      // Timeout starts AFTER cooldown — full budget for actual scraping
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`Scrape timed out after ${timeoutMs}ms for ${url}`)), timeoutMs)
-      ),
-    ]);
+    const result = await Promise.race([ scrapePromise, timeoutPromise ]);
 
     markDomainSuccess(domain);
     return result;
@@ -236,6 +244,7 @@ async function executeScrape(url, extractorJS, options = {}) {
     markDomainError(domain);
     throw error;
   } finally {
+    if (timeoutId) clearTimeout(timeoutId);
     if (page) {
       try { await page.close(); } catch { /* already closed */ }
     }
@@ -296,30 +305,29 @@ function recordDomainAttempt(domain, success) {
 
 /**
  * Get health status for a domain — used by IPC layer to decide Tier 4 escalation.
- * @param {string} domain — e.g., 'glassdoor.com'
+ * @param {string} domain — e.g., 'glassdoor.com' or 'glassdoor'
  * @returns {{ attempts: number, failures: number, successRate: number, shouldEscalate: boolean }}
  */
 export function getDomainHealth(domain) {
   // Normalize: accept either 'glassdoor' or 'glassdoor.com'
   const normalizedDomain = domain.includes('.') ? domain : `${domain}.com`;
-  
-  // Find matching domain in history
+
+  // Find matching history via DOMAIN_POLICY_ENTRIES (same key-search as getDomainPolicy)
+  // so domain resolution is identical in both functions — no bidirectional false-positives.
   let matchedHistory = null;
-  for (const [key, history] of domainHistory) {
-    if (key.includes(normalizedDomain) || normalizedDomain.includes(key)) {
-      matchedHistory = history;
+  for (const [key] of DOMAIN_POLICY_ENTRIES) {
+    if (normalizedDomain.includes(key)) {
+      matchedHistory = domainHistory.get(key) ?? null;
       break;
     }
   }
-  
+
   if (!matchedHistory || matchedHistory.length === 0) {
     return { attempts: 0, failures: 0, successRate: 1, shouldEscalate: false };
   }
 
   const failures = matchedHistory.filter(s => !s).length;
-  const successRate = matchedHistory.length > 0 
-    ? (matchedHistory.length - failures) / matchedHistory.length 
-    : 1;
+  const successRate = (matchedHistory.length - failures) / matchedHistory.length;
 
   return {
     attempts: matchedHistory.length,
@@ -328,4 +336,3 @@ export function getDomainHealth(domain) {
     shouldEscalate: failures >= ESCALATION_THRESHOLD,
   };
 }
-

@@ -41,8 +41,9 @@ export function SellHubNode({ id, data }) {
   const postingTimeoutsRef = useRef({});
 
   useEffect(() => {
+    const timeoutsMap = postingTimeoutsRef.current;
     return () => {
-      Object.values(postingTimeoutsRef.current).forEach(clearTimeout);
+      Object.values(timeoutsMap).forEach(clearTimeout);
     };
   }, []);
 
@@ -147,7 +148,7 @@ export function SellHubNode({ id, data }) {
       });
     } catch (error) {
       console.error('[SellHub] Analysis failed:', error);
-      if (getNode(id)) updateNodeData(id, { hubState: 'error', errorMessage: error.message });
+      if (getNode(id)) updateNodeData(id, { hubState: 'error', errorMessage: error?.message || String(error) });
     } finally {
       processingRef.current = false;
     }
@@ -185,7 +186,7 @@ export function SellHubNode({ id, data }) {
     } catch (err) {
       console.error('[SellHub] Price research failed:', err);
       if (getNode(id)) updateNodeData(id, { hubState: 'draft' });
-      addToast({ title: 'Pricing Error', description: err.message, type: 'error' });
+      addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
     } finally {
       processingRef.current = false;
     }

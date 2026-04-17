@@ -100,7 +100,7 @@ export const EBAY_SOLD_EXTRACTOR = `
         }
       }
     }
-  } catch (e) {}
+  } catch {}
 
   // Strategy 1: DOM parsing
   const cards = document.querySelectorAll('.s-item');
@@ -127,7 +127,7 @@ export const EBAY_SOLD_EXTRACTOR = `
         url: linkEl?.href || '',
         source: 'ebay-sold',
       });
-    } catch (e) {}
+    } catch {}
   });
 
   return items.slice(0, 25);
@@ -154,7 +154,7 @@ export const EBAY_ACTIVE_EXTRACTOR = `
       if (price === 0) return;
 
       items.push({ title, price, priceText, url: linkEl?.href || '', source: 'ebay-active' });
-    } catch (e) {}
+    } catch {}
   });
 
   return items.slice(0, 20);
@@ -207,7 +207,7 @@ export const POSHMARK_SOLD_EXTRACTOR = `
         if (items.length > 0) return items.slice(0, 25);
       }
     }
-  } catch (e) {}
+  } catch {}
   
   // Strategy 1: DOM parsing
   const cards = document.querySelectorAll('[data-et-name="listing"], .card--small, .tile, [class*="ListingTile"]');
@@ -231,7 +231,7 @@ export const POSHMARK_SOLD_EXTRACTOR = `
         url: linkEl?.href || '',
         source: 'poshmark',
       });
-    } catch (e) {}
+    } catch {}
   });
 
   return items.slice(0, 25);
@@ -280,7 +280,7 @@ export const SWAPPA_EXTRACTOR = `
         if (items.length > 0) return items.slice(0, 25);
       }
     }
-  } catch (e) {}
+  } catch {}
   
   // Strategy 1: Fallback DOM parsing
   const cards = document.querySelectorAll('.search_result, .listing_row, .row.item, [class*="ListingItem"], [class*="listing-card"]');
@@ -304,7 +304,7 @@ export const SWAPPA_EXTRACTOR = `
         url: linkEl?.href || '',
         source: 'swappa',
       });
-    } catch (e) {}
+    } catch {}
   });
 
   return items.slice(0, 25);
@@ -354,7 +354,7 @@ export const MERCARI_SOLD_EXTRACTOR = `
         return items.filter(i => { if (seen.has(i.url)) return false; seen.add(i.url); return true; }).slice(0, 20);
       }
     }
-  } catch (e) {}
+  } catch {}
 
   // Strategy 1: DOM parsing with broad selectors
   const cards = document.querySelectorAll(
@@ -386,7 +386,7 @@ export const MERCARI_SOLD_EXTRACTOR = `
         url: linkEl?.href ? (linkEl.href.startsWith('http') ? linkEl.href : 'https://www.mercari.com' + linkEl.getAttribute('href')) : '',
         source: 'mercari',
       });
-    } catch (e) {}
+    } catch {}
   });
 
   // Deduplicate by URL

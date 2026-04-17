@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import React, { useCallback, useState, useRef, useEffect } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { Lock, X } from 'lucide-react';
@@ -43,7 +44,7 @@ export const ResizeActive = new Set();
 export const TitleZoneActive     = new Set();              // nodeIds with active title-zone press
 export const TitleZoneCorrection = new Map();              // Map<nodeId, {x, y}> original position
 
-export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, width, height }) {
+export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, width }) {
   // currentSize is updated both from the width prop (via useEffect) AND synchronously
   // during active resize so SIZE is always fresh without waiting for ResizeObserver.
   const [currentSize, setCurrentSize] = useState(() => Math.round(width || DEFAULT_SIZE));
@@ -95,7 +96,6 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
 
   useEffect(() => {
     return () => EventLogger.unregisterNodeState(id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   useEffect(() => { setTitle(data.title || ''); }, [data.title]);
@@ -107,7 +107,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   // the input and ending editing before the user can type anything.
   useEffect(() => {
     mainFlow.setNodes(nds => nds.map(n =>
-      n.id === id ? { ...n, draggable: !isEditing } : n
+      n.id === id ? { ...n, draggable: !isEditing && !n.data?.locked } : n
     ));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEditing]);
@@ -157,7 +157,6 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     document.addEventListener('pointerdown', onDocPointerDown, { capture: true });
     return () => document.removeEventListener('pointerdown', onDocPointerDown, { capture: true });
   // id and mainFlow are stable; isEditing is the trigger; liveRef/inputRef/containerRef are refs.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEditing, id, mainFlow]);
 
   // Font & Size dialog trigger (from context menu)
@@ -541,7 +540,6 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   // isInTitleZone, mainFlow) are stable across renders (useCallback with no deps or
   // stable deps). id is stable for the component's lifetime. State setters are stable.
   // liveRef gives fresh isEditing/title/data/SIZE without re-registering listeners.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, mainFlow, getDistToEdge, getAngleFromCenter, getCircleCenter, getResizeCursor, isInTitleZone]);
 
   // ── Derived values ────────────────────────────────────────────────────────

@@ -37,7 +37,7 @@ export function CustomMiniMap({ nodes, edges, drawings, isAnimating }) {
   const svgRef = useRef(null);
 
   // ── Part A: content bounds (memo on nodes + drawings only) ──────────────
-  const { cMinX, cMinY, cMaxX, cMaxY, isEmpty } = useMemo(() => {
+  const { cMinX, cMinY, cMaxX, cMaxY } = useMemo(() => {
     let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
     nodes.forEach(n => {
       const { w, h } = getNodeDims(n);
@@ -112,7 +112,7 @@ export function CustomMiniMap({ nodes, edges, drawings, isAnimating }) {
       },
       { duration: 300 }
     );
-  }, [minX, minY, scale, offsetX, offsetY, viewport, setViewport]);
+  }, [minX, minY, scale, offsetX, offsetY, viewport, setViewport, isAnimating]);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -173,7 +173,7 @@ export function CustomMiniMap({ nodes, edges, drawings, isAnimating }) {
             const mh  = Math.max(h * scale, 3);
 
             if (n.type === 'text') {
-              const raw     = (n.data?.text || '').replace(/[#*_`>|\[\]]/g, '').trim();
+              const raw     = (n.data?.text || '').replace(/[#*_`>|[\]]/g, '').trim();
               const preview = raw.slice(0, 28);
               const bg      = n.data?.isSticky ? 'rgba(254,243,199,0.45)' : 'rgba(255,255,255,0.07)';
               const fill    = n.data?.isSticky

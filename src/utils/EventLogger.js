@@ -41,7 +41,7 @@ class EventLoggerSingleton {
     // Deduplicate consecutive identical messages (e.g. ResizeObserver floods).
     // Instead of 40 identical lines, emit one line + a "(×N)" suffix when it stops.
     if (this._lastMsg === message) {
-      this._lastCount = (this._lastCount || 1) + 1;
+      this._lastCount++;
       // Replace the last entry in the ring with the updated count.
       if (this.logs.length > 0) {
         const prev = this.logs[this.logs.length - 1];
@@ -110,9 +110,9 @@ class EventLoggerSingleton {
       // a ResizeObserver batch mid-loop. It is NOT a real error and alternates
       // with every "node resized" line during resize, making it 40-50% of the
       // entire log buffer and burying the actual signal. Suppress it entirely.
-      if (e.message?.startsWith('ResizeObserver loop')) return;
+      if (e?.message?.startsWith('ResizeObserver loop')) return;
       const loc = e.filename ? ` (${e.filename.split('/').pop()}:${e.lineno})` : '';
-      this.log(`JS-ERROR: ${e.message}${loc}`);
+      this.log(`JS-ERROR: ${e?.message || String(e)}${loc}`);
     });
 
     window.addEventListener('unhandledrejection', (e) => {

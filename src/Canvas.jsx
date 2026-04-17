@@ -199,7 +199,7 @@ export function Canvas() {
 
   const {
     saveCanvas, loadCanvas, exportCanvasToPNG,
-    saveState, hasUnsavedChanges, setHasUnsavedChanges, currentFile, setCurrentFile,
+    hasUnsavedChanges, setHasUnsavedChanges, currentFile, setCurrentFile,
   } = useCanvasPersistence({
     nodes, edges, drawings, setNodes, setEdges, setDrawings, customFitView, addToast,
     flushStack: navigation.flushStack,
@@ -262,6 +262,12 @@ export function Canvas() {
     setNodes((nds) => nds.concat(newNode));
     EventLogger.log(`Double-clicked canvas to create new Text Node`);
   }, [activeTool, placementMode, navigation.isAnimating, screenToFlowPosition, takeSnapshot, setNodes]);
+
+  const onNodeDoubleClick = useCallback((e, node) => {
+    if (node.type === 'group' && !node.data?.locked && !navigation.isAnimating) {
+      navigation.diveIn(node.id);
+    }
+  }, [navigation]);
 
   // ── Custom pointer-drag for Nested Canvas button ─────────────────────────
   const nestedDragListenersRef = useRef(null);
@@ -518,8 +524,6 @@ export function Canvas() {
           hasUnsavedChanges,
           navigationDepth: navigation.depth,
           snapToGrid,
-          bgVariant: settings.bgVariant,
-          showMiniMap: settings.showMiniMap,
           windowInnerWidth: window.innerWidth,
           windowInnerHeight: window.innerHeight,
           // Viewport transform — zoom level is critical for diagnosing
@@ -558,7 +562,7 @@ export function Canvas() {
         }
       }
     } catch (e) {
-      addToast({ title: 'Bug Report Error', description: e.message || 'An unexpected error occurred.', type: "error" });
+      addToast({ title: 'Bug Report Error', description: e?.message || String(e) || 'An unexpected error occurred.', type: "error" });
     }
   }, [nodes, edges, drawings, activeTool, placementMode, eraserType, settings, currentFile, hasUnsavedChanges, navigation.depth, snapToGrid, addToast, getViewport]);
 
@@ -649,11 +653,7 @@ export function Canvas() {
             onDragOver={handleDragOver}
             nodeTypes={nodeTypes}
             onDoubleClick={handlePaneDoubleClick}
-            onNodeDoubleClick={(e, node) => {
-                if (node.type === 'group' && !node.data?.locked && !navigation.isAnimating) {
-                  navigation.diveIn(node.id);
-                }
-              }}
+            onNodeDoubleClick={onNodeDoubleClick}
             onPaneContextMenu={onPaneContextMenu}
             onNodeContextMenu={onNodeContextMenu}
             snapToGrid={snapToGrid}

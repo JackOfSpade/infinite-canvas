@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useState, useRef, useEffect } from 'react';
 import { toPng } from 'html-to-image';
 
 /**
@@ -25,24 +25,26 @@ function migrateGroupNodes(nodes) {
         },
       };
     }
-    // Ensure locked nodes have deletable: false (added retroactively)
-    if (node.data?.locked && node.deletable !== false) {
-      node = { ...node, deletable: false };
+    // Ensure locked nodes have deletable: false (added retroactively).
+    // Use a separate variable — arrow-function parameters are const and cannot be reassigned.
+    let current = node;
+    if (current.data?.locked && current.deletable !== false) {
+      current = { ...current, deletable: false };
     }
     // Recurse into existing canvasData for new-format group nodes
-    if (node.type === 'group' && node.data?.canvasData?.nodes?.length > 0) {
-      const migratedInner = migrateGroupNodes(node.data.canvasData.nodes);
-      if (migratedInner !== node.data.canvasData.nodes) {
+    if (current.type === 'group' && current.data?.canvasData?.nodes?.length > 0) {
+      const migratedInner = migrateGroupNodes(current.data.canvasData.nodes);
+      if (migratedInner !== current.data.canvasData.nodes) {
         return {
-          ...node,
+          ...current,
           data: {
-            ...node.data,
-            canvasData: { ...node.data.canvasData, nodes: migratedInner },
+            ...current.data,
+            canvasData: { ...current.data.canvasData, nodes: migratedInner },
           },
         };
       }
     }
-    return node;
+    return current;
   });
 }
 /**
@@ -134,7 +136,7 @@ export function useCanvasPersistence({
     } catch (err) {
       console.error('Failed to save canvas:', err);
       setSaveState('idle');
-      addToast({ title: 'Save Error', description: err.message || 'An error occurred while saving.', type: 'error' });
+      addToast({ title: 'Save Error', description: err?.message || String(err) || 'An error occurred while saving.', type: 'error' });
     }
   }, [nodes, edges, drawings, currentFile, saveState, addToast, flushStack, isAnimatingRef]);
 
@@ -164,7 +166,7 @@ export function useCanvasPersistence({
       }
     } catch (err) {
       console.error('Failed to load canvas:', err);
-      addToast({ title: 'Load Error', description: err.message || 'An error occurred while loading.', type: 'error'});
+      addToast({ title: 'Load Error', description: err?.message || String(err) || 'An error occurred while loading.', type: 'error'});
     }
   }, [setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, customFitView, addToast, resetStack, clearHistory, isAnimatingRef]);
 
@@ -182,6 +184,7 @@ export function useCanvasPersistence({
         addToast({ title: 'Export Successful', description: 'Canvas has been exported to PNG.', type: 'success'});
       })
       .catch((err) => {
+        if (!isMountedRef.current) return;
         console.error('Failed to export image', err);
         addToast({ title: 'Export Failed', description: 'There was an error generating the PNG.', type: 'error'});
       });

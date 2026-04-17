@@ -251,7 +251,7 @@ export function useCanvasContextMenu({
     } catch (err) {
       if (!isMountedRef.current) return;
       console.error(err);
-      EventLogger.log("AI Polish crashed: " + err.message);
+      EventLogger.log("AI Polish crashed: " + (err?.message || String(err)));
     }
     setMenu(null);
   }, [menu, setNodes, takeSnapshot, addToast]);

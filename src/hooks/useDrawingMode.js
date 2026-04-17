@@ -114,7 +114,6 @@ export function useDrawingMode({
   currentStroke,
   setCurrentStroke,
   setMousePos,
-  setEraserScreenPos,
   setDrawings,
   setNodes,
   setEdges,
@@ -169,7 +168,7 @@ export function useDrawingMode({
       });
     }
   }, [screenToFlowPosition, getViewport, eraserSize, eraserType, getIntersectingNodes,
-      setNodes, setEdges, setDrawings]);
+      setNodes, setEdges, setDrawings, isAnimatingRef]);
 
   const handlePointerDown = useCallback((e) => {
     if (e.button !== 0) return;

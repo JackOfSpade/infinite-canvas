@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPlatforms: () => ipcRenderer.invoke('get-platforms'),
   getSessionStatuses: () => ipcRenderer.invoke('get-session-statuses'),
   getCachedSessionStatuses: () => ipcRenderer.invoke('get-cached-session-statuses'),
+  getSystemConfigStatus: () => ipcRenderer.invoke('get-system-config-status'),
   checkPlatformSession: (args) => ipcRenderer.invoke('check-platform-session', args),
   openLoginWindow: (args) => ipcRenderer.invoke('open-login-window', args),
   checkAndLogin: (args) => ipcRenderer.invoke('check-and-login', args),

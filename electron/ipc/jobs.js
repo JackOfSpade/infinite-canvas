@@ -1,11 +1,11 @@
-
 /**
  * Jobs IPC handlers — resume parsing, multi-source job search, AI scoring.
  * 12 Sources: Google, Indeed, LinkedIn, RemoteOK, WeWorkRemotely,
  *             ZipRecruiter, Glassdoor, Dice, Wellfound,
  *             Greenhouse API, Lever API, USAJobs API
  */
-import { ipcMain } from 'electron';
+import electronPkg from 'electron';
+const { ipcMain } = electronPkg;
 import { callGeminiDocument, callGeminiText } from './gemini.js';
 import { scrapeMultiple } from './browserPool.js';
 import { 
@@ -25,7 +25,7 @@ import {
   fetchDiceListings,
 } from '../extractors/apiExtractors.js';
 
-/** All source IDs — single source of truth for progress tracking. */
+// All source IDs — defines the complete set for progress tracking and reporting.
 const ALL_SOURCE_IDS = [
   'google', 'indeed', 'linkedin', 'remoteok', 'weworkremotely',
   'ziprecruiter', 'glassdoor', 'dice', 'wellfound',
@@ -89,7 +89,9 @@ async function fetchApiSources(queries, sender) {
 
   // Notify frontend that API sources are starting
   for (const { sourceId } of apiTasks) {
-    sender.send('job-source-progress', { sourceId, status: 'searching', count: 0 });
+    if (!sender.isDestroyed()) {
+      sender.send('job-source-progress', { sourceId, status: 'searching', count: 0 });
+    }
   }
 
   const results = await Promise.allSettled(apiTasks.map(async ({ sourceId, fn }) => {
@@ -97,7 +99,7 @@ async function fetchApiSources(queries, sender) {
       const jobs = await fn();
       return { sourceId, jobs };
     } catch (error) {
-      return { sourceId, jobs: [], error: error.message };
+      return { sourceId, jobs: [], error: error?.message || String(error) };
     }
   }));
 
@@ -130,8 +132,8 @@ Extract everything you can find. Be thorough.`);
       console.log('[Jobs] Resume parsed:', profile.titles?.join(', '));
       return { success: true, profile };
     } catch (error) {
-      console.error('[Jobs] Resume parse failed:', error.message);
-      return { success: false, error: error.message };
+      console.error('[Jobs] Resume parse failed:', error?.message || String(error));
+      return { success: false, error: error?.message || String(error) };
     }
   });
 
@@ -156,8 +158,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
 
       return { success: true, queries: result };
     } catch (error) {
-      console.error('[Jobs] Query generation failed:', error.message);
-      return { success: false, error: error.message };
+      console.error('[Jobs] Query generation failed:', error?.message || String(error));
+      return { success: false, error: error?.message || String(error) };
     }
   });
 
@@ -177,7 +179,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
 
       // Notify frontend that sources are starting
       for (const sourceId of Object.keys(sourceTaskIds)) {
-        event.sender.send('job-source-progress', { sourceId, status: 'searching', count: 0 });
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('job-source-progress', { sourceId, status: 'searching', count: 0 });
+        }
       }
 
       const allJobs = [];
@@ -218,11 +222,13 @@ Be creative with suggestedRoleQueries — think about what career directions the
         const allFailed = data.errors > 0 && data.jobs.length === 0;
         const status = (data.jobs.length === 0 && data.errors === 0) ? 'idle' : (allFailed ? 'error' : 'done');
         
-        event.sender.send('job-source-progress', {
-          sourceId,
-          status,
-          count: data.jobs.length,
-        });
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('job-source-progress', {
+            sourceId,
+            status,
+            count: data.jobs.length,
+          });
+        }
       }
 
       // Deduplicate by normalized company + title
@@ -237,8 +243,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
       console.log(`[Jobs] Found ${deduped.length} unique jobs (from ${allJobs.length} total across ${Object.keys(sourceResults).length} sources)`);
       return { success: true, jobs: deduped, sourceResults };
     } catch (error) {
-      console.error('[Jobs] Search failed:', error.message);
-      return { success: false, error: error.message };
+      console.error('[Jobs] Search failed:', error?.message || String(error));
+      return { success: false, error: error?.message || String(error) };
     }
   });
 
@@ -303,8 +309,8 @@ IMPORTANT SCORING RULES:
       console.log(`[Jobs] Scored ${scoredJobs.length} jobs across ${Object.keys(clusters).length} career directions`);
       return { success: true, scoredJobs, clusters };
     } catch (error) {
-      console.error('[Jobs] Scoring failed:', error.message);
-      return { success: false, error: error.message };
+      console.error('[Jobs] Scoring failed:', error?.message || String(error));
+      return { success: false, error: error?.message || String(error) };
     }
   });
 
@@ -331,8 +337,8 @@ Don't be generic. Reference specific skills from the resume that match specific 
 
       return { success: true, coverLetter: result.coverLetter };
     } catch (error) {
-      console.error('[Jobs] Cover letter failed:', error.message);
-      return { success: false, error: error.message };
+      console.error('[Jobs] Cover letter failed:', error?.message || String(error));
+      return { success: false, error: error?.message || String(error) };
     }
   });
 }

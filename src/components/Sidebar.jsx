@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Search, Store, BarChart3, ChevronLeft, ChevronRight, UserCircle, Briefcase, Bug } from 'lucide-react';
 import { SELL_PLATFORMS, JOB_SOURCES, PRICE_COMP_SOURCES } from '../utils/constants';
 
@@ -39,14 +39,14 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
     return () => { isMountedRef.current = false; };
   }, []);
 
-  const handleTabClick = (tab) => {
+  const handleTabClick = useCallback((tab) => {
     if (activeTab === tab && !collapsed) {
       setCollapsed(true);
     } else {
       setActiveTab(tab);
       setCollapsed(false);
     }
-  };
+  }, [activeTab, collapsed]);
 
   // Drag handlers — set dataTransfer type so Canvas knows what to create
   const handleModuleDragStart = useCallback((e, moduleType) => {

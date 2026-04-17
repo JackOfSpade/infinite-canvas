@@ -31,7 +31,7 @@ const STATE_LABELS = {
  * data.sourceFilter: string | null — if set, only show jobs from this source
  */
 export function JobHubNode({ id, data }) {
-  const { updateNodeData, addNodes, getNodes, setNodes } = useReactFlow();
+  const { updateNodeData, addNodes, getNodes, setNodes, getNode } = useReactFlow();
   const { addToast } = useToast();
   const processingRef = useRef(false);
   const cleanupRef = useRef(null);
@@ -257,8 +257,8 @@ export function JobHubNode({ id, data }) {
       addToast({ title: 'Job Search Complete', description: `Found and scored ${scoreResult.scoredJobs.length} jobs.`, type: 'success' });
     } catch (error) {
       console.error('[JobHub] Failed:', error);
-      if (getNode(id)) updateNodeData(id, { hubState: 'error', errorMessage: error.message });
-      addToast({ title: 'Job Search Failed', description: error.message, type: 'error' });
+      if (getNode(id)) updateNodeData(id, { hubState: 'error', errorMessage: error?.message || String(error) });
+      addToast({ title: 'Job Search Failed', description: error?.message || String(error), type: 'error' });
     } finally {
       processingRef.current = false;
     }

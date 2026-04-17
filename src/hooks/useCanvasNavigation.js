@@ -37,6 +37,20 @@ function syncStackUpward(currentNodes, currentEdges, currentDrawings, stack, sta
 }
 
 /**
+ * Resolve canvas data from a node, supporting both old and new data shapes.
+ * Pure function — no hook state required.
+ */
+function getCanvasData(node) {
+  if (node.data.canvasData) return node.data.canvasData;
+  // Legacy fallback
+  return {
+    nodes: node.data.nodes || [],
+    edges: node.data.edges || [],
+    drawings: node.data.drawings || [],
+  };
+}
+
+/**
  * Navigation stack for nested canvas dive-in / dive-out.
  *
  * Stack entries store the PARENT canvas state when we leave it:
@@ -84,19 +98,6 @@ export function useCanvasNavigation({
     { id: 'root', title: 'Main Canvas' },
     ...stack.map(s => ({ id: s.nodeId, title: s.childTitle })),
   ];
-
-  /**
-   * Resolve canvas data from a node, supporting both old and new data shapes.
-   */
-  const getCanvasData = useCallback((node) => {
-    if (node.data.canvasData) return node.data.canvasData;
-    // Legacy fallback
-    return {
-      nodes: node.data.nodes || [],
-      edges: node.data.edges || [],
-      drawings: node.data.drawings || [],
-    };
-  }, []);
 
   /**
    * Dive into a nested canvas node.
@@ -162,7 +163,7 @@ export function useCanvasNavigation({
         }, halfDuration);
       });
     }, halfDuration);
-  }, [isAnimating, reactFlow, getCanvasData, getAnimationDuration, setNodes, setEdges, setDrawings, clearHistory]);
+  }, [isAnimating, reactFlow, getAnimationDuration, setNodes, setEdges, setDrawings, clearHistory]);
 
   /**
    * Jump to a specific breadcrumb level.
@@ -235,7 +236,7 @@ export function useCanvasNavigation({
    */
   const extractToParent = useCallback((nodeId) => {
     if (stackRef.current.length === 0) return;
-    
+
     const nodeToExtract = nodesRef.current.find(n => n.id === nodeId);
     if (!nodeToExtract) return;
 
@@ -247,19 +248,18 @@ export function useCanvasNavigation({
     setStack(s => {
       const newStack = [...s];
       const parent = newStack[newStack.length - 1];
-      
+
       // Place near the parent group container, offset by previous extractions to avoid stacking
       const parentContainer = parent.nodes.find(n => n.id === parent.nodeId);
       const extractedCount = parent.nodes.length; // offset by total count to guarantee uniqueness
       const posX = (parentContainer?.position.x || 0) + (extractedCount % 5) * 40;
-      // offset slightly upward
-      const posY = (parentContainer?.position.y || 100) - 150;
+      const posY = (parentContainer?.position.y || 100) - 150; // offset slightly upward
 
       const newParentNodes = [
-        ...parent.nodes, 
-        { ...nodeToExtract, position: { x: posX, y: posY } }
+        ...parent.nodes,
+        { ...nodeToExtract, position: { x: posX, y: posY } },
       ];
-      
+
       newStack[newStack.length - 1] = { ...parent, nodes: newParentNodes };
       return newStack;
     });

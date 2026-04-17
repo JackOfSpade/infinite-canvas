@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import electronPkg from 'electron';
+const { app, BrowserWindow, ipcMain } = electronPkg;
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';

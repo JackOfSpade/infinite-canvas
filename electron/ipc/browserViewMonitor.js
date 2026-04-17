@@ -20,7 +20,8 @@
  *   stopMonitor(id)            — stop monitoring and close the window
  *   getActiveMonitors()        — list all active monitors with status
  */
-import { ipcMain, BrowserWindow } from 'electron';
+import electronPkg from 'electron';
+const { ipcMain, BrowserWindow } = electronPkg;
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
@@ -54,7 +55,53 @@ const monitors = new Map();
 
 let monitorIdCounter = 0;
 
+// ── Notification Helpers ────────────────────────────────────────────────────
 
+function getMainWindow() {
+  const monitorWinIds = new Set();
+  for (const m of monitors.values()) {
+    if (m.window?.id != null) monitorWinIds.add(m.window.id);
+  }
+  return BrowserWindow.getAllWindows().find(
+    w => !w.isDestroyed() && !monitorWinIds.has(w.id)
+  );
+}
+
+/**
+ * Send an IPC event to the main renderer window if it is alive.
+ * Silently no-ops if no main window is found or its webContents is destroyed.
+ */
+function sendToMain(channel, payload) {
+  const mainWin = getMainWindow();
+  if (mainWin && mainWin.webContents && !mainWin.webContents.isDestroyed()) {
+    mainWin.webContents.send(channel, payload);
+  }
+}
+
+function notifyDataChange(monitor) {
+  sendToMain('monitor-data-changed', {
+    id: monitor.id,
+    platform: monitor.platform,
+    itemCount: monitor.lastData.length,
+    dataVersion: monitor.dataVersion,
+    data: monitor.lastData,
+  });
+}
+
+function notifySessionExpired(monitor) {
+  sendToMain('monitor-session-expired', {
+    id: monitor.id,
+    platform: monitor.platform,
+  });
+}
+
+function notifyMonitorPaused(monitor) {
+  sendToMain('monitor-paused', {
+    id: monitor.id,
+    platform: monitor.platform,
+    consecutiveErrors: monitor.consecutiveErrors,
+  });
+}
 
 // ── Core Monitor Operations ─────────────────────────────────────────────────
 
@@ -95,7 +142,7 @@ function openMonitor({ platform, url, extractorJS, refreshMs = DEFAULT_REFRESH_I
 
   // Load the initial URL
   win.loadURL(url).catch(err => {
-    console.error(`[Monitor ${id}] Failed to load ${url}:`, err.message);
+    console.error(`[Monitor ${id}] Failed to load ${url}:`, err?.message || String(err));
   });
 
   const monitor = {
@@ -125,8 +172,12 @@ function openMonitor({ platform, url, extractorJS, refreshMs = DEFAULT_REFRESH_I
     }
   });
 
-  // Clean up if window is destroyed unexpectedly
+  // Clean up if the window is destroyed externally (crash, OS force-quit, etc.).
+  // Do NOT fire if we're in 'monitoring' or 'paused' state — those imply stopMonitor
+  // was already called (which calls destroy()) and we'd double-clean.
   win.on('closed', () => {
+    const m = monitors.get(id);
+    if (!m || m.status === 'monitoring' || m.status === 'paused') return;
     stopMonitor(id);
   });
 
@@ -164,69 +215,86 @@ async function refreshMonitor(id) {
   if (!monitor || monitor.status === 'paused') return;
 
   try {
+    // Guard: the window may have been destroyed externally between the status check above
+    // and this point (e.g. OS force-quit during a scheduled refresh).
+    if (monitor.window.isDestroyed()) return;
+
     // Reload the page
     const wc = monitor.window.webContents;
     await wc.loadURL(monitor.url);
+    if (!monitors.has(id)) return;
 
     // Wait for page to settle (network idle equivalent)
     await new Promise(r => setTimeout(r, 3000));
+    if (!monitors.has(id)) return;
+
+    // Re-fetch the live monitor record — the 3-second wait above is a meaningful
+    // async gap during which stopMonitor() could have been called, the status
+    // changed to 'paused', or the window could have been destroyed externally.
+    const liveMonitor = monitors.get(id);
+    if (!liveMonitor || liveMonitor.status === 'paused') return;
+    if (liveMonitor.window.isDestroyed() || wc.isDestroyed()) return;
 
     // Execute extractor JS in the page context
-    const data = await wc.executeJavaScript(monitor.extractorJS);
+    const data = await wc.executeJavaScript(liveMonitor.extractorJS);
+    if (!monitors.has(id)) return;
 
-    monitor.consecutiveErrors = 0;
-    monitor.lastRefreshTime = Date.now();
+    liveMonitor.consecutiveErrors = 0;
+    liveMonitor.lastRefreshTime = Date.now();
 
     // Reset backoff on success
-    monitor.refreshIntervalMs = monitor.baseRefreshMs;
+    liveMonitor.refreshIntervalMs = liveMonitor.baseRefreshMs;
 
     // Diff: check if data has changed
     const newDataStr = JSON.stringify(data);
-    const oldDataStr = JSON.stringify(monitor.lastData);
+    const oldDataStr = JSON.stringify(liveMonitor.lastData);
 
     if (newDataStr !== oldDataStr && Array.isArray(data) && data.length > 0) {
-      const prevCount = monitor.lastData.length;
-      monitor.lastData = data;
-      monitor.dataVersion++;
+      const prevCount = liveMonitor.lastData.length;
+      liveMonitor.lastData = data;
+      liveMonitor.dataVersion++;
 
-      console.log(`[Monitor ${id}] Data changed: ${prevCount} → ${data.length} items (v${monitor.dataVersion})`);
+      console.log(`[Monitor ${id}] Data changed: ${prevCount} → ${data.length} items (v${liveMonitor.dataVersion})`);
 
       // Notify the renderer about the update
-      notifyDataChange(monitor);
+      notifyDataChange(liveMonitor);
     } else {
       console.log(`[Monitor ${id}] Refresh OK — no changes (${(data || []).length} items)`);
     }
 
-    // Check for session expiry signals
+    // Check for session expiry signals (guard destroyed wc before getURL)
+    if (wc.isDestroyed()) return;
     const pageUrl = wc.getURL();
-    if (isSessionExpired(monitor.platform, pageUrl)) {
-      monitor.status = 'expired';
-      clearInterval(monitor.timer);
-      monitor.timer = null;
+    if (isSessionExpired(liveMonitor.platform, pageUrl)) {
+      liveMonitor.status = 'expired';
+      clearTimeout(liveMonitor.timer);
+      liveMonitor.timer = null;
       console.warn(`[Monitor ${id}] Session expired — user must re-authenticate`);
-      notifySessionExpired(monitor);
+      notifySessionExpired(liveMonitor);
       return;
     }
   } catch (error) {
-    monitor.consecutiveErrors++;
-    console.error(`[Monitor ${id}] Refresh failed (attempt ${monitor.consecutiveErrors}):`, error.message);
+    if (!monitors.has(id)) return;
+    const m = monitors.get(id);
+    m.consecutiveErrors++;
+    console.error(`[Monitor ${id}] Refresh failed (attempt ${m.consecutiveErrors}):`, error?.message || String(error));
 
     // Exponential backoff: double the interval on each consecutive error
-    if (monitor.consecutiveErrors > 1) {
-      monitor.refreshIntervalMs = Math.min(
+    if (m.consecutiveErrors > 1) {
+      m.refreshIntervalMs = Math.min(
         MAX_REFRESH_INTERVAL_MS,
-        monitor.refreshIntervalMs * 2
+        m.refreshIntervalMs * 2
       );
-      console.warn(`[Monitor ${id}] Backoff: next refresh in ${monitor.refreshIntervalMs / 1000}s`);
+      console.warn(`[Monitor ${id}] Backoff: next refresh in ${m.refreshIntervalMs / 1000}s`);
     }
 
     // After 5 consecutive errors, pause the monitor
-    if (monitor.consecutiveErrors >= 5) {
-      monitor.status = 'paused';
-      clearTimeout(monitor.timer);
-      monitor.timer = null;
+    if (m.consecutiveErrors >= 5) {
+      m.status = 'paused';
+      clearTimeout(m.timer);
+      m.timer = null;
       console.error(`[Monitor ${id}] Paused after 5 consecutive errors`);
-      notifyMonitorPaused(monitor);
+      notifyMonitorPaused(m);
     }
   }
 }
@@ -287,7 +355,9 @@ function reopenMonitor(id) {
 
   // Show the window for re-auth
   monitor.window.show();
-  monitor.window.loadURL(monitor.url);
+  monitor.window.loadURL(monitor.url).catch(err => {
+    console.error(`[Monitor ${id}] Failed to reload URL for re-auth:`, err?.message || String(err));
+  });
 
   console.log(`[Monitor ${id}] Reopened for re-authentication`);
 }
@@ -331,47 +401,6 @@ function isSessionExpired(platform, currentUrl) {
   return checks.some(pattern => url.includes(pattern));
 }
 
-// ── Notification Helpers ────────────────────────────────────────────────────
-
-function getMainWindow() {
-  const windows = BrowserWindow.getAllWindows();
-  return windows.find(w => !w.isDestroyed() && w.webContents.getURL().includes('localhost'));
-}
-
-function notifyDataChange(monitor) {
-  const mainWin = getMainWindow();
-  if (mainWin) {
-    mainWin.webContents.send('monitor-data-changed', {
-      id: monitor.id,
-      platform: monitor.platform,
-      itemCount: monitor.lastData.length,
-      dataVersion: monitor.dataVersion,
-      data: monitor.lastData,
-    });
-  }
-}
-
-function notifySessionExpired(monitor) {
-  const mainWin = getMainWindow();
-  if (mainWin) {
-    mainWin.webContents.send('monitor-session-expired', {
-      id: monitor.id,
-      platform: monitor.platform,
-    });
-  }
-}
-
-function notifyMonitorPaused(monitor) {
-  const mainWin = getMainWindow();
-  if (mainWin) {
-    mainWin.webContents.send('monitor-paused', {
-      id: monitor.id,
-      platform: monitor.platform,
-      consecutiveErrors: monitor.consecutiveErrors,
-    });
-  }
-}
-
 // ── IPC Handler Registration ────────────────────────────────────────────────
 
 export function registerMonitorHandlers() {
@@ -380,7 +409,7 @@ export function registerMonitorHandlers() {
     try {
       return openMonitor(opts);
     } catch (error) {
-      return { error: error.message };
+      return { error: error?.message || String(error) };
     }
   });
 
@@ -390,7 +419,7 @@ export function registerMonitorHandlers() {
       startMonitoring(id);
       return { success: true };
     } catch (error) {
-      return { error: error.message };
+      return { error: error?.message || String(error) };
     }
   });
 
@@ -406,7 +435,7 @@ export function registerMonitorHandlers() {
       reopenMonitor(id);
       return { success: true };
     } catch (error) {
-      return { error: error.message };
+      return { error: error?.message || String(error) };
     }
   });
 
@@ -435,7 +464,7 @@ export function registerMonitorHandlers() {
  * Clean up all monitors on app quit.
  */
 export function closeAllMonitors() {
-  for (const [id] of monitors) {
+  for (const id of monitors.keys()) {
     stopMonitor(id);
   }
 }

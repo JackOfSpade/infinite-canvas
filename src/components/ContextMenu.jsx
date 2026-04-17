@@ -45,9 +45,10 @@ export function ContextMenu({ x, y, items, onClose }) {
       if (rect.bottom > window.innerHeight) newPos.top = window.innerHeight - rect.height - 8;
       // Open submenus to the left when not enough room on the right (submenu ~180px)
       const spaceOnRight = window.innerWidth - (newPos.left + rect.width);
-      setSubmenuDirection(spaceOnRight >= 192 ? 'right' : 'left');
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setAdjustedPos(newPos);
+      requestAnimationFrame(() => {
+        setSubmenuDirection(spaceOnRight >= 192 ? 'right' : 'left');
+        setAdjustedPos(newPos);
+      });
     }
   }, [x, y]);
 

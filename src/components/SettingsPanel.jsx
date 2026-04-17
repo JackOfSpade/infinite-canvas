@@ -105,7 +105,12 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   }, [isOpen, onClose, capturingId]);
 
   // Reset capturing when panel closes
-  useEffect(() => { if (!isOpen) setCapturingId(null); }, [isOpen]);
+  useEffect(() => {
+    if (!isOpen) {
+      const timer = setTimeout(() => setCapturingId(null), 0);
+      return () => clearTimeout(timer);
+    }
+  }, [isOpen]);
 
   const handleSaveShortcut = useCallback((id, newBinding) => {
     updateShortcut(id, newBinding);

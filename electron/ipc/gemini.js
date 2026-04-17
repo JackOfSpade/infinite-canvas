@@ -5,7 +5,8 @@
 import fs from 'fs';
 import path from 'path';
 
-import { ipcMain } from 'electron';
+import electronPkg from 'electron';
+const { ipcMain } = electronPkg;
 import { GoogleAuth } from 'google-auth-library';
 
 const GEMINI_MODEL = 'gemini-2.5-flash';
@@ -30,15 +31,20 @@ async function getAuthClient() {
 }
 
 async function getToken() {
-  const { auth } = await getAuthClient();
-  const client = await auth.getClient();
-  const { token } = await client.getAccessToken();
-  if (!token) throw new Error('Failed to generate OAuth token from service account.');
-  return token;
-}
-
-function getEndpoint() {
-  return `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent`;
+  try {
+    const { auth } = await getAuthClient();
+    const client = await auth.getClient();
+    const { token } = await client.getAccessToken();
+    if (!token) throw new Error('Failed to generate OAuth token from service account.');
+    return token;
+  } catch (err) {
+    // Clear the cached client so the next call retries from scratch.
+    // Without this, a broken credential (e.g., rotated service account) is
+    // cached permanently for the process lifetime, silently failing every call.
+    authClient = null;
+    projectId = null;
+    throw err;
+  }
 }
 
 /**
@@ -49,7 +55,7 @@ function getEndpoint() {
  */
 async function callGemini(parts, genConfig = {}) {
   const token = await getToken();
-  const endpoint = getEndpoint();
+  const endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent`;
 
   const payload = {
     contents: [{ role: 'user', parts }],
@@ -62,6 +68,7 @@ async function callGemini(parts, genConfig = {}) {
 
   const response = await fetch(endpoint, {
     method: 'POST',
+    signal: AbortSignal.timeout(60000),
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   });
@@ -83,16 +90,26 @@ async function callGemini(parts, genConfig = {}) {
 
 /**
  * Parse raw Gemini response text into JSON, stripping markdown fences if present.
+ * Handles both ```json and bare ``` wrappers.
  */
 function parseGeminiJSON(raw) {
-  let cleaned = raw.trim();
-  if (cleaned.startsWith('```json')) cleaned = cleaned.slice(7);
-  if (cleaned.startsWith('```')) cleaned = cleaned.slice(3);
-  if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3);
+  const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   return JSON.parse(cleaned.trim());
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
+
+// MIME type tables — module-level so they're not re-allocated per call.
+const IMAGE_MIME_MAP = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif',
+};
+const DOCUMENT_MIME_MAP = {
+  '.pdf':  'application/pdf',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.doc':  'application/msword',
+  '.txt':  'text/plain',
+};
 
 /**
  * Send a text-only prompt to Gemini.
@@ -116,8 +133,7 @@ export async function callGeminiVision(imagePaths, prompt) {
   for (const imgPath of imagePaths) {
     const buffer = fs.readFileSync(imgPath);
     const ext = path.extname(imgPath).toLowerCase();
-    const mimeMap = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' };
-    const mimeType = mimeMap[ext] || 'image/jpeg';
+    const mimeType = IMAGE_MIME_MAP[ext] || 'image/jpeg';
     parts.push({ inlineData: { mimeType, data: buffer.toString('base64') } });
   }
 
@@ -135,14 +151,7 @@ export async function callGeminiVision(imagePaths, prompt) {
 export async function callGeminiDocument(filePath, prompt) {
   const buffer = fs.readFileSync(filePath);
   const ext = path.extname(filePath).toLowerCase();
-
-  const mimeMap = {
-    '.pdf': 'application/pdf',
-    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    '.doc': 'application/msword',
-    '.txt': 'text/plain',
-  };
-  const mimeType = mimeMap[ext];
+  const mimeType = DOCUMENT_MIME_MAP[ext];
 
   if (!mimeType) {
     // Fall back to treating as an image (screenshot of a resume)
@@ -162,13 +171,12 @@ export function registerGeminiHandlers() {
   ipcMain.handle('ai-polish-text', async (_event, text) => {
     try {
       const prompt = `You are an AI assistant in a visual workspace app. Polish the following text. Make it clear, concise, and professional. Output ONLY the improved text, without quotes or conversational filler. Keep original markdown formatting if any. The text is:\n\n${text}`;
-      const config = { responseMimeType: 'text/plain' }; // or text/plain
+      const config = { responseMimeType: 'text/plain' };
       const raw = await callGemini([{ text: prompt }], config);
       return { success: true, text: raw.trim() };
     } catch (e) {
       console.error('[Gemini] Polish failed:', e);
-      return { success: false, error: e.message };
+      return { success: false, error: e?.message || String(e) };
     }
   });
 }
-

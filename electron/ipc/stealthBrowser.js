@@ -13,7 +13,8 @@
  */
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { app } from 'electron';
+import electronPkg from 'electron';
+const { app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 
@@ -22,17 +23,25 @@ import { getSessionProfile } from './browser/antiDetectProfiles.js';
 // Apply stealth evasions
 puppeteer.use(StealthPlugin());
 
+// ── Tracker-URL patterns for the image request filter ───────────────────────
+// Only tracking pixels / beacons are allowed through; all other images are
+// blocked to reduce bandwidth during scraping. Defined at module level so the
+// array is not reallocated on every page creation.
+const IMAGE_TRACKER_PATTERNS = ['pixel', 'tracker', 'beacon', '1x1'];
+
 // ── Persistent Session Directory ────────────────────────────────────────────
+let _userDataDir = null;
 export function getUserDataDir() {
+  if (_userDataDir) return _userDataDir;
   const base = app?.getPath?.('userData') || path.join(process.env.HOME || process.env.USERPROFILE || '.', '.infinite-canvas');
   const dir = path.join(base, 'browser-data');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
+  _userDataDir = dir;
+  return _userDataDir;
 }
 
 // ── Chrome Executable Discovery ─────────────────────────────────────────────
 export function findChromePath() {
-  
   const platform = process.platform;
 
   const candidates = platform === 'darwin'
@@ -56,9 +65,9 @@ export function findChromePath() {
     if (fs.existsSync(p)) return p;
   }
 
-  const electronPath = app?.getPath?.('exe');
-  if (electronPath && fs.existsSync(electronPath)) return electronPath;
-
+  // No suitable Chrome/Chromium found. Electron's own executable cannot be used
+  // as a puppeteer-core target (it spawns a renderer, not a standalone browser).
+  // Set CHROME_PATH env var or install Google Chrome to resolve this.
   throw new Error(
     'No Chrome/Chromium installation found. Install Google Chrome or set CHROME_PATH env var.'
   );
@@ -71,36 +80,43 @@ let browserLaunchPromise = null;
 export async function getStealthBrowser() {
   if (browserInstance?.isConnected?.()) return browserInstance;
 
+  // Clear a dead/crashed instance so it can be garbage collected.
+  if (browserInstance) browserInstance = null;
+
   if (browserLaunchPromise) return browserLaunchPromise;
 
   browserLaunchPromise = (async () => {
     const executablePath = process.env.CHROME_PATH || findChromePath();
     console.log('[StealthBrowser] Launching with:', path.basename(executablePath));
 
-    browserInstance = await puppeteer.launch({
-      headless: 'new',
-      executablePath,
-      userDataDir: getUserDataDir(),
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-infobars',
-        '--window-size=1920,1080',
-        '--disable-dev-shm-usage',
-        '--lang=en-US,en',
-      ],
-      defaultViewport: {
-        width: 1920,
-        height: 1080,
-        deviceScaleFactor: 1,
-      },
-      ignoreHTTPSErrors: true,
-    });
+    try {
+      browserInstance = await puppeteer.launch({
+        headless: 'new',
+        executablePath,
+        userDataDir: getUserDataDir(),
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-blink-features=AutomationControlled',
+          '--disable-infobars',
+          '--window-size=1920,1080',
+          '--disable-dev-shm-usage',
+          '--lang=en-US,en',
+        ],
+        defaultViewport: {
+          width: 1920,
+          height: 1080,
+          deviceScaleFactor: 1,
+        },
+        ignoreHTTPSErrors: true,
+      });
 
-    console.log('[StealthBrowser] Browser launched successfully');
-    browserLaunchPromise = null;
-    return browserInstance;
+      console.log('[StealthBrowser] Browser launched successfully');
+      return browserInstance;
+    } finally {
+      // Always release the mutex so the next call can retry on failure.
+      browserLaunchPromise = null;
+    }
   })();
 
   return browserLaunchPromise;
@@ -149,12 +165,15 @@ export async function createStealthPage() {
     if (req.isInterceptResolutionHandled?.()) return;
 
     const type = req.resourceType();
-    const url = req.url();
 
     if (type === 'media') {
       req.abort('aborted', 0);
     } else if (type === 'image') {
-      if (url.endsWith('.gif') || url.includes('pixel') || url.includes('tracker') || url.includes('beacon') || url.includes('1x1')) {
+      // Allow tracking pixels/beacons (blocking them can change server-side behaviour);
+      // block all other images to cut bandwidth while scraping text content.
+      const url = req.url();
+      const isTracker = url.endsWith('.gif') || IMAGE_TRACKER_PATTERNS.some(p => url.includes(p));
+      if (isTracker) {
         req.continue({}, 0);
       } else {
         req.abort('aborted', 0);

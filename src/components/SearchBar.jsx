@@ -87,7 +87,7 @@ export const SearchBar = React.memo(function SearchBar({ nodes }) {
     const { zoom: currentZoom } = getViewport();
     setCenter(target.position.x + 100, target.position.y + 50, { zoom: currentZoom, duration: 600 });
     setMatchIndex(nextIdx + 1);
-  }, [getMatches, matchIndex, setCenter]);
+  }, [getMatches, matchIndex, setCenter, isAnimating, getViewport]);
 
   const executeSearch = useCallback((e) => {
     if (e.key !== 'Enter' || searchQuery.trim() === '') return;

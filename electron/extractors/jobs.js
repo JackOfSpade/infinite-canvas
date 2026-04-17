@@ -99,7 +99,7 @@ export const GOOGLE_JOBS_EXTRACTOR = `
         posted: postedEl?.innerText?.trim() || '',
         source: 'google'
       });
-    } catch (e) {}
+    } catch {}
   });
 
   return jobs.slice(0, 30);
@@ -141,7 +141,7 @@ export const INDEED_JOBS_EXTRACTOR = `
       });
       if (jobs.length > 0) return jobs.slice(0, 30);
     }
-  } catch (e) {}
+  } catch {}
 
   // Strategy 1: Parse mosaic provider JSON state (legacy)
   try {
@@ -171,7 +171,7 @@ export const INDEED_JOBS_EXTRACTOR = `
         if (jobs.length > 0) return jobs.slice(0, 30);
       }
     }
-  } catch (e) {}
+  } catch {}
   
   // Strategy 2: Fallback DOM parsing
   const cards = document.querySelectorAll('.job_seen_beacon, .resultContent, .tapItem, [data-jk]');
@@ -197,7 +197,7 @@ export const INDEED_JOBS_EXTRACTOR = `
         posted: postedEl?.innerText?.trim() || '',
         source: 'indeed'
       });
-    } catch (e) {}
+    } catch {}
   });
 
   return jobs.slice(0, 30);
@@ -231,7 +231,7 @@ export const LINKEDIN_JOBS_EXTRACTOR = `
         posted: postedEl?.innerText?.trim() || postedEl?.getAttribute('datetime') || '',
         source: 'linkedin'
       });
-    } catch (e) {}
+    } catch {}
   });
 
   return jobs.slice(0, 30);
@@ -268,7 +268,7 @@ export const REMOTEOK_EXTRACTOR = `
         posted: '',
         source: 'remoteok'
       });
-    } catch (e) {}
+    } catch {}
   });
 
   return jobs.slice(0, 30);
@@ -300,7 +300,7 @@ export const WEWORKREMOTELY_EXTRACTOR = `
         posted: '',
         source: 'weworkremotely'
       });
-    } catch (e) {}
+    } catch {}
   });
 
   return jobs.slice(0, 30);
@@ -355,7 +355,7 @@ export const ZIPRECRUITER_EXTRACTOR = `
       });
       if (jobs.length > 0) return jobs.slice(0, 30);
     }
-  } catch (e) {}
+  } catch {}
 
   // Strategy 1: Parse JSON-LD structured data
   try {
@@ -387,7 +387,7 @@ export const ZIPRECRUITER_EXTRACTOR = `
       });
     }
     if (jobs.length > 0) return jobs.slice(0, 30);
-  } catch (e) {}
+  } catch {}
   
   // Strategy 2: Fallback DOM parsing
   const cards = document.querySelectorAll('.job_content, .jobList article, [data-testid="job-card"], .job_result_card');
@@ -413,7 +413,7 @@ export const ZIPRECRUITER_EXTRACTOR = `
         posted: postedEl?.innerText?.trim() || '',
         source: 'ziprecruiter'
       });
-    } catch (e) {}
+    } catch {}
   });
 
   return jobs.slice(0, 30);
@@ -466,7 +466,7 @@ export const GLASSDOOR_EXTRACTOR = `
       }
       if (jobs.length > 0) return jobs.slice(0, 30);
     }
-  } catch (e) {}
+  } catch {}
 
   // Strategy 1: Parse Apollo GraphQL state from inline script
   try {
@@ -504,7 +504,7 @@ export const GLASSDOOR_EXTRACTOR = `
       }
       if (jobs.length > 0) return jobs.slice(0, 30);
     }
-  } catch (e) {}
+  } catch {}
   
   // Strategy 2: Fallback DOM parsing (works even with login overlay)
   const cards = document.querySelectorAll('[data-test="jobListing"], .JobCard_jobCardWrapper, .react-job-listing, li[data-id]');
@@ -533,7 +533,7 @@ export const GLASSDOOR_EXTRACTOR = `
         posted: '',
         source: 'glassdoor'
       });
-    } catch (e) {}
+    } catch {}
   });
 
   return jobs.slice(0, 30);
@@ -585,7 +585,7 @@ export const DICE_EXTRACTOR = `
       });
       if (jobs.length > 0) return jobs.slice(0, 30);
     }
-  } catch (e) {}
+  } catch {}
 
   // Strategy 1: DOM parsing (Dice uses web components — query shadow DOM if available)
   const cards = document.querySelectorAll('.card-content, dhi-search-card, [data-cy="search-result-card"], .search-card');
@@ -617,7 +617,7 @@ export const DICE_EXTRACTOR = `
         posted: postedEl?.innerText?.trim() || '',
         source: 'dice'
       });
-    } catch (e) {}
+    } catch {}
   });
 
   return jobs.slice(0, 30);
@@ -668,7 +668,7 @@ export const WELLFOUND_EXTRACTOR = `
           source: 'wellfound'
         });
       });
-    } catch (e) {}
+    } catch {}
   }
   
   // Strategy 2: Fallback DOM parsing
@@ -694,7 +694,7 @@ export const WELLFOUND_EXTRACTOR = `
           posted: '',
           source: 'wellfound'
         });
-      } catch (e) {}
+      } catch {}
     });
   }
 

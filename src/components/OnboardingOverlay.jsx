@@ -104,13 +104,19 @@ const STEPS = [
  */
 export function OnboardingOverlay() {
   const [visible, setVisible] = useState(() => {
-    return localStorage.getItem('onboardingComplete') !== 'true';
+    try {
+      return localStorage.getItem('onboardingComplete') !== 'true';
+    } catch {
+      return true;
+    }
   });
   const [step, setStep] = useState(0);
   const [direction, setDirection] = useState('next');
 
   const dismiss = useCallback(() => {
-    localStorage.setItem('onboardingComplete', 'true');
+    try {
+      localStorage.setItem('onboardingComplete', 'true');
+    } catch { /* noop */ }
     setVisible(false);
   }, []);
 

@@ -28,7 +28,7 @@ export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
 
   const addToast = useCallback(({ title, description, type = 'info', duration = 4000 }) => {
-    const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+    const id = crypto.randomUUID();
     setToasts((prev) => {
       const next = [...prev, { id, title, description, type, duration }];
       // Cap at 5 toasts — discard oldest if over limit

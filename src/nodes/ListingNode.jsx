@@ -43,6 +43,12 @@ export function ListingNode({ id, data }) {
   const [checkingAuth, setCheckingAuth] = useState(false);
   const { updateNodeData, getNode } = useReactFlow();
 
+  const isMountedRef = React.useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+
   useEffect(() => {
     syncPriceFromBackend(data.pricing);
   }, [data.pricing, syncPriceFromBackend]);
@@ -214,10 +220,7 @@ export function ListingNode({ id, data }) {
                       setCheckingAuth(true);
                       try {
                         const result = await window.electronAPI.checkAndLogin({ platformId: loginPrompt.platformId });
-                        if (!getNode(id)) {
-                          setCheckingAuth(false);
-                          return;
-                        }
+                        if (!getNode(id)) return;
                         if (result.connected) {
                           setLoginPrompt(null);
                           // Re-trigger the listing flow now that we're logged in
@@ -228,7 +231,7 @@ export function ListingNode({ id, data }) {
                       } catch (err) {
                         console.error('Login failed:', err);
                       } finally {
-                        setCheckingAuth(false);
+                        if (isMountedRef.current) setCheckingAuth(false);
                       }
                     }}
                     disabled={checkingAuth}

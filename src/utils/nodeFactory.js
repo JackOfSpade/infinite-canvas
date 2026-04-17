@@ -23,7 +23,6 @@ export function createGroupNode(position) {
   };
 }
 
-
 export function createJobHubNode(position, extra = {}) {
   return {
     id: uuidv4(), type: 'jobhub', position,

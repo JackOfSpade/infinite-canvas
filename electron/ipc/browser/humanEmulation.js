@@ -62,8 +62,6 @@ export async function dismissCookieBanner(page) {
     '.fc-cta-consent',
     // eBay specific
     '#gdpr-banner-accept',
-    // Indeed specific
-    '#onetrust-accept-btn-handler',
     // Google consent
     'button[aria-label="Accept all"]',
     'form[action*="consent"] button',
