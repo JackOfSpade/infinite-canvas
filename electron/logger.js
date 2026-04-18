@@ -6,7 +6,7 @@
 import electronPkg from 'electron';
 const { app } = electronPkg;
 
-const isProd = app.isPackaged;
+const isProd = app?.isPackaged;
 
 export const logger = {
   info: (...args) => {

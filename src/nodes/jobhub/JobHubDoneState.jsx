@@ -5,7 +5,8 @@ export function JobHubDoneState({
   resultCount, 
   sourceFilter, 
   toggleSourceFilter, 
-  resumeSummary 
+  resumeSummary,
+  locked = false
 }) {
   return (
     <div className="flex flex-col items-center justify-center py-6 px-4">
@@ -15,8 +16,9 @@ export function JobHubDoneState({
         <p className="text-blue-400/70 text-[9px] mt-1 font-medium">
           Filtered: {JOB_SOURCES.find(s => s.id === sourceFilter)?.name || sourceFilter}
           <button
-            className="ml-1 text-white/30 hover:text-white/60"
-            onClick={() => toggleSourceFilter(sourceFilter)}
+            className={`ml-1 transition-colors ${locked ? 'text-white/10 cursor-default' : 'text-white/30 hover:text-white/60'}`}
+            onClick={locked ? undefined : () => toggleSourceFilter(sourceFilter)}
+            disabled={locked}
             onPointerDown={(e) => e.stopPropagation()}
           >
             ✕

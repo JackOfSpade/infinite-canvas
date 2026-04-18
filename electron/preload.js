@@ -105,4 +105,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiPolishText: (text) => ipcRenderer.invoke('ai-polish-text', text),
   exportBugReport:             (payload) => ipcRenderer.invoke('export-bug-report', payload),
   generateBugReportMarkdown:   (payload) => ipcRenderer.invoke('generate-bug-report-markdown', payload),
+
+  // ── Lifecycle Control ────────────────────────────────────────────────────
+  cancelNodeTask: (nodeId) => ipcRenderer.send('cancel-node-task', nodeId),
 });

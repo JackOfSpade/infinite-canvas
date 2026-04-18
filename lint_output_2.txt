@@ -1,0 +1,10 @@
+
+> infinite-canvas@0.0.0 lint
+> eslint .
+
+
+/Users/jack/Desktop/My Apps/infinite-canvas/src/nodes/SellHubNode.jsx
+  150:6  warning  React Hook useCallback has a missing dependency: 'data.locked'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+✖ 1 problem (0 errors, 1 warning)
+

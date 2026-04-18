@@ -27,7 +27,27 @@ import { IssueReporterDialog } from './components/IssueReporterDialog';
 import { EventLogger } from './utils/EventLogger';
 import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from './nodes/CanvasNode';
 import { CanvasNavigationContext } from './contexts/CanvasNavigationContext';
-import { nodeTypes, DEFAULT_EDGE_OPTIONS } from './utils/constants';
+import { DEFAULT_EDGE_OPTIONS } from './utils/constants';
+
+import { DocumentNode } from './nodes/DocumentNode';
+import { TextNode } from './nodes/TextNode';
+import { CanvasNode } from './nodes/CanvasNode';
+import { LinkNode } from './nodes/LinkNode';
+import { ListingNode } from './nodes/ListingNode';
+import { JobCardNode } from './nodes/JobCardNode';
+import { JobHubNode } from './nodes/JobHubNode';
+import { SellHubNode } from './nodes/SellHubNode';
+
+const nodeTypes = {
+  document: DocumentNode,
+  text: TextNode,
+  group: CanvasNode, // Keep 'group' key for backward compatibility of saved nodes, but map it to CanvasNode
+  link: LinkNode,
+  listing: ListingNode,
+  jobcard: JobCardNode,
+  jobhub: JobHubNode,
+  sellhub: SellHubNode,
+};
 import { useUndoRedo } from './hooks/useUndoRedo';
 import { useCustomFitView } from './hooks/useCustomFitView';
 import { useCanvasPersistence } from './hooks/useCanvasPersistence';
@@ -110,10 +130,16 @@ export function Canvas() {
     return () => { isMountedRef.current = false; };
   }, []);
 
+  const { screenToFlowPosition, getIntersectingNodes, getNode } = useReactFlow();
+  const isInteractionRef = useRef(false);
+
   const { onNodeDragStart, onNodeDragStop } = useDragCorrections({ 
     setNodes, 
+    setEdges,
     isInteractionRef,
-    isMountedRef 
+    isMountedRef,
+    getIntersectingNodes,
+    takeSnapshot
   });
 
   const onEdgesChange = useCallback((changes) => {
@@ -126,7 +152,6 @@ export function Canvas() {
   }, [onEdgesChangeBase, snapshotOnDelete]);
 
   const isNavigationAnimatingRef = useRef(false);
-  const isInteractionRef = useRef(false);
 
   const { undo, redo, takeSnapshot, clearHistory, canUndo, canRedo } = useUndoRedo({
     nodes, edges, drawings, setNodes, setEdges, setDrawings,
@@ -211,7 +236,7 @@ export function Canvas() {
   const handleSettingsClick = useCallback(() => setIsSettingsOpen(true), []);
   const [activeColor, setActiveColor] = useState('white');
   const [toolMenuOpen, setToolMenuOpen] = useState(false);
-  const { screenToFlowPosition, getIntersectingNodes, getNode } = useReactFlow();
+
 
   // Custom pointer-drag for Nested Canvas button (bypasses HTML5 drag so ghost matches click-place ghost)
   const { onNestedCanvasDragStart } = useNestedCanvasDrag({
@@ -376,7 +401,12 @@ export function Canvas() {
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
-            onNodesDelete={onNodesDelete}
+            onNodesDelete={(deleted) => {
+              if (navigation.isAnimating) return;
+              // Ensure locked nodes are NEVER deleted even if RF logic is bypassed
+              const onlyDeletable = deleted.filter(n => !n.data?.locked);
+              onNodesDelete(onlyDeletable);
+            }}
             onNodeDragStart={onNodeDragStart}
             onNodeDragStop={onNodeDragStop}
             onConnect={onConnect}
@@ -390,7 +420,7 @@ export function Canvas() {
             onNodeContextMenu={onNodeContextMenu}
             snapToGrid={snapToGrid}
             snapGrid={[40, 40]}
-            panOnDrag={!interactiveDisabled}
+            panOnDrag={interactiveDisabled ? false : [1, 2]}
             selectionOnDrag={!interactiveDisabled}
             nodesDraggable={!interactiveDisabled}
             elementsSelectable={!interactiveDisabled}

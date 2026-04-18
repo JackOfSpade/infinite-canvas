@@ -77,7 +77,7 @@ function buildTaskCategoryMap(tasks) {
  * Fetch API-based marketplace sources in parallel (no Puppeteer needed).
  * Reverb uses internal REST API, StockX uses Algolia bypass.
  */
-async function fetchApiMarketplaceSources(query, signal = null) {
+async function fetchApiMarketplaceSources(query, signal = null, nodeId = null, sender = null) {
   const apiTasks = [
     { sourceId: 'reverb', fn: (s) => fetchReverbListings(query, true, s) },
     { sourceId: 'stockx', fn: (s) => fetchStockXListings(query, s) },
@@ -87,8 +87,14 @@ async function fetchApiMarketplaceSources(query, signal = null) {
     try {
       if (signal?.aborted) throw new Error('Aborted');
       const items = await fn(signal);
+      if (sender && !sender.isDestroyed()) {
+        sender.send('price-source-progress', { nodeId, sourceId, status: 'done', count: items.length });
+      }
       return { sourceId, items };
     } catch (error) {
+      if (sender && !sender.isDestroyed()) {
+        sender.send('price-source-progress', { nodeId, sourceId, status: 'error', count: 0 });
+      }
       return { sourceId, items: [], error: error?.message || String(error) };
     }
   }));
@@ -100,8 +106,8 @@ async function fetchApiMarketplaceSources(query, signal = null) {
 export function registerMarketplaceHandlers() {
 
   // ── Analyze Product Photos ────────────────────────────────────────────────
-  handleSafe('analyze-photos', async (event, { imagePaths }, signal) => {
-    logger.info('[Marketplace] Analyzing', imagePaths.length, 'photos');
+  handleSafe('analyze-photos', async (event, { imagePaths, nodeId }, signal) => {
+    logger.info(`[Marketplace][${nodeId}] Analyzing`, imagePaths.length, 'photos');
 
     const result = await callGeminiVision(imagePaths, `
 You are a marketplace listing expert. Analyze these product photos and identify what is being sold.
@@ -120,21 +126,21 @@ Return a JSON object:
 
 Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`, signal);
 
-    logger.info('[Marketplace] Product identified:', result?.generated_title || 'Unknown');
+    logger.info(`[Marketplace][${nodeId}] Product identified:`, result?.generated_title || 'Unknown');
     
     return { product: result };
   });
 
   // ── Research Price (Multi-Source FMV) ──────────────────────────────────────
-  handleSafe('research-price', async (event, { query, condition }, signal) => {
-    logger.info('[Marketplace] Researching price for:', query);
+  handleSafe('research-price', async (event, { query, condition, nodeId }, signal) => {
+    logger.info(`[Marketplace][${nodeId}] Researching price for:`, query);
 
     const tasks = buildCompTasks(query);
 
     // Notify frontend that all sources are starting
     for (const t of tasks) {
       if (!event.sender.isDestroyed()) {
-        event.sender.send('price-source-progress', { sourceId: t.id, status: 'searching', count: 0 });
+        event.sender.send('price-source-progress', { nodeId, sourceId: t.id, status: 'searching', count: 0 });
       }
     }
 
@@ -142,6 +148,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
       if (event.sender.isDestroyed()) return;
       const items = Array.isArray(res.data) ? res.data : [];
       event.sender.send('price-source-progress', {
+        nodeId,
         sourceId: res.id,
         status: res.success ? 'done' : 'error',
         count: items.length,
@@ -151,10 +158,10 @@ Be specific about what you can clearly see. If you can't identify brand or model
     const apiSourceIds = ['reverb', 'stockx'];
     for (const sourceId of apiSourceIds) {
       if (!event.sender.isDestroyed()) {
-        event.sender.send('price-source-progress', { sourceId, status: 'searching', count: 0 });
+        event.sender.send('price-source-progress', { nodeId, sourceId, status: 'searching', count: 0 });
       }
     }
-    const apiResultsPromise = fetchApiMarketplaceSources(query, signal);
+    const apiResultsPromise = fetchApiMarketplaceSources(query, signal, nodeId, event.sender);
 
     const [scrapeResults, apiResults] = await Promise.all([scrapeResultsPromise, apiResultsPromise]);
 

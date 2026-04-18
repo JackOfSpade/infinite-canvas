@@ -167,14 +167,29 @@ function setupApplicationMenu(win) {
 // ── App lifecycle ────────────────────────────────────────────────────────────
 
 app.on('web-contents-created', (_, contents) => {
-  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  contents.setWindowOpenHandler((details) => {
+    try {
+      const parsedUrl = new URL(details.url);
+      if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
+        electronPkg.shell.openExternal(details.url);
+      }
+    } catch {
+      // Ignore invalid URLs
+    }
+    return { action: 'deny' };
+  });
+
   contents.on('will-attach-webview', (event) => event.preventDefault());
+
   contents.on('will-navigate', (event, navigationUrl) => {
     try {
       const parsedUrl = new URL(navigationUrl);
       const isAllowedLocalhost = parsedUrl.hostname === 'localhost' || parsedUrl.hostname === '127.0.0.1';
       if (!parsedUrl.protocol.startsWith('file:') && !isAllowedLocalhost) {
         event.preventDefault();
+        if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
+          electronPkg.shell.openExternal(navigationUrl);
+        }
       }
     } catch {
       // Malformed or non-http URL (e.g. about:blank, javascript:) — block navigation

@@ -20,7 +20,7 @@
 export const EBAY_SOLD_CONFIG = {
   waitMs: 2500,
   timeoutMs: 40000,
-  waitFor: '.srp-results .s-item',
+  waitFor: '.srp-results .s-item, .srp-results .s-card',
   scrollFirst: true,
   dismissCookies: true,
   referer: 'https://www.google.com/',
@@ -29,7 +29,7 @@ export const EBAY_SOLD_CONFIG = {
 export const EBAY_ACTIVE_CONFIG = {
   waitMs: 2500,
   timeoutMs: 40000,
-  waitFor: '.srp-results .s-item',
+  waitFor: '.srp-results .s-item, .srp-results .s-card',
   scrollFirst: true,
   dismissCookies: true,
   referer: 'https://www.google.com/',
@@ -107,20 +107,21 @@ export const EBAY_SOLD_EXTRACTOR = `
   } catch {}
 
   // Strategy 1: DOM parsing
-  const cards = document.querySelectorAll('.s-item');
+  const cards = document.querySelectorAll('.s-item, .s-card');
   
   cards.forEach(card => {
     try {
-      const titleEl = card.querySelector('.s-item__title');
-      const priceEl = card.querySelector('.s-item__price');
-      const dateEl = card.querySelector('.s-item__title--tag, .s-item__ended-date, .POSITIVE');
-      const linkEl = card.querySelector('.s-item__link');
-      const conditionEl = card.querySelector('.SECONDARY_INFO');
+      const titleEl = card.querySelector('.s-item__title, .s-card__title, [class*="title"]');
+      const priceEl = card.querySelector('.s-item__price, .s-card__price, [class*="price"]');
+      const dateEl = card.querySelector('.s-item__title--tag, .s-item__ended-date, .POSITIVE, .s-card__caption');
+      const linkEl = card.querySelector('.s-item__link, .s-card__link');
+      const conditionEl = card.querySelector('.SECONDARY_INFO, .s-card__subtitle');
       
       const title = titleEl?.innerText?.trim() || '';
       if (!title || title === 'Shop on eBay') return;
       
-      const priceText = priceEl?.innerText?.trim() || '';
+      const priceTextRaw = priceEl?.innerText?.trim() || '';
+      const priceText = priceTextRaw.split(/[\\n\\r]+/)[0];
       const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
       if (price === 0) return;
 
@@ -142,18 +143,19 @@ export const EBAY_SOLD_EXTRACTOR = `
 export const EBAY_ACTIVE_EXTRACTOR = `
 (function() {
   const items = [];
-  const cards = document.querySelectorAll('.s-item');
+  const cards = document.querySelectorAll('.s-item, .s-card');
   
   cards.forEach(card => {
     try {
-      const titleEl = card.querySelector('.s-item__title');
-      const priceEl = card.querySelector('.s-item__price');
-      const linkEl = card.querySelector('.s-item__link');
+      const titleEl = card.querySelector('.s-item__title, .s-card__title, [class*="title"]');
+      const priceEl = card.querySelector('.s-item__price, .s-card__price, [class*="price"]');
+      const linkEl = card.querySelector('.s-item__link, .s-card__link');
       
       const title = titleEl?.innerText?.trim() || '';
       if (!title || title === 'Shop on eBay') return;
       
-      const priceText = priceEl?.innerText?.trim() || '';
+      const priceTextRaw = priceEl?.innerText?.trim() || '';
+      const priceText = priceTextRaw.split(/[\\n\\r]+/)[0];
       const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
       if (price === 0) return;
 
@@ -216,25 +218,33 @@ export const POSHMARK_SOLD_EXTRACTOR = `
   } catch {}
   
   // Strategy 1: DOM parsing
-  const cards = document.querySelectorAll('[data-et-name="listing"], .card--small, .tile, [class*="ListingTile"]');
+  const cards = document.querySelectorAll('.tile-grid-redesign__media--wrapper, [data-et-name="listing"], .card--small, .tile, [class*="ListingTile"]');
   cards.forEach(card => {
     try {
-      const titleEl = card.querySelector('[data-et-name="title"], .title__condition, .tile__title, [class*="itemTitle"]');
-      const priceEl = card.querySelector('[data-et-name="price"], .fw--bold, .tile__price, [class*="itemPrice"]');
+      const titleEl = card.querySelector('.tile-grid-redesign__title, [data-et-name="title"], .title__condition, .tile__title, [class*="itemTitle"]');
+      const priceEl = card.querySelector('.tile-grid-redesign__price-current, [data-et-name="price"], .fw--bold, .tile__price, [class*="itemPrice"]');
       const linkEl = card.querySelector('a[href*="/listing/"]');
-      const soldBadge = card.querySelector('.sold-tag, [class*="sold"], .badge--sold, .item__sold-tag');
+      const listingId = card.querySelector('[data-et-prop-listing_id]')?.getAttribute('data-et-prop-listing_id');
+      const soldBadge = card.querySelector('.tile-grid-redesign__listing-status-word, .sold-tag, [class*="sold"], .badge--sold, .item__sold-tag');
       
       const title = titleEl?.innerText?.trim() || '';
       if (!title) return;
       
-      const priceText = priceEl?.innerText?.trim() || '';
+      const priceTextRaw = priceEl?.innerText?.trim() || '';
+      const priceText = priceTextRaw.split(/[\\n\\r]+/)[0];
       const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
       if (price === 0) return;
+      let url = linkEl?.href || '';
+      if (!url && listingId) {
+        url = 'https://poshmark.com/listing/' + title.replace(/[^a-zA-Z0-9]/g, '-') + '-' + listingId;
+      } else if (url && !url.startsWith('http')) {
+        url = 'https://poshmark.com' + url;
+      }
 
       items.push({
         title, price, priceText,
         soldDate: soldBadge ? 'Sold' : '',
-        url: linkEl?.href || '',
+        url,
         source: 'poshmark',
       });
     } catch {}
@@ -303,7 +313,8 @@ export const SWAPPA_EXTRACTOR = `
       const title = titleEl?.innerText?.trim() || '';
       if (!title) return;
       
-      const priceText = priceEl?.innerText?.trim() || '';
+      const priceTextRaw = priceEl?.innerText?.trim() || '';
+      const priceText = priceTextRaw.split(/[\\n\\r]+/)[0];
       const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
       if (price === 0) return;
 
@@ -382,16 +393,17 @@ export const MERCARI_SOLD_EXTRACTOR = `
   targets.forEach(card => {
     try {
       // Walk up to find the container if we matched a link
-      const container = card.closest('[class*="Item"]') || card;
+      const container = card.closest('[class*="Item"]') || card.closest('[data-testid="ItemContainer"]') || card;
       
       const titleEl = container.querySelector('[data-testid="ItemName"], [class*="itemName"], [class*="ItemName"], p, span');
-      const priceEl = container.querySelector('[data-testid="ItemPrice"], [class*="itemPrice"], [class*="ItemPrice"], [class*="price"]');
-      const linkEl = container.querySelector('a[href*="/item/"]') || (container.tagName === 'A' ? container : null);
+      const priceEl = container.querySelector('[data-testid="ItemPrice"], [data-testid="ProductThumbItemPrice"], [class*="itemPrice"], [class*="ItemPrice"], [class*="price"]');
+      const linkEl = container.querySelector('a[href*="/item/"]') || (container.tagName === 'A' ? container : container.closest('a'));
       
       const title = titleEl?.innerText?.trim() || '';
       if (!title || title.length < 3) return;
       
-      const priceText = priceEl?.innerText?.trim() || '';
+      const priceTextRaw = priceEl?.innerText?.trim() || '';
+      const priceText = priceTextRaw.split(/[\\n\\r]+/)[0];
       const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
       if (price === 0) return;
 

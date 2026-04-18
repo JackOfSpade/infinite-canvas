@@ -82,9 +82,7 @@ export function TextNode({ id, data }) {
         color: data.isSticky ? '#1f2937' : 'inherit'
       }}
     >
-      {!data.isSticky && (
-        <Handle type="target" position={Position.Left} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-white" />
-      )}
+      <Handle type="target" position={Position.Left} className={`w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity ${data.isSticky ? 'bg-black/50' : 'bg-white'}`} />
       
       {data.isSticky && (
         <div className="absolute bottom-0 right-0 w-6 h-6 rounded-tl-xl transition-all" 
@@ -140,7 +138,7 @@ export function TextNode({ id, data }) {
         />
       )}
 
-      <Handle type="source" position={Position.Right} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-white" />
+      <Handle type="source" position={Position.Right} className={`w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity ${data.isSticky ? 'bg-black/50' : 'bg-white'}`} />
 
       {showFontDialog && (
         <FontSizeDialog

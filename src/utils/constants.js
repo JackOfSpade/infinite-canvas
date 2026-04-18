@@ -1,23 +1,4 @@
-// Node types
-import { DocumentNode } from '../nodes/DocumentNode';
-import { TextNode } from '../nodes/TextNode';
-import { CanvasNode } from '../nodes/CanvasNode';
-import { LinkNode } from '../nodes/LinkNode';
-import { ListingNode } from '../nodes/ListingNode';
-import { JobCardNode } from '../nodes/JobCardNode';
-import { JobHubNode } from '../nodes/JobHubNode';
-import { SellHubNode } from '../nodes/SellHubNode';
 
-export const nodeTypes = {
-  document: DocumentNode,
-  text: TextNode,
-  group: CanvasNode, // Keep 'group' key for backward compatibility of saved nodes, but map it to CanvasNode
-  link: LinkNode,
-  listing: ListingNode,
-  jobcard: JobCardNode,
-  jobhub: JobHubNode,
-  sellhub: SellHubNode,
-};
 
 export const DEFAULT_EDGE_OPTIONS = { type: 'bezier', animated: true, style: { strokeWidth: 3, opacity: 0.8 } };
 export const EDGE_STYLE = { stroke: '#a855f7', strokeWidth: 3 };

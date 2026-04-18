@@ -73,7 +73,7 @@ function buildJobTasks(queries) {
  * Fetch API-based sources in parallel (no Puppeteer needed).
  * @returns {{ sourceId: string, jobs: object[], error?: string }[]}
  */
-async function fetchApiSources(queries, sender, signal = null) {
+async function fetchApiSources(queries, sender, signal = null, nodeId = null) {
   const firstQuery = queries[0] || '';
   const apiKey = process.env.USAJOBS_API_KEY || '';
   const email = process.env.USAJOBS_EMAIL || '';
@@ -91,7 +91,7 @@ async function fetchApiSources(queries, sender, signal = null) {
   // Notify frontend that API sources are starting
   for (const { sourceId } of apiTasks) {
     if (!sender.isDestroyed()) {
-      sender.send('job-source-progress', { sourceId, status: 'searching', count: 0 });
+      sender.send('job-source-progress', { nodeId, sourceId, status: 'searching', count: 0 });
     }
   }
 
@@ -113,8 +113,8 @@ export function registerJobsHandlers() {
 
 
 
-  handleSafe('parse-resume', async (event, { filePath }, signal) => {
-    logger.info('[Jobs] Parsing resume:', filePath);
+  handleSafe('parse-resume', async (event, { filePath, nodeId }, signal) => {
+    logger.info(`[Jobs][${nodeId}] Parsing resume:`, filePath);
     const profile = await callGeminiDocument(filePath, `
 Analyze this resume/CV thoroughly. Return a JSON object with:
 {
@@ -129,7 +129,7 @@ Analyze this resume/CV thoroughly. Return a JSON object with:
 }
 Extract everything you can find. Be thorough.`, signal);
 
-    logger.info('[Jobs] Resume parsed:', profile.titles?.join(', '));
+    logger.info(`[Jobs][${nodeId}] Resume parsed:`, profile.titles?.join(', '));
     return { profile };
   });
 
@@ -154,8 +154,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries }, signal) => {
-    logger.info('[Jobs] Searching with', queries.length, 'queries across 12 sources');
+  handleSafe('search-jobs', async (event, { queries, nodeId }, signal) => {
+    logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, 'queries across 12 sources');
 
     const tasks = buildJobTasks(queries);
     
@@ -169,7 +169,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Notify frontend that sources are starting
     for (const sourceId of Object.keys(sourceTaskIds)) {
       if (!event.sender.isDestroyed()) {
-        event.sender.send('job-source-progress', { sourceId, status: 'searching', count: 0 });
+        event.sender.send('job-source-progress', { nodeId, sourceId, status: 'searching', count: 0 });
       }
     }
 
@@ -183,12 +183,13 @@ Be creative with suggestedRoleQueries — think about what career directions the
         const sourceId = res.id.replace(/-\d+$/, '');
         const count = Array.isArray(res.data) ? res.data.length : 0;
         event.sender.send('job-source-progress', {
+          nodeId,
           sourceId,
           status: res.success ? 'done' : 'error',
           count
         });
       }, signal),
-      fetchApiSources(queries, event.sender, signal)
+      fetchApiSources(queries, event.sender, signal, nodeId)
     ]);
 
     // Process Scraper Results
@@ -226,6 +227,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       
       if (!event.sender.isDestroyed()) {
         event.sender.send('job-source-progress', {
+          nodeId,
           sourceId,
           status,
           count: data.jobs.length,
@@ -247,8 +249,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // ── Score Jobs Against Resume ─────────────────────────────────────────────
-  handleSafe('score-jobs', async (event, { jobs, profile }, signal) => {
-    logger.info('[Jobs] Scoring', jobs.length, 'jobs');
+  handleSafe('score-jobs', async (event, { jobs, profile, nodeId }, signal) => {
+    logger.info(`[Jobs][${nodeId}] Scoring`, jobs.length, 'jobs');
 
     // Batch into groups of 15
     const BATCH_SIZE = 15;

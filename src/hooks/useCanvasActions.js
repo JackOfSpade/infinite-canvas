@@ -45,8 +45,19 @@ export function useCanvasActions({
       setHasUnsavedChanges(false);
     }
 
-    const lockedNodes = getNodes().filter((n) => n.data?.locked);
+    const allNodes = getNodes();
+    const lockedNodes = allNodes.filter((n) => n.data?.locked);
     const lockedIds = new Set(lockedNodes.map((n) => n.id));
+
+    // Cancel any active background tasks for nodes being removed
+    if (window.electronAPI?.cancelNodeTask) {
+      allNodes.forEach(n => {
+        if (!lockedIds.has(n.id)) {
+          window.electronAPI.cancelNodeTask(n.id);
+        }
+      });
+    }
+
     const lockedEdges = getEdges().filter(
       (e) => lockedIds.has(e.source) && lockedIds.has(e.target)
     );

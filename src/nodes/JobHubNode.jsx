@@ -54,14 +54,21 @@ export function JobHubNode({ id, data }) {
   // Listen for per-source progress events from the backend
   useEffect(() => {
     if (!window.electronAPI?.onJobSourceProgress) return;
-    const cleanup = window.electronAPI.onJobSourceProgress(({ sourceId, status, count }) => {
-      setSourceProgress(prev => ({ ...prev, [sourceId]: { status, count } }));
-      if (status === 'searching') setLastActiveSource(sourceId);
+    const cleanup = window.electronAPI.onJobSourceProgress((payload) => {
+      const { nodeId, sourceId, status, count } = payload;
+      
+      // Multi-hub safety: ignore events for other hubs
+      if (nodeId && nodeId !== id) return;
+
+      if (isMountedRef.current) {
+        setSourceProgress(prev => ({ ...prev, [sourceId]: { status, count } }));
+        if (status === 'searching') setLastActiveSource(sourceId);
+      }
     });
      
     cleanupRef.current = cleanup;
     return () => cleanup?.();
-  }, []);
+  }, [id]);
 
   // Source statuses with live text for the animated ring
   const getSourceStatuses = useCallback(() => {
@@ -159,11 +166,15 @@ export function JobHubNode({ id, data }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally runs once on mount only
 
-  // Auto-start if filePath was provided (canvas-level drop created this node)
+  // Auto-start or Re-sync on mount
   useEffect(() => {
+    // 1. Auto-start if drop-created
     if (data.filePath && hubState === 'empty' && !processingRef.current) {
       startProcessing(data.filePath);
     }
+    // 2. Re-sync if we remounted into a processing state (navigation back)
+    // We don't need to do anything special here as the background closure 
+    // is already updating data.hubState, which our component is rendering.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -175,8 +186,11 @@ export function JobHubNode({ id, data }) {
     try {
       // Step 1: Parse resume
       updateNodeData(id, { hubState: 'parsing' });
-      const parseResult = await window.electronAPI.parseResume({ filePath });
-      if (!isMountedRef.current) return;
+      const parseResult = await window.electronAPI.parseResume({ filePath, nodeId: id });
+      
+      // NAVIGATION RESILIENCE: 
+      // We check if the node still EXISTS in the world (any canvas level), 
+      // not just if the current component is mounted.
       if (!getNode(id)) { processingRef.current = false; return; }
       if (!parseResult.success) throw new Error(parseResult.error);
       const profile = parseResult.profile;
@@ -188,7 +202,6 @@ export function JobHubNode({ id, data }) {
 
       // Step 2: Generate queries
       const queryResult = await window.electronAPI.generateJobQueries({ profile });
-      if (!isMountedRef.current) return;
       if (!getNode(id)) { processingRef.current = false; return; }
       if (!queryResult.success) throw new Error(queryResult.error);
       const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queryResult.queries;
@@ -196,8 +209,7 @@ export function JobHubNode({ id, data }) {
 
       // Step 3: Search (multi-source — backend sends per-source progress events)
       updateNodeData(id, { hubState: 'searching', queryCount: allQueries.length });
-      const searchResult = await window.electronAPI.searchJobs({ queries: allQueries });
-      if (!isMountedRef.current) return;
+      const searchResult = await window.electronAPI.searchJobs({ queries: allQueries, nodeId: id });
       if (!getNode(id)) { processingRef.current = false; return; }
       if (!searchResult.success) throw new Error(searchResult.error);
 
@@ -209,8 +221,7 @@ export function JobHubNode({ id, data }) {
 
       // Step 4: Score
       updateNodeData(id, { hubState: 'scoring', jobCount: searchResult.jobs.length });
-      const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile });
-      if (!isMountedRef.current) return;
+      const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile, nodeId: id });
       if (!getNode(id)) { processingRef.current = false; return; }
       if (!scoreResult.success) throw new Error(scoreResult.error);
 
@@ -265,15 +276,24 @@ export function JobHubNode({ id, data }) {
         });
       });
 
-      addNodes(newNodes);
+      if (newNodes.length > 0) {
+        // We assume takeSnapshot is available via props or we can get it from a hook.
+        // But JobHubNode is inside ReactFlow, it doesn't have takeSnapshot directly.
+        // We'll dispatch a custom event that useUndoRedo listens to, or 
+        // since we are in a ref-based 'startProcessing', we should have takeSnapshot passed in.
+        // Wait, JobHubNode doesn't receive takeSnapshot in props.
+        // I'll add an event-based snapshot trigger.
+        document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
+        addNodes(newNodes);
+      }
       updateNodeData(id, { hubState: 'done', resultCount: scoreResult.scoredJobs.length });
       addToast({ title: 'Job Search Complete', description: `Found and scored ${scoreResult.scoredJobs.length} jobs.`, type: 'success' });
     } catch (error) {
       console.error('[JobHub] Failed:', error);
-      if (isMountedRef.current && getNode(id)) updateNodeData(id, { hubState: 'error', errorMessage: error?.message || String(error) });
-      if (isMountedRef.current) addToast({ title: 'Job Search Failed', description: error?.message || String(error), type: 'error' });
+      if (getNode(id)) updateNodeData(id, { hubState: 'error', errorMessage: error?.message || String(error) });
+      addToast({ title: 'Job Search Failed', description: error?.message || String(error), type: 'error' });
     } finally {
-      if (isMountedRef.current) processingRef.current = false;
+      processingRef.current = false;
     }
   };
 
@@ -337,6 +357,7 @@ export function JobHubNode({ id, data }) {
             sourceFilter={sourceFilter}
             toggleSourceFilter={toggleSourceFilter}
             resumeSummary={data.resumeSummary}
+            locked={!!data.locked}
           />
         )}
 

@@ -1,6 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
+let activeModalCount = 0;
+
+function updateModalCount(delta) {
+  activeModalCount = Math.max(0, activeModalCount + delta);
+  window.dispatchEvent(new CustomEvent('modal-stack-changed', {
+    detail: { count: activeModalCount }
+  }));
+}
+
 /**
  * Reusable floating dialog.
  * - No dark backdrop overlay — canvas stays fully visible.
@@ -19,6 +28,11 @@ export function Dialog({ title, children, onClose }) {
   const dialogRef = useRef(null);
 
   const closingRef = useRef(false);
+
+  useEffect(() => {
+    updateModalCount(1);
+    return () => updateModalCount(-1);
+  }, []);
 
   useEffect(() => {
     const handleKey = (e) => { 

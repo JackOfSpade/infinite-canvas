@@ -1,7 +1,15 @@
-import { handleSafe } from './ipcUtils.js';
+import { handleSafe, abortNodeTasks } from './ipcUtils.js';
+import electronPkg from 'electron';
+const { ipcMain } = electronPkg;
 
 export function registerNetworkHandlers() {
+  // Add direct listener for node task cancellation
+  ipcMain.on('cancel-node-task', (_event, nodeId) => {
+    if (nodeId) abortNodeTasks(nodeId);
+  });
+
   handleSafe('fetch-url-title', async (event, url, signal) => {
+    // ... rest of the handler
     try {
       let fetchUrl = url;
       if (!fetchUrl.startsWith('http://') && !fetchUrl.startsWith('https://')) {

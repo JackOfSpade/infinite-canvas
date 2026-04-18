@@ -5,6 +5,47 @@ import { logger } from '../logger.js';
 import electronPkg from 'electron';
 const { ipcMain } = electronPkg;
 
+// ── Node Task Registry ──────────────────────────────────────────────────────
+const nodeTasks = new Map(); // nodeId -> Set<AbortController>
+
+/**
+ * Register an AbortController for a specific node.
+ * Allows cancelling background tasks (e.g. search, analysis) when the node is deleted.
+ */
+function registerNodeTask(nodeId, ac) {
+  if (!nodeId) return;
+  if (!nodeTasks.has(nodeId)) {
+    nodeTasks.set(nodeId, new Set());
+  }
+  nodeTasks.get(nodeId).add(ac);
+  logger.info(`[IPC] Registered task for node ${nodeId}`);
+}
+
+/**
+ * Unregister an AbortController when a task completes.
+ */
+function unregisterNodeTask(nodeId, ac) {
+  const set = nodeTasks.get(nodeId);
+  if (set) {
+    set.delete(ac);
+    if (set.size === 0) nodeTasks.delete(nodeId);
+  }
+}
+
+/**
+ * Cancel all active background tasks for a specific node.
+ */
+export function abortNodeTasks(nodeId) {
+  const set = nodeTasks.get(nodeId);
+  if (set) {
+    logger.info(`[IPC] Aborting ${set.size} tasks for node ${nodeId}`);
+    for (const ac of set) {
+      ac.abort(new Error('Node deleted'));
+    }
+    nodeTasks.delete(nodeId);
+  }
+}
+
 /**
  * Creates an AbortController tied to the IPC event sender's lifecycle.
  * If the sender window is destroyed (e.g., closed by the user), the signal aborts.
@@ -12,7 +53,7 @@ const { ipcMain } = electronPkg;
  * 
  * @param {Electron.IpcMainInvokeEvent} event - The IPC event
  * @param {number} timeoutMs - Optional timeout in milliseconds
- * @returns {{ signal: AbortSignal, cleanup: Function }}
+ * @returns {{ ac: AbortController, signal: AbortSignal, cleanup: Function }}
  */
 export function createSenderAbortController(event, timeoutMs = 0) {
   const ac = new AbortController();
@@ -26,6 +67,7 @@ export function createSenderAbortController(event, timeoutMs = 0) {
   }
 
   return {
+    ac,
     signal: ac.signal,
     cleanup: () => {
       if (timeoutId) clearTimeout(timeoutId);
@@ -46,7 +88,13 @@ export function createSenderAbortController(event, timeoutMs = 0) {
  */
 export function handleSafe(channel, handler, timeoutMs = 0) {
   ipcMain.handle(channel, async (event, args) => {
-    const { signal, cleanup } = createSenderAbortController(event, timeoutMs);
+    const { ac, signal, cleanup } = createSenderAbortController(event, timeoutMs);
+    const nodeId = args?.nodeId;
+    
+    if (nodeId) {
+      registerNodeTask(nodeId, ac);
+    }
+
     try {
       const result = await handler(event, args, signal);
       
@@ -55,11 +103,17 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
       
       return { success: true, ...result };
     } catch (e) {
-      if (signal.aborted) return { success: false, error: 'Window closed' };
+      if (signal.aborted) {
+        return { success: false, error: e?.message === 'Node deleted' ? 'Node deleted' : 'Window closed' };
+      }
       logger.error(`[${channel}] failed:`, e?.message || String(e));
       return { success: false, error: e?.message || String(e) };
     } finally {
+      if (nodeId) {
+        unregisterNodeTask(nodeId, ac);
+      }
       cleanup();
     }
   });
 }
+

@@ -86,7 +86,7 @@ export function LinkNode({ id, data }) {
 
   const handleClick = (e) => {
     e.stopPropagation();
-    if (clickTimeoutRef.current !== null) return;
+    if (data.locked || clickTimeoutRef.current !== null) return;
     clickTimeoutRef.current = setTimeout(() => {
       openLink();
       clickTimeoutRef.current = null;

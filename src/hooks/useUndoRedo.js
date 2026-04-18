@@ -203,12 +203,28 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     requestAnimationFrame(() => { if (isMountedRef.current) isRestoringRef.current = false; });
   }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef]);
 
+  const [modalCount, setModalCount] = useState(0);
+
+  useEffect(() => {
+    const handler = (e) => setModalCount(e.detail.count || 0);
+    window.addEventListener('modal-stack-changed', handler);
+    return () => window.removeEventListener('modal-stack-changed', handler);
+  }, []);
+
   useEffect(() => {
     const handleKeyDown = (e) => {
+      // Guard: block shortcuts if any modal is active
+      if (modalCount > 0) return;
+
       const isMod = e.ctrlKey || e.metaKey;
       if (!isMod) return;
       const tag = e.target.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) {
+        // If it's an empty contentEditable, allow the workspace undo (to undo node creation)
+        if (e.target.innerText && e.target.innerText.trim().length > 0) return;
+        if (tag === 'INPUT' && e.target.value.trim().length > 0) return;
+        if (tag === 'TEXTAREA' && e.target.value.trim().length > 0) return;
+      }
 
       if (matchesShortcut(e, sc.undo)) {
         e.preventDefault();
@@ -220,7 +236,14 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo, sc]);
+  }, [undo, redo, sc, modalCount]);
+
+  // Listen for global snapshot requests (e.g. from JobHub when spawning results)
+  useEffect(() => {
+    const handleSnapshot = () => takeSnapshot();
+    document.addEventListener('canvas-take-snapshot', handleSnapshot);
+    return () => document.removeEventListener('canvas-take-snapshot', handleSnapshot);
+  }, [takeSnapshot]);
 
   const clearHistory = useCallback(() => {
     pastRef.current   = [];

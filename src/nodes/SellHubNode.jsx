@@ -68,11 +68,18 @@ export function SellHubNode({ id, data }) {
   // Listen for per-source price research progress events
   useEffect(() => {
     if (!window.electronAPI?.onPriceSourceProgress) return;
-    const cleanup = window.electronAPI.onPriceSourceProgress(({ sourceId, status, count }) => {
-      setCompProgress(prev => ({ ...prev, [sourceId]: { status, count } }));
+    const cleanup = window.electronAPI.onPriceSourceProgress((payload) => {
+      const { nodeId, sourceId, status, count } = payload;
+      
+      // Multi-hub safety
+      if (nodeId && nodeId !== id) return;
+
+      if (isMountedRef.current) {
+        setCompProgress(prev => ({ ...prev, [sourceId]: { status, count } }));
+      }
     });
     return () => cleanup?.();
-  }, []);
+  }, [id]);
 
   // ── Ring sources: comp sources during research, platform icons when priced ──
   const getSourceStatuses = useCallback(() => {
@@ -100,6 +107,7 @@ export function SellHubNode({ id, data }) {
 
       return SELL_PLATFORMS.map(p => {
         const openPlatform = () => {
+          if (data.locked) return;
           if (window.electronAPI?.openExternal) {
             // Animate outward arrow briefly
             setPostingPlatforms(prev => ({ ...prev, [p.id]: 'active' }));
@@ -139,7 +147,7 @@ export function SellHubNode({ id, data }) {
       ...p, status: 'idle',
       onClick: () => window.electronAPI?.openExternal?.(p.postUrl),
     }));
-  }, [hubState, selectedPlatforms, data.comps, compProgress, postingPlatforms]);
+  }, [hubState, selectedPlatforms, data.comps, compProgress, postingPlatforms, data.locked]);
 
   const startAnalysis = async (imagePaths) => {
     if (!window.electronAPI || processingRef.current) return;
@@ -147,12 +155,12 @@ export function SellHubNode({ id, data }) {
 
     try {
       updateNodeData(id, { hubState: 'analyzing' });
-      const result = await window.electronAPI.analyzePhotos({ imagePaths });
+      const result = await window.electronAPI.analyzePhotos({ imagePaths, nodeId: id });
       
-      if (!isMountedRef.current) return;
-      // Guard: node may have been deleted while awaiting the IPC response
+      // Navigation Resilience: Check if node still exists in the world
       if (!getNode(id)) { processingRef.current = false; return; }
       if (!result.success) throw new Error(result.error);
+      
       updateNodeData(id, {
         hubState: 'draft',
         product: result.product,
@@ -160,9 +168,12 @@ export function SellHubNode({ id, data }) {
       });
     } catch (error) {
       console.error('[SellHub] Analysis failed:', error);
-      if (isMountedRef.current && getNode(id)) updateNodeData(id, { hubState: 'error', errorMessage: error?.message || String(error) });
+      if (getNode(id)) {
+        updateNodeData(id, { hubState: 'error', errorMessage: error?.message || String(error) });
+      }
+      addToast({ title: 'Photo Analysis Failed', description: error?.message || String(error), type: 'error' });
     } finally {
-      if (isMountedRef.current) processingRef.current = false;
+      processingRef.current = false;
     }
   };
 
@@ -174,9 +185,9 @@ export function SellHubNode({ id, data }) {
     try {
       updateNodeData(id, { hubState: 'researching' });
       const result = await researchPrice((state, res) => {
-        if (!isMountedRef.current) return;
-        // Guard: node may have been deleted while price research was running
+        // Navigation Resilience: update global store regardless of mount state
         if (!getNode(id)) return;
+        
         if (state === 'priced') {
           updateNodeData(id, {
             hubState: 'priced',
@@ -193,16 +204,15 @@ export function SellHubNode({ id, data }) {
           addToast({ title: 'Pricing Failed', description: res.error || 'Could not determine a price.', type: 'error' });
         }
       });
-      if (!isMountedRef.current) return;
       if (!result && getNode(id)) {
         updateNodeData(id, { hubState: 'draft' });
       }
     } catch (err) {
       console.error('[SellHub] Price research failed:', err);
-      if (isMountedRef.current && getNode(id)) updateNodeData(id, { hubState: 'draft' });
-      if (isMountedRef.current) addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
+      if (getNode(id)) updateNodeData(id, { hubState: 'draft' });
+      addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
     } finally {
-      if (isMountedRef.current) processingRef.current = false;
+      processingRef.current = false;
     }
   };
 

@@ -2,7 +2,7 @@ import { useCallback, useRef } from 'react';
 import { EventLogger } from '../utils/EventLogger';
 import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from '../nodes/CanvasNode';
 
-export function useDragCorrections({ setNodes, isInteractionRef, isMountedRef }) {
+export function useDragCorrections({ setNodes, setEdges, isInteractionRef, isMountedRef, getIntersectingNodes, takeSnapshot }) {
   const resizeDragActiveRef    = useRef(new Set());
   const titleZoneDragActiveRef = useRef(new Set());
 
@@ -61,7 +61,53 @@ export function useDragCorrections({ setNodes, isInteractionRef, isMountedRef })
         n.id === node.id ? { ...n, position: { x: tzCorrection.x, y: tzCorrection.y } } : n
       ));
     }
-  }, [setNodes, isInteractionRef, isMountedRef]);
+
+    // Check if the node was dropped inside a group (nested canvas)
+    // Only standard nodes (no groups) are absorbed, to prevent deep recursion complexities.
+    if (!wasResizeDrag && !wasTitleZoneDrag && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'sellhub') {
+      if (getIntersectingNodes) {
+        const intersections = getIntersectingNodes(node);
+        const targetGroup = intersections.find(n => n.type === 'group' && !n.data?.locked);
+        if (targetGroup) {
+          if (takeSnapshot) takeSnapshot();
+          setNodes(nds => {
+            const draggedNode = nds.find(n => n.id === node.id);
+            if (!draggedNode) return nds;
+
+            // Offset the node's position relative to the nested canvas center
+            const cx = (targetGroup.measured?.width || targetGroup.width || 200) / 2;
+            const cy = (targetGroup.measured?.height || targetGroup.height || 200) / 2;
+            const nestedPos = { x: draggedNode.position.x - targetGroup.position.x - cx + 100, y: draggedNode.position.y - targetGroup.position.y - cy  + 100 };
+            
+            const newNodeState = { ...draggedNode, position: nestedPos };
+
+            const newNds = nds.filter(n => n.id !== node.id).map(n => {
+              if (n.id === targetGroup.id) {
+                const canvasData = n.data?.canvasData || { nodes: [], edges: [], drawings: [] };
+                return {
+                  ...n,
+                  data: {
+                    ...n.data,
+                    canvasData: {
+                      ...canvasData,
+                      nodes: [...(canvasData.nodes || []), newNodeState]
+                    }
+                  }
+                };
+              }
+              return n;
+            });
+            return newNds;
+          });
+          
+          if (setEdges) {
+            setEdges(eds => eds.filter(e => e.source !== node.id && e.target !== node.id));
+          }
+          EventLogger.log(`Absorbed node ${node.id} into group ${targetGroup.id}`);
+        }
+      }
+    }
+  }, [setNodes, setEdges, isInteractionRef, isMountedRef, getIntersectingNodes, takeSnapshot]);
 
   return { onNodeDragStart, onNodeDragStop };
 }

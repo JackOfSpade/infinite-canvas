@@ -261,9 +261,9 @@ async function executeScrape(url, extractorJS, options = {}) {
 
         // Navigate with network wait
         try {
-          await page.goto(url, { waitUntil: 'networkidle2', timeout: timeoutMs - 5000 });
+          await page.goto(url, { waitUntil: options.waitUntil || 'networkidle2', timeout: timeoutMs - 5000 });
         } catch (e) {
-          if (!e?.message?.includes('ERR_ABORTED') && !e?.message?.includes('net::ERR_')) {
+          if (!e?.message?.includes('ERR_ABORTED') && !e?.message?.includes('net::ERR_') && !e?.message?.includes('TimeoutError') && !e?.message?.includes('timeout')) {
             throw e;
           }
         }
@@ -308,10 +308,12 @@ async function executeScrape(url, extractorJS, options = {}) {
           page.__closing = true;
           try {
             if (!page.isClosed()) {
+              let closeTimeoutId;
               await Promise.race([
                 page.close(),
-                new Promise(r => setTimeout(r, 2000))
+                new Promise(r => { closeTimeoutId = setTimeout(r, 2000); })
               ]);
+              if (closeTimeoutId) clearTimeout(closeTimeoutId);
             }
           } catch { /* already closed */ }
         }
@@ -343,10 +345,12 @@ async function executeScrape(url, extractorJS, options = {}) {
       page.__closing = true;
       try {
         if (!page.isClosed()) {
+          let closeTimeoutId;
           await Promise.race([
             page.close(),
-            new Promise(r => setTimeout(r, 2000))
+            new Promise(r => { closeTimeoutId = setTimeout(r, 2000); })
           ]);
+          if (closeTimeoutId) clearTimeout(closeTimeoutId);
         }
       } catch (e) {
         logger.warn('[BrowserPool] Page close error:', e.message);
@@ -375,10 +379,12 @@ export async function closeAllPages() {
     try {
       if (page && !page.isClosed()) {
         // Use a race to avoid hanging the entire app shutdown if one page is stuck
+        let shutdownTimeoutId;
         await Promise.race([
           page.close(),
-          new Promise(r => setTimeout(r, 1000))
+          new Promise(r => { shutdownTimeoutId = setTimeout(r, 1000); })
         ]);
+        if (shutdownTimeoutId) clearTimeout(shutdownTimeoutId);
       }
     } catch {
       // Ignored during shutdown

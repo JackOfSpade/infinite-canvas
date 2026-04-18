@@ -224,7 +224,7 @@ export function useCanvasNavigation({
    * Dive out one level (back to parent).
    */
   const diveOut = useCallback(() => {
-    if (isAnimating || stackRef.current.length === 0) return;
+    if (isAnimating || isNavigatingRef.current || stackRef.current.length === 0) return;
     jumpTo(stackRef.current.length - 1);
   }, [isAnimating, jumpTo]);
 

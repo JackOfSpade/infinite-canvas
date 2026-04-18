@@ -107,25 +107,23 @@ export function useListingActions(id, data) {
       const query = `${product.brand || ''} ${product.model || ''} ${product.generated_title || ''}`.trim();
       const result = await window.electronAPI.researchPrice({
         query,
+        nodeId: id,
         condition: product.condition || 'Used - Good',
       });
 
-      if (!isMountedRef.current) return result;
-
       if (result.success) {
-        setPriceInput(result.pricing.recommended_price || '');
+        if (isMountedRef.current) setPriceInput(result.pricing.recommended_price || '');
         onStateChange?.('priced', result);
       } else {
         onStateChange?.('priced-empty', result);
       }
       return result;
     } catch (err) {
-      if (!isMountedRef.current) return null;
       console.error('Price research failed:', err);
       onStateChange?.('error', err);
       return null;
     }
-  }, [product]);
+  }, [product, id]);
 
   // ── Justification toggle ───────────────────────────────────────────────────
 

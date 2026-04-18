@@ -32,6 +32,7 @@ export const SearchBar = React.memo(function SearchBar() {
   const [isExpanded, setIsExpanded] = useState(false);
   const { setCenter, getViewport, getNodes } = useReactFlow();
   const inputRef = useRef(null);
+  const autoDiveTimeoutRef = useRef(null);
   const nav = useContext(CanvasNavigationContext);
   const isAnimating = nav?.isAnimating || false;
 
@@ -70,11 +71,16 @@ export const SearchBar = React.memo(function SearchBar() {
       return false;
     };
 
-    return currentNodes.filter(n => {
-      if (matchesQuery(n, q)) return true;
+    return currentNodes.map(n => {
+      const titleMatch = matchesQuery(n, q);
       const nested = n.data?.canvasData?.nodes;
-      return nested && nested.length > 0 && deepSearch(nested);
-    });
+      const internalMatch = nested && nested.length > 0 && deepSearch(nested);
+      
+      if (titleMatch || internalMatch) {
+        return { node: n, internalOnly: !titleMatch && internalMatch };
+      }
+      return null;
+    }).filter(Boolean);
   }, [searchQuery, getNodes]);
 
   const handleQueryChange = (e) => {
@@ -88,12 +94,26 @@ export const SearchBar = React.memo(function SearchBar() {
     setMatchCount(matches.length);
     if (matches.length === 0) return;
     const nextIdx = ((matchIndex - 1 + offset) % matches.length + matches.length) % matches.length;
-    const target = matches[nextIdx];
+    const targetInfo = matches[nextIdx];
+    const target = targetInfo.node;
+
     // Preserve the user's current zoom level; only pan to the match
     const { zoom: currentZoom } = getViewport();
     setCenter(target.position.x + 100, target.position.y + 50, { zoom: currentZoom, duration: 600 });
     setMatchIndex(nextIdx + 1);
-  }, [getMatches, matchIndex, setCenter, isAnimating, getViewport]);
+
+    // If it's an internal match and not an animating transition, offer to dive in
+    // or automatically dive in if the user clicks Enter on it.
+    if (targetInfo.internalOnly && nav?.diveIn) {
+      if (autoDiveTimeoutRef.current) clearTimeout(autoDiveTimeoutRef.current);
+      autoDiveTimeoutRef.current = setTimeout(() => {
+        if (inputRef.current === document.activeElement || document.activeElement?.closest('[data-search-bar]')) {
+           nav.diveIn(target.id);
+        }
+        autoDiveTimeoutRef.current = null;
+      }, 700);
+    }
+  }, [getMatches, matchIndex, setCenter, isAnimating, getViewport, nav, inputRef]);
 
   const executeSearch = useCallback((e) => {
     if (e.key !== 'Enter' || searchQuery.trim() === '') return;
@@ -104,6 +124,8 @@ export const SearchBar = React.memo(function SearchBar() {
   const handlePrev = useCallback(() => navigateBy(-1), [navigateBy]);
 
   const handleClear = () => {
+    if (autoDiveTimeoutRef.current) clearTimeout(autoDiveTimeoutRef.current);
+    autoDiveTimeoutRef.current = null;
     setSearchQuery('');
     setMatchCount(0);
     setMatchIndex(0);

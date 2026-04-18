@@ -190,7 +190,6 @@ export function useCanvasContextMenu({
   const tidyNodes = useCallback((onlySelected) => {
     takeSnapshot();
     setNodes(nds => {
-      // Filter out locked nodes from being tidied
       const targets = nds.filter(n => {
         if (n.data?.locked) return false;
         return onlySelected ? n.selected : true;
@@ -198,31 +197,71 @@ export function useCanvasContextMenu({
       
       if (targets.length === 0) return nds;
 
-      // Sort by approx Y, then X
-      const sorted = [...targets].sort((a, b) => {
-        if (Math.abs(a.position.y - b.position.y) > 100) return a.position.y - b.position.y;
-        return a.position.x - b.position.x;
+      const getWidth = (n) => n.measured?.width || n.width || (n.type === 'text' ? 200 : 250);
+      const getHeight = (n) => n.measured?.height || n.height || (n.type === 'text' ? 100 : 200);
+
+      const parentGroups = {};
+      targets.forEach(n => {
+        const key = n.parentId || 'ROOT';
+        if (!parentGroups[key]) parentGroups[key] = [];
+        parentGroups[key].push(n);
       });
 
-      const cols = Math.ceil(Math.sqrt(targets.length));
-      const anchorX = sorted[0]?.position.x || 0;
-      const anchorY = sorted[0]?.position.y || 0;
+      const newPositions = {};
+
+      Object.values(parentGroups).forEach(group => {
+        const sorted = [...group].sort((a, b) => {
+          if (Math.abs(a.position.y - b.position.y) > 100) return a.position.y - b.position.y;
+          return a.position.x - b.position.x;
+        });
+
+        const cols = Math.ceil(Math.sqrt(group.length));
+        const rows = Math.ceil(group.length / cols);
+        const gutter = 40;
+
+        const colWidths = new Array(cols).fill(0);
+        const rowHeights = new Array(rows).fill(0);
+
+        sorted.forEach((n, idx) => {
+          const col = idx % cols;
+          const row = Math.floor(idx / cols);
+          colWidths[col] = Math.max(colWidths[col], getWidth(n));
+          rowHeights[row] = Math.max(rowHeights[row], getHeight(n));
+        });
+
+        const colOffsets = new Array(cols).fill(0);
+        const rowOffsets = new Array(rows).fill(0);
+        for (let i = 1; i < cols; i++) colOffsets[i] = colOffsets[i - 1] + colWidths[i - 1] + gutter;
+        for (let i = 1; i < rows; i++) rowOffsets[i] = rowOffsets[i - 1] + rowHeights[i - 1] + gutter;
+
+        let anchorX = Infinity;
+        let anchorY = Infinity;
+        sorted.forEach(n => {
+          anchorX = Math.min(anchorX, n.position.x);
+          anchorY = Math.min(anchorY, n.position.y);
+        });
+
+        sorted.forEach((n, idx) => {
+          const col = idx % cols;
+          const row = Math.floor(idx / cols);
+          newPositions[n.id] = {
+            x: anchorX + colOffsets[col],
+            y: anchorY + rowOffsets[row]
+          };
+        });
+      });
 
       return nds.map(n => {
-        const idx = sorted.findIndex(s => s.id === n.id);
-        if (idx === -1) return n; // Keep unchanged (including locked nodes)
-        const col = idx % cols;
-        const row = Math.floor(idx / cols);
-        return {
-          ...n,
-          position: {
-            x: anchorX + col * 350,
-            y: anchorY + row * 250
-          }
-        };
+        if (newPositions[n.id]) {
+          return {
+            ...n,
+            position: newPositions[n.id]
+          };
+        }
+        return n;
       });
     });
-    EventLogger.log(`Tidied ${onlySelected ? 'selected' : 'all'} nodes`);
+    EventLogger.log(`Tidied ${onlySelected ? 'selected' : 'all'} nodes with dynamic layout`);
     setMenu(null);
   }, [setNodes, takeSnapshot]);
 
@@ -277,7 +316,14 @@ export function useCanvasContextMenu({
 
     setNodes(nds => nds.map(n => {
       if (n.id === menu.node.id) {
-        return { ...n, data: { ...n.data, isSticky: !isCurrentlySticky } };
+        return { 
+          ...n, 
+          data: { 
+            ...n.data, 
+            isSticky: !isCurrentlySticky,
+            backgroundColor: !isCurrentlySticky ? (n.data?.backgroundColor === 'transparent' || !n.data?.backgroundColor ? '#fde047' : n.data?.backgroundColor) : 'transparent'
+          } 
+        };
       }
       return n;
     }));

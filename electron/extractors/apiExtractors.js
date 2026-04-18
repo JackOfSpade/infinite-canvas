@@ -36,6 +36,41 @@ async function processInBatches(items, batchSize, processFn, signal = null) {
 }
 
 /**
+ * Combines an IPC abort signal (for window closes) with a hard timeout.
+ * Prevents fetch requests from hanging forever if the backend drops connection.
+ */
+function createTimeoutSignal(baseSignal, timeoutMs) {
+  if (typeof AbortSignal.any === 'function') {
+    return AbortSignal.any([baseSignal, AbortSignal.timeout(timeoutMs)].filter(Boolean));
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(new Error(`Timeout after ${timeoutMs}ms`)), timeoutMs);
+
+  if (baseSignal) {
+    if (baseSignal.aborted) {
+      clearTimeout(timeoutId);
+      controller.abort(baseSignal.reason);
+      return controller.signal;
+    }
+    const abortHandler = () => {
+      clearTimeout(timeoutId);
+      controller.abort(baseSignal.reason);
+    };
+    baseSignal.addEventListener('abort', abortHandler, { once: true });
+    
+    // Cleanup if timeout triggers first
+    controller.signal.addEventListener('abort', () => {
+      if (controller.signal.reason?.message?.startsWith('Timeout')) {
+        baseSignal.removeEventListener('abort', abortHandler);
+      }
+    }, { once: true });
+  }
+
+  return controller.signal;
+}
+
+/**
  * A tiny bespoke HTML stripper for snippets (no heavy external dom parser)
  * Real rendering to markdown is handled in python/gemini stages if needed.
  */
@@ -74,7 +109,7 @@ export async function fetchLinkedInJobs(query, signal = null) {
           'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
           'Referer': 'https://www.linkedin.com/jobs/search/',
         },
-        signal: signal || AbortSignal.timeout(10000),
+        signal: createTimeoutSignal(signal, 10000),
       });
 
       if (!res.ok) {
@@ -179,7 +214,7 @@ export async function fetchGreenhouseJobs(query, signal = null) {
     try {
       const res = await fetch(`https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`, {
         headers: { 'Accept': 'application/json' },
-        signal: signal || AbortSignal.timeout(8000),
+        signal: createTimeoutSignal(signal, 8000),
       });
       if (!res.ok) return [];
       const data = await res.json();
@@ -245,7 +280,7 @@ export async function fetchLeverJobs(query, signal = null) {
     try {
       const res = await fetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, {
         headers: { 'Accept': 'application/json' },
-        signal: signal || AbortSignal.timeout(8000),
+        signal: createTimeoutSignal(signal, 8000),
       });
       if (!res.ok) return [];
       const data = await res.json();
@@ -303,7 +338,7 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null) {
         'User-Agent': email || 'job-search-app@example.com',
         'Authorization-Key': apiKey,
       },
-      signal: signal || AbortSignal.timeout(10000),
+      signal: createTimeoutSignal(signal, 10000),
     });
 
     if (!res.ok) {
@@ -356,7 +391,7 @@ export async function fetchRemoteOKJobs(query, signal = null) {
         'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       },
-      signal: signal || AbortSignal.timeout(10000),
+      signal: createTimeoutSignal(signal, 10000),
     });
 
     if (!res.ok) {
@@ -406,7 +441,7 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null) {
         'Accept': 'application/rss+xml, application/xml, text/xml',
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       },
-      signal: signal || AbortSignal.timeout(10000),
+      signal: createTimeoutSignal(signal, 10000),
     });
 
     if (!res.ok) {
@@ -487,7 +522,7 @@ export async function fetchReverbListings(query, soldOnly = false, signal = null
         'Content-Type': 'application/hal+json',
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       },
-      signal: signal || AbortSignal.timeout(12000),
+      signal: createTimeoutSignal(signal, 12000),
     });
 
     if (!res.ok) {
@@ -553,7 +588,7 @@ export async function fetchDiceListings(query, location = '', signal = null) {
           'x-api-key': DICE_API_KEY,
           'Accept': 'application/json',
         },
-        signal: signal || AbortSignal.timeout(10000),
+        signal: createTimeoutSignal(signal, 10000),
       }
     );
 
@@ -673,7 +708,7 @@ export async function fetchStockXListings(query, signal = null) {
           STOCKX_KEY_EXTRACTOR,
           {
             waitMs: 3000,
-            timeoutMs: 15000,
+            timeoutMs: 35000,
             scrollFirst: false,
             dismissCookies: true,
             referer: 'https://www.google.com/',
@@ -712,7 +747,7 @@ export async function fetchStockXListings(query, signal = null) {
           query,
           hitsPerPage: 25,
         }),
-        signal: signal || AbortSignal.timeout(10000),
+        signal: createTimeoutSignal(signal, 10000),
       }
     );
 

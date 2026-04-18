@@ -54,19 +54,29 @@ export async function processDroppedFiles(files, startPosition) {
   const buildNode = (fsItem, pos) => {
     if (fsItem.type === 'document') {
       return {
-        id: crypto.randomUUID(), // Defense in depth: re-generate ID on drop to prevent collisions
+        id: crypto.randomUUID(),
         type: 'document',
         position: { ...pos },
         data: { filename: fsItem.filename, filePath: fsItem.filePath }
       };
     } else {
-      // Folder drop: create a canvas node with children as nested canvas data
-      const childNodes = (fsItem.items || []).map((child, i) => buildNode(child, { x: 20, y: 50 + i * 50 }));
+      const items = fsItem.items || [];
+      const cols = 3;
+      const childNodes = items.map((child, i) => {
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        return buildNode(child, { x: 20 + col * 220, y: 60 + row * 180 });
+      });
+
+      // Calculate a reasonable diameter for the circular folder node.
+      // Base size 180, grows slightly with item count, capped at 400.
+      const size = Math.min(400, 180 + Math.floor(items.length / 5) * 40);
+
       return {
-        id: crypto.randomUUID(), // Defense in depth: re-generate ID on drop to prevent collisions
+        id: crypto.randomUUID(),
         type: 'group',
         position: { ...pos },
-        style: { width: 180, height: 130 },
+        style: { width: size, height: size },
         data: { 
           title: fsItem.title, 
           canvasData: {

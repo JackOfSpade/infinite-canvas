@@ -15,10 +15,11 @@
 
 export const GOOGLE_JOBS_CONFIG = {
   waitMs: 2500,
-  timeoutMs: 35000,
+  timeoutMs: 45000,
   waitFor: '.iFjolb, .PwjeAc, [data-ved] li',
   scrollFirst: false,
   dismissCookies: true,
+  waitUntil: 'domcontentloaded',
 };
 
 export const INDEED_CONFIG = {
