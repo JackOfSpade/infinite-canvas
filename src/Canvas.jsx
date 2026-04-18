@@ -11,7 +11,7 @@ import {
 import { createTextNode, NODE_FACTORIES } from './utils/nodeFactory';
 import { Sidebar } from './components/Sidebar';
 import { ContextMenu } from './components/ContextMenu';
-import { CanvasToolbar, NestedCanvasIcon } from './components/CanvasToolbar';
+import { CanvasToolbar } from './components/CanvasToolbar';
 import { CanvasCursors } from './components/CanvasCursors';
 import { CustomMiniMap } from './components/CustomMiniMap';
 import { SearchBar } from './components/SearchBar';
@@ -45,13 +45,10 @@ import { useDragCorrections } from './hooks/useDragCorrections';
 import { useNestedCanvasDrag } from './hooks/useNestedCanvasDrag';
 import { useCanvasKeyboardShortcuts } from './hooks/useCanvasKeyboardShortcuts';
 import { useCanvasOSDeletion } from './hooks/useCanvasOSDeletion';
+import { useConfirmDialog } from './hooks/useConfirmDialog';
 import { ArrowUpLeft } from 'lucide-react';
 
-// ── One-time platform detection (Mac vs non-Mac key label) ─────────────────
-const IS_MAC = (() => {
-  const p = navigator.userAgentData?.platform ?? navigator.platform ?? '';
-  return p.toLowerCase().includes('mac');
-})();
+
 
 // ── Canvas ───────────────────────────────────────────────────────────────────
 export function Canvas() {
@@ -164,7 +161,7 @@ export function Canvas() {
   });
 
   useCanvasInitialization({
-    nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, saveCanvas, loadCanvas,
+    nodes, edges, drawings, currentFile, setCurrentFile, hasUnsavedChanges, setHasUnsavedChanges,
     flushStack: navigation.flushStack,
     isAnimatingRef: isNavigationAnimatingRef,
   });
@@ -190,21 +187,14 @@ export function Canvas() {
     };
   }, [saveCanvas, loadCanvas, exportCanvasToPNG]);
 
+
   // ── Generic Confirmation Dialog ───────────────────────────────────────────
-  const [confirmDialogData, setConfirmDialogData] = useState(null);
-  const requestConfirm = useCallback((data) => {
-    setConfirmDialogData(data);
-  }, []);
-  const requestClearConfirm = useCallback((onConfirm) => {
-    setConfirmDialogData({
-      title: "Clear Canvas",
-      message: `This will remove all nodes, edges, and drawings. This action can be undone with ${IS_MAC ? '⌘' : 'Ctrl+'}Z.`,
-      confirmLabel: "Clear Everything",
-      cancelLabel: "Keep Canvas",
-      variant: "danger",
-      onConfirm
-    });
-  }, []);
+  const {
+    confirmDialogData,
+    setConfirmDialogData,
+    requestConfirm,
+    requestClearConfirm
+  } = useConfirmDialog();
 
   // ── Canvas interactions ──────────────────────────────────────────────────
   const [activeTool, setActiveTool] = useState(null); // 'pen' | 'eraser' | null
@@ -221,7 +211,7 @@ export function Canvas() {
   const handleSettingsClick = useCallback(() => setIsSettingsOpen(true), []);
   const [activeColor, setActiveColor] = useState('white');
   const [toolMenuOpen, setToolMenuOpen] = useState(false);
-  const { screenToFlowPosition, getIntersectingNodes, getNode, setViewport, getViewport } = useReactFlow();
+  const { screenToFlowPosition, getIntersectingNodes, getNode } = useReactFlow();
 
   // Custom pointer-drag for Nested Canvas button (bypasses HTML5 drag so ghost matches click-place ghost)
   const { onNestedCanvasDragStart } = useNestedCanvasDrag({

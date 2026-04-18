@@ -9,7 +9,7 @@
 import electronPkg from 'electron';
 const { ipcMain } = electronPkg;
 import { callGeminiVision, callGeminiText } from './gemini.js';
-import { queueScrape } from './browserPool.js';
+import { scrapeMultiple } from './browserPool.js';
 import {
   EBAY_SOLD_EXTRACTOR, EBAY_SOLD_CONFIG,
   EBAY_ACTIVE_EXTRACTOR, EBAY_ACTIVE_CONFIG,
@@ -100,6 +100,10 @@ export function registerMarketplaceHandlers() {
 
   // ── Analyze Product Photos ────────────────────────────────────────────────
   ipcMain.handle('analyze-photos', async (_event, { imagePaths }) => {
+    const ac = new AbortController();
+    const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
+    _event.sender.once('destroyed', onSenderDestroyed);
+
     try {
       console.log('[Marketplace] Analyzing', imagePaths.length, 'photos');
 
@@ -118,22 +122,29 @@ Return a JSON object:
   "generated_description": "A detailed, buyer-friendly selling description (include specs if identifiable, condition details, what's included). 3-4 sentences."
 }
 
-Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`);
+Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`, ac.signal);
 
-      console.log('[Marketplace] Product identified:', result.generated_title);
-      
-      // Guard: Gemini Vision analysis can be slow (8-15s).
       if (_event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
-
+      console.log('[Marketplace] Product identified:', result?.generated_title || 'Unknown');
+      
       return { success: true, product: result };
     } catch (error) {
+      if (ac.signal.aborted) return { success: false, error: 'Window closed' };
       console.error('[Marketplace] Photo analysis failed:', error?.message || String(error));
       return { success: false, error: error?.message || String(error) };
+    } finally {
+      if (!_event.sender.isDestroyed()) {
+        _event.sender.removeListener('destroyed', onSenderDestroyed);
+      }
     }
   });
 
   // ── Research Price (Multi-Source FMV) ──────────────────────────────────────
   ipcMain.handle('research-price', async (event, { query, condition }) => {
+    const abortCtrl = new AbortController();
+    const onSenderDestroyed = () => abortCtrl.abort();
+    event.sender.once('destroyed', onSenderDestroyed);
+
     try {
       console.log('[Marketplace] Researching price for:', query);
 
@@ -146,9 +157,6 @@ Be specific about what you can clearly see. If you can't identify brand or model
         }
       }
 
-      const abortCtrl = new AbortController();
-      event.sender.once('destroyed', () => abortCtrl.abort());
-
       const scrapeResultsPromise = scrapeMultiple(tasks, (res) => {
         if (event.sender.isDestroyed()) return;
         const items = Array.isArray(res.data) ? res.data : [];
@@ -159,15 +167,13 @@ Be specific about what you can clearly see. If you can't identify brand or model
         });
       }, abortCtrl.signal);
 
-      const apiResultsPromise = (async () => {
-        const apiSourceIds = ['reverb', 'stockx'];
-        for (const sourceId of apiSourceIds) {
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('price-source-progress', { sourceId, status: 'searching', count: 0 });
-          }
+      const apiSourceIds = ['reverb', 'stockx'];
+      for (const sourceId of apiSourceIds) {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('price-source-progress', { sourceId, status: 'searching', count: 0 });
         }
-        return fetchApiMarketplaceSources(query, abortCtrl.signal);
-      })();
+      }
+      const apiResultsPromise = fetchApiMarketplaceSources(query, abortCtrl.signal);
 
       const [scrapeResults, apiResults] = await Promise.all([scrapeResultsPromise, apiResultsPromise]);
 
@@ -260,7 +266,7 @@ Platform routing rules for recommended_platforms (pick 2-4 most relevant):
 - Luxury/Designer → eBay (13% + free authentication) > Poshmark
 - General/Mixed → Mercari (10%) > eBay (13%) > Facebook (0% local)
 
-Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, whatnot`);
+Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, whatnot`, abortCtrl.signal);
 
         if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
 
@@ -286,8 +292,13 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
         comps: { sold: [], active: [] },
       };
     } catch (error) {
+      if (abortCtrl.signal.aborted) return { success: false, error: 'Window closed' };
       console.error('[Marketplace] Price research failed:', error?.message || String(error));
       return { success: false, error: error?.message || String(error) };
+    } finally {
+      if (!event.sender.isDestroyed()) {
+        event.sender.removeListener('destroyed', onSenderDestroyed);
+      }
     }
   });
 

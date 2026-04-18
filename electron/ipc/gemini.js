@@ -74,18 +74,24 @@ async function callGemini(parts, genConfig = {}) {
   const token = await getToken();
   const endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent`;
 
+  const { signal, ...restGenConfig } = genConfig;
+
   const payload = {
     contents: [{ role: 'user', parts }],
     generationConfig: {
       temperature: 0.1,
       responseMimeType: 'application/json',
-      ...genConfig,
+      maxOutputTokens: 8192,
+      ...restGenConfig,
     },
   };
 
+  const timeoutSignal = AbortSignal.timeout(60000);
+  const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+
   const response = await fetch(endpoint, {
     method: 'POST',
-    signal: genConfig.signal || AbortSignal.timeout(60000),
+    signal: combinedSignal,
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   });
@@ -119,9 +125,31 @@ function parseGeminiJSON(raw) {
   if (match) {
     jsonStr = match[1];
   } else {
-    // If no markdown block, try to find the first { and the last }
-    const start = raw.indexOf('{');
-    const end = raw.lastIndexOf('}');
+    // If no markdown block, try to find the first { or [ and the last } or ]
+    const firstBrace = raw.indexOf('{');
+    const firstBracket = raw.indexOf('[');
+    const lastBrace = raw.lastIndexOf('}');
+    const lastBracket = raw.lastIndexOf(']');
+    
+    let start = -1;
+    let end = -1;
+    
+    if (firstBrace !== -1 && firstBracket !== -1) {
+      start = Math.min(firstBrace, firstBracket);
+    } else if (firstBrace !== -1) {
+      start = firstBrace;
+    } else if (firstBracket !== -1) {
+      start = firstBracket;
+    }
+    
+    if (lastBrace !== -1 && lastBracket !== -1) {
+      end = Math.max(lastBrace, lastBracket);
+    } else if (lastBrace !== -1) {
+      end = lastBrace;
+    } else if (lastBracket !== -1) {
+      end = lastBracket;
+    }
+
     if (start !== -1 && end !== -1 && end > start) {
       jsonStr = raw.substring(start, end + 1);
     }
@@ -131,7 +159,7 @@ function parseGeminiJSON(raw) {
     return JSON.parse(jsonStr.trim());
   } catch (error) {
     console.error('[Gemini] Failed to parse JSON response:', error.message, '\nRaw Segment:', jsonStr.substring(0, 100));
-    return { error: 'Parse failed', raw: raw.substring(0, 200) };
+    throw new Error(`AI returned invalid JSON: ${error.message}`);
   }
 }
 
@@ -223,9 +251,13 @@ export async function callGeminiDocument(filePath, prompt, signal = null) {
 
 export function registerGeminiHandlers() {
   ipcMain.handle('ai-polish-text', async (event, text) => {
+    const ac = new AbortController();
+    const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
+    event.sender.once('destroyed', onSenderDestroyed);
+
     try {
       const prompt = `You are an AI assistant in a visual workspace app. Polish the following text. Make it clear, concise, and professional. Output ONLY the improved text, without quotes or conversational filler. Keep original markdown formatting if any. The text is:\n\n${text}`;
-      const config = { responseMimeType: 'text/plain' };
+      const config = { responseMimeType: 'text/plain', signal: ac.signal };
       const raw = await callGemini([{ text: prompt }], config);
       
       // Guard: Gemini calls can take 5s-20s. Window may be gone.
@@ -233,8 +265,13 @@ export function registerGeminiHandlers() {
 
       return { success: true, text: raw.trim() };
     } catch (e) {
+      if (ac.signal.aborted) return { success: false, error: 'Window closed' };
       console.error('[Gemini] Polish failed:', e);
       return { success: false, error: e?.message || String(e) };
+    } finally {
+      if (!event.sender.isDestroyed()) {
+        event.sender.removeListener('destroyed', onSenderDestroyed);
+      }
     }
   });
 }

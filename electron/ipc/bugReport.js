@@ -72,8 +72,17 @@ ${rows}
   const vp = frontEndState?.viewport;
   const viewportLine = vp ? `- Viewport: zoom=${vp.zoom} x=${vp.x} y=${vp.y}` : '';
 
-  const MAX_BUDGET_BYTES = 500 * 1024;
-  const appStateJson = JSON.stringify(appState, null, 2);
+  const STATE_BUDGET_BYTES = 1024 * 1024; // 1MB budget for the JSON state block
+  let appStateJson = JSON.stringify(appState, null, 2);
+  let stateWasTrimmed = false;
+
+  if (Buffer.byteLength(appStateJson, 'utf8') > STATE_BUDGET_BYTES) {
+    // If the full state is too large, it's almost always due to thousands of drawing points.
+    // Omit the drawings but keep the rest of the metadata.
+    const { drawings: _drawings, ...trimmedAppState } = appState;
+    appStateJson = JSON.stringify(trimmedAppState, null, 2);
+    stateWasTrimmed = true;
+  }
 
   let baseMarkdown = `# Bug Report
 
@@ -83,7 +92,7 @@ ${description}
 ## Application State Summary
 - Nodes: ${nodes ? nodes.length : 0}
 - Edges: ${edges ? edges.length : 0}
-- Drawings: ${drawings ? drawings.length : 0}
+- Drawings: ${drawings ? drawings.length : 0} ${stateWasTrimmed ? '*(Omitted from JSON below due to size)*' : ''}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
@@ -100,6 +109,7 @@ ${appStateJson}
 ## Event History
 `;
 
+  const MAX_BUDGET_BYTES = 10 * 1024 * 1024; // 10MB
   const bufferBytes    = Buffer.byteLength(baseMarkdown, 'utf8');
   const events         = payload.eventLogs || [];
   const remainingBytes = MAX_BUDGET_BYTES - bufferBytes;

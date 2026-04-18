@@ -161,7 +161,7 @@ app.on('web-contents-created', (_, contents) => {
 if (!gotTheLock) {
   app.quit();
 } else {
-  app.on('second-instance', (event, commandLine, workingDirectory) => {
+  app.on('second-instance', () => {
     // Someone tried to run a second instance, we should focus our window.
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -174,12 +174,15 @@ if (!gotTheLock) {
       let url = request.url.replace(/^local-file:\/\//, '');
       try {
         const decodedPath = decodeURIComponent(url);
-        const normalizedPath = path.normalize(decodedPath);
-        
         // ── Protocol Security Hardening ──────────────────────────────────────────
-        // Resolve real path to prevent symlink-based blocklist bypasses.
+        // 1. Resolve to an absolute path immediately to catch relative traversal attempts.
+        // 2. Normalize segments. 
+        // 3. Resolve real path to prevent symlink-based blocklist bypasses.
+        const absolutePath = path.resolve(decodedPath);
+        const normalizedPath = path.normalize(absolutePath);
+        
         let targetPath = normalizedPath;
-        try { targetPath = fs.realpathSync(normalizedPath); } catch {}
+        try { targetPath = fs.realpathSync(normalizedPath); } catch { /* ignore */ }
         
         // Convert to Unix-style separators for consistent verification across platforms
         const verificationPath = targetPath.split(path.sep).join('/').toLowerCase();
@@ -202,7 +205,7 @@ if (!gotTheLock) {
         }
         
         // Recursive/Inclusive blocklist check:
-        // We block if the sensitive pattern exists ANYWHERE in the normalized path.
+        // We block if the sensitive pattern exists ANYWHERE in the resolved path.
         if (sensitivePatterns.some(p => verificationPath.includes(p))) {
           console.warn(`[Security] Blocked access to sensitive path via local-file: ${targetPath}`);
           return callback({ error: -10 /* net::ERR_ACCESS_DENIED */ });

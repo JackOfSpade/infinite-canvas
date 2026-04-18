@@ -137,7 +137,24 @@ function canProcessTask(task) {
   return domainActive < MAX_PER_DOMAIN && !isDomainCoolingDown(domain);
 }
 
+let queuePoller = null;
+
 function processQueue() {
+  // If tasks are waiting and no active task is polling, ensure we periodically wake up
+  if (queue.length > 0 && !queuePoller) {
+    queuePoller = setInterval(() => {
+      if (queue.length === 0) {
+        clearInterval(queuePoller);
+        queuePoller = null;
+      } else {
+        processQueue(); // Will do the actual dispatch
+      }
+    }, 1000);
+  } else if (queue.length === 0 && queuePoller) {
+    clearInterval(queuePoller);
+    queuePoller = null;
+  }
+
   while (activeCount < MAX_CONCURRENT && queue.length > 0) {
     // Find the first task whose domain isn’t at capacity
     const taskIdx = queue.findIndex(t => canProcessTask(t));
@@ -289,7 +306,12 @@ async function executeScrape(url, extractorJS, options = {}) {
         if (page && !page.__closing) {
           page.__closing = true;
           try {
-            if (!page.isClosed()) await page.close();
+            if (!page.isClosed()) {
+              await Promise.race([
+                page.close(),
+                new Promise(r => setTimeout(r, 2000))
+              ]);
+            }
           } catch { /* already closed */ }
         }
       }
@@ -303,8 +325,14 @@ async function executeScrape(url, extractorJS, options = {}) {
     markDomainSuccess(domain);
     return result;
   } catch (error) {
-    console.error(`[BrowserPool] Scrape failed for ${url}:`, error);
-    markDomainError(domain);
+    const isAborted = options.signal?.aborted || error?.message === 'Aborted' || isShuttingDown;
+    
+    if (isAborted) {
+      console.log(`[BrowserPool] Scrape aborted/shutting down for ${url}`);
+    } else {
+      console.error(`[BrowserPool] Scrape failed for ${url}:`, error);
+      markDomainError(domain);
+    }
     
     // Clean up handle
     pageHandles.delete(pageId);
@@ -314,7 +342,10 @@ async function executeScrape(url, extractorJS, options = {}) {
       page.__closing = true;
       try {
         if (!page.isClosed()) {
-          await page.close();
+          await Promise.race([
+            page.close(),
+            new Promise(r => setTimeout(r, 2000))
+          ]);
         }
       } catch (e) {
         console.warn('[BrowserPool] Page close error:', e.message);
@@ -348,7 +379,7 @@ export async function closeAllPages() {
           new Promise(r => setTimeout(r, 1000))
         ]);
       }
-    } catch (e) {
+    } catch {
       // Ignored during shutdown
     }
   }));
@@ -361,7 +392,7 @@ process.on('exit', () => {
       if (!page.isClosed()) {
         console.log('[BrowserPool] Orphaned page detected on exit');
       }
-    } catch {}
+    } catch { /* ignore */ }
   }
 });
 
@@ -380,23 +411,29 @@ export function queueScrape(url, extractorJS, options = {}) {
     return activeTasks.get(cacheKey);
   }
 
+  let onAbort;
   const promise = new Promise((resolve, reject) => {
     if (options.signal?.aborted) return reject(new Error('Aborted'));
     
-    const onAbort = () => {
-      const idx = queue.findIndex(t => t.resolve === resolve);
-      if (idx !== -1) {
-        queue.splice(idx, 1);
-        reject(new Error('Aborted'));
-      }
-    };
-    if (options.signal) options.signal.addEventListener('abort', onAbort, { once: true });
+    if (options.signal) {
+      onAbort = () => {
+        const idx = queue.findIndex(t => t.resolve === resolve);
+        if (idx !== -1) {
+          queue.splice(idx, 1);
+          reject(new Error('Aborted'));
+        }
+      };
+      options.signal.addEventListener('abort', onAbort, { once: true });
+    }
 
     // We intentionally don't handle chained resolves manually anymore,
     // since everyone shares this one root promise returned from the map!
     queue.push({ url, extractorJS, options, resolve, reject });
     processQueue();
   }).finally(() => {
+    if (options.signal && onAbort) {
+      options.signal.removeEventListener('abort', onAbort);
+    }
     // Once settled (success or failure), remove from active map so future requests run fresh.
     activeTasks.delete(cacheKey);
   });

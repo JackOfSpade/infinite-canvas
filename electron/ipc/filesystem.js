@@ -18,10 +18,6 @@ const activeWatchers = new Map();
 /**
  * Module-level recursive directory scanner.
  * Uses lstat to detect symlinks and prevent recursion.
- */
-/**
- * Module-level recursive directory scanner.
- * Uses lstat to detect symlinks and prevent recursion.
  * Hardened: Max 10 simultaneous directory reads to prevent EMFILE errors.
  */
 let activeScans = 0;
@@ -43,7 +39,7 @@ async function scanPath(currentPath, visited, sender = null, depth = 0) {
   activeScans++;
   try {
     let realPath = currentPath;
-    try { realPath = await fs.promises.realpath(currentPath); } catch {}
+    try { realPath = await fs.promises.realpath(currentPath); } catch { /* ignore */ }
     if (visited.has(realPath)) return null;
     visited.add(realPath);
 
@@ -99,7 +95,7 @@ async function atomicWriteFile(targetPath, data) {
     await fs.promises.rename(tmpPath, targetPath);
   } catch (err) {
     // Clean up tmp file if write succeeded but rename failed
-    try { await fs.promises.unlink(tmpPath); } catch {}
+    try { await fs.promises.unlink(tmpPath); } catch { /* ignore */ }
     throw err;
   }
 }
@@ -145,13 +141,18 @@ export function registerFilesystemHandlers() {
   });
 
   ipcMain.handle('fetch-url-title', async (event, url) => {
+    const ac = new AbortController();
+    const timeoutId = setTimeout(() => ac.abort(new Error('Timeout')), 3000);
+    const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
+    event.sender.once('destroyed', onSenderDestroyed);
+
     try {
       let fetchUrl = url;
       if (!fetchUrl.startsWith('http://') && !fetchUrl.startsWith('https://')) {
         fetchUrl = 'https://' + fetchUrl;
       }
       const res = await fetch(fetchUrl, {
-        signal: AbortSignal.timeout(3000),
+        signal: ac.signal,
         headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' },
       });
       
@@ -164,15 +165,25 @@ export function registerFilesystemHandlers() {
       let text = '';
       let bytesRead = 0;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        text += decoder.decode(value, { stream: true });
-        bytesRead += value.length;
-        if (bytesRead >= MAX_SIZE) {
-          await reader.cancel();
-          break;
+      const matchPattern = /<title[^>]*>([^<]+)<\/title>/i;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          text += decoder.decode(value, { stream: true });
+          bytesRead += value.length;
+          
+          const earlyMatch = text.match(matchPattern);
+          if (earlyMatch) {
+            break; // Stop streaming early if title is found!
+          }
+
+          if (bytesRead >= MAX_SIZE) {
+            break;
+          }
         }
+      } finally {
+        await reader.cancel().catch(() => {});
       }
       
       // Guard: network fetch could be slow; window might be gone.
@@ -190,6 +201,11 @@ export function registerFilesystemHandlers() {
       return title;
     } catch {
       return null;
+    } finally {
+      clearTimeout(timeoutId);
+      if (!event.sender.isDestroyed()) {
+        event.sender.removeListener('destroyed', onSenderDestroyed);
+      }
     }
   });
 
@@ -332,8 +348,12 @@ export function registerFilesystemHandlers() {
 
       // If no clients remain across any windows, shut down the real watcher
       if (entry.clients.size === 0) {
-        entry.watcher.close();
         activeWatchers.delete(filePath);
+        try {
+          if (entry.watcher) entry.watcher.close();
+        } catch (err) {
+          console.warn(`[Filesystem] Error closing watcher for ${filePath}: ${err.message}`);
+        }
       }
     }
     return { success: true };
@@ -366,7 +386,7 @@ export async function cleanupTempFiles() {
         if (Date.now() - stats.mtimeMs > 60 * 60 * 1000) {
           await fs.promises.unlink(path.join(cwd, f));
         }
-      } catch {}
+      } catch { /* ignore */ }
     }
   } catch (err) {
     console.warn('[Filesystem] Startup cleanup failed:', err?.message || String(err));

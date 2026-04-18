@@ -61,7 +61,7 @@ export function useDragCorrections({ setNodes, isInteractionRef, isMountedRef })
         n.id === node.id ? { ...n, position: { x: tzCorrection.x, y: tzCorrection.y } } : n
       ));
     }
-  }, [setNodes]);
+  }, [setNodes, isInteractionRef, isMountedRef]);
 
   return { onNodeDragStart, onNodeDragStop };
 }

@@ -24,7 +24,7 @@ function safeStringify(obj) {
   if (typeof obj !== 'object' || obj === null) return String(obj);
   try {
     return JSON.stringify(obj);
-  } catch (e) {
+  } catch {
     // If it fails (likely circular or complex), fall back to basic type summary.
     // Wrap property access in try-catch in case 'obj' is a proxy that throws on access.
     try {

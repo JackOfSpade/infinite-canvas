@@ -3,7 +3,6 @@ import { useReactFlow } from '@xyflow/react';
 import { AnimatedSourceRing } from '../components/AnimatedSourceRing';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase, Loader2 } from 'lucide-react';
-import { v4 as uuidv4 } from 'uuid';
 import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
 import { useToast } from '../components/ToastProvider';
 import { JobHubProcessingState } from './jobhub/JobHubProcessingState';
@@ -239,12 +238,12 @@ export function JobHubNode({ id, data }) {
         const gx = hubX + Math.cos(angle) * clusterRadius;
         const gy = hubY + Math.sin(angle) * clusterRadius;
 
-        const groupId = uuidv4();
+        const groupId = crypto.randomUUID();
         const groupNodes = [];
 
         jobs.forEach((job, jobIdx) => {
           groupNodes.push({
-            id: uuidv4(),
+            id: crypto.randomUUID(),
             type: 'jobcard',
             position: {
               x: 20 + (jobIdx % 3) * 290,

@@ -676,6 +676,7 @@ export async function fetchStockXListings(query, signal = null) {
             scrollFirst: false,
             dismissCookies: true,
             referer: 'https://www.google.com/',
+            signal,
           }
         );
 

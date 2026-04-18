@@ -113,7 +113,6 @@ export const SearchBar = React.memo(function SearchBar() {
 
   useEffect(() => {
     if (searchQuery.trim() === '') {
-      setMatchCount(0);
       return;
     }
 

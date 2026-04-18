@@ -38,8 +38,13 @@ export const DrawingLayer = React.memo(forwardRef(function DrawingLayer({ drawin
     getCurrentStroke: () => currentStroke,
   }), [currentStroke]);
 
-  // Pre-join points to avoid repeating the work on every sub-render
-  const currentStrokePoints = currentStroke?.map(p => `${p.x},${p.y}`).join(' ');
+  // Pre-join points to avoid repeating the work on every sub-render.
+  // Memoized so we only re-join when the reference changes (which happens
+  // in useDrawingMode's point-reduction filter).
+  const currentStrokePoints = React.useMemo(() => {
+    if (!currentStroke) return '';
+    return currentStroke.map(p => `${p.x},${p.y}`).join(' ');
+  }, [currentStroke]);
 
   return (
     <svg className="absolute top-0 left-0 w-full h-full pointer-events-none z-[60]">

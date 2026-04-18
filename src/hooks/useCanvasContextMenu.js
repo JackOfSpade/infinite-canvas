@@ -1,6 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
-import { v4 as uuidv4 } from 'uuid';
 import { EventLogger } from '../utils/EventLogger';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { useToast } from '../components/ToastProvider';
@@ -26,7 +25,7 @@ function reassignCanvasDataIDs(node) {
 
   const idMap = new Map();
   const getMappedId = (oldId) => {
-    if (!idMap.has(oldId)) idMap.set(oldId, uuidv4());
+    if (!idMap.has(oldId)) idMap.set(oldId, crypto.randomUUID());
     return idMap.get(oldId);
   };
 
@@ -41,11 +40,11 @@ function reassignCanvasDataIDs(node) {
     });
     const newEdges = (canvasData.edges || []).map(e => ({
       ...e,
-      id: uuidv4(),
+      id: crypto.randomUUID(),
       source: idMap.has(e.source) ? idMap.get(e.source) : e.source,
       target: idMap.has(e.target) ? idMap.get(e.target) : e.target,
     }));
-    const newDrawings = (canvasData.drawings || []).map(d => d.id ? { ...d, id: uuidv4() } : d);
+    const newDrawings = (canvasData.drawings || []).map(d => d.id ? { ...d, id: crypto.randomUUID() } : d);
     return { nodes: newNodes, edges: newEdges, drawings: newDrawings };
   };
 
@@ -133,7 +132,7 @@ export function useCanvasContextMenu({
     const original = menu.node;
     let clone = {
       ...structuredClone(original),
-      id: uuidv4(),
+      id: crypto.randomUUID(),
       position: { x: original.position.x + 40, y: original.position.y + 40 },
       selected: false,
     };

@@ -1,109 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
-
-// ── Geometry helpers ────────────────────────────────────────────────────────
-function sqr(x) { return x * x; }
-function dist2(v, w) { return sqr(v.x - w.x) + sqr(v.y - w.y); }
-function lerpPt(a, b, t) { return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }; }
-
-function distToSegment(p, a, b) {
-  const l2 = dist2(a, b);
-  if (l2 === 0) return Math.sqrt(dist2(p, a));
-  const t = Math.max(0, Math.min(1,
-    ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / l2
-  ));
-  return Math.sqrt(dist2(p, lerpPt(a, b, t)));
-}
-
-/**
- * Line-circle intersection: returns sorted t-values in [0,1] where the segment
- * a→b intersects the circle at centre C with radius R.
- * Returns [] if no intersection, [t1] if tangent, [t1, t2] if two crossings.
- */
-function segmentCircleIntersections(a, b, C, R) {
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const fx = a.x - C.x, fy = a.y - C.y;
-  const segLen2 = dx * dx + dy * dy;
-  if (segLen2 === 0) return [];               // degenerate segment
-  const segDot  = 2 * (fx * dx + fy * dy);
-  const segConst = fx * fx + fy * fy - R * R;
-  const disc = segDot * segDot - 4 * segLen2 * segConst;
-  if (disc < 0) return [];
-  const sq = Math.sqrt(disc);
-  const t1 = (-segDot - sq) / (2 * segLen2);
-  const t2 = (-segDot + sq) / (2 * segLen2);
-  const ts = [];
-  if (t1 >= 0 && t1 <= 1) ts.push(t1);
-  if (t2 >= 0 && t2 <= 1 && Math.abs(t2 - t1) > 1e-6) ts.push(t2);
-  return ts.sort((a, b) => a - b);
-}
-
-/**
- * Pixel-erase a single stroke against the eraser circle at C with radius R.
- * Uses true line-circle intersections so erasure is continuous (not chunk-like).
- * Returns an array of sub-strokes (each is { ...stroke, points: [...] }).
- */
-function pixelEraseStroke(stroke, C, R, halfStroke = 0) {
-  const pts = Array.isArray(stroke) ? stroke : stroke.points;
-  if (!pts || pts.length < 2) return [stroke];
-
-  const result  = [];
-  let current   = [];   // points accumulating outside the circle
-
-  const insideCircle = (p) => sqr(p.x - C.x) + sqr(p.y - C.y) <= sqr(R + halfStroke);
-
-  let prevInside = insideCircle(pts[0]);
-  if (!prevInside) current.push(pts[0]);
-
-  for (let i = 0; i < pts.length - 1; i++) {
-    const a = pts[i], b = pts[i + 1];
-    const ts = segmentCircleIntersections(a, b, C, R + halfStroke);
-
-    if (ts.length === 0) {
-      // Segment entirely inside or entirely outside
-      const bIn = insideCircle(b);
-      if (!bIn) {
-        current.push(b);
-      } else {
-        // Entering or staying inside — commit current sub-stroke
-        if (current.length >= 2) result.push({ ...stroke, points: current });
-        current = [];
-      }
-      prevInside = bIn;
-    } else if (ts.length === 1) {
-      // One crossing
-      const cross = lerpPt(a, b, ts[0]);
-      if (!prevInside) {
-        // Going inside: add crossing point, commit sub-stroke
-        current.push(cross);
-        if (current.length >= 2) result.push({ ...stroke, points: current });
-        current = [];
-      } else {
-        // Coming out: start new sub-stroke from crossing
-        current = [cross, b];
-      }
-      prevInside = !prevInside;
-    } else {
-      // Two crossings: segment enters and exits the eraser circle
-      const enter = lerpPt(a, b, ts[0]);
-      const exit  = lerpPt(a, b, ts[1]);
-
-      // End the current sub-stroke at the entry point
-      current.push(enter);
-      if (current.length >= 2) result.push({ ...stroke, points: current });
-
-      // Start a new sub-stroke from the exit point
-      current = [exit, b];
-      // prevInside stays false (we entered and exited)
-    }
-  }
-
-  const strokeId = stroke.id || `${Date.now()}-${Math.random()}`;
-
-  if (current.length >= 2) result.push({ ...stroke, id: `${strokeId}-${result.length}`, points: current });
-  return result;
-}
+import { distToSegment, pixelEraseStroke, sqr } from '../utils/geometry';
 
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -153,6 +51,7 @@ export function useDrawingMode({
       // Delete entire strokes that come within the eraser radius
       setDrawings(prev => prev.filter(stroke => {
         const pts = Array.isArray(stroke) ? stroke : stroke.points;
+        if (!pts || pts.length < 2) return true;
         for (let i = 0; i < pts.length - 1; i++) {
           if (distToSegment(C, pts[i], pts[i + 1]) <= R) return false;
         }
@@ -172,7 +71,7 @@ export function useDrawingMode({
       });
     }
   }, [screenToFlowPosition, getViewport, eraserSize, eraserType, getIntersectingNodes,
-      setNodes, setEdges, setDrawings, isAnimatingRef]);
+      setNodes, setEdges, setDrawings, isAnimatingRef, isInteractionRef]);
 
   const handlePointerDown = useCallback((e) => {
     if (e.button !== 0) return;
@@ -236,7 +135,7 @@ export function useDrawingMode({
       if (!isAnimatingRef?.current) {
         takeSnapshot();
         setDrawings(prev => [...prev, { 
-          id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+          id: window.crypto.randomUUID(),
           points: currentStrokeRef.current, 
           color: activeColor, 
           penSize 

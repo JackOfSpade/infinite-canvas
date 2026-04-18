@@ -1,5 +1,3 @@
-import { v4 as uuidv4 } from 'uuid';
-
 /**
  * Creates a drag ghost element, sets it as drag image, and auto-removes it.
  * Used when dragging items from the toolbar onto the canvas.
@@ -56,7 +54,7 @@ export async function processDroppedFiles(files, startPosition) {
   const buildNode = (fsItem, pos) => {
     if (fsItem.type === 'document') {
       return {
-        id: uuidv4(), // Defense in depth: re-generate ID on drop to prevent collisions
+        id: crypto.randomUUID(), // Defense in depth: re-generate ID on drop to prevent collisions
         type: 'document',
         position: { ...pos },
         data: { filename: fsItem.filename, filePath: fsItem.filePath }
@@ -65,7 +63,7 @@ export async function processDroppedFiles(files, startPosition) {
       // Folder drop: create a canvas node with children as nested canvas data
       const childNodes = (fsItem.items || []).map((child, i) => buildNode(child, { x: 20, y: 50 + i * 50 }));
       return {
-        id: uuidv4(), // Defense in depth: re-generate ID on drop to prevent collisions
+        id: crypto.randomUUID(), // Defense in depth: re-generate ID on drop to prevent collisions
         type: 'group',
         position: { ...pos },
         style: { width: 180, height: 130 },

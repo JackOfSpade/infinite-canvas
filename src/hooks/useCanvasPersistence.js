@@ -189,7 +189,8 @@ export function useCanvasPersistence({
         clearHistory?.();
         // Defer: the useCanvasInitialization effect will fire setHasUnsavedChanges(true)
         // on the next render — we need our false to run *after* that effect.
-        setTimeout(() => { if (isMountedRef.current) setHasUnsavedChanges(false); }, 0);
+        // A 50ms timeout ensures we safely skip past any React 18 concurrent rendering microtasks.
+        setTimeout(() => { if (isMountedRef.current) setHasUnsavedChanges(false); }, 50);
         setTimeout(() => { if (isMountedRef.current) customFitView(); }, 50);
         addToast({ title: 'Workspace Loaded', description: 'Your canvas has been loaded successfully.', type: 'success'});
       } else if (!res?.canceled) {
@@ -200,7 +201,7 @@ export function useCanvasPersistence({
       console.error('Failed to load canvas:', err);
       addToast({ title: 'Load Error', description: err?.message || String(err) || 'An error occurred while loading.', type: 'error'});
     }
-  }, [setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, customFitView, addToast, resetStack, clearHistory, isAnimatingRef]);
+  }, [confirmDiscardChanges, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, customFitView, addToast, resetStack, clearHistory, isAnimatingRef]);
 
   const exportCanvasToPNG = useCallback(() => {
     if (isAnimatingRef?.current || isExportingRef.current) return;

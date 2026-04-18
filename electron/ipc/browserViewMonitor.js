@@ -173,11 +173,7 @@ function openMonitor({ platform, url, extractorJS, refreshMs = DEFAULT_REFRESH_I
   });
 
   // Clean up if the window is destroyed externally (crash, OS force-quit, etc.).
-  // Do NOT fire if we're in 'monitoring' or 'paused' state — those imply stopMonitor
-  // was already called (which calls destroy()) and we'd double-clean.
   win.on('closed', () => {
-    const m = monitors.get(id);
-    if (!m || m.status === 'monitoring' || m.status === 'paused') return;
     stopMonitor(id);
   });
 
@@ -217,11 +213,17 @@ async function refreshMonitor(id) {
   try {
     // Guard: the window may have been destroyed externally between the status check above
     // and this point (e.g. OS force-quit during a scheduled refresh).
-    if (!monitor.window || monitor.window.isDestroyed()) return;
+    if (!monitor.window || monitor.window.isDestroyed()) {
+      stopMonitor(id);
+      return;
+    }
 
     // Reload the page
     const wc = monitor.window.webContents;
-    if (!wc || wc.isDestroyed()) return;
+    if (!wc || wc.isDestroyed()) {
+      stopMonitor(id);
+      return;
+    }
 
     await wc.loadURL(monitor.url);
     if (!monitors.has(id)) return;
@@ -235,7 +237,10 @@ async function refreshMonitor(id) {
     // changed to 'paused', or the window could have been destroyed externally.
     const liveMonitor = monitors.get(id);
     if (!liveMonitor || liveMonitor.status === 'paused') return;
-    if (liveMonitor.window.isDestroyed() || wc.isDestroyed()) return;
+    if (liveMonitor.window.isDestroyed() || wc.isDestroyed()) {
+      stopMonitor(id);
+      return;
+    }
 
     // Execute extractor JS in the page context
     const data = await wc.executeJavaScript(liveMonitor.extractorJS);
@@ -325,6 +330,8 @@ function stopMonitor(id) {
   const monitor = monitors.get(id);
   if (!monitor) return;
 
+  monitors.delete(id); // Delete immediately to prevent reentrancy loops from window.destroy()
+  
   if (monitor.timer) {
     clearTimeout(monitor.timer);
     monitor.timer = null;
@@ -334,7 +341,6 @@ function stopMonitor(id) {
     monitor.window.destroy();
   }
 
-  monitors.delete(id);
   console.log(`[Monitor ${id}] Stopped and cleaned up`);
 }
 

@@ -8,6 +8,10 @@ import { registerMarketplaceHandlers } from '../electron/ipc/marketplace.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+import os from 'os';
+
+// Isolate test user data from main app to avoid stealth browser locks
+app.setPath('userData', path.join(os.tmpdir(), `infinite-canvas-test-${Date.now()}`));
 
 async function runTests() {
   console.log('\n[TEST RUNNER] Phase 2 — Multi-Source End-to-End Verification\n');

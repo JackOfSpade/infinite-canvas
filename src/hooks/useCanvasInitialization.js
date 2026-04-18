@@ -7,9 +7,8 @@ export function useCanvasInitialization({
   drawings,
   currentFile,
   setCurrentFile,
+  hasUnsavedChanges,
   setHasUnsavedChanges,
-  saveCanvas,
-  loadCanvas,
   flushStack,
   isAnimatingRef,
 }) {
@@ -43,10 +42,14 @@ export function useCanvasInitialization({
     if (!currentFile || !window.electronAPI) return;
 
     const timer = setTimeout(() => {
-      // Safety guard: never auto-save while navigation animations are active 
+      // Safety guard 1: never auto-save while navigation animations are active 
       // as the stack/nodes state may be transient or intermediate.
       if (isAnimatingRef?.current) return;
       
+      // Safety guard 2: don't save if there are no pending changes.
+      // This specifically avoids redundant saves immediately after a workspace load.
+      if (!hasUnsavedChanges) return;
+
       const rawData = flushRef.current ? flushRef.current() : stateRef.current;
       if (!rawData.nodes || !Array.isArray(rawData.nodes)) return;
 
@@ -63,6 +66,6 @@ export function useCanvasInitialization({
       }).catch(err => console.error('[auto-save] saveWorkspace failed:', err));
     }, 2000);
     return () => clearTimeout(timer);
-  }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef]);
+  }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, hasUnsavedChanges]);
 
 }

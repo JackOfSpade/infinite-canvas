@@ -22,7 +22,7 @@ export class ErrorBoundary extends React.Component {
           type: 'crash'
         });
       }
-    } catch (e) {
+    } catch {
       // Ignore
     }
   }
