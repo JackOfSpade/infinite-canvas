@@ -1,8 +1,9 @@
 import electronPkg from 'electron';
-const { ipcMain, dialog, app } = electronPkg;
+const { dialog, app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { handleSafe } from './ipcUtils.js';
 
 // ── Shared markdown generation ────────────────────────────────────────────────
 // Used by both the "save to file" and "copy to clipboard" handlers so the
@@ -147,35 +148,25 @@ ${appStateJson}
 export function registerBugReportHandlers() {
 
   // Save report to a file chosen by the user via a native save dialog.
-  ipcMain.handle('export-bug-report', async (event, payload) => {
-    try {
-      const markdownContent = generateMarkdown(payload);
+  handleSafe('export-bug-report', async (event, payload) => {
+    const markdownContent = generateMarkdown(payload);
 
-      const { canceled, filePath } = await dialog.showSaveDialog({
-        title: 'Save Bug Report',
-        defaultPath: path.join(app.getPath('desktop'), `bug_report_${Date.now()}.md`),
-        filters: [{ name: 'Markdown', extensions: ['md'] }],
-      });
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: 'Save Bug Report',
+      defaultPath: path.join(app.getPath('desktop'), `bug_report_${Date.now()}.md`),
+      filters: [{ name: 'Markdown', extensions: ['md'] }],
+    });
 
-      if (canceled || !filePath) return { success: false, canceled: true };
+    if (canceled || !filePath) return { success: false, canceled: true };
 
-      await fs.promises.writeFile(filePath, markdownContent, 'utf8');
-      return { success: true, filePath };
-    } catch (err) {
-      console.error('[BugReport] Failed to export bug report:', err);
-      return { success: false, error: err?.message || String(err) };
-    }
+    await fs.promises.writeFile(filePath, markdownContent, 'utf8');
+    return { filePath };
   });
 
   // Return the report as a string so the renderer can copy it to the clipboard.
   // No file dialog, no disk I/O — just generate and return the markdown.
-  ipcMain.handle('generate-bug-report-markdown', async (event, payload) => {
-    try {
-      const markdownContent = generateMarkdown(payload);
-      return { success: true, markdown: markdownContent };
-    } catch (err) {
-      console.error('[BugReport] Failed to generate bug report markdown:', err);
-      return { success: false, error: err?.message || String(err) };
-    }
+  handleSafe('generate-bug-report-markdown', async (event, payload) => {
+    const markdownContent = generateMarkdown(payload);
+    return { markdown: markdownContent };
   });
 }

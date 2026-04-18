@@ -1,12 +1,14 @@
+import { logger } from '../logger.js';
 /**
  * Accounts IPC handlers — platform login, session management.
  * Opens visible browser windows for login and checks cookie health.
  */
 
 import electronPkg from 'electron';
-const { ipcMain, app } = electronPkg;
+const { app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
+import { handleSafe } from './ipcUtils.js';
 import {
   openLoginWindow,
   getSessionStatus,
@@ -45,7 +47,7 @@ async function writeStatusCache(platformId, connected) {
     // _statusCache is already mutated (same object reference); persist to disk.
     await fs.promises.writeFile(getStatusCachePath(), JSON.stringify(cache));
   } catch (e) {
-    console.warn('[Accounts] Cache write failed:', e?.message || String(e));
+    logger.warn('[Accounts] Cache write failed:', e?.message || String(e));
   }
 }
 
@@ -55,15 +57,16 @@ async function writeStatusCache(platformId, connected) {
 export function registerAccountsHandlers() {
   // Get CACHED session statuses — instant, no Chrome launch.
   // Use this for panel display. The full (Chrome-based) check is get-session-statuses.
-  ipcMain.handle('get-cached-session-statuses', async () => {
+  handleSafe('get-cached-session-statuses', async () => {
     const cache = await readStatusCache();
-    return Object.entries(cache).map(([platform, v]) => ({
+    const statuses = Object.entries(cache).map(([platform, v]) => ({
       platform, connected: v.connected,
     }));
+    return { statuses };
   });
 
   // Get system config status (Gemini, USAJobs, etc)
-  ipcMain.handle('get-system-config-status', async () => {
+  handleSafe('get-system-config-status', async () => {
     let hasGemini = !!process.env.GEMINI_API_KEY;
     if (!hasGemini) {
       try {
@@ -80,54 +83,60 @@ export function registerAccountsHandlers() {
     } catch { /* stat fails if absent */ }
 
     return {
-      gemini:         { connected: hasGemini,          name: 'Gemini AI API' },
-      serviceAccount: { connected: hasServiceAccount,  name: 'Google Cloud Service Account' },
+      config: {
+        gemini:         { connected: hasGemini,          name: 'Gemini AI API' },
+        serviceAccount: { connected: hasServiceAccount,  name: 'Google Cloud Service Account' },
+      }
     };
   });
 
   // Get list of supported platforms
-  ipcMain.handle('get-platforms', () => {
-    return getSupportedPlatforms();
+  handleSafe('get-platforms', async () => {
+    return { platforms: getSupportedPlatforms() };
   });
 
   // Get connection status for all platforms
-  ipcMain.handle('get-session-statuses', async () => {
+  handleSafe('get-session-statuses', async () => {
     try {
-      return await getAllSessionStatuses();
+      const statuses = await getAllSessionStatuses();
+      return { statuses };
     } catch (error) {
-      console.error('[Accounts] Failed to check sessions:', error?.message || String(error));
-      return [];
+      logger.error('[Accounts] Failed to check sessions:', error?.message || String(error));
+      return { statuses: [] };
     }
   });
 
   // Check session for a SINGLE platform (fast — no login prompt)
-  ipcMain.handle('check-platform-session', async (_event, { platformId }) => {
+  handleSafe('check-platform-session', async (_event, { platformId }) => {
     try {
       return await getSessionStatus(platformId);
     } catch (error) {
-      console.error(`[Accounts] Session check failed for ${platformId}:`, error?.message || String(error));
+      logger.error(`[Accounts] Session check failed for ${platformId}:`, error?.message || String(error));
       return { platform: platformId, connected: false };
     }
   });
 
   // Open a visible login window for a specific platform
-  ipcMain.handle('open-login-window', async (_event, { platformId }) => {
+  handleSafe('open-login-window', async (_event, { platformId }) => {
     try {
       const result = await openLoginWindow(platformId, _event.sender);
       // After the login window closes, optimistically mark as connected.
       // The user manually closed the window after logging in, so we trust they succeeded.
       // Avoids a second Chrome launch just for verification.
       await writeStatusCache(platformId, true);
-      return result;
+      return result || {};
     } catch (error) {
-      console.error(`[Accounts] Login window failed for ${platformId}:`, error?.message || String(error));
+      logger.error(`[Accounts] Login window failed for ${platformId}:`, error?.message || String(error));
+      // handleSafe returns an object; here we can return our own custom failure attributes
+      // as handleSafe appends { success: true } by default if we don't throw.
+      // But actually, we log instead of throwing so it's a "soft" failure.
       return { success: false, error: error?.message || String(error) };
     }
   });
 
   // Check-and-login flow: check session → if not logged in, open login → verify
   // Returns { connected: boolean, platform: string, loginOpened: boolean }
-  ipcMain.handle('check-and-login', async (_event, { platformId }) => {
+  handleSafe('check-and-login', async (_event, { platformId }) => {
     try {
       // Step 1: Quick session check
       const status = await getSessionStatus(platformId);
@@ -136,7 +145,7 @@ export function registerAccountsHandlers() {
       }
 
       // Step 2: Not logged in — open login window (blocks until user closes it)
-      console.log(`[Accounts] ${platformId} not logged in — opening login window`);
+      logger.info(`[Accounts] ${platformId} not logged in — opening login window`);
       await openLoginWindow(platformId, _event.sender);
 
       // Step 3: Re-check session after login window closed
@@ -148,7 +157,7 @@ export function registerAccountsHandlers() {
 
       return { ...postLogin, loginOpened: true };
     } catch (error) {
-      console.error(`[Accounts] Check-and-login failed for ${platformId}:`, error?.message || String(error));
+      logger.error(`[Accounts] Check-and-login failed for ${platformId}:`, error?.message || String(error));
       return { platform: platformId, connected: false, loginOpened: false, error: error?.message || String(error) };
     }
   });
@@ -156,13 +165,13 @@ export function registerAccountsHandlers() {
   // ── Sell Monitor Auth (moved from marketplace.js — these are auth concerns) ──
 
   // Returns which platforms need login for sell monitoring
-  ipcMain.handle('get-sell-platforms', () => {
-    return getSellMonitorPlatforms();
+  handleSafe('get-sell-platforms', async () => {
+    return { platforms: getSellMonitorPlatforms() };
   });
 
   // Before sell monitoring: check if the user is logged into the platform.
   // Returns { platform, connected, name, sellerUrl }
-  ipcMain.handle('check-sell-monitor-auth', async (_event, { platformId }) => {
+  handleSafe('check-sell-monitor-auth', async (_event, { platformId }) => {
     const config = getSellMonitorConfig(platformId);
     if (!config) {
       return { platform: platformId, connected: false, error: 'Unknown platform' };
@@ -176,7 +185,7 @@ export function registerAccountsHandlers() {
         sellerUrl: config.sellerUrl,
       };
     } catch (error) {
-      console.error(`[Accounts] Auth check failed for ${platformId}:`, error?.message || String(error));
+      logger.error(`[Accounts] Auth check failed for ${platformId}:`, error?.message || String(error));
       return { platform: platformId, connected: false, name: config.name };
     }
   });

@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react';
+import { useNodeId, useStore } from '@xyflow/react';
 
 /**
  * AnimatedSourceRing — renders orbiting source icons around a hub node
@@ -20,17 +21,23 @@ import React, { useMemo } from 'react';
  * Props:
  *   sources: [{ id, name, letter, color, status, statusText, hoverText, onClick }]
  *   direction: 'in' | 'out'
- *   nodeWidth, nodeHeight: hub dimensions
+ *   nodeWidth, nodeHeight: [DEPRECATED] fallback hub dimensions
  *   radius: distance from center for source icons
  */
 export function AnimatedSourceRing({
   sources,
-  nodeId = 'hub', // unique prefix to namespace SVG IDs per instance
+  nodeId: customNodeId, // optional prop
   direction = 'in',
-  nodeWidth = 260,
-  nodeHeight = 160,
+  nodeWidth: fallbackNodeWidth = 260,
+  nodeHeight: fallbackNodeHeight = 160,
   radius = 120,
 }) {
+  const contextNodeId = useNodeId();
+  const idToUse = customNodeId || contextNodeId || 'hub';
+
+  const nodeWidth = useStore((s) => s.nodeLookup.get(contextNodeId)?.measured?.width) ?? fallbackNodeWidth;
+  const nodeHeight = useStore((s) => s.nodeLookup.get(contextNodeId)?.measured?.height) ?? fallbackNodeHeight;
+
   const cx = nodeWidth / 2;
   const cy = nodeHeight / 2;
 
@@ -70,11 +77,11 @@ export function AnimatedSourceRing({
         style={{ overflow: 'visible' }}
       >
         <defs>
-          {/* Arrowhead markers per source — prefixed with nodeId to avoid document-wide ID collisions */}
+          {/* Arrowhead markers per source — prefixed with idToUse to avoid document-wide ID collisions */}
           {sources.map(source => (
             <marker
-              key={`marker-${nodeId}-${source.id}`}
-              id={`arrowhead-${nodeId}-${source.id}`}
+              key={`marker-${idToUse}-${source.id}`}
+              id={`arrowhead-${idToUse}-${source.id}`}
               markerWidth="8"
               markerHeight="6"
               refX="7"
@@ -91,7 +98,7 @@ export function AnimatedSourceRing({
           ))}
 
           {/* Glow filter for active sources — also namespaced */}
-          <filter id={`activeGlow-${nodeId}`} x="-50%" y="-50%" width="200%" height="200%">
+          <filter id={`activeGlow-${idToUse}`} x="-50%" y="-50%" width="200%" height="200%">
             <feGaussianBlur stdDeviation="3" result="blur" />
             <feMerge>
               <feMergeNode in="blur" />
@@ -173,7 +180,7 @@ export function AnimatedSourceRing({
                 strokeDashoffset={dashOffset}
                 strokeLinecap="round"
                 opacity={isDone ? 0.3 : 0.75}
-                markerEnd={`url(#arrowhead-${nodeId}-${source.id})`}
+                markerEnd={`url(#arrowhead-${idToUse}-${source.id})`}
                 style={{
                   transition: `stroke-dashoffset ${transitionDuration} ease-out, stroke-width 0.3s, opacity 0.3s`,
                 }}

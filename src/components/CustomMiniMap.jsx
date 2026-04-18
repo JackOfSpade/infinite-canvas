@@ -1,29 +1,10 @@
 import React, { useMemo, useRef, useCallback } from 'react';
 import { Panel, useReactFlow, useStore } from '@xyflow/react';
-import { MINIMAP_NODE_COLORS } from '../utils/constants';
+import { MINIMAP_NODE_COLORS, NODE_DIMS, getNodeDims } from '../utils/constants';
 
 const MINIMAP_W = 200;
 const MINIMAP_H = 140;
 const CONTENT_PAD = 40;
-
-/** Default dimensions per node type (matches CanvasThumbnail) */
-const NODE_DIMS = {
-  text:     { w: 180, h: 36  },
-  link:     { w: 180, h: 50  },
-  document: { w: 180, h: 36  },
-  group:    { w: 160, h: 160 },
-  listing:  { w: 240, h: 180 },
-  jobcard:  { w: 180, h: 90  },
-  jobhub:   { w: 280, h: 350 },
-  sellhub:  { w: 280, h: 350 },
-};
-
-function getNodeDims(node) {
-  return {
-    w: node.measured?.width  || node.style?.width  || NODE_DIMS[node.type]?.w || 120,
-    h: node.measured?.height || node.style?.height || NODE_DIMS[node.type]?.h || 40,
-  };
-}
 
 /**
  * Custom SVG mini-map that renders actual node content (text preview, link labels,

@@ -1,4 +1,5 @@
-import { app } from 'electron';
+import electronPkg from 'electron';
+const { app } = electronPkg;
 import {
   fetchLinkedInJobs,
   fetchUSAJobs,

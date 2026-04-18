@@ -236,8 +236,6 @@ export function SellHubNode({ id, data }) {
           sources={getSourceStatuses()}
           nodeId={id}
           direction={hubState === 'researching' ? 'in' : 'out'}
-          nodeWidth={nodeWidth}
-          nodeHeight={nodeHeight}
           radius={hubState === 'priced' ? 170 : 140}
         />
       }

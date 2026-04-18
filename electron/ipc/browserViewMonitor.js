@@ -1,3 +1,4 @@
+import { logger } from '../logger.js';
 /**
  * Tier 4 — BrowserView Monitor Manager
  *
@@ -21,7 +22,8 @@
  *   getActiveMonitors()        — list all active monitors with status
  */
 import electronPkg from 'electron';
-const { ipcMain, BrowserWindow } = electronPkg;
+const { BrowserWindow } = electronPkg;
+import { handleSafe } from './ipcUtils.js';
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
@@ -142,7 +144,7 @@ function openMonitor({ platform, url, extractorJS, refreshMs = DEFAULT_REFRESH_I
 
   // Load the initial URL
   win.loadURL(url).catch(err => {
-    console.error(`[Monitor ${id}] Failed to load ${url}:`, err?.message || String(err));
+    logger.error(`[Monitor ${id}] Failed to load ${url}:`, err?.message || String(err));
   });
 
   const monitor = {
@@ -167,7 +169,7 @@ function openMonitor({ platform, url, extractorJS, refreshMs = DEFAULT_REFRESH_I
   win.on('close', (e) => {
     if (monitor.status === 'setup') {
       e.preventDefault();
-      console.log(`[Monitor ${id}] Setup complete — starting background monitoring`);
+      logger.info(`[Monitor ${id}] Setup complete — starting background monitoring`);
       startMonitoring(id);
     }
   });
@@ -177,7 +179,7 @@ function openMonitor({ platform, url, extractorJS, refreshMs = DEFAULT_REFRESH_I
     stopMonitor(id);
   });
 
-  console.log(`[Monitor ${id}] Opened for ${platform} at ${url}`);
+  logger.info(`[Monitor ${id}] Opened for ${platform} at ${url}`);
   return { id };
 }
 
@@ -194,7 +196,7 @@ function startMonitoring(id) {
   monitor.status = 'monitoring';
   monitor.window.hide();
 
-  console.log(`[Monitor ${id}] Background monitoring started (refresh: ${monitor.refreshIntervalMs / 1000}s)`);
+  logger.info(`[Monitor ${id}] Background monitoring started (refresh: ${monitor.refreshIntervalMs / 1000}s)`);
 
   // Run first extraction immediately
   refreshMonitor(id);
@@ -261,12 +263,12 @@ async function refreshMonitor(id) {
       liveMonitor.lastData = data;
       liveMonitor.dataVersion++;
 
-      console.log(`[Monitor ${id}] Data changed: ${prevCount} → ${data.length} items (v${liveMonitor.dataVersion})`);
+      logger.info(`[Monitor ${id}] Data changed: ${prevCount} → ${data.length} items (v${liveMonitor.dataVersion})`);
 
       // Notify the renderer about the update
       notifyDataChange(liveMonitor);
     } else {
-      console.log(`[Monitor ${id}] Refresh OK — no changes (${(data || []).length} items)`);
+      logger.info(`[Monitor ${id}] Refresh OK — no changes (${(data || []).length} items)`);
     }
 
     // Check for session expiry signals (guard destroyed wc before getURL)
@@ -276,7 +278,7 @@ async function refreshMonitor(id) {
       liveMonitor.status = 'expired';
       clearTimeout(liveMonitor.timer);
       liveMonitor.timer = null;
-      console.warn(`[Monitor ${id}] Session expired — user must re-authenticate`);
+      logger.warn(`[Monitor ${id}] Session expired — user must re-authenticate`);
       notifySessionExpired(liveMonitor);
       return;
     }
@@ -284,7 +286,7 @@ async function refreshMonitor(id) {
     if (!monitors.has(id)) return;
     const m = monitors.get(id);
     m.consecutiveErrors++;
-    console.error(`[Monitor ${id}] Refresh failed (attempt ${m.consecutiveErrors}):`, error?.message || String(error));
+    logger.error(`[Monitor ${id}] Refresh failed (attempt ${m.consecutiveErrors}):`, error?.message || String(error));
 
     // Exponential backoff: double the interval on each consecutive error
     if (m.consecutiveErrors > 1) {
@@ -292,7 +294,7 @@ async function refreshMonitor(id) {
         MAX_REFRESH_INTERVAL_MS,
         m.refreshIntervalMs * 2
       );
-      console.warn(`[Monitor ${id}] Backoff: next refresh in ${m.refreshIntervalMs / 1000}s`);
+      logger.warn(`[Monitor ${id}] Backoff: next refresh in ${m.refreshIntervalMs / 1000}s`);
     }
 
     // After 5 consecutive errors, pause the monitor
@@ -300,7 +302,7 @@ async function refreshMonitor(id) {
       m.status = 'paused';
       clearTimeout(m.timer);
       m.timer = null;
-      console.error(`[Monitor ${id}] Paused after 5 consecutive errors`);
+      logger.error(`[Monitor ${id}] Paused after 5 consecutive errors`);
       notifyMonitorPaused(m);
     }
   }
@@ -341,7 +343,7 @@ function stopMonitor(id) {
     monitor.window.destroy();
   }
 
-  console.log(`[Monitor ${id}] Stopped and cleaned up`);
+  logger.info(`[Monitor ${id}] Stopped and cleaned up`);
 }
 
 /**
@@ -365,11 +367,11 @@ function reopenMonitor(id) {
   if (monitor.window && !monitor.window.isDestroyed()) {
     monitor.window.show();
     monitor.window.loadURL(monitor.url).catch(err => {
-      console.error(`[Monitor ${id}] Failed to reload URL for re-auth:`, err?.message || String(err));
+      logger.error(`[Monitor ${id}] Failed to reload URL for re-auth:`, err?.message || String(err));
     });
   }
 
-  console.log(`[Monitor ${id}] Reopened for re-authentication`);
+  logger.info(`[Monitor ${id}] Reopened for re-authentication`);
 }
 
 /**
@@ -415,49 +417,37 @@ function isSessionExpired(platform, currentUrl) {
 
 export function registerMonitorHandlers() {
   // Open a new monitor window (user sees it, logs in, closes to start)
-  ipcMain.handle('open-monitor', async (_event, opts) => {
-    try {
-      return openMonitor(opts);
-    } catch (error) {
-      return { error: error?.message || String(error) };
-    }
+  handleSafe('open-monitor', async (_event, opts) => {
+    return openMonitor(opts);
   });
 
   // Force-start monitoring (skip waiting for window close)
-  ipcMain.handle('start-monitoring', async (_event, { id }) => {
-    try {
-      startMonitoring(id);
-      return { success: true };
-    } catch (error) {
-      return { error: error?.message || String(error) };
-    }
+  handleSafe('start-monitoring', async (_event, { id }) => {
+    startMonitoring(id);
+    return { success: true };
   });
 
   // Stop and close a monitor
-  ipcMain.handle('stop-monitor', async (_event, { id }) => {
+  handleSafe('stop-monitor', async (_event, { id }) => {
     stopMonitor(id);
     return { success: true };
   });
 
   // Reopen for re-authentication
-  ipcMain.handle('reopen-monitor', async (_event, { id }) => {
-    try {
-      reopenMonitor(id);
-      return { success: true };
-    } catch (error) {
-      return { error: error?.message || String(error) };
-    }
+  handleSafe('reopen-monitor', async (_event, { id }) => {
+    reopenMonitor(id);
+    return { success: true };
   });
 
   // Get status of all monitors
-  ipcMain.handle('get-monitors', async () => {
-    return getActiveMonitors();
+  handleSafe('get-monitors', async () => {
+    return { monitors: getActiveMonitors() };
   });
 
   // Get the latest data from a specific monitor
-  ipcMain.handle('get-monitor-data', async (_event, { id }) => {
+  handleSafe('get-monitor-data', async (_event, { id }) => {
     const monitor = monitors.get(id);
-    if (!monitor) return { error: 'Monitor not found' };
+    if (!monitor) throw new Error('Monitor not found');
     return {
       id: monitor.id,
       platform: monitor.platform,
@@ -467,7 +457,7 @@ export function registerMonitorHandlers() {
     };
   });
 
-  console.log('[MonitorManager] IPC handlers registered');
+  logger.info('[MonitorManager] IPC handlers registered');
 }
 
 /**

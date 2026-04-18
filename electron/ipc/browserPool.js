@@ -1,3 +1,4 @@
+import { logger } from '../logger.js';
 /**
  * Browser Pool — Manages concurrent stealth scraping through puppeteer-extra.
  *
@@ -328,9 +329,9 @@ async function executeScrape(url, extractorJS, options = {}) {
     const isAborted = options.signal?.aborted || error?.message === 'Aborted' || isShuttingDown;
     
     if (isAborted) {
-      console.log(`[BrowserPool] Scrape aborted/shutting down for ${url}`);
+      logger.info(`[BrowserPool] Scrape aborted/shutting down for ${url}`);
     } else {
-      console.error(`[BrowserPool] Scrape failed for ${url}:`, error);
+      logger.error(`[BrowserPool] Scrape failed for ${url}:`, error);
       markDomainError(domain);
     }
     
@@ -348,7 +349,7 @@ async function executeScrape(url, extractorJS, options = {}) {
           ]);
         }
       } catch (e) {
-        console.warn('[BrowserPool] Page close error:', e.message);
+        logger.warn('[BrowserPool] Page close error:', e.message);
       }
     }
     throw error;
@@ -368,7 +369,7 @@ export async function closeAllPages() {
   const handles = Array.from(pageHandles.values());
   pageHandles.clear();
 
-  console.log(`[BrowserPool] Closing ${handles.length} active pages during shutdown...`);
+  logger.info(`[BrowserPool] Closing ${handles.length} active pages during shutdown...`);
 
   await Promise.allSettled(handles.map(async ({ page }) => {
     try {
@@ -390,7 +391,7 @@ process.on('exit', () => {
   for (const { page } of pageHandles.values()) {
     try { 
       if (!page.isClosed()) {
-        console.log('[BrowserPool] Orphaned page detected on exit');
+        logger.info('[BrowserPool] Orphaned page detected on exit');
       }
     } catch { /* ignore */ }
   }

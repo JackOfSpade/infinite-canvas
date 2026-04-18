@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Search, Store, BarChart3, ChevronLeft, ChevronRight, UserCircle, Briefcase, Bug } from 'lucide-react';
 import { SELL_PLATFORMS, JOB_SOURCES, PRICE_COMP_SOURCES } from '../utils/constants';
+import { EventLogger } from '../utils/EventLogger';
 
 import { JobsTab } from './sidebar/JobsTab';
 import { SellTab } from './sidebar/SellTab';
@@ -29,6 +30,24 @@ const PLATFORMS = [
  * Props:
  *   nodes — current canvas nodes (for dashboard stats)
  */
+// Helper to compute stats cleanly
+function getStats(nodes) {
+  let jobCardsCount = 0, sellHubsCount = 0, appliedJobsCount = 0, totalValue = 0;
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    if (n.type === 'jobcard') {
+      jobCardsCount++;
+      if (n.data?.status === 'Applied') appliedJobsCount++;
+    } else if (n.type === 'sellhub') {
+      sellHubsCount++;
+      if (n.data?.hubState === 'priced') {
+        totalValue += parseFloat(n.data?.userPrice) || 0;
+      }
+    }
+  }
+  return { jobCardsCount, sellHubsCount, appliedJobsCount, totalValue };
+}
+
 export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClick }) {
   const [collapsed, setCollapsed] = useState(true);
   const [activeTab, setActiveTab] = useState('jobs');
@@ -54,23 +73,7 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
     e.dataTransfer.effectAllowed = 'copy';
   }, []);
 
-  // Compute aggregate numerical stats directly (avoids allocating massive arrays that break memoization)
-  const { jobCardsCount, sellHubsCount, appliedJobsCount, totalValue } = React.useMemo(() => {
-    let jCount = 0, sCount = 0, aCount = 0, value = 0;
-    for (let i = 0; i < nodes.length; i++) {
-      const n = nodes[i];
-      if (n.type === 'jobcard') {
-        jCount++;
-        if (n.data?.status === 'Applied') aCount++;
-      } else if (n.type === 'sellhub') {
-        sCount++;
-        if (n.data?.hubState === 'priced') {
-          value += parseFloat(n.data?.userPrice) || 0;
-        }
-      }
-    }
-    return { jobCardsCount: jCount, sellHubsCount: sCount, appliedJobsCount: aCount, totalValue: value };
-  }, [nodes]);
+  const { jobCardsCount, sellHubsCount, appliedJobsCount, totalValue } = React.useMemo(() => getStats(nodes), [nodes]);
 
   const [accountStatuses, setAccountStatuses] = useState({});
   const [systemStatuses, setSystemStatuses] = useState(null);
@@ -86,12 +89,12 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
           const map = {};
           for (const s of statuses) map[s.platform] = s;
           setAccountStatuses(map);
-        }).catch(console.error);
+        }).catch(err => EventLogger.error('Sidebar cached statuses failed', err));
       }
       if (window.electronAPI?.invoke) {
         window.electronAPI.invoke('get-system-config-status')
           .then(res => { if (isMountedRef.current) setSystemStatuses(res); })
-          .catch(console.error);
+          .catch(err => EventLogger.error('Sidebar system config failed', err));
       }
     }
   }, [activeTab, collapsed]);
@@ -109,7 +112,7 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
       for (const s of statuses) map[s.platform] = s;
       setAccountStatuses(map);
     } catch (e) {
-      console.error('Login failed:', e);
+      EventLogger.error('Login failed:', e);
     }
     if (isMountedRef.current) setLoadingPlatform(null);
   }, []);
@@ -217,22 +220,13 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
   );
 }, (prev, next) => {
   if (prev.onReportBugClick !== next.onReportBugClick) return false;
+  if (prev.nodes === next.nodes) return true;
   
-  // Fast loop to check if any dashboard-relevant statistics changed.
-  // If only node positions changed, we skip rendering entirely!
-  let pJ=0, pA=0, pS=0, pV=0;
-  for (let i = 0; i < prev.nodes.length; i++) {
-    const n = prev.nodes[i];
-    if (n.type === 'jobcard') { pJ++; if (n.data?.status === 'Applied') pA++; }
-    else if (n.type === 'sellhub') { pS++; if (n.data?.hubState === 'priced') pV += parseFloat(n.data?.userPrice) || 0; }
-  }
+  const pStats = getStats(prev.nodes);
+  const nStats = getStats(next.nodes);
   
-  let nJ=0, nA=0, nS=0, nV=0;
-  for (let i = 0; i < next.nodes.length; i++) {
-    const n = next.nodes[i];
-    if (n.type === 'jobcard') { nJ++; if (n.data?.status === 'Applied') nA++; }
-    else if (n.type === 'sellhub') { nS++; if (n.data?.hubState === 'priced') nV += parseFloat(n.data?.userPrice) || 0; }
-  }
-  
-  return pJ === nJ && pA === nA && pS === nS && pV === nV;
+  return pStats.jobCardsCount === nStats.jobCardsCount &&
+         pStats.appliedJobsCount === nStats.appliedJobsCount &&
+         pStats.sellHubsCount === nStats.sellHubsCount &&
+         pStats.totalValue === nStats.totalValue;
 });

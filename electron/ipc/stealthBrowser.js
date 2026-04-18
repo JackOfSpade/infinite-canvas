@@ -1,3 +1,4 @@
+import { logger } from '../logger.js';
 /**
  * Stealth Browser Manager — singleton puppeteer-extra browser with stealth plugin.
  *
@@ -98,7 +99,7 @@ export async function getStealthBrowser() {
 
   browserLaunchPromise = (async () => {
     const executablePath = process.env.CHROME_PATH || await findChromePath();
-    console.log('[StealthBrowser] Launching with:', path.basename(executablePath));
+    logger.info('[StealthBrowser] Launching with:', path.basename(executablePath));
 
     try {
       browserInstance = await puppeteer.launch({
@@ -122,7 +123,7 @@ export async function getStealthBrowser() {
         ignoreHTTPSErrors: true,
       });
 
-      console.log('[StealthBrowser] Browser launched successfully');
+      logger.info('[StealthBrowser] Browser launched successfully');
       return browserInstance;
     } finally {
       // Always release the mutex so the next call can retry on failure.

@@ -1,6 +1,12 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 
+function safeClone(data) {
+  if (!data) return data;
+  try { return structuredClone(data); }
+  catch { return JSON.parse(JSON.stringify(data)); }
+}
+
 /**
  * Walk the navigation stack upward from `startIndex` to 0, syncing each
  * level's canvas data back into its parent's node tree.
@@ -9,9 +15,9 @@ import { useReactFlow } from '@xyflow/react';
  * Pure function — does not mutate state.
  */
 function syncStackUpward(currentNodes, currentEdges, currentDrawings, stack, startIndex, stopIndex = 0) {
-  let nodes = structuredClone(currentNodes);
-  let edges = structuredClone(currentEdges);
-  let drawings = structuredClone(currentDrawings);
+  let nodes = safeClone(currentNodes);
+  let edges = safeClone(currentEdges);
+  let drawings = safeClone(currentDrawings);
 
   for (let i = startIndex; i >= stopIndex; i--) {
     const parentState = stack[i];
@@ -124,9 +130,9 @@ export function useCanvasNavigation({
     const parentState = {
       nodeId,
       childTitle: node.data.title || 'Sub-Canvas',
-      nodes: structuredClone(nodesRef.current),
-      edges: structuredClone(edgesRef.current),
-      drawings: structuredClone(drawingsRef.current),
+      nodes: safeClone(nodesRef.current),
+      edges: safeClone(edgesRef.current),
+      drawings: safeClone(drawingsRef.current),
       viewport,
     };
 

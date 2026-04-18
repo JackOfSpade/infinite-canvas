@@ -73,7 +73,6 @@ export const PRICE_COMP_SOURCES = [
   { id: 'mercari',      name: 'Mercari Sold',  letter: 'M',  color: '#ff4747' },
 ];
 
-/** MiniMap node colors — keyed by node type. */
 export const MINIMAP_NODE_COLORS = {
   group: '#3b82f6',
   document: '#8b5cf6',
@@ -84,3 +83,23 @@ export const MINIMAP_NODE_COLORS = {
   jobhub: '#4285f4',
   sellhub: '#10b981',
 };
+
+/** Default dimensions per node type */
+export const NODE_DIMS = {
+  text:     { w: 180, h: 36  },
+  link:     { w: 180, h: 50  },
+  document: { w: 180, h: 36  },
+  group:    { w: 160, h: 160 },
+  listing:  { w: 240, h: 180 },
+  jobcard:  { w: 180, h: 90  },
+  jobhub:   { w: 280, h: 350 },
+  sellhub:  { w: 280, h: 350 },
+};
+
+/** Extracts or estimates width/height of a node */
+export function getNodeDims(node) {
+  return {
+    w: node.width  || node.measured?.width  || node.style?.width  || NODE_DIMS[node.type]?.w || 120,
+    h: node.height || node.measured?.height || node.style?.height || NODE_DIMS[node.type]?.h || 40,
+  };
+}

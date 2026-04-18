@@ -1,8 +1,10 @@
+import { logger } from '../logger.js';
 /**
  * Filesystem IPC handlers — scan directories, open files/URLs, save/load workspaces.
  */
 import electronPkg from 'electron';
-const { ipcMain, shell, dialog } = electronPkg;
+const { shell, dialog } = electronPkg;
+import { handleSafe } from './ipcUtils.js';
 import path from 'path';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
@@ -78,7 +80,7 @@ async function scanPath(currentPath, visited, sender = null, depth = 0) {
     };
   } catch (err) {
     // Possible edge case: file deleted between readdir and lstat
-    console.warn(`[Filesystem] Skipping inaccessible path: ${currentPath}`, err?.message || String(err));
+    logger.warn(`[Filesystem] Skipping inaccessible path: ${currentPath}`, err?.message || String(err));
     return null;
   } finally {
     activeScans--;
@@ -101,240 +103,127 @@ async function atomicWriteFile(targetPath, data) {
 }
 
 export function registerFilesystemHandlers() {
-  ipcMain.handle('scan-directory', async (event, dirPath) => {
+  handleSafe('scan-directory', async (event, dirPath) => {
     const visited = new Set();
-    try {
-      const result = await scanPath(dirPath, visited, event.sender);
-      
-      // Guard: If window reload/close happened during deep file scan, abort early.
-      if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
-
-      if (!result) return { success: false, error: 'Directory skip or unreadable' };
-      return result.type === 'document' ? { isFile: true, file: result } : result;
-    } catch (error) {
-      console.error('Error scanning directory:', error);
-      return { success: false, error: error?.message || String(error) };
-    }
+    const result = await scanPath(dirPath, visited, event.sender);
+    
+    if (!result) throw new Error('Directory skip or unreadable');
+    return result.type === 'document' ? { isFile: true, file: result } : result;
   });
 
-  ipcMain.handle('open-file', async (_event, filePath) => {
-    try {
-      const err = await shell.openPath(filePath);
-      if (err) return { success: false, error: err };
-      return { success: true };
-    } catch (err) {
-      return { success: false, error: err?.message || String(err) };
-    }
+  handleSafe('open-file', async (_event, filePath) => {
+    const err = await shell.openPath(filePath);
+    if (err) throw new Error(err);
   });
 
-  ipcMain.handle('open-external', async (_event, url) => {
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        return { success: false, error: `Invalid protocol: ${parsed.protocol}. Only http and https are allowed for external links.` };
-      }
-      await shell.openExternal(url);
-      return { success: true };
-    } catch (err) {
-      return { success: false, error: err?.message || String(err) };
+  handleSafe('open-external', async (_event, url) => {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`Invalid protocol: ${parsed.protocol}. Only http and https are allowed for external links.`);
     }
+    await shell.openExternal(url);
   });
 
-  ipcMain.handle('fetch-url-title', async (event, url) => {
-    const ac = new AbortController();
-    const timeoutId = setTimeout(() => ac.abort(new Error('Timeout')), 3000);
-    const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
-    event.sender.once('destroyed', onSenderDestroyed);
-
-    try {
-      let fetchUrl = url;
-      if (!fetchUrl.startsWith('http://') && !fetchUrl.startsWith('https://')) {
-        fetchUrl = 'https://' + fetchUrl;
-      }
-      const res = await fetch(fetchUrl, {
-        signal: ac.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' },
+  handleSafe('save-workspace', async (_event, args) => {
+    const { data, filePath } = args;
+    let targetPath = filePath;
+    if (!targetPath) {
+      const { canceled, filePath: dialogPath } = await dialog.showSaveDialog({
+        title: 'Save Canvas',
+        defaultPath: 'canvas.json',
+        filters: [{ name: 'JSON Files', extensions: ['json'] }],
       });
-      
-      if (!res.body) return null;
-
-      // Hardening: Read only the first 1MB of the response to avoid memory bloat
-      const MAX_SIZE = 1024 * 1024; // 1MB
-      const reader = res.body.getReader();
-      let decoder = new TextDecoder();
-      let text = '';
-      let bytesRead = 0;
-
-      const matchPattern = /<title[^>]*>([^<]+)<\/title>/i;
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          text += decoder.decode(value, { stream: true });
-          bytesRead += value.length;
-          
-          const earlyMatch = text.match(matchPattern);
-          if (earlyMatch) {
-            break; // Stop streaming early if title is found!
-          }
-
-          if (bytesRead >= MAX_SIZE) {
-            break;
-          }
-        }
-      } finally {
-        await reader.cancel().catch(() => {});
-      }
-      
-      // Guard: network fetch could be slow; window might be gone.
-      if (event.sender.isDestroyed()) return null;
-
-      const match = text.match(/<title[^>]*>([^<]+)<\/title>/i);
-      if (!match) return null;
-      let title = match[1].trim();
-      // Simple HTML entity decode for common characters
-      title = title.replace(/&amp;/g, '&')
-                   .replace(/&lt;/g, '<')
-                   .replace(/&gt;/g, '>')
-                   .replace(/&quot;/g, '"')
-                   .replace(/&#39;/g, "'");
-      return title;
-    } catch {
-      return null;
-    } finally {
-      clearTimeout(timeoutId);
-      if (!event.sender.isDestroyed()) {
-        event.sender.removeListener('destroyed', onSenderDestroyed);
-      }
+      if (canceled || !dialogPath) return { canceled: true };
+      targetPath = dialogPath;
     }
+    // Production Hardening: Use atomic write to prevent data corruption
+    await atomicWriteFile(targetPath, JSON.stringify(data));
+    return { filePath: targetPath };
   });
 
-  ipcMain.handle('save-workspace', async (_event, args) => {
+  handleSafe('load-workspace', async (_event, opts) => {
+    let targetPath = opts?.filePath;
+    
+    if (!targetPath) {
+      const { canceled, filePaths } = await dialog.showOpenDialog({
+        title: 'Open Canvas',
+        properties: ['openFile'],
+        filters: [{ name: 'JSON Files', extensions: ['json'] }],
+      });
+      if (canceled || filePaths.length === 0) return { canceled: true };
+      targetPath = filePaths[0];
+    }
+
+    if (!fs.existsSync(targetPath)) throw new Error('File does not exist');
+    
+    const stats = fs.statSync(targetPath);
+    if (stats.size === 0) throw new Error('Workspace file is empty (0 bytes)');
+
+    const content = await fs.promises.readFile(targetPath, 'utf-8');
     try {
-      const { data, filePath } = args;
-      let targetPath = filePath;
-      if (!targetPath) {
-        const { canceled, filePath: dialogPath } = await dialog.showSaveDialog({
-          title: 'Save Canvas',
-          defaultPath: 'canvas.json',
-          filters: [{ name: 'JSON Files', extensions: ['json'] }],
-        });
-        if (canceled || !dialogPath) return { success: false, canceled: true };
-        targetPath = dialogPath;
-      }
-      // Production Hardening: Use atomic write to prevent data corruption
-      await atomicWriteFile(targetPath, JSON.stringify(data));
-      return { success: true, filePath: targetPath };
-    } catch (err) {
-      console.error('Failed to save workspace:', err);
-      return { success: false, error: err?.message || String(err) };
+      const data = JSON.parse(content);
+      logger.info(`[FileSystem] Loaded workspace: ${targetPath} (${stats.size} bytes)`);
+      return { data, filePath: targetPath };
+    } catch (jsonErr) {
+      logger.error(`[FileSystem] Failed to parse workspace JSON at ${targetPath}:`, jsonErr);
+      throw new Error('Invalid workspace file format. File may be corrupted or malformed.');
     }
   });
 
-  ipcMain.handle('load-workspace', async (_event, opts) => {
-    try {
-      let targetPath = opts?.filePath;
-      
-      if (!targetPath) {
-        const { canceled, filePaths } = await dialog.showOpenDialog({
-          title: 'Open Canvas',
-          properties: ['openFile'],
-          filters: [{ name: 'JSON Files', extensions: ['json'] }],
-        });
-        if (canceled || filePaths.length === 0) return { success: false, canceled: true };
-        targetPath = filePaths[0];
-      }
-
-      if (!fs.existsSync(targetPath)) {
-        return { success: false, error: 'File does not exist' };
-      }
-
-      const stats = fs.statSync(targetPath);
-      if (stats.size === 0) {
-        return { success: false, error: 'Workspace file is empty (0 bytes)' };
-      }
-
-      const content = await fs.promises.readFile(targetPath, 'utf-8');
-      
-      try {
-        const data = JSON.parse(content);
-        console.log(`[FileSystem] Loaded workspace: ${targetPath} (${stats.size} bytes)`);
-        return { success: true, data, filePath: targetPath };
-      } catch (jsonErr) {
-        console.error(`[FileSystem] Failed to parse workspace JSON at ${targetPath}:`, jsonErr);
-        return { success: false, error: 'Invalid workspace file format. File may be corrupted or malformed.' };
-      }
-    } catch (err) {
-      console.error('[FileSystem] Unexpected error loading workspace:', err);
-      return { success: false, error: err?.message || String(err) };
-    }
-  });
-
-  ipcMain.handle('start-file-watch', async (event, filePath) => {
+  handleSafe('start-file-watch', async (event, filePath) => {
     const sender = event.sender;
     
-    // 1. If we already have a watcher for this file...
     if (activeWatchers.has(filePath)) {
       const entry = activeWatchers.get(filePath);
       const count = entry.clients.get(sender) || 0;
       entry.clients.set(sender, count + 1);
-      return { success: true };
+      return;
     }
 
-    // 2. New watcher needed
-    try {
-      await fs.promises.access(filePath);
-      
-      const watcher = fs.watch(filePath, (eventType) => {
-        if (eventType === 'change') {
-          const entry = activeWatchers.get(filePath);
-          if (!entry) return;
-          // Notify ALL window instances watching this file
-          for (const [clientSender] of entry.clients) {
-            if (!clientSender.isDestroyed()) {
-              clientSender.send('file-changed', filePath);
-            }
-          }
-        }
-      });
-
-      watcher.on('error', (err) => {
-        console.warn(`[FileSystem] Watcher error for ${filePath}:`, err);
+    await fs.promises.access(filePath);
+    
+    const watcher = fs.watch(filePath, (eventType) => {
+      if (eventType === 'change') {
         const entry = activeWatchers.get(filePath);
-        if (entry) {
-          entry.watcher.close();
-          activeWatchers.delete(filePath);
+        if (!entry) return;
+        for (const [clientSender] of entry.clients) {
+          if (!clientSender.isDestroyed()) {
+            clientSender.send('file-changed', filePath);
+          }
         }
-      });
+      }
+    });
 
-      const clients = new Map();
-      clients.set(sender, 1);
-      activeWatchers.set(filePath, { watcher, clients });
+    watcher.on('error', (err) => {
+      logger.warn(`[FileSystem] Watcher error for ${filePath}:`, err);
+      const entry = activeWatchers.get(filePath);
+      if (entry) {
+        entry.watcher.close();
+        activeWatchers.delete(filePath);
+      }
+    });
 
-      // Ensure cleanup if window crashes/closes
-      if (!sender.__fsWatchCleanupAttached) {
-        sender.__fsWatchCleanupAttached = true;
-        sender.once('destroyed', () => {
-          for (const [fPath, entry] of activeWatchers.entries()) {
-            if (entry.clients.has(sender)) {
-              entry.clients.delete(sender);
-              if (entry.clients.size === 0) {
-                entry.watcher.close();
-                activeWatchers.delete(fPath);
-              }
+    const clients = new Map();
+    clients.set(sender, 1);
+    activeWatchers.set(filePath, { watcher, clients });
+
+    if (!sender.__fsWatchCleanupAttached) {
+      sender.__fsWatchCleanupAttached = true;
+      sender.once('destroyed', () => {
+        for (const [fPath, entry] of activeWatchers.entries()) {
+          if (entry.clients.has(sender)) {
+            entry.clients.delete(sender);
+            if (entry.clients.size === 0) {
+              entry.watcher.close();
+              activeWatchers.delete(fPath);
             }
           }
-        });
-      }
-
-      return { success: true };
-    } catch (err) {
-      console.error('Watch error:', err);
-      return { success: false, error: err?.message || String(err) };
+        }
+      });
     }
   });
 
-  ipcMain.handle('stop-file-watch', (event, filePath) => {
+  handleSafe('stop-file-watch', async (event, filePath) => {
     const sender = event.sender;
     const entry = activeWatchers.get(filePath);
     
@@ -346,27 +235,15 @@ export function registerFilesystemHandlers() {
         entry.clients.set(sender, current - 1);
       }
 
-      // If no clients remain across any windows, shut down the real watcher
       if (entry.clients.size === 0) {
         activeWatchers.delete(filePath);
-        try {
-          if (entry.watcher) entry.watcher.close();
-        } catch (err) {
-          console.warn(`[Filesystem] Error closing watcher for ${filePath}: ${err.message}`);
-        }
+        try { if (entry.watcher) entry.watcher.close(); } catch { /* ignore */ }
       }
     }
-    return { success: true };
   });
 
-  ipcMain.handle('delete-os-file', async (_event, filePath) => {
-    try {
-      await shell.trashItem(filePath);
-      return { success: true };
-    } catch (err) {
-      console.error('Failed to trash OS file:', err);
-      return { success: false, error: err?.message || String(err) };
-    }
+  handleSafe('delete-os-file', async (_event, filePath) => {
+    await shell.trashItem(filePath);
   });
 }
 
@@ -389,6 +266,6 @@ export async function cleanupTempFiles() {
       } catch { /* ignore */ }
     }
   } catch (err) {
-    console.warn('[Filesystem] Startup cleanup failed:', err?.message || String(err));
+    logger.warn('[Filesystem] Startup cleanup failed:', err?.message || String(err));
   }
 }

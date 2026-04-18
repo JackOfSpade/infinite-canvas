@@ -1,5 +1,7 @@
 {
   "name": "infinite-canvas",
+  "description": "Infinite Canvas - An AI-powered workspace",
+  "author": "Antigravity",
   "private": true,
   "version": "0.0.0",
   "type": "module",

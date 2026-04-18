@@ -1,3 +1,4 @@
+import { logger } from '../../logger.js';
 import puppeteer from 'puppeteer-extra';
 import { getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath } from '../stealthBrowser.js';
 
@@ -57,7 +58,7 @@ export async function openLoginWindow(platformId, sender = null) {
   if (!url) throw new Error(`Unknown platform: ${platformId}`);
 
   const executablePath = process.env.CHROME_PATH || await findChromePath();
-  console.log(`[StealthBrowser] Opening login window for ${platformId}`);
+  logger.info(`[StealthBrowser] Opening login window for ${platformId}`);
 
   // Launch a SEPARATE visible browser for login (shares the same userDataDir)
   const loginBrowser = await puppeteer.launch({

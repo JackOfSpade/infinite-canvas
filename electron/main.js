@@ -11,6 +11,7 @@ import { closeAllPages } from './ipc/browserPool.js';
 import { closeStealthBrowser } from './ipc/stealthBrowser.js';
 import { registerGeminiHandlers } from './ipc/gemini.js';
 import { registerBugReportHandlers } from './ipc/bugReport.js';
+import { registerNetworkHandlers } from './ipc/network.js';
 import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -30,6 +31,50 @@ process.on('unhandledRejection', (reason, promise) => {
 
 let mainWindow = null;
 const gotTheLock = app.requestSingleInstanceLock();
+
+/**
+ * Perform a handshake with the renderer to check for unsaved changes.
+ * Fixes a listener leak where a timeout previously left a dangling ipcMain.once listener.
+ */
+async function checkUnsavedChanges(win, actionType = 'close') {
+  if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) {
+    return true; // Safe to proceed
+  }
+
+  win.webContents.send('quit-request');
+  
+  const rendererState = await new Promise(resolve => {
+    let timeoutId;
+    const handler = (_e, { hasUnsavedChanges }) => {
+      clearTimeout(timeoutId);
+      resolve({ hasUnsavedChanges });
+    };
+
+    electronPkg.ipcMain.once('quit-response', handler);
+
+    timeoutId = setTimeout(() => {
+      electronPkg.ipcMain.removeListener('quit-response', handler);
+      resolve({ timeout: true });
+    }, 1500);
+  });
+
+  if (rendererState.hasUnsavedChanges) {
+    const actionStr = actionType === 'quit' ? 'Quit' : 'Close';
+    const msgStr = actionType === 'quit' ? 'quit' : 'close this window';
+    
+    const choice = electronPkg.dialog.showMessageBoxSync(win, {
+      type: 'warning',
+      buttons: [`${actionStr} Without Saving`, 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Unsaved Changes',
+      message: `You have unsaved changes. Are you sure you want to ${msgStr}? Your unsaved work will be lost.`
+    });
+    return choice === 0; // Return true if user clicked '[Action] Without Saving'
+  }
+  
+  return true;
+}
 
 // ── Window creation ──────────────────────────────────────────────────────────
 
@@ -55,28 +100,8 @@ function createWindow() {
 
     event.preventDefault();
     
-    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-      mainWindow.webContents.send('quit-request');
-      
-      const rendererState = await Promise.race([
-        new Promise(resolve => {
-          electronPkg.ipcMain.once('quit-response', (_e, { hasUnsavedChanges }) => resolve({ hasUnsavedChanges }));
-        }),
-        new Promise(resolve => setTimeout(() => resolve({ timeout: true }), 1500))
-      ]);
-
-      if (rendererState.hasUnsavedChanges) {
-        const choice = electronPkg.dialog.showMessageBoxSync(mainWindow, {
-          type: 'warning',
-          buttons: ['Close Without Saving', 'Cancel'],
-          defaultId: 1,
-          cancelId: 1,
-          title: 'Unsaved Changes',
-          message: 'You have unsaved changes. Are you sure you want to close this window? Your unsaved work will be lost.'
-        });
-        if (choice === 1) return; // User clicked Cancel
-      }
-    }
+    const canProceed = await checkUnsavedChanges(mainWindow, 'close');
+    if (!canProceed) return;
     
     mainWindow.destroy(); // Safe to destroy now
   });
@@ -228,6 +253,7 @@ if (!gotTheLock) {
     registerMonitorHandlers();
     registerGeminiHandlers();
     registerBugReportHandlers();
+    registerNetworkHandlers();
     createWindow();
 
     app.on('activate', () => {
@@ -248,31 +274,8 @@ app.on('before-quit', async (event) => {
   // 1. Handshake with renderer to check for unsaved changes.
   // We give the renderer 1.5 seconds to respond. If it doesn't, we assume it's
   // hung or no listeners are active and proceed with a safe quit.
-  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-    mainWindow.webContents.send('quit-request');
-    
-    // We wait for the renderer to report if it has unsaved changes.
-    const rendererState = await Promise.race([
-      new Promise(resolve => {
-        electronPkg.ipcMain.once('quit-response', (_e, { hasUnsavedChanges }) => resolve({ hasUnsavedChanges }));
-      }),
-      new Promise(resolve => setTimeout(() => resolve({ timeout: true }), 1500))
-    ]);
-
-    if (rendererState.hasUnsavedChanges) {
-      const choice = electronPkg.dialog.showMessageBoxSync(mainWindow, {
-        type: 'warning',
-        buttons: ['Quit Without Saving', 'Cancel'],
-        defaultId: 1,
-        cancelId: 1,
-        title: 'Unsaved Changes',
-        message: 'You have unsaved changes. Are you sure you want to quit? Your unsaved work will be lost.'
-      });
-      if (choice === 1) {
-        return; // User clicked Cancel
-      }
-    }
-  }
+  const canProceed = await checkUnsavedChanges(mainWindow, 'quit');
+  if (!canProceed) return;
 
   isQuitting = true;
 

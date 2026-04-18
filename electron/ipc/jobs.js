@@ -1,12 +1,13 @@
+import { logger } from '../logger.js';
 /**
  * Jobs IPC handlers — resume parsing, multi-source job search, AI scoring.
  * 12 Sources: Google, Indeed, LinkedIn, RemoteOK, WeWorkRemotely,
  *             ZipRecruiter, Glassdoor, Dice, Wellfound,
  *             Greenhouse API, Lever API, USAJobs API
  */
-import electronPkg from 'electron';
-const { ipcMain } = electronPkg;
+
 import { callGeminiDocument, callGeminiText } from './gemini.js';
+import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
 import { 
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
@@ -110,15 +111,11 @@ async function fetchApiSources(queries, sender, signal = null) {
  */
 export function registerJobsHandlers() {
 
-  // ── Parse Resume ──────────────────────────────────────────────────────────
-  ipcMain.handle('parse-resume', async (_event, { filePath }) => {
-    const ac = new AbortController();
-    const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
-    _event.sender.once('destroyed', onSenderDestroyed);
 
-    try {
-      console.log('[Jobs] Parsing resume:', filePath);
-      const profile = await callGeminiDocument(filePath, `
+
+  handleSafe('parse-resume', async (event, { filePath }, signal) => {
+    logger.info('[Jobs] Parsing resume:', filePath);
+    const profile = await callGeminiDocument(filePath, `
 Analyze this resume/CV thoroughly. Return a JSON object with:
 {
   "titles": ["exact job titles held, most recent first"],
@@ -130,32 +127,14 @@ Analyze this resume/CV thoroughly. Return a JSON object with:
   "education": ["degrees, certifications, notable training"],
   "summary": "A 2-sentence professional summary of this person"
 }
-Extract everything you can find. Be thorough.`, ac.signal);
+Extract everything you can find. Be thorough.`, signal);
 
-      console.log('[Jobs] Resume parsed:', profile.titles?.join(', '));
-      
-      // Guard: Resume parsing takes ~5s.
-      if (_event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
-
-      return { success: true, profile };
-    } catch (error) {
-      if (ac.signal.aborted) return { success: false, error: 'Window closed' };
-      console.error('[Jobs] Resume parse failed:', error?.message || String(error));
-      return { success: false, error: error?.message || String(error) };
-    } finally {
-      if (!_event.sender.isDestroyed()) {
-        _event.sender.removeListener('destroyed', onSenderDestroyed);
-      }
-    }
+    logger.info('[Jobs] Resume parsed:', profile.titles?.join(', '));
+    return { profile };
   });
 
-  ipcMain.handle('generate-job-queries', async (event, { profile }) => {
-    const ac = new AbortController();
-    const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
-    event.sender.once('destroyed', onSenderDestroyed);
-
-    try {
-      const result = await callGeminiText(`
+  handleSafe('generate-job-queries', async (event, { profile }, signal) => {
+    const result = await callGeminiText(`
 You are a career strategist. Given this professional profile, generate search queries for a job search.
 
 Profile:
@@ -169,151 +148,121 @@ Return a JSON object with three arrays of search query strings:
   "skillsOnlyQueries": ["2-3 queries using ONLY their skills and experience level, NO job title at all, e.g. 'python kubernetes 8 years team lead distributed systems'. This is intentionally broad to surface unexpected matches."]
 }
 
-Be creative with suggestedRoleQueries — think about what career directions their skills unlock that they might not have considered.`, ac.signal);
+Be creative with suggestedRoleQueries — think about what career directions their skills unlock that they might not have considered.`, signal);
       
-      if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
-
-      return { success: true, queries: result };
-    } catch (error) {
-      if (ac.signal.aborted) return { success: false, error: 'Window closed' };
-      console.error('[Jobs] Query generation failed:', error?.message || String(error));
-      return { success: false, error: error?.message || String(error) };
-    } finally {
-      if (!event.sender.isDestroyed()) {
-        event.sender.removeListener('destroyed', onSenderDestroyed);
-      }
-    }
+    return { queries: result };
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  ipcMain.handle('search-jobs', async (event, { queries }) => {
-    const abortCtrl = new AbortController();
-    const onSenderDestroyed = () => abortCtrl.abort(new Error('Sender destroyed'));
-    event.sender.once('destroyed', onSenderDestroyed);
+  handleSafe('search-jobs', async (event, { queries }, signal) => {
+    logger.info('[Jobs] Searching with', queries.length, 'queries across 12 sources');
 
-    try {
-      console.log('[Jobs] Searching with', queries.length, 'queries across 12 sources');
+    const tasks = buildJobTasks(queries);
+    
+    // Group tasks by source for per-source progress tracking
+    const sourceTaskIds = {};
+    for (const t of tasks) {
+      if (!sourceTaskIds[t.sourceId]) sourceTaskIds[t.sourceId] = [];
+      sourceTaskIds[t.sourceId].push(t.id);
+    }
 
-      const tasks = buildJobTasks(queries);
-      
-      // Group tasks by source for per-source progress tracking
-      const sourceTaskIds = {};
-      for (const t of tasks) {
-        if (!sourceTaskIds[t.sourceId]) sourceTaskIds[t.sourceId] = [];
-        sourceTaskIds[t.sourceId].push(t.id);
-      }
-
-      // Notify frontend that sources are starting
-      for (const sourceId of Object.keys(sourceTaskIds)) {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('job-source-progress', { sourceId, status: 'searching', count: 0 });
-        }
-      }
-
-      const allJobs = [];
-      const sourceResults = {};
-      
-      // 1. Run Scraper Tasks and API Tasks concurrently
-        const [results, apiResults] = await Promise.all([
-          scrapeMultiple(tasks, (res) => {
-            if (event.sender.isDestroyed()) return;
-            const sourceId = res.id.replace(/-\d+$/, '');
-            const count = Array.isArray(res.data) ? res.data.length : 0;
-            event.sender.send('job-source-progress', {
-              sourceId,
-              status: res.success ? 'done' : 'error',
-              count
-            });
-          }, abortCtrl.signal),
-          fetchApiSources(queries, event.sender, abortCtrl.signal)
-        ]);
-
-        // Process Scraper Results
-        for (const result of results) {
-          const sourceId = result.id.replace(/-\d+$/, '');
-          if (!sourceResults[sourceId]) sourceResults[sourceId] = { jobs: [], errors: 0 };
-
-          if (result.success && Array.isArray(result.data)) {
-            const tagged = result.data.map(j => ({ ...j, source: sourceId }));
-            sourceResults[sourceId].jobs.push(...tagged);
-            allJobs.push(...tagged);
-          } else {
-            sourceResults[sourceId].errors++;
-            console.warn(`[Jobs] Source ${result.id} failed:`, result.error);
-          }
-        }
-
-        // Process API Results
-        for (const res of apiResults) {
-          if (!sourceResults[res.sourceId]) sourceResults[res.sourceId] = { jobs: [], errors: 0 };
-          if (res.jobs.length > 0) {
-            const tagged = res.jobs.map(j => ({ ...j, source: res.sourceId }));
-            sourceResults[res.sourceId].jobs.push(...tagged);
-            allJobs.push(...tagged);
-          } else if (res.error) {
-            sourceResults[res.sourceId].errors++;
-          }
-        }
-
-        // Send per-source completion events
-        for (const sourceId of ALL_SOURCE_IDS) {
-          const data = sourceResults[sourceId] || { jobs: [], errors: 0 };
-          const allFailed = data.errors > 0 && data.jobs.length === 0;
-          const status = (data.jobs.length === 0 && data.errors === 0) ? 'idle' : (allFailed ? 'error' : 'done');
-          
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('job-source-progress', {
-              sourceId,
-              status,
-              count: data.jobs.length,
-            });
-          }
-        }
-
-        // Deduplicate by normalized company + title
-        const seen = new Set();
-        const deduped = allJobs.filter(job => {
-          const key = `${(job.title || '').toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}`;
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
-
-        console.log(`[Jobs] Found ${deduped.length} unique jobs (from ${allJobs.length} total across ${Object.keys(sourceResults).length} sources)`);
-        return { success: true, jobs: deduped, sourceResults };
-    } catch (error) {
-      if (abortCtrl.signal.aborted) return { success: false, error: 'Window closed' };
-      console.error('[Jobs] Search failed:', error?.message || String(error));
-      return { success: false, error: error?.message || String(error) };
-    } finally {
+    // Notify frontend that sources are starting
+    for (const sourceId of Object.keys(sourceTaskIds)) {
       if (!event.sender.isDestroyed()) {
-        event.sender.removeListener('destroyed', onSenderDestroyed);
+        event.sender.send('job-source-progress', { sourceId, status: 'searching', count: 0 });
       }
     }
+
+    const allJobs = [];
+    const sourceResults = {};
+    
+    // 1. Run Scraper Tasks and API Tasks concurrently
+    const [results, apiResults] = await Promise.all([
+      scrapeMultiple(tasks, (res) => {
+        if (event.sender.isDestroyed()) return;
+        const sourceId = res.id.replace(/-\d+$/, '');
+        const count = Array.isArray(res.data) ? res.data.length : 0;
+        event.sender.send('job-source-progress', {
+          sourceId,
+          status: res.success ? 'done' : 'error',
+          count
+        });
+      }, signal),
+      fetchApiSources(queries, event.sender, signal)
+    ]);
+
+    // Process Scraper Results
+    for (const result of results) {
+      const sourceId = result.id.replace(/-\d+$/, '');
+      if (!sourceResults[sourceId]) sourceResults[sourceId] = { jobs: [], errors: 0 };
+
+      if (result.success && Array.isArray(result.data)) {
+        const tagged = result.data.map(j => ({ ...j, source: sourceId }));
+        sourceResults[sourceId].jobs.push(...tagged);
+        allJobs.push(...tagged);
+      } else {
+        sourceResults[sourceId].errors++;
+        logger.warn(`[Jobs] Source ${result.id} failed:`, result.error);
+      }
+    }
+
+    // Process API Results
+    for (const res of apiResults) {
+      if (!sourceResults[res.sourceId]) sourceResults[res.sourceId] = { jobs: [], errors: 0 };
+      if (res.jobs.length > 0) {
+        const tagged = res.jobs.map(j => ({ ...j, source: res.sourceId }));
+        sourceResults[res.sourceId].jobs.push(...tagged);
+        allJobs.push(...tagged);
+      } else if (res.error) {
+        sourceResults[res.sourceId].errors++;
+      }
+    }
+
+    // Send per-source completion events
+    for (const sourceId of ALL_SOURCE_IDS) {
+      const data = sourceResults[sourceId] || { jobs: [], errors: 0 };
+      const allFailed = data.errors > 0 && data.jobs.length === 0;
+      const status = (data.jobs.length === 0 && data.errors === 0) ? 'idle' : (allFailed ? 'error' : 'done');
+      
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('job-source-progress', {
+          sourceId,
+          status,
+          count: data.jobs.length,
+        });
+      }
+    }
+
+    // Deduplicate by normalized company + title
+    const seen = new Set();
+    const deduped = allJobs.filter(job => {
+      const key = `${(job.title || '').toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    logger.info(`[Jobs] Found ${deduped.length} unique jobs (from ${allJobs.length} total across ${Object.keys(sourceResults).length} sources)`);
+    return { jobs: deduped, sourceResults };
   });
 
   // ── Score Jobs Against Resume ─────────────────────────────────────────────
-  ipcMain.handle('score-jobs', async (_event, { jobs, profile }) => {
-    const ac = new AbortController();
-    const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
-    _event.sender.once('destroyed', onSenderDestroyed);
+  handleSafe('score-jobs', async (event, { jobs, profile }, signal) => {
+    logger.info('[Jobs] Scoring', jobs.length, 'jobs');
 
-    try {
-      console.log('[Jobs] Scoring', jobs.length, 'jobs');
+    // Batch into groups of 15
+    const BATCH_SIZE = 15;
+    const scoredJobs = [];
 
-      // Batch into groups of 15
-      const BATCH_SIZE = 15;
-      const scoredJobs = [];
+    for (let i = 0; i < jobs.length; i += BATCH_SIZE) {
+      // Guard: Check if window was closed between batches
+      if (signal.aborted) break;
 
-      for (let i = 0; i < jobs.length; i += BATCH_SIZE) {
-        // Guard: Check if window was closed between batches
-        if (_event.sender.isDestroyed() || ac.signal.aborted) break;
-
-        const batch = jobs.slice(i, i + BATCH_SIZE);
-        let batchResult;
-        
-        try {
-          batchResult = await callGeminiText(`
+      const batch = jobs.slice(i, i + BATCH_SIZE);
+      let batchResult;
+      
+      try {
+        batchResult = await callGeminiText(`
 You are a career matching expert. Score each job against this candidate's profile.
 
 CANDIDATE PROFILE:
@@ -339,61 +288,45 @@ IMPORTANT SCORING RULES:
 - Skills-only matches without title match can still score 70%+ if requirements align.
 - Score 85%+ only for genuinely strong matches.
 - "unexpected" label is for jobs from the skills-only queries that reveal surprising career paths.
-- Aim for 3-7 distinct careerDirection categories total. Merge small categories.`, ac.signal);
-        } catch (err) {
-          if (ac.signal.aborted) throw err;
-          console.warn(`[Jobs] Batch scoring failed:`, err);
-          batchResult = null; // Forces string fallback below
-        }
-
-        if (Array.isArray(batchResult)) {
-          batch.forEach((job, idx) => {
-            const score = batchResult.find(s => s.index === idx) || { matchScore: 50, reasoning: 'Unable to score', careerDirection: 'Other', strengthLabel: 'exploring' };
-            scoredJobs.push({ ...job, ...score });
-          });
-        } else {
-          console.warn(`[Jobs] batchResult was not an array:`, batchResult);
-          batch.forEach((job) => {
-            scoredJobs.push({ ...job, matchScore: 50, reasoning: 'AI format error', careerDirection: 'Other', strengthLabel: 'exploring' });
-          });
-        }
+- Aim for 3-7 distinct careerDirection categories total. Merge small categories.`, signal);
+      } catch (err) {
+        if (signal.aborted) throw err;
+        logger.warn(`[Jobs] Batch scoring failed:`, err);
+        batchResult = null; // Forces string fallback below
       }
 
-      // Sort by score descending
-      scoredJobs.sort((a, b) => b.matchScore - a.matchScore);
-
-      // Group by career direction
-      const clusters = {};
-      for (const job of scoredJobs) {
-        const dir = job.careerDirection || 'Other';
-        if (!clusters[dir]) clusters[dir] = [];
-        clusters[dir].push(job);
-      }
-
-      console.log(`[Jobs] Scored ${scoredJobs.length} jobs across ${Object.keys(clusters).length} career directions`);
-      
-      if (_event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
-
-      return { success: true, scoredJobs, clusters };
-    } catch (error) {
-      if (ac.signal.aborted) return { success: false, error: 'Window closed' };
-      console.error('[Jobs] Scoring failed:', error?.message || String(error));
-      return { success: false, error: error?.message || String(error) };
-    } finally {
-      if (!_event.sender.isDestroyed()) {
-        _event.sender.removeListener('destroyed', onSenderDestroyed);
+      if (Array.isArray(batchResult)) {
+        batch.forEach((job, idx) => {
+          const score = batchResult.find(s => s.index === idx) || { matchScore: 50, reasoning: 'Unable to score', careerDirection: 'Other', strengthLabel: 'exploring' };
+          scoredJobs.push({ ...job, ...score });
+        });
+      } else {
+        logger.warn(`[Jobs] batchResult was not an array:`, batchResult);
+        batch.forEach((job) => {
+          scoredJobs.push({ ...job, matchScore: 50, reasoning: 'AI format error', careerDirection: 'Other', strengthLabel: 'exploring' });
+        });
       }
     }
+
+    // Sort by score descending
+    scoredJobs.sort((a, b) => b.matchScore - a.matchScore);
+
+    // Group by career direction
+    const clusters = {};
+    for (const job of scoredJobs) {
+      const dir = job.careerDirection || 'Other';
+      if (!clusters[dir]) clusters[dir] = [];
+      clusters[dir].push(job);
+    }
+
+    logger.info(`[Jobs] Scored ${scoredJobs.length} jobs across ${Object.keys(clusters).length} career directions`);
+    
+    return { scoredJobs, clusters };
   });
 
   // ── Generate Cover Letter ─────────────────────────────────────────────────
-  ipcMain.handle('generate-cover-letter', async (_event, { profile, job }) => {
-    const ac = new AbortController();
-    const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
-    _event.sender.once('destroyed', onSenderDestroyed);
-
-    try {
-      const result = await callGeminiText(`
+  handleSafe('generate-cover-letter', async (event, { profile, job }, signal) => {
+    const result = await callGeminiText(`
 Write a compelling cover letter for this candidate applying to this job.
 
 CANDIDATE:
@@ -409,19 +342,8 @@ Return a JSON object:
   "coverLetter": "The full cover letter text, properly formatted with paragraphs. Professional but authentic tone. Highlight specific skills that match the job. Keep it concise — 3-4 paragraphs max."
 }
 
-Don't be generic. Reference specific skills from the resume that match specific requirements from the job.`, ac.signal);
+Don't be generic. Reference specific skills from the resume that match specific requirements from the job.`, signal);
 
-      if (_event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
-
-      return { success: true, coverLetter: result.coverLetter };
-    } catch (error) {
-      if (ac.signal.aborted) return { success: false, error: 'Window closed' };
-      console.error('[Jobs] Cover letter failed:', error?.message || String(error));
-      return { success: false, error: error?.message || String(error) };
-    } finally {
-      if (!_event.sender.isDestroyed()) {
-        _event.sender.removeListener('destroyed', onSenderDestroyed);
-      }
-    }
+    return { coverLetter: result.coverLetter };
   });
 }

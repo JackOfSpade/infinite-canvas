@@ -306,8 +306,6 @@ export function JobHubNode({ id, data }) {
           sources={getSourceStatuses()}
           nodeId={id}
           direction="in"
-          nodeWidth={260}
-          nodeHeight={hubState === 'empty' ? 140 : 100}
           radius={140}
         />
       }

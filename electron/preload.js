@@ -17,7 +17,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Filesystem ──────────────────────────────────────────────────────────
   openFile: (filePath) => ipcRenderer.invoke('open-file', filePath),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
-  fetchUrlTitle: (url) => ipcRenderer.invoke('fetch-url-title', url),
+  fetchUrlTitle: async (url) => {
+    const res = await ipcRenderer.invoke('fetch-url-title', url);
+    return res.success ? (res.title || null) : null;
+  },
   saveWorkspace: (data) => ipcRenderer.invoke('save-workspace', data),
   loadWorkspace: () => ipcRenderer.invoke('load-workspace'),
   scanDirectory: (dirPath) => ipcRenderer.invoke('scan-directory', dirPath),
@@ -44,19 +47,46 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Marketplace Module ──────────────────────────────────────────────────
   analyzePhotos: (args) => ipcRenderer.invoke('analyze-photos', args),
   researchPrice: (args) => ipcRenderer.invoke('research-price', args),
-  getSellPlatforms: () => ipcRenderer.invoke('get-sell-platforms'),
-  checkSellMonitorAuth: (args) => ipcRenderer.invoke('check-sell-monitor-auth', args),
+  getSellPlatforms: async () => {
+    const res = await ipcRenderer.invoke('get-sell-platforms');
+    return res.success ? (res.platforms || []) : [];
+  },
+  checkSellMonitorAuth: async (args) => {
+    const res = await ipcRenderer.invoke('check-sell-monitor-auth', args);
+    return res.success ? res : { platform: args.platformId, connected: false };
+  },
 
   onPriceSourceProgress: createListener('price-source-progress'),
 
   // ── Accounts Module ───────────────────────────────────────────────────
-  getPlatforms: () => ipcRenderer.invoke('get-platforms'),
-  getSessionStatuses: () => ipcRenderer.invoke('get-session-statuses'),
-  getCachedSessionStatuses: () => ipcRenderer.invoke('get-cached-session-statuses'),
-  getSystemConfigStatus: () => ipcRenderer.invoke('get-system-config-status'),
-  checkPlatformSession: (args) => ipcRenderer.invoke('check-platform-session', args),
-  openLoginWindow: (args) => ipcRenderer.invoke('open-login-window', args),
-  checkAndLogin: (args) => ipcRenderer.invoke('check-and-login', args),
+  getPlatforms: async () => {
+    const res = await ipcRenderer.invoke('get-platforms');
+    return res.success ? (res.platforms || []) : [];
+  },
+  getSessionStatuses: async () => {
+    const res = await ipcRenderer.invoke('get-session-statuses');
+    return res.success ? (res.statuses || []) : [];
+  },
+  getCachedSessionStatuses: async () => {
+    const res = await ipcRenderer.invoke('get-cached-session-statuses');
+    return res.success ? (res.statuses || []) : [];
+  },
+  getSystemConfigStatus: async () => {
+    const res = await ipcRenderer.invoke('get-system-config-status');
+    return res.success ? (res.config || {}) : {};
+  },
+  checkPlatformSession: async (args) => {
+    const res = await ipcRenderer.invoke('check-platform-session', args);
+    return res.success ? res : { platform: args.platformId, connected: false };
+  },
+  openLoginWindow: async (args) => {
+    const res = await ipcRenderer.invoke('open-login-window', args);
+    return res.success ? res : { success: false };
+  },
+  checkAndLogin: async (args) => {
+    const res = await ipcRenderer.invoke('check-and-login', args);
+    return res.success ? res : { platform: args.platformId, connected: false, loginOpened: false };
+  },
 
   // ── Tier 4 Monitor Module ─────────────────────────────────────────────
   // Human-assisted BrowserView monitors for hostile platforms (Facebook, etc.)

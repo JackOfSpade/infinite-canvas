@@ -5,6 +5,7 @@ import { Lock, X } from 'lucide-react';
 import { CanvasThumbnail } from '../components/CanvasThumbnail';
 import { FontSizeDialog } from '../components/FontSizeDialog';
 import { EventLogger } from '../utils/EventLogger';
+import { getNodeDims } from '../utils/constants';
 
 const MIN_SIZE    = 80;
 const MAX_SIZE    = 600;
@@ -376,7 +377,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       // Read center from Zustand store — always synchronous and up-to-date.
       const node = mainFlow.getNode(id);
       if (!node) return;
-      const liveSize = node.style?.width || node.measured?.width || node.width || DEFAULT_SIZE;
+      const { w: liveSize } = getNodeDims(node);
       const flowCx = node.position.x + liveSize / 2;
       const flowCy = node.position.y + liveSize / 2;
       resizeCenterRef.current = { flowCx, flowCy };

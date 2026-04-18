@@ -1,5 +1,7 @@
 import { useCallback, useState, useRef, useEffect } from 'react';
 import { toPng } from 'html-to-image';
+import { getNodeDims } from '../utils/constants';
+import { EventLogger } from '../utils/EventLogger';
 
 /**
  * Recursively migrate old group nodes from separate data.nodes/edges/drawings
@@ -14,7 +16,7 @@ function migrateGroupNodes(nodes) {
       const { dragHandle: _dragHandle, ...restNode } = node;
       return {
         ...restNode,
-        style: { width: node.style?.width || 180, height: node.style?.height || 130 },
+        style: { width: getNodeDims(node).w || 180, height: getNodeDims(node).h || 130 },
         data: {
           ...restData,
           canvasData: {
@@ -156,7 +158,7 @@ export function useCanvasPersistence({
       }
     } catch (err) {
       if (!isMountedRef.current) return;
-      console.error('Failed to save canvas:', err);
+      EventLogger.error('Failed to save canvas:', err);
       setSaveState('idle');
       addToast({ title: 'Save Error', description: err?.message || String(err) || 'An error occurred while saving.', type: 'error' });
     }
@@ -198,7 +200,7 @@ export function useCanvasPersistence({
       }
     } catch (err) {
       if (!isMountedRef.current) return;
-      console.error('Failed to load canvas:', err);
+      EventLogger.error('Failed to load canvas:', err);
       addToast({ title: 'Load Error', description: err?.message || String(err) || 'An error occurred while loading.', type: 'error'});
     }
   }, [confirmDiscardChanges, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, customFitView, addToast, resetStack, clearHistory, isAnimatingRef]);
@@ -219,7 +221,7 @@ export function useCanvasPersistence({
       })
       .catch((err) => {
         if (!isMountedRef.current) return;
-        console.error('Failed to export image', err);
+        EventLogger.error('Failed to export image', err);
         addToast({ title: 'Export Failed', description: 'There was an error generating the PNG.', type: 'error'});
       })
       .finally(() => {

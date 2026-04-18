@@ -1,3 +1,4 @@
+import { logger } from '../logger.js';
 /**
  * Gemini AI service — text + vision support via Vertex AI.
  * Uses Service Account for authentication against regional endpoints.
@@ -5,9 +6,9 @@
 import fs from 'fs';
 import path from 'path';
 
-import electronPkg from 'electron';
-const { ipcMain } = electronPkg;
+
 import { GoogleAuth } from 'google-auth-library';
+import { handleSafe } from './ipcUtils.js';
 
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const LOCATION = 'us-central1';
@@ -158,7 +159,7 @@ function parseGeminiJSON(raw) {
   try {
     return JSON.parse(jsonStr.trim());
   } catch (error) {
-    console.error('[Gemini] Failed to parse JSON response:', error.message, '\nRaw Segment:', jsonStr.substring(0, 100));
+    logger.error('[Gemini] Failed to parse JSON response:', error.message, '\nRaw Segment:', jsonStr.substring(0, 100));
     throw new Error(`AI returned invalid JSON: ${error.message}`);
   }
 }
@@ -250,28 +251,10 @@ export async function callGeminiDocument(filePath, prompt, signal = null) {
 }
 
 export function registerGeminiHandlers() {
-  ipcMain.handle('ai-polish-text', async (event, text) => {
-    const ac = new AbortController();
-    const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
-    event.sender.once('destroyed', onSenderDestroyed);
-
-    try {
-      const prompt = `You are an AI assistant in a visual workspace app. Polish the following text. Make it clear, concise, and professional. Output ONLY the improved text, without quotes or conversational filler. Keep original markdown formatting if any. The text is:\n\n${text}`;
-      const config = { responseMimeType: 'text/plain', signal: ac.signal };
-      const raw = await callGemini([{ text: prompt }], config);
-      
-      // Guard: Gemini calls can take 5s-20s. Window may be gone.
-      if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
-
-      return { success: true, text: raw.trim() };
-    } catch (e) {
-      if (ac.signal.aborted) return { success: false, error: 'Window closed' };
-      console.error('[Gemini] Polish failed:', e);
-      return { success: false, error: e?.message || String(e) };
-    } finally {
-      if (!event.sender.isDestroyed()) {
-        event.sender.removeListener('destroyed', onSenderDestroyed);
-      }
-    }
+  handleSafe('ai-polish-text', async (event, text, signal) => {
+    const prompt = `You are an AI assistant in a visual workspace app. Polish the following text. Make it clear, concise, and professional. Output ONLY the improved text, without quotes or conversational filler. Keep original markdown formatting if any. The text is:\n\n${text}`;
+    const config = { responseMimeType: 'text/plain', signal };
+    const raw = await callGemini([{ text: prompt }], config);
+    return { text: raw.trim() };
   });
 }

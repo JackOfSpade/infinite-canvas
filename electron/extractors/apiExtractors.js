@@ -1,3 +1,4 @@
+import { logger } from '../logger.js';
 /**
  * API-Based Job Extractors — LinkedIn, Greenhouse, Lever, USAJobs.
  *
@@ -77,7 +78,7 @@ export async function fetchLinkedInJobs(query, signal = null) {
       });
 
       if (!res.ok) {
-        console.warn(`[LinkedIn API] Page ${start / 25} returned ${res.status}`);
+        logger.warn(`[LinkedIn API] Page ${start / 25} returned ${res.status}`);
         break;
       }
 
@@ -121,7 +122,7 @@ export async function fetchLinkedInJobs(query, signal = null) {
       // Polite delay between pages — report recommends 2-3s minimum for LinkedIn
       if (start < 25) await new Promise(r => setTimeout(r, 2000));
     } catch (error) {
-      console.error(`[LinkedIn API] Fetch failed at start=${start}:`, error?.message || String(error));
+      logger.error(`[LinkedIn API] Fetch failed at start=${start}:`, error?.message || String(error));
       break;
     }
   }
@@ -285,7 +286,7 @@ export async function fetchLeverJobs(query, signal = null) {
  */
 export async function fetchUSAJobs(query, apiKey, email, signal = null) {
   if (!apiKey) {
-    console.warn('[USAJobs] No API key configured — skipping');
+    logger.warn('[USAJobs] No API key configured — skipping');
     return [];
   }
 
@@ -306,7 +307,7 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null) {
     });
 
     if (!res.ok) {
-      console.error(`[USAJobs] API returned ${res.status}`);
+      logger.error(`[USAJobs] API returned ${res.status}`);
       return [];
     }
 
@@ -332,7 +333,7 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null) {
       };
     });
   } catch (error) {
-    console.error('[USAJobs] Fetch failed:', error?.message || String(error));
+    logger.error('[USAJobs] Fetch failed:', error?.message || String(error));
     return [];
   }
 }
@@ -359,7 +360,7 @@ export async function fetchRemoteOKJobs(query, signal = null) {
     });
 
     if (!res.ok) {
-      console.warn(`[RemoteOK API] Returned ${res.status}`);
+      logger.warn(`[RemoteOK API] Returned ${res.status}`);
       return [];
     }
 
@@ -386,7 +387,7 @@ export async function fetchRemoteOKJobs(query, signal = null) {
       source: 'remoteok',
     }));
   } catch (error) {
-    console.error('[RemoteOK API] Fetch failed:', error?.message || String(error));
+    logger.error('[RemoteOK API] Fetch failed:', error?.message || String(error));
     return [];
   }
 }
@@ -409,7 +410,7 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null) {
     });
 
     if (!res.ok) {
-      console.warn(`[WWR RSS] Returned ${res.status}`);
+      logger.warn(`[WWR RSS] Returned ${res.status}`);
       return [];
     }
 
@@ -459,7 +460,7 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null) {
 
     return jobs.slice(0, 30);
   } catch (error) {
-    console.error('[WWR RSS] Fetch failed:', error?.message || String(error));
+    logger.error('[WWR RSS] Fetch failed:', error?.message || String(error));
     return [];
   }
 }
@@ -490,7 +491,7 @@ export async function fetchReverbListings(query, soldOnly = false, signal = null
     });
 
     if (!res.ok) {
-      console.warn(`[Reverb API] Returned ${res.status}`);
+      logger.warn(`[Reverb API] Returned ${res.status}`);
       return [];
     }
 
@@ -511,7 +512,7 @@ export async function fetchReverbListings(query, soldOnly = false, signal = null
       };
     });
   } catch (error) {
-    console.error('[Reverb API] Fetch failed:', error?.message || String(error));
+    logger.error('[Reverb API] Fetch failed:', error?.message || String(error));
     return [];
   }
 }
@@ -557,14 +558,14 @@ export async function fetchDiceListings(query, location = '', signal = null) {
     );
 
     if (!res.ok) {
-      console.warn(`[Dice API] Returned ${res.status}`);
+      logger.warn(`[Dice API] Returned ${res.status}`);
       return [];
     }
 
     const data = await res.json();
     const jobs = data.data || [];
 
-    console.log(`[Dice API] Found ${jobs.length} jobs for "${query}"`);
+    logger.info(`[Dice API] Found ${jobs.length} jobs for "${query}"`);
 
     return jobs.map(job => ({
       title: job.title || '',
@@ -580,7 +581,7 @@ export async function fetchDiceListings(query, location = '', signal = null) {
       easyApply: job.easyApply || false,
     }));
   } catch (error) {
-    console.error('[Dice API] Fetch failed:', error?.message || String(error));
+    logger.error('[Dice API] Fetch failed:', error?.message || String(error));
     return [];
   }
 }
@@ -661,11 +662,11 @@ export async function fetchStockXListings(query, signal = null) {
     // Phase 1: Key Extraction Bootstrap (once per session)
     if (!algoliaKeys) {
       if (Date.now() - lastStockXErrorTime < 300000) {
-        console.warn('[StockX] Bootstrap cooldown active — skipping');
+        logger.warn('[StockX] Bootstrap cooldown active — skipping');
         return [];
       }
 
-      console.log('[StockX] No cached keys — extracting via stealth browser...');
+      logger.info('[StockX] No cached keys — extracting via stealth browser...');
       try {
         const keys = await queueScrape(
           `https://stockx.com/search?s=${encodeURIComponent(query)}`,
@@ -682,15 +683,15 @@ export async function fetchStockXListings(query, signal = null) {
 
         if (keys?.appId && keys?.apiKey) {
           algoliaKeys = keys;
-          console.log(`[StockX] Algolia keys extracted: appId=${keys.appId.substring(0, 4)}...`);
+          logger.info(`[StockX] Algolia keys extracted: appId=${keys.appId.substring(0, 4)}...`);
         } else {
           lastStockXErrorTime = Date.now();
           algoliaKeys = { appId: HARDCODED_STOCKX_APP_ID, apiKey: '' };
-          console.warn('[StockX] Bootstrap failed — using hardcoded fallback. Cooldown active.');
+          logger.warn('[StockX] Bootstrap failed — using hardcoded fallback. Cooldown active.');
         }
       } catch (err) {
         lastStockXErrorTime = Date.now();
-        console.error('[StockX] Extraction error:', err.message);
+        logger.error('[StockX] Extraction error:', err.message);
         return [];
       }
     }
@@ -716,7 +717,7 @@ export async function fetchStockXListings(query, signal = null) {
     );
 
     if (!algoliaRes.ok) {
-      console.warn(`[StockX Algolia] Returned ${algoliaRes.status}`);
+      logger.warn(`[StockX Algolia] Returned ${algoliaRes.status}`);
       algoliaKeys = null;
       return [];
     }
@@ -741,7 +742,7 @@ export async function fetchStockXListings(query, signal = null) {
       };
     });
   } catch (error) {
-    console.error('[StockX Algolia] Fetch failed:', error?.message || String(error));
+    logger.error('[StockX Algolia] Fetch failed:', error?.message || String(error));
     return [];
   }
 }

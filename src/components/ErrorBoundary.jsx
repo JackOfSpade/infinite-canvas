@@ -14,17 +14,7 @@ export class ErrorBoundary extends React.Component {
     console.error('[ErrorBoundary] Caught exception:', error, errorInfo);
     this.setState({ errorInfo });
     
-    // Attempt to log via backend IPC if available
-    try {
-      if (window.electronAPI && window.electronAPI.sendBugReport) {
-        window.electronAPI.sendBugReport({
-          description: 'Unhandled React Exception: ' + (error?.message || String(error)),
-          type: 'crash'
-        });
-      }
-    } catch {
-      // Ignore
-    }
+
   }
 
   handleReload = () => {

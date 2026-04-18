@@ -1,3 +1,4 @@
+import { logger } from '../logger.js';
 /**
  * Marketplace IPC handlers — photo analysis, multi-source FMV research, listing prep.
  *
@@ -6,9 +7,9 @@
  *   Tier 1 Active: eBay Active
  *   Tier 2 Sold:  Mercari Sold
  */
-import electronPkg from 'electron';
-const { ipcMain } = electronPkg;
+
 import { callGeminiVision, callGeminiText } from './gemini.js';
+import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
 import {
   EBAY_SOLD_EXTRACTOR, EBAY_SOLD_CONFIG,
@@ -99,15 +100,10 @@ async function fetchApiMarketplaceSources(query, signal = null) {
 export function registerMarketplaceHandlers() {
 
   // ── Analyze Product Photos ────────────────────────────────────────────────
-  ipcMain.handle('analyze-photos', async (_event, { imagePaths }) => {
-    const ac = new AbortController();
-    const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
-    _event.sender.once('destroyed', onSenderDestroyed);
+  handleSafe('analyze-photos', async (event, { imagePaths }, signal) => {
+    logger.info('[Marketplace] Analyzing', imagePaths.length, 'photos');
 
-    try {
-      console.log('[Marketplace] Analyzing', imagePaths.length, 'photos');
-
-      const result = await callGeminiVision(imagePaths, `
+    const result = await callGeminiVision(imagePaths, `
 You are a marketplace listing expert. Analyze these product photos and identify what is being sold.
 
 Return a JSON object:
@@ -122,104 +118,87 @@ Return a JSON object:
   "generated_description": "A detailed, buyer-friendly selling description (include specs if identifiable, condition details, what's included). 3-4 sentences."
 }
 
-Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`, ac.signal);
+Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`, signal);
 
-      if (_event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
-      console.log('[Marketplace] Product identified:', result?.generated_title || 'Unknown');
-      
-      return { success: true, product: result };
-    } catch (error) {
-      if (ac.signal.aborted) return { success: false, error: 'Window closed' };
-      console.error('[Marketplace] Photo analysis failed:', error?.message || String(error));
-      return { success: false, error: error?.message || String(error) };
-    } finally {
-      if (!_event.sender.isDestroyed()) {
-        _event.sender.removeListener('destroyed', onSenderDestroyed);
-      }
-    }
+    logger.info('[Marketplace] Product identified:', result?.generated_title || 'Unknown');
+    
+    return { product: result };
   });
 
   // ── Research Price (Multi-Source FMV) ──────────────────────────────────────
-  ipcMain.handle('research-price', async (event, { query, condition }) => {
-    const abortCtrl = new AbortController();
-    const onSenderDestroyed = () => abortCtrl.abort();
-    event.sender.once('destroyed', onSenderDestroyed);
+  handleSafe('research-price', async (event, { query, condition }, signal) => {
+    logger.info('[Marketplace] Researching price for:', query);
 
-    try {
-      console.log('[Marketplace] Researching price for:', query);
+    const tasks = buildCompTasks(query);
 
-      const tasks = buildCompTasks(query);
+    // Notify frontend that all sources are starting
+    for (const t of tasks) {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('price-source-progress', { sourceId: t.id, status: 'searching', count: 0 });
+      }
+    }
 
-      // Notify frontend that all sources are starting
-      for (const t of tasks) {
+    const scrapeResultsPromise = scrapeMultiple(tasks, (res) => {
+      if (event.sender.isDestroyed()) return;
+      const items = Array.isArray(res.data) ? res.data : [];
+      event.sender.send('price-source-progress', {
+        sourceId: res.id,
+        status: res.success ? 'done' : 'error',
+        count: items.length,
+      });
+    }, signal);
+
+    const apiSourceIds = ['reverb', 'stockx'];
+    for (const sourceId of apiSourceIds) {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('price-source-progress', { sourceId, status: 'searching', count: 0 });
+      }
+    }
+    const apiResultsPromise = fetchApiMarketplaceSources(query, signal);
+
+    const [scrapeResults, apiResults] = await Promise.all([scrapeResultsPromise, apiResultsPromise]);
+
+    const taskCategoryMap = buildTaskCategoryMap(tasks);
+    const allComps = { sold: [], active: [] };
+
+    // 1. Browser pool results
+    for (const r of scrapeResults) {
+      if (!r.success) {
+        logger.warn(`[Marketplace] A scrape task for ${r.id} was rejected: ${r.error}`);
+        continue;
+      }
+      const { id, data: items } = r;
+      const category = taskCategoryMap[id] ?? 'sold'; // API sources (reverb, stockx) are sold
+      if (Array.isArray(items)) {
+        allComps[category].push(...items);
+      }
+    }
+
+    // 2. API-based sources
+    for (const res of apiResults) {
+      if (res.items.length > 0) {
+        allComps.sold.push(...res.items);
         if (!event.sender.isDestroyed()) {
-          event.sender.send('price-source-progress', { sourceId: t.id, status: 'searching', count: 0 });
+          event.sender.send('price-source-progress', { sourceId: res.sourceId, status: 'done', count: res.items.length });
         }
-      }
-
-      const scrapeResultsPromise = scrapeMultiple(tasks, (res) => {
-        if (event.sender.isDestroyed()) return;
-        const items = Array.isArray(res.data) ? res.data : [];
-        event.sender.send('price-source-progress', {
-          sourceId: res.id,
-          status: res.success ? 'done' : 'error',
-          count: items.length,
-        });
-      }, abortCtrl.signal);
-
-      const apiSourceIds = ['reverb', 'stockx'];
-      for (const sourceId of apiSourceIds) {
+      } else {
         if (!event.sender.isDestroyed()) {
-          event.sender.send('price-source-progress', { sourceId, status: 'searching', count: 0 });
+          event.sender.send('price-source-progress', { sourceId: res.sourceId, status: res.error ? 'error' : 'done', count: 0 });
         }
       }
-      const apiResultsPromise = fetchApiMarketplaceSources(query, abortCtrl.signal);
+    }
 
-      const [scrapeResults, apiResults] = await Promise.all([scrapeResultsPromise, apiResultsPromise]);
+    const totalComps = allComps.sold.length + allComps.active.length;
+    logger.info(`[Marketplace] Found ${allComps.sold.length} sold, ${allComps.active.length} active comps across all sources`);
 
-      // Aggregate all comps by type — category comes from the task definition,
-      // so there's no separate list to keep in sync with buildCompTasks.
-      const taskCategoryMap = buildTaskCategoryMap(tasks);
-      const allComps = { sold: [], active: [] };
+    // Guard: Research process is long. Check before heavy synthesis.
+    if (signal.aborted) {
+      throw new Error('Window closed');
+    }
 
-      // 1. Browser pool results
-      for (const r of scrapeResults) {
-        if (!r.success) {
-          console.warn(`[Marketplace] A scrape task for ${r.id} was rejected: ${r.error}`);
-          continue;
-        }
-        const { id, data: items } = r;
-        const category = taskCategoryMap[id] ?? 'sold'; // API sources (reverb, stockx) are sold
-        if (Array.isArray(items)) {
-          allComps[category].push(...items);
-        }
-      }
-
-      // 2. API-based sources (Reverb REST API, StockX Algolia bypass)
-      for (const res of apiResults) {
-        if (res.items.length > 0) {
-          allComps.sold.push(...res.items);
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('price-source-progress', { sourceId: res.sourceId, status: 'done', count: res.items.length });
-          }
-        } else {
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('price-source-progress', { sourceId: res.sourceId, status: res.error ? 'error' : 'done', count: 0 });
-          }
-        }
-      }
-
-      const totalComps = allComps.sold.length + allComps.active.length;
-      console.log(`[Marketplace] Found ${allComps.sold.length} sold, ${allComps.active.length} active comps across all sources`);
-
-      // Guard: Research process is long. Check before heavy synthesis.
-      if (event.sender.isDestroyed() || abortCtrl.signal.aborted) {
-        return { success: false, error: 'Window closed' };
-      }
-
-      // If we have comp data, ask Gemini to synthesize pricing + routing
-      if (totalComps > 0) {
-        const pricing = await callGeminiText(`
+    // If we have comp data, ask Gemini to synthesize pricing + routing
+    if (totalComps > 0) {
+      const pricing = await callGeminiText(`
 You are a pricing analyst and marketplace routing expert. Given these comparable listings from multiple sources, recommend a selling price AND which platforms to list on.
 
 ITEM: ${query}
@@ -266,40 +245,24 @@ Platform routing rules for recommended_platforms (pick 2-4 most relevant):
 - Luxury/Designer → eBay (13% + free authentication) > Poshmark
 - General/Mixed → Mercari (10%) > eBay (13%) > Facebook (0% local)
 
-Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, whatnot`, abortCtrl.signal);
+Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, whatnot`, signal);
 
-        if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
-
-        return {
-          success: true,
-          pricing,
-          comps: allComps,
-        };
-      }
-
-      // Guard: Research process is the longest async operation (~30s).
-      if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
-
-      // No comps found — return empty with message
       return {
-        success: true,
-        pricing: {
-          recommended_price: null,
-          justification: 'No comparable listings found across eBay, Poshmark, Swappa, StockX, Reverb, or Mercari. Try adjusting the search terms or set your own price.',
-          market_summary: { sold_count: 0, active_count: 0 },
-          recommended_platforms: [],
-        },
-        comps: { sold: [], active: [] },
+        pricing,
+        comps: allComps,
       };
-    } catch (error) {
-      if (abortCtrl.signal.aborted) return { success: false, error: 'Window closed' };
-      console.error('[Marketplace] Price research failed:', error?.message || String(error));
-      return { success: false, error: error?.message || String(error) };
-    } finally {
-      if (!event.sender.isDestroyed()) {
-        event.sender.removeListener('destroyed', onSenderDestroyed);
-      }
     }
+
+    // No comps found — return empty with message
+    return {
+      pricing: {
+        recommended_price: null,
+        justification: 'No comparable listings found across eBay, Poshmark, Swappa, StockX, Reverb, or Mercari. Try adjusting the search terms or set your own price.',
+        market_summary: { sold_count: 0, active_count: 0 },
+        recommended_platforms: [],
+      },
+      comps: { sold: [], active: [] },
+    };
   });
 
 }

@@ -1,24 +1,6 @@
 import React, { useMemo } from 'react';
-import { MINIMAP_NODE_COLORS } from '../utils/constants';
+import { MINIMAP_NODE_COLORS, NODE_DIMS, getNodeDims } from '../utils/constants';
 import { Layers } from 'lucide-react';
-
-// Approximate default node dimensions by type
-const DEFAULT_DIMS = {
-  text: { w: 180, h: 36 },
-  link: { w: 180, h: 50 },
-  document: { w: 180, h: 36 },
-  group: { w: 160, h: 110 },
-  listing: { w: 240, h: 180 },
-  jobcard: { w: 180, h: 90 },
-  jobhub: { w: 280, h: 350 },
-  sellhub: { w: 280, h: 350 },
-};
-
-function getDims(node) {
-  const w = node.style?.width || node.measured?.width || DEFAULT_DIMS[node.type]?.w || 120;
-  const h = node.style?.height || node.measured?.height || DEFAULT_DIMS[node.type]?.h || 40;
-  return { w, h };
-}
 
 /** Strip basic markdown markers so we show raw text in the thumbnail */
 function stripMarkdown(str) {
@@ -167,7 +149,7 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
     const rects = nodes.map(n => {
-      const { w, h } = getDims(n);
+      const { w, h } = getNodeDims(n);
       const x = n.position.x, y = n.position.y;
       minX = Math.min(minX, x); minY = Math.min(minY, y);
       maxX = Math.max(maxX, x + w); maxY = Math.max(maxY, y + h);
@@ -191,7 +173,7 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
     const lines = edges.map(e => {
       const src = nodeMap[e.source], tgt = nodeMap[e.target];
       if (!src || !tgt) return null;
-      const sd = getDims(src), td = getDims(tgt);
+      const sd = getNodeDims(src), td = getNodeDims(tgt);
       return {
         id: e.id,
         x1: src.position.x + sd.w / 2, y1: src.position.y + sd.h / 2,
