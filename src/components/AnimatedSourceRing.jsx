@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { useNodeId, useStore } from '@xyflow/react';
+import { getNodeDims } from '../utils/constants';
 
 /**
  * AnimatedSourceRing — renders orbiting source icons around a hub node
@@ -35,8 +36,8 @@ export function AnimatedSourceRing({
   const contextNodeId = useNodeId();
   const idToUse = customNodeId || contextNodeId || 'hub';
 
-  const nodeWidth = useStore((s) => s.nodeLookup.get(contextNodeId)?.measured?.width) ?? fallbackNodeWidth;
-  const nodeHeight = useStore((s) => s.nodeLookup.get(contextNodeId)?.measured?.height) ?? fallbackNodeHeight;
+  const _hubNode = useStore((s) => s.nodeLookup.get(contextNodeId));
+  const { w: nodeWidth, h: nodeHeight } = _hubNode ? getNodeDims(_hubNode) : { w: fallbackNodeWidth, h: fallbackNodeHeight };
 
   const cx = nodeWidth / 2;
   const cy = nodeHeight / 2;

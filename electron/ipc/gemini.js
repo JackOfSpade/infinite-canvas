@@ -1,14 +1,12 @@
-import { logger } from '../logger.js';
 /**
  * Gemini AI service — text + vision support via Vertex AI.
  * Uses Service Account for authentication against regional endpoints.
  */
 import fs from 'fs';
 import path from 'path';
-
-
 import { GoogleAuth } from 'google-auth-library';
 import { handleSafe } from './ipcUtils.js';
+import { logger } from '../logger.js';
 
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const LOCATION = 'us-central1';

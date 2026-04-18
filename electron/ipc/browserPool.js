@@ -1,4 +1,3 @@
-import { logger } from '../logger.js';
 /**
  * Browser Pool — Manages concurrent stealth scraping through puppeteer-extra.
  *
@@ -20,6 +19,7 @@ import {
   humanScroll,
 } from './stealthBrowser.js';
 import { randomUUID } from 'crypto';
+import { logger } from '../logger.js';
 
 const MAX_CONCURRENT = 3;
 const MAX_PER_DOMAIN = 1; // Only 1 concurrent page per domain

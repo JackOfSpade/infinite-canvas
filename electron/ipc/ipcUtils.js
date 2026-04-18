@@ -1,9 +1,9 @@
-import { logger } from '../logger.js';
 /**
  * IPC Utility functions for robust handler lifecycle management.
  */
 import electronPkg from 'electron';
 const { ipcMain } = electronPkg;
+import { logger } from '../logger.js';
 
 // ── Node Task Registry ──────────────────────────────────────────────────────
 const nodeTasks = new Map(); // nodeId -> Set<AbortController>
@@ -116,4 +116,3 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
     }
   });
 }
-

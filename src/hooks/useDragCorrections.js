@@ -1,4 +1,5 @@
 import { useCallback, useRef } from 'react';
+import { getNodeDims } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
 import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from '../nodes/CanvasNode';
 
@@ -75,8 +76,9 @@ export function useDragCorrections({ setNodes, setEdges, isInteractionRef, isMou
             if (!draggedNode) return nds;
 
             // Offset the node's position relative to the nested canvas center
-            const cx = (targetGroup.measured?.width || targetGroup.width || 200) / 2;
-            const cy = (targetGroup.measured?.height || targetGroup.height || 200) / 2;
+            const dims = getNodeDims(targetGroup);
+            const cx = dims.w / 2;
+            const cy = dims.h / 2;
             const nestedPos = { x: draggedNode.position.x - targetGroup.position.x - cx + 100, y: draggedNode.position.y - targetGroup.position.y - cy  + 100 };
             
             const newNodeState = { ...draggedNode, position: nestedPos };

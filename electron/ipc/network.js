@@ -1,6 +1,12 @@
+/**
+ * Network IPC handlers — URL title fetching and task cancellation.
+ */
 import { handleSafe, abortNodeTasks } from './ipcUtils.js';
 import electronPkg from 'electron';
 const { ipcMain } = electronPkg;
+
+/** Pre-compiled once at module level to avoid recompilation on every fetch. */
+const TITLE_REGEX = /<title[^>]*>([^<]+)<\/title>/i;
 
 export function registerNetworkHandlers() {
   // Add direct listener for node task cancellation
@@ -9,7 +15,6 @@ export function registerNetworkHandlers() {
   });
 
   handleSafe('fetch-url-title', async (event, url, signal) => {
-    // ... rest of the handler
     try {
       let fetchUrl = url;
       if (!fetchUrl.startsWith('http://') && !fetchUrl.startsWith('https://')) {
@@ -25,11 +30,10 @@ export function registerNetworkHandlers() {
       // Hardening: Read only the first 1MB of the response to avoid memory bloat
       const MAX_SIZE = 1024 * 1024; // 1MB
       const reader = res.body.getReader();
-      let decoder = new TextDecoder();
+      const decoder = new TextDecoder();
       let text = '';
       let bytesRead = 0;
 
-      const matchPattern = /<title[^>]*>([^<]+)<\/title>/i;
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -37,7 +41,7 @@ export function registerNetworkHandlers() {
           text += decoder.decode(value, { stream: true });
           bytesRead += value.length;
           
-          const earlyMatch = text.match(matchPattern);
+          const earlyMatch = text.match(TITLE_REGEX);
           if (earlyMatch) {
             break; // Stop streaming early if title is found!
           }
@@ -53,7 +57,7 @@ export function registerNetworkHandlers() {
       // Guard: network fetch could be slow; window might be gone.
       if (event.sender.isDestroyed()) return { title: null };
 
-      const match = text.match(/<title[^>]*>([^<]+)<\/title>/i);
+      const match = text.match(TITLE_REGEX);
       if (!match) return { title: null };
       let title = match[1].trim();
       // Simple HTML entity decode for common characters

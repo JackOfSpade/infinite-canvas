@@ -1,4 +1,3 @@
-import { logger } from '../logger.js';
 /**
  * Stealth Browser Manager — singleton puppeteer-extra browser with stealth plugin.
  *
@@ -18,6 +17,7 @@ import electronPkg from 'electron';
 const { app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
+import { logger } from '../logger.js';
 
 import { getSessionProfile } from './browser/antiDetectProfiles.js';
 

@@ -107,6 +107,18 @@ class EventLoggerSingleton {
     this._nodeStates.set(id, state);
   }
 
+  /**
+   * Append a timestamped error event to the log.
+   * Accepts the same signature as console.error — a leading message string
+   * and optional extra arguments (errors, objects) that are safe-stringified.
+   * @param {string} message
+   * @param {...any} args
+   */
+  error(message, ...args) {
+    const extras = args.length ? ' ' + args.map(a => safeStringify(a)).join(' ') : '';
+    this.log(`ERROR: ${message}${extras}`);
+  }
+
   unregisterNodeState(id) {
     this._nodeStates.delete(id);
   }

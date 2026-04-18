@@ -1,4 +1,3 @@
-import { logger } from '../logger.js';
 /**
  * Tier 4 — BrowserView Monitor Manager
  *
@@ -24,6 +23,7 @@ import { logger } from '../logger.js';
 import electronPkg from 'electron';
 const { BrowserWindow } = electronPkg;
 import { handleSafe } from './ipcUtils.js';
+import { logger } from '../logger.js';
 
 // ── Configuration ───────────────────────────────────────────────────────────
 

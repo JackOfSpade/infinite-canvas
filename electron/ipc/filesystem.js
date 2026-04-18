@@ -1,10 +1,10 @@
-import { logger } from '../logger.js';
 /**
  * Filesystem IPC handlers — scan directories, open files/URLs, save/load workspaces.
  */
 import electronPkg from 'electron';
 const { shell, dialog } = electronPkg;
 import { handleSafe } from './ipcUtils.js';
+import { logger } from '../logger.js';
 import path from 'path';
 import fs from 'fs';
 import { randomUUID } from 'crypto';

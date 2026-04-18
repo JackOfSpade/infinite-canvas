@@ -1,4 +1,3 @@
-import { logger } from '../logger.js';
 /**
  * Marketplace IPC handlers — photo analysis, multi-source FMV research, listing prep.
  *
@@ -7,10 +6,10 @@ import { logger } from '../logger.js';
  *   Tier 1 Active: eBay Active
  *   Tier 2 Sold:  Mercari Sold
  */
-
 import { callGeminiVision, callGeminiText } from './gemini.js';
 import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
+import { logger } from '../logger.js';
 import {
   EBAY_SOLD_EXTRACTOR, EBAY_SOLD_CONFIG,
   EBAY_ACTIVE_EXTRACTOR, EBAY_ACTIVE_CONFIG,
@@ -104,7 +103,6 @@ async function fetchApiMarketplaceSources(query, signal = null, nodeId = null, s
  * Register all Marketplace IPC handlers.
  */
 export function registerMarketplaceHandlers() {
-
   // ── Analyze Product Photos ────────────────────────────────────────────────
   handleSafe('analyze-photos', async (event, { imagePaths, nodeId }, signal) => {
     logger.info(`[Marketplace][${nodeId}] Analyzing`, imagePaths.length, 'photos');

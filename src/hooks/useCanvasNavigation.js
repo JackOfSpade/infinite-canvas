@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
+import { getNodeDims } from '../utils/constants';
 
 function safeClone(data) {
   if (!data) return data;
@@ -154,8 +155,9 @@ export function useCanvasNavigation({
         if (childNodes.length > 0) {
           let sumX = 0, sumY = 0;
           childNodes.forEach(n => {
-            sumX += n.position.x + (n.measured?.width  || 150) / 2;
-            sumY += n.position.y + (n.measured?.height ||  50) / 2;
+            const dims = getNodeDims(n);
+            sumX += n.position.x + dims.w / 2;
+            sumY += n.position.y + dims.h / 2;
           });
           const cx = sumX / childNodes.length;
           const cy = sumY / childNodes.length;
@@ -258,6 +260,10 @@ export function useCanvasNavigation({
     setNodes(nds => nds.filter(n => n.id !== nodeId));
     setEdges(eds => eds.filter(e => e.source !== nodeId && e.target !== nodeId));
 
+    // Clear history to prevent a duplication bug where undoing the extraction 
+    // restores the node locally, but it remains injected in the parent stack.
+    clearHistory?.();
+
     // Inject into parent's saved state
     setStack(s => {
       if (s.length === 0) return s; // Secondary check inside setter
@@ -280,7 +286,7 @@ export function useCanvasNavigation({
       newStack[newStack.length - 1] = { ...parent, nodes: newParentNodes };
       return newStack;
     });
-  }, [setNodes, setEdges]);
+  }, [setNodes, setEdges, clearHistory]);
 
   /**
    * Reset the navigation stack entirely (e.g. when loading a new workspace).

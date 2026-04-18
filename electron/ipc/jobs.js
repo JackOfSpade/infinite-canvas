@@ -1,14 +1,13 @@
-import { logger } from '../logger.js';
 /**
  * Jobs IPC handlers — resume parsing, multi-source job search, AI scoring.
  * 12 Sources: Google, Indeed, LinkedIn, RemoteOK, WeWorkRemotely,
  *             ZipRecruiter, Glassdoor, Dice, Wellfound,
  *             Greenhouse API, Lever API, USAJobs API
  */
-
 import { callGeminiDocument, callGeminiText } from './gemini.js';
 import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
+import { logger } from '../logger.js';
 import { 
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
   INDEED_JOBS_EXTRACTOR, INDEED_CONFIG,
@@ -110,9 +109,6 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null) {
  * Register all Jobs IPC handlers.
  */
 export function registerJobsHandlers() {
-
-
-
   handleSafe('parse-resume', async (event, { filePath, nodeId }, signal) => {
     logger.info(`[Jobs][${nodeId}] Parsing resume:`, filePath);
     const profile = await callGeminiDocument(filePath, `

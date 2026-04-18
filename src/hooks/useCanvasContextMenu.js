@@ -3,6 +3,7 @@ import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { useToast } from '../components/ToastProvider';
+import { getNodeDims } from '../utils/constants';
 
 /** Static color choices for the node color submenu. */
 const NODE_COLORS = [
@@ -130,8 +131,17 @@ export function useCanvasContextMenu({
     if (!menu?.node) return;
     takeSnapshot();
     const original = menu.node;
+    
+    let clonedOriginal;
+    try {
+      clonedOriginal = structuredClone(original);
+    } catch {
+      console.warn("structuredClone failed during duplicateNode, falling back to JSON");
+      clonedOriginal = JSON.parse(JSON.stringify(original));
+    }
+
     let clone = {
-      ...structuredClone(original),
+      ...clonedOriginal,
       id: crypto.randomUUID(),
       position: { x: original.position.x + 40, y: original.position.y + 40 },
       selected: false,
@@ -145,6 +155,17 @@ export function useCanvasContextMenu({
       delete clone.draggable;
       delete clone.deletable;
     }
+
+    // Sanitize transient AI/Scraping states so the clone doesn't get stuck waiting for an IPC it didn't launch
+    if (clone.data?.hubState) {
+      const state = clone.data.hubState;
+      if (['parsing', 'querying', 'searching', 'scoring', 'analyzing'].includes(state)) {
+        clone.data.hubState = 'empty';
+      } else if (state === 'researching') {
+        clone.data.hubState = 'draft';
+      }
+    }
+
     setNodes(nds => nds.concat(clone));
     EventLogger.log(`Duplicated node ${original.id}`);
     setMenu(null);
@@ -197,9 +218,6 @@ export function useCanvasContextMenu({
       
       if (targets.length === 0) return nds;
 
-      const getWidth = (n) => n.measured?.width || n.width || (n.type === 'text' ? 200 : 250);
-      const getHeight = (n) => n.measured?.height || n.height || (n.type === 'text' ? 100 : 200);
-
       const parentGroups = {};
       targets.forEach(n => {
         const key = n.parentId || 'ROOT';
@@ -225,8 +243,9 @@ export function useCanvasContextMenu({
         sorted.forEach((n, idx) => {
           const col = idx % cols;
           const row = Math.floor(idx / cols);
-          colWidths[col] = Math.max(colWidths[col], getWidth(n));
-          rowHeights[row] = Math.max(rowHeights[row], getHeight(n));
+          const { w, h } = getNodeDims(n);
+          colWidths[col] = Math.max(colWidths[col], w);
+          rowHeights[row] = Math.max(rowHeights[row], h);
         });
 
         const colOffsets = new Array(cols).fill(0);

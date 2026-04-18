@@ -1,14 +1,13 @@
-import { logger } from '../logger.js';
 /**
  * Accounts IPC handlers — platform login, session management.
  * Opens visible browser windows for login and checks cookie health.
  */
-
 import electronPkg from 'electron';
 const { app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 import { handleSafe } from './ipcUtils.js';
+import { logger } from '../logger.js';
 import {
   openLoginWindow,
   getSessionStatus,

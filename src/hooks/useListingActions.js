@@ -112,15 +112,19 @@ export function useListingActions(id, data) {
       });
 
       if (result.success) {
-        if (isMountedRef.current) setPriceInput(result.pricing.recommended_price || '');
+        if (!isMountedRef.current) return result;
+        setPriceInput(result.pricing.recommended_price || '');
         onStateChange?.('priced', result);
       } else {
+        if (!isMountedRef.current) return result;
         onStateChange?.('priced-empty', result);
       }
       return result;
     } catch (err) {
       console.error('Price research failed:', err);
-      onStateChange?.('error', err);
+      if (isMountedRef.current) {
+        onStateChange?.('error', err);
+      }
       return null;
     }
   }, [product, id]);

@@ -162,7 +162,6 @@ function SubmenuPanel({ items, direction, onMouseEnter, onMouseLeave, onClose })
       }}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
-      onClose={onClose}
     >
       {items.map((sub, j) => {
         if (sub.divider) {

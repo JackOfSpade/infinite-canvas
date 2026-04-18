@@ -2,6 +2,7 @@ import React, { useState, useCallback, useRef, useEffect, useContext } from 'rea
 import { useReactFlow } from '@xyflow/react';
 import { Search, X, ChevronUp, ChevronDown } from 'lucide-react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
+import { getNodeDims } from '../utils/constants';
 
 /**
  * Returns true if a node's content matches the lowercased query string.
@@ -99,7 +100,8 @@ export const SearchBar = React.memo(function SearchBar() {
 
     // Preserve the user's current zoom level; only pan to the match
     const { zoom: currentZoom } = getViewport();
-    setCenter(target.position.x + 100, target.position.y + 50, { zoom: currentZoom, duration: 600 });
+    const dims = getNodeDims(target);
+    setCenter(target.position.x + dims.w / 2, target.position.y + dims.h / 2, { zoom: currentZoom, duration: 600 });
     setMatchIndex(nextIdx + 1);
 
     // If it's an internal match and not an animating transition, offer to dive in
@@ -147,6 +149,7 @@ export const SearchBar = React.memo(function SearchBar() {
     return () => {
       abortController.abort();
       clearTimeout(timer);
+      if (autoDiveTimeoutRef.current) clearTimeout(autoDiveTimeoutRef.current);
     };
   }, [searchQuery, getMatches]);
 

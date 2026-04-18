@@ -1,5 +1,6 @@
 import { useCallback } from 'react';
 import { useReactFlow } from '@xyflow/react';
+import { getNodeDims } from '../utils/constants';
 
 export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingRef) {
   const { setViewport } = useReactFlow();
@@ -9,10 +10,11 @@ export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingR
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     
     nodes.forEach(n => {
+      const { w, h } = getNodeDims(n);
       minX = Math.min(minX, n.position.x);
       minY = Math.min(minY, n.position.y);
-      maxX = Math.max(maxX, n.position.x + (n.measured?.width || 200));
-      maxY = Math.max(maxY, n.position.y + (n.measured?.height || 100));
+      maxX = Math.max(maxX, n.position.x + w);
+      maxY = Math.max(maxY, n.position.y + h);
     });
 
     drawings.forEach(stroke => {

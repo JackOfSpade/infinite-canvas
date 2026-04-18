@@ -68,8 +68,6 @@ import { useCanvasOSDeletion } from './hooks/useCanvasOSDeletion';
 import { useConfirmDialog } from './hooks/useConfirmDialog';
 import { ArrowUpLeft } from 'lucide-react';
 
-
-
 // ── Canvas ───────────────────────────────────────────────────────────────────
 export function Canvas() {
   const reactFlowWrapper = useRef(null);
@@ -133,15 +131,6 @@ export function Canvas() {
   const { screenToFlowPosition, getIntersectingNodes, getNode } = useReactFlow();
   const isInteractionRef = useRef(false);
 
-  const { onNodeDragStart, onNodeDragStop } = useDragCorrections({ 
-    setNodes, 
-    setEdges,
-    isInteractionRef,
-    isMountedRef,
-    getIntersectingNodes,
-    takeSnapshot
-  });
-
   const onEdgesChange = useCallback((changes) => {
     snapshotOnDelete(changes);
     changes.forEach(ch => {
@@ -160,6 +149,15 @@ export function Canvas() {
     isInteractionRef,
   });
   useEffect(() => { takeSnapshotRef.current = takeSnapshot; }, [takeSnapshot]);
+
+  const { onNodeDragStart, onNodeDragStop } = useDragCorrections({ 
+    setNodes, 
+    setEdges,
+    isInteractionRef,
+    isMountedRef,
+    getIntersectingNodes,
+    takeSnapshot
+  });
 
   const customFitView = useCustomFitView(reactFlowWrapper, nodes, drawings, isNavigationAnimatingRef);
 
@@ -211,7 +209,6 @@ export function Canvas() {
       unlistenExport?.();
     };
   }, [saveCanvas, loadCanvas, exportCanvasToPNG]);
-
 
   // ── Generic Confirmation Dialog ───────────────────────────────────────────
   const {
