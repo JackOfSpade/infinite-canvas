@@ -3,14 +3,12 @@ import { getNodeDims } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
 import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from '../nodes/CanvasNode';
 
-export function useDragCorrections({ setNodes, setEdges, isInteractionRef, getIntersectingNodes, takeSnapshot }) {
+export function useDragCorrections({ setNodes, setEdges, getIntersectingNodes, takeSnapshot }) {
   const resizeDragActiveRef    = useRef(new Set());
   const titleZoneDragActiveRef = useRef(new Set());
 
   const onNodeDragStart = useCallback((e, node) => {
     EventLogger.log(`rf-drag-start id=${node.id} type=${node.type} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
-    
-    if (isInteractionRef) isInteractionRef.current = true;
 
     // Tag this RF drag as resize-initiated if a resize is currently active.
     if (ResizeActive.has(node.id)) {
@@ -20,12 +18,10 @@ export function useDragCorrections({ setNodes, setEdges, isInteractionRef, getIn
     if (TitleZoneActive.has(node.id)) {
       titleZoneDragActiveRef.current.add(node.id);
     }
-  }, [isInteractionRef]);
+  }, []);
 
   const onNodeDragStop = useCallback((e, node) => {
     EventLogger.log(`rf-drag-stop id=${node.id} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
-    
-    if (isInteractionRef) isInteractionRef.current = false;
 
     const wasResizeDrag    = resizeDragActiveRef.current.has(node.id);
     const wasTitleZoneDrag = titleZoneDragActiveRef.current.has(node.id);
@@ -108,7 +104,7 @@ export function useDragCorrections({ setNodes, setEdges, isInteractionRef, getIn
         }
       }
     }
-  }, [setNodes, setEdges, isInteractionRef, getIntersectingNodes, takeSnapshot]);
+  }, [setNodes, setEdges, getIntersectingNodes, takeSnapshot]);
 
   return { onNodeDragStart, onNodeDragStop };
 }

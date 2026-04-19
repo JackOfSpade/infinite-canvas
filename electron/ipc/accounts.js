@@ -43,8 +43,12 @@ async function writeStatusCache(platformId, connected) {
   try {
     const cache = await readStatusCache(); // returns the in-memory object
     cache[platformId] = { connected, ts: Date.now() };
-    // _statusCache is already mutated (same object reference); persist to disk.
-    await fs.promises.writeFile(getStatusCachePath(), JSON.stringify(cache));
+    // Atomic write: write to a .tmp sibling then rename, so a crash during
+    // the write never leaves a partially-written (corrupt) JSON file.
+    const finalPath = getStatusCachePath();
+    const tmpPath   = finalPath + '.tmp';
+    await fs.promises.writeFile(tmpPath, JSON.stringify(cache));
+    await fs.promises.rename(tmpPath, finalPath);
   } catch (e) {
     logger.warn('[Accounts] Cache write failed:', e?.message || String(e));
   }

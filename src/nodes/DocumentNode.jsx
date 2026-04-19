@@ -4,21 +4,29 @@ import { FileIcon, Lock } from 'lucide-react';
 
 export const DocumentNode = React.memo(function DocumentNode({ data, selected }) {
   const [updated, setUpdated] = useState(false);
+  const [imgKey, setImgKey] = useState(Date.now());
 
+  const isImage = data.filename?.match(/\.(jpg|jpeg|png|gif|webp)$/i);
 
   useEffect(() => {
     if (!data.filePath || !window.electronAPI) return;
     
     window.electronAPI.startFileWatch(data.filePath);
     const removeListener = window.electronAPI.onFileChanged((changedPath) => {
-      if (changedPath === data.filePath) setUpdated(true);
+      if (changedPath === data.filePath) {
+        if (isImage) {
+          setImgKey(Date.now());
+        } else {
+          setUpdated(true);
+        }
+      }
     });
 
     return () => {
       removeListener();
       window.electronAPI.stopFileWatch(data.filePath);
     };
-  }, [data.filePath]);
+  }, [data.filePath, isImage]);
 
   const handleDoubleClick = async () => {
     if (data.locked) return; // Locked nodes are fully inert
@@ -31,8 +39,6 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
       }
     }
   };
-
-  const isImage = data.filename?.match(/\.(jpg|jpeg|png|gif|webp)$/i);
 
   if (isImage) {
     return (
@@ -52,10 +58,7 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
         <Handle type="target" position={Position.Left} className="w-3 h-3 bg-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" />
         
         <div className="relative rounded overflow-hidden flex items-center justify-center bg-black/40 min-w-[100px] min-h-[100px] max-w-[250px] max-h-[300px]">
-          <img src={`local-file://${data.filePath}`} alt={data.filename} className="object-contain max-w-full max-h-full" />
-          {updated && (
-            <span className="absolute top-2 right-2 w-3 h-3 bg-red-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.8)]" />
-          )}
+          <img src={`local-file://${data.filePath}?t=${imgKey}`} alt={data.filename} className="object-contain max-w-full max-h-full" />
         </div>
         
         <div className="px-1 text-white font-medium truncate text-xs max-w-[200px]">

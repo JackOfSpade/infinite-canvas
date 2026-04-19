@@ -10,14 +10,14 @@ import {
 
 import { DocumentNode } from './nodes/DocumentNode';
 import { TextNode } from './nodes/TextNode';
-import { CanvasNode, ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from './nodes/CanvasNode';
+import { CanvasNode, ResizeCorrection, ResizeActive } from './nodes/CanvasNode';
 import { LinkNode } from './nodes/LinkNode';
 import { ListingNode } from './nodes/ListingNode';
 import { JobCardNode } from './nodes/JobCardNode';
 import { JobHubNode } from './nodes/JobHubNode';
 import { SellHubNode } from './nodes/SellHubNode';
 
-import { createTextNode, NODE_FACTORIES } from './utils/nodeFactory';
+import { createTextNode } from './utils/nodeFactory';
 import { Sidebar } from './components/Sidebar';
 import { ContextMenu } from './components/ContextMenu';
 import { CanvasToolbar } from './components/CanvasToolbar';
@@ -261,7 +261,7 @@ export function Canvas() {
   }, [getNode]);
 
   const { handleDrop: handleDropBase, handleDragOver } = useCanvasDragAndDrop({
-    setNodes, setIsDrawingMode: (v) => setActiveTool(v ? 'pen' : null), takeSnapshot, depth: navigation.depth, updateGlobal: navigation.updateNodeDataGlobally
+    setNodes, setIsDrawingMode: (v) => setActiveTool(v ? 'pen' : null), takeSnapshot, depth: navigation.depth,
   });
   // Guard drops during navigation animations — a drop during the ~300ms fade would
   // append a node to the old canvas state and then the animation's setNodes would

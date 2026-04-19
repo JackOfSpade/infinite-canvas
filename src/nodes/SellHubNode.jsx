@@ -25,13 +25,16 @@ import { SellHubPricedState } from './sellhub/SellHubPricedState';
  */
 export function SellHubNode({ id, data }) {
 
-  const idRef = useRef(id); idRef.current = id;
+  // id is stable for this component's lifetime — ReactFlow never reuses
+  // instances with different ids, so we can safely close over it in callbacks.
   const { updateNodeData } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const { addToast } = useToast();
   const processingRef = useRef(false);
   const processingPriceRef = useRef(false);
+  // Stable ref so handleDrop always calls the latest startAnalysis without needing deps.
+  const startAnalysisRef = useRef(null);
 
   const {
     product, editing, setEditing, priceInput, justificationExpanded,
@@ -143,11 +146,11 @@ export function SellHubNode({ id, data }) {
     }));
   }, [hubState, selectedPlatforms, data.comps, compProgress, postingPlatforms, data.locked]);
 
-  const startAnalysis = async (imagePaths) => {
+  const startAnalysis = useCallback(async (imagePaths) => {
     if (!window.electronAPI || processingRef.current) return;
     processingRef.current = true;
     setCompProgress({});
-    const currentId = idRef.current;
+    const currentId = id;
 
     try {
       updateGlobal(currentId, { hubState: 'analyzing' });
@@ -167,12 +170,15 @@ export function SellHubNode({ id, data }) {
     } finally {
       processingRef.current = false;
     }
-  };
+  }, [id, updateGlobal, addToast]);
+
+  // Keep ref in sync so handleDrop always invokes the latest closure.
+  startAnalysisRef.current = startAnalysis;
 
   const handleConfirmDraft = async () => {
     if (processingPriceRef.current || !data.product) return;
     processingPriceRef.current = true;
-    const currentId = idRef.current;
+    const currentId = id;
 
     try {
       updateGlobal(currentId, { hubState: 'researching' });
@@ -213,8 +219,8 @@ export function SellHubNode({ id, data }) {
     if (hubState === 'analyzing' || hubState === 'researching') return; // Ignore drops while busy
     const files = Array.from(e.dataTransfer?.files || []);
     const images = files.filter(f => f.name.match(/\.(png|jpg|jpeg|webp|gif)$/i));
-    if (images.length > 0) startAnalysis(images.map(f => f.path));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const validImages = images.filter(f => f.path);
+    if (validImages.length > 0) startAnalysisRef.current?.(validImages.map(f => f.path));
   }, [data.locked, hubState]);
 
   const nodeWidth = 280;

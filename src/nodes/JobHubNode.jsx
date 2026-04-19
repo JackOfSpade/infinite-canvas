@@ -3,7 +3,7 @@ import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { AnimatedSourceRing } from '../components/AnimatedSourceRing';
 import { HubContainer } from '../components/HubContainer';
-import { Briefcase, Loader2 } from 'lucide-react';
+import { Briefcase } from 'lucide-react';
 import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
 
 import { JobHubProcessingState } from './jobhub/JobHubProcessingState';
@@ -32,15 +32,15 @@ const STATE_LABELS = {
  */
 export function JobHubNode({ id, data }) {
 
-  const idRef = useRef(id); 
-  useEffect(() => { idRef.current = id; }, [id]);
+  // id is stable for this component's lifetime — ReactFlow never reuses
+  // instances with different ids, so we can safely close over it in callbacks.
   const { updateNodeData, setNodes, addEdges, addNodes, getNode } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const addElementsGlobally = nav?.addElementsGlobally;
-  const addNodesGlobally = nav?.addNodesGlobally || addNodes;
   const processingRef = useRef(false);
-  const cleanupRef = useRef(null);
+  // Stable ref to startProcessing so handleDrop can call it without a stale closure.
+  const startProcessingRef = useRef(null);
 
 
   // Per-source progress state: { google: { status, count }, indeed: { status, count }, ... }
@@ -65,8 +65,6 @@ export function JobHubNode({ id, data }) {
       setSourceProgress(prev => ({ ...prev, [sourceId]: { status, count } }));
       if (status === 'searching') setLastActiveSource(sourceId);
     });
-     
-    cleanupRef.current = cleanup;
     return () => cleanup?.();
   }, [id]);
 
@@ -176,12 +174,12 @@ export function JobHubNode({ id, data }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const startProcessing = async (filePath) => {
+  const startProcessing = useCallback(async (filePath) => {
     if (!window.electronAPI || processingRef.current) return;
     processingRef.current = true;
     setSourceProgress({});
     
-    const currentId = idRef.current; 
+    const currentId = id;
 
     try {
       // Step 1: Parse resume
@@ -196,20 +194,23 @@ export function JobHubNode({ id, data }) {
       updateGlobal(currentId, {
         hubState: 'querying',
         resumeContext: {
-          skills: parseResult.data.insights.skills,
-          experience: parseResult.data.insights.yearsExperience
+          skills: parseResult.profile.skills,
+          experience: parseResult.profile.experience_years,
         }
       });
       
-      const allQueries = await window.electronAPI.generateQueries({ 
-        resumeData: parseResult.data, 
+      const queriesResult = await window.electronAPI.generateJobQueries({ 
+        profile: parseResult.profile,
         nodeId: currentId 
       });
+      // Flatten all query arrays into a single list for the search step.
+      const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queriesResult.queries || {};
+      const allQueries = [...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
 
       // Step 3: Search
       updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length });
       
-      const searchResult = await window.electronAPI.parallelSearchWithQueries({ queries: allQueries, nodeId: currentId });
+      const searchResult = await window.electronAPI.searchJobs({ queries: allQueries, nodeId: currentId });
       
       if (!searchResult.success || !searchResult.jobs || searchResult.jobs.length === 0) {
         updateGlobal(currentId, { hubState: 'done', resultCount: 0 });
@@ -220,7 +221,7 @@ export function JobHubNode({ id, data }) {
       // Step 4: Scraping & Scoring
       updateGlobal(currentId, { hubState: 'scoring', jobCount: searchResult.jobs.length });
       
-      const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, resumeData: parseResult.data, nodeId: currentId });
+      const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile: parseResult.profile, nodeId: currentId });
       
       if (!scoreResult.success) {
         throw new Error(scoreResult.error || 'Failed to score jobs');
@@ -272,8 +273,8 @@ export function JobHubNode({ id, data }) {
         if (addElementsGlobally) {
           addElementsGlobally(currentId, newNodes, newEdges);
         } else {
-          // Fallback if not inside CanvasNavigationContext
-          addNodesGlobally(currentId, newNodes);
+          // Fallback if not inside CanvasNavigationContext (e.g., dev/test environment)
+          addNodes(newNodes);
           addEdges(newEdges);
         }
       }
@@ -294,7 +295,10 @@ export function JobHubNode({ id, data }) {
     } finally {
       processingRef.current = false;
     }
-  };
+  }, [id, updateGlobal, getNode, addElementsGlobally, addNodes, addEdges]);
+
+  // Keep the ref up-to-date so handleDrop always calls the latest version.
+  startProcessingRef.current = startProcessing;
 
   // Handle file drops directly onto this node
   const handleDrop = useCallback((e) => {
@@ -305,8 +309,7 @@ export function JobHubNode({ id, data }) {
     if (processingStates.includes(hubState)) return; // Ignore drops while processing
     const files = Array.from(e.dataTransfer?.files || []);
     const resume = files.find(f => f.name.match(/\.(pdf|docx|doc|txt|png|jpg|jpeg)$/i));
-    if (resume?.path) startProcessing(resume.path);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (resume?.path) startProcessingRef.current?.(resume.path);
   }, [data.locked, hubState]);
 
   const isProcessing = ['parsing', 'querying', 'searching', 'scoring'].includes(hubState);

@@ -91,22 +91,22 @@ function ThumbnailNode({ r }) {
   }
 
   if (type === 'group') {
-    const r  = Math.min(w, h) / 2;
+    const radius = Math.min(w, h) / 2;
     const cx = x + w / 2;
     const cy = y + h / 2;
     // Scale font to the thumbnail circle size; preserve user's color/family choices
     const titleColor  = data?.textColor  || 'rgba(255,255,255,0.60)';
     const titleFamily = data?.fontFamily || 'Inter, ui-sans-serif, sans-serif';
-    const fs = Math.max(4, Math.min(r * 0.28, 9));
-    const maxChars = r > 0 ? Math.max(4, Math.floor((r * 1.8) / (fs * 0.6))) : 8;
+    const fs = Math.max(4, Math.min(radius * 0.28, 9));
+    const maxChars = radius > 0 ? Math.max(4, Math.floor((radius * 1.8) / (fs * 0.6))) : 8;
     return (
       <g>
-        <circle cx={cx} cy={cy} r={r}
+        <circle cx={cx} cy={cy} r={radius}
           fill="rgba(96,165,250,0.06)"
           stroke="rgba(96,165,250,0.45)"
           strokeWidth={2}
         />
-        {data?.title && r > 10 && (
+        {data?.title && radius > 10 && (
           <text
             x={cx} y={cy}
             fontSize={fs}

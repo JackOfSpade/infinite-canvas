@@ -81,6 +81,25 @@ function gaussianDelay(mean, stddev) {
   return Math.max(1000, Math.round(mean + normal * stddev));
 }
 
+/** 
+ * Gracefully close a puppeteer page with a timeout to prevent hanging.
+ */
+async function safeClose(page, timeoutMs = 2000) {
+  if (!page || page.isClosed() || page.__closing) return;
+  page.__closing = true;
+  let closeTimeoutId;
+  try {
+    await Promise.race([
+      page.close(),
+      new Promise(r => { closeTimeoutId = setTimeout(r, timeoutMs); })
+    ]);
+  } catch (e) {
+    logger.warn('[BrowserPool] safeClose error:', e?.message || e);
+  } finally {
+    if (closeTimeoutId) clearTimeout(closeTimeoutId);
+  }
+}
+
 // ── Per-Domain Rate Limiter ─────────────────────────────────────────────────
 const domainNextAllowed = new Map();
 const domainBackoff = new Map();
@@ -236,10 +255,7 @@ async function executeScrape(url, extractorJS, options = {}) {
 
         if (options.signal) {
           abortHandler = () => {
-            if (page && !page.__closing) {
-              page.__closing = true;
-              page.close().catch(() => {});
-            }
+            safeClose(page, 2000);
           };
           options.signal.addEventListener('abort', abortHandler, { once: true });
         }
@@ -304,22 +320,7 @@ async function executeScrape(url, extractorJS, options = {}) {
         }
         isSettled = true; // Ensure inner settle happens even on errors
         pageHandles.delete(pageId);
-        if (page && !page.__closing) {
-          page.__closing = true;
-          try {
-            if (!page.isClosed()) {
-              let closeTimeoutId;
-              try {
-                await Promise.race([
-                  page.close(),
-                  new Promise(r => { closeTimeoutId = setTimeout(r, 2000); })
-                ]);
-              } finally {
-                if (closeTimeoutId) clearTimeout(closeTimeoutId);
-              }
-            }
-          } catch { /* already closed */ }
-        }
+        await safeClose(page, 2000);
       }
     })();
 
@@ -344,24 +345,8 @@ async function executeScrape(url, extractorJS, options = {}) {
     pageHandles.delete(pageId);
 
     // Safety: ensure no concurrent close calls
-    if (page && !page.__closing) {
-      page.__closing = true;
-      try {
-        if (!page.isClosed()) {
-          let closeTimeoutId;
-          try {
-            await Promise.race([
-              page.close(),
-              new Promise(r => { closeTimeoutId = setTimeout(r, 2000); })
-            ]);
-          } finally {
-            if (closeTimeoutId) clearTimeout(closeTimeoutId);
-          }
-        }
-      } catch (e) {
-        logger.warn('[BrowserPool] Page close error:', e.message);
-      }
-    }
+    await safeClose(page, 2000);
+    
     throw error;
   } finally {
     isSettled = true;
@@ -386,22 +371,7 @@ export async function closeAllPages() {
   logger.info(`[BrowserPool] Closing ${handles.length} active pages during shutdown...`);
 
   await Promise.allSettled(handles.map(async ({ page }) => {
-    try {
-      if (page && !page.isClosed()) {
-        // Use a race to avoid hanging the entire app shutdown if one page is stuck
-        let shutdownTimeoutId;
-        try {
-          await Promise.race([
-            page.close(),
-            new Promise(r => { shutdownTimeoutId = setTimeout(r, 1000); })
-          ]);
-        } finally {
-          if (shutdownTimeoutId) clearTimeout(shutdownTimeoutId);
-        }
-      }
-    } catch {
-      // Ignored during shutdown
-    }
+    await safeClose(page, 1000);
   }));
 }
 

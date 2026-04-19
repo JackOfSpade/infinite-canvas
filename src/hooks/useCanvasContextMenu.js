@@ -341,7 +341,7 @@ export function useCanvasContextMenu({
         EventLogger.log("AI Polish failed: " + res.error);
       }
     } catch (err) {
-      console.error(err);
+      console.error('[ContextMenu] AI polish crashed:', err);
       EventLogger.log("AI Polish crashed: " + (err?.message || String(err)));
     }
     setMenu(null);

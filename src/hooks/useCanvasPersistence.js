@@ -107,6 +107,7 @@ export function useCanvasPersistence({
   const [currentFile, setCurrentFile] = useState(null);
   const [saveState, setSaveState] = useState('idle');
   const isExportingRef = useRef(false);
+  const saveStateTimerRef = useRef(null);
 
   useEffect(() => {
     // ── Quit Handshake ──────────────────────────────────────────────────────
@@ -128,6 +129,8 @@ export function useCanvasPersistence({
     return () => {
       unlistenQuit?.();
       window.removeEventListener('beforeunload', handleBeforeUnload);
+      // Cancel any pending 'idle' transition timer to prevent state updates after unmount
+      if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
     };
   }, [hasUnsavedChanges]);
 
@@ -145,7 +148,8 @@ export function useCanvasPersistence({
         setHasUnsavedChanges(false);
         setSaveState('saved');
         addToast({ title: 'Workspace Saved', description: 'Your canvas has been saved successfully.', type: 'success' });
-        setTimeout(() => { setSaveState('idle'); }, 1500);
+        if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
+        saveStateTimerRef.current = setTimeout(() => { setSaveState('idle'); }, 1500);
       } else {
         setSaveState('idle');
         addToast({ title: 'Save Failed', description: 'Could not save the workspace.', type: 'error' });

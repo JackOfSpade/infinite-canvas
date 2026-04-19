@@ -317,6 +317,6 @@ app.on('before-quit', async (event) => {
   } catch (err) {
     console.error('[Main] Error during cleanup:', err);
   } finally {
-    app.quit();
+    app.exit(0);
   }
 });

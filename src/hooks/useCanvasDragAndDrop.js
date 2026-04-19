@@ -48,14 +48,6 @@ export function useCanvasDragAndDrop({
         return;
       }
 
-      // Image-only drops → auto-create SellHubNode with imagePaths
-      const imageFiles = files.filter(f => f.name.match(/\.(png|jpg|jpeg|webp|gif)$/i));
-      if (imageFiles.length === files.length && imageFiles.length > 0) {
-        takeSnapshot();
-        setNodes(nds => nds.concat(NODE_FACTORIES.sellhub(position, { imagePaths: imageFiles.map(f => f.path) })));
-        return;
-      }
-
       // Default: treat as document/folder drops — only process items with valid system paths
       const validFiles = files.filter(f => f.path);
       if (validFiles.length === 0) return;

@@ -7,8 +7,8 @@ import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { Lock } from 'lucide-react';
 
 export function LinkNode({ id, data }) {
+  // id is immutable for a node's lifetime; ref gives async callbacks stable identity.
   const idRef = useRef(id);
-  useEffect(() => { idRef.current = id; }, [id]);
   const [showDialog, setShowDialog] = useState(null); // 'font' | 'url'
   const [urlInput, setUrlInput] = useState(data.url || '');
   const clickTimeoutRef = useRef(null);

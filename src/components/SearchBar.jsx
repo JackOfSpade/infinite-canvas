@@ -147,14 +147,11 @@ export const SearchBar = React.memo(function SearchBar() {
       return;
     }
 
-    const abortController = new AbortController();
     const timer = setTimeout(() => {
-      if (abortController.signal.aborted) return;
       setMatchCount(getMatches().length);
     }, 200);
 
     return () => {
-      abortController.abort();
       clearTimeout(timer);
       if (autoDiveTimeoutRef.current) clearTimeout(autoDiveTimeoutRef.current);
     };
