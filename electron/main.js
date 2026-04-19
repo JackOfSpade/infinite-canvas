@@ -305,10 +305,15 @@ app.on('before-quit', async (event) => {
     };
     
     // Give cleanup 2 seconds to finish, then force quit
-    await Promise.race([
-      cleanup(),
-      new Promise(resolve => setTimeout(resolve, 2000))
-    ]);
+    let forceQuitTimeoutId;
+    try {
+      await Promise.race([
+        cleanup(),
+        new Promise(resolve => { forceQuitTimeoutId = setTimeout(resolve, 2000); })
+      ]);
+    } finally {
+      if (forceQuitTimeoutId) clearTimeout(forceQuitTimeoutId);
+    }
   } catch (err) {
     console.error('[Main] Error during cleanup:', err);
   } finally {

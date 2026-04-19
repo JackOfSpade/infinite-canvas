@@ -1,16 +1,22 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback } from 'react';
 
 export function useCanvasOSDeletion({ requestConfirm }) {
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
-  }, []);
-
   const onNodesDelete = useCallback((deletedNodes) => {
-    // Cancel any active background tasks for these nodes
+    // Cancel any active background tasks for these nodes (including nested nodes)
     if (window.electronAPI?.cancelNodeTask) {
-      deletedNodes.forEach(n => window.electronAPI.cancelNodeTask(n.id));
+      const cancelRecursively = (nodes) => {
+        nodes.forEach(n => {
+          window.electronAPI.cancelNodeTask(n.id);
+          if (n.data?.canvasData?.nodes) {
+            cancelRecursively(n.data.canvasData.nodes);
+          }
+          // Also check legacy nodes shape if present
+          if (n.data?.nodes) {
+            cancelRecursively(n.data.nodes);
+          }
+        });
+      };
+      cancelRecursively(deletedNodes);
     }
 
     const documentNodes = deletedNodes.filter(n => n.type === 'document' && n.data?.filePath);
@@ -23,7 +29,7 @@ export function useCanvasOSDeletion({ requestConfirm }) {
         variant: 'warning',
         onConfirm: async () => {
           for (const node of documentNodes) {
-            if (!isMountedRef.current) break;
+            // Proceed with OS deletion even if unmounted because user confirmed
             try {
               await window.electronAPI.deleteOSFile(node.data.filePath);
             } catch (err) {

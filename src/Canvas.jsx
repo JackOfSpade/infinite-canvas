@@ -8,6 +8,15 @@ import {
   useReactFlow
 } from '@xyflow/react';
 
+import { DocumentNode } from './nodes/DocumentNode';
+import { TextNode } from './nodes/TextNode';
+import { CanvasNode, ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from './nodes/CanvasNode';
+import { LinkNode } from './nodes/LinkNode';
+import { ListingNode } from './nodes/ListingNode';
+import { JobCardNode } from './nodes/JobCardNode';
+import { JobHubNode } from './nodes/JobHubNode';
+import { SellHubNode } from './nodes/SellHubNode';
+
 import { createTextNode, NODE_FACTORIES } from './utils/nodeFactory';
 import { Sidebar } from './components/Sidebar';
 import { ContextMenu } from './components/ContextMenu';
@@ -25,29 +34,10 @@ import { AlignedBackground } from './components/AlignedBackground';
 import { SettingsPanel } from './components/SettingsPanel';
 import { IssueReporterDialog } from './components/IssueReporterDialog';
 import { EventLogger } from './utils/EventLogger';
-import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from './nodes/CanvasNode';
+
 import { CanvasNavigationContext } from './contexts/CanvasNavigationContext';
 import { DEFAULT_EDGE_OPTIONS } from './utils/constants';
 
-import { DocumentNode } from './nodes/DocumentNode';
-import { TextNode } from './nodes/TextNode';
-import { CanvasNode } from './nodes/CanvasNode';
-import { LinkNode } from './nodes/LinkNode';
-import { ListingNode } from './nodes/ListingNode';
-import { JobCardNode } from './nodes/JobCardNode';
-import { JobHubNode } from './nodes/JobHubNode';
-import { SellHubNode } from './nodes/SellHubNode';
-
-const nodeTypes = {
-  document: DocumentNode,
-  text: TextNode,
-  group: CanvasNode, // Keep 'group' key for backward compatibility of saved nodes, but map it to CanvasNode
-  link: LinkNode,
-  listing: ListingNode,
-  jobcard: JobCardNode,
-  jobhub: JobHubNode,
-  sellhub: SellHubNode,
-};
 import { useUndoRedo } from './hooks/useUndoRedo';
 import { useCustomFitView } from './hooks/useCustomFitView';
 import { useCanvasPersistence } from './hooks/useCanvasPersistence';
@@ -68,6 +58,17 @@ import { useCanvasOSDeletion } from './hooks/useCanvasOSDeletion';
 import { useConfirmDialog } from './hooks/useConfirmDialog';
 import { ArrowUpLeft } from 'lucide-react';
 
+const nodeTypes = {
+  document: DocumentNode,
+  text: TextNode,
+  group: CanvasNode, // Keep 'group' key for backward compatibility of saved nodes, but map it to CanvasNode
+  link: LinkNode,
+  listing: ListingNode,
+  jobcard: JobCardNode,
+  jobhub: JobHubNode,
+  sellhub: SellHubNode,
+};
+
 // ── Canvas ───────────────────────────────────────────────────────────────────
 export function Canvas() {
   const reactFlowWrapper = useRef(null);
@@ -76,6 +77,7 @@ export function Canvas() {
   const [nodes, setNodes, onNodesChangeBase] = useNodesState([]);
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState([]);
   const [drawings, setDrawings] = useState([]);
+  
   const { addToast } = useToast();
 
   // ── Settings ────────────────────────────────────────────────────────────
@@ -122,12 +124,6 @@ export function Canvas() {
   // These fire from ReactFlow's own drag system, independently of our pointer
   // handlers. We use ResizeActive to detect if the drag was initiated during a
   // CanvasNode resize session — only resize-tagged drags apply a ResizeCorrection.
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
-  }, []);
-
   const { screenToFlowPosition, getIntersectingNodes, getNode } = useReactFlow();
   const isInteractionRef = useRef(false);
 
@@ -153,8 +149,6 @@ export function Canvas() {
   const { onNodeDragStart, onNodeDragStop } = useDragCorrections({ 
     setNodes, 
     setEdges,
-    isInteractionRef,
-    isMountedRef,
     getIntersectingNodes,
     takeSnapshot
   });
@@ -267,7 +261,7 @@ export function Canvas() {
   }, [getNode]);
 
   const { handleDrop: handleDropBase, handleDragOver } = useCanvasDragAndDrop({
-    setNodes, setIsDrawingMode: (v) => setActiveTool(v ? 'pen' : null), takeSnapshot, depth: navigation.depth
+    setNodes, setIsDrawingMode: (v) => setActiveTool(v ? 'pen' : null), takeSnapshot, depth: navigation.depth, updateGlobal: navigation.updateNodeDataGlobally
   });
   // Guard drops during navigation animations — a drop during the ~300ms fade would
   // append a node to the old canvas state and then the animation's setNodes would
@@ -288,7 +282,7 @@ export function Canvas() {
   const { onConnect, onDragStart, clearCanvas } = useCanvasActions({
     setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, takeSnapshot, requestClearConfirm,
     resetStack: navigation.resetStack,
-    depth: navigation.depth,
+    depth: navigation.depth, updateGlobal: navigation.updateNodeDataGlobally,
     isAnimatingRef: isNavigationAnimatingRef,
   });
 
@@ -309,7 +303,7 @@ export function Canvas() {
     screenToFlowPosition,
     clearCanvas,
     extractToParent: navigation.extractToParent,
-    depth: navigation.depth
+    depth: navigation.depth, updateGlobal: navigation.updateNodeDataGlobally
   });
 
   // Guard context menu during navigation animations — opening a menu during the ~300ms

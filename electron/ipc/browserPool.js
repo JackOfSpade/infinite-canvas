@@ -309,11 +309,14 @@ async function executeScrape(url, extractorJS, options = {}) {
           try {
             if (!page.isClosed()) {
               let closeTimeoutId;
-              await Promise.race([
-                page.close(),
-                new Promise(r => { closeTimeoutId = setTimeout(r, 2000); })
-              ]);
-              if (closeTimeoutId) clearTimeout(closeTimeoutId);
+              try {
+                await Promise.race([
+                  page.close(),
+                  new Promise(r => { closeTimeoutId = setTimeout(r, 2000); })
+                ]);
+              } finally {
+                if (closeTimeoutId) clearTimeout(closeTimeoutId);
+              }
             }
           } catch { /* already closed */ }
         }
@@ -346,11 +349,14 @@ async function executeScrape(url, extractorJS, options = {}) {
       try {
         if (!page.isClosed()) {
           let closeTimeoutId;
-          await Promise.race([
-            page.close(),
-            new Promise(r => { closeTimeoutId = setTimeout(r, 2000); })
-          ]);
-          if (closeTimeoutId) clearTimeout(closeTimeoutId);
+          try {
+            await Promise.race([
+              page.close(),
+              new Promise(r => { closeTimeoutId = setTimeout(r, 2000); })
+            ]);
+          } finally {
+            if (closeTimeoutId) clearTimeout(closeTimeoutId);
+          }
         }
       } catch (e) {
         logger.warn('[BrowserPool] Page close error:', e.message);
@@ -370,6 +376,10 @@ async function executeScrape(url, extractorJS, options = {}) {
  */
 export async function closeAllPages() {
   isShuttingDown = true;
+  if (queuePoller) {
+    clearInterval(queuePoller);
+    queuePoller = null;
+  }
   const handles = Array.from(pageHandles.values());
   pageHandles.clear();
 
@@ -380,11 +390,14 @@ export async function closeAllPages() {
       if (page && !page.isClosed()) {
         // Use a race to avoid hanging the entire app shutdown if one page is stuck
         let shutdownTimeoutId;
-        await Promise.race([
-          page.close(),
-          new Promise(r => { shutdownTimeoutId = setTimeout(r, 1000); })
-        ]);
-        if (shutdownTimeoutId) clearTimeout(shutdownTimeoutId);
+        try {
+          await Promise.race([
+            page.close(),
+            new Promise(r => { shutdownTimeoutId = setTimeout(r, 1000); })
+          ]);
+        } finally {
+          if (shutdownTimeoutId) clearTimeout(shutdownTimeoutId);
+        }
       }
     } catch {
       // Ignored during shutdown

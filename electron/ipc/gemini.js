@@ -154,10 +154,13 @@ function parseGeminiJSON(raw) {
     }
   }
 
+  // Clean trailing commas that V8's JSON.parse chokes on
+  jsonStr = jsonStr.replace(/,\s*([}\]])/g, '$1');
+
   try {
     return JSON.parse(jsonStr.trim());
   } catch (error) {
-    logger.error('[Gemini] Failed to parse JSON response:', error.message, '\nRaw Segment:', jsonStr.substring(0, 100));
+    logger.error('[Gemini] Failed to parse JSON response:', error.message, '\nRaw Segment:', jsonStr);
     throw new Error(`AI returned invalid JSON: ${error.message}`);
   }
 }

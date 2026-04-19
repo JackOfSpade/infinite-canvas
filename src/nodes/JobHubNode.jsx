@@ -1,10 +1,11 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useContext } from 'react';
 import { useReactFlow } from '@xyflow/react';
+import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { AnimatedSourceRing } from '../components/AnimatedSourceRing';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase, Loader2 } from 'lucide-react';
 import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
-import { useToast } from '../components/ToastProvider';
+
 import { JobHubProcessingState } from './jobhub/JobHubProcessingState';
 import { JobHubDoneState } from './jobhub/JobHubDoneState';
 
@@ -30,22 +31,23 @@ const STATE_LABELS = {
  * data.sourceFilter: string | null — if set, only show jobs from this source
  */
 export function JobHubNode({ id, data }) {
-  const { updateNodeData, addNodes, getNodes, setNodes, getNode } = useReactFlow();
-  const { addToast } = useToast();
+
+  const idRef = useRef(id); 
+  useEffect(() => { idRef.current = id; }, [id]);
+  const { updateNodeData, setNodes, addEdges, addNodes, getNode } = useReactFlow();
+  const nav = useContext(CanvasNavigationContext);
+  const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
+  const addElementsGlobally = nav?.addElementsGlobally;
+  const addNodesGlobally = nav?.addNodesGlobally || addNodes;
   const processingRef = useRef(false);
   const cleanupRef = useRef(null);
-  const isMountedRef = useRef(true);
+
 
   // Per-source progress state: { google: { status, count }, indeed: { status, count }, ... }
   const [sourceProgress, setSourceProgress] = useState({});
   const [lastActiveSource, setLastActiveSource] = useState(null);
 
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
+
 
   const hubState = data.hubState || 'empty';
   const statusLabel = STATE_LABELS[hubState];
@@ -60,10 +62,8 @@ export function JobHubNode({ id, data }) {
       // Multi-hub safety: ignore events for other hubs
       if (nodeId && nodeId !== id) return;
 
-      if (isMountedRef.current) {
-        setSourceProgress(prev => ({ ...prev, [sourceId]: { status, count } }));
-        if (status === 'searching') setLastActiveSource(sourceId);
-      }
+      setSourceProgress(prev => ({ ...prev, [sourceId]: { status, count } }));
+      if (status === 'searching') setLastActiveSource(sourceId);
     });
      
     cleanupRef.current = cleanup;
@@ -116,11 +116,12 @@ export function JobHubNode({ id, data }) {
 
       // Done — show per-source counts with click filtering
       if (hubState === 'done') {
+        const fallbackCount = data.finalSourceCounts?.[s.id] || 0;
         const progress = sourceProgress[s.id];
         if (progress?.status === 'error') {
           return { ...s, status: 'error', statusText: 'Failed', hoverText: `${s.name} was blocked or returned no results` };
         }
-        const count = progress?.count || 0;
+        const count = progress?.count || fallbackCount;
         const isFiltered = sourceFilter === s.id;
         return {
           ...s,
@@ -137,12 +138,12 @@ export function JobHubNode({ id, data }) {
       return { ...s, status: 'idle' };
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hubState, sourceProgress, data.resultCount, data.errorMessage, sourceFilter]);
+  }, [hubState, sourceProgress, data.resultCount, data.errorMessage, sourceFilter, data.finalSourceCounts]);
 
   // Source click-through filtering
   const toggleSourceFilter = useCallback((sourceId) => {
     const newFilter = sourceFilter === sourceId ? null : sourceId;
-    updateNodeData(id, { sourceFilter: newFilter });
+    updateGlobal(id, { sourceFilter: newFilter });
 
     // Dim/undim JobCard nodes based on source filter
     // Note: opacity changes are transient (stripped before saves by sanitizeNodesForSave)
@@ -153,7 +154,7 @@ export function JobHubNode({ id, data }) {
       }
       return { ...n, style: { ...n.style, opacity: n.data?.source === newFilter ? 1 : 0.2 } };
     }));
-  }, [sourceFilter, id, updateNodeData, setNodes]);
+  }, [sourceFilter, id, updateGlobal, setNodes]);
 
   // Re-apply source filter dim on mount — in case the filter was persisted
   // but the opacity was stripped from the save file (which prevents stale opacity on reload).
@@ -172,9 +173,6 @@ export function JobHubNode({ id, data }) {
     if (data.filePath && hubState === 'empty' && !processingRef.current) {
       startProcessing(data.filePath);
     }
-    // 2. Re-sync if we remounted into a processing state (navigation back)
-    // We don't need to do anything special here as the background closure 
-    // is already updating data.hubState, which our component is rendering.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -182,116 +180,117 @@ export function JobHubNode({ id, data }) {
     if (!window.electronAPI || processingRef.current) return;
     processingRef.current = true;
     setSourceProgress({});
+    
+    const currentId = idRef.current; 
 
     try {
       // Step 1: Parse resume
-      updateNodeData(id, { hubState: 'parsing' });
-      const parseResult = await window.electronAPI.parseResume({ filePath, nodeId: id });
+      updateGlobal(currentId, { hubState: 'parsing' });
+      const parseResult = await window.electronAPI.parseResume({ filePath, nodeId: currentId });
       
-      // NAVIGATION RESILIENCE: 
-      // We check if the node still EXISTS in the world (any canvas level), 
-      // not just if the current component is mounted.
-      if (!getNode(id)) { processingRef.current = false; return; }
-      if (!parseResult.success) throw new Error(parseResult.error);
-      const profile = parseResult.profile;
+      if (!parseResult.success) {
+        throw new Error(parseResult.error || 'Failed to parse resume');
+      }
 
-      updateNodeData(id, {
+      // Step 2: Query construction
+      updateGlobal(currentId, {
         hubState: 'querying',
-        resumeSummary: profile.summary || profile.titles?.join(', ') || 'Resume parsed',
+        resumeContext: {
+          skills: parseResult.data.insights.skills,
+          experience: parseResult.data.insights.yearsExperience
+        }
+      });
+      
+      const allQueries = await window.electronAPI.generateQueries({ 
+        resumeData: parseResult.data, 
+        nodeId: currentId 
       });
 
-      // Step 2: Generate queries
-      const queryResult = await window.electronAPI.generateJobQueries({ profile });
-      if (!getNode(id)) { processingRef.current = false; return; }
-      if (!queryResult.success) throw new Error(queryResult.error);
-      const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queryResult.queries;
-      const allQueries = [...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
-
-      // Step 3: Search (multi-source — backend sends per-source progress events)
-      updateNodeData(id, { hubState: 'searching', queryCount: allQueries.length });
-      const searchResult = await window.electronAPI.searchJobs({ queries: allQueries, nodeId: id });
-      if (!getNode(id)) { processingRef.current = false; return; }
-      if (!searchResult.success) throw new Error(searchResult.error);
-
-      if (searchResult.jobs.length === 0) {
-        updateNodeData(id, { hubState: 'done', resultCount: 0 });
+      // Step 3: Search
+      updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length });
+      
+      const searchResult = await window.electronAPI.parallelSearchWithQueries({ queries: allQueries, nodeId: currentId });
+      
+      if (!searchResult.success || !searchResult.jobs || searchResult.jobs.length === 0) {
+        updateGlobal(currentId, { hubState: 'done', resultCount: 0 });
         processingRef.current = false;
         return;
       }
 
-      // Step 4: Score
-      updateNodeData(id, { hubState: 'scoring', jobCount: searchResult.jobs.length });
-      const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile, nodeId: id });
-      if (!getNode(id)) { processingRef.current = false; return; }
-      if (!scoreResult.success) throw new Error(scoreResult.error);
+      // Step 4: Scraping & Scoring
+      updateGlobal(currentId, { hubState: 'scoring', jobCount: searchResult.jobs.length });
+      
+      const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, resumeData: parseResult.data, nodeId: currentId });
+      
+      if (!scoreResult.success) {
+        throw new Error(scoreResult.error || 'Failed to score jobs');
+      }
 
       // Step 5: Spawn career direction clusters
-      const { clusters } = scoreResult;
-      const hubNodes = getNodes();
-      const hubNode = hubNodes.find(n => n.id === id);
-
-      // If the hub was deleted while processing (user deleted it mid-search),
-      // skip spawning orphan cluster nodes on the canvas.
-      if (!hubNode) {
-        processingRef.current = false;
-        return;
-      }
-
-      const hubX = hubNode.position.x;
-      const hubY = hubNode.position.y;
-
+      const hubNode = getNode(currentId);
+      const hubx = hubNode?.position?.x ?? 0;
+      const huby = hubNode?.position?.y ?? 0;
+      
       const newNodes = [];
-      const clusterEntries = Object.entries(clusters);
+      const newEdges = [];
+      let currentYOffset = 0;
+      const baseNodeId = `job-${Date.now()}`;
 
-      clusterEntries.forEach(([direction, jobs], clusterIdx) => {
-        const angle = (clusterIdx / clusterEntries.length) * 2 * Math.PI - Math.PI / 2;
-        const clusterRadius = 400;
-        const gx = hubX + Math.cos(angle) * clusterRadius;
-        const gy = hubY + Math.sin(angle) * clusterRadius;
-
-        const groupId = crypto.randomUUID();
-        const groupNodes = [];
-
-        jobs.forEach((job, jobIdx) => {
-          groupNodes.push({
-            id: crypto.randomUUID(),
-            type: 'jobcard',
-            position: {
-              x: 20 + (jobIdx % 3) * 290,
-              y: 60 + Math.floor(jobIdx / 3) * 200,
-            },
-            data: { ...job, status: 'New', resumeProfile: profile },
-          });
-        });
-
+      scoreResult.scoredJobs.forEach((job, index) => {
+        const jobId = `${baseNodeId}-${index}`;
+        
         newNodes.push({
-          id: groupId,
-          type: 'group',
-          position: { x: gx, y: gy },
-          style: { width: Math.max(340, Math.min(jobs.length * 290, 900)), height: 130 },
+          id: jobId,
+          type: 'jobcard',
+          position: { x: hubx + 400, y: huby + currentYOffset },
           data: {
-            title: `${direction} (${jobs.length})`,
-            canvasData: { nodes: groupNodes, edges: [], drawings: [] },
-          },
+            title: job.job_title,
+            company: job.company_name,
+            location: job.location,
+            score: job.match_score,
+            source: job.source,
+            matchReason: job.match_reason,
+            url: job.job_url,
+            isNew: false
+          }
         });
+
+        newEdges.push({
+          id: `edge-${currentId}-${jobId}`,
+          source: currentId,
+          target: jobId,
+          type: 'smoothstep',
+          animated: true,
+          style: { stroke: 'rgba(96,165,250,0.5)', strokeWidth: 2 }
+        });
+
+        currentYOffset += 280;
       });
 
       if (newNodes.length > 0) {
-        // We assume takeSnapshot is available via props or we can get it from a hook.
-        // But JobHubNode is inside ReactFlow, it doesn't have takeSnapshot directly.
-        // We'll dispatch a custom event that useUndoRedo listens to, or 
-        // since we are in a ref-based 'startProcessing', we should have takeSnapshot passed in.
-        // Wait, JobHubNode doesn't receive takeSnapshot in props.
-        // I'll add an event-based snapshot trigger.
         document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
-        addNodes(newNodes);
+        if (addElementsGlobally) {
+          addElementsGlobally(currentId, newNodes, newEdges);
+        } else {
+          // Fallback if not inside CanvasNavigationContext
+          addNodesGlobally(currentId, newNodes);
+          addEdges(newEdges);
+        }
       }
-      updateNodeData(id, { hubState: 'done', resultCount: scoreResult.scoredJobs.length });
-      addToast({ title: 'Job Search Complete', description: `Found and scored ${scoreResult.scoredJobs.length} jobs.`, type: 'success' });
+
+      const finalSourceCounts = {};
+      scoreResult.scoredJobs.forEach(job => {
+        finalSourceCounts[job.source] = (finalSourceCounts[job.source] || 0) + 1;
+      });
+
+      updateGlobal(currentId, { 
+        hubState: 'done', 
+        resultCount: scoreResult.scoredJobs.length,
+        finalSourceCounts 
+      });
     } catch (error) {
-      console.error('[JobHub] Failed:', error);
-      if (getNode(id)) updateNodeData(id, { hubState: 'error', errorMessage: error?.message || String(error) });
-      addToast({ title: 'Job Search Failed', description: error?.message || String(error), type: 'error' });
+      console.error("JobHubNode Task Error:", error);
+      updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
     } finally {
       processingRef.current = false;
     }
@@ -302,11 +301,13 @@ export function JobHubNode({ id, data }) {
     e.preventDefault();
     e.stopPropagation();
     if (data.locked) return; // Locked nodes don't accept new drops
+    const processingStates = ['parsing', 'querying', 'searching', 'scoring'];
+    if (processingStates.includes(hubState)) return; // Ignore drops while processing
     const files = Array.from(e.dataTransfer?.files || []);
     const resume = files.find(f => f.name.match(/\.(pdf|docx|doc|txt|png|jpg|jpeg)$/i));
     if (resume?.path) startProcessing(resume.path);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.locked]);
+  }, [data.locked, hubState]);
 
   const isProcessing = ['parsing', 'querying', 'searching', 'scoring'].includes(hubState);
 
@@ -363,16 +364,21 @@ export function JobHubNode({ id, data }) {
 
         {/* Error state */}
         {hubState === 'error' && (
-          <div className="flex flex-col items-center justify-center py-6 px-4">
-            <p className="text-red-400 text-xs font-medium mb-1">Search failed</p>
-            <p className="text-white/30 text-[10px] text-center">{data.errorMessage}</p>
-            <button
-              onClick={data.locked ? undefined : () => { updateNodeData(id, { hubState: 'empty', errorMessage: null }); setSourceProgress({}); }}
-              disabled={!!data.locked}
-              className={`mt-2 px-3 py-1 rounded text-[10px] transition-colors ${data.locked ? 'bg-white/5 text-white/20 cursor-default' : 'bg-white/5 text-white/50 hover:bg-white/10'}`}
-              onPointerDown={(e) => e.stopPropagation()}
+          <div className="absolute inset-0 bg-red-900/50 flex flex-col items-center justify-center p-4 text-center rounded-2xl z-20 backdrop-blur-sm shadow-[inset_0_2px_15px_rgba(255,0,0,0.2)]">
+            <div className="bg-red-900/80 p-3 rounded-full mb-3 shadow-[0_0_15px_rgba(255,0,0,0.5)]">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-red-200">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+              </svg>
+            </div>
+            <p className="text-white font-medium text-lg tracking-wide">Processing Failed</p>
+            <p className="text-red-200 text-xs mt-2 opacity-90 max-w-full truncate px-2">{data.errorMessage}</p>
+            <button 
+              className="mt-5 px-4 py-1.5 bg-red-500/20 hover:bg-red-500/40 text-red-100 text-xs rounded-full border border-red-500/30 transition-all font-medium backdrop-blur-md shadow-[0_2px_8px_rgba(0,0,0,0.3)] hover:shadow-[0_0_12px_rgba(255,0,0,0.4)]"
+              onClick={data.locked ? undefined : () => { updateGlobal(id, { hubState: 'empty', errorMessage: null }); setSourceProgress({}); }}
             >
-              Try again
+              Try Again
             </button>
           </div>
         )}

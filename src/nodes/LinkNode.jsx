@@ -1,26 +1,27 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useContext, useEffect } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
+import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { Dialog } from '../components/Dialog';
 import { FontSizeDialog } from '../components/FontSizeDialog';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { Lock } from 'lucide-react';
 
 export function LinkNode({ id, data }) {
+  const idRef = useRef(id);
+  useEffect(() => { idRef.current = id; }, [id]);
   const [showDialog, setShowDialog] = useState(null); // 'font' | 'url'
   const [urlInput, setUrlInput] = useState(data.url || '');
   const clickTimeoutRef = useRef(null);
-  const { updateNodeData, getNode } = useReactFlow();
+  const { updateNodeData } = useReactFlow();
+  const nav = useContext(CanvasNavigationContext);
+  const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
 
   const inputRef = useRef(null);
-  const isMountedRef = useRef(true);
-
   React.useEffect(() => {
-    isMountedRef.current = true;
     return () => {
       if (clickTimeoutRef.current !== null) {
         clearTimeout(clickTimeoutRef.current);
       }
-      isMountedRef.current = false;
     };
   }, []);
 
@@ -53,21 +54,20 @@ export function LinkNode({ id, data }) {
   }, [data.label, data.url, isEditingLabel]);
 
   // Auto-fetch title if we have a URL but no custom label yet
-  React.useEffect(() => {
+  useEffect(() => {
     if (data.url && !data.label && window.electronAPI?.fetchUrlTitle) {
+      const currentId = idRef.current;
       // Small delay to prevent rapid fires if user is actively typing a URL
       const timer = setTimeout(() => {
         window.electronAPI.fetchUrlTitle(data.url).then(title => {
-          // Guard: node may have been deleted before the title fetch resolved
-          if (!isMountedRef.current) return;
-          if (title && getNode(id)) {
-            updateNodeData(id, { label: title });
+          if (title) {
+            updateGlobal(currentId, { label: title });
           }
         }).catch(() => {});
       }, 500);
       return () => clearTimeout(timer);
     }
-  }, [data.url, data.label, id, updateNodeData, getNode]);
+  }, [data.url, data.label, updateGlobal]);
 
   const openLink = () => {
     const targetUrl = data.url || inputRef.current?.innerText || '';

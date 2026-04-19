@@ -107,9 +107,9 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   // would otherwise intercept the click and drag the node, causing onBlur on
   // the input and ending editing before the user can type anything.
   useEffect(() => {
-    mainFlow.setNodes(nds => nds.map(n =>
-      n.id === id ? { ...n, draggable: !isEditing && !n.data?.locked } : n
-    ));
+    // updateNode targets a single node directly (O(1)) rather than mapping
+    // over all nodes (O(n)), avoiding unnecessary re-renders of peers.
+    mainFlow.updateNode(id, { draggable: !isEditing && !data.locked });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEditing]);
 
@@ -805,8 +805,8 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         />
       )}
 
-      <Handle type="target" position={Position.Left}  id="canvas-target" className="opacity-0" />
-      <Handle type="source" position={Position.Right} id="canvas-source" className="opacity-0" />
+      <Handle type="target" position={Position.Left}  id="canvas-target" className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
+      <Handle type="source" position={Position.Right} id="canvas-source" className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
     </>
   );
 });

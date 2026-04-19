@@ -3,7 +3,7 @@ import { getNodeDims } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
 import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from '../nodes/CanvasNode';
 
-export function useDragCorrections({ setNodes, setEdges, isInteractionRef, isMountedRef, getIntersectingNodes, takeSnapshot }) {
+export function useDragCorrections({ setNodes, setEdges, isInteractionRef, getIntersectingNodes, takeSnapshot }) {
   const resizeDragActiveRef    = useRef(new Set());
   const titleZoneDragActiveRef = useRef(new Set());
 
@@ -25,7 +25,6 @@ export function useDragCorrections({ setNodes, setEdges, isInteractionRef, isMou
   const onNodeDragStop = useCallback((e, node) => {
     EventLogger.log(`rf-drag-stop id=${node.id} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
     
-    if (isMountedRef && !isMountedRef.current) return;
     if (isInteractionRef) isInteractionRef.current = false;
 
     const wasResizeDrag    = resizeDragActiveRef.current.has(node.id);
@@ -109,7 +108,7 @@ export function useDragCorrections({ setNodes, setEdges, isInteractionRef, isMou
         }
       }
     }
-  }, [setNodes, setEdges, isInteractionRef, isMountedRef, getIntersectingNodes, takeSnapshot]);
+  }, [setNodes, setEdges, isInteractionRef, getIntersectingNodes, takeSnapshot]);
 
   return { onNodeDragStart, onNodeDragStop };
 }

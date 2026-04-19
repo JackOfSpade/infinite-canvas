@@ -277,6 +277,14 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
   if (prev.edges.length !== next.edges.length) return false;
   if ((prev.drawings || []).length !== (next.drawings || []).length) return false;
   
+  if (prev.drawings && next.drawings) {
+    for (let i = 0; i < prev.drawings.length; i++) {
+      const pPts = Array.isArray(prev.drawings[i]) ? prev.drawings[i] : prev.drawings[i]?.points || [];
+      const nPts = Array.isArray(next.drawings[i]) ? next.drawings[i] : next.drawings[i]?.points || [];
+      if (pPts.length !== nPts.length) return false;
+    }
+  }
+
   // Custom check: only re-render if nodes' coordinates or data have meaningfully changed
   for (let i = 0; i < prev.nodes.length; i++) {
     const p = prev.nodes[i];

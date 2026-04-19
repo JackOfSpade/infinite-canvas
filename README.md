@@ -125,8 +125,8 @@ Drag the Sell module to your canvas and drop product photos onto it. The AI will
 - **Color Coding**: Right-click any node (Text, Link, Nested Canvas, or Document) and select **Color** to apply a beautiful translucent background. Use colors to categorize your thoughts and create visually striking diagrams!
 - **Lock Nodes**: Accidental drags getting in the way? Right-click a node and select **Lock Node**. This displays a padlock icon and prevents the node from being moved, deleted, edited, renamed, AI-polished, or dropped onto until unlocked. Perfect for setting up permanent structural frames or headers.
 - **Tidy Up Nodes**: Messy canvas? Select multiple nodes (Shift+Drag), right-click, and hit **Tidy Selection** (or **Tidy Canvas**) to beautifully snap them into organized algorithmic grids.
-- **Background Scenery**: Tired of the default dots? Click the Grid Pattern icon in the bottom toolbar to cycle between transparent Dots, Lines, Crosses, or a completely Clean backdrop.
-- **MiniMap**: Toggle the MiniMap from the toolbar to get a bird's-eye overview of your entire canvas in the bottom-right corner.
+- **Background Scenery**: Tired of the default dots? Click the Settings icon (Gear) in the toolbar to change your background pattern to Dots, Grid, or entirely plain.
+- **MiniMap**: Toggle the MiniMap from the Settings panel to get a bird's-eye overview of your entire canvas in the bottom-right corner.
 - **Snap to Grid**: Toggle the Magnet icon in the toolbar to snap nodes to a grid for pixel-perfect alignment.
 - **Clear Canvas**: Use the red Trash icon in the toolbar to reset your entire canvas.
 - **Settings Panel**: Click the Settings icon (Gear) in the toolbar to adjust UI preferences, such as the nested canvas animation speed.
@@ -166,6 +166,9 @@ To see this list inside the app at any time, just press **`?`** on your keyboard
 | **Prev match** | `Shift+Enter` (in search bar) |
 | **Save** | `⌘S` |
 | **Open** | `⌘O` |
+| **Text Tool** | `T` |
+| **Link Tool** | `L` |
+| **Cancel Placement** | `Escape` |
 | **Undo** | `⌘Z` |
 | **Redo** | `⌘⇧Z` or `⌘Y` |
 

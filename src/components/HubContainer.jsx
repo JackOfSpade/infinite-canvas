@@ -36,8 +36,8 @@ export function HubContainer({
   };
 
   return (
-    <div className="relative" style={{ overflow: 'visible' }}>
-      <Handle type="target" position={Position.Left} className="w-2 h-2 opacity-0" />
+    <div className="relative group" style={{ overflow: 'visible' }}>
+      <Handle type="target" position={Position.Left} className={`w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity ${theme === 'blue' ? 'bg-blue-400' : 'bg-emerald-400'}`} />
 
       {/* Animated glow ring during processing */}
       {isProcessing && (
@@ -57,7 +57,7 @@ export function HubContainer({
         {children}
       </div>
       {extras}
-      <Handle type="source" position={Position.Right} className="w-2 h-2 opacity-0" />
+      <Handle type="source" position={Position.Right} className={`w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity ${theme === 'blue' ? 'bg-blue-400' : 'bg-emerald-400'}`} />
     </div>
   );
 }

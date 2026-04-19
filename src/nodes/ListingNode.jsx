@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useContext, useRef } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
+import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { PriceJustification } from '../components/PriceJustification';
 import { EditableField } from '../components/EditableField';
 import { QuickPriceButtons } from '../components/QuickPriceButtons';
@@ -43,19 +44,18 @@ export function ListingNode({ id, data }) {
   const [checkingAuth, setCheckingAuth] = useState(false);
   const [statusText, setStatusText] = useState('Researching prices...');
   const { updateNodeData, getNode } = useReactFlow();
+  const nav = useContext(CanvasNavigationContext);
+  const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
 
-  const isMountedRef = React.useRef(true);
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
-  }, []);
+  const idRef = useRef(id); idRef.current = id;
+
 
   // Listen for granular pricing progress (Scanning eBay, etc.)
   useEffect(() => {
     if (!window.electronAPI?.onPriceSourceProgress || status !== 'confirming') return;
 
     const cleanup = window.electronAPI.onPriceSourceProgress(({ sourceId, status: pStatus, count }) => {
-      if (!isMountedRef.current || !getNode(id)) return;
+      if (!getNode(id)) return;
       
       const names = {
         'ebay-sold': 'eBay Sold',
@@ -83,24 +83,23 @@ export function ListingNode({ id, data }) {
   }, [data.pricing, syncPriceFromBackend]);
 
   const handleConfirmDraft = async () => {
-    updateNodeData(id, { status: 'confirming' });
+    const currentId = idRef.current;
+    updateGlobal(currentId, { status: 'confirming' });
     const result = await researchPrice((state, res) => {
-      // Guard: node may have been deleted while awaiting price research
-      if (!getNode(id)) return;
       if (state === 'priced') {
-        updateNodeData(id, {
+        updateGlobal(currentId, {
           status: 'priced',
           pricing: res.pricing,
           comps: res.comps,
           userPrice: res.pricing.recommended_price || '',
         });
       } else if (state === 'priced-empty') {
-        updateNodeData(id, { status: 'priced', pricing: { recommended_price: null, justification: res.error } });
+        updateGlobal(currentId, { status: 'priced', pricing: { recommended_price: null, justification: res.error } });
       } else if (state === 'error') {
-        updateNodeData(id, { status: 'draft' });
+        updateGlobal(currentId, { status: 'draft' });
       }
     });
-    if (!result && getNode(id)) updateNodeData(id, { status: 'draft' });
+    if (!result) updateGlobal(currentId, { status: 'draft' });
   };
 
 
@@ -249,7 +248,7 @@ export function ListingNode({ id, data }) {
                       setCheckingAuth(true);
                       try {
                         const result = await window.electronAPI.checkAndLogin({ platformId: loginPrompt.platformId });
-                        if (!isMountedRef.current || !getNode(id)) return;
+                        if (!getNode(id)) return;
                         if (result.connected) {
                           setLoginPrompt(null);
                           // Re-trigger the listing flow now that we're logged in
@@ -260,7 +259,7 @@ export function ListingNode({ id, data }) {
                       } catch (err) {
                         console.error('Login failed:', err);
                       } finally {
-                        if (isMountedRef.current) setCheckingAuth(false);
+                        setCheckingAuth(false);
                       }
                     }}
                     disabled={checkingAuth}
@@ -301,7 +300,7 @@ export function ListingNode({ id, data }) {
                   for (const platformId of selectedPlatforms) {
                     if (needsAuth.includes(platformId) && window.electronAPI?.checkSellMonitorAuth) {
                       const authStatus = await window.electronAPI.checkSellMonitorAuth({ platformId });
-                      if (!isMountedRef.current || !getNode(id)) return;
+                      if (!getNode(id)) return;
                       if (!authStatus.connected) {
                         setLoginPrompt({
                           platformId,

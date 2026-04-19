@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 
@@ -17,12 +17,6 @@ export function useIssueReporter({
   addToast,
 }) {
   const { getViewport } = useReactFlow();
-  const isMountedRef = useRef(true);
-
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
-  }, []);
 
   const handleIssueSubmit = useCallback(async (description, mode = 'file') => {
     if (!window.electronAPI) {
@@ -80,16 +74,13 @@ export function useIssueReporter({
 
       if (mode === 'clipboard') {
         const res = await window.electronAPI.generateBugReportMarkdown(payload);
-        if (!isMountedRef.current) return;
 
         if (res.success) {
           try {
             await navigator.clipboard.writeText(res.markdown);
-            if (!isMountedRef.current) return;
             addToast({ title: 'Bug Report Copied', description: 'Report copied to clipboard.', type: "success" });
           } catch (clipErr) {
             console.error('Clipboard failed:', clipErr);
-            if (!isMountedRef.current) return;
             addToast({ title: 'Clipboard Error', description: 'Generated report but could not copy to clipboard automatically.', type: "warning" });
           }
         } else {
@@ -97,7 +88,6 @@ export function useIssueReporter({
         }
       } else {
         const res = await window.electronAPI.exportBugReport(payload);
-        if (!isMountedRef.current) return;
 
         if (res.success) {
           addToast({ title: 'Bug Report Saved', description: 'Your report has been exported successfully.', type: "success" });
@@ -106,7 +96,6 @@ export function useIssueReporter({
         }
       }
     } catch (e) {
-      if (!isMountedRef.current) return;
       addToast({ title: 'Bug Report Error', description: e?.message || String(e) || 'An unexpected error occurred.', type: "error" });
     }
   }, [

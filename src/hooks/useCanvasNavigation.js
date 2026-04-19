@@ -58,6 +58,77 @@ function getCanvasData(node) {
 }
 
 /**
+ * Recursively finds and updates a node deep within nested canvasData.
+ */
+function deepUpdateNode(nodes, id, dataUpdate) {
+  if (!nodes) return { updated: false, nodes };
+  let anyUpdated = false;
+  const newNodes = nodes.map(n => {
+    if (n.id === id) {
+      anyUpdated = true;
+      return { ...n, data: { ...n.data, ...dataUpdate } };
+    }
+    if (n.data?.canvasData?.nodes) {
+      const { updated, nodes: childNodes } = deepUpdateNode(n.data.canvasData.nodes, id, dataUpdate);
+      if (updated) {
+        anyUpdated = true;
+        return { ...n, data: { ...n.data, canvasData: { ...n.data.canvasData, nodes: childNodes } } };
+      }
+    }
+    return n;
+  });
+  return { updated: anyUpdated, nodes: newNodes };
+}
+
+/**
+ * Recursively finds the level where targetNodeId exists and appends newNodes and newEdges there.
+ */
+function deepAddElements(nodes, edges, targetNodeId, newNodes, newEdges) {
+  if (!nodes) return { updated: false, nodes, edges };
+  let anyUpdated = false;
+
+  const nextNodes = nodes.map(n => {
+    // We do NOT modify n itself if it's the target, just map its children
+    if (n.data?.canvasData?.nodes) {
+      const { updated, nodes: childNodes, edges: childEdges } = deepAddElements(
+        n.data.canvasData.nodes, 
+        n.data.canvasData.edges || [], 
+        targetNodeId, 
+        newNodes, 
+        newEdges
+      );
+      if (updated) {
+        anyUpdated = true;
+        return { 
+          ...n, 
+          data: { 
+            ...n.data, 
+            canvasData: { 
+              ...n.data.canvasData, 
+              nodes: childNodes,
+              edges: childEdges
+            } 
+          } 
+        };
+      }
+    }
+    return n;
+  });
+
+  // If targetNodeId was found in THIS array level, append newNodes and newEdges here
+  if (nodes.some(n => n.id === targetNodeId)) {
+    anyUpdated = true;
+    return { 
+      updated: true, 
+      nodes: [...nextNodes, ...newNodes],
+      edges: edges ? [...edges, ...(newEdges || [])] : (newEdges || [])
+    };
+  }
+
+  return { updated: anyUpdated, nodes: nextNodes, edges };
+}
+
+/**
  * Navigation stack for nested canvas dive-in / dive-out.
  *
  * Stack entries store the PARENT canvas state when we leave it:
@@ -81,13 +152,9 @@ export function useCanvasNavigation({
   const edgesRef = useRef(edges);
   const drawingsRef = useRef(drawings);
   const stackRef = useRef(stack);
-  const isMountedRef = useRef(true);
   const isNavigatingRef = useRef(false);
-
   useEffect(() => {
-    isMountedRef.current = true;
     return () => {
-      isMountedRef.current = false;
       // Safety: ensure navigation flag is reset on unmount to prevent 
       // stuck UI states if the component is yanked during a transition.
       isNavigatingRef.current = false;
@@ -118,7 +185,10 @@ export function useCanvasNavigation({
     isNavigatingRef.current = true;
 
     const node = reactFlow.getNode(nodeId);
-    if (!node || node.type !== 'group') return;
+    if (!node || node.type !== 'group') {
+      isNavigatingRef.current = false;
+      return;
+    }
 
     const canvasData = getCanvasData(node);
     const halfDuration = getAnimationDuration() / 2;
@@ -139,7 +209,6 @@ export function useCanvasNavigation({
 
     // After fade-out completes, swap data
     setTimeout(() => {
-      if (!isMountedRef.current) return;
       setStack(s => [...s, parentState]);
       setNodes(canvasData.nodes || []);
       setEdges(canvasData.edges || []);
@@ -148,7 +217,6 @@ export function useCanvasNavigation({
 
       // Let React render the new data, then center and fade in
       requestAnimationFrame(() => {
-        if (!isMountedRef.current) return;
         // Centre on child content at current zoom — never change zoom
         const currentVp = reactFlow.getViewport();
         const childNodes = canvasData.nodes || [];
@@ -170,7 +238,6 @@ export function useCanvasNavigation({
         setAnimPhase('fade-in');
 
         setTimeout(() => {
-          if (!isMountedRef.current) return;
           setIsAnimating(false);
           setAnimPhase(null);
           isNavigatingRef.current = false;
@@ -186,7 +253,7 @@ export function useCanvasNavigation({
    */
   const jumpTo = useCallback((targetIndex) => {
     const currentStack = stackRef.current;
-    if (isAnimating || isNavigatingRef.current || targetIndex >= currentStack.length) return;
+    if (isAnimating || isNavigatingRef.current || targetIndex >= currentStack.length || targetIndex < 0) return;
     isNavigatingRef.current = true;
 
     const halfDuration = getAnimationDuration() / 2;
@@ -194,7 +261,6 @@ export function useCanvasNavigation({
     setAnimPhase('fade-out');
 
     setTimeout(() => {
-      if (!isMountedRef.current) return;
       const { nodes: cn, edges: ce, drawings: cd } = syncStackUpward(
         nodesRef.current, edgesRef.current, drawingsRef.current,
         currentStack, currentStack.length - 1, targetIndex
@@ -208,12 +274,10 @@ export function useCanvasNavigation({
       clearHistory?.();
 
       requestAnimationFrame(() => {
-        if (!isMountedRef.current) return;
         reactFlow.setViewport(targetViewport, { duration: 0 });
         setAnimPhase('fade-in');
 
         setTimeout(() => {
-          if (!isMountedRef.current) return;
           setIsAnimating(false);
           setAnimPhase(null);
           isNavigatingRef.current = false;
@@ -289,6 +353,62 @@ export function useCanvasNavigation({
   }, [setNodes, setEdges, clearHistory]);
 
   /**
+   * Globally updates a node's data by ID, regardless of whether it is 
+   * in the active canvas, hidden in the navigation stack, or deeply 
+   * nested inside a group's canvasData.
+   */
+  const updateNodeDataGlobally = useCallback((nodeId, dataUpdate) => {
+    let found = false;
+    setNodes(prev => {
+      const { updated, nodes: newNodes } = deepUpdateNode(prev, nodeId, dataUpdate);
+      if (updated) found = true;
+      return updated ? newNodes : prev;
+    });
+
+    if (found) return;
+
+    setStack(prevStack => {
+      let stackUpdated = false;
+      const newStack = prevStack.map(level => {
+        const { updated, nodes: newNodes } = deepUpdateNode(level.nodes, nodeId, dataUpdate);
+        if (updated) stackUpdated = true;
+        return updated ? { ...level, nodes: newNodes } : level;
+      });
+      return stackUpdated ? newStack : prevStack;
+    });
+  }, [setNodes]);
+
+  /**
+   * Appends new nodes and edges to the specific array level where targetNodeId lives.
+   */
+  const addElementsGlobally = useCallback((targetNodeId, newNodesPayload, newEdgesPayload = []) => {
+    let foundInActive = false;
+    
+    setNodes(prevNodes => {
+      const currentEdges = edgesRef.current;
+      const { updated, nodes: newNodes, edges: newEdges } = deepAddElements(prevNodes, currentEdges, targetNodeId, newNodesPayload, newEdgesPayload);
+      if (updated) {
+        foundInActive = true;
+        setEdges(newEdges);
+        return newNodes;
+      }
+      return prevNodes;
+    });
+
+    if (foundInActive) return;
+
+    setStack(prevStack => {
+      let stackUpdated = false;
+      const newStack = prevStack.map(level => {
+        const { updated, nodes: newStackNodes, edges: newStackEdges } = deepAddElements(level.nodes, level.edges, targetNodeId, newNodesPayload, newEdgesPayload);
+        if (updated) stackUpdated = true;
+        return updated ? { ...level, nodes: newStackNodes, edges: newStackEdges } : level;
+      });
+      return stackUpdated ? newStack : prevStack;
+    });
+  }, [setNodes, setEdges]);
+
+  /**
    * Reset the navigation stack entirely (e.g. when loading a new workspace).
    * This ensures we return to root level and discard all stale parent state.
    */
@@ -302,6 +422,8 @@ export function useCanvasNavigation({
     jumpTo,
     flushStack,
     extractToParent,
+    updateNodeDataGlobally,
+    addElementsGlobally,
     resetStack,
     breadcrumbs,
     depth,

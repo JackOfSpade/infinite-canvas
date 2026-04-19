@@ -61,12 +61,6 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
   const debounceTimerRef   = useRef(null);
   const lastFingerprintRef = useRef(null);
 
-  const isMountedRef       = useRef(true);
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
-  }, []);
-
   const [historyLens, setHistoryLens] = useState({ past: 0, future: 0 });
   const [isStateDirty, setIsStateDirty] = useState(false);
 
@@ -149,7 +143,6 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     if (isRestoringRef.current) return;
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     debounceTimerRef.current = setTimeout(() => { 
-      if (!isMountedRef.current) return;
       takeSnapshot(); 
     }, 500);
     return () => { if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current); };
@@ -181,7 +174,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     lastFingerprintRef.current = fingerprint(previous);
     syncHistoryLen();
     setIsStateDirty(false);
-    requestAnimationFrame(() => { if (isMountedRef.current) isRestoringRef.current = false; });
+    requestAnimationFrame(() => { isRestoringRef.current = false; });
   }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef]);
 
   const redo = useCallback(() => {
@@ -200,7 +193,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     lastFingerprintRef.current = fingerprint(next);
     syncHistoryLen();
     setIsStateDirty(false);
-    requestAnimationFrame(() => { if (isMountedRef.current) isRestoringRef.current = false; });
+    requestAnimationFrame(() => { isRestoringRef.current = false; });
   }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef]);
 
   const [modalCount, setModalCount] = useState(0);

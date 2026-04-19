@@ -158,6 +158,8 @@ export function registerFilesystemHandlers() {
     
     const stats = fs.statSync(targetPath);
     if (stats.size === 0) throw new Error('Workspace file is empty (0 bytes)');
+    // Safety guard against massive files that would OOM the V8 string parser
+    if (stats.size > 100 * 1024 * 1024) throw new Error(`Workspace file is excessively large (${(stats.size/1024/1024).toFixed(2)}MB). Limit is 100MB.`);
 
     const content = await fs.promises.readFile(targetPath, 'utf-8');
     try {

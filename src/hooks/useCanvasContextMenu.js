@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
@@ -21,7 +21,7 @@ const NODE_COLORS = [
  * to prevent ID collisions if identical child nodes are later extracted to a shared parent.
  * Pure function — returns a new object tree; does not mutate the input.
  */
-function reassignCanvasDataIDs(node) {
+export function reassignCanvasDataIDs(node) {
   if (node.type !== 'group' || !node.data?.canvasData) return node;
 
   const idMap = new Map();
@@ -65,20 +65,13 @@ export function useCanvasContextMenu({
   screenToFlowPosition,
   clearCanvas,
   extractToParent,
-  depth
+  depth,
+  updateGlobal
 }) {
   const [menu, setMenu] = useState(null);
   const reactFlow = useReactFlow();
-  const { deleteElements, getEdges, getNode } = reactFlow;
+  const { deleteElements, getEdges } = reactFlow;
   const { addToast } = useToast();
-  const isMountedRef = useRef(true);
-
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
 
   const onPaneContextMenuBase = useCallback((e) => {
     if (placementMode) return;
@@ -130,46 +123,85 @@ export function useCanvasContextMenu({
   const duplicateNode = useCallback(() => {
     if (!menu?.node) return;
     takeSnapshot();
-    const original = menu.node;
     
-    let clonedOriginal;
-    try {
-      clonedOriginal = structuredClone(original);
-    } catch {
-      console.warn("structuredClone failed during duplicateNode, falling back to JSON");
-      clonedOriginal = JSON.parse(JSON.stringify(original));
+    // Default to just the clicked node
+    let nodesToDuplicate = [menu.node];
+    
+    // If the clicked node is part of the current selection, duplicate all selected nodes
+    const selectedNodes = reactFlow.getNodes().filter(n => n.selected);
+    if (selectedNodes.find(n => n.id === menu.node.id)) {
+      nodesToDuplicate = selectedNodes;
     }
 
-    let clone = {
-      ...clonedOriginal,
-      id: crypto.randomUUID(),
-      position: { x: original.position.x + 40, y: original.position.y + 40 },
-      selected: false,
-    };
-    clone = reassignCanvasDataIDs(clone);
-    // Clear isNew flag on duplicated nodes so they don't auto-enter edit mode
-    if (clone.data) clone.data.isNew = false;
-    // Don't carry over lock state — the clone should be freely editable
-    if (clone.data?.locked) {
-      clone.data.locked = false;
-      delete clone.draggable;
-      delete clone.deletable;
-    }
-
-    // Sanitize transient AI/Scraping states so the clone doesn't get stuck waiting for an IPC it didn't launch
-    if (clone.data?.hubState) {
-      const state = clone.data.hubState;
-      if (['parsing', 'querying', 'searching', 'scoring', 'analyzing'].includes(state)) {
-        clone.data.hubState = 'empty';
-      } else if (state === 'researching') {
-        clone.data.hubState = 'draft';
+    const oldIdToNewId = new Map();
+    const newNodes = nodesToDuplicate.map(original => {
+      let clonedOriginal;
+      try {
+        clonedOriginal = structuredClone(original);
+      } catch {
+        console.warn("structuredClone failed during duplicateNode, falling back to JSON");
+        clonedOriginal = JSON.parse(JSON.stringify(original));
       }
+
+      let clone = {
+        ...clonedOriginal,
+        id: crypto.randomUUID(),
+        position: { x: original.position.x + 40, y: original.position.y + 40 },
+        selected: true,
+      };
+      
+      oldIdToNewId.set(original.id, clone.id);
+      clone = reassignCanvasDataIDs(clone);
+      // Clear isNew flag on duplicated nodes so they don't auto-enter edit mode
+      if (clone.data) clone.data.isNew = false;
+      // Don't carry over lock state — the clone should be freely editable
+      if (clone.data?.locked) {
+        clone.data.locked = false;
+        delete clone.draggable;
+        delete clone.deletable;
+      }
+
+      // Sanitize transient AI/Scraping states so the clone doesn't get stuck waiting for an IPC it didn't launch
+      if (clone.data?.hubState) {
+        const state = clone.data.hubState;
+        if (['parsing', 'querying', 'searching', 'scoring', 'analyzing'].includes(state)) {
+          clone.data.hubState = 'empty';
+        } else if (state === 'researching') {
+          clone.data.hubState = 'draft';
+        }
+      }
+      return clone;
+    });
+
+    // Duplicate internal spanning edges
+    const newEdges = [];
+    reactFlow.getEdges().forEach(eEdge => {
+      if (oldIdToNewId.has(eEdge.source) && oldIdToNewId.has(eEdge.target)) {
+        newEdges.push({
+          ...eEdge,
+          id: crypto.randomUUID(),
+          source: oldIdToNewId.get(eEdge.source),
+          target: oldIdToNewId.get(eEdge.target),
+          selected: true,
+        });
+      }
+    });
+
+    setNodes(nds => {
+      const unselected = nds.map(n => ({ ...n, selected: false }));
+      return unselected.concat(newNodes);
+    });
+    
+    if (newEdges.length > 0) {
+      reactFlow.setEdges(eds => {
+        const unselected = eds.map(edge => ({ ...edge, selected: false }));
+        return unselected.concat(newEdges);
+      });
     }
 
-    setNodes(nds => nds.concat(clone));
-    EventLogger.log(`Duplicated node ${original.id}`);
+    EventLogger.log(`Duplicated ${newNodes.length} nodes via context menu`);
     setMenu(null);
-  }, [menu, setNodes, takeSnapshot]);
+  }, [menu, setNodes, takeSnapshot, reactFlow]);
 
   const deleteSelectedNode = useCallback(() => {
     if (!menu?.node) return;
@@ -296,27 +328,24 @@ export function useCanvasContextMenu({
     const nodeId = menu.node.id;
     try {
       const res = await window.electronAPI.aiPolishText(text);
-      if (!isMountedRef.current) return;
       // Guard: node may have been deleted while the AI call was in-flight
-      if (!getNode(nodeId)) {
-        EventLogger.log(`AI Polish complete but node ${nodeId} no longer exists — discarding`);
-        setMenu(null);
-        return;
-      }
       if (res.success) {
-        setNodes(nds => nds.map(n => n.id === nodeId ? { ...n, data: { ...n.data, text: res.text } } : n));
+        if (updateGlobal) {
+          updateGlobal(nodeId, { text: res.text });
+        } else {
+          setNodes(nds => nds.map(n => n.id === nodeId ? { ...n, data: { ...n.data, text: res.text } } : n));
+        }
         EventLogger.log(`AI polished text for node ${nodeId}`);
       } else {
         addToast({ title: 'AI Polish Failed', description: res.error, type: 'error' });
         EventLogger.log("AI Polish failed: " + res.error);
       }
     } catch (err) {
-      if (!isMountedRef.current) return;
       console.error(err);
       EventLogger.log("AI Polish crashed: " + (err?.message || String(err)));
     }
     setMenu(null);
-  }, [menu, setNodes, takeSnapshot, addToast, getNode]);
+  }, [menu, setNodes, takeSnapshot, addToast, updateGlobal]);
 
   const toggleStickyNote = useCallback(() => {
     if (!menu?.node) return;
@@ -369,8 +398,10 @@ export function useCanvasContextMenu({
       const isText  = menu.node.type === 'text';
       const isLink  = menu.node.type === 'link';
       const isGroup = menu.node.type === 'group';
+      const isDocument = menu.node.type === 'document';
       const isSticky = isText && !!menu.node.data?.isSticky;
       const isLocked = menu.node.data?.locked;
+      const supportsColor = isText || isLink || isGroup || isDocument;
 
       const items = [];
 
@@ -397,11 +428,11 @@ export function useCanvasContextMenu({
       items.push({ label: 'Bring to Front', onClick: bringToFront, disabled: isLocked });
       items.push({ label: 'Send to Back', onClick: sendToBack, disabled: isLocked });
 
-      // "Sticky Note Color" only appears when right-clicking a sticky text node
-      if (isSticky) {
+      // Node Color supports text, link, group, document, and sticky notes
+      if (supportsColor) {
         items.push({ divider: true });
         items.push({
-          label: 'Sticky Note Color',
+          label: isSticky ? 'Sticky Note Color' : 'Node Color',
           disabled: isLocked,
           submenu: isLocked ? undefined : NODE_COLORS.map(c => ({
             label: c.label,

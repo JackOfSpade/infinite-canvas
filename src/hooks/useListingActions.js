@@ -25,13 +25,9 @@ export function useListingActions(id, data) {
   const [selectedPlatforms, setSelectedPlatforms] = useState(data.selectedPlatforms || ['ebay', 'facebook', 'craigslist']);
   const [copied, setCopied] = useState(false);
   const copiedTimeoutRef = useRef(null);
-  const isMountedRef = useRef(true);
-
   useEffect(() => {
-    isMountedRef.current = true;
     return () => {
       if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current);
-      isMountedRef.current = false;
     };
   }, []);
 
@@ -75,11 +71,10 @@ export function useListingActions(id, data) {
 
     navigator.clipboard.writeText(text)
       .then(() => {
-        if (!isMountedRef.current) return;
         setCopied(true);
         if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current);
         copiedTimeoutRef.current = setTimeout(() => {
-          if (isMountedRef.current) setCopied(false);
+          setCopied(false);
         }, 2000);
       })
       .catch((err) => {
@@ -112,19 +107,15 @@ export function useListingActions(id, data) {
       });
 
       if (result.success) {
-        if (!isMountedRef.current) return result;
         setPriceInput(result.pricing.recommended_price || '');
         onStateChange?.('priced', result);
       } else {
-        if (!isMountedRef.current) return result;
         onStateChange?.('priced-empty', result);
       }
       return result;
     } catch (err) {
       console.error('Price research failed:', err);
-      if (isMountedRef.current) {
-        onStateChange?.('error', err);
-      }
+      onStateChange?.('error', err);
       return null;
     }
   }, [product, id]);

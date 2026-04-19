@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Search, Store, BarChart3, ChevronLeft, ChevronRight, UserCircle, Briefcase, Bug } from 'lucide-react';
 import { SELL_PLATFORMS, JOB_SOURCES, PRICE_COMP_SOURCES } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
@@ -51,12 +51,6 @@ function getStats(nodes) {
 export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClick }) {
   const [collapsed, setCollapsed] = useState(true);
   const [activeTab, setActiveTab] = useState('jobs');
-  const isMountedRef = useRef(true);
-
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
-  }, []);
 
   const handleTabClick = useCallback((tab) => {
     if (activeTab === tab && !collapsed) {
@@ -85,7 +79,6 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
     if (activeTab === 'accounts' && !collapsed) {
       if (window.electronAPI?.getCachedSessionStatuses) {
         window.electronAPI.getCachedSessionStatuses().then(statuses => {
-          if (!isMountedRef.current) return;
           const map = {};
           for (const s of statuses) map[s.platform] = s;
           setAccountStatuses(map);
@@ -93,7 +86,7 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
       }
       if (window.electronAPI?.invoke) {
         window.electronAPI.invoke('get-system-config-status')
-          .then(res => { if (isMountedRef.current) setSystemStatuses(res); })
+          .then(res => { setSystemStatuses(res); })
           .catch(err => EventLogger.error('Sidebar system config failed', err));
       }
     }
@@ -107,14 +100,13 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
       // After login window closes, re-read the cache (which was just written by the main process).
       // No Chrome launch — the main process already marked it as connected.
       const statuses = await window.electronAPI.getCachedSessionStatuses();
-      if (!isMountedRef.current) return;
       const map = {};
       for (const s of statuses) map[s.platform] = s;
       setAccountStatuses(map);
     } catch (e) {
       EventLogger.error('Login failed:', e);
     }
-    if (isMountedRef.current) setLoadingPlatform(null);
+    setLoadingPlatform(null);
   }, []);
 
   const tabs = [

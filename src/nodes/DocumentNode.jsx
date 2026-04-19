@@ -5,6 +5,7 @@ import { FileIcon, Lock } from 'lucide-react';
 export const DocumentNode = React.memo(function DocumentNode({ data, selected }) {
   const [updated, setUpdated] = useState(false);
 
+
   useEffect(() => {
     if (!data.filePath || !window.electronAPI) return;
     
@@ -36,7 +37,7 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
   if (isImage) {
     return (
       <div 
-        className={`glass-card p-2 rounded-xl flex flex-col items-center gap-2 transition-all relative ${selected ? 'border-blue-400 shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'border-white/10'}`}
+        className={`glass-card p-2 rounded-xl flex flex-col items-center gap-2 transition-all relative group ${selected ? 'border-blue-400 shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'border-white/10'}`}
         onDoubleClick={handleDoubleClick}
         title={data.filePath}
         style={{
@@ -48,7 +49,7 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
             <Lock size={10} />
           </div>
         )}
-        <Handle type="target" position={Position.Left} className="w-3 h-3 bg-blue-400" />
+        <Handle type="target" position={Position.Left} className="w-3 h-3 bg-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" />
         
         <div className="relative rounded overflow-hidden flex items-center justify-center bg-black/40 min-w-[100px] min-h-[100px] max-w-[250px] max-h-[300px]">
           <img src={`local-file://${data.filePath}`} alt={data.filename} className="object-contain max-w-full max-h-full" />
@@ -61,14 +62,14 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
           {data.filename}
         </div>
 
-        <Handle type="source" position={Position.Right} className="w-3 h-3 bg-blue-400" />
+        <Handle type="source" position={Position.Right} className="w-3 h-3 bg-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" />
       </div>
     );
   }
 
   return (
     <div 
-      className={`glass-card p-3 rounded-xl flex items-center gap-3 w-64 transition-all relative ${selected ? 'border-blue-400 shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'border-white/10'}`}
+      className={`glass-card p-3 rounded-xl flex items-center gap-3 w-64 transition-all relative group ${selected ? 'border-blue-400 shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'border-white/10'}`}
       onDoubleClick={handleDoubleClick}
       title={data.filePath}
       style={{
@@ -80,7 +81,7 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
           <Lock size={10} />
         </div>
       )}
-      <Handle type="target" position={Position.Left} className="w-3 h-3 bg-blue-400" />
+      <Handle type="target" position={Position.Left} className="w-3 h-3 bg-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" />
       
       <div className="w-10 h-10 rounded bg-blue-500/20 flex items-center justify-center shrink-0 relative">
         <FileIcon className="w-5 h-5 text-blue-400" />
@@ -98,7 +99,7 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
         </span>
       </div>
 
-      <Handle type="source" position={Position.Right} className="w-3 h-3 bg-blue-400" />
+      <Handle type="source" position={Position.Right} className="w-3 h-3 bg-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" />
     </div>
   );
 });

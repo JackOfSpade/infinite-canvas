@@ -2,14 +2,11 @@ import { useCallback, useRef, useEffect } from 'react';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
 
 export function useNestedCanvasDrag({ isAnimatingRef, screenToFlowPosition, takeSnapshot, setNodes, cursorsRef }) {
-  const isMountedRef = useRef(true);
   const nestedDragListenersRef = useRef(null);
   const nestedDragRef = useRef(null);
 
   useEffect(() => {
-    isMountedRef.current = true;
     return () => {
-      isMountedRef.current = false;
       if (nestedDragListenersRef.current) {
         window.removeEventListener('pointermove', nestedDragListenersRef.current.onMove);
         window.removeEventListener('pointerup', nestedDragListenersRef.current.onUp);
@@ -47,7 +44,7 @@ export function useNestedCanvasDrag({ isAnimatingRef, screenToFlowPosition, take
       cursorsRef.current?.updateNestedDrag(null);
 
       if (ref?.dragging) {
-        if (!isMountedRef.current || isAnimatingRef.current) return;
+        if (isAnimatingRef.current) return;
         // Place node at drop position — same offset as handleDrop uses for node-type drops
         const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
         const factory = NODE_FACTORIES['group'];

@@ -1,5 +1,6 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useContext } from 'react';
 import { useReactFlow } from '@xyflow/react';
+import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { AnimatedSourceRing } from '../components/AnimatedSourceRing';
 import { HubContainer } from '../components/HubContainer';
 import { Camera, Loader2 } from 'lucide-react';
@@ -23,17 +24,14 @@ import { SellHubPricedState } from './sellhub/SellHubPricedState';
  * data.selectedPlatforms: string[]
  */
 export function SellHubNode({ id, data }) {
-  const { updateNodeData, getNode } = useReactFlow();
+
+  const idRef = useRef(id); idRef.current = id;
+  const { updateNodeData } = useReactFlow();
+  const nav = useContext(CanvasNavigationContext);
+  const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const { addToast } = useToast();
   const processingRef = useRef(false);
-  const isMountedRef = useRef(true);
-
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
+  const processingPriceRef = useRef(false);
 
   const {
     product, editing, setEditing, priceInput, justificationExpanded,
@@ -74,9 +72,7 @@ export function SellHubNode({ id, data }) {
       // Multi-hub safety
       if (nodeId && nodeId !== id) return;
 
-      if (isMountedRef.current) {
-        setCompProgress(prev => ({ ...prev, [sourceId]: { status, count } }));
-      }
+      setCompProgress(prev => ({ ...prev, [sourceId]: { status, count } }));
     });
     return () => cleanup?.();
   }, [id]);
@@ -113,9 +109,7 @@ export function SellHubNode({ id, data }) {
             setPostingPlatforms(prev => ({ ...prev, [p.id]: 'active' }));
             if (postingTimeoutsRef.current[p.id]) clearTimeout(postingTimeoutsRef.current[p.id]);
             postingTimeoutsRef.current[p.id] = setTimeout(() => {
-              if (isMountedRef.current) {
-                setPostingPlatforms(prev => ({ ...prev, [p.id]: 'done' }));
-              }
+              setPostingPlatforms(prev => ({ ...prev, [p.id]: 'done' }));
             }, 2000);
             window.electronAPI.openExternal(p.postUrl);
           }
@@ -152,25 +146,23 @@ export function SellHubNode({ id, data }) {
   const startAnalysis = async (imagePaths) => {
     if (!window.electronAPI || processingRef.current) return;
     processingRef.current = true;
+    setCompProgress({});
+    const currentId = idRef.current;
 
     try {
-      updateNodeData(id, { hubState: 'analyzing' });
-      const result = await window.electronAPI.analyzePhotos({ imagePaths, nodeId: id });
+      updateGlobal(currentId, { hubState: 'analyzing' });
+      const result = await window.electronAPI.analyzePhotos({ imagePaths, nodeId: currentId });
       
-      // Navigation Resilience: Check if node still exists in the world
-      if (!getNode(id)) { processingRef.current = false; return; }
       if (!result.success) throw new Error(result.error);
       
-      updateNodeData(id, {
+      updateGlobal(currentId, {
         hubState: 'draft',
         product: result.product,
-        imagePaths,
+        images: imagePaths,
       });
     } catch (error) {
       console.error('[SellHub] Analysis failed:', error);
-      if (getNode(id)) {
-        updateNodeData(id, { hubState: 'error', errorMessage: error?.message || String(error) });
-      }
+      updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
       addToast({ title: 'Photo Analysis Failed', description: error?.message || String(error), type: 'error' });
     } finally {
       processingRef.current = false;
@@ -178,41 +170,39 @@ export function SellHubNode({ id, data }) {
   };
 
   const handleConfirmDraft = async () => {
-    if (processingRef.current) return;
-    processingRef.current = true;
-    setCompProgress({});
+    if (processingPriceRef.current || !data.product) return;
+    processingPriceRef.current = true;
+    const currentId = idRef.current;
 
     try {
-      updateNodeData(id, { hubState: 'researching' });
+      updateGlobal(currentId, { hubState: 'researching' });
       const result = await researchPrice((state, res) => {
-        // Navigation Resilience: update global store regardless of mount state
-        if (!getNode(id)) return;
+        if (!res) return;
         
         if (state === 'priced') {
-          updateNodeData(id, {
+          updateGlobal(currentId, {
             hubState: 'priced',
             pricing: res.pricing,
-            comps: res.comps,
-            userPrice: res.pricing.recommended_price || '',
+            comps: res.comps || []
           });
           addToast({ title: 'Pricing Engine', description: `Recommended price: $${res.pricing.recommended_price}`, type: 'success' });
         } else if (state === 'priced-empty') {
-          updateNodeData(id, {
+          updateGlobal(currentId, {
             hubState: 'priced',
             pricing: { recommended_price: null, justification: res.error },
+            comps: []
           });
-          addToast({ title: 'Pricing Failed', description: res.error || 'Could not determine a price.', type: 'error' });
         }
       });
-      if (!result && getNode(id)) {
-        updateNodeData(id, { hubState: 'draft' });
+      if (!result) {
+        updateGlobal(currentId, { hubState: 'draft' });
       }
     } catch (err) {
       console.error('[SellHub] Price research failed:', err);
-      if (getNode(id)) updateNodeData(id, { hubState: 'draft' });
+      updateGlobal(currentId, { hubState: 'draft' });
       addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
     } finally {
-      processingRef.current = false;
+      processingPriceRef.current = false;
     }
   };
 
@@ -220,11 +210,12 @@ export function SellHubNode({ id, data }) {
     e.preventDefault();
     e.stopPropagation();
     if (data.locked) return; // Locked nodes don't accept new drops
+    if (hubState === 'analyzing' || hubState === 'researching') return; // Ignore drops while busy
     const files = Array.from(e.dataTransfer?.files || []);
     const images = files.filter(f => f.name.match(/\.(png|jpg|jpeg|webp|gif)$/i));
     if (images.length > 0) startAnalysis(images.map(f => f.path));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.locked]);
+  }, [data.locked, hubState]);
 
   const nodeWidth = 280;
   const nodeHeight = hubState === 'empty' ? 140 : hubState === 'draft' || hubState === 'priced' ? 320 : 120;
@@ -312,13 +303,14 @@ export function SellHubNode({ id, data }) {
 
         {/* ── Error ──────────────────────────────────────────────────────── */}
         {hubState === 'error' && (
-          <div className="flex flex-col items-center justify-center py-6 px-4">
+          <div className="flex flex-col items-center justify-center py-8 px-4 relative z-10 bg-black/40 rounded-xl">
             <p className="text-red-400 text-xs font-medium mb-1">Analysis failed</p>
             <p className="text-white/30 text-[10px] text-center">{data.errorMessage}</p>
-            <button onClick={data.locked ? undefined : () => { updateNodeData(id, { hubState: 'empty', errorMessage: null }); setCompProgress({}); }}
+            <button onClick={data.locked ? undefined : () => { updateGlobal(id, { hubState: 'empty', errorMessage: null }); setCompProgress({}); }}
               disabled={!!data.locked}
               className={`mt-2 px-3 py-1 rounded text-[10px] transition-colors ${data.locked ? 'bg-white/5 text-white/20 cursor-default' : 'bg-white/5 text-white/50 hover:bg-white/10'}`}
-              onPointerDown={(e) => e.stopPropagation()}>
+              onPointerDown={(e) => e.stopPropagation()}
+            >
               Try again
             </button>
           </div>

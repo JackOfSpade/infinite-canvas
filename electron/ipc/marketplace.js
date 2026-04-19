@@ -179,17 +179,11 @@ Be specific about what you can clearly see. If you can't identify brand or model
       }
     }
 
-    // 2. API-based sources
+    // 2. API-based sources (Reverb, StockX)
+    // Note: fetchApiMarketplaceSources already sent per-source progress events.
     for (const res of apiResults) {
       if (res.items.length > 0) {
         allComps.sold.push(...res.items);
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('price-source-progress', { sourceId: res.sourceId, status: 'done', count: res.items.length });
-        }
-      } else {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('price-source-progress', { sourceId: res.sourceId, status: res.error ? 'error' : 'done', count: 0 });
-        }
       }
     }
 

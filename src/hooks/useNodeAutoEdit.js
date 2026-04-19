@@ -15,12 +15,7 @@ export function useNodeAutoEdit(id, isNew, isEmptyPredicate, inputRef) {
   const { updateNodeData, setNodes, setViewport } = useReactFlow();
   const store = useStoreApi();
   const hasFocusedRef = useRef(false);
-  const isMountedRef = useRef(true);
 
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
-  }, []);
 
   // Auto-edit on initial placement
   useEffect(() => {
@@ -47,7 +42,6 @@ export function useNodeAutoEdit(id, isNew, isEmptyPredicate, inputRef) {
 
           // Restore viewport immediately after focus to undo any shift
           rafId = requestAnimationFrame(() => {
-            if (!isMountedRef.current) return;
             setViewport(savedViewport);
           });
         }

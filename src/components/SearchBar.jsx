@@ -57,6 +57,13 @@ export const SearchBar = React.memo(function SearchBar() {
     return () => window.removeEventListener('keydown', handleKey);
   }, [isExpanded]);
 
+  // Cleanup autoDiveTimeout on unmount
+  useEffect(() => {
+    return () => {
+      if (autoDiveTimeoutRef.current) clearTimeout(autoDiveTimeoutRef.current);
+    };
+  }, []);
+
   const getMatches = useCallback(() => {
     if (!searchQuery.trim()) return [];
     const q = searchQuery.toLowerCase();

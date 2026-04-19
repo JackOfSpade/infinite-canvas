@@ -10,15 +10,6 @@ export function useCanvasDragAndDrop({
   depth,
 }) {
   const depthRef = useRef(depth);
-  const isMountedRef = useRef(true);
-
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
-
   useEffect(() => {
     depthRef.current = depth;
   }, [depth]);
@@ -72,7 +63,6 @@ export function useCanvasDragAndDrop({
       takeSnapshot();
       const dropDepth = depthRef.current;
       const newItems = await processDroppedFiles(validFiles, position);
-      if (!isMountedRef.current) return;
       if (depthRef.current !== dropDepth) return; // Canvas changed during processing
 
       if (newItems.length > 0) {
@@ -81,11 +71,20 @@ export function useCanvasDragAndDrop({
       return;
     }
 
-    // Handle dropping URLs from the browser address bar
+    // Handle dropping URLs from the browser address bar or other sources.
+    // Strict regex: must start with an explicit protocol (https?://) OR look like a
+    // real hostname (word.word format) followed by an optional path. Common code
+    // file extensions (.js, .ts, .py, .md, etc.) are explicitly excluded so that
+    // dropping source files or markdown links doesn't accidentally create Link nodes.
     const droppedUrl = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain');
-    if (droppedUrl && /^(https?:\/\/|[a-z0-9-]+\.[a-z]{2,}(\/.*)?$)/i.test(droppedUrl.trim())) {
-      takeSnapshot();
-      setNodes(nds => nds.concat(NODE_FACTORIES.link(position, { url: droppedUrl.trim() })));
+    if (droppedUrl && droppedUrl.length < 2048) {
+      const trimmedUrl = droppedUrl.trim();
+      const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)(?:[?#].*)?$/i;
+      const URL_RE = /^(https?:\/\/[^\s]+|[a-z0-9]([a-z0-9-]*[a-z0-9])?\.[a-z]{2,}(\.[a-z]{2,})?([/?#][^\s]*)?)$/i;
+      if (URL_RE.test(trimmedUrl) && !CODE_EXT_RE.test(trimmedUrl.split('?')[0].split('#')[0])) {
+        takeSnapshot();
+        setNodes(nds => nds.concat(NODE_FACTORIES.link(position, { url: trimmedUrl })));
+      }
     }
   }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode]);
 

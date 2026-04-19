@@ -19,9 +19,15 @@ export function useCanvasActions({
 
   const onConnect = useCallback((params) => {
     if (isAnimatingRef?.current) return;
+
+    const targetNode = getNodes().find(n => n.id === params.target);
+    if (targetNode?.data?.isSticky) {
+      return;
+    }
+
     takeSnapshot();
     setEdges((eds) => addEdge({ ...params, animated: true, style: EDGE_STYLE }, eds));
-  }, [setEdges, takeSnapshot, isAnimatingRef]);
+  }, [setEdges, takeSnapshot, isAnimatingRef, getNodes]);
 
   const onDragStart = useCallback((e, type) => {
     e.dataTransfer.setData('app/node-type', type);
@@ -51,11 +57,20 @@ export function useCanvasActions({
 
     // Cancel any active background tasks for nodes being removed
     if (window.electronAPI?.cancelNodeTask) {
-      allNodes.forEach(n => {
-        if (!lockedIds.has(n.id)) {
-          window.electronAPI.cancelNodeTask(n.id);
-        }
-      });
+      const cancelRecursively = (nodes) => {
+        nodes.forEach(n => {
+          if (!lockedIds.has(n.id)) {
+            window.electronAPI.cancelNodeTask(n.id);
+            if (n.data?.canvasData?.nodes) {
+              cancelRecursively(n.data.canvasData.nodes);
+            }
+            if (n.data?.nodes) {
+              cancelRecursively(n.data.nodes);
+            }
+          }
+        });
+      };
+      cancelRecursively(allNodes);
     }
 
     const lockedEdges = getEdges().filter(

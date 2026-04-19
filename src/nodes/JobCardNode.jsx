@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useContext, useRef } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
+import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { Briefcase, ExternalLink, FileText, ChevronDown, ChevronUp, X } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
 
@@ -28,38 +29,38 @@ const STATUS_OPTIONS = ['New', 'Applied', 'Interview', 'Offer', 'Rejected'];
  *   status, coverLetter, resumeProfile
  */
 export function JobCardNode({ id, data }) {
+  const { updateNodeData, deleteElements } = useReactFlow();
+  const nav = useContext(CanvasNavigationContext);
+  const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
+
   const [expanded, setExpanded] = useState(false);
   const [generatingCL, setGeneratingCL] = useState(false);
-  const { updateNodeData, deleteElements, getNode } = useReactFlow();
   const { addToast } = useToast();
+  
+  // Cache ID for closure safely
+  const idRef = useRef(id); idRef.current = id;
 
   const score = data.matchScore || 0;
   const strength = data.strengthLabel || 'exploring';
 
-  const isMountedRef = React.useRef(true);
-  React.useEffect(() => {
-    isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
-  }, []);
   const accentColor = STRENGTH_COLORS[strength] || '#888';
   const status = data.status || 'New';
 
   const handleStatusChange = (newStatus) => {
-    updateNodeData(id, { status: newStatus });
+    updateGlobal(id, { status: newStatus });
   };
 
   const generateCoverLetter = async () => {
     if (!window.electronAPI?.generateCoverLetter || !data.resumeProfile) return;
     setGeneratingCL(true);
+    const currentId = idRef.current;
     try {
       const result = await window.electronAPI.generateCoverLetter({
         profile: data.resumeProfile,
         job: { title: data.title, company: data.company, snippet: data.snippet },
       });
-      // Guard: card may have been dismissed while awaiting the IPC response
-      if (!isMountedRef.current || !getNode(id)) return;
       if (result.success) {
-        updateNodeData(id, { coverLetter: result.coverLetter });
+        updateGlobal(currentId, { coverLetter: result.coverLetter });
         addToast({ title: 'Cover Letter Ready', description: `Generated for ${data.company}`, type: 'success' });
       } else {
         addToast({ title: 'Generation Failed', description: result.error, type: 'error' });
@@ -68,7 +69,7 @@ export function JobCardNode({ id, data }) {
       console.error('Cover letter generation failed:', e);
       addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
     } finally {
-      if (isMountedRef.current) setGeneratingCL(false);
+      setGeneratingCL(false);
     }
   };
 

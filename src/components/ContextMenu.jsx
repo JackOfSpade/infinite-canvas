@@ -143,11 +143,18 @@ function SubmenuPanel({ items, direction, onMouseEnter, onMouseLeave, onClose })
   useEffect(() => {
     if (ref.current) {
       const rect = ref.current.getBoundingClientRect();
+      let vOffset = 0;
       const overflow = rect.bottom - window.innerHeight;
       if (overflow > 0) {
         // Shift up by the overflow amount plus a small padding
-        setVerticalOffset(-overflow - 8);
+        vOffset = -overflow - 8;
       }
+      // Safeguard against shifting off the top of the screen
+      if (rect.top + vOffset < 8) {
+        vOffset = -rect.top + 8;
+      }
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setVerticalOffset(vOffset);
       setMeasured(true);
     }
   }, []);
@@ -158,7 +165,9 @@ function SubmenuPanel({ items, direction, onMouseEnter, onMouseLeave, onClose })
       className={`absolute top-0 ${direction === 'right' ? 'left-full ml-0.5' : 'right-full mr-0.5'} bg-[#1a1a1a]/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl py-1 min-w-[180px] text-white/90 text-sm`}
       style={{ 
         transform: `translateY(${verticalOffset}px)`, 
-        opacity: measured ? 1 : 0 
+        opacity: measured ? 1 : 0,
+        maxHeight: 'calc(100vh - 20px)',
+        overflowY: 'auto'
       }}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}

@@ -15,12 +15,6 @@ export function useCanvasInitialization({
   // Keep latest state in a ref so the auto-save timer reads current data
   // without the effect being torn down on every state change.
   const stateRef = useRef({ nodes, edges, drawings });
-  const isMountedRef = useRef(true);
-  
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
-  }, []);
 
   useEffect(() => {
     stateRef.current = { nodes, edges, drawings };
@@ -29,11 +23,12 @@ export function useCanvasInitialization({
   const flushRef = useRef(flushStack);
   useEffect(() => { flushRef.current = flushStack; }, [flushStack]);
 
-  // Track hasUnsavedChanges internally when props change
+  // Track hasUnsavedChanges internally when props change.
+  // Skip the very first render where all collections are empty — that's the clean
+  // initial mount before any workspace is loaded, not an actual edit.
   useEffect(() => {
-    if (nodes.length > 0 || edges.length > 0 || drawings.length > 0) {
-      setHasUnsavedChanges(true);
-    }
+    if (nodes.length === 0 && edges.length === 0 && drawings.length === 0) return;
+    setHasUnsavedChanges(true);
   }, [nodes, edges, drawings, setHasUnsavedChanges]);
 
   // Auto-save: debounced timer only recreated when the file path changes.
@@ -57,7 +52,6 @@ export function useCanvasInitialization({
       const data = { ...rawData, nodes: sanitizeNodesForSave(rawData.nodes) };
       
       window.electronAPI.saveWorkspace({ data, filePath: currentFile }).then(res => {
-        if (!isMountedRef.current) return;
         if (res?.success && res.filePath) {
           // Only update currentFile if the path changed (e.g. first save via dialog)
           if (res.filePath !== currentFile) setCurrentFile(res.filePath);

@@ -5,13 +5,7 @@ import { Clipboard, Save } from 'lucide-react';
 export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
   const [description, setDescription]   = useState('');
   const [isSubmitting, setIsSubmitting]  = useState(false);
-  const [activeMode, setActiveMode]      = useState(null); // 'clipboard' | 'file'
-
-  const isMountedRef = React.useRef(true);
-  React.useEffect(() => {
-    isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
-  }, []);
+    const [activeMode, setActiveMode]      = useState(null); // 'clipboard' | 'file'
 
   const submit = async (mode) => {
     if (!description.trim() || isSubmitting) return;
@@ -19,16 +13,13 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
     setActiveMode(mode);
     try {
       await onSubmit(description, mode);
-      if (!isMountedRef.current) return;
       setDescription('');
       onClose();
     } catch {
       // onSubmit handles its own error toasts; just reset UI state
     } finally {
-      if (isMountedRef.current) {
         setIsSubmitting(false);
         setActiveMode(null);
-      }
     }
   };
 
