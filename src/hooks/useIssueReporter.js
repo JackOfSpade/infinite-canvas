@@ -80,7 +80,7 @@ export function useIssueReporter({
             await navigator.clipboard.writeText(res.markdown);
             addToast({ title: 'Bug Report Copied', description: 'Report copied to clipboard.', type: "success" });
           } catch (clipErr) {
-            console.error('Clipboard failed:', clipErr);
+            EventLogger.error('Clipboard failed:', clipErr);
             addToast({ title: 'Clipboard Error', description: 'Generated report but could not copy to clipboard automatically.', type: "warning" });
           }
         } else {

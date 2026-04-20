@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
+import { EventLogger } from '../utils/EventLogger';
 
 /**
  * useListingActions — shared logic for ListingNode and SellHubNode.
@@ -68,7 +69,7 @@ export function useListingActions(id, data) {
     
     // Explicitly check for clipboard API availability
     if (!navigator.clipboard?.writeText) {
-      console.warn('Clipboard API not available');
+      EventLogger.log('handleCopyListing: Clipboard API not available');
       return;
     }
 
@@ -84,7 +85,7 @@ export function useListingActions(id, data) {
       })
       .catch((err) => {
         if (!isMountedRef.current) return;
-        console.warn('Clipboard write failed:', err);
+        EventLogger.log('handleCopyListing: clipboard write failed: ' + (err?.message || String(err)));
       });
   }, [product, priceInput]);
 
@@ -123,7 +124,7 @@ export function useListingActions(id, data) {
       return result;
     } catch (err) {
       if (!isMountedRef.current) return null;
-      console.error('Price research failed:', err);
+      EventLogger.error('researchPrice failed:', err);
       onStateChange?.('error', err);
       return null;
     }

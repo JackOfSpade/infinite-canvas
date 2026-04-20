@@ -3,6 +3,7 @@ import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { ExternalLink, FileText, ChevronDown, ChevronUp, X } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
+import { EventLogger } from '../utils/EventLogger';
 
 const STRENGTH_COLORS = {
   strong: '#22c55e',
@@ -74,7 +75,7 @@ export function JobCardNode({ id, data }) {
       }
     } catch (e) {
       if (!isMountedRef.current) return;
-      console.error('Cover letter generation failed:', e);
+      EventLogger.error('Cover letter generation failed:', e);
       addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
     } finally {
       if (isMountedRef.current) {
@@ -192,7 +193,7 @@ export function JobCardNode({ id, data }) {
               </div>
               <button
                 onClick={() => navigator.clipboard.writeText(data.coverLetter).catch(err => {
-                  console.error('Clipboard write failed:', err);
+                  EventLogger.log('clipboard copy failed: ' + (err?.message || String(err)));
                   addToast({ title: 'Clipboard Error', description: 'Failed to copy text', type: 'error' });
                 })}
                 className="text-blue-400/80 text-[10px] hover:text-blue-400 transition-colors"

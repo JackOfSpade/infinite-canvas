@@ -146,19 +146,8 @@ export function Canvas() {
   });
   useEffect(() => { takeSnapshotRef.current = takeSnapshot; }, [takeSnapshot]);
 
-  const { onNodeDragStart, onNodeDrag, onNodeDragStop } = useDragCorrections({
-    setNodes,
-    setEdges,
-    getIntersectingNodes,
-    getNode,
-    takeSnapshot,
-    updateNodeData,
-    addElementsGlobally: navigation.addElementsGlobally
-  });
-
-  const customFitView = useCustomFitView(reactFlowWrapper, nodes, drawings, isNavigationAnimatingRef);
-
   // ── Canvas Navigation (nested canvases) ─────────────────────────────────
+  // Must be declared before useDragCorrections, which references navigation.addElementsGlobally.
   const navigation = useCanvasNavigation({
     nodes, edges, drawings,
     setNodes, setEdges, setDrawings,
@@ -168,6 +157,20 @@ export function Canvas() {
   useEffect(() => {
     isNavigationAnimatingRef.current = navigation.isAnimating;
   }, [navigation.isAnimating]);
+
+  const { onNodeDragStart, onNodeDrag, onNodeDragStop } = useDragCorrections({
+    setNodes,
+    setEdges,
+    getEdges,
+    getIntersectingNodes,
+    getNode,
+    takeSnapshot,
+    updateNodeData,
+    addElementsGlobally: navigation.addElementsGlobally,
+    extractToLevel: navigation.extractToLevel,
+  });
+
+  const customFitView = useCustomFitView(reactFlowWrapper, nodes, drawings, isNavigationAnimatingRef);
 
   const {
     saveCanvas, loadCanvas, exportCanvasToPNG,
@@ -292,9 +295,9 @@ export function Canvas() {
 
   const { handlePointerDown, handlePointerMove, handlePointerUp } = useDrawingMode({
     placementMode, setPlacementMode, activeTool, eraserType, eraserSize,
-    setDrawings, setNodes, setEdges, takeSnapshot, activeColor,
+    setNodes, setDrawings, takeSnapshot, activeColor,
     penSize, getIntersectingNodes, isAnimatingRef: isNavigationAnimatingRef,
-    cursorsRef, drawingLayerRef, isInteractionRef
+    cursorsRef, drawingLayerRef, isInteractionRef,
   });
 
   const interactiveDisabled = !!activeTool || !!placementMode || navigation.isAnimating;
@@ -328,13 +331,11 @@ export function Canvas() {
   useCanvasKeyboardShortcuts({
     placementMode, setPlacementMode, activeTool, setActiveTool, setIsSettingsOpen,
     isAnimatingRef: isNavigationAnimatingRef,
-    takeSnapshot,
     duplicateNodes,
   });
 
   // ── WASD canvas navigation ───────────────────────────────────────────────
   useCanvasWASD({ isAnimatingRef: isNavigationAnimatingRef });
-
 
   // ── Issue Reporter ───────────────────────────────────────────────────────
   const { handleIssueSubmit } = useIssueReporter({

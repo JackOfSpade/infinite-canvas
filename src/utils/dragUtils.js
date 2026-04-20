@@ -6,6 +6,7 @@
  * @param {string} text - The text icon or generic name for the ghost UI
  * @param {string} color - The text color representing the node type
  */
+import { EventLogger } from './EventLogger';
 
 export function setupDragGhost(e, text, color) {
   const ghost = document.createElement('div');
@@ -95,7 +96,7 @@ export async function processDroppedFiles(files, startPosition) {
     try {
       const result = await window.electronAPI.scanDirectory(file.path);
       if (result && result.success === false) {
-        console.warn('Skipping dropped file/folder:', file.path, result.error);
+        EventLogger.log(`Drop: skipping file/folder ${file.path}: ${result.error}`);
         continue;
       }
       const fsItem = result.isFile ? result.file : result;
@@ -103,7 +104,7 @@ export async function processDroppedFiles(files, startPosition) {
       // Offset subsequent items slightly to prevent them stacking perfectly on top of each other
       currentPos = { x: currentPos.x + 40, y: currentPos.y + 40 };
     } catch (e) {
-      console.error('Failed to read file/folder on drop payload', e);
+      EventLogger.error('Failed to read file/folder on drop payload', e);
     }
   }
   

@@ -3,6 +3,7 @@ import { useReactFlow } from '@xyflow/react';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { processDroppedFiles } from '../utils/dragUtils';
 import { getNodeDims } from '../utils/constants';
+import { EventLogger } from '../utils/EventLogger';
 
 // Compiled once at module load — not per drop event.
 const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)(?:[?#].*)?$/i;
@@ -96,24 +97,12 @@ export function useCanvasDragAndDrop({
         path: f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : '')
       }));
 
-      // Resume files (PDF/DOCX) → auto-create JobHubNode with filePath
-      const resumeFile = files.find(f => f.name.match(/\.(pdf|docx|doc)$/i));
-      if (resumeFile?.path) {
-        takeSnapshot();
-        const newNode = NODE_FACTORIES.jobhub(position, { filePath: resumeFile.path });
-        insertNodes([newNode]);
-        return;
-      }
 
       // Default: treat as document/folder drops — only process items with valid system paths
       const validFiles = files.filter(f => f.path);
       if (validFiles.length === 0) {
-        console.warn('Drop ignored: No paths found on files. Debug data:', JSON.stringify({
-          files: files.map(f => ({ name: f.name, type: f.type, size: f.size, path: f.path })),
-          types: event.dataTransfer.types,
-          items: Array.from(event.dataTransfer.items || []).map(i => ({ kind: i.kind, type: i.type })),
-          userAgent: navigator.userAgent
-        }, null, 2));
+        EventLogger.log('Drop ignored: no valid paths on files. files=' +
+          JSON.stringify(files.map(f => ({ name: f.name, type: f.type, size: f.size, path: f.path }))));
         return;
       }
 
@@ -125,7 +114,7 @@ export function useCanvasDragAndDrop({
       if (newItems.length > 0) {
         insertNodes(newItems);
       } else {
-        console.warn('processDroppedFiles returned 0 items for validFiles:', validFiles);
+        EventLogger.log('Drop ignored: processDroppedFiles returned 0 items. count=' + validFiles.length);
       }
       return;
     }

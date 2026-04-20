@@ -8,6 +8,7 @@ import { PlatformToggles } from '../components/PlatformToggles';
 import { Camera, Loader2, ExternalLink, Copy, Check } from 'lucide-react';
 import { SELL_PLATFORMS } from '../utils/constants';
 import { useListingActions } from '../hooks/useListingActions';
+import { EventLogger } from '../utils/EventLogger';
 
 const STATUS_STYLES = {
   draft: { border: 'border-dashed border-white/20', badge: 'bg-white/10 text-white/50', label: '📝 DRAFT' },
@@ -63,7 +64,6 @@ export function ListingNode({ id, data }) {
       isMountedRef.current = false;
     };
   }, []);
-
 
   // Listen for granular pricing progress (Scanning eBay, etc.)
   useEffect(() => {
@@ -262,7 +262,7 @@ export function ListingNode({ id, data }) {
                         }
                       } catch (err) {
                         if (!isMountedRef.current) return;
-                        console.error('Login failed:', err);
+                        EventLogger.error('Login check failed:', err);
                       } finally {
                         if (isMountedRef.current) {
                           setCheckingAuth(false);

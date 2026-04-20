@@ -19,7 +19,7 @@ const vpSizeSelector = (s) => ({ width: s.width, height: s.height });
 const ReactiveMiniMapSVG = React.memo(({ cMinX, cMinY, cMaxX, cMaxY, isAnimating, children }) => {
   const transform = useStore(vpTransformSelector);
   const size = useStore(vpSizeSelector);
-  const { setViewport, getViewport } = useReactFlow();
+  const { setViewport } = useReactFlow();
   const svgRef = useRef(null);
 
   const vpZoom = transform[2];

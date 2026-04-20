@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { sanitizeNodesForSave } from './useCanvasPersistence';
+import { EventLogger } from '../utils/EventLogger';
 
 export function useCanvasInitialization({
   nodes,
@@ -63,7 +64,7 @@ export function useCanvasInitialization({
           if (res.filePath !== currentFile) setCurrentFile(res.filePath);
           setHasUnsavedChanges(false);
         }
-      }).catch(err => console.error('[auto-save] saveWorkspace failed:', err));
+      }).catch(err => EventLogger.error('[auto-save] saveWorkspace failed:', err));
     }, 2000);
     return () => clearTimeout(timer);
   }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef]);

@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { MINIMAP_NODE_COLORS, NODE_DIMS, getNodeDims } from '../utils/constants';
-import { getFileCategoryInfo, THEME_COLORS } from '../utils/fileDisplayUtils';
+import { THEME_COLORS } from '../utils/fileDisplayUtils';
 import { Layers } from 'lucide-react';
 
 import { ThumbnailNode } from './ThumbnailNode';

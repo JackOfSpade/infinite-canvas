@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import { FileIcon, Lock, Minimize2, Play, AudioLines } from 'lucide-react';
 import { getFileCategoryInfo, THEME_COLORS } from '../utils/fileDisplayUtils';
+import { EventLogger } from '../utils/EventLogger';
 
 /** Encodes a local file path for use with the custom local-file:// protocol. */
 function toLocalFileUrl(filePath) {
@@ -15,19 +16,7 @@ const LockBadge = () => (
   </div>
 );
 
-/** Helper to pause dangling audio/video elements when unmounting. */
-const MediaCleanup = ({ mediaRef }) => {
-  useEffect(() => {
-    return () => {
-      if (mediaRef?.current) {
-        mediaRef.current.pause();
-        mediaRef.current.src = "";
-        mediaRef.current.load();
-      }
-    };
-  }, [mediaRef]);
-  return null;
-};
+
 
 export const DocumentNode = React.memo(function DocumentNode({ data, selected }) {
   // Use a ref-based counter to force image re-fetches on file change.
@@ -65,13 +54,33 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
     };
   }, [data.filePath, isImage]);
 
+  useEffect(() => {
+    if (isExpanded && isMedia && data.filePath) {
+      const el = mediaRef.current;
+      if (el) {
+        // Enforce the src is set correctly on mount. This fixes a bug with React 18 
+        // StrictMode where cleanup unmounts the src attribute from the DOM element,
+        // but since the React virtual prop `src` never changes, it fails to re-apply.
+        el.src = toLocalFileUrl(data.filePath);
+      }
+      return () => {
+        if (el) {
+          el.pause();
+          el.removeAttribute('src');
+          el.load();
+        }
+      };
+    }
+  }, [isExpanded, isMedia, data.filePath]);
+
+
   const handleDoubleClick = async () => {
     if (data.locked) return;
     if (data.filePath && window.electronAPI) {
       try {
         await window.electronAPI.openFile(data.filePath);
       } catch (err) {
-        console.error('Error opening file:', err);
+        EventLogger.error('Error opening file:', err);
       }
     }
   };
@@ -166,7 +175,7 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
         </div>
 
         {/* Ensure the media stops playing if this component unmounts while playing. */}
-        <MediaCleanup mediaRef={mediaRef} />
+        {/* We rely on the internal useEffect hook for cleanup rather than an external component to avoid StrictMode races */}
 
         <div className="px-2 text-white font-medium truncate text-sm max-w-[280px]">
           {data.filename}

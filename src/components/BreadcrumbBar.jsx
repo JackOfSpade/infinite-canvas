@@ -27,6 +27,7 @@ export const BreadcrumbBar = React.memo(function BreadcrumbBar() {
                 <ChevronRight size={12} className="text-white/20 shrink-0" />
               )}
               <button
+                data-breadcrumb-level={i}
                 onClick={isClickable ? () => jumpTo(i) : undefined}
                 disabled={!isClickable}
                 className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md transition-colors ${

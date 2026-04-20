@@ -233,8 +233,7 @@ export function useCanvasContextMenu({
         EventLogger.log("AI Polish failed: " + res.error);
       }
     } catch (err) {
-      console.error('[ContextMenu] AI polish crashed:', err);
-      EventLogger.log("AI Polish crashed: " + (err?.message || String(err)));
+      EventLogger.error('[ContextMenu] AI polish crashed:', err);
     }
     setMenu(null);
   }, [menu, setNodes, takeSnapshot, addToast, updateGlobal]);
@@ -380,7 +379,7 @@ export function useCanvasContextMenu({
       return items;
     }
     return [];
-  }, [menu, spawnNode, duplicateNode, bringToFront, sendToBack, deleteSelectedNode, toggleLockNode, setNodeColor, clearCanvas, tidyNodes, aiPolishText, toggleStickyNote, closeMenu, takeSnapshot, depth, extractToParent]);
+  }, [menu, spawnNode, duplicateNode, bringToFront, sendToBack, deleteSelectedNode, toggleLockNode, setNodeColor, clearCanvas, tidyNodes, aiPolishText, toggleStickyNote, closeMenu, depth, extractToParent, reactFlow]);
 
   return {
     menu,

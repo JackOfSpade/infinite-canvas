@@ -3,7 +3,7 @@ import { MINIMAP_NODE_COLORS } from '../utils/constants';
 import { getFileCategoryInfo, THEME_COLORS } from '../utils/fileDisplayUtils';
 
 /** Strip basic markdown markers so we show raw text in the thumbnail */
-export function stripMarkdown(str) {
+function stripMarkdown(str) {
   return (str || '')
     .replace(/!\[.*?\]\(.*?\)/g, '')   // images
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')  // [text](url)
@@ -14,7 +14,7 @@ export function stripMarkdown(str) {
 }
 
 /** Try to extract a short domain-or-label string from a LinkNode's data */
-export function getLinkDisplay(data) {
+function getLinkDisplay(data) {
   const raw = data?.label || data?.url || '';
   try { return new URL(raw).hostname.replace(/^www\./, ''); } catch { return raw; }
 }

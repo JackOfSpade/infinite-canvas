@@ -1,4 +1,5 @@
 import { useCallback } from 'react';
+import { EventLogger } from '../utils/EventLogger';
 
 export function useCanvasOSDeletion({ requestConfirm }) {
   const onNodesDelete = useCallback((deletedNodes) => {
@@ -57,7 +58,7 @@ export function useCanvasOSDeletion({ requestConfirm }) {
             try {
               await window.electronAPI.deleteOSFile(path);
             } catch (err) {
-              console.error('Failed to trash file/folder:', err);
+              EventLogger.error('Failed to trash file/folder:', err);
             }
           }
         }

@@ -7,6 +7,7 @@ import { Camera, Loader2 } from 'lucide-react';
 import { SELL_PLATFORMS, PRICE_COMP_SOURCES } from '../utils/constants';
 import { useListingActions } from '../hooks/useListingActions';
 import { useToast } from '../components/ToastProvider';
+import { EventLogger } from '../utils/EventLogger';
 import { SellHubDraftState } from './sellhub/SellHubDraftState';
 import { SellHubPricedState } from './sellhub/SellHubPricedState';
 
@@ -175,7 +176,7 @@ export function SellHubNode({ id, data }) {
       });
     } catch (error) {
       if (!isMountedRef.current) return;
-      console.error('[SellHub] Analysis failed:', error);
+      EventLogger.error('[SellHub] Analysis failed:', error);
       updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
       addToast({ title: 'Photo Analysis Failed', description: error?.message || String(error), type: 'error' });
     } finally {
@@ -183,7 +184,7 @@ export function SellHubNode({ id, data }) {
         processingRef.current = false;
       }
     }
-  }, [id, updateGlobal, addToast]);
+  }, [id, updateGlobal, addToast, getNode]);
 
   // Keep ref in sync so handleDrop always invokes the latest closure.
   startAnalysisRef.current = startAnalysis;
@@ -219,7 +220,7 @@ export function SellHubNode({ id, data }) {
       }
     } catch (err) {
       if (!isMountedRef.current) return;
-      console.error('[SellHub] Price research failed:', err);
+      EventLogger.error('[SellHub] Price research failed:', err);
       updateGlobal(currentId, { hubState: 'draft' });
       addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
     } finally {
@@ -227,13 +228,15 @@ export function SellHubNode({ id, data }) {
         processingPriceRef.current = false;
       }
     }
-  }, [id, updateGlobal, researchPrice, addToast, data.product]);
+  }, [id, updateGlobal, researchPrice, addToast, data.product, getNode]);
 
   const handleDrop = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
     if (data.locked) return; // Locked nodes don't accept new drops
     if (hubState === 'analyzing' || hubState === 'researching') return; // Ignore drops while busy
+    
+    e.preventDefault();
+    e.stopPropagation();
+    
     const files = Array.from(e.dataTransfer?.files || []);
     const images = files.filter(f => f.name.match(/\.(png|jpg|jpeg|webp|gif)$/i));
     const validImages = images.map(f => {

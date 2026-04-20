@@ -1,5 +1,6 @@
 import { useCallback, useRef, useEffect, useState } from 'react';
 import { DEFAULT_SHORTCUTS } from './useSettings';
+import { EventLogger } from '../utils/EventLogger';
 
 const MAX_HISTORY = 100;
 
@@ -82,7 +83,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     } catch (err) {
       // Fallback: if structuredClone fails (due to non-serializable data in 'data' fields),
       // we use a JSON-based clone which is safer for standard React Flow data.
-      console.warn('[undo-redo] structuredClone failed, falling back to JSON clone:', err.message);
+      EventLogger.log('[undo-redo] structuredClone failed, falling back to JSON clone: ' + err.message);
       return JSON.parse(JSON.stringify({ nodes: n, edges: e, drawings: d }));
     }
   }, []);

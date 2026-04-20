@@ -16,7 +16,6 @@ export function useNodeAutoEdit(id, isNew, isEmptyPredicate, inputRef) {
   const store = useStoreApi();
   const hasFocusedRef = useRef(false);
 
-
   // Auto-edit on initial placement
   useEffect(() => {
     let timeoutId;

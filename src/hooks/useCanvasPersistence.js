@@ -250,7 +250,6 @@ export function useCanvasPersistence({
     saveCanvas,
     loadCanvas,
     exportCanvasToPNG,
-    saveState,
     hasUnsavedChanges,
     setHasUnsavedChanges,
     currentFile,

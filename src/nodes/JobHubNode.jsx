@@ -5,6 +5,7 @@ import { AnimatedSourceRing } from '../components/AnimatedSourceRing';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
 import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
+import { EventLogger } from '../utils/EventLogger';
 
 import { JobHubProcessingState } from './jobhub/JobHubProcessingState';
 import { JobHubDoneState } from './jobhub/JobHubDoneState';
@@ -281,7 +282,7 @@ export function JobHubNode({ id, data }) {
       if (newNodes.length > 0) {
         document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
         if (addElementsGlobally) {
-          addElementsGlobally(currentId, newNodes, newEdges);
+          addElementsGlobally(currentId, newNodes, newEdges, 'sibling');
         } else {
           // Fallback if not inside CanvasNavigationContext (e.g., dev/test environment)
           addNodes(newNodes);
@@ -301,7 +302,7 @@ export function JobHubNode({ id, data }) {
       });
     } catch (error) {
       if (!isMountedRef.current) return;
-      console.error("JobHubNode Task Error:", error);
+      EventLogger.error('JobHubNode task failed:', error);
       updateGlobal(id, { hubState: 'error', errorMessage: error?.message || String(error) });
     } finally {
       if (isMountedRef.current) {
@@ -315,10 +316,12 @@ export function JobHubNode({ id, data }) {
 
   // Handle file drops directly onto this node
   const handleDrop = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
     if (data.locked) return;
     if (PROCESSING_STATES.includes(hubState)) return;
+    
+    e.preventDefault();
+    e.stopPropagation();
+    
     const files = Array.from(e.dataTransfer?.files || []);
     const resume = files.find(f => f.name.match(/\.(pdf|docx|doc|txt|png|jpg|jpeg)$/i));
     if (resume) {

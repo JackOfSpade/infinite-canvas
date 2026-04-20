@@ -81,21 +81,41 @@ function deepUpdateNode(nodes, id, dataUpdate) {
 }
 
 /**
- * Recursively finds the level where targetNodeId exists and appends newNodes and newEdges there.
+ * Recursively finds the level where targetNodeId exists and appends newNodes and newEdges.
+ * placement: 'inside' (insert into targetNodeId's canvasData) | 'sibling' (insert alongside targetNodeId)
  */
-function deepAddElements(nodes, edges, targetNodeId, newNodes, newEdges) {
+function deepAddElements(nodes, edges, targetNodeId, newNodes, newEdges, placement = 'inside') {
   if (!nodes) return { updated: false, nodes, edges };
   let anyUpdated = false;
 
   const nextNodes = nodes.map(n => {
-    // We do NOT modify n itself if it's the target, just map its children
+    // If dropping inside this target node
+    if (placement === 'inside' && n.id === targetNodeId) {
+      anyUpdated = true;
+      const prevNodes = n.data?.canvasData?.nodes || [];
+      const prevEdges = n.data?.canvasData?.edges || [];
+      return {
+        ...n,
+        data: {
+          ...n.data,
+          canvasData: {
+            ...n.data?.canvasData,
+            nodes: [...prevNodes, ...(newNodes || [])],
+            edges: [...prevEdges, ...(newEdges || [])]
+          }
+        }
+      };
+    }
+
+    // Keep searching deeper
     if (n.data?.canvasData?.nodes) {
       const { updated, nodes: childNodes, edges: childEdges } = deepAddElements(
         n.data.canvasData.nodes, 
         n.data.canvasData.edges || [], 
         targetNodeId, 
         newNodes, 
-        newEdges
+        newEdges,
+        placement
       );
       if (updated) {
         anyUpdated = true;
@@ -115,12 +135,12 @@ function deepAddElements(nodes, edges, targetNodeId, newNodes, newEdges) {
     return n;
   });
 
-  // If targetNodeId was found in THIS array level, append newNodes and newEdges here
-  if (nodes.some(n => n.id === targetNodeId)) {
+  // If placement is sibling, append to the array containing the target node
+  if (placement === 'sibling' && nodes.some(n => n.id === targetNodeId)) {
     anyUpdated = true;
     return { 
       updated: true, 
-      nodes: [...nextNodes, ...newNodes],
+      nodes: [...nextNodes, ...(newNodes || [])],
       edges: edges ? [...edges, ...(newEdges || [])] : (newEdges || [])
     };
   }
@@ -326,10 +346,14 @@ export function useCanvasNavigation({
   }, []);
 
   /**
-   * Detach one or more nodes (and their internal edges) from the current sub-canvas and move them to the parent canvas.
+   * Detach one or more nodes (and their internal edges) from the current sub-canvas and move them to a parent canvas depth.
    */
-  const extractToParent = useCallback((nodeIdOrIds) => {
+  const extractToLevel = useCallback((nodeIdOrIds, explicitTargetIndex = undefined) => {
     if (stackRef.current.length === 0) return;
+
+    const targetIndex = explicitTargetIndex !== undefined ? explicitTargetIndex : stackRef.current.length - 1;
+    // Don't extract if the target is the current level or deeper than available stack
+    if (targetIndex >= stackRef.current.length || targetIndex < 0) return;
 
     const ids = Array.isArray(nodeIdOrIds) ? nodeIdOrIds : [nodeIdOrIds];
     
@@ -348,25 +372,34 @@ export function useCanvasNavigation({
     // restores the node locally, but it remains injected in the parent stack.
     clearHistory?.();
 
-    // Inject into parent's saved state
+    // Inject into ancestor's saved state
     setStack(s => {
-      if (s.length === 0) return s; // Secondary check inside setter
+      if (s.length <= targetIndex) return s;
       
       const newStack = [...s];
-      const parent = newStack[newStack.length - 1];
-      if (!parent) return s;
+      const targetParent = newStack[targetIndex];
+      if (!targetParent) return s;
 
-      const parentContainer = parent.nodes.find(n => n.id === parent.nodeId);
+      // The container node inside `targetParent` which the user previously entered, serving as the spatial anchor
+      const parentContainer = targetParent.nodes.find(n => n.id === targetParent.nodeId);
       
       // Compute bounding box of extracted nodes to preserve relative layout
       const minX = Math.min(...nodesToExtract.map(n => n.position.x));
       const minY = Math.min(...nodesToExtract.map(n => n.position.y));
+      const maxX = Math.max(...nodesToExtract.map(n => n.position.x + (n.measured?.width || 200)));
+      const maxY = Math.max(...nodesToExtract.map(n => n.position.y + (n.measured?.height || 66)));
+      const clusterWidth = Math.max(0, maxX - minX);
+      const clusterHeight = Math.max(0, maxY - minY);
       
-      // Base coordinate places the entire group's bounding box near the parent container
-      const basePosX = (parentContainer?.position.x || 0) + 120;
-      const basePosY = (parentContainer?.position.y || 100) - 150;
+      // Center the extracted cluster horizontally over the parent container
+      const parentWidth = parentContainer?.measured?.width || parseInt(parentContainer?.style?.width) || 160;
+      const parentX = parentContainer?.position.x || 0;
+      
+      const basePosX = parentX + (parentWidth / 2) - (clusterWidth / 2);
+      // Ensure the bottom edge of the entire cluster rests cleanly above the parent container
+      const basePosY = (parentContainer?.position.y || 100) - clusterHeight - 60; 
 
-      const newParentNodes = [...parent.nodes];
+      const newParentNodes = [...targetParent.nodes];
       nodesToExtract.forEach((nodeToExtract) => {
         const offsetX = nodeToExtract.position.x - minX;
         const offsetY = nodeToExtract.position.y - minY;
@@ -376,9 +409,9 @@ export function useCanvasNavigation({
         });
       });
 
-      const newParentEdges = [...(parent.edges || []), ...edgesToExtract];
+      const newParentEdges = [...(targetParent.edges || []), ...edgesToExtract];
 
-      newStack[newStack.length - 1] = { ...parent, nodes: newParentNodes, edges: newParentEdges };
+      newStack[targetIndex] = { ...targetParent, nodes: newParentNodes, edges: newParentEdges };
       return newStack;
     });
   }, [setNodes, setEdges, clearHistory]);
@@ -410,35 +443,31 @@ export function useCanvasNavigation({
   }, [setNodes]);
 
   /**
-   * Appends new nodes and edges to the specific array level where targetNodeId lives.
-   *
-   * Snapshots both refs at call-time so nodes and edges are computed from a consistent
-   * view of state, avoiding mismatches when functional setters for each would see
-   * different committed values. The stack is still updated via a functional setter
-   * because pipeline callers may call this back-to-back; the functional form always
-   * sees the latest committed stack and prevents overwrite races.
+   * Appends new nodes and edges to the targetNodeId either inside its subcanvas or as siblings.
+   * Uses functional updates to safely execute against the active state queue, preserving
+   * preceding updates (e.g. removing the dragged node from its old location).
    */
-  const addElementsGlobally = useCallback((targetNodeId, newNodesPayload, newEdgesPayload = []) => {
-    // Snapshot refs at call-time so both state updaters operate on the same
-    // consistent view of nodes/edges, avoiding stale-closure bugs in concurrent mode.
-    const snapshotNodes = nodesRef.current;
-    const snapshotEdges = edgesRef.current;
+  const addElementsGlobally = useCallback((targetNodeId, newNodesPayload, newEdgesPayload = [], placement = 'inside') => {
+    setNodes(prevNodes => {
+      const { updated, nodes: newNodes } = deepAddElements(
+        prevNodes, edgesRef.current, targetNodeId, newNodesPayload, newEdgesPayload, placement
+      );
+      return updated ? newNodes : prevNodes;
+    });
 
-    // Single deepAddElements call returns both updated nodes AND edges in one tree walk.
-    const { updated, nodes: newNodes, edges: newEdges } = deepAddElements(
-      snapshotNodes, snapshotEdges, targetNodeId, newNodesPayload, newEdgesPayload
-    );
-
-    if (updated) {
-      setNodes(newNodes);
-      setEdges(newEdges);
-    }
+    setEdges(prevEdges => {
+      // Use nodesRef.current (as a layout map) to safely navigate to the target using functional update state.
+      const { updated, edges: newEdges } = deepAddElements(
+        nodesRef.current, prevEdges, targetNodeId, newNodesPayload, newEdgesPayload, placement
+      );
+      return updated ? newEdges : prevEdges;
+    });
 
     setStack(prevStack => {
       let stackUpdated = false;
       const newStack = prevStack.map(level => {
         const { updated: lu, nodes: newStackNodes, edges: newStackEdges } = deepAddElements(
-          level.nodes, level.edges, targetNodeId, newNodesPayload, newEdgesPayload
+          level.nodes, level.edges, targetNodeId, newNodesPayload, newEdgesPayload, placement
         );
         if (lu) stackUpdated = true;
         return lu ? { ...level, nodes: newStackNodes, edges: newStackEdges } : level;
@@ -460,7 +489,8 @@ export function useCanvasNavigation({
     diveOut,
     jumpTo,
     flushStack,
-    extractToParent,
+    extractToParent: extractToLevel,
+    extractToLevel,
     updateNodeDataGlobally,
     addElementsGlobally,
     resetStack,

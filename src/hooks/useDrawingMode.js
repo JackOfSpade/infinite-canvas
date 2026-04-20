@@ -11,9 +11,8 @@ export function useDrawingMode({
   activeTool,
   eraserType,
   eraserSize = 15,
-  setDrawings,
   setNodes,
-  setEdges,
+  setDrawings,
   takeSnapshot,
   activeColor = 'white',
   penSize = 3,
@@ -70,7 +69,7 @@ export function useDrawingMode({
       });
     }
   }, [screenToFlowPosition, getViewport, eraserSize, eraserType, getIntersectingNodes,
-      setNodes, setEdges, setDrawings, isAnimatingRef, isInteractionRef]);
+      setDrawings, deleteElements, isAnimatingRef, isInteractionRef]);
 
   const handlePointerDown = useCallback((e) => {
     if (e.button !== 0) return;

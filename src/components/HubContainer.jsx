@@ -8,7 +8,6 @@ export function HubContainer({
   height, 
   minHeight = 140,
   onDrop,
-  interactiveStates = [],
   extras,
   children 
 }) {

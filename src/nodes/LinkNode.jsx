@@ -71,7 +71,7 @@ export function LinkNode({ id, data }) {
       }, 500);
       return () => clearTimeout(timer);
     }
-  }, [data.url, data.label, updateGlobal, getNode]);
+  }, [data.url, data.label, updateGlobal, getNode, id]);
 
   const openLink = () => {
     const targetUrl = data.url || inputRef.current?.innerText || '';
