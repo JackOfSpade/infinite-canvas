@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 /**
  * Creates a listener wrapper for IPC channels.
@@ -15,6 +15,7 @@ function createListener(channel) {
 contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Filesystem ──────────────────────────────────────────────────────────
+  getPathForFile: (file) => webUtils.getPathForFile(file),
   openFile: (filePath) => ipcRenderer.invoke('open-file', filePath),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   fetchUrlTitle: async (url) => {

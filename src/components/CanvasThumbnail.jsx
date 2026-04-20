@@ -124,6 +124,28 @@ function ThumbnailNode({ r }) {
     );
   }
 
+  if (type === 'document') {
+    const isImage = Boolean(data?.filename?.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i));
+    if (isImage && data?.filePath) {
+      const imgSrc = `local-file://${data.filePath.replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
+      return (
+        <g>
+          <rect x={x} y={y} width={w} height={h} rx={6} fill="rgba(12,12,18,0.7)" stroke="rgba(255,255,255,0.1)" strokeWidth={1} />
+          <image href={imgSrc} x={x + 4} y={y + 4} width={Math.max(0, w - 8)} height={Math.max(0, h - 8)} preserveAspectRatio="xMidYMid meet" />
+        </g>
+      );
+    }
+    // Fallback for non-image documents
+    return (
+      <rect
+        x={x} y={y} width={w} height={h}
+        rx={6} ry={6}
+        fill={MINIMAP_NODE_COLORS[type] || '#555'}
+        opacity={0.75}
+      />
+    );
+  }
+
   // All other node types: solid rectangle (minimap palette)
   return (
     <rect

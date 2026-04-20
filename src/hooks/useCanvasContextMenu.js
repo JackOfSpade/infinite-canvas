@@ -1,62 +1,20 @@
 import { useState, useCallback } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
-import { NODE_FACTORIES } from '../utils/nodeFactory';
+import { NODE_FACTORIES, cloneNode, reassignCanvasDataIDs } from '../utils/nodeFactory';
 import { useToast } from '../components/ToastProvider';
 import { getNodeDims } from '../utils/constants';
 
 /** Static color choices for the node color submenu. */
 const NODE_COLORS = [
-  { label: '🔴 Red', value: 'rgba(239, 68, 68, 0.2)' },
-  { label: '🟠 Orange', value: 'rgba(249, 115, 22, 0.2)' },
-  { label: '🟡 Yellow', value: 'rgba(234, 179, 8, 0.2)' },
-  { label: '🟢 Green', value: 'rgba(34, 197, 94, 0.2)' },
-  { label: '🔵 Blue', value: 'rgba(59, 130, 246, 0.2)' },
-  { label: '🟣 Purple', value: 'rgba(168, 85, 247, 0.2)' },
-  { label: '⚫️ Clear', value: null },
+  { label: '🔴 Red',    value: 'rgba(239, 68, 68, 0.2)'   },
+  { label: '🟠 Orange', value: 'rgba(249, 115, 22, 0.2)'  },
+  { label: '🟡 Yellow', value: 'rgba(234, 179, 8, 0.2)'   },
+  { label: '🟢 Green',  value: 'rgba(34, 197, 94, 0.2)'   },
+  { label: '🔵 Blue',   value: 'rgba(59, 130, 246, 0.2)'  },
+  { label: '🟣 Purple', value: 'rgba(168, 85, 247, 0.2)'  },
+  { label: '⚫️ Clear',  value: null                       },
 ];
-
-/**
- * Recursively remaps all node, edge, and drawing IDs inside a duplicated group's canvasData
- * to prevent ID collisions if identical child nodes are later extracted to a shared parent.
- * Pure function — returns a new object tree; does not mutate the input.
- */
-export function reassignCanvasDataIDs(node) {
-  if (node.type !== 'group' || !node.data?.canvasData) return node;
-
-  const idMap = new Map();
-  const getMappedId = (oldId) => {
-    if (!idMap.has(oldId)) idMap.set(oldId, crypto.randomUUID());
-    return idMap.get(oldId);
-  };
-
-  const processCanvasData = (canvasData) => {
-    if (!canvasData) return canvasData;
-    const newNodes = (canvasData.nodes || []).map(n => {
-      const newNode = { ...n, id: getMappedId(n.id) };
-      if (newNode.type === 'group' && newNode.data?.canvasData) {
-        newNode.data = { ...newNode.data, canvasData: processCanvasData(newNode.data.canvasData) };
-      }
-      return newNode;
-    });
-    const newEdges = (canvasData.edges || []).map(e => ({
-      ...e,
-      id: crypto.randomUUID(),
-      source: idMap.has(e.source) ? idMap.get(e.source) : e.source,
-      target: idMap.has(e.target) ? idMap.get(e.target) : e.target,
-    }));
-    const newDrawings = (canvasData.drawings || []).map(d => d.id ? { ...d, id: crypto.randomUUID() } : d);
-    return { nodes: newNodes, edges: newEdges, drawings: newDrawings };
-  };
-
-  return {
-    ...node,
-    data: {
-      ...node.data,
-      canvasData: processCanvasData(node.data.canvasData),
-    },
-  };
-}
 
 export function useCanvasContextMenu({
   placementMode,
@@ -135,41 +93,11 @@ export function useCanvasContextMenu({
 
     const oldIdToNewId = new Map();
     const newNodes = nodesToDuplicate.map(original => {
-      let clonedOriginal;
-      try {
-        clonedOriginal = structuredClone(original);
-      } catch {
-        console.warn("structuredClone failed during duplicateNode, falling back to JSON");
-        clonedOriginal = JSON.parse(JSON.stringify(original));
-      }
-
-      let clone = {
-        ...clonedOriginal,
-        id: crypto.randomUUID(),
-        position: { x: original.position.x + 40, y: original.position.y + 40 },
-        selected: true,
-      };
-      
+      let clone = cloneNode(original);
       oldIdToNewId.set(original.id, clone.id);
+      // Reassign nested canvas IDs to prevent collisions if the group's children
+      // are later extracted to a shared parent level.
       clone = reassignCanvasDataIDs(clone);
-      // Clear isNew flag on duplicated nodes so they don't auto-enter edit mode
-      if (clone.data) clone.data.isNew = false;
-      // Don't carry over lock state — the clone should be freely editable
-      if (clone.data?.locked) {
-        clone.data.locked = false;
-        delete clone.draggable;
-        delete clone.deletable;
-      }
-
-      // Sanitize transient AI/Scraping states so the clone doesn't get stuck waiting for an IPC it didn't launch
-      if (clone.data?.hubState) {
-        const state = clone.data.hubState;
-        if (['parsing', 'querying', 'searching', 'scoring', 'analyzing'].includes(state)) {
-          clone.data.hubState = 'empty';
-        } else if (state === 'researching') {
-          clone.data.hubState = 'draft';
-        }
-      }
       return clone;
     });
 
@@ -484,8 +412,7 @@ export function useCanvasContextMenu({
       return items;
     }
     return [];
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [menu, spawnNode, duplicateNode, bringToFront, sendToBack, deleteSelectedNode, toggleLockNode, setNodeColor, clearCanvas, tidyNodes, aiPolishText, toggleStickyNote, closeMenu, depth, extractToParent]);
+  }, [menu, spawnNode, duplicateNode, bringToFront, sendToBack, deleteSelectedNode, toggleLockNode, setNodeColor, clearCanvas, tidyNodes, aiPolishText, toggleStickyNote, closeMenu, takeSnapshot, depth, extractToParent]);
 
   return {
     menu,

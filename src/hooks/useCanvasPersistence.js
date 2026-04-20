@@ -108,18 +108,24 @@ export function useCanvasPersistence({
   const [saveState, setSaveState] = useState('idle');
   const isExportingRef = useRef(false);
   const saveStateTimerRef = useRef(null);
+  const loadTimerRef = useRef(null);
+
+  // Mirror hasUnsavedChanges into a ref so the quit/unload listeners can
+  // read the live value without being recreated on every state change.
+  const hasUnsavedChangesRef = useRef(hasUnsavedChanges);
+  useEffect(() => { hasUnsavedChangesRef.current = hasUnsavedChanges; }, [hasUnsavedChanges]);
 
   useEffect(() => {
     // ── Quit Handshake ──────────────────────────────────────────────────────
     // Listens for the main process signaling a quit intent (e.g., Cmd+Q).
     const unlistenQuit = window.electronAPI?.onQuitRequest?.(() => {
-      window.electronAPI.sendQuitResponse(hasUnsavedChanges);
+      window.electronAPI.sendQuitResponse(hasUnsavedChangesRef.current);
     });
 
     // ── Window Unload Guard ──────────────────────────────────────────────────
     // Standard browser/electron safety for closing the window tab directly.
     const handleBeforeUnload = (e) => {
-      if (hasUnsavedChanges) {
+      if (hasUnsavedChangesRef.current) {
         e.preventDefault();
         e.returnValue = ''; // Required for Chrome/Electron to show the prompt
       }
@@ -129,10 +135,10 @@ export function useCanvasPersistence({
     return () => {
       unlistenQuit?.();
       window.removeEventListener('beforeunload', handleBeforeUnload);
-      // Cancel any pending 'idle' transition timer to prevent state updates after unmount
       if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
+      if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
     };
-  }, [hasUnsavedChanges]);
+  }, []); // Stable: reads live value via ref — no need to re-register on change
 
   const saveCanvas = useCallback(async () => {
     if (!window.electronAPI || saveState !== 'idle' || isAnimatingRef?.current) return;
@@ -188,8 +194,12 @@ export function useCanvasPersistence({
         // Defer: the useCanvasInitialization effect will fire setHasUnsavedChanges(true)
         // on the next render — we need our false to run *after* that effect.
         // A 50ms timeout ensures we safely skip past any React 18 concurrent rendering microtasks.
-        setTimeout(() => { setHasUnsavedChanges(false); }, 50);
-        setTimeout(() => { customFitView(); }, 50);
+        if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+        loadTimerRef.current = setTimeout(() => {
+          loadTimerRef.current = null;
+          setHasUnsavedChanges(false);
+          customFitView();
+        }, 50);
         addToast({ title: 'Workspace Loaded', description: 'Your canvas has been loaded successfully.', type: 'success'});
       } else if (!res?.canceled) {
         addToast({ title: 'Load Failed', description: 'Failed to load canvas or invalid file format.', type: 'error'});

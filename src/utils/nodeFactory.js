@@ -44,3 +44,102 @@ export const NODE_FACTORIES = {
   jobhub: createJobHubNode,
   sellhub: createSellHubNode,
 };
+
+/**
+ * Create a clean, safe clone of an existing node for duplication.
+ * - Assigns a new random ID.
+ * - Offsets position by (dx, dy) (default: 40x40).
+ * - Clears `isNew` so clones don't auto-enter edit mode.
+ * - Clears `locked` so duplicated nodes are freely editable.
+ * - Sanitizes transient hub states so clones don't inherit in-flight AI jobs.
+ *
+ * NOTE: canvas-data ID reassignment (nested group nodes) is a separate concern
+ * handled by `reassignCanvasDataIDs` below.
+ *
+ * @param {object} original - The source node object
+ * @param {number} [dx=40] - Horizontal offset for the clone
+ * @param {number} [dy=40] - Vertical offset for the clone
+ * @returns {object} A new node object safe to push into the nodes array
+ */
+export function cloneNode(original, dx = 40, dy = 40) {
+  let src;
+  try {
+    src = structuredClone(original);
+  } catch {
+    src = JSON.parse(JSON.stringify(original));
+  }
+
+  const clone = {
+    ...src,
+    id: crypto.randomUUID(),
+    position: { x: original.position.x + dx, y: original.position.y + dy },
+    selected: true,
+  };
+
+  // Clear flags that should not carry over from source
+  if (clone.data) {
+    clone.data.isNew = false;
+  }
+
+  // Unlock: clones should always be freely movable/deletable
+  if (clone.data?.locked) {
+    clone.data.locked = false;
+    delete clone.draggable;
+    delete clone.deletable;
+  }
+
+  // Sanitize transient AI hub states so the clone is not stuck waiting
+  // for an IPC response it didn't initiate.
+  if (clone.data?.hubState) {
+    const ACTIVE_STATES = ['parsing', 'querying', 'searching', 'scoring', 'analyzing'];
+    if (ACTIVE_STATES.includes(clone.data.hubState)) {
+      clone.data.hubState = 'empty';
+    } else if (clone.data.hubState === 'researching') {
+      clone.data.hubState = 'draft';
+    }
+  }
+
+  return clone;
+}
+
+/**
+ * Recursively remaps all node, edge, and drawing IDs inside a duplicated group's canvasData
+ * to prevent ID collisions if identical child nodes are later extracted to a shared parent.
+ * Pure function — returns a new object tree; does not mutate the input.
+ */
+export function reassignCanvasDataIDs(node) {
+  if (node.type !== 'group' || !node.data?.canvasData) return node;
+
+  const idMap = new Map();
+  const getMappedId = (oldId) => {
+    if (!idMap.has(oldId)) idMap.set(oldId, crypto.randomUUID());
+    return idMap.get(oldId);
+  };
+
+  const processCanvasData = (canvasData) => {
+    if (!canvasData) return canvasData;
+    const newNodes = (canvasData.nodes || []).map(n => {
+      const newNode = { ...n, id: getMappedId(n.id) };
+      if (newNode.type === 'group' && newNode.data?.canvasData) {
+        newNode.data = { ...newNode.data, canvasData: processCanvasData(newNode.data.canvasData) };
+      }
+      return newNode;
+    });
+    const newEdges = (canvasData.edges || []).map(e => ({
+      ...e,
+      id: crypto.randomUUID(),
+      source: idMap.has(e.source) ? idMap.get(e.source) : e.source,
+      target: idMap.has(e.target) ? idMap.get(e.target) : e.target,
+    }));
+    const newDrawings = (canvasData.drawings || []).map(d => d.id ? { ...d, id: crypto.randomUUID() } : d);
+    return { nodes: newNodes, edges: newEdges, drawings: newDrawings };
+  };
+
+  return {
+    ...node,
+    data: {
+      ...node.data,
+      canvasData: processCanvasData(node.data.canvasData),
+    },
+  };
+}

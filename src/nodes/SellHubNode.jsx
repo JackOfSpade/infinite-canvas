@@ -175,7 +175,7 @@ export function SellHubNode({ id, data }) {
   // Keep ref in sync so handleDrop always invokes the latest closure.
   startAnalysisRef.current = startAnalysis;
 
-  const handleConfirmDraft = async () => {
+  const handleConfirmDraft = useCallback(async () => {
     if (processingPriceRef.current || !data.product) return;
     processingPriceRef.current = true;
     const currentId = id;
@@ -210,7 +210,7 @@ export function SellHubNode({ id, data }) {
     } finally {
       processingPriceRef.current = false;
     }
-  };
+  }, [id, updateGlobal, researchPrice, addToast, data.product]);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();

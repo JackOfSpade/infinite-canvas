@@ -6,6 +6,7 @@
  * @param {string} text - The text icon or generic name for the ghost UI
  * @param {string} color - The text color representing the node type
  */
+
 export function setupDragGhost(e, text, color) {
   const ghost = document.createElement('div');
   ghost.textContent = text;
@@ -79,6 +80,7 @@ export async function processDroppedFiles(files, startPosition) {
         style: { width: size, height: size },
         data: { 
           title: fsItem.title, 
+          filePath: fsItem.filePath,
           canvasData: {
             nodes: childNodes,
             edges: [],

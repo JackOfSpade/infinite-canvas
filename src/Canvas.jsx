@@ -282,7 +282,7 @@ export function Canvas() {
   const { onConnect, onDragStart, clearCanvas } = useCanvasActions({
     setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, takeSnapshot, requestClearConfirm,
     resetStack: navigation.resetStack,
-    depth: navigation.depth, updateGlobal: navigation.updateNodeDataGlobally,
+    depth: navigation.depth,
     isAnimatingRef: isNavigationAnimatingRef,
   });
 
@@ -322,7 +322,8 @@ export function Canvas() {
   // ── Keyboard Shortcuts Panel + Escape to cancel placement/tool ──────────
   useCanvasKeyboardShortcuts({ 
     placementMode, setPlacementMode, activeTool, setActiveTool, setIsSettingsOpen,
-    isAnimatingRef: isNavigationAnimatingRef 
+    isAnimatingRef: isNavigationAnimatingRef,
+    takeSnapshot,
   });
 
   // ── WASD canvas navigation ───────────────────────────────────────────────

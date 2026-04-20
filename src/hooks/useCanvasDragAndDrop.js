@@ -3,6 +3,10 @@ import { useReactFlow } from '@xyflow/react';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { processDroppedFiles } from '../utils/dragUtils';
 
+// Compiled once at module load — not per drop event.
+const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)(?:[?#].*)?$/i;
+const URL_RE = /^(https?:\/\/[^\s]+|[a-z0-9]([a-z0-9-]*[a-z0-9])?\.([a-z]{2,}\.)*[a-z]{2,}([/?#][^\s]*)?)$/i;
+
 export function useCanvasDragAndDrop({
   setNodes,
   setIsDrawingMode,
@@ -38,7 +42,12 @@ export function useCanvasDragAndDrop({
     }
 
     if (event.dataTransfer.files?.length > 0) {
-      const files = Array.from(event.dataTransfer.files);
+      const files = Array.from(event.dataTransfer.files).map(f => ({
+        name: f.name,
+        type: f.type,
+        size: f.size,
+        path: f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : '')
+      }));
 
       // Resume files (PDF/DOCX) → auto-create JobHubNode with filePath
       const resumeFile = files.find(f => f.name.match(/\.(pdf|docx|doc)$/i));
@@ -50,7 +59,15 @@ export function useCanvasDragAndDrop({
 
       // Default: treat as document/folder drops — only process items with valid system paths
       const validFiles = files.filter(f => f.path);
-      if (validFiles.length === 0) return;
+      if (validFiles.length === 0) {
+        console.warn('Drop ignored: No paths found on files. Debug data:', JSON.stringify({
+          files: files.map(f => ({ name: f.name, type: f.type, size: f.size, path: f.path })),
+          types: event.dataTransfer.types,
+          items: Array.from(event.dataTransfer.items || []).map(i => ({ kind: i.kind, type: i.type })),
+          userAgent: navigator.userAgent
+        }, null, 2));
+        return;
+      }
 
       takeSnapshot();
       const dropDepth = depthRef.current;
@@ -59,6 +76,8 @@ export function useCanvasDragAndDrop({
 
       if (newItems.length > 0) {
         setNodes(nds => nds.concat(newItems));
+      } else {
+        console.warn('processDroppedFiles returned 0 items for validFiles:', validFiles);
       }
       return;
     }
@@ -71,8 +90,6 @@ export function useCanvasDragAndDrop({
     const droppedUrl = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain');
     if (droppedUrl && droppedUrl.length < 2048) {
       const trimmedUrl = droppedUrl.trim();
-      const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)(?:[?#].*)?$/i;
-      const URL_RE = /^(https?:\/\/[^\s]+|[a-z0-9]([a-z0-9-]*[a-z0-9])?\.[a-z]{2,}(\.[a-z]{2,})?([/?#][^\s]*)?)$/i;
       if (URL_RE.test(trimmedUrl) && !CODE_EXT_RE.test(trimmedUrl.split('?')[0].split('#')[0])) {
         takeSnapshot();
         setNodes(nds => nds.concat(NODE_FACTORIES.link(position, { url: trimmedUrl })));

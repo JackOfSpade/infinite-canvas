@@ -212,6 +212,7 @@ if (!gotTheLock) {
   app.whenReady().then(() => {
     protocol.registerFileProtocol('local-file', (request, callback) => {
       let url = request.url.replace(/^local-file:\/\//, '');
+      url = url.split('?')[0].split('#')[0]; // Strip query and hash
       try {
         const decodedPath = decodeURIComponent(url);
         // ── Protocol Security Hardening ──────────────────────────────────────────
@@ -259,7 +260,7 @@ if (!gotTheLock) {
     });
 
     // Cleanup orphaned .tmp files from previous sessions
-    cleanupTempFiles().catch(err => console.error('[Main] Cleanup failed:', err));
+    cleanupTempFiles(app.getPath('userData')).catch(err => console.error('[Main] Cleanup failed:', err));
 
     registerFilesystemHandlers();
     registerJobsHandlers();

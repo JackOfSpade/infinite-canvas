@@ -67,6 +67,7 @@ async function scanPath(currentPath, visited, sender = null, depth = 0) {
         id: 'group-' + randomUUID(),
         type: 'group',
         title: base || currentPath,
+        filePath: currentPath,
         collapsed: true,
         items: children,
       };
@@ -174,16 +175,36 @@ export function registerFilesystemHandlers() {
 
   handleSafe('start-file-watch', async (event, filePath) => {
     const sender = event.sender;
-    
+
+    // Helper: attach a one-time cleanup listener the first time this sender
+    // appears in any entry of activeWatchers. This ensures the watcher is
+    // properly torn down even if the sender subscribes to an already-active path.
+    const ensureSenderCleanup = (s) => {
+      if (s.__fsWatchCleanupAttached) return;
+      s.__fsWatchCleanupAttached = true;
+      s.once('destroyed', () => {
+        for (const [fPath, entry] of activeWatchers.entries()) {
+          if (entry.clients.has(s)) {
+            entry.clients.delete(s);
+            if (entry.clients.size === 0) {
+              try { entry.watcher.close(); } catch { /* ignore */ }
+              activeWatchers.delete(fPath);
+            }
+          }
+        }
+      });
+    };
+
     if (activeWatchers.has(filePath)) {
       const entry = activeWatchers.get(filePath);
       const count = entry.clients.get(sender) || 0;
       entry.clients.set(sender, count + 1);
+      ensureSenderCleanup(sender); // attach cleanup for this sender if not yet done
       return;
     }
 
     await fs.promises.access(filePath);
-    
+
     const watcher = fs.watch(filePath, (eventType) => {
       if (eventType === 'change') {
         const entry = activeWatchers.get(filePath);
@@ -200,7 +221,7 @@ export function registerFilesystemHandlers() {
       logger.warn(`[FileSystem] Watcher error for ${filePath}:`, err);
       const entry = activeWatchers.get(filePath);
       if (entry) {
-        entry.watcher.close();
+        try { entry.watcher.close(); } catch { /* ignore */ }
         activeWatchers.delete(filePath);
       }
     });
@@ -208,22 +229,9 @@ export function registerFilesystemHandlers() {
     const clients = new Map();
     clients.set(sender, 1);
     activeWatchers.set(filePath, { watcher, clients });
-
-    if (!sender.__fsWatchCleanupAttached) {
-      sender.__fsWatchCleanupAttached = true;
-      sender.once('destroyed', () => {
-        for (const [fPath, entry] of activeWatchers.entries()) {
-          if (entry.clients.has(sender)) {
-            entry.clients.delete(sender);
-            if (entry.clients.size === 0) {
-              entry.watcher.close();
-              activeWatchers.delete(fPath);
-            }
-          }
-        }
-      });
-    }
+    ensureSenderCleanup(sender);
   });
+
 
   handleSafe('stop-file-watch', async (event, filePath) => {
     const sender = event.sender;
@@ -252,18 +260,20 @@ export function registerFilesystemHandlers() {
 /**
  * Startup Cleanup Logic: Finds and deletes orphaned .tmp files left over from
  * previous sessions (atomic write failures or app crashes).
+ *
+ * @param {string} [targetDir] - Directory to scan. Defaults to process.cwd() in dev.
  */
-export async function cleanupTempFiles() {
-  const cwd = process.cwd();
+export async function cleanupTempFiles(targetDir) {
+  const dir = targetDir || process.cwd();
   try {
-    const files = await fs.promises.readdir(cwd);
+    const files = await fs.promises.readdir(dir);
     const tmpFiles = files.filter(f => f.endsWith('.tmp') && f.includes('-'));
     for (const f of tmpFiles) {
       try {
-        const stats = await fs.promises.stat(path.join(cwd, f));
+        const stats = await fs.promises.stat(path.join(dir, f));
         // Only delete if older than 1 hour (safety against concurrent writes from active run)
         if (Date.now() - stats.mtimeMs > 60 * 60 * 1000) {
-          await fs.promises.unlink(path.join(cwd, f));
+          await fs.promises.unlink(path.join(dir, f));
         }
       } catch { /* ignore */ }
     }

@@ -1,9 +1,10 @@
 import { useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
-import { reassignCanvasDataIDs } from './useCanvasContextMenu';
+import { cloneNode, reassignCanvasDataIDs } from '../utils/nodeFactory';
 
-export function useCanvasKeyboardShortcuts({ 
+export function useCanvasKeyboardShortcuts({
+
   placementMode, setPlacementMode, 
   activeTool, setActiveTool, 
   setIsSettingsOpen,
@@ -30,38 +31,9 @@ export function useCanvasKeyboardShortcuts({
         
         const oldIdToNewId = new Map();
         const newNodes = selectedNodes.map(original => {
-          let clonedOriginal;
-          try {
-            clonedOriginal = structuredClone(original);
-          } catch {
-            clonedOriginal = JSON.parse(JSON.stringify(original));
-          }
-
-          let clone = {
-            ...clonedOriginal,
-            id: crypto.randomUUID(),
-            position: { x: original.position.x + 40, y: original.position.y + 40 },
-            selected: true,
-          };
-          
+          let clone = cloneNode(original);
           oldIdToNewId.set(original.id, clone.id);
-
           clone = reassignCanvasDataIDs(clone);
-          if (clone.data) clone.data.isNew = false;
-          if (clone.data?.locked) {
-            clone.data.locked = false;
-            delete clone.draggable;
-            delete clone.deletable;
-          }
-
-          if (clone.data?.hubState) {
-            const state = clone.data.hubState;
-            if (['parsing', 'querying', 'searching', 'scoring', 'analyzing'].includes(state)) {
-              clone.data.hubState = 'empty';
-            } else if (state === 'researching') {
-              clone.data.hubState = 'draft';
-            }
-          }
           return clone;
         });
 

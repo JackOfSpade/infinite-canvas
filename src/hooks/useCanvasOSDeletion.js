@@ -19,21 +19,45 @@ export function useCanvasOSDeletion({ requestConfirm }) {
       cancelRecursively(deletedNodes);
     }
 
-    const documentNodes = deletedNodes.filter(n => n.type === 'document' && n.data?.filePath);
-    if (documentNodes.length > 0 && window.electronAPI) {
+    const pathsToDelete = new Set();
+    const extractPaths = (nodes) => {
+      nodes.forEach(n => {
+        if (n.type === 'document' && n.data?.filePath) {
+          pathsToDelete.add(n.data.filePath);
+        } else if (n.type === 'group') {
+          if (n.data?.filePath) {
+            // Group created from a folder drag-in: delete the entire OS folder
+            pathsToDelete.add(n.data.filePath);
+          } else {
+            // Organic sub-canvas: recurse into children to delete inner files
+            if (n.data?.canvasData?.nodes) {
+              extractPaths(n.data.canvasData.nodes);
+            }
+            if (n.data?.nodes) {
+              extractPaths(n.data.nodes);
+            }
+          }
+        }
+      });
+    };
+
+    extractPaths(deletedNodes);
+    const osPaths = Array.from(pathsToDelete);
+
+    if (osPaths.length > 0 && window.electronAPI) {
       requestConfirm({
         title: 'Delete from OS?',
-        message: 'Do you also want to move the actual linked file(s) to trash?',
+        message: 'Do you also want to move the actual linked file(s) and folder(s) to trash?',
         confirmLabel: 'Move to Trash',
         cancelLabel: 'Keep OS File',
         variant: 'warning',
         onConfirm: async () => {
-          for (const node of documentNodes) {
+          for (const path of osPaths) {
             // Proceed with OS deletion even if unmounted because user confirmed
             try {
-              await window.electronAPI.deleteOSFile(node.data.filePath);
+              await window.electronAPI.deleteOSFile(path);
             } catch (err) {
-              console.error('Failed to trash file:', err);
+              console.error('Failed to trash file/folder:', err);
             }
           }
         }

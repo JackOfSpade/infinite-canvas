@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useCallback } from 'react';
 import { Panel, useReactFlow, useStore } from '@xyflow/react';
-import { MINIMAP_NODE_COLORS, NODE_DIMS, getNodeDims } from '../utils/constants';
+import { MINIMAP_NODE_COLORS, NODE_DIMS, getNodeDims, IMAGE_RE } from '../utils/constants';
 
 const MINIMAP_W = 200;
 const MINIMAP_H = 140;
@@ -253,6 +253,19 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
             }
 
             if (n.type === 'document') {
+              const isImage = IMAGE_RE.test(n.data?.filename || '');
+              if (isImage && n.data?.filePath) {
+                const imgSrc = `local-file://${n.data.filePath.replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
+                return (
+                  <g key={n.id}>
+                    <rect x={pos.x} y={pos.y} width={mw} height={mh} rx={2} 
+                      fill="rgba(12,12,18,0.7)" stroke="rgba(255,255,255,0.1)" strokeWidth={0.5} />
+                    <image href={imgSrc} x={pos.x + 2} y={pos.y + 2} 
+                      width={Math.max(0, mw - 4)} height={Math.max(0, mh - 4)} 
+                      preserveAspectRatio="xMidYMid meet" />
+                  </g>
+                );
+              }
               return (
                 <rect key={n.id} x={pos.x} y={pos.y} width={mw} height={mh} rx={2}
                   fill="rgba(251,191,36,0.25)" stroke="rgba(251,191,36,0.50)" strokeWidth={0.5} />

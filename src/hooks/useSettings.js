@@ -24,9 +24,18 @@ export const ANIMATION_DURATIONS = {
   dramatic: 600,
 };
 
+/** Persist settings to localStorage without throwing. */
+function persist(settings) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(settings)); } catch { /* noop */ }
+}
+
 /**
  * Manages persistent application settings via localStorage.
- * Returns { settings, updateSetting, resetShortcuts, getAnimationDuration }.
+ * Returns { settings, updateSetting, updateShortcut, resetShortcuts, getAnimationDuration }.
+ *
+ * NOTE: localStorage writes happen inside state updaters. This is intentional —
+ * `persist` uses try/catch and is idempotent (same input → same localStorage state),
+ * so React Strict Mode's double-invocation of updaters is harmless here.
  */
 export function useSettings() {
   const [settings, setSettings] = useState(() => {
@@ -48,7 +57,7 @@ export function useSettings() {
   const updateSetting = useCallback((key, value) => {
     setSettings(prev => {
       const next = { ...prev, [key]: value };
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* noop */ }
+      persist(next);
       return next;
     });
   }, []);
@@ -60,7 +69,7 @@ export function useSettings() {
         ...prev,
         shortcuts: { ...prev.shortcuts, [id]: { ...prev.shortcuts[id], ...binding } },
       };
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* noop */ }
+      persist(next);
       return next;
     });
   }, []);
@@ -69,7 +78,7 @@ export function useSettings() {
   const resetShortcuts = useCallback(() => {
     setSettings(prev => {
       const next = { ...prev, shortcuts: DEFAULT_SHORTCUTS };
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* noop */ }
+      persist(next);
       return next;
     });
   }, []);

@@ -153,11 +153,14 @@ export function useCanvasNavigation({
   const drawingsRef = useRef(drawings);
   const stackRef = useRef(stack);
   const isNavigatingRef = useRef(false);
+  const navTimersRef = useRef([]); // All pending navigation setTimeout IDs
   useEffect(() => {
     return () => {
-      // Safety: ensure navigation flag is reset on unmount to prevent 
-      // stuck UI states if the component is yanked during a transition.
+      // Safety: reset navigation flag and cancel all pending timers to prevent
+      // stale state updates if the component is torn down mid-transition.
       isNavigatingRef.current = false;
+      navTimersRef.current.forEach(id => clearTimeout(id));
+      navTimersRef.current = [];
     };
   }, []);
 
@@ -208,7 +211,8 @@ export function useCanvasNavigation({
     };
 
     // After fade-out completes, swap data
-    setTimeout(() => {
+    const t1 = setTimeout(() => {
+      navTimersRef.current = navTimersRef.current.filter(id => id !== t1);
       setStack(s => [...s, parentState]);
       setNodes(canvasData.nodes || []);
       setEdges(canvasData.edges || []);
@@ -237,13 +241,16 @@ export function useCanvasNavigation({
         }
         setAnimPhase('fade-in');
 
-        setTimeout(() => {
+        const t2 = setTimeout(() => {
+          navTimersRef.current = navTimersRef.current.filter(id => id !== t2);
           setIsAnimating(false);
           setAnimPhase(null);
           isNavigatingRef.current = false;
         }, halfDuration);
+        navTimersRef.current.push(t2);
       });
     }, halfDuration);
+    navTimersRef.current.push(t1);
   }, [isAnimating, reactFlow, getAnimationDuration, setNodes, setEdges, setDrawings, clearHistory]);
 
   /**
@@ -260,7 +267,8 @@ export function useCanvasNavigation({
     setIsAnimating(true);
     setAnimPhase('fade-out');
 
-    setTimeout(() => {
+    const t3 = setTimeout(() => {
+      navTimersRef.current = navTimersRef.current.filter(id => id !== t3);
       const { nodes: cn, edges: ce, drawings: cd } = syncStackUpward(
         nodesRef.current, edgesRef.current, drawingsRef.current,
         currentStack, currentStack.length - 1, targetIndex
@@ -277,13 +285,16 @@ export function useCanvasNavigation({
         reactFlow.setViewport(targetViewport, { duration: 0 });
         setAnimPhase('fade-in');
 
-        setTimeout(() => {
+        const t4 = setTimeout(() => {
+          navTimersRef.current = navTimersRef.current.filter(id => id !== t4);
           setIsAnimating(false);
           setAnimPhase(null);
           isNavigatingRef.current = false;
         }, halfDuration);
+        navTimersRef.current.push(t4);
       });
     }, halfDuration);
+    navTimersRef.current.push(t3);
   }, [isAnimating, reactFlow, getAnimationDuration, setNodes, setEdges, setDrawings, clearHistory]);
 
   /**
@@ -358,14 +369,14 @@ export function useCanvasNavigation({
    * nested inside a group's canvasData.
    */
   const updateNodeDataGlobally = useCallback((nodeId, dataUpdate) => {
-    let found = false;
+    // Always update both active nodes and the stack. deepUpdateNode is a pure function
+    // that returns the original array reference unchanged when nothing matches, so
+    // calling it on both is safe and avoids the async-flag race condition that existed
+    // when reading a flag set inside a React state updater.
     setNodes(prev => {
       const { updated, nodes: newNodes } = deepUpdateNode(prev, nodeId, dataUpdate);
-      if (updated) found = true;
       return updated ? newNodes : prev;
     });
-
-    if (found) return;
 
     setStack(prevStack => {
       let stackUpdated = false;
@@ -380,29 +391,37 @@ export function useCanvasNavigation({
 
   /**
    * Appends new nodes and edges to the specific array level where targetNodeId lives.
+   *
+   * Snapshots both refs at call-time so nodes and edges are computed from a consistent
+   * view of state, avoiding mismatches when functional setters for each would see
+   * different committed values. The stack is still updated via a functional setter
+   * because pipeline callers may call this back-to-back; the functional form always
+   * sees the latest committed stack and prevents overwrite races.
    */
   const addElementsGlobally = useCallback((targetNodeId, newNodesPayload, newEdgesPayload = []) => {
-    let foundInActive = false;
-    
-    setNodes(prevNodes => {
-      const currentEdges = edgesRef.current;
-      const { updated, nodes: newNodes, edges: newEdges } = deepAddElements(prevNodes, currentEdges, targetNodeId, newNodesPayload, newEdgesPayload);
-      if (updated) {
-        foundInActive = true;
-        setEdges(newEdges);
-        return newNodes;
-      }
-      return prevNodes;
-    });
+    // Snapshot refs at call-time so both state updaters operate on the same
+    // consistent view of nodes/edges, avoiding stale-closure bugs in concurrent mode.
+    const snapshotNodes = nodesRef.current;
+    const snapshotEdges = edgesRef.current;
 
-    if (foundInActive) return;
+    const { updated: nodesUpdated, nodes: newNodes } = deepAddElements(
+      snapshotNodes, snapshotEdges, targetNodeId, newNodesPayload, newEdgesPayload
+    );
+    const { updated: edgesUpdated, edges: newEdges } = deepAddElements(
+      snapshotNodes, snapshotEdges, targetNodeId, newNodesPayload, newEdgesPayload
+    );
+
+    if (nodesUpdated) setNodes(newNodes);
+    if (edgesUpdated) setEdges(newEdges);
 
     setStack(prevStack => {
       let stackUpdated = false;
       const newStack = prevStack.map(level => {
-        const { updated, nodes: newStackNodes, edges: newStackEdges } = deepAddElements(level.nodes, level.edges, targetNodeId, newNodesPayload, newEdgesPayload);
-        if (updated) stackUpdated = true;
-        return updated ? { ...level, nodes: newStackNodes, edges: newStackEdges } : level;
+        const { updated: lu, nodes: newStackNodes, edges: newStackEdges } = deepAddElements(
+          level.nodes, level.edges, targetNodeId, newNodesPayload, newEdgesPayload
+        );
+        if (lu) stackUpdated = true;
+        return lu ? { ...level, nodes: newStackNodes, edges: newStackEdges } : level;
       });
       return stackUpdated ? newStack : prevStack;
     });
