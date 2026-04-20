@@ -1,7 +1,7 @@
 import React, { useState, useContext, useRef } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
-import { Briefcase, ExternalLink, FileText, ChevronDown, ChevronUp, X } from 'lucide-react';
+import { ExternalLink, FileText, ChevronDown, ChevronUp, X } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
 
 const STRENGTH_COLORS = {
@@ -39,6 +39,12 @@ export function JobCardNode({ id, data }) {
   
   // Cache ID for closure safely
   const idRef = useRef(id); idRef.current = id;
+  const isMountedRef = useRef(true);
+  React.useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const score = data.matchScore || 0;
   const strength = data.strengthLabel || 'exploring';
@@ -59,6 +65,7 @@ export function JobCardNode({ id, data }) {
         profile: data.resumeProfile,
         job: { title: data.title, company: data.company, snippet: data.snippet },
       });
+      if (!isMountedRef.current) return;
       if (result.success) {
         updateGlobal(currentId, { coverLetter: result.coverLetter });
         addToast({ title: 'Cover Letter Ready', description: `Generated for ${data.company}`, type: 'success' });
@@ -66,10 +73,13 @@ export function JobCardNode({ id, data }) {
         addToast({ title: 'Generation Failed', description: result.error, type: 'error' });
       }
     } catch (e) {
+      if (!isMountedRef.current) return;
       console.error('Cover letter generation failed:', e);
       addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
     } finally {
-      setGeneratingCL(false);
+      if (isMountedRef.current) {
+        setGeneratingCL(false);
+      }
     }
   };
 

@@ -7,17 +7,22 @@ import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { Lock } from 'lucide-react';
 
 export function LinkNode({ id, data }) {
-  // id is immutable for a node's lifetime; ref gives async callbacks stable identity.
-  const idRef = useRef(id);
   const [showDialog, setShowDialog] = useState(null); // 'font' | 'url'
   const [urlInput, setUrlInput] = useState(data.url || '');
   const clickTimeoutRef = useRef(null);
-  const { updateNodeData } = useReactFlow();
+  const { updateNodeData, getNode } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
 
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   const inputRef = useRef(null);
-  React.useEffect(() => {
+  useEffect(() => {
     return () => {
       if (clickTimeoutRef.current !== null) {
         clearTimeout(clickTimeoutRef.current);
@@ -45,7 +50,7 @@ export function LinkNode({ id, data }) {
   };
 
   // Sync label content when data changes externally (undo/redo)
-  React.useEffect(() => {
+  useEffect(() => {
     if (!isEditingLabel && inputRef.current) {
       if (inputRef.current.innerText !== (data.label || data.url || '')) {
         inputRef.current.innerText = data.label || data.url || '';
@@ -56,18 +61,17 @@ export function LinkNode({ id, data }) {
   // Auto-fetch title if we have a URL but no custom label yet
   useEffect(() => {
     if (data.url && !data.label && window.electronAPI?.fetchUrlTitle) {
-      const currentId = idRef.current;
       // Small delay to prevent rapid fires if user is actively typing a URL
       const timer = setTimeout(() => {
         window.electronAPI.fetchUrlTitle(data.url).then(title => {
-          if (title) {
-            updateGlobal(currentId, { label: title });
+          if (title && isMountedRef.current && getNode(id)) {
+            updateGlobal(id, { label: title });
           }
         }).catch(() => {});
       }, 500);
       return () => clearTimeout(timer);
     }
-  }, [data.url, data.label, updateGlobal]);
+  }, [data.url, data.label, updateGlobal, getNode]);
 
   const openLink = () => {
     const targetUrl = data.url || inputRef.current?.innerText || '';
@@ -86,7 +90,7 @@ export function LinkNode({ id, data }) {
 
   const handleClick = (e) => {
     e.stopPropagation();
-    if (data.locked || clickTimeoutRef.current !== null) return;
+    if (clickTimeoutRef.current !== null) return;
     clickTimeoutRef.current = setTimeout(() => {
       openLink();
       clickTimeoutRef.current = null;
@@ -119,7 +123,7 @@ export function LinkNode({ id, data }) {
   const isEmpty = !data.label && !data.url;
 
   // Listen for dialog triggers from global context menu
-  React.useEffect(() => {
+  useEffect(() => {
     const handleOpenFont = () => {
       if (data.locked) return; // Locked nodes are not editable
       setShowDialog('font');

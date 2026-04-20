@@ -20,7 +20,7 @@ export function SellHubPricedState({
   locked = false,
 }) {
   return (
-    <div className="p-3 space-y-2" onPointerDown={(e) => e.stopPropagation()}>
+    <div className="p-3 space-y-2">
       <div className="text-emerald-400/60 text-[10px] font-semibold uppercase tracking-wider">💰 Ready to List</div>
 
       <div className="text-white/80 text-sm font-semibold truncate">{product.generated_title || 'Item'}</div>

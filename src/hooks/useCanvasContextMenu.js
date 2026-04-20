@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
-import { NODE_FACTORIES, cloneNode, reassignCanvasDataIDs } from '../utils/nodeFactory';
+import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { useToast } from '../components/ToastProvider';
 import { getNodeDims } from '../utils/constants';
 
@@ -24,7 +24,8 @@ export function useCanvasContextMenu({
   clearCanvas,
   extractToParent,
   depth,
-  updateGlobal
+  updateGlobal,
+  duplicateNodes
 }) {
   const [menu, setMenu] = useState(null);
   const reactFlow = useReactFlow();
@@ -80,7 +81,6 @@ export function useCanvasContextMenu({
 
   const duplicateNode = useCallback(() => {
     if (!menu?.node) return;
-    takeSnapshot();
     
     // Default to just the clicked node
     let nodesToDuplicate = [menu.node];
@@ -91,45 +91,9 @@ export function useCanvasContextMenu({
       nodesToDuplicate = selectedNodes;
     }
 
-    const oldIdToNewId = new Map();
-    const newNodes = nodesToDuplicate.map(original => {
-      let clone = cloneNode(original);
-      oldIdToNewId.set(original.id, clone.id);
-      // Reassign nested canvas IDs to prevent collisions if the group's children
-      // are later extracted to a shared parent level.
-      clone = reassignCanvasDataIDs(clone);
-      return clone;
-    });
-
-    // Duplicate internal spanning edges
-    const newEdges = [];
-    reactFlow.getEdges().forEach(eEdge => {
-      if (oldIdToNewId.has(eEdge.source) && oldIdToNewId.has(eEdge.target)) {
-        newEdges.push({
-          ...eEdge,
-          id: crypto.randomUUID(),
-          source: oldIdToNewId.get(eEdge.source),
-          target: oldIdToNewId.get(eEdge.target),
-          selected: true,
-        });
-      }
-    });
-
-    setNodes(nds => {
-      const unselected = nds.map(n => ({ ...n, selected: false }));
-      return unselected.concat(newNodes);
-    });
-    
-    if (newEdges.length > 0) {
-      reactFlow.setEdges(eds => {
-        const unselected = eds.map(edge => ({ ...edge, selected: false }));
-        return unselected.concat(newEdges);
-      });
-    }
-
-    EventLogger.log(`Duplicated ${newNodes.length} nodes via context menu`);
+    duplicateNodes(nodesToDuplicate);
     setMenu(null);
-  }, [menu, setNodes, takeSnapshot, reactFlow]);
+  }, [menu, duplicateNodes, reactFlow]);
 
   const deleteSelectedNode = useCallback(() => {
     if (!menu?.node) return;
@@ -346,8 +310,12 @@ export function useCanvasContextMenu({
           label: 'Move to Parent Canvas', 
           disabled: isLocked,
           onClick: () => {
-            takeSnapshot();
-            extractToParent(menu.node.id);
+            const selectedNodes = reactFlow.getNodes().filter(n => n.selected);
+            let nodesToExtract = [menu.node];
+            if (selectedNodes.find(n => n.id === menu.node.id)) {
+              nodesToExtract = selectedNodes;
+            }
+            extractToParent(nodesToExtract.map(n => n.id));
             setMenu(null);
           } 
         });

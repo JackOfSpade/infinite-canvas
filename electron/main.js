@@ -1,7 +1,7 @@
 import electronPkg from 'electron';
-const { app, BrowserWindow, Menu, protocol } = electronPkg;
+const { app, BrowserWindow, Menu, protocol, net } = electronPkg;
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { registerFilesystemHandlers, cleanupTempFiles } from './ipc/filesystem.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
@@ -201,6 +201,20 @@ app.on('web-contents-created', (_, contents) => {
 if (!gotTheLock) {
   app.quit();
 } else {
+  protocol.registerSchemesAsPrivileged([
+    {
+      scheme: 'local-file',
+      privileges: {
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        bypassCSP: true,
+        corsEnabled: true,
+        stream: true,
+      }
+    }
+  ]);
+
   app.on('second-instance', () => {
     // Someone tried to run a second instance, we should focus our window.
     if (mainWindow) {
@@ -210,7 +224,7 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(() => {
-    protocol.registerFileProtocol('local-file', (request, callback) => {
+    protocol.handle('local-file', (request) => {
       let url = request.url.replace(/^local-file:\/\//, '');
       url = url.split('?')[0].split('#')[0]; // Strip query and hash
       try {
@@ -242,20 +256,20 @@ if (!gotTheLock) {
         
         if (isUnixRoot || isWindowsRoot) {
           console.warn(`[Security] Blocked direct root access via local-file: ${targetPath}`);
-          return callback({ error: -10 });
+          return new Response('Access Denied', { status: 403 });
         }
         
         // Recursive/Inclusive blocklist check:
         // We block if the sensitive pattern exists ANYWHERE in the resolved path.
         if (sensitivePatterns.some(p => verificationPath.includes(p))) {
           console.warn(`[Security] Blocked access to sensitive path via local-file: ${targetPath}`);
-          return callback({ error: -10 /* net::ERR_ACCESS_DENIED */ });
+          return new Response('Access Denied', { status: 403 });
         }
 
-        return callback({ path: targetPath });
+        return net.fetch(pathToFileURL(targetPath).toString());
       } catch (error) {
-        console.error('Failed to register local-file protocol', error);
-        return callback({ error: -2 }); // net::ERR_FAILED
+        console.error('Failed to handle local-file protocol', error);
+        return new Response('Internal Error', { status: 500 });
       }
     });
 

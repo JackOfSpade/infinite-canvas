@@ -2,6 +2,7 @@ import { useCallback, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { processDroppedFiles } from '../utils/dragUtils';
+import { getNodeDims } from '../utils/constants';
 
 // Compiled once at module load — not per drop event.
 const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)(?:[?#].*)?$/i;
@@ -12,17 +13,37 @@ export function useCanvasDragAndDrop({
   setIsDrawingMode,
   takeSnapshot,
   depth,
+  addElementsGlobally,
 }) {
   const depthRef = useRef(depth);
   useEffect(() => {
     depthRef.current = depth;
   }, [depth]);
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, getIntersectingNodes, updateNodeData, getNode } = useReactFlow();
+  const hoveredGroupIdRef = useRef(null);
+
+  const handleDragLeave = useCallback(() => {
+    if (hoveredGroupIdRef.current) {
+      updateNodeData(hoveredGroupIdRef.current, { isDropTarget: false });
+      hoveredGroupIdRef.current = null;
+    }
+  }, [updateNodeData]);
 
   const handleDragOver = useCallback((event) => {
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
-  }, []);
+
+    const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+    const intersections = getIntersectingNodes({ x: position.x, y: position.y, width: 1, height: 1 });
+    const targetGroup = intersections.find(n => n.type === 'group' && !n.data?.locked);
+    const newTargetId = targetGroup ? targetGroup.id : null;
+
+    if (newTargetId !== hoveredGroupIdRef.current) {
+      if (hoveredGroupIdRef.current) updateNodeData(hoveredGroupIdRef.current, { isDropTarget: false });
+      if (newTargetId) updateNodeData(newTargetId, { isDropTarget: true });
+      hoveredGroupIdRef.current = newTargetId;
+    }
+  }, [screenToFlowPosition, getIntersectingNodes, updateNodeData]);
 
   const handleDrop = useCallback(async (event) => {
     event.preventDefault();
@@ -30,13 +51,39 @@ export function useCanvasDragAndDrop({
     const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
     const nodeType = event.dataTransfer.getData('app/node-type');
 
+    // Capture hover target before clearing it
+    const targetId = hoveredGroupIdRef.current;
+    handleDragLeave();
+
+    const insertNodes = (nodesToInsert) => {
+      if (targetId) {
+        const targetGroup = getNode(targetId);
+        if (targetGroup) {
+          const dims = getNodeDims(targetGroup);
+          const cx = dims.w / 2;
+          const cy = dims.h / 2;
+          const nestedItems = nodesToInsert.map(n => ({
+            ...n,
+            position: {
+              x: n.position.x - targetGroup.position.x - cx + 100,
+              y: n.position.y - targetGroup.position.y - cy + 100
+            }
+          }));
+          addElementsGlobally(targetId, nestedItems);
+          return;
+        }
+      }
+      setNodes(nds => nds.concat(nodesToInsert));
+    };
+
     if (nodeType) {
       position.x -= 12;
       position.y -= 20;
       const factory = NODE_FACTORIES[nodeType];
       if (factory) {
         takeSnapshot();
-        setNodes(nds => nds.concat(factory(position)));
+        const newNode = factory(position);
+        insertNodes([newNode]);
       }
       return;
     }
@@ -53,7 +100,8 @@ export function useCanvasDragAndDrop({
       const resumeFile = files.find(f => f.name.match(/\.(pdf|docx|doc)$/i));
       if (resumeFile?.path) {
         takeSnapshot();
-        setNodes(nds => nds.concat(NODE_FACTORIES.jobhub(position, { filePath: resumeFile.path })));
+        const newNode = NODE_FACTORIES.jobhub(position, { filePath: resumeFile.path });
+        insertNodes([newNode]);
         return;
       }
 
@@ -75,7 +123,7 @@ export function useCanvasDragAndDrop({
       if (depthRef.current !== dropDepth) return; // Canvas changed during processing
 
       if (newItems.length > 0) {
-        setNodes(nds => nds.concat(newItems));
+        insertNodes(newItems);
       } else {
         console.warn('processDroppedFiles returned 0 items for validFiles:', validFiles);
       }
@@ -83,19 +131,16 @@ export function useCanvasDragAndDrop({
     }
 
     // Handle dropping URLs from the browser address bar or other sources.
-    // Strict regex: must start with an explicit protocol (https?://) OR look like a
-    // real hostname (word.word format) followed by an optional path. Common code
-    // file extensions (.js, .ts, .py, .md, etc.) are explicitly excluded so that
-    // dropping source files or markdown links doesn't accidentally create Link nodes.
     const droppedUrl = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain');
     if (droppedUrl && droppedUrl.length < 2048) {
       const trimmedUrl = droppedUrl.trim();
       if (URL_RE.test(trimmedUrl) && !CODE_EXT_RE.test(trimmedUrl.split('?')[0].split('#')[0])) {
         takeSnapshot();
-        setNodes(nds => nds.concat(NODE_FACTORIES.link(position, { url: trimmedUrl })));
+        const newNode = NODE_FACTORIES.link(position, { url: trimmedUrl });
+        insertNodes([newNode]);
       }
     }
-  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode]);
+  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode, handleDragLeave, getNode, addElementsGlobally]);
 
-  return { handleDrop, handleDragOver };
+  return { handleDrop, handleDragOver, handleDragLeave };
 }

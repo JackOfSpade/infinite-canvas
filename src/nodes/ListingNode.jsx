@@ -16,6 +16,16 @@ const STATUS_STYLES = {
   live: { border: 'border-solid border-green-500/40', badge: 'bg-green-500/20 text-green-400', label: '✅ LISTED' },
 };
 
+/** Display names for price-research sources, used in progress status text. */
+const SOURCE_NAMES = {
+  'ebay-sold':    'eBay Sold',
+  'poshmark':     'Poshmark',
+  'swappa':       'Swappa',
+  'ebay-active':  'eBay Active',
+  'mercari':      'Mercari',
+  'reverb':       'Reverb',
+  'stockx':       'StockX',
+};
 
 /**
  * ListingNode — full lifecycle marketplace listing.
@@ -47,7 +57,12 @@ export function ListingNode({ id, data }) {
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
 
-  const idRef = useRef(id); idRef.current = id;
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
 
   // Listen for granular pricing progress (Scanning eBay, etc.)
@@ -55,19 +70,7 @@ export function ListingNode({ id, data }) {
     if (!window.electronAPI?.onPriceSourceProgress || status !== 'confirming') return;
 
     const cleanup = window.electronAPI.onPriceSourceProgress(({ sourceId, status: pStatus, count }) => {
-      if (!getNode(id)) return;
-      
-      const names = {
-        'ebay-sold': 'eBay Sold',
-        'poshmark': 'Poshmark',
-        'swappa': 'Swappa',
-        'ebay-active': 'eBay Active',
-        'mercari': 'Mercari',
-        'reverb': 'Reverb',
-        'stockx': 'StockX'
-      };
-      
-      const name = names[sourceId] || sourceId;
+      const name = SOURCE_NAMES[sourceId] || sourceId;
       if (pStatus === 'searching') {
         setStatusText(`Scanning ${name}...`);
       } else if (pStatus === 'done' && count > 0) {
@@ -76,32 +79,32 @@ export function ListingNode({ id, data }) {
     });
 
     return () => cleanup?.();
-  }, [id, status, getNode]);
+  }, [id, status]);
 
   useEffect(() => {
     syncPriceFromBackend(data.pricing);
   }, [data.pricing, syncPriceFromBackend]);
 
   const handleConfirmDraft = async () => {
-    const currentId = idRef.current;
-    updateGlobal(currentId, { status: 'confirming' });
+    updateGlobal(id, { status: 'confirming' });
     const result = await researchPrice((state, res) => {
+      if (!isMountedRef.current) return;
       if (state === 'priced') {
-        updateGlobal(currentId, {
+        updateGlobal(id, {
           status: 'priced',
           pricing: res.pricing,
           comps: res.comps,
           userPrice: res.pricing.recommended_price || '',
         });
       } else if (state === 'priced-empty') {
-        updateGlobal(currentId, { status: 'priced', pricing: { recommended_price: null, justification: res.error } });
+        updateGlobal(id, { status: 'priced', pricing: { recommended_price: null, justification: res.error } });
       } else if (state === 'error') {
-        updateGlobal(currentId, { status: 'draft' });
+        updateGlobal(id, { status: 'draft' });
       }
     });
-    if (!result) updateGlobal(currentId, { status: 'draft' });
+    if (!isMountedRef.current) return;
+    if (!result) updateGlobal(id, { status: 'draft' });
   };
-
 
   return (
     <div className={`bg-[#1a1a1a] ${style.border} border rounded-lg shadow-lg overflow-hidden group`} style={{ width: 300 }}>
@@ -248,6 +251,7 @@ export function ListingNode({ id, data }) {
                       setCheckingAuth(true);
                       try {
                         const result = await window.electronAPI.checkAndLogin({ platformId: loginPrompt.platformId });
+                        if (!isMountedRef.current) return;
                         if (!getNode(id)) return;
                         if (result.connected) {
                           setLoginPrompt(null);
@@ -257,9 +261,12 @@ export function ListingNode({ id, data }) {
                           // User closed login window without logging in — keep prompt
                         }
                       } catch (err) {
+                        if (!isMountedRef.current) return;
                         console.error('Login failed:', err);
                       } finally {
-                        setCheckingAuth(false);
+                        if (isMountedRef.current) {
+                          setCheckingAuth(false);
+                        }
                       }
                     }}
                     disabled={checkingAuth}
@@ -300,6 +307,7 @@ export function ListingNode({ id, data }) {
                   for (const platformId of selectedPlatforms) {
                     if (needsAuth.includes(platformId) && window.electronAPI?.checkSellMonitorAuth) {
                       const authStatus = await window.electronAPI.checkSellMonitorAuth({ platformId });
+                      if (!isMountedRef.current) return;
                       if (!getNode(id)) return;
                       if (!authStatus.connected) {
                         setLoginPrompt({

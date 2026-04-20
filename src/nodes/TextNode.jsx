@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { FontSizeDialog } from '../components/FontSizeDialog';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
@@ -25,7 +25,7 @@ export function TextNode({ id, data }) {
 
   const focusTimeoutRef = useRef(null);
 
-  React.useEffect(() => {
+  useEffect(() => {
     return () => {
       if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
     };
@@ -47,7 +47,7 @@ export function TextNode({ id, data }) {
   const isEmpty = !data.text && !isEditing;
 
   // Sync text content when data changes externally (undo/redo)
-  React.useEffect(() => {
+  useEffect(() => {
     if (!isEditing && inputRef.current) {
       if (inputRef.current.innerText !== (data.text || '')) {
         inputRef.current.innerText = data.text || '';
@@ -55,12 +55,12 @@ export function TextNode({ id, data }) {
     }
   }, [data.text, isEditing]);
 
-  const htmlContent = React.useMemo(() => {
+  const htmlContent = useMemo(() => {
     return DOMPurify.sanitize(marked.parse(data.text || ''));
   }, [data.text]);
 
   // Listen for font dialog trigger from global context menu
-  React.useEffect(() => {
+  useEffect(() => {
     const handleOpenFont = () => {
       if (data.locked) return; // Locked nodes are not editable
       setShowFontDialog(true);
@@ -103,7 +103,7 @@ export function TextNode({ id, data }) {
       )}
       
       {/* Placeholder shown on hover when empty and not editing */}
-      {isEmpty && !isEditing && (
+      {isEmpty && (
         <div 
           className="absolute inset-0 flex items-center text-white/40 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity"
           style={{ fontSize: `${fontSize}px`, fontFamily }}

@@ -52,7 +52,6 @@ export function HubContainer({
         style={{ width, height, minHeight: height ? undefined : minHeight }}
         onDrop={onDrop}
         onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }}
-        onPointerDown={(e) => { if (interactiveStates.includes(hubState)) e.stopPropagation(); }}
       >
         {children}
       </div>

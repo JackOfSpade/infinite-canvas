@@ -233,9 +233,12 @@ export function useCanvasNavigation({
           });
           const cx = sumX / childNodes.length;
           const cy = sumY / childNodes.length;
+          const viewportNode = document.querySelector('.react-flow__viewport');
+          const flowWidth = viewportNode ? viewportNode.parentElement.clientWidth : window.innerWidth;
+          const flowHeight = viewportNode ? viewportNode.parentElement.clientHeight : window.innerHeight;
           reactFlow.setViewport({
-            x: window.innerWidth  / 2 - cx * currentVp.zoom,
-            y: window.innerHeight / 2 - cy * currentVp.zoom,
+            x: flowWidth / 2 - cx * currentVp.zoom,
+            y: flowHeight / 2 - cy * currentVp.zoom,
             zoom: currentVp.zoom,
           }, { duration: 0 });
         }
@@ -301,9 +304,9 @@ export function useCanvasNavigation({
    * Dive out one level (back to parent).
    */
   const diveOut = useCallback(() => {
-    if (isAnimating || isNavigatingRef.current || stackRef.current.length === 0) return;
+    if (isNavigatingRef.current || stackRef.current.length === 0) return;
     jumpTo(stackRef.current.length - 1);
-  }, [isAnimating, jumpTo]);
+  }, [jumpTo]);
 
   /**
    * Flush: sync all pending sub-canvas edits back through the stack.
@@ -323,17 +326,23 @@ export function useCanvasNavigation({
   }, []);
 
   /**
-   * Detach a node from the current sub-canvas and move it to the parent canvas.
+   * Detach one or more nodes (and their internal edges) from the current sub-canvas and move them to the parent canvas.
    */
-  const extractToParent = useCallback((nodeId) => {
+  const extractToParent = useCallback((nodeIdOrIds) => {
     if (stackRef.current.length === 0) return;
 
-    const nodeToExtract = nodesRef.current.find(n => n.id === nodeId);
-    if (!nodeToExtract) return;
+    const ids = Array.isArray(nodeIdOrIds) ? nodeIdOrIds : [nodeIdOrIds];
+    
+    const nodesToExtract = nodesRef.current.filter(n => ids.includes(n.id));
+    if (nodesToExtract.length === 0) return;
+
+    // Preserve edges that are entirely between the extracted nodes
+    const edgesToExtract = edgesRef.current.filter(e => ids.includes(e.source) && ids.includes(e.target));
 
     // Remove from current canvas
-    setNodes(nds => nds.filter(n => n.id !== nodeId));
-    setEdges(eds => eds.filter(e => e.source !== nodeId && e.target !== nodeId));
+    setNodes(nds => nds.filter(n => !ids.includes(n.id)));
+    // Delete any edges connected to the extracted nodes in the current canvas
+    setEdges(eds => eds.filter(e => !ids.includes(e.source) && !ids.includes(e.target)));
 
     // Clear history to prevent a duplication bug where undoing the extraction 
     // restores the node locally, but it remains injected in the parent stack.
@@ -347,18 +356,29 @@ export function useCanvasNavigation({
       const parent = newStack[newStack.length - 1];
       if (!parent) return s;
 
-      // Place near the parent group container, offset by previous extractions to avoid stacking
       const parentContainer = parent.nodes.find(n => n.id === parent.nodeId);
-      const extractedCount = parent.nodes.length;
-      const posX = (parentContainer?.position.x || 0) + (extractedCount % 5) * 40;
-      const posY = (parentContainer?.position.y || 100) - 150;
+      
+      // Compute bounding box of extracted nodes to preserve relative layout
+      const minX = Math.min(...nodesToExtract.map(n => n.position.x));
+      const minY = Math.min(...nodesToExtract.map(n => n.position.y));
+      
+      // Base coordinate places the entire group's bounding box near the parent container
+      const basePosX = (parentContainer?.position.x || 0) + 120;
+      const basePosY = (parentContainer?.position.y || 100) - 150;
 
-      const newParentNodes = [
-        ...parent.nodes,
-        { ...nodeToExtract, position: { x: posX, y: posY } },
-      ];
+      const newParentNodes = [...parent.nodes];
+      nodesToExtract.forEach((nodeToExtract) => {
+        const offsetX = nodeToExtract.position.x - minX;
+        const offsetY = nodeToExtract.position.y - minY;
+        newParentNodes.push({ 
+          ...nodeToExtract, 
+          position: { x: basePosX + offsetX, y: basePosY + offsetY } 
+        });
+      });
 
-      newStack[newStack.length - 1] = { ...parent, nodes: newParentNodes };
+      const newParentEdges = [...(parent.edges || []), ...edgesToExtract];
+
+      newStack[newStack.length - 1] = { ...parent, nodes: newParentNodes, edges: newParentEdges };
       return newStack;
     });
   }, [setNodes, setEdges, clearHistory]);
@@ -404,15 +424,15 @@ export function useCanvasNavigation({
     const snapshotNodes = nodesRef.current;
     const snapshotEdges = edgesRef.current;
 
-    const { updated: nodesUpdated, nodes: newNodes } = deepAddElements(
-      snapshotNodes, snapshotEdges, targetNodeId, newNodesPayload, newEdgesPayload
-    );
-    const { updated: edgesUpdated, edges: newEdges } = deepAddElements(
+    // Single deepAddElements call returns both updated nodes AND edges in one tree walk.
+    const { updated, nodes: newNodes, edges: newEdges } = deepAddElements(
       snapshotNodes, snapshotEdges, targetNodeId, newNodesPayload, newEdgesPayload
     );
 
-    if (nodesUpdated) setNodes(newNodes);
-    if (edgesUpdated) setEdges(newEdges);
+    if (updated) {
+      setNodes(newNodes);
+      setEdges(newEdges);
+    }
 
     setStack(prevStack => {
       let stackUpdated = false;

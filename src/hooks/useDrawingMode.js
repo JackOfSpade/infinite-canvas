@@ -23,7 +23,7 @@ export function useDrawingMode({
   drawingLayerRef,
   isInteractionRef,
 }) {
-  const { screenToFlowPosition, getViewport } = useReactFlow();
+  const { screenToFlowPosition, getViewport, deleteElements } = useReactFlow();
   const isErasingRef = useRef(false);
   const currentStrokeRef = useRef(null);
 
@@ -41,10 +41,9 @@ export function useDrawingMode({
           x: C.x - R, y: C.y - R, width: R * 2, height: R * 2,
         });
         if (hit?.length) {
-          const ids = new Set(hit.filter(n => !n.data?.locked).map(n => n.id));
-          if (ids.size) {
-            setNodes(nds => nds.filter(n => !ids.has(n.id)));
-            setEdges?.(eds => eds.filter(e => !ids.has(e.source) && !ids.has(e.target)));
+          const ids = hit.filter(n => !n.data?.locked).map(n => ({ id: n.id }));
+          if (ids.length) {
+            deleteElements({ nodes: ids });
           }
         }
       }

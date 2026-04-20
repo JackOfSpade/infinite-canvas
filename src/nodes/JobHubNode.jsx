@@ -19,6 +19,8 @@ const STATE_LABELS = {
   error: null,
 };
 
+const PROCESSING_STATES = ['parsing', 'querying', 'searching', 'scoring'];
+
 /**
  * JobHubNode — draggable canvas module for job search.
  * Phase 2: Per-source independent status tracking + source filtering.
@@ -41,13 +43,16 @@ export function JobHubNode({ id, data }) {
   const processingRef = useRef(false);
   // Stable ref to startProcessing so handleDrop can call it without a stale closure.
   const startProcessingRef = useRef(null);
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
-
-  // Per-source progress state: { google: { status, count }, indeed: { status, count }, ... }
+  // Per-source progress state: { sourceId: { status, count }, ... }
   const [sourceProgress, setSourceProgress] = useState({});
   const [lastActiveSource, setLastActiveSource] = useState(null);
-
-
 
   const hubState = data.hubState || 'empty';
   const statusLabel = STATE_LABELS[hubState];
@@ -178,7 +183,6 @@ export function JobHubNode({ id, data }) {
     if (!window.electronAPI || processingRef.current) return;
     processingRef.current = true;
     setSourceProgress({});
-    
     const currentId = id;
 
     try {
@@ -186,6 +190,7 @@ export function JobHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'parsing' });
       const parseResult = await window.electronAPI.parseResume({ filePath, nodeId: currentId });
       
+      if (!isMountedRef.current || !getNode(currentId)) return;
       if (!parseResult.success) {
         throw new Error(parseResult.error || 'Failed to parse resume');
       }
@@ -203,6 +208,9 @@ export function JobHubNode({ id, data }) {
         profile: parseResult.profile,
         nodeId: currentId 
       });
+      
+      if (!isMountedRef.current || !getNode(currentId)) return;
+      
       // Flatten all query arrays into a single list for the search step.
       const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queriesResult.queries || {};
       const allQueries = [...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
@@ -212,6 +220,7 @@ export function JobHubNode({ id, data }) {
       
       const searchResult = await window.electronAPI.searchJobs({ queries: allQueries, nodeId: currentId });
       
+      if (!isMountedRef.current || !getNode(currentId)) return;
       if (!searchResult.success || !searchResult.jobs || searchResult.jobs.length === 0) {
         updateGlobal(currentId, { hubState: 'done', resultCount: 0 });
         processingRef.current = false;
@@ -223,12 +232,13 @@ export function JobHubNode({ id, data }) {
       
       const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile: parseResult.profile, nodeId: currentId });
       
+      if (!isMountedRef.current || !getNode(currentId)) return;
       if (!scoreResult.success) {
         throw new Error(scoreResult.error || 'Failed to score jobs');
       }
 
       // Step 5: Spawn career direction clusters
-      const hubNode = getNode(currentId);
+      const hubNode = getNode(id);
       const hubx = hubNode?.position?.x ?? 0;
       const huby = hubNode?.position?.y ?? 0;
       
@@ -284,16 +294,19 @@ export function JobHubNode({ id, data }) {
         finalSourceCounts[job.source] = (finalSourceCounts[job.source] || 0) + 1;
       });
 
-      updateGlobal(currentId, { 
+      updateGlobal(id, { 
         hubState: 'done', 
         resultCount: scoreResult.scoredJobs.length,
         finalSourceCounts 
       });
     } catch (error) {
+      if (!isMountedRef.current) return;
       console.error("JobHubNode Task Error:", error);
-      updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
+      updateGlobal(id, { hubState: 'error', errorMessage: error?.message || String(error) });
     } finally {
-      processingRef.current = false;
+      if (isMountedRef.current) {
+        processingRef.current = false;
+      }
     }
   }, [id, updateGlobal, getNode, addElementsGlobally, addNodes, addEdges]);
 
@@ -304,15 +317,17 @@ export function JobHubNode({ id, data }) {
   const handleDrop = useCallback((e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (data.locked) return; // Locked nodes don't accept new drops
-    const processingStates = ['parsing', 'querying', 'searching', 'scoring'];
-    if (processingStates.includes(hubState)) return; // Ignore drops while processing
+    if (data.locked) return;
+    if (PROCESSING_STATES.includes(hubState)) return;
     const files = Array.from(e.dataTransfer?.files || []);
     const resume = files.find(f => f.name.match(/\.(pdf|docx|doc|txt|png|jpg|jpeg)$/i));
-    if (resume?.path) startProcessingRef.current?.(resume.path);
+    if (resume) {
+      const path = resume.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(resume) : '');
+      if (path) startProcessingRef.current?.(path);
+    }
   }, [data.locked, hubState]);
 
-  const isProcessing = ['parsing', 'querying', 'searching', 'scoring'].includes(hubState);
+  const isProcessing = PROCESSING_STATES.includes(hubState);
 
   // Compute running total from per-source progress
   const totalSourceJobs = Object.values(sourceProgress).reduce((sum, p) => sum + (p.count || 0), 0);

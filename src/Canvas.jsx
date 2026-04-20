@@ -77,7 +77,7 @@ export function Canvas() {
   const [nodes, setNodes, onNodesChangeBase] = useNodesState([]);
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState([]);
   const [drawings, setDrawings] = useState([]);
-  
+
   const { addToast } = useToast();
 
   // ── Settings ────────────────────────────────────────────────────────────
@@ -101,8 +101,8 @@ export function Canvas() {
     snapshotOnDelete(changes);
     // Log notable changes for bug reports
     changes.forEach(ch => {
-      if (ch.type === 'remove')   EventLogger.log(`node removed id=${ch.id}`);
-      if (ch.type === 'add')      EventLogger.log(`node added type=${ch.item?.type} id=${ch.item?.id}`);
+      if (ch.type === 'remove') EventLogger.log(`node removed id=${ch.id}`);
+      if (ch.type === 'add') EventLogger.log(`node added type=${ch.item?.type} id=${ch.item?.id}`);
       if (ch.type === 'position' && ch.dragging === false) {
         // Log final resting position after a drag (not every intermediate move)
         EventLogger.log(`node moved id=${ch.id} x=${ch.position?.x?.toFixed(1)} y=${ch.position?.y?.toFixed(1)}`);
@@ -124,14 +124,14 @@ export function Canvas() {
   // These fire from ReactFlow's own drag system, independently of our pointer
   // handlers. We use ResizeActive to detect if the drag was initiated during a
   // CanvasNode resize session — only resize-tagged drags apply a ResizeCorrection.
-  const { screenToFlowPosition, getIntersectingNodes, getNode } = useReactFlow();
+  const { screenToFlowPosition, getIntersectingNodes, getNode, updateNodeData } = useReactFlow();
   const isInteractionRef = useRef(false);
 
   const onEdgesChange = useCallback((changes) => {
     snapshotOnDelete(changes);
     changes.forEach(ch => {
       if (ch.type === 'remove') EventLogger.log(`edge removed id=${ch.id}`);
-      if (ch.type === 'add')    EventLogger.log(`edge added id=${ch.item?.id}`);
+      if (ch.type === 'add') EventLogger.log(`edge added id=${ch.item?.id}`);
     });
     onEdgesChangeBase(changes);
   }, [onEdgesChangeBase, snapshotOnDelete]);
@@ -146,11 +146,14 @@ export function Canvas() {
   });
   useEffect(() => { takeSnapshotRef.current = takeSnapshot; }, [takeSnapshot]);
 
-  const { onNodeDragStart, onNodeDragStop } = useDragCorrections({ 
-    setNodes, 
+  const { onNodeDragStart, onNodeDrag, onNodeDragStop } = useDragCorrections({
+    setNodes,
     setEdges,
     getIntersectingNodes,
-    takeSnapshot
+    getNode,
+    takeSnapshot,
+    updateNodeData,
+    addElementsGlobally: navigation.addElementsGlobally
   });
 
   const customFitView = useCustomFitView(reactFlowWrapper, nodes, drawings, isNavigationAnimatingRef);
@@ -196,7 +199,7 @@ export function Canvas() {
     const unlistenExport = window.electronAPI?.onMenuExportPng?.(() => {
       if (!isNavigationAnimatingRef.current) exportCanvasToPNG();
     });
-    
+
     return () => {
       unlistenSave?.();
       unlistenOpen?.();
@@ -218,11 +221,11 @@ export function Canvas() {
   const [placementMode, setPlacementMode] = useState(null);
   const [snapToGrid, setSnapToGrid] = useState(false);
   // bgVariant, showMiniMap, penSize and eraserSize are persisted in settings
-  const bgVariant   = settings.bgVariant  ?? 'dots';
+  const bgVariant = settings.bgVariant ?? 'dots';
   const showMiniMap = settings.showMiniMap ?? true;
-  const penSize     = settings.penSize    ?? 3;
-  const eraserSize  = settings.eraserSize ?? 15;
-  const setPenSize    = useCallback((v) => updateSetting('penSize', v),    [updateSetting]);
+  const penSize = settings.penSize ?? 3;
+  const eraserSize = settings.eraserSize ?? 15;
+  const setPenSize = useCallback((v) => updateSetting('penSize', v), [updateSetting]);
   const setEraserSize = useCallback((v) => updateSetting('eraserSize', v), [updateSetting]);
   const handleSettingsClick = useCallback(() => setIsSettingsOpen(true), []);
   const [activeColor, setActiveColor] = useState('white');
@@ -248,7 +251,7 @@ export function Canvas() {
   }, [activeTool, placementMode, navigation.isAnimating, screenToFlowPosition, takeSnapshot, setNodes]);
 
   const onNodeDoubleClick = useCallback((e, node) => {
-    if (node.type === 'group' && !node.data?.locked && !navigation.isAnimating) {
+    if (node.type === 'group' && !navigation.isAnimating) {
       navigation.diveIn(node.id);
     }
   }, [navigation]);
@@ -260,8 +263,9 @@ export function Canvas() {
     return true;
   }, [getNode]);
 
-  const { handleDrop: handleDropBase, handleDragOver } = useCanvasDragAndDrop({
+  const { handleDrop: handleDropBase, handleDragOver, handleDragLeave } = useCanvasDragAndDrop({
     setNodes, setIsDrawingMode: (v) => setActiveTool(v ? 'pen' : null), takeSnapshot, depth: navigation.depth,
+    addElementsGlobally: navigation.addElementsGlobally,
   });
   // Guard drops during navigation animations — a drop during the ~300ms fade would
   // append a node to the old canvas state and then the animation's setNodes would
@@ -279,7 +283,7 @@ export function Canvas() {
 
   const { onNodesDelete } = useCanvasOSDeletion({ requestConfirm });
 
-  const { onConnect, onDragStart, clearCanvas } = useCanvasActions({
+  const { onConnect, onDragStart, clearCanvas, duplicateNodes } = useCanvasActions({
     setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, takeSnapshot, requestClearConfirm,
     resetStack: navigation.resetStack,
     depth: navigation.depth,
@@ -302,6 +306,7 @@ export function Canvas() {
     setNodes,
     screenToFlowPosition,
     clearCanvas,
+    duplicateNodes,
     extractToParent: navigation.extractToParent,
     depth: navigation.depth, updateGlobal: navigation.updateNodeDataGlobally
   });
@@ -320,10 +325,11 @@ export function Canvas() {
   }, [navigation.isAnimating, onNodeContextMenuBase]);
 
   // ── Keyboard Shortcuts Panel + Escape to cancel placement/tool ──────────
-  useCanvasKeyboardShortcuts({ 
+  useCanvasKeyboardShortcuts({
     placementMode, setPlacementMode, activeTool, setActiveTool, setIsSettingsOpen,
     isAnimatingRef: isNavigationAnimatingRef,
     takeSnapshot,
+    duplicateNodes,
   });
 
   // ── WASD canvas navigation ───────────────────────────────────────────────
@@ -332,8 +338,8 @@ export function Canvas() {
 
   // ── Issue Reporter ───────────────────────────────────────────────────────
   const { handleIssueSubmit } = useIssueReporter({
-    nodes, edges, drawings, activeTool, placementMode, eraserType, 
-    settings, currentFile, hasUnsavedChanges, navigationDepth: navigation.depth, 
+    nodes, edges, drawings, activeTool, placementMode, eraserType,
+    settings, currentFile, hasUnsavedChanges, navigationDepth: navigation.depth,
     snapToGrid, addToast
   });
 
@@ -400,11 +406,13 @@ export function Canvas() {
               onNodesDelete(onlyDeletable);
             }}
             onNodeDragStart={onNodeDragStart}
+            onNodeDrag={onNodeDrag}
             onNodeDragStop={onNodeDragStop}
             onConnect={onConnect}
             isValidConnection={isValidConnection}
             onDrop={handleDrop}
             onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
             nodeTypes={nodeTypes}
             onDoubleClick={handlePaneDoubleClick}
             onNodeDoubleClick={onNodeDoubleClick}
@@ -440,7 +448,7 @@ export function Canvas() {
               showFitView={false}
             >
               <ControlButton onClick={customFitView} title="fit view">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" /></svg>
               </ControlButton>
 
               {/* Zoom-out / Back button — only when inside a nested canvas */}

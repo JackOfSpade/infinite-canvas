@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useCallback } from 'react';
 import { Panel, useReactFlow, useStore } from '@xyflow/react';
-import { MINIMAP_NODE_COLORS, NODE_DIMS, getNodeDims, IMAGE_RE } from '../utils/constants';
+import { getNodeDims } from '../utils/constants';
+import { ThumbnailNode } from './ThumbnailNode';
 
 const MINIMAP_W = 200;
 const MINIMAP_H = 140;
@@ -15,9 +16,11 @@ const CONTENT_PAD = 40;
 const vpTransformSelector = (s) => s.transform;
 const vpSizeSelector = (s) => ({ width: s.width, height: s.height });
 
-const ViewportIndicator = React.memo(({ scale, minX, minY, offsetX, offsetY }) => {
+const ReactiveMiniMapSVG = React.memo(({ cMinX, cMinY, cMaxX, cMaxY, isAnimating, children }) => {
   const transform = useStore(vpTransformSelector);
   const size = useStore(vpSizeSelector);
+  const { setViewport, getViewport } = useReactFlow();
+  const svgRef = useRef(null);
 
   const vpZoom = transform[2];
   const vpFlowX = -transform[0] / vpZoom;
@@ -25,29 +28,62 @@ const ViewportIndicator = React.memo(({ scale, minX, minY, offsetX, offsetY }) =
   const vpFlowW = size.width / vpZoom;
   const vpFlowH = size.height / vpZoom;
 
-  const x = (vpFlowX - minX) * scale + offsetX;
-  const y = (vpFlowY - minY) * scale + offsetY;
-  const w = vpFlowW * scale;
-  const h = vpFlowH * scale;
+  const minX = Math.min(cMinX, vpFlowX - CONTENT_PAD);
+  const minY = Math.min(cMinY, vpFlowY - CONTENT_PAD);
+  const maxX = Math.max(cMaxX, vpFlowX + vpFlowW + CONTENT_PAD);
+  const maxY = Math.max(cMaxY, vpFlowY + vpFlowH + CONTENT_PAD);
+  const contentW = maxX - minX;
+  const contentH = maxY - minY;
+
+  const scale = Math.min(MINIMAP_W / contentW, MINIMAP_H / contentH);
+  const offsetX = (MINIMAP_W - contentW * scale) / 2;
+  const offsetY = (MINIMAP_H - contentH * scale) / 2;
+
+  const handleClick = useCallback((e) => {
+    if (isAnimating) return;
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const fx = (mx - offsetX) / scale + minX;
+    const fy = (my - offsetY) / scale + minY;
+    
+    setViewport(
+      {
+        x: size.width / 2 - fx * vpZoom,
+        y: size.height / 2 - fy * vpZoom,
+        zoom: vpZoom,
+      },
+      { duration: 300 }
+    );
+  }, [minX, minY, scale, offsetX, offsetY, setViewport, vpZoom, isAnimating, size.width, size.height]);
 
   return (
-    <rect
-      x={x} y={y}
-      width={w} height={h}
-      fill="rgba(255,255,255,0.04)"
-      stroke="rgba(255,255,255,0.35)"
-      strokeWidth={1}
-      rx={1}
-      style={{ pointerEvents: 'none' }}
-    />
+    <svg
+      ref={svgRef}
+      width={MINIMAP_W}
+      height={MINIMAP_H}
+      viewBox={`${minX} ${minY} ${contentW || MINIMAP_W} ${contentH || MINIMAP_H}`}
+      preserveAspectRatio="xMidYMid meet"
+      style={{ display: 'block' }}
+      onClick={handleClick}
+    >
+      {children}
+      <rect
+        x={vpFlowX} y={vpFlowY}
+        width={vpFlowW} height={vpFlowH}
+        fill="rgba(255,255,255,0.04)"
+        stroke="rgba(255,255,255,0.35)"
+        strokeWidth={1}
+        vectorEffect="non-scaling-stroke"
+        rx={6}
+        style={{ pointerEvents: 'none' }}
+      />
+    </svg>
   );
 });
 
 export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, drawings, isAnimating }) {
-  const { setViewport, getViewport } = useReactFlow();
-  const svgRef = useRef(null);
-
-  // ── Part A: content bounds (memo on nodes + drawings only) ──────────────
   const { cMinX, cMinY, cMaxX, cMaxY } = useMemo(() => {
     let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
     nodes.forEach(n => {
@@ -69,63 +105,57 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
     return { cMinX: mnX - CONTENT_PAD, cMinY: mnY - CONTENT_PAD, cMaxX: mxX + CONTENT_PAD, cMaxY: mxY + CONTENT_PAD, isEmpty: false };
   }, [nodes, drawings]);
 
-  // ── Part A2: O(1) node lookup by id ─────────────────────────────────────
   const nodeById = useMemo(() => {
     const m = new Map();
     nodes.forEach(n => m.set(n.id, n));
     return m;
   }, [nodes]);
 
-  // ── Part B: display bounds (fixed arbitrary vpFlow overlay for scale math)
-  // We use current viewport for scaling but we don't react to it continuously.
-  const currentVp = getViewport();
-  const vpFlowX = -currentVp.x / currentVp.zoom;
-  const vpFlowY = -currentVp.y / currentVp.zoom;
-  const vpFlowW = window.innerWidth / currentVp.zoom;
-  const vpFlowH = window.innerHeight / currentVp.zoom;
+  const renderedContent = useMemo(() => (
+    <>
+          {/* ── Edges ────────────────────────────────────────────────── */}
+          {edges.map(e => {
+            const src = nodeById.get(e.source);
+            const tgt = nodeById.get(e.target);
+            if (!src || !tgt) return null;
+            const sd = getNodeDims(src), td = getNodeDims(tgt);
+            return (
+              <line key={e.id}
+                x1={src.position.x + sd.w / 2} y1={src.position.y + sd.h / 2} 
+                x2={tgt.position.x + td.w / 2} y2={tgt.position.y + td.h / 2}
+                stroke="rgba(168,85,247,0.30)" strokeWidth={1} vectorEffect="non-scaling-stroke"
+              />
+            );
+          })}
 
-  const minX = Math.min(cMinX, vpFlowX - CONTENT_PAD);
-  const minY = Math.min(cMinY, vpFlowY - CONTENT_PAD);
-  const maxX = Math.max(cMaxX, vpFlowX + vpFlowW + CONTENT_PAD);
-  const maxY = Math.max(cMaxY, vpFlowY + vpFlowH + CONTENT_PAD);
-  const contentW = maxX - minX;
-  const contentH = maxY - minY;
+          {/* ── Drawings (freehand strokes) ───────────────────────── */}
+          {(drawings || []).map((stroke, i) => {
+            const pts = Array.isArray(stroke) ? stroke : stroke?.points;
+            if (!Array.isArray(pts) || pts.length < 2) return null;
+            const color = stroke?.color || 'white';
+            const pts2d = pts.map(p => `${p.x},${p.y}`).join(' ');
+            return (
+              <polyline key={i} points={pts2d} fill="none"
+                stroke={color === 'white' ? 'rgba(255,255,255,0.50)' : color}
+                strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round"
+                vectorEffect="non-scaling-stroke"
+              />
+            );
+          })}
 
-  // ── Scale to fit minimap while preserving aspect ratio ───────────────────
-  const scale = Math.min(MINIMAP_W / contentW, MINIMAP_H / contentH);
-  // Center content within the minimap rectangle
-  const offsetX = (MINIMAP_W - contentW * scale) / 2;
-  const offsetY = (MINIMAP_H - contentH * scale) / 2;
+          {/* ── Nodes ────────────────────────────────────────────────── */}
+          {nodes.map(n => {
+            const { w, h } = getNodeDims(n);
+            return (
+              <ThumbnailNode 
+                key={n.id} 
+                r={{ x: n.position.x, y: n.position.y, w, h, type: n.type, data: n.data }} 
+              />
+            );
+          })}
+    </>
+  ), [edges, nodeById, drawings, nodes]);
 
-  /** Convert a flow-space coordinate to minimap-pixel coordinate */
-  const toM = useCallback((fx, fy) => ({
-    x: (fx - minX) * scale + offsetX,
-    y: (fy - minY) * scale + offsetY,
-  }), [minX, minY, scale, offsetX, offsetY]);
-
-  // ── Click-to-pan ──────────────────────────────────────────────────────────
-  const handleClick = useCallback((e) => {
-    if (isAnimating) return;
-    const rect = svgRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    // Minimap pixel → flow coordinate
-    const fx = (mx - offsetX) / scale + minX;
-    const fy = (my - offsetY) / scale + minY;
-    // Center that flow point in the screen
-    const liveVp = getViewport();
-    setViewport(
-      {
-        x: window.innerWidth  / 2 - fx * liveVp.zoom,
-        y: window.innerHeight / 2 - fy * liveVp.zoom,
-        zoom: liveVp.zoom,
-      },
-      { duration: 300 }
-    );
-  }, [minX, minY, scale, offsetX, offsetY, setViewport, getViewport, isAnimating]);
-
-  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <Panel position="bottom-right" style={{ margin: 8, zIndex: 200 }}>
       <div
@@ -139,148 +169,15 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
           cursor: 'crosshair',
         }}
       >
-        <svg
-          ref={svgRef}
-          width={MINIMAP_W}
-          height={MINIMAP_H}
-          style={{ display: 'block' }}
-          onClick={handleClick}
+        <ReactiveMiniMapSVG
+          cMinX={cMinX}
+          cMinY={cMinY}
+          cMaxX={cMaxX}
+          cMaxY={cMaxY}
+          isAnimating={isAnimating}
         >
-          {/* ── Edges ────────────────────────────────────────────────── */}
-          {edges.map(e => {
-            const src = nodeById.get(e.source);
-            const tgt = nodeById.get(e.target);
-            if (!src || !tgt) return null;
-            const sd = getNodeDims(src), td = getNodeDims(tgt);
-            const p1 = toM(src.position.x + sd.w / 2, src.position.y + sd.h / 2);
-            const p2 = toM(tgt.position.x + td.w / 2, tgt.position.y + td.h / 2);
-            return (
-              <line key={e.id}
-                x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
-                stroke="rgba(168,85,247,0.30)" strokeWidth={1}
-              />
-            );
-          })}
-
-          {/* ── Drawings (freehand strokes) ───────────────────────── */}
-          {(drawings || []).map((stroke, i) => {
-            const pts = Array.isArray(stroke) ? stroke : stroke?.points;
-            if (!Array.isArray(pts) || pts.length < 2) return null;
-            const color = stroke?.color || 'white';
-            const pts2d = pts.map(p => { const m = toM(p.x, p.y); return `${m.x},${m.y}`; }).join(' ');
-            return (
-              <polyline key={i} points={pts2d} fill="none"
-                stroke={color === 'white' ? 'rgba(255,255,255,0.50)' : color}
-                strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round"
-              />
-            );
-          })}
-
-          {/* ── Nodes ────────────────────────────────────────────────── */}
-          {nodes.map(n => {
-            const { w, h } = getNodeDims(n);
-            const pos = toM(n.position.x, n.position.y);
-            const mw  = Math.max(w * scale, 3);
-            const mh  = Math.max(h * scale, 3);
-
-            if (n.type === 'text') {
-              const raw     = (n.data?.text || '').replace(/[#*_`>|[\]]/g, '').trim();
-              const preview = raw.slice(0, 28);
-              const bg      = n.data?.isSticky ? 'rgba(254,243,199,0.45)' : 'rgba(255,255,255,0.07)';
-              const fill    = n.data?.isSticky
-                ? 'rgba(30,30,30,0.85)'
-                : (n.data?.textColor || 'rgba(255,255,255,0.75)');
-              const fontFam = n.data?.fontFamily || 'sans-serif';
-              const fs      = Math.max(4, Math.min(mh * 0.65, 7));
-              return (
-                <g key={n.id}>
-                  <rect x={pos.x} y={pos.y} width={mw} height={mh} rx={2} fill={bg} />
-                  {preview && (
-                    <text x={pos.x + 2} y={pos.y + fs + 1} fontSize={fs} fill={fill}
-                      fontFamily={fontFam} style={{ pointerEvents: 'none' }}>
-                      {preview}
-                    </text>
-                  )}
-                </g>
-              );
-            }
-
-            if (n.type === 'link') {
-              const label   = (n.data?.label || n.data?.url || '').slice(0, 22);
-              const fs      = Math.max(4, Math.min(mh * 0.65, 7));
-              const fill    = n.data?.textColor || 'rgba(96,165,250,0.85)';
-              const fontFam = n.data?.fontFamily || 'sans-serif';
-              return (
-                <g key={n.id}>
-                  <rect x={pos.x} y={pos.y} width={mw} height={mh} rx={2}
-                    fill="rgba(96,165,250,0.15)" stroke="rgba(96,165,250,0.50)" strokeWidth={0.5} />
-                  {label && (
-                    <text x={pos.x + 2} y={pos.y + fs + 1} fontSize={fs}
-                      fill={fill} fontFamily={fontFam}
-                      style={{ pointerEvents: 'none' }}>
-                      ↗ {label}
-                    </text>
-                  )}
-                </g>
-              );
-            }
-
-            if (n.type === 'group') {
-              const r  = Math.max(Math.min(mw, mh) / 2, 2);
-              const cx = pos.x + mw / 2;
-              const cy = pos.y + mh / 2;
-              const fs = Math.max(4, r * 0.3);
-              const titleColor  = n.data?.textColor  || 'rgba(255,255,255,0.55)';
-              const titleFamily = n.data?.fontFamily || 'sans-serif';
-              const maxChars    = Math.max(4, Math.floor((r * 1.8) / (fs * 0.6)));
-              const label = n.data?.title
-                ? (n.data.title.length > maxChars ? n.data.title.slice(0, maxChars - 1) + '…' : n.data.title)
-                : null;
-              return (
-                <g key={n.id}>
-                  <circle cx={cx} cy={cy} r={r}
-                    fill="rgba(96,165,250,0.08)" stroke="rgba(96,165,250,0.50)" strokeWidth={0.5} />
-                  {label && r > 6 && (
-                    <text x={cx} y={cy} fontSize={fs}
-                      fill={titleColor} textAnchor="middle" dominantBaseline="middle"
-                      fontFamily={titleFamily} fontWeight="500"
-                      style={{ pointerEvents: 'none' }}>
-                      {label}
-                    </text>
-                  )}
-                </g>
-              );
-            }
-
-            if (n.type === 'document') {
-              const isImage = IMAGE_RE.test(n.data?.filename || '');
-              if (isImage && n.data?.filePath) {
-                const imgSrc = `local-file://${n.data.filePath.replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
-                return (
-                  <g key={n.id}>
-                    <rect x={pos.x} y={pos.y} width={mw} height={mh} rx={2} 
-                      fill="rgba(12,12,18,0.7)" stroke="rgba(255,255,255,0.1)" strokeWidth={0.5} />
-                    <image href={imgSrc} x={pos.x + 2} y={pos.y + 2} 
-                      width={Math.max(0, mw - 4)} height={Math.max(0, mh - 4)} 
-                      preserveAspectRatio="xMidYMid meet" />
-                  </g>
-                );
-              }
-              return (
-                <rect key={n.id} x={pos.x} y={pos.y} width={mw} height={mh} rx={2}
-                  fill="rgba(251,191,36,0.25)" stroke="rgba(251,191,36,0.50)" strokeWidth={0.5} />
-              );
-            }
-
-            // Fallback — use the minimap colour palette
-            return (
-              <rect key={n.id} x={pos.x} y={pos.y} width={mw} height={mh} rx={2}
-                fill={MINIMAP_NODE_COLORS[n.type] || '#555'} opacity={0.70} />
-            );
-          })}
-
-          <ViewportIndicator scale={scale} minX={minX} minY={minY} offsetX={offsetX} offsetY={offsetY} />
-        </svg>
+          {renderedContent}
+        </ReactiveMiniMapSVG>
       </div>
     </Panel>
   );

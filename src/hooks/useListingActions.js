@@ -25,8 +25,11 @@ export function useListingActions(id, data) {
   const [selectedPlatforms, setSelectedPlatforms] = useState(data.selectedPlatforms || ['ebay', 'facebook', 'craigslist']);
   const [copied, setCopied] = useState(false);
   const copiedTimeoutRef = useRef(null);
+  const isMountedRef = useRef(true);
+
   useEffect(() => {
     return () => {
+      isMountedRef.current = false;
       if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current);
     };
   }, []);
@@ -71,13 +74,16 @@ export function useListingActions(id, data) {
 
     navigator.clipboard.writeText(text)
       .then(() => {
+        if (!isMountedRef.current) return;
         setCopied(true);
         if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current);
         copiedTimeoutRef.current = setTimeout(() => {
+          if (!isMountedRef.current) return;
           setCopied(false);
         }, 2000);
       })
       .catch((err) => {
+        if (!isMountedRef.current) return;
         console.warn('Clipboard write failed:', err);
       });
   }, [product, priceInput]);
@@ -106,6 +112,8 @@ export function useListingActions(id, data) {
         condition: product.condition || 'Used - Good',
       });
 
+      if (!isMountedRef.current) return null;
+
       if (result.success) {
         setPriceInput(result.pricing.recommended_price || '');
         onStateChange?.('priced', result);
@@ -114,6 +122,7 @@ export function useListingActions(id, data) {
       }
       return result;
     } catch (err) {
+      if (!isMountedRef.current) return null;
       console.error('Price research failed:', err);
       onStateChange?.('error', err);
       return null;

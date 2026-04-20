@@ -10,7 +10,7 @@ export function SellHubDraftState({
   locked = false,
 }) {
   return (
-    <div className="p-3 space-y-2" onPointerDown={(e) => e.stopPropagation()}>
+    <div className="p-3 space-y-2">
       <div className="text-amber-400/60 text-[10px] font-semibold uppercase tracking-wider">📝 Draft</div>
 
       <EditableField 

@@ -67,6 +67,4 @@ export function useCanvasInitialization({
     }, 2000);
     return () => clearTimeout(timer);
   }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef]);
-
 }
-

@@ -110,10 +110,24 @@ export function useCanvasPersistence({
   const saveStateTimerRef = useRef(null);
   const loadTimerRef = useRef(null);
 
+  const nodesRef = useRef(nodes);
+  const edgesRef = useRef(edges);
+  const drawingsRef = useRef(drawings);
+  useEffect(() => {
+    nodesRef.current = nodes;
+    edgesRef.current = edges;
+    drawingsRef.current = drawings;
+  }, [nodes, edges, drawings]);
+
   // Mirror hasUnsavedChanges into a ref so the quit/unload listeners can
   // read the live value without being recreated on every state change.
   const hasUnsavedChangesRef = useRef(hasUnsavedChanges);
   useEffect(() => { hasUnsavedChangesRef.current = hasUnsavedChanges; }, [hasUnsavedChanges]);
+
+  // Mirror saveState into a ref so saveCanvas can guard concurrent calls
+  // without listing saveState as a dep (same pattern as hasUnsavedChangesRef).
+  const saveStateRef = useRef(saveState);
+  useEffect(() => { saveStateRef.current = saveState; }, [saveState]);
 
   useEffect(() => {
     // ── Quit Handshake ──────────────────────────────────────────────────────
@@ -141,11 +155,11 @@ export function useCanvasPersistence({
   }, []); // Stable: reads live value via ref — no need to re-register on change
 
   const saveCanvas = useCallback(async () => {
-    if (!window.electronAPI || saveState !== 'idle' || isAnimatingRef?.current) return;
+    if (!window.electronAPI || saveStateRef.current !== 'idle' || isAnimatingRef?.current) return;
     setSaveState('saving');
     try {
       // Flush the navigation stack to get complete root-level data
-      const rawData = flushStack ? flushStack() : { nodes, edges, drawings };
+      const rawData = flushStack ? flushStack() : { nodes: nodesRef.current, edges: edgesRef.current, drawings: drawingsRef.current };
       // Strip transient visual properties (e.g. source-filter opacity on job cards)
       const data = { ...rawData, nodes: sanitizeNodesForSave(rawData.nodes) };
       const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFile });
@@ -165,7 +179,7 @@ export function useCanvasPersistence({
       setSaveState('idle');
       addToast({ title: 'Save Error', description: err?.message || String(err) || 'An error occurred while saving.', type: 'error' });
     }
-  }, [nodes, edges, drawings, currentFile, saveState, addToast, flushStack, isAnimatingRef]);
+  }, [currentFile, addToast, flushStack, isAnimatingRef]);
 
   const confirmDiscardChanges = useCallback(() => {
     if (!hasUnsavedChanges) return true;

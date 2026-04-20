@@ -27,7 +27,7 @@ export function SellHubNode({ id, data }) {
 
   // id is stable for this component's lifetime — ReactFlow never reuses
   // instances with different ids, so we can safely close over it in callbacks.
-  const { updateNodeData } = useReactFlow();
+  const { updateNodeData, getNode } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const { addToast } = useToast();
@@ -35,6 +35,12 @@ export function SellHubNode({ id, data }) {
   const processingPriceRef = useRef(false);
   // Stable ref so handleDrop always calls the latest startAnalysis without needing deps.
   const startAnalysisRef = useRef(null);
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const {
     product, editing, setEditing, priceInput, justificationExpanded,
@@ -147,15 +153,19 @@ export function SellHubNode({ id, data }) {
   }, [hubState, selectedPlatforms, data.comps, compProgress, postingPlatforms, data.locked]);
 
   const startAnalysis = useCallback(async (imagePaths) => {
-    if (!window.electronAPI || processingRef.current) return;
+    // Ensure no null/empty paths slip through
+    const validPaths = (imagePaths || []).filter(p => typeof p === 'string' && p.trim().length > 0);
+    if (validPaths.length === 0 || !window.electronAPI || processingRef.current) return;
+    
     processingRef.current = true;
     setCompProgress({});
     const currentId = id;
 
     try {
       updateGlobal(currentId, { hubState: 'analyzing' });
-      const result = await window.electronAPI.analyzePhotos({ imagePaths, nodeId: currentId });
+      const result = await window.electronAPI.analyzePhotos({ imagePaths: validPaths, nodeId: currentId });
       
+      if (!isMountedRef.current || !getNode(currentId)) return;
       if (!result.success) throw new Error(result.error);
       
       updateGlobal(currentId, {
@@ -164,11 +174,14 @@ export function SellHubNode({ id, data }) {
         images: imagePaths,
       });
     } catch (error) {
+      if (!isMountedRef.current) return;
       console.error('[SellHub] Analysis failed:', error);
       updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
       addToast({ title: 'Photo Analysis Failed', description: error?.message || String(error), type: 'error' });
     } finally {
-      processingRef.current = false;
+      if (isMountedRef.current) {
+        processingRef.current = false;
+      }
     }
   }, [id, updateGlobal, addToast]);
 
@@ -200,15 +213,19 @@ export function SellHubNode({ id, data }) {
           });
         }
       });
+      if (!isMountedRef.current || !getNode(currentId)) return;
       if (!result) {
         updateGlobal(currentId, { hubState: 'draft' });
       }
     } catch (err) {
+      if (!isMountedRef.current) return;
       console.error('[SellHub] Price research failed:', err);
       updateGlobal(currentId, { hubState: 'draft' });
       addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
     } finally {
-      processingPriceRef.current = false;
+      if (isMountedRef.current) {
+        processingPriceRef.current = false;
+      }
     }
   }, [id, updateGlobal, researchPrice, addToast, data.product]);
 
@@ -219,8 +236,11 @@ export function SellHubNode({ id, data }) {
     if (hubState === 'analyzing' || hubState === 'researching') return; // Ignore drops while busy
     const files = Array.from(e.dataTransfer?.files || []);
     const images = files.filter(f => f.name.match(/\.(png|jpg|jpeg|webp|gif)$/i));
-    const validImages = images.filter(f => f.path);
-    if (validImages.length > 0) startAnalysisRef.current?.(validImages.map(f => f.path));
+    const validImages = images.map(f => {
+      const path = f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : '');
+      return { ...f, resolvedPath: path };
+    }).filter(f => f.resolvedPath);
+    if (validImages.length > 0) startAnalysisRef.current?.(validImages.map(f => f.resolvedPath));
   }, [data.locked, hubState]);
 
   const nodeWidth = 280;

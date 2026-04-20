@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 import React, { useCallback, useState, useRef, useEffect } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
-import { Lock, X } from 'lucide-react';
+import { Lock, X, ArrowDown } from 'lucide-react';
 import { CanvasThumbnail } from '../components/CanvasThumbnail';
 import { FontSizeDialog } from '../components/FontSizeDialog';
 import { EventLogger } from '../utils/EventLogger';
@@ -614,6 +614,18 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
             position: 'absolute', inset: 0, borderRadius: '50%', pointerEvents: 'none',
             background: 'radial-gradient(circle, transparent 55%, rgba(0,0,0,0.35) 100%)',
           }} />
+          {data.isDropTarget && (
+            <div className="absolute inset-0 rounded-full pointer-events-none z-50 flex items-center justify-center overflow-hidden transition-all duration-300 backdrop-blur-[6px]"
+                 style={{ 
+                   border: '3px solid rgba(59,130,246,0.9)', 
+                   boxShadow: '0 0 30px rgba(59,130,246,0.3), inset 0 0 30px rgba(59,130,246,0.4)',
+                   background: 'radial-gradient(circle, rgba(30,58,138,0.3) 0%, rgba(15,23,42,0.6) 100%)',
+                 }}>
+               <div className="flex flex-col items-center justify-center animate-bounce text-blue-400">
+                  <ArrowDown size={36} strokeWidth={2.5} className="drop-shadow-[0_0_8px_rgba(59,130,246,0.8)]" />
+               </div>
+            </div>
+          )}
           {!data.locked && !isResizing && !isEditing && (
             <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-all
                             bg-black/0 group-hover:bg-black/45 flex items-center justify-center

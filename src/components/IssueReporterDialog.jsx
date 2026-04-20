@@ -6,6 +6,12 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
   const [description, setDescription]   = useState('');
   const [isSubmitting, setIsSubmitting]  = useState(false);
     const [activeMode, setActiveMode]      = useState(null); // 'clipboard' | 'file'
+  const isMountedRef = React.useRef(true);
+  React.useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const submit = async (mode) => {
     if (!description.trim() || isSubmitting) return;
@@ -18,8 +24,10 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
     } catch {
       // onSubmit handles its own error toasts; just reset UI state
     } finally {
-        setIsSubmitting(false);
-        setActiveMode(null);
+        if (isMountedRef.current) {
+          setIsSubmitting(false);
+          setActiveMode(null);
+        }
     }
   };
 

@@ -2,6 +2,8 @@ import { useCallback } from 'react';
 import { addEdge, useReactFlow } from '@xyflow/react';
 import { setupDragGhost, setupCanvasDragGhost } from '../utils/dragUtils';
 import { EDGE_STYLE } from '../utils/constants';
+import { cloneNode, reassignCanvasDataIDs } from '../utils/nodeFactory';
+import { EventLogger } from '../utils/EventLogger';
 
 export function useCanvasActions({
   setNodes,
@@ -15,7 +17,7 @@ export function useCanvasActions({
   depth,
   isAnimatingRef,
 }) {
-  const { getNodes, getEdges } = useReactFlow();
+  const { getNodes, getEdges, setEdges: rfSetEdges } = useReactFlow();
 
   const onConnect = useCallback((params) => {
     if (isAnimatingRef?.current) return;
@@ -38,6 +40,46 @@ export function useCanvasActions({
       setupDragGhost(e, type === 'text' ? 'text' : 'link', type === 'text' ? 'rgba(255, 255, 255, 0.9)' : 'rgb(96, 165, 250)');
     }
   }, []);
+
+  const duplicateNodes = useCallback((nodesToDuplicate) => {
+    if (!nodesToDuplicate || nodesToDuplicate.length === 0) return;
+    takeSnapshot?.();
+    
+    const oldIdToNewId = new Map();
+    const newNodes = nodesToDuplicate.map(original => {
+      let clone = cloneNode(original);
+      oldIdToNewId.set(original.id, clone.id);
+      clone = reassignCanvasDataIDs(clone);
+      return clone;
+    });
+
+    const newEdges = [];
+    getEdges().forEach(eEdge => {
+      if (oldIdToNewId.has(eEdge.source) && oldIdToNewId.has(eEdge.target)) {
+        newEdges.push({
+          ...eEdge,
+          id: crypto.randomUUID(),
+          source: oldIdToNewId.get(eEdge.source),
+          target: oldIdToNewId.get(eEdge.target),
+          selected: true,
+        });
+      }
+    });
+
+    setNodes(nds => {
+      const unselected = nds.map(n => ({ ...n, selected: false }));
+      return unselected.concat(newNodes);
+    });
+    
+    if (newEdges.length > 0) {
+      rfSetEdges(eds => {
+        const unselected = eds.map(edge => ({ ...edge, selected: false }));
+        return unselected.concat(newEdges);
+      });
+    }
+
+    EventLogger.log(`Duplicated ${newNodes.length} nodes and ${newEdges.length} edges`);
+  }, [takeSnapshot, getEdges, setNodes, rfSetEdges]);
 
   const doClear = useCallback(() => {
     if (isAnimatingRef?.current) return;
@@ -90,5 +132,5 @@ export function useCanvasActions({
     }
   }, [requestClearConfirm, doClear]);
 
-  return { onConnect, onDragStart, clearCanvas };
+  return { onConnect, onDragStart, clearCanvas, duplicateNodes };
 }
