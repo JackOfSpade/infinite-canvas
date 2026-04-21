@@ -3,7 +3,7 @@ import React, { useCallback, useState, useRef, useEffect } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { Lock, X, ArrowDown } from 'lucide-react';
 import { CanvasThumbnail } from '../components/CanvasThumbnail';
-import { FontSizeDialog } from '../components/FontSizeDialog';
+import { CustomizeDialog } from '../components/CustomizeDialog';
 import { EventLogger } from '../utils/EventLogger';
 import { getNodeDims } from '../utils/constants';
 
@@ -56,7 +56,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
 
   const [title, setTitle]                   = useState(data.title || '');
   const [isEditing, setIsEditing]           = useState(false);
-  const [showFontDialog, setShowFontDialog] = useState(false);
+  const [showCustomizeDialog, setShowCustomizeDialog] = useState(false);
   const [edgeCursorStyle, setEdgeCursorStyle] = useState(null);
   const [isResizing, setIsResizing]         = useState(false);
 
@@ -162,7 +162,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
 
   // Font & Size dialog trigger (from context menu)
   useEffect(() => {
-    const handleOpenFont = () => { if (!data.locked) setShowFontDialog(true); };
+    const handleOpenFont = () => { if (!data.locked) setShowCustomizeDialog(true); };
     document.addEventListener(`edit-node-font-${id}`, handleOpenFont);
     return () => document.removeEventListener(`edit-node-font-${id}`, handleOpenFont);
   }, [id, data.locked]);
@@ -331,10 +331,11 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       // (delete button, input overlay — NOT the title click zone, which has
       // no data-no-resize so the geometry path below can handle it correctly)
       if (tgt.closest('[data-no-resize]')) {
-        // stopPropagation so bubble-phase handlers on ancestors don't also fire.
-        // RF uses a capture-phase listener so this doesn't block drag initiation,
-        // but the node will have draggable:false while editing (see useEffect above).
-        e.stopPropagation();
+        // We MUST let native events bubble for React Flow Handles so that their
+        // Synthetic onPointerDown listeners fire at the #root level to initiate edge dragging.
+        if (!tgt.closest('.react-flow__handle')) {
+          e.stopPropagation();
+        }
         EventLogger.log(
           `canvas-node rim-click SKIPPED id=${id} target=${targetDesc}` +
           ` angle=${angle.toFixed(1)}° dist=${dist.toFixed(1)}${posStr}`
@@ -565,6 +566,11 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     mainFlow.deleteElements({ nodes: [{ id }] });
   }, [id, mainFlow]);
 
+  const handleInputKeyDown = useCallback((e) => {
+    if (e.key === 'Enter')  commitTitle(e.target.value);
+    if (e.key === 'Escape') { setTitle(data.title || ''); setIsEditing(false); }
+  }, [commitTitle, data.title]);
+
   // sweep-flag=1 (clockwise in SVG screen coords) traces the TOP semicircle:
   // left equator → top (R, 0) → right equator. This places the title text at
   // the top of the circle (angle ≈ -90°), consistent with:
@@ -733,16 +739,11 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
           const estWidth  = measured > 0
             ? Math.min(SIZE * 0.85, measured + fontSize * 1.2)
             : Math.min(SIZE * 0.85, titleText.length * fontSize * 0.65 + 24);
-          // Title text is at the TOP arc (sweep=1). The arc baseline sits at y=0
-          // (container top edge). This div covers the zone just inside the top
-          // of the container — for inside-circle clicks (dist ≥ EDGE_ZONE) that
-          // land near the top where the text visually appears.
-          const zoneTop   = 0;
           return (
             <div
               style={{
                 position: 'absolute',
-                top:    zoneTop,
+                top:    0,
                 left:   (SIZE - estWidth) / 2,
                 width:  estWidth,
                 height: fontSize + 14,
@@ -767,10 +768,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
             value={title}
             onChange={e => setTitle(e.target.value)}
             onBlur={e  => commitTitle(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Enter')  commitTitle(e.target.value);
-              if (e.key === 'Escape') { setTitle(data.title || ''); setIsEditing(false); }
-            }}
+            onKeyDown={handleInputKeyDown}
             style={{
               position: 'fixed',
               top:      '-9999px',
@@ -802,23 +800,23 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
             <X size={10} />
           </button>
         )}
+        <Handle type="target" position={Position.Top}    id="top" data-no-resize="true" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
+        <Handle type="target" position={Position.Left}   id="left" data-no-resize="true" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
+        <Handle type="source" position={Position.Right}  id="right" data-no-resize="true" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
+        <Handle type="source" position={Position.Bottom} id="bottom" data-no-resize="true" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
       </div>
 
-      {showFontDialog && (
-        <FontSizeDialog
+      {showCustomizeDialog && (
+        <CustomizeDialog
           fontSize={fontSize}
           fontFamily={fontFamily}
           textColor={data.textColor || '#ffffff'}
+          backgroundColor={data.backgroundColor}
           titleSpacing={titleSpacing}
-          onApply={({ fontSize: fs, fontFamily: ff, textColor: tc, titleSpacing: ts }) =>
-            mainFlow.updateNodeData(id, { fontSize: fs, fontFamily: ff, textColor: tc, titleSpacing: ts })
-          }
-          onClose={() => setShowFontDialog(false)}
+          onApply={(updates) => mainFlow.updateNodeData(id, updates)}
+          onClose={() => setShowCustomizeDialog(false)}
         />
       )}
-
-      <Handle type="target" position={Position.Left}  id="canvas-target" className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
-      <Handle type="source" position={Position.Right} id="canvas-source" className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
     </>
   );
 });

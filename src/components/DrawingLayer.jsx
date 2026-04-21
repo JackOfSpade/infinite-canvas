@@ -1,4 +1,4 @@
-import React, { useState, useImperativeHandle, forwardRef } from 'react';
+import React, { useState, useImperativeHandle, useRef, forwardRef } from 'react';
 import { useStore } from '@xyflow/react';
 
 const vpTransformSelector = (s) => s.transform;
@@ -31,12 +31,20 @@ const DrawingStroke = React.memo(({ stroke }) => {
 
 export const DrawingLayer = React.memo(forwardRef(function DrawingLayer({ drawings, activeColor = 'white', penSize = 3 }, ref) {
   const [currentStroke, setCurrentStroke] = useState(null);
+  // Mirror currentStroke in a ref so getCurrentStroke never causes handle reconstruction.
+  const currentStrokeRef = useRef(null);
 
   useImperativeHandle(ref, () => ({
-    updateCurrentStroke: (stroke) => setCurrentStroke(stroke),
-    clearCurrentStroke: () => setCurrentStroke(null),
-    getCurrentStroke: () => currentStroke,
-  }), [currentStroke]);
+    updateCurrentStroke: (stroke) => {
+      currentStrokeRef.current = stroke;
+      setCurrentStroke(stroke);
+    },
+    clearCurrentStroke: () => {
+      currentStrokeRef.current = null;
+      setCurrentStroke(null);
+    },
+    getCurrentStroke: () => currentStrokeRef.current,
+  }), []); // stable — reads via ref, never needs to reconstruct
 
   // Pre-join points to avoid repeating the work on every sub-render.
   // Memoized so we only re-join when the reference changes (which happens

@@ -40,7 +40,6 @@ export function useCanvasWASD({ isAnimatingRef }) {
         keys.shift = e.shiftKey;
         if (!rafId) rafId = requestAnimationFrame(step);
       }
-      if (k === 'shift') keys.shift = true;
     };
     
     const onKeyUp = (e) => {

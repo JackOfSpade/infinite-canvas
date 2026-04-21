@@ -193,7 +193,7 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
 
         {/* ── Pen Tool ─────────────────────────────────────────────── */}
         <div className="relative" onClick={e => e.stopPropagation()}>
-        <ToolbarTooltip label="Pen Tool" shortcut="right-click for options" hidden={showColorMenu}>
+          <ToolbarTooltip label="Pen Tool" shortcut="right-click for options" hidden={showColorMenu}>
             <button
               onClick={handlePenClick}
               onContextMenu={handlePenContextMenu}

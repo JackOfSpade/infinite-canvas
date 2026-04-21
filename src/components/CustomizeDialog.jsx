@@ -49,29 +49,62 @@ const FONT_OPTIONS = [
   { value: '"Ubuntu Mono", monospace',                       label: 'Ubuntu Mono' },
 ];
 
-/** Quick-pick text colour swatches */
+/** Quick-pick text colour swatches (Pastel Primary + Secondary colors) */
 const TEXT_COLORS = [
-  '#ffffff', '#e5e7eb', '#fbbf24', '#fb923c',
-  '#f87171', '#f472b6', '#c084fc', '#60a5fa',
-  '#22d3ee', '#4ade80', '#1f2937',
+  '#000000', // Black
+  '#ffffff', // White
+  '#fca5a5', // Pastel Red
+  '#fdba74', // Pastel Orange
+  '#fde047', // Pastel Yellow
+  '#86efac', // Pastel Green
+  '#93c5fd', // Pastel Blue
+  '#d8b4fe', // Pastel Purple
 ];
 
+const BG_COLORS = ['transparent', ...TEXT_COLORS];
+
+const ColorSection = ({ label, colors, value, onSwatchClick, onInputChange, onInputBlur }) => {
+  const currentRep = (value === null || value === '') ? 'transparent' : value;
+  
+  return (
+    <div>
+      <label className="text-white/70 text-xs mb-1.5 block">{label}</label>
+      <div className="flex flex-wrap gap-1.5 mb-1.5">
+        {colors.map(c => (
+          <button
+            key={c}
+            onClick={() => onSwatchClick(c)}
+            className={`w-5 h-5 rounded-full flex items-center justify-center transition-transform hover:scale-110 ${currentRep === c ? 'ring-2 ring-white scale-110' : 'opacity-75'}`}
+            style={{ 
+              backgroundColor: c === 'transparent' ? '#1f1f1f' : c, 
+              border: c === '#ffffff' ? '1px solid rgba(255,255,255,0.3)' : (c === 'transparent' ? '1px dashed rgba(255,255,255,0.3)' : 'none') 
+            }}
+            title={c === 'transparent' ? `Clear ${label}` : c}
+          >
+            {c === 'transparent' && <span className="text-white/40 text-[10px] pointer-events-none">✕</span>}
+          </button>
+        ))}
+      </div>
+      <input
+        type="text"
+        placeholder="#HEX or rgba(…)"
+        value={value || ''}
+        onChange={(e) => onInputChange(e.target.value)}
+        onBlur={(e) => onInputBlur(e.target.value)}
+        className="w-full text-xs p-1.5 bg-black/50 text-white rounded outline-none border border-white/20 focus:border-blue-400"
+      />
+    </div>
+  );
+};
+
 /**
- * Reusable Font & Size dialog — changes apply instantly without clicking Done.
- * Used by TextNode, LinkNode, and CanvasNode.
- *
- * Props:
- *   fontSize      — current font size (number)
- *   fontFamily    — current font family (string)
- *   textColor     — current text colour (string, optional)
- *   titleSpacing  — vertical gap between title and arc (number, optional; only shown when provided)
- *   onApply({ fontSize, fontFamily, textColor, titleSpacing }) — called on every change
- *   onClose       — called to dismiss the dialog
+ * Reusable Customize dialog
  */
-export function FontSizeDialog({
+export function CustomizeDialog({
   fontSize: initialSize,
   fontFamily: initialFamily,
   textColor: initialColor = '#ffffff',
+  backgroundColor: initialBgColor = 'transparent',
   titleSpacing: initialSpacing,
   onApply,
   onClose,
@@ -79,36 +112,36 @@ export function FontSizeDialog({
   const [fontSize,     setFontSize]     = useState(initialSize);
   const [fontFamily,   setFontFamily]   = useState(initialFamily);
   const [textColor,    setTextColor]    = useState(initialColor);
+  const [backgroundColor, setBackgroundColor] = useState(initialBgColor);
   const [titleSpacing, setTitleSpacing] = useState(initialSpacing ?? 0);
 
   const showSpacing = initialSpacing !== undefined;
+  const hasFont = initialSize !== undefined;
 
   /** Push every change to the caller immediately — no Done button needed. */
   const emit = (overrides) => {
-    onApply({ fontSize, fontFamily, textColor, titleSpacing, ...overrides });
+    const payload = { fontSize, fontFamily, textColor, backgroundColor, titleSpacing, ...overrides };
+    const cleanPayload = Object.fromEntries(Object.entries(payload).filter(([, v]) => v !== undefined));
+    onApply(cleanPayload);
   };
 
-  // ── Font family ───────────────────────────────────────────────────────────
   const handleFamilyChange = (val) => {
     setFontFamily(val);
     emit({ fontFamily: val });
   };
 
-  // ── Font size ─────────────────────────────────────────────────────────────
   const handleSizeChange = (val) => {
     const clamped = Math.max(1, Math.min(500, Number(val) || 1));
     setFontSize(clamped);
     emit({ fontSize: clamped });
   };
 
-  // ── Title spacing ─────────────────────────────────────────────────────────
   const handleSpacingChange = (val) => {
     const clamped = Math.max(-20, Math.min(40, Number(val) || 0));
     setTitleSpacing(clamped);
     emit({ titleSpacing: clamped });
   };
 
-  // ── Text colour ───────────────────────────────────────────────────────────
   const handleColorSwatch = (c) => {
     setTextColor(c);
     emit({ textColor: c });
@@ -116,45 +149,61 @@ export function FontSizeDialog({
 
   const handleColorInput = (val) => {
     setTextColor(val);
-    // Only emit when it looks like a complete colour value
     if (/^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val)) {
       emit({ textColor: val });
     }
   };
 
+  const handleBgColorSwatch = (c) => {
+    let finalColor = c;
+    if (c === 'transparent') finalColor = null; // matching old Node Color signature
+    setBackgroundColor(finalColor);
+    emit({ backgroundColor: finalColor });
+  };
+
+  const handleBgColorInput = (val) => {
+    setBackgroundColor(val);
+    let finalColor = val;
+    if (val === '') finalColor = null;
+    if (val === '' || /^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val)) {
+      emit({ backgroundColor: finalColor });
+    }
+  };
+
   return (
-    <Dialog title="Font & Size" onClose={onClose}>
-      {/* Font family */}
-      <div className="flex justify-between items-center gap-2">
-        <label className="text-white/70 text-sm w-16 shrink-0">Font</label>
-        <select
-          className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
-          value={fontFamily}
-          onChange={(e) => handleFamilyChange(e.target.value)}
-          style={{ fontFamily }}
-        >
-          {FONT_OPTIONS.map(opt => (
-            <option key={opt.value} value={opt.value} style={{ fontFamily: opt.value }}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-      </div>
+    <Dialog title="Customize" onClose={onClose}>
+      {hasFont && (
+        <>
+          <div className="flex justify-between items-center gap-2">
+            <label className="text-white/70 text-sm w-16 shrink-0">Font</label>
+            <select
+              className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
+              value={fontFamily}
+              onChange={(e) => handleFamilyChange(e.target.value)}
+              style={{ fontFamily }}
+            >
+              {FONT_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value} style={{ fontFamily: opt.value }}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
 
-      {/* Font size */}
-      <div className="flex justify-between items-center gap-2">
-        <label className="text-white/70 text-sm w-16 shrink-0">Size</label>
-        <input
-          type="number"
-          className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
-          value={fontSize}
-          onChange={(e) => handleSizeChange(e.target.value)}
-          min={1}
-          max={500}
-        />
-      </div>
+          <div className="flex justify-between items-center gap-2">
+            <label className="text-white/70 text-sm w-16 shrink-0">Size</label>
+            <input
+              type="number"
+              className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
+              value={fontSize}
+              onChange={(e) => handleSizeChange(e.target.value)}
+              min={1}
+              max={500}
+            />
+          </div>
+        </>
+      )}
 
-      {/* Title spacing (only for canvas nodes) */}
       {showSpacing && (
         <div className="flex justify-between items-center gap-2">
           <label className="text-white/70 text-sm w-16 shrink-0">Gap</label>
@@ -171,30 +220,26 @@ export function FontSizeDialog({
       )}
 
       {/* Text colour */}
-      <div>
-        <label className="text-white/70 text-xs mb-1.5 block">Text Color</label>
-        {/* Quick swatches */}
-        <div className="flex flex-wrap gap-1.5 mb-1.5">
-          {TEXT_COLORS.map(c => (
-            <button
-              key={c}
-              onClick={() => handleColorSwatch(c)}
-              className={`w-5 h-5 rounded-full transition-transform hover:scale-110 ${textColor === c ? 'ring-2 ring-white scale-110' : 'opacity-75'}`}
-              style={{ backgroundColor: c, border: c === '#ffffff' ? '1px solid rgba(255,255,255,0.3)' : 'none' }}
-              title={c}
-            />
-          ))}
-        </div>
-        {/* Custom hex input */}
-        <input
-          type="text"
-          placeholder="#HEX or rgba(…)"
+      {hasFont && (
+        <ColorSection
+          label="Text Color"
+          colors={TEXT_COLORS}
           value={textColor}
-          onChange={(e) => handleColorInput(e.target.value)}
-          onBlur={(e) => emit({ textColor: e.target.value })}
-          className="w-full text-xs p-1.5 bg-black/50 text-white rounded outline-none border border-white/20 focus:border-blue-400"
+          onSwatchClick={handleColorSwatch}
+          onInputChange={handleColorInput}
+          onInputBlur={(val) => emit({ textColor: val })}
         />
-      </div>
+      )}
+
+      {/* Background colour */}
+      <ColorSection
+        label="Background Color"
+        colors={BG_COLORS}
+        value={backgroundColor}
+        onSwatchClick={handleBgColorSwatch}
+        onInputChange={handleBgColorInput}
+        onInputBlur={(val) => emit({ backgroundColor: val === '' ? null : val })}
+      />
     </Dialog>
   );
 }

@@ -133,7 +133,7 @@ export function useDrawingMode({
       if (!isAnimatingRef?.current) {
         takeSnapshot();
         setDrawings(prev => [...prev, { 
-          id: window.crypto.randomUUID(),
+          id: crypto.randomUUID(),
           points: currentStrokeRef.current, 
           color: activeColor, 
           penSize 

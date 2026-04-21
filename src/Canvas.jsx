@@ -5,7 +5,10 @@ import {
   useEdgesState,
   Controls,
   ControlButton,
-  useReactFlow
+  useReactFlow,
+  SelectionMode,
+  ConnectionMode,
+  ConnectionLineType
 } from '@xyflow/react';
 
 import { DocumentNode } from './nodes/DocumentNode';
@@ -124,7 +127,7 @@ export function Canvas() {
   // These fire from ReactFlow's own drag system, independently of our pointer
   // handlers. We use ResizeActive to detect if the drag was initiated during a
   // CanvasNode resize session — only resize-tagged drags apply a ResizeCorrection.
-  const { screenToFlowPosition, getIntersectingNodes, getNode, updateNodeData } = useReactFlow();
+  const { screenToFlowPosition, getIntersectingNodes, getNode, getEdges, updateNodeData } = useReactFlow();
   const isInteractionRef = useRef(false);
 
   const onEdgesChange = useCallback((changes) => {
@@ -168,6 +171,7 @@ export function Canvas() {
     updateNodeData,
     addElementsGlobally: navigation.addElementsGlobally,
     extractToLevel: navigation.extractToLevel,
+    isAnimatingRef: isNavigationAnimatingRef,
   });
 
   const customFitView = useCustomFitView(reactFlowWrapper, nodes, drawings, isNavigationAnimatingRef);
@@ -234,7 +238,6 @@ export function Canvas() {
   const [activeColor, setActiveColor] = useState('white');
   const [toolMenuOpen, setToolMenuOpen] = useState(false);
 
-
   // Custom pointer-drag for Nested Canvas button (bypasses HTML5 drag so ghost matches click-place ghost)
   const { onNestedCanvasDragStart } = useNestedCanvasDrag({
     isAnimatingRef: isNavigationAnimatingRef,
@@ -259,13 +262,6 @@ export function Canvas() {
     }
   }, [navigation]);
 
-  // Prevent drawing edges TO sticky notes — sticky notes are output-only anchors
-  const isValidConnection = useCallback((connection) => {
-    const target = getNode(connection.target);
-    if (target?.data?.isSticky) return false;
-    return true;
-  }, [getNode]);
-
   const { handleDrop: handleDropBase, handleDragOver, handleDragLeave } = useCanvasDragAndDrop({
     setNodes, setIsDrawingMode: (v) => setActiveTool(v ? 'pen' : null), takeSnapshot, depth: navigation.depth,
     addElementsGlobally: navigation.addElementsGlobally,
@@ -286,8 +282,15 @@ export function Canvas() {
 
   const { onNodesDelete } = useCanvasOSDeletion({ requestConfirm });
 
-  const { onConnect, onDragStart, clearCanvas, duplicateNodes } = useCanvasActions({
-    setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, takeSnapshot, requestClearConfirm,
+  const { onConnect, onDragStart, clearCanvas, duplicateNodes, copyNodes, pasteNodes } = useCanvasActions({
+    takeSnapshot,
+    setNodes,
+    setEdges,
+    setDrawings,
+    drawings,
+    setCurrentFile,
+    setHasUnsavedChanges,
+    requestClearConfirm,
     resetStack: navigation.resetStack,
     depth: navigation.depth,
     isAnimatingRef: isNavigationAnimatingRef,
@@ -311,7 +314,8 @@ export function Canvas() {
     clearCanvas,
     duplicateNodes,
     extractToParent: navigation.extractToParent,
-    depth: navigation.depth, updateGlobal: navigation.updateNodeDataGlobally
+    depth: navigation.depth, updateGlobal: navigation.updateNodeDataGlobally,
+    isAnimatingRef: isNavigationAnimatingRef
   });
 
   // Guard context menu during navigation animations — opening a menu during the ~300ms
@@ -331,7 +335,7 @@ export function Canvas() {
   useCanvasKeyboardShortcuts({
     placementMode, setPlacementMode, activeTool, setActiveTool, setIsSettingsOpen,
     isAnimatingRef: isNavigationAnimatingRef,
-    duplicateNodes,
+    duplicateNodes, copyNodes, pasteNodes
   });
 
   // ── WASD canvas navigation ───────────────────────────────────────────────
@@ -348,6 +352,15 @@ export function Canvas() {
   const animDuration = getAnimationDuration();
 
   const handleReportBugClick = useCallback(() => setIsIssueReporterOpen(true), []);
+  const handleCloseSettings = useCallback(() => setIsSettingsOpen(false), []);
+  const handleCloseIssueReporter = useCallback(() => setIsIssueReporterOpen(false), []);
+
+  const onNodesDeleteGuarded = useCallback((deleted) => {
+    if (navigation.isAnimating) return;
+    // Ensure locked nodes are NEVER deleted even if RF logic is bypassed
+    const onlyDeletable = deleted.filter(n => !n.data?.locked);
+    onNodesDelete(onlyDeletable);
+  }, [navigation.isAnimating, onNodesDelete]);
 
   // ── Render ───────────────────────────────────────────────────────────────
   return (
@@ -400,17 +413,11 @@ export function Canvas() {
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
-            onNodesDelete={(deleted) => {
-              if (navigation.isAnimating) return;
-              // Ensure locked nodes are NEVER deleted even if RF logic is bypassed
-              const onlyDeletable = deleted.filter(n => !n.data?.locked);
-              onNodesDelete(onlyDeletable);
-            }}
+            onNodesDelete={onNodesDeleteGuarded}
             onNodeDragStart={onNodeDragStart}
             onNodeDrag={onNodeDrag}
             onNodeDragStop={onNodeDragStop}
             onConnect={onConnect}
-            isValidConnection={isValidConnection}
             onDrop={handleDrop}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -423,11 +430,14 @@ export function Canvas() {
             snapGrid={[40, 40]}
             panOnDrag={interactiveDisabled ? false : [1, 2]}
             selectionOnDrag={!interactiveDisabled}
+            selectionMode={SelectionMode.Partial}
+            connectionMode={ConnectionMode.Loose}
+            connectionLineType={ConnectionLineType.SmoothStep}
             nodesDraggable={!interactiveDisabled}
             elementsSelectable={!interactiveDisabled}
             zoomOnScroll={!interactiveDisabled}
             zoomOnPinch={!interactiveDisabled}
-            panOnScroll={!interactiveDisabled}
+            panOnScroll={false}
             autoPanOnNodeFocus={false}
             zoomOnDoubleClick={false}
 
@@ -515,7 +525,7 @@ export function Canvas() {
 
         <SettingsPanel
           isOpen={isSettingsOpen}
-          onClose={() => setIsSettingsOpen(false)}
+          onClose={handleCloseSettings}
           settings={settings}
           updateSetting={updateSetting}
           updateShortcut={updateShortcut}
@@ -524,7 +534,7 @@ export function Canvas() {
 
         <IssueReporterDialog
           isOpen={isIssueReporterOpen}
-          onClose={() => setIsIssueReporterOpen(false)}
+          onClose={handleCloseIssueReporter}
           onSubmit={handleIssueSubmit}
         />
 

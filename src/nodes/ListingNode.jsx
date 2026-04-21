@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext, useRef } from 'react';
+import React, { useCallback, useState, useEffect, useContext, useRef } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { PriceJustification } from '../components/PriceJustification';
@@ -40,6 +40,9 @@ const SOURCE_NAMES = {
  * data.imagePaths: string[]
  * data.platformStatuses: { ebay: 'listed', facebook: 'draft', ... }
  */
+/** Platforms requiring sell-monitor authentication before opening a listing URL. */
+const NEEDS_AUTH = ['ebay', 'facebook', 'poshmark', 'mercari', 'swappa'];
+
 export function ListingNode({ id, data }) {
   const status = data.status || 'draft';
   const style = STATUS_STYLES[status] || STATUS_STYLES.draft;
@@ -57,13 +60,6 @@ export function ListingNode({ id, data }) {
   const { updateNodeData, getNode } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
-
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
 
   // Listen for granular pricing progress (Scanning eBay, etc.)
   useEffect(() => {
@@ -85,10 +81,9 @@ export function ListingNode({ id, data }) {
     syncPriceFromBackend(data.pricing);
   }, [data.pricing, syncPriceFromBackend]);
 
-  const handleConfirmDraft = async () => {
+  const handleConfirmDraft = useCallback(async () => {
     updateGlobal(id, { status: 'confirming' });
     const result = await researchPrice((state, res) => {
-      if (!isMountedRef.current) return;
       if (state === 'priced') {
         updateGlobal(id, {
           status: 'priced',
@@ -102,13 +97,33 @@ export function ListingNode({ id, data }) {
         updateGlobal(id, { status: 'draft' });
       }
     });
-    if (!isMountedRef.current) return;
     if (!result) updateGlobal(id, { status: 'draft' });
-  };
+  }, [id, updateGlobal, researchPrice]);
+
+  const handleListOnPlatforms = useCallback(async (e) => {
+    e.stopPropagation();
+    for (const platformId of selectedPlatforms) {
+      if (NEEDS_AUTH.includes(platformId) && window.electronAPI?.checkSellMonitorAuth) {
+        const authStatus = await window.electronAPI.checkSellMonitorAuth({ platformId });
+        if (!getNode(id)) return;
+        if (!authStatus.connected) {
+          setLoginPrompt({
+            platformId,
+            name: authStatus.name || platformId,
+            sellerUrl: authStatus.sellerUrl,
+          });
+          return;
+        }
+      }
+      const platform = SELL_PLATFORMS.find(p => p.id === platformId);
+      if (platform?.postUrl) window.electronAPI?.openExternal?.(platform.postUrl);
+    }
+  }, [id, selectedPlatforms, getNode]);
 
   return (
     <div className={`bg-[#1a1a1a] ${style.border} border rounded-lg shadow-lg overflow-hidden group`} style={{ width: 300 }}>
-      <Handle type="target" position={Position.Left} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity" />
+      <Handle type="target" position={Position.Top} id="top" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
+      <Handle type="target" position={Position.Left} id="left" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
 
       {/* Status badge */}
       <div className={`px-3 py-1 text-[10px] font-semibold ${style.badge}`}>
@@ -251,7 +266,6 @@ export function ListingNode({ id, data }) {
                       setCheckingAuth(true);
                       try {
                         const result = await window.electronAPI.checkAndLogin({ platformId: loginPrompt.platformId });
-                        if (!isMountedRef.current) return;
                         if (!getNode(id)) return;
                         if (result.connected) {
                           setLoginPrompt(null);
@@ -261,10 +275,9 @@ export function ListingNode({ id, data }) {
                           // User closed login window without logging in — keep prompt
                         }
                       } catch (err) {
-                        if (!isMountedRef.current) return;
                         EventLogger.error('Login check failed:', err);
                       } finally {
-                        if (isMountedRef.current) {
+                        if (getNode(id)) {
                           setCheckingAuth(false);
                         }
                       }
@@ -299,29 +312,7 @@ export function ListingNode({ id, data }) {
                 {copied ? 'Copied!' : 'Copy Listing'}
               </button>
               <button
-                onClick={data.locked ? undefined : async (e) => {
-                  e.stopPropagation();
-                  // Platforms that need login for sell monitoring
-                  const needsAuth = ['ebay', 'facebook', 'poshmark', 'mercari', 'swappa'];
-                  
-                  for (const platformId of selectedPlatforms) {
-                    if (needsAuth.includes(platformId) && window.electronAPI?.checkSellMonitorAuth) {
-                      const authStatus = await window.electronAPI.checkSellMonitorAuth({ platformId });
-                      if (!isMountedRef.current) return;
-                      if (!getNode(id)) return;
-                      if (!authStatus.connected) {
-                        setLoginPrompt({
-                          platformId,
-                          name: authStatus.name || platformId,
-                          sellerUrl: authStatus.sellerUrl,
-                        });
-                        return;
-                      }
-                    }
-                    const platform = SELL_PLATFORMS.find(p => p.id === platformId);
-                    if (platform?.postUrl) window.electronAPI?.openExternal?.(platform.postUrl);
-                  }
-                }}
+                onClick={data.locked ? undefined : handleListOnPlatforms}
                 disabled={!!data.locked}
                 className={`flex-1 py-1.5 rounded text-xs font-medium flex items-center justify-center gap-1 transition-colors ${
                   data.locked ? 'bg-white/5 text-white/20 cursor-default' : 'bg-blue-500/10 text-blue-400 hover:bg-blue-500/20'
@@ -336,7 +327,8 @@ export function ListingNode({ id, data }) {
         </div>
       )}
 
-      <Handle type="source" position={Position.Right} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity" />
+      <Handle type="source" position={Position.Right} id="right" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
+      <Handle type="source" position={Position.Bottom} id="bottom" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
     </div>
   );
 }

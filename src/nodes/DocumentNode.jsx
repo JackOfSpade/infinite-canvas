@@ -1,8 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Handle, Position } from '@xyflow/react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { FileIcon, Lock, Minimize2, Play, AudioLines } from 'lucide-react';
 import { getFileCategoryInfo, THEME_COLORS } from '../utils/fileDisplayUtils';
 import { EventLogger } from '../utils/EventLogger';
+import { CustomizeDialog } from '../components/CustomizeDialog';
 
 /** Encodes a local file path for use with the custom local-file:// protocol. */
 function toLocalFileUrl(filePath) {
@@ -16,9 +17,7 @@ const LockBadge = () => (
   </div>
 );
 
-
-
-export const DocumentNode = React.memo(function DocumentNode({ data, selected }) {
+export const DocumentNode = React.memo(function DocumentNode({ id, data, selected }) {
   // Use a ref-based counter to force image re-fetches on file change.
   // Avoids the impure Date.now() initializer; counter is stable at 0 on mount.
   const imgVersionRef = useRef(0);
@@ -26,6 +25,8 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
   const mediaRef = useRef(null);
 
   const [isExpanded, setIsExpanded] = useState(false);
+  const [showCustomizeDialog, setShowCustomizeDialog] = useState(false);
+  const { updateNodeData } = useReactFlow();
 
   const { category, label, color, badge, Icon } = getFileCategoryInfo(data.filename);
   const theme = THEME_COLORS[color];
@@ -55,6 +56,16 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
   }, [data.filePath, isImage]);
 
   useEffect(() => {
+    const handleOpenCustomize = () => {
+      if (!data.locked) setShowCustomizeDialog(true);
+    };
+    document.addEventListener(`edit-node-font-${id}`, handleOpenCustomize);
+    return () => {
+      document.removeEventListener(`edit-node-font-${id}`, handleOpenCustomize);
+    };
+  }, [id, data.locked]);
+
+  useEffect(() => {
     if (isExpanded && isMedia && data.filePath) {
       const el = mediaRef.current;
       if (el) {
@@ -73,8 +84,7 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
     }
   }, [isExpanded, isMedia, data.filePath]);
 
-
-  const handleDoubleClick = async () => {
+  const handleDoubleClick = useCallback(async () => {
     if (data.locked) return;
     if (data.filePath && window.electronAPI) {
       try {
@@ -83,23 +93,20 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
         EventLogger.error('Error opening file:', err);
       }
     }
-  };
+  }, [data.locked, data.filePath]);
 
   const selectedClass = selected
     ? 'border-blue-400 shadow-[0_0_15px_rgba(59,130,246,0.5)]'
     : 'border-white/10';
 
-  if (isImage) {
-    return (
-      <div
-        className={`glass-card p-2 rounded-xl flex flex-col items-center gap-2 transition-all relative group ${selectedClass}`}
-        onDoubleClick={handleDoubleClick}
-        title={data.filePath}
-        style={{ backgroundColor: data.backgroundColor || (selected ? 'rgba(59,130,246,0.1)' : undefined) }}
-      >
-        {data.locked && <LockBadge />}
-        <Handle type="target" position={Position.Left} className="w-3 h-3 bg-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+  let wrapperClassName = `glass-card rounded-xl flex transition-all relative group ${selectedClass}`;
+  let innerContent;
 
+  if (isImage) {
+    wrapperClassName += ' p-2 flex-col items-center gap-2';
+    innerContent = (
+      <>
+        {data.locked && <LockBadge />}
         <div className="relative rounded overflow-hidden flex items-center justify-center bg-black/40 min-w-[100px] min-h-[100px] max-w-[250px] max-h-[300px]">
           <div className="absolute top-2 right-2 px-1.5 py-0.5 rounded bg-black/60 text-white/90 text-[9px] font-bold tracking-wider z-10 pointer-events-none backdrop-blur-sm border border-white/10">
             {badge}
@@ -115,23 +122,13 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
         <div className="px-1 text-white font-medium truncate text-xs max-w-[200px]">
           {data.filename}
         </div>
-
-        <Handle type="source" position={Position.Right} className="w-3 h-3 bg-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" />
-      </div>
+      </>
     );
-  }
-
-  if (isExpanded && isMedia) {
-    return (
-      <div
-        className={`glass-card p-2 rounded-xl flex flex-col items-center gap-2 transition-all relative group shadow-2xl ${selectedClass}`}
-        onDoubleClick={handleDoubleClick}
-        title={data.filePath}
-        style={{ backgroundColor: data.backgroundColor || (selected ? 'rgba(59,130,246,0.1)' : undefined) }}
-      >
+  } else if (isExpanded && isMedia) {
+    wrapperClassName += ' p-2 flex-col items-center gap-2 shadow-2xl';
+    innerContent = (
+      <>
         {data.locked && <LockBadge />}
-        <Handle type="target" position={Position.Left} className="w-3 h-3 bg-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" />
-
         <div 
           className="relative rounded overflow-hidden flex flex-col items-center justify-center bg-black/50 pt-8 pb-3 px-3 min-w-[320px]"
           onDoubleClick={(e) => e.stopPropagation()}
@@ -139,9 +136,7 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
           <button 
              onClick={(e) => { 
                e.stopPropagation(); 
-               if (mediaRef.current) {
-                 mediaRef.current.pause();
-               }
+               if (mediaRef.current) mediaRef.current.pause();
                setIsExpanded(false); 
              }}
              className="nodrag absolute top-1 right-1 p-1.5 hover:bg-white/10 rounded-lg text-white/70 hover:text-white transition-colors z-10"
@@ -174,55 +169,67 @@ export const DocumentNode = React.memo(function DocumentNode({ data, selected })
           )}
         </div>
 
-        {/* Ensure the media stops playing if this component unmounts while playing. */}
-        {/* We rely on the internal useEffect hook for cleanup rather than an external component to avoid StrictMode races */}
-
         <div className="px-2 text-white font-medium truncate text-sm max-w-[280px]">
           {data.filename}
         </div>
+      </>
+    );
+  } else {
+    wrapperClassName += ' p-3 items-center gap-3 w-64';
+    innerContent = (
+      <>
+        {data.locked && <LockBadge />}
+        <div className={`w-10 h-10 rounded ${theme.bg} flex items-center justify-center shrink-0 relative overflow-hidden`}>
+          <Icon className={`w-5 h-5 ${theme.text} ${isMedia ? 'group-hover:opacity-0 transition-opacity' : ''}`} />
+          {isMedia && (
+            <button
+               onClick={(e) => { e.stopPropagation(); setIsExpanded(true); }}
+               className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 hover:bg-black/60"
+               title="Play Media"
+            >
+               <Play className="w-5 h-5 text-white ml-0.5 fill-white" />
+            </button>
+          )}
+        </div>
 
-        <Handle type="source" position={Position.Right} className="w-3 h-3 bg-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" />
-      </div>
+        <div className="flex flex-col min-w-0 overflow-hidden relative flex-1">
+          <span className="text-white font-medium truncate text-sm">
+            {data.filename || 'Unknown File'}
+          </span>
+          <span className="text-gray-400 truncate text-xs">
+            {label}
+          </span>
+        </div>
+        
+        <div className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider shrink-0 ${theme.text} ${theme.bg}`}>
+          {badge}
+        </div>
+
+      </>
     );
   }
 
+  const bgColor = data.backgroundColor || (selected && (isImage || isExpanded) ? 'rgba(59,130,246,0.1)' : undefined);
+
   return (
     <div
-      className={`glass-card p-3 rounded-xl flex items-center gap-3 w-64 transition-all relative group ${selectedClass}`}
+      className={wrapperClassName}
       onDoubleClick={handleDoubleClick}
       title={data.filePath}
-      style={{ backgroundColor: data.backgroundColor || undefined }}
+      style={{ backgroundColor: bgColor }}
     >
-      {data.locked && <LockBadge />}
-      <Handle type="target" position={Position.Left} className="w-3 h-3 bg-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" />
-
-      <div className={`w-10 h-10 rounded ${theme.bg} flex items-center justify-center shrink-0 relative overflow-hidden`}>
-        <Icon className={`w-5 h-5 ${theme.text} ${isMedia ? 'group-hover:opacity-0 transition-opacity' : ''}`} />
-        {isMedia && (
-          <button
-             onClick={(e) => { e.stopPropagation(); setIsExpanded(true); }}
-             className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 hover:bg-black/60"
-             title="Play Media"
-          >
-             <Play className="w-5 h-5 text-white ml-0.5 fill-white" />
-          </button>
-        )}
-      </div>
-
-      <div className="flex flex-col min-w-0 overflow-hidden relative flex-1">
-        <span className="text-white font-medium truncate text-sm">
-          {data.filename || 'Unknown File'}
-        </span>
-        <span className="text-gray-400 truncate text-xs">
-          {label}
-        </span>
-      </div>
-      
-      <div className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider shrink-0 ${theme.text} ${theme.bg}`}>
-        {badge}
-      </div>
-
-      <Handle type="source" position={Position.Right} className="w-3 h-3 bg-blue-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+      <Handle type="target" position={Position.Top} id="top" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
+      <Handle type="target" position={Position.Left} id="left" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
+      {innerContent}
+      <Handle type="source" position={Position.Right} id="right" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
+      <Handle type="source" position={Position.Bottom} id="bottom" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
+      {showCustomizeDialog && (
+        <CustomizeDialog
+          backgroundColor={data.backgroundColor}
+          onApply={(updates) => updateNodeData(id, updates)}
+          onClose={() => setShowCustomizeDialog(false)}
+        />
+      )}
     </div>
   );
 });

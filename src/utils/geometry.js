@@ -53,7 +53,7 @@ export function pixelEraseStroke(stroke, C, R, halfStroke = 0) {
   let prevInside = insideCircle(pts[0]);
   if (!prevInside) current.push(pts[0]);
 
-  const strokeId = stroke.id || window.crypto.randomUUID();
+  const strokeId = stroke.id || crypto.randomUUID();
 
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i], b = pts[i + 1];
@@ -66,7 +66,7 @@ export function pixelEraseStroke(stroke, C, R, halfStroke = 0) {
         current.push(b);
       } else {
         // Entering or staying inside — commit current sub-stroke
-        if (current.length >= 2) result.push({ ...stroke, id: `${strokeId}-erased-${window.crypto.randomUUID()}`, points: current });
+        if (current.length >= 2) result.push({ ...stroke, id: `${strokeId}-erased-${crypto.randomUUID()}`, points: current });
         current = [];
       }
       prevInside = bIn;
@@ -76,7 +76,7 @@ export function pixelEraseStroke(stroke, C, R, halfStroke = 0) {
       if (!prevInside) {
         // Going inside: add crossing point, commit sub-stroke
         current.push(cross);
-        if (current.length >= 2) result.push({ ...stroke, id: `${strokeId}-erased-${window.crypto.randomUUID()}`, points: current });
+        if (current.length >= 2) result.push({ ...stroke, id: `${strokeId}-erased-${crypto.randomUUID()}`, points: current });
         current = [];
       } else {
         // Coming out: start new sub-stroke from crossing
@@ -90,7 +90,7 @@ export function pixelEraseStroke(stroke, C, R, halfStroke = 0) {
 
       // End the current sub-stroke at the entry point
       current.push(enter);
-      if (current.length >= 2) result.push({ ...stroke, id: `${strokeId}-erased-${window.crypto.randomUUID()}`, points: current });
+      if (current.length >= 2) result.push({ ...stroke, id: `${strokeId}-erased-${crypto.randomUUID()}`, points: current });
 
       // Start a new sub-stroke from the exit point
       current = [exit, b];
@@ -98,6 +98,6 @@ export function pixelEraseStroke(stroke, C, R, halfStroke = 0) {
     }
   }
 
-  if (current.length >= 2) result.push({ ...stroke, id: `${strokeId}-erased-${window.crypto.randomUUID()}`, points: current });
+  if (current.length >= 2) result.push({ ...stroke, id: `${strokeId}-erased-${crypto.randomUUID()}`, points: current });
   return result;
 }

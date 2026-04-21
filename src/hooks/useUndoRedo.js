@@ -17,7 +17,7 @@ function matchesShortcut(e, binding) {
 /** Stable, pure snapshot fingerprint — no hook needed. */
 function fingerprint(snap) {
   if (!snap || !snap.nodes) return '';
-  const n = snap.nodes || [];
+  const n = snap.nodes;
   const e = snap.edges || [];
   const d = snap.drawings || [];
   return JSON.stringify({
@@ -157,7 +157,9 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     const currentState = deepCloneState();
     let previous;
 
-    if (fingerprint(past[past.length - 1]) === fingerprint(currentState)) {
+    // Use the cached fingerprint of the current state (set by the last takeSnapshot call)
+    // to avoid a redundant JSON.stringify on every undo action.
+    if (fingerprint(past[past.length - 1]) === lastFingerprintRef.current) {
       if (past.length < 2) return;
       previous        = past[past.length - 2];
       pastRef.current = past.slice(0, -2);

@@ -1,13 +1,13 @@
+import { EventLogger } from './EventLogger';
+
 /**
  * Creates a drag ghost element, sets it as drag image, and auto-removes it.
  * Used when dragging items from the toolbar onto the canvas.
- * 
+ *
  * @param {DragEvent} e - The native DOM drag event
  * @param {string} text - The text icon or generic name for the ghost UI
  * @param {string} color - The text color representing the node type
  */
-import { EventLogger } from './EventLogger';
-
 export function setupDragGhost(e, text, color) {
   const ghost = document.createElement('div');
   ghost.textContent = text;

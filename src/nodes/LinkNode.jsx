@@ -2,7 +2,7 @@ import React, { useState, useRef, useCallback, useContext, useEffect } from 'rea
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { Dialog } from '../components/Dialog';
-import { FontSizeDialog } from '../components/FontSizeDialog';
+import { CustomizeDialog } from '../components/CustomizeDialog';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { Lock } from 'lucide-react';
 
@@ -10,23 +10,14 @@ export function LinkNode({ id, data }) {
   const [showDialog, setShowDialog] = useState(null); // 'font' | 'url'
   const [urlInput, setUrlInput] = useState(data.url || '');
   const clickTimeoutRef = useRef(null);
-  const { updateNodeData, getNode } = useReactFlow();
+  const { updateNodeData } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
-
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
 
   const inputRef = useRef(null);
   useEffect(() => {
     return () => {
-      if (clickTimeoutRef.current !== null) {
-        clearTimeout(clickTimeoutRef.current);
-      }
+      if (clickTimeoutRef.current !== null) clearTimeout(clickTimeoutRef.current);
     };
   }, []);
 
@@ -64,40 +55,40 @@ export function LinkNode({ id, data }) {
       // Small delay to prevent rapid fires if user is actively typing a URL
       const timer = setTimeout(() => {
         window.electronAPI.fetchUrlTitle(data.url).then(title => {
-          if (title && isMountedRef.current && getNode(id)) {
+          if (title) {
             updateGlobal(id, { label: title });
           }
         }).catch(() => {});
       }, 500);
       return () => clearTimeout(timer);
     }
-  }, [data.url, data.label, updateGlobal, getNode, id]);
+  }, [data.url, data.label, updateGlobal, id]);
 
-  const openLink = () => {
+  const openLink = useCallback(() => {
     const targetUrl = data.url || inputRef.current?.innerText || '';
     if (targetUrl && targetUrl.trim()) {
-       let target = targetUrl;
-       if (!target.startsWith('http://') && !target.startsWith('https://')) {
-           target = 'https://' + target;
-       }
-       if (window.electronAPI?.openExternal) {
-           window.electronAPI.openExternal(target);
-       } else {
-           window.open(target, '_blank');
-       }
+      let target = targetUrl;
+      if (!target.startsWith('http://') && !target.startsWith('https://')) {
+        target = 'https://' + target;
+      }
+      if (window.electronAPI?.openExternal) {
+        window.electronAPI.openExternal(target);
+      } else {
+        window.open(target, '_blank');
+      }
     }
-  };
+  }, [data.url]);
 
-  const handleClick = (e) => {
+  const handleClick = useCallback((e) => {
     e.stopPropagation();
     if (clickTimeoutRef.current !== null) return;
     clickTimeoutRef.current = setTimeout(() => {
       openLink();
       clickTimeoutRef.current = null;
     }, 250);
-  };
+  }, [openLink]);
 
-  const handleDoubleClick = (e) => {
+  const handleDoubleClick = useCallback((e) => {
     if (data.locked) return; // Locked nodes are not editable
     e.stopPropagation();
     if (clickTimeoutRef.current !== null) {
@@ -108,13 +99,13 @@ export function LinkNode({ id, data }) {
     clickTimeoutRef.current = setTimeout(() => {
       if (inputRef.current) inputRef.current.focus({ preventScroll: true });
     }, 0);
-  };
+  }, [data.locked, setIsEditingLabel]);
 
-  const applyUrl = () => {
+  const applyUrl = useCallback(() => {
     const urlChanged = urlInput !== data.url;
     updateNodeData(id, { url: urlInput, ...(urlChanged ? { label: '' } : {}) });
     setShowDialog(null);
-  };
+  }, [urlInput, data.url, updateNodeData, id]);
 
   const fontSize = data.fontSize || 14;
   const fontFamily = data.fontFamily || 'sans-serif';
@@ -126,7 +117,7 @@ export function LinkNode({ id, data }) {
   useEffect(() => {
     const handleOpenFont = () => {
       if (data.locked) return; // Locked nodes are not editable
-      setShowDialog('font');
+      setShowDialog('customize');
     };
     const handleOpenUrl = () => {
       if (data.locked) return; // Locked nodes are not editable
@@ -150,7 +141,8 @@ export function LinkNode({ id, data }) {
         backgroundColor: data.backgroundColor || 'transparent'
       }}
     >
-      <Handle type="target" position={Position.Left} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
+      <Handle type="target" position={Position.Top} id="top" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
+      <Handle type="target" position={Position.Left} id="left" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
       
       {data.locked && (
         <div className="absolute -top-2 -right-2 bg-black/60 rounded-full p-0.5 text-white/70 backdrop-blur-sm pointer-events-none z-10">
@@ -177,20 +169,20 @@ export function LinkNode({ id, data }) {
         onBlur={handleLabelBlur}
         onKeyDown={(e) => { if (e.key === 'Escape') inputRef.current.blur(); }}
         onPointerDown={(e) => { if (isEditingLabel) e.stopPropagation(); }}
-        onContextMenu={(e) => { if (isEditingLabel) e.stopPropagation(); }}
         className={`${textColor ? '' : 'text-blue-400'} outline-none whitespace-nowrap min-w-[20px] min-h-[1em] ${isEditingLabel ? 'cursor-text' : 'select-none cursor-pointer hover:underline'}`}
         style={{ fontSize: `${fontSize}px`, fontFamily, ...(textColor ? { color: textColor } : {}), ...(isEditingLabel ? { userSelect: 'text' } : {}) }}
       />
 
-      <Handle type="source" position={Position.Right} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
+      <Handle type="source" position={Position.Right} id="right" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
+      <Handle type="source" position={Position.Bottom} id="bottom" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
 
-      {showDialog === 'font' && (
-        <FontSizeDialog
+      {showDialog === 'customize' && (
+        <CustomizeDialog
           fontSize={fontSize}
           fontFamily={fontFamily}
           textColor={data.textColor || '#60a5fa'}
-          onApply={({ fontSize: fs, fontFamily: ff, textColor: tc }) =>
-            updateNodeData(id, { fontSize: fs, fontFamily: ff, textColor: tc })}
+          backgroundColor={data.backgroundColor}
+          onApply={(updates) => updateNodeData(id, updates)}
           onClose={() => setShowDialog(null)}
         />
       )}

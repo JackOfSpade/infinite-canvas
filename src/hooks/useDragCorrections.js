@@ -3,12 +3,40 @@ import { getNodeDims } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
 import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from '../nodes/CanvasNode';
 
-export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel }) {
+// ── Pure module-level helpers ────────────────────────────────────────────────
+
+/**
+ * Returns true if placing the `nodesToAbsorb` cluster at `(anchorX, anchorY)`
+ * (relative to `dropMinX`/`dropMinY`) overlaps any existing `childNodes`.
+ * Used by the spiral-search placement algorithm in onNodeDragStop.
+ */
+function placementOverlaps(anchorX, anchorY, nodesToAbsorb, dropMinX, dropMinY, childNodes, padding) {
+  return childNodes.some(child => {
+    const cDims  = getNodeDims(child);
+    const cLeft  = child.position.x - padding;
+    const cRight = child.position.x + cDims.w + padding;
+    const cTop   = child.position.y - padding;
+    const cBottom = child.position.y + cDims.h + padding;
+    return nodesToAbsorb.some(dragged => {
+      const dDims   = getNodeDims(dragged);
+      const dLeft   = anchorX + (dragged.position.x - dropMinX);
+      const dRight  = dLeft + dDims.w;
+      const dTop    = anchorY + (dragged.position.y - dropMinY);
+      const dBottom = dTop + dDims.h;
+      return !(dRight <= cLeft || dLeft >= cRight || dBottom <= cTop || dTop >= cBottom);
+    });
+  });
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+
+export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef }) {
   const resizeDragActiveRef    = useRef(new Set());
   const titleZoneDragActiveRef = useRef(new Set());
   const targetGroupIdRef       = useRef(null);
 
   const onNodeDragStart = useCallback((e, node) => {
+    if (isAnimatingRef?.current) return;
     EventLogger.log(`rf-drag-start id=${node.id} type=${node.type} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
 
     // Tag this RF drag as resize-initiated if a resize is currently active.
@@ -22,6 +50,7 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
   }, []);
 
   const onNodeDrag = useCallback((e, node) => {
+    if (isAnimatingRef?.current) return;
     if (resizeDragActiveRef.current.has(node.id) || titleZoneDragActiveRef.current.has(node.id)) return;
     
     if (getIntersectingNodes && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'sellhub') {
@@ -38,6 +67,7 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
   }, [getIntersectingNodes, updateNodeData]);
 
   const onNodeDragStop = useCallback((e, node, draggedNodes) => {
+    if (isAnimatingRef?.current) return;
     EventLogger.log(`rf-drag-stop id=${node.id} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
 
     // Clear the drop target visual indicator if active
@@ -81,7 +111,6 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
       ));
     }
 
-
     // Check if the pointer was released over a breadcrumb navigator item
     const clientX = e.clientX ?? (e.touches && e.touches[0]?.clientX);
     const clientY = e.clientY ?? (e.touches && e.touches[0]?.clientY);
@@ -122,70 +151,64 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
           
           if (nodesToAbsorb.length === 0) return;
 
-          // Normalize vector based on object scale to handle non-square target group shapes seamlessly
-          const targetDims = getNodeDims(targetGroup);
-          const targetCx = targetGroup.position.x + targetDims.w / 2;
-          const targetCy = targetGroup.position.y + targetDims.h / 2;
-          
-          const primaryDims = getNodeDims(draggedNode);
-          const draggedCx = draggedNode.position.x + primaryDims.w / 2;
-          const draggedCy = draggedNode.position.y + primaryDims.h / 2;
-
-          const dx = draggedCx - targetCx;
-          const dy = draggedCy - targetCy;
-          
-          const normDx = dx / targetDims.w;
-          const normDy = dy / targetDims.h;
-
           const childNodes = targetGroup.data?.canvasData?.nodes || [];
           let anchorX = 0;
           let anchorY = 0;
 
-          // Measure the collective bounding box of everything the user is currently dragging and dropping
+          // Measure the collective bounding box of everything the user is dragging
           let dropMinX = Infinity, dropMaxX = -Infinity, dropMinY = Infinity, dropMaxY = -Infinity;
           nodesToAbsorb.forEach(n => {
-             const d = getNodeDims(n);
-             if (n.position.x < dropMinX) dropMinX = n.position.x;
-             if (n.position.x + d.w > dropMaxX) dropMaxX = n.position.x + d.w;
-             if (n.position.y < dropMinY) dropMinY = n.position.y;
-             if (n.position.y + d.h > dropMaxY) dropMaxY = n.position.y + d.h;
+            const d = getNodeDims(n);
+            dropMinX = Math.min(dropMinX, n.position.x);
+            dropMaxX = Math.max(dropMaxX, n.position.x + d.w);
+            dropMinY = Math.min(dropMinY, n.position.y);
+            dropMaxY = Math.max(dropMaxY, n.position.y + d.h);
           });
-          const dropWidth = dropMaxX - dropMinX;
+          const dropWidth  = dropMaxX - dropMinX;
           const dropHeight = dropMaxY - dropMinY;
 
           if (childNodes.length > 0) {
             let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
             childNodes.forEach(child => {
               const cDims = getNodeDims(child);
-              if (child.position.x < minX) minX = child.position.x;
-              if (child.position.x + cDims.w > maxX) maxX = child.position.x + cDims.w;
-              if (child.position.y < minY) minY = child.position.y;
-              if (child.position.y + cDims.h > maxY) maxY = child.position.y + cDims.h;
+              minX = Math.min(minX, child.position.x);
+              maxX = Math.max(maxX, child.position.x + cDims.w);
+              minY = Math.min(minY, child.position.y);
+              maxY = Math.max(maxY, child.position.y + cDims.h);
             });
             
-            const padding = 60;
+            const padding = 40;
             const childCx = (minX + maxX) / 2;
             const childCy = (minY + maxY) / 2;
 
-            if (Math.abs(normDx) > Math.abs(normDy)) {
-              if (normDx > 0) {
-                // Dropped on right half of the group circle -> snap to right side of content
-                anchorX = maxX + padding;
-                anchorY = childCy - (dropHeight / 2);
-              } else {
-                // Left half -> snap to left side
-                anchorX = minX - dropWidth - padding;
-                anchorY = childCy - (dropHeight / 2);
-              }
-            } else {
-              if (normDy >= 0) {
-                // Bottom half (or dead center) -> snap to bottom
-                anchorX = childCx - (dropWidth / 2);
-                anchorY = maxY + padding;
-              } else {
-                // Top half -> snap to top
-                anchorX = childCx - (dropWidth / 2);
-                anchorY = minY - dropHeight - padding;
+            // Start by trying the absolute center of the cluster view
+            anchorX = childCx - (dropWidth / 2);
+            anchorY = childCy - (dropHeight / 2);
+
+            // Spiral search for non-overlapping placement
+            if (placementOverlaps(anchorX, anchorY, nodesToAbsorb, dropMinX, dropMinY, childNodes, padding)) {
+              let found = false;
+              let radius = 60;
+              const radStep = 60;
+              const maxRadius = Math.max(5000, dropWidth * 3, dropHeight * 3);
+
+              while (!found && radius < maxRadius) {
+                const numPoints = Math.max(8, Math.floor((2 * Math.PI * radius) / radStep));
+                const angleStep = (2 * Math.PI) / numPoints;
+
+                for (let i = 0; i < numPoints; i++) {
+                  const angle = i * angleStep;
+                  const testX = anchorX + radius * Math.cos(angle);
+                  const testY = anchorY + radius * Math.sin(angle);
+
+                  if (!placementOverlaps(testX, testY, nodesToAbsorb, dropMinX, dropMinY, childNodes, padding)) {
+                    anchorX = testX;
+                    anchorY = testY;
+                    found = true;
+                    break;
+                  }
+                }
+                radius += radStep;
               }
             }
           } else {
@@ -224,7 +247,7 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
         }
       }
     }
-  }, [setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel]);
+  }, [setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef]);
 
   return { onNodeDragStart, onNodeDrag, onNodeDragStop };
 }

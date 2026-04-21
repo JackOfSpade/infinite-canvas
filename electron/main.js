@@ -30,6 +30,7 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 let mainWindow = null;
+let isQuitting = false;
 const gotTheLock = app.requestSingleInstanceLock();
 
 /**
@@ -273,8 +274,8 @@ if (!gotTheLock) {
       }
     });
 
-    // Cleanup orphaned .tmp files from previous sessions
-    cleanupTempFiles(app.getPath('userData')).catch(err => console.error('[Main] Cleanup failed:', err));
+    // (Legacy startup cleanup removed: cleanupTempFiles is now triggered dynamically 
+    // when saving/loading workspaces to ensure we target the correct local directories).
 
     registerFilesystemHandlers();
     registerJobsHandlers();
@@ -296,7 +297,6 @@ if (!gotTheLock) {
   });
 }
 
-let isQuitting = false;
 app.on('before-quit', async (event) => {
   if (isQuitting) return;
   event.preventDefault();

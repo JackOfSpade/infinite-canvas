@@ -6,7 +6,7 @@ export function useCanvasKeyboardShortcuts({
   activeTool, setActiveTool, 
   setIsSettingsOpen,
   isAnimatingRef,
-  duplicateNodes
+  duplicateNodes, copyNodes, pasteNodes
 }) {
   const { getNodes } = useReactFlow();
 
@@ -19,11 +19,27 @@ export function useCanvasKeyboardShortcuts({
       const k = e.key.toLowerCase();
 
       // Duplicate shortcut
-      if (k === 'd' && (e.metaKey || e.ctrlKey)) {
+      if (k === 'd' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         const selectedNodes = getNodes().filter(n => n.selected);
         if (selectedNodes.length === 0) return;
         duplicateNodes(selectedNodes);
+        return;
+      }
+
+      // Copy shortcut
+      if (k === 'c' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        const selectedNodes = getNodes().filter(n => n.selected);
+        if (selectedNodes.length === 0) return;
+        copyNodes(selectedNodes);
+        return;
+      }
+
+      // Paste shortcut
+      if (k === 'v' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        pasteNodes();
         return;
       }
 
@@ -52,5 +68,5 @@ export function useCanvasKeyboardShortcuts({
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [placementMode, activeTool, setPlacementMode, setActiveTool, setIsSettingsOpen, isAnimatingRef, getNodes, duplicateNodes]);
+  }, [placementMode, activeTool, setPlacementMode, setActiveTool, setIsSettingsOpen, isAnimatingRef, getNodes, duplicateNodes, copyNodes, pasteNodes]);
 }

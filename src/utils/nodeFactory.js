@@ -45,6 +45,9 @@ export const NODE_FACTORIES = {
   sellhub: createSellHubNode,
 };
 
+// Hub states that indicate an active background job — clones should not inherit these.
+const ACTIVE_HUB_STATES = new Set(['parsing', 'querying', 'searching', 'scoring', 'analyzing']);
+
 /**
  * Create a clean, safe clone of an existing node for duplication.
  * - Assigns a new random ID.
@@ -91,8 +94,7 @@ export function cloneNode(original, dx = 40, dy = 40) {
   // Sanitize transient AI hub states so the clone is not stuck waiting
   // for an IPC response it didn't initiate.
   if (clone.data?.hubState) {
-    const ACTIVE_STATES = ['parsing', 'querying', 'searching', 'scoring', 'analyzing'];
-    if (ACTIVE_STATES.includes(clone.data.hubState)) {
+    if (ACTIVE_HUB_STATES.has(clone.data.hubState)) {
       clone.data.hubState = 'empty';
     } else if (clone.data.hubState === 'researching') {
       clone.data.hubState = 'draft';
@@ -119,19 +121,25 @@ export function reassignCanvasDataIDs(node) {
   const processCanvasData = (canvasData) => {
     if (!canvasData) return canvasData;
     const newNodes = (canvasData.nodes || []).map(n => {
-      const newNode = { ...n, id: getMappedId(n.id) };
+      // Pass dx=0, dy=0 to preserve exact relative positioning within the sub-canvas
+      let newNode = cloneNode(n, 0, 0); 
+      newNode.id = getMappedId(n.id); // remap original ID consistently
+
       if (newNode.type === 'group' && newNode.data?.canvasData) {
         newNode.data = { ...newNode.data, canvasData: processCanvasData(newNode.data.canvasData) };
       }
       return newNode;
     });
+    
     const newEdges = (canvasData.edges || []).map(e => ({
       ...e,
       id: crypto.randomUUID(),
-      source: idMap.has(e.source) ? idMap.get(e.source) : e.source,
-      target: idMap.has(e.target) ? idMap.get(e.target) : e.target,
+      source: idMap.get(e.source) ?? e.source,
+      target: idMap.get(e.target) ?? e.target,
     }));
+    
     const newDrawings = (canvasData.drawings || []).map(d => d.id ? { ...d, id: crypto.randomUUID() } : d);
+    
     return { nodes: newNodes, edges: newEdges, drawings: newDrawings };
   };
 

@@ -44,10 +44,16 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
       const src = nodeMap[e.source], tgt = nodeMap[e.target];
       if (!src || !tgt) return null;
       const sd = getNodeDims(src), td = getNodeDims(tgt);
+      
+      const sx = src.position.x + sd.w;
+      const sy = src.position.y + sd.h / 2;
+      const tx = tgt.position.x;
+      const ty = tgt.position.y + td.h / 2;
+      const offset = Math.abs(tx - sx) * 0.6;
+      
       return {
         id: e.id,
-        x1: src.position.x + sd.w / 2, y1: src.position.y + sd.h / 2,
-        x2: tgt.position.x + td.w / 2, y2: tgt.position.y + td.h / 2,
+        d: `M${sx},${sy} C${sx + offset},${sy} ${tx - offset},${ty} ${tx},${ty}`
       };
     }).filter(Boolean);
 
@@ -105,10 +111,12 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
     >
       {/* Edges */}
       {edgeLines.map(l => (
-        <line
+        <path
           key={l.id}
-          x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2}
-          stroke="rgba(168, 85, 247, 0.4)" strokeWidth={3}
+          d={l.d}
+          fill="none"
+          stroke="rgba(168, 85, 247, 0.50)" strokeWidth={3}
+          strokeDasharray="6,6"
         />
       ))}
 

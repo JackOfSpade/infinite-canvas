@@ -71,11 +71,7 @@ export function ContextMenu({ x, y, items, onClose }) {
     <div 
       ref={menuRef} 
       className="fixed z-[9999] context-menu-enter" 
-      style={{
-        ...adjustedPos,
-        maxHeight: 'calc(100vh - 20px)',
-        overflowY: 'auto'
-      }}
+      style={adjustedPos}
     >
       <div className="bg-[#1a1a1a]/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl py-1 min-w-[180px] text-white/90 text-sm">
         {items.map((item, i) => {
@@ -84,7 +80,7 @@ export function ContextMenu({ x, y, items, onClose }) {
           }
 
           const hasSubmenu = item.submenu && item.submenu.length > 0;
-          const isDanger = item.label === 'Delete' || item.label === 'Clear Canvas' || item.danger;
+          const isDanger = !!item.danger;
 
           return (
             <div

@@ -43,6 +43,12 @@ body {
   box-shadow: none !important;
 }
 
+/* Hide the generic ReactFlow group selection bounding box (it looks like a stuck drag box) */
+.react-flow__nodesselection-rect {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 /* Make handles more visible but aesthetic */
 .react-flow__handle {
   width: 10px;

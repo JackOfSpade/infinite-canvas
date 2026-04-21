@@ -1,7 +1,7 @@
 /** Matches image file extensions that can be rendered by <img> or SVG <image>. */
 export const IMAGE_RE = /\.(jpg|jpeg|png|gif|webp|svg)$/i;
 
-export const DEFAULT_EDGE_OPTIONS = { type: 'bezier', animated: true, style: { strokeWidth: 3, opacity: 0.8 } };
+export const DEFAULT_EDGE_OPTIONS = { type: 'smoothstep', animated: true, style: { strokeWidth: 3, opacity: 0.8 } };
 export const EDGE_STYLE = { stroke: '#a855f7', strokeWidth: 3 };
 
 /** Selling platforms — single source of truth for ListingNode and SellHubNode. */

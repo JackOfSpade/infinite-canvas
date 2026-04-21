@@ -69,7 +69,6 @@ export function useNodeAutoEdit(id, isNew, isEmptyPredicate, inputRef) {
   return {
     isEditing,
     setIsEditing,
-    inputRef,
     handleBlur,
   };
 }

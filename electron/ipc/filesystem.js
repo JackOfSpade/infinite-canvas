@@ -92,7 +92,7 @@ async function scanPath(currentPath, visited, sender = null, depth = 0) {
  * Helper to perform an atomic write (write to tmp then rename).
  */
 async function atomicWriteFile(targetPath, data) {
-  const tmpPath = `${targetPath}.${randomUUID()}.tmp`;
+  const tmpPath = `${targetPath}.__ic_atomic_${randomUUID()}.tmp`;
   try {
     await fs.promises.writeFile(tmpPath, data, 'utf-8');
     await fs.promises.rename(tmpPath, targetPath);
@@ -139,6 +139,10 @@ export function registerFilesystemHandlers() {
     }
     // Production Hardening: Use atomic write to prevent data corruption
     await atomicWriteFile(targetPath, JSON.stringify(data));
+    
+    // Background cleanup of any orphaned .tmp files in this specific directory
+    cleanupTempFiles(path.dirname(targetPath)).catch(err => logger.warn('Save cleanup failed:', err));
+
     return { filePath: targetPath };
   });
 
@@ -166,6 +170,10 @@ export function registerFilesystemHandlers() {
     try {
       const data = JSON.parse(content);
       logger.info(`[FileSystem] Loaded workspace: ${targetPath} (${stats.size} bytes)`);
+      
+      // Cleanup any orphaned .tmp files left over from past crashes in this directory
+      cleanupTempFiles(path.dirname(targetPath)).catch(err => logger.warn('Load cleanup failed:', err));
+      
       return { data, filePath: targetPath };
     } catch (jsonErr) {
       logger.error(`[FileSystem] Failed to parse workspace JSON at ${targetPath}:`, jsonErr);
@@ -263,11 +271,22 @@ export function registerFilesystemHandlers() {
  *
  * @param {string} [targetDir] - Directory to scan. Defaults to process.cwd() in dev.
  */
+const cleanedDirs = new Set();
+
 export async function cleanupTempFiles(targetDir) {
   const dir = targetDir || process.cwd();
+  
+  // Logical proof: .tmp files are only orphaned if the ENTIRE process crashes. 
+  // Any failed write during an active session cleans up its own .tmp file. 
+  // Thus, sweeping a directory more than once per session is mathematically 
+  // redundant and could cause severe I/O lag on network drives during auto-saves.
+  if (cleanedDirs.has(dir)) return;
+  cleanedDirs.add(dir);
+
   try {
     const files = await fs.promises.readdir(dir);
-    const tmpFiles = files.filter(f => f.endsWith('.tmp') && f.includes('-'));
+    // Explicitly target ONLY our own atomic files
+    const tmpFiles = files.filter(f => f.includes('.__ic_atomic_') && f.endsWith('.tmp'));
     for (const f of tmpFiles) {
       try {
         const stats = await fs.promises.stat(path.join(dir, f));
@@ -281,3 +300,4 @@ export async function cleanupTempFiles(targetDir) {
     logger.warn('[Filesystem] Startup cleanup failed:', err?.message || String(err));
   }
 }
+

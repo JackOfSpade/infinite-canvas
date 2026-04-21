@@ -1,48 +1,56 @@
 import { useCallback } from 'react';
 import { EventLogger } from '../utils/EventLogger';
 
+// ── Pure module-level helpers ────────────────────────────────────────────────
+// These never close over hook state, so they are defined once at module scope
+// rather than being recreated on every onNodesDelete call.
+
+/**
+ * Recursively cancels active background tasks for a node and all its descendants.
+ */
+function cancelRecursively(nodes) {
+  nodes.forEach(n => {
+    window.electronAPI.cancelNodeTask(n.id);
+    if (n.data?.canvasData?.nodes) cancelRecursively(n.data.canvasData.nodes);
+    // Also check legacy nodes shape if present
+    if (n.data?.nodes) cancelRecursively(n.data.nodes);
+  });
+}
+
+/**
+ * Recursively collects OS file/folder paths from a node tree.
+ * - document nodes: contributes their own filePath.
+ * - group nodes created from a folder drag: contributes the folder path.
+ * - organic sub-canvas groups: recurses into children.
+ */
+function extractPaths(nodes, pathsToDelete) {
+  nodes.forEach(n => {
+    if (n.type === 'document' && n.data?.filePath) {
+      pathsToDelete.add(n.data.filePath);
+    } else if (n.type === 'group') {
+      if (n.data?.filePath) {
+        // Group created from a folder drag-in: delete the entire OS folder
+        pathsToDelete.add(n.data.filePath);
+      } else {
+        // Organic sub-canvas: recurse into children to delete inner files
+        if (n.data?.canvasData?.nodes) extractPaths(n.data.canvasData.nodes, pathsToDelete);
+        if (n.data?.nodes) extractPaths(n.data.nodes, pathsToDelete);
+      }
+    }
+  });
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+
 export function useCanvasOSDeletion({ requestConfirm }) {
   const onNodesDelete = useCallback((deletedNodes) => {
     // Cancel any active background tasks for these nodes (including nested nodes)
     if (window.electronAPI?.cancelNodeTask) {
-      const cancelRecursively = (nodes) => {
-        nodes.forEach(n => {
-          window.electronAPI.cancelNodeTask(n.id);
-          if (n.data?.canvasData?.nodes) {
-            cancelRecursively(n.data.canvasData.nodes);
-          }
-          // Also check legacy nodes shape if present
-          if (n.data?.nodes) {
-            cancelRecursively(n.data.nodes);
-          }
-        });
-      };
       cancelRecursively(deletedNodes);
     }
 
     const pathsToDelete = new Set();
-    const extractPaths = (nodes) => {
-      nodes.forEach(n => {
-        if (n.type === 'document' && n.data?.filePath) {
-          pathsToDelete.add(n.data.filePath);
-        } else if (n.type === 'group') {
-          if (n.data?.filePath) {
-            // Group created from a folder drag-in: delete the entire OS folder
-            pathsToDelete.add(n.data.filePath);
-          } else {
-            // Organic sub-canvas: recurse into children to delete inner files
-            if (n.data?.canvasData?.nodes) {
-              extractPaths(n.data.canvasData.nodes);
-            }
-            if (n.data?.nodes) {
-              extractPaths(n.data.nodes);
-            }
-          }
-        }
-      });
-    };
-
-    extractPaths(deletedNodes);
+    extractPaths(deletedNodes, pathsToDelete);
     const osPaths = Array.from(pathsToDelete);
 
     if (osPaths.length > 0 && window.electronAPI) {

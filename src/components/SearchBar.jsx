@@ -111,18 +111,20 @@ export const SearchBar = React.memo(function SearchBar() {
     setCenter(target.position.x + dims.w / 2, target.position.y + dims.h / 2, { zoom: currentZoom, duration: 600 });
     setMatchIndex(nextIdx + 1);
 
-    // If it's an internal match and not an animating transition, offer to dive in
-    // or automatically dive in if the user clicks Enter on it.
+    // If it's an internal match, auto-dive after a short delay if the user
+    // kept focus in the search bar (indicating they want to navigate deeper).
     if (targetInfo.internalOnly && nav?.diveIn) {
       if (autoDiveTimeoutRef.current) clearTimeout(autoDiveTimeoutRef.current);
       autoDiveTimeoutRef.current = setTimeout(() => {
+        // inputRef is a stable ref object — read .current inside the callback
         if (inputRef.current === document.activeElement || document.activeElement?.closest('[data-search-bar]')) {
            nav.diveIn(target.id);
         }
         autoDiveTimeoutRef.current = null;
       }, 700);
     }
-  }, [getMatches, matchIndex, setCenter, isAnimating, getViewport, nav, inputRef]);
+  // inputRef is a stable ref object — intentionally omitted from deps
+  }, [getMatches, matchIndex, setCenter, isAnimating, getViewport, nav]);
 
   const executeSearch = useCallback((e) => {
     if (e.key !== 'Enter' || searchQuery.trim() === '') return;

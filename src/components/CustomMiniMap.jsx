@@ -119,11 +119,19 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
             const tgt = nodeById.get(e.target);
             if (!src || !tgt) return null;
             const sd = getNodeDims(src), td = getNodeDims(tgt);
+            const sx = src.position.x + sd.w;
+            const sy = src.position.y + sd.h / 2;
+            const tx = tgt.position.x;
+            const ty = tgt.position.y + td.h / 2;
+            const offset = Math.abs(tx - sx) * 0.6;
+            const d = `M${sx},${sy} C${sx + offset},${sy} ${tx - offset},${ty} ${tx},${ty}`;
+
             return (
-              <line key={e.id}
-                x1={src.position.x + sd.w / 2} y1={src.position.y + sd.h / 2} 
-                x2={tgt.position.x + td.w / 2} y2={tgt.position.y + td.h / 2}
-                stroke="rgba(168,85,247,0.30)" strokeWidth={1} vectorEffect="non-scaling-stroke"
+              <path key={e.id}
+                d={d}
+                fill="none"
+                stroke="rgba(168,85,247,0.50)" strokeWidth={2} vectorEffect="non-scaling-stroke"
+                strokeDasharray="4,4"
               />
             );
           })}

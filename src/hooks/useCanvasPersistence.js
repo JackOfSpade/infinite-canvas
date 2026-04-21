@@ -49,6 +49,7 @@ function migrateGroupNodes(nodes) {
     return current;
   });
 }
+
 /**
  * Strip transient visual properties from nodes before saving.
  * Prevents runtime-only state (e.g. source-filter dim opacity) from
@@ -214,13 +215,13 @@ export function useCanvasPersistence({
           setHasUnsavedChanges(false);
           customFitView();
         }, 50);
-        addToast({ title: 'Workspace Loaded', description: 'Your canvas has been loaded successfully.', type: 'success'});
+        addToast({ title: 'Workspace Loaded', description: 'Your canvas has been loaded successfully.', type: 'success' });
       } else if (!res?.canceled) {
-        addToast({ title: 'Load Failed', description: 'Failed to load canvas or invalid file format.', type: 'error'});
+        addToast({ title: 'Load Failed', description: 'Failed to load canvas or invalid file format.', type: 'error' });
       }
     } catch (err) {
       EventLogger.error('Failed to load canvas:', err);
-      addToast({ title: 'Load Error', description: err?.message || String(err) || 'An error occurred while loading.', type: 'error'});
+      addToast({ title: 'Load Error', description: err?.message || String(err) || 'An error occurred while loading.', type: 'error' });
     }
   }, [confirmDiscardChanges, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, customFitView, addToast, resetStack, clearHistory, isAnimatingRef]);
 
@@ -231,8 +232,9 @@ export function useCanvasPersistence({
     isExportingRef.current = true;
     toPng(viewportNode, { backgroundColor: '#0a0a0a' })
       .then((dataUrl) => {
+        const date = new Date().toISOString().slice(0, 10);
         const link = document.createElement('a');
-        link.download = 'canvas-export.png';
+        link.download = `canvas-${date}.png`;
         link.href = dataUrl;
         link.click();
         addToast({ title: 'Export Successful', description: 'Canvas has been exported to PNG.', type: 'success'});

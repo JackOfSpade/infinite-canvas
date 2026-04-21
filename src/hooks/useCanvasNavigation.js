@@ -207,32 +207,42 @@ export function useCanvasNavigation({
     if (isAnimating || isNavigatingRef.current) return;
     isNavigatingRef.current = true;
 
-    const node = reactFlow.getNode(nodeId);
-    if (!node || node.type !== 'group') {
+    // Fast fail if node doesn't exist
+    const initialNode = reactFlow.getNode(nodeId);
+    if (!initialNode || initialNode.type !== 'group') {
       isNavigatingRef.current = false;
       return;
     }
 
-    const canvasData = getCanvasData(node);
     const halfDuration = getAnimationDuration() / 2;
 
     setIsAnimating(true);
     setAnimPhase('fade-out');
 
-    // Save current state
-    const viewport = reactFlow.getViewport();
-    const parentState = {
-      nodeId,
-      childTitle: node.data.title || 'Sub-Canvas',
-      nodes: safeClone(nodesRef.current),
-      edges: safeClone(edgesRef.current),
-      drawings: safeClone(drawingsRef.current),
-      viewport,
-    };
-
-    // After fade-out completes, swap data
+    // After fade-out completes, dynamically read the LATEST state to swap data.
+    // This prevents background tasks (file watchers, IPC) from hitting a race condition
+    // and overwriting their changes during the 300ms fade duration.
     const t1 = setTimeout(() => {
       navTimersRef.current = navTimersRef.current.filter(id => id !== t1);
+      
+      // Re-fetch the node from our latest ref to guarantee we capture any IPC updates
+      const latestNode = nodesRef.current.find(n => n.id === nodeId);
+      if (!latestNode) { 
+          // Extremely edge case: node deleted during fade-out by IPC
+          setIsAnimating(false); setAnimPhase(null); isNavigatingRef.current = false; 
+          return; 
+      }
+      const canvasData = getCanvasData(latestNode);
+
+      const parentState = {
+        nodeId,
+        childTitle: latestNode.data.title || 'Sub-Canvas',
+        nodes: safeClone(nodesRef.current),
+        edges: safeClone(edgesRef.current),
+        drawings: safeClone(drawingsRef.current),
+        viewport: reactFlow.getViewport(),
+      };
+
       setStack(s => [...s, parentState]);
       setNodes(canvasData.nodes || []);
       setEdges(canvasData.edges || []);
@@ -254,8 +264,9 @@ export function useCanvasNavigation({
           const cx = sumX / childNodes.length;
           const cy = sumY / childNodes.length;
           const viewportNode = document.querySelector('.react-flow__viewport');
-          const flowWidth = viewportNode ? viewportNode.parentElement.clientWidth : window.innerWidth;
-          const flowHeight = viewportNode ? viewportNode.parentElement.clientHeight : window.innerHeight;
+          const container = viewportNode?.parentElement;
+          const flowWidth  = container ? container.clientWidth  : window.innerWidth;
+          const flowHeight = container ? container.clientHeight : window.innerHeight;
           reactFlow.setViewport({
             x: flowWidth / 2 - cx * currentVp.zoom,
             y: flowHeight / 2 - cy * currentVp.zoom,
@@ -349,7 +360,7 @@ export function useCanvasNavigation({
    * Detach one or more nodes (and their internal edges) from the current sub-canvas and move them to a parent canvas depth.
    */
   const extractToLevel = useCallback((nodeIdOrIds, explicitTargetIndex = undefined) => {
-    if (stackRef.current.length === 0) return;
+    if (isAnimating || isNavigatingRef.current || stackRef.current.length === 0) return;
 
     const targetIndex = explicitTargetIndex !== undefined ? explicitTargetIndex : stackRef.current.length - 1;
     // Don't extract if the target is the current level or deeper than available stack
@@ -357,16 +368,19 @@ export function useCanvasNavigation({
 
     const ids = Array.isArray(nodeIdOrIds) ? nodeIdOrIds : [nodeIdOrIds];
     
-    const nodesToExtract = nodesRef.current.filter(n => ids.includes(n.id));
+    // Filter out locked nodes - they cannot be extracted
+    const nodesToExtract = nodesRef.current.filter(n => ids.includes(n.id) && !n.data?.locked);
     if (nodesToExtract.length === 0) return;
 
+    const finalIds = nodesToExtract.map(n => n.id);
+
     // Preserve edges that are entirely between the extracted nodes
-    const edgesToExtract = edgesRef.current.filter(e => ids.includes(e.source) && ids.includes(e.target));
+    const edgesToExtract = edgesRef.current.filter(e => finalIds.includes(e.source) && finalIds.includes(e.target));
 
     // Remove from current canvas
-    setNodes(nds => nds.filter(n => !ids.includes(n.id)));
+    setNodes(nds => nds.filter(n => !finalIds.includes(n.id)));
     // Delete any edges connected to the extracted nodes in the current canvas
-    setEdges(eds => eds.filter(e => !ids.includes(e.source) && !ids.includes(e.target)));
+    setEdges(eds => eds.filter(e => !finalIds.includes(e.source) && !finalIds.includes(e.target)));
 
     // Clear history to prevent a duplication bug where undoing the extraction 
     // restores the node locally, but it remains injected in the parent stack.
@@ -384,11 +398,15 @@ export function useCanvasNavigation({
       const parentContainer = targetParent.nodes.find(n => n.id === targetParent.nodeId);
       
       // Compute bounding box of extracted nodes to preserve relative layout
-      const minX = Math.min(...nodesToExtract.map(n => n.position.x));
-      const minY = Math.min(...nodesToExtract.map(n => n.position.y));
-      const maxX = Math.max(...nodesToExtract.map(n => n.position.x + (n.measured?.width || 200)));
-      const maxY = Math.max(...nodesToExtract.map(n => n.position.y + (n.measured?.height || 66)));
-      const clusterWidth = Math.max(0, maxX - minX);
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      nodesToExtract.forEach(n => {
+        const dims = getNodeDims(n);
+        minX = Math.min(minX, n.position.x);
+        maxX = Math.max(maxX, n.position.x + dims.w);
+        minY = Math.min(minY, n.position.y);
+        maxY = Math.max(maxY, n.position.y + dims.h);
+      });
+      const clusterWidth  = Math.max(0, maxX - minX);
       const clusterHeight = Math.max(0, maxY - minY);
       
       // Center the extracted cluster horizontally over the parent container

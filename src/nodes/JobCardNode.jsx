@@ -1,4 +1,4 @@
-import React, { useState, useContext, useRef } from 'react';
+import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { ExternalLink, FileText, ChevronDown, ChevronUp, X } from 'lucide-react';
@@ -40,12 +40,6 @@ export function JobCardNode({ id, data }) {
   
   // Cache ID for closure safely
   const idRef = useRef(id); idRef.current = id;
-  const isMountedRef = useRef(true);
-  React.useEffect(() => {
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
 
   const score = data.matchScore || 0;
   const strength = data.strengthLabel || 'exploring';
@@ -53,11 +47,17 @@ export function JobCardNode({ id, data }) {
   const accentColor = STRENGTH_COLORS[strength] || '#888';
   const status = data.status || 'New';
 
-  const handleStatusChange = (newStatus) => {
+  const handleStatusChange = useCallback((newStatus) => {
     updateGlobal(id, { status: newStatus });
-  };
+  }, [id, updateGlobal]);
 
-  const generateCoverLetter = async () => {
+  const openJobUrl = useCallback(() => {
+    if (data.url && window.electronAPI?.openExternal) {
+      window.electronAPI.openExternal(data.url);
+    }
+  }, [data.url]);
+
+  const generateCoverLetter = useCallback(async () => {
     if (!window.electronAPI?.generateCoverLetter || !data.resumeProfile) return;
     setGeneratingCL(true);
     const currentId = idRef.current;
@@ -66,7 +66,6 @@ export function JobCardNode({ id, data }) {
         profile: data.resumeProfile,
         job: { title: data.title, company: data.company, snippet: data.snippet },
       });
-      if (!isMountedRef.current) return;
       if (result.success) {
         updateGlobal(currentId, { coverLetter: result.coverLetter });
         addToast({ title: 'Cover Letter Ready', description: `Generated for ${data.company}`, type: 'success' });
@@ -74,28 +73,20 @@ export function JobCardNode({ id, data }) {
         addToast({ title: 'Generation Failed', description: result.error, type: 'error' });
       }
     } catch (e) {
-      if (!isMountedRef.current) return;
       EventLogger.error('Cover letter generation failed:', e);
       addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
     } finally {
-      if (isMountedRef.current) {
-        setGeneratingCL(false);
-      }
+      setGeneratingCL(false);
     }
-  };
-
-  const openJobUrl = () => {
-    if (data.url && window.electronAPI?.openExternal) {
-      window.electronAPI.openExternal(data.url);
-    }
-  };
+  }, [data.resumeProfile, data.title, data.company, data.snippet, updateGlobal, addToast]);
 
   return (
     <div
       className="bg-[#1a1a1a] border rounded-lg shadow-lg overflow-hidden group"
       style={{ borderColor: accentColor + '40', minWidth: 260, maxWidth: 320 }}
     >
-      <Handle type="target" position={Position.Left} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity" style={{ background: accentColor }} />
+      <Handle type="target" position={Position.Top} id="top" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" style={{ backgroundColor: accentColor }} />
+      <Handle type="target" position={Position.Left} id="left" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" style={{ backgroundColor: accentColor }} />
 
       {/* Header */}
       <div className="px-3 py-2 flex items-start gap-2" style={{ borderBottom: `1px solid ${accentColor}20` }}>
@@ -218,7 +209,8 @@ export function JobCardNode({ id, data }) {
         </div>
       )}
 
-      <Handle type="source" position={Position.Right} className="w-2 h-2 opacity-0 group-hover:opacity-100 transition-opacity" style={{ background: accentColor }} />
+      <Handle type="source" position={Position.Right} id="right" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" style={{ backgroundColor: accentColor }} />
+      <Handle type="source" position={Position.Bottom} id="bottom" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" style={{ backgroundColor: accentColor }} />
     </div>
   );
 }

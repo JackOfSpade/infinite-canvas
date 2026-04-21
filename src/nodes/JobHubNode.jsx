@@ -44,12 +44,6 @@ export function JobHubNode({ id, data }) {
   const processingRef = useRef(false);
   // Stable ref to startProcessing so handleDrop can call it without a stale closure.
   const startProcessingRef = useRef(null);
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
 
   // Per-source progress state: { sourceId: { status, count }, ... }
   const [sourceProgress, setSourceProgress] = useState({});
@@ -191,7 +185,7 @@ export function JobHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'parsing' });
       const parseResult = await window.electronAPI.parseResume({ filePath, nodeId: currentId });
       
-      if (!isMountedRef.current || !getNode(currentId)) return;
+      // Allow processing to finish even if unmounted or node deleted!
       if (!parseResult.success) {
         throw new Error(parseResult.error || 'Failed to parse resume');
       }
@@ -210,8 +204,6 @@ export function JobHubNode({ id, data }) {
         nodeId: currentId 
       });
       
-      if (!isMountedRef.current || !getNode(currentId)) return;
-      
       // Flatten all query arrays into a single list for the search step.
       const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queriesResult.queries || {};
       const allQueries = [...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
@@ -221,7 +213,6 @@ export function JobHubNode({ id, data }) {
       
       const searchResult = await window.electronAPI.searchJobs({ queries: allQueries, nodeId: currentId });
       
-      if (!isMountedRef.current || !getNode(currentId)) return;
       if (!searchResult.success || !searchResult.jobs || searchResult.jobs.length === 0) {
         updateGlobal(currentId, { hubState: 'done', resultCount: 0 });
         processingRef.current = false;
@@ -233,7 +224,6 @@ export function JobHubNode({ id, data }) {
       
       const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile: parseResult.profile, nodeId: currentId });
       
-      if (!isMountedRef.current || !getNode(currentId)) return;
       if (!scoreResult.success) {
         throw new Error(scoreResult.error || 'Failed to score jobs');
       }
@@ -301,15 +291,12 @@ export function JobHubNode({ id, data }) {
         finalSourceCounts 
       });
     } catch (error) {
-      if (!isMountedRef.current) return;
       EventLogger.error('JobHubNode task failed:', error);
       updateGlobal(id, { hubState: 'error', errorMessage: error?.message || String(error) });
     } finally {
-      if (isMountedRef.current) {
-        processingRef.current = false;
-      }
+      processingRef.current = false;
     }
-  }, [id, updateGlobal, getNode, addElementsGlobally, addNodes, addEdges]);
+  }, [id, updateGlobal, addElementsGlobally, addNodes, addEdges]);
 
   // Keep the ref up-to-date so handleDrop always calls the latest version.
   startProcessingRef.current = startProcessing;

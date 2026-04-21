@@ -36,13 +36,6 @@ export function SellHubNode({ id, data }) {
   const processingPriceRef = useRef(false);
   // Stable ref so handleDrop always calls the latest startAnalysis without needing deps.
   const startAnalysisRef = useRef(null);
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
-
   const {
     product, editing, setEditing, priceInput, justificationExpanded,
     selectedPlatforms, copied, handleFieldEdit, handlePriceChange,
@@ -166,7 +159,8 @@ export function SellHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'analyzing' });
       const result = await window.electronAPI.analyzePhotos({ imagePaths: validPaths, nodeId: currentId });
       
-      if (!isMountedRef.current || !getNode(currentId)) return;
+      // Allow processing to finish even if unmounted or node deleted!
+      // If the node was deleted globally, updateGlobal will safely do nothing.
       if (!result.success) throw new Error(result.error);
       
       updateGlobal(currentId, {
@@ -175,16 +169,13 @@ export function SellHubNode({ id, data }) {
         images: imagePaths,
       });
     } catch (error) {
-      if (!isMountedRef.current) return;
       EventLogger.error('[SellHub] Analysis failed:', error);
       updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
       addToast({ title: 'Photo Analysis Failed', description: error?.message || String(error), type: 'error' });
     } finally {
-      if (isMountedRef.current) {
-        processingRef.current = false;
-      }
+      processingRef.current = false;
     }
-  }, [id, updateGlobal, addToast, getNode]);
+  }, [id, updateGlobal, addToast]);
 
   // Keep ref in sync so handleDrop always invokes the latest closure.
   startAnalysisRef.current = startAnalysis;
@@ -214,21 +205,17 @@ export function SellHubNode({ id, data }) {
           });
         }
       });
-      if (!isMountedRef.current || !getNode(currentId)) return;
       if (!result) {
         updateGlobal(currentId, { hubState: 'draft' });
       }
     } catch (err) {
-      if (!isMountedRef.current) return;
       EventLogger.error('[SellHub] Price research failed:', err);
       updateGlobal(currentId, { hubState: 'draft' });
       addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
     } finally {
-      if (isMountedRef.current) {
-        processingPriceRef.current = false;
-      }
+      processingPriceRef.current = false;
     }
-  }, [id, updateGlobal, researchPrice, addToast, data.product, getNode]);
+  }, [id, updateGlobal, researchPrice, addToast, data.product]);
 
   const handleDrop = useCallback((e) => {
     if (data.locked) return; // Locked nodes don't accept new drops

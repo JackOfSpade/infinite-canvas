@@ -57,7 +57,7 @@ export function getFileCategoryInfo(filename) {
   if (['md', 'txt', 'rtf'].includes(ext)) {
     return { category: FILE_CATEGORIES.DOCUMENT, label: 'Text', color: 'sky', badge, Icon: FileText };
   }
-  if (['pdf'].includes(ext)) {
+  if (ext === 'pdf') {
     return { category: FILE_CATEGORIES.DOCUMENT, label: 'PDF Document', color: 'rose', badge, Icon: FileText };
   }
   if (['doc', 'docx'].includes(ext)) {

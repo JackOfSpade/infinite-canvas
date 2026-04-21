@@ -6,7 +6,7 @@ import { getNodeDims } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
 
 // Compiled once at module load — not per drop event.
-const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)(?:[?#].*)?$/i;
+const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)$/i;
 const URL_RE = /^(https?:\/\/[^\s]+|[a-z0-9]([a-z0-9-]*[a-z0-9])?\.([a-z]{2,}\.)*[a-z]{2,}([/?#][^\s]*)?)$/i;
 
 export function useCanvasDragAndDrop({
@@ -96,7 +96,6 @@ export function useCanvasDragAndDrop({
         size: f.size,
         path: f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : '')
       }));
-
 
       // Default: treat as document/folder drops — only process items with valid system paths
       const validFiles = files.filter(f => f.path);
