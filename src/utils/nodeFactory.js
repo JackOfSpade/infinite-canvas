@@ -3,17 +3,19 @@
  * Eliminates duplicate inline node construction across hooks.
  */
 
+import { generateId } from './idGenerator';
+
 export function createTextNode(position) {
-  return { id: crypto.randomUUID(), type: 'text', position, data: { text: '', isNew: true } };
+  return { id: generateId(), type: 'text', position, data: { text: '', isNew: true } };
 }
 
 export function createLinkNode(position, extra = {}) {
-  return { id: crypto.randomUUID(), type: 'link', position, data: { url: '', label: '', isNew: true, ...extra } };
+  return { id: generateId(), type: 'link', position, data: { url: '', label: '', isNew: true, ...extra } };
 }
 
 export function createGroupNode(position) {
   return {
-    id: crypto.randomUUID(), type: 'group', position,
+    id: generateId(), type: 'group', position,
     style: { width: 160, height: 160 },
     data: {
       title: '', isNew: true,
@@ -24,14 +26,14 @@ export function createGroupNode(position) {
 
 export function createJobHubNode(position, extra = {}) {
   return {
-    id: crypto.randomUUID(), type: 'jobhub', position,
+    id: generateId(), type: 'jobhub', position,
     data: { hubState: 'empty', ...extra },
   };
 }
 
 export function createSellHubNode(position, extra = {}) {
   return {
-    id: crypto.randomUUID(), type: 'sellhub', position,
+    id: generateId(), type: 'sellhub', position,
     data: { hubState: 'empty', ...extra },
   };
 }
@@ -74,7 +76,7 @@ export function cloneNode(original, dx = 40, dy = 40) {
 
   const clone = {
     ...src,
-    id: crypto.randomUUID(),
+    id: generateId(),
     position: { x: original.position.x + dx, y: original.position.y + dy },
     selected: true,
   };
@@ -114,7 +116,7 @@ export function reassignCanvasDataIDs(node) {
 
   const idMap = new Map();
   const getMappedId = (oldId) => {
-    if (!idMap.has(oldId)) idMap.set(oldId, crypto.randomUUID());
+    if (!idMap.has(oldId)) idMap.set(oldId, generateId());
     return idMap.get(oldId);
   };
 
@@ -133,12 +135,12 @@ export function reassignCanvasDataIDs(node) {
     
     const newEdges = (canvasData.edges || []).map(e => ({
       ...e,
-      id: crypto.randomUUID(),
+      id: generateId(),
       source: idMap.get(e.source) ?? e.source,
       target: idMap.get(e.target) ?? e.target,
     }));
     
-    const newDrawings = (canvasData.drawings || []).map(d => d.id ? { ...d, id: crypto.randomUUID() } : d);
+    const newDrawings = (canvasData.drawings || []).map(d => d.id ? { ...d, id: generateId() } : d);
     
     return { nodes: newNodes, edges: newEdges, drawings: newDrawings };
   };

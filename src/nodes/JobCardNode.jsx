@@ -1,4 +1,4 @@
-import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useContext, useRef, useState } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { ExternalLink, FileText, ChevronDown, ChevronUp, X } from 'lucide-react';

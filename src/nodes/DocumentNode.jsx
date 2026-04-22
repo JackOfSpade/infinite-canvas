@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Handle, Position, useReactFlow } from '@xyflow/react';
+import { Handle, Position, useReactFlow, NodeResizer } from '@xyflow/react';
 import { FileIcon, Lock, Minimize2, Play, AudioLines } from 'lucide-react';
 import { getFileCategoryInfo, THEME_COLORS } from '../utils/fileDisplayUtils';
 import { EventLogger } from '../utils/EventLogger';
@@ -7,7 +7,7 @@ import { CustomizeDialog } from '../components/CustomizeDialog';
 
 /** Encodes a local file path for use with the custom local-file:// protocol. */
 function toLocalFileUrl(filePath) {
-  return `local-file://${filePath.replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
+  return `local-file://${filePath.replace(/%/g, '%25').replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
 }
 
 /** Small lock badge shown on locked nodes. */
@@ -17,16 +17,17 @@ const LockBadge = () => (
   </div>
 );
 
-export const DocumentNode = React.memo(function DocumentNode({ id, data, selected }) {
+export const DocumentNode = React.memo(function DocumentNode({ id, data, selected, width, height }) {
   // Use a ref-based counter to force image re-fetches on file change.
   // Avoids the impure Date.now() initializer; counter is stable at 0 on mount.
   const imgVersionRef = useRef(0);
   const imgRef = useRef(null);
   const mediaRef = useRef(null);
 
-  const [isExpanded, setIsExpanded] = useState(false);
+  const isExpanded = !!data.isExpanded;
   const [showCustomizeDialog, setShowCustomizeDialog] = useState(false);
-  const { updateNodeData } = useReactFlow();
+  const [hoveringMedia, setHoveringMedia] = useState(false);
+  const { updateNodeData, setNodes } = useReactFlow();
 
   const { category, label, color, badge, Icon } = getFileCategoryInfo(data.filename);
   const theme = THEME_COLORS[color];
@@ -102,12 +103,30 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
   let wrapperClassName = `glass-card rounded-xl flex transition-all relative group ${selectedClass}`;
   let innerContent;
 
+  const isCollapsed = !isImage && !(isExpanded && isMedia);
+  
+  // Use expanded dimensions from data if available, fallback to defaults
+  // Video 16:9 ratio at 400px width = 225px height. Plus 88px padding = 313px total.
+  const currentWidth = width || data.expandedWidth;
+  const currentHeight = height || data.expandedHeight;
+  
+  const nodeWidth = isCollapsed ? 'auto' : (currentWidth || (isImage ? 250 : isVideo ? 400 : 320));
+  const nodeHeight = isCollapsed ? 'auto' : (currentHeight || (isExpanded && isVideo ? 313 : isExpanded && isAudio ? 200 : 'auto'));
+
+  // Sizing styles for smooth layout with or without Resizer dimensions applied
+  const containerStyle = {
+    width: nodeWidth,
+    height: nodeHeight,
+    minWidth: isImage ? 150 : isExpanded && isVideo ? 320 : isExpanded && isAudio ? 320 : 'auto',
+    minHeight: isImage ? 150 : isExpanded && isVideo ? 246 : isExpanded && isAudio ? 180 : 'auto'
+  };
+
   if (isImage) {
     wrapperClassName += ' p-2 flex-col items-center gap-2';
     innerContent = (
       <>
         {data.locked && <LockBadge />}
-        <div className="relative rounded overflow-hidden flex items-center justify-center bg-black/40 min-w-[100px] min-h-[100px] max-w-[250px] max-h-[300px]">
+        <div className="relative rounded overflow-hidden flex flex-1 w-full h-full items-center justify-center bg-black/40">
           <div className="absolute top-2 right-2 px-1.5 py-0.5 rounded bg-black/60 text-white/90 text-[9px] font-bold tracking-wider z-10 pointer-events-none backdrop-blur-sm border border-white/10">
             {badge}
           </div>
@@ -115,11 +134,11 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
             ref={imgRef}
             src={toLocalFileUrl(data.filePath)}
             alt={data.filename}
-            className="object-contain max-w-full max-h-full"
+            className="object-contain w-full h-full"
           />
         </div>
 
-        <div className="px-1 text-white font-medium truncate text-xs max-w-[200px]">
+        <div className="px-1 text-white font-medium truncate text-xs w-full text-center">
           {data.filename}
         </div>
       </>
@@ -130,15 +149,28 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
       <>
         {data.locked && <LockBadge />}
         <div 
-          className="relative rounded overflow-hidden flex flex-col items-center justify-center bg-black/50 pt-8 pb-3 px-3 min-w-[320px]"
-          onDoubleClick={(e) => e.stopPropagation()}
+          className="relative rounded overflow-hidden flex flex-col flex-1 w-full h-full items-center justify-center bg-black/50 pt-8 pb-3 px-3 group/media"
+          onMouseEnter={() => setHoveringMedia(true)}
+          onMouseLeave={() => setHoveringMedia(false)}
         >
           <button 
              onClick={(e) => { 
                e.stopPropagation(); 
                if (mediaRef.current) mediaRef.current.pause();
-               setIsExpanded(false); 
+               setNodes((nds) => nds.map((n) => {
+                 if (n.id === id) {
+                   return {
+                     ...n,
+                     width: undefined,
+                     height: undefined,
+                     style: { ...n?.style, width: undefined, height: undefined },
+                     data: { ...n.data, isExpanded: false, expandedWidth: n.width, expandedHeight: n.height }
+                   };
+                 }
+                 return n;
+               }));
              }}
+             onPointerDown={(e) => e.stopPropagation()}
              className="nodrag absolute top-1 right-1 p-1.5 hover:bg-white/10 rounded-lg text-white/70 hover:text-white transition-colors z-10"
              title="Collapse Player"
           >
@@ -153,23 +185,38 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
             <video
               ref={mediaRef}
               controls
+              title=""
               src={toLocalFileUrl(data.filePath)}
-              className="nodrag max-w-[400px] max-h-[300px] rounded-md shadow-inner bg-black/40"
+              className={`nodrag w-full h-full object-contain rounded-md shadow-inner bg-black/40 flex-1 ${hoveringMedia ? 'media-controls-visible' : 'media-controls-hidden'}`}
+              onPointerDown={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+              onLoadedMetadata={(e) => {
+                // Only self-resize if we haven't been given explicit dimensions yet
+                if (!width && !data.expandedWidth && e.target.videoWidth && e.target.videoHeight) {
+                  const ratio = e.target.videoWidth / e.target.videoHeight;
+                  const defaultW = 400;
+                  const calculatedH = Math.round(defaultW / ratio) + 88;
+                  setNodes((nds) => nds.map(n => n.id === id ? { ...n, width: defaultW, height: calculatedH, style: { ...n?.style, width: defaultW, height: calculatedH } } : n));
+                }
+              }}
             />
           ) : (
-            <div className="nodrag w-full mt-2 px-6 py-4 bg-black/20 rounded-lg border border-white/5 flex flex-col items-center gap-4 shadow-inner">
-              <AudioLines className={`w-12 h-12 ${theme.text} opacity-80`} />
+            <div className="w-full h-full mt-2 px-6 py-4 bg-black/20 rounded-lg border border-white/5 flex flex-col flex-1 items-center justify-center gap-4 shadow-inner">
+              <AudioLines className={`w-12 h-12 ${theme.text} opacity-80 shrink-0 ${hoveringMedia ? 'text-white' : ''} transition-colors`} />
               <audio
                 ref={mediaRef}
                 controls
+                title=""
                 src={toLocalFileUrl(data.filePath)}
-                className="w-full h-10 outline-none"
+                className="w-full outline-none shrink-0"
+                onPointerDown={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
               />
             </div>
           )}
         </div>
 
-        <div className="px-2 text-white font-medium truncate text-sm max-w-[280px]">
+        <div className="px-2 text-white font-medium truncate text-sm w-full text-center shrink-0">
           {data.filename}
         </div>
       </>
@@ -183,7 +230,26 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
           <Icon className={`w-5 h-5 ${theme.text} ${isMedia ? 'group-hover:opacity-0 transition-opacity' : ''}`} />
           {isMedia && (
             <button
-               onClick={(e) => { e.stopPropagation(); setIsExpanded(true); }}
+               onClick={(e) => { 
+                 e.stopPropagation(); 
+                 setNodes(nds => nds.map(n => {
+                   if (n.id === id) {
+                     return {
+                       ...n,
+                       width: n.data.expandedWidth || n.width,
+                       height: n.data.expandedHeight || n.height,
+                       style: {
+                         ...n?.style,
+                         width: n.data.expandedWidth || n.style?.width,
+                         height: n.data.expandedHeight || n.style?.height
+                       },
+                       data: { ...n.data, isExpanded: true }
+                     };
+                   }
+                   return n;
+                 }));
+               }}
+               onPointerDown={(e) => e.stopPropagation()}
                className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 hover:bg-black/60"
                title="Play Media"
             >
@@ -216,8 +282,17 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
       className={wrapperClassName}
       onDoubleClick={handleDoubleClick}
       title={data.filePath}
-      style={{ backgroundColor: bgColor }}
+      style={{ backgroundColor: bgColor, ...containerStyle }}
     >
+      {(isImage || (isExpanded && isMedia)) && (
+        <NodeResizer 
+           minWidth={isImage ? 150 : isVideo ? 320 : 250} 
+           minHeight={isImage ? 150 : isVideo ? 246 : 120} 
+           isVisible={selected && !data.locked} 
+           color="#3b82f6" 
+           handleStyle={{ width: 8, height: 8, borderRadius: 2 }}
+        />
+      )}
       <Handle type="target" position={Position.Top} id="top" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
       <Handle type="target" position={Position.Left} id="left" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
       {innerContent}

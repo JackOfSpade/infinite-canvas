@@ -1,9 +1,18 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { useToast } from '../components/ToastProvider';
-import { getNodeDims } from '../utils/constants';
+import { computeTidiedNodes } from '../utils/layoutUtils';
+
+// Helper to determine if an action applies to a single clicked node or the entire selected group
+const getTargetNodeIds = (reactFlow, menuNodeId) => {
+  const selectedNodes = reactFlow.getNodes().filter(n => n.selected);
+  if (selectedNodes.find(n => n.id === menuNodeId)) {
+    return selectedNodes.map(n => n.id);
+  }
+  return [menuNodeId];
+};
 
 export function useCanvasContextMenu({
   placementMode,
@@ -21,6 +30,11 @@ export function useCanvasContextMenu({
   const reactFlow = useReactFlow();
   const { deleteElements } = reactFlow;
   const { addToast } = useToast();
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   const onPaneContextMenuBase = useCallback((e) => {
     if (placementMode) return;
@@ -39,11 +53,7 @@ export function useCanvasContextMenu({
     if (!menu?.node) return;
     takeSnapshot();
     
-    const selectedNodes = reactFlow.getNodes().filter(n => n.selected);
-    let targetIds = [menu.node.id];
-    if (selectedNodes.find(n => n.id === menu.node.id)) {
-      targetIds = selectedNodes.map(n => n.id);
-    }
+    const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
     
     setNodes(nds => {
       const maxZ = nds.reduce((m, n) => Math.max(m, n.zIndex || 0), 0);
@@ -58,11 +68,7 @@ export function useCanvasContextMenu({
     if (!menu?.node) return;
     takeSnapshot();
     
-    const selectedNodes = reactFlow.getNodes().filter(n => n.selected);
-    let targetIds = [menu.node.id];
-    if (selectedNodes.find(n => n.id === menu.node.id)) {
-      targetIds = selectedNodes.map(n => n.id);
-    }
+    const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
     
     setNodes(nds => {
       const minZ = nds.reduce((m, n) => Math.min(m, n.zIndex || 0), 0);
@@ -84,24 +90,19 @@ export function useCanvasContextMenu({
     setNodes(nds => nds.concat(factory(pos)));
     EventLogger.log(`Spawned node of type ${type}`);
     setMenu(null);
-  }, [menu, screenToFlowPosition, setNodes, takeSnapshot]);
+  }, [menu, screenToFlowPosition, setNodes, takeSnapshot, isAnimatingRef]);
 
   const duplicateNode = useCallback(() => {
     if (isAnimatingRef?.current) return;
     if (!menu?.node) return;
     
-    // Default to just the clicked node
-    let nodesToDuplicate = [menu.node];
-    
     // If the clicked node is part of the current selection, duplicate all selected nodes
-    const selectedNodes = reactFlow.getNodes().filter(n => n.selected);
-    if (selectedNodes.find(n => n.id === menu.node.id)) {
-      nodesToDuplicate = selectedNodes;
-    }
+    const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
+    const nodesToDuplicate = reactFlow.getNodes().filter(n => targetIds.includes(n.id));
 
     duplicateNodes(nodesToDuplicate);
     setMenu(null);
-  }, [menu, duplicateNodes, reactFlow]);
+  }, [menu, duplicateNodes, reactFlow, isAnimatingRef]);
 
   const deleteSelectedNode = useCallback(() => {
     if (isAnimatingRef?.current) return;
@@ -109,14 +110,9 @@ export function useCanvasContextMenu({
     if (menu.node.data?.locked) return; // Button is disabled, but guard defensively
     takeSnapshot();
     
-    const selectedNodes = reactFlow.getNodes().filter(n => n.selected);
-    if (selectedNodes.find(n => n.id === menu.node.id)) {
-      deleteElements({ nodes: selectedNodes.map(n => ({ id: n.id })) });
-      EventLogger.log(`Deleted ${selectedNodes.length} selected nodes`);
-    } else {
-      deleteElements({ nodes: [{ id: menu.node.id }] });
-      EventLogger.log(`Deleted node ${menu.node.id}`);
-    }
+    const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
+    deleteElements({ nodes: targetIds.map(id => ({ id })) });
+    EventLogger.log(`Deleted ${targetIds.length} nodes`);
     
     setMenu(null);
   }, [menu, deleteElements, takeSnapshot, reactFlow, isAnimatingRef]);
@@ -127,12 +123,7 @@ export function useCanvasContextMenu({
     takeSnapshot();
     
     const isLocked = !menu.node.data?.locked;
-    const selectedNodes = reactFlow.getNodes().filter(n => n.selected);
-    let targetIds = [menu.node.id];
-    
-    if (selectedNodes.find(n => n.id === menu.node.id)) {
-      targetIds = selectedNodes.map(n => n.id);
-    }
+    const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
 
     setNodes(nds => nds.map(n => {
       if (targetIds.includes(n.id)) {
@@ -152,79 +143,10 @@ export function useCanvasContextMenu({
   const tidyNodes = useCallback((onlySelected) => {
     if (isAnimatingRef?.current) return;
     takeSnapshot();
-    setNodes(nds => {
-      const targets = nds.filter(n => {
-        if (n.data?.locked) return false;
-        return onlySelected ? n.selected : true;
-      });
-      
-      if (targets.length === 0) return nds;
-
-      const parentGroups = {};
-      targets.forEach(n => {
-        const key = n.parentId || 'ROOT';
-        if (!parentGroups[key]) parentGroups[key] = [];
-        parentGroups[key].push(n);
-      });
-
-      const newPositions = {};
-
-      Object.values(parentGroups).forEach(group => {
-        const sorted = [...group].sort((a, b) => {
-          if (Math.abs(a.position.y - b.position.y) > 100) return a.position.y - b.position.y;
-          return a.position.x - b.position.x;
-        });
-
-        const cols = Math.ceil(Math.sqrt(group.length));
-        const rows = Math.ceil(group.length / cols);
-        const gutter = 40;
-
-        const colWidths = new Array(cols).fill(0);
-        const rowHeights = new Array(rows).fill(0);
-
-        sorted.forEach((n, idx) => {
-          const col = idx % cols;
-          const row = Math.floor(idx / cols);
-          const { w, h } = getNodeDims(n);
-          colWidths[col] = Math.max(colWidths[col], w);
-          rowHeights[row] = Math.max(rowHeights[row], h);
-        });
-
-        const colOffsets = new Array(cols).fill(0);
-        const rowOffsets = new Array(rows).fill(0);
-        for (let i = 1; i < cols; i++) colOffsets[i] = colOffsets[i - 1] + colWidths[i - 1] + gutter;
-        for (let i = 1; i < rows; i++) rowOffsets[i] = rowOffsets[i - 1] + rowHeights[i - 1] + gutter;
-
-        let anchorX = Infinity;
-        let anchorY = Infinity;
-        sorted.forEach(n => {
-          anchorX = Math.min(anchorX, n.position.x);
-          anchorY = Math.min(anchorY, n.position.y);
-        });
-
-        sorted.forEach((n, idx) => {
-          const col = idx % cols;
-          const row = Math.floor(idx / cols);
-          newPositions[n.id] = {
-            x: anchorX + colOffsets[col],
-            y: anchorY + rowOffsets[row]
-          };
-        });
-      });
-
-      return nds.map(n => {
-        if (newPositions[n.id]) {
-          return {
-            ...n,
-            position: newPositions[n.id]
-          };
-        }
-        return n;
-      });
-    });
+    setNodes(nds => computeTidiedNodes(nds, onlySelected));
     EventLogger.log(`Tidied ${onlySelected ? 'selected' : 'all'} nodes with dynamic layout`);
     setMenu(null);
-  }, [setNodes, takeSnapshot]);
+  }, [setNodes, takeSnapshot, isAnimatingRef]);
 
   const aiPolishText = useCallback(async () => {
     if (isAnimatingRef?.current) return;
@@ -240,8 +162,10 @@ export function useCanvasContextMenu({
     try {
       const res = await window.electronAPI.aiPolishText(text);
       
+      // Guard: component unmounted mid-flight, abort safely.
+      if (!isMountedRef.current) return;
+      
       // Guard: node may have been deleted while the AI call was in-flight.
-      // If updateGlobal is available, we allow it to process because it checks the stack safely.
       if (!updateGlobal && !reactFlow.getNode(nodeId)) return;
       
       if (res.success) {
@@ -256,9 +180,9 @@ export function useCanvasContextMenu({
         EventLogger.log("AI Polish failed: " + res.error);
       }
     } catch (err) {
-      EventLogger.error('[ContextMenu] AI polish crashed:', err);
+      if (isMountedRef.current) EventLogger.error('[ContextMenu] AI polish crashed:', err);
     }
-    setMenu(null);
+    if (isMountedRef.current) setMenu(null);
   }, [menu, setNodes, takeSnapshot, addToast, updateGlobal, reactFlow, isAnimatingRef]);
 
   const toggleStickyNote = useCallback(() => {
@@ -268,12 +192,7 @@ export function useCanvasContextMenu({
     takeSnapshot();
     
     const isCurrentlySticky = menu.node.data?.isSticky;
-    const selectedNodes = reactFlow.getNodes().filter(n => n.selected);
-    let targetIds = [menu.node.id];
-    
-    if (selectedNodes.find(n => n.id === menu.node.id)) {
-      targetIds = selectedNodes.map(n => n.id);
-    }
+    const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
 
     setNodes(nds => nds.map(n => {
       // Don't apply to non-text/non-sticky compatible elements passively? 
@@ -296,7 +215,10 @@ export function useCanvasContextMenu({
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
-  const getContextMenuItems = useCallback(() => {
+  // useMemo: computes a value (items array) for the current menu state.
+  // useCallback would be semantically incorrect here since we're not stabilizing
+  // a function identity for event handlers — we're deriving a rendered value.
+  const contextMenuItems = useMemo(() => {
     if (!menu) return [];
     if (menu.type === 'pane') {
       return [
@@ -310,11 +232,11 @@ export function useCanvasContextMenu({
       ];
     }
     if (menu.type === 'node') {
-      const isText  = menu.node.type === 'text';
-      const isLink  = menu.node.type === 'link';
-      const isGroup = menu.node.type === 'group';
+      const isText     = menu.node.type === 'text';
+      const isLink     = menu.node.type === 'link';
+      const isGroup    = menu.node.type === 'group';
       const isDocument = menu.node.type === 'document';
-      const isLocked = menu.node.data?.locked;
+      const isLocked   = menu.node.data?.locked;
       const supportsColor = isText || isLink || isGroup || isDocument;
 
       const items = [];
@@ -326,27 +248,22 @@ export function useCanvasContextMenu({
 
       items.push({ divider: true });
       items.push({ label: 'Duplicate', onClick: duplicateNode });
-      
+
       if (depth > 0) {
-        items.push({ 
-          label: 'Move to Parent Canvas', 
+        items.push({
+          label: 'Move to Parent Canvas',
           disabled: isLocked,
           onClick: () => {
-            const selectedNodes = reactFlow.getNodes().filter(n => n.selected);
-            let nodesToExtract = [menu.node];
-            if (selectedNodes.find(n => n.id === menu.node.id)) {
-              nodesToExtract = selectedNodes;
-            }
-            extractToParent(nodesToExtract.map(n => n.id));
+            const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
+            extractToParent(targetIds);
             setMenu(null);
-          } 
+          }
         });
       }
-      
-      items.push({ label: 'Bring to Front', onClick: bringToFront, disabled: isLocked });
-      items.push({ label: 'Send to Back', onClick: sendToBack, disabled: isLocked });
 
-      // Node Color supports text, link, group, document, and sticky notes
+      items.push({ label: 'Bring to Front', onClick: bringToFront, disabled: isLocked });
+      items.push({ label: 'Send to Back',   onClick: sendToBack,   disabled: isLocked });
+
       if (supportsColor) {
         items.push({ divider: true });
         items.push({
@@ -361,13 +278,13 @@ export function useCanvasContextMenu({
 
       if (isLink) {
         items.push({ divider: true });
-        items.push({ 
-          label: 'Edit URL', 
+        items.push({
+          label: 'Edit URL',
           disabled: isLocked,
           onClick: isLocked ? undefined : () => {
             document.dispatchEvent(new CustomEvent(`edit-node-url-${menu.node.id}`));
             closeMenu();
-          } 
+          }
         });
       }
 
@@ -380,11 +297,11 @@ export function useCanvasContextMenu({
       items.push({ divider: true });
       items.push({ label: 'Tidy Selection', onClick: () => tidyNodes(true) });
       items.push({ divider: true });
-      items.push({ 
-        label: 'Delete', 
-        onClick: deleteSelectedNode, 
+      items.push({
+        label: 'Delete',
+        onClick: deleteSelectedNode,
         danger: true,
-        disabled: isLocked 
+        disabled: isLocked
       });
 
       return items;
@@ -397,6 +314,6 @@ export function useCanvasContextMenu({
     closeMenu,
     onPaneContextMenuBase,
     onNodeContextMenuBase,
-    getContextMenuItems
+    contextMenuItems,
   };
 }

@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
+import { generateId } from '../utils/idGenerator';
 
 const ToastContext = createContext(null);
 
@@ -28,7 +29,7 @@ export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
 
   const addToast = useCallback(({ title, description, type = 'info', duration = 4000 }) => {
-    const id = crypto.randomUUID();
+    const id = generateId();
     setToasts((prev) => {
       const next = [...prev, { id, title, description, type, duration }];
       // Cap at 5 toasts — discard oldest if over limit
@@ -63,7 +64,7 @@ function ToastCard({ toast, onRemove }) {
       }, toast.duration);
       return () => clearTimeout(timer);
     }
-  }, [toast, onRemove]);
+  }, [toast.id, toast.duration, onRemove]);
 
   return (
     <div className="bg-black/80 backdrop-blur-md border border-white/10 shadow-lg rounded-lg p-3 flex items-start gap-3 w-80 pointer-events-auto animate-in slide-in-from-right-4 fade-in duration-300">

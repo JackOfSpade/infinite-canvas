@@ -23,18 +23,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return res.success ? (res.title || null) : null;
   },
   saveWorkspace: (data) => ipcRenderer.invoke('save-workspace', data),
-  loadWorkspace: () => ipcRenderer.invoke('load-workspace'),
+  loadWorkspace: (opts) => ipcRenderer.invoke('load-workspace', opts),
   scanDirectory: (dirPath) => ipcRenderer.invoke('scan-directory', dirPath),
   startFileWatch: (filePath) => ipcRenderer.invoke('start-file-watch', filePath),
   stopFileWatch: (filePath) => ipcRenderer.invoke('stop-file-watch', filePath),
   deleteOSFile: (filePath) => ipcRenderer.invoke('delete-os-file', filePath),
 
   onFileChanged: createListener('file-changed'),
+  onMenuNew: createListener('menu-new'),
   onMenuOpen: createListener('menu-open'),
   onMenuSave: createListener('menu-save'),
   onMenuExportPng: createListener('menu-export-png'),
   onQuitRequest: createListener('quit-request'),
   sendQuitResponse: (hasUnsavedChanges) => ipcRenderer.send('quit-response', { hasUnsavedChanges }),
+  
+  // Custom dialogs wrapper
+  promptUnsavedChanges: (actionName) => ipcRenderer.invoke('prompt-unsaved-changes', actionName),
+  onRequestSaveAndRespond: createListener('request-save-and-respond'),
+  sendSaveResponse: (success) => ipcRenderer.send('save-response', { success }),
 
   // ── Jobs Module ─────────────────────────────────────────────────────────
   parseResume: (args) => ipcRenderer.invoke('parse-resume', args),

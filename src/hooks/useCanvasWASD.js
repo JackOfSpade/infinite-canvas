@@ -45,7 +45,6 @@ export function useCanvasWASD({ isAnimatingRef }) {
     const onKeyUp = (e) => {
       const k = e.key.toLowerCase();
       if (k in keys) keys[k] = false;
-      if (k === 'shift') keys.shift = false;
     };
     
     const onBlur = () => {

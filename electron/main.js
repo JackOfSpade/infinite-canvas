@@ -2,7 +2,7 @@ import electronPkg from 'electron';
 const { app, BrowserWindow, Menu, protocol, net } = electronPkg;
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { registerFilesystemHandlers, cleanupTempFiles } from './ipc/filesystem.js';
+import { registerFilesystemHandlers } from './ipc/filesystem.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
 import { registerAccountsHandlers } from './ipc/accounts.js';
@@ -39,7 +39,7 @@ const gotTheLock = app.requestSingleInstanceLock();
  */
 async function checkUnsavedChanges(win, actionType = 'close') {
   if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) {
-    return true; // Safe to proceed
+    return { action: 'proceed' };
   }
 
   win.webContents.send('quit-request');
@@ -65,16 +65,19 @@ async function checkUnsavedChanges(win, actionType = 'close') {
     
     const choice = electronPkg.dialog.showMessageBoxSync(win, {
       type: 'warning',
-      buttons: [`${actionStr} Without Saving`, 'Cancel'],
-      defaultId: 1,
-      cancelId: 1,
+      buttons: ['Save', `${actionStr} Without Saving`, 'Cancel'],
+      defaultId: 0,
+      cancelId: 2,
       title: 'Unsaved Changes',
-      message: `You have unsaved changes. Are you sure you want to ${msgStr}? Your unsaved work will be lost.`
+      message: `You have unsaved changes. Do you want to save before you ${msgStr}? Your unsaved work will be lost otherwise.`
     });
-    return choice === 0; // Return true if user clicked '[Action] Without Saving'
+    
+    if (choice === 0) return { action: 'save' };
+    if (choice === 1) return { action: 'proceed' };
+    return { action: 'cancel' };
   }
   
-  return true;
+  return { action: 'proceed' };
 }
 
 // ── Window creation ──────────────────────────────────────────────────────────
@@ -101,8 +104,22 @@ function createWindow() {
 
     event.preventDefault();
     
-    const canProceed = await checkUnsavedChanges(mainWindow, 'close');
-    if (!canProceed) return;
+    const result = await checkUnsavedChanges(mainWindow, 'close');
+    if (result.action === 'cancel') return;
+    
+    if (result.action === 'save') {
+      const saved = await new Promise(resolve => {
+        let saveTimeoutId;
+        const saveHandler = (_e, { success }) => { clearTimeout(saveTimeoutId); resolve(success); };
+        electronPkg.ipcMain.once('save-response', saveHandler);
+        safeMenuSend(mainWindow, 'request-save-and-respond');
+        saveTimeoutId = setTimeout(() => {
+          electronPkg.ipcMain.removeListener('save-response', saveHandler);
+          resolve(false);
+        }, 3000);
+      });
+      if (!saved) return;
+    }
     
     mainWindow.destroy(); // Safe to destroy now
   });
@@ -140,6 +157,7 @@ function setupApplicationMenu(win) {
     {
       label: 'File',
       submenu: [
+        { label: 'New Canvas',    accelerator: 'CmdOrCtrl+N',       click: () => safeMenuSend(win, 'menu-new') },
         { label: 'Open Canvas',   accelerator: 'CmdOrCtrl+O',       click: () => safeMenuSend(win, 'menu-open') },
         { label: 'Save Canvas',   accelerator: 'CmdOrCtrl+S',       click: () => safeMenuSend(win, 'menu-save') },
         { type: 'separator' },
@@ -285,6 +303,23 @@ if (!gotTheLock) {
     registerGeminiHandlers();
     registerBugReportHandlers();
     registerNetworkHandlers();
+
+    electronPkg.ipcMain.handle('prompt-unsaved-changes', async (event, actionName) => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const msgStr = actionName || 'proceed';
+      const choice = electronPkg.dialog.showMessageBoxSync(win, {
+        type: 'warning',
+        buttons: ['Save', `Proceed Without Saving`, 'Cancel'],
+        defaultId: 0,
+        cancelId: 2,
+        title: 'Unsaved Changes',
+        message: `You have unsaved changes. Do you want to save before you ${msgStr}? Your unsaved work will be lost otherwise.`
+      });
+      if (choice === 0) return 'save';
+      if (choice === 1) return 'proceed';
+      return 'cancel';
+    });
+
     createWindow();
 
     app.on('activate', () => {
@@ -304,8 +339,22 @@ app.on('before-quit', async (event) => {
   // 1. Handshake with renderer to check for unsaved changes.
   // We give the renderer 1.5 seconds to respond. If it doesn't, we assume it's
   // hung or no listeners are active and proceed with a safe quit.
-  const canProceed = await checkUnsavedChanges(mainWindow, 'quit');
-  if (!canProceed) return;
+  const result = await checkUnsavedChanges(mainWindow, 'quit');
+  if (result.action === 'cancel') return;
+  
+  if (result.action === 'save') {
+    const saved = await new Promise(resolve => {
+      let saveTimeoutId;
+      const saveHandler = (_e, { success }) => { clearTimeout(saveTimeoutId); resolve(success); };
+      electronPkg.ipcMain.once('save-response', saveHandler);
+      safeMenuSend(mainWindow, 'request-save-and-respond');
+      saveTimeoutId = setTimeout(() => {
+        electronPkg.ipcMain.removeListener('save-response', saveHandler);
+        resolve(false);
+      }, 3000);
+    });
+    if (!saved) return;
+  }
 
   isQuitting = true;
 

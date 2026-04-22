@@ -1,4 +1,3 @@
-/* eslint-disable react-refresh/only-export-components */
 import React, { useCallback, useState, useRef, useEffect } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { Lock, X, ArrowDown } from 'lucide-react';
@@ -6,44 +5,12 @@ import { CanvasThumbnail } from '../components/CanvasThumbnail';
 import { CustomizeDialog } from '../components/CustomizeDialog';
 import { EventLogger } from '../utils/EventLogger';
 import { getNodeDims } from '../utils/constants';
+import { ResizeCorrection, ResizeActive, TitleZoneActive, TitleZoneCorrection } from '../utils/canvasInteractions';
 
 const MIN_SIZE    = 80;
 const MAX_SIZE    = 600;
 const DEFAULT_SIZE = 160;
 const EDGE_ZONE   = 12; // screen-px from circle edge that activates resize cursor
-
-// ── ResizeCorrection ─────────────────────────────────────────────────────────
-// Module-level map shared with Canvas.jsx. When a resize session starts, we
-// record the center + size here. When RF fires onNodeDragStop (because it
-// intercepted our pointerdown before our stopPropagation could block it),
-// Canvas.jsx reads this map to correct RF's wrong dragged-to position back to
-// the center-anchored value we computed. The map entry is cleared by Canvas.jsx
-// inside onNodeDragStop immediately after applying the correction.
-export const ResizeCorrection = new Map();
-// Shape: Map<nodeId, { flowCx, flowCy, size }>
-
-// ── ResizeActive ─────────────────────────────────────────────────────────────
-// Set of nodeIds that currently have an active resize session (pointerdown on
-// rim, before the matching pointerup). Canvas.jsx reads this in onNodeDragStart
-// to tag the RF drag as "resize-initiated". Only resize-tagged drags consume
-// a ResizeCorrection entry in onNodeDragStop. This prevents stale ResizeCorrection
-// entries (from 0-moves phantom resizes where RF never fires onNodeDragStop)
-// from wrongly snapping the node when the user later does a normal drag.
-export const ResizeActive = new Set();
-
-// ── TitleZoneCorrection / TitleZoneActive ─────────────────────────────────────
-// Mirror of ResizeCorrection/ResizeActive for title-zone presses.
-//
-// Problem: RF uses a capture-phase drag listener on the node wrapper, which fires
-// BEFORE our bubble-phase onDown. When the user presses the bottom arc (title zone)
-// to start editing, RF sees the pointerdown and starts tracking a drag. If the user
-// holds and moves even slightly, RF displaces the node — even though our onUp will
-// correctly start editing. The node ends up at the wrong position.
-//
-// Fix: record the node's position when a title-zone press begins. If RF fires
-// onNodeDragStop for a title-zone-tagged drag, Canvas.jsx snaps the node back.
-export const TitleZoneActive     = new Set();              // nodeIds with active title-zone press
-export const TitleZoneCorrection = new Map();              // Map<nodeId, {x, y}> original position
 
 export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, width }) {
   // currentSize is updated both from the width prop (via useEffect) AND synchronously
@@ -555,11 +522,11 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   const titleSpacing = data.titleSpacing ?? 0;
 
   const commitTitle = useCallback((val) => {
-    const v = (val ?? title).trim();
+    const v = (val ?? liveRef.current.title).trim();
     setTitle(v);
     mainFlow.updateNodeData(id, { title: v });
     setIsEditing(false);
-  }, [id, mainFlow, title]);
+  }, [id, mainFlow]);
 
   const handleDelete = useCallback((e) => {
     e.stopPropagation();
@@ -568,8 +535,8 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
 
   const handleInputKeyDown = useCallback((e) => {
     if (e.key === 'Enter')  commitTitle(e.target.value);
-    if (e.key === 'Escape') { setTitle(data.title || ''); setIsEditing(false); }
-  }, [commitTitle, data.title]);
+    if (e.key === 'Escape') { setTitle(liveRef.current.data.title || ''); setIsEditing(false); }
+  }, [commitTitle]);
 
   // sweep-flag=1 (clockwise in SVG screen coords) traces the TOP semicircle:
   // left equator → top (R, 0) → right equator. This places the title text at

@@ -13,7 +13,8 @@ import {
 
 import { DocumentNode } from './nodes/DocumentNode';
 import { TextNode } from './nodes/TextNode';
-import { CanvasNode, ResizeCorrection, ResizeActive } from './nodes/CanvasNode';
+import { CanvasNode } from './nodes/CanvasNode';
+import { ResizeCorrection, ResizeActive } from './utils/canvasInteractions';
 import { LinkNode } from './nodes/LinkNode';
 import { ListingNode } from './nodes/ListingNode';
 import { JobCardNode } from './nodes/JobCardNode';
@@ -147,6 +148,34 @@ export function Canvas() {
     isAnimatingRef: isNavigationAnimatingRef,
     isInteractionRef,
   });
+
+  // ── Dev-Only HMR Wrapper for ReactFlow Nodes ───────────────────────────────
+  // Forces React Flow to instantly bypass Memoization and update node visuals
+  // when component files are hot-swapped by Vite.
+  useEffect(() => {
+    if (import.meta.env.DEV && import.meta.hot) {
+      const handleHMR = (payload) => {
+        if (payload?.updates?.some(u => u.path.includes('/src/nodes/'))) {
+          // Delay briefly to allow Vite to evaluate the new module, then force node prop updates
+          setTimeout(() => {
+            setNodes(nds => nds.map(n => ({ ...n, data: { ...n.data, _hmr: Date.now() } })));
+          }, 150);
+        }
+      };
+      
+      // Hook into the global Vite event stream
+      // Using 'vite:afterUpdate' works best to ensure modules are re-evaluated, 
+      // but 'vite:beforeUpdate' with a timeout is more universally supported in Older Vites.
+      import.meta.hot.on('vite:beforeUpdate', handleHMR);
+
+      return () => {
+        if (import.meta.hot.off) { 
+          import.meta.hot.off('vite:beforeUpdate', handleHMR);
+        }
+      };
+    }
+  }, [setNodes]);
+
   useEffect(() => { takeSnapshotRef.current = takeSnapshot; }, [takeSnapshot]);
 
   // ── Canvas Navigation (nested canvases) ─────────────────────────────────
@@ -170,7 +199,7 @@ export function Canvas() {
     takeSnapshot,
     updateNodeData,
     addElementsGlobally: navigation.addElementsGlobally,
-    extractToLevel: navigation.extractToLevel,
+    extractToLevel: navigation.extractToParent,
     isAnimatingRef: isNavigationAnimatingRef,
   });
 
@@ -185,6 +214,7 @@ export function Canvas() {
     resetStack: navigation.resetStack,
     clearHistory,
     isAnimatingRef: isNavigationAnimatingRef,
+    updateSetting,
   });
 
   useCanvasInitialization({
@@ -192,6 +222,30 @@ export function Canvas() {
     flushStack: navigation.flushStack,
     isAnimatingRef: isNavigationAnimatingRef,
   });
+
+  // ── Auto-load previous workspace on mount ───────────────────────────────
+  const hasAttemptedAutoLoad = useRef(false);
+  useEffect(() => {
+    if (hasAttemptedAutoLoad.current) return;
+    hasAttemptedAutoLoad.current = true;
+    if (settings.lastOpenedWorkspace) {
+      loadCanvas(settings.lastOpenedWorkspace, true);
+    }
+  }, [settings.lastOpenedWorkspace, loadCanvas]);
+  // ── Document Title Manager ───────────────────────────────────────────────
+  useEffect(() => {
+    let title = 'Infinite Canvas';
+    if (currentFile) {
+      let basename = currentFile.split(/[/\\]/).pop();
+      if (basename.endsWith('.json')) {
+        basename = basename.slice(0, -5);
+      }
+      title = `${basename}${hasUnsavedChanges ? '*' : ''}`;
+    } else if (hasUnsavedChanges) {
+      title = 'Untitled*';
+    }
+    document.title = title;
+  }, [currentFile, hasUnsavedChanges]);
 
   // ── Native Menu Wiring ───────────────────────────────────────────────────
   // Binds the native macOS/Windows application menu items (File -> Save, Open, etc.)
@@ -306,7 +360,7 @@ export function Canvas() {
   const interactiveDisabled = !!activeTool || !!placementMode || navigation.isAnimating;
 
   // ── Context Menu Logic ───────────────────────────────────────────────────
-  const { menu, closeMenu, onPaneContextMenuBase, onNodeContextMenuBase, getContextMenuItems } = useCanvasContextMenu({
+  const { menu, closeMenu, onPaneContextMenuBase, onNodeContextMenuBase, contextMenuItems } = useCanvasContextMenu({
     placementMode,
     takeSnapshot,
     setNodes,
@@ -516,7 +570,7 @@ export function Canvas() {
           <ContextMenu
             x={menu.x}
             y={menu.y}
-            items={getContextMenuItems()}
+            items={contextMenuItems}
             onClose={closeMenu}
           />
         )}

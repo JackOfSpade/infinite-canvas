@@ -15,6 +15,7 @@ const DEFAULT_SETTINGS = {
   showMiniMap:    true,
   penSize:        3,          // stroke width in flow-space pixels
   eraserSize:     15,         // eraser radius in flow-space pixels
+  lastOpenedWorkspace: null,
   shortcuts:      DEFAULT_SHORTCUTS,
 };
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useReactFlow } from '@xyflow/react';
+import { generateId } from '../utils/idGenerator';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { distToSegment, pixelEraseStroke, sqr } from '../utils/geometry';
 
@@ -133,7 +134,7 @@ export function useDrawingMode({
       if (!isAnimatingRef?.current) {
         takeSnapshot();
         setDrawings(prev => [...prev, { 
-          id: crypto.randomUUID(),
+          id: generateId(),
           points: currentStrokeRef.current, 
           color: activeColor, 
           penSize 

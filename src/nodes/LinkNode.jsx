@@ -27,7 +27,7 @@ export function LinkNode({ id, data }) {
 
   const { isEditing: isEditingLabel, setIsEditing: setIsEditingLabel, handleBlur } = useNodeAutoEdit(id, data.isNew, isEmptyPredicate, inputRef);
 
-  const handleLabelBlur = () => {
+  const handleLabelBlur = useCallback(() => {
     const rawText = inputRef.current?.innerText || '';
     
     // Auto-detect if user pasted a raw URL directly into a blank link node's label field
@@ -38,7 +38,7 @@ export function LinkNode({ id, data }) {
     } else {
       handleBlur({ label: rawText });
     }
-  };
+  }, [data.url, handleBlur]);
 
   // Sync label content when data changes externally (undo/redo)
   useEffect(() => {

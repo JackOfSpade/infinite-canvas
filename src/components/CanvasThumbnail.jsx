@@ -1,11 +1,11 @@
 import React, { useMemo } from 'react';
-import { MINIMAP_NODE_COLORS, NODE_DIMS, getNodeDims } from '../utils/constants';
-import { THEME_COLORS } from '../utils/fileDisplayUtils';
+import { getNodeDims } from '../utils/constants';
 import { Layers } from 'lucide-react';
 
 import { ThumbnailNode } from './ThumbnailNode';
 
 /**
+
  * SVG-based live thumbnail preview of a sub-canvas.
  * Text and link nodes render their actual content; other nodes use color blocks.
  */

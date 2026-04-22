@@ -1,86 +1,8 @@
 import { useCallback, useState, useRef, useEffect } from 'react';
 import { toPng } from 'html-to-image';
-import { getNodeDims } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
+import { migrateGroupNodes, sanitizeNodesForSave } from '../utils/serializationUtils';
 
-/**
- * Recursively migrate old group nodes from separate data.nodes/edges/drawings
- * to the unified data.canvasData structure.
- */
-function migrateGroupNodes(nodes) {
-  if (!Array.isArray(nodes)) return [];
-  return nodes.map(node => {
-    if (node.type === 'group' && !node.data?.canvasData && (node.data?.nodes || node.data?.edges || node.data?.drawings)) {
-      const { nodes: innerNodes, edges: innerEdges, drawings: innerDrawings,
-              collapsed: _collapsed, pushedNodes: _pushedNodes, items: _items, ...restData } = node.data;
-      const { dragHandle: _dragHandle, ...restNode } = node;
-      return {
-        ...restNode,
-        style: { width: getNodeDims(node).w || 180, height: getNodeDims(node).h || 130 },
-        data: {
-          ...restData,
-          canvasData: {
-            nodes: migrateGroupNodes(innerNodes || []),
-            edges: innerEdges || [],
-            drawings: innerDrawings || [],
-          },
-        },
-      };
-    }
-    // Ensure locked nodes have deletable: false (added retroactively).
-    // Use a separate variable — arrow-function parameters are const and cannot be reassigned.
-    let current = node;
-    if (current.data?.locked && current.deletable !== false) {
-      current = { ...current, deletable: false };
-    }
-    // Recurse into existing canvasData for new-format group nodes
-    if (current.type === 'group' && current.data?.canvasData?.nodes?.length > 0) {
-      const migratedInner = migrateGroupNodes(current.data.canvasData.nodes);
-      if (migratedInner !== current.data.canvasData.nodes) {
-        return {
-          ...current,
-          data: {
-            ...current.data,
-            canvasData: { ...current.data.canvasData, nodes: migratedInner },
-          },
-        };
-      }
-    }
-    return current;
-  });
-}
-
-/**
- * Strip transient visual properties from nodes before saving.
- * Prevents runtime-only state (e.g. source-filter dim opacity) from
- * being persisted to disk and corrupting the loaded workspace.
- *
- * This is recursive: group (CanvasNode) nodes can contain arbitrary
- * nested canvases, so we must sanitize down every level.
- */
-export function sanitizeNodesForSave(nodes) {
-  if (!Array.isArray(nodes)) return nodes;
-  return nodes.map(n => {
-    // Strip opacity from jobcard nodes — it's set transiently by toggleSourceFilter
-    // and should never be persisted (the hub's sourceFilter is saved separately).
-    if (n.type === 'jobcard' && n.style?.opacity !== undefined) {
-      const { opacity: _opacity, ...restStyle } = n.style || {};
-      return { ...n, style: Object.keys(restStyle).length ? restStyle : undefined };
-    }
-    // Recurse into nested canvas nodes so deeply-nested jobcards are also sanitized
-    if (n.type === 'group' && n.data?.canvasData?.nodes?.length > 0) {
-      const sanitizedInner = sanitizeNodesForSave(n.data.canvasData.nodes);
-      return {
-        ...n,
-        data: {
-          ...n.data,
-          canvasData: { ...n.data.canvasData, nodes: sanitizedInner },
-        },
-      };
-    }
-    return n;
-  });
-}
 
 /**
  * Encapsulates canvas save/load/export persistence logic.
@@ -103,6 +25,7 @@ export function useCanvasPersistence({
   resetStack,
   clearHistory,
   isAnimatingRef,
+  updateSetting,
 }) {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [currentFile, setCurrentFile] = useState(null);
@@ -137,6 +60,17 @@ export function useCanvasPersistence({
       window.electronAPI.sendQuitResponse(hasUnsavedChangesRef.current);
     });
 
+    // ── Preload Listeners ────────────────────────────────────────────────────
+    const unlistenMenuNew = window.electronAPI?.onMenuNew?.(() => {
+      // Defer to prevent state closures from being stale, though we use refs where possible
+      setTimeout(() => newCanvasRef.current?.(), 0);
+    });
+
+    const unlistenSaveAndRespond = window.electronAPI?.onRequestSaveAndRespond?.(async () => {
+      const success = await saveCanvasRef.current?.(true); // force save
+      window.electronAPI.sendSaveResponse(success);
+    });
+
     // ── Window Unload Guard ──────────────────────────────────────────────────
     // Standard browser/electron safety for closing the window tab directly.
     const handleBeforeUnload = (e) => {
@@ -149,6 +83,8 @@ export function useCanvasPersistence({
 
     return () => {
       unlistenQuit?.();
+      unlistenMenuNew?.();
+      unlistenSaveAndRespond?.();
       window.removeEventListener('beforeunload', handleBeforeUnload);
       if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
       if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
@@ -166,35 +102,87 @@ export function useCanvasPersistence({
       const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFile });
       if (res?.success && res.filePath) {
         setCurrentFile(res.filePath);
+        updateSetting?.('lastOpenedWorkspace', res.filePath);
         setHasUnsavedChanges(false);
         setSaveState('saved');
         addToast({ title: 'Workspace Saved', description: 'Your canvas has been saved successfully.', type: 'success' });
         if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
         saveStateTimerRef.current = setTimeout(() => { setSaveState('idle'); }, 1500);
+        return true;
       } else {
         setSaveState('idle');
         addToast({ title: 'Save Failed', description: 'Could not save the workspace.', type: 'error' });
+        return false;
       }
     } catch (err) {
       EventLogger.error('Failed to save canvas:', err);
       setSaveState('idle');
       addToast({ title: 'Save Error', description: err?.message || String(err) || 'An error occurred while saving.', type: 'error' });
+      return false;
     }
-  }, [currentFile, addToast, flushStack, isAnimatingRef]);
+  }, [currentFile, addToast, flushStack, isAnimatingRef, updateSetting]);
 
-  const confirmDiscardChanges = useCallback(() => {
-    if (!hasUnsavedChanges) return true;
-    return window.confirm('You have unsaved changes. Loading another workspace will discard them. Continue?');
-  }, [hasUnsavedChanges]);
+  // Expose stable references for the IPC listeners
+  const saveCanvasRef = useRef(saveCanvas);
+  // eslint-disable-next-line react-hooks/immutability
+  useEffect(() => { saveCanvasRef.current = saveCanvas; }, [saveCanvas]);
 
-  const loadCanvas = useCallback(async () => {
+  const handleUnsavedChanges = useCallback(async (actionName) => {
+    if (!hasUnsavedChangesRef.current) return true;
+    
+    // Uses the main process OS-level dialog to pause and ask the user
+    const choice = await window.electronAPI?.promptUnsavedChanges?.(actionName);
+    
+    if (choice === 'cancel') return false;
+    
+    if (choice === 'save') {
+      const success = await saveCanvas();
+      if (!success) return false; // Abort the action if save failed or was aborted
+    }
+    
+    return true;
+  }, [saveCanvas]);
+
+  const newCanvas = useCallback(async () => {
+    if (!window.electronAPI || isAnimatingRef?.current) return;
+    
+    const canProceed = await handleUnsavedChanges('create a new canvas');
+    if (!canProceed) return;
+    
+    resetStack?.();
+    setNodes([]);
+    setEdges([]);
+    setDrawings([]);
+    setCurrentFile(null);
+    updateSetting?.('lastOpenedWorkspace', null);
+    clearHistory?.();
+    
+    if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+    // Defer resetting this so React batches the empty nodes state first
+    setTimeout(() => {
+      setHasUnsavedChanges(false);
+      customFitView();
+    }, 50);
+    
+    addToast({ title: 'New Canvas', description: 'Created a blank canvas.', type: 'info' });
+  }, [handleUnsavedChanges, isAnimatingRef, setNodes, setEdges, setDrawings, resetStack, clearHistory, customFitView, addToast, updateSetting]);
+
+  const newCanvasRef = useRef(newCanvas);
+  // eslint-disable-next-line react-hooks/immutability
+  useEffect(() => { newCanvasRef.current = newCanvas; }, [newCanvas]);
+
+  const loadCanvas = useCallback(async (targetFilePath = null, isSilent = false) => {
     if (!window.electronAPI || isAnimatingRef?.current) return;
     
     // Security/UX Guard: Prevent overwriting unsaved work
-    if (!confirmDiscardChanges()) return;
+    if (!isSilent) {
+      const canProceed = await handleUnsavedChanges('open a different canvas');
+      if (!canProceed) return;
+    }
 
     try {
-      const res = await window.electronAPI.loadWorkspace();
+      const loadOpts = typeof targetFilePath === 'string' ? { filePath: targetFilePath } : undefined;
+      const res = await window.electronAPI.loadWorkspace(loadOpts);
       if (res?.success && res.data) {
         // Reset navigation stack to root — prevents stale breadcrumbs/stack corruption
         resetStack?.();
@@ -204,6 +192,7 @@ export function useCanvasPersistence({
         setEdges(res.data.edges || []);
         setDrawings(res.data.drawings || []);
         setCurrentFile(res.filePath);
+        updateSetting?.('lastOpenedWorkspace', res.filePath);
         // Clear undo history — a freshly-loaded workspace should start with a blank slate
         clearHistory?.();
         // Defer: the useCanvasInitialization effect will fire setHasUnsavedChanges(true)
@@ -215,15 +204,17 @@ export function useCanvasPersistence({
           setHasUnsavedChanges(false);
           customFitView();
         }, 50);
-        addToast({ title: 'Workspace Loaded', description: 'Your canvas has been loaded successfully.', type: 'success' });
+        if (!isSilent) addToast({ title: 'Workspace Loaded', description: 'Your canvas has been loaded successfully.', type: 'success' });
       } else if (!res?.canceled) {
-        addToast({ title: 'Load Failed', description: 'Failed to load canvas or invalid file format.', type: 'error' });
+        if (!isSilent) addToast({ title: 'Load Failed', description: 'Failed to load canvas or invalid file format.', type: 'error' });
       }
     } catch (err) {
       EventLogger.error('Failed to load canvas:', err);
-      addToast({ title: 'Load Error', description: err?.message || String(err) || 'An error occurred while loading.', type: 'error' });
+      if (!isSilent) addToast({ title: 'Load Error', description: err?.message || String(err) || 'An error occurred while loading.', type: 'error' });
+      // Clear auto-load config if it fails completely (deleted or broken) so we don't boot loop into it
+      if (isSilent) updateSetting?.('lastOpenedWorkspace', null);
     }
-  }, [confirmDiscardChanges, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, customFitView, addToast, resetStack, clearHistory, isAnimatingRef]);
+  }, [handleUnsavedChanges, setNodes, setEdges, setDrawings, customFitView, addToast, resetStack, clearHistory, isAnimatingRef, updateSetting]);
 
   const exportCanvasToPNG = useCallback(() => {
     if (isAnimatingRef?.current || isExportingRef.current) return;
@@ -251,6 +242,7 @@ export function useCanvasPersistence({
   return {
     saveCanvas,
     loadCanvas,
+    newCanvas,
     exportCanvasToPNG,
     hasUnsavedChanges,
     setHasUnsavedChanges,

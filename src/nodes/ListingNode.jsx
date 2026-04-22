@@ -57,9 +57,15 @@ export function ListingNode({ id, data }) {
   const [loginPrompt, setLoginPrompt] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(false);
   const [statusText, setStatusText] = useState('Researching prices...');
-  const { updateNodeData, getNode } = useReactFlow();
+  const { updateNodeData } = useReactFlow();
+
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   // Listen for granular pricing progress (Scanning eBay, etc.)
   useEffect(() => {
@@ -105,7 +111,7 @@ export function ListingNode({ id, data }) {
     for (const platformId of selectedPlatforms) {
       if (NEEDS_AUTH.includes(platformId) && window.electronAPI?.checkSellMonitorAuth) {
         const authStatus = await window.electronAPI.checkSellMonitorAuth({ platformId });
-        if (!getNode(id)) return;
+        if (!isMountedRef.current) return;
         if (!authStatus.connected) {
           setLoginPrompt({
             platformId,
@@ -118,7 +124,9 @@ export function ListingNode({ id, data }) {
       const platform = SELL_PLATFORMS.find(p => p.id === platformId);
       if (platform?.postUrl) window.electronAPI?.openExternal?.(platform.postUrl);
     }
-  }, [id, selectedPlatforms, getNode]);
+  }, [selectedPlatforms, isMountedRef]);
+
+
 
   return (
     <div className={`bg-[#1a1a1a] ${style.border} border rounded-lg shadow-lg overflow-hidden group`} style={{ width: 300 }}>
@@ -266,7 +274,7 @@ export function ListingNode({ id, data }) {
                       setCheckingAuth(true);
                       try {
                         const result = await window.electronAPI.checkAndLogin({ platformId: loginPrompt.platformId });
-                        if (!getNode(id)) return;
+                        if (!isMountedRef.current) return;
                         if (result.connected) {
                           setLoginPrompt(null);
                           // Re-trigger the listing flow now that we're logged in
@@ -277,7 +285,7 @@ export function ListingNode({ id, data }) {
                       } catch (err) {
                         EventLogger.error('Login check failed:', err);
                       } finally {
-                        if (getNode(id)) {
+                        if (isMountedRef.current) {
                           setCheckingAuth(false);
                         }
                       }

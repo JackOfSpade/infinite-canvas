@@ -1,12 +1,13 @@
 import React from 'react';
-import { Loader2 } from 'lucide-react';
+import { Loader2, XCircle } from 'lucide-react';
 
 export function JobHubProcessingState({ 
   statusLabel, 
   hubState, 
   totalSourceJobs, 
   resumeSummary,
-  activeSourceId 
+  activeSourceId,
+  onReset
 }) {
   const sourceNames = {
     google: 'Google', indeed: 'Indeed', linkedin: 'LinkedIn', 
@@ -17,7 +18,16 @@ export function JobHubProcessingState({
   };
 
   return (
-    <div className="flex flex-col items-center justify-center py-6 px-4">
+    <div className="group flex flex-col items-center justify-center py-6 px-4 relative">
+      {onReset && (
+        <button
+          onClick={onReset}
+          className="absolute top-2 right-2 p-1 text-white/30 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all rounded"
+          title="Cancel/Reset Task"
+        >
+          <XCircle size={14} />
+        </button>
+      )}
       <Loader2 size={22} className="animate-spin text-blue-400 mb-2" />
       <p className="text-white/60 text-xs font-medium">
         {hubState === 'searching' && activeSourceId ? `Scanning ${sourceNames[activeSourceId] || activeSourceId}...` : statusLabel}

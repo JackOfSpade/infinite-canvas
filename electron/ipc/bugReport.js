@@ -35,13 +35,12 @@ function generateMarkdown(payload) {
   // Shows style.width / measured.width / width prop separately.
   // A mismatch here (e.g. measured growing while style stays constant) is
   // the signature of the ReactFlow ResizeObserver race condition.
-  const groupNodes = (nodeInternals || []).filter(n => n.type === 'group');
   const compStateById = {};
   (nodeComponentStates || []).forEach(s => { compStateById[s.id] = s; });
 
   let nodeDiagMarkdown = '';
-  if (groupNodes.length > 0) {
-    const rows = groupNodes.map(n => {
+  if (nodeInternals && nodeInternals.length > 0) {
+    const rows = nodeInternals.map(n => {
       const cs = compStateById[n.id] || {};
       const flags = [
         cs.isEditing     ? 'editing'    : null,
@@ -50,6 +49,7 @@ function generateMarkdown(payload) {
       ].filter(Boolean).join(', ') || '—';
       return (
         `| \`${n.id.slice(0, 8)}\` ` +
+        `| ${n.type} ` +
         `| (${n.position?.x?.toFixed(0)}, ${n.position?.y?.toFixed(0)}) ` +
         `| ${n.width_prop    ?? '—'} ` +
         `| ${n.style_width   ?? '—'} ` +
@@ -59,12 +59,12 @@ function generateMarkdown(payload) {
       );
     }).join('\n');
     nodeDiagMarkdown = `
-## Group Node Diagnostics
+## Node Diagnostics
 > **Size columns**: mismatches reveal ResizeObserver/setNodes race conditions.
 > **Component state**: React state at the moment the report was generated.
 
-| ID (first 8) | Position | width (prop) | style.width | measured.width | currentSize | state flags |
-|---|---|---|---|---|---|---|
+| ID (first 8) | Type | Position | width (prop) | style.width | measured.width | currentSize | state flags |
+|---|---|---|---|---|---|---|---|
 ${rows}
 `;
   }
@@ -85,7 +85,9 @@ ${rows}
     stateWasTrimmed = true;
   }
 
-  let baseMarkdown = `# Bug Report
+  let baseMarkdown = `First assess if this bug report has all the data you need to debug this. If not, improve the bug reporting feature. Then, fix the following bug:
+
+# Bug Report
 
 ## Issue Description
 ${description}

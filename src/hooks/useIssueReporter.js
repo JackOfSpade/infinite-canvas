@@ -29,20 +29,17 @@ export function useIssueReporter({
 
       // For group nodes (CanvasNode), capture all three size fields separately.
       const nodeInternals = nodes.map(n => {
-        const base = { id: n.id, type: n.type };
-        if (n.type === 'group') {
-          return {
-            ...base,
-            position:       n.position,
-            width_prop:     n.width,
-            height_prop:    n.height,
-            style_width:    n.style?.width,
-            style_height:   n.style?.height,
-            measured_width:  n.measured?.width,
-            measured_height: n.measured?.height,
-          };
-        }
-        return base;
+        return {
+          id: n.id, 
+          type: n.type,
+          position:       n.position,
+          width_prop:     n.width,
+          height_prop:    n.height,
+          style_width:    n.style?.width,
+          style_height:   n.style?.height,
+          measured_width:  n.measured?.width,
+          measured_height: n.measured?.height,
+        };
       });
 
       const payload = {

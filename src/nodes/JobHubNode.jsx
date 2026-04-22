@@ -37,7 +37,7 @@ export function JobHubNode({ id, data }) {
 
   // id is stable for this component's lifetime — ReactFlow never reuses
   // instances with different ids, so we can safely close over it in callbacks.
-  const { updateNodeData, setNodes, addEdges, addNodes, getNode } = useReactFlow();
+  const { updateNodeData, setNodes, getNode, addNodes, addEdges } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const addElementsGlobally = nav?.addElementsGlobally;
@@ -179,6 +179,11 @@ export function JobHubNode({ id, data }) {
     processingRef.current = true;
     setSourceProgress({});
     const currentId = id;
+    
+    // Snapshot the node position so we can spawn siblings near it even if 
+    // the user navigates away and unmounts this layer of the canvas.
+    const hubNodeRef = getNode(currentId);
+    const originalPos = hubNodeRef?.position || { x: 0, y: 0 };
 
     try {
       // Step 1: Parse resume
@@ -229,9 +234,9 @@ export function JobHubNode({ id, data }) {
       }
 
       // Step 5: Spawn career direction clusters
-      const hubNode = getNode(id);
-      const hubx = hubNode?.position?.x ?? 0;
-      const huby = hubNode?.position?.y ?? 0;
+      // Use originalPos in case the user navigated to another canvas depth and getNode(id) now returns null
+      const hubx = originalPos.x;
+      const huby = originalPos.y;
       
       const newNodes = [];
       const newEdges = [];
@@ -246,13 +251,19 @@ export function JobHubNode({ id, data }) {
           type: 'jobcard',
           position: { x: hubx + 400, y: huby + currentYOffset },
           data: {
-            title: job.job_title,
-            company: job.company_name,
+            title: job.title,
+            company: job.company,
             location: job.location,
-            score: job.match_score,
+            salary: job.salary,
+            snippet: job.snippet,
+            matchScore: job.matchScore,
+            reasoning: job.reasoning,
+            careerDirection: job.careerDirection,
+            strengthLabel: job.strengthLabel,
             source: job.source,
-            matchReason: job.match_reason,
-            url: job.job_url,
+            url: job.url,
+            posted: job.posted,
+            resumeProfile: parseResult.profile,
             isNew: false
           }
         });
@@ -285,18 +296,18 @@ export function JobHubNode({ id, data }) {
         finalSourceCounts[job.source] = (finalSourceCounts[job.source] || 0) + 1;
       });
 
-      updateGlobal(id, { 
+      updateGlobal(currentId, { 
         hubState: 'done', 
         resultCount: scoreResult.scoredJobs.length,
         finalSourceCounts 
       });
     } catch (error) {
       EventLogger.error('JobHubNode task failed:', error);
-      updateGlobal(id, { hubState: 'error', errorMessage: error?.message || String(error) });
+      updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
     } finally {
       processingRef.current = false;
     }
-  }, [id, updateGlobal, addElementsGlobally, addNodes, addEdges]);
+  }, [id, updateGlobal, addElementsGlobally, addNodes, addEdges, getNode]);
 
   // Keep the ref up-to-date so handleDrop always calls the latest version.
   startProcessingRef.current = startProcessing;
@@ -316,6 +327,14 @@ export function JobHubNode({ id, data }) {
       if (path) startProcessingRef.current?.(path);
     }
   }, [data.locked, hubState]);
+
+  const resetHandler = useCallback((e) => {
+    e?.stopPropagation();
+    if (data.locked) return;
+    updateGlobal(id, { hubState: 'empty', errorMessage: null });
+    setSourceProgress({});
+    processingRef.current = false;
+  }, [data.locked, id, updateGlobal]);
 
   const isProcessing = PROCESSING_STATES.includes(hubState);
 
@@ -356,6 +375,7 @@ export function JobHubNode({ id, data }) {
             totalSourceJobs={totalSourceJobs}
             resumeSummary={data.resumeSummary}
             activeSourceId={lastActiveSource}
+            onReset={resetHandler}
           />
         )}
 

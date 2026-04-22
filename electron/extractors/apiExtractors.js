@@ -1,4 +1,3 @@
-import { logger } from '../logger.js';
 /**
  * API-Based Job Extractors — LinkedIn, Greenhouse, Lever, USAJobs.
  *
@@ -9,9 +8,11 @@ import { logger } from '../logger.js';
  * All functions return the standard job shape:
  *   { title, company, location, salary, snippet, url, posted, source }
  */
+import { logger } from '../logger.js';
 import { queueScrape } from '../ipc/browserPool.js';
 import { getRandomUA } from '../ipc/stealthBrowser.js';
 import { htmlToText } from 'html-to-text';
+
 
 /**
  * Process a list of items concurrently in batches.

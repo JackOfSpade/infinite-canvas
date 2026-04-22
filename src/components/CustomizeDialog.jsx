@@ -7,46 +7,46 @@ import { Dialog } from './Dialog';
  */
 const FONT_OPTIONS = [
   // ── Generic (always available) ─────────────────────────────────────────
-  { value: 'system-ui, sans-serif',                          label: 'System UI' },
-  { value: 'sans-serif',                                     label: 'Sans-Serif' },
-  { value: 'serif',                                          label: 'Serif' },
-  { value: 'monospace',                                      label: 'Monospace' },
-  { value: 'cursive',                                        label: 'Cursive' },
-  { value: 'fantasy',                                        label: 'Fantasy' },
+  { value: 'system-ui, sans-serif', label: 'System UI' },
+  { value: 'sans-serif', label: 'Sans-Serif' },
+  { value: 'serif', label: 'Serif' },
+  { value: 'monospace', label: 'Monospace' },
+  { value: 'cursive', label: 'Cursive' },
+  { value: 'fantasy', label: 'Fantasy' },
   // ── Common cross-platform ──────────────────────────────────────────────
-  { value: 'Arial, sans-serif',                              label: 'Arial' },
-  { value: '"Helvetica Neue", Helvetica, sans-serif',        label: 'Helvetica' },
-  { value: 'Verdana, Geneva, sans-serif',                    label: 'Verdana' },
-  { value: 'Tahoma, Geneva, sans-serif',                     label: 'Tahoma' },
-  { value: '"Trebuchet MS", Helvetica, sans-serif',          label: 'Trebuchet MS' },
-  { value: 'Impact, Charcoal, sans-serif',                   label: 'Impact' },
-  { value: '"Arial Narrow", Arial, sans-serif',              label: 'Arial Narrow' },
-  { value: 'Georgia, serif',                                 label: 'Georgia' },
-  { value: '"Times New Roman", Times, serif',                label: 'Times New Roman' },
-  { value: '"Palatino Linotype", Palatino, serif',           label: 'Palatino' },
-  { value: 'Garamond, serif',                                label: 'Garamond' },
-  { value: '"Book Antiqua", Palatino, serif',                label: 'Book Antiqua' },
-  { value: '"Courier New", Courier, monospace',              label: 'Courier New' },
-  { value: '"Lucida Console", Monaco, monospace',            label: 'Lucida Console' },
+  { value: 'Arial, sans-serif', label: 'Arial' },
+  { value: '"Helvetica Neue", Helvetica, sans-serif', label: 'Helvetica' },
+  { value: 'Verdana, Geneva, sans-serif', label: 'Verdana' },
+  { value: 'Tahoma, Geneva, sans-serif', label: 'Tahoma' },
+  { value: '"Trebuchet MS", Helvetica, sans-serif', label: 'Trebuchet MS' },
+  { value: 'Impact, Charcoal, sans-serif', label: 'Impact' },
+  { value: '"Arial Narrow", Arial, sans-serif', label: 'Arial Narrow' },
+  { value: 'Georgia, serif', label: 'Georgia' },
+  { value: '"Times New Roman", Times, serif', label: 'Times New Roman' },
+  { value: '"Palatino Linotype", Palatino, serif', label: 'Palatino' },
+  { value: 'Garamond, serif', label: 'Garamond' },
+  { value: '"Book Antiqua", Palatino, serif', label: 'Book Antiqua' },
+  { value: '"Courier New", Courier, monospace', label: 'Courier New' },
+  { value: '"Lucida Console", Monaco, monospace', label: 'Lucida Console' },
   { value: '"Lucida Sans Unicode", "Lucida Grande", sans-serif', label: 'Lucida Sans' },
-  { value: '"Comic Sans MS", "Comic Sans", cursive',         label: 'Comic Sans' },
+  { value: '"Comic Sans MS", "Comic Sans", cursive', label: 'Comic Sans' },
   // ── macOS / Apple ──────────────────────────────────────────────────────
-  { value: '-apple-system, BlinkMacSystemFont, sans-serif',  label: 'SF Pro (macOS)' },
-  { value: '"SF Mono", "Fira Mono", monospace',              label: 'SF Mono (macOS)' },
-  { value: 'Menlo, Monaco, monospace',                       label: 'Menlo (macOS)' },
-  { value: '"Gill Sans", "Gill Sans MT", sans-serif',        label: 'Gill Sans' },
-  { value: 'Optima, Candara, sans-serif',                    label: 'Optima (macOS)' },
-  { value: 'Futura, "Century Gothic", sans-serif',           label: 'Futura' },
-  { value: 'Baskerville, "Baskerville Old Face", serif',     label: 'Baskerville' },
-  { value: 'Didot, "GFS Didot", serif',                      label: 'Didot (macOS)' },
-  { value: '"Bodoni MT", Bodoni, serif',                     label: 'Bodoni' },
-  { value: '"Cochin", Georgia, serif',                       label: 'Cochin' },
+  { value: '-apple-system, BlinkMacSystemFont, sans-serif', label: 'SF Pro (macOS)' },
+  { value: '"SF Mono", "Fira Mono", monospace', label: 'SF Mono (macOS)' },
+  { value: 'Menlo, Monaco, monospace', label: 'Menlo (macOS)' },
+  { value: '"Gill Sans", "Gill Sans MT", sans-serif', label: 'Gill Sans' },
+  { value: 'Optima, Candara, sans-serif', label: 'Optima (macOS)' },
+  { value: 'Futura, "Century Gothic", sans-serif', label: 'Futura' },
+  { value: 'Baskerville, "Baskerville Old Face", serif', label: 'Baskerville' },
+  { value: 'Didot, "GFS Didot", serif', label: 'Didot (macOS)' },
+  { value: '"Bodoni MT", Bodoni, serif', label: 'Bodoni' },
+  { value: '"Cochin", Georgia, serif', label: 'Cochin' },
   // ── Developer / modern ─────────────────────────────────────────────────
-  { value: '"Inter", system-ui, sans-serif',                 label: 'Inter' },
-  { value: '"JetBrains Mono", "Fira Code", monospace',       label: 'JetBrains Mono' },
-  { value: '"Fira Code", "Fira Mono", monospace',            label: 'Fira Code' },
-  { value: '"Source Code Pro", monospace',                   label: 'Source Code Pro' },
-  { value: '"Ubuntu Mono", monospace',                       label: 'Ubuntu Mono' },
+  { value: '"Inter", system-ui, sans-serif', label: 'Inter' },
+  { value: '"JetBrains Mono", "Fira Code", monospace', label: 'JetBrains Mono' },
+  { value: '"Fira Code", "Fira Mono", monospace', label: 'Fira Code' },
+  { value: '"Source Code Pro", monospace', label: 'Source Code Pro' },
+  { value: '"Ubuntu Mono", monospace', label: 'Ubuntu Mono' },
 ];
 
 /** Quick-pick text colour swatches (Pastel Primary + Secondary colors) */
@@ -65,7 +65,7 @@ const BG_COLORS = ['transparent', ...TEXT_COLORS];
 
 const ColorSection = ({ label, colors, value, onSwatchClick, onInputChange, onInputBlur }) => {
   const currentRep = (value === null || value === '') ? 'transparent' : value;
-  
+
   return (
     <div>
       <label className="text-white/70 text-xs mb-1.5 block">{label}</label>
@@ -75,9 +75,9 @@ const ColorSection = ({ label, colors, value, onSwatchClick, onInputChange, onIn
             key={c}
             onClick={() => onSwatchClick(c)}
             className={`w-5 h-5 rounded-full flex items-center justify-center transition-transform hover:scale-110 ${currentRep === c ? 'ring-2 ring-white scale-110' : 'opacity-75'}`}
-            style={{ 
-              backgroundColor: c === 'transparent' ? '#1f1f1f' : c, 
-              border: c === '#ffffff' ? '1px solid rgba(255,255,255,0.3)' : (c === 'transparent' ? '1px dashed rgba(255,255,255,0.3)' : 'none') 
+            style={{
+              backgroundColor: c === 'transparent' ? '#1f1f1f' : c,
+              border: c === '#ffffff' ? '1px solid rgba(255,255,255,0.3)' : (c === 'transparent' ? '1px dashed rgba(255,255,255,0.3)' : 'none')
             }}
             title={c === 'transparent' ? `Clear ${label}` : c}
           >
@@ -109,9 +109,9 @@ export function CustomizeDialog({
   onApply,
   onClose,
 }) {
-  const [fontSize,     setFontSize]     = useState(initialSize);
-  const [fontFamily,   setFontFamily]   = useState(initialFamily);
-  const [textColor,    setTextColor]    = useState(initialColor);
+  const [fontSize, setFontSize] = useState(initialSize);
+  const [fontFamily, setFontFamily] = useState(initialFamily);
+  const [textColor, setTextColor] = useState(initialColor);
   const [backgroundColor, setBackgroundColor] = useState(initialBgColor);
   const [titleSpacing, setTitleSpacing] = useState(initialSpacing ?? 0);
 
@@ -131,13 +131,27 @@ export function CustomizeDialog({
   };
 
   const handleSizeChange = (val) => {
-    const clamped = Math.max(1, Math.min(500, Number(val) || 1));
+    setFontSize(val);
+    const num = Number(val);
+    // Emit real-time updates ONLY if the current input is a valid number inside bounds
+    if (!isNaN(num) && num >= 1 && num <= 500) emit({ fontSize: num });
+  };
+
+  const handleSizeBlur = () => {
+    // Assert visual bounds correction only when they click away
+    const clamped = Math.max(1, Math.min(500, Number(fontSize) || initialSize || 14));
     setFontSize(clamped);
     emit({ fontSize: clamped });
   };
 
   const handleSpacingChange = (val) => {
-    const clamped = Math.max(-20, Math.min(40, Number(val) || 0));
+    setTitleSpacing(val);
+    const num = Number(val);
+    if (!isNaN(num) && val !== '' && val !== '-') emit({ titleSpacing: Math.max(-20, Math.min(40, num)) });
+  };
+
+  const handleSpacingBlur = () => {
+    const clamped = Math.max(-20, Math.min(40, Number(titleSpacing) || 0));
     setTitleSpacing(clamped);
     emit({ titleSpacing: clamped });
   };
@@ -149,23 +163,22 @@ export function CustomizeDialog({
 
   const handleColorInput = (val) => {
     setTextColor(val);
-    if (/^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val)) {
+    // Support CSS named colors alongside hex/rgba
+    if (/^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val) || /^[a-zA-Z]+$/.test(val)) {
       emit({ textColor: val });
     }
   };
 
   const handleBgColorSwatch = (c) => {
-    let finalColor = c;
-    if (c === 'transparent') finalColor = null; // matching old Node Color signature
+    const finalColor = c === 'transparent' ? null : c;
     setBackgroundColor(finalColor);
     emit({ backgroundColor: finalColor });
   };
 
   const handleBgColorInput = (val) => {
-    setBackgroundColor(val);
-    let finalColor = val;
-    if (val === '') finalColor = null;
-    if (val === '' || /^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val)) {
+    const finalColor = val === '' ? null : val;
+    setBackgroundColor(finalColor);
+    if (val === '' || /^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val) || /^[a-zA-Z]+$/.test(val)) {
       emit({ backgroundColor: finalColor });
     }
   };
@@ -197,6 +210,7 @@ export function CustomizeDialog({
               className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
               value={fontSize}
               onChange={(e) => handleSizeChange(e.target.value)}
+              onBlur={handleSizeBlur}
               min={1}
               max={500}
             />
@@ -212,6 +226,7 @@ export function CustomizeDialog({
             className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none"
             value={titleSpacing}
             onChange={(e) => handleSpacingChange(e.target.value)}
+            onBlur={handleSpacingBlur}
             min={-20}
             max={40}
             title="Gap between title and circle edge (px)"

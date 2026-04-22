@@ -1,6 +1,7 @@
 import { useCallback, useRef, useEffect, useState } from 'react';
 import { DEFAULT_SHORTCUTS } from './useSettings';
 import { EventLogger } from '../utils/EventLogger';
+import { fingerprint } from '../utils/serializationUtils';
 
 const MAX_HISTORY = 100;
 
@@ -12,37 +13,6 @@ function matchesShortcut(e, binding) {
   if (binding.shift !== e.shiftKey) return false;
   if (binding.alt   !== e.altKey)   return false;
   return e.key.toLowerCase() === binding.key.toLowerCase();
-}
-
-/** Stable, pure snapshot fingerprint — no hook needed. */
-function fingerprint(snap) {
-  if (!snap || !snap.nodes) return '';
-  const n = snap.nodes;
-  const e = snap.edges || [];
-  const d = snap.drawings || [];
-  return JSON.stringify({
-    n: n.map(x => {
-      // Optimization: skip heavy recursive canvasData for groups in the fingerprint.
-      // Changes inside groups are managed by their own local undo/redo stacks.
-      const data = x.type === 'group' ? { ...x.data, canvasData: undefined } : x.data;
-      return { id: x.id, x: x.position?.x, y: x.position?.y, t: x.type, d: data, s: x.style };
-    }),
-    e: e.map(x => ({ id: x.id, s: x.source, t: x.target })),
-    dl: d.map(x => {
-      if (!x) return null;
-      const pts   = Array.isArray(x) ? x : (x.points || []);
-      const first = pts[0];
-      const last  = pts[pts.length - 1];
-      // Defensive: only record coords if they exist
-      const fCoord = first ? [first.x, first.y] : null;
-      const lCoord = last ? [last.x, last.y] : null;
-      // Also sample the middle point to detect shape changes that preserve first/last/length
-      const mid = pts.length > 2 ? pts[Math.floor(pts.length / 2)] : null;
-      const mCoord = mid ? [mid.x, mid.y] : null;
-
-      return { c: x.color, pl: pts.length, f: fCoord, l: lCoord, m: mCoord };
-    }),
-  });
 }
 
 /**

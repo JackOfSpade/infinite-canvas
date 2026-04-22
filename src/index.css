@@ -325,6 +325,14 @@ kbd {
 
 @keyframes breadcrumbSlideIn {
   from { opacity: 0; transform: translateY(-10px); }
-  to   { opacity: 1; transform: translateY(0); }
 }
 
+/* ======== Auto-Hide Media Player Controls ======== */
+.media-controls-hidden:not(:fullscreen):not(:-webkit-full-screen)::-webkit-media-controls-panel {
+  display: none !important;
+}
+
+.media-controls-visible:not(:fullscreen):not(:-webkit-full-screen)::-webkit-media-controls-panel {
+  display: flex !important;
+  opacity: 1 !important;
+}

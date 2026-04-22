@@ -1,4 +1,5 @@
 import { EventLogger } from './EventLogger';
+import { generateId } from './idGenerator';
 
 /**
  * Creates a drag ghost element, sets it as drag image, and auto-removes it.
@@ -44,6 +45,48 @@ export function setupCanvasDragGhost(e) {
 }
 
 /**
+ * Recursively converts a file-system item (file or folder) from the main-process
+ * scan result into a canvas Node object. Pure function — no closure dependencies.
+ */
+function buildNode(fsItem, pos) {
+  if (fsItem.type === 'document') {
+    return {
+      id: generateId(),
+      type: 'document',
+      position: { ...pos },
+      data: { filename: fsItem.filename, filePath: fsItem.filePath }
+    };
+  }
+  const items = fsItem.items || [];
+  const cols = 3;
+  const childNodes = items.map((child, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    return buildNode(child, { x: 20 + col * 220, y: 60 + row * 180 });
+  });
+
+  // Calculate a reasonable diameter for the circular folder node.
+  // Base size 180, grows slightly with item count, capped at 400.
+  const size = Math.min(400, 180 + Math.floor(items.length / 5) * 40);
+
+  return {
+    id: generateId(),
+    type: 'group',
+    position: { ...pos },
+    style: { width: size, height: size },
+    data: {
+      title: fsItem.title,
+      filePath: fsItem.filePath,
+      canvasData: {
+        nodes: childNodes,
+        edges: [],
+        drawings: [],
+      },
+    }
+  };
+}
+
+/**
  * Processes dropped OS files asynchronously into canvas Node objects.
  * Handles single files (DocumentNode) and scanned folders (CanvasNode with nested children).
  * Automatically shifts positions diagonally to prevent overlapping drops.
@@ -52,45 +95,6 @@ export async function processDroppedFiles(files, startPosition) {
   if (!window.electronAPI) return [];
   const newItems = [];
   let currentPos = { ...startPosition };
-  
-  const buildNode = (fsItem, pos) => {
-    if (fsItem.type === 'document') {
-      return {
-        id: crypto.randomUUID(),
-        type: 'document',
-        position: { ...pos },
-        data: { filename: fsItem.filename, filePath: fsItem.filePath }
-      };
-    } else {
-      const items = fsItem.items || [];
-      const cols = 3;
-      const childNodes = items.map((child, i) => {
-        const col = i % cols;
-        const row = Math.floor(i / cols);
-        return buildNode(child, { x: 20 + col * 220, y: 60 + row * 180 });
-      });
-
-      // Calculate a reasonable diameter for the circular folder node.
-      // Base size 180, grows slightly with item count, capped at 400.
-      const size = Math.min(400, 180 + Math.floor(items.length / 5) * 40);
-
-      return {
-        id: crypto.randomUUID(),
-        type: 'group',
-        position: { ...pos },
-        style: { width: size, height: size },
-        data: { 
-          title: fsItem.title, 
-          filePath: fsItem.filePath,
-          canvasData: {
-            nodes: childNodes,
-            edges: [],
-            drawings: [],
-          },
-        }
-      };
-    }
-  };
 
   for (const file of files) {
     try {
@@ -107,6 +111,7 @@ export async function processDroppedFiles(files, startPosition) {
       EventLogger.error('Failed to read file/folder on drop payload', e);
     }
   }
-  
+
   return newItems;
 }
+

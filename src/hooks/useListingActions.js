@@ -26,6 +26,9 @@ export function useListingActions(id, data) {
   const [selectedPlatforms, setSelectedPlatforms] = useState(data.selectedPlatforms || ['ebay', 'facebook', 'craigslist']);
   const [copied, setCopied] = useState(false);
   const copiedTimeoutRef = useRef(null);
+  // Ref for userPrice so syncPriceFromBackend is stable across renders.
+  const userPriceRef = useRef(data.userPrice);
+  useEffect(() => { userPriceRef.current = data.userPrice; }, [data.userPrice]);
 
   useEffect(() => {
     return () => {
@@ -55,10 +58,11 @@ export function useListingActions(id, data) {
   // ── Sync price from backend when it first arrives ─────────────────────────
 
   const syncPriceFromBackend = useCallback((pricing) => {
-    if (pricing?.recommended_price && !data.userPrice) {
+    if (pricing?.recommended_price && !userPriceRef.current) {
       setPriceInput(pricing.recommended_price);
     }
-  }, [data.userPrice]);
+  // Stable: reads userPriceRef to avoid re-creating on every userPrice change.
+  }, []);
 
   // ── Copy listing ───────────────────────────────────────────────────────────
 

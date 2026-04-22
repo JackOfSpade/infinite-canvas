@@ -23,22 +23,17 @@ export function TextNode({ id, data }) {
     handleBlur({ text });
   }, [handleBlur]);
 
-  const focusTimeoutRef = useRef(null);
-
-  useEffect(() => {
-    return () => {
-      if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
-    };
-  }, []);
-
   const handleDoubleClick = useCallback((e) => {
     if (data.locked) return; // Locked nodes are not editable
     e.stopPropagation();
     setIsEditing(true);
-    focusTimeoutRef.current = setTimeout(() => {
-      if (inputRef.current) inputRef.current.focus({ preventScroll: true });
-    }, 0);
   }, [data.locked, setIsEditing]);
+
+  useEffect(() => {
+    if (isEditing && inputRef.current) {
+      inputRef.current.focus({ preventScroll: true });
+    }
+  }, [isEditing]);
 
   const fontSize = data.fontSize || 14;
   const fontFamily = data.fontFamily || (data.isSticky ? "'Indie Flower', 'Comic Sans MS', cursive" : 'sans-serif');

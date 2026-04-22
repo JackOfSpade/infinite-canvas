@@ -2,151 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { getNodeDims } from '../utils/constants';
 
-function safeClone(data) {
-  if (!data) return data;
-  try { return structuredClone(data); }
-  catch { return JSON.parse(JSON.stringify(data)); }
-}
-
-/**
- * Walk the navigation stack upward from `startIndex` to 0, syncing each
- * level's canvas data back into its parent's node tree.
- *
- * Returns the root-level { nodes, edges, drawings }.
- * Pure function — does not mutate state.
- */
-function syncStackUpward(currentNodes, currentEdges, currentDrawings, stack, startIndex, stopIndex = 0) {
-  let nodes = safeClone(currentNodes);
-  let edges = safeClone(currentEdges);
-  let drawings = safeClone(currentDrawings);
-
-  for (let i = startIndex; i >= stopIndex; i--) {
-    const parentState = stack[i];
-    const updatedNodes = parentState.nodes.map(n => {
-      if (n.id === parentState.nodeId) {
-        return {
-          ...n,
-          data: {
-            ...n.data,
-            canvasData: { nodes, edges, drawings },
-          },
-        };
-      }
-      return n;
-    });
-
-    nodes = updatedNodes;
-    edges = parentState.edges;
-    drawings = parentState.drawings;
-  }
-
-  return { nodes, edges, drawings };
-}
-
-/**
- * Resolve canvas data from a node, supporting both old and new data shapes.
- * Pure function — no hook state required.
- */
-function getCanvasData(node) {
-  if (node.data.canvasData) return node.data.canvasData;
-  // Legacy fallback
-  return {
-    nodes: node.data.nodes || [],
-    edges: node.data.edges || [],
-    drawings: node.data.drawings || [],
-  };
-}
-
-/**
- * Recursively finds and updates a node deep within nested canvasData.
- */
-function deepUpdateNode(nodes, id, dataUpdate) {
-  if (!nodes) return { updated: false, nodes };
-  let anyUpdated = false;
-  const newNodes = nodes.map(n => {
-    if (n.id === id) {
-      anyUpdated = true;
-      return { ...n, data: { ...n.data, ...dataUpdate } };
-    }
-    if (n.data?.canvasData?.nodes) {
-      const { updated, nodes: childNodes } = deepUpdateNode(n.data.canvasData.nodes, id, dataUpdate);
-      if (updated) {
-        anyUpdated = true;
-        return { ...n, data: { ...n.data, canvasData: { ...n.data.canvasData, nodes: childNodes } } };
-      }
-    }
-    return n;
-  });
-  return { updated: anyUpdated, nodes: newNodes };
-}
-
-/**
- * Recursively finds the level where targetNodeId exists and appends newNodes and newEdges.
- * placement: 'inside' (insert into targetNodeId's canvasData) | 'sibling' (insert alongside targetNodeId)
- */
-function deepAddElements(nodes, edges, targetNodeId, newNodes, newEdges, placement = 'inside') {
-  if (!nodes) return { updated: false, nodes, edges };
-  let anyUpdated = false;
-
-  const nextNodes = nodes.map(n => {
-    // If dropping inside this target node
-    if (placement === 'inside' && n.id === targetNodeId) {
-      anyUpdated = true;
-      const prevNodes = n.data?.canvasData?.nodes || [];
-      const prevEdges = n.data?.canvasData?.edges || [];
-      return {
-        ...n,
-        data: {
-          ...n.data,
-          canvasData: {
-            ...n.data?.canvasData,
-            nodes: [...prevNodes, ...(newNodes || [])],
-            edges: [...prevEdges, ...(newEdges || [])]
-          }
-        }
-      };
-    }
-
-    // Keep searching deeper
-    if (n.data?.canvasData?.nodes) {
-      const { updated, nodes: childNodes, edges: childEdges } = deepAddElements(
-        n.data.canvasData.nodes, 
-        n.data.canvasData.edges || [], 
-        targetNodeId, 
-        newNodes, 
-        newEdges,
-        placement
-      );
-      if (updated) {
-        anyUpdated = true;
-        return { 
-          ...n, 
-          data: { 
-            ...n.data, 
-            canvasData: { 
-              ...n.data.canvasData, 
-              nodes: childNodes,
-              edges: childEdges
-            } 
-          } 
-        };
-      }
-    }
-    return n;
-  });
-
-  // If placement is sibling, append to the array containing the target node
-  if (placement === 'sibling' && nodes.some(n => n.id === targetNodeId)) {
-    anyUpdated = true;
-    return { 
-      updated: true, 
-      nodes: [...nextNodes, ...(newNodes || [])],
-      edges: edges ? [...edges, ...(newEdges || [])] : (newEdges || [])
-    };
-  }
-
-  return { updated: anyUpdated, nodes: nextNodes, edges };
-}
+import { safeClone, syncStackUpward, getCanvasData, deepUpdateNode, deepAddElements } from '../utils/navigationUtils';
 
 /**
  * Navigation stack for nested canvas dive-in / dive-out.
@@ -174,6 +30,7 @@ export function useCanvasNavigation({
   const stackRef = useRef(stack);
   const isNavigatingRef = useRef(false);
   const navTimersRef = useRef([]); // All pending navigation setTimeout IDs
+  const navFramesRef = useRef([]); // All pending requestAnimationFrame IDs
   useEffect(() => {
     return () => {
       // Safety: reset navigation flag and cancel all pending timers to prevent
@@ -181,6 +38,8 @@ export function useCanvasNavigation({
       isNavigatingRef.current = false;
       navTimersRef.current.forEach(id => clearTimeout(id));
       navTimersRef.current = [];
+      navFramesRef.current.forEach(id => cancelAnimationFrame(id));
+      navFramesRef.current = [];
     };
   }, []);
 
@@ -250,7 +109,8 @@ export function useCanvasNavigation({
       clearHistory?.();
 
       // Let React render the new data, then center and fade in
-      requestAnimationFrame(() => {
+      const frameId = requestAnimationFrame(() => {
+        navFramesRef.current = navFramesRef.current.filter(id => id !== frameId);
         // Centre on child content at current zoom — never change zoom
         const currentVp = reactFlow.getViewport();
         const childNodes = canvasData.nodes || [];
@@ -283,6 +143,7 @@ export function useCanvasNavigation({
         }, halfDuration);
         navTimersRef.current.push(t2);
       });
+      navFramesRef.current.push(frameId);
     }, halfDuration);
     navTimersRef.current.push(t1);
   }, [isAnimating, reactFlow, getAnimationDuration, setNodes, setEdges, setDrawings, clearHistory]);
@@ -315,7 +176,8 @@ export function useCanvasNavigation({
       setDrawings(cd);
       clearHistory?.();
 
-      requestAnimationFrame(() => {
+      const frameId = requestAnimationFrame(() => {
+        navFramesRef.current = navFramesRef.current.filter(id => id !== frameId);
         reactFlow.setViewport(targetViewport, { duration: 0 });
         setAnimPhase('fade-in');
 
@@ -327,6 +189,7 @@ export function useCanvasNavigation({
         }, halfDuration);
         navTimersRef.current.push(t4);
       });
+      navFramesRef.current.push(frameId);
     }, halfDuration);
     navTimersRef.current.push(t3);
   }, [isAnimating, reactFlow, getAnimationDuration, setNodes, setEdges, setDrawings, clearHistory]);
@@ -432,7 +295,7 @@ export function useCanvasNavigation({
       newStack[targetIndex] = { ...targetParent, nodes: newParentNodes, edges: newParentEdges };
       return newStack;
     });
-  }, [setNodes, setEdges, clearHistory]);
+  }, [setNodes, setEdges, clearHistory, isAnimating]);
 
   /**
    * Globally updates a node's data by ID, regardless of whether it is 
@@ -474,7 +337,9 @@ export function useCanvasNavigation({
     });
 
     setEdges(prevEdges => {
-      // Use nodesRef.current (as a layout map) to safely navigate to the target using functional update state.
+      // deepAddElements traverses the node tree (nodesRef.current) to locate the target group,
+      // then returns updated edges. We use the ref so the functional updater doesn't need `nodes`
+      // in the hook's dependency array, avoiding stale-closure issues with concurrent state updates.
       const { updated, edges: newEdges } = deepAddElements(
         nodesRef.current, prevEdges, targetNodeId, newNodesPayload, newEdgesPayload, placement
       );
@@ -508,7 +373,6 @@ export function useCanvasNavigation({
     jumpTo,
     flushStack,
     extractToParent: extractToLevel,
-    extractToLevel,
     updateNodeDataGlobally,
     addElementsGlobally,
     resetStack,

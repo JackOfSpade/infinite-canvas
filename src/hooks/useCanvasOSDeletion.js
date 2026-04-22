@@ -1,21 +1,6 @@
 import { useCallback } from 'react';
 import { EventLogger } from '../utils/EventLogger';
-
-// ── Pure module-level helpers ────────────────────────────────────────────────
-// These never close over hook state, so they are defined once at module scope
-// rather than being recreated on every onNodesDelete call.
-
-/**
- * Recursively cancels active background tasks for a node and all its descendants.
- */
-function cancelRecursively(nodes) {
-  nodes.forEach(n => {
-    window.electronAPI.cancelNodeTask(n.id);
-    if (n.data?.canvasData?.nodes) cancelRecursively(n.data.canvasData.nodes);
-    // Also check legacy nodes shape if present
-    if (n.data?.nodes) cancelRecursively(n.data.nodes);
-  });
-}
+import { cancelNodeTasksRecursively } from '../utils/canvasInteractions';
 
 /**
  * Recursively collects OS file/folder paths from a node tree.
@@ -40,13 +25,11 @@ function extractPaths(nodes, pathsToDelete) {
   });
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-
 export function useCanvasOSDeletion({ requestConfirm }) {
   const onNodesDelete = useCallback((deletedNodes) => {
     // Cancel any active background tasks for these nodes (including nested nodes)
     if (window.electronAPI?.cancelNodeTask) {
-      cancelRecursively(deletedNodes);
+      cancelNodeTasksRecursively(deletedNodes);
     }
 
     const pathsToDelete = new Set();

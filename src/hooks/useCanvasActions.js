@@ -4,6 +4,8 @@ import { setupDragGhost, setupCanvasDragGhost } from '../utils/dragUtils';
 import { EDGE_STYLE, getNodeDims } from '../utils/constants';
 import { cloneNode, reassignCanvasDataIDs } from '../utils/nodeFactory';
 import { EventLogger } from '../utils/EventLogger';
+import { generateId } from '../utils/idGenerator';
+import { cancelNodeTasksRecursively } from '../utils/canvasInteractions';
 
 const CLIPBOARD_KEY = 'infinite-canvas-clipboard';
 let applicationClipboardFallback = null;
@@ -21,7 +23,7 @@ export function useCanvasActions({
   depth,
   isAnimatingRef,
 }) {
-  const { getEdges, setEdges: rfSetEdges } = useReactFlow();
+  const { getNodes, getEdges, setEdges: rfSetEdges } = useReactFlow();
 
   const onConnect = useCallback((params) => {
     if (isAnimatingRef?.current) return;
@@ -58,7 +60,7 @@ export function useCanvasActions({
       if (oldIdToNewId.has(eEdge.source) && oldIdToNewId.has(eEdge.target)) {
         newEdges.push({
           ...eEdge,
-          id: crypto.randomUUID(),
+          id: generateId(),
           source: oldIdToNewId.get(eEdge.source),
           target: oldIdToNewId.get(eEdge.target),
           selected: true,
@@ -150,17 +152,19 @@ export function useCanvasActions({
       return clone;
     });
 
-    const newEdges = (clipboardData.edges || []).map(eEdge => ({
-      ...eEdge,
-      id: crypto.randomUUID(),
-      source: oldIdToNewId.get(eEdge.source),
-      target: oldIdToNewId.get(eEdge.target),
-      selected: true,
-    }));
+    const newEdges = (clipboardData.edges || [])
+      .filter(eEdge => oldIdToNewId.has(eEdge.source) && oldIdToNewId.has(eEdge.target))
+      .map(eEdge => ({
+        ...eEdge,
+        id: generateId(),
+        source: oldIdToNewId.get(eEdge.source),
+        target: oldIdToNewId.get(eEdge.target),
+        selected: true,
+      }));
 
     const newDrawings = (clipboardData.drawings || []).map(originalDrawing => ({
       ...originalDrawing,
-      id: crypto.randomUUID(),
+      id: generateId(),
       points: originalDrawing.points.map(p => ({ x: p.x + 20, y: p.y + 20 }))
     }));
 
@@ -189,7 +193,7 @@ export function useCanvasActions({
     try {
       applicationClipboardFallback = nextClipboard;
       localStorage.setItem(CLIPBOARD_KEY, JSON.stringify(nextClipboard));
-    } catch (e) {
+    } catch {
       // Ignored clipboard update failure
     }
 
@@ -208,32 +212,21 @@ export function useCanvasActions({
       setHasUnsavedChanges(false);
     }
 
-    // Use functional updater to avoid stale closure issues and eliminate getNodes dependency
-    setNodes(allNodes => {
-      const lockedNodes = allNodes.filter((n) => n.data?.locked);
-      const lockedIds = new Set(lockedNodes.map((n) => n.id));
+    const allNodes = getNodes();
+    const lockedNodes = allNodes.filter((n) => n.data?.locked);
+    const lockedIds = new Set(lockedNodes.map((n) => n.id));
 
-      // Cancel any active background tasks for nodes being removed
-      if (window.electronAPI?.cancelNodeTask) {
-        const cancelRecursively = (nodes) => {
-          nodes.forEach(n => {
-            if (!lockedIds.has(n.id)) {
-              window.electronAPI.cancelNodeTask(n.id);
-              if (n.data?.canvasData?.nodes) cancelRecursively(n.data.canvasData.nodes);
-              if (n.data?.nodes) cancelRecursively(n.data.nodes);
-            }
-          });
-        };
-        cancelRecursively(allNodes);
-      }
+    // Cancel any active background tasks for nodes being removed
+    if (window.electronAPI?.cancelNodeTask) {
+      cancelNodeTasksRecursively(allNodes, lockedIds);
+    }
 
-      setEdges(allEdges => allEdges.filter(
-        (e) => lockedIds.has(e.source) && lockedIds.has(e.target)
-      ));
-      setDrawings([]);
-      return lockedNodes;
-    });
-  }, [takeSnapshot, resetStack, depth, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, isAnimatingRef]);
+    setNodes(lockedNodes);
+    setEdges(allEdges => allEdges.filter(
+      (e) => lockedIds.has(e.source) && lockedIds.has(e.target)
+    ));
+    setDrawings([]);
+  }, [takeSnapshot, resetStack, depth, getNodes, setNodes, setEdges, setDrawings, setCurrentFile, setHasUnsavedChanges, isAnimatingRef]);
 
   const clearCanvas = useCallback(() => {
     if (requestClearConfirm) {

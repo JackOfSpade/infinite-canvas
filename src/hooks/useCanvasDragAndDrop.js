@@ -119,12 +119,18 @@ export function useCanvasDragAndDrop({
     }
 
     // Handle dropping URLs from the browser address bar or other sources.
-    const droppedUrl = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain');
-    if (droppedUrl && droppedUrl.length < 2048) {
-      const trimmedUrl = droppedUrl.trim();
-      if (URL_RE.test(trimmedUrl) && !CODE_EXT_RE.test(trimmedUrl.split('?')[0].split('#')[0])) {
+    const droppedText = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain');
+    if (droppedText && droppedText.length < 2048) {
+      const trimmedText = droppedText.trim();
+      if (URL_RE.test(trimmedText) && !CODE_EXT_RE.test(trimmedText.split('?')[0].split('#')[0])) {
         takeSnapshot();
-        const newNode = NODE_FACTORIES.link(position, { url: trimmedUrl });
+        const newNode = NODE_FACTORIES.link(position, { url: trimmedText });
+        insertNodes([newNode]);
+      } else if (trimmedText.length > 0) {
+        takeSnapshot();
+        // Insert as a TextNode if it doesn't match a URL format.
+        // createTextNode only accepts position, so we patch the text field manually.
+        const newNode = { ...NODE_FACTORIES.text(position), data: { text: trimmedText, isNew: false } };
         insertNodes([newNode]);
       }
     }

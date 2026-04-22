@@ -51,13 +51,6 @@ function getStats(nodes) {
 export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClick }) {
   const [collapsed, setCollapsed] = useState(true);
   const [activeTab, setActiveTab] = useState('jobs');
-  const isMountedRef = React.useRef(true);
-
-  useEffect(() => {
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
 
   const handleTabClick = useCallback((tab) => {
     if (activeTab === tab && !collapsed) {
@@ -86,23 +79,19 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
     if (activeTab === 'accounts' && !collapsed) {
       if (window.electronAPI?.getCachedSessionStatuses) {
         window.electronAPI.getCachedSessionStatuses().then(statuses => {
-          if (!isMountedRef.current) return;
           const map = {};
           for (const s of statuses) map[s.platform] = s;
           setAccountStatuses(map);
         }).catch(err => {
-          if (!isMountedRef.current) return;
           EventLogger.error('Sidebar cached statuses failed', err);
         });
       }
       if (window.electronAPI?.invoke) {
         window.electronAPI.invoke('get-system-config-status')
           .then(res => {
-            if (!isMountedRef.current) return;
             setSystemStatuses(res); 
           })
           .catch(err => {
-            if (!isMountedRef.current) return;
             EventLogger.error('Sidebar system config failed', err);
           });
       }
@@ -117,15 +106,12 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
       // After login window closes, re-read the cache (which was just written by the main process).
       // No Chrome launch — the main process already marked it as connected.
       const statuses = await window.electronAPI.getCachedSessionStatuses();
-      if (!isMountedRef.current) return;
       const map = {};
       for (const s of statuses) map[s.platform] = s;
       setAccountStatuses(map);
     } catch (e) {
-      if (!isMountedRef.current) return;
       EventLogger.error('Login failed:', e);
-    }
-    if (isMountedRef.current) {
+    } finally {
       setLoadingPlatform(null);
     }
   }, []);

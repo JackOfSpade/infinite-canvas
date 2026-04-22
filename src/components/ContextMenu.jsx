@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 
 /**
@@ -54,15 +54,15 @@ export function ContextMenu({ x, y, items, onClose }) {
   }, [x, y]);
 
   // ── Submenu hover helpers (with gap-crossing delay) ───────────────────────
-  const openSubmenu = (i) => {
+  const openSubmenu = useCallback((i) => {
     clearTimeout(closeTimerRef.current);
     setActiveSubmenu(i);
-  };
-  const scheduleClose = () => {
+  }, []);
+  const scheduleClose = useCallback(() => {
     clearTimeout(closeTimerRef.current);
     closeTimerRef.current = setTimeout(() => setActiveSubmenu(null), 120);
-  };
-  const cancelClose = () => clearTimeout(closeTimerRef.current);
+  }, []);
+  const cancelClose = useCallback(() => clearTimeout(closeTimerRef.current), []);
 
   useEffect(() => () => clearTimeout(closeTimerRef.current), []);
 
@@ -76,15 +76,16 @@ export function ContextMenu({ x, y, items, onClose }) {
       <div className="bg-[#1a1a1a]/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl py-1 min-w-[180px] text-white/90 text-sm">
         {items.map((item, i) => {
           if (item.divider) {
-            return <div key={i} className="border-t border-white/8 my-1" />;
+            return <div key={`div-${i}`} className="border-t border-white/8 my-1" />;
           }
 
           const hasSubmenu = item.submenu && item.submenu.length > 0;
           const isDanger = !!item.danger;
+          const itemKey = `${item.label ?? 'item'}-${i}`;
 
           return (
             <div
-              key={i}
+              key={itemKey}
               className="relative"
               onMouseEnter={() => hasSubmenu && openSubmenu(i)}
               onMouseLeave={() => hasSubmenu && scheduleClose()}
