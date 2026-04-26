@@ -10,7 +10,12 @@ export function fingerprint(snap) {
     n: n.map(x => {
       // Optimization: skip heavy recursive canvasData for groups in the fingerprint.
       // Changes inside groups are managed by their own local undo/redo stacks.
-      const data = x.type === 'group' ? { ...x.data, canvasData: undefined } : x.data;
+      // Destructure canvasData out so the serialized object never contains the key at all.
+      let data = x.data;
+      if (x.type === 'group' && data?.canvasData !== undefined) {
+        const { canvasData: _cd, ...rest } = data;
+        data = rest;
+      }
       return { id: x.id, x: x.position?.x, y: x.position?.y, t: x.type, d: data, s: x.style };
     }),
     e: e.map(x => ({ id: x.id, s: x.source, t: x.target })),
@@ -91,8 +96,8 @@ export function sanitizeNodesForSave(nodes) {
   return nodes.map(n => {
     // Recurse into nested canvas nodes first so deeply-nested nodes are also sanitized.
     // Also strip all transient data fields (isDropTarget, _hmr) from this group node.
-    if (n.type === 'group' && n.data?.canvasData?.nodes?.length > 0) {
-      const sanitizedInner = sanitizeNodesForSave(n.data.canvasData.nodes);
+    if (n.type === 'group' && n.data?.canvasData) {
+      const sanitizedInner = sanitizeNodesForSave(n.data.canvasData.nodes || []);
       const { isDropTarget: _idt, _hmr: _h, ...cleanData } = n.data || {};
       return {
         ...n,
@@ -109,12 +114,18 @@ export function sanitizeNodesForSave(nodes) {
     // - style.opacity (jobcard only): set transiently by toggleSourceFilter.
     const hasTransientData = n.data && ('isDropTarget' in n.data || '_hmr' in n.data);
     const hasTransientOpacity = n.type === 'jobcard' && n.style?.opacity !== undefined;
+    
+    // Reset stuck processing states so hubs auto-restart gracefully on reload
+    const isHub = n.type === 'jobhub' || n.type === 'sellhub';
+    const transientHubStates = ['parsing', 'querying', 'searching', 'scoring', 'analyzing', 'researching'];
+    const hasTransientHubState = isHub && n.data && transientHubStates.includes(n.data.hubState);
 
-    if (!hasTransientData && !hasTransientOpacity) return n;
+    if (!hasTransientData && !hasTransientOpacity && !hasTransientHubState) return n;
 
     let result = n;
-    if (hasTransientData) {
-      const { isDropTarget: _idt, _hmr: _h, ...cleanData } = n.data;
+    if (hasTransientData || hasTransientHubState) {
+      const { isDropTarget: _idt, _hmr: _h, ...cleanData } = result.data || {};
+      if (hasTransientHubState) cleanData.hubState = 'empty';
       result = { ...result, data: cleanData };
     }
     if (hasTransientOpacity) {

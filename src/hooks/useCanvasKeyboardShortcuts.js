@@ -52,6 +52,14 @@ export function useCanvasKeyboardShortcuts({
         if (activeTool)    { setActiveTool(null);    return; }
       }
 
+      // Tool shortcuts (Text, Link, Select)
+      if (k === 's' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        setActiveTool(prev => prev === 'select' ? null : 'select');
+        setPlacementMode(null);
+        return;
+      }
+
       // Tool shortcuts (Text, Link)
       if (k === 't' || k === 'l') {
         e.preventDefault();

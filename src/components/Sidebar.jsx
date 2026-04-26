@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Search, Store, BarChart3, ChevronLeft, ChevronRight, UserCircle, Briefcase, Bug } from 'lucide-react';
 import { SELL_PLATFORMS, JOB_SOURCES, PRICE_COMP_SOURCES } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
@@ -73,25 +73,34 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
   const [systemStatuses, setSystemStatuses] = useState(null);
   const [loadingPlatform, setLoadingPlatform] = useState(null);
 
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
+
   // Fetch CACHED statuses when accounts tab opens — instant, no Chrome launch.
   // The user can click "Refresh" to do a live Chrome-based check.
   useEffect(() => {
     if (activeTab === 'accounts' && !collapsed) {
       if (window.electronAPI?.getCachedSessionStatuses) {
         window.electronAPI.getCachedSessionStatuses().then(statuses => {
+          if (!isMountedRef.current) return;
           const map = {};
           for (const s of statuses) map[s.platform] = s;
           setAccountStatuses(map);
         }).catch(err => {
+          if (!isMountedRef.current) return;
           EventLogger.error('Sidebar cached statuses failed', err);
         });
       }
-      if (window.electronAPI?.invoke) {
-        window.electronAPI.invoke('get-system-config-status')
+      if (window.electronAPI?.getSystemConfigStatus) {
+        window.electronAPI.getSystemConfigStatus()
           .then(res => {
+            if (!isMountedRef.current) return;
             setSystemStatuses(res); 
           })
           .catch(err => {
+            if (!isMountedRef.current) return;
             EventLogger.error('Sidebar system config failed', err);
           });
       }
@@ -103,16 +112,19 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
     setLoadingPlatform(platformId);
     try {
       await window.electronAPI.openLoginWindow({ platformId });
+      if (!isMountedRef.current) return;
       // After login window closes, re-read the cache (which was just written by the main process).
       // No Chrome launch — the main process already marked it as connected.
       const statuses = await window.electronAPI.getCachedSessionStatuses();
+      if (!isMountedRef.current) return;
       const map = {};
       for (const s of statuses) map[s.platform] = s;
       setAccountStatuses(map);
     } catch (e) {
+      if (!isMountedRef.current) return;
       EventLogger.error('Login failed:', e);
     } finally {
-      setLoadingPlatform(null);
+      if (isMountedRef.current) setLoadingPlatform(null);
     }
   }, []);
 

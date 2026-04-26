@@ -242,6 +242,15 @@ if (!gotTheLock) {
     }
   });
 
+  // ── Chromium flags ──────────────────────────────────────────────────────────
+  // Disable VideoToolbox hardware H.264/HEVC acceleration on macOS.
+  // VideoToolbox hits kVTVideoDecoderBadDataErr (-12909) on certain MP4
+  // encodings at specific keyframe boundaries, causing MEDIA_ERR_DECODE (code 3)
+  // at consistent timestamps. The software (FFmpeg) decoder handles these files
+  // correctly. This flag has no meaningful quality/performance impact at typical
+  // canvas-preview sizes and is only applied when the app actually starts.
+  app.commandLine.appendSwitch('disable-accelerated-video-decode');
+
   app.whenReady().then(() => {
     protocol.handle('local-file', (request) => {
       let url = request.url.replace(/^local-file:\/\//, '');

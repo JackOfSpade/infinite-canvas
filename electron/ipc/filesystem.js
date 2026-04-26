@@ -263,6 +263,22 @@ export function registerFilesystemHandlers() {
   handleSafe('delete-os-file', async (_event, filePath) => {
     await shell.trashItem(filePath);
   });
+
+  handleSafe('write-text-file', async (_event, { filePath, content }) => {
+    // Validate the file exists before writing — prevents accidentally creating new files
+    await fs.promises.access(filePath, fs.constants.W_OK);
+    await atomicWriteFile(filePath, content);
+  });
+
+  handleSafe('save-file-dialog', async (_event, { defaultFilename, content, filters }) => {
+    const { filePath, canceled } = await dialog.showSaveDialog({
+      defaultPath: defaultFilename || 'export.txt',
+      filters: filters || [{ name: 'Text Files', extensions: ['txt'] }],
+    });
+    if (canceled || !filePath) return { saved: false };
+    await atomicWriteFile(filePath, content);
+    return { saved: true, filePath };
+  });
 }
 
 /**

@@ -30,6 +30,11 @@ export function useCanvasPersistence({
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [currentFile, setCurrentFile] = useState(null);
   const [saveState, setSaveState] = useState('idle');
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
+
   const isExportingRef = useRef(false);
   const saveStateTimerRef = useRef(null);
   const loadTimerRef = useRef(null);
@@ -42,6 +47,11 @@ export function useCanvasPersistence({
     edgesRef.current = edges;
     drawingsRef.current = drawings;
   }, [nodes, edges, drawings]);
+
+  // Mirror currentFile into a ref so saveCanvas can read it without being recreated
+  // on every file-path change (which would cascade into loadCanvas / handleUnsavedChanges).
+  const currentFileRef = useRef(currentFile);
+  useEffect(() => { currentFileRef.current = currentFile; }, [currentFile]);
 
   // Mirror hasUnsavedChanges into a ref so the quit/unload listeners can
   // read the live value without being recreated on every state change.
@@ -99,8 +109,10 @@ export function useCanvasPersistence({
       const rawData = flushStack ? flushStack() : { nodes: nodesRef.current, edges: edgesRef.current, drawings: drawingsRef.current };
       // Strip transient visual properties (e.g. source-filter opacity on job cards)
       const data = { ...rawData, nodes: sanitizeNodesForSave(rawData.nodes) };
-      const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFile });
+      // Read currentFile via ref to avoid this callback being recreated on every file-path change
+      const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFileRef.current });
       if (res?.success && res.filePath) {
+        if (!isMountedRef.current) return false;
         setCurrentFile(res.filePath);
         updateSetting?.('lastOpenedWorkspace', res.filePath);
         setHasUnsavedChanges(false);
@@ -110,22 +122,26 @@ export function useCanvasPersistence({
         saveStateTimerRef.current = setTimeout(() => { setSaveState('idle'); }, 1500);
         return true;
       } else {
+        if (!isMountedRef.current) return false;
         setSaveState('idle');
         addToast({ title: 'Save Failed', description: 'Could not save the workspace.', type: 'error' });
         return false;
       }
     } catch (err) {
       EventLogger.error('Failed to save canvas:', err);
+      if (!isMountedRef.current) return false;
       setSaveState('idle');
       addToast({ title: 'Save Error', description: err?.message || String(err) || 'An error occurred while saving.', type: 'error' });
       return false;
     }
-  }, [currentFile, addToast, flushStack, isAnimatingRef, updateSetting]);
+  }, [addToast, flushStack, isAnimatingRef, updateSetting]); // currentFile read via ref — omitted intentionally
 
-  // Expose stable references for the IPC listeners
+  // Expose stable references for the IPC listeners.
+  // Direct render-body assignment is the correct pattern for ref syncing in ESLint v7+
+  // (react-hooks/immutability disallows mutation inside useEffect).
   const saveCanvasRef = useRef(saveCanvas);
-  // eslint-disable-next-line react-hooks/immutability
-  useEffect(() => { saveCanvasRef.current = saveCanvas; }, [saveCanvas]);
+  // eslint-disable-next-line react-hooks/immutability -- render-body ref sync is the correct pattern when useEffect mutation is also disallowed by the same rule
+  saveCanvasRef.current = saveCanvas;
 
   const handleUnsavedChanges = useCallback(async (actionName) => {
     if (!hasUnsavedChangesRef.current) return true;
@@ -160,6 +176,7 @@ export function useCanvasPersistence({
     if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
     // Defer resetting this so React batches the empty nodes state first
     setTimeout(() => {
+      if (!isMountedRef.current) return;
       setHasUnsavedChanges(false);
       customFitView();
     }, 50);
@@ -168,8 +185,8 @@ export function useCanvasPersistence({
   }, [handleUnsavedChanges, isAnimatingRef, setNodes, setEdges, setDrawings, resetStack, clearHistory, customFitView, addToast, updateSetting]);
 
   const newCanvasRef = useRef(newCanvas);
-  // eslint-disable-next-line react-hooks/immutability
-  useEffect(() => { newCanvasRef.current = newCanvas; }, [newCanvas]);
+  // eslint-disable-next-line react-hooks/immutability -- render-body ref sync is the correct pattern when useEffect mutation is also disallowed by the same rule
+  newCanvasRef.current = newCanvas;
 
   const loadCanvas = useCallback(async (targetFilePath = null, isSilent = false) => {
     if (!window.electronAPI || isAnimatingRef?.current) return;
@@ -201,6 +218,7 @@ export function useCanvasPersistence({
         if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
         loadTimerRef.current = setTimeout(() => {
           loadTimerRef.current = null;
+          if (!isMountedRef.current) return;
           setHasUnsavedChanges(false);
           customFitView();
         }, 50);
@@ -223,6 +241,7 @@ export function useCanvasPersistence({
     isExportingRef.current = true;
     toPng(viewportNode, { backgroundColor: '#0a0a0a' })
       .then((dataUrl) => {
+        if (!isMountedRef.current) return;
         const date = new Date().toISOString().slice(0, 10);
         const link = document.createElement('a');
         link.download = `canvas-${date}.png`;
@@ -232,6 +251,7 @@ export function useCanvasPersistence({
       })
       .catch((err) => {
         EventLogger.error('Failed to export image', err);
+        if (!isMountedRef.current) return;
         addToast({ title: 'Export Failed', description: 'There was an error generating the PNG.', type: 'error'});
       })
       .finally(() => {
@@ -248,5 +268,6 @@ export function useCanvasPersistence({
     setHasUnsavedChanges,
     currentFile,
     setCurrentFile,
+    saveStateRef, // Exposed so useCanvasInitialization can gate auto-saves on in-progress saves
   };
 }

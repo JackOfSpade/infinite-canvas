@@ -34,14 +34,30 @@ export function SellHubNode({ id, data }) {
   const { addToast } = useToast();
   const processingRef = useRef(false);
   const processingPriceRef = useRef(false);
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
   // Stable ref so handleDrop always calls the latest startAnalysis without needing deps.
   const startAnalysisRef = useRef(null);
   const {
     product, editing, setEditing, priceInput, justificationExpanded,
     selectedPlatforms, copied, handleFieldEdit, handlePriceChange,
     handleQuickPrice, handleCopyListing, togglePlatform, toggleJustification,
-    researchPrice,
+    researchPrice, listingText,
   } = useListingActions(id, data);
+
+  const handleMarkListed = useCallback((platformId) => {
+    const current = data.platformStatuses || {};
+    const isListed = current[platformId] === 'listed';
+    const updated = { ...current };
+    if (isListed) {
+      delete updated[platformId]; // un-mark
+    } else {
+      updated[platformId] = 'listed';
+    }
+    updateGlobal(id, { platformStatuses: updated });
+  }, [id, data.platformStatuses, updateGlobal]);
 
   // Per-source comp progress: { 'ebay-sold': { status, count }, 'amazon': { status, count }, ... }
   const [compProgress, setCompProgress] = useState({});
@@ -159,6 +175,7 @@ export function SellHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'analyzing' });
       const result = await window.electronAPI.analyzePhotos({ imagePaths: validPaths, nodeId: currentId });
       
+      if (!isMountedRef.current) return;
       // Allow processing to finish even if unmounted or node deleted!
       // If the node was deleted globally, updateGlobal will safely do nothing.
       if (!result.success) throw new Error(result.error);
@@ -166,14 +183,16 @@ export function SellHubNode({ id, data }) {
       updateGlobal(currentId, {
         hubState: 'draft',
         product: result.product,
-        images: imagePaths,
+        imagePaths,
       });
     } catch (error) {
       EventLogger.error('[SellHub] Analysis failed:', error);
       updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
       addToast({ title: 'Photo Analysis Failed', description: error?.message || String(error), type: 'error' });
     } finally {
-      processingRef.current = false;
+      if (isMountedRef.current) {
+        processingRef.current = false;
+      }
     }
   }, [id, updateGlobal, addToast]);
 
@@ -230,8 +249,26 @@ export function SellHubNode({ id, data }) {
       const path = f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : '');
       return { ...f, resolvedPath: path };
     }).filter(f => f.resolvedPath);
-    if (validImages.length > 0) startAnalysisRef.current?.(validImages.map(f => f.resolvedPath));
-  }, [data.locked, hubState]);
+
+    if (validImages.length === 0) return;
+
+    // In draft/priced state: append photos rather than restarting analysis
+    if (hubState === 'draft' || hubState === 'priced') {
+      const newPaths = validImages.map(f => f.resolvedPath);
+      const existing = data.imagePaths || [];
+      const merged = [...new Set([...existing, ...newPaths])]; // deduplicate
+      updateGlobal(id, { imagePaths: merged });
+      addToast({
+        title: `${newPaths.length} Photo${newPaths.length > 1 ? 's' : ''} Added`,
+        description: `${merged.length} total photo${merged.length > 1 ? 's' : ''} — listing preserved`,
+        type: 'success'
+      });
+      return;
+    }
+
+    // Empty / error state: start fresh analysis
+    startAnalysisRef.current?.(validImages.map(f => f.resolvedPath));
+  }, [data.locked, data.imagePaths, hubState, id, updateGlobal, addToast]);
 
   const resetHandler = useCallback((e) => {
     e?.stopPropagation();
@@ -293,13 +330,14 @@ export function SellHubNode({ id, data }) {
 
         {/* ── Draft: editable product info ───────────────────────────────── */}
         {hubState === 'draft' && (
-          <SellHubDraftState 
+          <SellHubDraftState
             product={product}
             editing={editing}
             setEditing={setEditing}
             handleFieldEdit={handleFieldEdit}
             handleConfirmDraft={handleConfirmDraft}
             locked={!!data.locked}
+            imagePaths={data.imagePaths || []}
           />
         )}
 
@@ -323,7 +361,7 @@ export function SellHubNode({ id, data }) {
 
         {/* ── Priced: price + platform controls ──────────────────────────── */}
         {hubState === 'priced' && (
-          <SellHubPricedState 
+          <SellHubPricedState
             product={product}
             pricing={data.pricing}
             comps={data.comps}
@@ -336,7 +374,12 @@ export function SellHubNode({ id, data }) {
             togglePlatform={togglePlatform}
             copied={copied}
             handleCopyListing={handleCopyListing}
+            listingText={listingText}
             locked={!!data.locked}
+            imagePaths={data.imagePaths || []}
+            platformStatuses={data.platformStatuses || {}}
+            onMarkListed={handleMarkListed}
+            onReresearch={handleConfirmDraft}
           />
         )}
 

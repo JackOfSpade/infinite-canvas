@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 
@@ -17,6 +17,10 @@ export function useIssueReporter({
   addToast,
 }) {
   const { getViewport } = useReactFlow();
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   const handleIssueSubmit = useCallback(async (description, mode = 'file') => {
     if (!window.electronAPI) {
@@ -42,11 +46,31 @@ export function useIssueReporter({
         };
       });
 
+      // Snapshot any active media elements so reports include playback position,
+      // duration, error codes, and network state at the moment of the report.
+      const mediaState = Array.from(
+        document.querySelectorAll('video, audio')
+      ).map(el => ({
+        tag:          el.tagName.toLowerCase(),
+        src:          el.currentSrc || el.getAttribute('src') || null,
+        currentTime:  el.currentTime,
+        duration:     isFinite(el.duration) ? el.duration : null,
+        paused:       el.paused,
+        ended:        el.ended,
+        muted:        el.muted,
+        volume:       el.volume,
+        readyState:   el.readyState,   // 0=HAVE_NOTHING … 4=HAVE_ENOUGH_DATA
+        networkState: el.networkState, // 0=EMPTY 1=IDLE 2=LOADING 3=NO_SOURCE
+        errorCode:    el.error?.code ?? null,
+        errorMessage: el.error?.message ?? null,
+      }));
+
       const payload = {
         description,
         nodes,
         edges,
         drawings,
+        mediaState,
         frontEndState: {
           activeTool,
           placementMode,
@@ -71,6 +95,7 @@ export function useIssueReporter({
 
       if (mode === 'clipboard') {
         const res = await window.electronAPI.generateBugReportMarkdown(payload);
+        if (!isMountedRef.current) return;
 
         if (res.success) {
           try {
@@ -85,6 +110,7 @@ export function useIssueReporter({
         }
       } else {
         const res = await window.electronAPI.exportBugReport(payload);
+        if (!isMountedRef.current) return;
 
         if (res.success) {
           addToast({ title: 'Bug Report Saved', description: 'Your report has been exported successfully.', type: "success" });
@@ -93,7 +119,9 @@ export function useIssueReporter({
         }
       }
     } catch (e) {
-      addToast({ title: 'Bug Report Error', description: e?.message || String(e) || 'An unexpected error occurred.', type: "error" });
+      if (isMountedRef.current) {
+        addToast({ title: 'Bug Report Error', description: e?.message || String(e) || 'An unexpected error occurred.', type: "error" });
+      }
     }
   }, [
     nodes, edges, drawings, activeTool, placementMode, eraserType, settings, currentFile,

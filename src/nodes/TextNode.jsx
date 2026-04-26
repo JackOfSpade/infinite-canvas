@@ -6,7 +6,7 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { Lock } from 'lucide-react';
 
-export function TextNode({ id, data }) {
+export const TextNode = React.memo(function TextNode({ id, data }) {
   const [showCustomizeDialog, setShowCustomizeDialog] = useState(false);
   const { updateNodeData } = useReactFlow();
 
@@ -22,6 +22,14 @@ export function TextNode({ id, data }) {
     const text = inputRef.current?.innerText || '';
     handleBlur({ text });
   }, [handleBlur]);
+
+  const handleKeyDown = useCallback((e) => {
+    if (e.key === 'Escape') inputRef.current?.blur();
+  }, []);
+
+  const handlePointerDown = useCallback((e) => {
+    if (isEditing) e.stopPropagation();
+  }, [isEditing]);
 
   const handleDoubleClick = useCallback((e) => {
     if (data.locked) return; // Locked nodes are not editable
@@ -111,8 +119,8 @@ export function TextNode({ id, data }) {
         suppressContentEditableWarning
         onDoubleClick={handleDoubleClick}
         onBlur={handleTextBlur}
-        onKeyDown={(e) => { if (e.key === 'Escape') inputRef.current.blur(); }}
-        onPointerDown={(e) => { if (isEditing) e.stopPropagation(); }}
+        onKeyDown={handleKeyDown}
+        onPointerDown={handlePointerDown}
         className={`outline-none min-w-[20px] min-h-[1em] ${
           isEditing ? 'cursor-text whitespace-nowrap' : 'select-none cursor-default hidden'
         }`}
@@ -147,4 +155,4 @@ export function TextNode({ id, data }) {
       )}
     </div>
   );
-}
+});

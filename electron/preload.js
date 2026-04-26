@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startFileWatch: (filePath) => ipcRenderer.invoke('start-file-watch', filePath),
   stopFileWatch: (filePath) => ipcRenderer.invoke('stop-file-watch', filePath),
   deleteOSFile: (filePath) => ipcRenderer.invoke('delete-os-file', filePath),
+  writeTextFile: (filePath, content) => ipcRenderer.invoke('write-text-file', { filePath, content }),
+  saveFileDialog: (args) => ipcRenderer.invoke('save-file-dialog', args),
 
   onFileChanged: createListener('file-changed'),
   onMenuNew: createListener('menu-new'),
@@ -48,6 +50,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   searchJobs: (args) => ipcRenderer.invoke('search-jobs', args),
   scoreJobs: (args) => ipcRenderer.invoke('score-jobs', args),
   generateCoverLetter: (args) => ipcRenderer.invoke('generate-cover-letter', args),
+  generateInterviewPrep: (args) => ipcRenderer.invoke('generate-interview-prep', args),
 
   onJobSourceProgress: createListener('job-source-progress'),
 

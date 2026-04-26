@@ -20,6 +20,10 @@ export function useCanvasDragAndDrop({
   useEffect(() => {
     depthRef.current = depth;
   }, [depth]);
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
   const { screenToFlowPosition, getIntersectingNodes, updateNodeData, getNode } = useReactFlow();
   const hoveredGroupIdRef = useRef(null);
 
@@ -108,6 +112,7 @@ export function useCanvasDragAndDrop({
       takeSnapshot();
       const dropDepth = depthRef.current;
       const newItems = await processDroppedFiles(validFiles, position);
+      if (!isMountedRef.current) return;
       if (depthRef.current !== dropDepth) return; // Canvas changed during processing
 
       if (newItems.length > 0) {

@@ -85,7 +85,7 @@ export function Canvas() {
   const { addToast } = useToast();
 
   // ── Settings ────────────────────────────────────────────────────────────
-  const { settings, updateSetting, updateShortcut, resetShortcuts, getAnimationDuration } = useSettings();
+  const { settings, updateSetting, updateShortcut, resetShortcuts, animationDuration } = useSettings();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isIssueReporterOpen, setIsIssueReporterOpen] = useState(false);
 
@@ -184,11 +184,13 @@ export function Canvas() {
     nodes, edges, drawings,
     setNodes, setEdges, setDrawings,
     clearHistory,
-    getAnimationDuration,
+    animationDuration,
   });
-  useEffect(() => {
-    isNavigationAnimatingRef.current = navigation.isAnimating;
-  }, [navigation.isAnimating]);
+  // Sync isNavigationAnimatingRef synchronously during render (not via useEffect)
+  // to close the 1-frame race window where isAnimating is true but the ref hasn't
+  // been updated yet, allowing event handlers to bypass the animation guard.
+  // eslint-disable-next-line react-hooks/refs -- render-body ref sync is intentional; useEffect creates a 1-frame lag
+  isNavigationAnimatingRef.current = navigation.isAnimating;
 
   const { onNodeDragStart, onNodeDrag, onNodeDragStop } = useDragCorrections({
     setNodes,
@@ -208,6 +210,7 @@ export function Canvas() {
   const {
     saveCanvas, loadCanvas, exportCanvasToPNG,
     hasUnsavedChanges, setHasUnsavedChanges, currentFile, setCurrentFile,
+    saveStateRef,
   } = useCanvasPersistence({
     nodes, edges, drawings, setNodes, setEdges, setDrawings, customFitView, addToast,
     flushStack: navigation.flushStack,
@@ -221,6 +224,7 @@ export function Canvas() {
     nodes, edges, drawings, currentFile, setCurrentFile, hasUnsavedChanges, setHasUnsavedChanges,
     flushStack: navigation.flushStack,
     isAnimatingRef: isNavigationAnimatingRef,
+    saveStateRef,
   });
 
   // ── Auto-load previous workspace on mount ───────────────────────────────
@@ -275,6 +279,19 @@ export function Canvas() {
     requestConfirm,
     requestClearConfirm
   } = useConfirmDialog();
+
+  const confirmDialogDataRef = useRef(confirmDialogData);
+  // eslint-disable-next-line react-hooks/refs -- render-body ref sync is intentional; callbacks only read current at interaction time, never during render
+  confirmDialogDataRef.current = confirmDialogData;
+
+  const handleConfirmDialogConfirm = useCallback(() => {
+    confirmDialogDataRef.current?.onConfirm();
+    setConfirmDialogData(null);
+  }, [setConfirmDialogData]);
+
+  const handleConfirmDialogCancel = useCallback(() => {
+    setConfirmDialogData(null);
+  }, [setConfirmDialogData]);
 
   // ── Canvas interactions ──────────────────────────────────────────────────
   const [activeTool, setActiveTool] = useState(null); // 'pen' | 'eraser' | null
@@ -357,7 +374,10 @@ export function Canvas() {
     cursorsRef, drawingLayerRef, isInteractionRef,
   });
 
-  const interactiveDisabled = !!activeTool || !!placementMode || navigation.isAnimating;
+  // Drawing/placement tools fully disable node interaction; the select tool does not.
+  const isDrawingTool = activeTool === 'pen' || activeTool === 'eraser';
+  const isSelectTool  = activeTool === 'select';
+  const interactiveDisabled = isDrawingTool || !!placementMode || navigation.isAnimating;
 
   // ── Context Menu Logic ───────────────────────────────────────────────────
   const { menu, closeMenu, onPaneContextMenuBase, onNodeContextMenuBase, contextMenuItems } = useCanvasContextMenu({
@@ -403,7 +423,7 @@ export function Canvas() {
   });
 
   // ── Animation overlay style ──────────────────────────────────────────────
-  const animDuration = getAnimationDuration();
+  // animationDuration is a memoized value from useSettings (updates when animationSpeed changes)
 
   const handleReportBugClick = useCallback(() => setIsIssueReporterOpen(true), []);
   const handleCloseSettings = useCallback(() => setIsSettingsOpen(false), []);
@@ -416,6 +436,27 @@ export function Canvas() {
     onNodesDelete(onlyDeletable);
   }, [navigation.isAnimating, onNodesDelete]);
 
+  // ── Main canvas pointer guards ───────────────────────────────────────────
+  // These wrap the drawing-mode handlers with animation/menu guards so that
+  // drawing input is cleanly blocked during navigation transitions and while
+  // tool-configuration popovers (color picker, eraser menu) are open.
+  const onCanvasPointerDown = useCallback((e) => {
+    if (toolMenuOpen || menu || navigation.isAnimating) return;
+    handlePointerDown(e);
+  }, [toolMenuOpen, menu, navigation.isAnimating, handlePointerDown]);
+
+  const onCanvasPointerMove = useCallback((e) => {
+    handlePointerMove(e);
+    if (activeTool === 'eraser') {
+      cursorsRef.current?.updateMouse({ x: e.clientX, y: e.clientY });
+    }
+  }, [handlePointerMove, activeTool, cursorsRef]);
+
+  const onCanvasPointerLeave = useCallback((e) => {
+    handlePointerUp(e);
+    cursorsRef.current?.updateMouse({ x: -999, y: -999 });
+  }, [handlePointerUp, cursorsRef]);
+
   // ── Render ───────────────────────────────────────────────────────────────
   return (
     <div className="w-screen h-screen bg-neutral-950 flex" ref={reactFlowWrapper}>
@@ -424,22 +465,10 @@ export function Canvas() {
       <div
         className="flex-1 h-full relative"
         data-drawing-mode={activeTool || undefined}
-        onPointerDown={(e) => {
-          // Only block drawing while a popup/context-menu is open or animation is running
-          if (toolMenuOpen || menu || navigation.isAnimating) return;
-          handlePointerDown(e);
-        }}
-        onPointerMove={(e) => {
-          handlePointerMove(e);
-          if (activeTool === 'eraser') {
-            cursorsRef.current?.updateMouse({ x: e.clientX, y: e.clientY });
-          }
-        }}
+        onPointerDown={onCanvasPointerDown}
+        onPointerMove={onCanvasPointerMove}
         onPointerUp={handlePointerUp}
-        onPointerLeave={(e) => {
-          handlePointerUp(e);
-          cursorsRef.current?.updateMouse({ x: -999, y: -999 });
-        }}
+        onPointerLeave={onCanvasPointerLeave}
       >
         <SearchBar />
 
@@ -456,7 +485,7 @@ export function Canvas() {
             className="canvas-transition-overlay"
             style={{
               opacity: navigation.animPhase === 'fade-out' ? 1 : 0,
-              transition: `opacity ${animDuration / 2}ms ease-in-out`,
+              transition: `opacity ${animationDuration / 2}ms ease-in-out`,
             }}
           />
         )}
@@ -482,8 +511,8 @@ export function Canvas() {
             onNodeContextMenu={onNodeContextMenu}
             snapToGrid={snapToGrid}
             snapGrid={[40, 40]}
-            panOnDrag={interactiveDisabled ? false : [1, 2]}
-            selectionOnDrag={!interactiveDisabled}
+            panOnDrag={interactiveDisabled ? false : (isSelectTool ? [1, 2] : [0, 1, 2])}
+            selectionOnDrag={!interactiveDisabled && isSelectTool}
             selectionMode={SelectionMode.Partial}
             connectionMode={ConnectionMode.Loose}
             connectionLineType={ConnectionLineType.SmoothStep}
@@ -599,11 +628,8 @@ export function Canvas() {
             confirmLabel={confirmDialogData.confirmLabel}
             cancelLabel={confirmDialogData.cancelLabel}
             variant={confirmDialogData.variant}
-            onConfirm={() => {
-              confirmDialogData.onConfirm();
-              setConfirmDialogData(null);
-            }}
-            onCancel={() => setConfirmDialogData(null)}
+            onConfirm={handleConfirmDialogConfirm}
+            onCancel={handleConfirmDialogCancel}
           />
         )}
       </div>

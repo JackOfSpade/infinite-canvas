@@ -17,7 +17,7 @@ export function useCanvasNavigation({
   nodes, edges, drawings,
   setNodes, setEdges, setDrawings,
   clearHistory,
-  getAnimationDuration,
+  animationDuration,
 }) {
   const [stack, setStack] = useState([]);
   const [isAnimating, setIsAnimating] = useState(false);
@@ -63,7 +63,7 @@ export function useCanvasNavigation({
    * Dive into a nested canvas node.
    */
   const diveIn = useCallback((nodeId) => {
-    if (isAnimating || isNavigatingRef.current) return;
+    if (isNavigatingRef.current) return;
     isNavigatingRef.current = true;
 
     // Fast fail if node doesn't exist
@@ -73,7 +73,7 @@ export function useCanvasNavigation({
       return;
     }
 
-    const halfDuration = getAnimationDuration() / 2;
+    const halfDuration = animationDuration / 2;
 
     setIsAnimating(true);
     setAnimPhase('fade-out');
@@ -146,7 +146,7 @@ export function useCanvasNavigation({
       navFramesRef.current.push(frameId);
     }, halfDuration);
     navTimersRef.current.push(t1);
-  }, [isAnimating, reactFlow, getAnimationDuration, setNodes, setEdges, setDrawings, clearHistory]);
+  }, [reactFlow, animationDuration, setNodes, setEdges, setDrawings, clearHistory]); // isAnimating omitted — isNavigatingRef is the authoritative guard
 
   /**
    * Jump to a specific breadcrumb level.
@@ -155,10 +155,10 @@ export function useCanvasNavigation({
    */
   const jumpTo = useCallback((targetIndex) => {
     const currentStack = stackRef.current;
-    if (isAnimating || isNavigatingRef.current || targetIndex >= currentStack.length || targetIndex < 0) return;
+    if (isNavigatingRef.current || targetIndex >= currentStack.length || targetIndex < 0) return;
     isNavigatingRef.current = true;
 
-    const halfDuration = getAnimationDuration() / 2;
+    const halfDuration = animationDuration / 2;
     setIsAnimating(true);
     setAnimPhase('fade-out');
 
@@ -192,7 +192,7 @@ export function useCanvasNavigation({
       navFramesRef.current.push(frameId);
     }, halfDuration);
     navTimersRef.current.push(t3);
-  }, [isAnimating, reactFlow, getAnimationDuration, setNodes, setEdges, setDrawings, clearHistory]);
+  }, [reactFlow, animationDuration, setNodes, setEdges, setDrawings, clearHistory]); // isAnimating omitted — isNavigatingRef is the authoritative guard
 
   /**
    * Dive out one level (back to parent).
@@ -223,7 +223,7 @@ export function useCanvasNavigation({
    * Detach one or more nodes (and their internal edges) from the current sub-canvas and move them to a parent canvas depth.
    */
   const extractToLevel = useCallback((nodeIdOrIds, explicitTargetIndex = undefined) => {
-    if (isAnimating || isNavigatingRef.current || stackRef.current.length === 0) return;
+    if (isNavigatingRef.current || stackRef.current.length === 0) return;
 
     const targetIndex = explicitTargetIndex !== undefined ? explicitTargetIndex : stackRef.current.length - 1;
     // Don't extract if the target is the current level or deeper than available stack
@@ -295,7 +295,7 @@ export function useCanvasNavigation({
       newStack[targetIndex] = { ...targetParent, nodes: newParentNodes, edges: newParentEdges };
       return newStack;
     });
-  }, [setNodes, setEdges, clearHistory, isAnimating]);
+  }, [setNodes, setEdges, clearHistory]); // isAnimating omitted — isNavigatingRef is the authoritative guard
 
   /**
    * Globally updates a node's data by ID, regardless of whether it is 
@@ -336,15 +336,17 @@ export function useCanvasNavigation({
       return updated ? newNodes : prevNodes;
     });
 
-    setEdges(prevEdges => {
-      // deepAddElements traverses the node tree (nodesRef.current) to locate the target group,
-      // then returns updated edges. We use the ref so the functional updater doesn't need `nodes`
-      // in the hook's dependency array, avoiding stale-closure issues with concurrent state updates.
-      const { updated, edges: newEdges } = deepAddElements(
-        nodesRef.current, prevEdges, targetNodeId, newNodesPayload, newEdgesPayload, placement
-      );
-      return updated ? newEdges : prevEdges;
-    });
+    // For 'inside' placement: edges are embedded in the target group's data.canvasData,
+    // which setNodes already handles above. Only update the root edges array for 'sibling'
+    // placement, where newEdgesPayload is appended alongside the target node.
+    if (placement === 'sibling' && newEdgesPayload.length > 0) {
+      setEdges(prevEdges => {
+        const { updated, edges: newEdges } = deepAddElements(
+          nodesRef.current, prevEdges, targetNodeId, newNodesPayload, newEdgesPayload, placement
+        );
+        return updated ? newEdges : prevEdges;
+      });
+    }
 
     setStack(prevStack => {
       let stackUpdated = false;

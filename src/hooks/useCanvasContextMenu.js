@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
@@ -28,13 +28,12 @@ export function useCanvasContextMenu({
 }) {
   const [menu, setMenu] = useState(null);
   const reactFlow = useReactFlow();
-  const { deleteElements } = reactFlow;
-  const { addToast } = useToast();
   const isMountedRef = useRef(true);
-
   useEffect(() => {
     return () => { isMountedRef.current = false; };
   }, []);
+  const { deleteElements } = reactFlow;
+  const { addToast } = useToast();
 
   const onPaneContextMenuBase = useCallback((e) => {
     if (placementMode) return;
@@ -159,15 +158,13 @@ export function useCanvasContextMenu({
     }
     takeSnapshot();
     const nodeId = menu.node.id;
+    
+    // Immediately close menu to prevent double clicks and avoid unmount race conditions
+    setMenu(null);
+    
     try {
       const res = await window.electronAPI.aiPolishText(text);
-      
-      // Guard: component unmounted mid-flight, abort safely.
       if (!isMountedRef.current) return;
-      
-      // Guard: node may have been deleted while the AI call was in-flight.
-      if (!updateGlobal && !reactFlow.getNode(nodeId)) return;
-      
       if (res.success) {
         if (updateGlobal) {
           updateGlobal(nodeId, { text: res.text });
@@ -180,10 +177,10 @@ export function useCanvasContextMenu({
         EventLogger.log("AI Polish failed: " + res.error);
       }
     } catch (err) {
-      if (isMountedRef.current) EventLogger.error('[ContextMenu] AI polish crashed:', err);
+      EventLogger.error('[ContextMenu] AI polish crashed:', err);
+      if (!isMountedRef.current) return;
     }
-    if (isMountedRef.current) setMenu(null);
-  }, [menu, setNodes, takeSnapshot, addToast, updateGlobal, reactFlow, isAnimatingRef]);
+  }, [menu, setNodes, takeSnapshot, addToast, updateGlobal, isAnimatingRef]);
 
   const toggleStickyNote = useCallback(() => {
     if (isAnimatingRef?.current) return;
@@ -218,6 +215,11 @@ export function useCanvasContextMenu({
   // useMemo: computes a value (items array) for the current menu state.
   // useCallback would be semantically incorrect here since we're not stabilizing
   // a function identity for event handlers — we're deriving a rendered value.
+  //
+  /* eslint-disable react-hooks/refs */
+  // The callbacks below (bringToFront, aiPolishText, etc.) hold closures that reference
+  // isAnimatingRef?.current, but they are only invoked on user interaction (onClick),
+  // never during render. This is a false-positive from the v7 rule's ref-propagation tracking.
   const contextMenuItems = useMemo(() => {
     if (!menu) return [];
     if (menu.type === 'pane') {
@@ -308,6 +310,7 @@ export function useCanvasContextMenu({
     }
     return [];
   }, [menu, spawnNode, duplicateNode, bringToFront, sendToBack, deleteSelectedNode, toggleLockNode, clearCanvas, tidyNodes, aiPolishText, toggleStickyNote, closeMenu, depth, extractToParent, reactFlow]);
+  /* eslint-enable react-hooks/refs */
 
   return {
     menu,

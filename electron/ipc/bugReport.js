@@ -9,7 +9,7 @@ import { handleSafe } from './ipcUtils.js';
 // Used by both the "save to file" and "copy to clipboard" handlers so the
 // report content is identical regardless of how the user chooses to export it.
 function generateMarkdown(payload) {
-  const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates } = payload;
+  const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState } = payload;
 
   const systemInfo = {
     platform:        process.platform,
@@ -69,6 +69,34 @@ ${rows}
 `;
   }
 
+  // ── Media player state section ────────────────────────────────────────────
+  let mediaMarkdown = '';
+  if (mediaState && mediaState.length > 0) {
+    const READY_STATE = ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'];
+    const NET_STATE   = ['EMPTY', 'IDLE', 'LOADING', 'NO_SOURCE'];
+    const rows = mediaState.map((m, i) => {
+      const progress = m.duration ? `${m.currentTime?.toFixed(2)}s / ${m.duration?.toFixed(2)}s` : `${m.currentTime?.toFixed(2)}s / unknown`;
+      const errorStr = m.errorCode != null ? `code=${m.errorCode} ${m.errorMessage || ''}`.trim() : '—';
+      return (
+        `| ${i + 1} ` +
+        `| ${m.tag} ` +
+        `| ${m.paused ? 'paused' : m.ended ? 'ended' : 'playing'} ` +
+        `| ${progress} ` +
+        `| ${READY_STATE[m.readyState] ?? m.readyState} ` +
+        `| ${NET_STATE[m.networkState] ?? m.networkState} ` +
+        `| ${errorStr} |`
+      );
+    }).join('\n');
+    mediaMarkdown = `
+## Media Player State
+> Snapshot taken at report time. \`readyState\` and \`networkState\` reveal stalls, decode failures, and network issues.
+
+| # | Tag | Status | Progress | readyState | networkState | Error |
+|---|---|---|---|---|---|---|
+${rows}
+`;
+  }
+
   // ── Viewport section ───────────────────────────────────────────────────────
   const vp = frontEndState?.viewport;
   const viewportLine = vp ? `- Viewport: zoom=${vp.zoom} x=${vp.x} y=${vp.y}` : '';
@@ -99,7 +127,7 @@ ${description}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${nodeDiagMarkdown}
+${nodeDiagMarkdown}${mediaMarkdown}
 <details>
 <summary><b>Click here to expand the full JSON Application State</b></summary>
 

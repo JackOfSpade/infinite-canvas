@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Panel } from '@xyflow/react';
-import { Type, Trash2, Link2, PenTool, Eraser, Undo2, Redo2, Magnet, Settings } from 'lucide-react';
+import { Type, Trash2, Link2, PenTool, Eraser, Undo2, Redo2, Magnet, Settings, MousePointer2 } from 'lucide-react';
 
 /** Nested canvas icon — plain circle with inner glow along the inside edge */
 export function NestedCanvasIcon({ size = 18 }) {
@@ -167,6 +167,25 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
         className="glass-card rounded-full p-2 flex gap-1 bg-black/60 border border-white/10 items-center"
         onPointerDown={e => e.stopPropagation()}
       >
+
+        {/* ── Select Tool (box selection) ────────────────────────── */}
+        <ToolbarTooltip label="Select / Marquee" shortcut="S">
+          <button
+            onClick={() => {
+              setActiveTool(activeTool === 'select' ? null : 'select');
+              setPlacementMode(null);
+            }}
+            className={`p-3 rounded-full transition ${
+              activeTool === 'select'
+                ? 'text-white bg-amber-500/40 ring-2 ring-amber-400'
+                : 'text-white/70 hover:text-white hover:bg-white/10'
+            }`}
+          >
+            <MousePointer2 size={18} />
+          </button>
+        </ToolbarTooltip>
+
+        <div className="w-px h-6 bg-white/10 mx-0.5" />
 
         {/* ── Creation Tools ───────────────────────────────────────── */}
         <ToolbarTooltip label="Add Text" shortcut="drag or T">

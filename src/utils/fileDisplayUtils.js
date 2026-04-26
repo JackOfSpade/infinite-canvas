@@ -10,6 +10,7 @@ export const FILE_CATEGORIES = {
   VIDEO: 'video',
   ARCHIVE: 'archive',
   SPREADSHEET: 'spreadsheet',
+  TEXT: 'text',       // md / txt — previewable plain-text files
   DOCUMENT: 'document',
   UNKNOWN: 'unknown'
 };
@@ -54,8 +55,11 @@ export function getFileCategoryInfo(filename) {
   if (['csv', 'xls', 'xlsx'].includes(ext)) {
     return { category: FILE_CATEGORIES.SPREADSHEET, label: 'Spreadsheet', color: 'emerald', badge, Icon: FileSpreadsheet };
   }
-  if (['md', 'txt', 'rtf'].includes(ext)) {
-    return { category: FILE_CATEGORIES.DOCUMENT, label: 'Text', color: 'sky', badge, Icon: FileText };
+  if (['md', 'txt'].includes(ext)) {
+    return { category: FILE_CATEGORIES.TEXT, label: 'Text', color: 'sky', badge, Icon: FileText };
+  }
+  if (ext === 'rtf') {
+    return { category: FILE_CATEGORIES.DOCUMENT, label: 'Rich Text', color: 'sky', badge, Icon: FileText };
   }
   if (ext === 'pdf') {
     return { category: FILE_CATEGORIES.DOCUMENT, label: 'PDF Document', color: 'rose', badge, Icon: FileText };

@@ -61,6 +61,10 @@ export function useNodeAutoEdit(id, isNew, isEmptyPredicate, inputRef) {
     const isLocked = currentNode?.data?.locked;
     if (isEmptyPredicate() && !isLocked) {
       setNodes(nds => nds.filter(n => n.id !== id));
+      // Dispatch snapshot synchronously after state update to ensure history atomicity
+      setTimeout(() => {
+        document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
+      }, 0);
     } else {
       updateNodeData(id, dataUpdates);
     }

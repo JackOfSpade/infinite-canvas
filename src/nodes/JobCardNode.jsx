@@ -1,7 +1,7 @@
 import React, { useCallback, useContext, useRef, useState } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
-import { ExternalLink, FileText, ChevronDown, ChevronUp, X } from 'lucide-react';
+import { ExternalLink, FileText, ChevronDown, ChevronUp, X, Download, StickyNote, BrainCircuit, Clock } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
 
@@ -21,13 +21,15 @@ const STRENGTH_LABELS = {
 
 const STATUS_OPTIONS = ['New', 'Applied', 'Interview', 'Offer', 'Rejected'];
 
+const NOTES_DEBOUNCE_MS = 600;
+
 /**
  * JobCardNode — displays a scored job result on the canvas.
  *
  * data shape:
  *   title, company, location, salary, snippet, url, source,
  *   matchScore, reasoning, careerDirection, strengthLabel,
- *   status, coverLetter, resumeProfile
+ *   status, coverLetter, resumeProfile, notes
  */
 export function JobCardNode({ id, data }) {
   const { updateNodeData, deleteElements } = useReactFlow();
@@ -36,10 +38,22 @@ export function JobCardNode({ id, data }) {
 
   const [expanded, setExpanded] = useState(false);
   const [generatingCL, setGeneratingCL] = useState(false);
+  const [savingCL, setSavingCL] = useState(false);
+  const [generatingPrep, setGeneratingPrep] = useState(false);
+  // Controlled notes value — keeps textarea in sync with external updates (undo/redo)
+  const [notesValue, setNotesValue] = useState(data.notes || '');
+  // Local editable cover letter — user can personalise before copy/save
+  const [editedCL, setEditedCL] = useState(data.coverLetter || '');
+  const clFocusRef = useRef(false);
   const { addToast } = useToast();
-  
+
   // Cache ID for closure safely
   const idRef = useRef(id); idRef.current = id;
+
+  // Notes debounce ref — avoids updateGlobal on every keystroke
+  const notesTimerRef = useRef(null);
+  // Track focus so external sync doesn't interrupt mid-type
+  const notesFocusRef = useRef(false);
 
   const score = data.matchScore || 0;
   const strength = data.strengthLabel || 'exploring';
@@ -48,8 +62,14 @@ export function JobCardNode({ id, data }) {
   const status = data.status || 'New';
 
   const handleStatusChange = useCallback((newStatus) => {
-    updateGlobal(id, { status: newStatus });
-  }, [id, updateGlobal]);
+    const update = { status: newStatus };
+    // Record timestamp when entering key stages
+    if (newStatus === 'Applied' && !data.appliedAt) update.appliedAt = new Date().toISOString();
+    if (newStatus === 'Interview' && !data.interviewAt) update.interviewAt = new Date().toISOString();
+    // Auto-expand when entering Interview mode so prep is visible
+    if (newStatus === 'Interview') setExpanded(true);
+    updateGlobal(id, update);
+  }, [id, updateGlobal, data.appliedAt, data.interviewAt]);
 
   const openJobUrl = useCallback(() => {
     if (data.url && window.electronAPI?.openExternal) {
@@ -57,6 +77,41 @@ export function JobCardNode({ id, data }) {
     }
   }, [data.url]);
 
+  const isMountedRef = useRef(true);
+
+  React.useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+      if (notesTimerRef.current) clearTimeout(notesTimerRef.current);
+    };
+  }, []);
+
+  // ── Notes ─────────────────────────────────────────────────────────────────
+  // Sync when data.notes changes externally (e.g. undo/redo), but only when the
+  // user isn't actively typing — avoids resetting the caret position mid-edit.
+  React.useEffect(() => {
+    if (!notesFocusRef.current) {
+      setNotesValue(data.notes || '');
+    }
+  }, [data.notes]);
+
+  // Sync editedCL when cover letter is regenerated externally but not while editing
+  React.useEffect(() => {
+    if (!clFocusRef.current) {
+      setEditedCL(data.coverLetter || '');
+    }
+  }, [data.coverLetter]);
+
+  const handleNotesChange = useCallback((e) => {
+    const val = e.target.value;
+    setNotesValue(val);
+    if (notesTimerRef.current) clearTimeout(notesTimerRef.current);
+    notesTimerRef.current = setTimeout(() => {
+      updateGlobal(idRef.current, { notes: val });
+    }, NOTES_DEBOUNCE_MS);
+  }, [updateGlobal]);
+
+  // ── Cover letter ──────────────────────────────────────────────────────────
   const generateCoverLetter = useCallback(async () => {
     if (!window.electronAPI?.generateCoverLetter || !data.resumeProfile) return;
     setGeneratingCL(true);
@@ -66,6 +121,7 @@ export function JobCardNode({ id, data }) {
         profile: data.resumeProfile,
         job: { title: data.title, company: data.company, snippet: data.snippet },
       });
+      if (!isMountedRef.current) return;
       if (result.success) {
         updateGlobal(currentId, { coverLetter: result.coverLetter });
         addToast({ title: 'Cover Letter Ready', description: `Generated for ${data.company}`, type: 'success' });
@@ -73,12 +129,67 @@ export function JobCardNode({ id, data }) {
         addToast({ title: 'Generation Failed', description: result.error, type: 'error' });
       }
     } catch (e) {
+      if (!isMountedRef.current) return;
       EventLogger.error('Cover letter generation failed:', e);
       addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
     } finally {
-      setGeneratingCL(false);
+      if (isMountedRef.current) setGeneratingCL(false);
     }
   }, [data.resumeProfile, data.title, data.company, data.snippet, updateGlobal, addToast]);
+
+  // ── Interview Prep ────────────────────────────────────────────────────────
+  const generateInterviewPrep = useCallback(async () => {
+    if (!window.electronAPI?.generateInterviewPrep || !data.resumeProfile) return;
+    setGeneratingPrep(true);
+    const currentId = idRef.current;
+    try {
+      const result = await window.electronAPI.generateInterviewPrep({
+        profile: data.resumeProfile,
+        job: { title: data.title, company: data.company, snippet: data.snippet },
+      });
+      if (!isMountedRef.current) return;
+      if (result.success) {
+        updateGlobal(currentId, { interviewPrep: result.questions });
+        addToast({ title: 'Interview Prep Ready', description: `${result.questions?.length || 0} questions for ${data.company}`, type: 'success' });
+      } else {
+        addToast({ title: 'Generation Failed', description: result.error, type: 'error' });
+      }
+    } catch (e) {
+      if (!isMountedRef.current) return;
+      EventLogger.error('Interview prep generation failed:', e);
+      addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
+    } finally {
+      if (isMountedRef.current) setGeneratingPrep(false);
+    }
+  }, [data.resumeProfile, data.title, data.company, data.snippet, updateGlobal, addToast]);
+
+  const saveCoverLetterToFile = useCallback(async () => {
+    if (!editedCL || !window.electronAPI?.saveFileDialog) return;
+    setSavingCL(true);
+    try {
+      const safe = (data.company || 'company').replace(/[^a-z0-9]/gi, '-').toLowerCase();
+      const result = await window.electronAPI.saveFileDialog({
+        defaultFilename: `cover-letter-${safe}.txt`,
+        content: editedCL,           // use locally edited text
+        filters: [{ name: 'Text Files', extensions: ['txt'] }],
+      });
+      if (!isMountedRef.current) return;
+      if (result?.saved) {
+        addToast({ title: 'Cover Letter Saved', description: result.filePath, type: 'success' });
+      } else if (result?.success === false) {
+        // atomicWriteFile failed after dialog accepted (e.g. disk full, permissions)
+        EventLogger.error('Cover letter write failed:', result.error);
+        addToast({ title: 'Save Error', description: result.error || 'Could not write file', type: 'error' });
+      }
+      // result.saved === false without success===false means user canceled — no feedback needed
+    } catch (e) {
+      if (!isMountedRef.current) return;
+      EventLogger.error('Cover letter save failed:', e);
+      addToast({ title: 'Save Error', description: e?.message || String(e), type: 'error' });
+    } finally {
+      if (isMountedRef.current) setSavingCL(false);
+    }
+  }, [data.coverLetter, data.company, addToast]);
 
   return (
     <div
@@ -100,8 +211,8 @@ export function JobCardNode({ id, data }) {
           <div className="text-white/90 text-sm font-semibold leading-tight truncate">{data.title || 'Untitled'}</div>
           <div className="text-white/50 text-xs mt-0.5 truncate">{data.company}{data.location ? ` · ${data.location}` : ''}</div>
           {data.salary && <div className="text-emerald-400/80 text-xs mt-0.5">{data.salary}</div>}
-          
-          <button 
+
+          <button
             onClick={data.locked ? undefined : () => deleteElements({ nodes: [{ id }] })}
             disabled={!!data.locked}
             className={`absolute top-0 -right-2 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all ${
@@ -136,15 +247,27 @@ export function JobCardNode({ id, data }) {
 
       {/* Status bar */}
       <div className="px-3 py-1.5 flex items-center justify-between border-t border-white/5">
-        <select
-          value={status}
-          onChange={data.locked ? undefined : (e) => handleStatusChange(e.target.value)}
-          disabled={!!data.locked}
-          className={`bg-transparent text-xs outline-none ${data.locked ? 'text-white/30 cursor-default' : 'text-white/60 cursor-pointer hover:text-white/80'}`}
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          {STATUS_OPTIONS.map(s => <option key={s} value={s} className="bg-[#1a1a1a]">{s}</option>)}
-        </select>
+        <div className="flex items-center gap-2">
+          <select
+            value={status}
+            onChange={data.locked ? undefined : (e) => handleStatusChange(e.target.value)}
+            disabled={!!data.locked}
+            className={`bg-transparent text-xs outline-none ${data.locked ? 'text-white/30 cursor-default' : 'text-white/60 cursor-pointer hover:text-white/80'}`}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            {STATUS_OPTIONS.map(s => <option key={s} value={s} className="bg-[#1a1a1a]">{s}</option>)}
+          </select>
+          {/* Days-since badge for Applied / Interview */}
+          {data.appliedAt && (status === 'Applied' || status === 'Interview' || status === 'Offer') && (() => {
+            const days = Math.floor((Date.now() - new Date(data.appliedAt).getTime()) / 86400000);
+            return days >= 0 ? (
+              <span className="flex items-center gap-0.5 text-[9px] text-white/25">
+                <Clock size={8} />
+                {days === 0 ? 'today' : `${days}d`}
+              </span>
+            ) : null;
+          })()}
+        </div>
 
         <div className="flex items-center gap-1">
           {data.url && (
@@ -168,29 +291,84 @@ export function JobCardNode({ id, data }) {
 
       {/* Expanded section */}
       {expanded && (
-        <div className="px-3 py-2 border-t border-white/5 space-y-2">
+        <div className="px-3 py-2 border-t border-white/5 space-y-2" onPointerDown={(e) => e.stopPropagation()}>
+
+          {/* Snippet */}
           {data.snippet && (
             <div className="text-white/40 text-xs leading-relaxed max-h-24 overflow-y-auto custom-scrollbar">
               {data.snippet}
             </div>
           )}
 
+          {/* Notes */}
+          <div className="space-y-1">
+            <div className="flex items-center gap-1 text-white/30 text-[10px] font-semibold uppercase tracking-wider">
+              <StickyNote size={9} />
+              Notes
+            </div>
+            <textarea
+              value={notesValue}
+              onChange={data.locked ? undefined : handleNotesChange}
+              onFocus={() => { notesFocusRef.current = true; }}
+              onBlur={() => { notesFocusRef.current = false; }}
+              readOnly={!!data.locked}
+              placeholder={data.locked ? '' : 'Interview notes, contacts, follow-ups…'}
+              rows={2}
+              className={`nodrag w-full resize-none bg-black/20 border border-white/5 rounded px-2 py-1.5 text-white/60 text-[11px] leading-relaxed outline-none placeholder:text-white/20 transition-colors ${
+                data.locked ? 'cursor-default opacity-60' : 'focus:border-white/15 focus:bg-black/30'
+              }`}
+            />
+          </div>
+
           {/* Cover Letter */}
           {data.coverLetter ? (
             <div className="space-y-1">
-              <div className="text-white/50 text-[10px] font-semibold uppercase tracking-wider">Cover Letter</div>
-              <div className="text-white/60 text-xs leading-relaxed max-h-32 overflow-y-auto custom-scrollbar bg-black/20 rounded p-2">
-                {data.coverLetter}
+              <div className="flex items-center justify-between">
+                <div className="text-white/50 text-[10px] font-semibold uppercase tracking-wider">Cover Letter</div>
+                {!data.locked && (
+                  <button
+                    onClick={generatingCL ? undefined : (e) => { e.stopPropagation(); generateCoverLetter(); }}
+                    disabled={generatingCL}
+                    className="text-[9px] text-white/25 hover:text-white/50 transition-colors disabled:opacity-30"
+                    title="Regenerate cover letter"
+                  >
+                    {generatingCL ? 'Generating…' : 'Regenerate'}
+                  </button>
+                )}
               </div>
-              <button
-                onClick={() => navigator.clipboard.writeText(data.coverLetter).catch(err => {
-                  EventLogger.log('clipboard copy failed: ' + (err?.message || String(err)));
-                  addToast({ title: 'Clipboard Error', description: 'Failed to copy text', type: 'error' });
-                })}
-                className="text-blue-400/80 text-[10px] hover:text-blue-400 transition-colors"
-              >
-                Copy to clipboard
-              </button>
+              <textarea
+                value={editedCL}
+                onChange={data.locked ? undefined : (e) => setEditedCL(e.target.value)}
+                onFocus={() => { clFocusRef.current = true; }}
+                onBlur={() => { clFocusRef.current = false; }}
+                readOnly={!!data.locked}
+                rows={6}
+                className={`nodrag w-full resize-none bg-black/20 border border-white/5 rounded px-2 py-1.5 text-white/60 text-[11px] leading-relaxed outline-none font-mono ${
+                  data.locked ? 'cursor-default opacity-60' : 'focus:border-white/15 focus:bg-black/30'
+                }`}
+                placeholder="Cover letter text…"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => navigator.clipboard.writeText(editedCL).catch(err => {
+                    EventLogger.log('clipboard copy failed: ' + (err?.message || String(err)));
+                    addToast({ title: 'Clipboard Error', description: 'Failed to copy text', type: 'error' });
+                  })}
+                  className="text-blue-400/80 text-[10px] hover:text-blue-400 transition-colors"
+                >
+                  Copy to clipboard
+                </button>
+                <span className="text-white/15">·</span>
+                <button
+                  onClick={savingCL ? undefined : saveCoverLetterToFile}
+                  disabled={savingCL}
+                  className="flex items-center gap-0.5 text-white/40 text-[10px] hover:text-white/70 transition-colors disabled:opacity-40"
+                  title="Save cover letter to file"
+                >
+                  <Download size={9} />
+                  {savingCL ? 'Saving…' : 'Save to file'}
+                </button>
+              </div>
             </div>
           ) : (
             <button
@@ -205,6 +383,60 @@ export function JobCardNode({ id, data }) {
               <FileText size={12} />
               {generatingCL ? 'Generating...' : 'Generate Cover Letter'}
             </button>
+          )}
+
+          {/* Interview Prep — shown when status is Interview, or prep exists and not yet resolved */}
+          {(status === 'Interview' || (data.interviewPrep && status !== 'Offer' && status !== 'Rejected')) && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1 text-purple-400/70 text-[10px] font-semibold uppercase tracking-wider">
+                  <BrainCircuit size={9} />
+                  Interview Prep
+                </div>
+                {data.interviewPrep && !data.locked && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); generateInterviewPrep(); }}
+                    disabled={generatingPrep}
+                    className="text-[9px] text-white/25 hover:text-white/50 transition-colors disabled:opacity-30"
+                    title="Regenerate prep questions"
+                  >
+                    {generatingPrep ? 'Generating…' : 'Refresh'}
+                  </button>
+                )}
+              </div>
+
+              {data.interviewPrep?.length > 0 ? (
+                <div className="space-y-1.5 max-h-64 overflow-y-auto custom-scrollbar pr-0.5">
+                  {data.interviewPrep.map((q, i) => {
+                    const typeColor = q.type === 'behavioral' ? 'text-blue-400/60' : q.type === 'technical' ? 'text-emerald-400/60' : 'text-amber-400/60';
+                    const typeBg = q.type === 'behavioral' ? 'bg-blue-500/10' : q.type === 'technical' ? 'bg-emerald-500/10' : 'bg-amber-500/10';
+                    return (
+                      <div key={i} className={`rounded p-2 ${typeBg} border border-white/5`}>
+                        <div className={`text-[9px] font-medium uppercase tracking-wider mb-0.5 ${typeColor}`}>{q.type}</div>
+                        <div className="text-white/75 text-[11px] leading-snug font-medium">{q.question}</div>
+                        {q.tip && (
+                          <div className="text-white/35 text-[10px] leading-relaxed mt-1">{q.tip}</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <button
+                  onClick={data.locked ? undefined : (e) => { e.stopPropagation(); generateInterviewPrep(); }}
+                  disabled={generatingPrep || !!data.locked || !data.resumeProfile}
+                  className={`w-full flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium transition-colors ${
+                    data.locked || !data.resumeProfile
+                      ? 'bg-white/5 text-white/20 cursor-default'
+                      : 'bg-purple-500/10 text-purple-400/80 hover:bg-purple-500/20 hover:text-purple-400 disabled:opacity-50'
+                  }`}
+                  title={!data.resumeProfile ? 'Resume profile not available' : undefined}
+                >
+                  <BrainCircuit size={12} />
+                  {generatingPrep ? 'Generating…' : 'Generate Interview Prep'}
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}

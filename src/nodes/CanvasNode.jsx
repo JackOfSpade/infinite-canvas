@@ -77,8 +77,8 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     // updateNode targets a single node directly (O(1)) rather than mapping
     // over all nodes (O(n)), avoiding unnecessary re-renders of peers.
     mainFlow.updateNode(id, { draggable: !isEditing && !data.locked });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isEditing]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- mainFlow and id are stable; only isEditing and data.locked drive the update
+  }, [isEditing, data.locked]);
 
   useEffect(() => {
     if (data.isNew) {

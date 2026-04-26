@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback, useContext } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useContext, useMemo } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { AnimatedSourceRing } from '../components/AnimatedSourceRing';
@@ -6,6 +6,7 @@ import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
 import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
+import { useToast } from '../components/ToastProvider';
 
 import { JobHubProcessingState } from './jobhub/JobHubProcessingState';
 import { JobHubDoneState } from './jobhub/JobHubDoneState';
@@ -37,11 +38,16 @@ export function JobHubNode({ id, data }) {
 
   // id is stable for this component's lifetime — ReactFlow never reuses
   // instances with different ids, so we can safely close over it in callbacks.
-  const { updateNodeData, setNodes, getNode, addNodes, addEdges } = useReactFlow();
+  const { updateNodeData, setNodes, getNode, getNodes, getEdges, addNodes, addEdges, deleteElements } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const addElementsGlobally = nav?.addElementsGlobally;
   const processingRef = useRef(false);
+  const isMountedRef = useRef(true);
+  const { addToast } = useToast();
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
   // Stable ref to startProcessing so handleDrop can call it without a stale closure.
   const startProcessingRef = useRef(null);
 
@@ -138,30 +144,48 @@ export function JobHubNode({ id, data }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hubState, sourceProgress, data.resultCount, data.errorMessage, sourceFilter, data.finalSourceCounts]);
 
+  // Combined card opacity: source AND score AND status filters all applied together.
+  // Declared before toggleSourceFilter because toggleSourceFilter references it.
+  const applyCardFilters = useCallback(({ sourceFilter: sf, scoreThreshold: st, statusFilters: stf } = {}) => {
+    // Fall back to current data values if not passed explicitly
+    const activeSrc   = sf  !== undefined ? sf  : (data.sourceFilter || null);
+    const activeScore = st  !== undefined ? st  : (data.scoreThreshold || 0);
+    const activeStats = stf !== undefined ? stf : (data.statusFilters || []);
+
+    setNodes(nodes => nodes.map(n => {
+      if (n.type !== 'jobcard') return n;
+      const srcOk    = !activeSrc   || n.data?.source === activeSrc;
+      const scoreOk  = !activeScore || (n.data?.matchScore || 0) >= activeScore;
+      const statusOk = activeStats.length === 0 || activeStats.includes(n.data?.status || 'New');
+      const visible  = srcOk && scoreOk && statusOk;
+      return { ...n, style: { ...n.style, opacity: visible ? 1 : 0.15 } };
+    }));
+  }, [data.sourceFilter, data.scoreThreshold, data.statusFilters, setNodes]);
+
   // Source click-through filtering
   const toggleSourceFilter = useCallback((sourceId) => {
     const newFilter = sourceFilter === sourceId ? null : sourceId;
     updateGlobal(id, { sourceFilter: newFilter });
+    applyCardFilters({ sourceFilter: newFilter });
+  }, [sourceFilter, id, updateGlobal, applyCardFilters]);
 
-    // Dim/undim JobCard nodes based on source filter
-    // Note: opacity changes are transient (stripped before saves by sanitizeNodesForSave)
-    setNodes(nodes => nodes.map(n => {
-      if (n.type !== 'jobcard') return n;
-      if (!newFilter) {
-        return { ...n, style: { ...n.style, opacity: 1 } };
-      }
-      return { ...n, style: { ...n.style, opacity: n.data?.source === newFilter ? 1 : 0.2 } };
-    }));
-  }, [sourceFilter, id, updateGlobal, setNodes]);
+  const setScoreThreshold = useCallback((val) => {
+    updateGlobal(id, { scoreThreshold: val });
+    applyCardFilters({ scoreThreshold: val });
+  }, [id, updateGlobal, applyCardFilters]);
 
-  // Re-apply source filter dim on mount — in case the filter was persisted
-  // but the opacity was stripped from the save file (which prevents stale opacity on reload).
+  const toggleStatusFilter = useCallback((status) => {
+    const current = data.statusFilters || [];
+    const updated = current.includes(status) ? current.filter(s => s !== status) : [...current, status];
+    updateGlobal(id, { statusFilters: updated });
+    applyCardFilters({ statusFilters: updated });
+  }, [data.statusFilters, id, updateGlobal, applyCardFilters]);
+
+  // Re-apply all filters on mount — opacities are stripped from save files to keep them clean.
   useEffect(() => {
-    if (!sourceFilter) return;
-    setNodes(nodes => nodes.map(n => {
-      if (n.type !== 'jobcard') return n;
-      return { ...n, style: { ...n.style, opacity: n.data?.source === sourceFilter ? 1 : 0.2 } };
-    }));
+    const hasFilter = data.sourceFilter || (data.scoreThreshold || 0) > 0 || (data.statusFilters || []).length > 0;
+    if (!hasFilter) return;
+    applyCardFilters({});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally runs once on mount only
 
@@ -190,6 +214,7 @@ export function JobHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'parsing' });
       const parseResult = await window.electronAPI.parseResume({ filePath, nodeId: currentId });
       
+      if (!isMountedRef.current) return;
       // Allow processing to finish even if unmounted or node deleted!
       if (!parseResult.success) {
         throw new Error(parseResult.error || 'Failed to parse resume');
@@ -198,6 +223,9 @@ export function JobHubNode({ id, data }) {
       // Step 2: Query construction
       updateGlobal(currentId, {
         hubState: 'querying',
+        // Persist profile on hub so re-run works even if source file has moved
+        resumeProfile: parseResult.profile,
+        resumeSummary: `${parseResult.profile.skills?.slice(0, 3).join(', ')}${parseResult.profile.experience_years ? ` · ${parseResult.profile.experience_years}y exp` : ''}`,
         resumeContext: {
           skills: parseResult.profile.skills,
           experience: parseResult.profile.experience_years,
@@ -208,6 +236,7 @@ export function JobHubNode({ id, data }) {
         profile: parseResult.profile,
         nodeId: currentId 
       });
+      if (!isMountedRef.current) return;
       
       // Flatten all query arrays into a single list for the search step.
       const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queriesResult.queries || {};
@@ -217,6 +246,7 @@ export function JobHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length });
       
       const searchResult = await window.electronAPI.searchJobs({ queries: allQueries, nodeId: currentId });
+      if (!isMountedRef.current) return;
       
       if (!searchResult.success || !searchResult.jobs || searchResult.jobs.length === 0) {
         updateGlobal(currentId, { hubState: 'done', resultCount: 0 });
@@ -228,6 +258,7 @@ export function JobHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'scoring', jobCount: searchResult.jobs.length });
       
       const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile: parseResult.profile, nodeId: currentId });
+      if (!isMountedRef.current) return;
       
       if (!scoreResult.success) {
         throw new Error(scoreResult.error || 'Failed to score jobs');
@@ -305,7 +336,101 @@ export function JobHubNode({ id, data }) {
       EventLogger.error('JobHubNode task failed:', error);
       updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
     } finally {
-      processingRef.current = false;
+      if (isMountedRef.current) {
+        processingRef.current = false;
+      }
+    }
+  }, [id, updateGlobal, addElementsGlobally, addNodes, addEdges, getNode]);
+
+  /**
+   * Runs the pipeline from query-generation onward using an already-parsed profile.
+   * Used by re-run when the original file is no longer on disk.
+   */
+  const startProcessingWithProfile = useCallback(async (profile) => {
+    if (!window.electronAPI || processingRef.current || !profile) return;
+    processingRef.current = true;
+    setSourceProgress({});
+    const currentId = id;
+    const hubNodeRef = getNode(currentId);
+    const originalPos = hubNodeRef?.position || { x: 0, y: 0 };
+
+    try {
+      updateGlobal(currentId, { hubState: 'querying' });
+
+      const queriesResult = await window.electronAPI.generateJobQueries({ profile, nodeId: currentId });
+      if (!isMountedRef.current) return;
+
+      const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queriesResult.queries || {};
+      const allQueries = [...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
+
+      updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length });
+
+      const searchResult = await window.electronAPI.searchJobs({ queries: allQueries, nodeId: currentId });
+      if (!isMountedRef.current) return;
+
+      if (!searchResult.success || !searchResult.jobs || searchResult.jobs.length === 0) {
+        updateGlobal(currentId, { hubState: 'done', resultCount: 0 });
+        return; // finally block resets processingRef
+      }
+
+      updateGlobal(currentId, { hubState: 'scoring', jobCount: searchResult.jobs.length });
+
+      const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile, nodeId: currentId });
+      if (!isMountedRef.current) return;
+
+      if (!scoreResult.success) throw new Error(scoreResult.error || 'Failed to score jobs');
+
+      const hubx = originalPos.x;
+      const huby = originalPos.y;
+      const newNodes = [];
+      const newEdges = [];
+      let currentYOffset = 0;
+      const baseNodeId = `job-${Date.now()}`;
+
+      scoreResult.scoredJobs.forEach((job, index) => {
+        const jobId = `${baseNodeId}-${index}`;
+        newNodes.push({
+          id: jobId,
+          type: 'jobcard',
+          position: { x: hubx + 400, y: huby + currentYOffset },
+          data: {
+            title: job.title, company: job.company, location: job.location,
+            salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
+            reasoning: job.reasoning, careerDirection: job.careerDirection,
+            strengthLabel: job.strengthLabel, source: job.source,
+            url: job.url, posted: job.posted, resumeProfile: profile, isNew: false,
+          },
+        });
+        newEdges.push({
+          id: `edge-${currentId}-${jobId}`,
+          source: currentId, target: jobId,
+          type: 'smoothstep', animated: true,
+          style: { stroke: 'rgba(96,165,250,0.5)', strokeWidth: 2 },
+        });
+        currentYOffset += 280;
+      });
+
+      if (newNodes.length > 0) {
+        document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
+        if (addElementsGlobally) {
+          addElementsGlobally(currentId, newNodes, newEdges, 'sibling');
+        } else {
+          addNodes(newNodes);
+          addEdges(newEdges);
+        }
+      }
+
+      const finalSourceCounts = {};
+      scoreResult.scoredJobs.forEach(job => {
+        finalSourceCounts[job.source] = (finalSourceCounts[job.source] || 0) + 1;
+      });
+
+      updateGlobal(currentId, { hubState: 'done', resultCount: scoreResult.scoredJobs.length, finalSourceCounts });
+    } catch (error) {
+      EventLogger.error('JobHubNode (profile-rerun) task failed:', error);
+      updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
+    } finally {
+      if (isMountedRef.current) processingRef.current = false;
     }
   }, [id, updateGlobal, addElementsGlobally, addNodes, addEdges, getNode]);
 
@@ -335,6 +460,41 @@ export function JobHubNode({ id, data }) {
     setSourceProgress({});
     processingRef.current = false;
   }, [data.locked, id, updateGlobal]);
+
+  // Collect jobcard nodes connected to this hub (used for CSV export and dedup on re-run)
+  const connectedJobCards = useMemo(() => {
+    const edges = getEdges().filter(e => e.source === id);
+    const cardIds = new Set(edges.map(e => e.target));
+    return getNodes().filter(n => cardIds.has(n.id) && n.type === 'jobcard').map(n => n.data);
+  // Re-compute when hub state settles so new cards are included after a run
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, getEdges, getNodes, data.resultCount]);
+
+  const handleRerun = useCallback(() => {
+    if (data.locked || processingRef.current) return;
+    if (!data.filePath && !data.resumeProfile) {
+      addToast({ title: 'No Resume', description: 'Drop a resume file onto the hub to search again.', type: 'error' });
+      return;
+    }
+
+    // Remove old connected job cards before re-running so the canvas doesn't accumulate duplicates
+    const edges = getEdges().filter(e => e.source === id);
+    if (edges.length > 0) {
+      const nodesToDelete = edges.map(e => ({ id: e.target }));
+      const edgesToDelete = edges.map(e => ({ id: e.id }));
+      deleteElements({ nodes: nodesToDelete, edges: edgesToDelete });
+    }
+
+    setSourceProgress({});
+    if (data.filePath) {
+      // File still accessible — re-parse for freshness then run full pipeline
+      startProcessingRef.current?.(data.filePath);
+    } else {
+      // File gone but profile is persisted — run from query step onward
+      addToast({ title: 'Re-running Search', description: 'Using stored resume profile — original file not needed.', type: 'info' });
+      startProcessingWithProfile(data.resumeProfile);
+    }
+  }, [data.locked, data.filePath, data.resumeProfile, id, getEdges, deleteElements, addToast, startProcessingWithProfile]);
 
   const isProcessing = PROCESSING_STATES.includes(hubState);
 
@@ -381,12 +541,18 @@ export function JobHubNode({ id, data }) {
 
         {/* Done state */}
         {hubState === 'done' && (
-          <JobHubDoneState 
+          <JobHubDoneState
             resultCount={data.resultCount}
             sourceFilter={sourceFilter}
             toggleSourceFilter={toggleSourceFilter}
             resumeSummary={data.resumeSummary}
             locked={!!data.locked}
+            scoreThreshold={data.scoreThreshold || 0}
+            setScoreThreshold={setScoreThreshold}
+            statusFilters={data.statusFilters || []}
+            toggleStatusFilter={toggleStatusFilter}
+            onRerun={handleRerun}
+            jobCards={connectedJobCards}
           />
         )}
 

@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 
 const STORAGE_KEY = 'infiniteCanvas.settings';
 
@@ -32,7 +32,7 @@ function persist(settings) {
 
 /**
  * Manages persistent application settings via localStorage.
- * Returns { settings, updateSetting, updateShortcut, resetShortcuts, getAnimationDuration }.
+ * Returns { settings, updateSetting, updateShortcut, resetShortcuts, animationDuration }.
  *
  * NOTE: localStorage writes happen inside state updaters. This is intentional —
  * `persist` uses try/catch and is idempotent (same input → same localStorage state),
@@ -84,9 +84,9 @@ export function useSettings() {
     });
   }, []);
 
-  const getAnimationDuration = useCallback(() => {
+  const animationDuration = useMemo(() => {
     return ANIMATION_DURATIONS[settings.animationSpeed] || ANIMATION_DURATIONS.balanced;
   }, [settings.animationSpeed]);
 
-  return { settings, updateSetting, updateShortcut, resetShortcuts, getAnimationDuration };
+  return { settings, updateSetting, updateShortcut, resetShortcuts, animationDuration };
 }

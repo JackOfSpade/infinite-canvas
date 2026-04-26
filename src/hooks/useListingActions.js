@@ -64,29 +64,29 @@ export function useListingActions(id, data) {
   // Stable: reads userPriceRef to avoid re-creating on every userPrice change.
   }, []);
 
-  // ── Copy listing ───────────────────────────────────────────────────────────
+  // ── Copy listing ─────────────────────────────────────────────────────
 
-  const handleCopyListing = useCallback(() => {
-    const text = `${product.generated_title || ''}\n\nPrice: $${priceInput}\nCondition: ${product.condition || ''}\n\n${product.generated_description || ''}`;
-    
-    // Explicitly check for clipboard API availability
+  // Memoised so both Copy and Save-to-File use the same text without duplication.
+  const listingText = useMemo(() =>
+    `${product.generated_title || ''}\n\nPrice: $${priceInput}\nCondition: ${product.condition || ''}\n\n${product.generated_description || ''}`,
+    [product, priceInput]
+  );
+
+  const handleCopyListing = useCallback((textOverride) => {
     if (!navigator.clipboard?.writeText) {
       EventLogger.log('handleCopyListing: Clipboard API not available');
       return;
     }
-
-    navigator.clipboard.writeText(text)
+    navigator.clipboard.writeText(textOverride ?? listingText)
       .then(() => {
         setCopied(true);
         if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current);
-        copiedTimeoutRef.current = setTimeout(() => {
-          setCopied(false);
-        }, 2000);
+        copiedTimeoutRef.current = setTimeout(() => { setCopied(false); }, 2000);
       })
       .catch((err) => {
         EventLogger.log('handleCopyListing: clipboard write failed: ' + (err?.message || String(err)));
       });
-  }, [product, priceInput]);
+  }, [listingText]);
 
   // ── Platform selection ─────────────────────────────────────────────────────
 
@@ -100,6 +100,11 @@ export function useListingActions(id, data) {
 
   // ── Price research ─────────────────────────────────────────────────────────
 
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
+
   const researchPrice = useCallback(async (onStateChange) => {
     if (!window.electronAPI?.researchPrice) return;
     onStateChange?.('researching');
@@ -112,6 +117,8 @@ export function useListingActions(id, data) {
         condition: product.condition || 'Used - Good',
       });
 
+      if (!isMountedRef.current) return null;
+
       if (result.success) {
         setPriceInput(result.pricing.recommended_price || '');
         onStateChange?.('priced', result);
@@ -120,6 +127,7 @@ export function useListingActions(id, data) {
       }
       return result;
     } catch (err) {
+      if (!isMountedRef.current) return null;
       EventLogger.error('researchPrice failed:', err);
       onStateChange?.('error', err);
       return null;
@@ -141,6 +149,7 @@ export function useListingActions(id, data) {
     justificationExpanded,
     selectedPlatforms,
     copied,
+    listingText,
 
     // Handlers
     handleFieldEdit,

@@ -344,4 +344,39 @@ Don't be generic. Reference specific skills from the resume that match specific 
 
     return { coverLetter: result.coverLetter };
   });
+
+  // ── Generate Interview Prep ───────────────────────────────────────────────
+  handleSafe('generate-interview-prep', async (event, { profile, job }, signal) => {
+    logger.info(`[Jobs] Generating interview prep for ${job.title} at ${job.company}`);
+    const result = await callGeminiText(`
+You are an expert career coach preparing a candidate for a job interview.
+
+CANDIDATE PROFILE:
+${JSON.stringify(profile, null, 2)}
+
+JOB:
+Title: ${job.title}
+Company: ${job.company}
+Description: ${job.snippet || 'Not available'}
+
+Generate a focused interview prep guide. Return a JSON object:
+{
+  "questions": [
+    {
+      "type": "behavioral" | "technical" | "company",
+      "question": "The interview question they are likely to be asked",
+      "tip": "1-2 sentence coaching tip: what to emphasize from their specific background, which skills to highlight, or what angle to take. Be specific to THIS candidate's profile."
+    }
+  ]
+}
+
+Rules:
+- 3 behavioral questions (STAR-format questions about past experience)
+- 3 technical/skills questions specific to the role's requirements
+- 2 company-specific questions (about the company's mission, product, or growth stage)
+- Tips must reference the candidate's ACTUAL skills and experience, not generic advice
+- Total: exactly 8 questions`, signal);
+
+    return { questions: result.questions || [] };
+  });
 }

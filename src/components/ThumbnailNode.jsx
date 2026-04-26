@@ -132,7 +132,7 @@ export function ThumbnailNode({ r }) {
 
     const isImage = category === 'image';
     if (isImage && data?.filePath) {
-      const imgSrc = `local-file://${data.filePath.replace(/%/g, '%25').replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
+      const imgSrc = `local-file://${data.filePath.replace(/%/g, '%25').replace(/ /g, '%20').replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
       return (
         <g>
           <rect x={x} y={y} width={w} height={h} rx={6} fill={bgFill} stroke="rgba(255,255,255,0.1)" strokeWidth={1} vectorEffect="non-scaling-stroke" />

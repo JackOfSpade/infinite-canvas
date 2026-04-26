@@ -6,10 +6,11 @@ import { CustomizeDialog } from '../components/CustomizeDialog';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { Lock } from 'lucide-react';
 
-export function LinkNode({ id, data }) {
+export const LinkNode = React.memo(function LinkNode({ id, data }) {
   const [showDialog, setShowDialog] = useState(null); // 'font' | 'url'
   const [urlInput, setUrlInput] = useState(data.url || '');
   const clickTimeoutRef = useRef(null);
+  const focusTimerRef   = useRef(null);
   const { updateNodeData } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
@@ -18,6 +19,7 @@ export function LinkNode({ id, data }) {
   useEffect(() => {
     return () => {
       if (clickTimeoutRef.current !== null) clearTimeout(clickTimeoutRef.current);
+      if (focusTimerRef.current   !== null) clearTimeout(focusTimerRef.current);
     };
   }, []);
 
@@ -40,6 +42,14 @@ export function LinkNode({ id, data }) {
     }
   }, [data.url, handleBlur]);
 
+  const handleKeyDown = useCallback((e) => {
+    if (e.key === 'Escape') inputRef.current?.blur();
+  }, []);
+
+  const handlePointerDown = useCallback((e) => {
+    if (isEditingLabel) e.stopPropagation();
+  }, [isEditingLabel]);
+
   // Sync label content when data changes externally (undo/redo)
   useEffect(() => {
     if (!isEditingLabel && inputRef.current) {
@@ -51,17 +61,22 @@ export function LinkNode({ id, data }) {
 
   // Auto-fetch title if we have a URL but no custom label yet
   useEffect(() => {
+    let isMounted = true;
     if (data.url && !data.label && window.electronAPI?.fetchUrlTitle) {
       // Small delay to prevent rapid fires if user is actively typing a URL
       const timer = setTimeout(() => {
         window.electronAPI.fetchUrlTitle(data.url).then(title => {
-          if (title) {
+          if (isMounted && title) {
             updateGlobal(id, { label: title });
           }
         }).catch(() => {});
       }, 500);
-      return () => clearTimeout(timer);
+      return () => {
+        isMounted = false;
+        clearTimeout(timer);
+      };
     }
+    return () => { isMounted = false; };
   }, [data.url, data.label, updateGlobal, id]);
 
   const openLink = useCallback(() => {
@@ -96,7 +111,10 @@ export function LinkNode({ id, data }) {
       clickTimeoutRef.current = null;
     }
     setIsEditingLabel(true);
-    clickTimeoutRef.current = setTimeout(() => {
+    // Use a separate ref so this delay doesn't collide with the click-debounce guard
+    if (focusTimerRef.current !== null) clearTimeout(focusTimerRef.current);
+    focusTimerRef.current = setTimeout(() => {
+      focusTimerRef.current = null;
       if (inputRef.current) inputRef.current.focus({ preventScroll: true });
     }, 0);
   }, [data.locked, setIsEditingLabel]);
@@ -167,8 +185,8 @@ export function LinkNode({ id, data }) {
         onClick={isEditingLabel ? undefined : handleClick}
         onDoubleClick={handleDoubleClick}
         onBlur={handleLabelBlur}
-        onKeyDown={(e) => { if (e.key === 'Escape') inputRef.current.blur(); }}
-        onPointerDown={(e) => { if (isEditingLabel) e.stopPropagation(); }}
+        onKeyDown={handleKeyDown}
+        onPointerDown={handlePointerDown}
         className={`${textColor ? '' : 'text-blue-400'} outline-none whitespace-nowrap min-w-[20px] min-h-[1em] ${isEditingLabel ? 'cursor-text' : 'select-none cursor-pointer hover:underline'}`}
         style={{ fontSize: `${fontSize}px`, fontFamily, ...(textColor ? { color: textColor } : {}), ...(isEditingLabel ? { userSelect: 'text' } : {}) }}
       />
@@ -203,4 +221,4 @@ export function LinkNode({ id, data }) {
       )}
     </div>
   );
-}
+});

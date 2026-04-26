@@ -1,15 +1,26 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { getNodeDims } from '../utils/constants';
 
 export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingRef) {
   const { setViewport } = useReactFlow();
 
+  // Mirror nodes/drawings into refs so the callback can always read the latest
+  // values without needing them as dependencies (the callback is only ever called
+  // imperatively — it never needs to be a new function because its inputs changed).
+  const nodesRef    = useRef(nodes);
+  const drawingsRef = useRef(drawings);
+  useEffect(() => { nodesRef.current = nodes; },    [nodes]);
+  useEffect(() => { drawingsRef.current = drawings; }, [drawings]);
+
   const customFitView = useCallback(() => {
     if (isAnimatingRef?.current) return;
+    const currentNodes    = nodesRef.current;
+    const currentDrawings = drawingsRef.current;
+
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    
-    nodes.forEach(n => {
+
+    currentNodes.forEach(n => {
       const { w, h } = getNodeDims(n);
       minX = Math.min(minX, n.position.x);
       minY = Math.min(minY, n.position.y);
@@ -17,7 +28,7 @@ export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingR
       maxY = Math.max(maxY, n.position.y + h);
     });
 
-    drawings.forEach(stroke => {
+    currentDrawings.forEach(stroke => {
       // Drawings are stored as { points, color } objects; handle legacy bare arrays defensively
       const pts = Array.isArray(stroke) ? stroke : stroke.points || [];
       pts.forEach(p => {
@@ -29,16 +40,16 @@ export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingR
     });
 
     if (minX === Infinity) return;
-    
+
     minX -= 100; minY -= 100;
     maxX += 100; maxY += 100;
 
-    const width = maxX - minX;
+    const width  = maxX - minX;
     const height = maxY - minY;
-    const containerWidth = reactFlowWrapper.current?.clientWidth || window.innerWidth;
+    const containerWidth  = reactFlowWrapper.current?.clientWidth  || window.innerWidth;
     const containerHeight = reactFlowWrapper.current?.clientHeight || window.innerHeight;
-    
-    const scaleX = containerWidth / width;
+
+    const scaleX = containerWidth  / width;
     const scaleY = containerHeight / height;
     const zoom = Math.min(Math.max(Math.min(scaleX, scaleY), 0.1), 2);
 
@@ -46,11 +57,11 @@ export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingR
     const cy = (minY + maxY) / 2;
 
     setViewport({
-      x: containerWidth / 2 - cx * zoom,
+      x: containerWidth  / 2 - cx * zoom,
       y: containerHeight / 2 - cy * zoom,
       zoom
     }, { duration: 800 });
-  }, [nodes, drawings, setViewport, reactFlowWrapper, isAnimatingRef]);
+  }, [setViewport, reactFlowWrapper, isAnimatingRef]); // nodes/drawings read via refs — stable callback
 
   return customFitView;
 }

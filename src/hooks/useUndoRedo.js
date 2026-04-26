@@ -34,6 +34,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
 
   const [historyLens, setHistoryLens] = useState({ past: 0, future: 0 });
   const [isStateDirty, setIsStateDirty] = useState(false);
+  const isStateDirtyRef = useRef(false);
 
   const syncHistoryLen = useCallback(() => {
     setHistoryLens({ past: pastRef.current.length, future: futureRef.current.length });
@@ -63,7 +64,11 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     const snap = deepCloneState();
     const fp   = fingerprint(snap);
     if (fp === lastFingerprintRef.current) {
-      if (isStateDirty) setIsStateDirty(false);
+      // Use ref to avoid closing over stale isStateDirty state value
+      if (isStateDirtyRef.current) {
+        isStateDirtyRef.current = false;
+        setIsStateDirty(false);
+      }
       return;
     }
     lastFingerprintRef.current = fp;
@@ -71,8 +76,9 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     pastRef.current   = [...pastRef.current.slice(-(MAX_HISTORY - 1)), snap];
     futureRef.current = []; // any new action clears redo
     syncHistoryLen();
+    isStateDirtyRef.current = false;
     setIsStateDirty(false); // State is freshly saved, no longer dirty
-  }, [deepCloneState, syncHistoryLen, isStateDirty]);
+  }, [deepCloneState, syncHistoryLen]); // isStateDirty intentionally omitted — read via ref
 
   // ── KEY FIX ─────────────────────────────────────────────────────────────────
   // When state changes while we have redo entries AND we're not restoring,
@@ -92,12 +98,14 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     if (isInteractionRef?.current) return;
 
     // Fast path: if state is already known to be dirty and we don't have future to clear, skip fingerprinting!
-    if (isStateDirty && futureRef.current.length === 0) return;
+    // Use the ref (not the React state value) so this check is never stale between renders.
+    if (isStateDirtyRef.current && futureRef.current.length === 0) return;
 
     const currentFp = fingerprint({ nodes, edges, drawings });
     const isCurrentlyDirty = currentFp !== lastFingerprintRef.current;
 
-    if (isCurrentlyDirty !== isStateDirty) {
+    if (isCurrentlyDirty !== isStateDirtyRef.current) {
+      isStateDirtyRef.current = isCurrentlyDirty;
       setIsStateDirty(isCurrentlyDirty);
     }
 
@@ -107,7 +115,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
       syncHistoryLen();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges, drawings]); // intentionally tight deps for instant reaction
+  }, [nodes, edges, drawings]); // intentionally tight deps for instant reaction; isStateDirtyRef read via ref
 
   // Auto-snapshot (500ms debounce) — safety net for changes not explicitly snapshotted
   useEffect(() => {

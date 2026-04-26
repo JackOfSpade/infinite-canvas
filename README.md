@@ -1,183 +1,166 @@
-# Infinite Canvas — AI Workspace
-
-Welcome to your new spatial workspace! Infinite Canvas is a powerful, freeform digital whiteboard designed to help you organize your projects, visualize your ideas, and supercharge your workflows using built-in AI modules. 
-
-Instead of traditional folders and rigid documents, Infinite Canvas gives you unlimited space to lay out text, web links, files from your computer, and even specialized apps—all on the same board.
+# Infinite Canvas — Specialized Module Workflows
 
 ---
 
-## 🚀 Getting Started
+## Prerequisites
 
-Currently, Infinite Canvas is distributed as source code for early access. Here is how to run it on your Mac:
+Before using any specialized module, complete this one-time setup:
 
-### 1. Requirements
-- Node.js 18+ installed on your system.
-- macOS (as the app is optimized for desktop interactions).
-
-### 2. Installation
-Open your terminal and run:
 ```bash
 git clone <repository-url>
 cd infinite-canvas
 npm install
+npm run dev
 ```
 
-### 3. Connect the AI
-Infinite Canvas uses Vertex AI to power its advanced modules and visual polishing features. Place your Google Cloud Service Account credentials file in the project root folder:
-- Save the file specifically as `service-account.json` in the root of the project.
-- Ensure your Google Cloud Project has the Vertex AI API enabled.
+Place your Google Cloud service account file at the project root as `service-account.json` (required for all AI features).
 
-**Advanced Configurations (Optional)**
-For users looking to enable specialized job search integrations (like USAJobs), create an `.env` file in the project root containing:
+**USAJobs integration only** — create `.env` in the project root:
 ```env
 USAJOBS_API_KEY=your_usajobs_api_key
 USAJOBS_EMAIL=your_usajobs_email
 ```
 
-### 4. Launch the App
-```bash
-npm run dev
-```
-The application window will open automatically, presenting you with a fresh, empty canvas!
+---
+
+## Module 1 — Job Search Hub
+
+Reads your resume, queries 12 job boards simultaneously, AI-scores every result for fit, and populates the canvas with ranked Job Cards you can track through the full application lifecycle.
+
+**Covered sources:** Google Jobs · Indeed · LinkedIn · RemoteOK · WeWorkRemotely · ZipRecruiter · Glassdoor · Dice · Wellfound · Greenhouse · Lever · USAJobs
+
+### Step-by-step workflow
+
+**1. Place the hub on the canvas**
+Open the left sidebar. Under the **Jobs** tab, drag the **Job Search** card onto an empty area of the canvas. A blue hub node appears with an animated source ring showing all 12 job board icons.
+
+**2. Feed it your resume**
+Drop any resume file directly onto the hub node. Accepted formats: PDF, DOCX, DOC, TXT, or an image (PNG/JPG scan). Alternatively, drop a resume file anywhere on the canvas — a hub is auto-created and starts immediately.
+
+**3. Watch the four-phase pipeline**
+The hub progresses automatically through four phases. The source ring updates live as each board is queried.
+
+| Phase | What happens |
+|---|---|
+| Reading resume | AI extracts skills, titles, years of experience |
+| Planning search | AI generates title-based, role-pivot, and skills-only query sets |
+| Searching | All 12 boards searched in parallel; each source shows its live count |
+| AI scoring | Every result scored for match %, assigned a strength label and career direction |
+
+**4. Read your Job Cards**
+When done, Job Cards fan out to the right of the hub, each connected by an animated edge. Each card shows:
+- Match score (percentage badge, color-coded by strength label)
+- **Strength label**: `Strong Match` · `Worth Exploring` · `Stretch` · `Unexpected Find`
+- AI reasoning paragraph explaining the match
+- Company, location, posted date, and salary if available
+- Source board tag
+
+**5. Filter by source**
+On the hub's source ring, click any board icon (e.g. LinkedIn) to highlight only jobs from that source. Unselected cards dim to 20% opacity. Click the same icon again to show all.
+
+**6. Open a listing**
+On any Job Card, click the **↗** (external link) icon to open the original posting in your browser.
+
+**7. Track application status**
+Use the status dropdown at the bottom of each Job Card to move it through your pipeline:
+`New` → `Applied` → `Interview` → `Offer` → `Rejected`
+
+**8. Generate a cover letter**
+Expand a Job Card (click the chevron), then click **Generate Cover Letter**. The AI writes a tailored letter using your resume profile and the job's title, company, and description. Copy it to clipboard directly from the card.
+
+**9. Dismiss, save, and revisit**
+- Click the **×** on a card to dismiss jobs that don't interest you.
+- Press **⌘S** to save the workspace. All Job Cards, their statuses, cover letters, and the hub's state are persisted.
+- Reload the workspace later to continue tracking — statuses are fully preserved.
+
+**10. Start a new search**
+To search again (e.g. after updating your resume), hover over the hub and click the small **×** reset icon. Drop a new resume file to restart.
 
 ---
 
-## 🧠 Core Concepts
+## Module 2 — Marketplace Sell Hub
 
-### Nodes
-Everything you place on your canvas is a "Node". You can drag them around, arrange them however you like, and connect them together to map out relationships.
+Identifies your product from photos, generates a marketplace listing, researches live sold comparables across 7 price sources, recommends a price tier, and opens the selected platforms ready to paste your listing.
 
-| Type | How to use it |
-|------|-------------|
-| **Text** | Double-click anywhere on the empty canvas to create a text note. It supports full Markdown for easy formatting. |
-| **Link** | Click the 🔗 button in the bottom toolbar to drop a web bookmark. Click the bookmark to open it in your browser! |
-| **Document** | Need to reference a file? Just drag any file or folder from Finder and drop it straight onto your canvas. |
-| **Nested Canvas** | Click the ☐ button to create a folder-like node. Drop other nodes *inside* this node to keep your main canvas clean. |
+**Price research sources:** eBay Sold · Poshmark Sold · Swappa · StockX · Reverb Sold · eBay Active · Mercari Sold  
+**Posting platforms:** eBay · Facebook Marketplace · Mercari · Poshmark · Depop · Swappa · Reverb · Whatnot
 
-### Interacting with Nodes
-Once a node is on your canvas, here is how you interact with it:
-- **Text Nodes**: Double-click the text to edit it.
-- **Link Nodes**: Single-click the node to open the web page. Double-click the node to edit its display label. Right-click the node and select "Edit URL" to change the link.
-- **Documents**: Double-click a file node to native-open it in its default app on your computer!
-- **Nested Canvas**: Double-click a nested canvas card to dive into its full-screen view. Use the top breadcrumbs to return upward. To move any node out of a sub-canvas, right-click it and select **Move to Parent Canvas**!
-- **Arranging**: Organize nodes neatly inside nested canvases, or Right-click any node to control its Z-order (Send to Back / Bring to Front) or to duplicate it.
+### Step-by-step workflow
 
-### Connecting Your Ideas
-Want to show how two things are related? Hover over any node to reveal small dots on its edges. **Click and drag** from one dot to another node to draw an animated connection line between them.
+**1. Place the hub on the canvas**
+Open the left sidebar. Under the **Sell** tab, drag the **Marketplace** card onto the canvas. An amber hub appears with the platform ring around it.
 
-### Making it Pop (Sticky Notes)
-Tired of plain text notes? Right-click any Text Node and select **Make Sticky Note**. It will instantly transform into a beautiful, skeuomorphic post-it style note with a hand-written font, slightly rotated and shadowed to look like it's resting on your canvas. Perfect for brainstorming!
+**2. Drop product photos**
+Drop one or more product images (PNG, JPG, JPEG, WEBP, GIF) directly onto the hub. The hub auto-starts image analysis. Alternatively, drop images anywhere on the canvas.
 
-### AI Polish
-Your spatial workspace is powered by an AI assistant! Right-click any text node (or Sticky Note) and select **✨ AI Polish Text**. The AI will instantly rewrite your text to make it clear, concise, and professional, maintaining markdown formatting. Make sure you're running the app within the desktop Electron window (not a normal browser) so the AI can securely use your service account credentials!
+**3. AI photo analysis**
+The hub transitions to `Analyzing`. The Gemini Vision model reads the photos and generates:
+- Brand, model, category, condition, color
+- Generated listing title and description
+- Notable features
 
----
+**4. Review and edit the draft**
+When analysis completes, the hub moves to `Draft` state. Every field is inline-editable — click any field to correct it before proceeding. Fields: title, brand, model, condition, description.
 
-## 🛠️ Essential Tools
+**5. Confirm and research price**
+Click **Confirm & Research Price**. The hub enters `Researching` state. The source ring switches to comp source icons and shows live progress as each marketplace is scraped for sold comparables.
 
-### ✏️ Drawing Mode
-Click the **Pen Icon** on the bottom toolbar to start drawing freehand! 
-- **Right-click** the Pen icon to choose your preferred color from the palette, or enter a custom hex code.
-- Draw diagrams, underline text, or scribble notes.
-- Click the Pen icon again to return to normal interaction mode.
+**6. Read the price recommendation**
+When research completes (`Priced` state), the hub displays three price tiers:
+- **Recommended** — fair market value based on comps
+- **Quick Sell** — below market to move fast
+- **Max Profit** — upper bound of the range
 
-### 🧹 Eraser
-Click the **Eraser Icon** (next to the Pen) to erase drawings.
-- **Right-click** the Eraser icon to choose between **Erase by Object** (removes entire strokes) or **Erase by Pixels** (freehand erasing).
-- Use **Clear All Drawings** from the eraser menu to wipe all drawings at once.
+Expand the **Justification** section to read the AI's reasoning and a list of actual sold comparable listings.
 
-### 🔍 Powerful Search
-Press **⌘F** to open the search bar at the top of the canvas. Type any word to instantly find matching nodes — including text notes, documents, links, job cards (by title or company), and product listings. Press `Enter` to cycle through the matches! The search even looks inside nested canvases.
+**7. Set your price**
+Click any of the three quick-price buttons to auto-fill, or type your own price into the **Your Price** field.
 
-### ⏳ Time Travel (Undo/Redo)
-Made a mistake? Your canvas remembers every action you take.
-- Press **⌘Z** to Undo.
-- Press **⌘⇧Z** (or **⌘Y**) to Redo.
-- Notice the undo/redo buttons in your bottom toolbar update dynamically as you work!
+**8. Select platforms**
+Toggle which platforms you want to list on using the platform selector buttons.
 
-### 💾 Saving Your Work
-- **Save (⌘S)**: Clicking the floppy disk icon will prompt you to save your canvas as a file on your computer. 
-- **Auto-save**: Once you have saved your canvas once, the app will automatically save your progress 2 seconds after every change. Pay attention to the amber dot on the save icon—it indicates unsaved changes!
-- **Open (⌘O)**: Load a previously saved canvas.
-- **Export to PNG**: Click the download icon (📥) to take a high-res screenshot of your current canvas view.
+**9. Copy or save the listing**
+- Click **Copy Listing** to copy the full formatted listing text to your clipboard.
+- Click **Save to File** to open a native save dialog and write the listing as a `.txt` file to any location on disk.
+
+**10. Open platforms**
+Click any platform icon in the source ring (or click **List on Platforms**) to open that platform's listing creation page directly in your browser. The ring icon animates to `Opened ✓` to confirm which platforms you've visited.
+
+**11. Mark as listed**
+After posting on a platform, click the platform's **Mark as Listed** button in the priced state panel. It turns green with a checkmark (`✓ eBay`) and persists across reloads so you always know what's been posted.
+
+**12. Save your workspace**
+Press **⌘S** to save. The hub retains the product data, pricing, comp results, your price choice, and the per-platform listed status.
 
 ---
 
-## 🤖 The AI Sidebar Modules
+## Gap Analysis — Remaining Gaps
 
-The left sidebar gives you access to powerful AI-driven tasks that run right on your canvas. Click the sidebar to open it, and **drag a module onto your canvas** to get started.
+The following gaps remain after the current implementation. Items marked ✅ have been implemented.
 
-### 1. Job Search Hub
-Looking for a new role? Drag the Job module onto your canvas. 
-- **Drop your Resume (PDF/DOCX)** directly onto the Hub.
-- The AI will read your experience, generate creative career directions, and search across 12 different platforms (including Google, Indeed, and LinkedIn) on your behalf.
-- The Hub will generate **Categorized Folders (Nested Canvases)** arranged beautifully around it. Double-click any category folder to dive into a sub-canvas containing all your matching **Job Card Nodes**.
+### Job Search Hub
 
-### 2. Marketplace Sell Hub
-Drag the Sell module to your canvas and drop product photos onto it. The AI will analyze the images, generate detailed product descriptions, and suggest the best marketplace platforms (like eBay or Marketplace) and optimal pricing out of the box.
+| Status | Gap | Impact |
+|---|---|---|
+| ✅ | **Notes field on Job Cards** | Inline textarea, debounced save, persists with workspace |
+| ✅ | **Score threshold + status filter** | Slider + multi-toggle on hub done state, dims cards that don't match |
+| ✅ | **Cover letter save to file** | Native OS save dialog, writes `.txt` |
+| ✅ | **Re-run search** | "Re-run Search" button clears old connected cards and restarts the full pipeline |
+| ✅ | **Export job cards as CSV** | "Export CSV" writes `Title,Company,Location,Score,Strength,Status,Source,URL,Notes` |
+| ✅ | **Application date tracking** | `appliedAt` / `interviewAt` ISO timestamps recorded on status change; days-since badge shown next to status dropdown |
+| ✅ | **Interview prep** | "Generate Interview Prep" button appears when status = `Interview`; AI generates 8 role-specific Q&As (3 behavioral / 3 technical / 2 company) with coaching tips; persists to node data |
+| — | **Cards manually disconnected from hub are not cleaned up on re-run** | Edge case; normal workflow unaffected |
 
----
+### Marketplace Sell Hub
 
-## ✨ Pro Actions & Polish
+| Status | Gap | Impact |
+|---|---|---|
+| ✅ | **Product photos now visible** — thumbnails in Draft and Priced states via `local-file://` | Real preview of item |
+| ✅ | **Listing saved to file** — "Save to File" writes listing text via native dialog | No more clipboard-only risk |
+| ✅ | **Per-platform mark-as-listed** — green checkmark per platform, persisted to node data; toggle removes the mark | Tracks what's been posted |
+| ✅ | **Re-research prices** | "Refresh Prices" button re-runs the full comp scraping pipeline |
+| ✅ | **Preview & edit listing text** | Expandable textarea under Copy/Save buttons shows full listing; user can customize text before copying or saving; focus-aware sync prevents overwrite mid-edit |
+| ✅ | **Add photos without restarting** | Dropping images on draft/priced hub appends to `imagePaths` with deduplication; only empty/error state triggers fresh analysis |
+| — | **No photo auto-upload to platforms** — photos exist locally, cannot be auto-attached | User must re-attach photos on each platform manually |
 
-- **Animated Flow Lines**: Drawing connections between nodes uses sleek, animated bezier curves to visualize your workflow paths.
-- **Node Selections**: Selected nodes illuminate with a soft blue glassmorphic glow, keeping your active context clear.
-- **Color Coding**: Right-click any node (Text, Link, Nested Canvas, or Document) and select **Color** to apply a beautiful translucent background. Use colors to categorize your thoughts and create visually striking diagrams!
-- **Lock Nodes**: Accidental drags getting in the way? Right-click a node and select **Lock Node**. This displays a padlock icon and prevents the node from being moved, deleted, edited, renamed, AI-polished, or dropped onto until unlocked. Perfect for setting up permanent structural frames or headers.
-- **Tidy Up Nodes**: Messy canvas? Select multiple nodes (Shift+Drag), right-click, and hit **Tidy Selection** (or **Tidy Canvas**) to beautifully snap them into organized algorithmic grids.
-- **Background Scenery**: Tired of the default dots? Click the Settings icon (Gear) in the toolbar to change your background pattern to Dots, Grid, or entirely plain.
-- **MiniMap**: Toggle the MiniMap from the Settings panel to get a bird's-eye overview of your entire canvas in the bottom-right corner.
-- **Snap to Grid**: Toggle the Magnet icon in the toolbar to snap nodes to a grid for pixel-perfect alignment.
-- **Clear Canvas**: Use the red Trash icon in the toolbar to reset your entire canvas.
-- **Settings Panel**: Click the Settings icon (Gear) in the toolbar to adjust UI preferences, such as the nested canvas animation speed.
-- **Smart Link Fetching**: Creating a Link node or adding a URL no longer leaves you with an ugly web address. The app automatically fetches the real `<title>` metadata of the target site to label the bookmark elegantly.
-- **Sticky Note Toggle**: Transform any Text Node into a vibrant, realistic Sticky Note with a single right-click to add character to your boards.
-- **AI Text Polisher**: Select `✨ AI Polish Text` from the context menu of any text node to have the Gemini Assistant effortlessly rewrite and elevate your thoughts into clear, structured markdown.
 
----
-
-## 🧭 First-Time Workflow Guide
-
-If you're booting up Infinite Canvas for the first time, try this workflow to get the hang of your new spatial workspace:
-
-1. **Brainstorming:** Double click anywhere on the blank canvas to spawn a bare **Text Node**. Jot down some project ideas. Spawn a few more text notes. Use the **Color** context menu option to color-code related ideas (e.g., green for backend, blue for frontend). Right-click and choose **Make Sticky Note** to give your brainstorm some character!
-2. **Structuring:** To make a permanent "frame" for your ideas, create a Text Node, color it, enlarge its font, and position it as a header. Right-click and choose **Lock Node** so you don't accidentally move it.
-3. **Deep Diving:** Click the ☐ button in the toolbar to create a "Sub-Canvas" (Nested Canvas). Double-click the nested canvas to enter it! You're now on a brand new infinite board where you can gather references without cluttering your main layout. Look at the breadcrumbs at the top of the window to navigate back out.
-4. **Connecting the Dots:** Drag from the visual handles (the small dots on the edges of nodes) to draw connecting paths between your thoughts.
-5. **AI Magic:** Drag the "Job Search Hub" or "Marketplace Sell Hub" from the left sidebar directly to the canvas. Drop a PDF resume or product images onto them, and watch the AI seamlessly build out connected node networks containing job listings or product prices based on your personal data.
-6. **Refining Ideas:** If you wrote some messy thoughts on a node, right-click it and hit **✨ AI Polish Text** and watch your rough notes turn into a beautifully formatted summary!
-
----
-
-## ⌨️ Quick Keyboard Shortcuts
-
-To see this list inside the app at any time, just press **`?`** on your keyboard!
-
-| Action | Shortcut / Mouse |
-|--------|------------------|
-| **Add text note** | Double-click canvas |
-| **Pan around** | Drag canvas (or scroll) |
-| **Zoom in/out** | Scroll wheel |
-| **Select multiple** | Shift + Click & Drag |
-| **Delete item** | Select → Press `Delete` or `⌫` |
-| **Context menu** | Right-click any node or the canvas |
-| **Search** | `⌘F` |
-| **Next match** | `Enter` (in search bar) |
-| **Prev match** | `Shift+Enter` (in search bar) |
-| **Save** | `⌘S` |
-| **Open** | `⌘O` |
-| **Text Tool** | `T` |
-| **Link Tool** | `L` |
-| **Cancel Placement** | `Escape` |
-| **Undo** | `⌘Z` |
-| **Redo** | `⌘⇧Z` or `⌘Y` |
-
----
-
-## 🐛 Bug Reporting
-
-Notice something off? Click the **bug icon** in the bottom-left status bar to open the issue reporter. Type a brief description of the problem and click **Generate Report**. The app will automatically bundle a comprehensive debugging snapshot — including your canvas state, event log, app metadata, and reproduction steps — into a single file you can share for troubleshooting.
-
----
-
-*Enjoy building out your Infinite Canvas! Feel free to drag in menus, structure your systems, and design the ultimate visual workspace.*
