@@ -1,13 +1,18 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { Handle, Position, useReactFlow } from '@xyflow/react';
-import { CustomizeDialog } from '../components/CustomizeDialog';
+import { Handle, Position, useReactFlow, NodeResizeControl } from '@xyflow/react';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { Lock } from 'lucide-react';
 
-export const TextNode = React.memo(function TextNode({ id, data }) {
-  const [showCustomizeDialog, setShowCustomizeDialog] = useState(false);
+const RESIZE_CORNERS = [
+  { position: 'top-left', cursor: 'nwse-resize' },
+  { position: 'top-right', cursor: 'nesw-resize' },
+  { position: 'bottom-left', cursor: 'nesw-resize' },
+  { position: 'bottom-right', cursor: 'nwse-resize' },
+];
+
+export const TextNode = React.memo(function TextNode({ id, data, selected, width, height }) {
   const { updateNodeData } = useReactFlow();
 
   const inputRef = useRef(null);
@@ -43,6 +48,12 @@ export const TextNode = React.memo(function TextNode({ id, data }) {
     }
   }, [isEditing]);
 
+  const handlePaste = useCallback((e) => {
+    e.preventDefault();
+    const text = e.clipboardData.getData('text/plain');
+    document.execCommand('insertText', false, text);
+  }, []);
+
   const fontSize = data.fontSize || 14;
   const fontFamily = data.fontFamily || (data.isSticky ? "'Indie Flower', 'Comic Sans MS', cursive" : 'sans-serif');
   // textColor overrides the default; sticky notes default to dark ink
@@ -62,29 +73,40 @@ export const TextNode = React.memo(function TextNode({ id, data }) {
     return DOMPurify.sanitize(marked.parse(data.text || ''));
   }, [data.text]);
 
-  // Listen for font dialog trigger from global context menu
-  useEffect(() => {
-    const handleOpenFont = () => {
-      if (data.locked) return; // Locked nodes are not editable
-      setShowCustomizeDialog(true);
-    };
-    document.addEventListener(`edit-node-font-${id}`, handleOpenFont);
-    return () => document.removeEventListener(`edit-node-font-${id}`, handleOpenFont);
-  }, [id, data.locked]);
+  const isResized = width != null && height != null;
+  const showResizeHandles = selected && !data.locked;
 
   return (
-    <div 
-      className={`relative group px-2 py-1 rounded-md transition-colors ${data.isSticky ? 'shadow-xl' : ''}`}
+    <div
+      className={`relative group rounded-md transition-colors ${data.isSticky ? 'shadow-xl' : ''} ${isResized ? 'overflow-hidden px-0.5 py-0' : 'px-2 py-0.5'} ${isEditing ? 'nodrag' : ''}`}
       style={{
         backgroundColor: data.isSticky ? (data.backgroundColor ? data.backgroundColor.replace(/[\d.]+\)$/, '1)') : '#fef3c7') : (data.backgroundColor || 'transparent'),
         minWidth: data.isSticky ? '150px' : 'auto',
         minHeight: data.isSticky ? '150px' : 'auto',
+        width: isResized ? '100%' : undefined,
+        height: isResized ? '100%' : undefined,
         transform: data.isSticky && !isEditing ? 'rotate(-2deg)' : 'none',
         boxShadow: data.isSticky ? '2px 4px 10px rgba(0,0,0,0.3)' : undefined,
         borderBottomRightRadius: data.isSticky ? '20px 15px' : undefined,
         color: data.isSticky ? '#1f2937' : 'inherit'
       }}
     >
+      {showResizeHandles && RESIZE_CORNERS.map(({ position, cursor }) => (
+        <NodeResizeControl
+          key={position}
+          position={position}
+          minWidth={data.isSticky ? 150 : 60}
+          minHeight={data.isSticky ? 150 : Math.ceil(fontSize * 1.2)}
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: 2,
+            background: '#3b82f6',
+            border: 'none',
+            cursor,
+          }}
+        />
+      ))}
       <Handle type="target" position={Position.Top} id="top" className={`w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity ${data.isSticky ? 'bg-black/50' : 'bg-white'}`} />
       <Handle type="target" position={Position.Left} id="left" className={`w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity ${data.isSticky ? 'bg-black/50' : 'bg-white'}`} />
       
@@ -121,20 +143,32 @@ export const TextNode = React.memo(function TextNode({ id, data }) {
         onBlur={handleTextBlur}
         onKeyDown={handleKeyDown}
         onPointerDown={handlePointerDown}
+        onPaste={handlePaste}
         className={`outline-none min-w-[20px] min-h-[1em] ${
-          isEditing ? 'cursor-text whitespace-nowrap' : 'select-none cursor-default hidden'
+          isEditing
+            ? `cursor-text ${isResized ? 'whitespace-pre-wrap break-words thin-scrollbar' : 'whitespace-nowrap'}`
+            : 'select-none cursor-default hidden'
         }`}
-        style={{ fontSize: `${fontSize}px`, fontFamily, ...(textColor ? { color: textColor } : {}), ...(isEditing ? { userSelect: 'text' } : {}) }}
+        style={{
+          fontSize: `${fontSize}px`,
+          fontFamily,
+          lineHeight: 1.2,
+          ...(textColor ? { color: textColor } : {}),
+          ...(isEditing ? { userSelect: 'text' } : {}),
+          ...(isResized ? { width: '100%', height: '100%', overflowY: 'auto', overflowX: 'hidden', overflowWrap: 'break-word' } : {}),
+        }}
       />
 
       {!isEditing && (
         <div
           onDoubleClick={handleDoubleClick}
-          className={`outline-none min-w-[20px] min-h-[1em] select-none cursor-default prose-headings:m-0 prose-p:m-0 prose-ul:m-0 [&_a]:text-blue-500 [&_a]:underline ${data.isSticky ? 'p-2 font-handwriting' : ''}`}
+          className={`text-node-content outline-none min-w-[20px] min-h-[1em] select-none cursor-default [&_a]:text-blue-500 [&_a]:underline ${data.isSticky ? 'p-2 font-handwriting' : ''} ${isResized ? 'break-words thin-scrollbar' : ''}`}
           style={{
             fontSize: `${fontSize}px`,
             fontFamily: fontFamily,
+            lineHeight: 1.2,
             ...(textColor ? { color: textColor } : {}),
+            ...(isResized ? { width: '100%', height: '100%', overflowY: 'auto', overflowX: 'hidden', overflowWrap: 'break-word', whiteSpace: 'pre-wrap' } : {}),
           }}
           dangerouslySetInnerHTML={{ __html: htmlContent }}
         />
@@ -143,16 +177,7 @@ export const TextNode = React.memo(function TextNode({ id, data }) {
       <Handle type="source" position={Position.Right} id="right" className={`w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity ${data.isSticky ? 'bg-black/50' : 'bg-white'}`} />
       <Handle type="source" position={Position.Bottom} id="bottom" className={`w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity ${data.isSticky ? 'bg-black/50' : 'bg-white'}`} />
 
-      {showCustomizeDialog && (
-        <CustomizeDialog
-          fontSize={fontSize}
-          fontFamily={fontFamily}
-          textColor={data.textColor || (data.isSticky ? '#1f2937' : '#ffffff')}
-          backgroundColor={data.backgroundColor}
-          onApply={(updates) => updateNodeData(id, updates)}
-          onClose={() => setShowCustomizeDialog(false)}
-        />
-      )}
+
     </div>
   );
 });

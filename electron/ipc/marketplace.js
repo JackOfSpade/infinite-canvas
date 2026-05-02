@@ -125,7 +125,6 @@ Return a JSON object:
 Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`, signal);
 
     logger.info(`[Marketplace][${nodeId}] Product identified:`, result?.generated_title || 'Unknown');
-    
     return { product: result };
   });
 

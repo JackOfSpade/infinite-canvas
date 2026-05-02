@@ -1,8 +1,10 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useReactFlow } from '@xyflow/react';
+import { EventLogger } from '../utils/EventLogger';
 
 export function useCanvasWASD({ isAnimatingRef }) {
   const { getViewport, setViewport } = useReactFlow();
+  const movingRef = useRef(false);
 
   useEffect(() => {
     const keys = { w: false, a: false, s: false, d: false, arrowup: false, arrowleft: false, arrowdown: false, arrowright: false, shift: false };
@@ -16,7 +18,19 @@ export function useCanvasWASD({ isAnimatingRef }) {
       const down = s || arrowdown;
       const right = d || arrowright;
 
-      if (!up && !left && !down && !right) { rafId = null; return; }
+      if (!up && !left && !down && !right) { 
+        if (movingRef.current) {
+          movingRef.current = false;
+          EventLogger.log('WASD navigation stopped');
+        }
+        rafId = null; 
+        return; 
+      }
+      
+      if (!movingRef.current) {
+        movingRef.current = true;
+        EventLogger.log('WASD navigation started');
+      }
       
       // Suspend WASD viewport updates during dive-in/dive-out animations
       if (!isAnimatingRef.current) {

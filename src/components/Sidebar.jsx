@@ -129,8 +129,8 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
   }, []);
 
   const tabs = [
-    { id: 'jobs', icon: Briefcase, label: 'Jobs', badge: jobCardsCount > 0 ? jobCardsCount : null },
-    { id: 'sell', icon: Store, label: 'Sell', badge: sellHubsCount > 0 ? sellHubsCount : null },
+    { id: 'jobs', icon: Briefcase, label: 'Jobs' },
+    { id: 'sell', icon: Store, label: 'Sell' },
     { id: 'dashboard', icon: BarChart3, label: 'Stats' },
   ];
 

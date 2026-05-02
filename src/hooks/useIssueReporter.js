@@ -36,7 +36,12 @@ export function useIssueReporter({
         return {
           id: n.id, 
           type: n.type,
+          selected: !!n.selected,
           position:       n.position,
+          fontSize:       n.data?.fontSize,
+          fontFamily:     n.data?.fontFamily,
+          textColor:      n.data?.textColor,
+          backgroundColor: n.data?.backgroundColor,
           width_prop:     n.width,
           height_prop:    n.height,
           style_width:    n.style?.width,
@@ -47,20 +52,32 @@ export function useIssueReporter({
       });
 
       // Snapshot any active media elements so reports include playback position,
-      // duration, error codes, and network state at the moment of the report.
+      // duration, error codes, network state, plus seekable/buffered ranges at
+      // the moment of the report. An empty `seekable` while `buffered` is full
+      // is the smoking gun for a non-Range-capable source.
+      const trToArr = (tr) => {
+        if (!tr) return [];
+        const out = [];
+        for (let i = 0; i < tr.length; i++) {
+          out.push([tr.start(i), tr.end(i)]);
+        }
+        return out;
+      };
       const mediaState = Array.from(
         document.querySelectorAll('video, audio')
       ).map(el => ({
         tag:          el.tagName.toLowerCase(),
         src:          el.currentSrc || el.getAttribute('src') || null,
         currentTime:  el.currentTime,
-        duration:     isFinite(el.duration) ? el.duration : null,
+        duration:     isFinite(el.duration) ? el.duration : (Number.isNaN(el.duration) ? 'NaN' : (el.duration === Infinity ? 'Infinity' : null)),
         paused:       el.paused,
         ended:        el.ended,
         muted:        el.muted,
         volume:       el.volume,
         readyState:   el.readyState,   // 0=HAVE_NOTHING … 4=HAVE_ENOUGH_DATA
         networkState: el.networkState, // 0=EMPTY 1=IDLE 2=LOADING 3=NO_SOURCE
+        seekable:     trToArr(el.seekable), // empty ⇒ source advertised as non-seekable
+        buffered:     trToArr(el.buffered),
         errorCode:    el.error?.code ?? null,
         errorMessage: el.error?.message ?? null,
       }));

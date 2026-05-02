@@ -7,6 +7,9 @@ export const DEFAULT_SHORTCUTS = {
   redo:    { meta: true,  shift: true,  alt: false, key: 'z', label: 'Redo' },
   redoAlt: { meta: true,  shift: false, alt: false, key: 'y', label: 'Redo (alt)' },
   search:  { meta: true,  shift: false, alt: false, key: 'f', label: 'Search' },
+  selectTool: { meta: false, shift: false, alt: false, key: 'v', label: 'Select Tool' },
+  textTool:   { meta: false, shift: false, alt: false, key: 't', label: 'Text Tool' },
+  linkTool:   { meta: false, shift: false, alt: false, key: 'l', label: 'Link Tool' },
 };
 
 const DEFAULT_SETTINGS = {

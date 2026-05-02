@@ -1,7 +1,7 @@
 import electronPkg from 'electron';
-const { app, BrowserWindow, Menu, protocol, net } = electronPkg;
+const { app, BrowserWindow, Menu, protocol } = electronPkg;
 import path from 'path';
-import { fileURLToPath, pathToFileURL } from 'url';
+import { fileURLToPath } from 'url';
 import { registerFilesystemHandlers } from './ipc/filesystem.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
@@ -13,6 +13,35 @@ import { registerGeminiHandlers } from './ipc/gemini.js';
 import { registerBugReportHandlers } from './ipc/bugReport.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import fs from 'fs';
+import { Readable } from 'node:stream';
+
+// Minimal extension → MIME map for media types served via local-file://.
+// Chromium's media stack needs a sensible Content-Type to commit to a decoder pipeline,
+// and an explicit type avoids relying on sniffing for partial-content responses.
+const LOCAL_FILE_MIME_TYPES = {
+  '.mp4':  'video/mp4',
+  '.m4v':  'video/mp4',
+  '.mov':  'video/quicktime',
+  '.webm': 'video/webm',
+  '.mkv':  'video/x-matroska',
+  '.ogv':  'video/ogg',
+  '.mp3':  'audio/mpeg',
+  '.m4a':  'audio/mp4',
+  '.aac':  'audio/aac',
+  '.wav':  'audio/wav',
+  '.ogg':  'audio/ogg',
+  '.flac': 'audio/flac',
+  '.opus': 'audio/opus',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif',
+  '.webp': 'image/webp',
+  '.svg':  'image/svg+xml',
+  '.txt':  'text/plain; charset=utf-8',
+  '.md':   'text/markdown; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -294,7 +323,67 @@ if (!gotTheLock) {
           return new Response('Access Denied', { status: 403 });
         }
 
-        return net.fetch(pathToFileURL(targetPath).toString());
+        // ── Range-aware streaming ────────────────────────────────────────────────
+        // Honor HTTP Range requests so HTMLMediaElement reports the source as
+        // seekable. Without `Accept-Ranges: bytes` and 206 partial-content
+        // responses, Chromium leaves video.seekable empty and silently ignores
+        // timeline clicks even when the file is fully buffered.
+        let stat;
+        try { stat = fs.statSync(targetPath); }
+        catch { return new Response('Not Found', { status: 404 }); }
+        if (!stat.isFile()) return new Response('Not Found', { status: 404 });
+
+        const total = stat.size;
+        const ext = path.extname(targetPath).toLowerCase();
+        const contentType = LOCAL_FILE_MIME_TYPES[ext] || 'application/octet-stream';
+
+        const rangeHeader = request.headers.get('range');
+        if (rangeHeader) {
+          const m = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+          if (m) {
+            let start = m[1] === '' ? NaN : parseInt(m[1], 10);
+            let end   = m[2] === '' ? NaN : parseInt(m[2], 10);
+            // Suffix range: bytes=-N → last N bytes
+            if (Number.isNaN(start) && !Number.isNaN(end)) {
+              start = Math.max(0, total - end);
+              end = total - 1;
+            } else {
+              if (Number.isNaN(start)) start = 0;
+              if (Number.isNaN(end))   end   = total - 1;
+            }
+            if (start > end || start >= total) {
+              return new Response('Range Not Satisfiable', {
+                status: 416,
+                headers: { 'Content-Range': `bytes */${total}` },
+              });
+            }
+            end = Math.min(end, total - 1);
+            const chunkSize = end - start + 1;
+            const stream = fs.createReadStream(targetPath, { start, end });
+            return new Response(Readable.toWeb(stream), {
+              status: 206,
+              headers: {
+                'Content-Type':   contentType,
+                'Content-Length': String(chunkSize),
+                'Content-Range':  `bytes ${start}-${end}/${total}`,
+                'Accept-Ranges':  'bytes',
+                'Cache-Control':  'no-cache',
+              },
+            });
+          }
+          // Malformed Range — fall through to full-body 200.
+        }
+
+        const stream = fs.createReadStream(targetPath);
+        return new Response(Readable.toWeb(stream), {
+          status: 200,
+          headers: {
+            'Content-Type':   contentType,
+            'Content-Length': String(total),
+            'Accept-Ranges':  'bytes',
+            'Cache-Control':  'no-cache',
+          },
+        });
       } catch (error) {
         console.error('Failed to handle local-file protocol', error);
         return new Response('Internal Error', { status: 500 });

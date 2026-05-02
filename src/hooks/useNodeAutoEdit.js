@@ -66,7 +66,11 @@ export function useNodeAutoEdit(id, isNew, isEmptyPredicate, inputRef) {
         document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
       }, 0);
     } else {
+      // Apply data updates AND clear the selection outline that was active during edit.
+      // Otherwise the blue ".selected" outline lingers after the user clicks/pans away,
+      // which reads as "edit mode is still on".
       updateNodeData(id, dataUpdates);
+      setNodes(nds => nds.map(n => (n.id === id && n.selected ? { ...n, selected: false } : n)));
     }
   }, [id, isEmptyPredicate, setNodes, updateNodeData, store]);
 

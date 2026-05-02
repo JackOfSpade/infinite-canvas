@@ -55,11 +55,10 @@ body {
   height: 10px;
   background: #a855f7;
   border: 2px solid #222;
-  transition: transform 0.2s;
 }
 
 .react-flow__handle:hover {
-  transform: scale(1.5);
+  background: #c084fc;
 }
 
 /* Custom React Flow Controls (Bottom Left) */
@@ -309,11 +308,10 @@ kbd {
   border: 1.5px solid rgba(255, 255, 255, 0.08);
   overflow: hidden;
   cursor: pointer;
-  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
 .nested-canvas-card:hover {
-  transform: scale(1.02);
   box-shadow: 0 0 24px rgba(59, 130, 246, 0.15), 0 8px 32px rgba(0, 0, 0, 0.4);
   border-color: rgba(96, 165, 250, 0.3);
 }
@@ -442,4 +440,24 @@ kbd {
 .text-preview-md::-webkit-scrollbar-track  { background: transparent; }
 .text-preview-md::-webkit-scrollbar-thumb  { background: rgba(255,255,255,0.18); border-radius: 4px; }
 .text-preview-md::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
+
+/* Thin scrollbar utility — used by resized TextNode/DocumentNode scroll containers */
+.thin-scrollbar { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.2) transparent; }
+.thin-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
+.thin-scrollbar::-webkit-scrollbar-track  { background: transparent; }
+.thin-scrollbar::-webkit-scrollbar-thumb  { background: rgba(255,255,255,0.18); border-radius: 4px; }
+.thin-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
+
+/* TextNode markdown rendering: marked.parse() wraps single-line plain text in <p>,
+   whose box introduces ~15px of vertical space (default margins + block baseline)
+   even when margins are reset. Using display:contents removes the <p>'s box entirely
+   while preserving its text — the parent div's line-height/font apply directly. */
+.text-node-content :where(p) {
+  display: contents;
+}
+.text-node-content :where(h1, h2, h3, h4, h5, h6, ul, ol, blockquote, pre) {
+  margin: 0;
+  padding: 0;
+}
+.text-node-content :where(ul, ol) { padding-left: 1.25em; }
 

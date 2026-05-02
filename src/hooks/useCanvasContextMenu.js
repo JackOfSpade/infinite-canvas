@@ -272,7 +272,8 @@ export function useCanvasContextMenu({
           label: 'Customize',
           disabled: isLocked,
           onClick: isLocked ? undefined : () => {
-            document.dispatchEvent(new CustomEvent(`edit-node-font-${menu.node.id}`));
+            const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
+            document.dispatchEvent(new CustomEvent('open-multi-customize', { detail: { ids: targetIds } }));
             closeMenu();
           }
         });

@@ -14,6 +14,7 @@ const KEY_FILE = path.join(process.cwd(), 'service-account.json');
 
 let authClient = null;
 let projectId = null;
+let isMockMode = false;
 
 async function getAuthClient() {
   if (authClient) return { auth: authClient, projectId };
@@ -22,7 +23,9 @@ async function getAuthClient() {
     saRaw = await fs.promises.readFile(KEY_FILE, 'utf8');
   } catch (err) {
     if (err.code === 'ENOENT') {
-      throw new Error('service-account.json not found. Place it in the project root.');
+      logger.warn('[Gemini] service-account.json not found. Enabling Mock Mode for AI services.');
+      isMockMode = true;
+      return { auth: null, projectId: 'mock-project' };
     }
     throw err;
   }
@@ -70,6 +73,15 @@ async function callGemini(parts, genConfig = {}) {
     throw new Error(`AI prompt too large (${totalTextLen} chars). Please select fewer nodes or a smaller group.`);
   }
 
+  // Ensure getAuthClient runs to check for service-account.json and set isMockMode
+  await getAuthClient();
+
+  if (isMockMode) {
+    const textPart = parts.find(p => p.text)?.text || '';
+    logger.info('[Gemini] Mock Mode active. Returning dummy data for prompt.');
+    return generateMockResponse(textPart);
+  }
+
   const token = await getToken();
   const endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent`;
 
@@ -108,6 +120,93 @@ async function callGemini(parts, genConfig = {}) {
   if (!contentText) throw new Error('No content returned from Vertex AI.');
 
   return contentText;
+}
+
+/**
+ * Generates a context-aware mock JSON string based on the provided prompt.
+ * Ensures the app functions gracefully without Google Cloud credentials.
+ */
+function generateMockResponse(prompt) {
+  if (prompt.includes('marketplace listing expert')) {
+    return JSON.stringify({
+      brand: "Mock Brand",
+      model: "Mock Model 123",
+      category: "Electronics > Mock Category",
+      condition: "Used - Good",
+      color: "Mock Color",
+      notable_features: "Minor scratches on mock surface",
+      generated_title: "Mock Brand Model 123 - Good Condition",
+      generated_description: "This is a mock description generated because the service-account.json file is missing. Please add the file to enable real AI analysis."
+    });
+  }
+  if (prompt.includes('pricing analyst and marketplace routing expert')) {
+    return JSON.stringify({
+      recommended_price: 49.99,
+      quick_sell_price: 39.99,
+      max_profit_price: 59.99,
+      justification: "This is a mock justification generated in Mock Mode. Prices are completely arbitrary.",
+      market_summary: { sold_count: 5, sold_median: 45, sold_low: 30, sold_high: 60, active_count: 3, active_lowest: 40 },
+      recommended_platforms: [
+        { id: "ebay", name: "eBay", reason: "High traffic for mock items.", estimated_fee_pct: 13, net_payout: 43.49 }
+      ]
+    });
+  }
+  if (prompt.includes('Analyze this resume/CV thoroughly')) {
+    return JSON.stringify({
+      titles: ["Senior Mock Engineer", "Mock Developer"],
+      skills: ["JavaScript", "React", "Node.js", "Python"],
+      experience_years: 5,
+      soft_skills: ["Communication", "Leadership"],
+      industries: ["Tech", "Software"],
+      locations: ["Remote", "New York"],
+      education: ["BS Computer Science"],
+      summary: "An experienced software engineer with a background in building mock applications."
+    });
+  }
+  if (prompt.includes('generate search queries')) {
+    return JSON.stringify({
+      titleQueries: ["Senior Mock Engineer remote", "Mock Developer remote"],
+      suggestedRoleQueries: ["Mock Architect remote", "Lead Mock Developer"],
+      skillsOnlyQueries: ["JavaScript React Python 5 years remote"]
+    });
+  }
+  if (prompt.includes('Score each job')) {
+    const match = prompt.match(/JOBS TO SCORE \(array\):\n(\[[\s\S]*?\])\n/);
+    let numJobs = 1;
+    if (match) {
+      try { numJobs = JSON.parse(match[1]).length; } catch(e) {}
+    }
+    const scores = Array.from({ length: numJobs }).map((_, i) => ({
+      index: i,
+      matchScore: Math.max(50, 95 - (i * 3)), // Descending mock scores
+      reasoning: "This is mock reasoning generated in Mock Mode.",
+      careerDirection: i % 2 === 0 ? "Engineering" : "Leadership",
+      strengthLabel: i < 3 ? "strong" : "exploring"
+    }));
+    return JSON.stringify(scores);
+  }
+  if (prompt.includes('compelling cover letter')) {
+    return JSON.stringify({
+      coverLetter: "Dear Hiring Manager,\n\nI am writing to apply for this position. This is a mock cover letter generated because service-account.json is missing.\n\nSincerely,\nMock Applicant"
+    });
+  }
+  if (prompt.includes('expert career coach preparing a candidate')) {
+    return JSON.stringify({
+      questions: [
+        { type: "behavioral", question: "Tell me about a time you used mock data.", tip: "Highlight your problem-solving skills." },
+        { type: "technical", question: "How do you implement Mock Mode?", tip: "Discuss interception of API calls." },
+        { type: "company", question: "Why do you want to work here?", tip: "Reference their mission." },
+        { type: "behavioral", question: "Describe a challenge you overcame.", tip: "Focus on resilience." },
+        { type: "technical", question: "What is your favorite mock tool?", tip: "Be authentic." },
+        { type: "company", question: "How do you align with our values?", tip: "Show you researched them." },
+        { type: "behavioral", question: "Tell me about a conflict.", tip: "Use the STAR method." },
+        { type: "technical", question: "Explain a complex topic simply.", tip: "Use analogies." }
+      ]
+    });
+  }
+  
+  // Default JSON wrapper
+  return JSON.stringify({ mock: true, message: "Generic mock response" });
 }
 
 /**

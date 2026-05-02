@@ -1,10 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Handle, Position, useReactFlow, NodeResizer } from '@xyflow/react';
-import { Lock, Minimize2, Play, AudioLines, AlertTriangle, RefreshCw, FileText } from 'lucide-react';
+import { Lock, Minimize2, Play, AudioLines, AlertTriangle, RefreshCw, FileText, ZoomIn, ZoomOut } from 'lucide-react';
 import { marked } from 'marked';
 import { getFileCategoryInfo, THEME_COLORS } from '../utils/fileDisplayUtils';
 import { EventLogger } from '../utils/EventLogger';
-import { CustomizeDialog } from '../components/CustomizeDialog';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -66,6 +65,71 @@ const ExpandedPreviewShell = React.memo(function ExpandedPreviewShell({
   );
 });
 
+// ── Media fade-in/out (Web Audio) ─────────────────────────────────────────────
+// Routes the media element through a MediaElementAudioSourceNode → GainNode and
+// ramps gain on play/pause/seek transitions. Eliminates the audible pop produced
+// by macOS CoreAudio device wake-up and the discontinuity at sample boundaries
+// when restarting playback from t=0 repeatedly. Cached per-element via WeakMap
+// because MediaElementAudioSourceNode can only be created once per HTMLMediaElement.
+
+const FADE_IN_SECONDS  = 0.04;
+const FADE_OUT_SECONDS = 0.01;
+const audioGraphCache = new WeakMap();
+
+function useMediaFade(mediaRef, isActive) {
+  useEffect(() => {
+    if (!isActive) return;
+    const el = mediaRef.current;
+    if (!el) return;
+
+    let graph = audioGraphCache.get(el);
+    if (!graph) {
+      try {
+        const ctx  = new AudioContext();
+        const src  = ctx.createMediaElementSource(el);
+        const gain = ctx.createGain();
+        gain.gain.value = 0; // start muted; fade in on first play
+        src.connect(gain);
+        gain.connect(ctx.destination);
+        graph = { ctx, gain };
+        audioGraphCache.set(el, graph);
+      } catch {
+        return; // Web Audio unavailable or element already owned by another context
+      }
+    }
+    const { ctx, gain } = graph;
+
+    const fadeTo = (target, seconds) => {
+      if (ctx.state !== 'running') ctx.resume().catch(() => { /* user-gesture-gated */ });
+      const now = ctx.currentTime;
+      gain.gain.cancelScheduledValues(now);
+      gain.gain.setValueAtTime(gain.gain.value, now);
+      gain.gain.linearRampToValueAtTime(target, now + seconds);
+    };
+    const fadeIn  = () => fadeTo(1, FADE_IN_SECONDS);
+    const fadeOut = () => fadeTo(0, FADE_OUT_SECONDS);
+    const onSeeked = () => { if (!el.paused) fadeIn(); };
+
+    el.addEventListener('play',    fadeIn);
+    el.addEventListener('playing', fadeIn);
+    el.addEventListener('pause',   fadeOut);
+    el.addEventListener('seeking', fadeOut);
+    el.addEventListener('seeked',  onSeeked);
+    el.addEventListener('ended',   fadeOut);
+    return () => {
+      el.removeEventListener('play',    fadeIn);
+      el.removeEventListener('playing', fadeIn);
+      el.removeEventListener('pause',   fadeOut);
+      el.removeEventListener('seeking', fadeOut);
+      el.removeEventListener('seeked',  onSeeked);
+      el.removeEventListener('ended',   fadeOut);
+      // ctx persists in audioGraphCache — element may be reused across hook re-runs.
+    };
+  // mediaRef is stable; only re-run when isActive flips.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive]);
+}
+
 // ── Media event logger hook ────────────────────────────────────────────────────
 
 /** Attaches media event listeners that log playback lifecycle to the EventLogger. */
@@ -76,29 +140,29 @@ function useMediaEventLogger(mediaRef, nodeId, isActive) {
     if (!el) return;
 
     const shortId = nodeId.slice(0, 8);
-    const onPlay   = () => EventLogger.log(`media play    id=${shortId}`);
-    const onPause  = () => EventLogger.log(`media pause   id=${shortId} t=${el.currentTime?.toFixed(2)}s`);
-    const onEnded  = () => EventLogger.log(`media ended   id=${shortId}`);
-    const onError  = () => EventLogger.log(`media error   id=${shortId} code=${el.error?.code} msg=${el.error?.message}`);
-    const onStall  = () => EventLogger.log(`media stall   id=${shortId} t=${el.currentTime?.toFixed(2)}s`);
+    const onPlay = () => EventLogger.log(`media play    id=${shortId}`);
+    const onPause = () => EventLogger.log(`media pause   id=${shortId} t=${el.currentTime?.toFixed(2)}s`);
+    const onEnded = () => EventLogger.log(`media ended   id=${shortId}`);
+    const onError = () => EventLogger.log(`media error   id=${shortId} code=${el.error?.code} msg=${el.error?.message}`);
+    const onStall = () => EventLogger.log(`media stall   id=${shortId} t=${el.currentTime?.toFixed(2)}s`);
     const onSeeked = () => EventLogger.log(`media seeked  id=${shortId} t=${el.currentTime?.toFixed(2)}s`);
 
-    el.addEventListener('play',   onPlay);
-    el.addEventListener('pause',  onPause);
-    el.addEventListener('ended',  onEnded);
-    el.addEventListener('error',  onError);
-    el.addEventListener('stall',  onStall);
+    el.addEventListener('play', onPlay);
+    el.addEventListener('pause', onPause);
+    el.addEventListener('ended', onEnded);
+    el.addEventListener('error', onError);
+    el.addEventListener('stall', onStall);
     el.addEventListener('seeked', onSeeked);
     return () => {
-      el.removeEventListener('play',   onPlay);
-      el.removeEventListener('pause',  onPause);
-      el.removeEventListener('ended',  onEnded);
-      el.removeEventListener('error',  onError);
-      el.removeEventListener('stall',  onStall);
+      el.removeEventListener('play', onPlay);
+      el.removeEventListener('pause', onPause);
+      el.removeEventListener('ended', onEnded);
+      el.removeEventListener('error', onError);
+      el.removeEventListener('stall', onStall);
       el.removeEventListener('seeked', onSeeked);
     };
-  // Re-attach if the active flag or nodeId changes; mediaRef itself is stable.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Re-attach if the active flag or nodeId changes; mediaRef itself is stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive, nodeId]);
 }
 
@@ -130,8 +194,18 @@ const VideoPlayer = React.memo(function VideoPlayer({ mediaRef, src, hoveringMed
     const el = mediaRef.current;
     if (!el) return;
     setErrorInfo(null);
+    // Some MP4/AAC files have encoder-priming packets at negative timestamps
+    // (e.g. -46ms preroll). Chromium's audio decoder can hit PIPELINE_ERROR_DECODE
+    // when re-entering those packets after a previous play (notably after `ended`).
+    // After load(), seek past the priming offset before play so the decoder
+    // never receives the negative-timestamp packet on retry.
+    const onMeta = () => {
+      el.removeEventListener('loadedmetadata', onMeta);
+      try { el.currentTime = 0.05; } catch { /* ignore — element may have been unmounted */ }
+      el.play().catch(() => { /* ignore AbortError on quick retries */ });
+    };
+    el.addEventListener('loadedmetadata', onMeta, { once: true });
     el.load();
-    el.play().catch(() => { /* ignore AbortError on quick retries */ });
   }, [mediaRef]);
 
   return (
@@ -141,9 +215,8 @@ const VideoPlayer = React.memo(function VideoPlayer({ mediaRef, src, hoveringMed
         controls
         title=""
         src={src}
-        className={`nodrag w-full h-full object-contain rounded-md shadow-inner bg-black/40 flex-1 ${
-          hoveringMedia ? 'media-controls-visible' : 'media-controls-hidden'
-        }`}
+        className={`nodrag w-full h-full object-contain rounded-md shadow-inner bg-black/40 flex-1 ${hoveringMedia ? 'media-controls-visible' : 'media-controls-hidden'
+          }`}
         onPointerDown={(e) => e.stopPropagation()}
         onDoubleClick={(e) => e.stopPropagation()}
         onLoadedMetadata={onLoadedMetadata}
@@ -185,6 +258,7 @@ const VideoPlayer = React.memo(function VideoPlayer({ mediaRef, src, hoveringMed
 /** Stable audio element wrapper — mirrors VideoPlayer for the same stability reasons. */
 const AudioPlayer = React.memo(function AudioPlayer({ mediaRef, src, themeText, hoveringMedia, nodeId }) {
   useMediaEventLogger(mediaRef, nodeId, true);
+  useMediaFade(mediaRef, true);
   return (
     <div className="w-full h-full mt-2 px-6 py-4 bg-black/20 rounded-lg border border-white/5 flex flex-col flex-1 items-center justify-center gap-4 shadow-inner">
       <AudioLines className={`w-12 h-12 ${themeText} opacity-80 shrink-0 ${hoveringMedia ? 'text-white' : ''} transition-colors`} />
@@ -208,13 +282,44 @@ marked.setOptions({ breaks: true, gfm: true });
 
 const SAVE_DEBOUNCE_MS = 800; // ms of idle time after last keystroke before writing to disk
 
+// Absolute-positioned save-status dot. Rendered with fixed dimensions in every state
+// so toggling between idle/dirty/saving/saved/error never reflows the editor and the
+// textarea doesn't jump up/down. The clean state is a subtle gray dot (still visible).
+const STATUS_INDICATORS = {
+  saving: { color: 'bg-sky-400', pulse: true, label: 'Saving…' },
+  saved: { color: 'bg-emerald-400', pulse: false, label: 'Saved' },
+  error: { color: 'bg-red-400', pulse: true, label: 'Save failed' },
+  dirty: { color: 'bg-amber-400', pulse: false, label: 'Unsaved changes' },
+  clean: { color: 'bg-white/25', pulse: false, label: 'Saved' },
+};
+
+const StatusIndicator = React.memo(function StatusIndicator({ saveStatus, isDirty }) {
+  let key = 'clean';
+  if (saveStatus === 'saving') key = 'saving';
+  else if (saveStatus === 'saved') key = 'saved';
+  else if (saveStatus === 'error') key = 'error';
+  else if (isDirty) key = 'dirty';
+  const { color, pulse, label } = STATUS_INDICATORS[key];
+  return (
+    <div
+      className="absolute top-1.5 right-6 z-20 pointer-events-none"
+      title={label}
+      aria-label={label}
+    >
+      <span
+        className={`block w-2.5 h-2.5 rounded-full ring-1 ring-black/40 shadow-[0_0_4px_rgba(0,0,0,0.4)] transition-colors duration-300 ${color} ${pulse ? 'animate-pulse' : ''}`}
+      />
+    </div>
+  );
+});
+
 /**
  * Editable text/markdown preview.
  * .txt  -> always shows a textarea
  * .md   -> Preview / Edit tabs; double-click preview to enter edit mode
  * Auto-saves to disk via electronAPI.writeTextFile with debounce.
  */
-const TextPreview = React.memo(function TextPreview({ filePath, filename, isLocked, onFileChanged }) {
+const TextPreview = React.memo(function TextPreview({ filePath, filename, isLocked, onFileChanged, initialFontSize, onFontSizeChange }) {
   const isMd = filename.toLowerCase().endsWith('.md');
 
   // ── Disk-content state via reducer ────────────────────────────────────────
@@ -225,8 +330,8 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
     (state, action) => {
       if (action.type === 'loading') return { status: 'loading', content: null, error: null, gen: action.gen };
       if (action.gen !== state.gen) return state; // stale dispatch — discard
-      if (action.type === 'loaded') return { status: 'done',  content: action.content, error: null,         gen: state.gen };
-      if (action.type === 'error')  return { status: 'error', content: null,           error: action.error, gen: state.gen };
+      if (action.type === 'loaded') return { status: 'done', content: action.content, error: null, gen: state.gen };
+      if (action.type === 'error') return { status: 'error', content: null, error: action.error, gen: state.gen };
       return state;
     },
     { status: 'loading', content: null, error: null, gen: 0 }
@@ -238,13 +343,42 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
 
   // ── Edit state ─────────────────────────────────────────────────────
   // draftContent: what's currently in the textarea (may differ from diskContent)
-  const [draftContent,    setDraftContent]    = useState(null);  // null until first disk load
+  const [draftContent, setDraftContent] = useState(null);  // null until first disk load
   const [isMdPreviewMode, setIsMdPreviewMode] = useState(true);  // .md starts in preview
-  const [saveStatus,      setSaveStatus]      = useState('idle'); // 'idle'|'saving'|'saved'|'error'
-  const [externalChange,  setExternalChange]  = useState(false); // disk changed while editing
+  const [saveStatus, setSaveStatus] = useState('idle'); // 'idle'|'saving'|'saved'|'error'
+  const [externalChange, setExternalChange] = useState(false); // disk changed while editing
+  const [fontSize, setFontSizeLocal] = useState(initialFontSize || 12);
+  const setFontSize = useCallback((updater) => {
+    setFontSizeLocal(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      onFontSizeChange?.(next);
+      return next;
+    });
+  }, [onFontSizeChange]);
 
-  const saveTimerRef  = useRef(null);
-  const isMountedRef  = useRef(true);
+  const handleZoomIn = useCallback((e) => {
+    e?.stopPropagation();
+    setFontSize(prev => Math.min(prev + 2, 48));
+  }, [setFontSize]);
+
+  const handleZoomOut = useCallback((e) => {
+    e?.stopPropagation();
+    setFontSize(prev => Math.max(prev - 2, 8));
+  }, [setFontSize]);
+
+  const handleWheel = useCallback((e) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.stopPropagation();
+      if (e.deltaY < 0) {
+        setFontSize(prev => Math.min(prev + 1, 48));
+      } else if (e.deltaY > 0) {
+        setFontSize(prev => Math.max(prev - 1, 8));
+      }
+    }
+  }, [setFontSize]);
+
+  const saveTimerRef = useRef(null);
+  const isMountedRef = useRef(true);
   useEffect(() => () => { isMountedRef.current = false; }, []);
 
   useEffect(() => {
@@ -278,7 +412,7 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
         fetch(toLocalFileUrl(filePath) + `?_g=${gen}`)
           .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); })
           .then(text => { dispatchDisk({ type: 'loaded', content: text, gen }); setDraftContent(text); })
-          .catch(() => {}); // ignore watcher-triggered reload errors silently
+          .catch(() => { }); // ignore watcher-triggered reload errors silently
       }
     });
   }, [onFileChanged, draftContent, diskState.content, filePath]);
@@ -320,7 +454,7 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
     fetch(toLocalFileUrl(filePath) + `?_g=${gen}`)
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); })
       .then(text => { dispatchDisk({ type: 'loaded', content: text, gen }); setDraftContent(text); })
-      .catch(() => {});
+      .catch(() => { });
   }, [filePath]);
 
   const handleKeepEdits = useCallback(() => {
@@ -329,32 +463,27 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
   }, []);
 
   // ── Status indicator ─────────────────────────────────────────────────────
-  // Shows to the right of the tab row (or top-right for .txt).
-  // Written as a plain function (not a component) to satisfy react-hooks/static-components.
+  // The visual dot is rendered absolutely (see <StatusIndicator />) so it never
+  // affects flow layout — only `isDirty` is computed here.
   const isDirty = draftContent !== null && draftContent !== diskState.content;
-
-  function renderStatusDot() {
-    if (saveStatus === 'saving') {
-      return <span className="text-white/30 text-[9px] ml-1">saving…</span>;
-    }
-    if (saveStatus === 'saved') {
-      return <span className="text-emerald-400/70 text-[9px] ml-1">saved</span>;
-    }
-    if (saveStatus === 'error') {
-      return <span className="text-red-400/80 text-[9px] ml-1">save error</span>;
-    }
-    if (isDirty) {
-      return <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 ml-1.5 mb-0.5 shrink-0" title="Unsaved changes" />;
-    }
-    return null;
-  }
 
   // ── Shared textarea props ────────────────────────────────────────────────
   const textareaClass =
-    'nodrag flex-1 w-full h-full resize-none rounded-md bg-black/20 border border-white/5 ' +
-    'shadow-inner p-3 text-white/85 text-xs font-mono leading-relaxed outline-none ' +
+    'nodrag nowheel flex-1 w-full h-full resize-none rounded-md bg-black/20 border border-white/5 ' +
+    'shadow-inner p-3 text-white/85 font-mono leading-relaxed outline-none ' +
     'focus:border-sky-500/40 focus:bg-black/30 transition-colors ' +
     (isLocked ? 'cursor-not-allowed opacity-60' : 'cursor-text');
+
+  const ZoomControls = (
+    <div className="absolute bottom-3 right-5 flex items-center gap-1.5 bg-black/40 backdrop-blur-md rounded px-1.5 py-1 border border-white/10 z-20">
+      <button onClick={handleZoomOut} onPointerDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} className="nodrag cursor-pointer p-1 text-white/50 hover:text-white transition-colors" title="Zoom Out">
+        <ZoomOut size={16} />
+      </button>
+      <button onClick={handleZoomIn} onPointerDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()} className="nodrag cursor-pointer p-1 text-white/50 hover:text-white transition-colors" title="Zoom In">
+        <ZoomIn size={16} />
+      </button>
+    </div>
+  );
 
   // ── Loading / error states ───────────────────────────────────────────────
   if (diskState.status === 'error') {
@@ -394,28 +523,28 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
   // ── .txt — always editable ───────────────────────────────────────────────
   if (!isMd) {
     return (
-      <div className="flex-1 flex flex-col w-full h-full gap-0 overflow-hidden">
+      <div className="relative flex-1 flex flex-col w-full h-full gap-0 overflow-hidden">
         {ExternalChangeBanner}
-        <div className="flex items-center justify-end px-1 py-0.5 shrink-0">
-          {isLocked && <span className="text-white/30 text-[9px]">locked</span>}
-          { renderStatusDot() }
-        </div>
         <textarea
           className={textareaClass}
+          style={{ fontSize: `${fontSize}px` }}
           value={draftContent}
           onChange={handleChange}
           readOnly={isLocked}
           onPointerDown={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
+          onWheel={handleWheel}
           spellCheck={false}
         />
+        <StatusIndicator saveStatus={saveStatus} isDirty={isDirty} />
+        {ZoomControls}
       </div>
     );
   }
 
   // ── .md — Preview / Edit tabs ────────────────────────────────────────────
   return (
-    <div className="flex-1 flex flex-col w-full h-full gap-0 overflow-hidden">
+    <div className="relative flex-1 flex flex-col w-full h-full gap-0 overflow-hidden">
       {ExternalChangeBanner}
 
       {/* Tab row */}
@@ -423,51 +552,52 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
         <button
           onClick={() => setIsMdPreviewMode(true)}
           onPointerDown={(e) => e.stopPropagation()}
-          className={`nodrag px-2.5 py-0.5 rounded-t text-[10px] font-medium transition-colors ${
-            isMdPreviewMode
-              ? 'bg-black/30 text-white/90 border border-b-0 border-white/10'
-              : 'text-white/40 hover:text-white/60'
-          }`}
+          className={`nodrag px-2.5 py-0.5 rounded-t text-[10px] font-medium transition-colors ${isMdPreviewMode
+            ? 'bg-black/30 text-white/90 border border-b-0 border-white/10'
+            : 'text-white/40 hover:text-white/60'
+            }`}
         >
           Preview
         </button>
         <button
           onClick={() => setIsMdPreviewMode(false)}
           onPointerDown={(e) => e.stopPropagation()}
-          className={`nodrag px-2.5 py-0.5 rounded-t text-[10px] font-medium transition-colors ${
-            !isMdPreviewMode
-              ? 'bg-black/30 text-white/90 border border-b-0 border-white/10'
-              : 'text-white/40 hover:text-white/60'
-          }`}
+          className={`nodrag px-2.5 py-0.5 rounded-t text-[10px] font-medium transition-colors ${!isMdPreviewMode
+            ? 'bg-black/30 text-white/90 border border-b-0 border-white/10'
+            : 'text-white/40 hover:text-white/60'
+            }`}
         >
           Edit
         </button>
-        <span className="flex-1" />
-        {isLocked && <span className="text-white/30 text-[9px] mr-1">locked</span>}
-        { renderStatusDot() }
       </div>
 
       {/* Content */}
       {isMdPreviewMode ? (
         <div
-          className="nodrag flex-1 w-full h-full overflow-auto rounded-md bg-black/20 border border-white/5 shadow-inner p-3 text-preview-md"
+          className="nodrag nowheel flex-1 w-full h-full overflow-auto rounded-md bg-black/20 border border-white/5 shadow-inner p-3 text-preview-md"
+          style={{ fontSize: `${fontSize}px` }}
           onPointerDown={(e) => e.stopPropagation()}
           onDoubleClick={(e) => { e.stopPropagation(); setIsMdPreviewMode(false); }}
+          onWheel={handleWheel}
           title="Double-click to edit"
           dangerouslySetInnerHTML={{ __html: marked.parse(draftContent) }}
         />
       ) : (
         <textarea
           className={textareaClass}
+          style={{ fontSize: `${fontSize}px` }}
           value={draftContent}
           onChange={handleChange}
           readOnly={isLocked}
           onPointerDown={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
+          onWheel={handleWheel}
           spellCheck={false}
           autoFocus
         />
       )}
+      <StatusIndicator saveStatus={saveStatus} isDirty={isDirty} />
+      {ZoomControls}
     </div>
   );
 });
@@ -476,11 +606,10 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
 
 export const DocumentNode = React.memo(function DocumentNode({ id, data, selected, width, height }) {
   const imgVersionRef = useRef(0);
-  const imgRef        = useRef(null);
-  const mediaRef      = useRef(null);
+  const imgRef = useRef(null);
+  const mediaRef = useRef(null);
 
   const isExpanded = !!data.isExpanded;
-  const [showCustomizeDialog, setShowCustomizeDialog] = useState(false);
   const [hoveringMedia, setHoveringMedia] = useState(false);
   const { updateNodeData, setNodes } = useReactFlow();
 
@@ -496,12 +625,16 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
     return () => { textFileChangedCallbackRef.current = null; };
   }, []);
 
+  const handleFontSizeChange = useCallback((size) => {
+    updateNodeData(id, { editorFontSize: size });
+  }, [id, updateNodeData]);
+
   const { category, label, color, badge, Icon } = getFileCategoryInfo(data.filename);
-  const theme   = THEME_COLORS[color];
+  const theme = THEME_COLORS[color];
   const isImage = category === 'image';
   const isVideo = category === 'video';
   const isAudio = category === 'audio';
-  const isText  = category === 'text';   // .md / .txt — expandable text preview
+  const isText = category === 'text';   // .md / .txt — expandable text preview
   const isMedia = isVideo || isAudio;    // has an HTMLMediaElement
   const isExpandable = isMedia || isText; // can enter the expanded-preview state
 
@@ -525,11 +658,6 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
   }, [data.filePath, isImage, isText]);
 
   // ── Customize dialog trigger ───────────────────────────────────────────────
-  useEffect(() => {
-    const handleOpenCustomize = () => { if (!data.locked) setShowCustomizeDialog(true); };
-    document.addEventListener(`edit-node-font-${id}`, handleOpenCustomize);
-    return () => document.removeEventListener(`edit-node-font-${id}`, handleOpenCustomize);
-  }, [id, data.locked]);
 
   // ── Media src management ───────────────────────────────────────────────────
   // Effect 1: Enforce src on mount / file-change (fixes React 18 StrictMode quirk).
@@ -585,11 +713,11 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
       if (n.id !== id) return n;
       return {
         ...n,
-        width:  n.data.expandedWidth  || n.width,
+        width: n.data.expandedWidth || n.width,
         height: n.data.expandedHeight || n.height,
         style: {
           ...n?.style,
-          width:  n.data.expandedWidth  || n.style?.width,
+          width: n.data.expandedWidth || n.style?.width,
           height: n.data.expandedHeight || n.style?.height,
         },
         data: { ...n.data, isExpanded: true },
@@ -614,23 +742,23 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
     ? 'border-blue-400 shadow-[0_0_15px_rgba(59,130,246,0.5)]'
     : 'border-white/10';
 
-  let wrapperClassName = `glass-card rounded-xl flex transition-all relative group ${selectedClass}`;
+  let wrapperClassName = `glass-card rounded-xl flex transition-[border-color,box-shadow] relative group ${selectedClass}`;
 
   const isCollapsed = !isImage && !(isExpanded && isExpandable);
-  const currentWidth  = width  || data.expandedWidth;
+  const currentWidth = width || data.expandedWidth;
   const currentHeight = height || data.expandedHeight;
 
   // Default expanded sizes per type
   const defaultExpandedW = isVideo ? 400 : isText ? 380 : 320;
   const defaultExpandedH = isVideo ? 313 : isText ? 320 : 200;
 
-  const nodeWidth  = isCollapsed ? 'auto' : (currentWidth  || (isImage ? 250 : defaultExpandedW));
+  const nodeWidth = isCollapsed ? 'auto' : (currentWidth || (isImage ? 250 : defaultExpandedW));
   const nodeHeight = isCollapsed ? 'auto' : (currentHeight || (isExpanded ? defaultExpandedH : 'auto'));
 
   const containerStyle = {
-    width:     nodeWidth,
-    height:    nodeHeight,
-    minWidth:  isImage ? 150 : isExpanded && isExpandable ? 280 : 'auto',
+    width: nodeWidth,
+    height: nodeHeight,
+    minWidth: isImage ? 150 : isExpanded && isExpandable ? 280 : 'auto',
     minHeight: isImage ? 150 : isExpanded && isExpandable ? 180 : 'auto',
   };
 
@@ -696,6 +824,8 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
               filename={data.filename}
               isLocked={!!data.locked}
               onFileChanged={onTextFileChanged}
+              initialFontSize={data.editorFontSize}
+              onFontSizeChange={handleFontSizeChange}
             />
           )}
         </ExpandedPreviewShell>
@@ -759,18 +889,11 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
           handleStyle={{ width: 8, height: 8, borderRadius: 2 }}
         />
       )}
-      <Handle type="target" position={Position.Top}    id="top"    className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
-      <Handle type="target" position={Position.Left}   id="left"   className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
+      <Handle type="target" position={Position.Top} id="top" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
+      <Handle type="target" position={Position.Left} id="left" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
       {innerContent}
-      <Handle type="source" position={Position.Right}  id="right"  className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
+      <Handle type="source" position={Position.Right} id="right" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
       <Handle type="source" position={Position.Bottom} id="bottom" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
-      {showCustomizeDialog && (
-        <CustomizeDialog
-          backgroundColor={data.backgroundColor}
-          onApply={(updates) => updateNodeData(id, updates)}
-          onClose={() => setShowCustomizeDialog(false)}
-        />
-      )}
     </div>
   );
 });

@@ -169,7 +169,7 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
       >
 
         {/* ── Select Tool (box selection) ────────────────────────── */}
-        <ToolbarTooltip label="Select / Marquee" shortcut="S">
+        <ToolbarTooltip label="Select / Marquee" shortcut="V">
           <button
             onClick={() => {
               setActiveTool(activeTool === 'select' ? null : 'select');

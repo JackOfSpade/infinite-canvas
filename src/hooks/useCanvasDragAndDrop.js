@@ -8,6 +8,8 @@ import { EventLogger } from '../utils/EventLogger';
 // Compiled once at module load — not per drop event.
 const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)$/i;
 const URL_RE = /^(https?:\/\/[^\s]+|[a-z0-9]([a-z0-9-]*[a-z0-9])?\.([a-z]{2,}\.)*[a-z]{2,}([/?#][^\s]*)?)$/i;
+const IMAGE_EXT_RE = /\.(png|jpg|jpeg|webp|gif)$/i;
+const RESUME_EXT_RE = /\.(pdf|docx|doc)$/i;
 
 export function useCanvasDragAndDrop({
   setNodes,
@@ -101,7 +103,7 @@ export function useCanvasDragAndDrop({
         path: f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : '')
       }));
 
-      // Default: treat as document/folder drops — only process items with valid system paths
+      // Only process items with valid system paths
       const validFiles = files.filter(f => f.path);
       if (validFiles.length === 0) {
         EventLogger.log('Drop ignored: no valid paths on files. files=' +
@@ -109,6 +111,28 @@ export function useCanvasDragAndDrop({
         return;
       }
 
+      const imageFiles  = validFiles.filter(f => IMAGE_EXT_RE.test(f.name));
+      const resumeFiles = validFiles.filter(f => RESUME_EXT_RE.test(f.name));
+      const otherFiles  = validFiles.filter(f => !IMAGE_EXT_RE.test(f.name) && !RESUME_EXT_RE.test(f.name));
+
+      // All dropped files are images → auto-create a SellHub pre-seeded with the paths.
+      // The SellHubNode's own mount effect kicks off analysis automatically.
+      if (imageFiles.length > 0 && resumeFiles.length === 0 && otherFiles.length === 0) {
+        const imagePaths = imageFiles.map(f => f.path);
+        takeSnapshot();
+        insertNodes([NODE_FACTORIES.sellhub(position, { imagePaths })]);
+        return;
+      }
+
+      // Resume dropped → auto-create a JobHub pre-seeded with that file path.
+      // The JobHubNode's own mount effect kicks off pipeline automatically.
+      if (resumeFiles.length > 0 && otherFiles.length === 0 && imageFiles.length === 0) {
+        takeSnapshot();
+        insertNodes([NODE_FACTORIES.jobhub(position, { filePath: resumeFiles[0].path })]);
+        return;
+      }
+
+      // Default: treat as document/folder drops
       takeSnapshot();
       const dropDepth = depthRef.current;
       const newItems = await processDroppedFiles(validFiles, position);

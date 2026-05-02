@@ -172,7 +172,7 @@ export function SellHubNode({ id, data }) {
     const currentId = id;
 
     try {
-      updateGlobal(currentId, { hubState: 'analyzing' });
+      updateGlobal(currentId, { hubState: 'analyzing', imagePaths: validPaths });
       const result = await window.electronAPI.analyzePhotos({ imagePaths: validPaths, nodeId: currentId });
       
       if (!isMountedRef.current) return;
@@ -183,7 +183,6 @@ export function SellHubNode({ id, data }) {
       updateGlobal(currentId, {
         hubState: 'draft',
         product: result.product,
-        imagePaths,
       });
     } catch (error) {
       EventLogger.error('[SellHub] Analysis failed:', error);
@@ -238,7 +237,6 @@ export function SellHubNode({ id, data }) {
 
   const handleDrop = useCallback((e) => {
     if (data.locked) return; // Locked nodes don't accept new drops
-    if (hubState === 'analyzing' || hubState === 'researching') return; // Ignore drops while busy
     
     e.preventDefault();
     e.stopPropagation();
@@ -252,8 +250,10 @@ export function SellHubNode({ id, data }) {
 
     if (validImages.length === 0) return;
 
-    // In draft/priced state: append photos rather than restarting analysis
-    if (hubState === 'draft' || hubState === 'priced') {
+    EventLogger.log(`[SellHub][${id}] Drop event: ${validImages.length} valid images`);
+
+    // In draft/priced state, or analyzing/researching state: append photos rather than restarting analysis
+    if (hubState === 'draft' || hubState === 'priced' || hubState === 'analyzing' || hubState === 'researching') {
       const newPaths = validImages.map(f => f.resolvedPath);
       const existing = data.imagePaths || [];
       const merged = [...new Set([...existing, ...newPaths])]; // deduplicate

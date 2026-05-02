@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState, useEffect } from 'react';
+import React, { useCallback, useRef, useState, useEffect, useMemo } from 'react';
 import {
   ReactFlow,
   useNodesState,
@@ -19,7 +19,8 @@ import { LinkNode } from './nodes/LinkNode';
 import { ListingNode } from './nodes/ListingNode';
 import { JobCardNode } from './nodes/JobCardNode';
 import { JobHubNode } from './nodes/JobHubNode';
-import { SellHubNode } from './nodes/SellHubNode';
+import {SellHubNode} from './nodes/SellHubNode';
+import {CustomizeDialog} from './components/CustomizeDialog';
 
 import { createTextNode } from './utils/nodeFactory';
 import { Sidebar } from './components/Sidebar';
@@ -88,6 +89,7 @@ export function Canvas() {
   const { settings, updateSetting, updateShortcut, resetShortcuts, animationDuration } = useSettings();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isIssueReporterOpen, setIsIssueReporterOpen] = useState(false);
+  const [customizeTargetIds, setCustomizeTargetIds] = useState([]);
 
   // ── Undo / Redo ──────────────────────────────────────────────────────────
   const snapshotTakenForDeleteRef = useRef(false);
@@ -409,7 +411,8 @@ export function Canvas() {
   useCanvasKeyboardShortcuts({
     placementMode, setPlacementMode, activeTool, setActiveTool, setIsSettingsOpen,
     isAnimatingRef: isNavigationAnimatingRef,
-    duplicateNodes, copyNodes, pasteNodes
+    duplicateNodes, copyNodes, pasteNodes,
+    shortcuts: settings.shortcuts
   });
 
   // ── WASD canvas navigation ───────────────────────────────────────────────
@@ -458,6 +461,66 @@ export function Canvas() {
   }, [handlePointerUp, cursorsRef]);
 
   // ── Render ───────────────────────────────────────────────────────────────
+  // ── Multi-node customization ──────────────────────────────────────────
+  useEffect(() => {
+    const handleOpenMulti = (e) => {
+      if (e.detail?.ids) {
+        setCustomizeTargetIds(e.detail.ids);
+      }
+    };
+    document.addEventListener('open-multi-customize', handleOpenMulti);
+    return () => document.removeEventListener('open-multi-customize', handleOpenMulti);
+  }, []);
+
+  const handleCustomizeApply = useCallback((updates) => {
+    if (customizeTargetIds.length === 0) return;
+    
+    setNodes(nds => nds.map(n => {
+      if (customizeTargetIds.includes(n.id)) {
+        // Filter updates based on node type to ensure compatibility
+        // Text/Link/Canvas nodes support font properties; Document only supports background
+        const isCompatibleWithFont = ['text', 'link', 'group'].includes(n.type);
+        const filteredUpdates = { ...updates };
+        
+        if (!isCompatibleWithFont) {
+          delete filteredUpdates.fontSize;
+          delete filteredUpdates.fontFamily;
+          delete filteredUpdates.textColor;
+          delete filteredUpdates.titleSpacing;
+        }
+
+        return {
+          ...n,
+          data: { ...n.data, ...filteredUpdates }
+        };
+      }
+      return n;
+    }));
+  }, [customizeTargetIds, setNodes]);
+
+  const customizeInitialData = useMemo(() => {
+    if (customizeTargetIds.length === 0) return null;
+    const targetNodes = nodes.filter(n => customizeTargetIds.includes(n.id));
+    if (targetNodes.length === 0) return null;
+
+    const hasFontCompatible = targetNodes.some(n => ['text', 'link', 'group'].includes(n.type));
+    const hasSpacingCompatible = targetNodes.some(n => n.type === 'group');
+
+    // Use the first node that supports the property as the baseline for the dialog
+    const fontNode = targetNodes.find(n => ['text', 'link', 'group'].includes(n.type));
+    const bgNode   = targetNodes[0];
+
+    return {
+      fontSize: fontNode?.data?.fontSize,
+      fontFamily: fontNode?.data?.fontFamily,
+      textColor: fontNode?.data?.textColor,
+      titleSpacing: targetNodes.find(n => n.type === 'group')?.data?.titleSpacing,
+      backgroundColor: bgNode?.data?.backgroundColor,
+      showFont: hasFontCompatible,
+      showSpacing: hasSpacingCompatible
+    };
+  }, [customizeTargetIds, nodes]);
+
   return (
     <div className="w-screen h-screen bg-neutral-950 flex" ref={reactFlowWrapper}>
       <Sidebar nodes={nodes} onReportBugClick={handleReportBugClick} />
@@ -630,6 +693,14 @@ export function Canvas() {
             variant={confirmDialogData.variant}
             onConfirm={handleConfirmDialogConfirm}
             onCancel={handleConfirmDialogCancel}
+          />
+        )}
+
+        {customizeTargetIds.length > 0 && customizeInitialData && (
+          <CustomizeDialog
+            {...customizeInitialData}
+            onApply={handleCustomizeApply}
+            onClose={() => setCustomizeTargetIds([])}
           />
         )}
       </div>

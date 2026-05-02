@@ -138,12 +138,6 @@ class EventLoggerSingleton {
     if (typeof window === 'undefined') return;
 
     window.addEventListener('error', (e) => {
-      // "ResizeObserver loop completed with undelivered notifications" is a
-      // harmless Chromium quirk — it fires whenever our setNodes call interrupts
-      // a ResizeObserver batch mid-loop. It is NOT a real error and alternates
-      // with every "node resized" line during resize, making it 40-50% of the
-      // entire log buffer and burying the actual signal. Suppress it entirely.
-      if (e?.message?.startsWith('ResizeObserver loop')) return;
       const loc = e.filename ? ` (${e.filename.split('/').pop()}:${e.lineno})` : '';
       this.log(`JS-ERROR: ${e?.message || String(e)}${loc}`);
     });
@@ -167,6 +161,14 @@ class EventLoggerSingleton {
       this.log(`CONSOLE-WARN: ${msg}`);
       origWarn.apply(console, args);
     };
+
+    // Capture paste events to help debug clipboard-related issues
+    window.addEventListener('paste', (e) => {
+      const types = e.clipboardData?.types || [];
+      const text = e.clipboardData?.getData('text/plain') || '';
+      const summary = text.length > 50 ? text.slice(0, 50) + '...' : text;
+      this.log(`PASTE: types=[${Array.from(types).join(',')}] text="${summary.replace(/\\n/g, '\\\\n')}"`);
+    });
   }
 }
 

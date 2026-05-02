@@ -106,21 +106,27 @@ export function CustomizeDialog({
   textColor: initialColor = '#ffffff',
   backgroundColor: initialBgColor = 'transparent',
   titleSpacing: initialSpacing,
+  showFont = false,
+  showSpacing = false,
   onApply,
   onClose,
 }) {
-  const [fontSize, setFontSize] = useState(initialSize);
-  const [fontFamily, setFontFamily] = useState(initialFamily);
+  const [fontSize, setFontSize] = useState(initialSize || 14);
+  const [fontFamily, setFontFamily] = useState(initialFamily || 'sans-serif');
   const [textColor, setTextColor] = useState(initialColor);
   const [backgroundColor, setBackgroundColor] = useState(initialBgColor);
   const [titleSpacing, setTitleSpacing] = useState(initialSpacing ?? 0);
 
-  const showSpacing = initialSpacing !== undefined;
-  const hasFont = initialSize !== undefined;
+  const hasFont = showFont;
 
   /** Push every change to the caller immediately — no Done button needed. */
   const emit = (overrides) => {
-    const payload = { fontSize, fontFamily, textColor, backgroundColor, titleSpacing, ...overrides };
+    const payload = {
+      ...(hasFont ? { fontSize, fontFamily, textColor } : {}),
+      ...(showSpacing ? { titleSpacing } : {}),
+      backgroundColor,
+      ...overrides
+    };
     const cleanPayload = Object.fromEntries(Object.entries(payload).filter(([, v]) => v !== undefined));
     onApply(cleanPayload);
   };

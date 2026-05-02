@@ -2,7 +2,6 @@ import React, { useState, useRef, useCallback, useContext, useEffect } from 'rea
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { Dialog } from '../components/Dialog';
-import { CustomizeDialog } from '../components/CustomizeDialog';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
 import { Lock } from 'lucide-react';
 
@@ -49,6 +48,12 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
   const handlePointerDown = useCallback((e) => {
     if (isEditingLabel) e.stopPropagation();
   }, [isEditingLabel]);
+
+  const handlePaste = useCallback((e) => {
+    e.preventDefault();
+    const text = e.clipboardData.getData('text/plain');
+    document.execCommand('insertText', false, text);
+  }, []);
 
   // Sync label content when data changes externally (undo/redo)
   useEffect(() => {
@@ -133,28 +138,22 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
 
   // Listen for dialog triggers from global context menu
   useEffect(() => {
-    const handleOpenFont = () => {
-      if (data.locked) return; // Locked nodes are not editable
-      setShowDialog('customize');
-    };
     const handleOpenUrl = () => {
       if (data.locked) return; // Locked nodes are not editable
       setUrlInput(data.url || '');
       setShowDialog('url');
     };
     
-    document.addEventListener(`edit-node-font-${id}`, handleOpenFont);
     document.addEventListener(`edit-node-url-${id}`, handleOpenUrl);
     
     return () => {
-      document.removeEventListener(`edit-node-font-${id}`, handleOpenFont);
       document.removeEventListener(`edit-node-url-${id}`, handleOpenUrl);
     };
   }, [id, data.url, data.locked]);
 
   return (
-    <div 
-      className="relative group px-1 rounded-md transition-colors"
+    <div
+      className={`relative group px-1 rounded-md transition-colors ${isEditingLabel ? 'nodrag' : ''}`}
       style={{
         backgroundColor: data.backgroundColor || 'transparent'
       }}
@@ -187,6 +186,7 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
         onBlur={handleLabelBlur}
         onKeyDown={handleKeyDown}
         onPointerDown={handlePointerDown}
+        onPaste={handlePaste}
         className={`${textColor ? '' : 'text-blue-400'} outline-none whitespace-nowrap min-w-[20px] min-h-[1em] ${isEditingLabel ? 'cursor-text' : 'select-none cursor-pointer hover:underline'}`}
         style={{ fontSize: `${fontSize}px`, fontFamily, ...(textColor ? { color: textColor } : {}), ...(isEditingLabel ? { userSelect: 'text' } : {}) }}
       />
@@ -194,16 +194,7 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
       <Handle type="source" position={Position.Right} id="right" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
       <Handle type="source" position={Position.Bottom} id="bottom" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
 
-      {showDialog === 'customize' && (
-        <CustomizeDialog
-          fontSize={fontSize}
-          fontFamily={fontFamily}
-          textColor={data.textColor || '#60a5fa'}
-          backgroundColor={data.backgroundColor}
-          onApply={(updates) => updateNodeData(id, updates)}
-          onClose={() => setShowDialog(null)}
-        />
-      )}
+
 
       {showDialog === 'url' && (
         <Dialog title="Edit URL" onClose={() => setShowDialog(null)}>

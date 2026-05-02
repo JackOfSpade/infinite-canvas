@@ -46,11 +46,16 @@ function generateMarkdown(payload) {
         cs.isEditing     ? 'editing'    : null,
         cs.isResizing    ? 'resizing'   : null,
         cs.hasEdgeCursor ? 'edgeCursor' : null,
+        n.selected       ? 'selected'   : null,
       ].filter(Boolean).join(', ') || '—';
       return (
         `| \`${n.id.slice(0, 8)}\` ` +
         `| ${n.type} ` +
+        `| ${n.selected ? '✅' : '—'} ` +
         `| (${n.position?.x?.toFixed(0)}, ${n.position?.y?.toFixed(0)}) ` +
+        `| ${n.fontSize ?? '—'}/${n.fontFamily ?? '—'} ` +
+        `| ${n.textColor ?? '—'} ` +
+        `| ${n.backgroundColor ?? '—'} ` +
         `| ${n.width_prop    ?? '—'} ` +
         `| ${n.style_width   ?? '—'} ` +
         `| ${n.measured_width ?? '—'} ` +
@@ -63,8 +68,8 @@ function generateMarkdown(payload) {
 > **Size columns**: mismatches reveal ResizeObserver/setNodes race conditions.
 > **Component state**: React state at the moment the report was generated.
 
-| ID (first 8) | Type | Position | width (prop) | style.width | measured.width | currentSize | state flags |
-|---|---|---|---|---|---|---|---|
+| ID (first 8) | Type | Selected | Position | Font | T-Color | B-Color | width (prop) | style.width | measured.width | currentSize | state flags |
+|---|---|---|---|---|---|---|---|---|---|---|---|
 ${rows}
 `;
   }
@@ -74,8 +79,13 @@ ${rows}
   if (mediaState && mediaState.length > 0) {
     const READY_STATE = ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'];
     const NET_STATE   = ['EMPTY', 'IDLE', 'LOADING', 'NO_SOURCE'];
+    const fmtRanges = (arr) => {
+      if (!arr || arr.length === 0) return '(none)';
+      return arr.map(([s, e]) => `${s.toFixed(2)}–${e.toFixed(2)}`).join(', ');
+    };
     const rows = mediaState.map((m, i) => {
-      const progress = m.duration ? `${m.currentTime?.toFixed(2)}s / ${m.duration?.toFixed(2)}s` : `${m.currentTime?.toFixed(2)}s / unknown`;
+      const durStr = typeof m.duration === 'number' ? `${m.duration.toFixed(2)}s` : (m.duration || 'unknown');
+      const progress = `${m.currentTime?.toFixed(2)}s / ${durStr}`;
       const errorStr = m.errorCode != null ? `code=${m.errorCode} ${m.errorMessage || ''}`.trim() : '—';
       return (
         `| ${i + 1} ` +
@@ -84,15 +94,18 @@ ${rows}
         `| ${progress} ` +
         `| ${READY_STATE[m.readyState] ?? m.readyState} ` +
         `| ${NET_STATE[m.networkState] ?? m.networkState} ` +
+        `| ${fmtRanges(m.seekable)} ` +
+        `| ${fmtRanges(m.buffered)} ` +
         `| ${errorStr} |`
       );
     }).join('\n');
     mediaMarkdown = `
 ## Media Player State
-> Snapshot taken at report time. \`readyState\` and \`networkState\` reveal stalls, decode failures, and network issues.
+> Snapshot taken at report time. \`readyState\`/\`networkState\` reveal stalls and decode/network issues.
+> An empty \`seekable\` range while \`buffered\` is populated means the source isn't Range-capable — timeline clicks are ignored.
 
-| # | Tag | Status | Progress | readyState | networkState | Error |
-|---|---|---|---|---|---|---|
+| # | Tag | Status | Progress | readyState | networkState | Seekable | Buffered | Error |
+|---|---|---|---|---|---|---|---|---|
 ${rows}
 `;
   }

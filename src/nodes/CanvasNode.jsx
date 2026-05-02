@@ -2,7 +2,6 @@ import React, { useCallback, useState, useRef, useEffect } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { Lock, X, ArrowDown } from 'lucide-react';
 import { CanvasThumbnail } from '../components/CanvasThumbnail';
-import { CustomizeDialog } from '../components/CustomizeDialog';
 import { EventLogger } from '../utils/EventLogger';
 import { getNodeDims } from '../utils/constants';
 import { ResizeCorrection, ResizeActive, TitleZoneActive, TitleZoneCorrection } from '../utils/canvasInteractions';
@@ -23,7 +22,6 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
 
   const [title, setTitle]                   = useState(data.title || '');
   const [isEditing, setIsEditing]           = useState(false);
-  const [showCustomizeDialog, setShowCustomizeDialog] = useState(false);
   const [edgeCursorStyle, setEdgeCursorStyle] = useState(null);
   const [isResizing, setIsResizing]         = useState(false);
 
@@ -127,12 +125,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   // id and mainFlow are stable; isEditing is the trigger; liveRef/inputRef/containerRef are refs.
   }, [isEditing, id, mainFlow]);
 
-  // Font & Size dialog trigger (from context menu)
-  useEffect(() => {
-    const handleOpenFont = () => { if (!data.locked) setShowCustomizeDialog(true); };
-    document.addEventListener(`edit-node-font-${id}`, handleOpenFont);
-    return () => document.removeEventListener(`edit-node-font-${id}`, handleOpenFont);
-  }, [id, data.locked]);
+
 
   // ── Continuously-rotating SVG resize cursor ───────────────────────────────
   const getResizeCursor = useCallback((clientX, clientY) => {
@@ -773,17 +766,6 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
         <Handle type="source" position={Position.Bottom} id="bottom" data-no-resize="true" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
       </div>
 
-      {showCustomizeDialog && (
-        <CustomizeDialog
-          fontSize={fontSize}
-          fontFamily={fontFamily}
-          textColor={data.textColor || '#ffffff'}
-          backgroundColor={data.backgroundColor}
-          titleSpacing={titleSpacing}
-          onApply={(updates) => mainFlow.updateNodeData(id, updates)}
-          onClose={() => setShowCustomizeDialog(false)}
-        />
-      )}
     </>
   );
 });

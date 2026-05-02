@@ -300,7 +300,7 @@ export function AnimatedSourceRing({
           >
             <div
               className={`w-9 h-9 rounded-full flex items-center justify-center text-[11px] font-bold shadow-lg border-2 transition-all ${
-                source.onClick ? 'cursor-pointer hover:scale-110' : ''
+                source.onClick ? 'cursor-pointer hover:brightness-110' : ''
               }`}
               style={{
                 backgroundColor: isDone
