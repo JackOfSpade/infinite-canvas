@@ -381,6 +381,31 @@ export function Canvas() {
   const isSelectTool  = activeTool === 'select';
   const interactiveDisabled = isDrawingTool || !!placementMode || navigation.isAnimating;
 
+  // Deselect nodes whenever the user starts an interaction on empty canvas.
+  // ReactFlow's built-in onPaneClick already deselects on a plain click, but a
+  // click-and-drag (pan) doesn't fire onClick, so the prior selection visually
+  // lingers as a "selected" outline that reads as an edit highlight. We attach a
+  // mousedown listener directly to .react-flow__pane and filter to direct hits
+  // on the pane (events from nodes/edges bubble up but have a different target).
+  // Skip when a multi-select key is held so additive box-select still works.
+  useEffect(() => {
+    const wrapper = reactFlowWrapper.current;
+    if (!wrapper) return;
+    const pane = wrapper.querySelector('.react-flow__pane');
+    if (!pane) return;
+    const handlePaneMouseDown = (e) => {
+      if (e.target !== pane) return;
+      if (e.shiftKey || e.ctrlKey || e.metaKey) return;
+      setNodes((nds) =>
+        nds.some((n) => n.selected)
+          ? nds.map((n) => (n.selected ? { ...n, selected: false } : n))
+          : nds,
+      );
+    };
+    pane.addEventListener('mousedown', handlePaneMouseDown);
+    return () => pane.removeEventListener('mousedown', handlePaneMouseDown);
+  }, [setNodes]);
+
   // ── Context Menu Logic ───────────────────────────────────────────────────
   const { menu, closeMenu, onPaneContextMenuBase, onNodeContextMenuBase, contextMenuItems } = useCanvasContextMenu({
     placementMode,
@@ -474,14 +499,14 @@ export function Canvas() {
 
   const handleCustomizeApply = useCallback((updates) => {
     if (customizeTargetIds.length === 0) return;
-    
+
     setNodes(nds => nds.map(n => {
       if (customizeTargetIds.includes(n.id)) {
         // Filter updates based on node type to ensure compatibility
         // Text/Link/Canvas nodes support font properties; Document only supports background
         const isCompatibleWithFont = ['text', 'link', 'group'].includes(n.type);
         const filteredUpdates = { ...updates };
-        
+
         if (!isCompatibleWithFont) {
           delete filteredUpdates.fontSize;
           delete filteredUpdates.fontFamily;
@@ -496,7 +521,26 @@ export function Canvas() {
       }
       return n;
     }));
-  }, [customizeTargetIds, setNodes]);
+
+    // Remember the most recent text/link customization so newly-created text/link
+    // nodes inherit it (read by `readLastTextStyle` in nodeFactory). We only
+    // persist style when the user customized at least one text/link node, since
+    // pure document-node updates (e.g. backgroundColor only) shouldn't override
+    // the remembered text style.
+    const targetTypes = customizeTargetIds
+      .map(id => nodes.find(n => n.id === id)?.type)
+      .filter(Boolean);
+    if (targetTypes.some(t => t === 'text' || t === 'link')) {
+      const styleFields = {};
+      for (const k of ['fontSize', 'fontFamily', 'textColor', 'backgroundColor']) {
+        if (updates[k] !== undefined) styleFields[k] = updates[k];
+      }
+      if (Object.keys(styleFields).length > 0) {
+        const prev = settings.lastTextStyle || {};
+        updateSetting('lastTextStyle', { ...prev, ...styleFields });
+      }
+    }
+  }, [customizeTargetIds, setNodes, nodes, settings.lastTextStyle, updateSetting]);
 
   const customizeInitialData = useMemo(() => {
     if (customizeTargetIds.length === 0) return null;

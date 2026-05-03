@@ -1,10 +1,11 @@
 import React, { useCallback, useState, useRef, useEffect } from 'react';
-import { Handle, Position, useReactFlow } from '@xyflow/react';
+import { useReactFlow } from '@xyflow/react';
 import { Lock, X, ArrowDown } from 'lucide-react';
 import { CanvasThumbnail } from '../components/CanvasThumbnail';
 import { EventLogger } from '../utils/EventLogger';
 import { getNodeDims } from '../utils/constants';
 import { ResizeCorrection, ResizeActive, TitleZoneActive, TitleZoneCorrection } from '../utils/canvasInteractions';
+import { NodeHandles } from './_shared/NodeHandles';
 
 const MIN_SIZE    = 80;
 const MAX_SIZE    = 600;
@@ -760,10 +761,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
             <X size={10} />
           </button>
         )}
-        <Handle type="target" position={Position.Top}    id="top" data-no-resize="true" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
-        <Handle type="target" position={Position.Left}   id="left" data-no-resize="true" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
-        <Handle type="source" position={Position.Right}  id="right" data-no-resize="true" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
-        <Handle type="source" position={Position.Bottom} id="bottom" data-no-resize="true" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
+        <NodeHandles className="w-2 h-2 bg-blue-400" noResize />
       </div>
 
     </>

@@ -51,6 +51,30 @@ export function useIssueReporter({
         };
       });
 
+      // Snapshot whether any contenteditable is currently focused. A "save lost
+      // my edit" bug is almost always caused by the user pressing Cmd+S while
+      // still inside a text editor — TextNode only flushes innerText into
+      // data.text on blur, so we record the live DOM text alongside the saved
+      // data.text. A divergence here is the smoking gun.
+      const ae = document.activeElement;
+      let activeEditableText = null;
+      if (ae && ae.isContentEditable) {
+        const liveText = ae.innerText || '';
+        const nearestNode = ae.closest('.react-flow__node');
+        const editingNodeId = nearestNode?.getAttribute('data-id') || null;
+        const savedNode = editingNodeId ? nodes.find(n => n.id === editingNodeId) : null;
+        activeEditableText = {
+          editingNodeId,
+          liveText: liveText.length > 500 ? liveText.slice(0, 500) + '…' : liveText,
+          savedText: savedNode?.data?.text != null
+            ? (String(savedNode.data.text).length > 500
+                ? String(savedNode.data.text).slice(0, 500) + '…'
+                : String(savedNode.data.text))
+            : null,
+          divergent: savedNode ? (liveText !== (savedNode.data?.text || '')) : null,
+        };
+      }
+
       // Snapshot any active media elements so reports include playback position,
       // duration, error codes, network state, plus seekable/buffered ranges at
       // the moment of the report. An empty `seekable` while `buffered` is full
@@ -108,6 +132,8 @@ export function useIssueReporter({
         nodeInternals,
         nodeComponentStates: EventLogger.getNodeStates(),
         eventLogs: EventLogger.getLogs(),
+        lastSaveError: EventLogger.getLastSaveError(),
+        activeEditableText,
       };
 
       if (mode === 'clipboard') {

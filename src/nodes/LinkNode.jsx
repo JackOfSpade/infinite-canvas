@@ -1,41 +1,50 @@
 import React, { useState, useRef, useCallback, useContext, useEffect } from 'react';
-import { Handle, Position, useReactFlow } from '@xyflow/react';
+import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { Dialog } from '../components/Dialog';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
-import { Lock } from 'lucide-react';
+import { NodeHandles } from './_shared/NodeHandles';
+import { LockBadge } from './_shared/LockBadge';
+
+const URL_LIKE = /^(https?:\/\/|[a-z0-9-]+\.[a-z]{2,}(\/.*)?$)/i;
+
+const ensureProtocol = (raw) =>
+  raw.startsWith('http://') || raw.startsWith('https://') ? raw : `https://${raw}`;
 
 export const LinkNode = React.memo(function LinkNode({ id, data }) {
-  const [showDialog, setShowDialog] = useState(null); // 'font' | 'url'
+  const [showDialog, setShowDialog] = useState(null); // 'url' | null
   const [urlInput, setUrlInput] = useState(data.url || '');
   const clickTimeoutRef = useRef(null);
   const focusTimerRef   = useRef(null);
+  const inputRef        = useRef(null);
+
   const { updateNodeData } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
 
-  const inputRef = useRef(null);
-  useEffect(() => {
-    return () => {
-      if (clickTimeoutRef.current !== null) clearTimeout(clickTimeoutRef.current);
-      if (focusTimerRef.current   !== null) clearTimeout(focusTimerRef.current);
-    };
+  // Cancel pending timers on unmount so a stale callback can't fire after teardown.
+  useEffect(() => () => {
+    if (clickTimeoutRef.current !== null) clearTimeout(clickTimeoutRef.current);
+    if (focusTimerRef.current   !== null) clearTimeout(focusTimerRef.current);
   }, []);
 
-  const isEmptyPredicate = useCallback(() => {
-    return !inputRef.current?.innerText?.trim();
-  }, []);
+  const isEmptyPredicate = useCallback(
+    () => !inputRef.current?.innerText?.trim(),
+    [],
+  );
 
-  const { isEditing: isEditingLabel, setIsEditing: setIsEditingLabel, handleBlur } = useNodeAutoEdit(id, data.isNew, isEmptyPredicate, inputRef);
+  const {
+    isEditing: isEditingLabel,
+    setIsEditing: setIsEditingLabel,
+    handleBlur,
+  } = useNodeAutoEdit(id, data.isNew, isEmptyPredicate, inputRef);
 
   const handleLabelBlur = useCallback(() => {
     const rawText = inputRef.current?.innerText || '';
-    
-    // Auto-detect if user pasted a raw URL directly into a blank link node's label field
-    const isProbablyUrl = /^(https?:\/\/|[a-z0-9-]+\.[a-z]{2,}(\/.*)?$)/i.test(rawText.trim());
-    
-    if (isProbablyUrl && !data.url) {
-      handleBlur({ url: rawText.trim(), label: '' }); // Leave label empty to trigger the auto-fetcher
+    // Auto-detect a raw URL pasted into a blank link node's label field; promote it
+    // to `url` and leave `label` empty so the title auto-fetcher can populate it.
+    if (URL_LIKE.test(rawText.trim()) && !data.url) {
+      handleBlur({ url: rawText.trim(), label: '' });
     } else {
       handleBlur({ label: rawText });
     }
@@ -45,60 +54,42 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
     if (e.key === 'Escape') inputRef.current?.blur();
   }, []);
 
-  const handlePointerDown = useCallback((e) => {
-    if (isEditingLabel) e.stopPropagation();
-  }, [isEditingLabel]);
-
   const handlePaste = useCallback((e) => {
     e.preventDefault();
     const text = e.clipboardData.getData('text/plain');
     document.execCommand('insertText', false, text);
   }, []);
 
-  // Sync label content when data changes externally (undo/redo)
+  // Sync label content when data changes externally (undo/redo).
   useEffect(() => {
     if (!isEditingLabel && inputRef.current) {
-      if (inputRef.current.innerText !== (data.label || data.url || '')) {
-        inputRef.current.innerText = data.label || data.url || '';
-      }
+      const next = data.label || data.url || '';
+      if (inputRef.current.innerText !== next) inputRef.current.innerText = next;
     }
   }, [data.label, data.url, isEditingLabel]);
 
-  // Auto-fetch title if we have a URL but no custom label yet
+  // Auto-fetch page title when we have a URL but no custom label yet.
   useEffect(() => {
-    let isMounted = true;
-    if (data.url && !data.label && window.electronAPI?.fetchUrlTitle) {
-      // Small delay to prevent rapid fires if user is actively typing a URL
-      const timer = setTimeout(() => {
-        window.electronAPI.fetchUrlTitle(data.url).then(title => {
-          if (isMounted && title) {
-            updateGlobal(id, { label: title });
-          }
-        }).catch(() => {});
-      }, 500);
-      return () => {
-        isMounted = false;
-        clearTimeout(timer);
-      };
-    }
-    return () => { isMounted = false; };
+    if (!data.url || data.label || !window.electronAPI?.fetchUrlTitle) return;
+    let cancelled = false;
+    // Small delay debounces rapid URL changes while user is still typing.
+    const timer = setTimeout(() => {
+      window.electronAPI.fetchUrlTitle(data.url)
+        .then((title) => { if (!cancelled && title) updateGlobal(id, { label: title }); })
+        .catch(() => {});
+    }, 500);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [data.url, data.label, updateGlobal, id]);
 
   const openLink = useCallback(() => {
-    const targetUrl = data.url || inputRef.current?.innerText || '';
-    if (targetUrl && targetUrl.trim()) {
-      let target = targetUrl;
-      if (!target.startsWith('http://') && !target.startsWith('https://')) {
-        target = 'https://' + target;
-      }
-      if (window.electronAPI?.openExternal) {
-        window.electronAPI.openExternal(target);
-      } else {
-        window.open(target, '_blank');
-      }
-    }
+    const target = (data.url || inputRef.current?.innerText || '').trim();
+    if (!target) return;
+    const url = ensureProtocol(target);
+    if (window.electronAPI?.openExternal) window.electronAPI.openExternal(url);
+    else window.open(url, '_blank');
   }, [data.url]);
 
+  // Single click: open the link, but defer so a follow-up dblclick can cancel.
   const handleClick = useCallback((e) => {
     e.stopPropagation();
     if (clickTimeoutRef.current !== null) return;
@@ -109,67 +100,55 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
   }, [openLink]);
 
   const handleDoubleClick = useCallback((e) => {
-    if (data.locked) return; // Locked nodes are not editable
+    if (data.locked) return;
     e.stopPropagation();
     if (clickTimeoutRef.current !== null) {
       clearTimeout(clickTimeoutRef.current);
       clickTimeoutRef.current = null;
     }
     setIsEditingLabel(true);
-    // Use a separate ref so this delay doesn't collide with the click-debounce guard
+    // Defer focus a tick so React commits the contentEditable=true flip first.
     if (focusTimerRef.current !== null) clearTimeout(focusTimerRef.current);
     focusTimerRef.current = setTimeout(() => {
       focusTimerRef.current = null;
-      if (inputRef.current) inputRef.current.focus({ preventScroll: true });
+      inputRef.current?.focus({ preventScroll: true });
     }, 0);
   }, [data.locked, setIsEditingLabel]);
 
   const applyUrl = useCallback(() => {
     const urlChanged = urlInput !== data.url;
-    updateNodeData(id, { url: urlInput, ...(urlChanged ? { label: '' } : {}) });
+    // Clear label on URL change so the title auto-fetcher repopulates it.
+    updateNodeData(id, { url: urlInput, ...(urlChanged && { label: '' }) });
     setShowDialog(null);
   }, [urlInput, data.url, updateNodeData, id]);
 
-  const fontSize = data.fontSize || 14;
-  const fontFamily = data.fontFamily || 'sans-serif';
-  // textColor overrides the default blue; null means keep the CSS class default
-  const textColor = data.textColor || null;
-  const isEmpty = !data.label && !data.url;
-
-  // Listen for dialog triggers from global context menu
+  // Listen for the global context-menu "Edit URL" trigger.
   useEffect(() => {
     const handleOpenUrl = () => {
-      if (data.locked) return; // Locked nodes are not editable
+      if (data.locked) return;
       setUrlInput(data.url || '');
       setShowDialog('url');
     };
-    
     document.addEventListener(`edit-node-url-${id}`, handleOpenUrl);
-    
-    return () => {
-      document.removeEventListener(`edit-node-url-${id}`, handleOpenUrl);
-    };
+    return () => document.removeEventListener(`edit-node-url-${id}`, handleOpenUrl);
   }, [id, data.url, data.locked]);
+
+  const fontSize = data.fontSize || 14;
+  const fontFamily = data.fontFamily || 'sans-serif';
+  const textColor = data.textColor || null; // null keeps the default `text-blue-400`.
+  const isEmpty = !data.label && !data.url;
 
   return (
     <div
       className={`relative group px-1 rounded-md transition-colors ${isEditingLabel ? 'nodrag' : ''}`}
-      style={{
-        backgroundColor: data.backgroundColor || 'transparent'
-      }}
+      style={{ backgroundColor: data.backgroundColor || 'transparent' }}
     >
-      <Handle type="target" position={Position.Top} id="top" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
-      <Handle type="target" position={Position.Left} id="left" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
-      
-      {data.locked && (
-        <div className="absolute -top-2 -right-2 bg-black/60 rounded-full p-0.5 text-white/70 backdrop-blur-sm pointer-events-none z-10">
-          <Lock size={10} />
-        </div>
-      )}
-      
-      {/* Placeholder shown on hover when empty and not editing */}
+      <NodeHandles className="w-2 h-2 bg-blue-400" />
+
+      {data.locked && <LockBadge />}
+
       {isEmpty && !isEditingLabel && (
-        <div 
+        <div
           className="absolute inset-0 flex items-center text-blue-400/40 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity"
           style={{ fontSize: `${fontSize}px`, fontFamily }}
         >
@@ -185,20 +164,21 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
         onDoubleClick={handleDoubleClick}
         onBlur={handleLabelBlur}
         onKeyDown={handleKeyDown}
-        onPointerDown={handlePointerDown}
         onPaste={handlePaste}
-        className={`${textColor ? '' : 'text-blue-400'} outline-none whitespace-nowrap min-w-[20px] min-h-[1em] ${isEditingLabel ? 'cursor-text' : 'select-none cursor-pointer hover:underline'}`}
-        style={{ fontSize: `${fontSize}px`, fontFamily, ...(textColor ? { color: textColor } : {}), ...(isEditingLabel ? { userSelect: 'text' } : {}) }}
+        className={`${textColor ? '' : 'text-blue-400'} outline-none whitespace-nowrap min-w-[20px] min-h-[1em] ${
+          isEditingLabel ? 'cursor-text' : 'select-none cursor-pointer hover:underline'
+        }`}
+        style={{
+          fontSize: `${fontSize}px`,
+          fontFamily,
+          ...(textColor ? { color: textColor } : null),
+          ...(isEditingLabel ? { userSelect: 'text' } : null),
+        }}
       />
-
-      <Handle type="source" position={Position.Right} id="right" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
-      <Handle type="source" position={Position.Bottom} id="bottom" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-blue-400" />
-
-
 
       {showDialog === 'url' && (
         <Dialog title="Edit URL" onClose={() => setShowDialog(null)}>
-          <input 
+          <input
             type="text"
             className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-white font-mono text-sm outline-none"
             value={urlInput}
@@ -207,7 +187,12 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
             autoFocus
             onKeyDown={(e) => { if (e.key === 'Enter') applyUrl(); }}
           />
-          <button className="bg-blue-500 hover:bg-blue-600 text-white rounded px-4 py-2 mt-2 font-medium transition-colors" onClick={applyUrl}>Done</button>
+          <button
+            className="bg-blue-500 hover:bg-blue-600 text-white rounded px-4 py-2 mt-2 font-medium transition-colors"
+            onClick={applyUrl}
+          >
+            Done
+          </button>
         </Dialog>
       )}
     </div>

@@ -45,8 +45,27 @@ class EventLoggerSingleton {
     this._lastMsg   = null;
     this._lastCount = 0;
     this._nodeStates = new Map();
+    this._lastSaveError = null;
     this._installErrorCapture();
     this.log('Application started');
+  }
+
+  /**
+   * Capture the most recent workspace save failure so it appears prominently
+   * in bug reports. Without this, the actual reason (EACCES, ENOSPC, etc.)
+   * was lost — only the generic "Save Failed" toast remained.
+   */
+  recordSaveError(reason, filePath) {
+    this._lastSaveError = {
+      reason: typeof reason === 'string' ? reason : safeStringify(reason),
+      filePath: filePath || null,
+      timestamp: new Date().toISOString(),
+    };
+    this.error('Save failed:', reason, filePath ? `(path=${filePath})` : '');
+  }
+
+  getLastSaveError() {
+    return this._lastSaveError;
   }
 
   /**

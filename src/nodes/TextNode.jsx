@@ -1,43 +1,52 @@
-import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { Handle, Position, useReactFlow, NodeResizeControl } from '@xyflow/react';
+import React, { useRef, useCallback, useEffect } from 'react';
+import { NodeResizeControl } from '@xyflow/react';
 import { useNodeAutoEdit } from '../hooks/useNodeAutoEdit';
-import { marked } from 'marked';
-import DOMPurify from 'dompurify';
-import { Lock } from 'lucide-react';
+import { NodeHandles } from './_shared/NodeHandles';
+import { LockBadge } from './_shared/LockBadge';
 
 const RESIZE_CORNERS = [
-  { position: 'top-left', cursor: 'nwse-resize' },
-  { position: 'top-right', cursor: 'nesw-resize' },
-  { position: 'bottom-left', cursor: 'nesw-resize' },
+  { position: 'top-left',     cursor: 'nwse-resize' },
+  { position: 'top-right',    cursor: 'nesw-resize' },
+  { position: 'bottom-left',  cursor: 'nesw-resize' },
   { position: 'bottom-right', cursor: 'nwse-resize' },
 ];
 
-export const TextNode = React.memo(function TextNode({ id, data, selected, width, height }) {
-  const { updateNodeData } = useReactFlow();
+const RESIZE_HANDLE_STYLE = {
+  width: 8, height: 8, borderRadius: 2, background: '#3b82f6', border: 'none',
+};
 
+// Style applied to the inner content element when the node has been user-resized.
+// Both the editing div and the display div use the same scroll/wrap behavior.
+const RESIZED_INNER_STYLE = {
+  width: '100%',
+  height: '100%',
+  overflowY: 'auto',
+  overflowX: 'hidden',
+  overflowWrap: 'break-word',
+};
+
+export const TextNode = React.memo(function TextNode({ id, data, selected, width, height }) {
   const inputRef = useRef(null);
 
-  const isEmptyPredicate = useCallback(() => {
-    return !inputRef.current?.innerText?.trim();
-  }, []);
+  const isEmptyPredicate = useCallback(
+    () => !inputRef.current?.innerText?.trim(),
+    [],
+  );
 
-  const { isEditing, setIsEditing, handleBlur } = useNodeAutoEdit(id, data.isNew, isEmptyPredicate, inputRef);
+  const { isEditing, setIsEditing, handleBlur } = useNodeAutoEdit(
+    id, data.isNew, isEmptyPredicate, inputRef,
+  );
 
   const handleTextBlur = useCallback(() => {
-    const text = inputRef.current?.innerText || '';
-    handleBlur({ text });
+    handleBlur({ text: inputRef.current?.innerText || '' });
   }, [handleBlur]);
 
   const handleKeyDown = useCallback((e) => {
     if (e.key === 'Escape') inputRef.current?.blur();
   }, []);
 
-  const handlePointerDown = useCallback((e) => {
-    if (isEditing) e.stopPropagation();
-  }, [isEditing]);
-
   const handleDoubleClick = useCallback((e) => {
-    if (data.locked) return; // Locked nodes are not editable
+    if (data.locked) return;
     e.stopPropagation();
     setIsEditing(true);
   }, [data.locked, setIsEditing]);
@@ -55,79 +64,83 @@ export const TextNode = React.memo(function TextNode({ id, data, selected, width
   }, []);
 
   const fontSize = data.fontSize || 14;
-  const fontFamily = data.fontFamily || (data.isSticky ? "'Indie Flower', 'Comic Sans MS', cursive" : 'sans-serif');
+  const fontFamily = data.fontFamily
+    || (data.isSticky ? "'Indie Flower', 'Comic Sans MS', cursive" : 'sans-serif');
   // textColor overrides the default; sticky notes default to dark ink
   const textColor = data.textColor || (data.isSticky ? '#1f2937' : null);
   const isEmpty = !data.text && !isEditing;
+  const isResized = width != null && height != null;
+  const showResizeHandles = selected && !data.locked;
 
   // Sync text content when data changes externally (undo/redo)
   useEffect(() => {
     if (!isEditing && inputRef.current) {
-      if (inputRef.current.innerText !== (data.text || '')) {
-        inputRef.current.innerText = data.text || '';
-      }
+      const next = data.text || '';
+      if (inputRef.current.innerText !== next) inputRef.current.innerText = next;
     }
   }, [data.text, isEditing]);
 
-  const htmlContent = useMemo(() => {
-    return DOMPurify.sanitize(marked.parse(data.text || ''));
-  }, [data.text]);
+  // Background for sticky notes: force opaque alpha if user picked a color, else default cream.
+  const stickyBg = data.backgroundColor
+    ? data.backgroundColor.replace(/[\d.]+\)$/, '1)')
+    : '#fef3c7';
 
-  const isResized = width != null && height != null;
-  const showResizeHandles = selected && !data.locked;
+  const wrapperClassName = [
+    'relative group rounded-md transition-colors',
+    data.isSticky && 'shadow-xl',
+    isResized ? 'overflow-hidden px-0.5 py-0' : 'px-2 py-0.5',
+    isEditing && 'nodrag',
+  ].filter(Boolean).join(' ');
+
+  const wrapperStyle = {
+    backgroundColor: data.isSticky ? stickyBg : (data.backgroundColor || 'transparent'),
+    minWidth: data.isSticky ? '150px' : 'auto',
+    minHeight: data.isSticky ? '150px' : 'auto',
+    width: isResized ? '100%' : undefined,
+    height: isResized ? '100%' : undefined,
+    transform: data.isSticky && !isEditing ? 'rotate(-2deg)' : 'none',
+    boxShadow: data.isSticky ? '2px 4px 10px rgba(0,0,0,0.3)' : undefined,
+    borderBottomRightRadius: data.isSticky ? '20px 15px' : undefined,
+    color: data.isSticky ? '#1f2937' : 'inherit',
+  };
+
+  const innerBaseStyle = {
+    fontSize: `${fontSize}px`,
+    fontFamily,
+    lineHeight: 1.2,
+    ...(textColor ? { color: textColor } : null),
+  };
+
+  const handleClassName = `w-2 h-2 ${data.isSticky ? 'bg-black/50' : 'bg-white'}`;
 
   return (
-    <div
-      className={`relative group rounded-md transition-colors ${data.isSticky ? 'shadow-xl' : ''} ${isResized ? 'overflow-hidden px-0.5 py-0' : 'px-2 py-0.5'} ${isEditing ? 'nodrag' : ''}`}
-      style={{
-        backgroundColor: data.isSticky ? (data.backgroundColor ? data.backgroundColor.replace(/[\d.]+\)$/, '1)') : '#fef3c7') : (data.backgroundColor || 'transparent'),
-        minWidth: data.isSticky ? '150px' : 'auto',
-        minHeight: data.isSticky ? '150px' : 'auto',
-        width: isResized ? '100%' : undefined,
-        height: isResized ? '100%' : undefined,
-        transform: data.isSticky && !isEditing ? 'rotate(-2deg)' : 'none',
-        boxShadow: data.isSticky ? '2px 4px 10px rgba(0,0,0,0.3)' : undefined,
-        borderBottomRightRadius: data.isSticky ? '20px 15px' : undefined,
-        color: data.isSticky ? '#1f2937' : 'inherit'
-      }}
-    >
+    <div className={wrapperClassName} style={wrapperStyle}>
       {showResizeHandles && RESIZE_CORNERS.map(({ position, cursor }) => (
         <NodeResizeControl
           key={position}
           position={position}
           minWidth={data.isSticky ? 150 : 60}
           minHeight={data.isSticky ? 150 : Math.ceil(fontSize * 1.2)}
-          style={{
-            width: 8,
-            height: 8,
-            borderRadius: 2,
-            background: '#3b82f6',
-            border: 'none',
-            cursor,
-          }}
+          style={{ ...RESIZE_HANDLE_STYLE, cursor }}
         />
       ))}
-      <Handle type="target" position={Position.Top} id="top" className={`w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity ${data.isSticky ? 'bg-black/50' : 'bg-white'}`} />
-      <Handle type="target" position={Position.Left} id="left" className={`w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity ${data.isSticky ? 'bg-black/50' : 'bg-white'}`} />
-      
+
+      <NodeHandles className={handleClassName} />
+
       {data.isSticky && (
-        <div className="absolute bottom-0 right-0 w-6 h-6 rounded-tl-xl transition-all pointer-events-none" 
+        <div
+          className="absolute bottom-0 right-0 w-6 h-6 rounded-tl-xl transition-all pointer-events-none"
           style={{
             background: 'linear-gradient(to top left, rgba(0,0,0,0) 50%, rgba(0,0,0,0.05) 50%)',
-            borderBottomRightRadius: '15px'
-          }} 
+            borderBottomRightRadius: '15px',
+          }}
         />
       )}
 
-      {data.locked && (
-        <div className="absolute -top-2 -right-2 bg-black/60 rounded-full p-0.5 text-white/70 backdrop-blur-sm pointer-events-none z-10">
-          <Lock size={10} />
-        </div>
-      )}
-      
-      {/* Placeholder shown on hover when empty and not editing */}
+      {data.locked && <LockBadge />}
+
       {isEmpty && (
-        <div 
+        <div
           className="absolute inset-0 flex items-center text-white/40 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity"
           style={{ fontSize: `${fontSize}px`, fontFamily }}
         >
@@ -135,6 +148,7 @@ export const TextNode = React.memo(function TextNode({ id, data, selected, width
         </div>
       )}
 
+      {/* Editing surface: a contenteditable. Hidden (display: none via `hidden`) when not editing. */}
       <div
         ref={inputRef}
         contentEditable={isEditing}
@@ -142,7 +156,6 @@ export const TextNode = React.memo(function TextNode({ id, data, selected, width
         onDoubleClick={handleDoubleClick}
         onBlur={handleTextBlur}
         onKeyDown={handleKeyDown}
-        onPointerDown={handlePointerDown}
         onPaste={handlePaste}
         className={`outline-none min-w-[20px] min-h-[1em] ${
           isEditing
@@ -150,34 +163,31 @@ export const TextNode = React.memo(function TextNode({ id, data, selected, width
             : 'select-none cursor-default hidden'
         }`}
         style={{
-          fontSize: `${fontSize}px`,
-          fontFamily,
-          lineHeight: 1.2,
-          ...(textColor ? { color: textColor } : {}),
-          ...(isEditing ? { userSelect: 'text' } : {}),
-          ...(isResized ? { width: '100%', height: '100%', overflowY: 'auto', overflowX: 'hidden', overflowWrap: 'break-word' } : {}),
+          ...innerBaseStyle,
+          ...(isEditing ? { userSelect: 'text' } : null),
+          ...(isResized ? RESIZED_INNER_STYLE : null),
         }}
       />
 
+      {/* Display surface: plain-text rendering of `data.text`. Hidden while editing so the
+          contenteditable shows. We deliberately do NOT parse markdown — text nodes are not
+          .md and shouldn't reinterpret `*foo*` as italics, `[x](y)` as a link, etc. Newlines
+          render as visible line breaks via `whiteSpace: pre-wrap`. */}
       {!isEditing && (
         <div
           onDoubleClick={handleDoubleClick}
-          className={`text-node-content outline-none min-w-[20px] min-h-[1em] select-none cursor-default [&_a]:text-blue-500 [&_a]:underline ${data.isSticky ? 'p-2 font-handwriting' : ''} ${isResized ? 'break-words thin-scrollbar' : ''}`}
+          className={`outline-none min-w-[20px] min-h-[1em] select-none cursor-default ${
+            data.isSticky ? 'p-2 font-handwriting' : ''
+          } ${isResized ? 'break-words thin-scrollbar' : ''}`}
           style={{
-            fontSize: `${fontSize}px`,
-            fontFamily: fontFamily,
-            lineHeight: 1.2,
-            ...(textColor ? { color: textColor } : {}),
-            ...(isResized ? { width: '100%', height: '100%', overflowY: 'auto', overflowX: 'hidden', overflowWrap: 'break-word', whiteSpace: 'pre-wrap' } : {}),
+            ...innerBaseStyle,
+            whiteSpace: 'pre-wrap',
+            ...(isResized ? RESIZED_INNER_STYLE : null),
           }}
-          dangerouslySetInnerHTML={{ __html: htmlContent }}
-        />
+        >
+          {data.text || ''}
+        </div>
       )}
-
-      <Handle type="source" position={Position.Right} id="right" className={`w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity ${data.isSticky ? 'bg-black/50' : 'bg-white'}`} />
-      <Handle type="source" position={Position.Bottom} id="bottom" className={`w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity ${data.isSticky ? 'bg-black/50' : 'bg-white'}`} />
-
-
     </div>
   );
 });

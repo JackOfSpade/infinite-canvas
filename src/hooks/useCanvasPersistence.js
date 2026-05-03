@@ -105,6 +105,18 @@ export function useCanvasPersistence({
     if (!window.electronAPI || saveStateRef.current !== 'idle' || isAnimatingRef?.current) return;
     setSaveState('saving');
     try {
+      // Commit any in-progress contenteditable edit (e.g. text node being typed
+      // into when the user pressed Cmd+S). Without this, the save reads stale
+      // data.text because TextNode only flushes its DOM content into React
+      // state on blur. Two ticks let React process the blur-triggered setState
+      // and run the useEffect that mirrors `nodes` into `nodesRef`.
+      const active = document.activeElement;
+      if (active && active.isContentEditable) {
+        active.blur();
+        EventLogger.log('save: committed in-progress contenteditable edit');
+        await new Promise(r => setTimeout(r, 0));
+        await new Promise(r => setTimeout(r, 0));
+      }
       // Flush the navigation stack to get complete root-level data
       const rawData = flushStack ? flushStack() : { nodes: nodesRef.current, edges: edgesRef.current, drawings: drawingsRef.current };
       // Strip transient visual properties (e.g. source-filter opacity on job cards)
@@ -121,17 +133,25 @@ export function useCanvasPersistence({
         if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
         saveStateTimerRef.current = setTimeout(() => { setSaveState('idle'); }, 1500);
         return true;
-      } else {
+      } else if (res?.canceled) {
+        // User dismissed the native save dialog — not an error.
         if (!isMountedRef.current) return false;
         setSaveState('idle');
-        addToast({ title: 'Save Failed', description: 'Could not save the workspace.', type: 'error' });
+        return false;
+      } else {
+        if (!isMountedRef.current) return false;
+        const reason = res?.error || 'Could not save the workspace.';
+        EventLogger.recordSaveError(reason, currentFileRef.current);
+        setSaveState('idle');
+        addToast({ title: 'Save Failed', description: reason, type: 'error' });
         return false;
       }
     } catch (err) {
-      EventLogger.error('Failed to save canvas:', err);
+      const reason = err?.message || String(err) || 'An error occurred while saving.';
+      EventLogger.recordSaveError(reason, currentFileRef.current);
       if (!isMountedRef.current) return false;
       setSaveState('idle');
-      addToast({ title: 'Save Error', description: err?.message || String(err) || 'An error occurred while saving.', type: 'error' });
+      addToast({ title: 'Save Error', description: reason, type: 'error' });
       return false;
     }
   }, [addToast, flushStack, isAnimatingRef, updateSetting]); // currentFile read via ref — omitted intentionally

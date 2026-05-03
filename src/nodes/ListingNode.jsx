@@ -1,11 +1,12 @@
 import React, { useCallback, useState, useEffect, useContext, useRef } from 'react';
-import { Handle, Position, useReactFlow } from '@xyflow/react';
+import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { PriceJustification } from '../components/PriceJustification';
 import { EditableField } from '../components/EditableField';
 import { QuickPriceButtons } from '../components/QuickPriceButtons';
 import { PlatformToggles } from '../components/PlatformToggles';
 import { Camera, Loader2, ExternalLink, Copy, Check } from 'lucide-react';
+import { NodeHandles } from './_shared/NodeHandles';
 import { SELL_PLATFORMS } from '../utils/constants';
 import { useListingActions } from '../hooks/useListingActions';
 import { EventLogger } from '../utils/EventLogger';
@@ -130,8 +131,7 @@ export function ListingNode({ id, data }) {
 
   return (
     <div className={`bg-[#1a1a1a] ${style.border} border rounded-lg shadow-lg overflow-hidden group`} style={{ width: 300 }}>
-      <Handle type="target" position={Position.Top} id="top" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
-      <Handle type="target" position={Position.Left} id="left" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
+      <NodeHandles className="w-2 h-2" />
 
       {/* Status badge */}
       <div className={`px-3 py-1 text-[10px] font-semibold ${style.badge}`}>
@@ -335,8 +335,6 @@ export function ListingNode({ id, data }) {
         </div>
       )}
 
-      <Handle type="source" position={Position.Right} id="right" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
-      <Handle type="source" position={Position.Bottom} id="bottom" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
     </div>
   );
 }

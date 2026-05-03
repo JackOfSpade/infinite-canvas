@@ -5,12 +5,38 @@
 
 import { generateId } from './idGenerator';
 
+/**
+ * Read the user's last-applied text/link customization from settings so that
+ * newly-created text/link nodes inherit it. Falls back to {} on any failure.
+ * Storage key matches `useSettings` STORAGE_KEY; field is `lastTextStyle`.
+ */
+function readLastTextStyle() {
+  try {
+    const saved = localStorage.getItem('infiniteCanvas.settings');
+    if (!saved) return {};
+    const parsed = JSON.parse(saved);
+    return parsed?.lastTextStyle || {};
+  } catch {
+    return {};
+  }
+}
+
 export function createTextNode(position) {
-  return { id: generateId(), type: 'text', position, data: { text: '', isNew: true } };
+  return {
+    id: generateId(),
+    type: 'text',
+    position,
+    data: { text: '', isNew: true, ...readLastTextStyle() },
+  };
 }
 
 export function createLinkNode(position, extra = {}) {
-  return { id: generateId(), type: 'link', position, data: { url: '', label: '', isNew: true, ...extra } };
+  return {
+    id: generateId(),
+    type: 'link',
+    position,
+    data: { url: '', label: '', isNew: true, ...readLastTextStyle(), ...extra },
+  };
 }
 
 export function createGroupNode(position) {

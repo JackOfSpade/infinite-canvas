@@ -9,17 +9,17 @@ import { handleSafe } from './ipcUtils.js';
 // Used by both the "save to file" and "copy to clipboard" handlers so the
 // report content is identical regardless of how the user chooses to export it.
 function generateMarkdown(payload) {
-  const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState } = payload;
+  const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, lastSaveError, activeEditableText } = payload;
 
   const systemInfo = {
-    platform:        process.platform,
-    arch:            process.arch,
-    osRelease:       os.release(),
-    appVersion:      app.getVersion(),
-    nodeVersion:     process.versions.node,
+    platform: process.platform,
+    arch: process.arch,
+    osRelease: os.release(),
+    appVersion: app.getVersion(),
+    nodeVersion: process.versions.node,
     electronVersion: process.versions.electron,
-    totalMemMB:      Math.round(os.totalmem() / 1024 / 1024),
-    freeMemMB:       Math.round(os.freemem()  / 1024 / 1024),
+    totalMemMB: Math.round(os.totalmem() / 1024 / 1024),
+    freeMemMB: Math.round(os.freemem() / 1024 / 1024),
   };
 
   const appState = {
@@ -43,10 +43,10 @@ function generateMarkdown(payload) {
     const rows = nodeInternals.map(n => {
       const cs = compStateById[n.id] || {};
       const flags = [
-        cs.isEditing     ? 'editing'    : null,
-        cs.isResizing    ? 'resizing'   : null,
+        cs.isEditing ? 'editing' : null,
+        cs.isResizing ? 'resizing' : null,
         cs.hasEdgeCursor ? 'edgeCursor' : null,
-        n.selected       ? 'selected'   : null,
+        n.selected ? 'selected' : null,
       ].filter(Boolean).join(', ') || '—';
       return (
         `| \`${n.id.slice(0, 8)}\` ` +
@@ -56,10 +56,10 @@ function generateMarkdown(payload) {
         `| ${n.fontSize ?? '—'}/${n.fontFamily ?? '—'} ` +
         `| ${n.textColor ?? '—'} ` +
         `| ${n.backgroundColor ?? '—'} ` +
-        `| ${n.width_prop    ?? '—'} ` +
-        `| ${n.style_width   ?? '—'} ` +
+        `| ${n.width_prop ?? '—'} ` +
+        `| ${n.style_width ?? '—'} ` +
         `| ${n.measured_width ?? '—'} ` +
-        `| ${cs.size         ?? '—'} ` +
+        `| ${cs.size ?? '—'} ` +
         `| ${flags} |`
       );
     }).join('\n');
@@ -78,7 +78,7 @@ ${rows}
   let mediaMarkdown = '';
   if (mediaState && mediaState.length > 0) {
     const READY_STATE = ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'];
-    const NET_STATE   = ['EMPTY', 'IDLE', 'LOADING', 'NO_SOURCE'];
+    const NET_STATE = ['EMPTY', 'IDLE', 'LOADING', 'NO_SOURCE'];
     const fmtRanges = (arr) => {
       if (!arr || arr.length === 0) return '(none)';
       return arr.map(([s, e]) => `${s.toFixed(2)}–${e.toFixed(2)}`).join(', ');
@@ -107,6 +107,36 @@ ${rows}
 | # | Tag | Status | Progress | readyState | networkState | Seekable | Buffered | Error |
 |---|---|---|---|---|---|---|---|---|
 ${rows}
+`;
+  }
+
+  // ── Active editable section ────────────────────────────────────────────────
+  // Captures the divergence between the focused contenteditable's live DOM
+  // text and the saved data.text on its node. A `divergent: true` here is the
+  // signature of a "saved while editing — lost my edit" report.
+  let activeEditableMarkdown = '';
+  if (activeEditableText) {
+    const a = activeEditableText;
+    activeEditableMarkdown = `
+## Active Editable At Report Time
+- Editing node: \`${a.editingNodeId || '(unknown)'}\`
+- Diverges from saved data.text: ${a.divergent === true ? '⚠️ YES' : a.divergent === false ? 'no' : 'unknown'}
+- Live DOM text: \`${(a.liveText || '').replace(/`/g, '\\`')}\`
+- Saved data.text: \`${(a.savedText || '').replace(/`/g, '\\`')}\`
+`;
+  }
+
+  // ── Last save error section ────────────────────────────────────────────────
+  // Save errors used to be lost: the toast was shown, the user dismissed it,
+  // and the bug report had no record of *why* the save failed. Surfacing this
+  // up front means a "Save Failed" report is actionable instead of a guess.
+  let lastSaveErrorMarkdown = '';
+  if (lastSaveError) {
+    lastSaveErrorMarkdown = `
+## Last Save Error
+- Reason: \`${lastSaveError.reason || 'unknown'}\`
+- File: \`${lastSaveError.filePath || '(no current file)'}\`
+- When: ${lastSaveError.timestamp || 'unknown'}
 `;
   }
 
@@ -140,7 +170,7 @@ ${description}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${nodeDiagMarkdown}${mediaMarkdown}
+${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}
 <details>
 <summary><b>Click here to expand the full JSON Application State</b></summary>
 
@@ -154,19 +184,19 @@ ${appStateJson}
 `;
 
   const MAX_BUDGET_BYTES = 10 * 1024 * 1024; // 10MB
-  const bufferBytes    = Buffer.byteLength(baseMarkdown, 'utf8');
-  const events         = payload.eventLogs || [];
+  const bufferBytes = Buffer.byteLength(baseMarkdown, 'utf8');
+  const events = payload.eventLogs || [];
   const remainingBytes = MAX_BUDGET_BYTES - bufferBytes;
 
   let trimmedEventsMarkdown = '';
   if (remainingBytes > 0 && events.length > 0) {
-    const eventsBlockOpen  = `\`\`\`text\n`;
+    const eventsBlockOpen = `\`\`\`text\n`;
     const eventsBlockClose = `\n\`\`\`\n`;
     let eventsBytes = Buffer.byteLength(eventsBlockOpen) + Buffer.byteLength(eventsBlockClose);
 
     const includedEvents = [];
     for (let i = events.length - 1; i >= 0; i--) {
-      const eventStr   = events[i] + '\n';
+      const eventStr = events[i] + '\n';
       const eventBytes = Buffer.byteLength(eventStr, 'utf8');
       if (eventsBytes + eventBytes < remainingBytes) {
         eventsBytes += eventBytes;

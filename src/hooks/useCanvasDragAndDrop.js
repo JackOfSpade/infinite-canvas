@@ -8,7 +8,6 @@ import { EventLogger } from '../utils/EventLogger';
 // Compiled once at module load — not per drop event.
 const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)$/i;
 const URL_RE = /^(https?:\/\/[^\s]+|[a-z0-9]([a-z0-9-]*[a-z0-9])?\.([a-z]{2,}\.)*[a-z]{2,}([/?#][^\s]*)?)$/i;
-const IMAGE_EXT_RE = /\.(png|jpg|jpeg|webp|gif)$/i;
 const RESUME_EXT_RE = /\.(pdf|docx|doc)$/i;
 
 export function useCanvasDragAndDrop({
@@ -111,28 +110,21 @@ export function useCanvasDragAndDrop({
         return;
       }
 
-      const imageFiles  = validFiles.filter(f => IMAGE_EXT_RE.test(f.name));
       const resumeFiles = validFiles.filter(f => RESUME_EXT_RE.test(f.name));
-      const otherFiles  = validFiles.filter(f => !IMAGE_EXT_RE.test(f.name) && !RESUME_EXT_RE.test(f.name));
-
-      // All dropped files are images → auto-create a SellHub pre-seeded with the paths.
-      // The SellHubNode's own mount effect kicks off analysis automatically.
-      if (imageFiles.length > 0 && resumeFiles.length === 0 && otherFiles.length === 0) {
-        const imagePaths = imageFiles.map(f => f.path);
-        takeSnapshot();
-        insertNodes([NODE_FACTORIES.sellhub(position, { imagePaths })]);
-        return;
-      }
+      const otherFiles  = validFiles.filter(f => !RESUME_EXT_RE.test(f.name));
 
       // Resume dropped → auto-create a JobHub pre-seeded with that file path.
       // The JobHubNode's own mount effect kicks off pipeline automatically.
-      if (resumeFiles.length > 0 && otherFiles.length === 0 && imageFiles.length === 0) {
+      if (resumeFiles.length > 0 && otherFiles.length === 0) {
         takeSnapshot();
+        EventLogger.log(`drop routed type=jobhub files=${resumeFiles.length}`);
         insertNodes([NODE_FACTORIES.jobhub(position, { filePath: resumeFiles[0].path })]);
         return;
       }
 
-      // Default: treat as document/folder drops
+      // Default: treat as document/folder drops. Images become document nodes
+      // that display the image inline. SellHub is created intentionally by
+      // dragging it from the sidebar, not auto-routed from image drops.
       takeSnapshot();
       const dropDepth = depthRef.current;
       const newItems = await processDroppedFiles(validFiles, position);
@@ -140,6 +132,7 @@ export function useCanvasDragAndDrop({
       if (depthRef.current !== dropDepth) return; // Canvas changed during processing
 
       if (newItems.length > 0) {
+        EventLogger.log(`drop routed type=document files=${validFiles.length}`);
         insertNodes(newItems);
       } else {
         EventLogger.log('Drop ignored: processDroppedFiles returned 0 items. count=' + validFiles.length);

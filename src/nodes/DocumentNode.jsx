@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Handle, Position, useReactFlow, NodeResizer } from '@xyflow/react';
-import { Lock, Minimize2, Play, AudioLines, AlertTriangle, RefreshCw, FileText, ZoomIn, ZoomOut } from 'lucide-react';
+import { useReactFlow, NodeResizer } from '@xyflow/react';
+import { Minimize2, Play, AudioLines, AlertTriangle, RefreshCw, FileText, ZoomIn, ZoomOut } from 'lucide-react';
 import { marked } from 'marked';
 import { getFileCategoryInfo, THEME_COLORS } from '../utils/fileDisplayUtils';
 import { EventLogger } from '../utils/EventLogger';
+import { NodeHandles } from './_shared/NodeHandles';
+import { LockBadge } from './_shared/LockBadge';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -16,13 +18,6 @@ function toLocalFileUrl(filePath) {
 const MEDIA_ERROR_LABELS = { 1: 'Aborted', 2: 'Network error', 3: 'Decode error', 4: 'Not supported' };
 
 // ── Shared sub-components ──────────────────────────────────────────────────────
-
-/** Small lock badge shown on locked nodes. */
-const LockBadge = () => (
-  <div className="absolute -top-2 -right-2 bg-black/60 rounded-full p-0.5 text-white/70 backdrop-blur-sm pointer-events-none z-10">
-    <Lock size={10} />
-  </div>
-);
 
 /**
  * Shared expanded-preview shell used by video, audio, and text nodes.
@@ -889,11 +884,8 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
           handleStyle={{ width: 8, height: 8, borderRadius: 2 }}
         />
       )}
-      <Handle type="target" position={Position.Top} id="top" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
-      <Handle type="target" position={Position.Left} id="left" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
+      <NodeHandles className="w-3 h-3 bg-blue-400" />
       {innerContent}
-      <Handle type="source" position={Position.Right} id="right" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
-      <Handle type="source" position={Position.Bottom} id="bottom" className="w-3 h-3 bg-blue-400 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" />
     </div>
   );
 });

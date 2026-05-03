@@ -128,6 +128,30 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html')).catch(err => console.error('Failed to load local file:', err));
   }
 
+  // ── Spellcheck context menu ──────────────────────────────────────────────
+  // Chromium's spellchecker is on by default and underlines misspelled words.
+  // Electron exposes the suggestions and a one-call replacement API; we only
+  // surface this menu when the right-click actually lands on a misspelled word
+  // so the renderer's own canvas/node context menus continue to work.
+  mainWindow.webContents.on('context-menu', (_event, params) => {
+    if (!params.misspelledWord) return;
+    const template = params.dictionarySuggestions.map(suggestion => ({
+      label: suggestion,
+      click: () => mainWindow.webContents.replaceMisspelling(suggestion),
+    }));
+    if (template.length === 0) {
+      template.push({ label: 'No suggestions', enabled: false });
+    }
+    template.push(
+      { type: 'separator' },
+      {
+        label: 'Add to Dictionary',
+        click: () => mainWindow.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+      },
+    );
+    Menu.buildFromTemplate(template).popup({ window: mainWindow });
+  });
+
   mainWindow.on('close', async (event) => {
     if (isQuitting) return; // Let before-quit handle it
 

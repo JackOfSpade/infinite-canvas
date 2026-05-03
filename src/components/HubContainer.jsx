@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback } from 'react';
-import { Handle, Position } from '@xyflow/react';
+import { NodeHandles } from '../nodes/_shared/NodeHandles';
 
 export function HubContainer({ 
   hubState, 
@@ -78,8 +78,7 @@ export function HubContainer({
 
   return (
     <div className="relative group" style={{ overflow: 'visible' }}>
-      <Handle type="target" position={Position.Top} id="top" className={`w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity ${isBlue ? 'bg-blue-400' : 'bg-emerald-400'}`} />
-      <Handle type="target" position={Position.Left} id="left" className={`w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity ${isBlue ? 'bg-blue-400' : 'bg-emerald-400'}`} />
+      <NodeHandles className={`w-2 h-2 ${isBlue ? 'bg-blue-400' : 'bg-emerald-400'}`} />
 
       {/* Animated glow ring during processing */}
       {isProcessing && (
@@ -125,8 +124,6 @@ export function HubContainer({
         {children}
       </div>
       {extras}
-      <Handle type="source" position={Position.Right} id="right" className={`w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity ${isBlue ? 'bg-blue-400' : 'bg-emerald-400'}`} />
-      <Handle type="source" position={Position.Bottom} id="bottom" className={`w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity ${isBlue ? 'bg-blue-400' : 'bg-emerald-400'}`} />
     </div>
   );
 }

@@ -29,6 +29,16 @@ body {
   box-shadow: 0 0 16px rgba(96, 165, 250, 0.4);
 }
 
+/* Visible feedback for a selected edge. Edges in this app use an inline `style.stroke`
+   on the JSX, which has higher specificity than React Flow's default
+   `--xy-edge-stroke-selected` rule — so a selected edge would otherwise look identical
+   to an unselected one. drop-shadow() composes on top of any inline stroke color, and
+   the !important stroke-width bump makes the selected edge clearly thicker. */
+.react-flow__edge.selected .react-flow__edge-path {
+  filter: drop-shadow(0 0 4px #60a5fa) drop-shadow(0 0 8px rgba(96, 165, 250, 0.6));
+  stroke-width: 5 !important;
+}
+
 /* Remove default background/padding from group nodes (CanvasNode cards handle their own styling) */
 .react-flow__node-group {
   background: transparent !important;
@@ -447,17 +457,4 @@ kbd {
 .thin-scrollbar::-webkit-scrollbar-track  { background: transparent; }
 .thin-scrollbar::-webkit-scrollbar-thumb  { background: rgba(255,255,255,0.18); border-radius: 4px; }
 .thin-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
-
-/* TextNode markdown rendering: marked.parse() wraps single-line plain text in <p>,
-   whose box introduces ~15px of vertical space (default margins + block baseline)
-   even when margins are reset. Using display:contents removes the <p>'s box entirely
-   while preserving its text — the parent div's line-height/font apply directly. */
-.text-node-content :where(p) {
-  display: contents;
-}
-.text-node-content :where(h1, h2, h3, h4, h5, h6, ul, ol, blockquote, pre) {
-  margin: 0;
-  padding: 0;
-}
-.text-node-content :where(ul, ol) { padding-left: 1.25em; }
 

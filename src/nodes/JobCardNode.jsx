@@ -1,9 +1,10 @@
 import React, { useCallback, useContext, useRef, useState } from 'react';
-import { Handle, Position, useReactFlow } from '@xyflow/react';
+import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { ExternalLink, FileText, ChevronDown, ChevronUp, X, Download, StickyNote, BrainCircuit, Clock } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
+import { NodeHandles } from './_shared/NodeHandles';
 
 const STRENGTH_COLORS = {
   strong: '#22c55e',
@@ -196,8 +197,7 @@ export function JobCardNode({ id, data }) {
       className="bg-[#1a1a1a] border rounded-lg shadow-lg overflow-hidden group"
       style={{ borderColor: accentColor + '40', minWidth: 260, maxWidth: 320 }}
     >
-      <Handle type="target" position={Position.Top} id="top" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" style={{ backgroundColor: accentColor }} />
-      <Handle type="target" position={Position.Left} id="left" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" style={{ backgroundColor: accentColor }} />
+      <NodeHandles className="w-2 h-2" style={{ backgroundColor: accentColor }} />
 
       {/* Header */}
       <div className="px-3 py-2 flex items-start gap-2" style={{ borderBottom: `1px solid ${accentColor}20` }}>
@@ -441,8 +441,6 @@ export function JobCardNode({ id, data }) {
         </div>
       )}
 
-      <Handle type="source" position={Position.Right} id="right" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" style={{ backgroundColor: accentColor }} />
-      <Handle type="source" position={Position.Bottom} id="bottom" className="w-2 h-2 pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity" style={{ backgroundColor: accentColor }} />
     </div>
   );
 }
