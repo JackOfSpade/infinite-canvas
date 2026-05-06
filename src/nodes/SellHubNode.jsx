@@ -3,11 +3,12 @@ import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { AnimatedSourceRing } from '../components/AnimatedSourceRing';
 import { HubContainer } from '../components/HubContainer';
-import { Camera, Loader2 } from 'lucide-react';
+import { Camera } from 'lucide-react';
 import { SELL_PLATFORMS, PRICE_COMP_SOURCES } from '../utils/constants';
 import { useListingActions } from '../hooks/useListingActions';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
+import { HubBusyState } from '../components/HubBusyState';
 import { SellHubDraftState } from './sellhub/SellHubDraftState';
 import { SellHubPricedState } from './sellhub/SellHubPricedState';
 
@@ -73,13 +74,6 @@ export function SellHubNode({ id, data }) {
   }, []);
 
   const hubState = data.hubState || 'empty';
-
-  // Automatically start analysis if images were dropped
-  useEffect(() => {
-    if (data.imagePaths?.length > 0 && hubState === 'empty' && !processingRef.current) {
-      startAnalysis(data.imagePaths);
-    }
-  }, [data.imagePaths, hubState, startAnalysis]);
 
   // Listen for per-source price research progress events
   useEffect(() => {
@@ -195,6 +189,14 @@ export function SellHubNode({ id, data }) {
 
   // Keep ref in sync so handleDrop always invokes the latest closure.
   startAnalysisRef.current = startAnalysis;
+
+  // Auto-start analysis if images were dropped (must come after startAnalysis is declared
+  // — referencing it earlier would hit the const TDZ on first render).
+  useEffect(() => {
+    if (data.imagePaths?.length > 0 && hubState === 'empty' && !processingRef.current) {
+      startAnalysis(data.imagePaths);
+    }
+  }, [data.imagePaths, hubState, startAnalysis]);
 
   const handleConfirmDraft = useCallback(async () => {
     if (processingPriceRef.current || !data.product) return;
@@ -312,18 +314,12 @@ export function SellHubNode({ id, data }) {
 
         {/* ── Analyzing ──────────────────────────────────────────────────── */}
         {hubState === 'analyzing' && (
-          <div className="group flex flex-col items-center justify-center py-6 px-4 relative">
-            <button
-              onClick={resetHandler}
-              className="absolute top-2 right-2 p-1 text-white/30 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all rounded"
-              title="Cancel/Reset Task"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
-            </button>
-            <Loader2 size={22} className="animate-spin text-amber-400 mb-2" />
-            <p className="text-white/60 text-xs font-medium">AI analyzing photos...</p>
-            <p className="text-white/20 text-[10px] mt-1">{data.imagePaths?.length || 0} photo(s)</p>
-          </div>
+          <HubBusyState
+            theme="amber"
+            label="AI analyzing photos..."
+            subline={`${data.imagePaths?.length || 0} photo(s)`}
+            onReset={resetHandler}
+          />
         )}
 
         {/* ── Draft: editable product info ───────────────────────────────── */}
@@ -341,20 +337,12 @@ export function SellHubNode({ id, data }) {
 
         {/* ── Researching ────────────────────────────────────────────────── */}
         {hubState === 'researching' && (
-          <div className="group flex flex-col items-center justify-center py-6 px-4 relative">
-            <button
-              onClick={resetHandler}
-              className="absolute top-2 right-2 p-1 text-white/30 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all rounded"
-              title="Cancel/Reset Task"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
-            </button>
-            <Loader2 size={22} className="animate-spin text-amber-400 mb-2" />
-            <p className="text-white/60 text-xs font-medium">Researching market prices...</p>
-            {totalComps > 0 && (
-              <p className="text-amber-400/60 text-[10px] mt-1">{totalComps} comps found</p>
-            )}
-          </div>
+          <HubBusyState
+            theme="amber"
+            label="Researching market prices..."
+            subline={totalComps > 0 ? `${totalComps} comps found` : null}
+            onReset={resetHandler}
+          />
         )}
 
         {/* ── Priced: price + platform controls ──────────────────────────── */}

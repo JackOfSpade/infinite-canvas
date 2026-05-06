@@ -5,6 +5,7 @@ import { ExternalLink, FileText, ChevronDown, ChevronUp, X, Download, StickyNote
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
 import { NodeHandles } from './_shared/NodeHandles';
+import { useSyncWhileFocused } from '../hooks/useSyncWhileFocused';
 
 const STRENGTH_COLORS = {
   strong: '#22c55e',
@@ -41,11 +42,9 @@ export function JobCardNode({ id, data }) {
   const [generatingCL, setGeneratingCL] = useState(false);
   const [savingCL, setSavingCL] = useState(false);
   const [generatingPrep, setGeneratingPrep] = useState(false);
-  // Controlled notes value — keeps textarea in sync with external updates (undo/redo)
-  const [notesValue, setNotesValue] = useState(data.notes || '');
-  // Local editable cover letter — user can personalise before copy/save
-  const [editedCL, setEditedCL] = useState(data.coverLetter || '');
-  const clFocusRef = useRef(false);
+  // Notes / cover-letter both mirror node data but pause sync while the user is typing.
+  const { value: notesValue, setValue: setNotesValue, focusProps: notesFocusProps } = useSyncWhileFocused(data.notes || '');
+  const { value: editedCL, setValue: setEditedCL, focusProps: clFocusProps } = useSyncWhileFocused(data.coverLetter || '');
   const { addToast } = useToast();
 
   // Cache ID for closure safely
@@ -53,8 +52,6 @@ export function JobCardNode({ id, data }) {
 
   // Notes debounce ref — avoids updateGlobal on every keystroke
   const notesTimerRef = useRef(null);
-  // Track focus so external sync doesn't interrupt mid-type
-  const notesFocusRef = useRef(false);
 
   const score = data.matchScore || 0;
   const strength = data.strengthLabel || 'exploring';
@@ -87,22 +84,6 @@ export function JobCardNode({ id, data }) {
     };
   }, []);
 
-  // ── Notes ─────────────────────────────────────────────────────────────────
-  // Sync when data.notes changes externally (e.g. undo/redo), but only when the
-  // user isn't actively typing — avoids resetting the caret position mid-edit.
-  React.useEffect(() => {
-    if (!notesFocusRef.current) {
-      setNotesValue(data.notes || '');
-    }
-  }, [data.notes]);
-
-  // Sync editedCL when cover letter is regenerated externally but not while editing
-  React.useEffect(() => {
-    if (!clFocusRef.current) {
-      setEditedCL(data.coverLetter || '');
-    }
-  }, [data.coverLetter]);
-
   const handleNotesChange = useCallback((e) => {
     const val = e.target.value;
     setNotesValue(val);
@@ -110,7 +91,7 @@ export function JobCardNode({ id, data }) {
     notesTimerRef.current = setTimeout(() => {
       updateGlobal(idRef.current, { notes: val });
     }, NOTES_DEBOUNCE_MS);
-  }, [updateGlobal]);
+  }, [updateGlobal, setNotesValue]);
 
   // ── Cover letter ──────────────────────────────────────────────────────────
   const generateCoverLetter = useCallback(async () => {
@@ -309,8 +290,7 @@ export function JobCardNode({ id, data }) {
             <textarea
               value={notesValue}
               onChange={data.locked ? undefined : handleNotesChange}
-              onFocus={() => { notesFocusRef.current = true; }}
-              onBlur={() => { notesFocusRef.current = false; }}
+              {...notesFocusProps}
               readOnly={!!data.locked}
               placeholder={data.locked ? '' : 'Interview notes, contacts, follow-ups…'}
               rows={2}
@@ -339,8 +319,7 @@ export function JobCardNode({ id, data }) {
               <textarea
                 value={editedCL}
                 onChange={data.locked ? undefined : (e) => setEditedCL(e.target.value)}
-                onFocus={() => { clFocusRef.current = true; }}
-                onBlur={() => { clFocusRef.current = false; }}
+                {...clFocusProps}
                 readOnly={!!data.locked}
                 rows={6}
                 className={`nodrag w-full resize-none bg-black/20 border border-white/5 rounded px-2 py-1.5 text-white/60 text-[11px] leading-relaxed outline-none font-mono ${

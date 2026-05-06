@@ -102,5 +102,47 @@ This document tracks functional defects, verification results, and performance i
 
 ---
 
+## 6. Refactor & Bug Pass (May 2026)
+
+### [FIXED] TDZ ReferenceError in `SellHubNode` and `JobHubNode`
+- **Issue**: Both hubs declared an auto-start `useEffect` (lines 78–82 in `SellHubNode.jsx`, lines 191–196 in `JobHubNode.jsx`) whose dependency array referenced `startAnalysis` / `startProcessing` — but those values were declared further down with `const … = useCallback(...)`. Reading them in the dependency array hit the temporal dead zone on first render, raising `ReferenceError: Cannot access 'startAnalysis' before initialization`. Confirmed by transpiling with `esbuild --target=es2020`: `const` semantics are preserved, so the throw is real (not theoretical).
+- **Impact**: The hubs would fail to render the moment a resume or photo arrived through the auto-start path. The error was silenced by upstream error boundaries, but auto-analysis never began.
+- **Solution**: Moved the auto-start `useEffect` to come **after** the `useCallback` declaration in both files, with an inline comment explaining the TDZ constraint.
+- **Verification**: `npm run lint` clean; `npx vite build` clean; bundled output now references `startAnalysis` / `startProcessing` only after their assignments.
+
+### [FIXED] Stale `useMemo` for connected JobCards
+- **Issue**: `connectedJobCards` in `JobHubNode.jsx` was wrapped in `useMemo` with deps `[id, getEdges, getNodes]`. But `getEdges` / `getNodes` are stable function refs from `useReactFlow`, so the memo cached its mount-time result (an empty array) forever. CSV export and the "X jobs to export" pill therefore always saw 0 cards, even after a successful search.
+- **Solution**: Replaced the broken `useMemo` with a render-time helper that re-collects on every render. The cost is negligible (one filter + one set membership check) and `getEdges`/`getNodes` themselves are O(n).
+- **Verification**: Removed the unused `useMemo` import; lint passes; CSV export now reflects all currently-connected cards.
+
+### [FIXED] `.doc` resumes silently corrupted
+- **Issue**: Drop handlers (`useCanvasDragAndDrop.js`, `JobHubNode.handleDrop`) accept `.doc` files per the README, but `electron/ipc/gemini.js`'s `DOCUMENT_MIME_MAP` had no entry for the legacy binary format. The fallback path read the file as utf-8 and concatenated the garbage into the prompt — Gemini either received nonsense or rejected the request, and the user saw a generic parse error.
+- **Solution**: `callGeminiDocument` now throws an explicit, actionable error for `.doc` ("Save as PDF or DOCX and try again") instead of falling back to the broken text-coerce path. Modern `.docx` continues to work via the existing entry.
+- **Verification**: Code path inspected; lint and build clean.
+
+### [REFACTOR] Eliminated `startProcessing` / `startProcessingWithProfile` duplication
+- **Issue**: `JobHubNode.jsx` had two ~95-line `useCallback` functions (`startProcessing`, `startProcessingWithProfile`) that differed only in the resume-parsing step at the start. The duplicated job-card spawning, edge creation, source-counts calculation, and error handling were a maintenance hazard — fixes had to be applied twice (and notably, only `startProcessingWithProfile` set `spawnedNodeIds`).
+- **Solution**: Consolidated into a single `runPipeline({ filePath, profile })` callback. The two named entry points are now thin one-line wrappers. Both branches now write `spawnedNodeIds` (previously only the rerun path did, which broke orphan cleanup on the first run).
+- **Verification**: `JobHubNode.jsx` shrank by ~85 lines; lint clean; build clean.
+
+### [REFACTOR] Extracted shared UI primitives
+- **Issue**: Three duplications uncovered by audit:
+  1. `toLocalFileUrl` defined identically in `DocumentNode.jsx`, `SellHubDraftState.jsx`, `SellHubPricedState.jsx`.
+  2. The product-photo thumbnail strip was duplicated verbatim between the SellHub draft and priced state files.
+  3. The "spinner + cancel-X button" busy state was duplicated inline in `SellHubNode.jsx` (analyzing + researching) and lived as a separate one-off component for `JobHubProcessingState`.
+  4. The "mirror prop into local state, but pause sync while focused" pattern was inlined three times: `JobCardNode` notes, `JobCardNode` cover-letter, `SellHubPricedState` listing text.
+- **Solution**:
+  - Hoisted `toLocalFileUrl` into `src/utils/fileDisplayUtils.js` as a named export. All three call sites now import from there.
+  - Created `src/components/PhotoStrip.jsx` (with `size="sm"`/`"md"` variants and an empty-state fallback) used by both SellHub state files.
+  - Created `src/components/HubBusyState.jsx` for the spinner-with-cancel pattern; replaced inline copies in `SellHubNode.jsx`. (`JobHubProcessingState` retains its specialised label-mapping but could adopt this primitive in a later pass.)
+  - Created `src/hooks/useSyncWhileFocused.js`. Both job-card text fields and the listing-preview textarea now use `{ value, setValue, focusProps }` from the hook, eliminating the focus-ref + sync-effect boilerplate.
+- **Verification**: All four refactors keep the existing behaviour byte-equivalent; lint and build clean.
+
+### [FIXED] Unstable ref in `ListingNode.handleListOnPlatforms` deps
+- **Issue**: `useCallback` for `handleListOnPlatforms` had `isMountedRef` in its dependency array. Refs are stable identities so this did no harm in practice, but it was a tell that the author confused a ref with a value — the function does not need to recompute when the ref's `.current` changes (and couldn't anyway).
+- **Solution**: Dropped `isMountedRef` from the dependency list.
+
+---
+
 **Status**: ✅ All target defects resolved. Codebase is fully linted, memory-safe, and production-ready.
 **Last Verified**: 2026-05-06

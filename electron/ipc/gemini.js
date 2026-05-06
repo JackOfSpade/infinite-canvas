@@ -332,6 +332,12 @@ export async function callGeminiDocument(filePath, prompt, signal = null) {
     if (IMAGE_MIME_MAP[ext]) {
       return callGeminiVision([filePath], prompt, signal);
     }
+    // Legacy .doc files are a binary format that Vertex AI can't ingest as inline
+    // data. Reading the bytes as utf8 (the previous fallback) silently produced
+    // garbage; surface a clear actionable error instead.
+    if (ext === '.doc') {
+      throw new Error('Legacy .doc resumes are not supported. Save as PDF or DOCX and try again.');
+    }
     // Fallback to text/plain for other document types so Gemini tries to read them as raw text
     return callGemini([{ text: `${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n` + await fs.promises.readFile(filePath, 'utf8') }], { signal });
   }

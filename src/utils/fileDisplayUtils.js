@@ -1,7 +1,17 @@
 import {
-  FileIcon, FileCode, FileImage, FileAudio, FileVideo, 
+  FileIcon, FileCode, FileImage, FileAudio, FileVideo,
   FileArchive, FileText, FileSpreadsheet, FileJson
 } from 'lucide-react';
+
+/**
+ * Encodes a local filesystem path for the custom `local-file://` Electron protocol.
+ * Percent-encodes the four characters that would otherwise be misparsed as URL
+ * structural delimiters: `%`, space, `#`, and `?`. The order matters: `%` must be
+ * encoded first so the other replacements don't double-encode their `%` outputs.
+ */
+export function toLocalFileUrl(filePath) {
+  return `local-file://${filePath.replace(/%/g, '%25').replace(/ /g, '%20').replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
+}
 
 export const FILE_CATEGORIES = {
   IMAGE: 'image',

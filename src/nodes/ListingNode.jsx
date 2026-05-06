@@ -129,7 +129,7 @@ export function ListingNode({ id, data }) {
       const platform = SELL_PLATFORMS.find(p => p.id === platformId);
       if (platform?.postUrl) window.electronAPI?.openExternal?.(platform.postUrl);
     }
-  }, [selectedPlatforms, isMountedRef]);
+  }, [selectedPlatforms]);
 
 
 

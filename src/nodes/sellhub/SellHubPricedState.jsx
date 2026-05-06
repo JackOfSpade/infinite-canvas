@@ -2,15 +2,12 @@ import React, { useState, useRef, useEffect } from 'react';
 import { QuickPriceButtons } from '../../components/QuickPriceButtons';
 import { PriceJustification } from '../../components/PriceJustification';
 import { PlatformToggles } from '../../components/PlatformToggles';
-import { Check, Copy, Download, Camera, RefreshCw, ChevronDown, ChevronUp, Edit3 } from 'lucide-react';
+import { PhotoStrip } from '../../components/PhotoStrip';
+import { Check, Copy, Download, RefreshCw, ChevronDown, ChevronUp, Edit3 } from 'lucide-react';
 import { SELL_PLATFORMS } from '../../utils/constants';
 import { EventLogger } from '../../utils/EventLogger';
 import { useToast } from '../../components/ToastProvider';
-
-/** Converts a local filesystem path to the custom local-file:// protocol URL. */
-function toLocalFileUrl(filePath) {
-  return `local-file://${filePath.replace(/%/g, '%25').replace(/ /g, '%20').replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
-}
+import { useSyncWhileFocused } from '../../hooks/useSyncWhileFocused';
 
 export function SellHubPricedState({
   product,
@@ -36,20 +33,10 @@ export function SellHubPricedState({
   const [savingListing, setSavingListing] = useState(false);
   const [savedListing, setSavedListing] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
-  // Local editable copy of listing text — user can customize before copy/save
-  const [editedText, setEditedText] = useState(listingText);
-  const textFocusRef = useRef(false);
+  const { value: editedText, setValue: setEditedText, focusProps: textFocusProps } = useSyncWhileFocused(listingText);
   const { addToast } = useToast();
   const isMountedRef = useRef(true);
   useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
-
-  // Sync when listingText changes externally (e.g. price/product edits) but only if
-  // the user isn’t actively editing — same pattern as JobCardNode notes.
-  useEffect(() => {
-    if (!textFocusRef.current) {
-      setEditedText(listingText);
-    }
-  }, [listingText]);
 
   const handleSaveListing = async () => {
     if (!window.electronAPI?.saveFileDialog || savingListing) return;
@@ -85,30 +72,7 @@ export function SellHubPricedState({
     <div className="p-3 space-y-2">
       <div className="text-emerald-400/60 text-[10px] font-semibold uppercase tracking-wider">💰 Ready to List</div>
 
-      {/* Photo strip */}
-      {imagePaths.length > 0 ? (
-        <div className="flex gap-1 overflow-x-auto pb-1">
-          {imagePaths.slice(0, 4).map((p, i) => (
-            <img
-              key={i}
-              src={toLocalFileUrl(p)}
-              alt={`Product photo ${i + 1}`}
-              className="h-16 w-16 object-cover rounded shrink-0 border border-white/10"
-              onError={(e) => { e.currentTarget.style.display = 'none'; }}
-            />
-          ))}
-          {imagePaths.length > 4 && (
-            <div className="h-16 w-16 rounded border border-white/10 bg-black/20 flex items-center justify-center shrink-0 text-white/30 text-[10px]">
-              +{imagePaths.length - 4}
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="h-6 flex items-center gap-1 text-white/15 text-[10px]">
-          <Camera size={10} />
-          No photos
-        </div>
-      )}
+      <PhotoStrip imagePaths={imagePaths} size="sm" />
 
       <div className="text-white/80 text-sm font-semibold truncate">{product.generated_title || 'Item'}</div>
 
@@ -244,8 +208,7 @@ export function SellHubPricedState({
           <textarea
             value={editedText}
             onChange={locked ? undefined : (e) => setEditedText(e.target.value)}
-            onFocus={() => { textFocusRef.current = true; }}
-            onBlur={() => { textFocusRef.current = false; }}
+            {...textFocusProps}
             readOnly={locked}
             rows={8}
             className={`nodrag w-full resize-none bg-black/30 border-t border-white/5 px-2.5 py-2 text-white/60 text-[10px] leading-relaxed outline-none font-mono ${

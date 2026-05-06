@@ -2,17 +2,12 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useReactFlow, NodeResizer } from '@xyflow/react';
 import { Minimize2, Play, AudioLines, AlertTriangle, RefreshCw, FileText, ZoomIn, ZoomOut } from 'lucide-react';
 import { marked } from 'marked';
-import { getFileCategoryInfo, THEME_COLORS } from '../utils/fileDisplayUtils';
+import { getFileCategoryInfo, THEME_COLORS, toLocalFileUrl } from '../utils/fileDisplayUtils';
 import { EventLogger } from '../utils/EventLogger';
 import { NodeHandles } from './_shared/NodeHandles';
 import { LockBadge } from './_shared/LockBadge';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
-
-/** Encodes a local file path for use with the custom local-file:// protocol. */
-function toLocalFileUrl(filePath) {
-  return `local-file://${filePath.replace(/%/g, '%25').replace(/ /g, '%20').replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
-}
 
 /** Human-readable labels for HTMLMediaElement.error.code values. */
 const MEDIA_ERROR_LABELS = { 1: 'Aborted', 2: 'Network error', 3: 'Decode error', 4: 'Not supported' };

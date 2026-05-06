@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback, useContext, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useContext } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { AnimatedSourceRing } from '../components/AnimatedSourceRing';
@@ -187,202 +187,74 @@ export function JobHubNode({ id, data }) {
     applyCardFilters({});
   }, [applyCardFilters, data.scoreThreshold, data.sourceFilter, data.statusFilters]);
 
-  // Auto-start or Re-sync on mount
-  useEffect(() => {
-    // 1. Auto-start if drop-created
-    if (data.filePath && hubState === 'empty' && !processingRef.current) {
-      startProcessing(data.filePath);
-    }
-  }, [data.filePath, hubState, startProcessing]);
-
-  const startProcessing = useCallback(async (filePath) => {
+  /**
+   * Drives the full pipeline. Pass `filePath` for a fresh resume parse, or
+   * `profile` to skip parsing and re-run from query construction onward.
+   * `filePath` takes precedence when both are provided.
+   */
+  const runPipeline = useCallback(async ({ filePath, profile: providedProfile } = {}) => {
     if (!window.electronAPI || processingRef.current) return;
+    if (!filePath && !providedProfile) return;
     processingRef.current = true;
     setSourceProgress({});
     const currentId = id;
-    
-    // Snapshot the node position so we can spawn siblings near it even if 
+
+    // Snapshot the node position so we can spawn siblings near it even if
     // the user navigates away and unmounts this layer of the canvas.
-    const hubNodeRef = getNode(currentId);
-    const originalPos = hubNodeRef?.position || { x: 0, y: 0 };
+    const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
 
     try {
-      // Step 1: Parse resume
-      updateGlobal(currentId, { hubState: 'parsing' });
-      const parseResult = await window.electronAPI.parseResume({ filePath, nodeId: currentId });
-      
-      // Allow processing to finish even if unmounted or node deleted!
-      if (!parseResult.success) {
-        throw new Error(parseResult.error || 'Failed to parse resume');
+      let profile = providedProfile;
+
+      // Step 1: Parse resume (only when a fresh file path was supplied)
+      if (filePath) {
+        updateGlobal(currentId, { hubState: 'parsing' });
+        const parseResult = await window.electronAPI.parseResume({ filePath, nodeId: currentId });
+        if (!parseResult.success) throw new Error(parseResult.error || 'Failed to parse resume');
+        profile = parseResult.profile;
+
+        updateGlobal(currentId, {
+          hubState: 'querying',
+          resumeProfile: profile,
+          resumeSummary: `${profile.skills?.slice(0, 3).join(', ')}${profile.experience_years ? ` · ${profile.experience_years}y exp` : ''}`,
+          resumeContext: {
+            skills: profile.skills,
+            experience: profile.experience_years,
+          },
+        });
+      } else {
+        updateGlobal(currentId, { hubState: 'querying' });
       }
 
       // Step 2: Query construction
-      updateGlobal(currentId, {
-        hubState: 'querying',
-        // Persist profile on hub so re-run works even if source file has moved
-        resumeProfile: parseResult.profile,
-        resumeSummary: `${parseResult.profile.skills?.slice(0, 3).join(', ')}${parseResult.profile.experience_years ? ` · ${parseResult.profile.experience_years}y exp` : ''}`,
-        resumeContext: {
-          skills: parseResult.profile.skills,
-          experience: parseResult.profile.experience_years,
-        }
-      });
-      
-      const queriesResult = await window.electronAPI.generateJobQueries({ 
-        profile: parseResult.profile,
-        nodeId: currentId 
-      });
-      
-      // Flatten all query arrays into a single list for the search step.
+      const queriesResult = await window.electronAPI.generateJobQueries({ profile, nodeId: currentId });
       const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queriesResult.queries || {};
       const allQueries = [...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
 
       // Step 3: Search
       updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length });
-      
       const searchResult = await window.electronAPI.searchJobs({ queries: allQueries, nodeId: currentId });
-      
+
       if (!searchResult.success || !searchResult.jobs || searchResult.jobs.length === 0) {
         updateGlobal(currentId, { hubState: 'done', resultCount: 0 });
-        processingRef.current = false;
         return;
       }
 
-      // Step 4: Scraping & Scoring
+      // Step 4: Scoring
       updateGlobal(currentId, { hubState: 'scoring', jobCount: searchResult.jobs.length });
-      
-      const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile: parseResult.profile, nodeId: currentId });
-      
-      if (!scoreResult.success) {
-        throw new Error(scoreResult.error || 'Failed to score jobs');
-      }
-
-      // Step 5: Spawn career direction clusters
-      // Use originalPos in case the user navigated to another canvas depth and getNode(id) now returns null
-      const hubx = originalPos.x;
-      const huby = originalPos.y;
-      
-      const newNodes = [];
-      const newEdges = [];
-      let currentYOffset = 0;
-      const baseNodeId = `job-${Date.now()}`;
-
-      scoreResult.scoredJobs.forEach((job, index) => {
-        const jobId = `${baseNodeId}-${index}`;
-        
-        newNodes.push({
-          id: jobId,
-          type: 'jobcard',
-          position: { x: hubx + 400, y: huby + currentYOffset },
-          data: {
-            title: job.title,
-            company: job.company,
-            location: job.location,
-            salary: job.salary,
-            snippet: job.snippet,
-            matchScore: job.matchScore,
-            reasoning: job.reasoning,
-            careerDirection: job.careerDirection,
-            strengthLabel: job.strengthLabel,
-            source: job.source,
-            url: job.url,
-            posted: job.posted,
-            resumeProfile: parseResult.profile,
-            isNew: false
-          }
-        });
-
-        newEdges.push({
-          id: `edge-${currentId}-${jobId}`,
-          source: currentId,
-          target: jobId,
-          type: 'smoothstep',
-          animated: true,
-          style: { stroke: 'rgba(96,165,250,0.5)', strokeWidth: 2 }
-        });
-
-        currentYOffset += 280;
-      });
-
-      if (newNodes.length > 0) {
-        document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
-        if (addElementsGlobally) {
-          addElementsGlobally(currentId, newNodes, newEdges, 'sibling');
-        } else {
-          // Fallback if not inside CanvasNavigationContext (e.g., dev/test environment)
-          addNodes(newNodes);
-          addEdges(newEdges);
-        }
-      }
-
-      const finalSourceCounts = {};
-      scoreResult.scoredJobs.forEach(job => {
-        finalSourceCounts[job.source] = (finalSourceCounts[job.source] || 0) + 1;
-      });
-
-      updateGlobal(currentId, { 
-        hubState: 'done', 
-        resultCount: scoreResult.scoredJobs.length,
-        finalSourceCounts 
-      });
-    } catch (error) {
-      EventLogger.error('JobHubNode task failed:', error);
-      updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
-    } finally {
-      if (isMountedRef.current) {
-        processingRef.current = false;
-      }
-    }
-  }, [id, updateGlobal, addElementsGlobally, addNodes, addEdges, getNode]);
-
-  /**
-   * Runs the pipeline from query-generation onward using an already-parsed profile.
-   * Used by re-run when the original file is no longer on disk.
-   */
-  const startProcessingWithProfile = useCallback(async (profile) => {
-    if (!window.electronAPI || processingRef.current || !profile) return;
-    processingRef.current = true;
-    setSourceProgress({});
-    const currentId = id;
-    const hubNodeRef = getNode(currentId);
-    const originalPos = hubNodeRef?.position || { x: 0, y: 0 };
-
-    try {
-      updateGlobal(currentId, { hubState: 'querying' });
-
-      const queriesResult = await window.electronAPI.generateJobQueries({ profile, nodeId: currentId });
-
-      const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queriesResult.queries || {};
-      const allQueries = [...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
-
-      updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length });
-
-      const searchResult = await window.electronAPI.searchJobs({ queries: allQueries, nodeId: currentId });
-
-      if (!searchResult.success || !searchResult.jobs || searchResult.jobs.length === 0) {
-        updateGlobal(currentId, { hubState: 'done', resultCount: 0 });
-        return; // finally block resets processingRef
-      }
-
-      updateGlobal(currentId, { hubState: 'scoring', jobCount: searchResult.jobs.length });
-
       const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile, nodeId: currentId });
-
       if (!scoreResult.success) throw new Error(scoreResult.error || 'Failed to score jobs');
 
-      const hubx = originalPos.x;
-      const huby = originalPos.y;
+      // Step 5: Spawn job-card nodes adjacent to the hub
+      const baseNodeId = `job-${Date.now()}`;
       const newNodes = [];
       const newEdges = [];
-      let currentYOffset = 0;
-      const baseNodeId = `job-${Date.now()}`;
-
       scoreResult.scoredJobs.forEach((job, index) => {
         const jobId = `${baseNodeId}-${index}`;
         newNodes.push({
           id: jobId,
           type: 'jobcard',
-          position: { x: hubx + 400, y: huby + currentYOffset },
+          position: { x: originalPos.x + 400, y: originalPos.y + index * 280 },
           data: {
             title: job.title, company: job.company, location: job.location,
             salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
@@ -397,7 +269,6 @@ export function JobHubNode({ id, data }) {
           type: 'smoothstep', animated: true,
           style: { stroke: 'rgba(96,165,250,0.5)', strokeWidth: 2 },
         });
-        currentYOffset += 280;
       });
 
       if (newNodes.length > 0) {
@@ -405,30 +276,45 @@ export function JobHubNode({ id, data }) {
         if (addElementsGlobally) {
           addElementsGlobally(currentId, newNodes, newEdges, 'sibling');
         } else {
+          // Fallback if not inside CanvasNavigationContext (dev/test).
           addNodes(newNodes);
           addEdges(newEdges);
         }
-        
-        // Track spawned IDs so we can clean them up even if edges are deleted manually
-        updateGlobal(currentId, { spawnedNodeIds: newNodes.map(n => n.id) });
       }
 
+      // Track spawned IDs so re-runs can clean orphans even if edges were manually deleted.
       const finalSourceCounts = {};
       scoreResult.scoredJobs.forEach(job => {
         finalSourceCounts[job.source] = (finalSourceCounts[job.source] || 0) + 1;
       });
 
-      updateGlobal(currentId, { hubState: 'done', resultCount: scoreResult.scoredJobs.length, finalSourceCounts });
+      updateGlobal(currentId, {
+        hubState: 'done',
+        resultCount: scoreResult.scoredJobs.length,
+        finalSourceCounts,
+        spawnedNodeIds: newNodes.map(n => n.id),
+      });
     } catch (error) {
-      EventLogger.error('JobHubNode (profile-rerun) task failed:', error);
+      EventLogger.error('JobHubNode pipeline failed:', error);
       updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
     } finally {
       if (isMountedRef.current) processingRef.current = false;
     }
   }, [id, updateGlobal, addElementsGlobally, addNodes, addEdges, getNode]);
 
+  const startProcessing = useCallback((filePath) => runPipeline({ filePath }), [runPipeline]);
+  const startProcessingWithProfile = useCallback((profile) => runPipeline({ profile }), [runPipeline]);
+
   // Keep the ref up-to-date so handleDrop always calls the latest version.
   startProcessingRef.current = startProcessing;
+
+  // Auto-start when drop-created (must come after startProcessing is declared
+  // — referencing it earlier would hit the const TDZ on first render).
+  useEffect(() => {
+    if (data.filePath && hubState === 'empty' && !processingRef.current) {
+      startProcessing(data.filePath);
+    }
+  }, [data.filePath, hubState, startProcessing]);
 
   // Handle file drops directly onto this node
   const handleDrop = useCallback((e) => {
@@ -454,13 +340,15 @@ export function JobHubNode({ id, data }) {
     processingRef.current = false;
   }, [data.locked, id, updateGlobal]);
 
-  // Collect jobcard nodes connected to this hub (used for CSV export and dedup on re-run)
-  const connectedJobCards = useMemo(() => {
+  // Collect jobcard nodes connected to this hub (used for CSV export). Recomputed
+  // each render — the cost is small and getEdges/getNodes are stable refs that
+  // would otherwise freeze the memoised value at mount time.
+  const collectConnectedJobCards = () => {
     const edges = getEdges().filter(e => e.source === id);
     const cardIds = new Set(edges.map(e => e.target));
     return getNodes().filter(n => cardIds.has(n.id) && n.type === 'jobcard').map(n => n.data);
-  // Re-compute when hub state settles so new cards are included after a run
-  }, [id, getEdges, getNodes]);
+  };
+  const connectedJobCards = collectConnectedJobCards();
 
   const handleRerun = useCallback(() => {
     if (data.locked || processingRef.current) return;
