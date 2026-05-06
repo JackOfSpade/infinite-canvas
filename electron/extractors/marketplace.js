@@ -400,7 +400,7 @@ export const MERCARI_SOLD_EXTRACTOR = `
       const linkEl = container.querySelector('a[href*="/item/"]') || (container.tagName === 'A' ? container : container.closest('a'));
       
       const title = titleEl?.innerText?.trim() || '';
-      if (!title || title.length < 3) return;
+      if (!title || title.length < 2) return;
       
       const priceTextRaw = priceEl?.innerText?.trim() || '';
       const priceText = priceTextRaw.split(/[\\n\\r]+/)[0];

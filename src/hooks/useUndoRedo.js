@@ -114,8 +114,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
       futureRef.current = [];
       syncHistoryLen();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges, drawings]); // intentionally tight deps for instant reaction; isStateDirtyRef read via ref
+  }, [nodes, edges, drawings, syncHistoryLen, isInteractionRef]); // intentionally tight deps for instant reaction; isStateDirtyRef read via ref
 
   // Auto-snapshot (500ms debounce) — safety net for changes not explicitly snapshotted
   useEffect(() => {

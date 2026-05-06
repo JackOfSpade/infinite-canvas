@@ -149,7 +149,7 @@ The following gaps remain after the current implementation. Items marked ✅ hav
 | ✅ | **Export job cards as CSV** | "Export CSV" writes `Title,Company,Location,Score,Strength,Status,Source,URL,Notes` |
 | ✅ | **Application date tracking** | `appliedAt` / `interviewAt` ISO timestamps recorded on status change; days-since badge shown next to status dropdown |
 | ✅ | **Interview prep** | "Generate Interview Prep" button appears when status = `Interview`; AI generates 8 role-specific Q&As (3 behavioral / 3 technical / 2 company) with coaching tips; persists to node data |
-| — | **Cards manually disconnected from hub are not cleaned up on re-run** | Edge case; normal workflow unaffected |
+| ✅ | **Cards manually disconnected from hub are now cleaned up on re-run** | Hub tracks spawned IDs and deletes them regardless of edge state |
 
 ### Marketplace Sell Hub
 

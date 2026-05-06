@@ -118,7 +118,7 @@ Return a JSON object:
   "condition": "New | Like New | Used - Excellent | Used - Good | Used - Fair | For Parts",
   "color": "Primary color(s)",
   "notable_features": "Any visible accessories, damage, special features",
-  "generated_title": "An optimized selling title (60 chars max, include brand + model + key features + condition indicator)",
+  "generated_title": "An optimized selling title (80 chars max, include brand + model + key features + condition indicator)",
   "generated_description": "A detailed, buyer-friendly selling description (include specs if identifiable, condition details, what's included). 3-4 sentences."
 }
 

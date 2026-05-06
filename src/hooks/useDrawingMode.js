@@ -131,19 +131,17 @@ export function useDrawingMode({
       return;
     }
     if (activeTool === 'pen' && currentStrokeRef.current?.length > 1) {
-      if (!isAnimatingRef?.current) {
-        takeSnapshot();
-        setDrawings(prev => [...prev, { 
-          id: generateId(),
-          points: currentStrokeRef.current, 
-          color: activeColor, 
-          penSize 
-        }]);
-      }
+      takeSnapshot();
+      setDrawings(prev => [...prev, { 
+        id: generateId(),
+        points: currentStrokeRef.current, 
+        color: activeColor, 
+        penSize 
+      }]);
     }
     currentStrokeRef.current = null;
     drawingLayerRef.current?.clearCurrentStroke();
-  }, [placementMode, activeTool, takeSnapshot, setDrawings, activeColor, penSize, isAnimatingRef, drawingLayerRef, isInteractionRef]);
+  }, [placementMode, activeTool, takeSnapshot, setDrawings, activeColor, penSize, drawingLayerRef, isInteractionRef]);
 
   useEffect(() => {
     if (!placementMode) {

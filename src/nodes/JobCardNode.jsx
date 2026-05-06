@@ -190,7 +190,7 @@ export function JobCardNode({ id, data }) {
     } finally {
       if (isMountedRef.current) setSavingCL(false);
     }
-  }, [data.coverLetter, data.company, addToast]);
+  }, [editedCL, data.company, addToast]);
 
   return (
     <div

@@ -8,7 +8,8 @@ import { EventLogger } from '../utils/EventLogger';
 // Compiled once at module load — not per drop event.
 const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)$/i;
 const URL_RE = /^(https?:\/\/[^\s]+|[a-z0-9]([a-z0-9-]*[a-z0-9])?\.([a-z]{2,}\.)*[a-z]{2,}([/?#][^\s]*)?)$/i;
-const RESUME_EXT_RE = /\.(pdf|docx|doc)$/i;
+const RESUME_EXT_RE = /\.(pdf|docx|doc|txt)$/i;
+const IMAGE_EXT_RE = /\.(png|jpg|jpeg|webp|gif)$/i;
 
 export function useCanvasDragAndDrop({
   setNodes,
@@ -111,14 +112,23 @@ export function useCanvasDragAndDrop({
       }
 
       const resumeFiles = validFiles.filter(f => RESUME_EXT_RE.test(f.name));
-      const otherFiles  = validFiles.filter(f => !RESUME_EXT_RE.test(f.name));
+      const imageFiles  = validFiles.filter(f => IMAGE_EXT_RE.test(f.name));
+      const otherFiles  = validFiles.filter(f => !RESUME_EXT_RE.test(f.name) && !IMAGE_EXT_RE.test(f.name));
 
-      // Resume dropped → auto-create a JobHub pre-seeded with that file path.
-      // The JobHubNode's own mount effect kicks off pipeline automatically.
-      if (resumeFiles.length > 0 && otherFiles.length === 0) {
+      // 1. Only Resumes dropped (Doc/PDF/TXT) -> auto-create a JobHub.
+      if (resumeFiles.length > 0 && imageFiles.length === 0 && otherFiles.length === 0) {
         takeSnapshot();
         EventLogger.log(`drop routed type=jobhub files=${resumeFiles.length}`);
         insertNodes([NODE_FACTORIES.jobhub(position, { filePath: resumeFiles[0].path })]);
+        return;
+      }
+
+      // 2. Only Images dropped (PNG/JPG/etc) -> auto-create a SellHub (Marketplace).
+      if (imageFiles.length > 0 && resumeFiles.length === 0 && otherFiles.length === 0) {
+        takeSnapshot();
+        EventLogger.log(`drop routed type=sellhub files=${imageFiles.length}`);
+        const imagePaths = imageFiles.map(f => f.path);
+        insertNodes([NODE_FACTORIES.sellhub(position, { imagePaths })]);
         return;
       }
 
@@ -141,8 +151,11 @@ export function useCanvasDragAndDrop({
     }
 
     // Handle dropping URLs from the browser address bar or other sources.
+    // Guard: skip empty or near-empty text/plain payloads (e.g. sidebar hub drags
+    // explicitly set text/plain to '' to prevent browser auto-fill from creating
+    // spurious text nodes).
     const droppedText = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain');
-    if (droppedText && droppedText.length < 2048) {
+    if (droppedText && droppedText.trim().length > 3) {
       const trimmedText = droppedText.trim();
       if (URL_RE.test(trimmedText) && !CODE_EXT_RE.test(trimmedText.split('?')[0].split('#')[0])) {
         takeSnapshot();

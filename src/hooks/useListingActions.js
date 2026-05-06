@@ -23,7 +23,7 @@ export function useListingActions(id, data) {
   const [editing, setEditing] = useState(null);
   const [priceInput, setPriceInput] = useState(data.userPrice || data.pricing?.recommended_price || '');
   const [justificationExpanded, setJustificationExpanded] = useState(false);
-  const [selectedPlatforms, setSelectedPlatforms] = useState(data.selectedPlatforms || ['ebay', 'facebook', 'craigslist']);
+  const [selectedPlatforms, setSelectedPlatforms] = useState(data.selectedPlatforms || ['ebay', 'facebook', 'mercari']);
   const [copied, setCopied] = useState(false);
   const copiedTimeoutRef = useRef(null);
   // Ref for userPrice so syncPriceFromBackend is stable across renders.
@@ -35,6 +35,21 @@ export function useListingActions(id, data) {
       if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current);
     };
   }, []);
+ 
+  // Sync local state when data changes externally (e.g. undo/redo)
+  // We do this during render to avoid cascading effects, following the "Adjusting state based on props" pattern.
+  const [prevPlatforms, setPrevPlatforms] = useState(data.selectedPlatforms);
+  if (JSON.stringify(data.selectedPlatforms) !== JSON.stringify(prevPlatforms)) {
+    setPrevPlatforms(data.selectedPlatforms);
+    setSelectedPlatforms(data.selectedPlatforms);
+  }
+
+  const [prevExternalPrice, setPrevExternalPrice] = useState(data.userPrice || data.pricing?.recommended_price || '');
+  const currentExternalPrice = data.userPrice || data.pricing?.recommended_price || '';
+  if (editing !== 'price' && String(currentExternalPrice) !== String(prevExternalPrice)) {
+    setPrevExternalPrice(currentExternalPrice);
+    setPriceInput(currentExternalPrice);
+  }
 
   // ── Field editing ──────────────────────────────────────────────────────────
 
@@ -117,20 +132,17 @@ export function useListingActions(id, data) {
         condition: product.condition || 'Used - Good',
       });
 
-      if (!isMountedRef.current) return null;
-
       if (result.success) {
-        setPriceInput(result.pricing.recommended_price || '');
+        if (isMountedRef.current) setPriceInput(result.pricing.recommended_price || '');
         onStateChange?.('priced', result);
       } else {
         onStateChange?.('priced-empty', result);
       }
       return result;
     } catch (err) {
-      if (!isMountedRef.current) return null;
       EventLogger.error('researchPrice failed:', err);
       onStateChange?.('error', err);
-      return null;
+      throw err;
     }
   }, [product, id]);
 

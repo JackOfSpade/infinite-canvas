@@ -1,0 +1,34 @@
+
+> infinite-canvas@0.0.0 lint
+> eslint .
+
+
+/Users/jack/Desktop/My Apps/infinite-canvas/src/Canvas.jsx
+  141:44  error    Error: Cannot access variable before it is declared
+
+`getNode` is accessed before it is declared, which prevents the earlier access from updating when this value changes over time.
+
+  139 |     });
+  140 |     onNodesChangeBase(filteredChanges);
+> 141 |   }, [onNodesChangeBase, snapshotOnDelete, getNode]);
+      |                                            ^^^^^^^ `getNode` accessed before it is declared
+  142 |
+  143 |   // ── ReactFlow drag event logging + resize-drag tagging ───────────────────
+  144 |   // These fire from ReactFlow's own drag system, independently of our pointer
+
+  145 |   // handlers. We use ResizeActive to detect if the drag was initiated during a
+  146 |   // CanvasNode resize session — only resize-tagged drags apply a ResizeCorrection.
+> 147 |   const { screenToFlowPosition, getIntersectingNodes, getNode, getEdges, updateNodeData } = useReactFlow();
+      |                                                       ^^^^^^^ `getNode` is declared here
+  148 |   const isInteractionRef = useRef(false);
+  149 |
+  150 |   const onEdgesChange = useCallback((changes) => {  react-hooks/immutability
+  208:3   warning  Unused eslint-disable directive (no problems were reported from 'react-hooks/refs')
+  301:3   warning  Unused eslint-disable directive (no problems were reported from 'react-hooks/refs')
+
+/Users/jack/Desktop/My Apps/infinite-canvas/src/hooks/useUndoRedo.js
+  117:6  warning  React Hook useEffect has a missing dependency: 'isInteractionRef'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+✖ 4 problems (1 error, 3 warnings)
+  0 errors and 2 warnings potentially fixable with the `--fix` option.
+

@@ -10,9 +10,19 @@ import { cancelNodeTasksRecursively } from '../utils/canvasInteractions';
  */
 function extractPaths(nodes, pathsToDelete) {
   nodes.forEach(n => {
-    if (n.type === 'document' && n.data?.filePath) {
+    // Standard document/hub nodes with a primary file path
+    if ((n.type === 'document' || n.type === 'jobhub' || n.type === 'listing') && n.data?.filePath) {
       pathsToDelete.add(n.data.filePath);
-    } else if (n.type === 'group') {
+    }
+    
+    // Nodes that can hold multiple image assets (Marketplace)
+    if ((n.type === 'sellhub' || n.type === 'listing') && Array.isArray(n.data?.imagePaths)) {
+      n.data.imagePaths.forEach(p => {
+        if (p) pathsToDelete.add(p);
+      });
+    }
+
+    if (n.type === 'group') {
       if (n.data?.filePath) {
         // Group created from a folder drag-in: delete the entire OS folder
         pathsToDelete.add(n.data.filePath);

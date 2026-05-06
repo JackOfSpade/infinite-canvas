@@ -74,6 +74,43 @@ export function JobHubNode({ id, data }) {
     return () => cleanup?.();
   }, [id]);
 
+  // Combined card opacity: source AND score AND status filters all applied together.
+  // Declared before toggleSourceFilter because toggleSourceFilter references it.
+  const applyCardFilters = useCallback(({ sourceFilter: sf, scoreThreshold: st, statusFilters: stf } = {}) => {
+    // Fall back to current data values if not passed explicitly
+    const activeSrc   = sf  !== undefined ? sf  : (data.sourceFilter || null);
+    const activeScore = st  !== undefined ? st  : (data.scoreThreshold || 0);
+    const activeStats = stf !== undefined ? stf : (data.statusFilters || []);
+
+    setNodes(nodes => nodes.map(n => {
+      if (n.type !== 'jobcard') return n;
+      const srcOk    = !activeSrc   || n.data?.source === activeSrc;
+      const scoreOk  = !activeScore || (n.data?.matchScore || 0) >= activeScore;
+      const statusOk = activeStats.length === 0 || activeStats.includes(n.data?.status || 'New');
+      const visible  = srcOk && scoreOk && statusOk;
+      return { ...n, style: { ...n.style, opacity: visible ? 1 : 0.15 } };
+    }));
+  }, [data.sourceFilter, data.scoreThreshold, data.statusFilters, setNodes]);
+
+  // Source click-through filtering
+  const toggleSourceFilter = useCallback((sourceId) => {
+    const newFilter = sourceFilter === sourceId ? null : sourceId;
+    updateGlobal(id, { sourceFilter: newFilter });
+    applyCardFilters({ sourceFilter: newFilter });
+  }, [sourceFilter, id, updateGlobal, applyCardFilters]);
+
+  const setScoreThreshold = useCallback((val) => {
+    updateGlobal(id, { scoreThreshold: val });
+    applyCardFilters({ scoreThreshold: val });
+  }, [id, updateGlobal, applyCardFilters]);
+
+  const toggleStatusFilter = useCallback((status) => {
+    const current = data.statusFilters || [];
+    const updated = current.includes(status) ? current.filter(s => s !== status) : [...current, status];
+    updateGlobal(id, { statusFilters: updated });
+    applyCardFilters({ statusFilters: updated });
+  }, [data.statusFilters, id, updateGlobal, applyCardFilters]);
+
   // Source statuses with live text for the animated ring
   const getSourceStatuses = useCallback(() => {
     return JOB_SOURCES.map(s => {
@@ -141,53 +178,14 @@ export function JobHubNode({ id, data }) {
       }
       return { ...s, status: 'idle' };
     });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hubState, sourceProgress, data.resultCount, data.errorMessage, sourceFilter, data.finalSourceCounts]);
-
-  // Combined card opacity: source AND score AND status filters all applied together.
-  // Declared before toggleSourceFilter because toggleSourceFilter references it.
-  const applyCardFilters = useCallback(({ sourceFilter: sf, scoreThreshold: st, statusFilters: stf } = {}) => {
-    // Fall back to current data values if not passed explicitly
-    const activeSrc   = sf  !== undefined ? sf  : (data.sourceFilter || null);
-    const activeScore = st  !== undefined ? st  : (data.scoreThreshold || 0);
-    const activeStats = stf !== undefined ? stf : (data.statusFilters || []);
-
-    setNodes(nodes => nodes.map(n => {
-      if (n.type !== 'jobcard') return n;
-      const srcOk    = !activeSrc   || n.data?.source === activeSrc;
-      const scoreOk  = !activeScore || (n.data?.matchScore || 0) >= activeScore;
-      const statusOk = activeStats.length === 0 || activeStats.includes(n.data?.status || 'New');
-      const visible  = srcOk && scoreOk && statusOk;
-      return { ...n, style: { ...n.style, opacity: visible ? 1 : 0.15 } };
-    }));
-  }, [data.sourceFilter, data.scoreThreshold, data.statusFilters, setNodes]);
-
-  // Source click-through filtering
-  const toggleSourceFilter = useCallback((sourceId) => {
-    const newFilter = sourceFilter === sourceId ? null : sourceId;
-    updateGlobal(id, { sourceFilter: newFilter });
-    applyCardFilters({ sourceFilter: newFilter });
-  }, [sourceFilter, id, updateGlobal, applyCardFilters]);
-
-  const setScoreThreshold = useCallback((val) => {
-    updateGlobal(id, { scoreThreshold: val });
-    applyCardFilters({ scoreThreshold: val });
-  }, [id, updateGlobal, applyCardFilters]);
-
-  const toggleStatusFilter = useCallback((status) => {
-    const current = data.statusFilters || [];
-    const updated = current.includes(status) ? current.filter(s => s !== status) : [...current, status];
-    updateGlobal(id, { statusFilters: updated });
-    applyCardFilters({ statusFilters: updated });
-  }, [data.statusFilters, id, updateGlobal, applyCardFilters]);
+  }, [hubState, sourceProgress, data.errorMessage, sourceFilter, data.finalSourceCounts, toggleSourceFilter]);
 
   // Re-apply all filters on mount — opacities are stripped from save files to keep them clean.
   useEffect(() => {
     const hasFilter = data.sourceFilter || (data.scoreThreshold || 0) > 0 || (data.statusFilters || []).length > 0;
     if (!hasFilter) return;
     applyCardFilters({});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally runs once on mount only
+  }, [applyCardFilters, data.scoreThreshold, data.sourceFilter, data.statusFilters]);
 
   // Auto-start or Re-sync on mount
   useEffect(() => {
@@ -195,8 +193,7 @@ export function JobHubNode({ id, data }) {
     if (data.filePath && hubState === 'empty' && !processingRef.current) {
       startProcessing(data.filePath);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [data.filePath, hubState, startProcessing]);
 
   const startProcessing = useCallback(async (filePath) => {
     if (!window.electronAPI || processingRef.current) return;
@@ -214,7 +211,6 @@ export function JobHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'parsing' });
       const parseResult = await window.electronAPI.parseResume({ filePath, nodeId: currentId });
       
-      if (!isMountedRef.current) return;
       // Allow processing to finish even if unmounted or node deleted!
       if (!parseResult.success) {
         throw new Error(parseResult.error || 'Failed to parse resume');
@@ -236,7 +232,6 @@ export function JobHubNode({ id, data }) {
         profile: parseResult.profile,
         nodeId: currentId 
       });
-      if (!isMountedRef.current) return;
       
       // Flatten all query arrays into a single list for the search step.
       const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queriesResult.queries || {};
@@ -246,7 +241,6 @@ export function JobHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length });
       
       const searchResult = await window.electronAPI.searchJobs({ queries: allQueries, nodeId: currentId });
-      if (!isMountedRef.current) return;
       
       if (!searchResult.success || !searchResult.jobs || searchResult.jobs.length === 0) {
         updateGlobal(currentId, { hubState: 'done', resultCount: 0 });
@@ -258,7 +252,6 @@ export function JobHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'scoring', jobCount: searchResult.jobs.length });
       
       const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile: parseResult.profile, nodeId: currentId });
-      if (!isMountedRef.current) return;
       
       if (!scoreResult.success) {
         throw new Error(scoreResult.error || 'Failed to score jobs');
@@ -358,7 +351,6 @@ export function JobHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'querying' });
 
       const queriesResult = await window.electronAPI.generateJobQueries({ profile, nodeId: currentId });
-      if (!isMountedRef.current) return;
 
       const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queriesResult.queries || {};
       const allQueries = [...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
@@ -366,7 +358,6 @@ export function JobHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length });
 
       const searchResult = await window.electronAPI.searchJobs({ queries: allQueries, nodeId: currentId });
-      if (!isMountedRef.current) return;
 
       if (!searchResult.success || !searchResult.jobs || searchResult.jobs.length === 0) {
         updateGlobal(currentId, { hubState: 'done', resultCount: 0 });
@@ -376,7 +367,6 @@ export function JobHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'scoring', jobCount: searchResult.jobs.length });
 
       const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile, nodeId: currentId });
-      if (!isMountedRef.current) return;
 
       if (!scoreResult.success) throw new Error(scoreResult.error || 'Failed to score jobs');
 
@@ -418,6 +408,9 @@ export function JobHubNode({ id, data }) {
           addNodes(newNodes);
           addEdges(newEdges);
         }
+        
+        // Track spawned IDs so we can clean them up even if edges are deleted manually
+        updateGlobal(currentId, { spawnedNodeIds: newNodes.map(n => n.id) });
       }
 
       const finalSourceCounts = {};
@@ -467,8 +460,7 @@ export function JobHubNode({ id, data }) {
     const cardIds = new Set(edges.map(e => e.target));
     return getNodes().filter(n => cardIds.has(n.id) && n.type === 'jobcard').map(n => n.data);
   // Re-compute when hub state settles so new cards are included after a run
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, getEdges, getNodes, data.resultCount]);
+  }, [id, getEdges, getNodes]);
 
   const handleRerun = useCallback(() => {
     if (data.locked || processingRef.current) return;
@@ -477,11 +469,14 @@ export function JobHubNode({ id, data }) {
       return;
     }
 
-    // Remove old connected job cards before re-running so the canvas doesn't accumulate duplicates
+    // Remove old connected job cards before re-running. 
+    // We check both active edges AND our tracked spawned IDs to ensure orphaned cards are cleaned up.
     const edges = getEdges().filter(e => e.source === id);
-    if (edges.length > 0) {
-      const nodesToDelete = edges.map(e => ({ id: e.target }));
-      const edgesToDelete = edges.map(e => ({ id: e.id }));
+    const trackedIds = data.spawnedNodeIds || [];
+    const nodesToDelete = [...new Set([...edges.map(e => e.target), ...trackedIds])].map(targetId => ({ id: targetId }));
+    const edgesToDelete = edges.map(e => ({ id: e.id }));
+
+    if (nodesToDelete.length > 0 || edgesToDelete.length > 0) {
       deleteElements({ nodes: nodesToDelete, edges: edgesToDelete });
     }
 
@@ -494,7 +489,7 @@ export function JobHubNode({ id, data }) {
       addToast({ title: 'Re-running Search', description: 'Using stored resume profile — original file not needed.', type: 'info' });
       startProcessingWithProfile(data.resumeProfile);
     }
-  }, [data.locked, data.filePath, data.resumeProfile, id, getEdges, deleteElements, addToast, startProcessingWithProfile]);
+  }, [data.locked, data.filePath, data.resumeProfile, data.spawnedNodeIds, id, getEdges, deleteElements, addToast, startProcessingWithProfile]);
 
   const isProcessing = PROCESSING_STATES.includes(hubState);
 

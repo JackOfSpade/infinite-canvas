@@ -13,12 +13,15 @@ export function useCanvasWASD({ isAnimatingRef }) {
 
     const step = () => {
       const { w, a, s, d, arrowup, arrowleft, arrowdown, arrowright, shift } = keys;
-      const up = w || arrowup;
-      const left = a || arrowleft;
-      const down = s || arrowdown;
-      const right = d || arrowright;
+      const moveUp    = w || arrowup;
+      const moveLeft  = a || arrowleft;
+      const moveDown  = s || arrowdown;
+      const moveRight = d || arrowright;
 
-      if (!up && !left && !down && !right) { 
+      const dx = (moveRight ? -1 : 0) + (moveLeft ? 1 : 0);
+      const dy = (moveDown ? -1 : 0) + (moveUp ? 1 : 0);
+
+      if (dx === 0 && dy === 0) { 
         if (movingRef.current) {
           movingRef.current = false;
           EventLogger.log('WASD navigation stopped');
@@ -34,11 +37,13 @@ export function useCanvasWASD({ isAnimatingRef }) {
       
       // Suspend WASD viewport updates during dive-in/dive-out animations
       if (!isAnimatingRef.current) {
-        const speed = shift ? BASE_SPEED * 5 : BASE_SPEED;
         const vp = getViewport();
+        // Adjust speed by zoom level so it feels consistent at all distances
+        const speed = (shift ? BASE_SPEED * 4 : BASE_SPEED) / vp.zoom;
+        
         setViewport({
-          x: vp.x + (left ? speed : right ? -speed : 0),
-          y: vp.y + (up ? speed : down ? -speed : 0),
+          x: vp.x + dx * speed,
+          y: vp.y + dy * speed,
           zoom: vp.zoom,
         });
       }

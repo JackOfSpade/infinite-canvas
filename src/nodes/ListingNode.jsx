@@ -95,11 +95,15 @@ export function ListingNode({ id, data }) {
         updateGlobal(id, {
           status: 'priced',
           pricing: res.pricing,
-          comps: res.comps,
+          comps: res.comps || { sold: [], active: [] },
           userPrice: res.pricing.recommended_price || '',
         });
       } else if (state === 'priced-empty') {
-        updateGlobal(id, { status: 'priced', pricing: { recommended_price: null, justification: res.error } });
+        updateGlobal(id, {
+          status: 'priced',
+          pricing: { recommended_price: null, justification: res.error },
+          comps: { sold: [], active: [] },
+        });
       } else if (state === 'error') {
         updateGlobal(id, { status: 'draft' });
       }

@@ -42,8 +42,7 @@ export function useCanvasInitialization({
   useEffect(() => {
     if (nodes.length === 0 && edges.length === 0 && drawings.length === 0) return;
     setHasUnsavedChanges(true);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges, drawings]);
+  }, [nodes, edges, drawings, setHasUnsavedChanges]);
 
   // Auto-save: debounced 2-second timer that restarts whenever content or the
   // file path changes. Reads hasUnsavedChanges via ref so a successful save

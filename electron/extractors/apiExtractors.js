@@ -98,6 +98,7 @@ export async function fetchLinkedInJobs(query, signal = null) {
 
   // Fetch 2 pages (50 results max) to stay polite
   for (let start = 0; start < 50; start += 25) {
+    if (signal?.aborted) break;
     try {
       const params = new URLSearchParams({
         keywords: query,
@@ -210,7 +211,7 @@ const GREENHOUSE_BOARDS = [
  */
 export async function fetchGreenhouseJobs(query, signal = null) {
   const queryLower = query.toLowerCase();
-  const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
+  const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
   const allJobs = await processInBatches(GREENHOUSE_BOARDS, 10, async ({ token, company }) => {
     try {
       const res = await fetch(`https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`, {
@@ -276,7 +277,7 @@ const LEVER_COMPANIES = [
  */
 export async function fetchLeverJobs(query, signal = null) {
   const queryLower = query.toLowerCase();
-  const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
+  const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
   const allJobs = await processInBatches(LEVER_COMPANIES, 10, async ({ slug, company }) => {
     try {
       const res = await fetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, {
@@ -404,7 +405,7 @@ export async function fetchRemoteOKJobs(query, signal = null) {
     // First element is metadata, rest are jobs
     const jobs = Array.isArray(data) ? data.slice(1) : [];
     const queryLower = query.toLowerCase();
-    const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
+    const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
 
     // Filter by query relevance
     const matched = jobs.filter(job => {
@@ -452,7 +453,7 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null) {
 
     const xml = await res.text();
     const queryLower = query.toLowerCase();
-    const queryTerms = queryLower.split(/\s+/).filter(t => t.length > 2);
+    const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
 
     // Parse RSS items with regex (no XML parser dependency needed)
     const itemPattern = /<item>([\s\S]*?)<\/item>/gi;

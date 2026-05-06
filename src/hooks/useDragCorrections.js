@@ -7,13 +7,18 @@ import { findNonOverlappingPlacement } from '../utils/layoutUtils';
 
 // ────────────────────────────────────────────────────────────────────────────
 
-export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef }) {
+export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef, isInteractionRef }) {
   const resizeDragActiveRef    = useRef(new Set());
   const titleZoneDragActiveRef = useRef(new Set());
   const targetGroupIdRef       = useRef(null);
 
   const onNodeDragStart = useCallback((e, node) => {
     if (isAnimatingRef?.current) return;
+    if (isInteractionRef) isInteractionRef.current = true;
+    
+    // Snapshot the state BEFORE the move starts so Undo has a valid "old" position to return to.
+    if (takeSnapshot) takeSnapshot();
+    
     EventLogger.log(`rf-drag-start id=${node.id} type=${node.type} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
 
     // Tag this RF drag as resize-initiated if a resize is currently active.
@@ -24,7 +29,7 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
     if (TitleZoneActive.has(node.id)) {
       titleZoneDragActiveRef.current.add(node.id);
     }
-  }, [isAnimatingRef]);
+  }, [isAnimatingRef, takeSnapshot, isInteractionRef]);
 
   const onNodeDrag = useCallback((e, node) => {
     if (isAnimatingRef?.current) return;
@@ -45,7 +50,12 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
 
   const onNodeDragStop = useCallback((e, node, draggedNodes) => {
     if (isAnimatingRef?.current) return;
+    if (isInteractionRef) isInteractionRef.current = false;
+
     EventLogger.log(`rf-drag-stop id=${node.id} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
+
+    // Snapshot the FINAL resting position so the "Redo" stack is cleared and history is consistent.
+    if (takeSnapshot) takeSnapshot();
 
     // Clear the drop target visual indicator if active
     if (targetGroupIdRef.current) {
@@ -161,7 +171,7 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
         }
       }
     }
-  }, [setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef]);
+  }, [setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef, isInteractionRef]);
 
   return { onNodeDragStart, onNodeDrag, onNodeDragStop };
 }

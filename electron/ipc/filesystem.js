@@ -92,10 +92,18 @@ async function scanPath(currentPath, visited, sender = null, depth = 0) {
  * Helper to perform an atomic write (write to tmp then rename).
  */
 async function atomicWriteFile(targetPath, data) {
-  const tmpPath = `${targetPath}.__ic_atomic_${randomUUID()}.tmp`;
+  let finalPath = targetPath;
+  try {
+    // Resolve symlinks so we write to the actual destination, preserving the link structure
+    finalPath = await fs.promises.realpath(targetPath);
+  } catch {
+    // If realpath fails (e.g. file doesn't exist yet), use targetPath as-is
+  }
+
+  const tmpPath = `${finalPath}.__ic_atomic_${randomUUID()}.tmp`;
   try {
     await fs.promises.writeFile(tmpPath, data, 'utf-8');
-    await fs.promises.rename(tmpPath, targetPath);
+    await fs.promises.rename(tmpPath, finalPath);
   } catch (err) {
     // Clean up tmp file if write succeeded but rename failed
     try { await fs.promises.unlink(tmpPath); } catch { /* ignore */ }
@@ -113,6 +121,16 @@ export function registerFilesystemHandlers() {
   });
 
   handleSafe('open-file', async (_event, filePath) => {
+    // Security Guard: Prevent opening executable or sensitive system files via the OS shell
+    const ext = path.extname(filePath).toLowerCase();
+    const blockedExts = ['.exe', '.sh', '.bat', '.cmd', '.msi', '.app', '.com', '.vbs', '.js', '.jse', '.wsf', '.wsh', '.ps1'];
+    if (blockedExts.includes(ext)) {
+      throw new Error('Opening executable files is restricted for security reasons.');
+    }
+    
+    // Additional Guard: Ensure the file actually exists before asking the shell to handle it
+    if (!fs.existsSync(filePath)) throw new Error('File not found: ' + filePath);
+    
     const err = await shell.openPath(filePath);
     if (err) throw new Error(err);
   });

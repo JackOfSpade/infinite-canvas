@@ -174,7 +174,7 @@ function generateMockResponse(prompt) {
     const match = prompt.match(/JOBS TO SCORE \(array\):\n(\[[\s\S]*?\])\n/);
     let numJobs = 1;
     if (match) {
-      try { numJobs = JSON.parse(match[1]).length; } catch(e) {}
+      try { numJobs = JSON.parse(match[1]).length; } catch { /* ignore parse error */ }
     }
     const scores = Array.from({ length: numJobs }).map((_, i) => ({
       index: i,
@@ -328,9 +328,12 @@ export async function callGeminiDocument(filePath, prompt, signal = null) {
   const mimeType = DOCUMENT_MIME_MAP[ext];
 
   if (!mimeType) {
-    // Fall back to treating as an image (e.g. screenshot of a resume).
-    // callGeminiVision will handle its own file reading.
-    return callGeminiVision([filePath], prompt, signal);
+    // If it's a known image extension, treat as vision call
+    if (IMAGE_MIME_MAP[ext]) {
+      return callGeminiVision([filePath], prompt, signal);
+    }
+    // Fallback to text/plain for other document types so Gemini tries to read them as raw text
+    return callGemini([{ text: `${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n` + await fs.promises.readFile(filePath, 'utf8') }], { signal });
   }
 
   const stats = await fs.promises.stat(filePath);

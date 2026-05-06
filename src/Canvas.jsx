@@ -82,6 +82,7 @@ export function Canvas() {
   const [nodes, setNodes, onNodesChangeBase] = useNodesState([]);
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState([]);
   const [drawings, setDrawings] = useState([]);
+  const confirmDialogDataRef = useRef(null);
 
   const { addToast } = useToast();
 
@@ -95,6 +96,8 @@ export function Canvas() {
   const snapshotTakenForDeleteRef = useRef(false);
   const takeSnapshotRef = useRef(null);
 
+  const { screenToFlowPosition, getIntersectingNodes, getNode, getEdges, updateNodeData } = useReactFlow();
+
   const snapshotOnDelete = useCallback((changes) => {
     if (changes.some(c => c.type === 'remove') && !snapshotTakenForDeleteRef.current) {
       snapshotTakenForDeleteRef.current = true;
@@ -104,9 +107,23 @@ export function Canvas() {
   }, []);
 
   const onNodesChange = useCallback((changes) => {
-    snapshotOnDelete(changes);
+    // Prevent removal of locked nodes
+    const filteredChanges = changes.filter(ch => {
+      if (ch.type === 'remove') {
+        const node = getNode(ch.id);
+        if (node?.data?.locked) {
+          EventLogger.log(`Node removal BLOCKED (locked) id=${ch.id}`);
+          return false;
+        }
+      }
+      return true;
+    });
+
+    if (filteredChanges.length === 0) return;
+
+    snapshotOnDelete(filteredChanges);
     // Log notable changes for bug reports
-    changes.forEach(ch => {
+    filteredChanges.forEach(ch => {
       if (ch.type === 'remove') EventLogger.log(`node removed id=${ch.id}`);
       if (ch.type === 'add') EventLogger.log(`node added type=${ch.item?.type} id=${ch.item?.id}`);
       if (ch.type === 'position' && ch.dragging === false) {
@@ -123,14 +140,9 @@ export function Canvas() {
         }
       }
     });
-    onNodesChangeBase(changes);
-  }, [onNodesChangeBase, snapshotOnDelete]);
+    onNodesChangeBase(filteredChanges);
+  }, [onNodesChangeBase, snapshotOnDelete, getNode]);
 
-  // ── ReactFlow drag event logging + resize-drag tagging ───────────────────
-  // These fire from ReactFlow's own drag system, independently of our pointer
-  // handlers. We use ResizeActive to detect if the drag was initiated during a
-  // CanvasNode resize session — only resize-tagged drags apply a ResizeCorrection.
-  const { screenToFlowPosition, getIntersectingNodes, getNode, getEdges, updateNodeData } = useReactFlow();
   const isInteractionRef = useRef(false);
 
   const onEdgesChange = useCallback((changes) => {
@@ -188,11 +200,12 @@ export function Canvas() {
     clearHistory,
     animationDuration,
   });
-  // Sync isNavigationAnimatingRef synchronously during render (not via useEffect)
+  // Sync isNavigationAnimatingRef synchronously via useLayoutEffect (to catch frames as early as possible)
   // to close the 1-frame race window where isAnimating is true but the ref hasn't
   // been updated yet, allowing event handlers to bypass the animation guard.
-  // eslint-disable-next-line react-hooks/refs -- render-body ref sync is intentional; useEffect creates a 1-frame lag
-  isNavigationAnimatingRef.current = navigation.isAnimating;
+  React.useLayoutEffect(() => {
+    isNavigationAnimatingRef.current = navigation.isAnimating;
+  }, [navigation.isAnimating]);
 
   const { onNodeDragStart, onNodeDrag, onNodeDragStop } = useDragCorrections({
     setNodes,
@@ -205,6 +218,7 @@ export function Canvas() {
     addElementsGlobally: navigation.addElementsGlobally,
     extractToLevel: navigation.extractToParent,
     isAnimatingRef: isNavigationAnimatingRef,
+    isInteractionRef,
   });
 
   const customFitView = useCustomFitView(reactFlowWrapper, nodes, drawings, isNavigationAnimatingRef);
@@ -282,9 +296,9 @@ export function Canvas() {
     requestClearConfirm
   } = useConfirmDialog();
 
-  const confirmDialogDataRef = useRef(confirmDialogData);
-  // eslint-disable-next-line react-hooks/refs -- render-body ref sync is intentional; callbacks only read current at interaction time, never during render
-  confirmDialogDataRef.current = confirmDialogData;
+  React.useLayoutEffect(() => {
+    confirmDialogDataRef.current = confirmDialogData;
+  }, [confirmDialogData]);
 
   const handleConfirmDialogConfirm = useCallback(() => {
     confirmDialogDataRef.current?.onConfirm();

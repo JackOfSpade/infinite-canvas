@@ -1,0 +1,96 @@
+
+> infinite-canvas@0.0.0 lint
+> eslint . --max-warnings 0
+
+
+/Users/jack/Desktop/My Apps/infinite-canvas/electron/ipc/gemini.js
+  177:60  error  'e' is defined but never used  no-unused-vars
+  177:63  error  Empty block statement          no-empty
+
+/Users/jack/Desktop/My Apps/infinite-canvas/src/hooks/useCanvasActions.js
+  145:38  error  React Hook "useReactFlow" cannot be called inside a callback. React Hooks must be called in a React function component or a custom React Hook function  react-hooks/rules-of-hooks
+
+/Users/jack/Desktop/My Apps/infinite-canvas/src/hooks/useDragCorrections.js
+   15:39  error    Compilation Skipped: Existing memoization could not be preserved
+
+React Compiler has skipped optimizing this component because the existing manual memoization could not be preserved. The inferred dependencies did not match the manually specified dependencies, which could cause the value to change more or less frequently than expected. The inferred dependency was `isInteractionRef`, but the source dependencies were [isAnimatingRef, takeSnapshot]. Inferred different dependency than source.
+
+  13 |   const targetGroupIdRef       = useRef(null);
+  14 |
+> 15 |   const onNodeDragStart = useCallback((e, node) => {
+     |                                       ^^^^^^^^^^^^^^
+> 16 |     if (isAnimatingRef?.current) return;
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+> 17 |     if (isInteractionRef) isInteractionRef.current = true;
+     …
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+> 31 |     }
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+> 32 |   }, [isAnimatingRef, takeSnapshot]);
+     | ^^^^ Could not preserve existing manual memoization
+  33 |
+  34 |   const onNodeDrag = useCallback((e, node) => {
+  35 |     if (isAnimatingRef?.current) return;                                                                                                                                                                                                                                                                   react-hooks/preserve-manual-memoization
+   32:6   warning  React Hook useCallback has a missing dependency: 'isInteractionRef'. Either include it or remove the dependency array                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            react-hooks/exhaustive-deps
+   51:38  error    Compilation Skipped: Existing memoization could not be preserved
+
+React Compiler has skipped optimizing this component because the existing manual memoization could not be preserved. The inferred dependencies did not match the manually specified dependencies, which could cause the value to change more or less frequently than expected. The inferred dependency was `isInteractionRef`, but the source dependencies were [setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef]. Inferred different dependency than source.
+
+   49 |   }, [getIntersectingNodes, updateNodeData, isAnimatingRef]);
+   50 |
+>  51 |   const onNodeDragStop = useCallback((e, node, draggedNodes) => {
+      |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+>  52 |     if (isAnimatingRef?.current) return;
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+>  53 |     if (isInteractionRef) isInteractionRef.current = false;
+      …
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+> 173 |     }
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+> 174 |   }, [setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef]);
+      | ^^^^ Could not preserve existing manual memoization
+  175 |
+  176 |   return { onNodeDragStart, onNodeDrag, onNodeDragStop };
+  177 | }  react-hooks/preserve-manual-memoization
+  174:6   warning  React Hook useCallback has a missing dependency: 'isInteractionRef'. Either include it or remove the dependency array                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            react-hooks/exhaustive-deps
+
+/Users/jack/Desktop/My Apps/infinite-canvas/src/hooks/useDrawingMode.js
+  144:6  warning  React Hook useCallback has an unnecessary dependency: 'isAnimatingRef'. Either exclude it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/jack/Desktop/My Apps/infinite-canvas/src/hooks/useListingActions.js
+  42:7  error  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+  40 |   useEffect(() => {
+  41 |     if (data.selectedPlatforms) {
+> 42 |       setSelectedPlatforms(data.selectedPlatforms);
+     |       ^^^^^^^^^^^^^^^^^^^^ Avoid calling setState() directly within an effect
+  43 |     }
+  44 |   }, [data.selectedPlatforms]);
+  45 |                                                                                                                                                                                    react-hooks/set-state-in-effect
+  49:7  error  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+  47 |     // Only sync if the user isn't currently typing in the field
+  48 |     if (editing !== 'price' && (data.userPrice !== undefined || data.pricing?.recommended_price !== undefined)) {
+> 49 |       setPriceInput(data.userPrice || data.pricing?.recommended_price || '');
+     |       ^^^^^^^^^^^^^ Avoid calling setState() directly within an effect
+  50 |     }
+  51 |   }, [data.userPrice, data.pricing?.recommended_price, editing]);
+  52 |  react-hooks/set-state-in-effect
+
+/Users/jack/Desktop/My Apps/infinite-canvas/src/nodes/JobCardNode.jsx
+  193:6  warning  React Hook useCallback has a missing dependency: 'editedCL'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+✖ 11 problems (7 errors, 4 warnings)
+

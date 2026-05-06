@@ -79,8 +79,7 @@ export function SellHubNode({ id, data }) {
     if (data.imagePaths?.length > 0 && hubState === 'empty' && !processingRef.current) {
       startAnalysis(data.imagePaths);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [data.imagePaths, hubState, startAnalysis]);
 
   // Listen for per-source price research progress events
   useEffect(() => {
@@ -175,7 +174,6 @@ export function SellHubNode({ id, data }) {
       updateGlobal(currentId, { hubState: 'analyzing', imagePaths: validPaths });
       const result = await window.electronAPI.analyzePhotos({ imagePaths: validPaths, nodeId: currentId });
       
-      if (!isMountedRef.current) return;
       // Allow processing to finish even if unmounted or node deleted!
       // If the node was deleted globally, updateGlobal will safely do nothing.
       if (!result.success) throw new Error(result.error);
@@ -212,14 +210,14 @@ export function SellHubNode({ id, data }) {
           updateGlobal(currentId, {
             hubState: 'priced',
             pricing: res.pricing,
-            comps: res.comps || []
+            comps: res.comps || { sold: [], active: [] }
           });
           addToast({ title: 'Pricing Engine', description: `Recommended price: $${res.pricing.recommended_price}`, type: 'success' });
         } else if (state === 'priced-empty') {
           updateGlobal(currentId, {
             hubState: 'priced',
             pricing: { recommended_price: null, justification: res.error },
-            comps: []
+            comps: { sold: [], active: [] }
           });
         }
       });

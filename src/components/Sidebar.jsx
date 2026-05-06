@@ -64,6 +64,10 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
   // Drag handlers — set dataTransfer type so Canvas knows what to create
   const handleModuleDragStart = useCallback((e, moduleType) => {
     e.dataTransfer.setData('app/node-type', moduleType);
+    // Explicitly set text/plain to empty string to prevent the browser from
+    // auto-filling it with the element's text content (e.g. "Drag to canvas...").
+    // Without this, the canvas drop handler falls through to text-node creation.
+    e.dataTransfer.setData('text/plain', '');
     e.dataTransfer.effectAllowed = 'copy';
   }, []);
 

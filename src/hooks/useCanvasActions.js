@@ -23,7 +23,7 @@ export function useCanvasActions({
   depth,
   isAnimatingRef,
 }) {
-  const { getNodes, getEdges, setEdges: rfSetEdges } = useReactFlow();
+  const { getNodes, getEdges, setEdges: rfSetEdges, getViewport } = useReactFlow();
 
   const onConnect = useCallback((params) => {
     if (isAnimatingRef?.current) return;
@@ -107,9 +107,9 @@ export function useCanvasActions({
 
     // Deep clone to prevent unintended reference mutations while in clipboard
     const clipboardData = {
-      nodes: JSON.parse(JSON.stringify(nodesToCopy)),
-      edges: JSON.parse(JSON.stringify(edgesToCopy)),
-      drawings: JSON.parse(JSON.stringify(drawingsToCopy))
+      nodes: structuredClone(nodesToCopy),
+      edges: structuredClone(edgesToCopy),
+      drawings: structuredClone(drawingsToCopy)
     };
 
     try {
@@ -142,12 +142,38 @@ export function useCanvasActions({
     if (!clipboardData || !clipboardData.nodes || clipboardData.nodes.length === 0) return;
     takeSnapshot?.();
 
+    const { x: vpx, y: vpy, zoom } = getViewport();
+    const viewportNode = document.querySelector('.react-flow__viewport');
+    const container = viewportNode?.parentElement;
+    const flowWidth  = container ? container.clientWidth / zoom  : window.innerWidth / zoom;
+    const flowHeight = container ? container.clientHeight / zoom : window.innerHeight / zoom;
+    
+    // Compute center of current viewport in flow coordinates
+    const centerX = -vpx / zoom + flowWidth / 2;
+    const centerY = -vpy / zoom + flowHeight / 2;
+
+    // Compute bounding box of copied cluster to find its local center
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    clipboardData.nodes.forEach(n => {
+      const d = getNodeDims(n);
+      minX = Math.min(minX, n.position.x);
+      maxX = Math.max(maxX, n.position.x + d.w);
+      minY = Math.min(minY, n.position.y);
+      maxY = Math.max(maxY, n.position.y + d.h);
+    });
+    const clusterCenterX = (minX + maxX) / 2;
+    const clusterCenterY = (minY + maxY) / 2;
+
     const oldIdToNewId = new Map();
     const newNodes = clipboardData.nodes.map(original => {
-      let clone = cloneNode(original, 0, 0); // Position is set explicitly below; zero offsets preserve intent clarity
+      let clone = cloneNode(original, 0, 0); 
       oldIdToNewId.set(original.id, clone.id);
       clone = reassignCanvasDataIDs(clone);
-      clone.position = { x: original.position.x + 20, y: original.position.y + 20 }; // Exact mapping to guarantee layout integrity against base structure
+      
+      // Position relative to viewport center
+      const offsetX = original.position.x - clusterCenterX;
+      const offsetY = original.position.y - clusterCenterY;
+      clone.position = { x: centerX + offsetX, y: centerY + offsetY };
       clone.selected = true;
       return clone;
     });
@@ -162,11 +188,16 @@ export function useCanvasActions({
         selected: true,
       }));
 
-    const newDrawings = (clipboardData.drawings || []).map(originalDrawing => ({
-      ...originalDrawing,
-      id: generateId(),
-      points: originalDrawing.points.map(p => ({ x: p.x + 20, y: p.y + 20 }))
-    }));
+    const newDrawings = (clipboardData.drawings || []).map(originalDrawing => {
+      return {
+        ...originalDrawing,
+        id: generateId(),
+        points: originalDrawing.points.map(p => ({
+          x: centerX + (p.x - clusterCenterX),
+          y: centerY + (p.y - clusterCenterY)
+        }))
+      };
+    });
 
     setNodes(nds => {
       const unselected = nds.map(n => ({ ...n, selected: false }));
@@ -198,7 +229,7 @@ export function useCanvasActions({
     }
 
     EventLogger.log(`Pasted ${newNodes.length} nodes, ${newEdges.length} edges, and ${newDrawings.length} drawings from localStorage.`);
-  }, [takeSnapshot, setNodes, rfSetEdges, setDrawings, isAnimatingRef]);
+  }, [takeSnapshot, setNodes, rfSetEdges, setDrawings, isAnimatingRef, getViewport]);
 
   const doClear = useCallback(() => {
     if (isAnimatingRef?.current) return;

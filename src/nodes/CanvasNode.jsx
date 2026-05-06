@@ -37,21 +37,19 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
   const textRef      = useRef(null); // ref to the SVG <text> element for getComputedTextLength()
   const pathId = `tcp-${id}`;
 
+  const [measuredTextLen, setMeasuredTextLen] = useState(0);
+  useEffect(() => {
+    // textRef is stable, but the text content inside the <textPath> changes.
+    // Measuring here avoids triggering a layout reflow on every render.
+    setMeasuredTextLen(textRef.current?.getComputedTextLength?.() ?? 0);
+  }, [title, SIZE]);
+
   // liveRef gives the stable native-listener useEffect access to values that
   // change between renders (isEditing, title, data, SIZE) without needing to
   // re-register the listeners every render.
   const liveRef = useRef(null);
-  // measuredTextLen: exact SVG advance width of the title text in local units.
-  // Stored in liveRef so the native pointer handlers (isInTitleArc) can use it
-  // without being re-registered every time the title changes.
-  // textRef.current is always populated because <text> renders unconditionally.
-  liveRef.current = {
-    isEditing, title, data, SIZE,
-    measuredTextLen: textRef.current?.getComputedTextLength?.() ?? 0,
-  };
+  liveRef.current = { isEditing, title, data, SIZE, measuredTextLen };
 
-  // Keep the EventLogger registry up-to-date so bug reports show React
-  // component state (isEditing, isResizing, edgeCursorStyle) per node.
   useEffect(() => {
     EventLogger.registerNodeState(id, {
       isEditing,

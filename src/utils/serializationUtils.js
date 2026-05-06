@@ -8,15 +8,21 @@ export function fingerprint(snap) {
   const d = snap.drawings || [];
   return JSON.stringify({
     n: n.map(x => {
-      // Optimization: skip heavy recursive canvasData for groups in the fingerprint.
-      // Changes inside groups are managed by their own local undo/redo stacks.
-      // Destructure canvasData out so the serialized object never contains the key at all.
+      // Optimization: avoid heavy recursive serialization for the fingerprint.
+      // Instead, include a "deep summary" of nested canvas data (counts/lengths)
+      // so changes inside groups trigger a state change detection, enabling undo/redo.
       let data = x.data;
-      if (x.type === 'group' && data?.canvasData !== undefined) {
-        const { canvasData: _cd, ...rest } = data;
+      let summary = null;
+      if (x.type === 'group' && data?.canvasData) {
+        const { canvasData, ...rest } = data;
         data = rest;
+        summary = {
+          nc: canvasData.nodes?.length || 0,
+          ec: canvasData.edges?.length || 0,
+          dc: canvasData.drawings?.length || 0
+        };
       }
-      return { id: x.id, x: x.position?.x, y: x.position?.y, t: x.type, d: data, s: x.style };
+      return { id: x.id, x: x.position?.x, y: x.position?.y, t: x.type, d: data, s: x.style, sm: summary };
     }),
     e: e.map(x => ({ id: x.id, s: x.source, t: x.target })),
     dl: d.map(x => {
