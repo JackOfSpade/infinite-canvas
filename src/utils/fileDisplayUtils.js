@@ -44,7 +44,7 @@ export function getFileCategoryInfo(filename) {
   const ext = parts.length > 1 ? parts.pop().toLowerCase() : '';
   const badge = ext ? ext.substring(0, 4).toUpperCase() : 'FILE';
   
-  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'].includes(ext)) {
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'tiff', 'tif', 'avif', 'jxl'].includes(ext)) {
     return { category: FILE_CATEGORIES.IMAGE, label: 'Image', color: 'pink', badge, Icon: FileImage };
   }
   if (['js', 'ts', 'jsx', 'tsx', 'py', 'java', 'c', 'cpp', 'rs', 'go', 'php', 'rb', 'kt', 'swift', 'sh'].includes(ext)) {

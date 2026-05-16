@@ -106,12 +106,26 @@ export function useIssueReporter({
         errorMessage: el.error?.message ?? null,
       }));
 
+      // Snapshot all <img> elements so broken-image reports include the load
+      // state at the moment of the report. naturalWidth/naturalHeight = 0 on a
+      // `complete` img is the protocol-level failure signature (4xx/5xx response
+      // or a decode error that Chromium couldn't handle). The src helps trace
+      // which filePath / protocol scheme is misbehaving.
+      const imageState = Array.from(document.querySelectorAll('img')).map(el => ({
+        src:          el.getAttribute('src') || null,
+        complete:     el.complete,
+        naturalWidth: el.naturalWidth,
+        naturalHeight: el.naturalHeight,
+        broken:       el.complete && el.naturalWidth === 0,
+      }));
+
       const payload = {
         description,
         nodes,
         edges,
         drawings,
         mediaState,
+        imageState,
         frontEndState: {
           activeTool,
           placementMode,

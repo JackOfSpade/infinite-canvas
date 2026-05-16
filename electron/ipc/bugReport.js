@@ -9,7 +9,7 @@ import { handleSafe } from './ipcUtils.js';
 // Used by both the "save to file" and "copy to clipboard" handlers so the
 // report content is identical regardless of how the user chooses to export it.
 function generateMarkdown(payload) {
-  const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, lastSaveError, activeEditableText } = payload;
+  const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, imageState, lastSaveError, activeEditableText } = payload;
 
   const systemInfo = {
     platform: process.platform,
@@ -110,6 +110,31 @@ ${rows}
 `;
   }
 
+  // ── Image element state section ───────────────────────────────────────────
+  // Captures <img> load state at report time. `broken: true` (complete=true,
+  // naturalWidth=0) means the protocol returned an error or an undisplayable
+  // payload — the primary signature of HEIC / unsupported-format failures.
+  let imageMarkdown = '';
+  if (imageState && imageState.length > 0) {
+    const rows = imageState.map((img, i) => {
+      const srcShort = img.src ? img.src.replace(/^local-file:\/\//, '').slice(-60) : '(none)';
+      return (
+        `| ${i + 1} ` +
+        `| ${img.broken ? '⚠️ broken' : img.complete ? 'ok' : 'loading'} ` +
+        `| ${img.naturalWidth} × ${img.naturalHeight} ` +
+        `| \`...${srcShort}\` |`
+      );
+    }).join('\n');
+    imageMarkdown = `
+## Image Element State
+> \`broken\` = complete with naturalWidth=0 — protocol returned 4xx/5xx or undisplayable bytes.
+
+| # | Status | Natural Size | src (last 60 chars) |
+|---|---|---|---|
+${rows}
+`;
+  }
+
   // ── Active editable section ────────────────────────────────────────────────
   // Captures the divergence between the focused contenteditable's live DOM
   // text and the saved data.text on its node. A `divergent: true` here is the
@@ -156,7 +181,7 @@ ${rows}
     stateWasTrimmed = true;
   }
 
-  let baseMarkdown = `First assess if this bug report has all the data you need to debug this. If not, improve the bug reporting feature. Then, fix the following bug:
+  let baseMarkdown = `Do not change the bug report feature just what it reports. First assess if this bug report has all the data you need to debug this. If not, improve the reporting. Then, fix the following bug:
 
 # Bug Report
 
@@ -170,7 +195,7 @@ ${description}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}
+${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 <details>
 <summary><b>Click here to expand the full JSON Application State</b></summary>
 

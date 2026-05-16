@@ -13,7 +13,12 @@ import { registerGeminiHandlers } from './ipc/gemini.js';
 import { registerBugReportHandlers } from './ipc/bugReport.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import fs from 'fs';
+import os from 'node:os';
 import { Readable } from 'node:stream';
+import { execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFile = promisify(execFileCb);
 
 // Minimal extension → MIME map for media types served via local-file://.
 // Chromium's media stack needs a sensible Content-Type to commit to a decoder pipeline,
@@ -305,7 +310,7 @@ if (!gotTheLock) {
   app.commandLine.appendSwitch('disable-accelerated-video-decode');
 
   app.whenReady().then(() => {
-    protocol.handle('local-file', (request) => {
+    protocol.handle('local-file', async (request) => {
       let url = request.url.replace(/^local-file:\/\//, '');
       url = url.split('?')[0].split('#')[0]; // Strip query and hash
       try {
@@ -347,19 +352,55 @@ if (!gotTheLock) {
           return new Response('Access Denied', { status: 403 });
         }
 
-        // ── Range-aware streaming ────────────────────────────────────────────────
-        // Honor HTTP Range requests so HTMLMediaElement reports the source as
-        // seekable. Without `Accept-Ranges: bytes` and 206 partial-content
-        // responses, Chromium leaves video.seekable empty and silently ignores
-        // timeline clicks even when the file is fully buffered.
+        // Verify the file exists and get its extension before any branch
+        // (HEIC transcoding and range-streaming both need these).
         let stat;
         try { stat = fs.statSync(targetPath); }
         catch { return new Response('Not Found', { status: 404 }); }
         if (!stat.isFile()) return new Response('Not Found', { status: 404 });
 
-        const total = stat.size;
         const ext = path.extname(targetPath).toLowerCase();
         const contentType = LOCAL_FILE_MIME_TYPES[ext] || 'application/octet-stream';
+
+        // ── HEIC / HEIF → JPEG transcoding via sips ───────────────────────────
+        // Chromium has no HEVC/H.265 decoder, so raw HEIC bytes render as a
+        // broken image. nativeImage.createFromPath() returns an empty image for
+        // HEIC in the Electron main process (it is renderer-side only on macOS).
+        // sips is Apple's built-in image-processing tool (ships with every Mac
+        // since 10.3) and uses the full Core Image / ImageIO stack — including
+        // HEIC support via AVFoundation. Output is JPEG for compact transfer.
+        if (ext === '.heic' || ext === '.heif') {
+          const tmpPath = path.join(os.tmpdir(), `ic_heic_${process.hrtime.bigint()}.jpg`);
+          try {
+            await execFile('/usr/bin/sips', [
+              '-s', 'format', 'jpeg',
+              '-s', 'formatOptions', '85',
+              targetPath,
+              '--out', tmpPath,
+            ]);
+            const jpegBuf = await fs.promises.readFile(tmpPath);
+            return new Response(jpegBuf, {
+              status: 200,
+              headers: {
+                'Content-Type':   'image/jpeg',
+                'Content-Length': String(jpegBuf.length),
+                'Cache-Control':  'no-cache',
+              },
+            });
+          } catch (heicErr) {
+            console.error('[local-file] HEIC sips conversion failed:', heicErr);
+            return new Response('HEIC decode error', { status: 500 });
+          } finally {
+            fs.promises.unlink(tmpPath).catch(() => {});
+          }
+        }
+
+        // ── Range-aware streaming ────────────────────────────────────────────────
+        // Honor HTTP Range requests so HTMLMediaElement reports the source as
+        // seekable. Without `Accept-Ranges: bytes` and 206 partial-content
+        // responses, Chromium leaves video.seekable empty and silently ignores
+        // timeline clicks even when the file is fully buffered.
+        const total = stat.size;
 
         const rangeHeader = request.headers.get('range');
         if (rangeHeader) {

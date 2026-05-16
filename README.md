@@ -134,33 +134,5 @@ Press **⌘S** to save. The hub retains the product data, pricing, comp results,
 
 ---
 
-## Gap Analysis — Remaining Gaps
-
-The following gaps remain after the current implementation. Items marked ✅ have been implemented.
-
-### Job Search Hub
-
-| Status | Gap | Impact |
-|---|---|---|
-| ✅ | **Notes field on Job Cards** | Inline textarea, debounced save, persists with workspace |
-| ✅ | **Score threshold + status filter** | Slider + multi-toggle on hub done state, dims cards that don't match |
-| ✅ | **Cover letter save to file** | Native OS save dialog, writes `.txt` |
-| ✅ | **Re-run search** | "Re-run Search" button clears old connected cards and restarts the full pipeline |
-| ✅ | **Export job cards as CSV** | "Export CSV" writes `Title,Company,Location,Score,Strength,Status,Source,URL,Notes` |
-| ✅ | **Application date tracking** | `appliedAt` / `interviewAt` ISO timestamps recorded on status change; days-since badge shown next to status dropdown |
-| ✅ | **Interview prep** | "Generate Interview Prep" button appears when status = `Interview`; AI generates 8 role-specific Q&As (3 behavioral / 3 technical / 2 company) with coaching tips; persists to node data |
-| ✅ | **Cards manually disconnected from hub are now cleaned up on re-run** | Hub tracks spawned IDs and deletes them regardless of edge state |
-
-### Marketplace Sell Hub
-
-| Status | Gap | Impact |
-|---|---|---|
-| ✅ | **Product photos now visible** — thumbnails in Draft and Priced states via `local-file://` | Real preview of item |
-| ✅ | **Listing saved to file** — "Save to File" writes listing text via native dialog | No more clipboard-only risk |
-| ✅ | **Per-platform mark-as-listed** — green checkmark per platform, persisted to node data; toggle removes the mark | Tracks what's been posted |
-| ✅ | **Re-research prices** | "Refresh Prices" button re-runs the full comp scraping pipeline |
-| ✅ | **Preview & edit listing text** | Expandable textarea under Copy/Save buttons shows full listing; user can customize text before copying or saving; focus-aware sync prevents overwrite mid-edit |
-| ✅ | **Add photos without restarting** | Dropping images on draft/priced hub appends to `imagePaths` with deduplication; only empty/error state triggers fresh analysis |
-| — | **No photo auto-upload to platforms** — photos exist locally, cannot be auto-attached | User must re-attach photos on each platform manually |
 
 
