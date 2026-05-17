@@ -16,9 +16,13 @@ export function EditableField({ value, placeholder, isEditing, onStartEdit, onSa
   const handleKeyDown = (e) => { if (e.key === 'Enter') onSave(e.target.value); };
 
   if (isEditing && !disabled) {
+    // `nodrag` makes ReactFlow ignore pointer-downs that start inside the
+    // input so the user can drag-select text without the parent node moving.
+    // `stopPropagation` on pointerdown is defensive — matches the pattern
+    // used by other in-node controls in this codebase.
     const inputClass = variant === 'title'
-      ? 'w-full bg-black/30 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none'
-      : 'w-16 bg-black/30 border border-white/10 rounded px-1 text-white text-xs outline-none inline-block';
+      ? 'nodrag w-full bg-black/30 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none'
+      : 'nodrag w-16 bg-black/30 border border-white/10 rounded px-1 text-white text-xs outline-none inline-block';
 
     return (
       <input
@@ -27,6 +31,7 @@ export function EditableField({ value, placeholder, isEditing, onStartEdit, onSa
         defaultValue={value || ''}
         onBlur={handleBlur}
         onKeyDown={handleKeyDown}
+        onPointerDown={(e) => e.stopPropagation()}
       />
     );
   }

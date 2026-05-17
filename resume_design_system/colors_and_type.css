@@ -1,0 +1,196 @@
+/* ============================================================
+   Editorial Resume Design System — design tokens
+   ----------------------------------------------------------
+   Type:    Source Serif 4 (display, local ttf)  ·  Inter (body,
+            local woff2)  ·  IBM Plex Mono (technologies, local ttf)
+            All three families are bundled locally — zero network
+            dependencies at render time.
+   Color:   Warm off-white ground · deep warm ink · one oxblood
+            accent, used sparingly (default: candidate name only)
+   Units:   Print-first. Sizes given in pt so they survive PDF
+            export at exact metric. Spacing scale is rem-based
+            (1rem = 11pt = body) so layout reflows cleanly when
+            base size is tweaked.
+   ============================================================ */
+
+/* All three families ship locally — no Google Fonts CDN dependency. */
+
+/* ---------- Source Serif 4 (local) ---------- */
+@font-face {
+  font-family: "Source Serif 4";
+  src: url("fonts/SourceSerif4-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Source Serif 4";
+  src: url("fonts/SourceSerif4-Semibold.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ---------- IBM Plex Mono (local) ---------- */
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("fonts/IBMPlexMono-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("fonts/IBMPlexMono-Medium.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ---------- Inter (local) ---------- */
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/Inter-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/Inter-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/Inter-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/Inter-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* ---------- Color · ground ---------- */
+  --bg:          #F7F4ED;   /* warm off-white, ~4% warm tint   */
+  --bg-rule:    rgba(26, 24, 21, 0.10); /* hairline rule color */
+
+  /* ---------- Color · ink (text) ---------- */
+  --ink-1:       #1A1815;   /* primary — body, role titles    */
+  --ink-2:       #54504A;   /* secondary — dates, locations   */
+  --ink-3:       #8C857A;   /* tertiary — scope, tradeoffs    */
+  --ink-4:       #B6AFA2;   /* quaternary — disabled, page nr */
+
+  /* ---------- Color · accent ---------- */
+  /* Default usage: candidate name ONLY. Toggle with --accent-on. */
+  --accent:      #7A1F2B;   /* oxblood — quiet, ink-like      */
+  --accent-on:   var(--accent);   /* set to var(--ink-1) for pure monochrome */
+
+  /* ---------- Type · families ---------- */
+  --ff-display:  "Source Serif 4", "Source Serif Pro", Georgia, "Times New Roman", serif;
+  --ff-body:     "Inter", -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --ff-mono:     "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  /* ---------- Type · scale (pt for print fidelity) ---------- */
+  --fs-display:  28pt;      /* candidate name                 */
+  --fs-h1:       18pt;      /* document title (rarely used)   */
+  --fs-h2:        9pt;      /* section header (uppercase)     */
+  --fs-h3:       11pt;      /* role title / company           */
+  --fs-body:     10.25pt;   /* bullets, paragraphs            */
+  --fs-small:     9.5pt;    /* meta (dates, location)         */
+  --fs-caption:   8.75pt;   /* scope chip, tradeoff note      */
+  --fs-mono:      9pt;      /* inline technologies            */
+
+  /* ---------- Type · weight ---------- */
+  /* Inter Light (300) is not bundled — start at Regular. */
+  --fw-regular:  400;
+  --fw-medium:   500;
+  --fw-semibold: 600;
+
+  /* ---------- Type · leading ---------- */
+  --lh-display:  1.05;
+  --lh-tight:    1.20;
+  --lh-snug:     1.35;
+  --lh-body:     1.45;
+  --lh-loose:    1.55;
+
+  /* ---------- Type · tracking ---------- */
+  --tr-display:  -0.012em;
+  --tr-h2:        0.14em;   /* uppercase tracked              */
+  --tr-mono:     -0.005em;
+  --tr-tight:    -0.005em;
+
+  /* ---------- Spacing · 4pt baseline ---------- */
+  --s-0:   0;
+  --s-1:   2pt;
+  --s-2:   4pt;
+  --s-3:   6pt;
+  --s-4:   8pt;
+  --s-5:  12pt;
+  --s-6:  16pt;
+  --s-7:  20pt;
+  --s-8:  24pt;
+  --s-9:  32pt;
+  --s-10: 40pt;
+
+  /* ---------- Page geometry (Letter) ---------- */
+  --page-w:        8.5in;
+  --page-h:       11.0in;
+  --margin-top:    0.72in;
+  --margin-bot:    0.72in;
+  --margin-side:   0.78in;
+  --rule-weight:   0.5pt;
+
+  /* ---------- Layout columns (single primary column) ---------- */
+  --col-meta-w:   1.45in;   /* right-aligned date/location column
+                               — visual alignment, NOT a 2-col flow */
+  --col-gap:      0.32in;
+}
+
+/* ============================================================
+   Semantic / element-level defaults
+   These are the rules that apply when nothing else is set —
+   the document's resting voice.
+   ============================================================ */
+
+html {
+  background: var(--bg);
+  color: var(--ink-1);
+  font-family: var(--ff-body);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  font-feature-settings: "kern", "liga", "calt", "ss01", "tnum";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body { margin: 0; }
+
+p   { margin: 0 0 var(--s-4); }
+b, strong { font-weight: var(--fw-semibold); color: var(--ink-1); }
+em, i     { font-style: italic; }
+small     { font-size: var(--fs-small); color: var(--ink-2); }
+
+a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 0.5pt solid var(--bg-rule);
+}
+a:hover { border-bottom-color: var(--ink-2); }
+
+code, kbd, samp {
+  font-family: var(--ff-mono);
+  font-size: 0.92em;
+  letter-spacing: var(--tr-mono);
+  color: var(--ink-2);
+}
+
+ul { margin: 0; padding: 0; list-style: none; }

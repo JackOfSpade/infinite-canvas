@@ -1,11 +1,16 @@
 import React, { useCallback, useContext, useRef, useState } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
-import { ExternalLink, FileText, ChevronDown, ChevronUp, X, Download, StickyNote, BrainCircuit, Clock } from 'lucide-react';
+import { ExternalLink, FileText, ChevronDown, ChevronUp, X, Download, StickyNote, BrainCircuit, Clock, RefreshCw } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
 import { NodeHandles } from './_shared/NodeHandles';
 import { useSyncWhileFocused } from '../hooks/useSyncWhileFocused';
+import { MonitorStatusBadge } from '../components/MonitorStatusBadge';
+import { JOB_STATUS_LABELS } from '../components/monitorStatusLabels';
+import { useMonitorCheck } from '../hooks/useMonitorCheck';
+
+const MONITOR_FIELDS = { status: 'monitorStatus', message: 'monitorMessage', lastChecked: 'monitorLastChecked' };
 
 const STRENGTH_COLORS = {
   strong: '#22c55e',
@@ -74,6 +79,29 @@ export function JobCardNode({ id, data }) {
       window.electronAPI.openExternal(data.url);
     }
   }, [data.url]);
+
+  // ── Monitoring (same philosophy as MarketplaceCardNode) ─────────────────
+  // Defaults to the original posting URL so the user gets useful "is the
+  // job still open?" checks even without pasting anything. Falls back to the
+  // user-pasted applicationUrl when they want to monitor a specific tracking
+  // URL (e.g. their Greenhouse application detail page) instead.
+  const monitorUrl = (data.applicationUrl?.trim() || data.url || '').trim();
+
+  const setApplicationUrl = useCallback((url) => {
+    updateGlobal(id, { applicationUrl: url });
+  }, [id, updateGlobal]);
+
+  const { checking: checkingStatus, check: checkStatus } = useMonitorCheck({
+    id,
+    url: monitorUrl,
+    platformId: data.source || 'job',
+    locked: !!data.locked,
+    fields: MONITOR_FIELDS,
+    updateNode: updateGlobal,
+    onMissingUrl: () => {
+      addToast({ title: 'No URL to check', description: 'This card has no job URL or application URL set.', type: 'error' });
+    },
+  });
 
   const isMountedRef = useRef(true);
 
@@ -226,6 +254,16 @@ export function JobCardNode({ id, data }) {
         </div>
       )}
 
+      {/* Monitor status pill (only when the user has actually run a check) */}
+      {data.monitorLastChecked && (
+        <MonitorStatusBadge
+          status={data.monitorStatus || 'unknown'}
+          lastChecked={data.monitorLastChecked}
+          labels={JOB_STATUS_LABELS}
+          className="mx-3 my-1.5"
+        />
+      )}
+
       {/* Status bar */}
       <div className="px-3 py-1.5 flex items-center justify-between border-t border-white/5">
         <div className="flex items-center gap-2">
@@ -251,6 +289,16 @@ export function JobCardNode({ id, data }) {
         </div>
 
         <div className="flex items-center gap-1">
+          {monitorUrl && !data.locked && (
+            <button
+              onClick={(e) => { e.stopPropagation(); checkStatus(); }}
+              disabled={checkingStatus}
+              className="p-1 text-white/30 hover:text-blue-400 transition-colors disabled:opacity-40"
+              title={`Check whether ${data.applicationUrl ? 'your application' : 'this job posting'} is still active`}
+            >
+              <RefreshCw size={12} className={checkingStatus ? 'animate-spin' : ''} />
+            </button>
+          )}
           {data.url && (
             <button
               onClick={(e) => { e.stopPropagation(); openJobUrl(); }}
@@ -280,6 +328,30 @@ export function JobCardNode({ id, data }) {
               {data.snippet}
             </div>
           )}
+
+          {/* Application URL (for AI monitoring after you apply) */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <div className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">
+                Application URL
+              </div>
+              {data.monitorMessage && (
+                <span className="text-white/30 text-[9px] truncate max-w-[60%]" title={data.monitorMessage}>
+                  {data.monitorMessage}
+                </span>
+              )}
+            </div>
+            <input
+              type="text"
+              value={data.applicationUrl || ''}
+              onChange={data.locked ? undefined : (e) => setApplicationUrl(e.target.value)}
+              onPointerDown={(e) => e.stopPropagation()}
+              disabled={!!data.locked}
+              placeholder="Paste your application tracking URL (optional — defaults to job listing)"
+              className="nodrag w-full bg-black/20 border border-white/5 rounded px-2 py-1 text-white/60 text-[10px] outline-none focus:border-white/15 focus:bg-black/30 disabled:opacity-60"
+            />
+          </div>
+
 
           {/* Notes */}
           <div className="space-y-1">

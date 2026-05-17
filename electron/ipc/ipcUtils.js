@@ -47,6 +47,20 @@ export function abortNodeTasks(nodeId) {
 }
 
 /**
+ * Returns a snapshot of every node currently holding active IPC tasks.
+ * Used by the bug-report generator so "I clicked Cancel but the pipeline
+ * kept running" reports immediately reveal whether the cancel call actually
+ * cleared the tasks or never fired at all.
+ */
+export function snapshotActiveNodeTasks() {
+  const out = [];
+  for (const [nodeId, set] of nodeTasks.entries()) {
+    out.push({ nodeId, taskCount: set.size });
+  }
+  return out;
+}
+
+/**
  * Creates an AbortController tied to the IPC event sender's lifecycle.
  * If the sender window is destroyed (e.g., closed by the user), the signal aborts.
  * Optionally aborts after a timeout.
@@ -107,7 +121,12 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
         return { success: false, error: e?.message === 'Node deleted' ? 'Node deleted' : 'Window closed' };
       }
       logger.error(`[${channel}] failed:`, e?.message || String(e));
-      return { success: false, error: e?.message || String(e) };
+      return { 
+        success: false, 
+        error: e?.message || String(e),
+        isRateLimit: e?.isRateLimit,
+        provider: e?.provider
+      };
     } finally {
       if (nodeId) {
         unregisterNodeTask(nodeId, ac);

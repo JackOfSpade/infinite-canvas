@@ -1,9 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { QuickPriceButtons } from '../../components/QuickPriceButtons';
 import { PriceJustification } from '../../components/PriceJustification';
-import { PlatformToggles } from '../../components/PlatformToggles';
 import { PhotoStrip } from '../../components/PhotoStrip';
-import { Check, Copy, Download, RefreshCw, ChevronDown, ChevronUp, Edit3 } from 'lucide-react';
+import { Check, Copy, Download, RefreshCw, ChevronDown, ChevronUp, Edit3, Plus, Activity } from 'lucide-react';
 import { SELL_PLATFORMS } from '../../utils/constants';
 import { EventLogger } from '../../utils/EventLogger';
 import { useToast } from '../../components/ToastProvider';
@@ -18,17 +17,17 @@ export function SellHubPricedState({
   handleQuickPrice,
   justificationExpanded,
   toggleJustification,
-  selectedPlatforms,
-  togglePlatform,
   copied,
   handleCopyListing,
   listingText = '',
   locked = false,
-  // New props
   imagePaths = [],
-  platformStatuses = {},
-  onMarkListed,
   onReresearch,
+  // Phase-2 redesign: marketplace cards replace the platform-toggles UX.
+  spawnedMarketplaceIds = [], // ids already represented by a connected MarketplaceCardNode
+  onSpawnMarketplaceCard,     // (platformId) => spawn a card next to the hub
+  onCheckAllStatuses,         // () => trigger checkStatus on every connected card
+  checkingAll = false,
 }) {
   const [savingListing, setSavingListing] = useState(false);
   const [savedListing, setSavedListing] = useState(false);
@@ -93,7 +92,8 @@ export function SellHubPricedState({
             value={priceInput}
             onChange={locked ? undefined : (e) => handlePriceChange(e.target.value)}
             disabled={locked}
-            className={`flex-1 bg-black/30 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none text-right ${locked ? 'opacity-50 cursor-default' : ''}`}
+            onPointerDown={(e) => e.stopPropagation()}
+            className={`nodrag flex-1 bg-black/30 border border-white/10 rounded px-2 py-1 text-white text-sm outline-none text-right ${locked ? 'opacity-50 cursor-default' : ''}`}
             placeholder="0"
           />
         </div>
@@ -110,46 +110,56 @@ export function SellHubPricedState({
         onToggle={toggleJustification}
       />
 
-      {/* Platform selection */}
-      <div className="pt-1 border-t border-white/5">
-        <div className="text-white/20 text-[9px] font-semibold uppercase tracking-wider mb-1">
-          Click source icon to post →
-        </div>
-        <PlatformToggles selected={selectedPlatforms} onToggle={locked ? undefined : togglePlatform} disabled={locked} />
-      </div>
-
-      {/* Per-platform mark-as-listed */}
-      {selectedPlatforms.length > 0 && (
-        <div className="pt-1 border-t border-white/5 space-y-1">
-          <div className="text-white/20 text-[9px] font-semibold uppercase tracking-wider">Mark as listed:</div>
-          <div className="flex flex-wrap gap-1">
-            {selectedPlatforms.map(pid => {
-              const platform = SELL_PLATFORMS.find(p => p.id === pid);
-              if (!platform) return null;
-              const isListed = platformStatuses[pid] === 'listed';
-              return (
-                <button
-                  key={pid}
-                  onClick={locked ? undefined : () => onMarkListed?.(pid)}
-                  disabled={locked}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  title={isListed ? `${platform.name}: Listed ✓` : `Mark ${platform.name} as listed`}
-                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] transition-colors ${
-                    isListed
-                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/20'
-                      : locked
-                        ? 'bg-white/5 text-white/20 cursor-default'
-                        : 'bg-white/5 text-white/40 hover:bg-white/10 hover:text-white/60'
-                  }`}
-                >
-                  {isListed && <Check size={8} />}
-                  {platform.name}
-                </button>
-              );
-            })}
+      {/* Marketplace cards — spawn one per platform you list on.
+          Each card persists on the canvas, holds its own listing URL, and can
+          be status-checked independently. Replaces the old auto-post toggles. */}
+      <div className="pt-1 border-t border-white/5 space-y-1.5">
+        <div className="flex items-center justify-between">
+          <div className="text-white/20 text-[9px] font-semibold uppercase tracking-wider">
+            Marketplaces
           </div>
+          {spawnedMarketplaceIds.length > 0 && !locked && (
+            <button
+              onClick={onCheckAllStatuses}
+              disabled={checkingAll}
+              onPointerDown={(e) => e.stopPropagation()}
+              className="nodrag flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 text-[9px] font-medium border border-blue-500/20 transition-colors disabled:opacity-50"
+              title="Ask AI to check the current status of every connected marketplace listing"
+            >
+              <Activity size={9} className={checkingAll ? 'animate-pulse' : ''} />
+              {checkingAll ? 'Checking…' : 'Check All'}
+            </button>
+          )}
         </div>
-      )}
+        <div className="text-white/30 text-[9px] leading-snug">
+          Spawn a card for each marketplace you list on. Each card holds a listing URL you paste after posting manually.
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {SELL_PLATFORMS.map(p => {
+            const spawned = spawnedMarketplaceIds.includes(p.id);
+            return (
+              <button
+                key={p.id}
+                onClick={locked || spawned ? undefined : () => onSpawnMarketplaceCard?.(p.id)}
+                disabled={locked || spawned}
+                onPointerDown={(e) => e.stopPropagation()}
+                title={spawned ? `${p.name} card already on canvas` : `Add ${p.name} marketplace card`}
+                className={`nodrag flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors border ${
+                  spawned
+                    ? 'bg-emerald-500/10 text-emerald-400/70 border-emerald-500/20 cursor-default'
+                    : locked
+                      ? 'bg-white/5 text-white/20 border-white/5 cursor-default'
+                      : 'bg-white/5 text-white/60 border-white/10 hover:bg-white/10 hover:text-white/90'
+                }`}
+                style={spawned ? undefined : { borderLeftColor: p.color, borderLeftWidth: 2 }}
+              >
+                {spawned ? <Check size={8} /> : <Plus size={8} />}
+                {p.name}
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
       {/* Refresh prices */}
       {!locked && onReresearch && (

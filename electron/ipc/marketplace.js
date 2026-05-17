@@ -6,7 +6,7 @@
  *   Tier 1 Active: eBay Active
  *   Tier 2 Sold:  Mercari Sold
  */
-import { callGeminiVision, callGeminiText } from './gemini.js';
+import { callLLMVision, callLLMText } from './llm.js';
 import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
 import { logger } from '../logger.js';
@@ -100,6 +100,94 @@ async function fetchApiMarketplaceSources(query, signal = null, nodeId = null, s
 }
 
 /**
+ * Best-effort marketplace listing status check.
+ *
+ * Fetches the listing URL as plain HTML and asks the LLM to classify it. This
+ * is intentionally provider-agnostic — every marketplace renders slightly
+ * different SOLD / ENDED / REMOVED / login-wall markup, so handing the raw
+ * page to the model is more robust than writing eight bespoke scrapers (and
+ * matches the "remove auto-posting, too complicated and changes often"
+ * direction the user took on this module).
+ *
+ * Returns one of: live | sold | expired | needs-login | unknown.
+ * A 4xx/5xx that smells like a login redirect maps to `needs-login` so the
+ * UI can tell the user "log in to the marketplace site again."
+ */
+async function checkListingStatusViaAI(url, platformId, signal) {
+  let html, status, finalUrl;
+  try {
+    const res = await fetch(url, {
+      redirect: 'follow',
+      headers: {
+        // A real-browser UA avoids most marketplaces' API-shaped 403s. We're
+        // not bypassing any auth — just asking for the same page the user sees.
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml',
+      },
+      signal,
+    });
+    status = res.status;
+    finalUrl = res.url || url;
+    html = await res.text();
+  } catch (err) {
+    return { status: 'error', message: `Fetch failed: ${err?.message || String(err)}` };
+  }
+
+  // Cheap pre-classification: if the response redirected to a login URL or
+  // returned 401/403, we don't need to burn AI tokens deciding.
+  const finalLower = String(finalUrl).toLowerCase();
+  if (status === 401 || status === 403 || /\/(login|signin|sign-in|account\/login)/i.test(finalLower)) {
+    return { status: 'needs-login', message: `Marketplace requires a fresh login (redirected to ${finalUrl}). Sign in on the ${platformId} site in your browser, then retry.` };
+  }
+  if (status === 404 || status === 410) {
+    return { status: 'expired', message: `Listing not found (${status}). It may have been removed or sold and de-indexed.` };
+  }
+  if (!html || html.length < 200) {
+    return { status: 'unknown', message: `Empty or near-empty response (${html?.length || 0} bytes).` };
+  }
+
+  // Trim to keep token usage modest — most status signals live in the page
+  // head and the first content section (status banner, "this listing has
+  // ended", etc.). 12k chars covers that comfortably.
+  const trimmed = html.slice(0, 12000).replace(/\s+/g, ' ');
+
+  let parsed;
+  try {
+    parsed = await callLLMText(`
+You are checking the live status of a marketplace listing. The user posted a listing on ${platformId} and pasted its URL; we fetched the page HTML and need to know whether the item is still available.
+
+URL: ${url}
+HTTP status: ${status}
+HTML (truncated):
+${trimmed}
+
+Return ONLY a JSON object:
+{
+  "status": "live" | "sold" | "expired" | "needs-login" | "unknown",
+  "message": "1 short sentence explaining the signal you saw (e.g. 'Page shows SOLD banner', 'Listing ended, no buyer', 'Login wall — cannot determine status')"
+}
+
+Classification rules:
+- "live"        — page renders the product with a buy button / asking price
+- "sold"        — page says SOLD, completed, item ended with buyer, etc.
+- "expired"     — page says listing ended/removed/unavailable with no buyer, OR a 404-ish "not found" state inside the body
+- "needs-login" — page redirected to a login form or shows a "sign in to view this" wall
+- "unknown"     — none of the above is clear
+
+Be conservative: prefer "unknown" over a wrong guess.`, signal);
+  } catch (err) {
+    return { status: 'error', message: `AI classification failed: ${err?.message || String(err)}` };
+  }
+
+  const allowed = new Set(['live', 'sold', 'expired', 'needs-login', 'unknown']);
+  const out = {
+    status:  allowed.has(parsed?.status) ? parsed.status : 'unknown',
+    message: parsed?.message || '',
+  };
+  return out;
+}
+
+/**
  * Register all Marketplace IPC handlers.
  */
 export function registerMarketplaceHandlers() {
@@ -107,7 +195,7 @@ export function registerMarketplaceHandlers() {
   handleSafe('analyze-photos', async (event, { imagePaths, nodeId }, signal) => {
     logger.info(`[Marketplace][${nodeId}] Analyzing`, imagePaths.length, 'photos');
 
-    const result = await callGeminiVision(imagePaths, `
+    const result = await callLLMVision(imagePaths, `
 You are a marketplace listing expert. Analyze these product photos and identify what is being sold.
 
 Return a JSON object:
@@ -196,7 +284,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
 
     // If we have comp data, ask Gemini to synthesize pricing + routing
     if (totalComps > 0) {
-      const pricing = await callGeminiText(`
+      const pricing = await callLLMText(`
 You are a pricing analyst and marketplace routing expert. Given these comparable listings from multiple sources, recommend a selling price AND which platforms to list on.
 
 ITEM: ${query}
@@ -263,4 +351,10 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
     };
   });
 
+  // ── Check listing status (per-marketplace card) ───────────────────────────
+  handleSafe('check-listing-status', async (_event, { url, platformId, nodeId }, signal) => {
+    logger.info(`[Marketplace][${nodeId}] Checking ${platformId} listing status: ${url}`);
+    const result = await checkListingStatusViaAI(url, platformId, signal);
+    return result;
+  });
 }

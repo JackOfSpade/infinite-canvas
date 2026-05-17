@@ -82,7 +82,7 @@ export function computeTidiedNodes(nds, onlySelected) {
  * Returns true if placing the `nodesToAbsorb` cluster at `(anchorX, anchorY)`
  * (relative to `dropMinX`/`dropMinY`) overlaps any existing `childNodes`.
  */
-export function placementOverlaps(anchorX, anchorY, nodesToAbsorb, dropMinX, dropMinY, childNodes, padding = 40) {
+function placementOverlaps(anchorX, anchorY, nodesToAbsorb, dropMinX, dropMinY, childNodes, padding = 40) {
   return childNodes.some(child => {
     const cDims  = getNodeDims(child);
     const cLeft  = child.position.x - padding;

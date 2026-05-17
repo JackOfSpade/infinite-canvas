@@ -7,23 +7,45 @@ import path from 'path';
 import { GoogleAuth } from 'google-auth-library';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
+import { resolveServiceAccountPath } from './settings.js';
 
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const LOCATION = 'us-central1';
-const KEY_FILE = path.join(process.cwd(), 'service-account.json');
+
+// Internal sentinel prepended to mock responses so parseGeminiJSON can tag
+// the parsed object with `_mockMode: true`. Callers downstream (marketplace,
+// jobs) propagate this so the UI can show "data is fake until you configure
+// AI" instead of silently presenting placeholder values as real results.
+const MOCK_PREFIX = '__IC_MOCK__';
 
 let authClient = null;
 let projectId = null;
+let cachedKeyFile = null; // tracks which file the cached client was built from
 let isMockMode = false;
 
 async function getAuthClient() {
-  if (authClient) return { auth: authClient, projectId };
+  const keyFile = resolveServiceAccountPath();
+  // Reuse the cached client only if it was built from the same file we'd
+  // resolve right now. If the user changes the path in Settings, the next
+  // call rebuilds against the new account instead of silently using the old one.
+  if (authClient && cachedKeyFile === keyFile) return { auth: authClient, projectId };
+  authClient = null;
+  projectId = null;
+  cachedKeyFile = null;
+  isMockMode = false;
+
+  if (!keyFile) {
+    logger.warn('[Gemini] No service-account.json configured or found. Enabling Mock Mode for AI services.');
+    isMockMode = true;
+    return { auth: null, projectId: 'mock-project' };
+  }
+
   let saRaw;
   try {
-    saRaw = await fs.promises.readFile(KEY_FILE, 'utf8');
+    saRaw = await fs.promises.readFile(keyFile, 'utf8');
   } catch (err) {
     if (err.code === 'ENOENT') {
-      logger.warn('[Gemini] service-account.json not found. Enabling Mock Mode for AI services.');
+      logger.warn(`[Gemini] Configured service-account file not found at ${keyFile}. Enabling Mock Mode.`);
       isMockMode = true;
       return { auth: null, projectId: 'mock-project' };
     }
@@ -32,9 +54,10 @@ async function getAuthClient() {
   const sa = JSON.parse(saRaw);
   projectId = sa.project_id;
   authClient = new GoogleAuth({
-    keyFile: KEY_FILE,
+    keyFile,
     scopes: ['https://www.googleapis.com/auth/cloud-platform'],
   });
+  cachedKeyFile = keyFile;
   return { auth: authClient, projectId };
 }
 
@@ -56,12 +79,14 @@ async function getToken() {
 }
 
 /**
- * Core Gemini call — sends parts (text + optional images) to Vertex AI.
+ * Core Gemini call — sends parts (text + optional images) to Vertex AI or AI Studio.
  * @param {Array} parts — Array of { text } or { inlineData: { mimeType, data } } objects
+ * @param {string} apiKey - Optional Gemini API Key. If missing, falls back to Vertex AI.
+ * @param {string} model - The model ID to use
  * @param {object} [genConfig] — generationConfig overrides
  * @returns {Promise<string>} — Raw text response from Gemini
  */
-async function callGemini(parts, genConfig = {}) {
+async function callGemini(parts, apiKey, model, genConfig = {}) {
   // Hardening: Prevent "Payload Too Large" errors by capping total prompt text.
   // Vertex AI has token limits, but 100k chars is a safe "fail-fast" boundary for
   // strings to prevent massive JSON stringification from crashing the process.
@@ -73,17 +98,29 @@ async function callGemini(parts, genConfig = {}) {
     throw new Error(`AI prompt too large (${totalTextLen} chars). Please select fewer nodes or a smaller group.`);
   }
 
-  // Ensure getAuthClient runs to check for service-account.json and set isMockMode
-  await getAuthClient();
+  // If an API key is provided, route directly to the free AI Studio endpoint
+  // Otherwise, default to the Vertex AI service account pipeline
+  let endpoint = '';
+  let headers = { 'Content-Type': 'application/json' };
+  
+  if (apiKey) {
+    endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-2.5-flash'}:generateContent?key=${apiKey}`;
+  } else {
+    // Ensure getAuthClient runs to check for service-account.json and set isMockMode
+    await getAuthClient();
 
-  if (isMockMode) {
-    const textPart = parts.find(p => p.text)?.text || '';
-    logger.info('[Gemini] Mock Mode active. Returning dummy data for prompt.');
-    return generateMockResponse(textPart);
+    if (isMockMode) {
+      const textPart = parts.find(p => p.text)?.text || '';
+      logger.info('[Gemini] Mock Mode active. Returning dummy data for prompt.');
+      // Sentinel prefix lets parseGeminiJSON strip it and signal mock-ness to
+      // callers without changing the return type (still a JSON string).
+      return MOCK_PREFIX + generateMockResponse(textPart);
+    }
+
+    const token = await getToken();
+    endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${model || GEMINI_MODEL}:generateContent`;
+    headers['Authorization'] = `Bearer ${token}`;
   }
-
-  const token = await getToken();
-  const endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent`;
 
   const { signal, ...restGenConfig } = genConfig;
 
@@ -103,7 +140,7 @@ async function callGemini(parts, genConfig = {}) {
   const response = await fetch(endpoint, {
     method: 'POST',
     signal: combinedSignal,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers,
     body: JSON.stringify(payload),
   });
 
@@ -112,7 +149,12 @@ async function callGemini(parts, genConfig = {}) {
     let errMsg;
     try { errMsg = JSON.parse(errText)?.error?.message || errText; }
     catch { errMsg = errText; }
-    throw new Error(`Vertex AI error ${response.status}: ${errMsg}`);
+    // Label the error with the endpoint we actually called so users can tell
+    // an AI Studio billing/quota issue from a Vertex service-account issue at
+    // a glance. Previously this string always said "Vertex AI" regardless of
+    // which path ran, which sent users debugging the wrong system.
+    const endpointName = apiKey ? 'Gemini API (AI Studio)' : 'Vertex AI';
+    throw new Error(`${endpointName} error ${response.status}: ${errMsg}`);
   }
 
   const data = await response.json();
@@ -213,9 +255,17 @@ function generateMockResponse(prompt) {
  * Parse raw Gemini response text into JSON, stripping markdown fences if present.
  * Handles both ```json and bare ``` wrappers.
  */
-function parseGeminiJSON(raw) {
+export function parseGeminiJSON(raw) {
   if (!raw) return null;
-  
+
+  // Strip the mock-mode sentinel before parsing; remember whether it was
+  // present so we can tag the parsed object.
+  let isMock = false;
+  if (typeof raw === 'string' && raw.startsWith(MOCK_PREFIX)) {
+    isMock = true;
+    raw = raw.slice(MOCK_PREFIX.length);
+  }
+
   // Resilient JSON extraction: Find the first code block or the outer-most { } pair.
   // This handles instances where Gemini adds markdown fences OR conversational text.
   let jsonStr = raw;
@@ -257,7 +307,15 @@ function parseGeminiJSON(raw) {
   jsonStr = jsonStr.replace(/,\s*([}\]])/g, '$1');
 
   try {
-    return JSON.parse(jsonStr.trim());
+    const parsed = JSON.parse(jsonStr.trim());
+    // Tag mock-mode results so the UI can show "this is placeholder data"
+    // instead of presenting it as a real AI response. Plain objects only —
+    // arrays/primitives stay untouched (mock mode currently only returns
+    // objects, but be defensive).
+    if (isMock && parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      parsed._mockMode = true;
+    }
+    return parsed;
   } catch (error) {
     logger.error('[Gemini] Failed to parse JSON response:', error.message, '\nRaw Segment:', jsonStr);
     throw new Error(`AI returned invalid JSON: ${error.message}`);
@@ -270,6 +328,7 @@ function parseGeminiJSON(raw) {
 const IMAGE_MIME_MAP = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
   '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif',
+  '.heic': 'image/heic', '.heif': 'image/heic',
 };
 const DOCUMENT_MIME_MAP = {
   '.pdf':  'application/pdf',
@@ -284,10 +343,12 @@ const DOCUMENT_MIME_MAP = {
 /**
  * Send a text-only prompt to Gemini.
  * @param {string} prompt
+ * @param {string} apiKey
+ * @param {string} model
  * @returns {Promise<object>} — Parsed JSON response
  */
-export async function callGeminiText(prompt, signal = null) {
-  const raw = await callGemini([{ text: prompt }], { signal });
+export async function callGeminiText(prompt, apiKey, model, signal = null) {
+  const raw = await callGemini([{ text: prompt }], apiKey, model, { signal });
   return parseGeminiJSON(raw);
 }
 
@@ -295,9 +356,11 @@ export async function callGeminiText(prompt, signal = null) {
  * Send images + text prompt to Gemini Vision.
  * @param {string[]} imagePaths — Absolute paths to image files
  * @param {string} prompt — Text prompt
+ * @param {string} apiKey
+ * @param {string} model
  * @returns {Promise<object>} — Parsed JSON response
  */
-export async function callGeminiVision(imagePaths, prompt, signal = null) {
+export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal = null) {
   const imageParts = await Promise.all(imagePaths.map(async (imgPath) => {
     const stats = await fs.promises.stat(imgPath);
     // Vertex AI inlineData limit is 20MB. Base64 encoding adds ~33% overhead,
@@ -313,7 +376,7 @@ export async function callGeminiVision(imagePaths, prompt, signal = null) {
   }));
 
   const parts = [...imageParts, { text: prompt }];
-  const raw = await callGemini(parts, { signal });
+  const raw = await callGemini(parts, apiKey, model, { signal });
   return parseGeminiJSON(raw);
 }
 
@@ -321,16 +384,18 @@ export async function callGeminiVision(imagePaths, prompt, signal = null) {
  * Send a PDF or document file to Gemini for analysis.
  * @param {string} filePath — Path to PDF/DOCX file
  * @param {string} prompt — Analysis prompt
+ * @param {string} apiKey
+ * @param {string} model
  * @returns {Promise<object>} — Parsed JSON response
  */
-export async function callGeminiDocument(filePath, prompt, signal = null) {
+export async function callGeminiDocument(filePath, prompt, apiKey, model, signal = null) {
   const ext = path.extname(filePath).toLowerCase();
   const mimeType = DOCUMENT_MIME_MAP[ext];
 
   if (!mimeType) {
     // If it's a known image extension, treat as vision call
     if (IMAGE_MIME_MAP[ext]) {
-      return callGeminiVision([filePath], prompt, signal);
+      return callGeminiVision([filePath], prompt, apiKey, model, signal);
     }
     // Legacy .doc files are a binary format that Vertex AI can't ingest as inline
     // data. Reading the bytes as utf8 (the previous fallback) silently produced
@@ -339,7 +404,7 @@ export async function callGeminiDocument(filePath, prompt, signal = null) {
       throw new Error('Legacy .doc resumes are not supported. Save as PDF or DOCX and try again.');
     }
     // Fallback to text/plain for other document types so Gemini tries to read them as raw text
-    return callGemini([{ text: `${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n` + await fs.promises.readFile(filePath, 'utf8') }], { signal });
+    return callGemini([{ text: `${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n` + await fs.promises.readFile(filePath, 'utf8') }], apiKey, model, { signal });
   }
 
   const stats = await fs.promises.stat(filePath);
@@ -355,7 +420,7 @@ export async function callGeminiDocument(filePath, prompt, signal = null) {
     { text: prompt },
   ];
 
-  const raw = await callGemini(parts, { signal });
+  const raw = await callGemini(parts, apiKey, model, { signal });
   return parseGeminiJSON(raw);
 }
 
@@ -363,7 +428,10 @@ export function registerGeminiHandlers() {
   handleSafe('ai-polish-text', async (event, text, signal) => {
     const prompt = `You are an AI assistant in a visual workspace app. Polish the following text. Make it clear, concise, and professional. Output ONLY the improved text, without quotes or conversational filler. Keep original markdown formatting if any. The text is:\n\n${text}`;
     const config = { responseMimeType: 'text/plain', signal };
-    const raw = await callGemini([{ text: prompt }], config);
+    // This is a legacy handler, let's inject settings here too
+    const { getAISettings } = await import('./settings.js');
+    const settings = getAISettings();
+    const raw = await callGemini([{ text: prompt }], settings.geminiApiKey, settings.geminiModel, config);
     return { text: raw.trim() };
   });
 }

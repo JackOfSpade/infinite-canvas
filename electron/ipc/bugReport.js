@@ -3,7 +3,104 @@ const { dialog, app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { handleSafe } from './ipcUtils.js';
+import { fileURLToPath } from 'url';
+import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
+import { getAISettings, resolveServiceAccountPath } from './settings.js';
+
+// Captured at module load: the moment this code first ran in the main process.
+// Used to detect when a user edits a source file but forgets to restart
+// Electron — the renderer hot-reloads via Vite but the main-process modules
+// keep running the old code, producing the maddening "I changed it, why isn't
+// it doing the new thing?" failure mode.
+const PROCESS_START_MS = Date.now();
+
+/**
+ * Returns the mtime (ms) of the newest main-process source file we care about,
+ * or null if any stat fails. Comparing this to PROCESS_START_MS tells us if a
+ * source file has been edited since the main process booted.
+ */
+function getNewestMainProcessSourceMtime() {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url)); // electron/ipc/
+    const candidates = [
+      'bugReport.js', 'settings.js', 'gemini.js', 'claude.js', 'llm.js',
+      'jobs.js', 'marketplace.js', 'jobsHistory.js',
+    ].map(f => path.join(here, f));
+    candidates.push(path.join(here, '..', 'preload.js'));
+    candidates.push(path.join(here, '..', 'main.js'));
+
+    let newest = 0;
+    for (const p of candidates) {
+      try {
+        const stat = fs.statSync(p);
+        if (stat.mtimeMs > newest) newest = stat.mtimeMs;
+      } catch { /* missing file is fine */ }
+    }
+    return newest || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Captures the AI configuration relevant to "why did nothing happen when I
+ * clicked X" reports. NEVER includes the raw key strings — only whether they
+ * are present and (for the active key) a short prefix for sanity-checking
+ * that the user pasted the right format.
+ */
+function buildAIConfigSnapshot() {
+  let ai = {};
+  try { ai = getAISettings() || {}; } catch { /* settings store may not be ready */ }
+
+  const geminiKey   = ai.geminiApiKey;
+  const claudeKey   = ai.anthropicApiKey;
+  const provider    = ai.provider || 'gemini';
+  const activeKey   = provider === 'claude' ? claudeKey : geminiKey;
+  const keyPrefix   = activeKey ? `${String(activeKey).slice(0, 7)}…` : '(none)';
+
+  // resolveServiceAccountPath checks the user-configured path first, then
+  // falls back to process.cwd()/service-account.json. Returns null if neither
+  // is readable — which is the exact "I added a path but nothing happened"
+  // failure mode that needs to be visible in the report.
+  let resolvedSAPath = null;
+  try { resolvedSAPath = resolveServiceAccountPath(); } catch { /* ignore */ }
+
+  // Gemini works with either a UI key OR a resolvable service-account.json;
+  // Claude needs the UI key.
+  const effectivelyConfigured = provider === 'claude'
+    ? !!claudeKey
+    : (!!geminiKey || !!resolvedSAPath);
+
+  // For Gemini, the runtime picks AI Studio when a key is set, Vertex when
+  // a service-account is resolvable, and Mock Mode otherwise. Surfacing the
+  // effective endpoint (not just "which keys are set") means a future
+  // "billing depleted on Vertex" vs "rate-limited on AI Studio" report is
+  // immediately disambiguated.
+  let activeEndpoint;
+  if (provider === 'claude') {
+    activeEndpoint = claudeKey ? 'Anthropic API' : '(no key)';
+  } else if (geminiKey) {
+    activeEndpoint = 'Gemini API (AI Studio — generativelanguage.googleapis.com)';
+  } else if (resolvedSAPath) {
+    activeEndpoint = 'Vertex AI (aiplatform.googleapis.com via service-account)';
+  } else {
+    activeEndpoint = 'Mock Mode (placeholder data)';
+  }
+
+  return {
+    provider,
+    geminiModel:           ai.geminiModel || '(unset)',
+    claudeModel:           ai.claudeModel || '(unset)',
+    hasGeminiKey:          !!geminiKey,
+    hasAnthropicKey:       !!claudeKey,
+    activeKeyPrefix:       keyPrefix,
+    configuredSAPath:      ai.serviceAccountPath || '(unset)',
+    resolvedSAPath:        resolvedSAPath || '(none)',
+    serviceAccountUsable:  !!resolvedSAPath,
+    activeEndpoint,
+    effectivelyConfigured,
+  };
+}
 
 // ── Shared markdown generation ────────────────────────────────────────────────
 // Used by both the "save to file" and "copy to clipboard" handlers so the
@@ -38,6 +135,11 @@ function generateMarkdown(payload) {
   const compStateById = {};
   (nodeComponentStates || []).forEach(s => { compStateById[s.id] = s; });
 
+  // Index full nodes by id so we can pull `data` for the preview column —
+  // nodeInternals is intentionally stripped of `data` to keep its shape small.
+  const nodeDataById = {};
+  (nodes || []).forEach(n => { nodeDataById[n.id] = n.data || {}; });
+
   let nodeDiagMarkdown = '';
   if (nodeInternals && nodeInternals.length > 0) {
     const rows = nodeInternals.map(n => {
@@ -48,6 +150,39 @@ function generateMarkdown(payload) {
         cs.hasEdgeCursor ? 'edgeCursor' : null,
         n.selected ? 'selected' : null,
       ].filter(Boolean).join(', ') || '—';
+      // Hub-aware preview: include hubState plus whichever payload keys this
+      // node carries. `nodeInternals` is intentionally stripped of `data`, so
+      // pull from `nodeDataById` (built above from the full `nodes` array).
+      const d = nodeDataById[n.id] || {};
+      const previewParts = [];
+      if (d.hubState)                  previewParts.push(`hubState: ${d.hubState}`);
+      if (d.errorMessage)              previewParts.push(`err: ${String(d.errorMessage).slice(0, 60)}`);
+      if (d.isRateLimit)               previewParts.push(`rateLimit: true`);
+      if (Array.isArray(d.imagePaths)) previewParts.push(`imagePaths: ${d.imagePaths.length}`);
+      if (Array.isArray(d.images))     previewParts.push(`images: ${d.images.length}`);
+      if (d.file)                      previewParts.push(`file: ${d.file.name || d.file}`);
+      if (d.filePath)                  previewParts.push(`filePath: ${path.basename(String(d.filePath))}`);
+      if (d.resumeProfile)             previewParts.push('resumeProfile: ✓');
+      if (d.url)                       previewParts.push(`url: ${String(d.url).slice(0, 50)}`);
+      if (d.product?.brand)            previewParts.push(`brand: ${d.product.brand}`);
+      // Mock-mode flag is set by gemini.js when AI wasn't configured at call
+      // time. Surfacing it here turns "why is the product info wrong?" reports
+      // into a one-glance diagnosis.
+      if (d.product?._mockMode)        previewParts.push('⚠️ mockMode: true');
+      if (d.resumeProfile?._mockMode)  previewParts.push('⚠️ resume._mockMode: true');
+      // Per-source ring progress lives in component state, not node data.
+      // Compact it as `comp: ebay-sold=done/12,poshmark=searching/0,...` so a
+      // "stale ring after re-research" report is diagnosable at a glance.
+      const ringProgress = cs.compProgress || cs.sourceProgress;
+      if (ringProgress && typeof ringProgress === 'object') {
+        const entries = Object.entries(ringProgress);
+        if (entries.length > 0) {
+          const tag = cs.compProgress ? 'comp' : 'src';
+          previewParts.push(`${tag}: ` + entries.map(([k, v]) => `${k}=${v?.status || '?'}/${v?.count ?? '?'}`).join(','));
+        }
+      }
+      const dataPreview = previewParts.join(', ');
+
       return (
         `| \`${n.id.slice(0, 8)}\` ` +
         `| ${n.type} ` +
@@ -60,7 +195,8 @@ function generateMarkdown(payload) {
         `| ${n.style_width ?? '—'} ` +
         `| ${n.measured_width ?? '—'} ` +
         `| ${cs.size ?? '—'} ` +
-        `| ${flags} |`
+        `| ${flags} ` +
+        `| ${dataPreview || '—'} |`
       );
     }).join('\n');
     nodeDiagMarkdown = `
@@ -68,8 +204,8 @@ function generateMarkdown(payload) {
 > **Size columns**: mismatches reveal ResizeObserver/setNodes race conditions.
 > **Component state**: React state at the moment the report was generated.
 
-| ID (first 8) | Type | Selected | Position | Font | T-Color | B-Color | width (prop) | style.width | measured.width | currentSize | state flags |
-|---|---|---|---|---|---|---|---|---|---|---|---|
+| ID (first 8) | Type | Selected | Position | Font | T-Color | B-Color | width (prop) | style.width | measured.width | currentSize | state flags | data preview |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
 ${rows}
 `;
   }
@@ -165,6 +301,77 @@ ${rows}
 `;
   }
 
+  // ── Active IPC tasks ──────────────────────────────────────────────────────
+  // Catches the "I clicked Cancel/X but the pipeline kept running" failure
+  // mode. The renderer can mark a node visually 'done' instantly, but if the
+  // backend AbortControllers weren't cancelled, the underlying tasks finish
+  // and overwrite the user's reset. This snapshot makes that immediately
+  // diagnosable in any report.
+  let activeTasksMarkdown = '';
+  try {
+    const tasks = snapshotActiveNodeTasks() || [];
+    if (tasks.length > 0) {
+      const rows = tasks
+        .map(t => `| \`${String(t.nodeId).slice(0, 8)}\` | ${t.taskCount} |`)
+        .join('\n');
+      activeTasksMarkdown = `
+## Active IPC Tasks
+> Nodes with backend AbortControllers still registered at report time.
+> A node showing tasks here while its UI looks idle means a cancel/abort
+> request never reached the backend.
+
+| Node ID (first 8) | Active task count |
+|---|---|
+${rows}
+`;
+    } else {
+      activeTasksMarkdown = `
+## Active IPC Tasks
+- ✅ None registered.
+`;
+    }
+  } catch { /* never break the report on diagnostic failure */ }
+
+  // ── Build freshness ───────────────────────────────────────────────────────
+  // Catches the "I edited a file but the running app still does the old thing"
+  // failure mode. Vite hot-reloads the renderer, but Electron main-process
+  // files (preload, IPC handlers, settings store) only reload on a full restart.
+  // If any tracked source is newer than the process start, the running build is
+  // stale — flag it loudly so the report doesn't waste time chasing a phantom.
+  const newestSrcMs = getNewestMainProcessSourceMtime();
+  const uptimeMs    = Math.round(process.uptime() * 1000);
+  const startedAt   = new Date(PROCESS_START_MS).toISOString();
+  const newestSrcStr = newestSrcMs ? new Date(newestSrcMs).toISOString() : '(unknown)';
+  const isStale     = !!(newestSrcMs && newestSrcMs > PROCESS_START_MS);
+  const stalenessLine = isStale
+    ? `⚠️ **STALE BUILD**: a tracked main-process source file was modified ${Math.round((newestSrcMs - PROCESS_START_MS) / 1000)}s after the process started. The running app is NOT executing the current source on disk — fully restart Electron (not just Vite) before treating this report as authoritative.`
+    : '✅ Up to date — no tracked main-process source has been modified since the process started.';
+  const buildFreshnessMarkdown = `
+## Build Freshness
+- Main process started: \`${startedAt}\` (uptime ${Math.round(uptimeMs / 1000)}s)
+- Newest tracked source file mtime: \`${newestSrcStr}\`
+- ${stalenessLine}
+`;
+
+  // ── AI configuration snapshot ─────────────────────────────────────────────
+  // Surfaces missing keys / wrong provider — the most common cause of
+  // "I clicked the AI button and nothing happened" reports.
+  const aiConfig = buildAIConfigSnapshot();
+  const aiConfigMarkdown = `
+## AI Configuration
+- Active provider: \`${aiConfig.provider}\`
+- **Active endpoint**: \`${aiConfig.activeEndpoint}\`
+- Gemini model: \`${aiConfig.geminiModel}\`
+- Claude model: \`${aiConfig.claudeModel}\`
+- Gemini API key set: ${aiConfig.hasGeminiKey ? '✅' : '❌'}
+- Anthropic API key set: ${aiConfig.hasAnthropicKey ? '✅' : '❌'}
+- Active key prefix: \`${aiConfig.activeKeyPrefix}\`
+- service-account.json configured path: \`${aiConfig.configuredSAPath}\`
+- service-account.json resolved path: \`${aiConfig.resolvedSAPath}\`
+- service-account.json usable: ${aiConfig.serviceAccountUsable ? '✅' : '❌'}
+- **Effectively configured for active provider**: ${aiConfig.effectivelyConfigured ? '✅' : '❌ — AI calls will fall back to Mock Mode (Gemini) or fail (Claude) until a key is added in Settings'}
+`;
+
   // ── Viewport section ───────────────────────────────────────────────────────
   const vp = frontEndState?.viewport;
   const viewportLine = vp ? `- Viewport: zoom=${vp.zoom} x=${vp.x} y=${vp.y}` : '';
@@ -181,7 +388,7 @@ ${rows}
     stateWasTrimmed = true;
   }
 
-  let baseMarkdown = `Do not change the bug report feature just what it reports. First assess if this bug report has all the data you need to debug this. If not, improve the reporting. Then, fix the following bug:
+  let baseMarkdown = `Do not change the bug report feature, just what it reports. First assess if this bug report has all the data you need to debug this. If not, improve the reporting. Then, fix the following bug:
 
 # Bug Report
 
@@ -195,7 +402,7 @@ ${description}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 <details>
 <summary><b>Click here to expand the full JSON Application State</b></summary>
 

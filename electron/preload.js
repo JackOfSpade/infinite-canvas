@@ -51,12 +51,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scoreJobs: (args) => ipcRenderer.invoke('score-jobs', args),
   generateCoverLetter: (args) => ipcRenderer.invoke('generate-cover-letter', args),
   generateInterviewPrep: (args) => ipcRenderer.invoke('generate-interview-prep', args),
+  loadJobsHistory: (args) => ipcRenderer.invoke('load-jobs-history', args),
+  appendJobsHistory: (args) => ipcRenderer.invoke('append-jobs-history', args),
 
   onJobSourceProgress: createListener('job-source-progress'),
 
   // ── Marketplace Module ──────────────────────────────────────────────────
   analyzePhotos: (args) => ipcRenderer.invoke('analyze-photos', args),
   researchPrice: (args) => ipcRenderer.invoke('research-price', args),
+  checkListingStatus: (args) => ipcRenderer.invoke('check-listing-status', args),
   getSellPlatforms: async () => {
     const res = await ipcRenderer.invoke('get-sell-platforms');
     return res.success ? (res.platforms || []) : [];
@@ -115,6 +118,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiPolishText: (text) => ipcRenderer.invoke('ai-polish-text', text),
   exportBugReport:             (payload) => ipcRenderer.invoke('export-bug-report', payload),
   generateBugReportMarkdown:   (payload) => ipcRenderer.invoke('generate-bug-report-markdown', payload),
+
+  // ── Settings ────────────────────────────────────────────────────────────
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+  updateSettings: (updates) => ipcRenderer.invoke('update-settings', updates),
+  pickServiceAccountFile: () => ipcRenderer.invoke('pick-service-account-file'),
+  onSettingsChanged: createListener('settings-changed'),
 
   // ── Lifecycle Control ────────────────────────────────────────────────────
   cancelNodeTask: (nodeId) => ipcRenderer.send('cancel-node-task', nodeId),

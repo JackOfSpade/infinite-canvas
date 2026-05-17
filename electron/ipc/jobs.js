@@ -4,11 +4,11 @@
  *             ZipRecruiter, Glassdoor, Dice, Wellfound,
  *             Greenhouse API, Lever API, USAJobs API
  */
-import { callGeminiDocument, callGeminiText } from './gemini.js';
+import { callLLMDocument, callLLMText } from './llm.js';
 import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
 import { logger } from '../logger.js';
-import { 
+import {
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
   INDEED_JOBS_EXTRACTOR, INDEED_CONFIG,
   ZIPRECRUITER_EXTRACTOR, ZIPRECRUITER_CONFIG,
@@ -24,6 +24,10 @@ import {
   fetchWeWorkRemotelyJobs,
   fetchDiceListings,
 } from '../extractors/apiExtractors.js';
+import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory } from './jobsHistory.js';
+import { filterJobsByAge } from './jobDateFilter.js';
+
+const DEFAULT_MAX_AGE_DAYS = 14;
 
 // All source IDs — defines the complete set for progress tracking and reporting.
 const ALL_SOURCE_IDS = [
@@ -36,16 +40,27 @@ const ALL_SOURCE_IDS = [
 // - remoteok: Open JSON API at remoteok.com/api (zero WAF)
 // - weworkremotely: RSS feed at weworkremotely.com/remote-jobs.rss (zero WAF)
 
+// Google Jobs chip parameter: closest discrete bucket ≥ requested age.
+// Sources that take a raw day count get the number unmodified.
+function googleDateChip(days) {
+  if (days <= 1) return 'today';
+  if (days <= 3) return '3days';
+  if (days <= 7) return 'week';
+  return 'month';
+}
+
 // ── Source → URL + Extractor + Config mapping (DOM scrape sources only) ──────
 // LinkedIn has been moved to the API pool (fetchLinkedInJobs) — no Puppeteer needed.
-function buildJobTasks(queries) {
+function buildJobTasks(queries, maxAgeDays) {
+  const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+  const gChip = googleDateChip(days);
   // Browser pool extractors — only platforms that REQUIRE Puppeteer rendering.
   // RemoteOK and WeWorkRemotely have been moved to fetchApiSources (direct HTTP).
   const extractors = {
-    google:          { extractor: GOOGLE_JOBS_EXTRACTOR,      config: GOOGLE_JOBS_CONFIG,      urlFn: q => `https://www.google.com/search?q=${encodeURIComponent(q)}&ibp=htl;jobs` },
-    indeed:          { extractor: INDEED_JOBS_EXTRACTOR,      config: INDEED_CONFIG,           urlFn: q => `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}&fromage=14` },
-    ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR,     config: ZIPRECRUITER_CONFIG,     urlFn: q => `https://www.ziprecruiter.com/jobs-search?search=${encodeURIComponent(q)}&days=14` },
-    glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,        config: GLASSDOOR_CONFIG,        urlFn: q => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}` },
+    google:          { extractor: GOOGLE_JOBS_EXTRACTOR,      config: GOOGLE_JOBS_CONFIG,      urlFn: q => `https://www.google.com/search?q=${encodeURIComponent(q)}&ibp=htl;jobs&htichips=date_posted:${gChip}` },
+    indeed:          { extractor: INDEED_JOBS_EXTRACTOR,      config: INDEED_CONFIG,           urlFn: q => `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}&fromage=${days}` },
+    ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR,     config: ZIPRECRUITER_CONFIG,     urlFn: q => `https://www.ziprecruiter.com/jobs-search?search=${encodeURIComponent(q)}&days=${days}` },
+    glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,        config: GLASSDOOR_CONFIG,        urlFn: q => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}&fromAge=${days}` },
     wellfound:       { extractor: WELLFOUND_EXTRACTOR,        config: WELLFOUND_CONFIG,        urlFn: q => `https://wellfound.com/role/${q.toLowerCase().replace(/\s+/g, '-')}` },
   };
 
@@ -72,16 +87,17 @@ function buildJobTasks(queries) {
  * Fetch API-based sources in parallel (no Puppeteer needed).
  * @returns {{ sourceId: string, jobs: object[], error?: string }[]}
  */
-async function fetchApiSources(queries, sender, signal = null, nodeId = null) {
+async function fetchApiSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS) {
   const firstQuery = queries[0] || '';
   const apiKey = process.env.USAJOBS_API_KEY || '';
   const email = process.env.USAJOBS_EMAIL || '';
+  const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
 
   const apiTasks = [
-    { sourceId: 'linkedin',       fn: (s) => fetchLinkedInJobs(firstQuery, s) },
+    { sourceId: 'linkedin',       fn: (s) => fetchLinkedInJobs(firstQuery, s, days) },
     { sourceId: 'greenhouse',     fn: (s) => fetchGreenhouseJobs(firstQuery, s) },
     { sourceId: 'lever',          fn: (s) => fetchLeverJobs(firstQuery, s) },
-    { sourceId: 'usajobs',        fn: (s) => fetchUSAJobs(firstQuery, apiKey, email, s) },
+    { sourceId: 'usajobs',        fn: (s) => fetchUSAJobs(firstQuery, apiKey, email, s, days) },
     { sourceId: 'remoteok',       fn: (s) => fetchRemoteOKJobs(firstQuery, s) },
     { sourceId: 'weworkremotely', fn: (s) => fetchWeWorkRemotelyJobs(firstQuery, s) },
     { sourceId: 'dice',           fn: (s) => fetchDiceListings(firstQuery, '', s) },
@@ -111,7 +127,7 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null) {
 export function registerJobsHandlers() {
   handleSafe('parse-resume', async (event, { filePath, nodeId }, signal) => {
     logger.info(`[Jobs][${nodeId}] Parsing resume:`, filePath);
-    const profile = await callGeminiDocument(filePath, `
+    const profile = await callLLMDocument(filePath, `
 Analyze this resume/CV thoroughly. Return a JSON object with:
 {
   "titles": ["exact job titles held, most recent first"],
@@ -130,7 +146,7 @@ Extract everything you can find. Be thorough.`, signal);
   });
 
   handleSafe('generate-job-queries', async (event, { profile }, signal) => {
-    const result = await callGeminiText(`
+    const result = await callLLMText(`
 You are a career strategist. Given this professional profile, generate search queries for a job search.
 
 Profile:
@@ -150,10 +166,11 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries, nodeId }, signal) => {
-    logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, 'queries across 12 sources');
+  handleSafe('search-jobs', async (event, { queries, nodeId, maxAgeDays, canvasFilePath }, signal) => {
+    const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+    logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across 12 sources (maxAge=${ageDays}d)`);
 
-    const tasks = buildJobTasks(queries);
+    const tasks = buildJobTasks(queries, ageDays);
     
     // Group tasks by source for per-source progress tracking
     const sourceTaskIds = {};
@@ -185,7 +202,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
           count
         });
       }, signal),
-      fetchApiSources(queries, event.sender, signal, nodeId)
+      fetchApiSources(queries, event.sender, signal, nodeId, ageDays)
     ]);
 
     // Process Scraper Results
@@ -240,8 +257,36 @@ Be creative with suggestedRoleQueries — think about what career directions the
       return true;
     });
 
-    logger.info(`[Jobs] Found ${deduped.length} unique jobs (from ${allJobs.length} total across ${Object.keys(sourceResults).length} sources)`);
-    return { jobs: deduped, sourceResults };
+    // Drop entries whose `posted` string parses to older than maxAgeDays.
+    // Sources without a URL date param rely entirely on this pass; those
+    // with a URL param re-apply it as a safety net.
+    const ageFiltered = filterJobsByAge(deduped, ageDays);
+    const ageDropped = deduped.length - ageFiltered.length;
+
+    // Drop anything we've already shown the user on a previous run.
+    let kept = ageFiltered;
+    let historyDropped = 0;
+    if (canvasFilePath) {
+      const history = await loadJobsHistory(canvasFilePath);
+      const result = dedupAgainstHistory(ageFiltered, history);
+      kept = result.kept;
+      historyDropped = result.removed;
+    }
+
+    logger.info(
+      `[Jobs] ${kept.length} new jobs (raw=${allJobs.length}, dedup=${deduped.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped})`
+    );
+    return { jobs: kept, sourceResults };
+  });
+
+  // ── Jobs history (60-day rolling CSV next to the canvas JSON) ─────────────
+  handleSafe('append-jobs-history', async (_event, { canvasFilePath, jobs }) => {
+    return appendJobsHistory(canvasFilePath, jobs);
+  });
+
+  handleSafe('load-jobs-history', async (_event, { canvasFilePath }) => {
+    const rows = await loadJobsHistory(canvasFilePath);
+    return { rows };
   });
 
   // ── Score Jobs Against Resume ─────────────────────────────────────────────
@@ -260,7 +305,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       let batchResult;
       
       try {
-        batchResult = await callGeminiText(`
+        batchResult = await callLLMText(`
 You are a career matching expert. Score each job against this candidate's profile.
 
 CANDIDATE PROFILE:
@@ -324,7 +369,7 @@ IMPORTANT SCORING RULES:
 
   // ── Generate Cover Letter ─────────────────────────────────────────────────
   handleSafe('generate-cover-letter', async (event, { profile, job }, signal) => {
-    const result = await callGeminiText(`
+    const result = await callLLMText(`
 Write a compelling cover letter for this candidate applying to this job.
 
 CANDIDATE:
@@ -348,7 +393,7 @@ Don't be generic. Reference specific skills from the resume that match specific 
   // ── Generate Interview Prep ───────────────────────────────────────────────
   handleSafe('generate-interview-prep', async (event, { profile, job }, signal) => {
     logger.info(`[Jobs] Generating interview prep for ${job.title} at ${job.company}`);
-    const result = await callGeminiText(`
+    const result = await callLLMText(`
 You are an expert career coach preparing a candidate for a job interview.
 
 CANDIDATE PROFILE:

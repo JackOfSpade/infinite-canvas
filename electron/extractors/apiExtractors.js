@@ -93,7 +93,7 @@ function stripHtml(html) {
  * Fetch jobs from LinkedIn's public API endpoint (no login needed).
  * This replaces the Puppeteer-based LinkedIn scraper.
  */
-export async function fetchLinkedInJobs(query, signal = null) {
+export async function fetchLinkedInJobs(query, signal = null, maxAgeDays = null) {
   const allJobs = [];
 
   // Fetch 2 pages (50 results max) to stay polite
@@ -104,6 +104,10 @@ export async function fetchLinkedInJobs(query, signal = null) {
         keywords: query,
         start: String(start),
       });
+      // LinkedIn's "Time Posted" filter takes seconds (`r604800` = past week)
+      if (maxAgeDays && maxAgeDays > 0) {
+        params.set('f_TPR', `r${Math.floor(maxAgeDays * 86400)}`);
+      }
 
       const res = await fetch(`https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?${params}`, {
         headers: {
@@ -321,7 +325,7 @@ export async function fetchLeverJobs(query, signal = null) {
  * @param {string} apiKey — USAJobs API key (from .env or config)
  * @param {string} email — registered email for User-Agent header
  */
-export async function fetchUSAJobs(query, apiKey, email, signal = null) {
+export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDays = 30) {
   if (!apiKey) {
     logger.warn('[USAJobs] No API key configured — skipping');
     return [];
@@ -331,7 +335,7 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null) {
     const params = new URLSearchParams({
       Keyword: query,
       ResultsPerPage: '25',
-      DatePosted: '30', // Last 30 days
+      DatePosted: String(Math.max(1, Math.floor(maxAgeDays || 30))),
     });
 
     const res = await fetch(`https://data.usajobs.gov/api/search?${params}`, {

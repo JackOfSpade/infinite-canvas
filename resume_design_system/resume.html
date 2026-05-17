@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Anya R. Castellanos · Staff Engineer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<!-- Design tokens (typography, color, spacing) -->
+<link rel="stylesheet" href="colors_and_type.css">
+
+<style>
+/* =========================================================
+   resume.html — single-file template
+   Semantic markup maps 1:1 to JSON Resume v1.0.0 + the
+   following namespaced custom fields:
+     work[].highlights[i].x_scope     → inline scope metric
+     work[].highlights[i].x_tradeoff  → "decision · alt · reason"
+     work[].highlights[i].x_ai_assisted = true
+     work[].x_summary                 → role-level scope summary
+     projects[].x_metrics             → scale numbers block
+   =========================================================*/
+
+/* -------- viewport / page chrome (screen preview only) -------- */
+@media screen {
+  body {
+    padding: 32px 16px 64px;
+    background:
+      radial-gradient(ellipse at top,
+        #EEE9DC 0%, #E6E0CF 60%, #DCD5C2 100%);
+    min-height: 100vh;
+  }
+  .page {
+    background: var(--bg);
+    width: var(--page-w);
+    min-height: var(--page-h);
+    margin: 0 auto 24px;
+    padding: var(--margin-top) var(--margin-side) var(--margin-bot);
+    box-shadow:
+      0 1px 0 rgba(26,24,21,0.04),
+      0 24px 48px -16px rgba(26,24,21,0.18),
+      0 4px 12px -4px rgba(26,24,21,0.10);
+    box-sizing: border-box;
+  }
+}
+
+/* -------- print: CSS Paged Media -------- */
+@page {
+  size: Letter;
+  margin: 0;     /* margins handled inside .page so screen matches print */
+}
+@media print {
+  html, body { background: var(--bg); }
+  body { padding: 0; }
+  .page {
+    width: auto;
+    min-height: auto;
+    margin: 0;
+    padding: var(--margin-top) var(--margin-side) var(--margin-bot);
+    box-shadow: none;
+    page-break-after: always;
+  }
+  .page:last-child { page-break-after: auto; }
+}
+
+/* =========================================================
+   Header — name, tagline, contact line. All body text;
+   never use document <header> for parser-critical info.
+   =========================================================*/
+.resume-header {
+  margin-bottom: var(--s-9);
+}
+.name {
+  font-family: var(--ff-display);
+  font-weight: var(--fw-semibold);
+  font-size: var(--fs-display);
+  line-height: var(--lh-display);
+  letter-spacing: var(--tr-display);
+  color: var(--accent-on);
+  margin: 0 0 var(--s-2);
+}
+.tagline {
+  font-size: var(--fs-h3);
+  font-weight: var(--fw-regular);
+  color: var(--ink-2);
+  margin: 0 0 var(--s-5);
+  letter-spacing: var(--tr-tight);
+}
+.contact {
+  font-size: var(--fs-small);
+  color: var(--ink-1);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--s-5);
+  row-gap: var(--s-2);
+}
+.contact .sep { color: var(--ink-4); user-select: none; }
+.contact a { border-bottom-color: rgba(26,24,21,0.18); }
+
+/* =========================================================
+   Section header
+   Small uppercase mark + thin rule that fills the rest of
+   the line. Quiet, editorial. Same height as one line of body.
+   =========================================================*/
+.section {
+  margin-top: var(--s-9);
+}
+.section:first-of-type { margin-top: 0; }
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-5);
+  margin: 0 0 var(--s-6);
+  break-after: avoid;
+}
+.section-head h2 {
+  font-family: var(--ff-body);
+  font-size: var(--fs-h2);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tr-h2);
+  text-transform: uppercase;
+  color: var(--ink-1);
+  margin: 0;
+  flex-shrink: 0;
+}
+.section-head .rule {
+  flex: 1;
+  height: var(--rule-weight);
+  background: var(--bg-rule);
+  align-self: center;
+  margin-top: 1pt;
+}
+
+/* =========================================================
+   Role — the core repeating block.
+   Two-line header: (line 1) title · company   ·   dates
+                    (line 2) scope summary     ·   location
+   Below: bullets at full content width.
+   =========================================================*/
+.role {
+  margin-bottom: var(--s-8);
+  /* Don't try to keep a 6-bullet role unsplit — just protect
+     the header and ensure no orphan first bullet. */
+}
+.role:last-child { margin-bottom: 0; }
+
+.role-header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: var(--col-gap);
+  align-items: baseline;
+  break-after: avoid;
+  margin-bottom: var(--s-3);
+}
+.role-title-line {
+  font-size: var(--fs-h3);
+  font-weight: var(--fw-semibold);
+  color: var(--ink-1);
+  letter-spacing: var(--tr-tight);
+}
+.role-title-line .company { font-weight: var(--fw-semibold); }
+.role-title-line .title-sep {
+  color: var(--ink-4);
+  font-weight: var(--fw-regular);
+  margin: 0 0.35em;
+}
+.role-dates {
+  font-size: var(--fs-small);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.role-meta {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: var(--col-gap);
+  align-items: baseline;
+  margin-bottom: var(--s-4);
+  break-after: avoid;
+}
+.role-summary {
+  font-size: var(--fs-small);
+  color: var(--ink-2);
+  font-style: italic;
+  letter-spacing: var(--tr-tight);
+}
+.role-location {
+  font-size: var(--fs-small);
+  color: var(--ink-2);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* =========================================================
+   Highlights / bullets
+   Standard bullet glyph (·), tight enough to scan vertically,
+   roomy enough to wrap to 1.5–2 lines cleanly.
+   =========================================================*/
+.highlights {
+  margin: 0;
+  padding: 0;
+}
+.highlights li {
+  position: relative;
+  padding-left: 1.05em;
+  margin-bottom: var(--s-3);
+  line-height: var(--lh-body);
+  break-inside: avoid;          /* keep a bullet's lines together */
+  orphans: 2;
+  widows: 2;
+}
+.highlights li:last-child { margin-bottom: 0; }
+.highlights li::before {
+  content: "•";
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--ink-3);
+  font-size: 1em;
+  line-height: var(--lh-body);
+}
+
+/* Don't orphan the first bullet from its role header. */
+.role-meta + .highlights > li:first-child,
+.role-header + .highlights > li:first-child { break-before: avoid; }
+
+/* -------- inline annotations on a bullet -------- */
+.scope, .tradeoff {
+  font-size: var(--fs-caption);
+  color: var(--ink-2);        /* bumped from --ink-3: staff-level thinking
+                                 should register on a skim. Same inline
+                                 placement so the bullet and reasoning
+                                 stay visually coupled. */
+  letter-spacing: var(--tr-tight);
+}
+.scope::before  { content: " — "; color: var(--ink-4); }
+.tradeoff       { font-style: italic; }
+.tradeoff::before {
+  content: " · trade-off: ";
+  color: var(--ink-4);
+  font-style: normal;
+}
+
+/* AI-assisted bullets get NO visual treatment, only a data
+   attribute. The brief: "treated like any other bullet visually
+   but with semantic markup so it can be surfaced or hidden." */
+.highlights li[data-ai-assisted="true"] { /* intentionally empty */ }
+
+/* =========================================================
+   Selected Systems / Projects
+   Compact tabular block: name · one-line description · metrics.
+   =========================================================*/
+.projects { display: block; }
+.project  { margin-bottom: var(--s-5); break-inside: avoid; }
+.project:last-child { margin-bottom: 0; }
+
+.project-name {
+  font-weight: var(--fw-semibold);
+  color: var(--ink-1);
+}
+.project-desc {
+  color: var(--ink-1);
+}
+.project-metrics {
+  display: block;
+  margin-top: var(--s-1);
+  font-family: var(--ff-mono);
+  font-size: var(--fs-mono);
+  letter-spacing: var(--tr-mono);
+  color: var(--ink-2);
+}
+.project-metrics .dot {
+  color: var(--ink-4);
+  margin: 0 0.5em;
+}
+
+/* =========================================================
+   Skills by category
+   Two-column on screen (wide), one-column collapses on print
+   for shorter lists. Plex Mono for the technology names so
+   they read as terms, not prose.
+   =========================================================*/
+.skills {
+  display: grid;
+  grid-template-columns: var(--col-meta-w) 1fr;
+  column-gap: var(--col-gap);
+  row-gap: var(--s-3);
+}
+.skills dt {
+  font-size: var(--fs-small);
+  color: var(--ink-2);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tr-tight);
+  break-after: avoid;
+}
+.skills dd {
+  margin: 0;
+  font-family: var(--ff-mono);
+  font-size: var(--fs-mono);
+  letter-spacing: var(--tr-mono);
+  color: var(--ink-1);
+  line-height: var(--lh-snug);
+}
+.skills dd .sep { color: var(--ink-4); margin: 0 0.35em; }
+
+/* =========================================================
+   Education
+   Single line per entry; same meta-line grid as roles.
+   =========================================================*/
+.edu-line {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: var(--col-gap);
+  align-items: baseline;
+}
+.edu-line + .edu-line { margin-top: var(--s-3); }
+.edu-school { font-weight: var(--fw-semibold); }
+.edu-meta   { font-size: var(--fs-small); color: var(--ink-2); white-space: nowrap; }
+
+/* =========================================================
+   Page-break rules — last line of defence.
+   Keep role headers with their first bullet; keep a project
+   block together; never break a single bullet's lines.
+   =========================================================*/
+.section-head    { break-after: avoid; }
+.role-header     { break-after: avoid; }
+.role-meta       { break-after: avoid; }
+.project         { break-inside: avoid; }
+.edu-line        { break-inside: avoid; }
+
+/* =========================================================
+   Utility — tabular numerals everywhere a date/QPS/$ appears
+   so digit columns align across bullets visually.
+   =========================================================*/
+.tnum, .role-dates, .project-metrics, .edu-meta {
+  font-variant-numeric: tabular-nums;
+}
+</style>
+</head>
+
+<body>
+<main class="page" role="document"
+      itemscope itemtype="https://schema.org/Person">
+
+<!-- ============= Header (basics) ============= -->
+<header class="resume-header">
+  <h1 class="name" itemprop="name">Anya R. Castellanos</h1>
+  <p class="tagline" itemprop="jobTitle">
+    Staff Engineer · distributed systems &amp; storage infrastructure
+  </p>
+  <p class="contact" role="group" aria-label="Contact">
+    <span itemprop="address" itemscope itemtype="https://schema.org/PostalAddress">
+      <span itemprop="addressLocality">Brooklyn, NY</span>
+    </span>
+    <span class="sep" aria-hidden="true">·</span>
+    <a href="mailto:anya@castellanos.dev" itemprop="email">anya@castellanos.dev</a>
+    <span class="sep" aria-hidden="true">·</span>
+    <a href="https://github.com/acastellanos" itemprop="sameAs">github.com/acastellanos</a>
+    <span class="sep" aria-hidden="true">·</span>
+    <a href="https://linkedin.com/in/anyacastellanos" itemprop="sameAs">linkedin.com/in/anyacastellanos</a>
+    <span class="sep" aria-hidden="true">·</span>
+    <a href="https://castellanos.dev" itemprop="url">castellanos.dev</a>
+  </p>
+</header>
+
+<!-- ============= Experience (work) ============= -->
+<section class="section" aria-labelledby="sec-experience">
+  <div class="section-head">
+    <h2 id="sec-experience">Experience</h2>
+    <span class="rule" aria-hidden="true"></span>
+  </div>
+
+  <!-- Role 1 — Staff @ Tessera (current, 4y) -->
+  <article class="role" itemprop="hasOccupation" itemscope itemtype="https://schema.org/EmployeeRole">
+    <div class="role-header">
+      <p class="role-title-line">
+        <span class="title" itemprop="roleName">Staff Engineer</span>
+        <span class="title-sep">·</span>
+        <span class="company" itemprop="memberOf">Tessera Labs</span>
+      </p>
+      <p class="role-dates"><time datetime="2022-03">Mar 2022</time> – <time>Present</time></p>
+    </div>
+    <div class="role-meta">
+      <p class="role-summary">Storage platform — tech lead, team of 8; query, ingest, replication.</p>
+      <p class="role-location">Brooklyn, NY</p>
+    </div>
+    <ul class="highlights">
+      <li>
+        Set technical direction for the storage platform across three sub-teams; chair the
+        platform review forum and own the published service contracts for 14 shared
+        components.
+      </li>
+      <li>
+        Designed the sharding strategy for the timeseries write path, sustaining
+        <strong>1.4M QPS</strong> at <strong>p99 38&nbsp;ms</strong> across a 19&nbsp;PB
+        dataset; replaced the prior consistent-hash scheme after it misbalanced under
+        tenant skew.
+        <span class="tradeoff">accepted +20&nbsp;ms tail latency for 4× write capacity and
+        bounded hot-shard recovery time.</span>
+      </li>
+      <li>
+        Led the query layer rewrite from a Postgres-backed CTE engine to a custom
+        vectorized executor; cut p99 query latency
+        <strong>2.1&nbsp;s → 340&nbsp;ms</strong> at constant cost-per-query.
+        <span class="scope">8 engineers, 11-month project, no read-path regressions in
+        cutover</span>
+      </li>
+      <li>
+        Owned the multi-region replication design: 3-region active/active with bounded
+        staleness ≤ 200 ms; chose CRDT-based metadata sync over Raft after benchmarking
+        showed Raft leader-election added ~4 s of unavailability per quorum loss.
+        <span class="tradeoff">CRDT vs. Raft — picked eventual convergence for metadata
+        because operator pain on Raft quorum loss outweighed the consistency benefit at
+        our read/write ratio.</span>
+      </li>
+      <li data-ai-assisted="true">
+        Built an internal review agent on Claude Code that summarizes PR diffs against
+        the platform contract and flags shared-service ownership conflicts at review time;
+        cross-team review cycle dropped from <strong>3.2 → 0.7 days</strong> median,
+        adopted by 4 sibling platform teams.
+      </li>
+      <li>
+        Mentored three senior engineers into staff-track scope; two were promoted within
+        the engagement. Authored the team's career-ladder examples doc, since adopted org-wide.
+      </li>
+    </ul>
+  </article>
+
+  <!-- Role 2 — Senior @ Helix (3y) -->
+  <article class="role">
+    <div class="role-header">
+      <p class="role-title-line">
+        <span class="title">Senior Software Engineer</span>
+        <span class="title-sep">·</span>
+        <span class="company">Helix Cloud</span>
+      </p>
+      <p class="role-dates"><time datetime="2019-02">Feb 2019</time> – <time datetime="2022-02">Feb 2022</time></p>
+    </div>
+    <div class="role-meta">
+      <p class="role-summary">Edge Compute — tech lead, team of 12; runtime &amp; control plane.</p>
+      <p class="role-location">Remote (US)</p>
+    </div>
+    <ul class="highlights">
+      <li>
+        Drove the cold-start program for the V8 isolate runtime: boot time
+        <strong>380&nbsp;ms → 18&nbsp;ms p95</strong> across the fleet. The
+        snapshot-restore design (joint with the runtime team) is now in use across three
+        product lines.
+      </li>
+      <li>
+        Designed and shipped the autoscaler rewrite for the regional control plane;
+        replaced the single-leader scheduler with a sharded scheduler keyed by
+        <code>(tenant, region)</code>, lifting the per-region ceiling from 8K to
+        <strong>110K concurrent functions</strong>.
+        <span class="scope">control plane serving ~1.1M tenants</span>
+      </li>
+      <li>
+        Wrote the post-incident retrospective for the 2020 us-east-2 control-plane
+        outage; the published findings became the basis for the company-wide
+        &ldquo;blast radius&rdquo; review now mandatory for new tier-1 services.
+      </li>
+      <li>
+        Established the SLO program for Edge Compute. Defined the availability and
+        latency SLOs the org still operates on, including the error-budget policy that
+        gates feature work.
+      </li>
+    </ul>
+  </article>
+
+  <!-- Role 3 — earlier (2y) -->
+  <article class="role">
+    <div class="role-header">
+      <p class="role-title-line">
+        <span class="title">Software Engineer</span>
+        <span class="title-sep">·</span>
+        <span class="company">Cardinal Systems</span>
+      </p>
+      <p class="role-dates"><time datetime="2017-06">Jun 2017</time> – <time datetime="2019-02">Feb 2019</time></p>
+    </div>
+    <div class="role-meta">
+      <p class="role-summary">Search &amp; ingestion — IC on a 6-person team.</p>
+      <p class="role-location">San Francisco, CA</p>
+    </div>
+    <ul class="highlights">
+      <li>
+        Built the document indexing pipeline (Kafka → custom enrichment service →
+        Elasticsearch) sustaining <strong>50K docs/sec</strong>, ~3× the Logstash-based
+        predecessor at a quarter of the compute footprint.
+      </li>
+      <li>
+        Led the cutover of the auth service from monolith to a standalone Go service
+        handling <strong>22K req/s</strong> at p99 9 ms; zero downtime, traffic-shifted
+        over 72 hours behind a feature flag.
+      </li>
+    </ul>
+  </article>
+
+</section>
+
+<!-- ============= Selected Systems (projects) ============= -->
+<section class="section" aria-labelledby="sec-systems">
+  <div class="section-head">
+    <h2 id="sec-systems">Selected Systems</h2>
+    <span class="rule" aria-hidden="true"></span>
+  </div>
+
+  <div class="projects">
+    <article class="project">
+      <p>
+        <span class="project-name">Tessera Timeseries Write Path</span>
+        <span class="title-sep">·</span>
+        <span class="project-desc">sharded ingest tier with CRDT-replicated metadata
+        across three regions; custom vectorized executor on the read side.</span>
+      </p>
+      <span class="project-metrics">
+        1.4M QPS<span class="dot">·</span>p99 38 ms<span class="dot">·</span>19 PB<span class="dot">·</span>3 regions
+      </span>
+    </article>
+
+    <article class="project">
+      <p>
+        <span class="project-name">Helix Edge V8 Snapshot-Restore</span>
+        <span class="title-sep">·</span>
+        <span class="project-desc">deduplicated heap-snapshot service feeding warm
+        isolates; reduced cold-start blast radius from per-request to per-deploy.</span>
+      </p>
+      <span class="project-metrics">
+        cold-start 380→18 ms p95<span class="dot">·</span>−73% snapshot egress<span class="dot">·</span>3 product lines
+      </span>
+    </article>
+
+    <article class="project">
+      <p>
+        <span class="project-name">Cardinal Ingestion Pipeline</span>
+        <span class="title-sep">·</span>
+        <span class="project-desc">Kafka-fed enrichment + ES sink replacing a
+        Logstash topology; back-pressure and replay built into the enrichment
+        protocol.</span>
+      </p>
+      <span class="project-metrics">
+        50K docs/sec<span class="dot">·</span>−74% ingest cost<span class="dot">·</span>p99 enrichment 12 ms
+      </span>
+    </article>
+  </div>
+</section>
+
+<!-- ============= Skills ============= -->
+<section class="section" aria-labelledby="sec-skills">
+  <div class="section-head">
+    <h2 id="sec-skills">Skills</h2>
+    <span class="rule" aria-hidden="true"></span>
+  </div>
+
+  <dl class="skills">
+    <dt>Languages</dt>
+    <dd>Go<span class="sep">·</span>Rust<span class="sep">·</span>Python<span class="sep">·</span>TypeScript<span class="sep">·</span>SQL</dd>
+
+    <dt>Distributed&nbsp;Systems</dt>
+    <dd>Raft<span class="sep">·</span>Paxos<span class="sep">·</span>CRDTs<span class="sep">·</span>consistent hashing<span class="sep">·</span>leader election<span class="sep">·</span>gossip<span class="sep">·</span>multi-region failover<span class="sep">·</span>vector clocks</dd>
+
+    <dt>Data</dt>
+    <dd>Postgres<span class="sep">·</span>ClickHouse<span class="sep">·</span>FoundationDB<span class="sep">·</span>Kafka<span class="sep">·</span>Elasticsearch<span class="sep">·</span>Snowflake</dd>
+
+    <dt>Infrastructure</dt>
+    <dd>Kubernetes<span class="sep">·</span>Terraform<span class="sep">·</span>AWS (us-east, eu-west, ap-northeast)<span class="sep">·</span>Cloudflare Workers<span class="sep">·</span>gRPC<span class="sep">·</span>Envoy</dd>
+
+    <dt>Observability</dt>
+    <dd>OpenTelemetry<span class="sep">·</span>Prometheus<span class="sep">·</span>Grafana<span class="sep">·</span>Honeycomb<span class="sep">·</span>structured logging<span class="sep">·</span>SLOs &amp; error budgets</dd>
+  </dl>
+</section>
+
+<!-- ============= Education ============= -->
+<section class="section" aria-labelledby="sec-education">
+  <div class="section-head">
+    <h2 id="sec-education">Education</h2>
+    <span class="rule" aria-hidden="true"></span>
+  </div>
+
+  <div class="edu-line">
+    <p>
+      <span class="edu-school">Carnegie Mellon University</span>
+      <span class="title-sep">·</span>
+      <span class="edu-degree">B.S. Computer Science</span>
+    </p>
+    <p class="edu-meta">2017 · Pittsburgh, PA</p>
+  </div>
+</section>
+
+</main>
+
+<!-- =========================================================
+     JSON Resume v1.0.0 schema mirror (with x_* extensions).
+     Kept in-page as a reference for the renderer / future
+     AI edits; not used at runtime.
+     ========================================================= -->
+<script type="application/json" id="resume-data">
+{
+  "basics": {
+    "name": "Anya R. Castellanos",
+    "label": "Staff Engineer · distributed systems & storage infrastructure",
+    "email": "anya@castellanos.dev",
+    "url": "https://castellanos.dev",
+    "location": { "city": "Brooklyn", "region": "NY" },
+    "profiles": [
+      { "network": "GitHub",   "url": "https://github.com/acastellanos" },
+      { "network": "LinkedIn", "url": "https://linkedin.com/in/anyacastellanos" }
+    ]
+  },
+  "work": [
+    {
+      "name": "Tessera Labs",
+      "position": "Staff Engineer",
+      "startDate": "2022-03",
+      "endDate": null,
+      "location": "Brooklyn, NY",
+      "x_summary": "Storage platform — tech lead, team of 8; query, ingest, replication.",
+      "highlights": [
+        { "text": "Set technical direction for the storage platform..." },
+        { "text": "Designed sharding strategy for the timeseries write path...",
+          "x_tradeoff": "accepted +20ms tail latency for 4× write capacity..." },
+        { "text": "Built an internal review agent on Claude Code...",
+          "x_ai_assisted": true }
+      ]
+    }
+  ],
+  "projects": [
+    { "name": "Tessera Timeseries Write Path",
+      "description": "sharded ingest tier with CRDT-replicated metadata...",
+      "x_metrics": ["1.4M QPS", "p99 38 ms", "19 PB", "3 regions"] }
+  ],
+  "skills": [
+    { "name": "Languages", "keywords": ["Go", "Rust", "Python", "TypeScript", "SQL"] }
+  ],
+  "education": [
+    { "institution": "Carnegie Mellon University",
+      "studyType": "B.S.", "area": "Computer Science",
+      "endDate": "2017", "location": "Pittsburgh, PA" }
+  ]
+}
+</script>
+
+</body>
+</html>

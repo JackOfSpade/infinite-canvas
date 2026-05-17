@@ -120,7 +120,12 @@ export function useCanvasPersistence({
       // Flush the navigation stack to get complete root-level data
       const rawData = flushStack ? flushStack() : { nodes: nodesRef.current, edges: edgesRef.current, drawings: drawingsRef.current };
       // Strip transient visual properties (e.g. source-filter opacity on job cards)
-      const data = { ...rawData, nodes: sanitizeNodesForSave(rawData.nodes) };
+      // and drop ephemeral nodes (e.g. price-research comp-source cards).
+      const sanitizedNodes = sanitizeNodesForSave(rawData.nodes);
+      // Drop edges that reference removed ephemerals so the saved file stays consistent.
+      const liveNodeIds = new Set(sanitizedNodes.map(n => n.id));
+      const sanitizedEdges = (rawData.edges || []).filter(e => liveNodeIds.has(e.source) && liveNodeIds.has(e.target));
+      const data = { ...rawData, nodes: sanitizedNodes, edges: sanitizedEdges };
       // Read currentFile via ref to avoid this callback being recreated on every file-path change
       const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFileRef.current });
       if (res?.success && res.filePath) {

@@ -138,20 +138,6 @@ body {
   to   { transform: translateX(0);     opacity: 1; }
 }
 
-/* ======== AnimatedSourceRing Transitions ======== */
-
-@keyframes completionBounce {
-  0% { transform: scale(1); }
-  40% { transform: scale(1.25); }
-  70% { transform: scale(0.95); }
-  100% { transform: scale(1); }
-}
-
-@keyframes activePulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.08); opacity: 0.85; }
-}
-
 /* ======== Onboarding Overlay ======== */
 
 .onboarding-panel {

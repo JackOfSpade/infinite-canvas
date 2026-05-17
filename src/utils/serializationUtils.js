@@ -99,7 +99,12 @@ export function migrateGroupNodes(nodes) {
  */
 export function sanitizeNodesForSave(nodes) {
   if (!Array.isArray(nodes)) return nodes;
-  return nodes.map(n => {
+  // Drop ephemeral nodes (e.g. comp-source cards spawned during price research).
+  // These are spawned and reaped by their owning hub within a single session;
+  // persisting them would leave orphaned cards across reload with no hub
+  // listening for their progress events.
+  const filtered = nodes.filter(n => n.type !== 'compsourcecard' && !n.data?.ephemeral);
+  return filtered.map(n => {
     // Recurse into nested canvas nodes first so deeply-nested nodes are also sanitized.
     // Also strip all transient data fields (isDropTarget, _hmr) from this group node.
     if (n.type === 'group' && n.data?.canvasData) {

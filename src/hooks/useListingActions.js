@@ -136,7 +136,9 @@ export function useListingActions(id, data) {
         if (isMountedRef.current) setPriceInput(result.pricing.recommended_price || '');
         onStateChange?.('priced', result);
       } else {
-        onStateChange?.('priced-empty', result);
+        const err = new Error(result.error);
+        if (result.isRateLimit) err.isRateLimit = true;
+        throw err;
       }
       return result;
     } catch (err) {

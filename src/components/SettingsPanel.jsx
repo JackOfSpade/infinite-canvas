@@ -92,6 +92,28 @@ function ShortcutRow({ id, binding, onSave, isCapturing, onStartCapture, onCance
  */
 export function SettingsPanel({ isOpen, onClose, settings, updateSetting, updateShortcut, resetShortcuts }) {
   const [capturingId, setCapturingId] = useState(null);
+  const [aiSettings, setAiSettings] = useState(null);
+
+  useEffect(() => {
+    if (!isOpen || !window.electronAPI?.getSettings) return;
+    let cancelled = false;
+    window.electronAPI.getSettings()
+      .then((storeData) => {
+        if (cancelled) return;
+        if (storeData && storeData.ai) setAiSettings(storeData.ai);
+      })
+      .catch(() => { /* IPC unavailable — leave loading state until next open */ });
+    return () => { cancelled = true; };
+  }, [isOpen]);
+
+  const updateAISetting = useCallback((key, value) => {
+    if (!window.electronAPI?.updateSettings || !aiSettings) return;
+    const next = { ...aiSettings, [key]: value };
+    setAiSettings(next);
+    // IPC outside the setState updater so it fires exactly once — strict /
+    // concurrent mode may invoke updaters twice, which would double-write.
+    window.electronAPI.updateSettings({ ai: next });
+  }, [aiSettings]);
 
   // Close on Escape (also cancels capturing)
   useEffect(() => {
@@ -146,6 +168,145 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
 
         {/* Scrollable Content */}
         <div className="px-6 py-5 space-y-6 overflow-y-auto custom-scrollbar flex-1">
+
+          {/* ── AI Models & APIs ─────────────────────────────────────── */}
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <Sparkles size={13} className="text-white/30" />
+              <span className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">
+                AI Models & APIs
+              </span>
+            </div>
+
+            {aiSettings ? (
+              <div className="space-y-4">
+                {/* Provider Selection */}
+                <div>
+                  <div className="text-white/50 text-[11px] mb-1.5">Primary AI Provider</div>
+                  <div className="flex gap-1.5">
+                    {['gemini', 'claude'].map(p => (
+                      <button
+                        key={p}
+                        onClick={() => updateAISetting('provider', p)}
+                        className={`flex-1 py-1.5 rounded-lg text-[11px] font-medium transition-all capitalize ${
+                          aiSettings.provider === p
+                            ? 'bg-blue-500/30 border border-blue-500/50 text-blue-300'
+                            : 'bg-white/[0.03] border border-white/[0.06] text-white/35 hover:bg-white/[0.07] hover:text-white/60'
+                        }`}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Gemini Settings */}
+                {aiSettings.provider === 'gemini' && (
+                  <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
+                    <div>
+                      <div className="text-white/50 text-[11px] mb-1">Model</div>
+                      <select
+                        value={aiSettings.geminiModel || 'gemini-2.5-flash'}
+                        onChange={(e) => updateAISetting('geminiModel', e.target.value)}
+                        className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
+                      >
+                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                        <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                        <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                      </select>
+                    </div>
+                    <div>
+                      <div className="flex justify-between items-end mb-1">
+                        <div className="text-white/50 text-[11px]">API Key (AI Studio)</div>
+                        <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-[9px] text-blue-400 hover:underline">Get Key</a>
+                      </div>
+                      <input
+                        type="password"
+                        placeholder="AIzaSy..."
+                        value={aiSettings.geminiApiKey || ''}
+                        onChange={(e) => updateAISetting('geminiApiKey', e.target.value)}
+                        className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
+                      />
+                    </div>
+
+                    {/* Vertex AI service-account.json — alternative to the API key */}
+                    <div>
+                      <div className="text-white/50 text-[11px] mb-1">
+                        Or service-account.json (Vertex AI)
+                      </div>
+                      <div className="flex gap-1.5">
+                        <input
+                          type="text"
+                          readOnly
+                          placeholder="No file selected"
+                          value={aiSettings.serviceAccountPath || ''}
+                          className="flex-1 bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-[10px] text-white/60 focus:outline-none truncate"
+                          title={aiSettings.serviceAccountPath || ''}
+                        />
+                        <button
+                          onClick={async () => {
+                            const res = await window.electronAPI?.pickServiceAccountFile?.();
+                            if (res?.path) updateAISetting('serviceAccountPath', res.path);
+                          }}
+                          className="px-2 py-1.5 rounded-md bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 text-[10px] font-medium border border-blue-500/30 transition-colors"
+                        >
+                          Browse…
+                        </button>
+                        {aiSettings.serviceAccountPath && (
+                          <button
+                            onClick={() => updateAISetting('serviceAccountPath', '')}
+                            className="px-2 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-white/40 text-[10px] border border-white/10 transition-colors"
+                            title="Clear configured path"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                      <p className="text-white/30 text-[9px] mt-1">
+                        Either an API key or a service-account file works. The file is preferred when both are set.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Claude Settings */}
+                {aiSettings.provider === 'claude' && (
+                  <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
+                    <div>
+                      <div className="text-white/50 text-[11px] mb-1">Model</div>
+                      <select 
+                        value={aiSettings.claudeModel || 'claude-3-5-sonnet-latest'}
+                        onChange={(e) => updateAISetting('claudeModel', e.target.value)}
+                        className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
+                      >
+                        <option value="claude-3-5-sonnet-latest">Claude 3.5 Sonnet</option>
+                        <option value="claude-3-5-haiku-latest">Claude 3.5 Haiku</option>
+                        <option value="claude-3-opus-latest">Claude 3 Opus</option>
+                      </select>
+                    </div>
+                    <div>
+                      <div className="flex justify-between items-end mb-1">
+                        <div className="text-white/50 text-[11px]">API Key</div>
+                        <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-[9px] text-blue-400 hover:underline">Get Key</a>
+                      </div>
+                      <input 
+                        type="password"
+                        placeholder="sk-ant-api..."
+                        value={aiSettings.anthropicApiKey || ''}
+                        onChange={(e) => updateAISetting('anthropicApiKey', e.target.value)}
+                        className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-white/30 text-xs text-center py-2">Loading settings...</div>
+            )}
+          </div>
+
+          <div className="w-full h-px bg-white/[0.06]" />
 
           {/* ── Animation Speed ─────────────────────────────────────── */}
           <div>

@@ -12,6 +12,7 @@ import { closeStealthBrowser } from './ipc/stealthBrowser.js';
 import { registerGeminiHandlers } from './ipc/gemini.js';
 import { registerBugReportHandlers } from './ipc/bugReport.js';
 import { registerNetworkHandlers } from './ipc/network.js';
+import { registerSettingsHandlers } from './ipc/settings.js';
 import fs from 'fs';
 import os from 'node:os';
 import { Readable } from 'node:stream';
@@ -466,6 +467,7 @@ if (!gotTheLock) {
     registerGeminiHandlers();
     registerBugReportHandlers();
     registerNetworkHandlers();
+    registerSettingsHandlers();
 
     electronPkg.ipcMain.handle('prompt-unsaved-changes', async (event, actionName) => {
       const win = BrowserWindow.fromWebContents(event.sender);

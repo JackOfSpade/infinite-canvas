@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<link rel="stylesheet" href="_card.css">
+<style>
+  .role-mini { display: grid; grid-template-columns: 1fr auto; gap: 4px 24px; align-items: baseline; }
+  .role-mini .title { font-size: 11pt; font-weight: 600; color: var(--ink-1); }
+  .role-mini .dates { font-size: 9.5pt; color: var(--ink-2); white-space: nowrap; text-align: right; }
+  .role-mini .summary { font-size: 9.5pt; color: var(--ink-2); font-style: italic; }
+  .role-mini .loc { font-size: 9.5pt; color: var(--ink-2); text-align: right; white-space: nowrap; }
+  .role-mini .bullet { grid-column: 1 / -1; padding-left: 1.05em; position: relative; font-size: 10.25pt; line-height: 1.45; margin-top: 4px; }
+  .role-mini .bullet::before { content: "•"; position: absolute; left: 0; color: var(--ink-3); }
+  .role-mini .bullet .tradeoff { font-size: 8.75pt; color: var(--ink-2); font-style: italic; }
+  .role-mini .bullet .tradeoff::before { content: " · trade-off: "; color: var(--ink-4); font-style: normal; }
+  .legend { font-family: var(--ff-mono); font-size: 8pt; color: var(--ink-3); letter-spacing: -0.005em; margin-top: 14px; }
+  .legend .swatch-inline { display: inline-block; width: 9px; height: 9px; margin: 0 4px 0 0; vertical-align: -1px; }
+</style>
+</head><body>
+<div class="role-mini">
+  <div class="title">Staff Engineer · Tessera Labs</div>
+  <div class="dates">Mar 2022 – Present</div>
+  <div class="summary">Storage platform — tech lead, team of 8.</div>
+  <div class="loc">Brooklyn, NY</div>
+  <div class="bullet">Designed sharding for 1.4M QPS at p99 38 ms.<span class="tradeoff">+20 ms tail for 4× write capacity.</span></div>
+</div>
+<div class="legend">
+  <span class="swatch-inline" style="background:#1A1815"></span>ink-1 · title, bullet
+  &nbsp;&nbsp;<span class="swatch-inline" style="background:#54504A"></span>ink-2 · meta, trade-off
+  &nbsp;&nbsp;<span class="swatch-inline" style="background:#8C857A"></span>ink-3 · captions
+  &nbsp;&nbsp;<span class="swatch-inline" style="background:#B6AFA2"></span>ink-4 · separators
+</div>
+</body></html>

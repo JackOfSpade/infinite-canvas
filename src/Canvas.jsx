@@ -14,12 +14,15 @@ import {
 import { DocumentNode } from './nodes/DocumentNode';
 import { TextNode } from './nodes/TextNode';
 import { CanvasNode } from './nodes/CanvasNode';
-import { ResizeCorrection, ResizeActive } from './utils/canvasInteractions';
+import { ResizeCorrection } from './utils/canvasInteractions';
 import { LinkNode } from './nodes/LinkNode';
 import { ListingNode } from './nodes/ListingNode';
 import { JobCardNode } from './nodes/JobCardNode';
 import { JobHubNode } from './nodes/JobHubNode';
 import {SellHubNode} from './nodes/SellHubNode';
+import { MarketplaceCardNode } from './nodes/MarketplaceCardNode';
+import { CompSourceCardNode } from './nodes/CompSourceCardNode';
+import { JobSourceCardNode } from './nodes/JobSourceCardNode';
 import {CustomizeDialog} from './components/CustomizeDialog';
 
 import { createTextNode } from './utils/nodeFactory';
@@ -72,6 +75,9 @@ const nodeTypes = {
   jobcard: JobCardNode,
   jobhub: JobHubNode,
   sellhub: SellHubNode,
+  marketplacecard: MarketplaceCardNode,
+  compsourcecard: CompSourceCardNode,
+  jobsourcecard: JobSourceCardNode,
 };
 
 // ── Canvas ───────────────────────────────────────────────────────────────────
@@ -242,6 +248,13 @@ export function Canvas() {
     isAnimatingRef: isNavigationAnimatingRef,
     saveStateRef,
   });
+
+  // Exposes currentFile to descendants (e.g. JobHubNode) alongside the
+  // navigation helpers via the same context, avoiding a second provider.
+  const navContextValue = React.useMemo(
+    () => ({ ...navigation, currentFile }),
+    [navigation, currentFile]
+  );
 
   // ── Auto-load previous workspace on mount ───────────────────────────────
   const hasAttemptedAutoLoad = useRef(false);
@@ -507,8 +520,15 @@ export function Canvas() {
         setCustomizeTargetIds(e.detail.ids);
       }
     };
+    const handleOpenSettings = () => {
+      setIsSettingsOpen(true);
+    };
     document.addEventListener('open-multi-customize', handleOpenMulti);
-    return () => document.removeEventListener('open-multi-customize', handleOpenMulti);
+    document.addEventListener('open-settings', handleOpenSettings);
+    return () => {
+      document.removeEventListener('open-multi-customize', handleOpenMulti);
+      document.removeEventListener('open-settings', handleOpenSettings);
+    };
   }, []);
 
   const handleCustomizeApply = useCallback((updates) => {
@@ -611,7 +631,7 @@ export function Canvas() {
           />
         )}
 
-        <CanvasNavigationContext.Provider value={navigation}>
+        <CanvasNavigationContext.Provider value={navContextValue}>
           <ReactFlow
             nodes={nodes}
             edges={edges}

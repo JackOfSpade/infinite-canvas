@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useContext } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
-import { AnimatedSourceRing } from '../components/AnimatedSourceRing';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
 import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
@@ -10,6 +9,7 @@ import { useToast } from '../components/ToastProvider';
 
 import { JobHubProcessingState } from './jobhub/JobHubProcessingState';
 import { JobHubDoneState } from './jobhub/JobHubDoneState';
+import { useCheckAllConnected } from '../hooks/useCheckAllConnected';
 
 const STATE_LABELS = {
   empty: null,
@@ -42,6 +42,7 @@ export function JobHubNode({ id, data }) {
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const addElementsGlobally = nav?.addElementsGlobally;
+  const canvasFilePath = nav?.currentFile || null;
   const processingRef = useRef(false);
   const isMountedRef = useRef(true);
   const { addToast } = useToast();
@@ -64,7 +65,7 @@ export function JobHubNode({ id, data }) {
     if (!window.electronAPI?.onJobSourceProgress) return;
     const cleanup = window.electronAPI.onJobSourceProgress((payload) => {
       const { nodeId, sourceId, status, count } = payload;
-      
+
       // Multi-hub safety: ignore events for other hubs
       if (nodeId && nodeId !== id) return;
 
@@ -73,6 +74,27 @@ export function JobHubNode({ id, data }) {
     });
     return () => cleanup?.();
   }, [id]);
+
+  // Surface the live ring state to the bug-report snapshot so reports about
+  // ring rendering can be diagnosed from the report alone.
+  useEffect(() => {
+    EventLogger.registerNodeState(id, { hubState, sourceProgress });
+    return () => EventLogger.unregisterNodeState(id);
+  }, [id, hubState, sourceProgress]);
+
+  // Settings change → clear any "config missing" error so the user isn't left
+  // staring at a stale warning after they've fixed it. Don't auto-rerun the
+  // pipeline; the user re-triggers via Re-run Search themselves.
+  useEffect(() => {
+    if (!window.electronAPI?.onSettingsChanged) return;
+    const cleanup = window.electronAPI.onSettingsChanged((payload) => {
+      if (!payload?.changedSections?.includes('ai')) return;
+      if (hubState === 'error') {
+        updateGlobal(id, { hubState: 'empty', errorMessage: null, isRateLimit: false });
+      }
+    });
+    return () => cleanup?.();
+  }, [id, hubState, updateGlobal]);
 
   // Combined card opacity: source AND score AND status filters all applied together.
   // Declared before toggleSourceFilter because toggleSourceFilter references it.
@@ -92,12 +114,25 @@ export function JobHubNode({ id, data }) {
     }));
   }, [data.sourceFilter, data.scoreThreshold, data.statusFilters, setNodes]);
 
-  // Source click-through filtering
+  // Source click-through filtering. Now invoked from the JobSourceCardNode
+  // children (via a CustomEvent) rather than the old orbital ring icons.
   const toggleSourceFilter = useCallback((sourceId) => {
     const newFilter = sourceFilter === sourceId ? null : sourceId;
     updateGlobal(id, { sourceFilter: newFilter });
     applyCardFilters({ sourceFilter: newFilter });
   }, [sourceFilter, id, updateGlobal, applyCardFilters]);
+
+  // Listen for filter-toggle dispatches from this hub's source cards. Each
+  // event carries hubId so multi-hub canvases stay independent.
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.detail?.hubId !== id) return;
+      if (!e.detail?.sourceId) return;
+      toggleSourceFilter(e.detail.sourceId);
+    };
+    document.addEventListener('job-source-filter-toggle', handler);
+    return () => document.removeEventListener('job-source-filter-toggle', handler);
+  }, [id, toggleSourceFilter]);
 
   const setScoreThreshold = useCallback((val) => {
     updateGlobal(id, { scoreThreshold: val });
@@ -111,74 +146,72 @@ export function JobHubNode({ id, data }) {
     applyCardFilters({ statusFilters: updated });
   }, [data.statusFilters, id, updateGlobal, applyCardFilters]);
 
-  // Source statuses with live text for the animated ring
-  const getSourceStatuses = useCallback(() => {
-    return JOB_SOURCES.map(s => {
-      if (!ACTIVE_JOB_SOURCES.includes(s.id)) return { ...s, status: 'idle' };
+  // How far back to look for postings on each search. Persisted on node data
+  // so it survives saves and applies to re-runs.
+  const maxAgeDays = data.maxAgeDays || 14;
+  const setMaxAgeDays = useCallback((val) => {
+    const n = Math.max(1, Math.min(180, Math.floor(Number(val) || 14)));
+    updateGlobal(id, { maxAgeDays: n });
+  }, [id, updateGlobal]);
 
-      // Pre-search states — all sources move together
-      if (hubState === 'parsing') {
-        return { ...s, status: 'active', statusText: 'Reading resume...', hoverText: 'Extracting skills, titles, and experience from your resume' };
-      }
-      if (hubState === 'querying') {
-        return { ...s, status: 'active', statusText: 'Building queries...', hoverText: 'AI generating title-based, role-pivot, and skills-only search queries' };
-      }
+  // ── Job-source platform cards (persistent, one per ACTIVE_JOB_SOURCE) ─────
+  // Replaces the orbital ring with real canvas nodes connected by edges.
+  // Each card subscribes to its own progress events and falls back to the
+  // hub's `finalSourceCounts` between runs so the last-known count is shown.
+  const ensureSourceCards = useCallback(() => {
+    const existing = getNodes().filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id);
+    const existingSourceIds = new Set(existing.map(n => n.data?.sourceId));
+    const missing = ACTIVE_JOB_SOURCES
+      .map(sid => JOB_SOURCES.find(s => s.id === sid))
+      .filter(s => s && !existingSourceIds.has(s.id));
+    if (missing.length === 0) return;
 
-      // During search — use per-source progress
-      if (hubState === 'searching') {
-        const progress = sourceProgress[s.id];
-        if (!progress) return { ...s, status: 'active', statusText: 'Waiting...', hoverText: `Queued for search on ${s.name}` };
+    const hubPos = getNode(id)?.position || { x: 0, y: 0 };
+    // Lay missing cards out in a 3-column grid to the left of the hub. The
+    // user can drag them anywhere afterward — initial placement just keeps
+    // them out of the way and visually grouped.
+    const COLS = 3;
+    const CARD_W = 140, CARD_H = 50, GAP_X = 12, GAP_Y = 12;
+    const startOffset = existing.length; // append after any pre-existing cards
+    const stamp = Date.now();
 
-        if (progress.status === 'searching') {
-          return { ...s, status: 'active', statusText: `Searching...`, hoverText: `Scanning ${s.name} for matching jobs` };
-        }
-        if (progress.status === 'done') {
-          return {
-            ...s, status: 'done',
-            statusText: `${progress.count} found`,
-            hoverText: `${progress.count} jobs found on ${s.name}. Click to filter.`,
-            onClick: () => toggleSourceFilter(s.id),
-          };
-        }
-        if (progress.status === 'error') {
-          return { ...s, status: 'error', statusText: 'Failed', hoverText: `${s.name} returned no results (may be blocked)` };
-        }
-        return { ...s, status: 'active', statusText: 'Searching...', hoverText: `Scanning ${s.name}` };
-      }
-
-      // Scoring — all sources show scoring state
-      if (hubState === 'scoring') {
-        const progress = sourceProgress[s.id];
-        if (progress?.status === 'error') {
-          return { ...s, status: 'error', statusText: 'Failed', hoverText: `${s.name} returned no results` };
-        }
-        return { ...s, status: 'active', statusText: `Scoring...`, hoverText: `AI analyzing jobs from ${s.name}` };
-      }
-
-      // Done — show per-source counts with click filtering
-      if (hubState === 'done') {
-        const fallbackCount = data.finalSourceCounts?.[s.id] || 0;
-        const progress = sourceProgress[s.id];
-        if (progress?.status === 'error') {
-          return { ...s, status: 'error', statusText: 'Failed', hoverText: `${s.name} was blocked or returned no results` };
-        }
-        const count = progress?.count || fallbackCount;
-        const isFiltered = sourceFilter === s.id;
-        return {
-          ...s,
-          status: count > 0 ? 'done' : 'error',
-          statusText: isFiltered ? `✦ ${count} shown` : `${count} found`,
-          hoverText: `${count} jobs from ${s.name}. Click to ${isFiltered ? 'show all' : 'filter'}.`,
-          onClick: () => toggleSourceFilter(s.id),
-        };
-      }
-
-      if (hubState === 'error') {
-        return { ...s, status: 'error', statusText: 'Failed', hoverText: data.errorMessage || 'Search encountered an error' };
-      }
-      return { ...s, status: 'idle' };
+    const newNodes = missing.map((source, i) => {
+      const idx = startOffset + i;
+      const col = idx % COLS;
+      const row = Math.floor(idx / COLS);
+      return {
+        id: `js-${id}-${source.id}-${stamp}`,
+        type: 'jobsourcecard',
+        position: {
+          x: hubPos.x - (COLS * (CARD_W + GAP_X)) - 40 + col * (CARD_W + GAP_X),
+          y: hubPos.y + row * (CARD_H + GAP_Y),
+        },
+        data: {
+          sourceId: source.id,
+          name:     source.name,
+          letter:   source.letter,
+          color:    source.color,
+          hubId:    id,
+        },
+      };
     });
-  }, [hubState, sourceProgress, data.errorMessage, sourceFilter, data.finalSourceCounts, toggleSourceFilter]);
+
+    const newEdges = newNodes.map(n => ({
+      id: `edge-${id}-${n.id}`,
+      source: id,
+      target: n.id,
+      type: 'smoothstep',
+      animated: true,
+      style: { stroke: 'rgba(96,165,250,0.5)', strokeWidth: 2 },
+    }));
+
+    if (addElementsGlobally) {
+      addElementsGlobally(id, newNodes, newEdges, 'sibling');
+    } else {
+      addNodes(newNodes);
+      addEdges(newEdges);
+    }
+  }, [id, getNode, getNodes, addElementsGlobally, addNodes, addEdges]);
 
   // Re-apply all filters on mount — opacities are stripped from save files to keep them clean.
   useEffect(() => {
@@ -199,6 +232,11 @@ export function JobHubNode({ id, data }) {
     setSourceProgress({});
     const currentId = id;
 
+    // Spawn (or reuse) one platform card per active job source. Cards subscribe
+    // to per-source progress events themselves, so the hub doesn't need to push
+    // anything to them — they update independently.
+    ensureSourceCards();
+
     // Snapshot the node position so we can spawn siblings near it even if
     // the user navigates away and unmounts this layer of the canvas.
     const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
@@ -210,7 +248,11 @@ export function JobHubNode({ id, data }) {
       if (filePath) {
         updateGlobal(currentId, { hubState: 'parsing' });
         const parseResult = await window.electronAPI.parseResume({ filePath, nodeId: currentId });
-        if (!parseResult.success) throw new Error(parseResult.error || 'Failed to parse resume');
+        if (!parseResult.success) {
+          const err = new Error(parseResult.error || 'Failed to parse resume');
+          if (parseResult.isRateLimit) err.isRateLimit = true;
+          throw err;
+        }
         profile = parseResult.profile;
 
         updateGlobal(currentId, {
@@ -228,12 +270,22 @@ export function JobHubNode({ id, data }) {
 
       // Step 2: Query construction
       const queriesResult = await window.electronAPI.generateJobQueries({ profile, nodeId: currentId });
+      if (!queriesResult.success) {
+        const err = new Error(queriesResult.error || 'Failed to generate queries');
+        if (queriesResult.isRateLimit) err.isRateLimit = true;
+        throw err;
+      }
       const { titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [] } = queriesResult.queries || {};
       const allQueries = [...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
 
       // Step 3: Search
       updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length });
-      const searchResult = await window.electronAPI.searchJobs({ queries: allQueries, nodeId: currentId });
+      const searchResult = await window.electronAPI.searchJobs({
+        queries: allQueries,
+        nodeId: currentId,
+        maxAgeDays: data.maxAgeDays || 14,
+        canvasFilePath,
+      });
 
       if (!searchResult.success || !searchResult.jobs || searchResult.jobs.length === 0) {
         updateGlobal(currentId, { hubState: 'done', resultCount: 0 });
@@ -243,7 +295,11 @@ export function JobHubNode({ id, data }) {
       // Step 4: Scoring
       updateGlobal(currentId, { hubState: 'scoring', jobCount: searchResult.jobs.length });
       const scoreResult = await window.electronAPI.scoreJobs({ jobs: searchResult.jobs, profile, nodeId: currentId });
-      if (!scoreResult.success) throw new Error(scoreResult.error || 'Failed to score jobs');
+      if (!scoreResult.success) {
+        const err = new Error(scoreResult.error || 'Failed to score jobs');
+        if (scoreResult.isRateLimit) err.isRateLimit = true;
+        throw err;
+      }
 
       // Step 5: Spawn job-card nodes adjacent to the hub
       const baseNodeId = `job-${Date.now()}`;
@@ -288,6 +344,18 @@ export function JobHubNode({ id, data }) {
         finalSourceCounts[job.source] = (finalSourceCounts[job.source] || 0) + 1;
       });
 
+      // Append shown jobs to the 60-day rolling history file so future runs
+      // can suppress them. Best-effort: a failed write must not break the
+      // user-visible pipeline. The backend handles 60-day pruning in the
+      // same write.
+      if (canvasFilePath && scoreResult.scoredJobs.length > 0) {
+        const historyRows = scoreResult.scoredJobs.map(j => ({
+          source: j.source, company: j.company, title: j.title, location: j.location, url: j.url,
+        }));
+        window.electronAPI.appendJobsHistory({ canvasFilePath, jobs: historyRows })
+          .catch(err => EventLogger.error('[JobHub] History append failed:', err));
+      }
+
       updateGlobal(currentId, {
         hubState: 'done',
         resultCount: scoreResult.scoredJobs.length,
@@ -296,11 +364,15 @@ export function JobHubNode({ id, data }) {
       });
     } catch (error) {
       EventLogger.error('JobHubNode pipeline failed:', error);
-      updateGlobal(currentId, { hubState: 'error', errorMessage: error?.message || String(error) });
+      updateGlobal(currentId, { 
+        hubState: 'error', 
+        errorMessage: error?.message || String(error),
+        isRateLimit: !!error?.isRateLimit
+      });
     } finally {
       if (isMountedRef.current) processingRef.current = false;
     }
-  }, [id, updateGlobal, addElementsGlobally, addNodes, addEdges, getNode]);
+  }, [id, updateGlobal, addElementsGlobally, addNodes, addEdges, getNode, canvasFilePath, data.maxAgeDays, ensureSourceCards]);
 
   const startProcessing = useCallback((filePath) => runPipeline({ filePath }), [runPipeline]);
   const startProcessingWithProfile = useCallback((profile) => runPipeline({ profile }), [runPipeline]);
@@ -320,35 +392,68 @@ export function JobHubNode({ id, data }) {
   const handleDrop = useCallback((e) => {
     if (data.locked) return;
     if (PROCESSING_STATES.includes(hubState)) return;
-    
+
     e.preventDefault();
     e.stopPropagation();
-    
+
     const files = Array.from(e.dataTransfer?.files || []);
-    const resume = files.find(f => f.name.match(/\.(pdf|docx|doc|txt|png|jpg|jpeg)$/i));
-    if (resume) {
-      const path = resume.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(resume) : '');
-      if (path) startProcessingRef.current?.(path);
+    const exts = files.map(f => (f.name.match(/\.[a-z0-9]+$/i)?.[0] || '?').toLowerCase());
+    EventLogger.log(`[JobHub][${id}] Drop attempt: ${files.length} file(s) ext=[${exts.join(', ') || 'none'}]`);
+
+    const ACCEPTED_RE = /\.(pdf|docx|doc|txt|png|jpe?g|heic|heif)$/i;
+    const resume = files.find(f => ACCEPTED_RE.test(f.name));
+    if (!resume) {
+      if (files.length > 0) {
+        EventLogger.log(`[JobHub][${id}] Drop rejected: no supported resume in ${files.length} file(s)`);
+        addToast({
+          title: 'Unsupported file type',
+          description: `Dropped ${files.length} file(s) but none are supported resumes. Accepted: PDF, DOCX, DOC, TXT, PNG, JPG, HEIC, HEIF.`,
+          type: 'error',
+        });
+      }
+      return;
     }
-  }, [data.locked, hubState]);
+
+    const path = resume.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(resume) : '');
+    if (path) {
+      EventLogger.log(`[JobHub][${id}] Drop accepted: ${resume.name}`);
+      startProcessingRef.current?.(path);
+    }
+  }, [data.locked, hubState, id, addToast]);
 
   const resetHandler = useCallback((e) => {
     e?.stopPropagation();
     if (data.locked) return;
-    updateGlobal(id, { hubState: 'empty', errorMessage: null });
+
+    // Actually abort the backend — without this the AbortControllers registered
+    // against this nodeId keep running and finish a few seconds later, often
+    // bouncing the UI back to a "done" state the user just dismissed.
+    window.electronAPI?.cancelNodeTask?.(id);
+
+    updateGlobal(id, { hubState: 'empty', errorMessage: null, isRateLimit: false });
     setSourceProgress({});
     processingRef.current = false;
   }, [data.locked, id, updateGlobal]);
 
-  // Collect jobcard nodes connected to this hub (used for CSV export). Recomputed
-  // each render — the cost is small and getEdges/getNodes are stable refs that
-  // would otherwise freeze the memoised value at mount time.
-  const collectConnectedJobCards = () => {
-    const edges = getEdges().filter(e => e.source === id);
-    const cardIds = new Set(edges.map(e => e.target));
-    return getNodes().filter(n => cardIds.has(n.id) && n.type === 'jobcard').map(n => n.data);
-  };
-  const connectedJobCards = collectConnectedJobCards();
+  // Bulk job-card status checks via the shared hook (same one SellHubNode
+  // uses for marketplace cards). The hook also exposes getConnectedCards()
+  // which we reuse for the CSV export and connected-count display.
+  const {
+    checkingAll: checkingAllStatuses,
+    checkAll: handleCheckAllStatuses,
+    getConnectedCards: getConnectedJobCardNodes,
+  } = useCheckAllConnected({
+    hubId: id,
+    cardType: 'jobcard',
+    // Application URL takes priority when the user has pasted one; otherwise
+    // we check the original job posting (still useful: "is this still open?").
+    getUrl: (d) => d?.applicationUrl?.trim() || d?.url || '',
+    getPlatformId: (d) => d?.source || 'job',
+    fields: { status: 'monitorStatus', message: 'monitorMessage', lastChecked: 'monitorLastChecked' },
+    updateNode: updateNodeData,
+    itemLabel: 'job',
+  });
+  const connectedJobCards = getConnectedJobCardNodes().map(n => n.data);
 
   const handleRerun = useCallback(() => {
     if (data.locked || processingRef.current) return;
@@ -385,21 +490,13 @@ export function JobHubNode({ id, data }) {
   const totalSourceJobs = Object.values(sourceProgress).reduce((sum, p) => sum + (p.count || 0), 0);
 
   return (
-    <HubContainer 
-      hubState={hubState} 
+    <HubContainer
+      hubState={hubState}
       theme="blue"
       width={260}
       height={undefined}
       minHeight={hubState === 'empty' ? 140 : 100}
       onDrop={handleDrop}
-      extras={
-        <AnimatedSourceRing
-          sources={getSourceStatuses()}
-          nodeId={id}
-          direction="in"
-          radius={140}
-        />
-      }
     >
         {/* Empty state — drop zone */}
         {hubState === 'empty' && (
@@ -407,6 +504,21 @@ export function JobHubNode({ id, data }) {
             <Briefcase size={28} className="text-blue-400/40 mb-3" />
             <p className="text-white/40 text-sm font-medium">Drop resume here</p>
             <p className="text-white/20 text-[10px] mt-1">PDF, DOCX, or image</p>
+            <div
+              className="nodrag mt-4 flex items-center gap-1.5 text-[10px] text-white/40"
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <span>Look back</span>
+              <input
+                type="number"
+                min={1}
+                max={180}
+                value={maxAgeDays}
+                onChange={(e) => setMaxAgeDays(e.target.value)}
+                className="w-10 text-center bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-blue-400/50"
+              />
+              <span>days</span>
+            </div>
           </div>
         )}
 
@@ -436,6 +548,10 @@ export function JobHubNode({ id, data }) {
             toggleStatusFilter={toggleStatusFilter}
             onRerun={handleRerun}
             jobCards={connectedJobCards}
+            maxAgeDays={maxAgeDays}
+            setMaxAgeDays={setMaxAgeDays}
+            onCheckAllStatuses={handleCheckAllStatuses}
+            checkingAll={checkingAllStatuses}
           />
         )}
 
@@ -449,14 +565,38 @@ export function JobHubNode({ id, data }) {
                 <line x1="12" y1="16" x2="12.01" y2="16"></line>
               </svg>
             </div>
-            <p className="text-white font-medium text-lg tracking-wide">Processing Failed</p>
+            <p className="text-white font-medium text-lg tracking-wide">
+              {data.isRateLimit ? 'Usage Limit Reached' : 'Processing Failed'}
+            </p>
             <p className="text-red-200 text-xs mt-2 opacity-90 max-w-full truncate px-2">{data.errorMessage}</p>
-            <button 
-              className="mt-5 px-4 py-1.5 bg-red-500/20 hover:bg-red-500/40 text-red-100 text-xs rounded-full border border-red-500/30 transition-all font-medium backdrop-blur-md shadow-[0_2px_8px_rgba(0,0,0,0.3)] hover:shadow-[0_0_12px_rgba(255,0,0,0.4)]"
-              onClick={data.locked ? undefined : () => { updateGlobal(id, { hubState: 'empty', errorMessage: null }); setSourceProgress({}); }}
-            >
-              Try Again
-            </button>
+            <div className="flex gap-2 mt-5">
+              {data.isRateLimit && (
+                <button 
+                  className="px-4 py-1.5 bg-blue-500/20 hover:bg-blue-500/40 text-blue-100 text-xs rounded-full border border-blue-500/30 transition-all font-medium backdrop-blur-md shadow-[0_2px_8px_rgba(0,0,0,0.3)] hover:shadow-[0_0_12px_rgba(59,130,246,0.4)]"
+                  onClick={data.locked ? undefined : () => {
+                    document.dispatchEvent(new CustomEvent('open-settings', { detail: { tab: 'ai' } }));
+                  }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                >
+                  Change Model
+                </button>
+              )}
+              <button 
+                className="px-4 py-1.5 bg-red-500/20 hover:bg-red-500/40 text-red-100 text-xs rounded-full border border-red-500/30 transition-all font-medium backdrop-blur-md shadow-[0_2px_8px_rgba(0,0,0,0.3)] hover:shadow-[0_0_12px_rgba(255,0,0,0.4)]"
+                onClick={data.locked ? undefined : () => { 
+                  updateGlobal(id, { errorMessage: null, isRateLimit: false }); 
+                  setSourceProgress({}); 
+                  if (data.filePath || data.resumeProfile) {
+                    handleRerun();
+                  } else {
+                    updateGlobal(id, { hubState: 'empty' });
+                  }
+                }}
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                Try Again
+              </button>
+            </div>
           </div>
         )}
       </HubContainer>

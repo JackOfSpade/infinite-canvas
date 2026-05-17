@@ -46,9 +46,38 @@ export async function getUserDataDir() {
 }
 
 // ── Chrome Executable Discovery ─────────────────────────────────────────────
-export async function findChromePath() {
-  const platform = process.platform;
+// Preference order:
+//   1. CHROME_PATH env var (explicit override).
+//   2. Playwright's bundled Chromium under ~/Library/Caches/ms-playwright/...
+//      Lives outside /Applications/, so macOS Sequoia's App Management gate
+//      does NOT prompt the user with "infinite-canvas was prevented from
+//      modifying apps on your Mac" on first launch. This is the path that
+//      avoids the prompt entirely.
+//   3. System Chrome/Chromium/Brave in /Applications/ — works but triggers
+//      the App Management prompt once per app install on Sequoia (15+).
+//
+// Returning the first existing path means a user who has installed Playwright
+// browsers (already a dep, just needs `npx playwright install chromium` once)
+// gets prompt-free scraping. Without it we still work, just with the one-time
+// macOS approval.
 
+async function findPlaywrightChromiumPath() {
+  try {
+    const pw = await import('playwright');
+    const p = pw?.chromium?.executablePath?.();
+    if (!p) return null;
+    await fs.promises.access(p);
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+export async function findChromePath() {
+  const playwrightPath = await findPlaywrightChromiumPath();
+  if (playwrightPath) return playwrightPath;
+
+  const platform = process.platform;
   const candidates = platform === 'darwin'
     ? [
         '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -75,11 +104,12 @@ export async function findChromePath() {
     }
   }
 
-  // No suitable Chrome/Chromium found. Electron's own executable cannot be used
-  // as a puppeteer-core target (it spawns a renderer, not a standalone browser).
-  // Set CHROME_PATH env var or install Google Chrome to resolve this.
+  // Electron's own executable can't be used as a puppeteer-core target (it
+  // spawns a renderer, not a standalone browser). Either install Playwright's
+  // chromium (`npx playwright install chromium`) — recommended, avoids the
+  // macOS App Management prompt — or install Google Chrome.
   throw new Error(
-    'No Chrome/Chromium installation found. Install Google Chrome or set CHROME_PATH env var.'
+    'No Chrome/Chromium installation found. Run `npx playwright install chromium` (no permission prompts) or install Google Chrome.'
   );
 }
 
@@ -99,7 +129,13 @@ export async function getStealthBrowser() {
 
   browserLaunchPromise = (async () => {
     const executablePath = process.env.CHROME_PATH || await findChromePath();
-    logger.info('[StealthBrowser] Launching with:', path.basename(executablePath));
+    // Include whether this is the prompt-free Playwright path so the log line
+    // is enough to diagnose "why am I getting the macOS App Management prompt?"
+    const usingPlaywright = executablePath.includes('/ms-playwright/');
+    logger.info(
+      `[StealthBrowser] Launching with: ${path.basename(executablePath)} ` +
+      `(${usingPlaywright ? 'Playwright bundle, no Sequoia prompt' : 'system Chrome — first launch may prompt'})`
+    );
 
     try {
       browserInstance = await puppeteer.launch({

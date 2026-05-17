@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { JOB_SOURCES } from '../../utils/constants';
-import { SlidersHorizontal, X, RefreshCw, Download } from 'lucide-react';
+import { SlidersHorizontal, X, RefreshCw, Download, Activity } from 'lucide-react';
 import { EventLogger } from '../../utils/EventLogger';
 import { useToast } from '../../components/ToastProvider';
 
@@ -20,6 +20,12 @@ export function JobHubDoneState({
   // Action props
   onRerun,
   jobCards = [],
+  // Search controls (passed back to the hub for next run)
+  maxAgeDays = 14,
+  setMaxAgeDays,
+  // Status-monitoring (per-card AI status check across all connected JobCardNodes)
+  onCheckAllStatuses,
+  checkingAll = false,
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [exportingCSV, setExportingCSV] = useState(false);
@@ -128,6 +134,42 @@ export function JobHubDoneState({
             <Download size={9} />
             {exportingCSV ? 'Exporting…' : 'Export CSV'}
           </button>
+        </div>
+      )}
+
+      {/* Check All — same philosophy as the marketplace hub: ask AI to
+          re-check every connected JobCardNode's URL so the user can see at
+          a glance which postings are still open, filled, or expired. */}
+      {!locked && jobCards.length > 0 && onCheckAllStatuses && (
+        <button
+          onClick={onCheckAllStatuses}
+          disabled={checkingAll}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="nodrag mt-1.5 w-full flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-blue-500/10 hover:bg-blue-500/20 text-blue-300 text-[10px] font-medium border border-blue-500/20 transition-colors disabled:opacity-50"
+          title="Ask AI to check the current status of every connected job card"
+        >
+          <Activity size={9} className={checkingAll ? 'animate-pulse' : ''} />
+          {checkingAll ? 'Checking…' : `Check All Statuses (${jobCards.length})`}
+        </button>
+      )}
+
+      {/* Listing age — applies to the next Re-run Search */}
+      {!locked && (
+        <div
+          className="nodrag mt-2 flex items-center gap-1.5 text-[10px] text-white/40"
+          onPointerDown={(e) => e.stopPropagation()}
+          title="Maximum posting age (in days) to consider on the next search"
+        >
+          <span>Look back</span>
+          <input
+            type="number"
+            min={1}
+            max={180}
+            value={maxAgeDays}
+            onChange={(e) => setMaxAgeDays?.(e.target.value)}
+            className="w-10 text-center bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-blue-400/50"
+          />
+          <span>days</span>
         </div>
       )}
 
