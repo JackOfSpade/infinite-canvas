@@ -13,18 +13,50 @@ dist-ssr
 dist-electron
 release/
 
-# Sensitive
+# Sensitive — secrets, signing keys, env variants
 .env
+.env.*
 service-account.json
+credentials.json
+secrets.json
+*.secret
+*.pem
+*.key
+*.crt
+*.cert
+*.p12
+*.pfx
+*.keystore
 *.local
+
+# Test / coverage output
+coverage/
+.nyc_output/
+
+# Build caches and scratch dirs
+*.tsbuildinfo
+out/
+tmp/
+temp/
+
+# Backup / merge leftovers
+*~
+*.bak
+*.orig
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
+Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+
+# macOS resource forks / metadata
+._*
+.AppleDouble
+.LSOverride
