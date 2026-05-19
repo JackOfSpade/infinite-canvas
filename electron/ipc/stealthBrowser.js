@@ -234,6 +234,89 @@ export async function createStealthPage() {
   return page;
 }
 
+/**
+ * Fetch a page's fully-rendered HTML through the persistent stealth browser.
+ * Because the browser uses `userDataDir`, cookies from a prior `openLoginWindow`
+ * are reused — this is how authenticated dashboards / notification feeds work
+ * without re-prompting for login.
+ *
+ * Returns the same shape as a plain fetch so the check engine can swap
+ * fetchers transparently: { ok, status, finalUrl, html } on success,
+ * { ok: false, error } on failure.
+ */
+export async function fetchHtmlAuthed(url, { timeoutMs = 25000, signal } = {}) {
+  let page = null;
+  try {
+    page = await createStealthPage();
+    if (signal?.aborted) throw new Error('Aborted');
+    page.setDefaultNavigationTimeout(timeoutMs - 2000);
+
+    let response = null;
+    try {
+      response = await page.goto(url, { waitUntil: 'networkidle2', timeout: timeoutMs - 5000 });
+    } catch (e) {
+      // Tolerate the network-idle timeout — many marketplace dashboards keep
+      // background polls open. As long as the document loaded we can still
+      // read it.
+      if (!/timeout|ERR_ABORTED|net::ERR_/i.test(e?.message || '')) throw e;
+    }
+    if (signal?.aborted) throw new Error('Aborted');
+
+    const status   = response?.status() ?? 0;
+    const finalUrl = page.url() || url;
+    const html     = await page.content();
+    return { ok: true, status, finalUrl, html };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  } finally {
+    if (page) await page.close().catch(() => {});
+  }
+}
+
+/**
+ * Like fetchHtmlAuthed, but skips the aggressive image/media request
+ * interception that createStealthPage installs. Used by verifySellMonitorLogin
+ * specifically — eBay's anti-bot returns a CAPTCHA / login wall when image
+ * requests are systematically aborted, which made every verify attempt
+ * spuriously return "not logged in" even for fully-authenticated sessions.
+ * The scraper path keeps the blocking because it saves real bandwidth at
+ * scale; one-off verify calls don't need it.
+ */
+export async function fetchHtmlClean(url, { timeoutMs = 25000, signal } = {}) {
+  let page = null;
+  try {
+    const browser = await getStealthBrowser();
+    page = await browser.newPage();
+    // Match createStealthPage's headers so cookies + UA are consistent; just
+    // skip request interception entirely.
+    const { getSessionProfile } = await import('./browser/antiDetectProfiles.js');
+    const profile = getSessionProfile();
+    await page.setUserAgent(profile.ua, profile.clientHints);
+    await page.setViewport({ ...profile.viewport, deviceScaleFactor: 2 });
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+
+    if (signal?.aborted) throw new Error('Aborted');
+    page.setDefaultNavigationTimeout(timeoutMs - 2000);
+
+    let response = null;
+    try {
+      response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs - 5000 });
+    } catch (e) {
+      if (!/timeout|ERR_ABORTED|net::ERR_/i.test(e?.message || '')) throw e;
+    }
+    if (signal?.aborted) throw new Error('Aborted');
+
+    const status   = response?.status() ?? 0;
+    const finalUrl = page.url() || url;
+    const html     = await page.content();
+    return { ok: true, status, finalUrl, html };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  } finally {
+    if (page) await page.close().catch(() => {});
+  }
+}
+
 export async function closeStealthBrowser(forShutdown = false) {
   if (forShutdown) {
     isShuttingDown = true;
@@ -256,12 +339,20 @@ export { getRandomUA } from './browser/antiDetectProfiles.js';
 // Centralized config for platforms that require login for sell monitoring.
 // Previously duplicated in marketplace.js — now single source of truth.
 
+// sellerUrl: the page used to monitor active listings (seller-only access)
+// verifyUrl: the page used by verifySellMonitorLogin to confirm a login
+//   completed. Distinct because seller pages often redirect non-seller
+//   accounts to onboarding flows (eBay /sh/lst/active → /sh/landing or
+//   even /signin if the redirect chain passes through signin.ebay.com),
+//   producing a false "not logged in" verdict for users who genuinely
+//   completed login but don't have a seller subscription. The verify URL
+//   is a universal account/profile page that any logged-in user can reach.
 const SELL_MONITOR_PLATFORMS = {
-  ebay:      { name: 'eBay',       sellerUrl: 'https://www.ebay.com/sh/lst/active' },
-  poshmark:  { name: 'Poshmark',   sellerUrl: 'https://poshmark.com/closet' },
-  mercari:   { name: 'Mercari',    sellerUrl: 'https://www.mercari.com/mypage/listings/' },
-  swappa:    { name: 'Swappa',     sellerUrl: 'https://swappa.com/user/listings' },
-  facebook:  { name: 'Facebook',   sellerUrl: 'https://www.facebook.com/marketplace/you/selling' },
+  ebay:      { name: 'eBay',       sellerUrl: 'https://www.ebay.com/sh/lst/active',                 verifyUrl: 'https://www.ebay.com/mye/myebay/summary' },
+  poshmark:  { name: 'Poshmark',   sellerUrl: 'https://poshmark.com/closet',                         verifyUrl: 'https://poshmark.com/feed' },
+  mercari:   { name: 'Mercari',    sellerUrl: 'https://www.mercari.com/mypage/listings/',            verifyUrl: 'https://www.mercari.com/mypage/' },
+  swappa:    { name: 'Swappa',     sellerUrl: 'https://swappa.com/user/listings',                    verifyUrl: 'https://swappa.com/account' },
+  facebook:  { name: 'Facebook',   sellerUrl: 'https://www.facebook.com/marketplace/you/selling',    verifyUrl: 'https://www.facebook.com/me' },
 };
 
 /**
@@ -272,6 +363,7 @@ export function getSellMonitorPlatforms() {
     id,
     name: config.name,
     sellerUrl: config.sellerUrl,
+    verifyUrl: config.verifyUrl || config.sellerUrl,
   }));
 }
 

@@ -275,9 +275,13 @@ async function executeScrape(url, extractorJS, options = {}) {
           }, referer);
         }
 
-        // Navigate with network wait
+        // Navigate with network wait. Capture the Response so we can read
+        // HTTP status / final URL for anti-bot detection after the extractor
+        // runs — if the response fails (timeout, etc.) we keep going so the
+        // extractor still gets a shot, but the detector sees status=0.
+        let pageResponse = null;
         try {
-          await page.goto(url, { waitUntil: options.waitUntil || 'networkidle2', timeout: timeoutMs - 5000 });
+          pageResponse = await page.goto(url, { waitUntil: options.waitUntil || 'networkidle2', timeout: timeoutMs - 5000 });
         } catch (e) {
           if (!e?.message?.includes('ERR_ABORTED') && !e?.message?.includes('net::ERR_') && !e?.message?.includes('TimeoutError') && !e?.message?.includes('timeout')) {
             throw e;
@@ -312,8 +316,37 @@ async function executeScrape(url, extractorJS, options = {}) {
           await new Promise(r => setTimeout(r, Math.max(500, jitteredWait)));
         }
 
-        // Execute the extractor in page context
-        return await page.evaluate(extractorJS);
+        // Execute the extractor in page context, then run anti-bot
+        // detection on what we observed. Both the raw extractor result and
+        // the warning (if any) flow back to the caller so the UI can render
+        // a visible signal instead of silently accepting a blocked page.
+        const extractorResult = await page.evaluate(extractorJS);
+        let warning = null;
+        try {
+          const { detectAntiBotSignal } = await import('./antiBotDetector.js');
+          const html       = await page.content().catch(() => '');
+          const finalUrl   = page.url() || url;
+          const status     = pageResponse?.status?.() ?? 0;
+          const itemCount  = Array.isArray(extractorResult)
+            ? extractorResult.length
+            : (extractorResult && typeof extractorResult === 'object'
+                ? (Array.isArray(extractorResult.items) ? extractorResult.items.length : null)
+                : null);
+          warning = detectAntiBotSignal({
+            status,
+            finalUrl,
+            html,
+            itemsExtracted: itemCount,
+            expectedMinItems: options.expectedMinItems || 0,
+            sourceLabel: options.sourceLabel || domain,
+          });
+          if (warning) {
+            logger.warn(`[BrowserPool] Anti-bot signal on ${url}: ${warning.code} — ${warning.evidence}`);
+          }
+        } catch (e) {
+          logger.warn('[BrowserPool] Anti-bot detector failed (non-fatal):', e?.message || String(e));
+        }
+        return { data: extractorResult, warning };
       } finally {
         if (options.signal && abortHandler) {
           options.signal.removeEventListener('abort', abortHandler);
@@ -435,15 +468,24 @@ export function queueScrape(url, extractorJS, options = {}) {
 /**
  * Queue multiple scrape tasks. All go through the concurrency limiter.
  * @param {Array<{id: string, url: string, extractorJS: string, options?: object}>} tasks
- * @returns {Promise<Array<{id: string, success: boolean, data?: any, error?: string}>>}
+ * @returns {Promise<Array<{id: string, success: boolean, data?: any, warning?: object, error?: string}>>}
+ *
+ * Each result now carries an optional `warning` from antiBotDetector — surfaced
+ * up the stack via the onProgress callback and the final return so callers
+ * can show "this source was likely blocked/throttled" instead of silently
+ * accepting an empty extractor result.
  */
 export async function scrapeMultiple(tasks, onProgress = null, signal = null) {
   const results = await Promise.allSettled(
     tasks.map(async (task) => {
       try {
         if (signal?.aborted) throw new Error('Aborted');
-        const data = await queueScrape(task.url, task.extractorJS, { ...task.options, signal });
-        const result = { id: task.id, success: true, data };
+        // executeScrape/queueScrape now return { data, warning }; preserve
+        // both on the per-task result.
+        const wrapped = await queueScrape(task.url, task.extractorJS, { ...task.options, signal, sourceLabel: task.id });
+        const data = wrapped?.data ?? null;
+        const warning = wrapped?.warning ?? null;
+        const result = { id: task.id, success: true, data, warning };
         onProgress?.(result);
         return result;
       } catch (err) {

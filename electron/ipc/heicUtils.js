@@ -3,6 +3,7 @@ import path from 'path';
 import os from 'os';
 import { promisify } from 'util';
 import fs from 'fs';
+import crypto from 'crypto';
 
 const execAsync = promisify(exec);
 
@@ -17,13 +18,20 @@ export async function convertHeicIfNecessary(filePath) {
     throw new Error('HEIC conversion is only supported on macOS. Please convert to JPG manually.');
   }
 
-  const tempFile = path.join(os.tmpdir(), `converted_${Date.now()}.jpg`);
-  
+  // randomUUID, not Date.now(): the vision pipeline runs every HEIC through
+  // here in Promise.all, so 5-7 conversions land in the same millisecond.
+  // Same-ms Date.now() collisions caused two sips invocations to race on the
+  // same --out path, surfacing as Error 13 "Cannot rename temporary file".
+  const tempFile = path.join(os.tmpdir(), `converted_${crypto.randomUUID()}.jpg`);
+
   try {
     // macOS built-in sips tool
     await execAsync(`sips -s format jpeg "${filePath}" --out "${tempFile}"`);
     return tempFile;
   } catch (err) {
+    // sips may have produced a partial file before failing — clean it up so
+    // the temp dir doesn't accumulate zero-byte junk over a long session.
+    try { await fs.promises.unlink(tempFile); } catch { /* not created */ }
     throw new Error(`Failed to convert HEIC to JPG: ${err.message}`);
   }
 }
@@ -36,5 +44,54 @@ export async function cleanupTempFile(filePath) {
     }
   } catch {
     // Ignore cleanup errors
+  }
+}
+
+/**
+ * Resize an image so the longer side is at most `maxLongSide` px. Used before
+ * sending photos to Claude vision — Claude charges per ~1568x1568 tile
+ * (~1600 input tokens), so a 4032px phone photo ends up at ~4 tiles ≈ 6400
+ * tokens. Downscaling to 768px fits in one tile (~260 tokens) with no
+ * measurable impact on brand/model/condition identification. Skipped if the
+ * image is already small enough.
+ *
+ * Returns the path to a downscaled temp file if a resize happened, OR the
+ * original `srcPath` if the image was already small. The caller is
+ * responsible for tracking returned temp paths in their cleanup list.
+ *
+ * macOS-only (uses sips). On other platforms, returns the original path —
+ * Claude will accept the full-res image, just at higher cost.
+ */
+export async function downscaleImageIfNeeded(srcPath, { maxLongSide = 768 } = {}) {
+  if (process.platform !== 'darwin') return srcPath;
+
+  let width = 0, height = 0;
+  try {
+    // sips emits "  pixelWidth: 4032" / "  pixelHeight: 2268" — grep both
+    // in one call instead of two execs.
+    const { stdout } = await execAsync(`sips --getProperty pixelWidth --getProperty pixelHeight "${srcPath}"`);
+    width  = parseInt(stdout.match(/pixelWidth:\s*(\d+)/)?.[1] || '0', 10);
+    height = parseInt(stdout.match(/pixelHeight:\s*(\d+)/)?.[1] || '0', 10);
+  } catch {
+    // sips failed to read the image (corrupt file, unknown format) — let the
+    // downstream readFile/Claude call surface the real error.
+    return srcPath;
+  }
+
+  if (width === 0 || height === 0) return srcPath;
+  if (Math.max(width, height) <= maxLongSide) return srcPath;
+
+  const tempFile = path.join(os.tmpdir(), `scaled_${crypto.randomUUID()}.jpg`);
+  try {
+    // sips -Z preserves aspect ratio: resizes so the longest side is exactly
+    // maxLongSide. Format-converts to JPEG to avoid any PNG/HEIC parsing
+    // overhead downstream (Claude accepts JPEG just fine for vision).
+    await execAsync(`sips -Z ${maxLongSide} -s format jpeg "${srcPath}" --out "${tempFile}"`);
+    return tempFile;
+  } catch {
+    try { await fs.promises.unlink(tempFile); } catch { /* not created */ }
+    // Resize failure shouldn't sink the whole vision call — fall back to the
+    // original full-res image (more expensive, but correct).
+    return srcPath;
   }
 }

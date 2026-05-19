@@ -99,11 +99,18 @@ export function migrateGroupNodes(nodes) {
  */
 export function sanitizeNodesForSave(nodes) {
   if (!Array.isArray(nodes)) return nodes;
-  // Drop ephemeral nodes (e.g. comp-source cards spawned during price research).
-  // These are spawned and reaped by their owning hub within a single session;
-  // persisting them would leave orphaned cards across reload with no hub
-  // listening for their progress events.
-  const filtered = nodes.filter(n => n.type !== 'compsourcecard' && !n.data?.ephemeral);
+  // Drop ephemeral nodes (e.g. comp-source cards spawned during price research)
+  // EXCEPT those carrying actionable warning/error state — those represent a
+  // paused 'comps-ready' flow the user needs to recover on reload. Without
+  // this carve-out, quitting from comps-ready would persist the hub (with
+  // pendingComps and scrapeWarnings) but strip the cards that hold the
+  // Solve/Skip buttons, leaving the user no way to act.
+  const filtered = nodes.filter(n => {
+    const isEphemeral = n.type === 'compsourcecard' || n.data?.ephemeral;
+    if (!isEphemeral) return true;
+    const p = n.data?.persistedProgress;
+    return !!(p?.warning || p?.status === 'error');
+  });
   return filtered.map(n => {
     // Recurse into nested canvas nodes first so deeply-nested nodes are also sanitized.
     // Also strip all transient data fields (isDropTarget, _hmr) from this group node.

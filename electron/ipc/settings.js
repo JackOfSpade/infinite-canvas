@@ -21,8 +21,6 @@ const store = new Store({
   defaults: {
     ai: {
       provider: 'gemini',
-      geminiModel: 'gemini-2.5-flash',
-      claudeModel: 'claude-3-5-sonnet-latest',
       anthropicApiKey: '',
       geminiApiKey: '',
       // Absolute path to a Google service-account JSON. When set, takes
@@ -31,8 +29,30 @@ const store = new Store({
       // it across canvases without copying.
       serviceAccountPath: '',
     },
+    // Extra URLs to scrape during a marketplace listing status check, keyed
+    // by platformId. The listing's own URL is always checked; these are
+    // platform-wide "places the status might surface" — the seller dashboard,
+    // notifications center, sold-items tab. AI classification of each URL
+    // runs in parallel and the strongest signal wins, which is what makes
+    // the system robust to "the SOLD notification lives in the activity feed,
+    // not on the listing page yet."
+    marketplaceWatchUrls: {},
   },
 });
+
+// One-shot migration: model selection moved from user-controlled to
+// per-task auto-selection in llm.js TASK_MODELS. Strip the persisted
+// `claudeModel` / `geminiModel` so they don't show up in get-settings
+// payloads (which would confuse renderers that still display them) and
+// can't be accidentally re-read by any new code path. Safe even when the
+// fields are already absent.
+try {
+  const ai = store.get('ai') || {};
+  if ('claudeModel' in ai || 'geminiModel' in ai) {
+    const { claudeModel: _drop1, geminiModel: _drop2, ...rest } = ai;
+    store.set('ai', rest);
+  }
+} catch { /* never block startup on settings migration */ }
 
 export function registerSettingsHandlers() {
   handleSafe('get-settings', async () => {
@@ -75,6 +95,19 @@ export function registerSettingsHandlers() {
 
 export function getAISettings() {
   return store.get('ai');
+}
+
+/**
+ * Watch URLs configured for a given platform's status check. The listing's
+ * own URL is always checked separately by the caller; this returns the
+ * platform-wide extras (dashboard, notifications, etc.) the user has added
+ * via Settings → Marketplace.
+ */
+export function getMarketplaceWatchUrls(platformId) {
+  if (!platformId) return [];
+  const all = store.get('marketplaceWatchUrls') || {};
+  const list = all[platformId];
+  return Array.isArray(list) ? list.filter(u => typeof u === 'string' && u.trim().length > 0) : [];
 }
 
 /**

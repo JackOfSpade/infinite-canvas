@@ -9,17 +9,27 @@
 import { callLLMVision, callLLMText } from './llm.js';
 import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
+import { fetchHtmlAuthed } from './stealthBrowser.js';
+import { getMarketplaceWatchUrls } from './settings.js';
+import {
+  classifyMultipleUrls,
+  aggregateStrongest,
+  extractListingIdentifier,
+  plainFetcher,
+} from './listingStatusCheck.js';
+import { openCaptchaResolveWindow } from './browser/authWindows.js';
 import { logger } from '../logger.js';
+import { VISION_PRODUCT_ANALYSIS_SCHEMA, PRICE_SYNTHESIS_SCHEMA, buildPlatformFitSchema } from './aiSchemas.js';
 import {
   EBAY_SOLD_EXTRACTOR, EBAY_SOLD_CONFIG,
   EBAY_ACTIVE_EXTRACTOR, EBAY_ACTIVE_CONFIG,
   POSHMARK_SOLD_EXTRACTOR, POSHMARK_CONFIG,
   SWAPPA_EXTRACTOR, SWAPPA_CONFIG,
   MERCARI_SOLD_EXTRACTOR, MERCARI_CONFIG,
+  PRICECHARTING_EXTRACTOR, PRICECHARTING_CONFIG,
 } from '../extractors/marketplace.js';
 import {
   fetchReverbListings,
-  fetchStockXListings,
 } from '../extractors/apiExtractors.js';
 
 // ── Source → URL + Extractor mapping (browser pool sources only) ────────────
@@ -62,6 +72,15 @@ function buildCompTasks(query) {
       extractorJS: MERCARI_SOLD_EXTRACTOR,
       options: MERCARI_CONFIG,
     },
+    // Niche: video games + retro electronics. Returns empty for unrelated
+    // queries (cheap), but for games it has clean aggregated sold-price
+    // data that eBay's noisy search results often miss.
+    {
+      id: 'pricecharting', category: 'sold',
+      url: `https://www.pricecharting.com/search-products?q=${encodeURIComponent(query)}&type=prices`,
+      extractorJS: PRICECHARTING_EXTRACTOR,
+      options: PRICECHARTING_CONFIG,
+    },
   ];
 }
 
@@ -73,23 +92,102 @@ function buildTaskCategoryMap(tasks) {
 }
 
 /**
+ * Scrape a SINGLE comp source by id. Used by the captcha-resolved auto-retry
+ * flow so a freshly-unblocked source can fetch in isolation instead of
+ * triggering a full re-scrape of every other (already-successful) source.
+ *
+ * Returns the same shape per source as the multi-source path:
+ * `{ sourceId, items, warning, category }`. Emits per-source progress
+ * events (`searching` then `done`/`error`) so the existing comp card
+ * subscribes and updates in place.
+ */
+async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
+  const allTasks = buildCompTasks(query);
+  const taskCategoryMap = buildTaskCategoryMap(allTasks);
+  const task = allTasks.find(t => t.id === sourceId);
+
+  const send = (status, count, warning = null, url = null) => {
+    if (sender && !sender.isDestroyed()) {
+      sender.send('price-source-progress', { nodeId, sourceId, status, count, warning, url });
+    }
+  };
+
+  // Browser-pool source (ebay-sold, poshmark, swappa, ebay-active, mercari).
+  if (task) {
+    send('searching', 0);
+    const results = await scrapeMultiple([task], (res) => {
+      if (sender && !sender.isDestroyed()) {
+        const items = Array.isArray(res.data) ? res.data : [];
+        send(res.success ? 'done' : 'error', items.length, res.warning || null, task.url);
+      }
+    }, signal);
+    const r = results[0];
+    if (!r?.success) {
+      return {
+        sourceId,
+        items: [],
+        warning: { code: 'task-failed', severity: 'block', evidence: r?.error || 'unknown', suggestion: 'Scrape threw before completing.' },
+        category: taskCategoryMap[sourceId] || 'sold',
+      };
+    }
+    return {
+      sourceId,
+      items: Array.isArray(r.data) ? r.data : [],
+      warning: r.warning || null,
+      category: taskCategoryMap[sourceId] || 'sold',
+    };
+  }
+
+  // API source (reverb only — StockX was removed from comp sources because
+  // PerimeterX systematically blocks both the key bootstrap and the
+  // hardcoded fallback).
+  if (sourceId === 'reverb') {
+    send('searching', 0);
+    try {
+      const result = await fetchReverbListings(query, true, signal);
+      const items = Array.isArray(result) ? result : (result?.items || []);
+      const warning = Array.isArray(result) ? null : (result?.warning || null);
+      send('done', items.length, warning);
+      return { sourceId, items, warning, category: 'sold' };
+    } catch (error) {
+      send('error', 0);
+      return {
+        sourceId,
+        items: [],
+        warning: { code: 'fetch-error', severity: 'block', evidence: error?.message || String(error), suggestion: 'API call failed during single-source rescrape.' },
+        category: 'sold',
+      };
+    }
+  }
+
+  throw new Error(`Unknown sourceId: ${sourceId}`);
+}
+
+/**
  * Fetch API-based marketplace sources in parallel (no Puppeteer needed).
  * Reverb uses internal REST API, StockX uses Algolia bypass.
  */
 async function fetchApiMarketplaceSources(query, signal = null, nodeId = null, sender = null) {
+  // StockX removed — PerimeterX systematically blocks both the stealth-
+  // browser key bootstrap and the hardcoded-key fallback, so it returned
+  // zero usable data on every run. fetchStockXListings stays exported from
+  // apiExtractors for the day someone has a working bypass.
   const apiTasks = [
     { sourceId: 'reverb', fn: (s) => fetchReverbListings(query, true, s) },
-    { sourceId: 'stockx', fn: (s) => fetchStockXListings(query, s) },
   ];
 
   return Promise.all(apiTasks.map(async ({ sourceId, fn }) => {
     try {
       if (signal?.aborted) throw new Error('Aborted');
-      const items = await fn(signal);
+      // Each API fetcher now returns { items, warning } so blocks/throttles
+      // surface in the UI instead of silently producing an empty array.
+      const result = await fn(signal);
+      const items = Array.isArray(result) ? result : (result?.items || []);
+      const warning = Array.isArray(result) ? null : (result?.warning || null);
       if (sender && !sender.isDestroyed()) {
-        sender.send('price-source-progress', { nodeId, sourceId, status: 'done', count: items.length });
+        sender.send('price-source-progress', { nodeId, sourceId, status: 'done', count: items.length, warning });
       }
-      return { sourceId, items };
+      return { sourceId, items, warning };
     } catch (error) {
       if (sender && !sender.isDestroyed()) {
         sender.send('price-source-progress', { nodeId, sourceId, status: 'error', count: 0 });
@@ -100,91 +198,82 @@ async function fetchApiMarketplaceSources(query, signal = null, nodeId = null, s
 }
 
 /**
- * Best-effort marketplace listing status check.
+ * Multi-source marketplace listing status check.
  *
- * Fetches the listing URL as plain HTML and asks the LLM to classify it. This
- * is intentionally provider-agnostic — every marketplace renders slightly
- * different SOLD / ENDED / REMOVED / login-wall markup, so handing the raw
- * page to the model is more robust than writing eight bespoke scrapers (and
- * matches the "remove auto-posting, too complicated and changes often"
- * direction the user took on this module).
+ * For each URL provided (the listing URL, per-card watchUrls, and per-platform
+ * watchUrls from Settings), fetches the page and asks the LLM "what is the
+ * state of listing X?" — not "what is on this page?" That identifier anchoring
+ * is what lets the same engine handle:
+ *   - the listing's own page (SOLD banner above the buy button)
+ *   - a notifications/activity center ("Your item just sold for $180")
+ *   - the seller's account dashboard with N listings (find this row's status)
  *
- * Returns one of: live | sold | expired | needs-login | unknown.
- * A 4xx/5xx that smells like a login redirect maps to `needs-login` so the
- * UI can tell the user "log in to the marketplace site again."
+ * Public listing URLs go through plain fetch. Per-card watchUrls and
+ * per-platform watchUrls (typically dashboards / notification feeds) route
+ * through the stealth browser so the persistent userDataDir's cookies — set
+ * by a prior `openLoginWindow` — keep us logged in.
+ *
+ * Returns { status, message, sources } where status is the strongest signal
+ * across all URLs (sold > expired > needs-login > live > unknown), message is
+ * a human sentence quoting that evidence, and sources is the per-URL trace.
  */
-async function checkListingStatusViaAI(url, platformId, signal) {
-  let html, status, finalUrl;
-  try {
-    const res = await fetch(url, {
-      redirect: 'follow',
-      headers: {
-        // A real-browser UA avoids most marketplaces' API-shaped 403s. We're
-        // not bypassing any auth — just asking for the same page the user sees.
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml',
-      },
-      signal,
-    });
-    status = res.status;
-    finalUrl = res.url || url;
-    html = await res.text();
-  } catch (err) {
-    return { status: 'error', message: `Fetch failed: ${err?.message || String(err)}` };
-  }
+async function checkListingStatusMultiSource({
+  listingUrl,
+  platformId,
+  watchUrls = [],
+  productTitle,
+  listingId,
+  signal,
+}) {
+  // Identity anchor — model uses this to find the right row/banner across
+  // any page format. Falls back to product title when the URL has no
+  // recognizable item id.
+  const identifier = listingId || extractListingIdentifier(listingUrl, productTitle);
 
-  // Cheap pre-classification: if the response redirected to a login URL or
-  // returned 401/403, we don't need to burn AI tokens deciding.
-  const finalLower = String(finalUrl).toLowerCase();
-  if (status === 401 || status === 403 || /\/(login|signin|sign-in|account\/login)/i.test(finalLower)) {
-    return { status: 'needs-login', message: `Marketplace requires a fresh login (redirected to ${finalUrl}). Sign in on the ${platformId} site in your browser, then retry.` };
-  }
-  if (status === 404 || status === 410) {
-    return { status: 'expired', message: `Listing not found (${status}). It may have been removed or sold and de-indexed.` };
-  }
-  if (!html || html.length < 200) {
-    return { status: 'unknown', message: `Empty or near-empty response (${html?.length || 0} bytes).` };
-  }
+  // Per-platform watch URLs are configured once and apply to every card on
+  // that platform. Plus optional per-card watchUrls (rare; for power users).
+  const platformWatchUrls = getMarketplaceWatchUrls(platformId);
+  const cardWatchUrls     = (watchUrls || []).filter(Boolean);
 
-  // Trim to keep token usage modest — most status signals live in the page
-  // head and the first content section (status banner, "this listing has
-  // ended", etc.). 12k chars covers that comfortably.
-  const trimmed = html.slice(0, 12000).replace(/\s+/g, ' ');
-
-  let parsed;
-  try {
-    parsed = await callLLMText(`
-You are checking the live status of a marketplace listing. The user posted a listing on ${platformId} and pasted its URL; we fetched the page HTML and need to know whether the item is still available.
-
-URL: ${url}
-HTTP status: ${status}
-HTML (truncated):
-${trimmed}
-
-Return ONLY a JSON object:
-{
-  "status": "live" | "sold" | "expired" | "needs-login" | "unknown",
-  "message": "1 short sentence explaining the signal you saw (e.g. 'Page shows SOLD banner', 'Listing ended, no buyer', 'Login wall — cannot determine status')"
-}
-
-Classification rules:
-- "live"        — page renders the product with a buy button / asking price
-- "sold"        — page says SOLD, completed, item ended with buyer, etc.
-- "expired"     — page says listing ended/removed/unavailable with no buyer, OR a 404-ish "not found" state inside the body
-- "needs-login" — page redirected to a login form or shows a "sign in to view this" wall
-- "unknown"     — none of the above is clear
-
-Be conservative: prefer "unknown" over a wrong guess.`, signal);
-  } catch (err) {
-    return { status: 'error', message: `AI classification failed: ${err?.message || String(err)}` };
-  }
-
-  const allowed = new Set(['live', 'sold', 'expired', 'needs-login', 'unknown']);
-  const out = {
-    status:  allowed.has(parsed?.status) ? parsed.status : 'unknown',
-    message: parsed?.message || '',
+  // De-duplicate while preserving order: listingUrl first (cheapest, public),
+  // then per-card overrides, then platform-wide watch URLs.
+  const seen = new Set();
+  const all = [];
+  const pushUnique = (u, source) => {
+    const key = String(u || '').trim();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    all.push({ url: key, source });
   };
-  return out;
+  pushUnique(listingUrl, 'listing');
+  cardWatchUrls.forEach(u => pushUnique(u, 'card-watch'));
+  platformWatchUrls.forEach(u => pushUnique(u, 'platform-watch'));
+
+  if (all.length === 0) {
+    return { status: 'error', message: 'No URLs to check (paste a listing URL or configure a platform watch URL in Settings)', sources: [] };
+  }
+
+  // Watch URLs are almost always auth-walled (dashboards, notification
+  // feeds), so route them through the cookie-bearing stealth browser. The
+  // canonical listing URL stays on plain fetch for speed. classifyMultipleUrls
+  // fetches all N URLs in parallel, then makes ONE consolidated LLM call so
+  // the instruction block + listing identity preamble is paid once instead
+  // of N times — meaningful savings when N≥2.
+  const urlSpecs = all.map(({ url, source }) => ({
+    url,
+    urlLabel: source === 'listing' ? 'listing' : source === 'card-watch' ? 'card watch' : 'platform watch',
+    fetcher:  source === 'listing' ? plainFetcher : fetchHtmlAuthed,
+  }));
+
+  const perUrl = await classifyMultipleUrls({
+    urlSpecs,
+    listingIdentifier: identifier,
+    productTitle,
+    platformId,
+    signal,
+  });
+
+  return aggregateStrongest(perUrl);
 }
 
 /**
@@ -207,28 +296,33 @@ Return a JSON object:
   "color": "Primary color(s)",
   "notable_features": "Any visible accessories, damage, special features",
   "generated_title": "An optimized selling title (80 chars max, include brand + model + key features + condition indicator)",
-  "generated_description": "A detailed, buyer-friendly selling description (include specs if identifiable, condition details, what's included). 3-4 sentences."
+  "generated_description": "A detailed, buyer-friendly selling description (include specs if identifiable, condition details, what's included). 3-4 sentences.",
+  "search_query": "A short, neutral query string for marketplace search engines. Include ONLY brand + model + the 1-2 most price-driving specs (storage size, screen size, year, capacity, etc. — whatever's relevant for the category). EXCLUDE condition keywords ('For Parts', 'Used', 'Refurbished'), color (unless brand-defining), and marketing fluff. Goal: broad enough to surface variants for price comparison. Examples: 'Apple iPhone XS 512GB', 'Sony WH-1000XM4', 'Nintendo Switch OLED'."
 }
 
-Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`, signal);
+Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`, { signal, task: 'vision-product-analysis', responseSchema: VISION_PRODUCT_ANALYSIS_SCHEMA });
 
     logger.info(`[Marketplace][${nodeId}] Product identified:`, result?.generated_title || 'Unknown');
     return { product: result };
   });
 
-  // ── Research Price (Multi-Source FMV) ──────────────────────────────────────
-  handleSafe('research-price', async (event, { query, condition, nodeId }, signal) => {
-    logger.info(`[Marketplace][${nodeId}] Researching price for:`, query);
+  // ── Scrape Comps (no AI synthesis) ────────────────────────────────────────
+  // Split from synthesis so the renderer can pause between scrape and AI when
+  // some sources errored — gives the user a chance to solve captchas / dismiss
+  // failures before the model spends tokens on partial data. The renderer
+  // calls `synthesize-price` afterward with the comps it decides to use.
+  handleSafe('scrape-price-comps', async (event, { query, nodeId }, signal) => {
+    logger.info(`[Marketplace][${nodeId}] Scraping comps for:`, query);
 
     const tasks = buildCompTasks(query);
 
-    // Notify frontend that all sources are starting
     for (const t of tasks) {
       if (!event.sender.isDestroyed()) {
         event.sender.send('price-source-progress', { nodeId, sourceId: t.id, status: 'searching', count: 0 });
       }
     }
 
+    const sourceUrlById = Object.fromEntries(tasks.map(t => [t.id, t.url]));
     const scrapeResultsPromise = scrapeMultiple(tasks, (res) => {
       if (event.sender.isDestroyed()) return;
       const items = Array.isArray(res.data) ? res.data : [];
@@ -237,10 +331,12 @@ Be specific about what you can clearly see. If you can't identify brand or model
         sourceId: res.id,
         status: res.success ? 'done' : 'error',
         count: items.length,
+        warning: res.warning || null,
+        url: sourceUrlById[res.id] || null,
       });
     }, signal);
 
-    const apiSourceIds = ['reverb', 'stockx'];
+    const apiSourceIds = ['reverb'];
     for (const sourceId of apiSourceIds) {
       if (!event.sender.isDestroyed()) {
         event.sender.send('price-source-progress', { nodeId, sourceId, status: 'searching', count: 0 });
@@ -252,74 +348,141 @@ Be specific about what you can clearly see. If you can't identify brand or model
 
     const taskCategoryMap = buildTaskCategoryMap(tasks);
     const allComps = { sold: [], active: [] };
+    const scrapeWarnings = [];
 
-    // 1. Browser pool results
     for (const r of scrapeResults) {
       if (!r.success) {
         logger.warn(`[Marketplace] A scrape task for ${r.id} was rejected: ${r.error}`);
+        scrapeWarnings.push({ sourceId: r.id, severity: 'block', code: 'task-failed', evidence: r.error, suggestion: 'Scrape threw before completing — likely network or browser error. Check Recent Main-Process Logs in the bug report.' });
         continue;
       }
-      const { id, data: items } = r;
-      const category = taskCategoryMap[id] ?? 'sold'; // API sources (reverb, stockx) are sold
-      if (Array.isArray(items)) {
-        allComps[category].push(...items);
-      }
+      const { id, data: items, warning } = r;
+      if (warning) scrapeWarnings.push({ sourceId: id, ...warning });
+      const category = taskCategoryMap[id] ?? 'sold';
+      if (Array.isArray(items)) allComps[category].push(...items);
     }
 
-    // 2. API-based sources (Reverb, StockX)
-    // Note: fetchApiMarketplaceSources already sent per-source progress events.
     for (const res of apiResults) {
-      if (res.items.length > 0) {
-        allComps.sold.push(...res.items);
-      }
+      if (res.warning) scrapeWarnings.push({ sourceId: res.sourceId, ...res.warning });
+      if (res.items.length > 0) allComps.sold.push(...res.items);
     }
 
-    const totalComps = allComps.sold.length + allComps.active.length;
-    logger.info(`[Marketplace] Found ${allComps.sold.length} sold, ${allComps.active.length} active comps across all sources`);
+    logger.info(`[Marketplace][${nodeId}] Scrape done: ${allComps.sold.length} sold, ${allComps.active.length} active, ${scrapeWarnings.length} warning(s)`);
 
-    // Guard: Research process is long. Check before heavy synthesis.
-    if (signal.aborted) {
-      throw new Error('Window closed');
+    if (signal.aborted) throw new Error('Window closed');
+
+    return { comps: allComps, scrapeWarnings };
+  });
+
+  // ── Synthesize Price (AI step, takes pre-scraped comps) ───────────────────
+  // Renderer calls this after `scrape-price-comps` once it decides to proceed
+  // (either all sources clean, or user clicked "Skip & Price" with partial
+  // data). Kept separate so we never spend AI tokens on a request the user
+  // hasn't approved.
+  handleSafe('synthesize-price', async (event, { query, condition, comps, nodeId }, signal) => {
+    const sold = Array.isArray(comps?.sold) ? comps.sold : [];
+    const active = Array.isArray(comps?.active) ? comps.active : [];
+    const total = sold.length + active.length;
+    logger.info(`[Marketplace][${nodeId}] Synthesizing price from ${sold.length} sold + ${active.length} active comps`);
+
+    if (total === 0) {
+      return {
+        pricing: {
+          recommended_price: null,
+          justification: 'No similar listings to synthesize from — set your own price or resolve blocked sources and retry.',
+          market_summary: { sold_count: 0, active_count: 0 },
+          recommended_platforms: [],
+        },
+      };
     }
 
-    // If we have comp data, ask Gemini to synthesize pricing + routing
-    if (totalComps > 0) {
-      const pricing = await callLLMText(`
-You are a pricing analyst and marketplace routing expert. Given these comparable listings from multiple sources, recommend a selling price AND which platforms to list on.
+    // Deterministic pre-sort: rank each listing by how many tokens of the
+    // ITEM query its title contains, descending. This guarantees exact-spec
+    // matches survive the slice cap below — without it, similar-but-not-
+    // exact listings could push true exact matches out of the 25-item
+    // window the AI sees, leaving the AI to over-weight close variants
+    // when better data was available but truncated.
+    const queryTokens = String(query || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(t => t.length >= 2);
+    const scoreByTitleMatch = (item) => {
+      const title = String(item?.title || '').toLowerCase();
+      if (!title) return 0;
+      let hits = 0;
+      for (const t of queryTokens) if (title.includes(t)) hits++;
+      return hits;
+    };
+    const byMatchDesc = (a, b) => scoreByTitleMatch(b) - scoreByTitleMatch(a);
+    const sortedSold   = [...sold].sort(byMatchDesc);
+    const sortedActive = [...active].sort(byMatchDesc);
+
+    const pricing = await callLLMText(`
+You are a pricing analyst and marketplace routing expert. Given these similar listings from multiple sources, recommend a selling price AND which platforms to list on. Use plain English in your justification — don't say "comp(s)" or "comparable"; say "similar listing(s)" or "sold listing(s)".
 
 ITEM: ${query}
 CONDITION: ${condition}
 
+The listings below are pre-sorted by how many ITEM keywords appear in each title (highest match first). Use that ordering as your first hint when identifying anchor vs. adjusted vs. bound listings, then refine using the spec details inside each listing.
+
 RECENTLY SOLD (what buyers actually paid):
-${JSON.stringify(allComps.sold.slice(0, 25), null, 2)}
+${JSON.stringify(sortedSold.slice(0, 25))}
 
 CURRENTLY ACTIVE (competition):
-${JSON.stringify(allComps.active.slice(0, 15), null, 2)}
+${JSON.stringify(sortedActive.slice(0, 15))}
 
-Return a JSON object:
+WEIGHTING — rank each listing by how closely its spec matches the ITEM:
+- ANCHOR: same spec across the price-driving attributes (whatever those are for this category — capacity, size, generation, condition tier, included accessories, model variant, etc.). Weight these heaviest.
+- ADJUSTED: similar but differs on a known price-driving attribute. Use them, but mentally adjust their price up or down for the difference before averaging in. (E.g. a higher-capacity variant should be discounted down; a worse-condition variant should be discounted up to estimate same-condition value.)
+- BOUND: only loosely related. Use as ceilings/floors only, not for the central estimate.
+
+If exact-match listings are scarce, lean on adjusted listings — DO NOT refuse to price. Note the weighting and your adjustments in the justification so the user can sanity-check.
+
+MATCH QUALITY — pick one of these three values for the "match_quality" field:
+  strong   — 3 or more anchor listings within a tight price band
+  moderate — anchored mostly on adjusted listings, OR a few anchors with a wide spread
+  weak     — only bound listings were available; recommendation is best-guess
+
+Return ONLY a single JSON object with EXACTLY this shape. No comments, no trailing prose, no type annotations, no explanation outside the JSON.
+
 {
-  "recommended_price": number (your best single price recommendation for a sale within 1-2 weeks),
-  "quick_sell_price": number (price that would likely sell in 1-3 days),
-  "max_profit_price": number (highest reasonable price, may take 3-4 weeks),
-  "justification": "2-3 sentences explaining your reasoning with specific data points (median sold price, number of comps, active competition, demand signals)",
+  "recommended_price": 0,
+  "quick_sell_price": 0,
+  "max_profit_price": 0,
+  "justification": "3-5 sentences: state which listings anchored the price, what adjustments you applied for non-exact ones (direction + rough size), and any caveats. Cite specific titles or numbers where it helps.",
+  "match_quality": "strong",
+  "comp_breakdown": {
+    "anchor_count": 0,
+    "adjusted_count": 0,
+    "bound_count": 0
+  },
   "market_summary": {
-    "sold_count": number,
-    "sold_median": number,
-    "sold_low": number,
-    "sold_high": number,
-    "active_count": number,
-    "active_lowest": number
+    "sold_count": 0,
+    "sold_median": 0,
+    "sold_low": 0,
+    "sold_high": 0,
+    "active_count": 0,
+    "active_lowest": 0
   },
   "recommended_platforms": [
     {
-      "id": "platform_id",
-      "name": "Platform Name",
+      "id": "ebay",
+      "name": "eBay",
       "reason": "Why this platform is optimal for this item (1 sentence)",
-      "estimated_fee_pct": number (total fee percentage including processing),
-      "net_payout": number (recommended_price minus fees)
+      "estimated_fee_pct": 0,
+      "net_payout": 0
     }
   ]
 }
+
+Field guidance:
+- recommended_price: best single price for a sale within 1-2 weeks
+- quick_sell_price: price that would likely sell in 1-3 days
+- max_profit_price: highest reasonable price (may take 3-4 weeks)
+- match_quality: one of "strong" | "moderate" | "weak" — use exactly one of those three string values
+- comp_breakdown.*_count: integers (how many listings you treated as anchor / adjusted / bound)
+- recommended_platforms: 2-4 entries from the list below
 
 Platform routing rules for recommended_platforms (pick 2-4 most relevant):
 - Electronics → Swappa (3% fee) > eBay (13%) > Mercari (10%)
@@ -331,30 +494,154 @@ Platform routing rules for recommended_platforms (pick 2-4 most relevant):
 - Luxury/Designer → eBay (13% + free authentication) > Poshmark
 - General/Mixed → Mercari (10%) > eBay (13%) > Facebook (0% local)
 
-Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, whatnot`, signal);
+Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, whatnot`, {
+      signal,
+      task: 'price-synthesis',
+      // Cap scales with comp count — the prompt asks the AI to classify
+      // each listing as anchor/adjusted/bound, so thinking tokens grow
+      // roughly linearly with input size. See llm.js TASK_MAX_TOKENS.
+      hints: { itemCount: sortedSold.slice(0, 25).length + sortedActive.slice(0, 15).length },
+      // Schema enforces: match_quality enum, comp_breakdown shape, platform
+      // id enum, all numeric fields actually numeric. Eliminates the
+      // recurring "AI returned invalid JSON" / "echoed the union type
+      // notation literally" failures we hit twice this session.
+      responseSchema: PRICE_SYNTHESIS_SCHEMA,
+    });
 
-      return {
-        pricing,
-        comps: allComps,
-      };
+    return { pricing };
+  });
+
+  // ── Rescrape a single comp source ─────────────────────────────────────────
+  // Used after a captcha resolve to refetch ONLY the unblocked source,
+  // instead of throwing away the prior scrape's ~70 successful comps and
+  // re-paying for a full multi-source run. The renderer merges the returned
+  // items into pendingComps and drops the source from scrapeWarnings.
+  handleSafe('rescrape-source', async (event, { sourceId, query, nodeId }, signal) => {
+    logger.info(`[Marketplace][${nodeId}] Rescraping single source: ${sourceId}`);
+    const result = await scrapeOneSource(sourceId, query, event.sender, signal, nodeId);
+    logger.info(`[Marketplace][${nodeId}] Rescrape ${sourceId} → ${result.items.length} item(s), warning=${result.warning?.code || 'none'}`);
+    return result;
+  });
+
+  // ── Resolve captcha / anti-bot challenge that blocked a comp scrape ───────
+  // Opens the exact failed URL in a visible browser sharing our scrape
+  // userDataDir. Polls for the challenge page to disappear; auto-closes
+  // when cleared. Resulting cookies persist for the userDataDir's session
+  // TTL, so the renderer's follow-up "Refresh Prices" call lands on a
+  // clean page instead of bouncing back into the same wall.
+  handleSafe('resolve-captcha', async (event, { url, sourceId, nodeId } = {}, signal) => {
+    logger.info(`[Marketplace][${nodeId}] User opening captcha-resolve window for ${sourceId}: ${url}`);
+    // Look up the source's extractor + category (browser-pool sources only —
+    // API sources like reverb/stockx don't have one and never go through
+    // the captcha-resolve flow anyway since they have no URL to open). The
+    // extractor runs inline in the visible session before close so we get
+    // data from the same fingerprint that passed the bot check — a
+    // headless rescrape after close just re-triggers the same wall.
+    // Category travels with the result so the renderer drops items into
+    // the right bucket (sold vs. active).
+    const task = buildCompTasks('').find(t => t.id === sourceId);
+    const inlineExtractorJS = task?.extractorJS || null;
+    const category = task?.category || 'sold';
+    // Pass through the abort signal so resetHandler → cancelNodeTask(hubId)
+    // → abortNodeTasks aborts this controller and openCaptchaResolveWindow
+    // closes the puppeteer browser. Without it the visible window persisted
+    // beyond the in-canvas state that spawned it.
+    const result = await openCaptchaResolveWindow(url, event.sender, signal, inlineExtractorJS);
+    logger.info(`[Marketplace][${nodeId}] Captcha-resolve window closed for ${sourceId}; auto-detected=${result.resolved}, items=${result.items?.length ?? 'none'}`);
+
+    // Sync the card's visible state with the merged data. Without this fake
+    // "done, no warning" event, the comp-source-card keeps showing its
+    // original captcha-presented warning + Solve/Skip buttons even after
+    // the hub merged the inline-extracted items into pendingComps — leaving
+    // the user thinking nothing happened. The card's existing 3s auto-dismiss
+    // timer then removes it from the canvas naturally.
+    if (result.resolved && Array.isArray(result.items) && !event.sender.isDestroyed()) {
+      event.sender.send('price-source-progress', {
+        nodeId,
+        sourceId,
+        status: 'done',
+        count: result.items.length,
+        warning: null,
+        url: null,
+      });
+    }
+    return { ...result, category };
+  });
+
+  // ── Assess platform fit (which marketplaces suit this specific item) ──────
+  // Separate from research-price so the pricing prompt stays focused on price,
+  // and so the UI can show pricing immediately while fit populates a moment
+  // later. Returns a per-platform verdict the SellHub uses to hide unfit
+  // platforms behind a "show all" toggle.
+  handleSafe('assess-platform-fit', async (event, { product, platforms, nodeId }, signal) => {
+    logger.info(`[Marketplace][${nodeId}] Assessing platform fit across ${platforms?.length || 0} platforms`);
+    if (!Array.isArray(platforms) || platforms.length === 0 || !product) {
+      return { fit: {} };
     }
 
-    // No comps found — return empty with message
-    return {
-      pricing: {
-        recommended_price: null,
-        justification: 'No comparable listings found across eBay, Poshmark, Swappa, StockX, Reverb, or Mercari. Try adjusting the search terms or set your own price.',
-        market_summary: { sold_count: 0, active_count: 0 },
-        recommended_platforms: [],
-      },
-      comps: { sold: [], active: [] },
-    };
+    const platformLines = platforms.map(p => `- ${p.id} (${p.name})`).join('\n');
+    const productSummary = JSON.stringify({
+      brand:             product.brand,
+      model:             product.model,
+      category:          product.category,
+      condition:         product.condition,
+      color:             product.color,
+      notable_features:  product.notable_features,
+      generated_title:   product.generated_title,
+      generated_description: product.generated_description,
+    }, null, 2);
+
+    const verdict = await callLLMText(`
+You are a marketplace policy + audience expert. For each marketplace, decide whether this specific item is a GOOD fit or UNFIT to list there.
+
+UNFIT means at least one of: the platform's policies don't allow this category/condition, the platform's audience is wrong for this item (e.g. fashion-only platform getting electronics), or the item is so off-brand for the platform that it would barely get views.
+
+GOOD means: the listing would be allowed AND the audience is plausible for this item.
+
+ITEM:
+${productSummary}
+
+PLATFORMS:
+${platformLines}
+
+Return a JSON object with one entry per platform id. The "reason" field is REQUIRED for unfit verdicts (one short sentence), and may be omitted or empty for good fits.
+
+{
+  "<platform_id>": { "fit": "good" | "unfit", "reason": "..." },
+  ...
+}
+
+Notes:
+- "For Parts" or "Used - Fair" electronics: Mercari, Poshmark, Depop are unfit. eBay + Swappa + Facebook are good.
+- Fashion items: Swappa, Reverb, Whatnot are unfit. Poshmark, Depop, Mercari, eBay are good.
+- Musical instruments: Reverb is the obvious fit. eBay also good. Others usually unfit unless mainstream-consumer audio.
+- Furniture / bulky home goods: Facebook (local) is good; everything else unfit (shipping kills the deal).
+- Collectibles / cards: Whatnot + eBay are good; others usually unfit.
+
+Be confident — don't mark everything "good." If you're unsure, lean "good" unless there's a real policy/audience reason.`, { signal, task: 'platform-fit-assessment', responseSchema: buildPlatformFitSchema(platforms.map(p => p.id)) });
+
+    logger.info(`[Marketplace][${nodeId}] Fit verdicts:`, Object.entries(verdict || {}).map(([k, v]) => `${k}=${v?.fit}`).join(' '));
+    return { fit: verdict || {} };
   });
 
   // ── Check listing status (per-marketplace card) ───────────────────────────
-  handleSafe('check-listing-status', async (_event, { url, platformId, nodeId }, signal) => {
-    logger.info(`[Marketplace][${nodeId}] Checking ${platformId} listing status: ${url}`);
-    const result = await checkListingStatusViaAI(url, platformId, signal);
+  // Renderer passes the listing URL + optional per-card watch URLs + the
+  // product title (for identifier fallback + AI context). Per-platform watch
+  // URLs are merged in from settings server-side so the renderer never has
+  // to re-fetch them.
+  handleSafe('check-listing-status', async (_event, args = {}, signal) => {
+    const { url, platformId, nodeId, watchUrls, productTitle, listingId } = args;
+    const urlCount = 1 + (Array.isArray(watchUrls) ? watchUrls.length : 0) + getMarketplaceWatchUrls(platformId).length;
+    logger.info(`[Marketplace][${nodeId}] Checking ${platformId} status across ${urlCount} URL(s); listing=${url}`);
+    const result = await checkListingStatusMultiSource({
+      listingUrl: url,
+      platformId,
+      watchUrls,
+      productTitle,
+      listingId,
+      signal,
+    });
+    logger.info(`[Marketplace][${nodeId}] Result: ${result.status} — ${result.message}`);
     return result;
   });
 }

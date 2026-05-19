@@ -35,7 +35,7 @@ function extractPaths(nodes, pathsToDelete) {
   });
 }
 
-export function useCanvasOSDeletion({ requestConfirm }) {
+export function useCanvasOSDeletion({ requestConfirm, undo }) {
   const onNodesDelete = useCallback((deletedNodes) => {
     // Cancel any active background tasks for these nodes (including nested nodes)
     if (window.electronAPI?.cancelNodeTask) {
@@ -62,10 +62,16 @@ export function useCanvasOSDeletion({ requestConfirm }) {
               EventLogger.error('Failed to trash file/folder:', err);
             }
           }
-        }
+        },
+        // X-in-the-corner: roll the canvas back so the nodes that triggered
+        // this dialog reappear. ReactFlow has already pushed the deletion
+        // onto the undo stack by the time onNodesDelete fires, so one undo()
+        // restores both nodes and their edges. OS files were never touched
+        // (we only trash on Confirm), so nothing to clean up on disk.
+        onAbort: undo ? () => undo() : undefined,
       });
     }
-  }, [requestConfirm]);
+  }, [requestConfirm, undo]);
 
   return { onNodesDelete };
 }

@@ -55,10 +55,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   appendJobsHistory: (args) => ipcRenderer.invoke('append-jobs-history', args),
 
   onJobSourceProgress: createListener('job-source-progress'),
+  resolveJobSource: (args) => ipcRenderer.invoke('resolve-job-source', args),
+  bucketJobs: (args) => ipcRenderer.invoke('bucket-jobs', args),
 
   // ── Marketplace Module ──────────────────────────────────────────────────
   analyzePhotos: (args) => ipcRenderer.invoke('analyze-photos', args),
-  researchPrice: (args) => ipcRenderer.invoke('research-price', args),
+  scrapePriceComps: (args) => ipcRenderer.invoke('scrape-price-comps', args),
+  rescrapeSource: (args) => ipcRenderer.invoke('rescrape-source', args),
+  synthesizePrice: (args) => ipcRenderer.invoke('synthesize-price', args),
+  assessPlatformFit: (args) => ipcRenderer.invoke('assess-platform-fit', args),
+  resolveCaptcha: (args) => ipcRenderer.invoke('resolve-captcha', args),
   checkListingStatus: (args) => ipcRenderer.invoke('check-listing-status', args),
   getSellPlatforms: async () => {
     const res = await ipcRenderer.invoke('get-sell-platforms');
@@ -93,8 +99,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return res.success ? res : { platform: args.platformId, connected: false };
   },
   openLoginWindow: async (args) => {
-    const res = await ipcRenderer.invoke('open-login-window', args);
-    return res.success ? res : { success: false };
+    // Pass the full IPC response through. Previously this bridge replaced
+    // any !success response with a bare `{ success: false }`, dropping the
+    // `error` field, the `connected` verdict, and the `reason` string —
+    // which left the renderer with no signal about why a login attempt
+    // failed and forced a generic fallback toast that hid real bugs.
+    return await ipcRenderer.invoke('open-login-window', args);
   },
   checkAndLogin: async (args) => {
     const res = await ipcRenderer.invoke('check-and-login', args);

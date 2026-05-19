@@ -5,8 +5,10 @@
  *             Greenhouse API, Lever API, USAJobs API
  */
 import { callLLMDocument, callLLMText } from './llm.js';
+import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA } from './aiSchemas.js';
 import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
+import { openCaptchaResolveWindow } from './browser/authWindows.js';
 import { logger } from '../logger.js';
 import {
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
@@ -27,7 +29,7 @@ import {
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory } from './jobsHistory.js';
 import { filterJobsByAge } from './jobDateFilter.js';
 
-const DEFAULT_MAX_AGE_DAYS = 14;
+const DEFAULT_MAX_AGE_DAYS = 21;
 
 // All source IDs — defines the complete set for progress tracking and reporting.
 const ALL_SOURCE_IDS = [
@@ -113,8 +115,12 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
   return Promise.all(apiTasks.map(async ({ sourceId, fn }) => {
     try {
       if (signal?.aborted) throw new Error('Aborted');
-      const jobs = await fn(signal);
-      return { sourceId, jobs };
+      // Each API fetcher now returns { items, warning } so blocks/throttles
+      // can surface in the UI instead of silently producing an empty array.
+      const result = await fn(signal);
+      const jobs = Array.isArray(result) ? result : (result?.items || []);
+      const warning = Array.isArray(result) ? null : (result?.warning || null);
+      return { sourceId, jobs, warning };
     } catch (error) {
       return { sourceId, jobs: [], error: error?.message || String(error) };
     }
@@ -139,29 +145,38 @@ Analyze this resume/CV thoroughly. Return a JSON object with:
   "education": ["degrees, certifications, notable training"],
   "summary": "A 2-sentence professional summary of this person"
 }
-Extract everything you can find. Be thorough.`, signal);
+Extract everything you can find. Be thorough.`, { signal, task: 'resume-parse', responseSchema: RESUME_PARSE_SCHEMA });
 
     logger.info(`[Jobs][${nodeId}] Resume parsed:`, profile.titles?.join(', '));
     return { profile };
   });
 
-  handleSafe('generate-job-queries', async (event, { profile }, signal) => {
+  handleSafe('generate-job-queries', async (event, { profile, targetRole }, signal) => {
+    const role = (targetRole || '').trim();
+    const targetBlock = role ? `
+TARGET ROLE PRIORITY: The user explicitly wants to pivot into or land the role: ${role}.
+This is the top priority — bias query construction toward this role even if their resume doesn't fully align.` : '';
+    const targetQueryInstruction = role
+      ? `"targetRoleQueries": ["3-5 queries that hunt specifically for '${role}' postings. Include seniority + remoteness variants (e.g. '${role} senior', '${role} remote', '${role} junior') and include the candidate's location in at least one. These are the highest-priority queries."]`
+      : `"targetRoleQueries": []`;
+
     const result = await callLLMText(`
-You are a career strategist. Given this professional profile, generate search queries for a job search.
+You are a career strategist. Given this professional profile, generate search queries for a job search.${targetBlock}
 
 Profile:
-${JSON.stringify(profile, null, 2)}
+${JSON.stringify(profile)}
 
-Return a JSON object with three arrays of search query strings:
+Return a JSON object with four arrays of search query strings:
 
 {
   "titleQueries": ["2-3 queries using their exact job titles + location, e.g. 'senior backend engineer denver'"],
   "suggestedRoleQueries": ["3-5 queries for roles they could transition into — adjacent, stretch, and pivot roles they may not have considered. Think creatively: a backend engineer could be an engineering manager, developer advocate, solutions architect, technical PM, etc. Include the location."],
-  "skillsOnlyQueries": ["2-3 queries using ONLY their skills and experience level, NO job title at all, e.g. 'python kubernetes 8 years team lead distributed systems'. This is intentionally broad to surface unexpected matches."]
+  "skillsOnlyQueries": ["2-3 queries using ONLY their skills and experience level, NO job title at all, e.g. 'python kubernetes 8 years team lead distributed systems'. This is intentionally broad to surface unexpected matches."],
+  ${targetQueryInstruction}
 }
 
-Be creative with suggestedRoleQueries — think about what career directions their skills unlock that they might not have considered.`, signal);
-      
+Be creative with suggestedRoleQueries — think about what career directions their skills unlock that they might not have considered.${role ? ` Always include the literal string ${role} in at least one targetRoleQueries entry, paired with the candidate's location.` : ''}`, { signal, task: 'job-query-generation', responseSchema: JOB_QUERY_GENERATION_SCHEMA });
+
     return { queries: result };
   });
 
@@ -171,12 +186,17 @@ Be creative with suggestedRoleQueries — think about what career directions the
     logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across 12 sources (maxAge=${ageDays}d)`);
 
     const tasks = buildJobTasks(queries, ageDays);
-    
+
     // Group tasks by source for per-source progress tracking
     const sourceTaskIds = {};
+    // First scrape URL per source — sent on completion events so the source
+    // card's Solve button has a target to open in the cookie-sharing browser
+    // (mirrors marketplace's CompSourceCardNode `progress.url` flow).
+    const sourceFirstUrl = {};
     for (const t of tasks) {
       if (!sourceTaskIds[t.sourceId]) sourceTaskIds[t.sourceId] = [];
       sourceTaskIds[t.sourceId].push(t.id);
+      if (!sourceFirstUrl[t.sourceId]) sourceFirstUrl[t.sourceId] = t.url;
     }
 
     // Notify frontend that sources are starting
@@ -188,7 +208,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
 
     const allJobs = [];
     const sourceResults = {};
-    
+
     // 1. Run Scraper Tasks and API Tasks concurrently
     const [results, apiResults] = await Promise.all([
       scrapeMultiple(tasks, (res) => {
@@ -199,7 +219,10 @@ Be creative with suggestedRoleQueries — think about what career directions the
           nodeId,
           sourceId,
           status: res.success ? 'done' : 'error',
-          count
+          count,
+          // Forward anti-bot warning so the JobSourceCardNode can render
+          // the embedded text warning instead of silently showing 0 jobs.
+          warning: res.warning || null,
         });
       }, signal),
       fetchApiSources(queries, event.sender, signal, nodeId, ageDays)
@@ -208,8 +231,13 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Process Scraper Results
     for (const result of results) {
       const sourceId = result.id.replace(/-\d+$/, '');
-      if (!sourceResults[sourceId]) sourceResults[sourceId] = { jobs: [], errors: 0 };
+      if (!sourceResults[sourceId]) sourceResults[sourceId] = { jobs: [], errors: 0, warnings: [] };
 
+      // Capture anti-bot warning per source even on success — a "success
+      // with 0 items" usually means a soft block returned a skeleton page.
+      if (result.warning) {
+        sourceResults[sourceId].warnings.push(result.warning);
+      }
       if (result.success && Array.isArray(result.data)) {
         const tagged = result.data.map(j => ({ ...j, source: sourceId }));
         sourceResults[sourceId].jobs.push(...tagged);
@@ -217,34 +245,103 @@ Be creative with suggestedRoleQueries — think about what career directions the
       } else {
         sourceResults[sourceId].errors++;
         logger.warn(`[Jobs] Source ${result.id} failed:`, result.error);
+        // Synthesize a warning from the error message so the source card
+        // can render a reason instead of a bare "Failed". Without this,
+        // a Google 45s timeout (or any scrape error that wasn't anti-bot)
+        // ends up on the card as red text saying just "Failed".
+        const msg = String(result.error || 'Unknown error');
+        const isTimeout = /timed?\s*out|timeout/i.test(msg);
+        sourceResults[sourceId].warnings.push({
+          code: isTimeout ? 'scrape-timeout' : 'scrape-failed',
+          severity: 'block',
+          evidence: msg.slice(0, 240),
+          suggestion: isTimeout
+            ? 'Site was unreachable or too slow within 45s. Often a soft block — try a fresh stealth profile or come back later.'
+            : 'Scrape failed before extracting jobs. Check logs for the full stack trace.',
+        });
       }
     }
 
     // Process API Results
     for (const res of apiResults) {
-      if (!sourceResults[res.sourceId]) sourceResults[res.sourceId] = { jobs: [], errors: 0 };
+      if (!sourceResults[res.sourceId]) sourceResults[res.sourceId] = { jobs: [], errors: 0, warnings: [] };
+      // Each API fetcher now returns { items, warning }; the wrapper above
+      // also passes warning through. Capture it so blocks/throttles on
+      // API-based sources surface in the same UI panel as scraped sources.
+      if (res.warning) {
+        sourceResults[res.sourceId].warnings.push(res.warning);
+      }
       if (res.jobs.length > 0) {
         const tagged = res.jobs.map(j => ({ ...j, source: res.sourceId }));
         sourceResults[res.sourceId].jobs.push(...tagged);
         allJobs.push(...tagged);
       } else if (res.error) {
         sourceResults[res.sourceId].errors++;
+        // Same as scrape path: turn the raw error into a visible warning.
+        sourceResults[res.sourceId].warnings.push({
+          code: 'api-failed',
+          severity: 'block',
+          evidence: String(res.error).slice(0, 240),
+          suggestion: 'API call failed. Check logs for the full response.',
+        });
       }
     }
 
-    // Send per-source completion events
+    // Send per-source completion events — include the strongest warning for
+    // that source so the card UI keeps showing it even after the final
+    // event lands (otherwise the per-source completion event clobbers the
+    // earlier scrape-progress event that carried the warning).
+    //
+    // Status semantics (was: "0 jobs + 0 errors → idle", which was wrong —
+    // a source that ran and got 0 isn't idle, it's done with no results):
+    //   - 'done'    → ran successfully (count may be 0)
+    //   - 'skipped' → pre-skipped without running (config-missing info warning)
+    //   - 'error'   → fetched but every attempt failed (errors > 0 OR every
+    //                 attempt produced a block warning and no jobs)
+    //   - 'idle'    → reserved for "never got a progress event" (renderer fallback)
     for (const sourceId of ALL_SOURCE_IDS) {
-      const data = sourceResults[sourceId] || { jobs: [], errors: 0 };
+      const data = sourceResults[sourceId] || { jobs: [], errors: 0, warnings: [] };
+      // Block > info > throttle > nothing. Block wins for visual urgency;
+      // info wins over throttle so a config-missing reason isn't hidden by
+      // a soft warning.
+      const strongest =
+        data.warnings.find(w => w?.severity === 'block') ||
+        data.warnings.find(w => w?.severity === 'info')  ||
+        data.warnings[0] ||
+        null;
+
+      const hadBlock = data.warnings.some(w => w?.severity === 'block');
+      const hadInfoSkip = data.warnings.some(w => w?.severity === 'info');
       const allFailed = data.errors > 0 && data.jobs.length === 0;
-      const status = (data.jobs.length === 0 && data.errors === 0) ? 'idle' : (allFailed ? 'error' : 'done');
-      
+
+      let status;
+      if (data.jobs.length > 0) status = 'done';
+      else if (hadInfoSkip)     status = 'skipped';
+      else if (allFailed || hadBlock) status = 'error';
+      else                      status = 'done';   // ran cleanly, 0 results
+
       if (!event.sender.isDestroyed()) {
         event.sender.send('job-source-progress', {
           nodeId,
           sourceId,
           status,
           count: data.jobs.length,
+          warning: strongest,
+          // Failed scrape URL (browser-pool sources only). Empty for API
+          // sources — their Solve button won't render, which is correct
+          // since opening a login URL doesn't help an extractor that
+          // doesn't share cookies anyway.
+          url: sourceFirstUrl[sourceId] || null,
         });
+      }
+    }
+
+    // Flat per-source warning list returned with the response so the JobHub
+    // done state can render a copy-able "Scrape Warnings" panel.
+    const scrapeWarnings = [];
+    for (const [sourceId, data] of Object.entries(sourceResults)) {
+      for (const w of data.warnings || []) {
+        scrapeWarnings.push({ sourceId, ...w });
       }
     }
 
@@ -276,7 +373,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     logger.info(
       `[Jobs] ${kept.length} new jobs (raw=${allJobs.length}, dedup=${deduped.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped})`
     );
-    return { jobs: kept, sourceResults };
+    return { jobs: kept, sourceResults, scrapeWarnings };
   });
 
   // ── Jobs history (60-day rolling CSV next to the canvas JSON) ─────────────
@@ -290,12 +387,66 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // ── Score Jobs Against Resume ─────────────────────────────────────────────
-  handleSafe('score-jobs', async (event, { jobs, profile, nodeId }, signal) => {
-    logger.info(`[Jobs][${nodeId}] Scoring`, jobs.length, 'jobs');
+  handleSafe('score-jobs', async (event, { jobs, profile, nodeId, targetRole }, signal) => {
+    const role = (targetRole || '').trim();
+    logger.info(`[Jobs][${nodeId}] Scoring`, jobs.length, 'jobs', role ? `(target: ${role})` : '');
 
     // Batch into groups of 15
     const BATCH_SIZE = 15;
     const scoredJobs = [];
+    // Trim the per-job payload to what actually drives matching. Drop
+    // metadata fields (url, source, posted) the scorer doesn't read; keep
+    // title/company/location/salary/snippet. Snippet (JD body) dominates
+    // the payload, so this is a small but free saving across all batches.
+    const slimBatch = (batch) => batch.map((j, idx) => ({
+      index: idx,
+      title:    j.title || '',
+      company:  j.company || '',
+      location: j.location || '',
+      salary:   j.salary || '',
+      snippet:  j.snippet || '',
+    }));
+
+    // Static prefix shared across every batch — passed to callLLMText as
+    // `cachedPrefix` so providers that support prefix caching (Claude
+    // ephemeral, Gemini 2.5 implicit) bill the prefix once at write rate
+    // and at ~0.1x on subsequent batch reads. Order matters: static content
+    // (instructions + profile + target rules + output spec) all goes here;
+    // the dynamic per-batch job payload goes in the user prompt below.
+    const targetBlock = role ? `
+
+TARGET ROLE: The user wants to pivot into / land: ${role}.
+For each job, set isTargetRoleMatch=true ONLY if the job is reasonably for the target role ${role} (same role family, adjacent seniority, or a near-equivalent title). Set false for everything else, including strong fits in unrelated directions.
+Score target-role jobs by the candidate's chance of GETTING AN INTERVIEW for that role — even when their resume is a partial fit, a meaningful pivot opportunity with score 40-60 is more useful than perfect non-target matches.` : `
+
+NO TARGET ROLE was supplied. Set isTargetRoleMatch=false for every job — the field is unused this run.`;
+    const cachedPrefix = `You are a career matching expert. Score each job against this candidate's profile.
+
+CANDIDATE PROFILE:
+${JSON.stringify(profile)}${targetBlock}
+
+Return JSON of the form { "scores": [ ... one object per job in the array I send next ... ] }:
+{
+  "scores": [
+    {
+      "index": 0,
+      "matchScore": 85,
+      "reasoning": "1-2 sentences explaining WHY this matches or doesn't. Read between the lines — a startup wanting a 'manager with engineering depth' is a match for an experienced engineer even without management title.",
+      "careerDirection": "Engineering | Leadership | Product | DevRel | Consulting | Design | Data | Operations | Teaching | Other",
+      "strengthLabel": "strong | exploring | stretch | unexpected",
+      "isTargetRoleMatch": ${role ? 'true | false (per the target role rules above)' : 'false (no target role this run)'}
+    }
+  ]
+}
+
+IMPORTANT SCORING RULES:
+- matchScore is your HOLISTIC judgment of the candidate's chance of getting an interview — NOT a mechanical formula like (skills matched / skills wanted). Read the JD wording carefully: weigh must-haves more than nice-to-haves; consider seniority signal, growth potential, cultural fit, and how a reviewing recruiter would react.
+- Don't just match title-to-title. A startup "manager" role that wants someone who's been in the trenches IS a match for an experienced IC.
+- Skills-only matches without title match can still score 70%+ if requirements align.
+- Score 85%+ only for genuinely strong matches; 65-84 = good chance of interview; 40-64 = stretch / longshot; <40 = unlikely.
+- "unexpected" label is for jobs from the skills-only queries that reveal surprising career paths.
+- "stretch" label is for plausible pivots where the candidate's experience only partially aligns.
+- Aim for 3-7 distinct careerDirection categories total. Merge small categories.`;
 
     for (let i = 0; i < jobs.length; i += BATCH_SIZE) {
       // Guard: Check if window was closed between batches
@@ -303,50 +454,39 @@ Be creative with suggestedRoleQueries — think about what career directions the
 
       const batch = jobs.slice(i, i + BATCH_SIZE);
       let batchResult;
-      
+
       try {
-        batchResult = await callLLMText(`
-You are a career matching expert. Score each job against this candidate's profile.
-
-CANDIDATE PROFILE:
-${JSON.stringify(profile, null, 2)}
-
-JOBS TO SCORE (array):
-${JSON.stringify(batch, null, 2)}
-
-For each job, return a JSON array with one object per job:
-[
-  {
-    "index": 0,
-    "matchScore": 85,
-    "reasoning": "1-2 sentences explaining WHY this matches or doesn't. Read between the lines — a startup wanting a 'manager with engineering depth' is a match for an experienced engineer even without management title.",
-    "careerDirection": "Engineering | Leadership | Product | DevRel | Consulting | Design | Data | Operations | Teaching | Other",
-    "strengthLabel": "strong | exploring | stretch | unexpected"
-  }
-]
-
-IMPORTANT SCORING RULES:
-- Don't just match title-to-title. Read the job requirements deeply.
-- A startup "manager" role that wants someone who's been in the trenches IS a match for an experienced IC.
-- Skills-only matches without title match can still score 70%+ if requirements align.
-- Score 85%+ only for genuinely strong matches.
-- "unexpected" label is for jobs from the skills-only queries that reveal surprising career paths.
-- Aim for 3-7 distinct careerDirection categories total. Merge small categories.`, signal);
+        batchResult = await callLLMText(`JOBS TO SCORE (array, indexed):
+${JSON.stringify(slimBatch(batch))}`, {
+          signal,
+          task: 'job-scoring',
+          hints: { itemCount: batch.length },
+          responseSchema: JOB_SCORING_SCHEMA,
+          cachedPrefix,
+        });
       } catch (err) {
         if (signal.aborted) throw err;
         logger.warn(`[Jobs] Batch scoring failed:`, err);
         batchResult = null; // Forces string fallback below
       }
 
-      if (Array.isArray(batchResult)) {
+      // Accept either the wrapped { scores: [...] } shape (schema-enforced)
+      // or a bare array (older response format) so the rollout is robust if a
+      // provider ever returns the legacy shape.
+      const scores = Array.isArray(batchResult?.scores)
+        ? batchResult.scores
+        : Array.isArray(batchResult)
+          ? batchResult
+          : null;
+      if (scores) {
         batch.forEach((job, idx) => {
-          const score = batchResult.find(s => s.index === idx) || { matchScore: 50, reasoning: 'Unable to score', careerDirection: 'Other', strengthLabel: 'exploring' };
-          scoredJobs.push({ ...job, ...score });
+          const score = scores.find(s => s.index === idx) || { matchScore: 50, reasoning: 'Unable to score', careerDirection: 'Other', strengthLabel: 'exploring', isTargetRoleMatch: false };
+          scoredJobs.push({ ...job, ...score, isTargetRoleMatch: !!score.isTargetRoleMatch });
         });
       } else {
-        logger.warn(`[Jobs] batchResult was not an array:`, batchResult);
+        logger.warn(`[Jobs] batchResult missing scores array:`, batchResult);
         batch.forEach((job) => {
-          scoredJobs.push({ ...job, matchScore: 50, reasoning: 'AI format error', careerDirection: 'Other', strengthLabel: 'exploring' });
+          scoredJobs.push({ ...job, matchScore: 50, reasoning: 'AI format error', careerDirection: 'Other', strengthLabel: 'exploring', isTargetRoleMatch: false });
         });
       }
     }
@@ -385,7 +525,7 @@ Return a JSON object:
   "coverLetter": "The full cover letter text, properly formatted with paragraphs. Professional but authentic tone. Highlight specific skills that match the job. Keep it concise — 3-4 paragraphs max."
 }
 
-Don't be generic. Reference specific skills from the resume that match specific requirements from the job.`, signal);
+Don't be generic. Reference specific skills from the resume that match specific requirements from the job.`, { signal, task: 'cover-letter-generation' });
 
     return { coverLetter: result.coverLetter };
   });
@@ -420,8 +560,80 @@ Rules:
 - 3 technical/skills questions specific to the role's requirements
 - 2 company-specific questions (about the company's mission, product, or growth stage)
 - Tips must reference the candidate's ACTUAL skills and experience, not generic advice
-- Total: exactly 8 questions`, signal);
+- Total: exactly 8 questions`, { signal, task: 'interview-prep-generation', responseSchema: INTERVIEW_PREP_SCHEMA });
 
     return { questions: result.questions || [] };
+  });
+
+  // ── Bucket scored jobs into per-category salary ranges ────────────────────
+  // Runs after score-jobs. Takes the scored jobs (which already carry
+  // careerDirection) and asks the AI to pick salary bucket boundaries that
+  // fit each category's distribution. Returns the bucket tree the renderer
+  // uses to spawn the collapsible JobCategoryNode / JobBucketNode hierarchy.
+  handleSafe('bucket-jobs', async (event, { jobs, nodeId }, signal) => {
+    logger.info(`[Jobs][${nodeId}] Bucketing ${jobs.length} jobs into category/salary tree`);
+    // Strip the scored jobs down to just what bucketing needs — careerDirection,
+    // salary text, title, index. Drops the reasoning + resumeProfile + snippet
+    // payload that would otherwise bloat the prompt and burn tokens on data
+    // the bucketer doesn't need.
+    const compact = jobs.map((j, i) => ({
+      index: i,
+      careerDirection: j.careerDirection || 'Other',
+      title: j.title || '',
+      salary: j.salary || '',
+    }));
+    const result = await callLLMText(`
+You are a career data analyst. Group these scored jobs by careerDirection, then within each category pick salary bucket boundaries that fit the actual salary distribution.
+
+JOBS:
+${JSON.stringify(compact, null, 2)}
+
+Return a JSON object of the shape:
+{
+  "categories": [
+    {
+      "name": "Engineering",
+      "buckets": [
+        { "label": "$60-80k",   "minSalary": 60000, "maxSalary": 80000,  "jobIndices": [0, 4, 7] },
+        { "label": "$80-120k",  "minSalary": 80000, "maxSalary": 120000, "jobIndices": [2, 9] },
+        { "label": "Unspecified", "minSalary": 0,   "maxSalary": 0,      "jobIndices": [11, 13] }
+      ]
+    }
+  ]
+}
+
+RULES:
+- Use the EXACT careerDirection values from the input as category names. Don't rename or merge.
+- Pick 1–4 buckets per category based on the spread of actual salaries in that category. A category with 2 jobs gets 1 bucket; a category with wide spread gets 3–4.
+- Bucket labels should be human-friendly currency ranges: "$60-80k", "$120k+", "Unspecified".
+- "$X+" (open-ended top bucket) uses minSalary=X, maxSalary=0.
+- Jobs without parseable salary go in a single "Unspecified" bucket per category (minSalary=0, maxSalary=0).
+- Every input job MUST appear in exactly one bucket — jobIndices across all buckets must be the complete 0..N-1 set with no duplicates.
+- Order buckets from lowest to highest salary; Unspecified last.
+- Order categories alphabetically.`, {
+      signal,
+      task: 'job-bucketing',
+      hints: { itemCount: jobs.length },
+      responseSchema: JOB_BUCKETING_SCHEMA,
+    });
+    logger.info(`[Jobs][${nodeId}] Bucketed into ${result?.categories?.length || 0} categories`);
+    return { categories: result?.categories || [] };
+  });
+
+  // ── Resolve a job-source block — opens the failed scrape URL in a visible,
+  // cookie-sharing browser so the user can solve a captcha or log in. Same
+  // underlying primitive marketplace uses for `resolve-captcha`, minus the
+  // inline-extractor (jobs need a full re-run anyway, no point pulling
+  // single-page results out of the visible session).
+  //
+  // Returns { resolved } so the renderer can decide whether to auto-suggest
+  // a re-run. The persistence of cleared cookies in the shared userDataDir
+  // means a subsequent Re-run Search lands on a clean session.
+  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId } = {}, signal) => {
+    if (!url) throw new Error('resolve-job-source requires a url');
+    logger.info(`[Jobs][${nodeId}] User opening resolve window for ${sourceId}: ${url}`);
+    const result = await openCaptchaResolveWindow(url, event.sender, signal, null);
+    logger.info(`[Jobs][${nodeId}] Resolve window closed for ${sourceId}; auto-detected=${result.resolved}`);
+    return { resolved: !!result.resolved };
   });
 }

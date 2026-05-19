@@ -2,103 +2,34 @@ import React, { useState, useRef, useEffect, useCallback, useContext } from 'rea
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { HubContainer } from '../components/HubContainer';
-import { Camera, AlertTriangle, X, RefreshCw } from 'lucide-react';
-import { PRICE_COMP_SOURCES } from '../utils/constants';
+import { Camera } from 'lucide-react';
+import { PRICE_COMP_SOURCES, SELL_PLATFORMS } from '../utils/constants';
 import { useListingActions } from '../hooks/useListingActions';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
 import { HubBusyState } from '../components/HubBusyState';
 import { SellHubDraftState } from './sellhub/SellHubDraftState';
 import { SellHubPricedState } from './sellhub/SellHubPricedState';
+import { HubErrorBanner } from '../components/HubErrorBanner';
+import { SellHubCompsReadyDecision } from './sellhub/SellHubCompsReadyDecision';
 import { useCheckAllConnected } from '../hooks/useCheckAllConnected';
-
-/**
- * Inline error banner shown above the draft / empty body. Replaces the old
- * dedicated 'error' hubState — the user wanted failures to keep their place in
- * the flow (still see/edit the product, still able to drop new photos) rather
- * than be wiped to a "Try Again" wall.
- */
-function ErrorBanner({ errorMessage, isRateLimit, locked, onRetry, onDismiss }) {
-  const msg = String(errorMessage || '');
-  const isBillingDepleted = /prepayment credits are depleted|billing|insufficient/i.test(msg);
-  const headerLabel = !isRateLimit
-    ? 'Last attempt failed'
-    : isBillingDepleted ? 'Billing Credits Depleted' : 'Usage Limit Reached';
-
-  return (
-    <div className="m-2 p-2 rounded-md bg-red-500/10 border border-red-500/30" onPointerDown={(e) => e.stopPropagation()}>
-      <div className="flex items-start gap-1.5">
-        <AlertTriangle size={11} className="text-red-400 shrink-0 mt-0.5" />
-        <div className="flex-1 min-w-0">
-          <div className="text-red-300 text-[10px] font-semibold uppercase tracking-wider mb-0.5">
-            {headerLabel}
-          </div>
-          <div className="text-white/70 text-[10px] leading-snug break-words">
-            {errorMessage}
-          </div>
-          {isBillingDepleted && (
-            <div className="text-white/40 text-[10px] mt-1 leading-snug">
-              Billing is enabled but prepayment is empty — free tier no longer applies. Top up at Cloud Billing, or use a key from an account without billing.
-            </div>
-          )}
-          <div className="flex gap-1 mt-1.5 flex-wrap">
-            {!locked && onRetry && (
-              <button
-                onClick={(e) => { e.stopPropagation(); onRetry(); }}
-                className="nodrag flex items-center gap-1 px-1.5 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white/80 text-[10px] font-medium transition-colors"
-              >
-                <RefreshCw size={9} /> Try again
-              </button>
-            )}
-            {!locked && isRateLimit && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  document.dispatchEvent(new CustomEvent('open-settings', { detail: { tab: 'ai' } }));
-                }}
-                className="nodrag px-1.5 py-0.5 rounded bg-blue-500/20 hover:bg-blue-500/30 text-blue-200 text-[10px] font-medium transition-colors"
-              >
-                Change model / key
-              </button>
-            )}
-            {!locked && isBillingDepleted && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  window.electronAPI?.openExternal?.('https://ai.google.dev/gemini-api/docs/billing#prepay');
-                }}
-                className="nodrag px-1.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-[10px] font-medium transition-colors"
-              >
-                Top up billing
-              </button>
-            )}
-          </div>
-        </div>
-        {!locked && onDismiss && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onDismiss(); }}
-            className="nodrag text-white/30 hover:text-white/60 shrink-0"
-            title="Dismiss"
-          >
-            <X size={11} />
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
+import { useUnmountEffect } from '../hooks/useUnmountEffect';
+import { useEpochCancellation } from '../hooks/useEpochCancellation';
+import { useSourceProgress } from '../hooks/useSourceProgress';
+import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
+import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 
 /**
  * SellHubNode — draggable canvas module for marketplace selling.
  *
- * data.hubState: 'empty' | 'analyzing' | 'draft' | 'researching' | 'priced'
- *   (legacy 'error' value from older saves is mapped to draft/empty at render
- *    time; new failures set errorMessage but stay in draft/empty.)
+ * data.hubState: 'empty' | 'analyzing' | 'draft' | 'researching' | 'priced' | 'comps-ready'
+ *   Failures set errorMessage (surfaced via HubErrorBanner) but stay in the
+ *   logical step rather than wiping to a dedicated error wall.
  * data.imagePaths: string[]
  * data.product: { brand, model, generated_title, generated_description, condition, category }
  * data.pricing: { recommended_price, quick_sell_price, max_profit_price, justification, market_summary }
  * data.comps: { sold: [], active: [] }
- * data.errorMessage: string | null — surfaced inline via ErrorBanner above the body
+ * data.errorMessage: string | null — surfaced inline via HubErrorBanner above the body
  * data.isRateLimit: boolean
  * data.userPrice: number
  */
@@ -106,7 +37,7 @@ export function SellHubNode({ id, data }) {
 
   // id is stable for this component's lifetime — ReactFlow never reuses
   // instances with different ids, so we can safely close over it in callbacks.
-  const { updateNodeData, getNode, getNodes, getEdges, addNodes, addEdges, deleteElements } = useReactFlow();
+  const { updateNodeData, getNode, getNodes, getEdges, addNodes, addEdges, deleteElements, fitView } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const addElementsGlobally = nav?.addElementsGlobally;
@@ -114,30 +45,28 @@ export function SellHubNode({ id, data }) {
   const processingRef = useRef(false);
   const processingPriceRef = useRef(false);
   const isMountedRef = useRef(true);
-  // Cancellation epoch — bumped by resetHandler. In-flight startAnalysis /
-  // handleConfirmDraft capture the epoch at start; their success and catch
-  // blocks compare on completion. A mismatch means the user cancelled (or
-  // a newer attempt is now in flight) and the late settlement must not
-  // overwrite the freshly-reverted state (this was the "Analysis failed —
-  // Window closed" bug — the backend abort settled after the UI reverted).
-  const cancellationEpochRef = useRef(0);
+  // Cancellation epoch — see hooks/useEpochCancellation.js. In-flight async
+  // workflows (startAnalysis / handleConfirmDraft / synthesizeAndPrice)
+  // call `epoch.start()` and re-check `cancelled()` after each await so a
+  // user-triggered reset (which bumps the epoch) doesn't get clobbered by
+  // a late settlement.
+  const epoch = useEpochCancellation();
   useEffect(() => {
     return () => { isMountedRef.current = false; };
   }, []);
   // Stable ref so handleDrop always calls the latest startAnalysis without needing deps.
   const startAnalysisRef = useRef(null);
   const {
-    product, editing, setEditing, priceInput, justificationExpanded,
-    copied, handleFieldEdit, handlePriceChange,
-    handleQuickPrice, handleCopyListing, toggleJustification,
-    researchPrice, listingText,
+    product, editing, setEditing, justificationExpanded,
+    handleFieldEdit, toggleJustification,
+    scrapePriceComps, rescrapeSource, synthesizePrice,
   } = useListingActions(id, data);
 
   // ── Phase-2 marketplace cards ──────────────────────────────────────────
   // Each platform the user is selling on becomes its own canvas node spawned
   // from here and connected by an edge. The hub then becomes the control
   // center: spawn cards + "Check All Statuses" (walks each connected card).
-  const { checkingAll, checkAll: handleCheckAllStatuses, getConnectedCards } = useCheckAllConnected({
+  const { checkingAll, checkAll: handleCheckAllStatuses } = useCheckAllConnected({
     hubId: id,
     cardType: 'marketplacecard',
     getUrl: (d) => d?.listingUrl,
@@ -146,7 +75,13 @@ export function SellHubNode({ id, data }) {
     itemLabel: 'marketplace',
   });
 
-  const spawnedMarketplaceIds = getConnectedCards()
+  // Query the WHOLE canvas (not just edge-connected) by hubId backlink so a
+  // user who detached a card can't accidentally double-spawn the same
+  // platform. With the hub→card edge now locked non-deletable on spawn, true
+  // orphans only exist for pre-this-change cards — those fall back to manual
+  // delete + respawn, which is fine.
+  const spawnedMarketplaceIds = getNodes()
+    .filter(n => n.type === 'marketplacecard' && n.data?.hubId === id)
     .map(n => n.data?.platformId)
     .filter(Boolean);
 
@@ -162,10 +97,11 @@ export function SellHubNode({ id, data }) {
       position: { x: hubPos.x + 400, y: hubPos.y + index * 260 },
       data: {
         platformId,
+        hubId: id,
         listingUrl: '',
         status: 'unknown',
         productSnapshot: product?.generated_title
-          ? { title: product.generated_title, price: priceInput }
+          ? { title: product.generated_title, price: data.pricing?.recommended_price || null }
           : null,
       },
     };
@@ -173,6 +109,14 @@ export function SellHubNode({ id, data }) {
       id: `edge-${id}-${cardId}`,
       source: id, target: cardId,
       type: 'smoothstep', animated: true,
+      // Hub→spawn-card edge is structural, not user-managed. Locking
+      // selectable/deletable means it can only go away when the card itself
+      // is deleted (ReactFlow auto-prunes attached edges), keeping the
+      // hub's spawn-tracking and "Check All" walks in lockstep with the
+      // actual card lifecycle.
+      selectable: false,
+      deletable: false,
+      focusable: false,
       style: { stroke: 'rgba(245,158,11,0.5)', strokeWidth: 2 },
     };
     document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
@@ -183,37 +127,34 @@ export function SellHubNode({ id, data }) {
       addEdges([newEdge]);
     }
   }, [
-    data.locked, spawnedMarketplaceIds, id, getNode, product, priceInput,
+    data.locked, spawnedMarketplaceIds, id, getNode, product, data.pricing?.recommended_price,
     addElementsGlobally, addNodes, addEdges,
   ]);
 
 
-  // Per-source comp progress: { 'ebay-sold': { status, count }, 'amazon': { status, count }, ... }
-  const [compProgress, setCompProgress] = useState({});
+  // Surfaced via EventLogger.registerNodeState so the bug-report node-
+  // diagnostics row shows "queued: N" when early captcha-resolves are
+  // sitting waiting for scrape completion. Previously this state was
+  // invisible, which made "I solved all the cards but it still said 1
+  // left" reports hard to diagnose.
+  const [queuedResolvesCount, setQueuedResolvesCount] = useState(0);
 
   const hubState = data.hubState || 'empty';
 
-  // Listen for per-source price research progress events
-  useEffect(() => {
-    if (!window.electronAPI?.onPriceSourceProgress) return;
-    const cleanup = window.electronAPI.onPriceSourceProgress((payload) => {
-      const { nodeId, sourceId, status, count } = payload;
-
-      // Multi-hub safety
-      if (nodeId && nodeId !== id) return;
-
-      setCompProgress(prev => ({ ...prev, [sourceId]: { status, count } }));
-    });
-    return () => cleanup?.();
-  }, [id]);
+  // Per-source comp progress populated from backend `price-source-progress`
+  // events. Reset before each fresh run so stale counts don't bleed in.
+  const {
+    progress: compProgress,
+    reset: resetCompProgress,
+  } = useSourceProgress(window.electronAPI?.onPriceSourceProgress, id);
 
   // Surface the live ring state to the bug-report snapshot so reports like
   // "old comps circle is still showing" can be diagnosed from the report alone
   // (otherwise compProgress is only visible to the user's eyes).
   useEffect(() => {
-    EventLogger.registerNodeState(id, { hubState, compProgress });
+    EventLogger.registerNodeState(id, { hubState, compProgress, queuedResolvesCount });
     return () => EventLogger.unregisterNodeState(id);
-  }, [id, hubState, compProgress]);
+  }, [id, hubState, compProgress, queuedResolvesCount]);
 
 
   const startAnalysis = useCallback(async (imagePaths) => {
@@ -222,18 +163,18 @@ export function SellHubNode({ id, data }) {
     if (validPaths.length === 0 || !window.electronAPI || processingRef.current) return;
 
     processingRef.current = true;
-    setCompProgress({});
+    resetCompProgress();
     const currentId = id;
     // Capture epoch so a later resetHandler can invalidate this attempt's
     // settlement. Also clear any leftover errorMessage so a successful run
     // doesn't leave a stale banner around after the next render.
-    const myEpoch = cancellationEpochRef.current;
+    const cancelled = epoch.start();
     updateGlobal(currentId, { hubState: 'analyzing', imagePaths: validPaths, errorMessage: null, isRateLimit: false });
 
     try {
       const result = await window.electronAPI.analyzePhotos({ imagePaths: validPaths, nodeId: currentId });
 
-      if (myEpoch !== cancellationEpochRef.current) return; // user cancelled — let resetHandler's state stand
+      if (cancelled()) return; // user cancelled — let resetHandler's state stand
 
       if (!result.success) {
         const err = new Error(result.error);
@@ -247,7 +188,7 @@ export function SellHubNode({ id, data }) {
         errorMessage: null,
       });
     } catch (error) {
-      if (myEpoch !== cancellationEpochRef.current) return; // cancelled — don't overwrite revert
+      if (cancelled()) return; // cancelled — don't overwrite revert
       EventLogger.error('[SellHub] Analysis failed:', error);
       // Revert to 'empty' (no product was produced) but surface the failure
       // inline via errorMessage so the user can retry from the same step.
@@ -262,18 +203,27 @@ export function SellHubNode({ id, data }) {
         processingRef.current = false;
       }
     }
-  }, [id, updateGlobal, addToast]);
+  }, [id, updateGlobal, addToast, epoch, resetCompProgress]);
 
   // Keep ref in sync so handleDrop always invokes the latest closure.
   startAnalysisRef.current = startAnalysis;
 
   // Auto-start analysis if images were dropped (must come after startAnalysis is declared
   // — referencing it earlier would hit the const TDZ on first render).
+  // Skip when errorMessage is set: the catch block reverts hubState to 'empty'
+  // while leaving imagePaths populated, so without this guard a failed
+  // attempt re-triggers itself on the next render — infinite retry storm
+  // until the user manages to click Reset.
   useEffect(() => {
-    if (data.imagePaths?.length > 0 && hubState === 'empty' && !processingRef.current) {
+    if (
+      data.imagePaths?.length > 0 &&
+      hubState === 'empty' &&
+      !data.errorMessage &&
+      !processingRef.current
+    ) {
       startAnalysis(data.imagePaths);
     }
-  }, [data.imagePaths, hubState, startAnalysis]);
+  }, [data.imagePaths, hubState, data.errorMessage, startAnalysis]);
 
   // Explicit re-run for the "Re-analyze with real AI" CTA on the mock banner.
   // Resets product to a clean slate so the downstream useEffect picks up the
@@ -281,7 +231,7 @@ export function SellHubNode({ id, data }) {
   const handleReanalyze = useCallback(() => {
     if (data.locked || processingRef.current) return;
     if (!data.imagePaths?.length) return;
-    updateGlobal(id, { hubState: 'empty', product: null, pricing: null, comps: null, errorMessage: null });
+    updateGlobal(id, { hubState: 'empty', product: null, pricing: null, comps: null, platformFit: null, errorMessage: null });
   }, [data.locked, data.imagePaths, id, updateGlobal]);
 
   // React to settings changes so live nodes don't get stuck showing a stale
@@ -305,24 +255,21 @@ export function SellHubNode({ id, data }) {
   // progress events. They're ephemeral because comp sources aren't user-
   // facing platforms — they're internal data sources for the price model.
 
+  // Reap every comp-source card belonging to this hub. Called defensively at
+  // the start of a new scrape run (clean slate) and on user-cancel from the
+  // 'comps-ready' state. Individual cards self-manage in normal flow:
+  // clean-success cards self-delete on a 3s timer, warned/errored cards
+  // stick around until the user clicks Solve or Skip on them.
   const cleanupCompSourceCards = useCallback(() => {
-    const cardIds = getNodes()
-      .filter(n => n.type === 'compsourcecard' && n.data?.hubId === id)
-      .map(n => ({ id: n.id }));
-    if (cardIds.length === 0) return;
-    const cardIdSet = new Set(cardIds.map(c => c.id));
-    const edgesToDelete = getEdges()
-      .filter(e => cardIdSet.has(e.source) || cardIdSet.has(e.target))
-      .map(e => ({ id: e.id }));
-    deleteElements({ nodes: cardIds, edges: edgesToDelete });
+    deleteChildrenByHubId({
+      getNodes, getEdges, deleteElements, hubId: id,
+      childTypes: ['compsourcecard'],
+    });
   }, [id, getNodes, getEdges, deleteElements]);
 
   // If the hub is deleted mid-research, reap its ephemeral comp cards so they
   // don't strand on the canvas with no listener for their progress events.
-  // Ref pattern keeps the unmount effect dep-free without staling the closure.
-  const cleanupRef = useRef(cleanupCompSourceCards);
-  cleanupRef.current = cleanupCompSourceCards;
-  useEffect(() => () => cleanupRef.current(), []);
+  useUnmountEffect(cleanupCompSourceCards);
 
   const spawnCompSourceCards = useCallback(() => {
     // Defensive: clear any leftovers from a previous (interrupted) run.
@@ -333,8 +280,10 @@ export function SellHubNode({ id, data }) {
     // hub's body. Radius is wide enough that the cards don't overlap the hub.
     const count  = PRICE_COMP_SOURCES.length;
     const radius = 260;
-    const cx = hubPos.x + 140; // hub width / 2
-    const cy = hubPos.y + 120; // approx hub vertical center during research
+    const HUB_W = 280, HUB_H = 240;     // approx hub footprint while researching
+    const CARD_W = 140, CARD_H = 48;
+    const cx = hubPos.x + HUB_W / 2;
+    const cy = hubPos.y + HUB_H / 2;
     const stamp = Date.now();
 
     const newNodes = PRICE_COMP_SOURCES.map((source, i) => {
@@ -343,14 +292,15 @@ export function SellHubNode({ id, data }) {
         id: `comp-${id}-${source.id}-${stamp}`,
         type: 'compsourcecard',
         position: {
-          x: cx + Math.cos(angle) * radius - 70, // card width / 2
-          y: cy + Math.sin(angle) * radius - 24, // card height / 2
+          x: cx + Math.cos(angle) * radius - CARD_W / 2,
+          y: cy + Math.sin(angle) * radius - CARD_H / 2,
         },
         data: {
           sourceId: source.id,
           name:     source.name,
           letter:   source.letter,
           color:    source.color,
+          domain:   source.domain,
           hubId:    id,
           ephemeral: true,
         },
@@ -362,13 +312,18 @@ export function SellHubNode({ id, data }) {
       };
     });
 
+    // Route each hub→card edge to the hub's nearest side so edges don't all
+    // bunch on one face. pickEdgeHandles handles the math; both ends already
+    // render the required NodeHandles slots.
     const newEdges = newNodes.map(n => ({
       id: `edge-${id}-${n.id}`,
       source: id,
       target: n.id,
-      type: 'smoothstep',
-      animated: true,
-      style: { stroke: 'rgba(245,158,11,0.5)', strokeWidth: 2 },
+      ...pickEdgeHandles(
+        { x: n.position.x + CARD_W / 2, y: n.position.y + CARD_H / 2 },
+        { x: cx,                        y: cy                       },
+      ),
+      ...structuralEdge('rgba(245,158,11,0.5)'),
     }));
 
     if (addElementsGlobally) {
@@ -379,68 +334,362 @@ export function SellHubNode({ id, data }) {
     }
   }, [id, getNode, addElementsGlobally, addNodes, addEdges, cleanupCompSourceCards]);
 
-  const handleConfirmDraft = useCallback(async () => {
-    if (processingPriceRef.current || !data.product) return;
-    processingPriceRef.current = true;
+  // After scrape finishes, transition straight to 'priced' (clean) or pause
+  // in 'comps-ready' (some sources blocked) so the user can resolve or skip
+  // before we spend AI tokens. Extracted because both the initial run and
+  // the "Skip & price now" button funnel through the same synthesis step.
+  const synthesizeAndPrice = useCallback(async (comps, scrapeWarnings, cancelled) => {
     const currentId = id;
-    const myEpoch = cancellationEpochRef.current;
-
-    // Clear per-source progress before the new run. Without this, re-research
-    // from the priced state leaves stale "X found" / done states on the ring
-    // until each source's first new progress event overwrites it.
-    setCompProgress({});
-    spawnCompSourceCards();
-    updateGlobal(currentId, { hubState: 'researching', errorMessage: null, isRateLimit: false });
-
     try {
-      const result = await researchPrice((state, res) => {
-        if (myEpoch !== cancellationEpochRef.current) return; // cancelled — ignore mid-flight updates
-        if (!res) return;
-
-        if (state === 'priced') {
-          updateGlobal(currentId, {
-            hubState: 'priced',
-            pricing: res.pricing,
-            comps: res.comps || { sold: [], active: [] },
-            errorMessage: null,
-          });
-          const rec = res.pricing?.recommended_price;
-          addToast({
-            title: 'Pricing Engine',
-            description: rec != null ? `Recommended price: $${rec}` : 'No comparable listings found — set your own price.',
-            type: 'success',
-          });
-        } else if (state === 'priced-empty') {
-          updateGlobal(currentId, {
-            hubState: 'priced',
-            pricing: { recommended_price: null, justification: res.error },
-            comps: { sold: [], active: [] },
-            errorMessage: null,
-          });
-        }
+      const synthResult = await synthesizePrice(comps);
+      if (cancelled()) return;
+      updateGlobal(currentId, {
+        hubState: 'priced',
+        pricing: synthResult.pricing,
+        comps,
+        scrapeWarnings: Array.isArray(scrapeWarnings) ? scrapeWarnings : [],
+        platformFit: null,
+        errorMessage: null,
       });
-      if (myEpoch !== cancellationEpochRef.current) return;
-      if (!result) {
-        updateGlobal(currentId, { hubState: 'draft' });
+      // Fire platform-fit assessment in the background.
+      if (window.electronAPI?.assessPlatformFit && data.product) {
+        window.electronAPI.assessPlatformFit({
+          product: data.product,
+          platforms: SELL_PLATFORMS.map(p => ({ id: p.id, name: p.name })),
+          nodeId: currentId,
+        })
+          .then(r => {
+            if (cancelled()) return;
+            if (r?.fit && typeof r.fit === 'object') {
+              updateGlobal(currentId, { platformFit: r.fit });
+            }
+          })
+          .catch(err => EventLogger.error('[SellHub] Platform-fit assessment failed (non-fatal):', err));
       }
+      const rec = synthResult.pricing?.recommended_price;
+      const warnCount = Array.isArray(scrapeWarnings) ? scrapeWarnings.length : 0;
+      addToast({
+        title: 'Pricing Engine',
+        description: rec != null
+          ? `Recommended price: $${rec}${warnCount > 0 ? ` (synthesized without ${warnCount} blocked source(s))` : ''}`
+          : 'No similar listings — set your own price.',
+        type: warnCount > 0 ? 'warning' : 'success',
+      });
     } catch (err) {
-      if (myEpoch !== cancellationEpochRef.current) return; // cancelled — preserve revert
-      EventLogger.error('[SellHub] Price research failed:', err);
-      // Revert to 'draft' (product is intact) and surface the error inline
-      // so the user can edit the draft or click Try Again from the banner.
+      if (cancelled()) return;
+      EventLogger.error('[SellHub] Price synthesis failed:', err);
       updateGlobal(currentId, {
         hubState: 'draft',
         errorMessage: err?.message || String(err),
         isRateLimit: !!err?.isRateLimit,
       });
       addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
+    }
+  }, [id, updateGlobal, synthesizePrice, addToast, data.product]);
+
+  const handleConfirmDraft = useCallback(async () => {
+    if (processingPriceRef.current || !data.product) return;
+    processingPriceRef.current = true;
+    const currentId = id;
+    const cancelled = epoch.start();
+
+    resetCompProgress();
+    spawnCompSourceCards();
+    updateGlobal(currentId, { hubState: 'researching', errorMessage: null, isRateLimit: false, pendingComps: null });
+
+    requestAnimationFrame(() => {
+      fitView({ duration: 600, padding: 0.2 });
+    });
+
+    try {
+      const scrapeResult = await scrapePriceComps();
+      if (cancelled()) return;
+
+      const comps = scrapeResult.comps || { sold: [], active: [] };
+      const scrapeWarnings = Array.isArray(scrapeResult.scrapeWarnings) ? scrapeResult.scrapeWarnings : [];
+
+      // Branch: any blocked source → pause and ask the user. AI synthesis is
+      // skipped here so we don't spend tokens on partial data without consent.
+      // The 'comps-ready' UI hands the decision back: Solve blockers (cards
+      // already show Solve buttons) or Skip → call synthesizeAndPrice directly.
+      // Edge case: zero comps AND zero warnings means search came up empty
+      // legitimately — go straight to priced with an empty result.
+      // Drain any captcha-resolves that landed during the scrape. Each
+      // queued merge replaces same-source items in pendingComps and drops
+      // the source from scrapeWarnings. Order doesn't matter — the filter
+      // is by source id, so later entries for the same source overwrite
+      // earlier ones cleanly.
+      let mergedComps = comps;
+      let effectiveWarnings = scrapeWarnings;
+      if (pendingMergesRef.current.length > 0) {
+        const queued = pendingMergesRef.current.splice(0);
+        setQueuedResolvesCount(0);
+        EventLogger.log(`[SellHub][${id}] applying ${queued.length} queued early-resolve(s): ${queued.map(q => q.sourceId).join(', ')}`);
+        for (const q of queued) {
+          const other = q.category === 'sold' ? 'active' : 'sold';
+          mergedComps = {
+            [q.category]: [
+              ...((mergedComps[q.category] || []).filter(i => i?.source !== q.sourceId)),
+              ...(q.items || []),
+            ],
+            [other]: mergedComps[other] || [],
+          };
+          effectiveWarnings = effectiveWarnings.filter(w => w.sourceId !== q.sourceId);
+        }
+      }
+      const effectiveTotal = (mergedComps.sold?.length || 0) + (mergedComps.active?.length || 0);
+
+      if (effectiveWarnings.length > 0) {
+        updateGlobal(currentId, {
+          hubState: 'comps-ready',
+          pendingComps: mergedComps,
+          scrapeWarnings: effectiveWarnings,
+          errorMessage: null,
+        });
+        addToast({
+          title: 'Sources blocked',
+          description: `${effectiveWarnings.length} source(s) blocked or errored. Resolve them or click Skip to price with partial data.`,
+          type: 'warning',
+        });
+        return;
+      }
+
+      if (effectiveTotal === 0) {
+        updateGlobal(currentId, {
+          hubState: 'priced',
+          pricing: { recommended_price: null, justification: 'No similar listings found — set your own price.', market_summary: { sold_count: 0, active_count: 0 }, recommended_platforms: [] },
+          comps: mergedComps,
+          scrapeWarnings: [],
+          platformFit: null,
+          errorMessage: null,
+        });
+        return;
+      }
+
+      // All clean (either no warnings from the start, or queued resolves
+      // cleared them) → straight to synthesis.
+      await synthesizeAndPrice(mergedComps, effectiveWarnings, cancelled);
+    } catch (err) {
+      if (cancelled()) return;
+      EventLogger.error('[SellHub] Price scrape failed:', err);
+      updateGlobal(currentId, {
+        hubState: 'draft',
+        errorMessage: err?.message || String(err),
+        isRateLimit: !!err?.isRateLimit,
+      });
+      addToast({ title: 'Scrape Error', description: err?.message || String(err), type: 'error' });
     } finally {
       processingPriceRef.current = false;
-      // Reap the ephemeral comp-source cards regardless of outcome (success,
-      // empty, error). They're useful only while research is in flight.
-      cleanupCompSourceCards();
+      // No cleanup pass here — clean-success cards self-dismiss on their
+      // own 3s timer (so the user actually sees the "25 found" result),
+      // and warned/errored cards stick around until the user acts on them.
+      // Defensive cleanup at start-of-next-run (spawnCompSourceCards) still
+      // ensures no carry-over.
     }
-  }, [id, updateGlobal, researchPrice, addToast, data.product, spawnCompSourceCards, cleanupCompSourceCards]);
+  }, [id, updateGlobal, scrapePriceComps, synthesizeAndPrice, addToast, data.product, spawnCompSourceCards, fitView, epoch, resetCompProgress]);
+
+  // Per-source skip — fired by a comp card's Skip button. Drops the source
+  // from data.scrapeWarnings, deletes the card, then if the warnings list
+  // is empty AND we're still in 'comps-ready', auto-fires synthesis. This
+  // is the per-card analogue of the old hub-level "Skip & price now"
+  // button: each blocked source gets its own decision, and the AI call
+  // only fires once every blocked source has been individually
+  // resolved-or-skipped. Filtered by hubId so a multi-hub canvas doesn't
+  // cross-trigger.
+  //
+  // Refs bridge data.scrapeWarnings / data.pendingComps / hubState so two
+  // skip events firing within a single React batch both read the LATEST
+  // warnings list (the first event's updateGlobal hasn't flushed when the
+  // second runs). Without the refs, the second event would re-add the
+  // first event's already-dismissed warning.
+  const scrapeWarningsRef = useRef(data.scrapeWarnings);
+  const pendingCompsRef   = useRef(data.pendingComps);
+  const hubStateRef       = useRef(hubState);
+  useEffect(() => { scrapeWarningsRef.current = data.scrapeWarnings; }, [data.scrapeWarnings]);
+  useEffect(() => { pendingCompsRef.current   = data.pendingComps;   }, [data.pendingComps]);
+  useEffect(() => { hubStateRef.current       = hubState;            }, [hubState]);
+  useEffect(() => {
+    const onSkip = (e) => {
+      if (e.detail?.hubId !== id) return;
+      const skippedSourceId = e.detail?.sourceId;
+      if (!skippedSourceId) return;
+
+      const remainingWarnings = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== skippedSourceId);
+      // Mutate the ref synchronously so a SECOND skip event in the same
+      // tick sees the post-first-skip list, not the stale closure value.
+      scrapeWarningsRef.current = remainingWarnings;
+      EventLogger.log(`[SellHub][${id}] user skipped ${skippedSourceId}; ${remainingWarnings.length} blocked source(s) remaining`);
+      updateGlobal(id, { scrapeWarnings: remainingWarnings });
+
+      // Delete the skipped card (and its edge, auto-pruned by ReactFlow).
+      const cardNode = getNodes().find(n => n.type === 'compsourcecard' && n.data?.hubId === id && n.data?.sourceId === skippedSourceId);
+      if (cardNode) deleteElements({ nodes: [{ id: cardNode.id }] });
+
+      // If this was the last blocker AND we're still in the pause state,
+      // auto-fire synthesis. The hubState check guards against firing
+      // again after the user already moved on (e.g., already in 'priced').
+      if (remainingWarnings.length === 0 && hubStateRef.current === 'comps-ready' && pendingCompsRef.current) {
+        if (processingPriceRef.current) return;
+        processingPriceRef.current = true;
+        const cancelled = epoch.start();
+        const comps = pendingCompsRef.current;
+        (async () => {
+          try {
+            updateGlobal(id, { hubState: 'researching' });
+            await synthesizeAndPrice(comps, [], cancelled);
+            updateGlobal(id, { pendingComps: null });
+          } finally {
+            processingPriceRef.current = false;
+          }
+        })();
+      }
+    };
+    document.addEventListener('comp-source-skip', onSkip);
+    return () => document.removeEventListener('comp-source-skip', onSkip);
+  }, [id, updateGlobal, getNodes, deleteElements, synthesizeAndPrice, epoch]);
+
+  // After a comp card's captcha-resolve window auto-detects the challenge as
+  // cleared, refetch ONLY the unblocked source and merge into pendingComps.
+  // Previous behavior (full handleConfirmDraft re-run) threw away the prior
+  // scrape's ~70 successful items and re-hit every other source for nothing.
+  //
+  // Refs bridge data.scrapeWarnings / data.pendingComps / hubState into the
+  // async retry handler so rapid resolves don't read stale closures.
+  const rescrapeSourceRef = useRef(rescrapeSource);
+  const synthesizeAndPriceRef = useRef(synthesizeAndPrice);
+  useEffect(() => { rescrapeSourceRef.current = rescrapeSource; }, [rescrapeSource]);
+  useEffect(() => { synthesizeAndPriceRef.current = synthesizeAndPrice; }, [synthesizeAndPrice]);
+
+  // Queue of resolves that landed BEFORE the scrape itself completed (per-
+  // source-progress events fire mid-scrape, so a fast user can click Solve
+  // and resolve a captcha while the rest of the scrape is still running).
+  // Without queueing, those early resolves would be discarded by the
+  // hubState guard, leaving the warning in scrapeWarnings and the hub
+  // stuck in comps-ready with "1 left" even though the user solved
+  // everything visible. Drained in handleConfirmDraft after the scrape
+  // settles and pendingComps is initialized.
+  const pendingMergesRef = useRef([]);
+  useEffect(() => {
+    const onResolved = async (e) => {
+      if (e.detail?.hubId !== id) return;
+      const resolvedSourceId = e.detail?.sourceId;
+      if (!resolvedSourceId) return;
+
+      // Prefer items extracted inline in the visible captcha-resolve session.
+      // The session that passed the bot check is the only session guaranteed
+      // to be able to read the real content — a headless rescrape after
+      // close just re-triggers the same wall on sites that fingerprint
+      // (the original bug was exactly this loop for Mercari). Only fall
+      // back to rescrape when inline extract wasn't possible.
+      const inlineItems = Array.isArray(e.detail?.items) ? e.detail.items : null;
+      let result;
+      if (inlineItems) {
+        EventLogger.log(`[SellHub][${id}] captcha resolved for ${resolvedSourceId} — using ${inlineItems.length} inline-extracted item(s); no rescrape needed`);
+        addToast({
+          title: 'Captcha cleared',
+          description: `${resolvedSourceId} pulled ${inlineItems.length} item(s) inline — other sources keep their results.`,
+          type: 'success',
+        });
+        result = { sourceId: resolvedSourceId, items: inlineItems, warning: null, category: e.detail?.category || 'sold' };
+      } else {
+        EventLogger.log(`[SellHub][${id}] captcha resolved for ${resolvedSourceId} — no inline items, falling back to rescrape`);
+        addToast({
+          title: 'Captcha cleared',
+          description: `Refetching ${resolvedSourceId} (cookies are fresh) — other sources keep their results.`,
+          type: 'success',
+        });
+        try {
+          result = await rescrapeSourceRef.current(resolvedSourceId);
+        } catch (err) {
+          EventLogger.error(`[SellHub][${id}] rescrape ${resolvedSourceId} failed:`, err);
+          addToast({ title: 'Rescrape failed', description: err?.message || String(err), type: 'error' });
+          return;
+        }
+      }
+
+      // The hubState guard splits three ways:
+      //  - 'comps-ready': normal path, merge below.
+      //  - 'researching': the scrape is still running. User clicked Solve
+      //    on a per-source-progress warning that arrived mid-scrape.
+      //    Queue this result and let handleConfirmDraft's success-path
+      //    drain it after the scrape settles, otherwise the warning
+      //    would stick around when scrape completion overwrites
+      //    pendingComps with the original (warning-included) data.
+      //  - anything else ('draft', 'priced', 'empty'): user moved on
+      //    (Cancel or Refresh Prices) — discard.
+      if (hubStateRef.current === 'researching') {
+        EventLogger.log(`[SellHub][${id}] queueing early resolve for ${resolvedSourceId} (${result.items?.length || 0} items, category=${result.category}) — will apply after scrape completes`);
+        pendingMergesRef.current.push({
+          sourceId: resolvedSourceId,
+          items: result.items || [],
+          category: result.category || 'sold',
+        });
+        setQueuedResolvesCount(pendingMergesRef.current.length);
+        return;
+      }
+      if (hubStateRef.current !== 'comps-ready') {
+        EventLogger.log(`[SellHub][${id}] hubState=${hubStateRef.current} during rescrape settle — discarding ${resolvedSourceId} result`);
+        return;
+      }
+
+      // Source still blocked? Update its warning and leave it for the user.
+      // The card's progress event subscription already updated its visual
+      // state via the per-source-progress emits inside scrapeOneSource.
+      if (result.warning) {
+        EventLogger.log(`[SellHub][${id}] ${resolvedSourceId} still blocked after retry: ${result.warning.code}`);
+        const updatedWarnings = (scrapeWarningsRef.current || []).map(w =>
+          w.sourceId === resolvedSourceId ? { ...w, ...result.warning, sourceId: resolvedSourceId } : w
+        );
+        scrapeWarningsRef.current = updatedWarnings;
+        updateGlobal(id, { scrapeWarnings: updatedWarnings });
+        addToast({
+          title: 'Source still blocked',
+          description: `${resolvedSourceId}: ${result.warning.code}. Try Solve again or Skip.`,
+          type: 'warning',
+        });
+        return;
+      }
+
+      // Success — merge items into pendingComps under their category. Tag-by-
+      // source lets a retry-of-a-retry replace prior items cleanly instead of
+      // accumulating duplicates. Items already carry a `source` field from
+      // the extractors.
+      const prevComps = pendingCompsRef.current || { sold: [], active: [] };
+      const category = result.category || 'sold';
+      const otherCategory = category === 'sold' ? 'active' : 'sold';
+      const mergedComps = {
+        [category]: [
+          ...((prevComps[category] || []).filter(i => i?.source !== resolvedSourceId)),
+          ...result.items,
+        ],
+        [otherCategory]: prevComps[otherCategory] || [],
+      };
+      const remainingWarnings = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== resolvedSourceId);
+      pendingCompsRef.current = mergedComps;
+      scrapeWarningsRef.current = remainingWarnings;
+      updateGlobal(id, { pendingComps: mergedComps, scrapeWarnings: remainingWarnings });
+
+      EventLogger.log(`[SellHub][${id}] merged ${result.items.length} ${resolvedSourceId} items into pendingComps; ${remainingWarnings.length} blocked source(s) remaining`);
+
+      // If this was the last blocker AND we're still in the pause state,
+      // auto-fire synthesis. The hubState check guards against firing after
+      // the user already moved on (Cancel'd or Skip'd everything else).
+      if (remainingWarnings.length === 0 && hubStateRef.current === 'comps-ready') {
+        if (processingPriceRef.current) return;
+        processingPriceRef.current = true;
+        const cancelled = epoch.start();
+        try {
+          updateGlobal(id, { hubState: 'researching' });
+          await synthesizeAndPriceRef.current(mergedComps, [], cancelled);
+          updateGlobal(id, { pendingComps: null });
+        } finally {
+          processingPriceRef.current = false;
+        }
+      }
+    };
+    document.addEventListener('comp-captcha-resolved', onResolved);
+    return () => document.removeEventListener('comp-captcha-resolved', onResolved);
+  }, [id, addToast, updateGlobal, epoch]);
 
   const handleDrop = useCallback((e) => {
     if (data.locked) return; // Locked nodes don't accept new drops
@@ -479,8 +728,17 @@ export function SellHubNode({ id, data }) {
 
     EventLogger.log(`[SellHub][${id}] Drop accepted: ${validImages.length}/${files.length} images`);
 
-    // In draft/priced state, or analyzing/researching state: append photos rather than restarting analysis
-    if (hubState === 'draft' || hubState === 'priced' || hubState === 'analyzing' || hubState === 'researching') {
+    // In any state where the user has work in flight or completed, append
+    // photos rather than restarting analysis. Includes 'comps-ready' so a
+    // drop during the resolve/skip pause doesn't wipe pendingComps + warned
+    // comp cards by kicking off a fresh analysis.
+    if (
+      hubState === 'draft' ||
+      hubState === 'priced' ||
+      hubState === 'analyzing' ||
+      hubState === 'researching' ||
+      hubState === 'comps-ready'
+    ) {
       const newPaths = validImages.map(f => f.resolvedPath);
       const existing = data.imagePaths || [];
       const merged = [...new Set([...existing, ...newPaths])]; // deduplicate
@@ -507,7 +765,7 @@ export function SellHubNode({ id, data }) {
     // handleConfirmDraft promise settling after this point sees the mismatch
     // and skips its state update. This is what stops the "Window closed"
     // message from clobbering the revert a few seconds later.
-    cancellationEpochRef.current += 1;
+    epoch.bump();
 
     // Actually cancel the backend pipeline. The IPC is fire-and-forget; the
     // backend's finally{} clears its own progress. We don't await it.
@@ -517,28 +775,38 @@ export function SellHubNode({ id, data }) {
     // keep their draft (title/description/condition they already approved),
     // not start over from the drop zone. Only the analyzing step has no
     // product yet, so that one goes all the way back to 'empty'.
-    const revertTo = hubState === 'researching' && data.product ? 'draft' : 'empty';
+    const revertTo = (hubState === 'researching' || hubState === 'comps-ready') && data.product ? 'draft' : 'empty';
 
-    updateGlobal(id, {
+    // When reverting all the way to 'empty', also drop imagePaths. Otherwise
+    // the auto-start effect would re-fire startAnalysis immediately on the
+    // next render — `imagePaths > 0 && hubState === 'empty' && !errorMessage`
+    // all still match, defeating the cancel and looping the backend task.
+    const updates = {
       hubState: revertTo,
       errorMessage: null,
       isRateLimit: false,
-    });
-    setCompProgress({});
+      pendingComps: null,
+    };
+    if (revertTo === 'empty') updates.imagePaths = null;
+    updateGlobal(id, updates);
+    resetCompProgress();
     cleanupCompSourceCards();
+    // Drop queued early-resolves — they belong to the cancelled run and
+    // would otherwise leak into the next scrape's drain pass.
+    pendingMergesRef.current = [];
+    setQueuedResolvesCount(0);
     processingRef.current = false;
     processingPriceRef.current = false;
-  }, [data.locked, data.product, hubState, id, updateGlobal, cleanupCompSourceCards]);
-
-  // Legacy migration: any older workspace saved with hubState='error' is
-  // mapped to the step it should logically belong to. errorMessage already
-  // tells us _what_ failed via the banner, so we don't need a dedicated state.
-  const effectiveHubState = hubState === 'error'
-    ? (data.product ? 'draft' : 'empty')
-    : hubState;
+  }, [data.locked, data.product, hubState, id, updateGlobal, cleanupCompSourceCards, epoch, resetCompProgress]);
 
   const nodeWidth = 280;
-  const nodeHeight = effectiveHubState === 'empty' ? 140 : effectiveHubState === 'draft' || effectiveHubState === 'priced' ? 320 : 120;
+  const nodeHeight = hubState === 'empty'
+    ? 140
+    : hubState === 'draft' || hubState === 'priced'
+      ? 320
+      : hubState === 'comps-ready'
+        ? 220
+        : 120;
 
   // Running total from comp progress
   const totalComps = Object.values(compProgress).reduce((sum, p) => sum + (p.count || 0), 0);
@@ -561,7 +829,7 @@ export function SellHubNode({ id, data }) {
   }, [data.locked, data.product, data.imagePaths, id, updateGlobal, handleConfirmDraft, startAnalysis]);
 
   const banner = data.errorMessage ? (
-    <ErrorBanner
+    <HubErrorBanner
       errorMessage={data.errorMessage}
       isRateLimit={!!data.isRateLimit}
       locked={!!data.locked}
@@ -572,16 +840,16 @@ export function SellHubNode({ id, data }) {
 
   return (
     <HubContainer
-      hubState={effectiveHubState}
+      hubState={hubState}
       theme="amber"
       width={nodeWidth}
       height={undefined}
       minHeight={nodeHeight}
       onDrop={handleDrop}
-      interactiveStates={['draft', 'priced']}
+      interactiveStates={['draft', 'priced', 'comps-ready']}
     >
         {/* ── Empty: drop zone (+ banner if a prior attempt failed) ─────── */}
-        {effectiveHubState === 'empty' && (
+        {hubState === 'empty' && (
           <>
             {banner}
             <div className="flex flex-col items-center justify-center py-8 px-4 cursor-pointer">
@@ -593,7 +861,7 @@ export function SellHubNode({ id, data }) {
         )}
 
         {/* ── Analyzing ──────────────────────────────────────────────────── */}
-        {effectiveHubState === 'analyzing' && (
+        {hubState === 'analyzing' && (
           <HubBusyState
             theme="amber"
             label="AI analyzing photos..."
@@ -603,7 +871,7 @@ export function SellHubNode({ id, data }) {
         )}
 
         {/* ── Draft: editable product info (+ banner if research failed) ─ */}
-        {effectiveHubState === 'draft' && (
+        {hubState === 'draft' && (
           <>
             {banner}
             <SellHubDraftState
@@ -620,29 +888,35 @@ export function SellHubNode({ id, data }) {
         )}
 
         {/* ── Researching ────────────────────────────────────────────────── */}
-        {effectiveHubState === 'researching' && (
+        {hubState === 'researching' && (
           <HubBusyState
             theme="amber"
             label="Researching market prices..."
-            subline={totalComps > 0 ? `${totalComps} comps found` : null}
+            subline={totalComps > 0 ? `${totalComps} similar listing${totalComps === 1 ? '' : 's'} found` : null}
             onReset={resetHandler}
           />
         )}
 
+        {/* ── Comps Ready: scrape finished but some sources blocked ─────── */}
+        {/* Pauses before AI synthesis so the user can solve captchas (cards
+            already show Solve buttons) or skip and price with partial data. */}
+        {hubState === 'comps-ready' && (
+          <SellHubCompsReadyDecision
+            scrapeWarnings={data.scrapeWarnings || []}
+            pendingComps={data.pendingComps || { sold: [], active: [] }}
+            onCancel={resetHandler}
+          />
+        )}
+
         {/* ── Priced: price + platform controls ──────────────────────────── */}
-        {effectiveHubState === 'priced' && (
+        {hubState === 'priced' && (
           <SellHubPricedState
             product={product}
             pricing={data.pricing}
             comps={data.comps}
-            priceInput={priceInput}
-            handlePriceChange={handlePriceChange}
-            handleQuickPrice={handleQuickPrice}
+            scrapeWarnings={data.scrapeWarnings || []}
             justificationExpanded={justificationExpanded}
             toggleJustification={toggleJustification}
-            copied={copied}
-            handleCopyListing={handleCopyListing}
-            listingText={listingText}
             locked={!!data.locked}
             imagePaths={data.imagePaths || []}
             onReresearch={handleConfirmDraft}
@@ -650,6 +924,7 @@ export function SellHubNode({ id, data }) {
             onSpawnMarketplaceCard={handleSpawnMarketplaceCard}
             onCheckAllStatuses={handleCheckAllStatuses}
             checkingAll={checkingAll}
+            platformFit={data.platformFit || null}
           />
         )}
       </HubContainer>

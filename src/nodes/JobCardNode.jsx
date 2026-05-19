@@ -98,9 +98,6 @@ export function JobCardNode({ id, data }) {
     locked: !!data.locked,
     fields: MONITOR_FIELDS,
     updateNode: updateGlobal,
-    onMissingUrl: () => {
-      addToast({ title: 'No URL to check', description: 'This card has no job URL or application URL set.', type: 'error' });
-    },
   });
 
   const isMountedRef = useRef(true);
@@ -203,13 +200,13 @@ export function JobCardNode({ id, data }) {
 
   return (
     <div
-      className="bg-[#1a1a1a] border rounded-lg shadow-lg overflow-hidden group"
-      style={{ borderColor: accentColor + '40', minWidth: 260, maxWidth: 320 }}
+      className="w-[280px] rounded-2xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden group"
+      style={{ borderColor: accentColor + '55' }}
     >
       <NodeHandles className="w-2 h-2" style={{ backgroundColor: accentColor }} />
 
       {/* Header */}
-      <div className="px-3 py-2 flex items-start gap-2" style={{ borderBottom: `1px solid ${accentColor}20` }}>
+      <div className="px-3 py-2 flex items-start gap-2 border-b border-white/5">
         <div
           className="shrink-0 mt-0.5 w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold"
           style={{ backgroundColor: accentColor + '20', color: accentColor }}

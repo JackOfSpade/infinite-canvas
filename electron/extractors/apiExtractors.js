@@ -94,81 +94,81 @@ function stripHtml(html) {
  * This replaces the Puppeteer-based LinkedIn scraper.
  */
 export async function fetchLinkedInJobs(query, signal = null, maxAgeDays = null) {
+  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const allJobs = [];
+  let warning = null;
 
   // Fetch 2 pages (50 results max) to stay polite
   for (let start = 0; start < 50; start += 25) {
     if (signal?.aborted) break;
-    try {
-      const params = new URLSearchParams({
-        keywords: query,
-        start: String(start),
-      });
-      // LinkedIn's "Time Posted" filter takes seconds (`r604800` = past week)
-      if (maxAgeDays && maxAgeDays > 0) {
-        params.set('f_TPR', `r${Math.floor(maxAgeDays * 86400)}`);
-      }
+    const params = new URLSearchParams({
+      keywords: query,
+      start: String(start),
+    });
+    // LinkedIn's "Time Posted" filter takes seconds (`r604800` = past week)
+    if (maxAgeDays && maxAgeDays > 0) {
+      params.set('f_TPR', `r${Math.floor(maxAgeDays * 86400)}`);
+    }
 
-      const res = await fetch(`https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?${params}`, {
-        headers: {
-          'Accept': 'text/html',
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-          'Referer': 'https://www.linkedin.com/jobs/search/',
-        },
-        signal: createTimeoutSignal(signal, 10000),
-      });
+    const r = await safeApiFetch(`https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?${params}`, {
+      headers: {
+        'Accept': 'text/html',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Referer': 'https://www.linkedin.com/jobs/search/',
+      },
+      signal: createTimeoutSignal(signal, 10000),
+    }, 'linkedin');
 
-      if (!res.ok) {
-        logger.warn(`[LinkedIn API] Page ${start / 25} returned ${res.status}`);
-        break;
-      }
-
-      const html = await res.text();
-      if (!html || html.trim().length < 50) break;
-
-      // Parse HTML snippets with regex — LinkedIn returns <li> cards
-      // Each card has: title in <h3>, company in <h4>, location, link, datetime
-      const cardPattern = /<li[\s\S]*?<\/li>/gi;
-      const cards = html.match(cardPattern) || [];
-
-      for (const card of cards) {
-        try {
-          const titleMatch = card.match(/<h3[^>]*class="[^"]*base-search-card__title[^"]*"[^>]*>([\s\S]*?)<\/h3>/i) ||
-                             card.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
-          const companyMatch = card.match(/<h4[^>]*class="[^"]*base-search-card__subtitle[^"]*"[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i) ||
-                               card.match(/<h4[^>]*>([\s\S]*?)<\/h4>/i);
-          const locationMatch = card.match(/<span[^>]*class="[^"]*job-search-card__location[^"]*"[^>]*>([\s\S]*?)<\/span>/i);
-          const linkMatch = card.match(/<a[^>]*class="[^"]*base-card__full-link[^"]*"[^>]*href="([^"]+)"/i) ||
-                            card.match(/href="(https:\/\/www\.linkedin\.com\/jobs\/view\/[^"]+)"/i);
-          const dateMatch = card.match(/<time[^>]*datetime="([^"]+)"[^>]*>([\s\S]*?)<\/time>/i);
-
-          const title = stripHtml(titleMatch?.[1] || '').trim();
-          if (!title) continue;
-
-          allJobs.push({
-            title,
-            company: stripHtml(companyMatch?.[1] || companyMatch?.[2] || '').trim(),
-            location: stripHtml(locationMatch?.[1] || '').trim(),
-            salary: '',
-            snippet: '',
-            url: linkMatch?.[1]?.split('?')[0] || '', // Strip tracking params
-            posted: dateMatch?.[2] ? stripHtml(dateMatch[2]).trim() : (dateMatch?.[1] || ''),
-            source: 'linkedin',
-          });
-        } catch {
-          // Skip malformed cards
-        }
-      }
-
-      // Polite delay between pages — report recommends 2-3s minimum for LinkedIn
-      if (start < 25) await new Promise(r => setTimeout(r, 2000));
-    } catch (error) {
-      logger.error(`[LinkedIn API] Fetch failed at start=${start}:`, error?.message || String(error));
+    // First detected warning wins — the rest of the loop bails. LinkedIn is
+    // a heavy anti-bot source so if page 0 is blocked, page 1 will be too.
+    if (r.warning && !warning) warning = r.warning;
+    if (!r.ok) {
+      logger.warn(`[LinkedIn API] Page ${start / 25} returned ${r.status}${r.warning ? ` (${r.warning.code})` : ''}`);
       break;
     }
+
+    const html = r.text;
+    if (!html || html.trim().length < 50) break;
+
+    // Parse HTML snippets with regex — LinkedIn returns <li> cards
+    // Each card has: title in <h3>, company in <h4>, location, link, datetime
+    const cardPattern = /<li[\s\S]*?<\/li>/gi;
+    const cards = html.match(cardPattern) || [];
+
+    for (const card of cards) {
+      try {
+        const titleMatch = card.match(/<h3[^>]*class="[^"]*base-search-card__title[^"]*"[^>]*>([\s\S]*?)<\/h3>/i) ||
+                           card.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+        const companyMatch = card.match(/<h4[^>]*class="[^"]*base-search-card__subtitle[^"]*"[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i) ||
+                             card.match(/<h4[^>]*>([\s\S]*?)<\/h4>/i);
+        const locationMatch = card.match(/<span[^>]*class="[^"]*job-search-card__location[^"]*"[^>]*>([\s\S]*?)<\/span>/i);
+        const linkMatch = card.match(/<a[^>]*class="[^"]*base-card__full-link[^"]*"[^>]*href="([^"]+)"/i) ||
+                          card.match(/href="(https:\/\/www\.linkedin\.com\/jobs\/view\/[^"]+)"/i);
+        const dateMatch = card.match(/<time[^>]*datetime="([^"]+)"[^>]*>([\s\S]*?)<\/time>/i);
+
+        const title = stripHtml(titleMatch?.[1] || '').trim();
+        if (!title) continue;
+
+        allJobs.push({
+          title,
+          company: stripHtml(companyMatch?.[1] || companyMatch?.[2] || '').trim(),
+          location: stripHtml(locationMatch?.[1] || '').trim(),
+          salary: '',
+          snippet: '',
+          url: linkMatch?.[1]?.split('?')[0] || '', // Strip tracking params
+          posted: dateMatch?.[2] ? stripHtml(dateMatch[2]).trim() : (dateMatch?.[1] || ''),
+          source: 'linkedin',
+        });
+      } catch {
+        // Skip malformed cards
+      }
+    }
+
+    // Polite delay between pages — report recommends 2-3s minimum for LinkedIn
+    if (start < 25) await new Promise(r => setTimeout(r, 2000));
   }
 
-  return allJobs.slice(0, 30);
+  return { items: allJobs.slice(0, 30), warning };
 }
 
 // ── Greenhouse API ──────────────────────────────────────────────────────────
@@ -214,20 +214,22 @@ const GREENHOUSE_BOARDS = [
  * Searches board titles client-side (the API doesn't support keyword search).
  */
 export async function fetchGreenhouseJobs(query, signal = null) {
+  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const queryLower = query.toLowerCase();
   const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
+  // Greenhouse fans out across dozens of board tokens; collect warnings
+  // per-call and pick the strongest at the end so a wave of blocks across
+  // the whole platform shows up, not just an isolated 429 from one board.
+  const warnings = [];
   const allJobs = await processInBatches(GREENHOUSE_BOARDS, 10, async ({ token, company }) => {
-    try {
-      const res = await fetch(`https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`, {
-        headers: { 'Accept': 'application/json' },
-        signal: createTimeoutSignal(signal, 8000),
-      });
-      if (!res.ok) return [];
-      const data = await res.json();
-      return (data.jobs || []).map(job => ({ ...job, _company: company, _token: token }));
-    } catch {
-      return [];
-    }
+    const r = await safeApiFetch(`https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`, {
+      headers: { 'Accept': 'application/json' },
+      signal: createTimeoutSignal(signal, 8000),
+    }, 'greenhouse');
+    if (r.warning) warnings.push(r.warning);
+    if (!r.ok) return [];
+    const data = r.json;
+    return ((data && data.jobs) || []).map(job => ({ ...job, _company: company, _token: token }));
   }, signal);
 
   // Filter by query relevance
@@ -236,7 +238,7 @@ export async function fetchGreenhouseJobs(query, signal = null) {
     return queryTerms.some(term => text.includes(term));
   });
 
-  return matched.slice(0, 30).map(job => ({
+  const items = matched.slice(0, 30).map(job => ({
     title: job.title || '',
     company: job._company || '',
     location: job.location?.name || '',
@@ -246,6 +248,8 @@ export async function fetchGreenhouseJobs(query, signal = null) {
     posted: job.updated_at ? new Date(job.updated_at).toLocaleDateString() : '',
     source: 'greenhouse',
   }));
+  const strongest = warnings.find(w => w.severity === 'block') || warnings[0] || null;
+  return { items, warning: strongest };
 }
 
 
@@ -280,20 +284,19 @@ const LEVER_COMPANIES = [
  * Fetch jobs from Lever career pages matching the query.
  */
 export async function fetchLeverJobs(query, signal = null) {
+  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const queryLower = query.toLowerCase();
   const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
+  const warnings = [];
   const allJobs = await processInBatches(LEVER_COMPANIES, 10, async ({ slug, company }) => {
-    try {
-      const res = await fetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, {
-        headers: { 'Accept': 'application/json' },
-        signal: createTimeoutSignal(signal, 8000),
-      });
-      if (!res.ok) return [];
-      const data = await res.json();
-      return (Array.isArray(data) ? data : []).map(job => ({ ...job, _company: company }));
-    } catch {
-      return [];
-    }
+    const r = await safeApiFetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, {
+      headers: { 'Accept': 'application/json' },
+      signal: createTimeoutSignal(signal, 8000),
+    }, 'lever');
+    if (r.warning) warnings.push(r.warning);
+    if (!r.ok) return [];
+    const data = r.json;
+    return (Array.isArray(data) ? data : []).map(job => ({ ...job, _company: company }));
   }, signal);
 
   // Filter by query relevance
@@ -302,7 +305,7 @@ export async function fetchLeverJobs(query, signal = null) {
     return queryTerms.some(term => text.includes(term));
   });
 
-  return matched.slice(0, 30).map(job => ({
+  const items = matched.slice(0, 30).map(job => ({
     title: job.text || '',
     company: job._company || '',
     location: job.categories?.location || '',
@@ -312,6 +315,8 @@ export async function fetchLeverJobs(query, signal = null) {
     posted: job.createdAt ? new Date(job.createdAt).toLocaleDateString() : '',
     source: 'lever',
   }));
+  const strongest = warnings.find(w => w.severity === 'block') || warnings[0] || null;
+  return { items, warning: strongest };
 }
 
 
@@ -328,55 +333,65 @@ export async function fetchLeverJobs(query, signal = null) {
 export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDays = 30) {
   if (!apiKey) {
     logger.warn('[USAJobs] No API key configured — skipping');
-    return [];
-  }
-
-  try {
-    const params = new URLSearchParams({
-      Keyword: query,
-      ResultsPerPage: '25',
-      DatePosted: String(Math.max(1, Math.floor(maxAgeDays || 30))),
-    });
-
-    const res = await fetch(`https://data.usajobs.gov/api/search?${params}`, {
-      headers: {
-        'Host': 'data.usajobs.gov',
-        'User-Agent': email || 'job-search-app@example.com',
-        'Authorization-Key': apiKey,
+    // Surface the skip reason as a `warning` so the source card can render
+    // it instead of silently sitting at "idle/0". Severity `info` (not block
+    // or throttle) so the card colors it neutrally — this isn't a failure,
+    // it's a "you need to set USAJOBS_API_KEY in your env to enable this."
+    return {
+      items: [],
+      warning: {
+        code: 'config-missing',
+        severity: 'info',
+        evidence: 'USAJOBS_API_KEY env var not set',
+        suggestion: 'Get a free key at developer.usajobs.gov and set USAJOBS_API_KEY + USAJOBS_EMAIL in your env to enable this source.',
       },
-      signal: createTimeoutSignal(signal, 10000),
-    });
-
-    if (!res.ok) {
-      logger.error(`[USAJobs] API returned ${res.status}`);
-      return [];
-    }
-
-    const data = await res.json();
-    const items = data?.SearchResult?.SearchResultItems || [];
-
-    return items.slice(0, 30).map(item => {
-      const pos = item.MatchedObjectDescriptor || {};
-      const salary = pos.PositionRemuneration?.[0];
-      const salaryStr = salary
-        ? `$${salary.MinimumRange} - $${salary.MaximumRange} / ${salary.RateIntervalCode}`
-        : '';
-
-      return {
-        title: pos.PositionTitle || '',
-        company: pos.OrganizationName || pos.DepartmentName || '',
-        location: pos.PositionLocationDisplay || '',
-        salary: salaryStr,
-        snippet: stripHtml(pos.QualificationSummary || pos.UserArea?.Details?.MajorDuties?.[0] || '').substring(0, 300),
-        url: pos.PositionURI || pos.ApplyURI?.[0] || '',
-        posted: pos.PublicationStartDate || '',
-        source: 'usajobs',
-      };
-    });
-  } catch (error) {
-    logger.error('[USAJobs] Fetch failed:', error?.message || String(error));
-    return [];
+    };
   }
+  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
+
+  const params = new URLSearchParams({
+    Keyword: query,
+    ResultsPerPage: '25',
+    DatePosted: String(Math.max(1, Math.floor(maxAgeDays || 30))),
+  });
+
+  const r = await safeApiFetch(`https://data.usajobs.gov/api/search?${params}`, {
+    headers: {
+      'Host': 'data.usajobs.gov',
+      'User-Agent': email || 'job-search-app@example.com',
+      'Authorization-Key': apiKey,
+    },
+    signal: createTimeoutSignal(signal, 10000),
+  }, 'usajobs');
+
+  if (!r.ok) {
+    if (r.warning) logger.warn(`[USAJobs] ${r.warning.code}: ${r.warning.evidence}`);
+    else logger.error(`[USAJobs] API returned ${r.status}`);
+    return { items: [], warning: r.warning };
+  }
+
+  const data = r.json;
+  const resultItems = data?.SearchResult?.SearchResultItems || [];
+
+  const items = resultItems.slice(0, 30).map(item => {
+    const pos = item.MatchedObjectDescriptor || {};
+    const salary = pos.PositionRemuneration?.[0];
+    const salaryStr = salary
+      ? `$${salary.MinimumRange} - $${salary.MaximumRange} / ${salary.RateIntervalCode}`
+      : '';
+
+    return {
+      title: pos.PositionTitle || '',
+      company: pos.OrganizationName || pos.DepartmentName || '',
+      location: pos.PositionLocationDisplay || '',
+      salary: salaryStr,
+      snippet: stripHtml(pos.QualificationSummary || pos.UserArea?.Details?.MajorDuties?.[0] || '').substring(0, 300),
+      url: pos.PositionURI || pos.ApplyURI?.[0] || '',
+      posted: pos.PublicationStartDate || '',
+      source: 'usajobs',
+    };
+  });
+  return { items, warning: r.warning };
 }
 
 
@@ -391,46 +406,44 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
  * Fetch jobs from RemoteOK's open JSON API (bypasses Puppeteer entirely).
  */
 export async function fetchRemoteOKJobs(query, signal = null) {
-  try {
-    const res = await fetch('https://remoteok.com/api', {
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      },
-      signal: createTimeoutSignal(signal, 10000),
-    });
+  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
+  const r = await safeApiFetch('https://remoteok.com/api', {
+    headers: {
+      'Accept': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    },
+    signal: createTimeoutSignal(signal, 10000),
+  }, 'remoteok');
 
-    if (!res.ok) {
-      logger.warn(`[RemoteOK API] Returned ${res.status}`);
-      return [];
-    }
-
-    const data = await res.json();
-    // First element is metadata, rest are jobs
-    const jobs = Array.isArray(data) ? data.slice(1) : [];
-    const queryLower = query.toLowerCase();
-    const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
-
-    // Filter by query relevance
-    const matched = jobs.filter(job => {
-      const text = `${job.position || ''} ${job.company || ''} ${(job.tags || []).join(' ')} ${job.description || ''}`.toLowerCase();
-      return queryTerms.some(term => text.includes(term));
-    });
-
-    return matched.slice(0, 30).map(job => ({
-      title: job.position || '',
-      company: job.company || '',
-      location: job.location || 'Remote',
-      salary: job.salary || (job.salary_min ? `$${job.salary_min} - $${job.salary_max}` : ''),
-      snippet: (job.tags || []).join(', '),
-      url: job.url ? `https://remoteok.com${job.url}` : '',
-      posted: job.date || '',
-      source: 'remoteok',
-    }));
-  } catch (error) {
-    logger.error('[RemoteOK API] Fetch failed:', error?.message || String(error));
-    return [];
+  if (!r.ok) {
+    if (r.warning) logger.warn(`[RemoteOK API] ${r.warning.code}: ${r.warning.evidence}`);
+    else logger.warn(`[RemoteOK API] Returned ${r.status}`);
+    return { items: [], warning: r.warning };
   }
+
+  const data = r.json;
+  // First element is metadata, rest are jobs
+  const jobs = Array.isArray(data) ? data.slice(1) : [];
+  const queryLower = query.toLowerCase();
+  const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
+
+  // Filter by query relevance
+  const matched = jobs.filter(job => {
+    const text = `${job.position || ''} ${job.company || ''} ${(job.tags || []).join(' ')} ${job.description || ''}`.toLowerCase();
+    return queryTerms.some(term => text.includes(term));
+  });
+
+  const items = matched.slice(0, 30).map(job => ({
+    title: job.position || '',
+    company: job.company || '',
+    location: job.location || 'Remote',
+    salary: job.salary || (job.salary_min ? `$${job.salary_min} - $${job.salary_max}` : ''),
+    snippet: (job.tags || []).join(', '),
+    url: job.url ? `https://remoteok.com${job.url}` : '',
+    posted: job.date || '',
+    source: 'remoteok',
+  }));
+  return { items, warning: r.warning };
 }
 
 
@@ -441,69 +454,66 @@ export async function fetchRemoteOKJobs(query, signal = null) {
  * Fetch jobs from WeWorkRemotely's RSS feed (bypasses Puppeteer entirely).
  */
 export async function fetchWeWorkRemotelyJobs(query, signal = null) {
-  try {
-    const res = await fetch('https://weworkremotely.com/remote-jobs.rss', {
-      headers: {
-        'Accept': 'application/rss+xml, application/xml, text/xml',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      },
-      signal: createTimeoutSignal(signal, 10000),
-    });
+  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
+  const r = await safeApiFetch('https://weworkremotely.com/remote-jobs.rss', {
+    headers: {
+      'Accept': 'application/rss+xml, application/xml, text/xml',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    },
+    signal: createTimeoutSignal(signal, 10000),
+  }, 'weworkremotely');
 
-    if (!res.ok) {
-      logger.warn(`[WWR RSS] Returned ${res.status}`);
-      return [];
-    }
-
-    const xml = await res.text();
-    const queryLower = query.toLowerCase();
-    const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
-
-    // Parse RSS items with regex (no XML parser dependency needed)
-    const itemPattern = /<item>([\s\S]*?)<\/item>/gi;
-    const items = xml.match(itemPattern) || [];
-    const jobs = [];
-
-    for (const item of items) {
-      const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/i) ||
-                          item.match(/<title>(.*?)<\/title>/i);
-      const linkMatch = item.match(/<link>(.*?)<\/link>/i);
-      const descMatch = item.match(/<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/i) ||
-                         item.match(/<description>([\s\S]*?)<\/description>/i);
-      const pubDateMatch = item.match(/<pubDate>(.*?)<\/pubDate>/i);
-      const regionMatch = item.match(/<region><!\[CDATA\[(.*?)\]\]><\/region>/i) ||
-                           item.match(/<region>(.*?)<\/region>/i);
-
-      const title = titleMatch?.[1]?.trim() || '';
-      if (!title) continue;
-
-      // Extract company from title (WWR formats as "Company: Job Title")
-      const titleParts = title.split(':');
-      const company = titleParts.length > 1 ? titleParts[0].trim() : '';
-      const jobTitle = titleParts.length > 1 ? titleParts.slice(1).join(':').trim() : title;
-
-      // Filter by query relevance
-      const text = `${title} ${stripHtml(descMatch?.[1] || '')}`.toLowerCase();
-      const matches = queryTerms.some(term => text.includes(term));
-      if (!matches) continue;
-
-      jobs.push({
-        title: jobTitle,
-        company,
-        location: regionMatch?.[1]?.trim() || 'Remote',
-        salary: '',
-        snippet: stripHtml(descMatch?.[1] || '').substring(0, 300),
-        url: linkMatch?.[1]?.trim() || '',
-        posted: pubDateMatch?.[1] ? new Date(pubDateMatch[1]).toLocaleDateString() : '',
-        source: 'weworkremotely',
-      });
-    }
-
-    return jobs.slice(0, 30);
-  } catch (error) {
-    logger.error('[WWR RSS] Fetch failed:', error?.message || String(error));
-    return [];
+  if (!r.ok) {
+    if (r.warning) logger.warn(`[WWR RSS] ${r.warning.code}: ${r.warning.evidence}`);
+    else logger.warn(`[WWR RSS] Returned ${r.status}`);
+    return { items: [], warning: r.warning };
   }
+
+  const xml = r.text;
+  const queryLower = query.toLowerCase();
+  const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
+
+  // Parse RSS items with regex (no XML parser dependency needed)
+  const itemPattern = /<item>([\s\S]*?)<\/item>/gi;
+  const rssItems = xml.match(itemPattern) || [];
+  const jobs = [];
+
+  for (const item of rssItems) {
+    const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/i) ||
+                        item.match(/<title>(.*?)<\/title>/i);
+    const linkMatch = item.match(/<link>(.*?)<\/link>/i);
+    const descMatch = item.match(/<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/i) ||
+                       item.match(/<description>([\s\S]*?)<\/description>/i);
+    const pubDateMatch = item.match(/<pubDate>(.*?)<\/pubDate>/i);
+    const regionMatch = item.match(/<region><!\[CDATA\[(.*?)\]\]><\/region>/i) ||
+                         item.match(/<region>(.*?)<\/region>/i);
+
+    const title = titleMatch?.[1]?.trim() || '';
+    if (!title) continue;
+
+    // Extract company from title (WWR formats as "Company: Job Title")
+    const titleParts = title.split(':');
+    const company = titleParts.length > 1 ? titleParts[0].trim() : '';
+    const jobTitle = titleParts.length > 1 ? titleParts.slice(1).join(':').trim() : title;
+
+    // Filter by query relevance
+    const text = `${title} ${stripHtml(descMatch?.[1] || '')}`.toLowerCase();
+    const matches = queryTerms.some(term => text.includes(term));
+    if (!matches) continue;
+
+    jobs.push({
+      title: jobTitle,
+      company,
+      location: regionMatch?.[1]?.trim() || 'Remote',
+      salary: '',
+      snippet: stripHtml(descMatch?.[1] || '').substring(0, 300),
+      url: linkMatch?.[1]?.trim() || '',
+      posted: pubDateMatch?.[1] ? new Date(pubDateMatch[1]).toLocaleDateString() : '',
+      source: 'weworkremotely',
+    });
+  }
+
+  return { items: jobs.slice(0, 30), warning: r.warning };
 }
 
 
@@ -517,45 +527,43 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null) {
  * Returns the standard comp shape for pricing comparison.
  */
 export async function fetchReverbListings(query, soldOnly = false, signal = null) {
-  try {
-    const params = new URLSearchParams({ query });
-    if (soldOnly) params.set('state', 'ended');
+  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
+  const params = new URLSearchParams({ query });
+  if (soldOnly) params.set('state', 'ended');
 
-    const res = await fetch(`https://api.reverb.com/api/listings/all?${params}`, {
-      headers: {
-        'Accept': 'application/hal+json',
-        'Accept-Version': '3.0',
-        'Content-Type': 'application/hal+json',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      },
-      signal: createTimeoutSignal(signal, 12000),
-    });
+  const r = await safeApiFetch(`https://api.reverb.com/api/listings/all?${params}`, {
+    headers: {
+      'Accept': 'application/hal+json',
+      'Accept-Version': '3.0',
+      'Content-Type': 'application/hal+json',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    },
+    signal: createTimeoutSignal(signal, 12000),
+  }, 'reverb');
 
-    if (!res.ok) {
-      logger.warn(`[Reverb API] Returned ${res.status}`);
-      return [];
-    }
-
-    const data = await res.json();
-    const listings = data?.listings || data?._embedded?.listings || [];
-
-    return listings.slice(0, 25).map(listing => {
-      const price = listing.price?.amount ? parseFloat(listing.price.amount) : 0;
-      return {
-        title: listing.title || listing.make_model || '',
-        price,
-        priceText: price > 0 ? `$${price.toFixed(2)}` : '',
-        condition: listing.condition?.display_name || listing.condition?.slug || '',
-        soldDate: listing.state === 'ended' ? (listing.sold_date || 'Sold') : '',
-        seller: listing.seller?.feedback_percentage ? `${listing.seller.feedback_percentage}%` : '',
-        url: listing._links?.web?.href || listing.web_url || '',
-        source: 'reverb',
-      };
-    });
-  } catch (error) {
-    logger.error('[Reverb API] Fetch failed:', error?.message || String(error));
-    return [];
+  if (!r.ok) {
+    if (r.warning) logger.warn(`[Reverb API] ${r.warning.code}: ${r.warning.evidence}`);
+    else logger.warn(`[Reverb API] Returned ${r.status}`);
+    return { items: [], warning: r.warning };
   }
+
+  const data = r.json;
+  const listings = data?.listings || data?._embedded?.listings || [];
+
+  const items = listings.slice(0, 25).map(listing => {
+    const price = listing.price?.amount ? parseFloat(listing.price.amount) : 0;
+    return {
+      title: listing.title || listing.make_model || '',
+      price,
+      priceText: price > 0 ? `$${price.toFixed(2)}` : '',
+      condition: listing.condition?.display_name || listing.condition?.slug || '',
+      soldDate: listing.state === 'ended' ? (listing.sold_date || 'Sold') : '',
+      seller: listing.seller?.feedback_percentage ? `${listing.seller.feedback_percentage}%` : '',
+      url: listing._links?.web?.href || listing.web_url || '',
+      source: 'reverb',
+    };
+  });
+  return { items, warning: r.warning };
 }
 
 // ── Dice Public API ─────────────────────────────────────────────────────────
@@ -575,56 +583,55 @@ const DICE_API_KEY = '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
  * @returns {Promise<Array>} — standardized job objects
  */
 export async function fetchDiceListings(query, location = '', signal = null) {
-  try {
-    const params = new URLSearchParams({
-      q: query,
-      countryCode2: 'US',
-      radius: '30',
-      radiusUnit: 'mi',
-      page: '1',
-      pageSize: '25',
-      ...(location ? { location } : {}),
-    });
+  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
+  const params = new URLSearchParams({
+    q: query,
+    countryCode2: 'US',
+    radius: '30',
+    radiusUnit: 'mi',
+    page: '1',
+    pageSize: '25',
+    ...(location ? { location } : {}),
+  });
 
-    const res = await fetch(
-      `https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search?${params}`,
-      {
-        headers: {
-          'User-Agent': getRandomUA(),
-          'x-api-key': DICE_API_KEY,
-          'Accept': 'application/json',
-        },
-        signal: createTimeoutSignal(signal, 10000),
-      }
-    );
+  const r = await safeApiFetch(
+    `https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search?${params}`,
+    {
+      headers: {
+        'User-Agent': getRandomUA(),
+        'x-api-key': DICE_API_KEY,
+        'Accept': 'application/json',
+      },
+      signal: createTimeoutSignal(signal, 10000),
+    },
+    'dice'
+  );
 
-    if (!res.ok) {
-      logger.warn(`[Dice API] Returned ${res.status}`);
-      return [];
-    }
-
-    const data = await res.json();
-    const jobs = data.data || [];
-
-    logger.info(`[Dice API] Found ${jobs.length} jobs for "${query}"`);
-
-    return jobs.map(job => ({
-      title: job.title || '',
-      company: job.companyName || '',
-      location: job.jobLocation?.displayName || '',
-      salary: job.salary || '',
-      snippet: (job.summary || '').substring(0, 300),
-      url: job.detailsPageUrl || `https://www.dice.com/job-detail/${job.guid || job.id}`,
-      posted: job.postedDate || '',
-      source: 'dice',
-      remote: job.workFromHomeAvailability === 'TRUE',
-      employmentType: job.employmentType || '',
-      easyApply: job.easyApply || false,
-    }));
-  } catch (error) {
-    logger.error('[Dice API] Fetch failed:', error?.message || String(error));
-    return [];
+  if (!r.ok) {
+    if (r.warning) logger.warn(`[Dice API] ${r.warning.code}: ${r.warning.evidence}`);
+    else logger.warn(`[Dice API] Returned ${r.status}`);
+    return { items: [], warning: r.warning };
   }
+
+  const data = r.json;
+  const jobs = data?.data || [];
+
+  logger.info(`[Dice API] Found ${jobs.length} jobs for "${query}"`);
+
+  const items = jobs.map(job => ({
+    title: job.title || '',
+    company: job.companyName || '',
+    location: job.jobLocation?.displayName || '',
+    salary: job.salary || '',
+    snippet: (job.summary || '').substring(0, 300),
+    url: job.detailsPageUrl || `https://www.dice.com/job-detail/${job.guid || job.id}`,
+    posted: job.postedDate || '',
+    source: 'dice',
+    remote: job.workFromHomeAvailability === 'TRUE',
+    employmentType: job.employmentType || '',
+    easyApply: job.easyApply || false,
+  }));
+  return { items, warning: r.warning };
 }
 
 
@@ -699,17 +706,26 @@ const STOCKX_KEY_EXTRACTOR = `
  *   3. All data queries go to Algolia directly (Tier 1)
  */
 export async function fetchStockXListings(query, signal = null) {
+  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
+  let bootstrapWarning = null;
   try {
     // Phase 1: Key Extraction Bootstrap (once per session)
     if (!algoliaKeys) {
       if (Date.now() - lastStockXErrorTime < 300000) {
         logger.warn('[StockX] Bootstrap cooldown active — skipping');
-        return [];
+        return { items: [], warning: {
+          code: 'stockx-bootstrap-cooldown',
+          severity: 'block',
+          evidence: '[stockx] Key extraction failed recently — 5 min cooldown active',
+          suggestion: 'PerimeterX likely blocked the key-extraction page. Wait 5 minutes; if it persists, the stealth browser fingerprint may need rotation.',
+        } };
       }
 
       logger.info('[StockX] No cached keys — extracting via stealth browser...');
       try {
-        const keys = await queueScrape(
+        // queueScrape now returns { data, warning } — propagate either the
+        // extracted keys or the anti-bot warning from the page fetch.
+        const wrapped = await queueScrape(
           `https://stockx.com/search?s=${encodeURIComponent(query)}`,
           STOCKX_KEY_EXTRACTOR,
           {
@@ -721,6 +737,11 @@ export async function fetchStockXListings(query, signal = null) {
             signal,
           }
         );
+        const keys = wrapped?.data ?? null;
+        // If the bootstrap fetch tripped PerimeterX, browserPool's detector
+        // already flagged it. Save the warning so we surface it even if we
+        // fall back to the hardcoded App ID and the Algolia query "works".
+        if (wrapped?.warning) bootstrapWarning = wrapped.warning;
 
         if (keys?.appId && keys?.apiKey) {
           algoliaKeys = keys;
@@ -733,14 +754,19 @@ export async function fetchStockXListings(query, signal = null) {
       } catch (err) {
         lastStockXErrorTime = Date.now();
         logger.error('[StockX] Extraction error:', err.message);
-        return [];
+        return { items: [], warning: bootstrapWarning || {
+          code: 'stockx-bootstrap-failed',
+          severity: 'block',
+          evidence: `[stockx] key extraction threw: ${err.message}`,
+          suggestion: 'PerimeterX likely served a JS challenge that stealth couldn\'t solve. Manual session refresh or proxy may be required.',
+        } };
       }
     }
 
-    if (!algoliaKeys?.appId) return [];
+    if (!algoliaKeys?.appId) return { items: [], warning: bootstrapWarning };
 
     // Phase 2: Query Algolia directly
-    const algoliaRes = await fetch(
+    const r = await safeApiFetch(
       `https://${algoliaKeys.appId}-dsn.algolia.net/1/indexes/products/query`,
       {
         method: 'POST',
@@ -754,19 +780,23 @@ export async function fetchStockXListings(query, signal = null) {
           hitsPerPage: 25,
         }),
         signal: createTimeoutSignal(signal, 10000),
-      }
+      },
+      'stockx-algolia'
     );
 
-    if (!algoliaRes.ok) {
-      logger.warn(`[StockX Algolia] Returned ${algoliaRes.status}`);
+    if (!r.ok) {
+      if (r.warning) logger.warn(`[StockX Algolia] ${r.warning.code}: ${r.warning.evidence}`);
+      else logger.warn(`[StockX Algolia] Returned ${r.status}`);
       algoliaKeys = null;
-      return [];
+      // Prefer the Algolia warning when present; fall back to the bootstrap
+      // warning since the user wants to see ANY signal from this pipeline.
+      return { items: [], warning: r.warning || bootstrapWarning };
     }
 
-    const data = await algoliaRes.json();
-    const hits = data.hits || [];
+    const data = r.json;
+    const hits = data?.hits || [];
 
-    return hits.slice(0, 25).map(hit => {
+    const items = hits.slice(0, 25).map(hit => {
       const lastSale = hit.last_sale || hit.market?.lastSale || 0;
       const lowestAsk = hit.lowest_ask || hit.market?.lowestAsk || 0;
       const price = lastSale || lowestAsk;
@@ -782,8 +812,12 @@ export async function fetchStockXListings(query, signal = null) {
         source: 'stockx',
       };
     });
+    // Surface bootstrapWarning even on a successful Algolia query — the user
+    // should know if we fell back to hardcoded keys because StockX blocked
+    // the key page, even if the search itself worked.
+    return { items, warning: r.warning || bootstrapWarning };
   } catch (error) {
     logger.error('[StockX Algolia] Fetch failed:', error?.message || String(error));
-    return [];
+    return { items: [], warning: bootstrapWarning };
   }
 }

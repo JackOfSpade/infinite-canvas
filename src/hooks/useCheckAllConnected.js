@@ -28,6 +28,11 @@ export function useCheckAllConnected({
   cardType,
   getUrl,
   getPlatformId,
+  // Optional getters for the new multi-source check args. Defaults match the
+  // marketplacecard shape (data.watchUrls, data.productSnapshot.title); pass
+  // explicit getters for other card types (or to opt out by returning empty).
+  getWatchUrls    = (d) => Array.isArray(d?.watchUrls) ? d.watchUrls : [],
+  getProductTitle = (d) => d?.productSnapshot?.title || '',
   fields = DEFAULT_FIELDS,
   updateNode,
   itemLabel = 'item',
@@ -37,9 +42,19 @@ export function useCheckAllConnected({
   const [checkingAll, setCheckingAll] = useState(false);
 
   const getConnectedCards = useCallback(() => {
+    // Two ownership signals — accept either:
+    //   - `data.hubId === hubId` tag (used by JobHub: jobcards live under a
+    //     category/bucket tree, so their edges don't terminate at the hub).
+    //   - Direct outgoing edge from the hub (used by SellHub: marketplacecards
+    //     are spawned as direct children with a single hub→card edge).
+    // Without the hubId branch, JobHub's "Check All" walks zero cards because
+    // hub→category→bucket→jobcard edges don't have source===hubId.
     const outgoing = getEdges().filter(e => e.source === hubId);
-    const ids = new Set(outgoing.map(e => e.target));
-    return getNodes().filter(n => ids.has(n.id) && n.type === cardType);
+    const edgeIds = new Set(outgoing.map(e => e.target));
+    return getNodes().filter(n =>
+      n.type === cardType &&
+      (n.data?.hubId === hubId || edgeIds.has(n.id))
+    );
   }, [hubId, cardType, getEdges, getNodes]);
 
   const checkAll = useCallback(async () => {
@@ -51,11 +66,18 @@ export function useCheckAllConnected({
     let checked = 0;
     try {
       for (const card of cards) {
-        const url = String(getUrl(card.data) || '').trim();
-        if (!url) {
+        const url        = String(getUrl(card.data) || '').trim();
+        const platformId = getPlatformId(card.data);
+        const watchUrls  = getWatchUrls(card.data);
+        const productTitle = getProductTitle(card.data);
+        // Per-platform watch URLs live server-side; the backend merges them in,
+        // so a card with no listing URL but with a configured platform watch
+        // URL still gets a meaningful check. Only flag "no URL" when the card
+        // has nothing AND no per-card watch URLs.
+        if (!url && watchUrls.length === 0) {
           updateNode(card.id, {
             [fields.status]:      'error',
-            [fields.message]:     'No URL to check',
+            [fields.message]:     'No URL to check (paste a listing URL or configure a platform watch URL in Settings)',
             [fields.lastChecked]: new Date().toISOString(),
           });
           continue;
@@ -63,12 +85,16 @@ export function useCheckAllConnected({
         try {
           const res = await window.electronAPI?.checkListingStatus?.({
             url,
-            platformId: getPlatformId(card.data),
+            platformId,
             nodeId: card.id,
+            watchUrls,
+            productTitle,
           });
           const writes = { [fields.lastChecked]: new Date().toISOString() };
-          if (res?.success) {
-            writes[fields.status]  = res.status || 'unknown';
+          // New backend always returns { status, message, sources }; the
+          // legacy { success: true, status, message } shape is gone.
+          if (res?.status) {
+            writes[fields.status]  = res.status;
             writes[fields.message] = res.message || '';
           } else {
             writes[fields.status]  = 'error';
@@ -96,7 +122,7 @@ export function useCheckAllConnected({
   // getConnectedCards reads getEdges/getNodes which are stable refs from
   // useReactFlow — intentionally omitted to keep this callback stable.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [checkingAll, fields, getUrl, getPlatformId, updateNode, addToast, itemLabel]);
+  }, [checkingAll, fields, getUrl, getPlatformId, getWatchUrls, getProductTitle, updateNode, addToast, itemLabel]);
 
   return { checkingAll, checkAll, getConnectedCards };
 }

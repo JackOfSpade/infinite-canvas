@@ -3,11 +3,20 @@ import { Handle, Position } from '@xyflow/react';
 
 const HANDLE_BASE = 'pointer-events-none group-hover:pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity';
 
+// Existing user-drag handles (target on top/left, source on right/bottom) plus
+// extra programmatic-edge handles on the opposite types so spawn helpers can
+// connect any side regardless of who's source vs. target. The new handles
+// keep existing ids unchanged (no breakage of default edge routing) and use
+// `-out`/`-in` suffixes for the additions.
 const POSITIONS = [
-  { type: 'target', position: Position.Top,    id: 'top'    },
-  { type: 'target', position: Position.Left,   id: 'left'   },
-  { type: 'source', position: Position.Right,  id: 'right'  },
-  { type: 'source', position: Position.Bottom, id: 'bottom' },
+  { type: 'target', position: Position.Top,    id: 'top'        },
+  { type: 'target', position: Position.Left,   id: 'left'       },
+  { type: 'source', position: Position.Right,  id: 'right'      },
+  { type: 'source', position: Position.Bottom, id: 'bottom'     },
+  { type: 'source', position: Position.Top,    id: 'top-out'    },
+  { type: 'source', position: Position.Left,   id: 'left-out'   },
+  { type: 'target', position: Position.Right,  id: 'right-in'   },
+  { type: 'target', position: Position.Bottom, id: 'bottom-in'  },
 ];
 
 /**

@@ -58,7 +58,7 @@ export function PriceJustification({ pricing, comps, expanded, onToggle }) {
           {comps?.sold?.length > 0 && (
             <details className="text-xs">
               <summary className="text-white/30 cursor-pointer hover:text-white/50 transition-colors">
-                View {comps.sold.length} sold comps
+                View {comps.sold.length} sold listing{comps.sold.length === 1 ? '' : 's'}
               </summary>
               <div className="mt-1 space-y-0.5 max-h-24 overflow-y-auto custom-scrollbar">
                 {comps.sold.slice(0, 10).map((item, i) => (

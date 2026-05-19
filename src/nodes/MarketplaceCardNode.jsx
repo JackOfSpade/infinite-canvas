@@ -1,8 +1,9 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useState } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
-import { ExternalLink, RefreshCw } from 'lucide-react';
+import { ExternalLink, RefreshCw, Eye, ChevronDown, ChevronRight, AlertTriangle, Info } from 'lucide-react';
 import { SELL_PLATFORMS } from '../utils/constants';
 import { MonitorStatusBadge } from '../components/MonitorStatusBadge';
+import { PlatformBadge } from '../components/PlatformBadge';
 import { useMonitorCheck } from '../hooks/useMonitorCheck';
 
 /**
@@ -20,38 +21,45 @@ import { useMonitorCheck } from '../hooks/useMonitorCheck';
  *   {
  *     platformId: 'ebay' | 'mercari' | ...,
  *     listingUrl: string,
- *     status: 'unknown' | 'live' | 'sold' | 'expired' | 'needs-login' | 'error',
+ *     status: 'unknown' | 'live' | 'sold' | 'ended' | 'needs-login' | 'error',
  *     lastChecked: ISO string,
  *     statusMessage: string,
+ *     attention?: Array<{ urgency: 'high' | 'low', category: string, headline: string, evidence: string }>,
  *     productSnapshot?: { title, price } // copied from parent hub for display
  *   }
  */
 
 export function MarketplaceCardNode({ id, data }) {
   const { updateNodeData } = useReactFlow();
+  const [watchOpen, setWatchOpen] = useState(false);
+  const [watchDraft, setWatchDraft] = useState(() => (data.watchUrls || []).join('\n'));
 
   const platform = SELL_PLATFORMS.find(p => p.id === data.platformId);
   const url = data.listingUrl?.trim() || '';
+  const watchUrls = Array.isArray(data.watchUrls) ? data.watchUrls : [];
 
+  // Uses the default field names (status / statusMessage / lastChecked).
+  // Per-platform watch URLs (configured in Settings) are merged in by the
+  // backend, so the hook always issues the request — backend reports
+  // "No URLs to check..." inline when nothing's configured.
   const { checking, check: checkStatus } = useMonitorCheck({
     id,
     url,
     platformId: data.platformId,
+    watchUrls,
+    productTitle: data.productSnapshot?.title,
     locked: !!data.locked,
     updateNode: updateNodeData,
-    // The marketplace card uses the default field names (status / statusMessage / lastChecked).
-    onMissingUrl: () => {
-      updateNodeData(id, {
-        status: 'error',
-        statusMessage: 'Paste a listing URL first',
-        lastChecked: new Date().toISOString(),
-      });
-    },
   });
 
   const setUrl = useCallback((newUrl) => {
     updateNodeData(id, { listingUrl: newUrl });
   }, [id, updateNodeData]);
+
+  const saveWatchUrls = useCallback(() => {
+    const lines = (watchDraft || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    updateNodeData(id, { watchUrls: lines });
+  }, [watchDraft, id, updateNodeData]);
 
   const openInBrowser = useCallback(() => {
     // No listing URL yet → open the marketplace's "create listing" page so the
@@ -82,12 +90,13 @@ export function MarketplaceCardNode({ id, data }) {
         className="flex items-center gap-2 px-3 py-2 border-b border-white/5"
         style={{ background: `${platform.color}15` }}
       >
-        <div
-          className="h-6 w-6 rounded-full flex items-center justify-center text-[10px] font-bold text-white shrink-0"
-          style={{ background: platform.color }}
-        >
-          {platform.letter}
-        </div>
+        <PlatformBadge
+          name={platform.name}
+          letter={platform.letter}
+          color={platform.color}
+          domain={platform.domain}
+          size={24}
+        />
         <div className="flex-1 min-w-0">
           <div className="text-white text-xs font-semibold truncate">{platform.name}</div>
           {data.productSnapshot?.title && (
@@ -99,11 +108,15 @@ export function MarketplaceCardNode({ id, data }) {
       <div className="p-3 space-y-2">
         <MonitorStatusBadge status={data.status || 'unknown'} lastChecked={data.lastChecked} />
 
-        {data.statusMessage && (
+        {/* Show the prose status message only on error/unknown — for live/sold/ended
+            the badge plus the Attention items already cover everything in the message. */}
+        {data.statusMessage && (data.status === 'error' || data.status === 'unknown') && (
           <div className="text-white/40 text-[9px] leading-snug px-1 break-words">
             {data.statusMessage}
           </div>
         )}
+
+        <AttentionPanels items={data.attention} />
 
         {/* Listing URL input */}
         <div>
@@ -121,6 +134,33 @@ export function MarketplaceCardNode({ id, data }) {
           />
         </div>
 
+        {/* Extra Watch URLs (per-card, optional) — collapsed by default since
+            most users will configure these per-platform in Settings instead. */}
+        <div>
+          <button
+            onClick={() => setWatchOpen(v => !v)}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="nodrag flex items-center gap-1 text-white/40 text-[9px] font-semibold uppercase tracking-wider hover:text-white/60 transition-colors"
+            title="Extra URLs to scan for this listing's status (e.g. a specific notification URL)"
+          >
+            {watchOpen ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+            <Eye size={9} />
+            Extra Watch URLs ({watchUrls.length})
+          </button>
+          {watchOpen && (
+            <textarea
+              rows={2}
+              value={watchDraft}
+              onChange={(e) => setWatchDraft(e.target.value)}
+              onBlur={saveWatchUrls}
+              onPointerDown={(e) => e.stopPropagation()}
+              placeholder={'One URL per line. Card-specific extras\n(platform-wide go in Settings).'}
+              disabled={!!data.locked}
+              className="nodrag mt-1 w-full bg-black/40 border border-white/10 rounded px-2 py-1 text-white/70 text-[10px] outline-none focus:border-blue-400/50 disabled:opacity-50 font-mono leading-snug resize-none"
+            />
+          )}
+        </div>
+
         {/* Actions */}
         <div className="flex gap-1.5">
           <button
@@ -134,7 +174,13 @@ export function MarketplaceCardNode({ id, data }) {
           </button>
           <button
             onClick={checkStatus}
-            disabled={checking || data.locked || !data.listingUrl?.trim()}
+            // Check is meaningful as long as we have something to scan — either a
+            // listing URL OR at least one watch URL (per-card or per-platform).
+            // The per-platform list isn't visible here, so we conservatively
+            // require either a listing URL or a per-card watch URL to enable
+            // the button — power users who rely only on platform-wide URLs can
+            // use the hub's "Check All Statuses" instead.
+            disabled={checking || data.locked || (!data.listingUrl?.trim() && watchUrls.length === 0)}
             onPointerDown={(e) => e.stopPropagation()}
             className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-md bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 text-[10px] font-medium transition-colors border border-blue-500/20 disabled:opacity-40 disabled:cursor-default"
             title="Ask AI to fetch the listing and report its current status"
@@ -144,6 +190,91 @@ export function MarketplaceCardNode({ id, data }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * AttentionPanels — splits the AI-surfaced items into two lanes so the visual
+ * weight matches the actual stakes:
+ *
+ *   - Urgent: items the prompt classified as `urgency: 'high'` (offer
+ *     expiring, suspension, dispute response due, payout held, etc.).
+ *     Defaults to open — burying these behind a click defeats the point.
+ *   - Info: low-urgency FYI items (new watchers, price suggestions,
+ *     edit recommendations). Defaults to closed.
+ *
+ * Each lane renders only if it has items, so a quiet listing shows nothing.
+ */
+function AttentionPanels({ items }) {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  const urgent = items.filter(i => i.urgency === 'high');
+  const info   = items.filter(i => i.urgency !== 'high');
+  return (
+    <div className="space-y-1.5">
+      {urgent.length > 0 && (
+        <AttentionLane
+          items={urgent}
+          label="Action Needed"
+          icon={<AlertTriangle size={10} className="text-red-400" />}
+          defaultOpen
+          accent={{
+            badge: 'bg-red-500/30 text-red-200',
+            item:  'bg-red-500/10 border-red-500/30',
+            text:  'text-red-200',
+          }}
+        />
+      )}
+      {info.length > 0 && (
+        <AttentionLane
+          items={info}
+          label="Info"
+          icon={<Info size={10} className="text-sky-400" />}
+          accent={{
+            badge: 'bg-sky-500/20 text-sky-200',
+            item:  'bg-sky-500/[0.07] border-sky-500/20',
+            text:  'text-sky-100',
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function AttentionLane({ items, label, icon, accent, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(v => !v)}
+        onPointerDown={(e) => e.stopPropagation()}
+        className="nodrag w-full flex items-center gap-1.5 px-2 py-1 rounded-md border bg-white/5 border-white/10 hover:bg-white/10 transition-colors"
+        title={label === 'Action Needed' ? 'Items the AI thinks need your action' : 'FYI items — nothing requires action'}
+      >
+        {open ? <ChevronDown size={10} className="text-white/60" /> : <ChevronRight size={10} className="text-white/60" />}
+        {icon}
+        <span className="text-[10px] font-medium text-white/80">{label}</span>
+        <span className={`ml-auto text-[9px] font-bold leading-none px-1.5 py-0.5 rounded-full ${accent.badge}`}>
+          {items.length}
+        </span>
+      </button>
+      {open && (
+        <ul className="mt-1.5 space-y-1.5">
+          {items.map((item, i) => (
+            <li
+              key={`${item.headline}-${i}`}
+              className={`px-2 py-1.5 rounded-md border text-[10px] leading-snug ${accent.item}`}
+            >
+              <div className={`font-medium ${accent.text}`}>{item.headline}</div>
+              {item.evidence && (
+                <div className="text-white/40 text-[9px] mt-0.5 italic break-words">
+                  &ldquo;{item.evidence}&rdquo;
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

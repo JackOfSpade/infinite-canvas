@@ -1,13 +1,15 @@
 import React, { useState } from 'react';
 import { JOB_SOURCES } from '../../utils/constants';
-import { SlidersHorizontal, X, RefreshCw, Download, Activity } from 'lucide-react';
-import { EventLogger } from '../../utils/EventLogger';
+import { SlidersHorizontal, X, RefreshCw, Activity, Target } from 'lucide-react';
 import { useToast } from '../../components/ToastProvider';
+import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
 
 const STATUS_OPTIONS = ['New', 'Applied', 'Interview', 'Offer', 'Rejected'];
 
 export function JobHubDoneState({
   resultCount,
+  targetCount = 0,
+  otherCount = 0,
   sourceFilter,
   toggleSourceFilter,
   resumeSummary,
@@ -15,57 +17,34 @@ export function JobHubDoneState({
   // Filter props
   scoreThreshold = 0,
   setScoreThreshold,
+  scoreRangeMin = 0,
+  scoreRangeMax = 100,
   statusFilters = [],
   toggleStatusFilter,
   // Action props
   onRerun,
   jobCards = [],
   // Search controls (passed back to the hub for next run)
-  maxAgeDays = 14,
+  maxAgeDays = 21,
   setMaxAgeDays,
+  // Target/pivot role input — surfaces on the done state so the user can
+  // tweak it before re-running without going back to empty state.
+  targetRole = '',
+  setTargetRole,
   // Status-monitoring (per-card AI status check across all connected JobCardNodes)
   onCheckAllStatuses,
   checkingAll = false,
+  // Anti-bot signals collected during the search pipeline
+  scrapeWarnings = [],
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [exportingCSV, setExportingCSV] = useState(false);
   const { addToast } = useToast();
 
-  const hasActiveFilters = scoreThreshold > 0 || statusFilters.length > 0 || sourceFilter;
-
-  const handleExportCSV = async () => {
-    if (exportingCSV || jobCards.length === 0 || !window.electronAPI?.saveFileDialog) return;
-    setExportingCSV(true);
-    try {
-      const esc = (v) => {
-        const s = String(v ?? '').replace(/"/g, '""');
-        return /[,"\n]/.test(s) ? `"${s}"` : s;
-      };
-      const header = 'Title,Company,Location,Score,Strength,Status,Source,URL,Notes';
-      const rows = jobCards.map(c => [
-        esc(c.title), esc(c.company), esc(c.location),
-        esc(c.matchScore), esc(c.strengthLabel), esc(c.status || 'New'),
-        esc(c.source), esc(c.url), esc(c.notes),
-      ].join(','));
-      const csv = [header, ...rows].join('\n');
-      const result = await window.electronAPI.saveFileDialog({
-        defaultFilename: 'job-search-results.csv',
-        content: csv,
-        filters: [{ name: 'CSV Files', extensions: ['csv'] }],
-      });
-      if (result?.saved) {
-        addToast({ title: 'CSV Exported', description: `${jobCards.length} jobs saved to ${result.filePath}`, type: 'success' });
-      } else if (result?.success === false) {
-        EventLogger.error('[JobHub] CSV export write failed:', result.error);
-        addToast({ title: 'Export Failed', description: result.error || 'Could not write file', type: 'error' });
-      }
-      // result.saved === false without success===false means user canceled — no feedback needed
-    } catch (e) {
-      EventLogger.error('[JobHub] CSV export failed:', e);
-    } finally {
-      setExportingCSV(false);
-    }
-  };
+  // Slider is "active" when the user has nudged it above the dynamic minimum.
+  // When min === max, the slider is a no-op and we hide it entirely.
+  const sliderUsable = scoreRangeMax > scoreRangeMin;
+  const sliderActive = sliderUsable && scoreThreshold > scoreRangeMin;
+  const hasActiveFilters = sliderActive || statusFilters.length > 0 || sourceFilter;
 
   return (
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1">
@@ -73,6 +52,20 @@ export function JobHubDoneState({
       {/* Result count */}
       <div className="text-emerald-400 text-2xl font-bold">{resultCount || 0}</div>
       <p className="text-white/40 text-xs">jobs matched</p>
+      {(targetCount > 0 || otherCount > 0) && (
+        <p className="text-white/30 text-[10px] mt-0.5">
+          {targetCount > 0 && <><span className="text-purple-300/80">{targetCount} target</span></>}
+          {targetCount > 0 && otherCount > 0 && <span className="text-white/20"> · </span>}
+          {otherCount > 0 && <><span className="text-blue-300/80">{otherCount} other</span></>}
+        </p>
+      )}
+
+      {/* Anti-bot / throttle warnings collected during the search pipeline. */}
+      {scrapeWarnings.length > 0 && (
+        <div className="w-full mt-2">
+          <ScrapeWarningsPanel warnings={scrapeWarnings} addToast={addToast} />
+        </div>
+      )}
 
       {/* Active filter summary pills */}
       <div className="flex flex-wrap justify-center gap-1 mt-1 min-h-[18px]">
@@ -86,11 +79,11 @@ export function JobHubDoneState({
             )}
           </span>
         )}
-        {scoreThreshold > 0 && (
+        {sliderActive && (
           <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-white/10 text-white/50 text-[9px]">
             ≥{scoreThreshold}%
             {!locked && (
-              <button onClick={() => setScoreThreshold?.(0)} onPointerDown={(e) => e.stopPropagation()}>
+              <button onClick={() => setScoreThreshold?.(scoreRangeMin)} onPointerDown={(e) => e.stopPropagation()}>
                 <X size={8} />
               </button>
             )}
@@ -112,9 +105,8 @@ export function JobHubDoneState({
         <p className="text-white/20 text-[10px] text-center mt-1">{resumeSummary}</p>
       )}
 
-      {/* Action buttons: re-run + export */}
       {!locked && (
-        <div className="flex gap-1.5 mt-2 w-full">
+        <div className="flex mt-2 w-full">
           <button
             onClick={onRerun}
             onPointerDown={(e) => e.stopPropagation()}
@@ -123,16 +115,6 @@ export function JobHubDoneState({
           >
             <RefreshCw size={9} />
             Re-run Search
-          </button>
-          <button
-            onClick={handleExportCSV}
-            disabled={exportingCSV || jobCards.length === 0}
-            onPointerDown={(e) => e.stopPropagation()}
-            className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-white/5 text-white/40 hover:bg-white/10 hover:text-white/60 text-[10px] transition-colors disabled:opacity-30 disabled:cursor-default"
-            title={jobCards.length === 0 ? 'No cards to export' : `Export ${jobCards.length} jobs as CSV`}
-          >
-            <Download size={9} />
-            {exportingCSV ? 'Exporting…' : 'Export CSV'}
           </button>
         </div>
       )}
@@ -153,23 +135,35 @@ export function JobHubDoneState({
         </button>
       )}
 
-      {/* Listing age — applies to the next Re-run Search */}
+      {/* Target role + Look back — both feed the next Re-run Search */}
       {!locked && (
-        <div
-          className="nodrag mt-2 flex items-center gap-1.5 text-[10px] text-white/40"
-          onPointerDown={(e) => e.stopPropagation()}
-          title="Maximum posting age (in days) to consider on the next search"
-        >
-          <span>Look back</span>
-          <input
-            type="number"
-            min={1}
-            max={180}
-            value={maxAgeDays}
-            onChange={(e) => setMaxAgeDays?.(e.target.value)}
-            className="w-10 text-center bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-blue-400/50"
-          />
-          <span>days</span>
+        <div className="nodrag w-full mt-2 flex flex-col items-stretch gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
+          <div className="flex items-center gap-1.5 text-[10px] text-white/40">
+            <Target size={10} className="text-purple-300/70 shrink-0" />
+            <input
+              type="text"
+              value={targetRole}
+              onChange={(e) => setTargetRole?.(e.target.value)}
+              placeholder="Target role (optional)"
+              className="flex-1 min-w-0 px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-purple-400/50 placeholder:text-white/25"
+              title="Set or change the role to pivot into. Applies on next Re-run Search."
+            />
+          </div>
+          <div
+            className="flex items-center justify-center gap-1.5 text-[10px] text-white/40"
+            title="Maximum posting age (in days) to consider on the next search"
+          >
+            <span>Look back</span>
+            <input
+              type="number"
+              min={1}
+              max={180}
+              value={maxAgeDays}
+              onChange={(e) => setMaxAgeDays?.(e.target.value)}
+              className="w-10 text-center bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-blue-400/50"
+            />
+            <span>days</span>
+          </div>
         </div>
       )}
 
@@ -193,25 +187,33 @@ export function JobHubDoneState({
       {filtersOpen && !locked && (
         <div className="nodrag w-full mt-2 space-y-3 px-1" onPointerDown={(e) => e.stopPropagation()}>
 
-          {/* Score threshold */}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between text-[10px]">
-              <span className="text-white/40">Min score</span>
-              <span className="text-white/60 font-medium">{scoreThreshold > 0 ? `≥${scoreThreshold}%` : 'Any'}</span>
+          {/* Score threshold — dynamic range based on actually-spawned scores.
+              Bottom = "show everything"; top = "show only the highest match".
+              Hidden when min===max (single-job lists, or all jobs scored
+              identically — a no-op slider would just be noise). */}
+          {sliderUsable && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="text-white/40">Min score</span>
+                <span className="text-white/60 font-medium">
+                  {sliderActive ? `≥${scoreThreshold}%` : 'All'}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={scoreRangeMin}
+                max={scoreRangeMax}
+                step={1}
+                value={scoreThreshold}
+                onChange={(e) => setScoreThreshold?.(Number(e.target.value))}
+                className="w-full h-1 accent-blue-400 cursor-pointer"
+              />
+              <div className="flex justify-between text-[8px] text-white/20">
+                <span>{scoreRangeMin}%</span>
+                <span>{scoreRangeMax}%</span>
+              </div>
             </div>
-            <input
-              type="range"
-              min={0}
-              max={95}
-              step={5}
-              value={scoreThreshold}
-              onChange={(e) => setScoreThreshold?.(Number(e.target.value))}
-              className="w-full h-1 accent-blue-400 cursor-pointer"
-            />
-            <div className="flex justify-between text-[8px] text-white/20">
-              <span>0%</span><span>50%</span><span>95%</span>
-            </div>
-          </div>
+          )}
 
           {/* Status filter */}
           <div className="space-y-1">

@@ -7,7 +7,8 @@
 export const MARKETPLACE_STATUS_LABELS = {
   live:          'Live',
   sold:          'Sold',
-  expired:       'Expired',
+  ended:         'Ended',
+  expired:       'Ended', // back-compat: nodes saved before the rename
   'needs-login': 'Needs login',
   error:         'Error',
   unknown:       'Not checked',
@@ -16,7 +17,8 @@ export const MARKETPLACE_STATUS_LABELS = {
 export const JOB_STATUS_LABELS = {
   live:          'Open',
   sold:          'Filled',
-  expired:       'Closed',
+  ended:         'Closed',
+  expired:       'Closed', // back-compat: nodes saved before the rename
   'needs-login': 'Needs login',
   error:         'Error',
   unknown:       'Not checked',

@@ -15,6 +15,7 @@ import {
   getSupportedPlatforms,
   getSellMonitorPlatforms,
   getSellMonitorConfig,
+  fetchHtmlClean,
 } from './stealthBrowser.js';
 
 // ── Session status disk cache ─────────────────────────────────────────────────────────
@@ -29,7 +30,7 @@ function getStatusCachePath() {
   if (!_statusCachePath) _statusCachePath = path.join(app.getPath('userData'), 'session-status-cache.json');
   return _statusCachePath;
 }
-async function readStatusCache() {
+export async function readStatusCache() {
   if (_statusCache) return _statusCache;
   try {
     const p = getStatusCachePath();
@@ -39,10 +40,122 @@ async function readStatusCache() {
     return _statusCache;
   } catch { _statusCache = {}; return _statusCache; }
 }
-async function writeStatusCache(platformId, connected) {
+/**
+ * After the login window closes, verify the user actually completed login
+ * by hitting the platform's seller URL with the same persistent userDataDir
+ * cookies. If the response 4xxs or redirects to /login etc., we know the
+ * user closed the window without finishing — and we should NOT cache
+ * connected:true.
+ *
+ * Returns { connected, reason } so callers can surface a meaningful message
+ * ("redirected to login" vs "server error vs verifying") rather than just a
+ * bare boolean.
+ */
+/**
+ * Returns { connected, reason, trace } where trace is a diagnostic record
+ * the cache persists (target URL, final URL, status, body-sniff result).
+ * The trace is what the bug report surfaces when "I just logged in but the
+ * pill still says Log in" — without it the verifier is a black box.
+ */
+export async function verifySellMonitorLogin(platformId) {
+  // Outer try/catch so any unforeseen exception (Chrome failed to launch,
+  // module import error, network stack panic) becomes a verdict instead
+  // of bubbling up. Without this, the open-login-window handler's catch
+  // returns `{ success: false }` and writeStatusCache is never called,
+  // leaving a stale cache entry and an opaque renderer toast.
+  try {
+    const config = getSellMonitorConfig(platformId);
+    // Prefer verifyUrl (universal logged-in page like /my/account) over
+    // sellerUrl (seller-specific, may redirect non-seller accounts through
+    // signin.* hosts that trip our login-redirect regex). Falls back to
+    // sellerUrl when verifyUrl isn't set for backward compat.
+    const target = config?.verifyUrl || config?.sellerUrl;
+    if (!target) {
+      return { connected: false, reason: 'No verify URL configured for this platform.', trace: { target: null } };
+    }
+    logger.info(`[Accounts] Verifying ${platformId} login via ${target}`);
+    let r;
+    try {
+      // fetchHtmlClean (not fetchHtmlAuthed) — the latter installs request
+      // interception that aborts every image, which marketplaces' anti-bot
+      // systems flag and respond to with a login wall even for fully-
+      // authenticated sessions. The clean path uses the same persistent
+      // cookies but loads images normally so eBay/etc don't fingerprint us
+      // as a bot.
+      r = await fetchHtmlClean(target, { timeoutMs: 25000 });
+    } catch (e) {
+      const trace = { target, error: e?.message || String(e) };
+      return { connected: false, reason: `Verification fetch failed: ${e?.message || String(e)}`, trace };
+    }
+    if (!r.ok) {
+      const trace = { target, error: r.error };
+      return { connected: false, reason: `Verification fetch error: ${r.error}`, trace };
+    }
+
+    const trace = {
+      target,
+      finalUrl: r.finalUrl,
+      status: r.status,
+      htmlBytes: r.html?.length || 0,
+      bodyHead: stripTags(r.html || '').slice(0, 300),
+    };
+
+    if (r.status === 401 || r.status === 403) {
+      return { connected: false, reason: `Auth wall (HTTP ${r.status}) — not logged in.`, trace };
+    }
+    const finalUrlLower = String(r.finalUrl || '').toLowerCase();
+    if (/\/(login|signin|sign-in|account\/login|auth)/i.test(finalUrlLower)) {
+      return { connected: false, reason: `Redirected to ${r.finalUrl} — login not completed.`, trace };
+    }
+
+    // Body-content sniff — catches "soft" login walls where the response is
+    // 200 OK with the original URL but the body is actually a sign-in form
+    // (eBay does this when anti-bot kicks in). Looks for high-signal phrases
+    // in the first chunk of stripped text, scoped to avoid false positives
+    // from a stray "Sign in" link in nav chrome.
+    const head = trace.bodyHead.toLowerCase();
+    const softWallSignals = [
+      'sign in to your account',
+      'sign in to ebay',
+      'sign in to continue',
+      'please sign in',
+      'log in to your account',
+      'log in to continue',
+      'enter your email or username',
+      'enter your password',
+    ];
+    const matched = softWallSignals.find(s => head.includes(s));
+    if (matched) {
+      trace.softWallMatch = matched;
+      return { connected: false, reason: `Page body looks like a sign-in form ("${matched}") despite URL ${r.finalUrl} — likely anti-bot challenge.`, trace };
+    }
+
+    return { connected: true, reason: `Reached ${r.finalUrl} (HTTP ${r.status}) without auth redirect or sign-in body.`, trace };
+  } catch (e) {
+    logger.error(`[Accounts] verifySellMonitorLogin unexpected error for ${platformId}:`, e);
+    return {
+      connected: false,
+      reason: `Unexpected verifier error: ${e?.message || String(e)}`,
+      trace: { error: e?.message || String(e), stack: e?.stack?.slice(0, 600) },
+    };
+  }
+}
+
+// Cheap tag stripper for the body sniff. Not a full HTML parser — we only
+// need the first few hundred chars of visible text for the sign-in regex.
+function stripTags(html) {
+  return String(html || '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export async function writeStatusCache(platformId, connected, extras = {}) {
   try {
     const cache = await readStatusCache(); // returns the in-memory object
-    cache[platformId] = { connected, ts: Date.now() };
+    cache[platformId] = { connected, ts: Date.now(), ...extras };
     // Atomic write: write to a .tmp sibling then rename, so a crash during
     // the write never leaves a partially-written (corrupt) JSON file.
     const finalPath = getStatusCachePath();
@@ -53,6 +166,66 @@ async function writeStatusCache(platformId, connected) {
     logger.warn('[Accounts] Cache write failed:', e?.message || String(e));
   }
 }
+
+// ── Background revalidation ─────────────────────────────────────────────────
+// On app start, walk the cache and re-verify any `connected: true` entries
+// older than the TTL. Catches platforms whose cookies expired since last open
+// so the user doesn't see a stale "Logged in" pill that then fails at scrape
+// time. Runs sequentially in the background; transient errors (Chrome busy,
+// stealth browser torn down by an unrelated user click) DO NOT downgrade the
+// cache — only a real verdict from the verifier overwrites a cached value.
+const STALE_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+export async function revalidateStaleSessions({ maxAgeMs = STALE_SESSION_TTL_MS } = {}) {
+  try {
+    const cache = await readStatusCache();
+    const now = Date.now();
+    const stale = Object.entries(cache)
+      .filter(([, v]) => v?.connected && (now - (v.ts || 0) > maxAgeMs))
+      .map(([platformId]) => platformId);
+    if (!stale.length) {
+      logger.info('[Accounts] Background revalidate: no stale connected sessions');
+      return;
+    }
+    logger.info(`[Accounts] Background revalidate: ${stale.length} stale connected entries (${stale.join(', ')})`);
+    for (const platformId of stale) {
+      // Skip platforms with an active login flow — the user is already
+      // interacting with them, and our verify would race their window's
+      // close/verify cycle on the shared userDataDir.
+      if (activeLoginFlows.has(platformId)) {
+        logger.info(`[Accounts] Background revalidate skipping ${platformId} — login flow in flight`);
+        continue;
+      }
+      try {
+        const verdict = await verifySellMonitorLogin(platformId);
+        if (verdict.trace?.error) {
+          // Transient (network blip, browser torn down mid-fetch). Don't
+          // overwrite — wait for the next app open or a real user click.
+          logger.info(`[Accounts] Background revalidate ${platformId} transient error — keeping cached value: ${verdict.reason}`);
+          continue;
+        }
+        await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
+        logger.info(`[Accounts] Background revalidate ${platformId}: ${verdict.connected ? 'still logged in' : 'session expired'}`);
+      } catch (e) {
+        logger.warn(`[Accounts] Background revalidate ${platformId} threw:`, e?.message || String(e));
+      }
+    }
+  } catch (e) {
+    logger.warn('[Accounts] Background revalidate setup failed:', e?.message || String(e));
+  }
+}
+
+// ── Single-flight login dedup ────────────────────────────────────────────────
+// Rapid Log-in clicks (or a Log-in click while a prior verify is still
+// running) used to spawn a second puppeteer process on the same userDataDir
+// → Chrome's single-process profile lock → "browser is already running"
+// error AND a "Target closed" race that killed the in-flight verify's page.
+//
+// Fix: dedupe by platformId. If a login flow (window + verify) is already
+// in flight, subsequent IPC calls await the same promise instead of
+// starting a new one. New flows only start once the prior one fully
+// settles (window closed + verify cached).
+const activeLoginFlows = new Map(); // platformId → Promise<verdict>
 
 /**
  * Register all Accounts IPC handlers.
@@ -119,49 +292,126 @@ export function registerAccountsHandlers() {
     }
   });
 
-  // Open a visible login window for a specific platform
+  // Open a visible login window for a specific platform.
+  //
+  // After the window closes, navigate to the platform's seller URL in the
+  // same persistent session and confirm we land somewhere that isn't a
+  // login wall. Only then do we cache connected:true. The previous flow
+  // optimistically cached on window-close regardless of whether the user
+  // actually completed login — closing without signing in still got
+  // marked as connected.
   handleSafe('open-login-window', async (_event, { platformId }) => {
+    // Cache shortcut: when the user clicks "Logged in · refresh," they want
+    // to re-verify the cached session, not pop another window. If the disk
+    // cache already says connected, skip openLoginWindow entirely and just
+    // re-run verifySellMonitorLogin against the persisted cookies. If verify
+    // comes back negative, the cache is updated to false and the next click
+    // falls through to the normal launch-window path.
+    const cache = await readStatusCache();
+    if (cache[platformId]?.connected) {
+      logger.info(`[Accounts] ${platformId} cached as connected — re-verifying without opening window`);
+      const verdict = await verifySellMonitorLogin(platformId);
+      await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
+      return { connected: verdict.connected, reason: verdict.reason, skippedWindow: true };
+    }
+
+    // Single-flight: if a login flow for this platform is already in flight
+    // (window open OR verify running), return the same promise. Rapid double-
+    // clicks no longer launch a second puppeteer process on the same
+    // userDataDir, and a click during verify no longer races closeStealthBrowser
+    // against the verify's in-flight page.goto.
+    const existing = activeLoginFlows.get(platformId);
+    if (existing) {
+      logger.info(`[Accounts] Login flow already in flight for ${platformId} — deduping click`);
+      return await existing;
+    }
+
+    const flow = (async () => {
+      try {
+        const result = await openLoginWindow(platformId, _event.sender);
+        const verdict = await verifySellMonitorLogin(platformId);
+        await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
+        if (!verdict.connected) {
+          logger.info(`[Accounts] ${platformId} login window closed without successful login: ${verdict.reason}`);
+        } else {
+          logger.info(`[Accounts] ${platformId} login verified: ${verdict.reason}`);
+        }
+        return { ...(result || {}), connected: verdict.connected, reason: verdict.reason };
+      } catch (error) {
+        // Catch path: openLoginWindow itself blew up (Chrome failed to launch,
+        // platform unknown, etc.). Persist the failure into the cache and
+        // return a structured verdict so the renderer's toast surfaces the
+        // real error instead of the generic "closed without sign-in" fallback.
+        // verifySellMonitorLogin is now defensive enough that we shouldn't
+        // land here for verify-side issues — only loginBrowser launch issues.
+        const msg = error?.message || String(error);
+        logger.error(`[Accounts] Login window failed for ${platformId}:`, msg);
+        const trace = { error: msg, stack: error?.stack?.slice(0, 600), stage: 'openLoginWindow' };
+        await writeStatusCache(platformId, false, { lastReason: msg, lastTrace: trace });
+        return { connected: false, reason: msg, error: msg };
+      }
+    })();
+
+    activeLoginFlows.set(platformId, flow);
     try {
-      const result = await openLoginWindow(platformId, _event.sender);
-      // After the login window closes, optimistically mark as connected.
-      // The user manually closed the window after logging in, so we trust they succeeded.
-      // Avoids a second Chrome launch just for verification.
-      await writeStatusCache(platformId, true);
-      return result || {};
-    } catch (error) {
-      logger.error(`[Accounts] Login window failed for ${platformId}:`, error?.message || String(error));
-      // handleSafe returns an object; here we can return our own custom failure attributes
-      // as handleSafe appends { success: true } by default if we don't throw.
-      // But actually, we log instead of throwing so it's a "soft" failure.
-      return { success: false, error: error?.message || String(error) };
+      return await flow;
+    } finally {
+      // Always clear so the next genuine click (after this flow fully settles
+      // — window closed AND verify resolved) starts a fresh flow.
+      activeLoginFlows.delete(platformId);
     }
   });
 
   // Check-and-login flow: check session → if not logged in, open login → verify
   // Returns { connected: boolean, platform: string, loginOpened: boolean }
+  //
+  // Both pre- and post-login checks use the disk cache + verifySellMonitorLogin
+  // path — never the broken getSessionStatus cookie heuristic, which false-
+  // positives on anonymous tracking cookies (see note on `check-sell-monitor-auth`).
   handleSafe('check-and-login', async (_event, { platformId }) => {
-    try {
-      // Step 1: Quick session check
-      const status = await getSessionStatus(platformId);
-      if (status.connected) {
-        return { ...status, loginOpened: false };
-      }
+    // Step 1: Quick cache lookup. If we already have a positive verdict
+    // from a prior verified login, trust it and skip Chrome entirely.
+    const cache = await readStatusCache();
+    if (cache[platformId]?.connected) {
+      return { platform: platformId, connected: true, loginOpened: false };
+    }
 
-      // Step 2: Not logged in — open login window (blocks until user closes it)
-      logger.info(`[Accounts] ${platformId} not logged in — opening login window`);
+    // Share the dedup with open-login-window — if either handler has a flow
+    // in flight for this platform, this call awaits it instead of starting
+    // a parallel login + verify that would race on userDataDir.
+    const existing = activeLoginFlows.get(platformId);
+    if (existing) {
+      logger.info(`[Accounts] check-and-login deduping to in-flight login for ${platformId}`);
+      const result = await existing;
+      return { platform: platformId, connected: !!result?.connected, loginOpened: true, reason: result?.reason };
+    }
+
+    const flow = (async () => {
+    try {
+      // Step 2: Not in cache — open login window (blocks until user closes it).
+      logger.info(`[Accounts] ${platformId} not in verified-login cache — opening login window`);
       await openLoginWindow(platformId, _event.sender);
 
-      // Step 3: Re-check session after login window closed
-      const postLogin = await getSessionStatus(platformId);
-      
-      if (_event.sender.isDestroyed()) {
-        return { platform: platformId, connected: postLogin.connected, loginOpened: true };
-      }
+      // Step 3: Verify by hitting the seller URL via the same persistent
+      // session. Cache the verdict either way so the next call short-circuits.
+      const verdict = await verifySellMonitorLogin(platformId);
+      await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
 
-      return { ...postLogin, loginOpened: true };
+      if (_event.sender.isDestroyed()) {
+        return { platform: platformId, connected: verdict.connected, loginOpened: true };
+      }
+      return { platform: platformId, connected: verdict.connected, loginOpened: true, reason: verdict.reason };
     } catch (error) {
       logger.error(`[Accounts] Check-and-login failed for ${platformId}:`, error?.message || String(error));
       return { platform: platformId, connected: false, loginOpened: false, error: error?.message || String(error) };
+    }
+    })();  // close the flow IIFE
+
+    activeLoginFlows.set(platformId, flow);
+    try {
+      return await flow;
+    } finally {
+      activeLoginFlows.delete(platformId);
     }
   });
 
@@ -174,22 +424,28 @@ export function registerAccountsHandlers() {
 
   // Before sell monitoring: check if the user is logged into the platform.
   // Returns { platform, connected, name, sellerUrl }
+  //
+  // Truth source is the disk cache, populated only by a successful
+  // openLoginWindow flow. The previous implementation called
+  // getSessionStatus(), which matched any cookie whose name contains
+  // 'session' / 'token' / 'auth' — that returned true on first visit for
+  // most marketplaces because Mercari / eBay / etc. drop anonymous
+  // tracking cookies with exactly those names. Users who'd never logged
+  // in were shown as "Logged in." Now we only trust events the app
+  // actually witnessed.
   handleSafe('check-sell-monitor-auth', async (_event, { platformId }) => {
     const config = getSellMonitorConfig(platformId);
     if (!config) {
       return { platform: platformId, connected: false, error: 'Unknown platform' };
     }
-
-    try {
-      const status = await getSessionStatus(platformId);
-      return {
-        ...status,
-        name: config.name,
-        sellerUrl: config.sellerUrl,
-      };
-    } catch (error) {
-      logger.error(`[Accounts] Auth check failed for ${platformId}:`, error?.message || String(error));
-      return { platform: platformId, connected: false, name: config.name };
-    }
+    const cache = await readStatusCache();
+    const cached = cache[platformId];
+    return {
+      platform: platformId,
+      connected: !!cached?.connected,
+      lastConfirmedAt: cached?.ts || null,
+      name: config.name,
+      sellerUrl: config.sellerUrl,
+    };
   });
 }

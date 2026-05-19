@@ -120,33 +120,68 @@ export function useListingActions(id, data) {
     return () => { isMountedRef.current = false; };
   }, []);
 
-  const researchPrice = useCallback(async (onStateChange) => {
-    if (!window.electronAPI?.researchPrice) return;
-    onStateChange?.('researching');
+  // Build a neutral search-friendly query string. Prefer the AI-generated
+  // `search_query` field (brand + model + price-driving specs only, no
+  // condition / color / marketing fluff) because marketplace search engines
+  // do relevance ranking on token overlap — and a noisy query like
+  // "FOR PARTS: Apple iPhone XS Silver 512GB" biases toward a narrow slice
+  // instead of the broader pool we want for anchor/adjusted/bound weighting.
+  // Falls back to the old brand+model+title concat for workspaces saved
+  // before the search_query field existed.
+  const buildSearchQuery = useCallback(() => {
+    const ai = product.search_query?.trim();
+    if (ai) return ai;
+    return `${product.brand || ''} ${product.model || ''} ${product.generated_title || ''}`.trim();
+  }, [product]);
 
-    try {
-      const query = `${product.brand || ''} ${product.model || ''} ${product.generated_title || ''}`.trim();
-      const result = await window.electronAPI.researchPrice({
-        query,
-        nodeId: id,
-        condition: product.condition || 'Used - Good',
-      });
-
-      if (result.success) {
-        if (isMountedRef.current) setPriceInput(result.pricing.recommended_price || '');
-        onStateChange?.('priced', result);
-      } else {
-        const err = new Error(result.error);
-        if (result.isRateLimit) err.isRateLimit = true;
-        throw err;
-      }
-      return result;
-    } catch (err) {
-      EventLogger.error('researchPrice failed:', err);
-      onStateChange?.('error', err);
+  // Split into two stages so the caller can pause between scrape and synthesis
+  // when sources errored — see SellHubNode.handleConfirmDraft for the
+  // resolve-or-skip decision flow that lives between them.
+  const scrapePriceComps = useCallback(async () => {
+    if (!window.electronAPI?.scrapePriceComps) throw new Error('scrapePriceComps API unavailable');
+    const query = buildSearchQuery();
+    const result = await window.electronAPI.scrapePriceComps({ query, nodeId: id });
+    if (!result.success) {
+      const err = new Error(result.error);
+      if (result.isRateLimit) err.isRateLimit = true;
       throw err;
     }
-  }, [product, id]);
+    return result;
+  }, [buildSearchQuery, id]);
+
+  // Rescrape a single comp source — used after captcha-resolve to refetch
+  // just the unblocked source instead of re-running the whole pipeline.
+  const rescrapeSource = useCallback(async (sourceId) => {
+    if (!window.electronAPI?.rescrapeSource) throw new Error('rescrapeSource API unavailable');
+    const query = buildSearchQuery();
+    const result = await window.electronAPI.rescrapeSource({ sourceId, query, nodeId: id });
+    if (!result.success) {
+      const err = new Error(result.error);
+      if (result.isRateLimit) err.isRateLimit = true;
+      throw err;
+    }
+    return result;
+  }, [buildSearchQuery, id]);
+
+  const synthesizePrice = useCallback(async (comps) => {
+    if (!window.electronAPI?.synthesizePrice) throw new Error('synthesizePrice API unavailable');
+    const query = buildSearchQuery();
+    const result = await window.electronAPI.synthesizePrice({
+      query,
+      nodeId: id,
+      condition: product.condition || 'Used - Good',
+      comps,
+    });
+    if (!result.success) {
+      const err = new Error(result.error);
+      if (result.isRateLimit) err.isRateLimit = true;
+      throw err;
+    }
+    if (isMountedRef.current && result.pricing?.recommended_price) {
+      setPriceInput(result.pricing.recommended_price);
+    }
+    return result;
+  }, [buildSearchQuery, product.condition, id]);
 
   // ── Justification toggle ───────────────────────────────────────────────────
 
@@ -172,7 +207,9 @@ export function useListingActions(id, data) {
     handleCopyListing,
     togglePlatform,
     toggleJustification,
-    researchPrice,
+    scrapePriceComps,
+    rescrapeSource,
+    synthesizePrice,
     syncPriceFromBackend,
   };
 }

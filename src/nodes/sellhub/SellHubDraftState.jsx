@@ -107,12 +107,6 @@ export function SellHubDraftState({
         </select>
       </div>
 
-      {product.generated_description && (
-        <div className="text-white/35 text-[10px] leading-relaxed max-h-12 overflow-hidden">
-          {product.generated_description}
-        </div>
-      )}
-
       <button
         onClick={locked ? undefined : handleConfirmDraft}
         disabled={locked}

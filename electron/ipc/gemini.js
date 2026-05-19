@@ -12,6 +12,68 @@ import { resolveServiceAccountPath } from './settings.js';
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const LOCATION = 'us-central1';
 
+/**
+ * Convert standard JSON Schema (lowercase types) to Gemini's responseSchema
+ * format (uppercase types). Recursively walks objects + arrays. Drops
+ * unsupported keywords (anyOf/oneOf/$ref/additionalProperties) that Gemini's
+ * schema validator rejects — keep schemas simple to avoid surprises.
+ */
+function toGeminiSchema(schema) {
+  if (!schema || typeof schema !== 'object') return schema;
+  const TYPE_MAP = {
+    string: 'STRING', number: 'NUMBER', integer: 'INTEGER',
+    boolean: 'BOOLEAN', array: 'ARRAY', object: 'OBJECT', null: 'NULL',
+  };
+  const out = {};
+  if (schema.type) out.type = TYPE_MAP[schema.type] || schema.type;
+  if (schema.description) out.description = schema.description;
+  if (schema.enum) out.enum = schema.enum;
+  if (schema.nullable) out.nullable = schema.nullable;
+  if (schema.required) out.required = schema.required;
+  if (schema.properties) {
+    out.properties = {};
+    for (const [k, v] of Object.entries(schema.properties)) {
+      out.properties[k] = toGeminiSchema(v);
+    }
+  }
+  if (schema.items) out.items = toGeminiSchema(schema.items);
+  return out;
+}
+
+// Transient HTTP errors worth retrying. 503/500/502/504 are server-side
+// hiccups; 429 is rate limit (provider tells us to back off). Everything
+// else is a config/auth/quota/payload issue that won't improve on retry.
+const TRANSIENT_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
+
+/**
+ * fetch() wrapper with exp backoff for transient HTTP errors and network
+ * failures. Returns the final Response (caller still handles non-2xx). Aborts
+ * are not retried — the user/timeout asked to stop, respect that. Logs each
+ * retry so bug reports show the attempt history.
+ */
+async function fetchWithRetry(url, init, { label = 'fetch', maxAttempts = 3, baseDelayMs = 600 } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, init);
+      if (res.ok || !TRANSIENT_HTTP_STATUSES.has(res.status) || attempt === maxAttempts) {
+        return res;
+      }
+      const delay = baseDelayMs * Math.pow(3, attempt - 1);
+      logger.warn(`[${label}] HTTP ${res.status} (transient) — retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
+      await new Promise(r => setTimeout(r, delay));
+    } catch (err) {
+      lastErr = err;
+      // Don't retry aborts — caller/timeout explicitly stopped us.
+      if (err?.name === 'AbortError' || init?.signal?.aborted || attempt === maxAttempts) throw err;
+      const delay = baseDelayMs * Math.pow(3, attempt - 1);
+      logger.warn(`[${label}] network error: ${err?.message || String(err)} — retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
 // Internal sentinel prepended to mock responses so parseGeminiJSON can tag
 // the parsed object with `_mockMode: true`. Callers downstream (marketplace,
 // jobs) propagate this so the UI can show "data is fake until you configure
@@ -122,27 +184,41 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const { signal, ...restGenConfig } = genConfig;
+  const { signal, responseSchema, ...restGenConfig } = genConfig;
 
+  const generationConfig = {
+    temperature: 0.1,
+    responseMimeType: 'application/json',
+    maxOutputTokens: 2048,   // default; callers pass task-specific caps via opts
+    ...restGenConfig,
+  };
+  if (responseSchema) {
+    // Gemini's responseSchema constrains generation to a JSON Schema —
+    // 100% guarantee of valid JSON + schema-conforming output. Eliminates
+    // the entire class of "AI returned invalid JSON" / "AI returned an
+    // enum value we don't recognize" failures. Schema is auto-converted
+    // from standard JSON Schema lowercase types to Gemini's uppercase.
+    generationConfig.responseSchema = toGeminiSchema(responseSchema);
+  }
   const payload = {
     contents: [{ role: 'user', parts }],
-    generationConfig: {
-      temperature: 0.1,
-      responseMimeType: 'application/json',
-      maxOutputTokens: 8192,
-      ...restGenConfig,
-    },
+    generationConfig,
   };
 
   const timeoutSignal = AbortSignal.timeout(60000);
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+  const endpointName = apiKey ? 'Gemini API (AI Studio)' : 'Vertex AI';
 
-  const response = await fetch(endpoint, {
+  // Auto-retry transient errors so a "model overloaded" blip doesn't bubble up
+  // as a card-level error the user has to manually re-click. 503 (overload),
+  // 429 (rate limit), 500/502/504 (gateway hiccups) are all worth retrying;
+  // 4xx other than 429 are config/auth/quota issues and won't get better.
+  const response = await fetchWithRetry(endpoint, {
     method: 'POST',
     signal: combinedSignal,
     headers,
     body: JSON.stringify(payload),
-  });
+  }, { label: endpointName });
 
   if (!response.ok) {
     const errText = await response.text();
@@ -153,13 +229,43 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     // an AI Studio billing/quota issue from a Vertex service-account issue at
     // a glance. Previously this string always said "Vertex AI" regardless of
     // which path ran, which sent users debugging the wrong system.
-    const endpointName = apiKey ? 'Gemini API (AI Studio)' : 'Vertex AI';
     throw new Error(`${endpointName} error ${response.status}: ${errMsg}`);
   }
 
   const data = await response.json();
-  const contentText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!contentText) throw new Error('No content returned from Vertex AI.');
+  const candidate = data?.candidates?.[0];
+  const contentText = candidate?.content?.parts?.[0]?.text;
+  const finishReason = candidate?.finishReason;
+  const usage = data?.usageMetadata;
+  const cap = payload.generationConfig.maxOutputTokens;
+
+  // Log finish reason + token usage on every call so bug reports include the
+  // signals needed to distinguish a true model error from a hit token cap.
+  // `thoughtsTokenCount` is critical for Gemini 2.5+ thinking models: it
+  // counts against the same cap as output tokens, so a "MAX_TOKENS at
+  // out:71 cap:2048" mystery resolves the moment you see thoughts:1977.
+  logger.info(`[Gemini] finishReason=${finishReason} usage=in:${usage?.promptTokenCount ?? '?'} out:${usage?.candidatesTokenCount ?? '?'} thoughts:${usage?.thoughtsTokenCount ?? 0} cap:${cap}`);
+
+  // MAX_TOKENS truncation produces JSON that's missing its closing braces —
+  // parseGeminiJSON then throws "Unterminated string" or similar, which sends
+  // the user debugging a JSON formatting issue when the real cause is the
+  // output cap. Detect it here and throw a clear, actionable error instead.
+  if (finishReason === 'MAX_TOKENS') {
+    const thoughts = usage?.thoughtsTokenCount || 0;
+    const visible  = usage?.candidatesTokenCount ?? 0;
+    const note = thoughts > visible
+      ? ` Most of that budget (${thoughts} tok) went to thinking — disable it via thinkingConfig or raise the cap.`
+      : '';
+    throw new Error(`AI response was truncated — hit the ${cap}-token output cap (model wrote ${visible} visible tokens + ${thoughts} thinking tokens before being cut off).${note} Raise the cap for this task in llm.js TASK_MAX_TOKENS.`);
+  }
+  // SAFETY / RECITATION / OTHER are also non-success terminations that produce
+  // empty or partial content. Surface them by name so the user knows whether
+  // to retry, edit input, or report a model issue.
+  if (finishReason && finishReason !== 'STOP' && finishReason !== 'MAX_TOKENS') {
+    throw new Error(`AI response terminated abnormally: finishReason=${finishReason}. This usually means safety filters or recitation blocking — try rephrasing or removing problematic content.`);
+  }
+
+  if (!contentText) throw new Error(`No content returned from Gemini (finishReason=${finishReason || 'unknown'}).`);
 
   return contentText;
 }
@@ -317,7 +423,24 @@ export function parseGeminiJSON(raw) {
     }
     return parsed;
   } catch (error) {
-    logger.error('[Gemini] Failed to parse JSON response:', error.message, '\nRaw Segment:', jsonStr);
+    // Log a window AROUND the failure position, not the head of the doc.
+    // V8's JSON.parse error messages include "at position N" — pull that
+    // out and dump ±200 chars so bug reports show the actual malformed
+    // syntax instead of valid prelude that gets truncated by the ring
+    // buffer before the error site is reached.
+    const posMatch = String(error.message || '').match(/at position (\d+)/);
+    let context = '';
+    if (posMatch) {
+      const pos = Number(posMatch[1]);
+      const start = Math.max(0, pos - 200);
+      const end = Math.min(jsonStr.length, pos + 200);
+      const before = jsonStr.slice(start, pos);
+      const after = jsonStr.slice(pos, end);
+      context = `\nContext (±200 chars around pos ${pos}, length=${jsonStr.length}):\n${before}«ERROR HERE»${after}`;
+    } else {
+      context = `\nRaw (length=${jsonStr.length}):\n${jsonStr.slice(0, 1000)}${jsonStr.length > 1000 ? '\n…[truncated]' : ''}`;
+    }
+    logger.error('[Gemini] Failed to parse JSON response:', error.message, context);
     throw new Error(`AI returned invalid JSON: ${error.message}`);
   }
 }
@@ -347,8 +470,8 @@ const DOCUMENT_MIME_MAP = {
  * @param {string} model
  * @returns {Promise<object>} — Parsed JSON response
  */
-export async function callGeminiText(prompt, apiKey, model, signal = null) {
-  const raw = await callGemini([{ text: prompt }], apiKey, model, { signal });
+export async function callGeminiText(prompt, apiKey, model, signal = null, opts = {}) {
+  const raw = await callGemini([{ text: prompt }], apiKey, model, { signal, ...opts });
   return parseGeminiJSON(raw);
 }
 
@@ -360,7 +483,7 @@ export async function callGeminiText(prompt, apiKey, model, signal = null) {
  * @param {string} model
  * @returns {Promise<object>} — Parsed JSON response
  */
-export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal = null) {
+export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal = null, opts = {}) {
   const imageParts = await Promise.all(imagePaths.map(async (imgPath) => {
     const stats = await fs.promises.stat(imgPath);
     // Vertex AI inlineData limit is 20MB. Base64 encoding adds ~33% overhead,
@@ -376,7 +499,7 @@ export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal
   }));
 
   const parts = [...imageParts, { text: prompt }];
-  const raw = await callGemini(parts, apiKey, model, { signal });
+  const raw = await callGemini(parts, apiKey, model, { signal, ...opts });
   return parseGeminiJSON(raw);
 }
 
@@ -388,14 +511,14 @@ export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal
  * @param {string} model
  * @returns {Promise<object>} — Parsed JSON response
  */
-export async function callGeminiDocument(filePath, prompt, apiKey, model, signal = null) {
+export async function callGeminiDocument(filePath, prompt, apiKey, model, signal = null, opts = {}) {
   const ext = path.extname(filePath).toLowerCase();
   const mimeType = DOCUMENT_MIME_MAP[ext];
 
   if (!mimeType) {
     // If it's a known image extension, treat as vision call
     if (IMAGE_MIME_MAP[ext]) {
-      return callGeminiVision([filePath], prompt, apiKey, model, signal);
+      return callGeminiVision([filePath], prompt, apiKey, model, signal, opts);
     }
     // Legacy .doc files are a binary format that Vertex AI can't ingest as inline
     // data. Reading the bytes as utf8 (the previous fallback) silently produced
@@ -404,7 +527,7 @@ export async function callGeminiDocument(filePath, prompt, apiKey, model, signal
       throw new Error('Legacy .doc resumes are not supported. Save as PDF or DOCX and try again.');
     }
     // Fallback to text/plain for other document types so Gemini tries to read them as raw text
-    return callGemini([{ text: `${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n` + await fs.promises.readFile(filePath, 'utf8') }], apiKey, model, { signal });
+    return callGemini([{ text: `${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n` + await fs.promises.readFile(filePath, 'utf8') }], apiKey, model, { signal, ...opts });
   }
 
   const stats = await fs.promises.stat(filePath);
@@ -420,18 +543,30 @@ export async function callGeminiDocument(filePath, prompt, apiKey, model, signal
     { text: prompt },
   ];
 
-  const raw = await callGemini(parts, apiKey, model, { signal });
+  const raw = await callGemini(parts, apiKey, model, { signal, ...opts });
   return parseGeminiJSON(raw);
 }
 
 export function registerGeminiHandlers() {
   handleSafe('ai-polish-text', async (event, text, signal) => {
     const prompt = `You are an AI assistant in a visual workspace app. Polish the following text. Make it clear, concise, and professional. Output ONLY the improved text, without quotes or conversational filler. Keep original markdown formatting if any. The text is:\n\n${text}`;
-    const config = { responseMimeType: 'text/plain', signal };
-    // This is a legacy handler, let's inject settings here too
+    // Text polish always returns plain text (not JSON), so it can't share
+    // callLLMText (which parses JSON). Look up the same per-task model the
+    // rest of the app uses, then call Gemini directly with text/plain mime.
     const { getAISettings } = await import('./settings.js');
     const settings = getAISettings();
-    const raw = await callGemini([{ text: prompt }], settings.geminiApiKey, settings.geminiModel, config);
+    const model = settings.provider === 'gemini'
+      ? 'gemini-2.5-flash-lite'   // matches TASK_MODELS['text-polish'].gemini
+      : null;
+    // If user picked Claude, polish via Claude Haiku 4.5 directly. Avoids
+    // forcing them onto Gemini just for this one helper.
+    if (settings.provider === 'claude') {
+      const { callClaudeText } = await import('./claude.js');
+      const raw = await callClaudeText(prompt, 'claude-haiku-4-5-20251001', settings.anthropicApiKey, signal, { maxTokens: 1024, expectJson: false });
+      return { text: raw.trim() };
+    }
+    const config = { responseMimeType: 'text/plain', signal, maxOutputTokens: 1024 };
+    const raw = await callGemini([{ text: prompt }], settings.geminiApiKey, model, config);
     return { text: raw.trim() };
   });
 }

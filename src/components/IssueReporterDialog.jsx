@@ -1,11 +1,25 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Dialog } from './Dialog';
 import { Clipboard, Save } from 'lucide-react';
 
+// Persist the in-progress description across dialog open/close cycles AND
+// across app restarts. Users were losing in-progress reports when they
+// reopened the dialog after a successful submit; preserving the draft is
+// almost always what they want, and they can select-all to clear if not.
+const DRAFT_STORAGE_KEY = 'issue-reporter-draft';
+
 export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
-  const [description, setDescription]   = useState('');
+  const [description, setDescription]   = useState(() => {
+    try { return localStorage.getItem(DRAFT_STORAGE_KEY) || ''; } catch { return ''; }
+  });
   const [isSubmitting, setIsSubmitting]  = useState(false);
   const [activeMode, setActiveMode]      = useState(null); // 'clipboard' | 'file'
+
+  // Mirror description to localStorage on every change so reopens (and even
+  // app restarts) bring back what the user typed.
+  useEffect(() => {
+    try { localStorage.setItem(DRAFT_STORAGE_KEY, description); } catch { /* quota/disabled */ }
+  }, [description]);
 
   const isMountedRef = React.useRef(true);
   React.useEffect(() => {
@@ -19,7 +33,10 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
     try {
       await onSubmit(description, mode);
       if (!isMountedRef.current) return;
-      setDescription('');
+      // NB: do NOT clear `description` here. Per user feedback, the draft
+      // should survive submit so reopening shows what was typed — useful for
+      // sending the same report through both Copy and Save, or refining and
+      // re-submitting.
       setIsSubmitting(false);
       setActiveMode(null);
       onClose();
@@ -38,7 +55,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
   return (
     <Dialog onClose={onClose} title="Report an Issue">
       <form
-        onSubmit={e => { e.preventDefault(); submit('file'); }}
+        onSubmit={e => { e.preventDefault(); submit('clipboard'); }}
         className="flex flex-col gap-4"
       >
         <textarea
@@ -59,20 +76,20 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
             Cancel
           </button>
 
-          {/* Copy to clipboard — no file dialog, instant */}
+          {/* Save to file — secondary action, gray. Native save dialog. */}
           <button
             type="button"
             disabled={noDesc || isSubmitting}
-            onClick={() => submit('clipboard')}
+            onClick={() => submit('file')}
             className="flex items-center gap-1.5 px-4 py-2 text-sm
                        bg-white/8 hover:bg-white/14 disabled:opacity-50
                        text-white/80 hover:text-white rounded-md transition-colors border border-white/10"
           >
-            <Clipboard size={13} />
-            {activeMode === 'clipboard' ? 'Copying…' : 'Copy to Clipboard'}
+            <Save size={13} />
+            {activeMode === 'file' ? 'Saving…' : 'Save to File'}
           </button>
 
-          {/* Save to file — native save dialog */}
+          {/* Copy to clipboard — primary action, blue. Instant, no dialog. */}
           <button
             type="submit"
             disabled={noDesc || isSubmitting}
@@ -80,8 +97,8 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
                        bg-blue-600 hover:bg-blue-500 disabled:opacity-50
                        text-white rounded-md transition-colors"
           >
-            <Save size={13} />
-            {activeMode === 'file' ? 'Saving…' : 'Save to File'}
+            <Clipboard size={13} />
+            {activeMode === 'clipboard' ? 'Copying…' : 'Copy to Clipboard'}
           </button>
         </div>
       </form>

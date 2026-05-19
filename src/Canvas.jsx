@@ -23,6 +23,7 @@ import {SellHubNode} from './nodes/SellHubNode';
 import { MarketplaceCardNode } from './nodes/MarketplaceCardNode';
 import { CompSourceCardNode } from './nodes/CompSourceCardNode';
 import { JobSourceCardNode } from './nodes/JobSourceCardNode';
+import { JobGroupNode } from './nodes/JobGroupNode';
 import {CustomizeDialog} from './components/CustomizeDialog';
 
 import { createTextNode } from './utils/nodeFactory';
@@ -78,6 +79,7 @@ const nodeTypes = {
   marketplacecard: MarketplaceCardNode,
   compsourcecard: CompSourceCardNode,
   jobsourcecard: JobSourceCardNode,
+  jobgroup: JobGroupNode,
 };
 
 // ── Canvas ───────────────────────────────────────────────────────────────────
@@ -322,6 +324,14 @@ export function Canvas() {
     setConfirmDialogData(null);
   }, [setConfirmDialogData]);
 
+  // X button — caller-provided "undo everything this dialog was about to act
+  // on" callback. Used by the delete-from-disk dialog to roll back the canvas
+  // deletion that triggered it. No-op if the caller didn't provide one.
+  const handleConfirmDialogAbort = useCallback(() => {
+    confirmDialogDataRef.current?.onAbort?.();
+    setConfirmDialogData(null);
+  }, [setConfirmDialogData]);
+
   // ── Canvas interactions ──────────────────────────────────────────────────
   const [activeTool, setActiveTool] = useState(null); // 'pen' | 'eraser' | null
   const [eraserType, setEraserType] = useState('object'); // 'object' | 'pixel'
@@ -380,7 +390,7 @@ export function Canvas() {
     setDrawings([]);
   }, [takeSnapshot, setDrawings, navigation.isAnimating]);
 
-  const { onNodesDelete } = useCanvasOSDeletion({ requestConfirm });
+  const { onNodesDelete } = useCanvasOSDeletion({ requestConfirm, undo });
 
   const { onConnect, onDragStart, clearCanvas, duplicateNodes, copyNodes, pasteNodes } = useCanvasActions({
     takeSnapshot,
@@ -771,6 +781,10 @@ export function Canvas() {
             variant={confirmDialogData.variant}
             onConfirm={handleConfirmDialogConfirm}
             onCancel={handleConfirmDialogCancel}
+            // Only render the X-to-abort affordance for dialogs whose caller
+            // supplied an abort handler. Other dialogs (Clear Canvas, etc.)
+            // don't need it because Cancel already preserves prior state.
+            onAbort={confirmDialogData.onAbort ? handleConfirmDialogAbort : undefined}
           />
         )}
 

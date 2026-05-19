@@ -2,9 +2,14 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import {
   X, Settings, Zap, Scale, Sparkles,
-  Grid3x3, Map, Keyboard, RotateCcw, Check
+  Grid3x3, Map, Keyboard, RotateCcw, Check,
+  ShoppingBag, LogIn, Eye, Loader2,
 } from 'lucide-react';
 import { ANIMATION_DURATIONS, DEFAULT_SHORTCUTS } from '../hooks/useSettings';
+import { useSyncWhileFocused } from '../hooks/useSyncWhileFocused';
+import { useToast } from './ToastProvider';
+import { SELL_PLATFORMS } from '../utils/constants';
+import { PlatformBadge } from './PlatformBadge';
 
 const SPEED_OPTIONS = [
   { key: 'snappy',   label: 'Snappy',   desc: `${ANIMATION_DURATIONS.snappy}ms`,   icon: Zap,      color: 'text-amber-400' },
@@ -87,12 +92,175 @@ function ShortcutRow({ id, binding, onSave, isCapturing, onStartCapture, onCance
 }
 
 /**
+ * Per-platform marketplace monitor block. Two responsibilities per platform:
+ *
+ *   1. Log in to that marketplace so subsequent status checks can read pages
+ *      that require auth (dashboards, notification centers). Reuses the
+ *      existing `openLoginWindow` IPC, which persists cookies in the stealth
+ *      browser's userDataDir — one login lasts until cookies expire.
+ *
+ *   2. Add "watch URLs" the AI check should also scrape every time it runs
+ *      for any card on this platform. These are typically:
+ *        - the seller dashboard / active-listings page
+ *        - a notifications / activity feed
+ *        - a sold-items tab
+ *      The strongest signal across all URLs wins, so a SOLD notification in
+ *      the feed will outrank a "still live" reading from the listing page
+ *      that hasn't been re-rendered yet.
+ */
+/**
+ * One platform's row. Owns its own textarea state via useSyncWhileFocused so:
+ *   - Async settings load AFTER panel open populates the textarea (the old
+ *     useState-initializer approach captured the empty initial map forever,
+ *     then onBlur clobbered the real saved URLs with an empty list).
+ *   - In-flight typing isn't wiped by an unrelated settings update.
+ */
+function PlatformWatchUrlsRow({ platform, urls, connected, pending, onLogin, onChangeUrls }) {
+  const joined = (urls || []).join('\n');
+  const { value, setValue, focusProps } = useSyncWhileFocused(joined);
+
+  const handleBlur = () => {
+    focusProps.onBlur();
+    const lines = (value || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    onChangeUrls(platform.id, lines);
+  };
+
+  // Live count from the editor reflects unsaved edits — friendlier than
+  // showing the persisted count while the user is mid-typing.
+  const liveCount = (value || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean).length;
+
+  return (
+    <div className="bg-white/[0.02] border border-white/5 rounded-lg p-3 space-y-2">
+      <div className="flex items-center gap-2">
+        <PlatformBadge name={platform.name} letter={platform.letter} color={platform.color} domain={platform.domain} size={20} />
+        <div className="flex-1 text-white/80 text-xs font-semibold">{platform.name}</div>
+        {pending ? (
+          <span
+            className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border bg-white/[0.04] border-white/10 text-white/50 select-none"
+            title="Verifying session…"
+          >
+            <Loader2 size={10} className="animate-spin" />
+            Verifying<span className="login-pending-dots" />
+          </span>
+        ) : connected ? (
+          <span
+            className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border bg-emerald-500/10 border-emerald-500/30 text-emerald-300 select-none"
+            title="Session active — the app will flip this back to Log in automatically when it expires."
+          >
+            <Check size={10} />
+            Logged in
+          </span>
+        ) : (
+          <button
+            onClick={() => onLogin(platform.id)}
+            className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border transition-colors bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20"
+            title="Open a window to log into this marketplace"
+          >
+            <LogIn size={10} />
+            Log in
+          </button>
+        )}
+      </div>
+      <div>
+        <div className="flex items-center gap-1.5 mb-1">
+          <Eye size={10} className="text-white/30" />
+          <span className="text-white/40 text-[10px] font-semibold uppercase tracking-wider">
+            Watch URLs ({liveCount})
+          </span>
+        </div>
+        <textarea
+          rows={3}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onFocus={focusProps.onFocus}
+          onBlur={handleBlur}
+          placeholder={`e.g.\nhttps://www.${platform.domain}/seller/dashboard\nhttps://www.${platform.domain}/notifications`}
+          className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-white/80 text-[10px] outline-none focus:border-blue-400/50 font-mono leading-relaxed resize-none"
+        />
+        <div className="text-white/30 text-[9px] mt-1 leading-snug">
+          One URL per line. Each is fetched (logged-in if you're signed in) and scanned by AI for THIS listing's status. The strongest signal across all URLs wins.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MarketplaceMonitorSection({ watchUrlsByPlatform, onChangeWatchUrls }) {
+  const [authByPlatform, setAuthByPlatform] = useState({});
+  // Per-platform in-flight flag — drives the "Verifying…" pill so the user
+  // sees that the click registered even during the post-window verify gap
+  // (window auto-closes, then verifySellMonitorLogin runs ~2s before the
+  // cache updates and the button can flip to "Logged in").
+  const [pendingByPlatform, setPendingByPlatform] = useState({});
+  const { addToast } = useToast();
+
+  // Refresh auth status for every platform on mount. The cached IPC is cheap
+  // (reads a JSON file); the full Chrome-backed check fires when the user
+  // clicks "Log in" so we don't launch Chrome just to render this panel.
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(SELL_PLATFORMS.map(async (p) => {
+      try {
+        const res = await window.electronAPI?.checkSellMonitorAuth?.({ platformId: p.id });
+        return [p.id, !!res?.connected];
+      } catch { return [p.id, false]; }
+    })).then(entries => {
+      if (cancelled) return;
+      setAuthByPlatform(Object.fromEntries(entries));
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleLogin = useCallback(async (platformId) => {
+    setPendingByPlatform(prev => ({ ...prev, [platformId]: true }));
+    try {
+      // open-login-window now returns the verify verdict inline
+      // ({ connected, reason }) — no need for a second IPC roundtrip.
+      // Surfacing the reason as a toast tells the user WHY a login didn't
+      // stick (e.g. "Redirected to /signin — login not completed"), which
+      // is the difference between "I think nothing happened" and "oh, the
+      // verifier hit a seller-only page and bounced."
+      const res = await window.electronAPI?.openLoginWindow?.({ platformId });
+      const connected = !!res?.connected;
+      setAuthByPlatform(prev => ({ ...prev, [platformId]: connected }));
+      const niceName = SELL_PLATFORMS.find(p => p.id === platformId)?.name || platformId;
+      if (connected) {
+        addToast({ title: `${niceName}: logged in`, description: res?.reason || 'Session verified.', type: 'success' });
+      } else {
+        addToast({ title: `${niceName}: login not verified`, description: res?.reason || 'Closed the login window without completing sign-in. Try again.', type: 'error' });
+      }
+    } catch (err) {
+      addToast({ title: 'Login failed', description: err?.message || String(err), type: 'error' });
+    } finally {
+      setPendingByPlatform(prev => ({ ...prev, [platformId]: false }));
+    }
+  }, [addToast]);
+
+  return (
+    <div className="space-y-3">
+      {SELL_PLATFORMS.map(p => (
+        <PlatformWatchUrlsRow
+          key={p.id}
+          platform={p}
+          urls={watchUrlsByPlatform?.[p.id] || []}
+          connected={authByPlatform[p.id]}
+          pending={!!pendingByPlatform[p.id]}
+          onLogin={handleLogin}
+          onChangeUrls={onChangeWatchUrls}
+        />
+      ))}
+    </div>
+  );
+}
+
+/**
  * Application settings panel.
- * Sections: Animation Speed, View (background + mini-map), Keyboard Shortcuts.
+ * Sections: AI, Marketplace Monitors, Animation Speed, View, Keyboard Shortcuts.
  */
 export function SettingsPanel({ isOpen, onClose, settings, updateSetting, updateShortcut, resetShortcuts }) {
   const [capturingId, setCapturingId] = useState(null);
   const [aiSettings, setAiSettings] = useState(null);
+  const [watchUrlsByPlatform, setWatchUrlsByPlatform] = useState({});
 
   useEffect(() => {
     if (!isOpen || !window.electronAPI?.getSettings) return;
@@ -101,6 +269,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
       .then((storeData) => {
         if (cancelled) return;
         if (storeData && storeData.ai) setAiSettings(storeData.ai);
+        if (storeData && storeData.marketplaceWatchUrls) setWatchUrlsByPlatform(storeData.marketplaceWatchUrls);
       })
       .catch(() => { /* IPC unavailable — leave loading state until next open */ });
     return () => { cancelled = true; };
@@ -114,6 +283,15 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
     // concurrent mode may invoke updaters twice, which would double-write.
     window.electronAPI.updateSettings({ ai: next });
   }, [aiSettings]);
+
+  const updateMarketplaceWatchUrls = useCallback((platformId, urls) => {
+    if (!window.electronAPI?.updateSettings) return;
+    setWatchUrlsByPlatform(prev => {
+      const next = { ...prev, [platformId]: urls };
+      window.electronAPI.updateSettings({ marketplaceWatchUrls: next });
+      return next;
+    });
+  }, []);
 
   // Close on Escape (also cancels capturing)
   useEffect(() => {
@@ -203,18 +381,8 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                 {/* Gemini Settings */}
                 {aiSettings.provider === 'gemini' && (
                   <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
-                    <div>
-                      <div className="text-white/50 text-[11px] mb-1">Model</div>
-                      <select
-                        value={aiSettings.geminiModel || 'gemini-2.5-flash'}
-                        onChange={(e) => updateAISetting('geminiModel', e.target.value)}
-                        className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
-                      >
-                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                        <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
-                        <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
-                      </select>
+                    <div className="text-white/40 text-[10px] leading-snug">
+                      Model is picked automatically per task — Flash for vision &amp; pricing, Flash-Lite for status checks &amp; light edits.
                     </div>
                     <div>
                       <div className="flex justify-between items-end mb-1">
@@ -273,17 +441,8 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                 {/* Claude Settings */}
                 {aiSettings.provider === 'claude' && (
                   <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
-                    <div>
-                      <div className="text-white/50 text-[11px] mb-1">Model</div>
-                      <select 
-                        value={aiSettings.claudeModel || 'claude-3-5-sonnet-latest'}
-                        onChange={(e) => updateAISetting('claudeModel', e.target.value)}
-                        className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
-                      >
-                        <option value="claude-3-5-sonnet-latest">Claude 3.5 Sonnet</option>
-                        <option value="claude-3-5-haiku-latest">Claude 3.5 Haiku</option>
-                        <option value="claude-3-opus-latest">Claude 3 Opus</option>
-                      </select>
+                    <div className="text-white/40 text-[10px] leading-snug">
+                      Model is picked automatically per task — Sonnet 4.6 for vision &amp; pricing, Haiku 4.5 for status checks &amp; light edits.
                     </div>
                     <div>
                       <div className="flex justify-between items-end mb-1">
@@ -304,6 +463,25 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
             ) : (
               <div className="text-white/30 text-xs text-center py-2">Loading settings...</div>
             )}
+          </div>
+
+          <div className="w-full h-px bg-white/[0.06]" />
+
+          {/* ── Marketplace Monitors ─────────────────────────────────── */}
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <ShoppingBag size={13} className="text-white/30" />
+              <span className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">
+                Marketplace Monitors
+              </span>
+            </div>
+            <div className="text-white/40 text-[11px] mb-3 leading-relaxed">
+              Log in once per marketplace so status checks can read your dashboards and notification feeds, then list any extra pages you want every check to scan for THIS listing's status.
+            </div>
+            <MarketplaceMonitorSection
+              watchUrlsByPlatform={watchUrlsByPlatform}
+              onChangeWatchUrls={updateMarketplaceWatchUrls}
+            />
           </div>
 
           <div className="w-full h-px bg-white/[0.06]" />

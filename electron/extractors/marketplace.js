@@ -64,6 +64,18 @@ export const MERCARI_CONFIG = {
   referer: 'https://www.google.com/',
 };
 
+// PriceCharting publishes aggregated sold-price data for video games + retro
+// consoles. No aggressive anti-bot (their business model depends on price
+// data being accessible). Results are a `.offers-table` of rows, one per
+// game+console combo, with loose / CIB / new price columns.
+export const PRICECHARTING_CONFIG = {
+  waitMs: 1500,
+  timeoutMs: 25000,
+  waitFor: '.offers-table tr, table tr, #games_table',
+  scrollFirst: false,
+  dismissCookies: false,
+};
+
 
 // ── eBay Sold Listings Extractor ────────────────────────────────────────────
 // Strategy 0: Extract inline variant JSON from <script> tags (pricing matrices)
@@ -411,6 +423,67 @@ export const MERCARI_SOLD_EXTRACTOR = `
         title, price, priceText,
         url: linkEl?.href ? (linkEl.href.startsWith('http') ? linkEl.href : 'https://www.mercari.com' + linkEl.getAttribute('href')) : '',
         source: 'mercari',
+      });
+    } catch {}
+  });
+
+  // Deduplicate by URL
+  const seen = new Set();
+  return items.filter(item => {
+    if (seen.has(item.url)) return false;
+    seen.add(item.url);
+    return true;
+  }).slice(0, 20);
+})()
+`;
+
+// ── PriceCharting Extractor ─────────────────────────────────────────────────
+// PriceCharting search returns a table of game results. Each row carries the
+// title (with platform in brackets) and loose / CIB / new prices. We pick the
+// loose price as the FMV anchor — that's what a typical reseller listing
+// matches (cart-only, no box). Falls back to whichever price cell has a
+// number when loose is missing.
+export const PRICECHARTING_EXTRACTOR = `
+(function() {
+  const items = [];
+
+  const parsePrice = (txt) => {
+    if (!txt) return 0;
+    const m = String(txt).replace(/[,\\s]/g, '').match(/\\$?(\\d+(?:\\.\\d{1,2})?)/);
+    return m ? parseFloat(m[1]) : 0;
+  };
+
+  // Strategy 1: PriceCharting renders results inside #games_table > tbody > tr
+  // (legacy id) or a generic table.offers-table. Each row has a title link
+  // and three price columns. Try both shells.
+  const rows = document.querySelectorAll('#games_table tbody tr, table.offers-table tbody tr, table tr');
+  rows.forEach(row => {
+    try {
+      const titleLink = row.querySelector('td.title a, a[href*="/game/"]');
+      if (!titleLink) return;
+      const title = (titleLink.innerText || titleLink.textContent || '').trim();
+      if (!title || title.length < 2) return;
+
+      // Price cells, in column order. PriceCharting columns are:
+      // loose | complete-in-box (CIB) | new. Some result pages drop one.
+      const priceCells = Array.from(row.querySelectorAll('td.price, td[align="right"]'))
+        .map(td => parsePrice(td.innerText || td.textContent))
+        .filter(p => p > 0);
+      if (priceCells.length === 0) return;
+      const price = priceCells[0]; // loose price first
+
+      const href = titleLink.getAttribute('href') || '';
+      const url = href.startsWith('http')
+        ? href
+        : 'https://www.pricecharting.com' + (href.startsWith('/') ? href : '/' + href);
+
+      items.push({
+        title,
+        price,
+        priceText: '$' + price.toFixed(2),
+        url,
+        condition: 'Loose (cart-only)',
+        source: 'pricecharting',
       });
     } catch {}
   });
