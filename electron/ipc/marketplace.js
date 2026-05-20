@@ -55,6 +55,41 @@ export function getMarketplaceTelemetry() {
   return marketplaceTelemetry;
 }
 
+/**
+ * Count distinct listings in a comp array, mirroring the extractors' dedup key:
+ * the listing URL when present, else title+price. Lets the funnel surface
+ * "found vs. unique" so an extractor that double-counts (e.g. nested-DOM
+ * matches) can't hide behind a healthy-looking raw total.
+ */
+function uniqueCompCount(items) {
+  if (!Array.isArray(items)) return 0;
+  const seen = new Set();
+  for (const it of items) {
+    const key = (it?.url && String(it.url).trim()) || `${it?.title || ''}|${it?.price ?? ''}`;
+    seen.add(key);
+  }
+  return seen.size;
+}
+
+/**
+ * Price distribution {n, min, median, max} of a comp slice, for the report's
+ * "kept vs. dropped by the cap" line — the evidence behind "by-design, not lost
+ * data." If the DROPPED slice's prices reach into the KEPT band, the title-match
+ * cap dropped relevant comps, not just noise; if they sit below it, the cap is
+ * working as intended. Returns null for an empty/price-less slice.
+ */
+function priceStats(items) {
+  if (!Array.isArray(items)) return null;
+  const prices = items.map(i => Number(i?.price) || 0).filter(p => p > 0).sort((a, b) => a - b);
+  if (prices.length === 0) return null;
+  return {
+    n: prices.length,
+    min: prices[0],
+    median: prices[Math.floor(prices.length / 2)],
+    max: prices[prices.length - 1],
+  };
+}
+
 // ── Source → URL + Extractor mapping (browser pool sources only) ────────────
 // Reverb and StockX have been moved to fetchApiMarketplaceSources (direct HTTP).
 //
@@ -378,21 +413,32 @@ Be specific about what you can clearly see. If you can't identify brand or model
     const taskCategoryMap = buildTaskCategoryMap(tasks);
     const allComps = { sold: [], active: [] };
     const scrapeWarnings = [];
+    // Raw item count per source so the bug report can show which source
+    // contributed what (and, paired with the synthesis "unique" count, expose
+    // a single source double-counting).
+    const bySource = {};
 
     for (const r of scrapeResults) {
       if (!r.success) {
         logger.warn(`[Marketplace] A scrape task for ${r.id} was rejected: ${r.error}`);
-        scrapeWarnings.push({ sourceId: r.id, severity: 'block', code: 'task-failed', evidence: r.error, suggestion: 'Scrape threw before completing — likely network or browser error. Check Recent Main-Process Logs in the bug report.' });
+        // code 'task-failed' = the scrape threw before completing (browser-launch
+        // / profile-lock conflict, network, nav timeout) — an INTERNAL error, not
+        // an anti-bot wall. The report classifies it separately so a self-inflicted
+        // browser-lock race never masquerades as a captcha the user must "solve."
+        scrapeWarnings.push({ sourceId: r.id, severity: 'block', code: 'task-failed', evidence: r.error, suggestion: 'Scrape threw before completing — likely a browser-launch/profile-lock conflict or network error, NOT anti-bot. Check Recent Main-Process Logs in the bug report.' });
+        bySource[r.id] = 0;
         continue;
       }
       const { id, data: items, warning } = r;
       if (warning) scrapeWarnings.push({ sourceId: id, ...warning });
       const category = taskCategoryMap[id] ?? 'sold';
+      bySource[id] = Array.isArray(items) ? items.length : 0;
       if (Array.isArray(items)) allComps[category].push(...items);
     }
 
     for (const res of apiResults) {
       if (res.warning) scrapeWarnings.push({ sourceId: res.sourceId, ...res.warning });
+      bySource[res.sourceId] = Array.isArray(res.items) ? res.items.length : 0;
       if (res.items.length > 0) allComps.sold.push(...res.items);
     }
 
@@ -403,7 +449,11 @@ Be specific about what you can clearly see. If you can't identify brand or model
       active: allComps.active.length,
       sources: tasks.length + apiSourceIds.length,
       warnings: scrapeWarnings.length,
-      blocked: scrapeWarnings.filter(w => w?.severity === 'block').length,
+      // Anti-bot blocks vs. internal scrape errors are different failures with
+      // different fixes — keep them separate instead of one "block-severity" bucket.
+      blocked: scrapeWarnings.filter(w => w?.severity === 'block' && w?.code !== 'task-failed').length,
+      errored: scrapeWarnings.filter(w => w?.code === 'task-failed').length,
+      bySource,
     };
     // A fresh full scrape starts a new run — drop any resolves recorded for a
     // previous product/run so the report's funnel only shows this run's.
@@ -567,8 +617,20 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       ts: Date.now(),
       soldFound: sold.length,
       activeFound: active.length,
+      // Distinct listings among what was found — a found≫unique gap means an
+      // extractor double-counted, silently inflating the set fed to pricing.
+      soldUnique: uniqueCompCount(sold),
+      activeUnique: uniqueCompCount(active),
       soldUsed: soldComps.length,
       activeUsed: activeComps.length,
+      // Price distribution of what the cap KEPT vs. DROPPED, so "prices dropped
+      // from analysis?" is answerable from the report: dropped prices below the
+      // kept band = low-relevance noise (cap working); dropped prices reaching
+      // into the kept band = the title-match ranking dropped relevant comps.
+      soldKeptStats:      priceStats(soldComps),
+      soldDroppedStats:   priceStats(sortedSold.slice(soldN)),
+      activeKeptStats:    priceStats(activeComps),
+      activeDroppedStats: priceStats(sortedActive.slice(activeN)),
       recommendedPrice: pricing?.recommended_price ?? null,
       matchQuality: pricing?.match_quality || '(unknown)',
     };

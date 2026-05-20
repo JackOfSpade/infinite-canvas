@@ -192,7 +192,20 @@ export const EBAY_ACTIVE_EXTRACTOR = `
 export const POSHMARK_SOLD_EXTRACTOR = `
 (function() {
   const items = [];
-  
+
+  // Collapse repeats of the same listing. Key on the listing URL when present;
+  // fall back to title+price for the (link-less) stripped twins the nested-DOM
+  // match used to emit. Keeps the first, drops later copies.
+  const dedupeComps = (arr) => {
+    const seen = new Set();
+    return arr.filter(i => {
+      const key = (i && i.url) ? String(i.url) : ((i && i.title) || '') + '|' + ((i && i.price) || 0);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+
   // Strategy 0: Parse __PRELOADED_STATE__ (Redux hydration state)
   try {
     const scripts = document.querySelectorAll('script');
@@ -228,14 +241,24 @@ export const POSHMARK_SOLD_EXTRACTOR = `
               source: 'poshmark',
             });
           });
-          if (items.length > 0) return items.slice(0, 25);
+          // Redux state can list the same listing in multiple slices
+          // (search.searchResults + the data map), so dedup before returning.
+          if (items.length > 0) return dedupeComps(items).slice(0, 25);
         } catch {}
       }
     }
   } catch {}
-  
+
   // Strategy 1: DOM parsing
-  const cards = document.querySelectorAll('.tile-grid-redesign__media--wrapper, [data-et-name="listing"], .card--small, .tile, [class*="ListingTile"]');
+  // Poshmark nests matching wrappers — a single listing renders as
+  // .tile > [class*="ListingTile"] > [data-et-name="listing"], so the
+  // selector union below matches the SAME listing 2-3× (ancestor +
+  // descendants). Each match re-extracts the same title/price (the innermost
+  // one lacks the link + sold badge, producing an empty-url stripped twin),
+  // which previously triple-counted every listing into the pricing set with
+  // no dedup. Keep only the OUTERMOST match per listing so each renders once.
+  const matched = Array.from(document.querySelectorAll('.tile-grid-redesign__media--wrapper, [data-et-name="listing"], .card--small, .tile, [class*="ListingTile"]'));
+  const cards = matched.filter(el => !matched.some(other => other !== el && other.contains(el)));
   cards.forEach(card => {
     try {
       const titleEl = card.querySelector('.tile-grid-redesign__title, [data-et-name="title"], .title__condition, .tile__title, [class*="itemTitle"]');
@@ -267,7 +290,9 @@ export const POSHMARK_SOLD_EXTRACTOR = `
     } catch {}
   });
 
-  return items.slice(0, 25);
+  // Defensive final dedup (outermost-only selection above should already
+  // prevent nested double-counts, but guard against repeated listing ids).
+  return dedupeComps(items).slice(0, 25);
 })()
 `;
 

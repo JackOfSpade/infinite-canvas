@@ -266,10 +266,24 @@ function buildMarketplacePipelineSnapshot() {
 
   if (t.scrape) {
     const s = t.scrape;
+    const errored = s.errored ?? 0;
     lines.push(`\n### Comp scrape${ago(s.ts)}`);
-    lines.push(`- ${s.sources} sources → **${s.sold} sold + ${s.active} active** comps · ${s.warnings} warning(s)${s.blocked > 0 ? `, ${s.blocked} block-severity` : ''}`);
+    lines.push(
+      `- ${s.sources} sources → **${s.sold} sold + ${s.active} active** comps · ${s.warnings} warning(s)` +
+      `${s.blocked > 0 ? `, ${s.blocked} anti-bot block(s)` : ''}` +
+      `${errored > 0 ? `, ${errored} scrape error(s)` : ''}`,
+    );
+    if (s.bySource && Object.keys(s.bySource).length > 0) {
+      // Per-source raw counts — pair with the synthesis "unique" line below to
+      // spot a single source double-counting (e.g. a healthy-looking total
+      // that's mostly one source's duplicates).
+      lines.push(`- Per source (raw items): ${Object.entries(s.bySource).map(([id, n]) => `${id}=${n}`).join(', ')}`);
+    }
     if (s.blocked > 0) {
-      lines.push('- _(blocked sources contribute 0 comps until solved via the card\'s Solve button — see the resolve stage / Recent Logs)_');
+      lines.push('- _(anti-bot-blocked sources contribute 0 comps until solved via the card\'s Solve button — see the resolve stage / Recent Logs)_');
+    }
+    if (errored > 0) {
+      lines.push('- _(scrape error(s) = the scrape threw before completing — e.g. a browser-launch/profile-lock conflict or network failure, NOT an anti-bot wall. A visible window opened mid-scrape can race the headless profile lock. See Recent Logs.)_');
     }
   }
 
@@ -294,6 +308,41 @@ function buildMarketplacePipelineSnapshot() {
         `- Comps fed to the model: ${s.soldUsed}/${s.soldFound} sold + ${s.activeUsed}/${s.activeFound} active` +
         (capped ? ' _(capped at the top 25 sold / 15 active by title-match — by-design, not lost data)_' : ''),
       );
+      // Found vs. unique — a gap means an extractor emitted the same listing
+      // multiple times, so the "found"/"used" totals overstate the real signal
+      // the model saw (duplicates aren't lost data, they're phantom data).
+      const soldDup   = s.soldUnique   != null ? s.soldFound   - s.soldUnique   : 0;
+      const activeDup = s.activeUnique != null ? s.activeFound - s.activeUnique : 0;
+      if (soldDup > 0 || activeDup > 0) {
+        lines.push(
+          `- ⚠️ Duplicate comps: only **${s.soldUnique} unique** of ${s.soldFound} sold` +
+          ` and **${s.activeUnique} unique** of ${s.activeFound} active — an extractor is double-counting listings, inflating the set fed to pricing (check Per-source counts above to find which).`,
+        );
+      } else if (s.soldUnique != null) {
+        lines.push(`- All ${s.soldFound} sold / ${s.activeFound} active comps are distinct (no duplicate inflation).`);
+      }
+      // What the cap actually dropped — the evidence behind "by-design, not lost
+      // data." If the dropped prices reach into the kept band, the title-match
+      // ranking dropped relevant comps (not just cheap noise) and is worth a look.
+      if (capped) {
+        const fmt = (st) => st ? `$${st.min}–$${st.max} (median $${st.median})` : '—';
+        if (s.soldDroppedStats) {
+          const reaches = s.soldKeptStats && s.soldDroppedStats.max >= s.soldKeptStats.median;
+          lines.push(
+            `- Dropped ${s.soldDroppedStats.n} sold ${fmt(s.soldDroppedStats)}; kept ${fmt(s.soldKeptStats)}.` +
+            (reaches
+              ? ' ⚠️ dropped prices reach into the kept band — title-match ranking dropped relevant comps, not just noise.'
+              : ' Dropped sit below the kept band (low-relevance noise — cap working as intended).'),
+          );
+        }
+        if (s.activeDroppedStats) {
+          const reachesA = s.activeKeptStats && s.activeDroppedStats.max >= s.activeKeptStats.median;
+          lines.push(
+            `- Dropped ${s.activeDroppedStats.n} active ${fmt(s.activeDroppedStats)}; kept ${fmt(s.activeKeptStats)}.` +
+            (reachesA ? ' ⚠️ dropped active prices reach into the kept band.' : ''),
+          );
+        }
+      }
       lines.push(`- Result: recommended_price=${s.recommendedPrice == null ? '**null** ⚠️ (comps scraped but no price produced)' : '$' + s.recommendedPrice}, match_quality=${s.matchQuality}`);
     }
   }
@@ -310,8 +359,11 @@ function buildMarketplacePipelineSnapshot() {
 > platform fit), captured in the main process so it survives SellHub deletion
 > and log-buffer scroll — the sell-side analog of the Job Search Pipeline. The
 > "found → fed to the model" gap in synthesis answers "did we use all the comps
-> we found?": the top-25/15 cap is by-design; blocked sources and a null price
-> are not. Each stage stamps independently (a resolve/rescrape can run alone).
+> we found?": the top-25/15 cap is by-design; blocked sources, a null price, and
+> a found≫unique gap (an extractor double-counting) are not. Per-source raw
+> counts + the unique line localize a silent inflation; anti-bot blocks and
+> internal scrape errors are reported separately (a browser-launch/profile-lock
+> race is NOT a captcha). Each stage stamps independently (resolve/rescrape alone).
 
 ${lines.join('\n')}
 `;

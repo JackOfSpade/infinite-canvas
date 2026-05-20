@@ -38,6 +38,15 @@ const SUSPICIOUS_MIN_BYTES  = 2000;  // floor / fallback when there's no baselin
 const SUSPICIOUS_MAX_BYTES  = 20000; // ceiling — a soft-block skeleton is rarely larger
 const SUSPICIOUS_BODY_RATIO = 0.3;   // < 30% of the source's typical body = suspicious
 
+// A served anti-bot wall replaces content, so an extractor that pulled at least
+// this many records is proof real results came back — any body-keyword "block"
+// hit (Layer 3) is then ambient page chrome (e.g. an always-loaded reCAPTCHA
+// script that sites embed on every page), NOT a challenge served instead of the
+// data. At/above this floor we skip the keyword sniff so a full result set is
+// never mislabeled as a block. (HTTP-status and final-URL signals still apply —
+// those can't co-occur with a healthy 200 result page anyway.)
+const CONTENT_SERVED_MIN_ITEMS = 3;
+
 const KEYWORD_SIGNALS = [
   // Cloudflare interstitials
   { pat: /just a moment\s*\.\.\.|checking your browser|cf-challenge|cf-browser-verification|cf_chl_/i,
@@ -160,7 +169,16 @@ export function detectAntiBotSignal(ctx = {}) {
 
   // Layer 3 — body keyword sniff. Scope to the head so a legitimate listing
   // that happens to mention "captcha" deep in nav chrome doesn't false-positive.
-  if (html) {
+  //
+  // Skip entirely when the extractor returned a healthy item count: a real wall
+  // serves the challenge INSTEAD of content, so if we got a full result set the
+  // keyword matched ambient chrome (a reCAPTCHA/hCaptcha script the site loads
+  // on every page), not a block. Without this gate, e.g. Mercari — which embeds
+  // grecaptcha on every search page — gets its 20 returned sold comps mislabeled
+  // as a hard "captcha-presented" block, triggering a phantom Solve prompt and
+  // an unwarranted rate-limiter penalty.
+  const contentServed = itemsExtracted != null && itemsExtracted >= CONTENT_SERVED_MIN_ITEMS;
+  if (html && !contentServed) {
     const head = String(html).slice(0, HTML_SCAN_CHARS);
     for (const s of KEYWORD_SIGNALS) {
       const m = head.match(s.pat);
