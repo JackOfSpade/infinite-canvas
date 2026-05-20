@@ -1443,7 +1443,13 @@ export function JobHubNode({ id, data }) {
           <>
             {banner}
             <JobHubSourcesReadyState
-              blockedCount={(data.scrapeWarnings || []).filter(w => w?.severity === 'block').length}
+              // Count DISTINCT blocked sources, not raw warnings: a source can
+              // hit a captcha on several queries (indeed-0, indeed-1, …) and
+              // store one warning each, but the canvas shows one card per
+              // source — so counting warnings made it say "2 sources blocked"
+              // with only one Indeed card visible. Skip/resolve already filters
+              // warnings by sourceId, so distinct-source count is the truth.
+              blockedCount={new Set((data.scrapeWarnings || []).filter(w => w?.severity === 'block').map(w => w.sourceId)).size}
               jobsAvailable={Array.isArray(data.pendingJobs) ? data.pendingJobs.length : (data.jobCount || 0)}
               resumeSummary={data.resumeSummary}
               locked={!!data.locked}

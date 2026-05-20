@@ -29,7 +29,7 @@ export function JobHubSourcesReadyState({
       </div>
       <p className="text-white/50 text-[11px] text-center px-2 leading-snug">
         {jobsAvailable > 0
-          ? `${jobsAvailable} job${jobsAvailable === 1 ? '' : 's'} are ready to score — but a few sources need attention before we spend AI tokens.`
+          ? `${jobsAvailable} job${jobsAvailable === 1 ? ' is' : 's are'} ready to score — but ${blockedCount} source${blockedCount === 1 ? ' needs' : 's need'} attention before we spend AI tokens.`
           : 'Some sources need attention before we score results.'}
       </p>
       <p className="text-white/30 text-[10px] text-center px-2 leading-snug mt-1">

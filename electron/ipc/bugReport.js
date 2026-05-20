@@ -291,6 +291,20 @@ export function generateMarkdown(payload) {
       if (d.hubState) previewParts.push(`hubState: ${d.hubState}`);
       if (d.errorMessage) previewParts.push(`err: ${String(d.errorMessage).slice(0, 60)}`);
       if (d.isRateLimit) previewParts.push(`rateLimit: true`);
+      // Warnings: show total + block-severity + DISTINCT source breakdown. The
+      // hub renders one card per source but stores one warning per blocked
+      // query, so the raw warning count can exceed the number of visible cards
+      // (e.g. `2 (2 block / 1 src: indeed×2)` — the "says 2 blocked but I see 1"
+      // report). Surfacing src-count here makes that mismatch obvious without
+      // expanding the full JSON and counting sourceIds by hand.
+      if (Array.isArray(d.scrapeWarnings) && d.scrapeWarnings.length) {
+        const blocks = d.scrapeWarnings.filter(w => w?.severity === 'block');
+        const bySource = {};
+        for (const w of blocks) { const s = w?.sourceId || '?'; bySource[s] = (bySource[s] || 0) + 1; }
+        const srcIds = Object.keys(bySource);
+        const breakdown = srcIds.map(s => bySource[s] > 1 ? `${s}×${bySource[s]}` : s).join(',');
+        previewParts.push(`warnings: ${d.scrapeWarnings.length} (${blocks.length} block / ${srcIds.length} src${breakdown ? `: ${breakdown}` : ''})`);
+      }
       if (Array.isArray(d.imagePaths)) previewParts.push(`imagePaths: ${d.imagePaths.length}`);
       if (Array.isArray(d.images)) previewParts.push(`images: ${d.images.length}`);
       if (d.file) previewParts.push(`file: ${d.file.name || d.file}`);
