@@ -38,6 +38,10 @@ coverage/
 out/
 tmp/
 temp/
+scratch/
+
+# Agent / editor local config (personal — keep out of the repo)
+.claude/
 
 # Backup / merge leftovers
 *~
