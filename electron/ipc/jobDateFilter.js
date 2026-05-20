@@ -6,6 +6,19 @@
  * relevant listing because the source uses some format we missed.
  */
 
+// Relative-unit token → day multiplier. Each pattern is fully anchored (^…$)
+// so a token matches EXACTLY its set — there's no "starts-with-mo" overlap
+// between months ("mo") and minutes ("m"), which is the disambiguation the old
+// unanchored /^mo/ etc. relied on alternation luck to get right. Hours and
+// minutes map to 0 (same calendar day). The matcher regex below lists each
+// family longest-first so a short unit never shadows a longer one.
+const UNIT_TO_DAYS = [
+  [/^(?:months?|mo)$/, 30],
+  [/^(?:weeks?|w)$/, 7],
+  [/^(?:days?|d)$/, 1],
+  [/^(?:hours?|h|minutes?|mins?|m)$/, 0],
+];
+
 export function parsePostedDate(raw) {
   if (!raw) return null;
   const s = String(raw).trim();
@@ -28,17 +41,16 @@ export function parsePostedDate(raw) {
   // Note: bare "Nm" is treated as minutes (matches the LinkedIn/Twitter
   // convention); "Nmo" is months. Both are recent enough that any reasonable
   // maxAgeDays will keep them.
-  const m = lower.match(/(\d+)\s*(mo|months?|d|days?|h|hours?|w|weeks?|m|mins?|minutes?)\b/);
+  // Longest-first within each family (months? before mo, weeks? before w, …)
+  // so the engine never grabs a short prefix when a longer unit is present —
+  // correctness no longer depends on the trailing \b alone.
+  const m = lower.match(/(\d+)\s*(months?|mo|weeks?|w|days?|d|hours?|h|minutes?|mins?|m)\b/);
   if (m) {
     const n = parseInt(m[1], 10);
     const unit = m[2];
-    let days;
-    if (/^mo|months?$/.test(unit)) days = n * 30;
-    else if (/^w|weeks?$/.test(unit)) days = n * 7;
-    else if (/^d|days?$/.test(unit)) days = n;
-    else days = 0; // hours / minutes — same-day
+    const mult = UNIT_TO_DAYS.find(([re]) => re.test(unit))?.[1] ?? 0;
     const d = new Date();
-    d.setDate(d.getDate() - days);
+    d.setDate(d.getDate() - n * mult);
     return d;
   }
   return null;

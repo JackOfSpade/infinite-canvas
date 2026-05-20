@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   X, Settings, Zap, Scale, Sparkles,
   Grid3x3, Map, Keyboard, RotateCcw, Check,
-  ShoppingBag, LogIn, Eye, Loader2,
+  ShoppingBag, LogIn, Eye, Loader2, Briefcase,
 } from 'lucide-react';
 import { ANIMATION_DURATIONS, DEFAULT_SHORTCUTS } from '../hooks/useSettings';
 import { useSyncWhileFocused } from '../hooks/useSyncWhileFocused';
@@ -260,6 +260,7 @@ function MarketplaceMonitorSection({ watchUrlsByPlatform, onChangeWatchUrls }) {
 export function SettingsPanel({ isOpen, onClose, settings, updateSetting, updateShortcut, resetShortcuts }) {
   const [capturingId, setCapturingId] = useState(null);
   const [aiSettings, setAiSettings] = useState(null);
+  const [jobsSettings, setJobsSettings] = useState(null);
   const [watchUrlsByPlatform, setWatchUrlsByPlatform] = useState({});
 
   useEffect(() => {
@@ -269,6 +270,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
       .then((storeData) => {
         if (cancelled) return;
         if (storeData && storeData.ai) setAiSettings(storeData.ai);
+        if (storeData && storeData.jobs) setJobsSettings(storeData.jobs);
         if (storeData && storeData.marketplaceWatchUrls) setWatchUrlsByPlatform(storeData.marketplaceWatchUrls);
       })
       .catch(() => { /* IPC unavailable — leave loading state until next open */ });
@@ -283,6 +285,13 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
     // concurrent mode may invoke updaters twice, which would double-write.
     window.electronAPI.updateSettings({ ai: next });
   }, [aiSettings]);
+
+  const updateJobsSetting = useCallback((key, value) => {
+    if (!window.electronAPI?.updateSettings || !jobsSettings) return;
+    const next = { ...jobsSettings, [key]: value };
+    setJobsSettings(next);
+    window.electronAPI.updateSettings({ jobs: next });
+  }, [jobsSettings]);
 
   const updateMarketplaceWatchUrls = useCallback((platformId, urls) => {
     if (!window.electronAPI?.updateSettings) return;
@@ -459,6 +468,64 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                     </div>
                   </div>
                 )}
+              </div>
+            ) : (
+              <div className="text-white/30 text-xs text-center py-2">Loading settings...</div>
+            )}
+          </div>
+
+          <div className="w-full h-px bg-white/[0.06]" />
+
+          {/* ── Job Sources ─────────────────────────────────────────── */}
+          {/* Per-source credentials for job-search APIs that require keys.
+              Stored in electron-store (Settings) — not .env — so they
+              persist across sessions and don't require restarting the app. */}
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <Briefcase size={13} className="text-white/30" />
+              <span className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">
+                Job Sources
+              </span>
+            </div>
+            <div className="text-white/40 text-[11px] mb-3 leading-relaxed">
+              Some job boards require an API key. Paste your credentials here to enable that source — keys are stored locally and persist between sessions.
+            </div>
+            {jobsSettings ? (
+              <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
+                <div className="flex items-center justify-between">
+                  <div className="text-white/70 text-[11px] font-medium">USAJobs</div>
+                  <a
+                    href="https://developer.usajobs.gov/apirequest/"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[9px] text-blue-400 hover:underline"
+                  >
+                    Get Free Key
+                  </a>
+                </div>
+                <div>
+                  <div className="text-white/50 text-[11px] mb-1">API Key</div>
+                  <input
+                    type="password"
+                    placeholder="Authorization-Key"
+                    value={jobsSettings.usajobsApiKey || ''}
+                    onChange={(e) => updateJobsSetting('usajobsApiKey', e.target.value)}
+                    className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
+                  />
+                </div>
+                <div>
+                  <div className="text-white/50 text-[11px] mb-1">Email</div>
+                  <input
+                    type="email"
+                    placeholder="you@example.com"
+                    value={jobsSettings.usajobsEmail || ''}
+                    onChange={(e) => updateJobsSetting('usajobsEmail', e.target.value)}
+                    className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
+                  />
+                </div>
+                <div className="text-white/30 text-[10px] leading-snug">
+                  USAJobs requires both your API key and the email address it was issued to.
+                </div>
               </div>
             ) : (
               <div className="text-white/30 text-xs text-center py-2">Loading settings...</div>

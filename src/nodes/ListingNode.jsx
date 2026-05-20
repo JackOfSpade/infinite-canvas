@@ -52,7 +52,7 @@ export function ListingNode({ id, data }) {
     product, editing, setEditing, priceInput, justificationExpanded,
     selectedPlatforms, copied, handleFieldEdit, handlePriceChange,
     handleQuickPrice, handleCopyListing, togglePlatform, toggleJustification,
-    researchPrice, syncPriceFromBackend,
+    scrapePriceComps, synthesizePrice, syncPriceFromBackend,
   } = useListingActions(id, data);
 
   const [loginPrompt, setLoginPrompt] = useState(null);
@@ -89,27 +89,41 @@ export function ListingNode({ id, data }) {
   }, [data.pricing, syncPriceFromBackend]);
 
   const handleConfirmDraft = useCallback(async () => {
+    // Two-stage flow: scrape comparable listings, then synthesize a price from
+    // them. (useListingActions split the old single `researchPrice` call into
+    // scrape + synthesize so SellHub can pause between them; ListingNode runs
+    // them back-to-back since it has no resolve/skip decision UI.)
     updateGlobal(id, { status: 'confirming' });
-    const result = await researchPrice((state, res) => {
-      if (state === 'priced') {
+    try {
+      const scrapeResult = await scrapePriceComps();
+      if (!isMountedRef.current) return;
+      const comps = scrapeResult.comps || { sold: [], active: [] };
+
+      const synthResult = await synthesizePrice(comps);
+      if (!isMountedRef.current) return;
+      const pricing = synthResult.pricing;
+
+      if (pricing?.recommended_price != null) {
         updateGlobal(id, {
           status: 'priced',
-          pricing: res.pricing,
-          comps: res.comps || { sold: [], active: [] },
-          userPrice: res.pricing.recommended_price || '',
+          pricing,
+          comps: synthResult.comps || comps,
+          userPrice: pricing.recommended_price || '',
         });
-      } else if (state === 'priced-empty') {
+      } else {
+        // Synthesis ran but produced no usable price (typically no comps found).
         updateGlobal(id, {
           status: 'priced',
-          pricing: { recommended_price: null, justification: res.error },
-          comps: { sold: [], active: [] },
+          pricing: pricing || { recommended_price: null, justification: 'No comparable listings found.' },
+          comps: synthResult.comps || comps,
         });
-      } else if (state === 'error') {
-        updateGlobal(id, { status: 'draft' });
       }
-    });
-    if (!result) updateGlobal(id, { status: 'draft' });
-  }, [id, updateGlobal, researchPrice]);
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      EventLogger.error(`[ListingNode][${id}] Price research failed:`, err);
+      updateGlobal(id, { status: 'draft' });
+    }
+  }, [id, updateGlobal, scrapePriceComps, synthesizePrice]);
 
   const handleListOnPlatforms = useCallback(async (e) => {
     e.stopPropagation();

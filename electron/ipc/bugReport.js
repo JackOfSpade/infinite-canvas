@@ -5,9 +5,10 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
-import { getAISettings, resolveServiceAccountPath } from './settings.js';
+import { getAISettings, resolveServiceAccountPath, getJobsSettings } from './settings.js';
 import { getSellMonitorPlatforms } from './stealthBrowser.js';
 import { getRecentLogs } from '../logger.js';
+import { getGeminiTelemetry } from './gemini.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -61,11 +62,11 @@ function buildAIConfigSnapshot() {
   let ai = {};
   try { ai = getAISettings() || {}; } catch { /* settings store may not be ready */ }
 
-  const geminiKey   = ai.geminiApiKey;
-  const claudeKey   = ai.anthropicApiKey;
-  const provider    = ai.provider || 'gemini';
-  const activeKey   = provider === 'claude' ? claudeKey : geminiKey;
-  const keyPrefix   = activeKey ? `${String(activeKey).slice(0, 7)}…` : '(none)';
+  const geminiKey = ai.geminiApiKey;
+  const claudeKey = ai.anthropicApiKey;
+  const provider = ai.provider || 'gemini';
+  const activeKey = provider === 'claude' ? claudeKey : geminiKey;
+  const keyPrefix = activeKey ? `${String(activeKey).slice(0, 7)}…` : '(none)';
 
   // resolveServiceAccountPath checks the user-configured path first, then
   // falls back to process.cwd()/service-account.json. Returns null if neither
@@ -96,27 +97,148 @@ function buildAIConfigSnapshot() {
     activeEndpoint = 'Mock Mode (placeholder data)';
   }
 
+  const telemetry = getGeminiTelemetry();
+
   return {
     provider,
-    // Model is auto-selected per task in llm.js TASK_MODELS, not stored on
-    // settings. Surfacing the per-task map here would bloat the report; the
-    // active provider + the active endpoint are the load-bearing facts.
-    modelSelection:        'auto (per-task; see llm.js TASK_MODELS)',
-    hasGeminiKey:          !!geminiKey,
-    hasAnthropicKey:       !!claudeKey,
-    activeKeyPrefix:       keyPrefix,
-    configuredSAPath:      ai.serviceAccountPath || '(unset)',
-    resolvedSAPath:        resolvedSAPath || '(none)',
-    serviceAccountUsable:  !!resolvedSAPath,
+    modelSelection: provider === 'gemini' ? 'dynamic fallback (best to worst across all Gemini models)' : 'auto (per-task; see llm.js TASK_MODELS)',
+    hasGeminiKey: !!geminiKey,
+    hasAnthropicKey: !!claudeKey,
+    activeKeyPrefix: keyPrefix,
+    configuredSAPath: ai.serviceAccountPath || '(unset)',
+    resolvedSAPath: resolvedSAPath || '(none)',
+    serviceAccountUsable: !!resolvedSAPath,
     activeEndpoint,
     effectivelyConfigured,
+    geminiLastAttemptedModel: telemetry.lastAttemptedModel,
+    geminiLastSuccessfulModel: telemetry.lastSuccessfulModel,
+    geminiLastAttemptedError: telemetry.lastAttemptedError,
   };
+}
+
+function buildJobsConfigSnapshot() {
+  let jobs = {};
+  try { jobs = getJobsSettings() || {}; } catch { /* settings store may not be ready */ }
+
+  const usajobsKey = jobs.usajobsApiKey;
+  const usajobsEmail = jobs.usajobsEmail;
+  const keyPrefix = usajobsKey ? `${String(usajobsKey).slice(0, 5)}…` : '(none)';
+
+  return {
+    hasUsajobsKey: !!usajobsKey,
+    hasUsajobsEmail: !!usajobsEmail,
+    usajobsKeyPrefix: keyPrefix,
+  };
+}
+
+// Mid-run hubStates that should NEVER survive to disk — they are single-session
+// pipeline state. Alongside the data keys checked inline below (errorMessage,
+// isRateLimit, scrapeWarnings, pendingJobs, pendingTargetRole) these are exactly
+// what sanitizeNodesForSave strips; if any show up in the PERSISTED workspace
+// file the auto-loaded canvas replays them on every restart. Kept in sync with
+// sanitizeNodesForSave in serializationUtils.js.
+const PERSISTED_TRANSIENT_HUB_STATES = ['parsing', 'querying', 'searching', 'scoring', 'analyzing', 'researching'];
+
+/**
+ * Reads the auto-loaded workspace file from disk and reports whether any hub
+ * node carries transient state that should have been stripped before save.
+ *
+ * This is the load-bearing fact for "stale banner survives restart" reports:
+ * the rest of the report shows the *in-memory* node data, which legitimately
+ * holds the error during a live session — that is NOT the bug. Only a transient
+ * field baked into the on-disk file proves a true persistence bug (vs. volatile
+ * state that the next save will clean). Without this section the two are
+ * indistinguishable without manually opening the JSON file.
+ */
+function buildPersistedWorkspaceSnapshot(frontEndState) {
+  const filePath = frontEndState?.currentFile || frontEndState?.settings?.lastOpenedWorkspace || null;
+  if (!filePath) {
+    return `
+## Persisted Workspace Snapshot
+- No auto-loaded workspace (currentFile / lastOpenedWorkspace unset) — nothing persists across restart.
+`;
+  }
+
+  let raw, mtime;
+  try {
+    raw = fs.readFileSync(filePath, 'utf8');
+    mtime = fs.statSync(filePath).mtime.toISOString();
+  } catch (err) {
+    return `
+## Persisted Workspace Snapshot
+- File: \`${filePath}\`
+- ⚠️ Could not read file on disk: ${err?.message || String(err)}
+`;
+  }
+
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch (err) {
+    return `
+## Persisted Workspace Snapshot
+- File: \`${filePath}\` (mtime ${mtime})
+- ⚠️ File is not valid JSON: ${err?.message || String(err)}
+`;
+  }
+
+  // Check if sidecar exists
+  const sidecarPath = filePath.endsWith('.json') ? filePath.slice(0, -5) + '.progress.json' : filePath + '.progress.json';
+  let sidecarExists = false;
+  try {
+    sidecarExists = fs.existsSync(sidecarPath);
+  } catch { /* ignore */ }
+
+  // Walk all nodes (recursing into group sub-canvases) looking for hubs that
+  // carry transient fields. Each offender is a node whose stale state will be
+  // replayed on the next auto-load.
+  const offenders = [];
+  if (parsed?.transientProgress) {
+    offenders.push('  - `canvas`: Contains embedded `transientProgress` state on disk (should have been stripped/deleted immediately on load)');
+  }
+  let hubCount = 0;
+  const walk = (nodes) => {
+    if (!Array.isArray(nodes)) return;
+    for (const n of nodes) {
+      if (n?.type === 'jobhub' || n?.type === 'sellhub') {
+        hubCount++;
+        const d = n.data || {};
+        const hits = [];
+        if (PERSISTED_TRANSIENT_HUB_STATES.includes(d.hubState)) hits.push(`hubState=${d.hubState}`);
+        if (d.errorMessage) hits.push(`errorMessage="${String(d.errorMessage).slice(0, 60)}"`);
+        if (d.isRateLimit) hits.push('isRateLimit=true');
+        if (Array.isArray(d.scrapeWarnings) && d.scrapeWarnings.length) hits.push(`scrapeWarnings=${d.scrapeWarnings.length}`);
+        if (Array.isArray(d.pendingJobs) && d.pendingJobs.length) hits.push(`pendingJobs=${d.pendingJobs.length}`);
+        if ('pendingTargetRole' in d && d.pendingTargetRole) hits.push('pendingTargetRole=set');
+        if (hits.length) offenders.push(`  - \`${String(n.id).slice(0, 8)}\` (${n.type}): ${hits.join(', ')}`);
+      }
+      if (n?.type === 'group' && n.data?.canvasData?.nodes) walk(n.data.canvasData.nodes);
+    }
+  };
+  walk(parsed?.nodes);
+
+  const verdict = offenders.length
+    ? `⚠️ **${offenders.length} item(s) carry transient state on disk** — these replay on every auto-load (true persistence bug):\n${offenders.join('\n')}`
+    : '✅ Clean — no transient hub state (errorMessage / isRateLimit / scrapeWarnings / pendingJobs / mid-run hubState) or embedded progress is persisted.';
+
+  return `
+## Persisted Workspace Snapshot
+> What is ACTUALLY on disk in the auto-loaded workspace, vs. the in-memory
+> node data shown elsewhere. The in-memory copy legitimately holds error/
+> pending state during a live session; only a field found HERE proves a
+> bug where stale state survives a restart.
+
+- File: \`${filePath}\` (mtime ${mtime})
+- Embedded progress state on disk: \`${parsed?.transientProgress ? 'Yes' : 'No'}\`
+- Legacy progress sidecar: \`${sidecarExists ? 'Present (will restore on load)' : 'None'}\`
+- Persisted hub nodes scanned: ${hubCount}
+- ${verdict}
+`;
 }
 
 // ── Shared markdown generation ────────────────────────────────────────────────
 // Used by both the "save to file" and "copy to clipboard" handlers so the
 // report content is identical regardless of how the user chooses to export it.
-function generateMarkdown(payload) {
+export function generateMarkdown(payload) {
   const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, imageState, lastSaveError, activeEditableText } = payload;
 
   const systemInfo = {
@@ -166,16 +288,16 @@ function generateMarkdown(payload) {
       // pull from `nodeDataById` (built above from the full `nodes` array).
       const d = nodeDataById[n.id] || {};
       const previewParts = [];
-      if (d.hubState)                  previewParts.push(`hubState: ${d.hubState}`);
-      if (d.errorMessage)              previewParts.push(`err: ${String(d.errorMessage).slice(0, 60)}`);
-      if (d.isRateLimit)               previewParts.push(`rateLimit: true`);
+      if (d.hubState) previewParts.push(`hubState: ${d.hubState}`);
+      if (d.errorMessage) previewParts.push(`err: ${String(d.errorMessage).slice(0, 60)}`);
+      if (d.isRateLimit) previewParts.push(`rateLimit: true`);
       if (Array.isArray(d.imagePaths)) previewParts.push(`imagePaths: ${d.imagePaths.length}`);
-      if (Array.isArray(d.images))     previewParts.push(`images: ${d.images.length}`);
-      if (d.file)                      previewParts.push(`file: ${d.file.name || d.file}`);
-      if (d.filePath)                  previewParts.push(`filePath: ${path.basename(String(d.filePath))}`);
-      if (d.resumeProfile)             previewParts.push('resumeProfile: ✓');
-      if (d.url)                       previewParts.push(`url: ${String(d.url).slice(0, 50)}`);
-      if (d.product?.brand)            previewParts.push(`brand: ${d.product.brand}`);
+      if (Array.isArray(d.images)) previewParts.push(`images: ${d.images.length}`);
+      if (d.file) previewParts.push(`file: ${d.file.name || d.file}`);
+      if (d.filePath) previewParts.push(`filePath: ${path.basename(String(d.filePath))}`);
+      if (d.resumeProfile) previewParts.push('resumeProfile: ✓');
+      if (d.url) previewParts.push(`url: ${String(d.url).slice(0, 50)}`);
+      if (d.product?.brand) previewParts.push(`brand: ${d.product.brand}`);
       // Marketplace-card surface: status + statusMessage are the most common
       // signal for "why does this card say X?" reports. statusMessage is
       // truncated since the raw text (e.g. an AI error or a multi-URL
@@ -190,9 +312,9 @@ function generateMarkdown(payload) {
         previewParts.push(`expanded: ${d.expanded ? 'true' : 'false'}`);
         if (Array.isArray(d.childIds)) previewParts.push(`children: ${d.childIds.length}`);
       }
-      if (d.platformId)                previewParts.push(`platform: ${d.platformId}`);
-      if (d.status)                    previewParts.push(`status: ${d.status}`);
-      if (d.statusMessage)             previewParts.push(`statusMsg: ${String(d.statusMessage).slice(0, 100)}`);
+      if (d.platformId) previewParts.push(`platform: ${d.platformId}`);
+      if (d.status) previewParts.push(`status: ${d.status}`);
+      if (d.statusMessage) previewParts.push(`statusMsg: ${String(d.statusMessage).slice(0, 100)}`);
       if (d.listingUrl) {
         try { previewParts.push(`listingHost: ${new URL(d.listingUrl).host}`); }
         catch { previewParts.push(`listingUrl: ${String(d.listingUrl).slice(0, 40)}`); }
@@ -211,8 +333,8 @@ function generateMarkdown(payload) {
       // Mock-mode flag is set by gemini.js when AI wasn't configured at call
       // time. Surfacing it here turns "why is the product info wrong?" reports
       // into a one-glance diagnosis.
-      if (d.product?._mockMode)        previewParts.push('⚠️ mockMode: true');
-      if (d.resumeProfile?._mockMode)  previewParts.push('⚠️ resume._mockMode: true');
+      if (d.product?._mockMode) previewParts.push('⚠️ mockMode: true');
+      if (d.resumeProfile?._mockMode) previewParts.push('⚠️ resume._mockMode: true');
       // Per-source ring progress lives in component state, not node data.
       // Compact it as `comp: ebay-sold=done/12,poshmark=searching/0,...` so a
       // "stale ring after re-research" report is diagnosable at a glance.
@@ -225,9 +347,16 @@ function generateMarkdown(payload) {
           // bug report shows WHY a source ended up skipped/error/empty
           // without requiring the full scrapeWarnings array to be cross-
           // referenced. Format: `linkedin=done/0[http-403]`.
+          //
+          // When the warning exists but `url` is missing, append `,no-url`.
+          // A warning without url means the source card's Solve button
+          // can't render — almost always the result of an event-ordering
+          // bug like the mid-scrape vs post-completion event split.
           previewParts.push(`${tag}: ` + entries.map(([k, v]) => {
             const base = `${k}=${v?.status || '?'}/${v?.count ?? '?'}`;
-            return v?.warning?.code ? `${base}[${v.warning.code}]` : base;
+            if (!v?.warning?.code) return base;
+            const urlTag = v?.url ? '' : ',no-url';
+            return `${base}[${v.warning.code}${urlTag}]`;
           }).join(','));
         }
       }
@@ -396,10 +525,10 @@ ${rows}
   // If any tracked source is newer than the process start, the running build is
   // stale — flag it loudly so the report doesn't waste time chasing a phantom.
   const newestSrcMs = getNewestMainProcessSourceMtime();
-  const uptimeMs    = Math.round(process.uptime() * 1000);
-  const startedAt   = new Date(PROCESS_START_MS).toISOString();
+  const uptimeMs = Math.round(process.uptime() * 1000);
+  const startedAt = new Date(PROCESS_START_MS).toISOString();
   const newestSrcStr = newestSrcMs ? new Date(newestSrcMs).toISOString() : '(unknown)';
-  const isStale     = !!(newestSrcMs && newestSrcMs > PROCESS_START_MS);
+  const isStale = !!(newestSrcMs && newestSrcMs > PROCESS_START_MS);
   const stalenessLine = isStale
     ? `⚠️ **STALE BUILD**: a tracked main-process source file was modified ${Math.round((newestSrcMs - PROCESS_START_MS) / 1000)}s after the process started. The running app is NOT executing the current source on disk — fully restart Electron (not just Vite) before treating this report as authoritative.`
     : '✅ Up to date — no tracked main-process source has been modified since the process started.';
@@ -409,6 +538,15 @@ ${rows}
 - Newest tracked source file mtime: \`${newestSrcStr}\`
 - ${stalenessLine}
 `;
+
+  // ── Persisted workspace snapshot ──────────────────────────────────────────
+  // Reads the on-disk auto-loaded workspace and flags transient hub state that
+  // should have been stripped before save. The decisive signal for any "stale
+  // state survives restart" report. Never break the report on diagnostic
+  // failure — the helper already returns markdown for every error path.
+  let persistedWorkspaceMarkdown = '';
+  try { persistedWorkspaceMarkdown = buildPersistedWorkspaceSnapshot(frontEndState); }
+  catch { /* never break the report on diagnostic failure */ }
 
   // ── Marketplace session snapshot ──────────────────────────────────────────
   // Disk cache (session-status-cache.json, written by accounts.js after a
@@ -527,7 +665,42 @@ ${formatted}
 - service-account.json resolved path: \`${aiConfig.resolvedSAPath}\`
 - service-account.json usable: ${aiConfig.serviceAccountUsable ? '✅' : '❌'}
 - **Effectively configured for active provider**: ${aiConfig.effectivelyConfigured ? '✅' : '❌ — AI calls will fall back to Mock Mode (Gemini) or fail (Claude) until a key is added in Settings'}
+${aiConfig.provider === 'gemini' ? `
+### Gemini Telemetry
+- Last attempted model: \`${aiConfig.geminiLastAttemptedModel}\`
+- Last successful model: \`${aiConfig.geminiLastSuccessfulModel}\`
+- Last attempted error: \`${aiConfig.geminiLastAttemptedError}\`
+` : ''}
 `;
+
+  const jobsConfig = buildJobsConfigSnapshot();
+  const jobsConfigMarkdown = `
+## Job Search API Configuration
+- USAJobs API key set: ${jobsConfig.hasUsajobsKey ? '✅' : '❌'}
+- USAJobs Email set: ${jobsConfig.hasUsajobsEmail ? '✅' : '❌'}
+- USAJobs key prefix: \`${jobsConfig.usajobsKeyPrefix}\`
+`;
+
+  let issueReporterDraftMarkdown = '';
+  if (payload.issueReporterDraft) {
+    const d = payload.issueReporterDraft;
+    const lsLine = d.localStorageError
+      ? `Error: ${d.localStorageError}`
+      : d.localStoragePresent
+        ? `Present (length: ${d.localStorageLength}, prefix: \`${d.localStoragePrefix}\`)`
+        : 'None';
+    const ssLine = d.sessionStorageError
+      ? `Error: ${d.sessionStorageError}`
+      : d.sessionStoragePresent
+        ? `Present (length: ${d.sessionStorageLength}, prefix: \`${d.sessionStoragePrefix}\`)`
+        : 'None';
+
+    issueReporterDraftMarkdown = `
+## Issue Reporter Draft State
+- LocalStorage legacy draft: \`${lsLine}\`
+- SessionStorage draft (current session): \`${ssLine}\`
+`;
+  }
 
   // ── Viewport section ───────────────────────────────────────────────────────
   const vp = frontEndState?.viewport;
@@ -559,7 +732,7 @@ ${description}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${buildFreshnessMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${marketplaceSessionsMarkdown}${mainProcessLogsMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${issueReporterDraftMarkdown}${marketplaceSessionsMarkdown}${mainProcessLogsMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 <details>
 <summary><b>Click here to expand the full JSON Application State</b></summary>
 

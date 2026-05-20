@@ -164,7 +164,7 @@ export const INDEED_JOBS_EXTRACTOR = `
             location: r.formattedLocation || r.location || '',
             salary: r.extractedSalary?.max ? ('$' + r.extractedSalary.min + ' - $' + r.extractedSalary.max) : (r.salarySnippet?.text || ''),
             snippet: (r.snippet || r.jobSnippet || '').substring(0, 300),
-            url: r.link ? ('https://www.indeed.com' + r.link) : (r.viewJobLink ? ('https://www.indeed.com/viewjob?jk=' + r.jobkey) : ''),
+            url: r.link ? ('https://www.indeed.com' + r.link) : (r.jobkey ? ('https://www.indeed.com/viewjob?jk=' + r.jobkey) : ''),
             posted: r.formattedRelativeTime || r.pubDate || '',
             source: 'indeed'
           });
@@ -576,7 +576,7 @@ export const WELLFOUND_EXTRACTOR = `
         jobs.push({
           title,
           company: startup.name || startup.companyName || '',
-          location: node.locationNames?.join(', ') || node.remote ? 'Remote' : '',
+          location: node.locationNames?.length ? node.locationNames.join(', ') : (node.remote ? 'Remote' : ''),
           salary: node.compensation ? node.compensation : '',
           snippet: startup.highConcept || startup.oneLiner || '',
           url: node.slug ? 'https://wellfound.com/jobs/' + node.slug : (node.url || ''),

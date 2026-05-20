@@ -113,7 +113,12 @@ async function createMessage(anthropic, userContent, { model, maxTokens, signal,
 
   const text = response.content[0]?.text;
   if (!text) throw new Error(`No content returned from Claude (stop_reason=${stopReason || 'unknown'}).`);
-  return expectJson ? '{' + text : text;
+  if (!expectJson) return text;
+  // We prefilled the assistant turn with '{', so Claude's continuation omits
+  // the leading brace — prepend it back. Guard the rare case where the model
+  // echoes the brace anyway: a naive '{' + text would yield invalid '{{…' that
+  // the downstream JSON parser (indexOf('{') based) can't repair.
+  return text.trimStart().startsWith('{') ? text : '{' + text;
 }
 
 export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens = 2048, expectJson = false, responseSchema = null, cachedPrefix = null } = {}) {

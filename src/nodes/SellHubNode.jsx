@@ -14,7 +14,7 @@ import { HubErrorBanner } from '../components/HubErrorBanner';
 import { SellHubCompsReadyDecision } from './sellhub/SellHubCompsReadyDecision';
 import { useCheckAllConnected } from '../hooks/useCheckAllConnected';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
-import { useEpochCancellation } from '../hooks/useEpochCancellation';
+import { useEpochCancellation, isNodeDeletedAbort } from '../hooks/useEpochCancellation';
 import { useSourceProgress } from '../hooks/useSourceProgress';
 import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
@@ -188,7 +188,10 @@ export function SellHubNode({ id, data }) {
         errorMessage: null,
       });
     } catch (error) {
-      if (cancelled()) return; // cancelled — don't overwrite revert
+      // User cancelled OR deleted the hub mid-analysis. Bail silently in
+      // both cases — see isNodeDeletedAbort for why the second check is
+      // needed despite the existing cancelled() guard.
+      if (cancelled() || isNodeDeletedAbort(error)) return;
       EventLogger.error('[SellHub] Analysis failed:', error);
       // Revert to 'empty' (no product was produced) but surface the failure
       // inline via errorMessage so the user can retry from the same step.
@@ -234,19 +237,18 @@ export function SellHubNode({ id, data }) {
     updateGlobal(id, { hubState: 'empty', product: null, pricing: null, comps: null, platformFit: null, errorMessage: null });
   }, [data.locked, data.imagePaths, id, updateGlobal]);
 
-  // React to settings changes so live nodes don't get stuck showing a stale
-  // "API key missing" banner after the user fixes the config. Clearing
-  // errorMessage is always safe — the user can retry from any step.
+  // React to settings changes. We log them for bug report telemetry but do NOT
+  // auto-clear the error or revert the state without explicit user action.
   useEffect(() => {
     if (!window.electronAPI?.onSettingsChanged) return;
     const cleanup = window.electronAPI.onSettingsChanged((payload) => {
       if (!payload?.changedSections?.includes('ai')) return;
       if (data.errorMessage) {
-        updateGlobal(id, { errorMessage: null, isRateLimit: false });
+        EventLogger.log(`[SellHub][${id}] Settings changed with active error; keeping error banner open for explicit user action`);
       }
     });
     return () => cleanup?.();
-  }, [id, data.errorMessage, updateGlobal]);
+  }, [id, data.errorMessage]);
 
   // ── Comp-source cards (ephemeral, one per PRICE_COMP_SOURCE) ──────────────
   // Per-source progress shown as real canvas nodes connected by edges —
@@ -376,7 +378,7 @@ export function SellHubNode({ id, data }) {
         type: warnCount > 0 ? 'warning' : 'success',
       });
     } catch (err) {
-      if (cancelled()) return;
+      if (cancelled() || isNodeDeletedAbort(err)) return;
       EventLogger.error('[SellHub] Price synthesis failed:', err);
       updateGlobal(currentId, {
         hubState: 'draft',
@@ -470,7 +472,7 @@ export function SellHubNode({ id, data }) {
       // cleared them) → straight to synthesis.
       await synthesizeAndPrice(mergedComps, effectiveWarnings, cancelled);
     } catch (err) {
-      if (cancelled()) return;
+      if (cancelled() || isNodeDeletedAbort(err)) return;
       EventLogger.error('[SellHub] Price scrape failed:', err);
       updateGlobal(currentId, {
         hubState: 'draft',
@@ -601,6 +603,9 @@ export function SellHubNode({ id, data }) {
         try {
           result = await rescrapeSourceRef.current(resolvedSourceId);
         } catch (err) {
+          // Silent bail if the user deleted the hub while a rescrape was
+          // mid-flight — no toast, no log, the hub is gone anyway.
+          if (isNodeDeletedAbort(err)) return;
           EventLogger.error(`[SellHub][${id}] rescrape ${resolvedSourceId} failed:`, err);
           addToast({ title: 'Rescrape failed', description: err?.message || String(err), type: 'error' });
           return;
@@ -812,6 +817,7 @@ export function SellHubNode({ id, data }) {
   const totalComps = Object.values(compProgress).reduce((sum, p) => sum + (p.count || 0), 0);
 
   const handleDismissError = useCallback(() => {
+    EventLogger.log(`[SellHub][${id}] User clicked Dismiss Error`);
     updateGlobal(id, { errorMessage: null, isRateLimit: false });
   }, [id, updateGlobal]);
 
@@ -820,6 +826,7 @@ export function SellHubNode({ id, data }) {
   //  - product missing but imagePaths present → re-run analysis
   const handleRetryFailed = useCallback(() => {
     if (data.locked) return;
+    EventLogger.log(`[SellHub][${id}] User clicked Try Again on error banner`);
     updateGlobal(id, { errorMessage: null, isRateLimit: false });
     if (data.product) {
       handleConfirmDraft();

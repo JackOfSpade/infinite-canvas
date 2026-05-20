@@ -1,7 +1,7 @@
 import { useCallback, useState, useRef, useEffect } from 'react';
 import { toPng } from 'html-to-image';
 import { EventLogger } from '../utils/EventLogger';
-import { migrateGroupNodes, sanitizeNodesForSave } from '../utils/serializationUtils';
+import { migrateGroupNodes, sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
 
 
 /**
@@ -122,9 +122,10 @@ export function useCanvasPersistence({
       // Strip transient visual properties (e.g. source-filter opacity on job cards)
       // and drop ephemeral nodes (e.g. price-research comp-source cards).
       const sanitizedNodes = sanitizeNodesForSave(rawData.nodes);
-      // Drop edges that reference removed ephemerals so the saved file stays consistent.
-      const liveNodeIds = new Set(sanitizedNodes.map(n => n.id));
-      const sanitizedEdges = (rawData.edges || []).filter(e => liveNodeIds.has(e.source) && liveNodeIds.has(e.target));
+      // Drop orphan edges — refs to nodes that were removed (whether via the
+      // ephemeral filter just above, or via a delete that bypassed the
+      // normal cascade-cleanup path). Recursive across group sub-canvases.
+      const sanitizedEdges = sanitizeEdgesForSave(rawData.edges, sanitizedNodes);
       const data = { ...rawData, nodes: sanitizedNodes, edges: sanitizedEdges };
       // Read currentFile via ref to avoid this callback being recreated on every file-path change
       const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFileRef.current });
@@ -230,8 +231,27 @@ export function useCanvasPersistence({
         resetStack?.();
         // Migrate old group nodes on load
         const migratedNodes = migrateGroupNodes(res.data.nodes || []);
-        setNodes(migratedNodes);
-        setEdges(res.data.edges || []);
+        // Sanitize transient hub state on load, not just on save. A workspace
+        // saved before the save-time strip existed (or by any path that
+        // bypassed it) can carry a stale data.errorMessage / pending-pipeline
+        // buffer / mid-run hubState on a jobhub/sellhub. Without stripping here
+        // the "report an issue" banner from a forgotten failed run reappears on
+        // every auto-load and never clears — a freshly-loaded canvas is marked
+        // clean (hasUnsavedChanges=false below), so no auto-save ever fires to
+        // re-sanitize it. Running the same sanitizer used on save makes load
+        // idempotent for clean files and self-healing for stale ones.
+        const sanitizedNodes = sanitizeNodesForSave(migratedNodes);
+        // Strip orphan edges on load too — files saved before the save-time
+        // orphan filter existed can carry hundreds of orphans (refs to
+        // long-deleted hub trees) that render as ghost connections in the
+        // minimap and bloat ReactFlow's internal graph. Cleaning here means
+        // the canvas appears clean the moment it opens, without waiting for
+        // the auto-save debounce to land (which can be delayed indefinitely
+        // when the pipeline is actively updating hub state). Pass the
+        // sanitized nodes so edges to any dropped ephemeral are pruned too.
+        const cleanEdges = sanitizeEdgesForSave(res.data.edges || [], sanitizedNodes);
+        setNodes(sanitizedNodes);
+        setEdges(cleanEdges);
         setDrawings(res.data.drawings || []);
         setCurrentFile(res.filePath);
         updateSetting?.('lastOpenedWorkspace', res.filePath);

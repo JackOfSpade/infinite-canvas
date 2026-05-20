@@ -274,11 +274,15 @@ export function useCanvasNavigation({
       
       // Center the extracted cluster horizontally over the parent container
       const parentWidth = parentContainer?.measured?.width || parseInt(parentContainer?.style?.width) || 160;
-      const parentX = parentContainer?.position.x || 0;
-      
+      // Guard `position` too, not just `parentContainer`: a stale stack entry can
+      // hold an anchor node that lost its position, and `parentContainer?.position.x`
+      // only short-circuits on a nullish container — it would still throw on a
+      // present-but-position-less node.
+      const parentX = parentContainer?.position?.x || 0;
+
       const basePosX = parentX + (parentWidth / 2) - (clusterWidth / 2);
       // Ensure the bottom edge of the entire cluster rests cleanly above the parent container
-      const basePosY = (parentContainer?.position.y || 100) - clusterHeight - 60; 
+      const basePosY = (parentContainer?.position?.y || 100) - clusterHeight - 60;
 
       const newParentNodes = [...targetParent.nodes];
       nodesToExtract.forEach((nodeToExtract) => {

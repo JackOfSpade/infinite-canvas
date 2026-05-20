@@ -59,6 +59,11 @@ async function fetchWithRetry(url, init, { label = 'fetch', maxAttempts = 3, bas
       if (res.ok || !TRANSIENT_HTTP_STATUSES.has(res.status) || attempt === maxAttempts) {
         return res;
       }
+      // If we hit a 429 (rate limit or quota exceeded), do not retry the same model.
+      // Return immediately so the outer fallback loop can progress to the next model.
+      if (res.status === 429) {
+        return res;
+      }
       const delay = baseDelayMs * Math.pow(3, attempt - 1);
       logger.warn(`[${label}] HTTP ${res.status} (transient) — retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
       await new Promise(r => setTimeout(r, delay));
@@ -140,26 +145,25 @@ async function getToken() {
   }
 }
 
-/**
- * Core Gemini call — sends parts (text + optional images) to Vertex AI or AI Studio.
- * @param {Array} parts — Array of { text } or { inlineData: { mimeType, data } } objects
- * @param {string} apiKey - Optional Gemini API Key. If missing, falls back to Vertex AI.
- * @param {string} model - The model ID to use
- * @param {object} [genConfig] — generationConfig overrides
- * @returns {Promise<string>} — Raw text response from Gemini
- */
-async function callGemini(parts, apiKey, model, genConfig = {}) {
-  // Hardening: Prevent "Payload Too Large" errors by capping total prompt text.
-  // Vertex AI has token limits, but 100k chars is a safe "fail-fast" boundary for
-  // strings to prevent massive JSON stringification from crashing the process.
-  let totalTextLen = 0;
-  for (const part of parts) {
-    if (part.text) totalTextLen += part.text.length;
-  }
-  if (totalTextLen > 100000) {
-    throw new Error(`AI prompt too large (${totalTextLen} chars). Please select fewer nodes or a smaller group.`);
-  }
+let lastAttemptedModel = '(none)';
+let lastSuccessfulModel = '(none)';
+let lastAttemptedError = '(none)';
 
+/**
+ * Exposes internal Gemini diagnostics to the bug reporting IPC layer.
+ */
+export function getGeminiTelemetry() {
+  return {
+    lastAttemptedModel,
+    lastSuccessfulModel,
+    lastAttemptedError
+  };
+}
+
+/**
+ * Inner executor for a single Gemini API request.
+ */
+async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   // If an API key is provided, route directly to the free AI Studio endpoint
   // Otherwise, default to the Vertex AI service account pipeline
   let endpoint = '';
@@ -194,10 +198,7 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   };
   if (responseSchema) {
     // Gemini's responseSchema constrains generation to a JSON Schema —
-    // 100% guarantee of valid JSON + schema-conforming output. Eliminates
-    // the entire class of "AI returned invalid JSON" / "AI returned an
-    // enum value we don't recognize" failures. Schema is auto-converted
-    // from standard JSON Schema lowercase types to Gemini's uppercase.
+    // 100% guarantee of valid JSON + schema-conforming output.
     generationConfig.responseSchema = toGeminiSchema(responseSchema);
   }
   const payload = {
@@ -209,10 +210,6 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const endpointName = apiKey ? 'Gemini API (AI Studio)' : 'Vertex AI';
 
-  // Auto-retry transient errors so a "model overloaded" blip doesn't bubble up
-  // as a card-level error the user has to manually re-click. 503 (overload),
-  // 429 (rate limit), 500/502/504 (gateway hiccups) are all worth retrying;
-  // 4xx other than 429 are config/auth/quota issues and won't get better.
   const response = await fetchWithRetry(endpoint, {
     method: 'POST',
     signal: combinedSignal,
@@ -225,10 +222,6 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     let errMsg;
     try { errMsg = JSON.parse(errText)?.error?.message || errText; }
     catch { errMsg = errText; }
-    // Label the error with the endpoint we actually called so users can tell
-    // an AI Studio billing/quota issue from a Vertex service-account issue at
-    // a glance. Previously this string always said "Vertex AI" regardless of
-    // which path ran, which sent users debugging the wrong system.
     throw new Error(`${endpointName} error ${response.status}: ${errMsg}`);
   }
 
@@ -239,17 +232,10 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   const usage = data?.usageMetadata;
   const cap = payload.generationConfig.maxOutputTokens;
 
-  // Log finish reason + token usage on every call so bug reports include the
-  // signals needed to distinguish a true model error from a hit token cap.
-  // `thoughtsTokenCount` is critical for Gemini 2.5+ thinking models: it
-  // counts against the same cap as output tokens, so a "MAX_TOKENS at
-  // out:71 cap:2048" mystery resolves the moment you see thoughts:1977.
+  // Log finish reason + token usage on every call so bug reports include the signals
   logger.info(`[Gemini] finishReason=${finishReason} usage=in:${usage?.promptTokenCount ?? '?'} out:${usage?.candidatesTokenCount ?? '?'} thoughts:${usage?.thoughtsTokenCount ?? 0} cap:${cap}`);
 
-  // MAX_TOKENS truncation produces JSON that's missing its closing braces —
-  // parseGeminiJSON then throws "Unterminated string" or similar, which sends
-  // the user debugging a JSON formatting issue when the real cause is the
-  // output cap. Detect it here and throw a clear, actionable error instead.
+  // MAX_TOKENS truncation produces JSON that's missing its closing braces
   if (finishReason === 'MAX_TOKENS') {
     const thoughts = usage?.thoughtsTokenCount || 0;
     const visible  = usage?.candidatesTokenCount ?? 0;
@@ -258,9 +244,7 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
       : '';
     throw new Error(`AI response was truncated — hit the ${cap}-token output cap (model wrote ${visible} visible tokens + ${thoughts} thinking tokens before being cut off).${note} Raise the cap for this task in llm.js TASK_MAX_TOKENS.`);
   }
-  // SAFETY / RECITATION / OTHER are also non-success terminations that produce
-  // empty or partial content. Surface them by name so the user knows whether
-  // to retry, edit input, or report a model issue.
+  // SAFETY / RECITATION / OTHER
   if (finishReason && finishReason !== 'STOP' && finishReason !== 'MAX_TOKENS') {
     throw new Error(`AI response terminated abnormally: finishReason=${finishReason}. This usually means safety filters or recitation blocking — try rephrasing or removing problematic content.`);
   }
@@ -268,6 +252,115 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   if (!contentText) throw new Error(`No content returned from Gemini (finishReason=${finishReason || 'unknown'}).`);
 
   return contentText;
+}
+
+/**
+ * Core Gemini call — sends parts (text + optional images) to Vertex AI or AI Studio,
+ * automatically falling back across the 12 available models in descending capability order
+ * when rate limits or quotas are exceeded.
+ * @param {Array} parts — Array of { text } or { inlineData: { mimeType, data } } objects
+ * @param {string} apiKey - Optional Gemini API Key. If missing, falls back to Vertex AI.
+ * @param {string} model - Ignored for Gemini calls to enforce progressive fallback.
+ * @param {object} [genConfig] — generationConfig overrides
+ * @returns {Promise<string>} — Raw text response from Gemini
+ */
+async function callGemini(parts, apiKey, model, genConfig = {}) {
+  // If Mock Mode is active, we don't need fallback
+  await getAuthClient();
+  if (!apiKey && isMockMode) {
+    const textPart = parts.find(p => p.text)?.text || '';
+    logger.info('[Gemini] Mock Mode active. Returning dummy data for prompt.');
+    return MOCK_PREFIX + generateMockResponse(textPart);
+  }
+
+  // Hardening: Prevent "Payload Too Large" errors by capping total prompt text.
+  let totalTextLen = 0;
+  for (const part of parts) {
+    if (part.text) totalTextLen += part.text.length;
+  }
+  if (totalTextLen > 100000) {
+    throw new Error(`AI prompt too large (${totalTextLen} chars). Please select fewer nodes or a smaller group.`);
+  }
+
+  const GEMINI_MODEL_FALLBACKS = [
+    'gemini-3.1-pro',
+    'gemini-2.5-pro',
+    'gemini-3.5-flash',
+    'gemini-3-flash',
+    'gemini-2.5-flash',
+    'gemini-2-flash',
+    'gemini-3.1-flash-lite',
+    'gemini-2.5-flash-lite',
+    'gemini-2-flash-lite',
+  ];
+  // NOTE: text-to-speech (`*-tts`) models are intentionally excluded — they
+  // cannot serve generateContent text/JSON output, so including them in this
+  // fallback chain only burned extra failed calls before the final error.
+
+  const attemptedErrors = [];
+
+  for (const currentModel of GEMINI_MODEL_FALLBACKS) {
+    // Bail immediately if the caller cancelled (node deleted / Reset). Without
+    // this, an aborted request walks the entire fallback chain — each attempt
+    // throws on the already-aborted signal — and surfaces a misleading "all
+    // models failed" instead of a clean cancellation. `genConfig.signal` is the
+    // user signal specifically (the per-call timeout is a separate signal), so
+    // a single model timing out still correctly falls through to the next.
+    if (genConfig.signal?.aborted) {
+      const abortErr = new Error('Gemini request aborted');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
+    try {
+      logger.info(`[Gemini] Attempting call with model: ${currentModel}`);
+      lastAttemptedModel = currentModel;
+
+      const result = await callGeminiSingle(parts, apiKey, currentModel, genConfig);
+
+      lastSuccessfulModel = currentModel;
+      return result;
+    } catch (err) {
+      const errMsg = err.message || String(err);
+      logger.warn(`[Gemini] Model ${currentModel} failed: ${errMsg}`);
+      
+      lastAttemptedError = `${currentModel}: ${errMsg}`;
+      attemptedErrors.push({ model: currentModel, error: errMsg });
+
+      const isRateLimitOrQuota = 
+        errMsg.includes('429') ||
+        errMsg.toLowerCase().includes('quota') ||
+        errMsg.toLowerCase().includes('rate limit') ||
+        errMsg.includes('404') || // model not found or enabled in this region/key
+        errMsg.includes('503') || // overloaded
+        errMsg.includes('500') ||
+        errMsg.includes('502') ||
+        errMsg.includes('504');
+
+      if (isRateLimitOrQuota) {
+        logger.warn(`[Gemini] Falling back to the next best model...`);
+        continue;
+      }
+
+      logger.warn(`[Gemini] Proceeding to fallback after non-transient failure: ${errMsg}`);
+    }
+  }
+
+  // If we reach here, all models have failed!
+  const errorDetails = attemptedErrors.map(e => `* ${e.model}: ${e.error}`).join('\n');
+  const finalError = new Error(`All Gemini models failed. Usage limits or quotas may have been exceeded on all fallback models.\n\nDetails:\n${errorDetails}`);
+
+  // Tag as rate limit if any of the errors were rate limits
+  const hasRateLimit = attemptedErrors.some(e => 
+    e.error.includes('429') || 
+    e.error.toLowerCase().includes('rate limit') || 
+    e.error.toLowerCase().includes('quota')
+  );
+  if (hasRateLimit) {
+    finalError.isRateLimit = true;
+    finalError.provider = 'gemini';
+  }
+
+  throw finalError;
 }
 
 /**

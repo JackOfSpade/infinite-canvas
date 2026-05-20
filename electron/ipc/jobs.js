@@ -28,6 +28,7 @@ import {
 } from '../extractors/apiExtractors.js';
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory } from './jobsHistory.js';
 import { filterJobsByAge } from './jobDateFilter.js';
+import { getJobsSettings } from './settings.js';
 
 const DEFAULT_MAX_AGE_DAYS = 21;
 
@@ -91,8 +92,10 @@ function buildJobTasks(queries, maxAgeDays) {
  */
 async function fetchApiSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS) {
   const firstQuery = queries[0] || '';
-  const apiKey = process.env.USAJOBS_API_KEY || '';
-  const email = process.env.USAJOBS_EMAIL || '';
+  // Source credentials come from Settings (electron-store) with a legacy
+  // process.env fallback handled inside getJobsSettings() for users still
+  // on the old .env config.
+  const { usajobsApiKey: apiKey, usajobsEmail: email } = getJobsSettings();
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
 
   const apiTasks = [
@@ -199,10 +202,18 @@ Be creative with suggestedRoleQueries — think about what career directions the
       if (!sourceFirstUrl[t.sourceId]) sourceFirstUrl[t.sourceId] = t.url;
     }
 
-    // Notify frontend that sources are starting
+    // Notify frontend that sources are starting. Include `url` from the
+    // first task per source so the JobSourceCardNode's `progress.url` is
+    // populated from event #1 — without this, a captcha that hits mid-scrape
+    // delivers its warning event BEFORE the per-source completion loop fires
+    // (which is the only path that previously carried url), so the card's
+    // Solve button stayed hidden until every other source had finished.
     for (const sourceId of Object.keys(sourceTaskIds)) {
       if (!event.sender.isDestroyed()) {
-        event.sender.send('job-source-progress', { nodeId, sourceId, status: 'searching', count: 0 });
+        event.sender.send('job-source-progress', {
+          nodeId, sourceId, status: 'searching', count: 0,
+          url: sourceFirstUrl[sourceId] || null,
+        });
       }
     }
 
@@ -223,6 +234,10 @@ Be creative with suggestedRoleQueries — think about what career directions the
           // Forward anti-bot warning so the JobSourceCardNode can render
           // the embedded text warning instead of silently showing 0 jobs.
           warning: res.warning || null,
+          // Include url here too so the Solve button can render against
+          // mid-scrape warnings without waiting for the per-source
+          // completion event that fires only after EVERY source finishes.
+          url: sourceFirstUrl[sourceId] || null,
         });
       }, signal),
       fetchApiSources(queries, event.sender, signal, nodeId, ageDays)
@@ -376,6 +391,117 @@ Be creative with suggestedRoleQueries — think about what career directions the
     return { jobs: kept, sourceResults, scrapeWarnings };
   });
 
+  handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId }, signal) => {
+    logger.info(`[Jobs] Background single-source search for ${sourceId} with query "${query}"`);
+    const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+
+    let jobs = [];
+    let warning = null;
+
+    if (nodeId && !event.sender.isDestroyed()) {
+      event.sender.send('job-source-progress', {
+        nodeId,
+        sourceId,
+        status: 'searching',
+        count: 0,
+        warning: null,
+      });
+    }
+
+    if (sourceId === 'usajobs') {
+      const { usajobsApiKey: apiKey, usajobsEmail: email } = getJobsSettings();
+      if (!apiKey || !email) {
+        const synthesizedWarning = {
+          code: 'config-missing',
+          severity: 'info',
+          evidence: 'USAJobs API key + email not set',
+          suggestion: 'Get a free key at developer.usajobs.gov, then open Settings → Job Sources and paste the API key + your email to enable this source.',
+        };
+        if (nodeId && !event.sender.isDestroyed()) {
+          event.sender.send('job-source-progress', {
+            nodeId,
+            sourceId,
+            status: 'skipped',
+            count: 0,
+            warning: synthesizedWarning,
+          });
+        }
+        return {
+          success: false,
+          warning: synthesizedWarning,
+        };
+      }
+
+      try {
+        const result = await fetchUSAJobs(query, apiKey, email, signal, ageDays);
+        jobs = Array.isArray(result) ? result : (result?.items || []);
+        warning = Array.isArray(result) ? null : (result?.warning || null);
+      } catch (err) {
+        logger.error(`[USAJobs] Background fetch failed:`, err);
+        const synthWarning = {
+          code: 'api-failed',
+          severity: 'block',
+          evidence: String(err?.message || err),
+          suggestion: 'API call failed. Check logs for the full response.',
+        };
+        if (nodeId && !event.sender.isDestroyed()) {
+          event.sender.send('job-source-progress', {
+            nodeId,
+            sourceId,
+            status: 'error',
+            count: 0,
+            warning: synthWarning,
+          });
+        }
+        return {
+          success: false,
+          error: err?.message || String(err),
+          warning: synthWarning,
+        };
+      }
+    } else {
+      return { success: false, error: `Unsupported single source: ${sourceId}` };
+    }
+
+    const tagged = jobs.map(j => ({ ...j, source: sourceId }));
+    
+    const seen = new Set();
+    const deduped = tagged.filter(job => {
+      const key = `${(job.title || '').toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    const ageFiltered = filterJobsByAge(deduped, ageDays);
+    let kept = ageFiltered;
+    if (canvasFilePath) {
+      const history = await loadJobsHistory(canvasFilePath);
+      const result = dedupAgainstHistory(ageFiltered, history);
+      kept = result.kept;
+    }
+
+    let status = 'done';
+    if (warning && warning.severity === 'block') status = 'error';
+    else if (warning && warning.severity === 'info') status = 'skipped';
+
+    if (nodeId && !event.sender.isDestroyed()) {
+      event.sender.send('job-source-progress', {
+        nodeId,
+        sourceId,
+        status,
+        count: kept.length,
+        warning,
+      });
+    }
+
+    return {
+      success: true,
+      jobs: kept,
+      warning,
+    };
+  });
+
   // ── Jobs history (60-day rolling CSV next to the canvas JSON) ─────────────
   handleSafe('append-jobs-history', async (_event, { canvasFilePath, jobs }) => {
     return appendJobsHistory(canvasFilePath, jobs);
@@ -450,7 +576,7 @@ IMPORTANT SCORING RULES:
 
     for (let i = 0; i < jobs.length; i += BATCH_SIZE) {
       // Guard: Check if window was closed between batches
-      if (signal.aborted) break;
+      if (signal?.aborted) break;
 
       const batch = jobs.slice(i, i + BATCH_SIZE);
       let batchResult;
@@ -465,7 +591,7 @@ ${JSON.stringify(slimBatch(batch))}`, {
           cachedPrefix,
         });
       } catch (err) {
-        if (signal.aborted) throw err;
+        if (signal?.aborted) throw err;
         logger.warn(`[Jobs] Batch scoring failed:`, err);
         batchResult = null; // Forces string fallback below
       }
@@ -622,18 +748,35 @@ RULES:
 
   // ── Resolve a job-source block — opens the failed scrape URL in a visible,
   // cookie-sharing browser so the user can solve a captcha or log in. Same
-  // underlying primitive marketplace uses for `resolve-captcha`, minus the
-  // inline-extractor (jobs need a full re-run anyway, no point pulling
-  // single-page results out of the visible session).
+  // underlying primitive marketplace uses for `resolve-captcha`. When the
+  // user's session cleared the bot challenge, we run the source's extractor
+  // in THAT same visible window so the items the user just unlocked land
+  // straight in pendingJobs — without this, "solve captcha" produced 0 jobs
+  // from that source because the original headless scrape had already
+  // failed, and we'd have needed a full Re-run Search to retry it.
   //
-  // Returns { resolved } so the renderer can decide whether to auto-suggest
-  // a re-run. The persistence of cleared cookies in the shared userDataDir
-  // means a subsequent Re-run Search lands on a clean session.
+  // Returns { resolved, items } so the renderer can merge items into
+  // pendingJobs and drop the warning. items is [] when no extractor is
+  // available for the source (API sources can't be inline-extracted; their
+  // Solve button doesn't render).
   handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId } = {}, signal) => {
     if (!url) throw new Error('resolve-job-source requires a url');
     logger.info(`[Jobs][${nodeId}] User opening resolve window for ${sourceId}: ${url}`);
-    const result = await openCaptchaResolveWindow(url, event.sender, signal, null);
-    logger.info(`[Jobs][${nodeId}] Resolve window closed for ${sourceId}; auto-detected=${result.resolved}`);
-    return { resolved: !!result.resolved };
+    // Map sourceId → the same extractor JS used by buildJobTasks. Only the
+    // scrape sources (those needing Puppeteer) have an extractor here;
+    // API sources don't expose a Solve button so this lookup never miss-
+    // fires for them.
+    const SOURCE_EXTRACTORS = {
+      google:       GOOGLE_JOBS_EXTRACTOR,
+      indeed:       INDEED_JOBS_EXTRACTOR,
+      ziprecruiter: ZIPRECRUITER_EXTRACTOR,
+      glassdoor:    GLASSDOOR_EXTRACTOR,
+      wellfound:    WELLFOUND_EXTRACTOR,
+    };
+    const inlineExtractorJS = SOURCE_EXTRACTORS[sourceId] || null;
+    const result = await openCaptchaResolveWindow(url, event.sender, signal, inlineExtractorJS);
+    const items = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
+    logger.info(`[Jobs][${nodeId}] Resolve window closed for ${sourceId}; auto-detected=${result.resolved}; inline-extracted=${items.length} job(s)`);
+    return { resolved: !!result.resolved, items };
   });
 }

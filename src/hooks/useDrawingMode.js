@@ -83,6 +83,12 @@ export function useDrawingMode({
       setPlacementMode(null);
       return;
     }
+    // Don't START an erase/stroke mid navigation-animation: the canvas data is
+    // about to be swapped to another layer, so a snapshot taken now (and any
+    // stroke committed on pointer-up) would land on the wrong canvas. Mirrors
+    // the guard in handlePointerMove/handleEraser. (Committing an already-started
+    // stroke on pointer-up is still allowed — see useDrawingMode debug notes.)
+    if (isAnimatingRef?.current) return;
     if (activeTool === 'eraser') {
       isErasingRef.current = true;
       takeSnapshot();
@@ -96,7 +102,7 @@ export function useDrawingMode({
       drawingLayerRef.current?.updateCurrentStroke(newStroke);
     }
   }, [placementMode, activeTool, screenToFlowPosition, takeSnapshot,
-      setNodes, setPlacementMode, handleEraser, drawingLayerRef, isInteractionRef]);
+      setNodes, setPlacementMode, handleEraser, drawingLayerRef, isInteractionRef, isAnimatingRef]);
 
   const handlePointerMove = useCallback((e) => {
     if (placementMode) {

@@ -336,14 +336,14 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
     // Surface the skip reason as a `warning` so the source card can render
     // it instead of silently sitting at "idle/0". Severity `info` (not block
     // or throttle) so the card colors it neutrally — this isn't a failure,
-    // it's a "you need to set USAJOBS_API_KEY in your env to enable this."
+    // it's a "open Settings → Job Sources to enable this source."
     return {
       items: [],
       warning: {
         code: 'config-missing',
         severity: 'info',
-        evidence: 'USAJOBS_API_KEY env var not set',
-        suggestion: 'Get a free key at developer.usajobs.gov and set USAJOBS_API_KEY + USAJOBS_EMAIL in your env to enable this source.',
+        evidence: 'USAJobs API key + email not set',
+        suggestion: 'Get a free key at developer.usajobs.gov, then open Settings → Job Sources and paste the API key + your email to enable this source.',
       },
     };
   }

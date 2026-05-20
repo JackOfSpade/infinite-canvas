@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { sanitizeNodesForSave } from '../utils/serializationUtils';
+import { sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
 import { EventLogger } from '../utils/EventLogger';
 
 export function useCanvasInitialization({
@@ -74,7 +74,11 @@ export function useCanvasInitialization({
       if (!rawData.nodes || !Array.isArray(rawData.nodes)) return;
 
       // Strip transient visual properties (e.g. source-filter opacity on job cards)
-      const data = { ...rawData, nodes: sanitizeNodesForSave(rawData.nodes) };
+      // and drop orphan edges (refs to nodes that were deleted outside the
+      // normal cascade path — accumulate forever otherwise and bloat the file).
+      const sanitizedNodes = sanitizeNodesForSave(rawData.nodes);
+      const sanitizedEdges = sanitizeEdgesForSave(rawData.edges, sanitizedNodes);
+      const data = { ...rawData, nodes: sanitizedNodes, edges: sanitizedEdges };
 
       window.electronAPI.saveWorkspace({ data, filePath: currentFile }).then(res => {
         if (!isMountedRef.current) return;

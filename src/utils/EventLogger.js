@@ -188,6 +188,26 @@ class EventLoggerSingleton {
       const summary = text.length > 50 ? text.slice(0, 50) + '...' : text;
       this.log(`PASTE: types=[${Array.from(types).join(',')}] text="${summary.replace(/\\n/g, '\\\\n')}"`);
     });
+
+    // Capture settings changes to help diagnose configuration/API key updates
+    const initSettingsListener = () => {
+      if (window.electronAPI?.onSettingsChanged) {
+        window.electronAPI.onSettingsChanged((payload) => {
+          this.log(`SETTINGS-CHANGED: sections=[${payload?.changedSections?.join(', ') || 'none'}]`);
+        });
+        return true;
+      }
+      return false;
+    };
+
+    if (!initSettingsListener()) {
+      const handle = setInterval(() => {
+        if (initSettingsListener()) {
+          clearInterval(handle);
+        }
+      }, 100);
+      setTimeout(() => clearInterval(handle), 10000);
+    }
   }
 }
 

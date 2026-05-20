@@ -9,10 +9,11 @@ import { useToast } from '../components/ToastProvider';
 
 import { JobHubProcessingState } from './jobhub/JobHubProcessingState';
 import { JobHubDoneState } from './jobhub/JobHubDoneState';
+import { JobHubSourcesReadyState } from './jobhub/JobHubSourcesReadyState';
 import { HubErrorBanner } from '../components/HubErrorBanner';
 import { useCheckAllConnected } from '../hooks/useCheckAllConnected';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
-import { useEpochCancellation } from '../hooks/useEpochCancellation';
+import { useEpochCancellation, isNodeDeletedAbort } from '../hooks/useEpochCancellation';
 import { useSourceProgress } from '../hooks/useSourceProgress';
 import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
@@ -28,16 +29,42 @@ const STATE_LABELS = {
   querying: 'Planning search strategy...',
   searching: 'Searching for jobs...',
   scoring: 'AI scoring matches...',
+  'sources-ready': null,
   done: null,
 };
 
 const PROCESSING_STATES = ['parsing', 'querying', 'searching', 'scoring'];
 
+const COL_X_WITH_TARGET    = { branch: 400, category: 700, bucket: 1000, job: 1400 };
+const COL_X_WITHOUT_TARGET = { category: 400, bucket: 700, job: 1100 };
+const ROW_H = { branch: 90, category: 70, bucket: 70, job: 280 };
+
+function parseSalaryToNumeric(salaryStr) {
+  if (!salaryStr) return 0;
+  const clean = salaryStr.toLowerCase().replace(/[$,]/g, '');
+  const m = clean.match(/(\d+)\s*(k)?/);
+  if (!m) return 0;
+  let val = parseFloat(m[1]);
+  if (m[2] === 'k') val *= 1000;
+  if (val < 1000) {
+    if (clean.includes('hour') || clean.includes('hr')) {
+      val = val * 40 * 52;
+    } else if (clean.includes('day')) {
+      val = val * 5 * 52;
+    }
+  }
+  return val;
+}
+
 /**
  * JobHubNode — draggable canvas module for job search.
  * Phase 2: Per-source independent status tracking + source filtering.
  *
- * data.hubState: 'empty' | 'parsing' | 'querying' | 'searching' | 'scoring' | 'done'
+ * data.hubState: 'empty' | 'parsing' | 'querying' | 'searching' | 'scoring' |
+ *                'sources-ready' | 'done'
+ *                'sources-ready' = paused after search because one or more
+ *                sources hit block-severity warnings (captcha, login wall).
+ *                The user must resolve or skip them before scoring runs.
  *                Failures set data.errorMessage (surfaced via HubErrorBanner)
  *                but stay in the logical step rather than wiping to an error wall.
  * data.filePath: string (set when auto-created from canvas file drop)
@@ -56,11 +83,22 @@ export function JobHubNode({ id, data }) {
   const addElementsGlobally = nav?.addElementsGlobally;
   const canvasFilePath = nav?.currentFile || null;
   const processingRef = useRef(false);
+  const pendingUSAJobsRefreshRef = useRef(false);
+  const scrapeWarningsRef = useRef(data.scrapeWarnings);
+  const hubStateRef = useRef(data.hubState);
+  const pendingJobsRef = useRef(data.pendingJobs);
+  const resumeScoringRef = useRef(null);
   const isMountedRef = useRef(true);
+  const settingsDebounceTimerRef = useRef(null);
   const epoch = useEpochCancellation();
   const { addToast } = useToast();
   useEffect(() => {
-    return () => { isMountedRef.current = false; };
+    return () => {
+      isMountedRef.current = false;
+      if (settingsDebounceTimerRef.current) {
+        clearTimeout(settingsDebounceTimerRef.current);
+      }
+    };
   }, []);
   // Stable ref to startProcessing so handleDrop can call it without a stale closure.
   const startProcessingRef = useRef(null);
@@ -68,6 +106,10 @@ export function JobHubNode({ id, data }) {
   const hubState = data.hubState || 'empty';
   const statusLabel = STATE_LABELS[hubState];
   const sourceFilter = data.sourceFilter || null;
+
+  scrapeWarningsRef.current = data.scrapeWarnings;
+  hubStateRef.current       = data.hubState;
+  pendingJobsRef.current    = data.pendingJobs;
 
   // Per-source progress state populated by backend `job-source-progress`
   // events. Reset via `resetSourceProgress` before each fresh run so stale
@@ -78,26 +120,524 @@ export function JobHubNode({ id, data }) {
     reset: resetSourceProgress,
   } = useSourceProgress(window.electronAPI?.onJobSourceProgress, id);
 
-  // Surface the live ring state to the bug-report snapshot so reports about
-  // ring rendering can be diagnosed from the report alone.
-  useEffect(() => {
-    EventLogger.registerNodeState(id, { hubState, sourceProgress });
-    return () => EventLogger.unregisterNodeState(id);
-  }, [id, hubState, sourceProgress]);
+  const getPrimaryQuery = useCallback(() => {
+    const q = data.queries;
+    if (!q) return '';
+    const {
+      targetRoleQueries = [], titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = []
+    } = q;
+    const all = [...targetRoleQueries, ...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
+    return all[0] || '';
+  }, [data.queries]);
 
-  // Settings change → clear any "config missing" error so the user isn't left
-  // staring at a stale warning after they've fixed it. Don't auto-rerun the
-  // pipeline; the user re-triggers via Re-run Search themselves.
+  const appendJobsToDoneCanvas = useCallback(({ scoredJobs, filteredWarnings }) => {
+    const currentId = id;
+    const existingNodes = getNodes();
+    const existingEdges = getEdges();
+
+    const hasTarget = !!(data.targetRole || '').trim();
+    const activeTargetRole = (data.targetRole || '').trim();
+    const profile = data.resumeProfile;
+
+    // Layout columns mapping
+    const COL_X = hasTarget ? COL_X_WITH_TARGET : COL_X_WITHOUT_TARGET;
+
+    const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
+    const baseNodeId = `job-append-${Date.now()}`;
+
+    const newNodes = [];
+    const newEdges = [];
+
+    // Helper to find parent-child relationship in existing edges
+    const getConnectedChildIds = (parentId) => {
+      const allEdges = [...existingEdges, ...newEdges];
+      return allEdges.filter(e => e.source === parentId).map(e => e.target);
+    };
+
+    // Keep track of count updates needed for existing nodes
+    const nodeCountDeltas = {};
+
+    let nextJobNodeIdx = 0;
+
+    scoredJobs.forEach((job) => {
+      // Determine logical category and parent
+      let categoryLabel = job.careerDirection || 'Other';
+      let parentNodeId = currentId; // Default parent is the hub itself (flat structure)
+      let isUnderTargetBranch = false;
+
+      if (hasTarget) {
+        if (job.isTargetRoleMatch) {
+          // Under Target Role branch (no Category level)
+          const targetBranch = existingNodes.find(n => 
+            n.type === 'jobgroup' && 
+            n.data?.kind === 'branch' && 
+            n.data?.hubId === currentId && 
+            n.data?.label?.startsWith('Target Role')
+          );
+          if (targetBranch) {
+            parentNodeId = targetBranch.id;
+            isUnderTargetBranch = true;
+          } else {
+            parentNodeId = currentId;
+          }
+        } else {
+          // Under Other Strong Matches branch, under Category
+          if ((job.matchScore || 0) < 65) {
+            return; // Skip low-scoring non-target jobs
+          }
+          const otherBranch = existingNodes.find(n => 
+            n.type === 'jobgroup' && 
+            n.data?.kind === 'branch' && 
+            n.data?.hubId === currentId && 
+            n.data?.label === 'Other Strong Matches'
+          );
+          if (otherBranch) {
+            parentNodeId = otherBranch.id;
+          } else {
+            parentNodeId = currentId;
+          }
+        }
+      }
+
+      // If we are not under target branch, we must have a Category node under the parentNodeId.
+      let categoryNodeId = parentNodeId;
+      if (!isUnderTargetBranch) {
+        const connectedChildren = getConnectedChildIds(parentNodeId);
+        let catNode = existingNodes.find(n => 
+          n.type === 'jobgroup' && 
+          n.data?.kind === 'category' && 
+          n.data?.hubId === currentId && 
+          n.data?.label === categoryLabel
+        ) || newNodes.find(n => 
+          n.type === 'jobgroup' && 
+          n.data?.kind === 'category' && 
+          n.data?.hubId === currentId && 
+          n.data?.label === categoryLabel
+        );
+
+        if (!catNode) {
+          // Create new Category node
+          const catId = `${baseNodeId}-cat-${categoryLabel.replace(/\s+/g, '-')}`;
+          
+          // Compute Y coordinate
+          const siblingCats = [...existingNodes, ...newNodes].filter(n => 
+            n.type === 'jobgroup' && 
+            n.data?.kind === 'category' && 
+            n.data?.hubId === currentId &&
+            connectedChildren.includes(n.id)
+          );
+          let maxY = originalPos.y;
+          if (siblingCats.length > 0) {
+            maxY = Math.max(...siblingCats.map(n => n.position.y));
+          } else {
+            const pNode = existingNodes.find(n => n.id === parentNodeId);
+            maxY = pNode ? pNode.position.y : originalPos.y;
+          }
+          const catY = maxY + ROW_H.category;
+
+          catNode = {
+            id: catId,
+            type: 'jobgroup',
+            position: { x: originalPos.x + COL_X.category, y: catY },
+            hidden: hasTarget && parentNodeId !== currentId,
+            data: {
+              kind: 'category',
+              hubId: currentId,
+              label: categoryLabel,
+              count: 0,
+              childIds: [],
+              expanded: false,
+            },
+          };
+          newNodes.push(catNode);
+          newEdges.push({
+            id: `edge-${parentNodeId}-${catId}`,
+            source: parentNodeId,
+            target: catId,
+            ...structuralEdge('rgba(96,165,250,0.5)'),
+          });
+        }
+        categoryNodeId = catNode.id;
+      }
+
+      // Now find or create Bucket node under categoryNodeId
+      const connectedBuckets = getConnectedChildIds(categoryNodeId);
+      const bucketNodes = [...existingNodes, ...newNodes].filter(n => 
+        n.type === 'jobgroup' && 
+        n.data?.kind === 'bucket' && 
+        n.data?.hubId === currentId &&
+        connectedBuckets.includes(n.id)
+      );
+
+      // Match bucket by salary
+      const jobSalary = parseSalaryToNumeric(job.salary);
+      let matchedBucket = null;
+
+      if (jobSalary === 0) {
+        matchedBucket = bucketNodes.find(n => n.data?.minSalary === 0 && n.data?.maxSalary === 0);
+      } else {
+        matchedBucket = bucketNodes.find(n => 
+          n.data?.minSalary <= jobSalary && 
+          (n.data?.maxSalary === 0 || jobSalary <= n.data?.maxSalary)
+        );
+      }
+
+      // Fallback 1: match by label
+      if (!matchedBucket) {
+        matchedBucket = bucketNodes.find(n => 
+          n.data?.label === 'Unspecified' || 
+          n.data?.label === 'All'
+        );
+      }
+
+      // Fallback 2: use the last bucket in category
+      if (!matchedBucket && bucketNodes.length > 0) {
+        matchedBucket = bucketNodes[bucketNodes.length - 1];
+      }
+
+      if (!matchedBucket) {
+        // Create a new "Unspecified" Bucket node
+        const bucId = `${categoryNodeId}-buc-fallback-${Date.now()}`;
+        
+        // Compute Y coordinate
+        let maxY = originalPos.y;
+        if (bucketNodes.length > 0) {
+          maxY = Math.max(...bucketNodes.map(n => n.position.y));
+        } else {
+          const catNode = [...existingNodes, ...newNodes].find(n => n.id === categoryNodeId);
+          maxY = catNode ? catNode.position.y : originalPos.y;
+        }
+        const bucY = maxY + ROW_H.bucket;
+
+        matchedBucket = {
+          id: bucId,
+          type: 'jobgroup',
+          position: { x: originalPos.x + COL_X.bucket, y: bucY },
+          hidden: true,
+          data: {
+            kind: 'bucket',
+            hubId: currentId,
+            label: 'Unspecified',
+            count: 0,
+            childIds: [],
+            visibleCount: 10,
+            expanded: false,
+            minSalary: 0,
+            maxSalary: 0,
+          },
+        };
+        newNodes.push(matchedBucket);
+        newEdges.push({
+          id: `edge-${categoryNodeId}-${bucId}`,
+          source: categoryNodeId,
+          target: bucId,
+          ...structuralEdge('rgba(96,165,250,0.5)'),
+        });
+      }
+
+      // Create new jobcard node stacked under matchedBucket
+      const jobId = `${baseNodeId}-job-${nextJobNodeIdx++}`;
+      
+      const connectedJobs = getConnectedChildIds(matchedBucket.id);
+      const existingJobCardsCount = connectedJobs.length;
+      const jobY = matchedBucket.position.y + existingJobCardsCount * ROW_H.job;
+
+      const jobNode = {
+        id: jobId,
+        type: 'jobcard',
+        position: { x: originalPos.x + COL_X.job, y: jobY },
+        hidden: true,
+        data: {
+          hubId: currentId,
+          title: job.title,
+          company: job.company,
+          location: job.location,
+          salary: job.salary,
+          snippet: job.snippet,
+          matchScore: job.matchScore,
+          reasoning: job.reasoning,
+          careerDirection: job.careerDirection,
+          strengthLabel: job.strengthLabel,
+          source: job.source,
+          url: job.url,
+          posted: job.posted,
+          resumeProfile: profile,
+          isNew: true,
+          isTargetRoleMatch: !!job.isTargetRoleMatch,
+        },
+      };
+
+      newNodes.push(jobNode);
+      newEdges.push({
+        id: `edge-${matchedBucket.id}-${jobId}`,
+        source: matchedBucket.id,
+        target: jobId,
+        ...structuralEdge('rgba(96,165,250,0.5)'),
+      });
+
+      // Update matchedBucket childIds and counts
+      if (existingNodes.find(n => n.id === matchedBucket.id)) {
+        nodeCountDeltas[matchedBucket.id] = nodeCountDeltas[matchedBucket.id] || { childIds: [], count: 0 };
+        nodeCountDeltas[matchedBucket.id].childIds.push(jobId);
+        nodeCountDeltas[matchedBucket.id].count += 1;
+      } else {
+        matchedBucket.data.childIds.push(jobId);
+        matchedBucket.data.count += 1;
+        matchedBucket.data.visibleCount = Math.min(10, matchedBucket.data.count);
+      }
+
+      // Propagate counts to parent Category/Branch nodes
+      let currParentId = categoryNodeId;
+      while (currParentId && currParentId !== currentId) {
+        if (existingNodes.find(n => n.id === currParentId)) {
+          nodeCountDeltas[currParentId] = nodeCountDeltas[currParentId] || { count: 0 };
+          nodeCountDeltas[currParentId].count += 1;
+        } else {
+          const newParentNode = newNodes.find(n => n.id === currParentId);
+          if (newParentNode) {
+            newParentNode.data.count += 1;
+          }
+        }
+
+        const edge = [...existingEdges, ...newEdges].find(e => e.target === currParentId);
+        currParentId = edge ? edge.source : null;
+      }
+    });
+
+    if (newNodes.length > 0) {
+      document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
+
+      setNodes((nodes) => {
+        return nodes.map((n) => {
+          const delta = nodeCountDeltas[n.id];
+          if (delta) {
+            const updatedData = { ...n.data };
+            if (delta.childIds) {
+              updatedData.childIds = [...(updatedData.childIds || []), ...delta.childIds];
+              updatedData.visibleCount = Math.min(10, updatedData.childIds.length);
+            }
+            if (typeof delta.count === 'number') {
+              updatedData.count = (updatedData.count || 0) + delta.count;
+            }
+            return { ...n, data: updatedData };
+          }
+          return n;
+        });
+      });
+
+      if (addElementsGlobally) {
+        addElementsGlobally(currentId, newNodes, newEdges, 'sibling');
+      } else {
+        addNodes(newNodes);
+        addEdges(newEdges);
+      }
+    }
+
+    const finalSourceCounts = { ...data.finalSourceCounts };
+    scoredJobs.forEach(job => {
+      finalSourceCounts[job.source] = (finalSourceCounts[job.source] || 0) + 1;
+    });
+
+    const hasTargetRole = !!activeTargetRole;
+    const targetCandidates = scoredJobs.filter(j => j.isTargetRoleMatch);
+    const otherCandidates = scoredJobs.filter(j => !j.isTargetRoleMatch && (j.matchScore || 0) >= 65);
+
+    const targetDelta = hasTargetRole ? targetCandidates.length : 0;
+    const otherDelta = hasTargetRole ? otherCandidates.length : 0;
+
+    const allAddedScores = scoredJobs.map(j => j.matchScore || 0);
+    const scoreRangeMin = Math.min(data.scoreRangeMin ?? 0, ...allAddedScores);
+    const scoreRangeMax = Math.max(data.scoreRangeMax ?? 100, ...allAddedScores);
+
+    updateGlobal(currentId, {
+      hubState: 'done',
+      resultCount: (data.resultCount || 0) + (hasTargetRole ? (targetDelta + otherDelta) : scoredJobs.length),
+      totalScoredCount: (data.totalScoredCount || 0) + scoredJobs.length,
+      targetCount: (data.targetCount || 0) + targetDelta,
+      otherCount: (data.otherCount || 0) + otherDelta,
+      finalSourceCounts,
+      scoreRangeMin,
+      scoreRangeMax,
+      scrapeWarnings: filteredWarnings,
+    });
+  }, [id, data.targetRole, data.finalSourceCounts, data.resultCount, data.totalScoredCount, data.targetCount, data.otherCount, data.scoreRangeMin, data.scoreRangeMax, data.resumeProfile, getNodes, getEdges, getNode, setNodes, addElementsGlobally, addNodes, addEdges, updateGlobal]);
+
+  const triggerUSAJobsBackgroundSearch = useCallback(async () => {
+    if (processingRef.current) return;
+    const query = getPrimaryQuery();
+    if (!query) {
+      EventLogger.log(`[JobHub][${id}] No stored queries found to run USAJobs background search.`);
+      return;
+    }
+
+    processingRef.current = true;
+    const currentId = id;
+    const cancelled = epoch.start();
+
+    try {
+      EventLogger.log(`[JobHub][${id}] Starting USAJobs background search for query: "${query}"`);
+      
+      const res = await window.electronAPI.searchJobsSingleSource({
+        query,
+        sourceId: 'usajobs',
+        // Read straight off `data` rather than the `maxAgeDays` const, which is
+        // declared further down the component body — referencing it here (and in
+        // this callback's deps) would hit the temporal dead zone on every render
+        // and crash the node. Mirrors runPipeline's `data.maxAgeDays || 21`.
+        maxAgeDays: data.maxAgeDays || 21,
+        canvasFilePath,
+        nodeId: currentId,
+      });
+
+      if (cancelled()) return;
+
+      if (!res.success) {
+        throw new Error(res.error || 'Failed to search USAJobs');
+      }
+
+      const freshJobs = res.jobs || [];
+      const newWarning = res.warning || null;
+
+      const filteredWarnings = (scrapeWarningsRef.current || []).filter(
+        w => w.sourceId !== 'usajobs'
+      );
+      if (newWarning) {
+        filteredWarnings.push({ sourceId: 'usajobs', ...newWarning });
+      }
+
+      const currentState = hubStateRef.current;
+
+      if (currentState === 'sources-ready') {
+        const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
+        const seen = new Set(prevPending.map(j => `${j.title}|${j.company}|${j.url || ''}`));
+        const fresh = freshJobs.filter(j => {
+          const k = `${j.title}|${j.company}|${j.url || ''}`;
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
+        const mergedPending = [...prevPending, ...fresh];
+        pendingJobsRef.current = mergedPending;
+        scrapeWarningsRef.current = filteredWarnings;
+
+        updateGlobal(currentId, {
+          pendingJobs: mergedPending,
+          jobCount: mergedPending.length,
+          scrapeWarnings: filteredWarnings,
+        });
+
+        const remainingBlocks = filteredWarnings.filter(w => w?.severity === 'block');
+        if (remainingBlocks.length === 0 && mergedPending.length > 0) {
+          EventLogger.log(`[JobHub][${id}] Auto-resuming scoring from sources-ready state.`);
+          processingRef.current = false;
+          await resumeScoringRef.current?.();
+        }
+      } else if (currentState === 'done') {
+        if (freshJobs.length > 0) {
+          updateGlobal(currentId, {
+            hubState: 'scoring',
+            scrapeWarnings: filteredWarnings,
+          });
+
+          const profile = data.resumeProfile;
+          const activeTargetRole = (data.targetRole || '').trim();
+
+          const scoreResult = await window.electronAPI.scoreJobs({
+            jobs: freshJobs,
+            profile,
+            nodeId: currentId,
+            targetRole: activeTargetRole,
+          });
+
+          if (cancelled()) return;
+
+          if (!scoreResult.success) {
+            throw new Error(scoreResult.error || 'Failed to score background USAJobs');
+          }
+
+          appendJobsToDoneCanvas({
+            scoredJobs: scoreResult.scoredJobs,
+            filteredWarnings,
+          });
+        } else {
+          updateGlobal(currentId, {
+            hubState: 'done',
+            scrapeWarnings: filteredWarnings,
+          });
+        }
+      }
+    } catch (err) {
+      if (cancelled() || isNodeDeletedAbort(err)) return;
+      EventLogger.error(`[JobHub][${id}] USAJobs background search/integrate failed:`, err);
+      addToast({
+        title: 'USAJobs Refresh Failed',
+        description: err?.message || String(err),
+        type: 'error',
+      });
+      updateGlobal(currentId, {
+        hubState: hubStateRef.current === 'scoring' ? 'done' : hubStateRef.current,
+        errorMessage: err?.message || String(err),
+      });
+    } finally {
+      if (isMountedRef.current) {
+        processingRef.current = false;
+        pendingUSAJobsRefreshRef.current = false;
+      }
+    }
+  }, [id, data.maxAgeDays, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas]);
+
+  const handleJobsSettingsChange = useCallback(async () => {
+    if (settingsDebounceTimerRef.current) {
+      clearTimeout(settingsDebounceTimerRef.current);
+    }
+    settingsDebounceTimerRef.current = setTimeout(async () => {
+      try {
+        const settings = await window.electronAPI.getSettings();
+        const usajobsKey = settings?.jobs?.usajobsApiKey;
+        const usajobsEmail = settings?.jobs?.usajobsEmail;
+        if (!usajobsKey || !usajobsEmail) {
+          return;
+        }
+
+        const hasConfigOrApiWarning = (data.scrapeWarnings || []).some(
+          w => w.sourceId === 'usajobs' && (
+            w.code === 'config-missing' ||
+            w.code === 'api-failed' ||
+            w.code === 'scrape-failed'
+          )
+        );
+
+        if (hasConfigOrApiWarning) {
+          EventLogger.log(`[JobHub][${id}] USAJobs credentials detected/updated. Refreshing USAJobs...`);
+          if (processingRef.current) {
+            pendingUSAJobsRefreshRef.current = true;
+            EventLogger.log(`[JobHub][${id}] Pipeline is currently active. Queued USAJobs background refresh.`);
+          } else {
+            triggerUSAJobsBackgroundSearch();
+          }
+        }
+      } catch (err) {
+        EventLogger.error(`[JobHub][${id}] Error handling jobs settings change:`, err);
+      }
+    }, 1000);
+  }, [id, data.scrapeWarnings, triggerUSAJobsBackgroundSearch]);
+
+  // React to settings changes. We log them for bug report telemetry but do NOT
+  // auto-clear the error or revert the state without explicit user action.
   useEffect(() => {
     if (!window.electronAPI?.onSettingsChanged) return;
     const cleanup = window.electronAPI.onSettingsChanged((payload) => {
-      if (!payload?.changedSections?.includes('ai')) return;
-      if (data.errorMessage) {
-        updateGlobal(id, { errorMessage: null, isRateLimit: false });
+      if (payload?.changedSections?.includes('ai')) {
+        if (data.errorMessage) {
+          EventLogger.log(`[JobHub][${id}] Settings changed with active error; keeping error banner open for explicit user action`);
+        }
+      }
+      if (payload?.changedSections?.includes('jobs')) {
+        handleJobsSettingsChange();
       }
     });
     return () => cleanup?.();
-  }, [id, data.errorMessage, updateGlobal]);
+  }, [id, data.errorMessage, handleJobsSettingsChange]);
 
   // Combined card opacity: source AND score AND status filters all applied together.
   // Score filter uses the dynamic slider value. The slider's "show all" bottom
@@ -172,6 +712,7 @@ export function JobHubNode({ id, data }) {
 
   // Cascade-delete every spawned child on hub unmount.
   const cleanupAllJobChildren = useCallback(() => {
+    EventLogger.log(`[JobHub][${id}] Cleaning up all children (source cards, jobs, groups)`);
     deleteChildrenByHubId({
       getNodes, getEdges, deleteElements, hubId: id,
       childTypes: ['jobsourcecard', 'jobcard', 'jobgroup'],
@@ -268,6 +809,123 @@ export function JobHubNode({ id, data }) {
   }, [applyCardFilters, data.scoreThreshold, data.scoreRangeMin, data.sourceFilter, data.statusFilters]);
 
   /**
+   * Steps 4-5 of the pipeline: scoring → bucketing → spawn → set 'done'.
+   * Extracted so the resume-after-pause path (user cleared their last block
+   * warning) can re-enter scoring without re-fetching the resume + search.
+   *
+   * The caller is responsible for: setting processingRef true, capturing the
+   * cancellation epoch, finally-clearing processingRef. Mirrors the marketplace
+   * synthesizeAndPrice pattern.
+   */
+  const runScoringAndSpawn = useCallback(async ({
+    profile, jobs, scrapeWarnings, activeTargetRole, originalPos, cancelled,
+  }) => {
+    const currentId = id;
+
+    // Step 4: Scoring
+    updateGlobal(currentId, { hubState: 'scoring', jobCount: jobs.length });
+    const scoreResult = await window.electronAPI.scoreJobs({
+      jobs, profile, nodeId: currentId, targetRole: activeTargetRole,
+    });
+    if (cancelled()) return;
+    if (!scoreResult.success) {
+      const err = new Error(scoreResult.error || 'Failed to score jobs');
+      if (scoreResult.isRateLimit) err.isRateLimit = true;
+      throw err;
+    }
+
+    // ── Branch construction (split + loose-fill) ──────────────────────
+    const hasTarget = !!activeTargetRole;
+    const { targetList, otherList, displayedJobs } =
+      partitionJobsForBranches(scoreResult.scoredJobs, hasTarget);
+
+    // Step 4.5: Bucket displayed jobs into a category → salary-range tree.
+    // Target jobs get a careerDirection override so the AI clusters them
+    // under one synthetic "Target Role" category (see buildJobsForBucketing
+    // and TARGET_BUCKETING_CATEGORY). Failure here degrades to flat spawn.
+    let bucketTree = null;
+    const bucketingInput = buildJobsForBucketing(
+      displayedJobs, targetList, scoreResult.scoredJobs, hasTarget,
+    );
+    try {
+      const bucketResult = await window.electronAPI.bucketJobs({
+        jobs: bucketingInput,
+        nodeId: currentId,
+      });
+      if (cancelled()) return;
+      if (bucketResult?.success && Array.isArray(bucketResult.categories) && bucketResult.categories.length > 0) {
+        bucketTree = bucketResult.categories;
+      } else {
+        EventLogger.error('[JobHub] Bucketing returned no categories — falling back to flat spawn');
+      }
+    } catch (err) {
+      EventLogger.error('[JobHub] Bucketing failed — falling back to flat spawn:', err);
+    }
+
+    // Step 5: Spawn the tree. Pure node/edge construction lives in
+    // buildJobTreeNodes; we just pass results to ReactFlow below.
+    const baseNodeId = `job-${Date.now()}`;
+    const { newNodes, newEdges, scoreRangeMin, scoreRangeMax } = buildJobTreeNodes({
+      scoredJobs: scoreResult.scoredJobs,
+      bucketTree,
+      bucketingInput,
+      targetList,
+      otherList,
+      displayedJobs,
+      hasTarget,
+      targetRole: activeTargetRole,
+      profile,
+      originalPos,
+      hubId: currentId,
+      baseNodeId,
+    });
+    const flatJobsToSpawn = hasTarget ? displayedJobs : scoreResult.scoredJobs;
+
+    if (newNodes.length > 0) {
+      document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
+      if (addElementsGlobally) {
+        addElementsGlobally(currentId, newNodes, newEdges, 'sibling');
+      } else {
+        // Fallback if not inside CanvasNavigationContext (dev/test).
+        addNodes(newNodes);
+        addEdges(newEdges);
+      }
+      requestAnimationFrame(() => {
+        fitView({ duration: 600, padding: 0.2 });
+      });
+    }
+
+    const finalSourceCounts = {};
+    scoreResult.scoredJobs.forEach(job => {
+      finalSourceCounts[job.source] = (finalSourceCounts[job.source] || 0) + 1;
+    });
+
+    if (canvasFilePath && scoreResult.scoredJobs.length > 0) {
+      const historyRows = scoreResult.scoredJobs.map(j => ({
+        source: j.source, company: j.company, title: j.title, location: j.location, url: j.url,
+      }));
+      window.electronAPI.appendJobsHistory({ canvasFilePath, jobs: historyRows })
+        .catch(err => EventLogger.error('[JobHub] History append failed:', err));
+    }
+
+    updateGlobal(currentId, {
+      hubState: 'done',
+      resultCount: flatJobsToSpawn.length,
+      totalScoredCount: scoreResult.scoredJobs.length,
+      targetCount: hasTarget ? targetList.length : 0,
+      otherCount: hasTarget ? otherList.length : 0,
+      finalSourceCounts,
+      scoreRangeMin,
+      scoreRangeMax,
+      scoreThreshold: scoreRangeMin,
+      // Clear pendingJobs once we've successfully consumed them so a re-run
+      // doesn't pick up the old paused buffer.
+      pendingJobs: null,
+      scrapeWarnings: Array.isArray(scrapeWarnings) ? scrapeWarnings : [],
+    });
+  }, [id, updateGlobal, addElementsGlobally, addNodes, addEdges, canvasFilePath, fitView]);
+
+  /**
    * Drives the full pipeline. Pass `filePath` for a fresh resume parse, or
    * `profile` to skip parsing and re-run from query construction onward.
    * `filePath` takes precedence when both are provided.
@@ -340,7 +998,7 @@ export function JobHubNode({ id, data }) {
       const allQueries = [...targetRoleQueries, ...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
 
       // Step 3: Search
-      updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length });
+      updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length, queries: queriesResult.queries });
       const searchResult = await window.electronAPI.searchJobs({
         queries: allQueries,
         nodeId: currentId,
@@ -369,123 +1027,43 @@ export function JobHubNode({ id, data }) {
         return;
       }
 
-      // Step 4: Scoring
-      updateGlobal(currentId, { hubState: 'scoring', jobCount: searchResult.jobs.length });
-      const scoreResult = await window.electronAPI.scoreJobs({
-        jobs: searchResult.jobs, profile, nodeId: currentId, targetRole: activeTargetRole,
-      });
-      if (cancelled()) return;
-      if (!scoreResult.success) {
-        const err = new Error(scoreResult.error || 'Failed to score jobs');
-        if (scoreResult.isRateLimit) err.isRateLimit = true;
-        throw err;
-      }
-
-      // ── Branch construction (split + loose-fill) ──────────────────────
-      // Pure list-shaping happens in buildJobTree.js. JobHubNode here is
-      // just the IPC orchestrator.
-      const hasTarget = !!activeTargetRole;
-      const { targetList, otherList, displayedJobs } =
-        partitionJobsForBranches(scoreResult.scoredJobs, hasTarget);
-
-      // Step 4.5: Bucket displayed jobs into a category → salary-range tree.
-      // Target jobs get a careerDirection override so the AI clusters them
-      // under one synthetic "Target Role" category (see buildJobsForBucketing
-      // and TARGET_BUCKETING_CATEGORY). Failure here degrades to flat spawn.
-      let bucketTree = null;
-      const bucketingInput = buildJobsForBucketing(
-        displayedJobs, targetList, scoreResult.scoredJobs, hasTarget,
-      );
-      try {
-        const bucketResult = await window.electronAPI.bucketJobs({
-          jobs: bucketingInput,
-          nodeId: currentId,
+      // ── Block gate ──────────────────────────────────────────────────
+      // If any source hit a block-severity warning (captcha, login wall),
+      // pause before spending AI tokens on scoring. The user gets a chance
+      // to Solve / Skip each blocked source, then either auto-resume (when
+      // the last warning is cleared) or click "Score current results" to
+      // proceed with partial data. Mirrors SellHub's 'comps-ready' state.
+      // info-severity warnings (USAJobs config-missing) and throttles don't
+      // gate the pipeline — they're informational and bypassing them
+      // shouldn't require a manual click.
+      const searchWarnings = Array.isArray(searchResult.scrapeWarnings) ? searchResult.scrapeWarnings : [];
+      const blockingWarnings = searchWarnings.filter(w => w?.severity === 'block');
+      if (blockingWarnings.length > 0) {
+        updateGlobal(currentId, {
+          hubState: 'sources-ready',
+          pendingJobs: searchResult.jobs,
+          pendingTargetRole: activeTargetRole,
+          jobCount: searchResult.jobs.length,
+          scrapeWarnings: searchWarnings,
         });
-        if (cancelled()) return;
-        if (bucketResult?.success && Array.isArray(bucketResult.categories) && bucketResult.categories.length > 0) {
-          bucketTree = bucketResult.categories;
-        } else {
-          EventLogger.error('[JobHub] Bucketing returned no categories — falling back to flat spawn');
-        }
-      } catch (err) {
-        EventLogger.error('[JobHub] Bucketing failed — falling back to flat spawn:', err);
+        return;
       }
 
-      // Step 5: Spawn the tree. Pure node/edge construction lives in
-      // buildJobTreeNodes; we just pass results to ReactFlow below.
-      const baseNodeId = `job-${Date.now()}`;
-      const { newNodes, newEdges, scoreRangeMin, scoreRangeMax } = buildJobTreeNodes({
-        scoredJobs: scoreResult.scoredJobs,
-        bucketTree,
-        bucketingInput,
-        targetList,
-        otherList,
-        displayedJobs,
-        hasTarget,
-        targetRole: activeTargetRole,
+      await runScoringAndSpawn({
         profile,
+        jobs: searchResult.jobs,
+        scrapeWarnings: searchWarnings,
+        activeTargetRole,
         originalPos,
-        hubId: currentId,
-        baseNodeId,
-      });
-      const flatJobsToSpawn = hasTarget ? displayedJobs : scoreResult.scoredJobs;
-
-      if (newNodes.length > 0) {
-        document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
-        if (addElementsGlobally) {
-          addElementsGlobally(currentId, newNodes, newEdges, 'sibling');
-        } else {
-          // Fallback if not inside CanvasNavigationContext (dev/test).
-          addNodes(newNodes);
-          addEdges(newEdges);
-        }
-
-        // Frame the hub + freshly-spawned column of job cards. Same call the
-        // third Controls button issues; waits one frame so ReactFlow registers
-        // the new nodes before computing the bounds.
-        requestAnimationFrame(() => {
-          fitView({ duration: 600, padding: 0.2 });
-        });
-      }
-
-      // Track spawned IDs so re-runs can clean orphans even if edges were manually deleted.
-      const finalSourceCounts = {};
-      scoreResult.scoredJobs.forEach(job => {
-        finalSourceCounts[job.source] = (finalSourceCounts[job.source] || 0) + 1;
-      });
-
-      // Append shown jobs to the 60-day rolling history file so future runs
-      // can suppress them. Best-effort: a failed write must not break the
-      // user-visible pipeline. The backend handles 60-day pruning in the
-      // same write.
-      if (canvasFilePath && scoreResult.scoredJobs.length > 0) {
-        const historyRows = scoreResult.scoredJobs.map(j => ({
-          source: j.source, company: j.company, title: j.title, location: j.location, url: j.url,
-        }));
-        window.electronAPI.appendJobsHistory({ canvasFilePath, jobs: historyRows })
-          .catch(err => EventLogger.error('[JobHub] History append failed:', err));
-      }
-
-      updateGlobal(currentId, {
-        hubState: 'done',
-        resultCount: flatJobsToSpawn.length,
-        totalScoredCount: scoreResult.scoredJobs.length,
-        targetCount: hasTarget ? targetList.length : 0,
-        otherCount: hasTarget ? otherList.length : 0,
-        finalSourceCounts,
-        scoreRangeMin,
-        scoreRangeMax,
-        // Reset slider to min on every run — the previous absolute value is
-        // not meaningful across runs because the underlying score range
-        // changed (per spec: "show all" default).
-        scoreThreshold: scoreRangeMin,
-        // Persist scrape warnings so the done-state panel can show which
-        // sources got blocked / throttled even on a successful run with
-        // results — partial-block scenarios were previously invisible.
-        scrapeWarnings: Array.isArray(searchResult.scrapeWarnings) ? searchResult.scrapeWarnings : [],
+        cancelled,
       });
     } catch (error) {
-      if (cancelled()) return; // user cancelled — let resetHandler's revert stand
+      // User cancelled (Reset) OR deleted the hub mid-pipeline. The
+      // Node-deleted branch handles the race where the backend abort
+      // settles BEFORE the unmount effect has bumped the epoch — without
+      // it, we'd write a useless errorMessage onto data that's about to
+      // be discarded and log a misleading "pipeline failed" line.
+      if (cancelled() || isNodeDeletedAbort(error)) return;
       EventLogger.error('JobHubNode pipeline failed:', error);
       // Revert to the logical step ('done' if any results exist on the
       // canvas, else 'empty') and surface the failure via errorMessage so
@@ -499,12 +1077,159 @@ export function JobHubNode({ id, data }) {
         isRateLimit: !!error?.isRateLimit,
       });
     } finally {
-      if (isMountedRef.current) processingRef.current = false;
+      if (isMountedRef.current) {
+        processingRef.current = false;
+        if (pendingUSAJobsRefreshRef.current) {
+          pendingUSAJobsRefreshRef.current = false;
+          setTimeout(() => {
+            if (isMountedRef.current) {
+              triggerUSAJobsBackgroundSearch();
+            }
+          }, 0);
+        }
+      }
     }
-  }, [id, updateGlobal, addElementsGlobally, addNodes, addEdges, getNode, getNodes, canvasFilePath, data.maxAgeDays, data.targetRole, ensureSourceCards, fitView, epoch, resetSourceProgress]);
+  }, [id, updateGlobal, getNode, getNodes, canvasFilePath, data.maxAgeDays, data.targetRole, ensureSourceCards, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch]);
 
   const startProcessing = useCallback((filePath) => runPipeline({ filePath }), [runPipeline]);
   const startProcessingWithProfile = useCallback((profile) => runPipeline({ profile }), [runPipeline]);
+
+  /**
+   * Resume the pipeline from the paused 'sources-ready' state. Picks up the
+   * partial search results stored in data.pendingJobs and re-enters scoring.
+   * Called either:
+   *  - automatically when the user has resolved or skipped every blocking
+   *    warning (drained via the job-source-skip listener below), or
+   *  - manually via the "Score current results" button on the paused-state
+   *    UI, which also clears any remaining scrapeWarnings before resuming.
+   */
+  const resumeScoring = useCallback(async () => {
+    if (processingRef.current) return;
+    const pending = data.pendingJobs;
+    const profile = data.resumeProfile;
+    if (!pending || !Array.isArray(pending) || pending.length === 0) return;
+    if (!profile) return;
+    processingRef.current = true;
+    const currentId = id;
+    const cancelled = epoch.start();
+    const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
+    try {
+      await runScoringAndSpawn({
+        profile,
+        jobs: pending,
+        scrapeWarnings: Array.isArray(data.scrapeWarnings) ? data.scrapeWarnings : [],
+        activeTargetRole: data.pendingTargetRole || data.targetRole || '',
+        originalPos,
+        cancelled,
+      });
+    } catch (error) {
+      if (cancelled() || isNodeDeletedAbort(error)) return;
+      EventLogger.error('[JobHub] Resume scoring failed:', error);
+      updateGlobal(currentId, {
+        hubState: 'sources-ready',
+        errorMessage: error?.message || String(error),
+        isRateLimit: !!error?.isRateLimit,
+      });
+    } finally {
+      if (isMountedRef.current) {
+        processingRef.current = false;
+        if (pendingUSAJobsRefreshRef.current) {
+          pendingUSAJobsRefreshRef.current = false;
+          setTimeout(() => {
+            if (isMountedRef.current) {
+              triggerUSAJobsBackgroundSearch();
+            }
+          }, 0);
+        }
+      }
+    }
+  }, [id, data.pendingJobs, data.resumeProfile, data.scrapeWarnings, data.pendingTargetRole, data.targetRole, epoch, getNode, runScoringAndSpawn, updateGlobal, triggerUSAJobsBackgroundSearch]);
+
+  resumeScoringRef.current = resumeScoring;
+
+  // Listen for individual job-source skips dispatched from JobSourceCardNode.
+  // Each event drops the matching warning from data.scrapeWarnings; once the
+  // remaining list is empty AND we're in the paused 'sources-ready' state,
+  // auto-resume scoring with whatever the partial search collected.
+  useEffect(() => {
+    const onSkip = (e) => {
+      if (e.detail?.hubId !== id) return;
+      const skippedSourceId = e.detail?.sourceId;
+      if (!skippedSourceId) return;
+      const remaining = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== skippedSourceId);
+      scrapeWarningsRef.current = remaining;
+      updateGlobal(id, { scrapeWarnings: remaining });
+      // The gate that paused the pipeline was block-severity only (captcha,
+      // login walls). info-severity warnings (e.g. USAJobs config-missing,
+      // shown so the user knows why that source returned 0 but not requiring
+      // action) and throttles should NOT keep the resume from firing — the
+      // user already addressed every actionable block by this point.
+      const remainingBlocks = remaining.filter(w => w?.severity === 'block');
+      if (
+        remainingBlocks.length === 0 &&
+        hubStateRef.current === 'sources-ready' &&
+        pendingJobsRef.current && pendingJobsRef.current.length > 0 &&
+        !processingRef.current
+      ) {
+        resumeScoringRef.current?.();
+      }
+    };
+    document.addEventListener('job-source-skip', onSkip);
+    return () => document.removeEventListener('job-source-skip', onSkip);
+  }, [id, updateGlobal]);
+
+  // Listen for job-source-resolved dispatched after a successful Solve.
+  // Carries `items` — jobs extracted inline from the visible browser session
+  // that just cleared the bot challenge. Merge them into pendingJobs by
+  // (title|company|url) fingerprint so a retry-of-a-retry doesn't double-
+  // count, drop the source's warning, and auto-resume scoring if this was
+  // the last block.
+  useEffect(() => {
+    const onResolved = (e) => {
+      if (e.detail?.hubId !== id) return;
+      const resolvedSourceId = e.detail?.sourceId;
+      if (!resolvedSourceId) return;
+      const items = Array.isArray(e.detail?.items) ? e.detail.items : [];
+      // Merge new items into pendingJobs, replacing same-source entries so
+      // a retry brings fresh data rather than stacking on top of old.
+      const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
+      const keep = prevPending.filter(j => j?.source !== resolvedSourceId);
+      const seen = new Set(keep.map(j => `${j.title}|${j.company}|${j.url || ''}`));
+      const fresh = items.filter(j => {
+        const k = `${j.title}|${j.company}|${j.url || ''}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      const mergedPending = [...keep, ...fresh];
+      pendingJobsRef.current = mergedPending;
+      // Drop the resolved source's warning.
+      const remaining = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== resolvedSourceId);
+      scrapeWarningsRef.current = remaining;
+      updateGlobal(id, { pendingJobs: mergedPending, jobCount: mergedPending.length, scrapeWarnings: remaining });
+      // Auto-resume on no remaining BLOCK warnings (info / throttle stays).
+      const remainingBlocks = remaining.filter(w => w?.severity === 'block');
+      if (
+        remainingBlocks.length === 0 &&
+        hubStateRef.current === 'sources-ready' &&
+        mergedPending.length > 0 &&
+        !processingRef.current
+      ) {
+        resumeScoringRef.current?.();
+      }
+    };
+    document.addEventListener('job-source-resolved', onResolved);
+    return () => document.removeEventListener('job-source-resolved', onResolved);
+  }, [id, updateGlobal]);
+
+  // "Score current results" button on the paused-state UI: clear all
+  // remaining warnings (user chose to proceed without resolving) and resume.
+  const handleScoreCurrentResults = useCallback(() => {
+    if (data.hubState !== 'sources-ready') return;
+    scrapeWarningsRef.current = [];
+    updateGlobal(id, { scrapeWarnings: [] });
+    resumeScoring();
+  }, [id, data.hubState, updateGlobal, resumeScoring]);
 
   // Keep the ref up-to-date so handleDrop always calls the latest version.
   startProcessingRef.current = startProcessing;
@@ -548,6 +1273,8 @@ export function JobHubNode({ id, data }) {
     e?.stopPropagation();
     if (data.locked) return;
 
+    EventLogger.log(`[JobHub][${id}] User clicked Reset`);
+
     // Bump the epoch so any in-flight runPipeline step that settles after
     // this point sees a mismatch and bails (doesn't overwrite the freshly-
     // reverted state or spawn orphan nodes).
@@ -565,8 +1292,9 @@ export function JobHubNode({ id, data }) {
     // resume again or click Try Again on the error state.
     updateGlobal(id, { hubState: 'empty', filePath: null, errorMessage: null, isRateLimit: false });
     resetSourceProgress();
+    cleanupAllJobChildren();
     processingRef.current = false;
-  }, [data.locked, id, updateGlobal, epoch, resetSourceProgress]);
+  }, [data.locked, id, updateGlobal, epoch, resetSourceProgress, cleanupAllJobChildren]);
 
   // Bulk job-card status checks via the shared hook (same one SellHubNode
   // uses for marketplace cards). The hook also exposes getConnectedCards()
@@ -603,6 +1331,9 @@ export function JobHubNode({ id, data }) {
       childTypes: ['jobcard', 'jobgroup'],
     });
 
+    // Clear any paused-pipeline buffer so the new run doesn't accidentally
+    // resume the previous attempt's partial results.
+    updateGlobal(id, { pendingJobs: null, pendingTargetRole: null });
     resetSourceProgress();
     if (data.filePath) {
       // File still accessible — re-parse for freshness then run full pipeline
@@ -612,7 +1343,7 @@ export function JobHubNode({ id, data }) {
       addToast({ title: 'Re-running Search', description: 'Using stored resume profile — original file not needed.', type: 'info' });
       startProcessingWithProfile(data.resumeProfile);
     }
-  }, [data.locked, data.filePath, data.resumeProfile, id, getNodes, getEdges, deleteElements, addToast, startProcessingWithProfile, resetSourceProgress]);
+  }, [data.locked, data.filePath, data.resumeProfile, id, getNodes, getEdges, deleteElements, addToast, startProcessingWithProfile, resetSourceProgress, updateGlobal]);
 
   const isProcessing = PROCESSING_STATES.includes(hubState);
 
@@ -620,11 +1351,21 @@ export function JobHubNode({ id, data }) {
   const totalSourceJobs = Object.values(sourceProgress).reduce((sum, p) => sum + (p.count || 0), 0);
 
   const handleDismissError = useCallback(() => {
+    EventLogger.log(`[JobHub][${id}] User clicked Dismiss Error`);
     updateGlobal(id, { errorMessage: null, isRateLimit: false });
-  }, [id, updateGlobal]);
+    // Cleanup orphaned platform cards if there are no job result nodes on the canvas
+    const hubChildrenOnCanvas = getNodes().some(n =>
+      (n.type === 'jobcard' || n.type === 'jobgroup') && n.data?.hubId === id
+    );
+    if (!hubChildrenOnCanvas) {
+      EventLogger.log(`[JobHub][${id}] Dismissing error with empty canvas; cleaning up orphaned source cards`);
+      cleanupAllJobChildren();
+    }
+  }, [id, updateGlobal, getNodes, cleanupAllJobChildren]);
 
   const handleRetryFailed = useCallback(() => {
     if (data.locked) return;
+    EventLogger.log(`[JobHub][${id}] User clicked Try Again on error banner`);
     updateGlobal(id, { errorMessage: null, isRateLimit: false });
     handleRerun();
   }, [data.locked, id, updateGlobal, handleRerun]);
@@ -693,6 +1434,22 @@ export function JobHubNode({ id, data }) {
             activeSourceId={lastActiveSource}
             onReset={resetHandler}
           />
+        )}
+
+        {/* Paused on blocked sources — show the resolve/skip decision UI.
+            Banner stays visible above (e.g. if a prior scoring attempt
+            failed and we reverted here). */}
+        {hubState === 'sources-ready' && (
+          <>
+            {banner}
+            <JobHubSourcesReadyState
+              blockedCount={(data.scrapeWarnings || []).filter(w => w?.severity === 'block').length}
+              jobsAvailable={Array.isArray(data.pendingJobs) ? data.pendingJobs.length : (data.jobCount || 0)}
+              resumeSummary={data.resumeSummary}
+              locked={!!data.locked}
+              onScoreCurrent={handleScoreCurrentResults}
+            />
+          </>
         )}
 
         {/* Done state — shows stale results + banner above when a re-run failed */}

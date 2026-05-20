@@ -54,3 +54,21 @@ export function useEpochCancellation() {
 
   return useMemo(() => ({ start, bump }), [start, bump]);
 }
+
+/**
+ * Recognize the abort error the backend throws when its AbortController is
+ * cancelled via `abortNodeTasks(nodeId)`. Used in catch blocks to bail
+ * silently — without this check the post-await catch runs BEFORE the
+ * unmount effect bumps the epoch (cancelNodeTask fires from Canvas's
+ * `onNodesDelete` before React processes the resulting unmount), so the
+ * `cancelled()` predicate would still be false and the pipeline would
+ * write a spurious errorMessage onto the about-to-be-deleted hub data
+ * plus log a misleading "pipeline failed: Node deleted" error.
+ *
+ * Match string is defined in electron/ipc/ipcUtils.js abortNodeTasks().
+ */
+export function isNodeDeletedAbort(error) {
+  if (!error) return false;
+  const msg = typeof error === 'string' ? error : error.message;
+  return msg === 'Node deleted';
+}

@@ -5,6 +5,7 @@ import { SELL_PLATFORMS } from '../utils/constants';
 import { MonitorStatusBadge } from '../components/MonitorStatusBadge';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { useMonitorCheck } from '../hooks/useMonitorCheck';
+import { useSyncWhileFocused } from '../hooks/useSyncWhileFocused';
 
 /**
  * MarketplaceCardNode — one persistent canvas node per marketplace the user
@@ -32,7 +33,13 @@ import { useMonitorCheck } from '../hooks/useMonitorCheck';
 export function MarketplaceCardNode({ id, data }) {
   const { updateNodeData } = useReactFlow();
   const [watchOpen, setWatchOpen] = useState(false);
-  const [watchDraft, setWatchDraft] = useState(() => (data.watchUrls || []).join('\n'));
+  // Sync the editable draft from data.watchUrls when not focused, so an external
+  // change (undo/redo, hub re-spawning the card) isn't left stale in the textarea
+  // — and a subsequent blur doesn't clobber the real saved URLs with a stale
+  // draft. Mirrors SettingsPanel's PlatformWatchUrlsRow, which fixed this exact
+  // once-initialized-useState bug.
+  const { value: watchDraft, setValue: setWatchDraft, focusProps: watchFocusProps, focusRef: watchFocusRef } =
+    useSyncWhileFocused((data.watchUrls || []).join('\n'));
 
   const platform = SELL_PLATFORMS.find(p => p.id === data.platformId);
   const url = data.listingUrl?.trim() || '';
@@ -57,9 +64,10 @@ export function MarketplaceCardNode({ id, data }) {
   }, [id, updateNodeData]);
 
   const saveWatchUrls = useCallback(() => {
+    watchFocusRef.current = false; // end the focus-pause so external syncs resume
     const lines = (watchDraft || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
     updateNodeData(id, { watchUrls: lines });
-  }, [watchDraft, id, updateNodeData]);
+  }, [watchDraft, watchFocusRef, id, updateNodeData]);
 
   const openInBrowser = useCallback(() => {
     // No listing URL yet → open the marketplace's "create listing" page so the
@@ -152,6 +160,7 @@ export function MarketplaceCardNode({ id, data }) {
               rows={2}
               value={watchDraft}
               onChange={(e) => setWatchDraft(e.target.value)}
+              onFocus={watchFocusProps.onFocus}
               onBlur={saveWatchUrls}
               onPointerDown={(e) => e.stopPropagation()}
               placeholder={'One URL per line. Card-specific extras\n(platform-wide go in Settings).'}

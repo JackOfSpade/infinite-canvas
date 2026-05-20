@@ -37,6 +37,13 @@ const store = new Store({
     // the system robust to "the SOLD notification lives in the activity feed,
     // not on the listing page yet."
     marketplaceWatchUrls: {},
+    // Per-source credentials for job-search APIs that require keys. Used by
+    // electron/ipc/jobs.js fetchApiSources. Storing here (vs .env) lets the
+    // user configure via the Settings UI and persists across sessions.
+    jobs: {
+      usajobsApiKey: '',
+      usajobsEmail: '',
+    },
   },
 });
 
@@ -95,6 +102,20 @@ export function registerSettingsHandlers() {
 
 export function getAISettings() {
   return store.get('ai');
+}
+
+/**
+ * Per-source credentials for job-search APIs. Today only USAJobs requires a
+ * key; the structure leaves room to add more sources without another getter.
+ * Falls back to process.env for back-compat with users still using the old
+ * .env-based config (purely additive — UI-configured values take precedence).
+ */
+export function getJobsSettings() {
+  const jobs = store.get('jobs') || {};
+  return {
+    usajobsApiKey: jobs.usajobsApiKey || process.env.USAJOBS_API_KEY || '',
+    usajobsEmail:  jobs.usajobsEmail  || process.env.USAJOBS_EMAIL  || '',
+  };
 }
 
 /**

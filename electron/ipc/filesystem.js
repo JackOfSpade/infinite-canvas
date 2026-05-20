@@ -111,6 +111,99 @@ async function atomicWriteFile(targetPath, data) {
   }
 }
 
+/**
+ * Helper to construct the sidecar path for a given canvas path.
+ */
+function getSidecarPath(filePath) {
+  return filePath.endsWith('.json') ? filePath.slice(0, -5) + '.progress.json' : filePath + '.progress.json';
+}
+
+/**
+ * Extracts volatile transient/paused state from the nodes array and returns it,
+ * while stripping the transient keys and resetting states in the original nodes
+ * array (mutating it).
+ */
+function extractSidecarData(nodes) {
+  const hubs = [];
+  const cards = [];
+
+  const traverseAndExtract = (nodeList) => {
+    if (!Array.isArray(nodeList)) return;
+    for (const n of nodeList) {
+      if (n.type === 'jobhub' && n.data?.hubState === 'sources-ready') {
+        const d = n.data;
+        hubs.push({
+          id: n.id,
+          hubState: d.hubState,
+          scrapeWarnings: d.scrapeWarnings,
+          pendingJobs: d.pendingJobs,
+          pendingTargetRole: d.pendingTargetRole,
+          errorMessage: d.errorMessage,
+          isRateLimit: d.isRateLimit,
+        });
+        
+        // Strip transient/paused fields from main file data
+        d.hubState = 'empty';
+        delete d.scrapeWarnings;
+        delete d.pendingJobs;
+        delete d.pendingTargetRole;
+        delete d.errorMessage;
+        delete d.isRateLimit;
+      } else if (n.type === 'jobsourcecard' && n.data?.persistedProgress) {
+        cards.push({
+          id: n.id,
+          persistedProgress: n.data.persistedProgress,
+        });
+        
+        // Strip transient/paused progress from main file data
+        delete n.data.persistedProgress;
+      }
+      
+      if (n.type === 'group' && n.data?.canvasData?.nodes) {
+        traverseAndExtract(n.data.canvasData.nodes);
+      }
+    }
+  };
+
+  traverseAndExtract(nodes);
+  return { hubs, cards };
+}
+
+/**
+ * Merges saved transient/paused sidecar states back into the matching nodes.
+ */
+function mergeSidecarData(nodes, sidecarData) {
+  if (!sidecarData) return;
+  const hubsMap = new Map((sidecarData.hubs || []).map(h => [h.id, h]));
+  const cardsMap = new Map((sidecarData.cards || []).map(c => [c.id, c]));
+
+  const traverseAndMerge = (nodeList) => {
+    if (!Array.isArray(nodeList)) return;
+    for (const n of nodeList) {
+      if (n.type === 'jobhub' && hubsMap.has(n.id)) {
+        const sidecarHub = hubsMap.get(n.id);
+        n.data = n.data || {};
+        n.data.hubState = sidecarHub.hubState || 'sources-ready';
+        if (sidecarHub.scrapeWarnings !== undefined) n.data.scrapeWarnings = sidecarHub.scrapeWarnings;
+        if (sidecarHub.pendingJobs !== undefined) n.data.pendingJobs = sidecarHub.pendingJobs;
+        if (sidecarHub.pendingTargetRole !== undefined) n.data.pendingTargetRole = sidecarHub.pendingTargetRole;
+        if (sidecarHub.errorMessage !== undefined) n.data.errorMessage = sidecarHub.errorMessage;
+        if (sidecarHub.isRateLimit !== undefined) n.data.isRateLimit = sidecarHub.isRateLimit;
+      } else if (n.type === 'jobsourcecard' && cardsMap.has(n.id)) {
+        const sidecarCard = cardsMap.get(n.id);
+        n.data = n.data || {};
+        if (sidecarCard.persistedProgress !== undefined) n.data.persistedProgress = sidecarCard.persistedProgress;
+      }
+
+      if (n.type === 'group' && n.data?.canvasData?.nodes) {
+        traverseAndMerge(n.data.canvasData.nodes);
+      }
+    }
+  };
+
+  traverseAndMerge(nodes);
+}
+
 export function registerFilesystemHandlers() {
   handleSafe('scan-directory', async (event, dirPath) => {
     const visited = new Set();
@@ -155,6 +248,26 @@ export function registerFilesystemHandlers() {
       if (canceled || !dialogPath) return { canceled: true };
       targetPath = dialogPath;
     }
+
+    // Embedded Progress System: Extract progress data if in sources-ready state
+    const { hubs, cards } = extractSidecarData(data.nodes || []);
+    
+    if (hubs.length > 0) {
+      data.transientProgress = { hubs, cards };
+      logger.info('[FileSystem] Embedded progress state in canvas JSON data');
+    } else {
+      delete data.transientProgress;
+    }
+
+    // Delete legacy separate sidecar progress file if present
+    try {
+      const sidecarPath = getSidecarPath(targetPath);
+      if (fs.existsSync(sidecarPath)) {
+        await fs.promises.unlink(sidecarPath);
+        logger.info(`[FileSystem] Cleaned up legacy separate progress sidecar: ${sidecarPath}`);
+      }
+    } catch { /* ignore */ }
+
     // Production Hardening: Use atomic write to prevent data corruption
     await atomicWriteFile(targetPath, JSON.stringify(data));
     
@@ -188,6 +301,46 @@ export function registerFilesystemHandlers() {
     try {
       const data = JSON.parse(content);
       logger.info(`[FileSystem] Loaded workspace: ${targetPath} (${stats.size} bytes)`);
+
+      // Clean up legacy separate progress sidecar file if it exists
+      try {
+        const sidecarPath = getSidecarPath(targetPath);
+        if (fs.existsSync(sidecarPath)) {
+          try {
+            const sidecarContent = await fs.promises.readFile(sidecarPath, 'utf-8');
+            const sidecarData = JSON.parse(sidecarContent);
+            mergeSidecarData(data.nodes || [], sidecarData);
+            logger.info(`[FileSystem] Migrated and merged legacy progress sidecar data from ${sidecarPath}`);
+          } catch (err) {
+            logger.error(`[FileSystem] Failed to parse legacy sidecar data: ${sidecarPath}`, err);
+          }
+          await fs.promises.unlink(sidecarPath);
+          logger.info(`[FileSystem] Deleted legacy progress sidecar file: ${sidecarPath}`);
+        }
+      } catch { /* ignore */ }
+
+      // Check for embedded transientProgress
+      if (data.transientProgress) {
+        const sidecarData = data.transientProgress;
+        // Merge progress back into the nodes for V8/React Flow memory
+        mergeSidecarData(data.nodes || [], sidecarData);
+        logger.info('[FileSystem] Restored embedded transient progress into React Flow memory nodes');
+        
+        // Immediately delete/strip the saved state from the file on disk
+        delete data.transientProgress;
+        
+        try {
+          const cleanData = JSON.parse(JSON.stringify(data));
+          // Strip nodes in cleanData so the disk copy is fully clean
+          extractSidecarData(cleanData.nodes || []);
+          delete cleanData.transientProgress;
+          
+          await atomicWriteFile(targetPath, JSON.stringify(cleanData));
+          logger.info(`[FileSystem] Immediately deleted saved transient progress from disk file: ${targetPath}`);
+        } catch (err) {
+          logger.error(`[FileSystem] Failed to write clean canvas to disk after loading: ${targetPath}`, err);
+        }
+      }
       
       // Cleanup any orphaned .tmp files left over from past crashes in this directory
       cleanupTempFiles(path.dirname(targetPath)).catch(err => logger.warn('Load cleanup failed:', err));

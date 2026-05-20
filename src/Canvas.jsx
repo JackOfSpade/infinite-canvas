@@ -24,6 +24,7 @@ import { MarketplaceCardNode } from './nodes/MarketplaceCardNode';
 import { CompSourceCardNode } from './nodes/CompSourceCardNode';
 import { JobSourceCardNode } from './nodes/JobSourceCardNode';
 import { JobGroupNode } from './nodes/JobGroupNode';
+import { sanitizeEdgesForSave } from './utils/serializationUtils';
 import {CustomizeDialog} from './components/CustomizeDialog';
 
 import { createTextNode } from './utils/nodeFactory';
@@ -91,6 +92,21 @@ export function Canvas() {
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState([]);
   const [drawings, setDrawings] = useState([]);
   const confirmDialogDataRef = useRef(null);
+
+  // Self-healing orphan-edge prune: whenever the node set changes, drop any
+  // edge whose source/target isn't a live node. Belt-and-suspenders for the
+  // save-time and load-time strips in serializationUtils — covers any code
+  // path that re-introduces orphans (older code paths, undo of a delete,
+  // pre-fix saved files reloaded over an open session, etc.). Prevents the
+  // minimap from rendering ghost connections to deleted-hub positions.
+  // No-op when the edge set is already clean (returns the same array
+  // reference so React doesn't re-render).
+  useEffect(() => {
+    setEdges(prev => {
+      const clean = sanitizeEdgesForSave(prev, nodes);
+      return clean.length === prev.length ? prev : clean;
+    });
+  }, [nodes, setEdges]);
 
   const { addToast } = useToast();
 

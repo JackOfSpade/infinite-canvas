@@ -97,6 +97,36 @@ export function migrateGroupNodes(nodes) {
  * This is recursive: group (CanvasNode) nodes can contain arbitrary
  * nested canvases, so we must sanitize down every level.
  */
+/**
+ * Drop edges whose source or target node no longer exists in the live set.
+ * Orphan edges accumulate when a node is force-deleted from outside the
+ * regular delete path (or before the cascade-cleanup utility existed), then
+ * persist forever in the saved JSON — bloating the file and rendering as
+ * dashed lines to phantom positions on the minimap.
+ *
+ * Call this AFTER sanitizeNodesForSave (which may have dropped ephemerals),
+ * passing the SANITIZED node list so edges to dropped nodes are also pruned.
+ */
+export function sanitizeEdgesForSave(edges, sanitizedNodes) {
+  if (!Array.isArray(edges)) return edges;
+  // Build the live node-id set, recursing into group-node canvasData so
+  // edges that target nodes inside a sub-canvas aren't mistakenly orphaned.
+  // (Edges at one level can only reference nodes at the same level in
+  // ReactFlow's data model, but recursing is cheap insurance against any
+  // future shape change.)
+  const liveIds = new Set();
+  const collect = (arr) => {
+    if (!Array.isArray(arr)) return;
+    for (const n of arr) {
+      if (!n?.id) continue;
+      liveIds.add(n.id);
+      if (n.type === 'group' && n.data?.canvasData?.nodes) collect(n.data.canvasData.nodes);
+    }
+  };
+  collect(sanitizedNodes);
+  return edges.filter(e => liveIds.has(e?.source) && liveIds.has(e?.target));
+}
+
 export function sanitizeNodesForSave(nodes) {
   if (!Array.isArray(nodes)) return nodes;
   // Drop ephemeral nodes (e.g. comp-source cards spawned during price research)
@@ -106,7 +136,7 @@ export function sanitizeNodesForSave(nodes) {
   // pendingComps and scrapeWarnings) but strip the cards that hold the
   // Solve/Skip buttons, leaving the user no way to act.
   const filtered = nodes.filter(n => {
-    const isEphemeral = n.type === 'compsourcecard' || n.data?.ephemeral;
+    const isEphemeral = n.type === 'compsourcecard' || n.type === 'jobsourcecard' || n.data?.ephemeral;
     if (!isEphemeral) return true;
     const p = n.data?.persistedProgress;
     return !!(p?.warning || p?.status === 'error');
@@ -132,18 +162,40 @@ export function sanitizeNodesForSave(nodes) {
     // - style.opacity (jobcard only): set transiently by toggleSourceFilter.
     const hasTransientData = n.data && ('isDropTarget' in n.data || '_hmr' in n.data);
     const hasTransientOpacity = n.type === 'jobcard' && n.style?.opacity !== undefined;
-    
-    // Reset stuck processing states so hubs auto-restart gracefully on reload
-    const isHub = n.type === 'jobhub' || n.type === 'sellhub';
+
+    // Reset stuck *processing* states so hubs auto-restart gracefully on reload.
+    // 'sources-ready' is intentionally NOT in this list: it's the paused JobHub
+    // state (search ran, user hasn't resolved/skipped blocked sources yet) and
+    // is preserved across reload — like SellHub's 'comps-ready' — so the user
+    // can resume. Its recovery buffers (pendingJobs / scrapeWarnings) are kept
+    // by the conditional key list below; only the error banner is stripped.
+    const isJobHub = n.type === 'jobhub';
+    const isSellHub = n.type === 'sellhub';
+    const isHub = isJobHub || isSellHub;
     const transientHubStates = ['parsing', 'querying', 'searching', 'scoring', 'analyzing', 'researching'];
     const hasTransientHubState = isHub && n.data && transientHubStates.includes(n.data.hubState);
 
-    if (!hasTransientData && !hasTransientOpacity && !hasTransientHubState) return n;
+    // Hub-specific transient data fields. These are diagnostic / pending-flow
+    // state generated within a single session — once the app restarts the
+    // user has no context for them, and persisting them surfaces stale
+    // "report an issue" banners from runs they don't remember. Stripping on
+    // save means the same-session experience is unchanged (the fields live
+    // in React state until the next save) but a fresh session loads clean.
+    const isSourcesReady = isJobHub && n.data?.hubState === 'sources-ready';
+    const JOBHUB_TRANSIENT_KEYS = isSourcesReady
+      ? ['errorMessage', 'isRateLimit']
+      : ['scrapeWarnings', 'pendingJobs', 'pendingTargetRole', 'errorMessage', 'isRateLimit'];
+    const hasJobHubTransient = isJobHub && n.data && JOBHUB_TRANSIENT_KEYS.some(k => k in n.data);
+
+    if (!hasTransientData && !hasTransientOpacity && !hasTransientHubState && !hasJobHubTransient) return n;
 
     let result = n;
-    if (hasTransientData || hasTransientHubState) {
+    if (hasTransientData || hasTransientHubState || hasJobHubTransient) {
       const { isDropTarget: _idt, _hmr: _h, ...cleanData } = result.data || {};
       if (hasTransientHubState) cleanData.hubState = 'empty';
+      if (hasJobHubTransient) {
+        for (const k of JOBHUB_TRANSIENT_KEYS) delete cleanData[k];
+      }
       result = { ...result, data: cleanData };
     }
     if (hasTransientOpacity) {

@@ -2,24 +2,31 @@ import React, { useEffect, useState } from 'react';
 import { Dialog } from './Dialog';
 import { Clipboard, Save } from 'lucide-react';
 
-// Persist the in-progress description across dialog open/close cycles AND
-// across app restarts. Users were losing in-progress reports when they
-// reopened the dialog after a successful submit; preserving the draft is
-// almost always what they want, and they can select-all to clear if not.
+// Persist the in-progress description across dialog open/close cycles but NOT
+// across app restarts/exit.
 const DRAFT_STORAGE_KEY = 'issue-reporter-draft';
 
 export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
   const [description, setDescription]   = useState(() => {
-    try { return localStorage.getItem(DRAFT_STORAGE_KEY) || ''; } catch { return ''; }
+    try { return sessionStorage.getItem(DRAFT_STORAGE_KEY) || ''; } catch { return ''; }
   });
   const [isSubmitting, setIsSubmitting]  = useState(false);
   const [activeMode, setActiveMode]      = useState(null); // 'clipboard' | 'file'
 
-  // Mirror description to localStorage on every change so reopens (and even
-  // app restarts) bring back what the user typed.
+  // Mirror description to sessionStorage on every change so reopens
+  // bring back what the user typed within the same session.
   useEffect(() => {
-    try { localStorage.setItem(DRAFT_STORAGE_KEY, description); } catch { /* quota/disabled */ }
+    try { sessionStorage.setItem(DRAFT_STORAGE_KEY, description); } catch { /* quota/disabled */ }
   }, [description]);
+
+  // Clean up legacy localStorage draft key from previous versions on mount
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(DRAFT_STORAGE_KEY) !== null) {
+        localStorage.removeItem(DRAFT_STORAGE_KEY);
+      }
+    } catch { /* ignore */ }
+  }, []);
 
   const isMountedRef = React.useRef(true);
   React.useEffect(() => {
