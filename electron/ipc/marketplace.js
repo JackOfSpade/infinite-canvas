@@ -32,6 +32,28 @@ import {
   fetchReverbListings,
 } from '../extractors/apiExtractors.js';
 
+// ── Pipeline telemetry ───────────────────────────────────────────────────────
+// Sell-side analog of jobs.js's getJobsTelemetry: records the last marketplace
+// pipeline run so the bug reporter can answer "did we analyze all the comps we
+// found and did pricing work?" without depending on the renderer node tree
+// (gone the instant the SellHub is deleted) or the 60-line log ring buffer
+// (scrolls). Each stage stamps independently — a captcha-resolve or single-
+// source rescrape can run without a fresh full scrape.
+const marketplaceTelemetry = {
+  analyze:   null, // { ts, photos, title, mock }
+  scrape:    null, // { ts, sold, active, sources, warnings, blocked }
+  resolves:  {},   // { [sourceId]: { ts, extracted, category } } — keyed so a
+                   // multi-source recovery (e.g. Mercari then eBay) keeps every
+                   // resolve; re-resolving a source replaces its entry. Reset
+                   // when a fresh scrape stamps so resolves are scoped to it.
+  synthesis: null, // { ts, soldFound, activeFound, soldUsed, activeUsed, recommendedPrice, matchQuality }
+  fit:       null, // { ts, platforms, good, unfit }
+};
+
+export function getMarketplaceTelemetry() {
+  return marketplaceTelemetry;
+}
+
 // ── Source → URL + Extractor mapping (browser pool sources only) ────────────
 // Reverb and StockX have been moved to fetchApiMarketplaceSources (direct HTTP).
 //
@@ -303,6 +325,12 @@ Return a JSON object:
 Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`, { signal, task: 'vision-product-analysis', responseSchema: VISION_PRODUCT_ANALYSIS_SCHEMA });
 
     logger.info(`[Marketplace][${nodeId}] Product identified:`, result?.generated_title || 'Unknown');
+    marketplaceTelemetry.analyze = {
+      ts: Date.now(),
+      photos: Array.isArray(imagePaths) ? imagePaths.length : 0,
+      title: result?.generated_title || '(unknown)',
+      mock: !!result?._mockMode,
+    };
     return { product: result };
   });
 
@@ -368,6 +396,17 @@ Be specific about what you can clearly see. If you can't identify brand or model
     }
 
     logger.info(`[Marketplace][${nodeId}] Scrape done: ${allComps.sold.length} sold, ${allComps.active.length} active, ${scrapeWarnings.length} warning(s)`);
+    marketplaceTelemetry.scrape = {
+      ts: Date.now(),
+      sold: allComps.sold.length,
+      active: allComps.active.length,
+      sources: tasks.length + apiSourceIds.length,
+      warnings: scrapeWarnings.length,
+      blocked: scrapeWarnings.filter(w => w?.severity === 'block').length,
+    };
+    // A fresh full scrape starts a new run — drop any resolves recorded for a
+    // previous product/run so the report's funnel only shows this run's.
+    marketplaceTelemetry.resolves = {};
 
     if (signal.aborted) throw new Error('Window closed');
 
@@ -386,6 +425,10 @@ Be specific about what you can clearly see. If you can't identify brand or model
     logger.info(`[Marketplace][${nodeId}] Synthesizing price from ${sold.length} sold + ${active.length} active comps`);
 
     if (total === 0) {
+      marketplaceTelemetry.synthesis = {
+        ts: Date.now(), soldFound: 0, activeFound: 0, soldUsed: 0, activeUsed: 0,
+        recommendedPrice: null, matchQuality: 'none',
+      };
       return {
         pricing: {
           recommended_price: null,
@@ -508,6 +551,21 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       responseSchema: PRICE_SYNTHESIS_SCHEMA,
     });
 
+    // soldUsed/activeUsed are the counts that ACTUALLY reached the model after
+    // the top-25/15 title-match slice above — the "used vs. found" gap is the
+    // sell-side analog of the jobs funnel's expected drops (by-design, not lost
+    // data). recommended_price=null is the "scraped comps but produced no
+    // price" signal.
+    marketplaceTelemetry.synthesis = {
+      ts: Date.now(),
+      soldFound: sold.length,
+      activeFound: active.length,
+      soldUsed: sortedSold.slice(0, 25).length,
+      activeUsed: sortedActive.slice(0, 15).length,
+      recommendedPrice: pricing?.recommended_price ?? null,
+      matchQuality: pricing?.match_quality || '(unknown)',
+    };
+
     return { pricing };
   });
 
@@ -565,6 +623,13 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
         url: null,
       });
     }
+    // Keyed by sourceId so a multi-source recovery keeps every resolve;
+    // re-resolving the same source replaces its entry (latest wins).
+    marketplaceTelemetry.resolves[sourceId] = {
+      ts: Date.now(),
+      extracted: Array.isArray(result?.items) ? result.items.length : 0,
+      category,
+    };
     return { ...result, category };
   });
 
@@ -621,6 +686,13 @@ Notes:
 Be confident — don't mark everything "good." If you're unsure, lean "good" unless there's a real policy/audience reason.`, { signal, task: 'platform-fit-assessment', responseSchema: buildPlatformFitSchema(platforms.map(p => p.id)) });
 
     logger.info(`[Marketplace][${nodeId}] Fit verdicts:`, Object.entries(verdict || {}).map(([k, v]) => `${k}=${v?.fit}`).join(' '));
+    const verdicts = Object.values(verdict || {});
+    marketplaceTelemetry.fit = {
+      ts: Date.now(),
+      platforms: platforms.length,
+      good: verdicts.filter(v => v?.fit === 'good').length,
+      unfit: verdicts.filter(v => v?.fit === 'unfit').length,
+    };
     return { fit: verdict || {} };
   });
 

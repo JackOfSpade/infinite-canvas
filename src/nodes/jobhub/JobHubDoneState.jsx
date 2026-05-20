@@ -34,11 +34,17 @@ export function JobHubDoneState({
   // Status-monitoring (per-card AI status check across all connected JobCardNodes)
   onCheckAllStatuses,
   checkingAll = false,
+  // Bulk-remove cards a status check flagged as Filled/Closed.
+  onClearClosed,
   // Anti-bot signals collected during the search pipeline
   scrapeWarnings = [],
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const { addToast } = useToast();
+
+  // Cards a status sweep flagged as no longer open (Filled/Closed/expired).
+  // Kept in sync with CLOSED_MONITOR_STATUSES in JobHubNode.
+  const closedCount = jobCards.filter(c => ['sold', 'ended', 'expired'].includes(c?.monitorStatus)).length;
 
   // Slider is "active" when the user has nudged it above the dynamic minimum.
   // When min === max, the slider is a no-op and we hide it entirely.
@@ -132,6 +138,21 @@ export function JobHubDoneState({
         >
           <Activity size={9} className={checkingAll ? 'animate-pulse' : ''} />
           {checkingAll ? 'Checking…' : `Check All Statuses (${jobCards.length})`}
+        </button>
+      )}
+
+      {/* Clear closed — appears once a status check flags any postings as
+          Filled/Closed. Removes those cards (and any now-empty groups); they
+          stay in the jobs-history ledger so they won't re-surface on re-run. */}
+      {!locked && closedCount > 0 && onClearClosed && (
+        <button
+          onClick={onClearClosed}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="nodrag mt-1.5 w-full flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-white/5 hover:bg-red-500/15 text-white/50 hover:text-red-300 text-[10px] font-medium border border-white/10 transition-colors"
+          title="Remove job cards detected as Filled or Closed. They stay in history, so they won't show up again on a re-run."
+        >
+          <X size={9} />
+          Clear closed ({closedCount})
         </button>
       )}
 

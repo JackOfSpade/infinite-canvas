@@ -235,6 +235,7 @@ async function executeScrape(url, extractorJS, options = {}) {
     throw new Error('Browser pool is shutting down');
   }
 
+  const scrapeStart = Date.now();
   try {
     const timeoutPromise = new Promise((_, reject) => {
       timeoutId = setTimeout(() => reject(new Error(`Scrape timed out after ${timeoutMs}ms for ${url}`)), timeoutMs);
@@ -275,13 +276,17 @@ async function executeScrape(url, extractorJS, options = {}) {
           }, referer);
         }
 
-        // Navigate with network wait. Capture the Response so we can read
-        // HTTP status / final URL for anti-bot detection after the extractor
-        // runs — if the response fails (timeout, etc.) we keep going so the
-        // extractor still gets a shot, but the detector sees status=0.
+        // Navigate. Default to 'domcontentloaded' rather than 'networkidle2':
+        // ad/tracking-heavy result pages (e.g. eBay sold listings) never reach
+        // network-idle, so networkidle2 burned the entire timeout budget and
+        // tripped the outer hard timeout. We instead get the DOM fast and let
+        // the extractor-stabilization loop below decide when results are ready
+        // — a far better readiness signal than "the network went quiet." Still
+        // capture the Response for anti-bot detection (status / final URL); if
+        // navigation fails we keep going so the extractor gets a shot.
         let pageResponse = null;
         try {
-          pageResponse = await page.goto(url, { waitUntil: options.waitUntil || 'networkidle2', timeout: timeoutMs - 5000 });
+          pageResponse = await page.goto(url, { waitUntil: options.waitUntil || 'domcontentloaded', timeout: timeoutMs - 5000 });
         } catch (e) {
           if (!e?.message?.includes('ERR_ABORTED') && !e?.message?.includes('net::ERR_') && !e?.message?.includes('TimeoutError') && !e?.message?.includes('timeout')) {
             throw e;
@@ -310,17 +315,60 @@ async function executeScrape(url, extractorJS, options = {}) {
           await humanMouseMove(page);
         }
 
-        // Extra settle time for JS-rendered content (add randomized jitter)
-        if (waitMs > 0) {
-          const jitteredWait = waitMs + Math.floor(Math.random() * 1000) - 500;
-          await new Promise(r => setTimeout(r, Math.max(500, jitteredWait)));
+        // ── Dynamic content readiness ───────────────────────────────────────
+        // Replaces the old "fixed settle delay → single extract." Poll the
+        // extractor and wait for its item COUNT to stabilize: a server-rendered
+        // page is ready on the first read; a JS/lazy grid is waited on exactly
+        // as long as items keep arriving, then stops. This is what makes the
+        // lighter 'domcontentloaded' navigation safe, and it removes the
+        // guess-a-settle-time magic number. Bounded by the remaining timeout
+        // budget (with headroom for anti-bot detection + close) and by a short
+        // zero-streak so a genuinely-empty page returns promptly.
+        const countItems = (r) => Array.isArray(r)
+          ? r.length
+          : (r && typeof r === 'object' && Array.isArray(r.items) ? r.items.length : (r ? -1 : 0));
+        // -1 = an opaque (non-array, non-{items}) shape we can't count → accept on sight.
+        const READINESS_POLL_MS = 600;
+        const STABLE_READS_REQUIRED = 2;   // count unchanged this many reads → settled
+        const MAX_ZERO_READS = 6;          // ~3.6s of 0 items → accept empty
+        const readinessDeadline = scrapeStart + timeoutMs - 6000; // leave headroom
+
+        // One short human-like beat before the first read (replaces the old
+        // jittered settle), capped so it never dominates the budget.
+        await new Promise(r => setTimeout(r, Math.max(300, Math.min(waitMs, 1200))));
+
+        let extractorResult = null;
+        let lastCount = -2;   // sentinel so the first real read always "changes"
+        let stableReads = 0;
+        let zeroReads = 0;
+        while (true) {
+          if (isSettled || options.signal?.aborted) break;
+          let r = null;
+          try { r = await page.evaluate(extractorJS); }
+          catch { /* navigated mid-evaluate — retry next tick */ }
+          if (r != null) {
+            extractorResult = r;                 // always keep the freshest result
+            const count = countItems(r);
+            if (count === -1) break;             // opaque shape — done
+            if (count > 0) {
+              zeroReads = 0;
+              if (count === lastCount) { if (++stableReads >= STABLE_READS_REQUIRED) break; }
+              else { stableReads = 0; lastCount = count; }
+            } else if (++zeroReads >= MAX_ZERO_READS) {
+              break;                             // genuinely empty (or unparseable)
+            }
+          }
+          if (Date.now() >= readinessDeadline) break;  // budget spent — take freshest
+          await new Promise(res => setTimeout(res, READINESS_POLL_MS));
+        }
+        // Guarantee a value even if every evaluate threw (rare).
+        if (extractorResult == null) {
+          try { extractorResult = await page.evaluate(extractorJS); } catch { extractorResult = []; }
         }
 
-        // Execute the extractor in page context, then run anti-bot
-        // detection on what we observed. Both the raw extractor result and
-        // the warning (if any) flow back to the caller so the UI can render
-        // a visible signal instead of silently accepting a blocked page.
-        const extractorResult = await page.evaluate(extractorJS);
+        // Run anti-bot detection on what we observed. Both the raw extractor
+        // result and the warning (if any) flow back to the caller so the UI can
+        // render a visible signal instead of silently accepting a blocked page.
         let warning = null;
         try {
           const { detectAntiBotSignal } = await import('./antiBotDetector.js');

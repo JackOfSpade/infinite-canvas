@@ -32,6 +32,28 @@ import { getJobsSettings } from './settings.js';
 
 const DEFAULT_MAX_AGE_DAYS = 21;
 
+// ── Pipeline telemetry ───────────────────────────────────────────────────────
+// Records the last job-search funnel so the bug reporter can answer "did we
+// analyze all the jobs we found?" without depending on (a) the renderer node
+// tree, which vanishes the instant the user deletes the hub, or (b) the 60-line
+// log ring buffer, which scrolls. Each stage stamps its own slot independently
+// because the stages are separate IPC calls that don't always run together
+// (e.g. a captcha-resolve scores pendingJobs with no fresh search). Mirrors
+// gemini.js's getGeminiTelemetry().
+const jobsTelemetry = {
+  search:    null, // { ts, queries, raw, deduped, ageDropped, historyDropped, kept }
+  resolves:  {},   // { [sourceId]: { ts, extracted, ageDropped, historyDropped, kept } }
+                   // keyed so a multi-source recovery (e.g. Indeed then LinkedIn)
+                   // keeps every resolve; re-resolving a source replaces its
+                   // entry. Reset when a fresh search stamps so it's scoped to it.
+  scoring:   null, // { ts, input, scored, placeholders, batches, failedBatches, unscored }
+  bucketing: null, // { ts, input, categories }
+};
+
+export function getJobsTelemetry() {
+  return jobsTelemetry;
+}
+
 // All source IDs — defines the complete set for progress tracking and reporting.
 const ALL_SOURCE_IDS = [
   'google', 'indeed', 'linkedin', 'remoteok', 'weworkremotely',
@@ -388,6 +410,17 @@ Be creative with suggestedRoleQueries — think about what career directions the
     logger.info(
       `[Jobs] ${kept.length} new jobs (raw=${allJobs.length}, dedup=${deduped.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped})`
     );
+    jobsTelemetry.search = {
+      ts: Date.now(),
+      queries: queries.length,
+      raw: allJobs.length,
+      deduped: deduped.length,
+      ageDropped,
+      historyDropped,
+      kept: kept.length,
+    };
+    // A fresh search starts a new run — drop resolves recorded for a prior run.
+    jobsTelemetry.resolves = {};
     return { jobs: kept, sourceResults, scrapeWarnings };
   });
 
@@ -520,6 +553,14 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Batch into groups of 15
     const BATCH_SIZE = 15;
     const scoredJobs = [];
+    // Telemetry: a job is a "placeholder" when it was emitted with a default
+    // matchScore (50) because its batch's LLM call failed or the response was
+    // missing its index — i.e. the job was NOT genuinely analyzed. Tracking
+    // this lets the bug report distinguish "15 real scores" from "15 scored,
+    // 4 of them filler", which the `Scored N jobs` log line alone hides.
+    let placeholderCount = 0;
+    let failedBatches = 0;
+    let batches = 0;
     // Trim the per-job payload to what actually drives matching. Drop
     // metadata fields (url, source, posted) the scorer doesn't read; keep
     // title/company/location/salary/snippet. Snippet (JD body) dominates
@@ -578,6 +619,7 @@ IMPORTANT SCORING RULES:
       // Guard: Check if window was closed between batches
       if (signal?.aborted) break;
 
+      batches++;
       const batch = jobs.slice(i, i + BATCH_SIZE);
       let batchResult;
 
@@ -606,11 +648,15 @@ ${JSON.stringify(slimBatch(batch))}`, {
           : null;
       if (scores) {
         batch.forEach((job, idx) => {
-          const score = scores.find(s => s.index === idx) || { matchScore: 50, reasoning: 'Unable to score', careerDirection: 'Other', strengthLabel: 'exploring', isTargetRoleMatch: false };
+          const matched = scores.find(s => s.index === idx);
+          if (!matched) placeholderCount++; // index missing from an otherwise-OK batch
+          const score = matched || { matchScore: 50, reasoning: 'Unable to score', careerDirection: 'Other', strengthLabel: 'exploring', isTargetRoleMatch: false };
           scoredJobs.push({ ...job, ...score, isTargetRoleMatch: !!score.isTargetRoleMatch });
         });
       } else {
         logger.warn(`[Jobs] batchResult missing scores array:`, batchResult);
+        failedBatches++;
+        placeholderCount += batch.length; // whole batch fell back to filler scores
         batch.forEach((job) => {
           scoredJobs.push({ ...job, matchScore: 50, reasoning: 'AI format error', careerDirection: 'Other', strengthLabel: 'exploring', isTargetRoleMatch: false });
         });
@@ -629,7 +675,19 @@ ${JSON.stringify(slimBatch(batch))}`, {
     }
 
     logger.info(`[Jobs] Scored ${scoredJobs.length} jobs across ${Object.keys(clusters).length} career directions`);
-    
+    jobsTelemetry.scoring = {
+      ts: Date.now(),
+      input: jobs.length,
+      scored: scoredJobs.length,
+      placeholders: placeholderCount,
+      batches,
+      failedBatches,
+      // >0 means the abort signal cut the batch loop short, so these jobs were
+      // never even sent to the scorer (distinct from placeholders, which were
+      // sent but came back unusable).
+      unscored: jobs.length - scoredJobs.length,
+    };
+
     return { scoredJobs, clusters };
   });
 
@@ -743,6 +801,11 @@ RULES:
       responseSchema: JOB_BUCKETING_SCHEMA,
     });
     logger.info(`[Jobs][${nodeId}] Bucketed into ${result?.categories?.length || 0} categories`);
+    jobsTelemetry.bucketing = {
+      ts: Date.now(),
+      input: jobs.length,
+      categories: result?.categories?.length || 0,
+    };
     return { categories: result?.categories || [] };
   });
 
@@ -759,7 +822,7 @@ RULES:
   // pendingJobs and drop the warning. items is [] when no extractor is
   // available for the source (API sources can't be inline-extracted; their
   // Solve button doesn't render).
-  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId } = {}, signal) => {
+  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, canvasFilePath, maxAgeDays } = {}, signal) => {
     if (!url) throw new Error('resolve-job-source requires a url');
     logger.info(`[Jobs][${nodeId}] User opening resolve window for ${sourceId}: ${url}`);
     // Map sourceId → the same extractor JS used by buildJobTasks. Only the
@@ -775,8 +838,40 @@ RULES:
     };
     const inlineExtractorJS = SOURCE_EXTRACTORS[sourceId] || null;
     const result = await openCaptchaResolveWindow(url, event.sender, signal, inlineExtractorJS);
-    const items = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
-    logger.info(`[Jobs][${nodeId}] Resolve window closed for ${sourceId}; auto-detected=${result.resolved}; inline-extracted=${items.length} job(s)`);
+    const extracted = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
+
+    // Run the SAME age + history dedup the headless search path applies.
+    // Without it, this path returned raw items, so every job the user already
+    // saw on a prior run re-appeared (and got re-scored) each time they
+    // re-solved a source's captcha — the "I keep seeing the same 15 Indeed
+    // jobs" report. Indeed is the acute case: it's permanently captcha-walled,
+    // so the headless scrape contributes 0 Indeed jobs and they ONLY arrive
+    // here — meaning history suppression never touched them at all.
+    const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+    const ageFiltered = filterJobsByAge(extracted, ageDays);
+    const ageDropped = extracted.length - ageFiltered.length;
+    let items = ageFiltered;
+    let historyDropped = 0;
+    if (canvasFilePath) {
+      const history = await loadJobsHistory(canvasFilePath);
+      const deduped = dedupAgainstHistory(ageFiltered, history);
+      items = deduped.kept;
+      historyDropped = deduped.removed;
+    }
+
+    logger.info(
+      `[Jobs][${nodeId}] Resolve window closed for ${sourceId}; auto-detected=${result.resolved}; ` +
+      `inline-extracted=${extracted.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, new=${items.length}`
+    );
+    // Keyed by sourceId so a multi-source recovery keeps every resolve;
+    // re-resolving the same source replaces its entry (latest wins).
+    jobsTelemetry.resolves[sourceId] = {
+      ts: Date.now(),
+      extracted: extracted.length,
+      ageDropped,
+      historyDropped,
+      kept: items.length,
+    };
     return { resolved: !!result.resolved, items };
   });
 }

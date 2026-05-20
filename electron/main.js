@@ -64,9 +64,49 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('[Main Process] Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-let mainWindow = null;
+// ── Multi-window state ─────────────────────────────────────────────────────
+// The app supports several canvas windows open at once (File ▸ New Canvas,
+// File ▸ Open Canvas, or relaunching the app). Each window is an independent
+// canvas; shared resources (browser pool, stealth browser, monitors,
+// electron-store, localStorage) live once in this single main process and are
+// deliberately shared — running multiple OS processes would fight over those.
+//
+// `canvasWindows` tracks only the user-facing canvas windows; it excludes the
+// hidden BrowserWindows the monitor module spins up (see browserViewMonitor.js).
+const canvasWindows = new Set();
+// Most-recently focused canvas window — menu actions target this so File ▸ Save
+// etc. act on the window the user is actually looking at.
+let lastFocusedCanvasWindow = null;
+// Cascades successive windows so they don't land exactly on top of each other.
+let newWindowOffset = 0;
 let isQuitting = false;
 const gotTheLock = app.requestSingleInstanceLock();
+
+/** The canvas window a menu action should target: focused, else most-recent. */
+function getTargetCanvasWindow() {
+  const focused = electronPkg.BrowserWindow.getFocusedWindow();
+  if (focused && canvasWindows.has(focused) && !focused.isDestroyed()) return focused;
+  if (lastFocusedCanvasWindow && !lastFocusedCanvasWindow.isDestroyed()) return lastFocusedCanvasWindow;
+  for (const win of canvasWindows) if (!win.isDestroyed()) return win;
+  return null;
+}
+
+/**
+ * Ask a window's renderer to save, and resolve once it reports back (or times
+ * out). Shared by the per-window close handler and the app-wide quit handler.
+ */
+function requestSaveAndWait(win) {
+  return new Promise(resolve => {
+    let saveTimeoutId;
+    const saveHandler = (_e, { success }) => { clearTimeout(saveTimeoutId); resolve(success); };
+    electronPkg.ipcMain.once('save-response', saveHandler);
+    safeMenuSend(win, 'request-save-and-respond');
+    saveTimeoutId = setTimeout(() => {
+      electronPkg.ipcMain.removeListener('save-response', saveHandler);
+      resolve(false);
+    }, 3000);
+  });
+}
 
 /**
  * Perform a handshake with the renderer to check for unsaved changes.
@@ -117,8 +157,24 @@ async function checkUnsavedChanges(win, actionType = 'close') {
 
 // ── Window creation ──────────────────────────────────────────────────────────
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
+/**
+ * Open a new canvas window.
+ *
+ * @param {{ mode?: 'auto'|'blank'|'file', filePath?: string }} [initSpec]
+ *   How the freshly-mounted renderer should populate itself:
+ *     - 'auto'  → restore the last opened workspace (used on first launch /
+ *                 dock re-activation).
+ *     - 'blank' → start empty (New Canvas, relaunch).
+ *     - 'file'  → load the given canvas file silently (Open Canvas).
+ *   The intent is passed to the renderer via the loaded URL's query string so
+ *   it is available synchronously at mount with no IPC round-trip.
+ */
+function createWindow(initSpec = { mode: 'auto' }) {
+  // Cascade so a second/third window doesn't perfectly cover the first.
+  const offset = newWindowOffset;
+  newWindowOffset = (newWindowOffset + 30) % 150;
+
+  const win = new BrowserWindow({
     width: 1200,
     height: 800,
     webPreferences: {
@@ -127,11 +183,24 @@ function createWindow() {
       contextIsolation: true,
     },
   });
+  if (canvasWindows.size > 0) {
+    const [bx, by] = win.getPosition();
+    win.setPosition(bx + offset, by + offset);
+  }
+
+  canvasWindows.add(win);
+  lastFocusedCanvasWindow = win;
+  win.on('focus', () => { lastFocusedCanvasWindow = win; });
+
+  const query = { init: initSpec?.mode || 'auto' };
+  if (initSpec?.mode === 'file' && initSpec.filePath) query.file = initSpec.filePath;
 
   if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL).catch(err => console.error('Failed to load dev server:', err));
+    const devUrl = new URL(process.env.VITE_DEV_SERVER_URL);
+    for (const [k, v] of Object.entries(query)) devUrl.searchParams.set(k, v);
+    win.loadURL(devUrl.href).catch(err => console.error('Failed to load dev server:', err));
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html')).catch(err => console.error('Failed to load local file:', err));
+    win.loadFile(path.join(__dirname, '../dist/index.html'), { query }).catch(err => console.error('Failed to load local file:', err));
   }
 
   // ── Spellcheck context menu ──────────────────────────────────────────────
@@ -139,11 +208,11 @@ function createWindow() {
   // Electron exposes the suggestions and a one-call replacement API; we only
   // surface this menu when the right-click actually lands on a misspelled word
   // so the renderer's own canvas/node context menus continue to work.
-  mainWindow.webContents.on('context-menu', (_event, params) => {
+  win.webContents.on('context-menu', (_event, params) => {
     if (!params.misspelledWord) return;
     const template = params.dictionarySuggestions.map(suggestion => ({
       label: suggestion,
-      click: () => mainWindow.webContents.replaceMisspelling(suggestion),
+      click: () => win.webContents.replaceMisspelling(suggestion),
     }));
     if (template.length === 0) {
       template.push({ label: 'No suggestions', enabled: false });
@@ -152,38 +221,65 @@ function createWindow() {
       { type: 'separator' },
       {
         label: 'Add to Dictionary',
-        click: () => mainWindow.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+        click: () => win.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
       },
     );
-    Menu.buildFromTemplate(template).popup({ window: mainWindow });
+    Menu.buildFromTemplate(template).popup({ window: win });
   });
 
-  mainWindow.on('close', async (event) => {
+  win.on('close', async (event) => {
     if (isQuitting) return; // Let before-quit handle it
 
     event.preventDefault();
-    
-    const result = await checkUnsavedChanges(mainWindow, 'close');
+
+    const result = await checkUnsavedChanges(win, 'close');
     if (result.action === 'cancel') return;
-    
+
     if (result.action === 'save') {
-      const saved = await new Promise(resolve => {
-        let saveTimeoutId;
-        const saveHandler = (_e, { success }) => { clearTimeout(saveTimeoutId); resolve(success); };
-        electronPkg.ipcMain.once('save-response', saveHandler);
-        safeMenuSend(mainWindow, 'request-save-and-respond');
-        saveTimeoutId = setTimeout(() => {
-          electronPkg.ipcMain.removeListener('save-response', saveHandler);
-          resolve(false);
-        }, 3000);
-      });
+      const saved = await requestSaveAndWait(win);
       if (!saved) return;
     }
-    
-    mainWindow.destroy(); // Safe to destroy now
+
+    win.destroy(); // Safe to destroy now
   });
 
-  setupApplicationMenu(mainWindow);
+  win.on('closed', () => {
+    canvasWindows.delete(win);
+    if (lastFocusedCanvasWindow === win) lastFocusedCanvasWindow = null;
+  });
+
+  return win;
+}
+
+/**
+ * Show the open dialog and load the chosen canvas in a *new* window, leaving
+ * the current window untouched. Backs File ▸ Open Canvas (and ⌘O).
+ */
+async function openCanvasInNewWindow() {
+  const parent = getTargetCanvasWindow();
+  const dialogOpts = {
+    title: 'Open Canvas',
+    properties: ['openFile'],
+    filters: [{ name: 'JSON Files', extensions: ['json'] }],
+  };
+  const { canceled, filePaths } = parent && !parent.isDestroyed()
+    ? await electronPkg.dialog.showOpenDialog(parent, dialogOpts)
+    : await electronPkg.dialog.showOpenDialog(dialogOpts);
+  if (canceled || !filePaths || filePaths.length === 0) return;
+
+  const filePath = filePaths[0];
+  // If this canvas is already open in a window, just focus it rather than
+  // opening a duplicate that would fight over the same file on auto-save.
+  for (const win of canvasWindows) {
+    if (win.isDestroyed()) continue;
+    if (win.__canvasFilePath && win.__canvasFilePath === filePath) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+      return;
+    }
+  }
+
+  createWindow({ mode: 'file', filePath });
 }
 
 // ── Application menu ─────────────────────────────────────────────────────────
@@ -195,8 +291,12 @@ function safeMenuSend(win, channel) {
   }
 }
 
-function setupApplicationMenu(win) {
+function setupApplicationMenu() {
   const isMac = process.platform === 'darwin';
+
+  // Menu items act on whichever canvas window is focused at click time, so a
+  // single application menu correctly drives any of the open windows.
+  const sendToFocused = (channel) => safeMenuSend(getTargetCanvasWindow(), channel);
 
   const template = [
     ...(isMac ? [{
@@ -216,11 +316,11 @@ function setupApplicationMenu(win) {
     {
       label: 'File',
       submenu: [
-        { label: 'New Canvas',    accelerator: 'CmdOrCtrl+N',       click: () => safeMenuSend(win, 'menu-new') },
-        { label: 'Open Canvas',   accelerator: 'CmdOrCtrl+O',       click: () => safeMenuSend(win, 'menu-open') },
-        { label: 'Save Canvas',   accelerator: 'CmdOrCtrl+S',       click: () => safeMenuSend(win, 'menu-save') },
+        { label: 'New Canvas',    accelerator: 'CmdOrCtrl+N',       click: () => createWindow({ mode: 'blank' }) },
+        { label: 'Open Canvas…',  accelerator: 'CmdOrCtrl+O',       click: () => { openCanvasInNewWindow(); } },
+        { label: 'Save Canvas',   accelerator: 'CmdOrCtrl+S',       click: () => sendToFocused('menu-save') },
         { type: 'separator' },
-        { label: 'Export as PNG', accelerator: 'CmdOrCtrl+Shift+E', click: () => safeMenuSend(win, 'menu-export-png') },
+        { label: 'Export as PNG', accelerator: 'CmdOrCtrl+Shift+E', click: () => sendToFocused('menu-export-png') },
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
       ],
@@ -294,11 +394,11 @@ if (!gotTheLock) {
   ]);
 
   app.on('second-instance', () => {
-    // Someone tried to run a second instance, we should focus our window.
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    // The single-instance lock funnels every relaunch (e.g. double-clicking the
+    // app again) into this one process. Instead of just focusing the existing
+    // window, open a fresh blank canvas window so relaunching gives the user a
+    // genuinely new workspace alongside what they already have open.
+    createWindow({ mode: 'blank' });
   });
 
   // ── Chromium flags ──────────────────────────────────────────────────────────
@@ -485,7 +585,16 @@ if (!gotTheLock) {
       return 'cancel';
     });
 
-    createWindow();
+    // The renderer reports which canvas file each window currently has open so
+    // we can (a) avoid opening the same file in two windows and (b) target the
+    // right window. Tracked directly on the BrowserWindow instance.
+    electronPkg.ipcMain.on('window:set-current-file', (event, filePath) => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (win && !win.isDestroyed()) win.__canvasFilePath = filePath || null;
+    });
+
+    setupApplicationMenu();
+    createWindow({ mode: 'auto' });
 
     // Re-verify any session entries that are older than the TTL so a stale
     // "Logged in" pill doesn't outlive the actual cookie. Deferred so the
@@ -494,7 +603,9 @@ if (!gotTheLock) {
     setTimeout(() => { revalidateStaleSessions().catch(() => {}); }, 5000);
 
     app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      // macOS: re-opening from the dock with no windows restores the last
+      // session. Count only canvas windows — hidden monitor windows don't count.
+      if (canvasWindows.size === 0) createWindow({ mode: 'auto' });
     });
   });
 
@@ -507,24 +618,20 @@ app.on('before-quit', async (event) => {
   if (isQuitting) return;
   event.preventDefault();
 
-  // 1. Handshake with renderer to check for unsaved changes.
-  // We give the renderer 1.5 seconds to respond. If it doesn't, we assume it's
-  // hung or no listeners are active and proceed with a safe quit.
-  const result = await checkUnsavedChanges(mainWindow, 'quit');
-  if (result.action === 'cancel') return;
-  
-  if (result.action === 'save') {
-    const saved = await new Promise(resolve => {
-      let saveTimeoutId;
-      const saveHandler = (_e, { success }) => { clearTimeout(saveTimeoutId); resolve(success); };
-      electronPkg.ipcMain.once('save-response', saveHandler);
-      safeMenuSend(mainWindow, 'request-save-and-respond');
-      saveTimeoutId = setTimeout(() => {
-        electronPkg.ipcMain.removeListener('save-response', saveHandler);
-        resolve(false);
-      }, 3000);
-    });
-    if (!saved) return;
+  // 1. Handshake with each open canvas window to check for unsaved changes.
+  // Each window gets 1.5s to respond; a hung/unresponsive renderer is treated
+  // as "no unsaved changes" so a stuck window can't block quit forever. If any
+  // window cancels (or a requested save fails), we abort the whole quit.
+  for (const win of [...canvasWindows]) {
+    if (win.isDestroyed()) continue;
+    const result = await checkUnsavedChanges(win, 'quit');
+    if (result.action === 'cancel') return;
+    if (result.action === 'save') {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+      const saved = await requestSaveAndWait(win);
+      if (!saved) return;
+    }
   }
 
   isQuitting = true;

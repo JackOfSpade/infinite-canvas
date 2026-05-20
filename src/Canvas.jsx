@@ -274,15 +274,37 @@ export function Canvas() {
     [navigation, currentFile]
   );
 
-  // ── Auto-load previous workspace on mount ───────────────────────────────
+  // ── Initial canvas population on mount ──────────────────────────────────
+  // Each window is told what to show via the loaded URL's `init` query param,
+  // set by the main process when it creates the window:
+  //   • 'blank' → a New Canvas (or relaunch); stay empty.
+  //   • 'file'  → Open Canvas opened a specific file in this fresh window.
+  //   • 'auto'/absent → first launch / dock re-activation; restore last session.
   const hasAttemptedAutoLoad = useRef(false);
   useEffect(() => {
     if (hasAttemptedAutoLoad.current) return;
     hasAttemptedAutoLoad.current = true;
+
+    const params = new URLSearchParams(window.location.search);
+    const initMode = params.get('init');
+    const initFile = params.get('file');
+
+    if (initMode === 'blank') return;            // fresh, intentionally empty
+    if (initMode === 'file' && initFile) {
+      loadCanvas(initFile, true);
+      return;
+    }
     if (settings.lastOpenedWorkspace) {
       loadCanvas(settings.lastOpenedWorkspace, true);
     }
   }, [settings.lastOpenedWorkspace, loadCanvas]);
+
+  // ── Report the open file to the main process ────────────────────────────
+  // Lets main avoid opening the same canvas in two windows (it focuses the
+  // existing one instead).
+  useEffect(() => {
+    window.electronAPI?.setWindowFile?.(currentFile || null);
+  }, [currentFile]);
   // ── Document Title Manager ───────────────────────────────────────────────
   useEffect(() => {
     let title = 'Infinite Canvas';
@@ -299,14 +321,13 @@ export function Canvas() {
   }, [currentFile, hasUnsavedChanges]);
 
   // ── Native Menu Wiring ───────────────────────────────────────────────────
-  // Binds the native macOS/Windows application menu items (File -> Save, Open, etc.)
-  // to the React-managed canvas state inside this window.
+  // Binds the native macOS/Windows application menu items (File -> Save, Export)
+  // to the React-managed canvas state inside this window. New Canvas and Open
+  // Canvas are handled entirely in the main process (each opens its own window),
+  // so they aren't wired here.
   useEffect(() => {
     const unlistenSave = window.electronAPI?.onMenuSave?.(() => {
       if (!isNavigationAnimatingRef.current) saveCanvas();
-    });
-    const unlistenOpen = window.electronAPI?.onMenuOpen?.(() => {
-      if (!isNavigationAnimatingRef.current) loadCanvas();
     });
     const unlistenExport = window.electronAPI?.onMenuExportPng?.(() => {
       if (!isNavigationAnimatingRef.current) exportCanvasToPNG();
@@ -314,10 +335,9 @@ export function Canvas() {
 
     return () => {
       unlistenSave?.();
-      unlistenOpen?.();
       unlistenExport?.();
     };
-  }, [saveCanvas, loadCanvas, exportCanvasToPNG]);
+  }, [saveCanvas, exportCanvasToPNG]);
 
   // ── Generic Confirmation Dialog ───────────────────────────────────────────
   const {

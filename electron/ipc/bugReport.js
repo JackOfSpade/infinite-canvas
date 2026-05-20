@@ -9,6 +9,8 @@ import { getAISettings, resolveServiceAccountPath, getJobsSettings } from './set
 import { getSellMonitorPlatforms } from './stealthBrowser.js';
 import { getRecentLogs } from '../logger.js';
 import { getGeminiTelemetry } from './gemini.js';
+import { getJobsTelemetry } from './jobs.js';
+import { getMarketplaceTelemetry } from './marketplace.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -129,6 +131,192 @@ function buildJobsConfigSnapshot() {
     hasUsajobsEmail: !!usajobsEmail,
     usajobsKeyPrefix: keyPrefix,
   };
+}
+
+/**
+ * Renders the last job-search pipeline funnel (search → scoring → bucketing).
+ *
+ * This is the load-bearing section for "did we analyze all the jobs we found?"
+ * reports. The in-memory node tallies that would otherwise answer it
+ * (totalScoredCount / finalSourceCounts on the hub) evaporate the moment the
+ * user deletes the hub — which is exactly when these reports get filed — and
+ * the raw funnel numbers otherwise live only in the 60-line log ring buffer,
+ * which scrolls. getJobsTelemetry() captures them in the main process so they
+ * survive both.
+ *
+ * Crucially, it separates *expected* drops (dedup / too-old / already-seen
+ * history) from *unexpected* losses: jobs that reached the scorer but came
+ * back as placeholder filler (matchScore=50, "AI format error"), and jobs the
+ * abort signal cut off before they were ever scored. A bare "Scored N jobs"
+ * log line hides both.
+ */
+function buildJobsPipelineSnapshot() {
+  let t;
+  try { t = getJobsTelemetry(); } catch { return ''; }
+  const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
+  if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing)) return '';
+
+  const ago = (ts) => {
+    if (!ts) return '';
+    const s = Math.round((Date.now() - ts) / 1000);
+    return Number.isFinite(s) ? ` (${s}s ago)` : '';
+  };
+
+  const lines = [];
+
+  if (t.search) {
+    const s = t.search;
+    lines.push(`### Search${ago(s.ts)}`);
+    lines.push(`- Queries: ${s.queries}`);
+    lines.push(
+      `- Found (raw): ${s.raw} → deduped ${s.deduped} → age-dropped ${s.ageDropped} → ` +
+      `already-seen/history ${s.historyDropped} → **new: ${s.kept}**`,
+    );
+    lines.push('- _(dedup / age / history drops are by-design — not jobs we failed to analyze)_');
+  } else {
+    lines.push('### Search\n- (no search recorded this session — e.g. scoring resumed from a captcha-resolve)');
+  }
+
+  // Captcha-resolve / Solve path. Indeed (and other captcha-walled sources)
+  // only ever reach scoring through here, so this is where their "found →
+  // analyzed" accounting lives — and the line a "did we re-show old jobs?"
+  // report turns on. historyDropped>0 with kept=0 is the healthy answer to
+  // "I solved the captcha again and saw the same jobs": now they're suppressed.
+  if (hasResolves) {
+    // One line per resolved source (newest first) so a multi-source recovery
+    // — e.g. Indeed then LinkedIn — shows every resolve, not just the last.
+    const entries = Object.entries(t.resolves).sort((a, b) => (b[1]?.ts || 0) - (a[1]?.ts || 0));
+    lines.push('\n### Captcha-resolve / Solve');
+    for (const [sourceId, r] of entries) {
+      lines.push(
+        `- \`${sourceId}\`${ago(r.ts)}: inline-extracted ${r.extracted} → age-dropped ${r.ageDropped} → ` +
+        `already-seen/history ${r.historyDropped} → **new: ${r.kept}**`,
+      );
+      if (r.extracted > 0 && r.kept === 0) {
+        lines.push('  - _(every extracted job was already shown on a prior run — correctly suppressed, not re-analyzed)_');
+      }
+    }
+  }
+
+  if (t.scoring) {
+    const s = t.scoring;
+    const clean = s.placeholders === 0 && s.unscored === 0;
+    lines.push(`\n### Scoring${ago(s.ts)}`);
+    lines.push(`- Input: ${s.input} → scored: ${s.scored} ${clean ? '✅ all genuinely analyzed' : ''}`);
+    lines.push(`- Batches: ${s.batches} (${s.failedBatches} failed)`);
+    if (s.placeholders > 0) {
+      lines.push(`- ⚠️ **${s.placeholders} placeholder score(s)** — these jobs reached the scorer but came back unusable and were given a default matchScore=50. They were NOT genuinely analyzed.`);
+    }
+    if (s.unscored > 0) {
+      lines.push(`- ⚠️ **${s.unscored} job(s) never scored** — the abort signal cut the batch loop short before they were sent to the scorer.`);
+    }
+  } else {
+    lines.push('\n### Scoring\n- (no scoring recorded this session)');
+  }
+
+  if (t.bucketing) {
+    const b = t.bucketing;
+    lines.push(`\n### Bucketing${ago(b.ts)}`);
+    lines.push(`- Input: ${b.input} → categories: ${b.categories}`);
+    if (b.categories === 0 && b.input > 0) {
+      lines.push('- ⚠️ Bucketing returned 0 categories — the renderer will have fallen back to a flat spawn (jobs still shown, but the category/salary tree is lost).');
+    }
+  } else {
+    lines.push('\n### Bucketing\n- (no bucketing recorded this session)');
+  }
+
+  return `
+## Job Search Pipeline
+> Last run's funnel, captured in the main process so it survives hub deletion
+> and log-buffer scroll. The "found → analyzed" gap answers "did we analyze all
+> the jobs?": dedup / age / already-seen drops are expected; placeholder or
+> unscored jobs are not. Each stage stamps independently — a captcha-resolve
+> can score pending jobs with no fresh search this session.
+
+${lines.join('\n')}
+`;
+}
+
+/**
+ * Sell-side analog of buildJobsPipelineSnapshot: renders the last marketplace
+ * pipeline funnel (photo analysis → comp scrape → captcha-resolve → price
+ * synthesis → platform fit). Same rationale — the SellHub's in-memory tallies
+ * vanish when the hub is deleted, and the raw funnel otherwise lives only in
+ * the scrolling log buffer. The decisive line for "did we use all the comps we
+ * found?" is synthesis's used-vs-found gap (the top-25/15 slice is by-design;
+ * a recommended_price of null means comps were scraped but no price came out).
+ */
+function buildMarketplacePipelineSnapshot() {
+  let t;
+  try { t = getMarketplaceTelemetry(); } catch { return ''; }
+  const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
+  if (!t || (!t.analyze && !t.scrape && !hasResolves && !t.synthesis && !t.fit)) return '';
+
+  const ago = (ts) => {
+    if (!ts) return '';
+    const s = Math.round((Date.now() - ts) / 1000);
+    return Number.isFinite(s) ? ` (${s}s ago)` : '';
+  };
+
+  const lines = [];
+
+  if (t.analyze) {
+    const a = t.analyze;
+    lines.push(`### Product analysis${ago(a.ts)}`);
+    lines.push(`- ${a.photos} photo(s) → "${a.title}"${a.mock ? ' ⚠️ **mock mode** (AI not configured — placeholder product)' : ''}`);
+  }
+
+  if (t.scrape) {
+    const s = t.scrape;
+    lines.push(`\n### Comp scrape${ago(s.ts)}`);
+    lines.push(`- ${s.sources} sources → **${s.sold} sold + ${s.active} active** comps · ${s.warnings} warning(s)${s.blocked > 0 ? `, ${s.blocked} block-severity` : ''}`);
+    if (s.blocked > 0) {
+      lines.push('- _(blocked sources contribute 0 comps until solved via the card\'s Solve button — see the resolve stage / Recent Logs)_');
+    }
+  }
+
+  if (hasResolves) {
+    // One line per resolved source (newest first) so a multi-source recovery
+    // — e.g. Mercari then eBay — shows every resolve, not just the last.
+    const entries = Object.entries(t.resolves).sort((a, b) => (b[1]?.ts || 0) - (a[1]?.ts || 0));
+    lines.push('\n### Captcha-resolve / Solve');
+    for (const [sourceId, r] of entries) {
+      lines.push(`- \`${sourceId}\`${ago(r.ts)}: inline-extracted ${r.extracted} ${r.category} comp(s) merged into the pricing set`);
+    }
+  }
+
+  if (t.synthesis) {
+    const s = t.synthesis;
+    lines.push(`\n### Price synthesis${ago(s.ts)}`);
+    if (s.soldFound + s.activeFound === 0) {
+      lines.push('- ⚠️ 0 comps available → no price synthesized (all sources empty or blocked).');
+    } else {
+      const capped = s.soldFound > s.soldUsed || s.activeFound > s.activeUsed;
+      lines.push(
+        `- Comps fed to the model: ${s.soldUsed}/${s.soldFound} sold + ${s.activeUsed}/${s.activeFound} active` +
+        (capped ? ' _(capped at the top 25 sold / 15 active by title-match — by-design, not lost data)_' : ''),
+      );
+      lines.push(`- Result: recommended_price=${s.recommendedPrice == null ? '**null** ⚠️ (comps scraped but no price produced)' : '$' + s.recommendedPrice}, match_quality=${s.matchQuality}`);
+    }
+  }
+
+  if (t.fit) {
+    const f = t.fit;
+    lines.push(`\n### Platform fit${ago(f.ts)}`);
+    lines.push(`- ${f.platforms} platform(s) → ${f.good} good / ${f.unfit} unfit`);
+  }
+
+  return `
+## Marketplace Pipeline
+> Last sell-side run's funnel (photo analysis → comp scrape → price synthesis →
+> platform fit), captured in the main process so it survives SellHub deletion
+> and log-buffer scroll — the sell-side analog of the Job Search Pipeline. The
+> "found → fed to the model" gap in synthesis answers "did we use all the comps
+> we found?": the top-25/15 cap is by-design; blocked sources and a null price
+> are not. Each stage stamps independently (a resolve/rescrape can run alone).
+
+${lines.join('\n')}
+`;
 }
 
 // Mid-run hubStates that should NEVER survive to disk — they are single-session
@@ -695,6 +883,14 @@ ${aiConfig.provider === 'gemini' ? `
 - USAJobs key prefix: \`${jobsConfig.usajobsKeyPrefix}\`
 `;
 
+  let jobsPipelineMarkdown = '';
+  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(); }
+  catch { /* never break the report on diagnostic failure */ }
+
+  let marketplacePipelineMarkdown = '';
+  try { marketplacePipelineMarkdown = buildMarketplacePipelineSnapshot(); }
+  catch { /* never break the report on diagnostic failure */ }
+
   let issueReporterDraftMarkdown = '';
   if (payload.issueReporterDraft) {
     const d = payload.issueReporterDraft;
@@ -746,7 +942,7 @@ ${description}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${issueReporterDraftMarkdown}${marketplaceSessionsMarkdown}${mainProcessLogsMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceSessionsMarkdown}${mainProcessLogsMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 <details>
 <summary><b>Click here to expand the full JSON Application State</b></summary>
 

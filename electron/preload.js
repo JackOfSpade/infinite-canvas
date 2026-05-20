@@ -31,9 +31,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   writeTextFile: (filePath, content) => ipcRenderer.invoke('write-text-file', { filePath, content }),
   saveFileDialog: (args) => ipcRenderer.invoke('save-file-dialog', args),
 
+  // Report which canvas file this window currently has open so the main
+  // process can avoid opening the same file in a second window.
+  setWindowFile: (filePath) => ipcRenderer.send('window:set-current-file', filePath),
+
   onFileChanged: createListener('file-changed'),
-  onMenuNew: createListener('menu-new'),
-  onMenuOpen: createListener('menu-open'),
   onMenuSave: createListener('menu-save'),
   onMenuExportPng: createListener('menu-export-png'),
   onQuitRequest: createListener('quit-request'),

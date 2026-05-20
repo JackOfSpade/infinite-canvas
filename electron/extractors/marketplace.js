@@ -407,13 +407,28 @@ export const MERCARI_SOLD_EXTRACTOR = `
       // Walk up to find the container if we matched a link
       const container = card.closest('[class*="Item"]') || card.closest('[data-testid="ItemContainer"]') || card;
       
-      const titleEl = container.querySelector('[data-testid="ItemName"], [class*="itemName"], [class*="ItemName"], p, span');
       const priceEl = container.querySelector('[data-testid="ItemPrice"], [data-testid="ProductThumbItemPrice"], [class*="itemPrice"], [class*="ItemPrice"], [class*="price"]');
       const linkEl = container.querySelector('a[href*="/item/"]') || (container.tagName === 'A' ? container : container.closest('a'));
-      
-      const title = titleEl?.innerText?.trim() || '';
-      if (!title || title.length < 2) return;
-      
+
+      // Title resolution. The old bare "p, span" fallback grabbed the FIRST
+      // child paragraph/span — which on a Mercari card is the discount badge
+      // ("76%") or the "SOLD" overlay, not the product name. Prefer the explicit
+      // name node, then the thumbnail alt / link aria-label (Mercari puts the
+      // product name there), and reject anything that's clearly a badge /
+      // status word / bare price rather than a title.
+      const isJunkTitle = (t) =>
+        !t || t.length < 4 || /^\\d+%$/.test(t) || /^(sold|free|new|used)$/i.test(t) || /^\\$?\\d[\\d.,]*$/.test(t);
+      let title = (container.querySelector('[data-testid="ItemName"], [class*="itemName"], [class*="ItemName"]')?.innerText || '').trim();
+      if (isJunkTitle(title)) {
+        const alt = (container.querySelector('img[alt]')?.getAttribute('alt') || '').trim();
+        if (!isJunkTitle(alt)) title = alt;
+      }
+      if (isJunkTitle(title)) {
+        const aria = (linkEl?.getAttribute?.('aria-label') || '').trim();
+        if (!isJunkTitle(aria)) title = aria;
+      }
+      if (isJunkTitle(title)) return; // no real product title found — skip this card
+
       const priceTextRaw = priceEl?.innerText?.trim() || '';
       const priceText = priceTextRaw.split(/[\\n\\r]+/)[0];
       const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;

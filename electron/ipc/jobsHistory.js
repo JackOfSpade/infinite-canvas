@@ -42,7 +42,23 @@ function normUrl(url) {
     // Force https and strip leading `www.` so cross-aggregator reposts
     // (e.g. http://indeed.com vs https://www.indeed.com) collapse to one key.
     const host = u.hostname.toLowerCase().replace(/^www\./, '');
-    return `https://${host}${u.pathname}`.toLowerCase().replace(/\/+$/, '');
+    const path = u.pathname.toLowerCase().replace(/\/+$/, '');
+    // Listing identity normally lives in the PATH, so the query (tracking
+    // params, session tokens) is dropped to canonicalize. Indeed inverts that:
+    // its scraped links are click-redirect stubs (`/rc/clk`, `/pagead/clk`)
+    // where the path is shared across every listing and the identity is the
+    // `jk` job-key in the query — while the rest of the query (`bb=`, `xkcb=`)
+    // is a session token that changes on every scrape. Dropping the whole
+    // query there collapsed EVERY indeed listing to one key, which both
+    // under-recorded history (only the first listing wrote a row) and
+    // over-suppressed dedup (every later listing looked already-seen). So:
+    //   - `jk` present → keep it as the stable identity (path?jk=…)
+    //   - redirect stub with no `jk` → '' so dedup falls back to title+company
+    //   - everything else → path as before (identity is in the path)
+    const jk = u.searchParams.get('jk');
+    if (jk) return `https://${host}${path}?jk=${jk.toLowerCase()}`;
+    if (/\/(?:rc|pagead)\/clk$/.test(path)) return '';
+    return `https://${host}${path}`;
   } catch {
     return String(url).split('?')[0].trim().toLowerCase()
       .replace(/^https?:\/\//, 'https://')

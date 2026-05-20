@@ -35,6 +35,12 @@ const STATE_LABELS = {
 
 const PROCESSING_STATES = ['parsing', 'querying', 'searching', 'scoring'];
 
+// Monitor-status codes (set by "Check All Statuses") that mean the posting is
+// no longer open — eligible for "Clear closed". 'expired' is the back-compat
+// alias for 'ended'. 'needs-login' / 'error' are excluded: those mean we
+// couldn't determine status, not that the job is gone.
+const CLOSED_MONITOR_STATUSES = ['sold', 'ended', 'expired'];
+
 const COL_X_WITH_TARGET    = { branch: 400, category: 700, bucket: 1000, job: 1400 };
 const COL_X_WITHOUT_TARGET = { category: 400, bucket: 700, job: 1100 };
 const ROW_H = { branch: 90, category: 70, bucket: 70, job: 280 };
@@ -1007,12 +1013,41 @@ export function JobHubNode({ id, data }) {
       });
       if (cancelled()) return;
 
-      if (!searchResult.success || !searchResult.jobs || searchResult.jobs.length === 0) {
-        // Persist scrape warnings even when zero jobs returned — this path
-        // is the most common "blocked everywhere" failure mode and the user
-        // needs the warnings to debug why nothing came back. Also reset the
-        // slider range + branch counts so the done-state UI doesn't show
-        // stale values from a previous successful run.
+      const searchWarnings = Array.isArray(searchResult.scrapeWarnings) ? searchResult.scrapeWarnings : [];
+      const blockingWarnings = searchWarnings.filter(w => w?.severity === 'block');
+      const foundJobs = (searchResult.success && Array.isArray(searchResult.jobs)) ? searchResult.jobs : [];
+
+      // ── Block gate ──────────────────────────────────────────────────
+      // If any source hit a block-severity warning (captcha, login wall),
+      // pause in 'sources-ready' so the user can Solve / Skip each blocked
+      // source before we spend AI tokens, then auto-resume when the last
+      // warning clears (or "Score current results" with partial data).
+      //
+      // This MUST come before the zero-jobs terminal branch below: a run can
+      // legitimately return 0 jobs *because* the only productive source was
+      // blocked (e.g. Indeed served a captcha while every other source was
+      // history-deduped). Going straight to 'done' there showed "0 jobs
+      // matched" prematurely AND stranded the jobs the user later unlocked via
+      // Solve — the resolve merged them into pendingJobs, but auto-resume only
+      // fires from 'sources-ready', so they were never scored.
+      //
+      // info-severity warnings (USAJobs config-missing) and throttles don't
+      // gate — they're informational and shouldn't require a manual click.
+      if (blockingWarnings.length > 0) {
+        updateGlobal(currentId, {
+          hubState: 'sources-ready',
+          pendingJobs: foundJobs,
+          pendingTargetRole: activeTargetRole,
+          jobCount: foundJobs.length,
+          scrapeWarnings: searchWarnings,
+        });
+        return;
+      }
+
+      if (foundJobs.length === 0) {
+        // Genuinely empty — no blocked sources left to recover. Terminal 'done'.
+        // Reset the slider range + branch counts so the done-state UI doesn't
+        // show stale values from a previous successful run.
         updateGlobal(currentId, {
           hubState: 'done',
           resultCount: 0,
@@ -1022,28 +1057,6 @@ export function JobHubNode({ id, data }) {
           scoreRangeMin: 0,
           scoreRangeMax: 100,
           scoreThreshold: 0,
-          scrapeWarnings: Array.isArray(searchResult.scrapeWarnings) ? searchResult.scrapeWarnings : [],
-        });
-        return;
-      }
-
-      // ── Block gate ──────────────────────────────────────────────────
-      // If any source hit a block-severity warning (captcha, login wall),
-      // pause before spending AI tokens on scoring. The user gets a chance
-      // to Solve / Skip each blocked source, then either auto-resume (when
-      // the last warning is cleared) or click "Score current results" to
-      // proceed with partial data. Mirrors SellHub's 'comps-ready' state.
-      // info-severity warnings (USAJobs config-missing) and throttles don't
-      // gate the pipeline — they're informational and bypassing them
-      // shouldn't require a manual click.
-      const searchWarnings = Array.isArray(searchResult.scrapeWarnings) ? searchResult.scrapeWarnings : [];
-      const blockingWarnings = searchWarnings.filter(w => w?.severity === 'block');
-      if (blockingWarnings.length > 0) {
-        updateGlobal(currentId, {
-          hubState: 'sources-ready',
-          pendingJobs: searchResult.jobs,
-          pendingTargetRole: activeTargetRole,
-          jobCount: searchResult.jobs.length,
           scrapeWarnings: searchWarnings,
         });
         return;
@@ -1051,7 +1064,7 @@ export function JobHubNode({ id, data }) {
 
       await runScoringAndSpawn({
         profile,
-        jobs: searchResult.jobs,
+        jobs: foundJobs,
         scrapeWarnings: searchWarnings,
         activeTargetRole,
         originalPos,
@@ -1105,9 +1118,29 @@ export function JobHubNode({ id, data }) {
    */
   const resumeScoring = useCallback(async () => {
     if (processingRef.current) return;
-    const pending = data.pendingJobs;
+    // Read the live refs, NOT data.pendingJobs/data.scrapeWarnings: onResolved
+    // merges freshly-extracted items into pendingJobsRef and then calls this
+    // synchronously, before React re-renders — so the data closure still holds
+    // the pre-merge list. That was the "captcha resolve inline-extracted 15
+    // jobs but only 1 got scored" bug (and why the cleared warnings weren't
+    // persisted). The refs are updated on every render AND synchronously by the
+    // resolve/skip handlers, so they're always at least as fresh as data.
+    const pending = pendingJobsRef.current;
     const profile = data.resumeProfile;
-    if (!pending || !Array.isArray(pending) || pending.length === 0) return;
+    if (!pending || !Array.isArray(pending) || pending.length === 0) {
+      // Nothing was collected (every blocked source got skipped, or a resolve
+      // yielded no items) — finish in the terminal empty 'done' state instead
+      // of leaving the hub stuck on the paused 'sources-ready' screen. Needed
+      // now that a 0-jobs-but-blocked run pauses in 'sources-ready' with an
+      // empty pendingJobs (see the block gate in runPipeline).
+      updateGlobal(id, {
+        hubState: 'done', resultCount: 0, totalScoredCount: 0, targetCount: 0,
+        otherCount: 0, scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0,
+        pendingJobs: null,
+        scrapeWarnings: Array.isArray(scrapeWarningsRef.current) ? scrapeWarningsRef.current : [],
+      });
+      return;
+    }
     if (!profile) return;
     processingRef.current = true;
     const currentId = id;
@@ -1117,7 +1150,7 @@ export function JobHubNode({ id, data }) {
       await runScoringAndSpawn({
         profile,
         jobs: pending,
-        scrapeWarnings: Array.isArray(data.scrapeWarnings) ? data.scrapeWarnings : [],
+        scrapeWarnings: Array.isArray(scrapeWarningsRef.current) ? scrapeWarningsRef.current : [],
         activeTargetRole: data.pendingTargetRole || data.targetRole || '',
         originalPos,
         cancelled,
@@ -1143,7 +1176,7 @@ export function JobHubNode({ id, data }) {
         }
       }
     }
-  }, [id, data.pendingJobs, data.resumeProfile, data.scrapeWarnings, data.pendingTargetRole, data.targetRole, epoch, getNode, runScoringAndSpawn, updateGlobal, triggerUSAJobsBackgroundSearch]);
+  }, [id, data.resumeProfile, data.pendingTargetRole, data.targetRole, epoch, getNode, runScoringAndSpawn, updateGlobal, triggerUSAJobsBackgroundSearch]);
 
   resumeScoringRef.current = resumeScoring;
 
@@ -1168,9 +1201,11 @@ export function JobHubNode({ id, data }) {
       if (
         remainingBlocks.length === 0 &&
         hubStateRef.current === 'sources-ready' &&
-        pendingJobsRef.current && pendingJobsRef.current.length > 0 &&
         !processingRef.current
       ) {
+        // resumeScoring scores pendingJobs, or finishes in empty 'done' when
+        // none were collected — so skipping the last blocked source never
+        // leaves the hub stuck on the paused screen.
         resumeScoringRef.current?.();
       }
     };
@@ -1209,12 +1244,17 @@ export function JobHubNode({ id, data }) {
       updateGlobal(id, { pendingJobs: mergedPending, jobCount: mergedPending.length, scrapeWarnings: remaining });
       // Auto-resume on no remaining BLOCK warnings (info / throttle stays).
       const remainingBlocks = remaining.filter(w => w?.severity === 'block');
+      // Record the merge so a "resolve extracted N jobs but only M got scored"
+      // discrepancy is visible in the bug-report event history (pair this with
+      // the main-process "Scoring N jobs" line to spot a stale-state regression).
+      EventLogger.log(`[JobHub][${id}] Resolved ${resolvedSourceId}: received ${items.length} item(s), +${fresh.length} new → pendingJobs ${prevPending.length}→${mergedPending.length}; ${remainingBlocks.length} block warning(s) remain`);
       if (
         remainingBlocks.length === 0 &&
         hubStateRef.current === 'sources-ready' &&
-        mergedPending.length > 0 &&
         !processingRef.current
       ) {
+        // resumeScoring scores the merged jobs, or finishes in empty 'done' if
+        // the resolve cleared the last block but yielded nothing to score.
         resumeScoringRef.current?.();
       }
     };
@@ -1315,6 +1355,103 @@ export function JobHubNode({ id, data }) {
     itemLabel: 'job',
   });
   const connectedJobCards = getConnectedJobCardNodes().map(n => n.data);
+
+  // Bulk-remove job cards a status sweep flagged as Filled/Closed/expired.
+  // They're already in the jobs-history ledger (written at discovery), so they
+  // won't re-surface on a future search — this just declutters dead listings.
+  // Cascades up the result tree so emptied bucket/category groups are removed
+  // too (rather than leaving empty shells), and trims/recomputes the counts on
+  // groups that only lost some children.
+  const handleClearClosed = useCallback(() => {
+    if (data.locked) return;
+    const cards = getConnectedJobCardNodes();
+    const closed = cards.filter(c => CLOSED_MONITOR_STATUSES.includes(c.data?.monitorStatus));
+    if (closed.length === 0) return;
+
+    const allNodes = getNodes();
+    const nodeById = new Map(allNodes.map(n => [n.id, n]));
+    const removeIds = new Set(closed.map(c => c.id));
+
+    // Cascade up: drop any group whose entire child set is being removed,
+    // repeating until stable (a category goes once all its buckets go).
+    const groups = allNodes.filter(n => n.type === 'jobgroup' && n.data?.hubId === id);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const g of groups) {
+        if (removeIds.has(g.id)) continue;
+        const kids = Array.isArray(g.data?.childIds) ? g.data.childIds : [];
+        if (kids.length > 0 && kids.every(k => removeIds.has(k))) {
+          removeIds.add(g.id);
+          changed = true;
+        }
+      }
+    }
+
+    // Surviving job-card descendants of a group (walk childIds; guard cycles).
+    const countSurvivingJobs = (nodeId, seen = new Set()) => {
+      if (seen.has(nodeId)) return 0;
+      seen.add(nodeId);
+      const n = nodeById.get(nodeId);
+      if (!n) return 0;
+      if (n.type === 'jobcard') return removeIds.has(nodeId) ? 0 : 1;
+      const kids = Array.isArray(n.data?.childIds) ? n.data.childIds : [];
+      return kids.reduce((sum, k) => sum + countSurvivingJobs(k, seen), 0);
+    };
+
+    // Trim childIds + recompute count on surviving groups that lost children.
+    const groupUpdates = new Map();
+    for (const g of groups) {
+      if (removeIds.has(g.id)) continue;
+      const kids = Array.isArray(g.data?.childIds) ? g.data.childIds : [];
+      const survivingKids = kids.filter(k => !removeIds.has(k));
+      if (survivingKids.length !== kids.length) {
+        const patch = { childIds: survivingKids, count: countSurvivingJobs(g.id) };
+        if (g.data?.kind === 'bucket') {
+          patch.visibleCount = Math.min(g.data?.visibleCount ?? 10, survivingKids.length);
+        }
+        groupUpdates.set(g.id, patch);
+      }
+    }
+
+    // Snapshot for undo, apply group trims, then delete removed nodes + edges.
+    document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
+    if (groupUpdates.size > 0) {
+      setNodes(nds => nds.map(n => groupUpdates.has(n.id)
+        ? { ...n, data: { ...n.data, ...groupUpdates.get(n.id) } }
+        : n));
+    }
+    const edgesToDelete = getEdges()
+      .filter(e => removeIds.has(e.source) || removeIds.has(e.target))
+      .map(e => ({ id: e.id }));
+    deleteElements({ nodes: [...removeIds].map(rid => ({ id: rid })), edges: edgesToDelete });
+
+    // Keep the hub's headline counts consistent with what's left on the canvas.
+    const remaining = cards.filter(c => !removeIds.has(c.id));
+    const newTarget = remaining.filter(c => c.data?.isTargetRoleMatch).length;
+    updateGlobal(id, {
+      resultCount: remaining.length,
+      targetCount: newTarget,
+      otherCount: remaining.length - newTarget,
+    });
+
+    // Re-snapshot the post-clear state next tick so the undo stack holds a clean
+    // [pre-clear, post-clear] pair. The pre-clear snapshot above captures the
+    // cards WITH their found Filled/Closed statuses; this deferred one makes
+    // useUndoRedo's lastFingerprint track the live (post-clear) state, so an
+    // undo fired inside the 500ms auto-snapshot window restores that pre-clear
+    // snapshot (statuses intact) instead of mis-targeting and skipping it.
+    // Same deferred-snapshot pattern as useNodeAutoEdit's auto-delete.
+    setTimeout(() => document.dispatchEvent(new CustomEvent('canvas-take-snapshot')), 0);
+
+    const groupsRemoved = removeIds.size - closed.length;
+    EventLogger.log(`[JobHub][${id}] Cleared ${closed.length} closed job(s)${groupsRemoved > 0 ? ` + ${groupsRemoved} empty group(s)` : ''}`);
+    addToast({
+      title: 'Cleared closed jobs',
+      description: `Removed ${closed.length} closed listing${closed.length === 1 ? '' : 's'} — kept in history, so they won't reappear.`,
+      type: 'success',
+    });
+  }, [data.locked, id, getConnectedJobCardNodes, getNodes, getEdges, setNodes, deleteElements, updateGlobal, addToast]);
 
   const handleRerun = useCallback(() => {
     if (data.locked || processingRef.current) return;
@@ -1484,6 +1621,7 @@ export function JobHubNode({ id, data }) {
               setTargetRole={setTargetRole}
               onCheckAllStatuses={handleCheckAllStatuses}
               checkingAll={checkingAllStatuses}
+              onClearClosed={handleClearClosed}
               scrapeWarnings={data.scrapeWarnings || []}
             />
           </>

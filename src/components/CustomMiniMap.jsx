@@ -119,12 +119,19 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
             const tgt = nodeById.get(e.target);
             if (!src || !tgt) return null;
             const sd = getNodeDims(src), td = getNodeDims(tgt);
-            const sx = src.position.x + sd.w;
+            // Connect node CENTERS with a straight line. The old code drew from
+            // the source's RIGHT edge to the target's LEFT edge, baking in a
+            // left→right flow assumption. That's only true for the job-result
+            // tree; when source cards fan in a circle around a hub, every
+            // connector still left the hub's right side, so the minimap looked
+            // like all cards hung off the right of the hub. Center-to-center is
+            // direction-agnostic and matches the canvas for any layout. (Nodes
+            // render on top of edges, so only the segment between boxes shows.)
+            const sx = src.position.x + sd.w / 2;
             const sy = src.position.y + sd.h / 2;
-            const tx = tgt.position.x;
+            const tx = tgt.position.x + td.w / 2;
             const ty = tgt.position.y + td.h / 2;
-            const offset = Math.abs(tx - sx) * 0.6;
-            const d = `M${sx},${sy} C${sx + offset},${sy} ${tx - offset},${ty} ${tx},${ty}`;
+            const d = `M${sx},${sy} L${tx},${ty}`;
 
             return (
               <path key={e.id}

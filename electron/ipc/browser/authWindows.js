@@ -332,6 +332,21 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     let lastHeartbeatLog = 0;
     let firstProbeLogged = false;
     let extractedItems = null;
+    // ── Dynamic readiness (inline-extract path) ──────────────────────────────
+    // Once the anti-bot gate is passed (no challenge widgets), we DON'T guess
+    // "page loaded" from a fixed body-text length — that proxy fires before a
+    // heavy results grid (e.g. eBay sold) finishes hydrating, yielding 0 items.
+    // Instead we poll the extractor and wait for its item COUNT to stabilize:
+    // a fast page settles in one tick; a lazily-loading grid waits exactly as
+    // long as items keep arriving. The constants govern stability *detection*,
+    // not content-guessing, and the ceiling is only a safety net.
+    let antiBotClearedAt = null;   // ms when challenge widgets first disappeared
+    let lastExtractCount = -1;     // item count from the previous poll
+    let stableTicks = 0;           // consecutive polls with an unchanged (>0) count
+    let zeroStreak = 0;            // consecutive polls returning 0 items
+    const STABLE_TICKS_REQUIRED = 2;     // count unchanged this many polls → settled
+    const MAX_ZERO_STREAK = 5;           // 0 items this many polls (~2s) → accept empty
+    const READINESS_CEILING_MS = 20000;  // hard cap after the gate clears (safety net)
 
     // Single probe tick — pulled out so we can run it immediately after
     // goto resolves AND on every setInterval. Without the immediate first
@@ -387,46 +402,89 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
           logger.info(`[StealthBrowser] Captcha wait: host=${currentHost} — ${initial}`);
         }
 
-        // Resolved when no challenge widgets are visible AND the page has
-        // substantive content (rules out a blank interstitial that strips
-        // its widgets pre-content-load).
-        const seemsResolved = probe.hits.length === 0 && probe.textLength > 1500;
-        if (seemsResolved) {
-          // Run the inline extractor (if provided) in this same browser
-          // session BEFORE closing. This is the whole point of the inline
-          // path: the visible session passed the anti-bot check, so it can
-          // see the real content; a headless re-scrape after close would
-          // re-trigger the same wall. Items returned ride alongside the
-          // `resolved` flag and skip the rescrape on the renderer side.
-          if (inlineExtractorJS) {
-            try {
-              const items = await page.evaluate(inlineExtractorJS);
-              if (Array.isArray(items)) {
-                extractedItems = items;
-                logger.info(`[StealthBrowser] Inline extract on ${currentHost} → ${items.length} item(s) (skipping headless rescrape)`);
-              } else {
-                logger.warn(`[StealthBrowser] Inline extract returned non-array (${typeof items}); falling back to rescrape`);
-              }
-            } catch (e) {
-              logger.warn(`[StealthBrowser] Inline extract failed (${e?.message || e}); falling back to rescrape`);
-            }
+        const noChallenge = probe.hits.length === 0;
+
+        // Declare the challenge cleared, stash any extracted items, and close
+        // (the window's `disconnected` → cleanup resolves with { resolved, items }).
+        const finishCleared = async (items) => {
+          if (items) {
+            extractedItems = items;
+            logger.info(`[StealthBrowser] Inline extract on ${currentHost} → ${items.length} item(s) (skipping headless rescrape)`);
           }
           logger.info(`[StealthBrowser] Captcha auto-detected as cleared on ${currentHost} (no visible challenge widgets, textLen=${probe.textLength}) — closing window`);
           resolved = true;
           if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
           if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
           await captchaBrowser.close().catch(() => {});
+        };
+
+        if (inlineExtractorJS) {
+          // ── Inline-extract path: wait for the extractor's item count to settle.
+          if (!noChallenge) {
+            // Still showing a challenge — reset the tracker so a post-solve
+            // render starts measuring fresh.
+            antiBotClearedAt = null; lastExtractCount = -1; stableTicks = 0; zeroStreak = 0;
+          } else {
+            if (antiBotClearedAt == null) antiBotClearedAt = Date.now();
+            let items = null;
+            try {
+              const result = await page.evaluate(inlineExtractorJS);
+              if (Array.isArray(result)) items = result;
+              else logger.warn(`[StealthBrowser] Inline extract returned non-array (${typeof result}); falling back to rescrape`);
+            } catch (e) {
+              logger.warn(`[StealthBrowser] Inline extract failed (${e?.message || e}); falling back to rescrape`);
+            }
+
+            const ceilingHit = Date.now() - antiBotClearedAt >= READINESS_CEILING_MS;
+
+            if (items == null) {
+              // Extractor failed/non-array — no count to stabilize on. Treat the
+              // page as cleared and close so the renderer's headless-rescrape
+              // fallback runs (unchanged from the original behavior).
+              await finishCleared(null);
+              return;
+            }
+
+            const count = items.length;
+            if (count > 0) {
+              stableTicks = (count === lastExtractCount) ? stableTicks + 1 : 0;
+              lastExtractCount = count;
+              zeroStreak = 0;
+              if (stableTicks >= STABLE_TICKS_REQUIRED || ceilingHit) {
+                logger.info(`[StealthBrowser] ${currentHost} results settled at ${count} item(s)${ceilingHit ? ' (readiness ceiling hit)' : ` after ${stableTicks} stable poll(s)`}`);
+                await finishCleared(items);
+                return;
+              }
+              // count still climbing — keep polling.
+            } else {
+              // 0 items: the grid may still be hydrating. Wait a bounded number
+              // of polls before accepting a genuinely-empty result.
+              zeroStreak++;
+              if (zeroStreak >= MAX_ZERO_STREAK || ceilingHit) {
+                logger.info(`[StealthBrowser] ${currentHost} cleared but extractor found 0 items after ${zeroStreak} poll(s)${ceilingHit ? ' (readiness ceiling hit)' : ''} — accepting empty result`);
+                await finishCleared(items); // items === []
+                return;
+              }
+              // keep polling in case results are still rendering.
+            }
+          }
+        } else if (noChallenge && probe.textLength > 1500) {
+          // ── No extractor (login / API source): fall back to the body-text
+          // heuristic — there's no item count to stabilize on.
+          await finishCleared(null);
           return;
         }
 
         const now = Date.now();
         if (now - lastHeartbeatLog > 10000) {
           lastHeartbeatLog = now;
-          // Include which widgets are matching so future bug reports show
-          // the exact false-positive cause instead of just "stillBlocked".
+          // Include the matching widgets / settle progress so future bug
+          // reports show the exact cause instead of just "stillBlocked".
           const reason = probe.hits.length > 0
             ? `visible challenge widgets: [${probe.hits.join(', ')}]`
-            : `no widgets but textLen=${probe.textLength} below 1500 threshold`;
+            : (inlineExtractorJS
+                ? `no widgets; extractor at ${lastExtractCount < 0 ? 0 : lastExtractCount} item(s), waiting for count to settle`
+                : `no widgets but textLen=${probe.textLength} below 1500 threshold`);
           logger.info(`[StealthBrowser] Captcha wait: host=${currentHost} — ${reason}`);
         }
       } catch {

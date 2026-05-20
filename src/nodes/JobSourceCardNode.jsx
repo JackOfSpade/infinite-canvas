@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useContext } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { Loader2, CheckCircle2, Filter, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
 import { mergeSourceProgress } from './_shared/sourceProgress';
+import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 
 /**
  * JobSourceCardNode — persistent canvas node representing one job source
@@ -31,6 +32,11 @@ import { mergeSourceProgress } from './_shared/sourceProgress';
  */
 export function JobSourceCardNode({ id, data }) {
   const { getNode, deleteElements, updateNodeData } = useReactFlow();
+  // Same nav context the owning JobHub reads currentFile from — needed so a
+  // captcha-resolve can history-dedup against this project's jobs-history CSV
+  // (mirrors the headless search path), instead of re-surfacing already-seen
+  // jobs every time the user re-solves a source.
+  const nav = useContext(CanvasNavigationContext);
   const [progress, setProgress] = useState(data.persistedProgress || null); // { status, count, warning, url } | null
   const [resolving, setResolving] = useState(false);
   // Local-only dismiss: clicking Skip on a warned card just hides the
@@ -86,6 +92,11 @@ export function JobSourceCardNode({ id, data }) {
         url: progress.url,
         sourceId: data.sourceId,
         nodeId: data.hubId,
+        // Let the resolve handler apply the same age + history dedup the
+        // headless search does, so re-solving doesn't re-surface already-seen
+        // jobs. maxAgeDays lives on the owning hub's data.
+        canvasFilePath: nav?.currentFile || null,
+        maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
       });
       // When the captcha-resolve window auto-detects the challenge as
       // cleared, the visible browser session that just bypassed the bot

@@ -71,11 +71,6 @@ export function useCanvasPersistence({
     });
 
     // ── Preload Listeners ────────────────────────────────────────────────────
-    const unlistenMenuNew = window.electronAPI?.onMenuNew?.(() => {
-      // Defer to prevent state closures from being stale, though we use refs where possible
-      setTimeout(() => newCanvasRef.current?.(), 0);
-    });
-
     const unlistenSaveAndRespond = window.electronAPI?.onRequestSaveAndRespond?.(async () => {
       const success = await saveCanvasRef.current?.(true); // force save
       window.electronAPI.sendSaveResponse(success);
@@ -93,7 +88,6 @@ export function useCanvasPersistence({
 
     return () => {
       unlistenQuit?.();
-      unlistenMenuNew?.();
       unlistenSaveAndRespond?.();
       window.removeEventListener('beforeunload', handleBeforeUnload);
       if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
@@ -184,35 +178,6 @@ export function useCanvasPersistence({
     
     return true;
   }, [saveCanvas]);
-
-  const newCanvas = useCallback(async () => {
-    if (!window.electronAPI || isAnimatingRef?.current) return;
-    
-    const canProceed = await handleUnsavedChanges('create a new canvas');
-    if (!canProceed) return;
-    
-    resetStack?.();
-    setNodes([]);
-    setEdges([]);
-    setDrawings([]);
-    setCurrentFile(null);
-    updateSetting?.('lastOpenedWorkspace', null);
-    clearHistory?.();
-    
-    if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
-    // Defer resetting this so React batches the empty nodes state first
-    setTimeout(() => {
-      if (!isMountedRef.current) return;
-      setHasUnsavedChanges(false);
-      customFitView();
-    }, 50);
-    
-    addToast({ title: 'New Canvas', description: 'Created a blank canvas.', type: 'info' });
-  }, [handleUnsavedChanges, isAnimatingRef, setNodes, setEdges, setDrawings, resetStack, clearHistory, customFitView, addToast, updateSetting]);
-
-  const newCanvasRef = useRef(newCanvas);
-  // eslint-disable-next-line react-hooks/immutability -- render-body ref sync is the correct pattern when useEffect mutation is also disallowed by the same rule
-  newCanvasRef.current = newCanvas;
 
   const loadCanvas = useCallback(async (targetFilePath = null, isSilent = false) => {
     if (!window.electronAPI || isAnimatingRef?.current) return;
@@ -307,7 +272,6 @@ export function useCanvasPersistence({
   return {
     saveCanvas,
     loadCanvas,
-    newCanvas,
     exportCanvasToPNG,
     hasUnsavedChanges,
     setHasUnsavedChanges,

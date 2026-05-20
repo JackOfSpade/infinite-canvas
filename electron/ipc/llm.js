@@ -95,10 +95,18 @@ const TASK_MAX_TOKENS = {
   'job-scoring':               ({ itemCount = 10 } = {}) =>
     Math.min(24576, 2500 + itemCount * 300),
   // Bucketing reasons over salaries per category — thinking-heavy (the model
-  // weighs distributions) but visible output is small (~50 tokens per bucket
-  // × ~10 buckets total = ~500). Static 6144 absorbs typical use; scales OK
-  // up to ~100 jobs.
-  'job-bucketing':             6144,
+  // weighs each job's salary against its category's distribution). The old
+  // static 6144 was calibrated against gemini-2.5-flash's light thinking and
+  // an over-optimistic "~500 visible" estimate; on newer thinking-heavy models
+  // it truncated — real telemetry on a 15-job run: gemini-3.5-flash emitted
+  // 3229 thinking + 2899 visible (=6128) and was STILL cut off at 6144, only
+  // surviving because the dynamic fallback reached a model that didn't think.
+  // Both thinking and visible scale ~linearly with job count (one jobIndex per
+  // job in the output, ~215 thinking + ~195 visible per job observed), so size
+  // it per-item like job-scoring. 4096 base + 400/item gives 15→10k (~1.6x the
+  // observed truncation point), 50→24k, capped at 24576 to bound billing.
+  'job-bucketing':             ({ itemCount = 15 } = {}) =>
+    Math.min(24576, 4096 + itemCount * 400),
   'cover-letter-generation':   2048,  // a paragraph-length letter
   'interview-prep-generation': 2048,  // bulleted prep
   'text-polish':               1024,  // light edit
