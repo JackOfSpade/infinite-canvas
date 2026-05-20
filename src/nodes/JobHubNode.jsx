@@ -4,6 +4,7 @@ import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
 import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
+import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
 import { EventLogger } from '../utils/EventLogger';
 import { useToast } from '../components/ToastProvider';
 
@@ -21,7 +22,21 @@ import {
   partitionJobsForBranches,
   buildJobsForBucketing,
   buildJobTreeNodes,
+  LIKELY_THRESHOLD,
 } from './jobhub/buildJobTree';
+
+// "Other Strong Matches" cutoff for the append path. Prefer the per-hub gate
+// persisted by the initial run (data.strongMatchGate) so appended jobs bucket
+// the same way; fall back to the absolute bar for hubs created before the gate
+// was persisted.
+const otherStrongGate = (storedGate) => storedGate ?? LIKELY_THRESHOLD;
+
+// Job freshness window (days). Default mirrors electron DEFAULT_MAX_AGE_DAYS;
+// the cap bounds the user-set slider. NOTE: auto-widening this on thin results
+// would need a search refetch (filterJobsByAge runs post-fetch, so date-param
+// sources won't already have older jobs in the pool) — left as a follow-up.
+const JOB_DEFAULT_AGE_DAYS   = 21;
+const JOB_MAX_AGE_DAYS_LIMIT = 180;
 
 const STATE_LABELS = {
   empty: null,
@@ -188,8 +203,8 @@ export function JobHubNode({ id, data }) {
           }
         } else {
           // Under Other Strong Matches branch, under Category
-          if ((job.matchScore || 0) < 65) {
-            return; // Skip low-scoring non-target jobs
+          if ((job.matchScore || 0) < otherStrongGate(data.strongMatchGate)) {
+            return; // Skip non-target jobs below this run's strong-match bar
           }
           const otherBranch = existingNodes.find(n => 
             n.type === 'jobgroup' && 
@@ -446,7 +461,7 @@ export function JobHubNode({ id, data }) {
 
     const hasTargetRole = !!activeTargetRole;
     const targetCandidates = scoredJobs.filter(j => j.isTargetRoleMatch);
-    const otherCandidates = scoredJobs.filter(j => !j.isTargetRoleMatch && (j.matchScore || 0) >= 65);
+    const otherCandidates = scoredJobs.filter(j => !j.isTargetRoleMatch && (j.matchScore || 0) >= otherStrongGate(data.strongMatchGate));
 
     const targetDelta = hasTargetRole ? targetCandidates.length : 0;
     const otherDelta = hasTargetRole ? otherCandidates.length : 0;
@@ -466,7 +481,7 @@ export function JobHubNode({ id, data }) {
       scoreRangeMax,
       scrapeWarnings: filteredWarnings,
     });
-  }, [id, data.targetRole, data.finalSourceCounts, data.resultCount, data.totalScoredCount, data.targetCount, data.otherCount, data.scoreRangeMin, data.scoreRangeMax, data.resumeProfile, getNodes, getEdges, getNode, setNodes, addElementsGlobally, addNodes, addEdges, updateGlobal]);
+  }, [id, data.targetRole, data.finalSourceCounts, data.resultCount, data.totalScoredCount, data.targetCount, data.otherCount, data.scoreRangeMin, data.scoreRangeMax, data.strongMatchGate, data.resumeProfile, getNodes, getEdges, getNode, setNodes, addElementsGlobally, addNodes, addEdges, updateGlobal]);
 
   const triggerUSAJobsBackgroundSearch = useCallback(async () => {
     if (processingRef.current) return;
@@ -704,7 +719,7 @@ export function JobHubNode({ id, data }) {
   // postings have been filled (see job-listing-age research notes).
   const maxAgeDays = data.maxAgeDays || 21;
   const setMaxAgeDays = useCallback((val) => {
-    const n = Math.max(1, Math.min(180, Math.floor(Number(val) || 21)));
+    const n = Math.max(1, Math.min(JOB_MAX_AGE_DAYS_LIMIT, Math.floor(Number(val) || JOB_DEFAULT_AGE_DAYS)));
     updateGlobal(id, { maxAgeDays: n });
   }, [id, updateGlobal]);
 
@@ -742,16 +757,17 @@ export function JobHubNode({ id, data }) {
     const hubPos = getNode(id)?.position || { x: 0, y: 0 };
     // Lay cards out in a circle around the hub — matches the SellHub →
     // CompSourceCard pattern so edges fan to each card's nearest hub side
-    // instead of all bunching on the left. Radius is sized for ~12 sources
-    // (30° apart at r=320 → ~110px clearance between hub edge and nearest
-    // card edge). The user can drag any card anywhere afterward.
+    // instead of all bunching on the left. The user can drag any card anywhere
+    // afterward.
     const HUB_W = 260, HUB_H = 140;     // approx hub footprint while idle
     const CARD_W = 140, CARD_H = 50;
-    const RADIUS = 320;
     const cx = hubPos.x + HUB_W / 2;
     const cy = hubPos.y + HUB_H / 2;
     const total = existing.length + missing.length;
     const stamp = Date.now();
+    // Radius derived from card count + footprint so cards never overlap as the
+    // source list grows (replaces a fixed 320 that only worked for ~12 sources).
+    const RADIUS = radialRadius({ count: total, cardW: CARD_W, cardH: CARD_H, hubW: HUB_W, hubH: HUB_H });
 
     const newNodes = missing.map((source, i) => {
       // Angle the card across the full circle; first card at top (-π/2).
@@ -800,7 +816,7 @@ export function JobHubNode({ id, data }) {
     // gives ReactFlow one tick to register the new nodes; a synchronous fitView
     // would frame only the hub.
     requestAnimationFrame(() => {
-      fitView({ duration: 600, padding: 0.2 });
+      fitView({ duration: fitViewDuration(total), padding: 0.2 });
     });
   }, [id, getNode, getNodes, addElementsGlobally, addNodes, addEdges, fitView]);
 
@@ -842,7 +858,7 @@ export function JobHubNode({ id, data }) {
 
     // ── Branch construction (split + loose-fill) ──────────────────────
     const hasTarget = !!activeTargetRole;
-    const { targetList, otherList, displayedJobs } =
+    const { targetList, otherList, displayedJobs, gate: strongMatchGate } =
       partitionJobsForBranches(scoreResult.scoredJobs, hasTarget);
 
     // Step 4.5: Bucket displayed jobs into a category → salary-range tree.
@@ -920,6 +936,9 @@ export function JobHubNode({ id, data }) {
       totalScoredCount: scoreResult.scoredJobs.length,
       targetCount: hasTarget ? targetList.length : 0,
       otherCount: hasTarget ? otherList.length : 0,
+      // Persist this run's "Other Strong" cutoff so later appends (USAJobs
+      // background search, captcha-resolve) bucket non-target jobs identically.
+      strongMatchGate,
       finalSourceCounts,
       scoreRangeMin,
       scoreRangeMax,

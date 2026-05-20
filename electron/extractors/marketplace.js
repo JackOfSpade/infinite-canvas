@@ -16,6 +16,11 @@
  */
 
 // ── Site Configurations ─────────────────────────────────────────────────────
+// `timeoutMs` is a SEED / safety ceiling, not a fixed budget: scrapeBudget
+// learns each source's typical time-to-ready and derives a tighter working
+// timeout for fast sources (never looser than this seed). `waitMs` is now
+// vestigial — the readiness-stabilization loop in browserPool decides when
+// results are ready, and the pre-read beat is sized from learned timing.
 
 export const EBAY_SOLD_CONFIG = {
   waitMs: 2500,

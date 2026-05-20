@@ -11,6 +11,9 @@ import { getRecentLogs } from '../logger.js';
 import { getGeminiTelemetry } from './gemini.js';
 import { getJobsTelemetry } from './jobs.js';
 import { getMarketplaceTelemetry } from './marketplace.js';
+import { getBudgetSnapshot } from './scrapeBudget.js';
+import { getRateLimiterSnapshot } from './rateLimiter.js';
+import { getTokenBudgetSnapshot } from './tokenBudget.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -18,6 +21,13 @@ import { getMarketplaceTelemetry } from './marketplace.js';
 // keep running the old code, producing the maddening "I changed it, why isn't
 // it doing the new thing?" failure mode.
 const PROCESS_START_MS = Date.now();
+
+// "(Ns ago)" suffix for a timestamp — shared by the pipeline snapshot builders.
+const ago = (ts) => {
+  if (!ts) return '';
+  const s = Math.round((Date.now() - ts) / 1000);
+  return Number.isFinite(s) ? ` (${s}s ago)` : '';
+};
 
 /**
  * Returns the mtime (ms) of the newest main-process .js file actually running,
@@ -156,12 +166,6 @@ function buildJobsPipelineSnapshot() {
   const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
   if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing)) return '';
 
-  const ago = (ts) => {
-    if (!ts) return '';
-    const s = Math.round((Date.now() - ts) / 1000);
-    return Number.isFinite(s) ? ` (${s}s ago)` : '';
-  };
-
   const lines = [];
 
   if (t.search) {
@@ -252,12 +256,6 @@ function buildMarketplacePipelineSnapshot() {
   const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
   if (!t || (!t.analyze && !t.scrape && !hasResolves && !t.synthesis && !t.fit)) return '';
 
-  const ago = (ts) => {
-    if (!ts) return '';
-    const s = Math.round((Date.now() - ts) / 1000);
-    return Number.isFinite(s) ? ` (${s}s ago)` : '';
-  };
-
   const lines = [];
 
   if (t.analyze) {
@@ -316,6 +314,82 @@ function buildMarketplacePipelineSnapshot() {
 > are not. Each stage stamps independently (a resolve/rescrape can run alone).
 
 ${lines.join('\n')}
+`;
+}
+
+/**
+ * Renders the live tuning state of the scrape pipeline — the answer to "why did
+ * this source time out / get blocked / run so slowly?" reports.
+ *
+ * Two halves with different lifetimes:
+ *   - Rate limiter (rateLimiter.js): IN-MEMORY, resets each run. A domain's
+ *     `tighten` (≥1) multiplies its seed cooldown after throttle/block signals
+ *     and decays on success; global pressure shrinks pool concurrency. We list
+ *     only domains that actually hit a throttle/block/error this session.
+ *   - Learned budgets (scrapeBudget.js): PERSISTED across runs. Per-source EMA
+ *     of time-to-ready, used to size each source's working timeout (never above
+ *     its seed). Present even with no scraping this session.
+ *
+ * Returns '' when there's nothing to show, so the section self-omits.
+ */
+function buildScraperAdaptationSnapshot() {
+  let rl = null, budgets = null;
+  try { rl = getRateLimiterSnapshot(); } catch { /* non-fatal */ }
+  try { budgets = getBudgetSnapshot(); } catch { /* non-fatal */ }
+
+  const rlLines = [];
+  if (rl && rl.domains && Object.keys(rl.domains).length > 0) {
+    // Only domains that meaningfully tightened or saw a non-ok outcome — an
+    // all-clean domain at tighten=1 is just noise here.
+    const hot = Object.entries(rl.domains)
+      .filter(([, d]) => d.tighten > 1.05 || (Array.isArray(d.recent) && d.recent.some(o => o !== 'ok')))
+      .sort((a, b) => b[1].tighten - a[1].tighten);
+    rlLines.push(`- Effective concurrency: ${rl.effectiveConcurrency} · global pressure: ${rl.pressure}`);
+    if (hot.length === 0) {
+      rlLines.push('- (no domain hit a throttle/block/error this session)');
+    } else {
+      for (const [domain, d] of hot) {
+        const recent = Array.isArray(d.recent) && d.recent.length ? ` (recent: ${d.recent.join(', ')})` : '';
+        rlLines.push(`- \`${domain}\`: tighten ${d.tighten}×${recent}`);
+      }
+    }
+  }
+
+  const budgetLines = [];
+  if (budgets && Object.keys(budgets).length > 0) {
+    for (const [key, s] of Object.entries(budgets).sort((a, b) => a[0].localeCompare(b[0]))) {
+      if (!s || (!(s.samples > 0) && !(s.bodySamples > 0))) continue;
+      const parts = [];
+      if (s.samples > 0) {
+        const note = s.samples >= 5 ? '' : ' (seed)';
+        parts.push(`ema ${s.ema}ms /${s.samples}${note}`);
+      }
+      // Learned body-size baseline — the suspicious-empty soft-block threshold
+      // is judged against this instead of a flat byte count.
+      if (s.bodySamples > 0) {
+        parts.push(`body ~${Math.round(s.bodyEma / 1000)}KB /${s.bodySamples}`);
+      }
+      budgetLines.push(`- \`${key}\`: ${parts.join(', ')}`);
+    }
+  }
+
+  if (rlLines.length === 0 && budgetLines.length === 0) return '';
+
+  return `
+## Scraper Adaptation
+> Live tuning for the scrape pipeline. **Rate limiter** state is in-memory
+> (resets each run); **learned budgets** persist across runs. Together they
+> answer "why was this source slow / blocked / timed out?" — a high \`tighten\`
+> or shrunken concurrency means anti-bot signals were observed; a learned
+> budget far below a source's seed means it normally settles fast. The body
+> baseline is the source's typical good-response size — soft blocks are flagged
+> when a response is anomalously small relative to it.
+
+### Rate limiter (this session)
+${rlLines.length ? rlLines.join('\n') : '- (rate limiter idle this session)'}
+
+### Learned scrape budgets (persisted)
+${budgetLines.length ? budgetLines.join('\n') : '- (no source has a recorded sample yet — all using seed timeouts)'}
 `;
 }
 
@@ -855,6 +929,21 @@ ${formatted}
   // Surfaces missing keys / wrong provider — the most common cause of
   // "I clicked the AI button and nothing happened" reports.
   const aiConfig = buildAIConfigSnapshot();
+  // Learned token budgets — observed output (visible+thinking) tokens per task,
+  // which drive the self-calibrating max_tokens cap (effectiveCap). A p95 near
+  // the 24576 hard cap means a task is truncating and the cap has grown to match.
+  const tokenBudgets = (() => { try { return getTokenBudgetSnapshot(); } catch { return {}; } })();
+  const tokenBudgetLines = Object.entries(tokenBudgets)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([task, s]) => `- \`${task}\`: p95 ${s.p95} / max ${s.max} tok over ${s.samples} call(s)`);
+  const tokenBudgetMarkdown = tokenBudgetLines.length
+    ? `
+### Learned Token Budgets
+> Observed output (visible + thinking) tokens per task — drives the self-calibrating
+> max_tokens cap. A p95 near the 24576 hard cap means that task is truncating.
+${tokenBudgetLines.join('\n')}`
+    : '';
+
   const aiConfigMarkdown = `
 ## AI Configuration
 - Active provider: \`${aiConfig.provider}\`
@@ -872,7 +961,7 @@ ${aiConfig.provider === 'gemini' ? `
 - Last attempted model: \`${aiConfig.geminiLastAttemptedModel}\`
 - Last successful model: \`${aiConfig.geminiLastSuccessfulModel}\`
 - Last attempted error: \`${aiConfig.geminiLastAttemptedError}\`
-` : ''}
+` : ''}${tokenBudgetMarkdown}
 `;
 
   const jobsConfig = buildJobsConfigSnapshot();
@@ -889,6 +978,10 @@ ${aiConfig.provider === 'gemini' ? `
 
   let marketplacePipelineMarkdown = '';
   try { marketplacePipelineMarkdown = buildMarketplacePipelineSnapshot(); }
+  catch { /* never break the report on diagnostic failure */ }
+
+  let scraperAdaptationMarkdown = '';
+  try { scraperAdaptationMarkdown = buildScraperAdaptationSnapshot(); }
   catch { /* never break the report on diagnostic failure */ }
 
   let issueReporterDraftMarkdown = '';
@@ -942,7 +1035,7 @@ ${description}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceSessionsMarkdown}${mainProcessLogsMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceSessionsMarkdown}${scraperAdaptationMarkdown}${mainProcessLogsMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 <details>
 <summary><b>Click here to expand the full JSON Application State</b></summary>
 
@@ -955,6 +1048,8 @@ ${appStateJson}
 ## Event History
 `;
 
+  // Static safety bound (not adaptive): keeps the assembled bug-report payload
+  // from ballooning past what's reasonable to ship/store.
   const MAX_BUDGET_BYTES = 10 * 1024 * 1024; // 10MB
   const bufferBytes = Buffer.byteLength(baseMarkdown, 'utf8');
   const events = payload.eventLogs || [];

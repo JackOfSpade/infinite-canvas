@@ -19,10 +19,34 @@ import { EventLogger } from '../../utils/EventLogger';
 // AI-judgment cutoff for "good chance of interview." Below this we treat
 // the candidate as unlikely to clear initial screen — used to decide the
 // Other Strong cutoff AND the loose-fill ladder for Target Role.
-const LIKELY_THRESHOLD = 65;
+export const LIKELY_THRESHOLD = 65;
 // Minimum size of the Target Role branch when loose-fill kicks in: better
 // to show 5 best-shot longshots than an empty branch on a real pivot.
 const TARGET_FILL_MIN  = 5;
+// "Other Strong Matches" relaxation: when too few non-target jobs clear
+// LIKELY_THRESHOLD, lower the bar to admit up to OTHER_FILL_MIN of the best
+// (never below OTHER_FLOOR) so a niche/weak run still surfaces its top non-
+// target matches instead of an empty branch — the non-target analog of
+// TARGET_FILL_MIN. See strongMatchGate.
+const OTHER_FLOOR    = 50;
+const OTHER_FILL_MIN = 5;
+
+/**
+ * Cutoff score for the "Other Strong Matches" branch, derived from the run's
+ * own non-target score distribution. Stays at LIKELY_THRESHOLD when there are
+ * already ≥ OTHER_FILL_MIN strong non-target jobs; otherwise drops to the score
+ * of the OTHER_FILL_MIN-th best (clamped to [OTHER_FLOOR, LIKELY_THRESHOLD]) so
+ * a thin run still shows its best non-target matches. Computed once per run and
+ * persisted on the hub (data.strongMatchGate) so later appends bucket the same way.
+ * @param {number[]} nonTargetScores  matchScores of the run's non-target jobs
+ */
+export function strongMatchGate(nonTargetScores = []) {
+  const strong = nonTargetScores.filter(s => s >= LIKELY_THRESHOLD).length;
+  if (strong >= OTHER_FILL_MIN || nonTargetScores.length === 0) return LIKELY_THRESHOLD;
+  const sortedDesc = [...nonTargetScores].sort((a, b) => b - a);
+  const nth = sortedDesc[Math.min(OTHER_FILL_MIN, sortedDesc.length) - 1];
+  return Math.max(OTHER_FLOOR, Math.min(LIKELY_THRESHOLD, nth ?? LIKELY_THRESHOLD));
+}
 // Synthetic careerDirection name we override target jobs to before
 // bucketing, so the AI clusters them under one category whose buckets
 // mount directly under the Target Role branch (no Category level).
@@ -54,7 +78,7 @@ const keyOf = (job) => `${job?.title}|${job?.company}|${job?.url || ''}`;
  */
 export function partitionJobsForBranches(scoredJobs, hasTarget) {
   if (!hasTarget) {
-    return { targetList: [], otherList: [], displayedJobs: scoredJobs };
+    return { targetList: [], otherList: [], displayedJobs: scoredJobs, gate: LIKELY_THRESHOLD };
   }
   const targetCandidates = scoredJobs.filter(j => j.isTargetRoleMatch);
   const likelyTargets = targetCandidates.filter(j => (j.matchScore || 0) >= LIKELY_THRESHOLD);
@@ -74,10 +98,14 @@ export function partitionJobsForBranches(scoredJobs, hasTarget) {
       .map(j => ({ ...j, strengthLabel: 'stretch' }));
     targetList = [...likelyTargets, ...fillers];
   }
-  const otherList = scoredJobs.filter(
-    j => !j.isTargetRoleMatch && (j.matchScore || 0) >= LIKELY_THRESHOLD,
+  // Relative cutoff from this run's non-target distribution (relaxes when thin).
+  const gate = strongMatchGate(
+    scoredJobs.filter(j => !j.isTargetRoleMatch).map(j => j.matchScore || 0),
   );
-  return { targetList, otherList, displayedJobs: [...targetList, ...otherList] };
+  const otherList = scoredJobs.filter(
+    j => !j.isTargetRoleMatch && (j.matchScore || 0) >= gate,
+  );
+  return { targetList, otherList, displayedJobs: [...targetList, ...otherList], gate };
 }
 
 /**

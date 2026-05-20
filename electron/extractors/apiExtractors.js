@@ -12,6 +12,31 @@ import { logger } from '../logger.js';
 import { queueScrape } from '../ipc/browserPool.js';
 import { getRandomUA } from '../ipc/stealthBrowser.js';
 import { htmlToText } from 'html-to-text';
+import { resolveBudget } from '../ipc/scrapeBudget.js';
+import { JOB_RESULT_CAP } from '../ipc/resultCaps.js';
+
+// Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
+// shared scrapeBudget store so they live in one place and share the budget
+// machinery used by the browser scrape path. NOTE: unlike the browser path
+// these are single-shot fetches with no "time to stable" to learn from, so
+// they're not actively learned yet — this indirection removes the scattered
+// magic literals and leaves a single hook to switch on learning later.
+const API_TIMEOUT_SEEDS = {
+  'linkedin-api':   10000,
+  'greenhouse-api':  8000,
+  'lever-api':       8000,
+  'usajobs-api':    10000,
+  'remoteok-api':   10000,
+  'wwr-api':        10000,
+  'reverb-api':     12000,
+  'dice-api':       10000,
+  'stockx-api':     10000,
+};
+
+/** Resolve an API fetch timeout from its seed via the shared budget store. */
+function apiTimeout(key) {
+  return resolveBudget(key, API_TIMEOUT_SEEDS[key] ?? 10000).timeoutMs;
+}
 
 
 /**
@@ -116,7 +141,7 @@ export async function fetchLinkedInJobs(query, signal = null, maxAgeDays = null)
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         'Referer': 'https://www.linkedin.com/jobs/search/',
       },
-      signal: createTimeoutSignal(signal, 10000),
+      signal: createTimeoutSignal(signal, apiTimeout('linkedin-api')),
     }, 'linkedin');
 
     // First detected warning wins — the rest of the loop bails. LinkedIn is
@@ -168,7 +193,7 @@ export async function fetchLinkedInJobs(query, signal = null, maxAgeDays = null)
     if (start < 25) await new Promise(r => setTimeout(r, 2000));
   }
 
-  return { items: allJobs.slice(0, 30), warning };
+  return { items: allJobs.slice(0, JOB_RESULT_CAP), warning };
 }
 
 // ── Greenhouse API ──────────────────────────────────────────────────────────
@@ -224,7 +249,7 @@ export async function fetchGreenhouseJobs(query, signal = null) {
   const allJobs = await processInBatches(GREENHOUSE_BOARDS, 10, async ({ token, company }) => {
     const r = await safeApiFetch(`https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`, {
       headers: { 'Accept': 'application/json' },
-      signal: createTimeoutSignal(signal, 8000),
+      signal: createTimeoutSignal(signal, apiTimeout('greenhouse-api')),
     }, 'greenhouse');
     if (r.warning) warnings.push(r.warning);
     if (!r.ok) return [];
@@ -238,7 +263,7 @@ export async function fetchGreenhouseJobs(query, signal = null) {
     return queryTerms.some(term => text.includes(term));
   });
 
-  const items = matched.slice(0, 30).map(job => ({
+  const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
     title: job.title || '',
     company: job._company || '',
     location: job.location?.name || '',
@@ -291,7 +316,7 @@ export async function fetchLeverJobs(query, signal = null) {
   const allJobs = await processInBatches(LEVER_COMPANIES, 10, async ({ slug, company }) => {
     const r = await safeApiFetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, {
       headers: { 'Accept': 'application/json' },
-      signal: createTimeoutSignal(signal, 8000),
+      signal: createTimeoutSignal(signal, apiTimeout('lever-api')),
     }, 'lever');
     if (r.warning) warnings.push(r.warning);
     if (!r.ok) return [];
@@ -305,7 +330,7 @@ export async function fetchLeverJobs(query, signal = null) {
     return queryTerms.some(term => text.includes(term));
   });
 
-  const items = matched.slice(0, 30).map(job => ({
+  const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
     title: job.text || '',
     company: job._company || '',
     location: job.categories?.location || '',
@@ -361,7 +386,7 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
       'User-Agent': email || 'job-search-app@example.com',
       'Authorization-Key': apiKey,
     },
-    signal: createTimeoutSignal(signal, 10000),
+    signal: createTimeoutSignal(signal, apiTimeout('usajobs-api')),
   }, 'usajobs');
 
   if (!r.ok) {
@@ -373,7 +398,7 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
   const data = r.json;
   const resultItems = data?.SearchResult?.SearchResultItems || [];
 
-  const items = resultItems.slice(0, 30).map(item => {
+  const items = resultItems.slice(0, JOB_RESULT_CAP).map(item => {
     const pos = item.MatchedObjectDescriptor || {};
     const salary = pos.PositionRemuneration?.[0];
     const salaryStr = salary
@@ -412,7 +437,7 @@ export async function fetchRemoteOKJobs(query, signal = null) {
       'Accept': 'application/json',
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     },
-    signal: createTimeoutSignal(signal, 10000),
+    signal: createTimeoutSignal(signal, apiTimeout('remoteok-api')),
   }, 'remoteok');
 
   if (!r.ok) {
@@ -433,7 +458,7 @@ export async function fetchRemoteOKJobs(query, signal = null) {
     return queryTerms.some(term => text.includes(term));
   });
 
-  const items = matched.slice(0, 30).map(job => ({
+  const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
     title: job.position || '',
     company: job.company || '',
     location: job.location || 'Remote',
@@ -460,7 +485,7 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null) {
       'Accept': 'application/rss+xml, application/xml, text/xml',
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     },
-    signal: createTimeoutSignal(signal, 10000),
+    signal: createTimeoutSignal(signal, apiTimeout('wwr-api')),
   }, 'weworkremotely');
 
   if (!r.ok) {
@@ -513,7 +538,7 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null) {
     });
   }
 
-  return { items: jobs.slice(0, 30), warning: r.warning };
+  return { items: jobs.slice(0, JOB_RESULT_CAP), warning: r.warning };
 }
 
 
@@ -538,7 +563,7 @@ export async function fetchReverbListings(query, soldOnly = false, signal = null
       'Content-Type': 'application/hal+json',
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     },
-    signal: createTimeoutSignal(signal, 12000),
+    signal: createTimeoutSignal(signal, apiTimeout('reverb-api')),
   }, 'reverb');
 
   if (!r.ok) {
@@ -602,7 +627,7 @@ export async function fetchDiceListings(query, location = '', signal = null) {
         'x-api-key': DICE_API_KEY,
         'Accept': 'application/json',
       },
-      signal: createTimeoutSignal(signal, 10000),
+      signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
     },
     'dice'
   );
@@ -779,7 +804,7 @@ export async function fetchStockXListings(query, signal = null) {
           query,
           hitsPerPage: 25,
         }),
-        signal: createTimeoutSignal(signal, 10000),
+        signal: createTimeoutSignal(signal, apiTimeout('stockx-api')),
       },
       'stockx-algolia'
     );

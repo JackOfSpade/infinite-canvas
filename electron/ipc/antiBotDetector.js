@@ -21,6 +21,23 @@
  * how loud to render (yellow = throttle, red = hard block).
  */
 
+// ── Detection tuning ──────────────────────────────────────────────────────────
+// Keyword-scan windows: how far into a body we look for block markers. Block
+// interstitials always put their markers near the top, so these are structural
+// "scan the head" bounds (not page-content thresholds) — kept fixed.
+const HTML_SCAN_CHARS = 5000; // HTML body keyword sniff
+const API_SCAN_CHARS  = 2000; // raw API body keyword sniff
+
+// Suspicious-empty ("soft block returns a stripped 200") thresholds. The body
+// size is judged against the source's LEARNED typical good-response size when
+// available (see expectedBodySize), else an absolute floor. The clamp keeps the
+// threshold sane: never below MIN (full page HTML is always large, so this is a
+// safe no-false-positive floor) and never above MAX (so a large-but-partial
+// real page isn't mislabeled as a skeleton block).
+const SUSPICIOUS_MIN_BYTES  = 2000;  // floor / fallback when there's no baseline
+const SUSPICIOUS_MAX_BYTES  = 20000; // ceiling — a soft-block skeleton is rarely larger
+const SUSPICIOUS_BODY_RATIO = 0.3;   // < 30% of the source's typical body = suspicious
+
 const KEYWORD_SIGNALS = [
   // Cloudflare interstitials
   { pat: /just a moment\s*\.\.\.|checking your browser|cf-challenge|cf-browser-verification|cf_chl_/i,
@@ -93,11 +110,12 @@ const URL_SIGNALS = [
  * @param {string} [ctx.html]                Response body (raw HTML or stripped text — both work)
  * @param {number} [ctx.itemsExtracted]      How many records the extractor produced (null if N/A)
  * @param {number} [ctx.expectedMinItems]    Floor below which "zero or near-zero" is suspicious (default 0 — set to e.g. 5 for established platforms)
+ * @param {number} [ctx.expectedBodySize]    This source's LEARNED typical good-response body size (chars); 0/absent → use the absolute floor
  * @param {string} [ctx.sourceLabel]         For the evidence string ("eBay Sold", "LinkedIn", etc.)
  * @returns {null | {code, severity, evidence, suggestion}}
  */
 export function detectAntiBotSignal(ctx = {}) {
-  const { status = 0, finalUrl = '', html = '', itemsExtracted = null, expectedMinItems = 0, sourceLabel = '' } = ctx;
+  const { status = 0, finalUrl = '', html = '', itemsExtracted = null, expectedMinItems = 0, expectedBodySize = 0, sourceLabel = '' } = ctx;
   const label = sourceLabel ? `[${sourceLabel}] ` : '';
 
   // Layer 1 — HTTP status
@@ -140,11 +158,10 @@ export function detectAntiBotSignal(ctx = {}) {
     }
   }
 
-  // Layer 3 — body keyword sniff. Scope to the first ~5000 chars so a
-  // legitimate listing that happens to mention "captcha" deep in nav
-  // chrome doesn't false-positive.
+  // Layer 3 — body keyword sniff. Scope to the head so a legitimate listing
+  // that happens to mention "captcha" deep in nav chrome doesn't false-positive.
   if (html) {
-    const head = String(html).slice(0, 5000);
+    const head = String(html).slice(0, HTML_SCAN_CHARS);
     for (const s of KEYWORD_SIGNALS) {
       const m = head.match(s.pat);
       if (m) {
@@ -162,13 +179,20 @@ export function detectAntiBotSignal(ctx = {}) {
   // a generic zero-results on a long-tail query is not suspicious by itself.
   if (itemsExtracted != null && expectedMinItems > 0 && itemsExtracted < expectedMinItems) {
     const htmlLen = html ? String(html).length : 0;
-    // Sometimes a soft block returns a stripped-down 200 OK with no items
-    // and a very small body. Flag the combination, not either alone.
-    if (htmlLen < 2000) {
+    // Sometimes a soft block returns a stripped-down 200 OK with no items and a
+    // small body. Judge "small" against this source's learned typical body size
+    // when we have one (catches a styled block page that's still bigger than a
+    // flat byte floor); otherwise fall back to the absolute floor. Clamped so
+    // the threshold is never below the floor or above a skeleton-sized ceiling.
+    const suspiciousBelow = expectedBodySize > 0
+      ? Math.min(SUSPICIOUS_MAX_BYTES, Math.max(SUSPICIOUS_MIN_BYTES, Math.round(expectedBodySize * SUSPICIOUS_BODY_RATIO)))
+      : SUSPICIOUS_MIN_BYTES;
+    if (htmlLen < suspiciousBelow) {
+      const vs = expectedBodySize > 0 ? ` (typical ~${Math.round(expectedBodySize)})` : '';
       return {
         code: 'suspicious-empty',
         severity: 'throttle',
-        evidence: `${label}returned ${itemsExtracted} items with only ${htmlLen} chars of body`,
+        evidence: `${label}returned ${itemsExtracted} items with only ${htmlLen} chars of body${vs}`,
         suggestion: 'Response was suspiciously small AND empty of items. Most likely a soft block; retry with a fresh profile.',
       };
     }
@@ -271,7 +295,7 @@ export function detectApiAntiBotSignal(ctx = {}) {
   }
   // Also sniff the raw body — useful when an API responds with HTML on block
   // (Cloudflare interstitial returned with text/html instead of JSON).
-  if (bodyText) candidateStrings.push(String(bodyText).slice(0, 2000));
+  if (bodyText) candidateStrings.push(String(bodyText).slice(0, API_SCAN_CHARS));
 
   for (const s of candidateStrings) {
     for (const p of API_JSON_ERROR_PATTERNS) {

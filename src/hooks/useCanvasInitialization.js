@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
 import { EventLogger } from '../utils/EventLogger';
+import { TIMINGS, autosaveDebounceMs } from '../utils/timings';
 
 export function useCanvasInitialization({
   nodes,
@@ -44,9 +45,10 @@ export function useCanvasInitialization({
     setHasUnsavedChanges(true);
   }, [nodes, edges, drawings, setHasUnsavedChanges]);
 
-  // Auto-save: debounced 2-second timer that restarts whenever content or the
-  // file path changes. Reads hasUnsavedChanges via ref so a successful save
-  // (which flips the flag to false) doesn't reset the debounce unnecessarily.
+  // Auto-save: debounced timer (≥2s, longer for big workspaces — see
+  // autosaveDebounceMs) that restarts whenever content or the file path changes.
+  // Reads hasUnsavedChanges via ref so a successful save (which flips the flag
+  // to false) doesn't reset the debounce unnecessarily.
   useEffect(() => {
     if (!currentFile || !window.electronAPI) return;
 
@@ -55,14 +57,14 @@ export function useCanvasInitialization({
       // Safety guard 1: never auto-save while navigation animations are active
       // as the stack/nodes state may be transient or intermediate.
       if (isAnimatingRef?.current) {
-        timer = setTimeout(attemptSave, 1000);
+        timer = setTimeout(attemptSave, TIMINGS.AUTOSAVE_RETRY_ANIMATING_MS);
         return;
       }
 
       // Safety guard 2: don't save if a manual save (Cmd+S) is already in-progress.
       // Concurrent writes to the same file can cause partial-write corruption or OS lock conflicts.
       if (saveStateRef?.current && saveStateRef.current !== 'idle') {
-        timer = setTimeout(attemptSave, 500);
+        timer = setTimeout(attemptSave, TIMINGS.AUTOSAVE_RETRY_SAVING_MS);
         return;
       }
 
@@ -90,7 +92,8 @@ export function useCanvasInitialization({
       }).catch(err => EventLogger.error('[auto-save] saveWorkspace failed:', err));
     };
 
-    timer = setTimeout(attemptSave, 2000);
+    // Debounce scales with workspace size (bigger = costlier to serialize/write).
+    timer = setTimeout(attemptSave, autosaveDebounceMs(nodes.length));
     return () => clearTimeout(timer);
   }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, saveStateRef]);
 }

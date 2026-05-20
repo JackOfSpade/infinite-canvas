@@ -2,6 +2,7 @@ import { useCallback, useState, useRef, useEffect } from 'react';
 import { toPng } from 'html-to-image';
 import { EventLogger } from '../utils/EventLogger';
 import { migrateGroupNodes, sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
+import { TIMINGS } from '../utils/timings';
 
 
 /**
@@ -131,7 +132,7 @@ export function useCanvasPersistence({
         setSaveState('saved');
         addToast({ title: 'Workspace Saved', description: 'Your canvas has been saved successfully.', type: 'success' });
         if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
-        saveStateTimerRef.current = setTimeout(() => { setSaveState('idle'); }, 1500);
+        saveStateTimerRef.current = setTimeout(() => { setSaveState('idle'); }, TIMINGS.FEEDBACK_MS);
         return true;
       } else if (res?.canceled) {
         // User dismissed the native save dialog — not an error.

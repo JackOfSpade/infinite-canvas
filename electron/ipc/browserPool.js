@@ -2,10 +2,10 @@
  * Browser Pool — Manages concurrent stealth scraping through puppeteer-extra.
  *
  * Anti-ban architecture:
- *   - Max 3 simultaneous pages total
+ *   - Global concurrency cap that shrinks under cross-domain block pressure
  *   - Max 1 concurrent page per domain (prevents pattern detection)
- *   - Per-domain cooldown (3–8s between requests to same domain)
- *   - Exponential backoff on errors/blocks (60s → 120s → 240s)
+ *   - Adaptive per-domain cooldown that tightens on throttle/block signals and
+ *     relaxes on success (see rateLimiter.js — the seed cooldowns are the floor)
  *   - Gaussian-distributed inter-request delays (not uniform = detectable)
  *
  * Public API:
@@ -20,9 +20,23 @@ import {
 } from './stealthBrowser.js';
 import { randomUUID } from 'crypto';
 import { logger } from '../logger.js';
+import { READINESS, resolveBudget, recordReady, recordBodySize, getBodyBaseline } from './scrapeBudget.js';
+import {
+  extractDomain,
+  isCoolingDown,
+  effectiveConcurrency,
+  perDomainLimit,
+  recordOutcome,
+  nextWakeMs,
+} from './rateLimiter.js';
 
-const MAX_CONCURRENT = 3;
-const MAX_PER_DOMAIN = 1; // Only 1 concurrent page per domain
+// Queue dispatch cadence. These are housekeeping intervals, not rate limits —
+// the rate limiter (cooldowns) governs actual request pacing. The idle poller
+// is a backstop; it wakes at the soonest cooldown expiry (bounded by
+// POLLER_MAX_MS) so a freed domain dispatches promptly without busy-spinning.
+const POLLER_MAX_MS = 1000;   // longest gap between idle re-checks
+const POLLER_MIN_MS = 100;    // shortest, so we never tight-loop
+const REQUEUE_DELAY_MS = 500; // re-check delay after a task frees a slot
 
 let activeCount = 0;
 const activeDomains = new Map(); // domain -> count of active pages
@@ -31,57 +45,9 @@ const activeTasks = new Map(); // cacheKey -> Promise (deduplicates both queued 
 const pageHandles = new Map(); // uuid -> { page, startTime }
 let isShuttingDown = false;
 
-// Domain-specific RPM policies (per deep research report, P6).
-// LinkedIn is aggressively defended; StockX uses PerimeterX; eBay is moderate.
-const DOMAIN_POLICIES = {
-  'linkedin.com': { rpm: 1, baseCooldownMs: 60000 },   // ~1 req/min, daily cap
-  'indeed.com': { rpm: 5, baseCooldownMs: 12000 },   // 5 req/min
-  'glassdoor.com': { rpm: 3, baseCooldownMs: 20000 },   // Cloudflare-heavy
-  'stockx.com': { rpm: 3, baseCooldownMs: 20000 },   // PerimeterX
-  'ebay.com': { rpm: 15, baseCooldownMs: 4000 },   // Moderate tolerance
-  'poshmark.com': { rpm: 5, baseCooldownMs: 12000 },
-  'mercari.com': { rpm: 8, baseCooldownMs: 8000 },
-  'reverb.com': { rpm: 10, baseCooldownMs: 6000 },
-  'swappa.com': { rpm: 10, baseCooldownMs: 6000 },
-  'depop.com': { rpm: 5, baseCooldownMs: 12000 },
-};
-const DEFAULT_POLICY = { rpm: 5, baseCooldownMs: 12000 };
-
-// Pre-built entry list — avoids recreating the array on every getDomainPolicy call.
-const DOMAIN_POLICY_ENTRIES = Object.entries(DOMAIN_POLICIES);
-
 // ── Utility Functions ───────────────────────────────────────────────────────
 
-/** Canonicalize a raw domain name against known policies */
-function getCanonicalDomain(rawDomain) {
-  for (const [key] of DOMAIN_POLICY_ENTRIES) {
-    if (rawDomain.includes(key)) return key;
-  }
-  return rawDomain;
-}
-
-/** Returns the canonical policy key for a URL (e.g., 'ebay.com' even for 'm.ebay.com') */
-function extractDomain(url) {
-  try {
-    const rawDomain = new URL(url).hostname.replace(/^www\./, '');
-    return getCanonicalDomain(rawDomain);
-  } catch {
-    return 'unknown';
-  }
-}
-
-/** Gaussian-distributed random delay (more natural than uniform). */
-function gaussianDelay(mean, stddev) {
-  // Clamp u1 away from 0: Math.log(0) = -Infinity → sqrt(-Infinity) = NaN →
-  // Math.max(1000, NaN) = NaN in JS → setTimeout(fn, NaN) fires immediately,
-  // bypassing the rate-limiter.  Number.EPSILON (~5e-324) is safe.
-  const u1 = Math.random() || Number.EPSILON;
-  const u2 = Math.random();
-  const normal = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-  return Math.max(1000, Math.round(mean + normal * stddev));
-}
-
-/** 
+/**
  * Gracefully close a puppeteer page with a timeout to prevent hanging.
  */
 async function safeClose(page, timeoutMs = 2000) {
@@ -100,85 +66,36 @@ async function safeClose(page, timeoutMs = 2000) {
   }
 }
 
-// ── Per-Domain Rate Limiter ─────────────────────────────────────────────────
-const domainNextAllowed = new Map();
-const domainBackoff = new Map();
-
-function getDomainPolicy(domain) {
-  return DOMAIN_POLICIES[domain] || DEFAULT_POLICY;
-}
-
-function isDomainCoolingDown(domain) {
-  const next = domainNextAllowed.get(domain);
-  return next ? Date.now() < next : false;
-}
-
-/** 
- * Updates the cooldown timer for a domain.
- * Called after each successful or failed request.
- */
-function updateDomainCooldown(domain) {
-  const backoffMult = domainBackoff.get(domain) || 1;
-  const policy = getDomainPolicy(domain);
-  const baseCooldown = gaussianDelay(policy.baseCooldownMs, policy.baseCooldownMs * 0.3);
-  const cooldown = baseCooldown * backoffMult;
-  
-  domainNextAllowed.set(domain, Date.now() + cooldown);
-}
-
-/** Mark a domain as having encountered an error (triggers exponential backoff). */
-function markDomainError(domain) {
-  const current = domainBackoff.get(domain) || 1;
-  const next = Math.min(current * 2, 16); // Max 16x = ~64s cooldown
-  domainBackoff.set(domain, next);
-  updateDomainCooldown(domain); // Trigger immediate cooldown on error
-  
-  // Record for Tier 4 escalation tracking
-  recordDomainAttempt(domain, false);
-}
-
-/** Mark a domain as having succeeded (halves backoff). */
-function markDomainSuccess(domain) {
-  const current = domainBackoff.get(domain) || 1;
-  if (current > 1) {
-    domainBackoff.set(domain, Math.max(1, current * 0.5)); // Halve backoff on success
-  }
-  updateDomainCooldown(domain);
-  // Record for Tier 4 escalation tracking
-  recordDomainAttempt(domain, true);
-}
+// ── Queue Dispatch ───────────────────────────────────────────────────────────
+// All rate-limiting policy (cooldowns, tighten, escalation, pressure) lives in
+// rateLimiter.js. This layer only owns the queue + concurrency slots.
 
 function canProcessTask(task) {
   const domain = extractDomain(task.url);
   const domainActive = activeDomains.get(domain) || 0;
-  // Per-domain concurrency limit AND per-domain cooldown check.
-  // This allows processQueue to skip tasks that are still in cooldown
-  // and process others, maximizing global slot utilization.
-  return domainActive < MAX_PER_DOMAIN && !isDomainCoolingDown(domain);
+  // Per-domain concurrency cap AND per-domain cooldown. Skipping cooling tasks
+  // lets us dispatch others, maximizing global slot utilization.
+  return domainActive < perDomainLimit && !isCoolingDown(domain);
 }
 
 let queuePoller = null;
 
-function processQueue() {
-  // If tasks are waiting and no active task is polling, ensure we periodically wake up
-  if (queue.length > 0 && !queuePoller) {
-    queuePoller = setInterval(() => {
-      if (queue.length === 0) {
-        clearInterval(queuePoller);
-        queuePoller = null;
-      } else {
-        processQueue(); // Will do the actual dispatch
-      }
-    }, 1000);
-  } else if (queue.length === 0 && queuePoller) {
-    clearInterval(queuePoller);
+/** Backstop wake: re-check the queue when the soonest domain cooldown expires. */
+function scheduleQueueWake() {
+  if (queuePoller || queue.length === 0 || isShuttingDown) return;
+  const wait = Math.max(POLLER_MIN_MS, Math.min(nextWakeMs() ?? POLLER_MAX_MS, POLLER_MAX_MS));
+  queuePoller = setTimeout(() => {
     queuePoller = null;
-  }
+    processQueue();
+  }, wait);
+}
 
-  while (activeCount < MAX_CONCURRENT && queue.length > 0) {
-    // Find the first task whose domain isn’t at capacity
+function processQueue() {
+  // Effective concurrency shrinks under cross-domain block pressure.
+  while (activeCount < effectiveConcurrency() && queue.length > 0) {
+    // Find the first task whose domain isn't cooling down / at capacity
     const taskIdx = queue.findIndex(t => canProcessTask(t));
-    if (taskIdx === -1) break; // All queued tasks are for busy domains
+    if (taskIdx === -1) break; // All queued tasks are for busy/cooling domains
 
     const task = queue.splice(taskIdx, 1)[0];
     const { url, extractorJS, options, resolve, reject } = task;
@@ -197,27 +114,36 @@ function processQueue() {
         const count = activeDomains.get(domain) || 1;
         if (count <= 1) activeDomains.delete(domain);
         else activeDomains.set(domain, count - 1);
-        
-        // Schedule another check soon in case of domain cooldowns
-        setTimeout(processQueue, 500); 
+
+        // A slot freed — re-check soon (cooldowns may also have moved on).
+        setTimeout(processQueue, REQUEUE_DELAY_MS);
       });
   }
+
+  // Tasks still waiting (pool full or every domain cooling) — arm the backstop.
+  if (queue.length > 0) scheduleQueueWake();
 }
 
 /**
  * Internal — creates a stealth page, navigates, extracts data.
  *
  * Options:
- *   waitMs       — extra delay after page load (default 2000)
- *   timeoutMs    — hard timeout for the entire operation (default 30000)
+ *   timeoutMs    — SEED hard timeout (default 30000). Treated as a ceiling:
+ *                  scrapeBudget learns each source's typical time-to-ready and
+ *                  derives a tighter working budget for fast sources, never
+ *                  looser than this seed. See scrapeBudget.resolveBudget.
  *   waitFor      — CSS selector to wait for before extracting (optional)
  *   scrollFirst  — if true, simulate human scrolling before extraction (default false)
  *   dismissCookies — if true, try to dismiss cookie banners (default true)
  *   referer      — spoofed Referer header (optional)
+ *   sourceLabel  — stable source id used as the budget key (set by scrapeMultiple)
+ *
+ * NOTE: the legacy `waitMs` settle is gone — the readiness loop below decides
+ * when results are ready, and the pre-first-read beat is sized from learned
+ * timing. `waitMs` in a config is now ignored (kept only for cache-key purposes).
  */
 async function executeScrape(url, extractorJS, options = {}) {
   const {
-    waitMs = 2000,
     timeoutMs = 30000,
     waitFor = null,
     scrollFirst = false,
@@ -226,6 +152,13 @@ async function executeScrape(url, extractorJS, options = {}) {
   } = options;
 
   const domain = extractDomain(url);
+  // Budget key: prefer the explicit source id (e.g. 'ebay-sold'); fall back to
+  // domain for ad-hoc single scrapes. `timeoutMs` is the seed/ceiling.
+  const sourceKey = options.sourceLabel || domain;
+  const { timeoutMs: budgetMs, firstBeatMs, learned } = resolveBudget(sourceKey, timeoutMs);
+  if (learned && budgetMs < timeoutMs) {
+    logger.info(`[BrowserPool] ${sourceKey}: using learned budget ${budgetMs}ms (seed ${timeoutMs}ms)`);
+  }
   const pageId = randomUUID(); // Track this specific page instance
   let page = null;
   let timeoutId = null;
@@ -238,7 +171,7 @@ async function executeScrape(url, extractorJS, options = {}) {
   const scrapeStart = Date.now();
   try {
     const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error(`Scrape timed out after ${timeoutMs}ms for ${url}`)), timeoutMs);
+      timeoutId = setTimeout(() => reject(new Error(`Scrape timed out after ${budgetMs}ms for ${url}`)), budgetMs);
     });
 
     const scrapePromise = (async () => {
@@ -266,8 +199,8 @@ async function executeScrape(url, extractorJS, options = {}) {
           return null;
         }
 
-        // Set page-level timeout
-        page.setDefaultNavigationTimeout(timeoutMs - 2000);
+        // Set page-level timeout (headroom carved out of the working budget)
+        page.setDefaultNavigationTimeout(Math.max(5000, budgetMs - READINESS.DEFAULT_NAV_HEADROOM_MS));
 
         // Set referrer organically if specified
         if (referer) {
@@ -286,7 +219,7 @@ async function executeScrape(url, extractorJS, options = {}) {
         // navigation fails we keep going so the extractor gets a shot.
         let pageResponse = null;
         try {
-          pageResponse = await page.goto(url, { waitUntil: options.waitUntil || 'domcontentloaded', timeout: timeoutMs - 5000 });
+          pageResponse = await page.goto(url, { waitUntil: options.waitUntil || 'domcontentloaded', timeout: Math.max(5000, budgetMs - READINESS.NAV_HEADROOM_MS) });
         } catch (e) {
           if (!e?.message?.includes('ERR_ABORTED') && !e?.message?.includes('net::ERR_') && !e?.message?.includes('TimeoutError') && !e?.message?.includes('timeout')) {
             throw e;
@@ -298,10 +231,13 @@ async function executeScrape(url, extractorJS, options = {}) {
           await dismissCookieBanner(page);
         }
 
-        // Wait for specific content selector if provided
+        // Wait for specific content selector if provided. Bounded by SELECTOR_WAIT_MS
+        // but never more than the budget's readiness window — the stabilization
+        // loop below is the real readiness signal, this is just an early hint.
         if (waitFor) {
           try {
-            await page.waitForSelector(waitFor, { timeout: Math.min(waitMs + 3000, 8000) });
+            const selectorWait = Math.min(READINESS.SELECTOR_WAIT_MS, Math.max(2000, budgetMs - READINESS.READINESS_HEADROOM_MS));
+            await page.waitForSelector(waitFor, { timeout: selectorWait });
           } catch {
             // Selector didn't appear — continue anyway, extractor may still find content
           }
@@ -328,19 +264,19 @@ async function executeScrape(url, extractorJS, options = {}) {
           ? r.length
           : (r && typeof r === 'object' && Array.isArray(r.items) ? r.items.length : (r ? -1 : 0));
         // -1 = an opaque (non-array, non-{items}) shape we can't count → accept on sight.
-        const READINESS_POLL_MS = 600;
-        const STABLE_READS_REQUIRED = 2;   // count unchanged this many reads → settled
-        const MAX_ZERO_READS = 6;          // ~3.6s of 0 items → accept empty
-        const readinessDeadline = scrapeStart + timeoutMs - 6000; // leave headroom
+        // Detection constants + headroom are centralized in scrapeBudget.READINESS
+        // so this loop and authWindows' captcha loop can't drift apart.
+        const readinessDeadline = scrapeStart + budgetMs - READINESS.READINESS_HEADROOM_MS;
 
-        // One short human-like beat before the first read (replaces the old
-        // jittered settle), capped so it never dominates the budget.
-        await new Promise(r => setTimeout(r, Math.max(300, Math.min(waitMs, 1200))));
+        // One short human-like beat before the first read, sized from this
+        // source's learned timing (clamped) instead of a fixed settle guess.
+        await new Promise(r => setTimeout(r, firstBeatMs));
 
         let extractorResult = null;
         let lastCount = -2;   // sentinel so the first real read always "changes"
         let stableReads = 0;
         let zeroReads = 0;
+        let settledPositively = false;  // true only when we break on a stable, >0 count
         while (true) {
           if (isSettled || options.signal?.aborted) break;
           let r = null;
@@ -352,15 +288,19 @@ async function executeScrape(url, extractorJS, options = {}) {
             if (count === -1) break;             // opaque shape — done
             if (count > 0) {
               zeroReads = 0;
-              if (count === lastCount) { if (++stableReads >= STABLE_READS_REQUIRED) break; }
-              else { stableReads = 0; lastCount = count; }
-            } else if (++zeroReads >= MAX_ZERO_READS) {
+              if (count === lastCount) {
+                if (++stableReads >= READINESS.STABLE_READS) { settledPositively = true; break; }
+              } else { stableReads = 0; lastCount = count; }
+            } else if (++zeroReads >= READINESS.MAX_ZERO_READS) {
               break;                             // genuinely empty (or unparseable)
             }
           }
           if (Date.now() >= readinessDeadline) break;  // budget spent — take freshest
-          await new Promise(res => setTimeout(res, READINESS_POLL_MS));
+          await new Promise(res => setTimeout(res, READINESS.POLL_MS));
         }
+        // Time-to-ready for the budget learner — only the clean positive-stable
+        // case (recorded below, after anti-bot detection rules out a block).
+        const stableElapsedMs = settledPositively ? Date.now() - scrapeStart : null;
         // Guarantee a value even if every evaluate threw (rare).
         if (extractorResult == null) {
           try { extractorResult = await page.evaluate(extractorJS); } catch { extractorResult = []; }
@@ -386,14 +326,28 @@ async function executeScrape(url, extractorJS, options = {}) {
             html,
             itemsExtracted: itemCount,
             expectedMinItems: options.expectedMinItems || 0,
+            expectedBodySize: getBodyBaseline(sourceKey),  // learned typical good-body size
             sourceLabel: options.sourceLabel || domain,
           });
           if (warning) {
             logger.warn(`[BrowserPool] Anti-bot signal on ${url}: ${warning.code} — ${warning.evidence}`);
+          } else if (itemCount > 0 && html) {
+            // Clean response with real items — feed the body-size baseline so
+            // future suspicious-empty checks are judged against this source's norm.
+            recordBodySize(sourceKey, String(html).length);
           }
         } catch (e) {
           logger.warn('[BrowserPool] Anti-bot detector failed (non-fatal):', e?.message || String(e));
         }
+
+        // Feed the budget learner: a positive-count stabilization that wasn't
+        // flagged as a hard block is a clean "this is how long success takes"
+        // sample. Blocks/throttles/empties are intentionally excluded so the
+        // EMA tracks healthy timing, not stall duration.
+        if (stableElapsedMs != null && warning?.severity !== 'block') {
+          recordReady(sourceKey, stableElapsedMs);
+        }
+
         return { data: extractorResult, warning };
       } finally {
         if (options.signal && abortHandler) {
@@ -410,16 +364,22 @@ async function executeScrape(url, extractorJS, options = {}) {
 
     const result = await Promise.race([scrapePromise, timeoutPromise]);
 
-    markDomainSuccess(domain);
+    // Feed the rate limiter the REAL outcome. A soft block/throttle (HTTP 200 +
+    // anti-bot warning) must back the domain off and count toward escalation —
+    // it is not a clean success. Aborts/shutdowns (null result) record nothing.
+    if (result) {
+      const severity = result.warning?.severity;
+      recordOutcome(domain, severity === 'block' ? 'block' : severity === 'throttle' ? 'throttle' : 'ok');
+    }
     return result;
   } catch (error) {
     const isAborted = options.signal?.aborted || error?.message === 'Aborted' || isShuttingDown;
-    
+
     if (isAborted) {
       logger.info(`[BrowserPool] Scrape aborted/shutting down for ${url}`);
     } else {
       logger.error(`[BrowserPool] Scrape failed for ${url}:`, error);
-      markDomainError(domain);
+      recordOutcome(domain, 'error');  // network/nav-timeout/hard-timeout → tighten
     }
     
     // Clean up handle
@@ -443,7 +403,7 @@ async function executeScrape(url, extractorJS, options = {}) {
 export async function closeAllPages() {
   isShuttingDown = true;
   if (queuePoller) {
-    clearInterval(queuePoller);
+    clearTimeout(queuePoller);
     queuePoller = null;
   }
   const handles = Array.from(pageHandles.values());
@@ -468,10 +428,10 @@ process.on('exit', () => {
 });
 
 /**
- * Queue a single scrape task. Respects MAX_CONCURRENT limit.
+ * Queue a single scrape task. Respects the (adaptive) global concurrency cap.
  * @param {string} url
  * @param {string} extractorJS — JS string to evaluate in page context
- * @param {object} [options] — { waitMs, timeoutMs, waitFor, scrollFirst, dismissCookies, referer }
+ * @param {object} [options] — { timeoutMs, waitFor, scrollFirst, dismissCookies, referer, sourceLabel }
  * @returns {Promise<any>}
  */
 export function queueScrape(url, extractorJS, options = {}) {
@@ -551,49 +511,7 @@ export async function scrapeMultiple(tasks, onProgress = null, signal = null) {
 }
 
 // ── Tier 4 Escalation Tracking ──────────────────────────────────────────────
-// Tracks success/failure history per domain to recommend Tier 4 escalation.
-// If a domain fails ≥3 of its last 10 attempts, it's flagged for Tier 4.
-
-const ESCALATION_THRESHOLD = 3;      // Failures out of last N attempts
-const HISTORY_WINDOW = 10;            // Rolling window size
-
-/** @type {Map<string, boolean[]>} domain → array of success (true) / failure (false) */
-const domainHistory = new Map();
-
-/** Record a success or failure for a domain's rolling window. */
-function recordDomainAttempt(domain, success) {
-  const history = domainHistory.get(domain) || [];
-  history.push(success);
-  // Keep only the last HISTORY_WINDOW entries
-  if (history.length > HISTORY_WINDOW) history.shift();
-  domainHistory.set(domain, history);
-}
-
-/**
- * Get health status for a domain — used by IPC layer to decide Tier 4 escalation.
- * @param {string} domain — e.g., 'glassdoor.com' or 'glassdoor'
- * @returns {{ attempts: number, failures: number, successRate: number, shouldEscalate: boolean }}
- */
-export function getDomainHealth(domain) {
-  // Normalize: accept either 'glassdoor' or 'glassdoor.com'
-  const normalizedDomain = domain.includes('.') ? domain : `${domain}.com`;
-
-  // Find canonical key
-  const canonicalKey = getCanonicalDomain(normalizedDomain);
-
-  const matchedHistory = domainHistory.get(canonicalKey) ?? null;
-
-  if (!matchedHistory || matchedHistory.length === 0) {
-    return { attempts: 0, failures: 0, successRate: 1, shouldEscalate: false };
-  }
-
-  const failures = matchedHistory.filter(s => !s).length;
-  const successRate = (matchedHistory.length - failures) / matchedHistory.length;
-
-  return {
-    attempts: matchedHistory.length,
-    failures,
-    successRate: Math.round(successRate * 100) / 100,
-    shouldEscalate: failures >= ESCALATION_THRESHOLD,
-  };
-}
+// Escalation now lives in rateLimiter.js (outcome-aware: block/throttle/error
+// all count, so soft blocks correctly drive escalation). Re-exported here so
+// existing importers of `getDomainHealth` from browserPool keep working.
+export { getDomainHealth } from './rateLimiter.js';

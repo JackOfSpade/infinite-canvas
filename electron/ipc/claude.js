@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../logger.js';
+import { recordTokenUsage } from './tokenBudget.js';
 
 const IMAGE_MIME_MAP = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
@@ -9,13 +10,18 @@ const IMAGE_MIME_MAP = {
   '.heic': 'image/heic', '.heif': 'image/heic',
 };
 
+// Hard ceiling on the Anthropic SDK's built-in retries. The SDK already does
+// exactly what we'd hand-roll for Gemini: auto-retries 408/409/429/500/503/529
+// (529 = Anthropic "overloaded", the analogue of Gemini's 503) with exponential
+// backoff AND natively honors the server's Retry-After / retry-after-ms headers.
+// So there's nothing to add here beyond naming the ceiling — without retries a
+// transient overload would bubble up as a card-level "error" the user has to
+// re-click, even though the listing itself is fine.
+const ANTHROPIC_MAX_RETRIES = 3;
+
 function getAnthropicClient(apiKey) {
   if (!apiKey) throw new Error("Anthropic API key is missing. Please add it in settings.");
-  // maxRetries: SDK auto-retries 408/409/429/500/503/529 with exp backoff.
-  // 529 is Anthropic's "overloaded" status — the analogue of Gemini's 503.
-  // Without retries, a transient overload bubbles up as a card-level "error"
-  // the user has to manually re-click; the listing itself is fine.
-  return new Anthropic({ apiKey, maxRetries: 3 });
+  return new Anthropic({ apiKey, maxRetries: ANTHROPIC_MAX_RETRIES });
 }
 
 /**
@@ -27,7 +33,7 @@ function getAnthropicClient(apiKey) {
  * Saves a handful of output tokens per call and makes downstream parsing
  * more reliable (no `Sure!`-style chatter to strip).
  */
-async function createMessage(anthropic, userContent, { model, maxTokens, signal, expectJson, responseSchema, cachedPrefix }) {
+async function createMessage(anthropic, userContent, { model, maxTokens, signal, expectJson, responseSchema, cachedPrefix, task }) {
   // If a cachedPrefix is provided, split the user turn into a cache-marked
   // text block + the original dynamic content. Anthropic's `ephemeral` cache
   // gives subsequent calls within ~5 minutes a ~90% cost reduction on the
@@ -96,6 +102,11 @@ async function createMessage(anthropic, userContent, { model, maxTokens, signal,
     : '';
   logger.info(`[Claude] stop_reason=${stopReason} usage=in:${usage?.input_tokens ?? '?'} out:${usage?.output_tokens ?? '?'} cap:${maxTokens}${responseSchema ? ' (tool-use)' : ''}${cacheTag}`);
 
+  // Feed the self-calibrating token budget (output_tokens is the billable
+  // output; a max_tokens stop records a sample at the cap so the budget grows
+  // next call — recorded before the truncation throw below for that self-heal).
+  recordTokenUsage(task, usage?.output_tokens || 0);
+
   if (stopReason === 'max_tokens') {
     throw new Error(`AI response was truncated — hit the ${maxTokens}-token output cap (model wrote ${usage?.output_tokens ?? 'unknown'} tokens before being cut off). Try with fewer/smaller inputs, or raise the cap for this task in llm.js TASK_MAX_TOKENS.`);
   }
@@ -121,12 +132,12 @@ async function createMessage(anthropic, userContent, { model, maxTokens, signal,
   return text.trimStart().startsWith('{') ? text : '{' + text;
 }
 
-export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens = 2048, expectJson = false, responseSchema = null, cachedPrefix = null } = {}) {
+export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens = 2048, expectJson = false, responseSchema = null, cachedPrefix = null, task = null } = {}) {
   const anthropic = getAnthropicClient(apiKey);
-  return createMessage(anthropic, prompt, { model, maxTokens, signal, expectJson, responseSchema, cachedPrefix });
+  return createMessage(anthropic, prompt, { model, maxTokens, signal, expectJson, responseSchema, cachedPrefix, task });
 }
 
-export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal, { maxTokens = 2048, expectJson = false, responseSchema = null } = {}) {
+export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal, { maxTokens = 2048, expectJson = false, responseSchema = null, task = null } = {}) {
   const anthropic = getAnthropicClient(apiKey);
   const tempFiles = [];
 
@@ -172,7 +183,7 @@ export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal
     }));
 
     const userContent = [...contentParts, { type: 'text', text: prompt }];
-    return await createMessage(anthropic, userContent, { model, maxTokens, signal, expectJson, responseSchema });
+    return await createMessage(anthropic, userContent, { model, maxTokens, signal, expectJson, responseSchema, task });
   } finally {
     if (tempFiles.length > 0) {
       const { cleanupTempFile } = await import('./heicUtils.js');
@@ -181,11 +192,11 @@ export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal
   }
 }
 
-export async function callClaudeDocument(filePath, prompt, model, apiKey, signal, { maxTokens = 2048, expectJson = false, responseSchema = null } = {}) {
+export async function callClaudeDocument(filePath, prompt, model, apiKey, signal, { maxTokens = 2048, expectJson = false, responseSchema = null, task = null } = {}) {
   const ext = path.extname(filePath).toLowerCase();
 
   if (IMAGE_MIME_MAP[ext]) {
-    return callClaudeVision([filePath], prompt, model, apiKey, signal, { maxTokens, expectJson, responseSchema });
+    return callClaudeVision([filePath], prompt, model, apiKey, signal, { maxTokens, expectJson, responseSchema, task });
   }
 
   if (ext === '.doc') {
@@ -207,7 +218,7 @@ export async function callClaudeDocument(filePath, prompt, model, apiKey, signal
       },
       { type: 'text', text: prompt }
     ];
-    return createMessage(anthropic, userContent, { model, maxTokens, signal, expectJson, responseSchema });
+    return createMessage(anthropic, userContent, { model, maxTokens, signal, expectJson, responseSchema, task });
   }
 
   const textContent = await fs.promises.readFile(filePath, 'utf8');

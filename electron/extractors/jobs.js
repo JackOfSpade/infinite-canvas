@@ -12,6 +12,11 @@
  */
 
 // ── Site Configurations ─────────────────────────────────────────────────────
+// `timeoutMs` is a SEED / safety ceiling, not a fixed budget: scrapeBudget
+// learns each source's typical time-to-ready and derives a tighter working
+// timeout for fast sources (never looser than this seed). `waitMs` is now
+// vestigial — the readiness-stabilization loop in browserPool decides when
+// results are ready, and the pre-read beat is sized from learned timing.
 
 export const GOOGLE_JOBS_CONFIG = {
   waitMs: 2500,
@@ -29,31 +34,6 @@ export const INDEED_CONFIG = {
   scrollFirst: true,
   dismissCookies: true,
   referer: 'https://www.google.com/',
-};
-
-export const LINKEDIN_CONFIG = {
-  waitMs: 3000,
-  timeoutMs: 40000,
-  waitFor: '.base-card, .job-search-card, .base-search-card',
-  scrollFirst: true,
-  dismissCookies: true,
-  referer: 'https://www.google.com/',
-};
-
-export const REMOTEOK_CONFIG = {
-  waitMs: 2000,
-  timeoutMs: 30000,
-  waitFor: 'tr.job, tr[data-slug]',
-  scrollFirst: false,
-  dismissCookies: false,
-};
-
-export const WEWORKREMOTELY_CONFIG = {
-  waitMs: 2000,
-  timeoutMs: 30000,
-  waitFor: 'section.jobs li a',
-  scrollFirst: false,
-  dismissCookies: false,
 };
 
 // ── Google Jobs ─────────────────────────────────────────────────────────────
@@ -197,109 +177,6 @@ export const INDEED_JOBS_EXTRACTOR = `
         url: titleEl?.href ? (titleEl.href.startsWith('http') ? titleEl.href : 'https://www.indeed.com' + titleEl.getAttribute('href')) : '',
         posted: postedEl?.innerText?.trim() || '',
         source: 'indeed'
-      });
-    } catch {}
-  });
-
-  return jobs.slice(0, 30);
-})()
-`;
-
-// ── LinkedIn ────────────────────────────────────────────────────────────────
-export const LINKEDIN_JOBS_EXTRACTOR = `
-(function() {
-  const jobs = [];
-  const cards = document.querySelectorAll('.base-card, .job-search-card, .base-search-card, [data-entity-urn]');
-  
-  cards.forEach(card => {
-    try {
-      const titleEl = card.querySelector('.base-search-card__title, .job-search-card__title, h3, h4');
-      const companyEl = card.querySelector('.base-search-card__subtitle, .job-search-card__company-name, h4 + div a');
-      const locationEl = card.querySelector('.job-search-card__location, .job-result-card__location, [class*="location"]');
-      const linkEl = card.querySelector('a.base-card__full-link, a.base-search-card__full-link, a[href*="/jobs/view"]');
-      const postedEl = card.querySelector('time, [datetime], [class*="listed"]');
-      
-      const title = titleEl?.innerText?.trim() || '';
-      if (!title) return;
-
-      jobs.push({
-        title,
-        company: companyEl?.innerText?.trim() || '',
-        location: locationEl?.innerText?.trim() || '',
-        salary: '',
-        snippet: '',
-        url: linkEl?.href || '',
-        posted: postedEl?.innerText?.trim() || postedEl?.getAttribute('datetime') || '',
-        source: 'linkedin'
-      });
-    } catch {}
-  });
-
-  return jobs.slice(0, 30);
-})()
-`;
-
-// ── RemoteOK ────────────────────────────────────────────────────────────────
-export const REMOTEOK_EXTRACTOR = `
-(function() {
-  const jobs = [];
-  const rows = document.querySelectorAll('tr.job, tr[data-slug]');
-  
-  rows.forEach(row => {
-    try {
-      const titleEl = row.querySelector('[itemprop="title"], h2, .company_and_position h2');
-      const companyEl = row.querySelector('[itemprop="hiringOrganization"] h3, .companyLink h3, .company h3');
-      const locationEl = row.querySelector('.location, [class*="location"]');
-      const salaryEl = row.querySelector('[class*="salary"]');
-      const linkEl = row.querySelector('a.preventLink, a[href*="/remote-jobs/"]');
-      const tagsEls = row.querySelectorAll('.tag h3, .tags .tag');
-      
-      const title = titleEl?.innerText?.trim() || '';
-      if (!title) return;
-
-      const tags = Array.from(tagsEls).map(t => t.innerText?.trim()).filter(Boolean).join(', ');
-
-      jobs.push({
-        title,
-        company: companyEl?.innerText?.trim() || '',
-        location: locationEl?.innerText?.trim() || 'Remote',
-        salary: salaryEl?.innerText?.trim() || '',
-        snippet: tags ? 'Tags: ' + tags : '',
-        url: linkEl ? 'https://remoteok.com' + linkEl.getAttribute('href') : '',
-        posted: '',
-        source: 'remoteok'
-      });
-    } catch {}
-  });
-
-  return jobs.slice(0, 30);
-})()
-`;
-
-// ── WeWorkRemotely ──────────────────────────────────────────────────────────
-export const WEWORKREMOTELY_EXTRACTOR = `
-(function() {
-  const jobs = [];
-  const items = document.querySelectorAll('section.jobs li > a[href*="/remote-jobs/"], article.job-listing a');
-  
-  items.forEach(link => {
-    try {
-      const titleEl = link.querySelector('.title, h4, h3');
-      const companyEl = link.querySelector('.company, .company span');
-      const regionEl = link.querySelector('.region, [class*="region"]');
-      
-      const title = titleEl?.innerText?.trim() || link.innerText?.split('\\n').find(l => l.trim().length > 5)?.trim() || '';
-      if (!title) return;
-
-      jobs.push({
-        title,
-        company: companyEl?.innerText?.trim() || '',
-        location: regionEl?.innerText?.trim() || 'Remote',
-        salary: '',
-        snippet: '',
-        url: link.href?.startsWith('http') ? link.href : 'https://weworkremotely.com' + link.getAttribute('href'),
-        posted: '',
-        source: 'weworkremotely'
       });
     } catch {}
   });

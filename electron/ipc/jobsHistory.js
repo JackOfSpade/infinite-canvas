@@ -24,6 +24,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from '../logger.js';
 
+// "Already seen" retention window for suppressing re-shown jobs. Deliberately a
+// fixed midpoint (NOT coupled to the max search window): a longer window stops
+// re-showing stale dupes but also suppresses genuine RE-POSTS for longer (dedup
+// is on title|company|url, not posting date), so a job reposted after this many
+// days correctly resurfaces as new. 60d balances those — left fixed by design.
 const MAX_AGE_DAYS = 60;
 const SUFFIX = '.jobs-history.csv';
 const HEADER = 'seen_date,source,company,title,location,url';

@@ -24,6 +24,13 @@ import { verifySellMonitorLogin, writeStatusCache } from './accounts.js';
 import { logger } from '../logger.js';
 import { PAGE_STATUS_SINGLE_SCHEMA, PAGE_STATUS_MULTI_SCHEMA } from './aiSchemas.js';
 
+// Structural thresholds (absolute by design — not page-baseline candidates):
+//   - MIN_CONTENT_CHARS: below this, a fetched page is treated as empty/blocked
+//     and we skip the LLM call (a real status page is always far larger).
+//   - IDENTIFIER_MAX_CHARS: cap on the URL-slug/title used as the search needle.
+const MIN_CONTENT_CHARS    = 200;
+const IDENTIFIER_MAX_CHARS = 80;
+
 // Dedup concurrent verifier calls per platform. If a multi-URL check has
 // four sources that all 403 simultaneously, we only run the verifier once
 // and share its verdict — otherwise we'd race four `fetchHtmlClean` calls
@@ -187,12 +194,12 @@ export function extractListingIdentifier(listingUrl, productTitle) {
       const last = segments[segments.length - 1];
       if (last && last.length >= 4) {
         // Strip file extensions and trailing query-like fragments.
-        return last.replace(/\.\w+$/, '').slice(0, 80);
+        return last.replace(/\.\w+$/, '').slice(0, IDENTIFIER_MAX_CHARS);
       }
     } catch { /* malformed URL — fall through to title */ }
   }
   const title = (productTitle || '').trim();
-  if (title.length >= 4) return title.slice(0, 80);
+  if (title.length >= 4) return title.slice(0, IDENTIFIER_MAX_CHARS);
   return null;
 }
 
@@ -389,7 +396,7 @@ export async function classifyOneUrl({
       message: `Listing not found (HTTP ${r.status}).`,
     };
   }
-  if (!r.html || r.html.length < 200) {
+  if (!r.html || r.html.length < MIN_CONTENT_CHARS) {
     return {
       url, urlLabel,
       status: 'unknown',
@@ -556,7 +563,7 @@ export async function classifyMultipleUrls({
     if (r.status === 404 || r.status === 410) {
       return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, status: 'ended', message: `Listing not found (HTTP ${r.status}).` } };
     }
-    if (!r.html || r.html.length < 200) {
+    if (!r.html || r.html.length < MIN_CONTENT_CHARS) {
       return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, status: 'unknown', message: `Empty or near-empty response (${r.html?.length || 0} bytes).` } };
     }
     const stripped = stripHtmlForAnalysis(r.html);

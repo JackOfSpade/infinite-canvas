@@ -3,6 +3,8 @@ import { useReactFlow } from '@xyflow/react';
 import { Search, X, ChevronUp, ChevronDown } from 'lucide-react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { getNodeDims } from '../utils/constants';
+import { panDuration } from '../utils/layoutGeometry';
+import { TIMINGS } from '../utils/timings';
 
 /**
  * Returns true if a node's content matches the lowercased query string.
@@ -43,7 +45,7 @@ export const SearchBar = React.memo(function SearchBar() {
       if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
         e.preventDefault();
         setIsExpanded(true);
-        setTimeout(() => inputRef.current?.focus(), 100);
+        setTimeout(() => inputRef.current?.focus(), TIMINGS.FOCUS_DELAY_MS);
       }
       if (e.key === 'Escape' && isExpanded) {
         setIsExpanded(false);
@@ -106,9 +108,16 @@ export const SearchBar = React.memo(function SearchBar() {
     const target = targetInfo.node;
 
     // Preserve the user's current zoom level; only pan to the match
-    const { zoom: currentZoom } = getViewport();
+    const vp = getViewport();
     const dims = getNodeDims(target);
-    setCenter(target.position.x + dims.w / 2, target.position.y + dims.h / 2, { zoom: currentZoom, duration: 600 });
+    const targetCx = target.position.x + dims.w / 2;
+    const targetCy = target.position.y + dims.h / 2;
+    // Scale the animation by how far we're actually travelling on screen, so a
+    // near match snaps and a cross-canvas jump glides (replaces a fixed 600ms).
+    const viewCx = (window.innerWidth / 2 - vp.x) / vp.zoom;
+    const viewCy = (window.innerHeight / 2 - vp.y) / vp.zoom;
+    const travelPx = Math.hypot(targetCx - viewCx, targetCy - viewCy) * vp.zoom;
+    setCenter(targetCx, targetCy, { zoom: vp.zoom, duration: panDuration(travelPx) });
     setMatchIndex(nextIdx + 1);
 
     // If it's an internal match, auto-dive after a short delay if the user
@@ -121,7 +130,7 @@ export const SearchBar = React.memo(function SearchBar() {
            nav.diveIn(target.id);
         }
         autoDiveTimeoutRef.current = null;
-      }, 700);
+      }, TIMINGS.SEARCH_AUTODIVE_MS);
     }
   // inputRef is a stable ref object — intentionally omitted from deps
   }, [getMatches, matchIndex, setCenter, isAnimating, getViewport, nav]);
@@ -151,7 +160,7 @@ export const SearchBar = React.memo(function SearchBar() {
 
     const timer = setTimeout(() => {
       setMatchCount(getMatches().length);
-    }, 200);
+    }, TIMINGS.SEARCH_RECOUNT_DEBOUNCE_MS);
 
     return () => {
       clearTimeout(timer);
@@ -169,7 +178,7 @@ export const SearchBar = React.memo(function SearchBar() {
         <Search
           size={16}
           className="text-white/30 ml-4 shrink-0 cursor-pointer"
-          onClick={() => { setIsExpanded(true); setTimeout(() => inputRef.current?.focus(), 100); }}
+          onClick={() => { setIsExpanded(true); setTimeout(() => inputRef.current?.focus(), TIMINGS.FOCUS_DELAY_MS); }}
         />
         <input
           ref={inputRef}

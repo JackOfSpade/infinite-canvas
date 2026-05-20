@@ -8,6 +8,10 @@ const { ipcMain } = electronPkg;
 /** Pre-compiled once at module level to avoid recompilation on every fetch. */
 const TITLE_REGEX = /<title[^>]*>([^<]+)<\/title>/i;
 
+// Static safety bound (not adaptive): a <title> lives in the document head, so a
+// fetched page that hasn't yielded one within 3s is almost certainly not going to.
+const TITLE_FETCH_TIMEOUT_MS = 3000;
+
 export function registerNetworkHandlers() {
   // Add direct listener for node task cancellation
   ipcMain.on('cancel-node-task', (_event, nodeId) => {
@@ -70,5 +74,5 @@ export function registerNetworkHandlers() {
     } catch {
       return { title: null };
     }
-  }, 3000); // 3000ms timeout passed to handleSafe
+  }, TITLE_FETCH_TIMEOUT_MS); // timeout passed to handleSafe
 }

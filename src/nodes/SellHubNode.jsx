@@ -4,6 +4,7 @@ import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { HubContainer } from '../components/HubContainer';
 import { Camera } from 'lucide-react';
 import { PRICE_COMP_SOURCES, SELL_PLATFORMS } from '../utils/constants';
+import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
 import { useListingActions } from '../hooks/useListingActions';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
@@ -279,11 +280,13 @@ export function SellHubNode({ id, data }) {
 
     const hubPos = getNode(id)?.position || { x: 0, y: 0 };
     // Lay the cards out in a circle around the hub, centered roughly on the
-    // hub's body. Radius is wide enough that the cards don't overlap the hub.
+    // hub's body.
     const count  = PRICE_COMP_SOURCES.length;
-    const radius = 260;
     const HUB_W = 280, HUB_H = 240;     // approx hub footprint while researching
     const CARD_W = 140, CARD_H = 48;
+    // Radius derived from card count + footprint so cards clear the hub and
+    // never overlap each other as the comp-source list grows (replaces a fixed 260).
+    const radius = radialRadius({ count, cardW: CARD_W, cardH: CARD_H, hubW: HUB_W, hubH: HUB_H });
     const cx = hubPos.x + HUB_W / 2;
     const cy = hubPos.y + HUB_H / 2;
     const stamp = Date.now();
@@ -400,7 +403,7 @@ export function SellHubNode({ id, data }) {
     updateGlobal(currentId, { hubState: 'researching', errorMessage: null, isRateLimit: false, pendingComps: null });
 
     requestAnimationFrame(() => {
-      fitView({ duration: 600, padding: 0.2 });
+      fitView({ duration: fitViewDuration(PRICE_COMP_SOURCES.length), padding: 0.2 });
     });
 
     try {

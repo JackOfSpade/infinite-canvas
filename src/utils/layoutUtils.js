@@ -1,4 +1,5 @@
 import { getNodeDims } from './constants';
+import { gridSpacing, spiralStep } from './layoutGeometry';
 
 /**
  * Computes a tidied grid layout for the provided nodes.
@@ -25,14 +26,16 @@ export function computeTidiedNodes(nds, onlySelected) {
   const newPositions = {};
 
   Object.values(parentGroups).forEach(group => {
+    // Spacing derived from this group's node sizes — big nodes get a wider
+    // gutter / row threshold, tiny ones a tighter one (was a flat 40 / 100).
+    const { gutter, rowThreshold } = gridSpacing(group);
     const sorted = [...group].sort((a, b) => {
-      if (Math.abs(a.position.y - b.position.y) > 100) return a.position.y - b.position.y;
+      if (Math.abs(a.position.y - b.position.y) > rowThreshold) return a.position.y - b.position.y;
       return a.position.x - b.position.x;
     });
 
     const cols = Math.ceil(Math.sqrt(group.length));
     const rows = Math.ceil(group.length / cols);
-    const gutter = 40;
 
     const colWidths = new Array(cols).fill(0);
     const rowHeights = new Array(rows).fill(0);
@@ -129,7 +132,8 @@ export function findNonOverlappingPlacement(nodesToAbsorb, childNodes) {
       maxY = Math.max(maxY, child.position.y + cDims.h);
     });
     
-    const padding = 40;
+    // Clearance + spiral step derived from node/cluster size (were flat 40 / 60).
+    const padding = gridSpacing(childNodes).padding;
     const childCx = (minX + maxX) / 2;
     const childCy = (minY + maxY) / 2;
 
@@ -140,8 +144,8 @@ export function findNonOverlappingPlacement(nodesToAbsorb, childNodes) {
     // Spiral search for non-overlapping placement
     if (placementOverlaps(anchorX, anchorY, nodesToAbsorb, dropMinX, dropMinY, childNodes, padding)) {
       let found = false;
-      let radius = 60;
-      const radStep = 60;
+      const radStep = spiralStep(dropWidth, dropHeight);
+      let radius = radStep;
       const maxRadius = Math.max(5000, dropWidth * 3, dropHeight * 3);
 
       while (!found && radius < maxRadius) {

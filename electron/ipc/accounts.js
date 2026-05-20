@@ -18,6 +18,10 @@ import {
   fetchHtmlClean,
 } from './stealthBrowser.js';
 
+// Timeout for a session-verify page fetch. Not a freshness/density signal —
+// it's an auth-check network bound (fixed, like STALE_SESSION_TTL_MS below).
+const SESSION_VERIFY_TIMEOUT_MS = 25000;
+
 // ── Session status disk cache ─────────────────────────────────────────────────────────
 // Avoids launching Chrome just to display status on panel open.
 // In-memory copy is the single source of truth during the process lifetime;
@@ -82,7 +86,7 @@ export async function verifySellMonitorLogin(platformId) {
       // authenticated sessions. The clean path uses the same persistent
       // cookies but loads images normally so eBay/etc don't fingerprint us
       // as a bot.
-      r = await fetchHtmlClean(target, { timeoutMs: 25000 });
+      r = await fetchHtmlClean(target, { timeoutMs: SESSION_VERIFY_TIMEOUT_MS });
     } catch (e) {
       const trace = { target, error: e?.message || String(e) };
       return { connected: false, reason: `Verification fetch failed: ${e?.message || String(e)}`, trace };

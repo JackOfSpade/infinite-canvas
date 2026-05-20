@@ -8,6 +8,16 @@ import { GoogleAuth } from 'google-auth-library';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { resolveServiceAccountPath } from './settings.js';
+import { recordTokenUsage } from './tokenBudget.js';
+
+// Determinism for structured/JSON output (not a telemetry-learning candidate —
+// temperature is a quality knob, not a budget). Payload char cap is a 413
+// "Payload Too Large" guard, also intentionally fixed.
+const GEMINI_TEMPERATURE = 0.1;
+const MAX_PROMPT_CHARS   = 100000;
+// Static safety bound (not adaptive): Vertex inlineData tops out at 20MB and
+// base64 adds ~33%, so cap raw image/document files here to avoid a 413 / OOM.
+const MAX_AI_FILE_BYTES  = 15 * 1024 * 1024; // 15MB
 
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const LOCATION = 'us-central1';
@@ -45,13 +55,57 @@ function toGeminiSchema(schema) {
 // else is a config/auth/quota/payload issue that won't improve on retry.
 const TRANSIENT_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
 
+// ── Retry / backoff policy ────────────────────────────────────────────────────
+// Same-endpoint retries for transient 5xx / network blips (429 is handled by the
+// model-fallback loop, not retried here). Backoff prefers the server's own
+// Retry-After header when present (derive from observed provider behavior),
+// falling back to bounded exponential backoff. MAX_ATTEMPTS is the hard ceiling.
+const RETRY = {
+  MAX_ATTEMPTS:   3,      // hard ceiling on same-endpoint retries
+  BASE_DELAY_MS:  600,    // first backoff step
+  BACKOFF_FACTOR: 3,      // exponential growth per attempt
+  MAX_BACKOFF_MS: 30000,  // cap any single wait, incl. an honored Retry-After
+};
+
+// Per-request timeout scales with payload: a multimodal call with several images
+// legitimately takes longer than a short text call, so give it more headroom
+// (bounded) instead of timing out a valid slow vision request at a flat 60s.
+const REQUEST_TIMEOUT_BASE_MS      = 60000;
+const REQUEST_TIMEOUT_PER_IMAGE_MS = 8000;
+const REQUEST_TIMEOUT_MAX_MS       = 120000;
+
 /**
- * fetch() wrapper with exp backoff for transient HTTP errors and network
- * failures. Returns the final Response (caller still handles non-2xx). Aborts
- * are not retried — the user/timeout asked to stop, respect that. Logs each
- * retry so bug reports show the attempt history.
+ * Parse an HTTP Retry-After header (delta-seconds or HTTP-date) to ms, or null.
  */
-async function fetchWithRetry(url, init, { label = 'fetch', maxAttempts = 3, baseDelayMs = 600 } = {}) {
+function parseRetryAfterMs(res) {
+  const h = res?.headers?.get?.('retry-after');
+  if (!h) return null;
+  const secs = Number(h);
+  if (Number.isFinite(secs)) return Math.max(0, Math.round(secs * 1000));
+  const when = Date.parse(h);
+  if (!Number.isNaN(when)) return Math.max(0, when - Date.now());
+  return null;
+}
+
+/** Sleep that resolves early if the signal aborts (so a long Retry-After wait
+ *  doesn't outlive a cancelled/timed-out request). */
+function abortableSleep(ms, signal) {
+  return new Promise((resolve) => {
+    if (!(ms > 0) || signal?.aborted) return resolve();
+    const onAbort = () => { clearTimeout(t); resolve(); };
+    const t = setTimeout(() => { signal?.removeEventListener?.('abort', onAbort); resolve(); }, ms);
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * fetch() wrapper with bounded backoff for transient HTTP errors and network
+ * failures. Honors a server-provided Retry-After on transient 5xx; returns the
+ * final Response (caller still handles non-2xx). Aborts are not retried — the
+ * user/timeout asked to stop, respect that. Logs each retry so bug reports show
+ * the attempt history.
+ */
+async function fetchWithRetry(url, init, { label = 'fetch', maxAttempts = RETRY.MAX_ATTEMPTS } = {}) {
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -59,21 +113,29 @@ async function fetchWithRetry(url, init, { label = 'fetch', maxAttempts = 3, bas
       if (res.ok || !TRANSIENT_HTTP_STATUSES.has(res.status) || attempt === maxAttempts) {
         return res;
       }
-      // If we hit a 429 (rate limit or quota exceeded), do not retry the same model.
-      // Return immediately so the outer fallback loop can progress to the next model.
+      // 429 = rate limit / quota: don't wait-and-retry the same model. Return so
+      // the outer fallback loop moves to the next model immediately — faster than
+      // honoring a multi-second Retry-After on a call the user is waiting on.
       if (res.status === 429) {
         return res;
       }
-      const delay = baseDelayMs * Math.pow(3, attempt - 1);
-      logger.warn(`[${label}] HTTP ${res.status} (transient) — retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
-      await new Promise(r => setTimeout(r, delay));
+      // Transient 5xx: prefer the server's own Retry-After (e.g. an overloaded
+      // 503 telling us exactly how long to wait), else bounded exponential
+      // backoff. Capped so a large/garbage value can't hang the call.
+      const retryAfter = parseRetryAfterMs(res);
+      const backoff = RETRY.BASE_DELAY_MS * Math.pow(RETRY.BACKOFF_FACTOR, attempt - 1);
+      const delay = Math.min(RETRY.MAX_BACKOFF_MS, retryAfter ?? backoff);
+      logger.warn(`[${label}] HTTP ${res.status} (transient) — retrying in ${delay}ms${retryAfter != null ? ' (honoring Retry-After)' : ''} (attempt ${attempt}/${maxAttempts})`);
+      await abortableSleep(delay, init?.signal);
+      if (init?.signal?.aborted) return res;  // aborted during backoff — stop retrying
     } catch (err) {
       lastErr = err;
       // Don't retry aborts — caller/timeout explicitly stopped us.
       if (err?.name === 'AbortError' || init?.signal?.aborted || attempt === maxAttempts) throw err;
-      const delay = baseDelayMs * Math.pow(3, attempt - 1);
+      const delay = Math.min(RETRY.MAX_BACKOFF_MS, RETRY.BASE_DELAY_MS * Math.pow(RETRY.BACKOFF_FACTOR, attempt - 1));
       logger.warn(`[${label}] network error: ${err?.message || String(err)} — retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
-      await new Promise(r => setTimeout(r, delay));
+      await abortableSleep(delay, init?.signal);
+      if (init?.signal?.aborted) throw err;
     }
   }
   throw lastErr;
@@ -188,10 +250,12 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const { signal, responseSchema, ...restGenConfig } = genConfig;
+  // `task` is metadata for token-usage telemetry, not a Gemini API field — pull
+  // it out so it never leaks into generationConfig (which would 400 the call).
+  const { signal, responseSchema, task, ...restGenConfig } = genConfig;
 
   const generationConfig = {
-    temperature: 0.1,
+    temperature: GEMINI_TEMPERATURE,
     responseMimeType: 'application/json',
     maxOutputTokens: 2048,   // default; callers pass task-specific caps via opts
     ...restGenConfig,
@@ -206,7 +270,12 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
     generationConfig,
   };
 
-  const timeoutSignal = AbortSignal.timeout(60000);
+  // Scale the timeout to the payload: multimodal calls with several images
+  // legitimately take longer, so a flat 60s would falsely abort a valid slow
+  // vision request. Bounded by REQUEST_TIMEOUT_MAX_MS.
+  const imageParts = parts.reduce((n, p) => n + (p.inlineData ? 1 : 0), 0);
+  const timeoutMs = Math.min(REQUEST_TIMEOUT_MAX_MS, REQUEST_TIMEOUT_BASE_MS + imageParts * REQUEST_TIMEOUT_PER_IMAGE_MS);
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const endpointName = apiKey ? 'Gemini API (AI Studio)' : 'Vertex AI';
 
@@ -234,6 +303,13 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
 
   // Log finish reason + token usage on every call so bug reports include the signals
   logger.info(`[Gemini] finishReason=${finishReason} usage=in:${usage?.promptTokenCount ?? '?'} out:${usage?.candidatesTokenCount ?? '?'} thoughts:${usage?.thoughtsTokenCount ?? 0} cap:${cap}`);
+
+  // Feed the self-calibrating token budget. Total output = visible + thinking
+  // (both count toward the cap and are billed). A MAX_TOKENS truncation records
+  // a sample AT the cap, which pulls p95 up so the budget grows next call —
+  // that's the intended self-heal, so we record before the truncation throw.
+  const totalOut = (usage?.candidatesTokenCount || 0) + (usage?.thoughtsTokenCount || 0);
+  recordTokenUsage(task, totalOut);
 
   // MAX_TOKENS truncation produces JSON that's missing its closing braces
   if (finishReason === 'MAX_TOKENS') {
@@ -278,7 +354,7 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   for (const part of parts) {
     if (part.text) totalTextLen += part.text.length;
   }
-  if (totalTextLen > 100000) {
+  if (totalTextLen > MAX_PROMPT_CHARS) {
     throw new Error(`AI prompt too large (${totalTextLen} chars). Please select fewer nodes or a smaller group.`);
   }
 
@@ -581,7 +657,7 @@ export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal
     const stats = await fs.promises.stat(imgPath);
     // Vertex AI inlineData limit is 20MB. Base64 encoding adds ~33% overhead,
     // so we cap the raw file size at 15MB to be safe and provide a clear error.
-    if (stats.size > 15 * 1024 * 1024) {
+    if (stats.size > MAX_AI_FILE_BYTES) {
       throw new Error(`Image file too large: ${path.basename(imgPath)} (${(stats.size / 1024 / 1024).toFixed(1)}MB). Max 15MB for AI analysis.`);
     }
 
@@ -626,7 +702,7 @@ export async function callGeminiDocument(filePath, prompt, apiKey, model, signal
   const stats = await fs.promises.stat(filePath);
   // Vertex AI inlineData limit is 20MB. Base64 encoding adds ~33% overhead,
   // so we cap the raw file size at 15MB to be safe and prevent OOM crashes.
-  if (stats.size > 15 * 1024 * 1024) {
+  if (stats.size > MAX_AI_FILE_BYTES) {
     throw new Error(`Document file too large: ${path.basename(filePath)} (${(stats.size / 1024 / 1024).toFixed(1)}MB). Max 15MB for AI analysis.`);
   }
 

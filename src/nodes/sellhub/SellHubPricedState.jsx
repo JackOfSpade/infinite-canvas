@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { PriceJustification } from '../../components/PriceJustification';
 import { PhotoStrip } from '../../components/PhotoStrip';
 import { Check, Copy, RefreshCw, ChevronDown, ChevronRight, Plus, Activity, Sparkles } from 'lucide-react';
+import { TIMINGS } from '../../utils/timings';
 import { SELL_PLATFORMS } from '../../utils/constants';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
@@ -20,7 +21,7 @@ function ExpandableTitle({ title, addToast }) {
     try {
       await navigator.clipboard.writeText(title);
       setJustCopied(true);
-      setTimeout(() => setJustCopied(false), 1500);
+      setTimeout(() => setJustCopied(false), TIMINGS.FEEDBACK_MS);
       addToast?.({ title: 'Title copied', description: title, type: 'success' });
     } catch {
       addToast?.({ title: 'Copy failed', description: 'Clipboard unavailable', type: 'error' });

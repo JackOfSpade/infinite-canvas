@@ -76,9 +76,27 @@ export const FINGERPRINT_PROFILES = [
 
 let sessionProfile = null;
 
+/**
+ * Per-session "behavioral temperament" — multipliers chosen ONCE per session
+ * (like the fingerprint) so human-emulation cadence varies run-to-run instead
+ * of drawing from an identical distribution every time. A session might be a
+ * fast/twitchy operator or a slow/deliberate one; consumers (humanEmulation)
+ * scale their pauses/jitter/scroll depth by these.
+ */
+function generateBehaviorProfile() {
+  const rand = (min, max) => min + Math.random() * (max - min);
+  return {
+    speed:       rand(0.8, 1.3),  // pace of pauses/delays this session (>1 = slower/more deliberate)
+    jitter:      rand(0.85, 1.2), // amplitude of movement randomness
+    scrollDepth: rand(0.8, 1.25), // how far this "person" scrolls per gesture
+  };
+}
+
 export function getSessionProfile() {
   if (!sessionProfile) {
-    sessionProfile = FINGERPRINT_PROFILES[Math.floor(Math.random() * FINGERPRINT_PROFILES.length)];
+    const base = FINGERPRINT_PROFILES[Math.floor(Math.random() * FINGERPRINT_PROFILES.length)];
+    // Shallow-copy so the shared FINGERPRINT_PROFILES entries stay pristine.
+    sessionProfile = { ...base, behavior: generateBehaviorProfile() };
   }
   return sessionProfile;
 }

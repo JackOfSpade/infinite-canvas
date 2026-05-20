@@ -9,6 +9,7 @@ import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUER
 import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
+import { jobScoringBatchSize, HEAVY_WAF_QUERY_CAP, DEFAULT_QUERY_CAP } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
@@ -31,6 +32,12 @@ import { filterJobsByAge } from './jobDateFilter.js';
 import { getJobsSettings } from './settings.js';
 
 const DEFAULT_MAX_AGE_DAYS = 21;
+// Sentinel score for jobs the AI couldn't score (missing from the batch result,
+// or a whole batch that failed to parse). NOT adaptive: a fixed midpoint marks
+// "unscored" rather than asserting a real fit — the bug-report telemetry counts
+// these (placeholderCount) so a scoring failure stays visible instead of being
+// laundered into a plausible number.
+const UNSCORED_FALLBACK_SCORE = 50;
 
 // ── Pipeline telemetry ───────────────────────────────────────────────────────
 // Records the last job-search funnel so the bug reporter can answer "did we
@@ -93,7 +100,7 @@ function buildJobTasks(queries, maxAgeDays) {
   // Remote-only boards get fewer queries; heavy WAF sites get only the first query
   for (const [sourceId, { extractor, config, urlFn }] of Object.entries(extractors)) {
     const isHeavyWAF = sourceId === 'ziprecruiter' || sourceId === 'glassdoor';
-    const querySubset = isHeavyWAF ? queries.slice(0, 1) : queries.slice(0, 2);
+    const querySubset = isHeavyWAF ? queries.slice(0, HEAVY_WAF_QUERY_CAP) : queries.slice(0, DEFAULT_QUERY_CAP);
 
     querySubset.forEach((q, i) => {
       tasks.push({
@@ -550,8 +557,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const role = (targetRole || '').trim();
     logger.info(`[Jobs][${nodeId}] Scoring`, jobs.length, 'jobs', role ? `(target: ${role})` : '');
 
-    // Batch into groups of 15
-    const BATCH_SIZE = 15;
+    // Batch size derived from the job-scoring token budget (see resultCaps);
+    // shrinks automatically if a thinking-heavier model raises per-job cost.
+    const BATCH_SIZE = jobScoringBatchSize();
     const scoredJobs = [];
     // Telemetry: a job is a "placeholder" when it was emitted with a default
     // matchScore (50) because its batch's LLM call failed or the response was
@@ -650,7 +658,7 @@ ${JSON.stringify(slimBatch(batch))}`, {
         batch.forEach((job, idx) => {
           const matched = scores.find(s => s.index === idx);
           if (!matched) placeholderCount++; // index missing from an otherwise-OK batch
-          const score = matched || { matchScore: 50, reasoning: 'Unable to score', careerDirection: 'Other', strengthLabel: 'exploring', isTargetRoleMatch: false };
+          const score = matched || { matchScore: UNSCORED_FALLBACK_SCORE, reasoning: 'Unable to score', careerDirection: 'Other', strengthLabel: 'exploring', isTargetRoleMatch: false };
           scoredJobs.push({ ...job, ...score, isTargetRoleMatch: !!score.isTargetRoleMatch });
         });
       } else {
@@ -658,7 +666,7 @@ ${JSON.stringify(slimBatch(batch))}`, {
         failedBatches++;
         placeholderCount += batch.length; // whole batch fell back to filler scores
         batch.forEach((job) => {
-          scoredJobs.push({ ...job, matchScore: 50, reasoning: 'AI format error', careerDirection: 'Other', strengthLabel: 'exploring', isTargetRoleMatch: false });
+          scoredJobs.push({ ...job, matchScore: UNSCORED_FALLBACK_SCORE, reasoning: 'AI format error', careerDirection: 'Other', strengthLabel: 'exploring', isTargetRoleMatch: false });
         });
       }
     }

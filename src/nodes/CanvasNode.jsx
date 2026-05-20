@@ -4,13 +4,17 @@ import { Lock, X, ArrowDown } from 'lucide-react';
 import { CanvasThumbnail } from '../components/CanvasThumbnail';
 import { EventLogger } from '../utils/EventLogger';
 import { getNodeDims } from '../utils/constants';
+import { edgeZoneForRadius } from '../utils/layoutGeometry';
 import { ResizeCorrection, ResizeActive, TitleZoneActive, TitleZoneCorrection } from '../utils/canvasInteractions';
 import { NodeHandles } from './_shared/NodeHandles';
 
+// Flow-space sizing bounds for the circular sub-canvas. These are deliberate
+// user-sizing limits with no content signal to derive from (the node is a
+// container the user sizes by hand), so they stay fixed. Only the screen-space
+// resize hit-zone is derived — see getEdgeZone / edgeZoneForRadius.
 const MIN_SIZE    = 80;
 const MAX_SIZE    = 600;
 const DEFAULT_SIZE = 160;
-const EDGE_ZONE   = 12; // screen-px from circle edge that activates resize cursor
 
 export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, width }) {
   // currentSize is updated both from the width prop (via useEffect) AND synchronously
@@ -145,6 +149,15 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
     return Math.abs(Math.sqrt((clientX - cx) ** 2 + (clientY - cy) ** 2) - rect.width / 2);
   }, []);
 
+  // Width (screen px) of the rim that activates the resize cursor. Derived from
+  // the RENDERED radius (rect already folds in zoom), so the zone is a constant
+  // fraction of the visible circle instead of a fixed 12px that swallowed a
+  // zoomed-out circle and was a sliver on a zoomed-in one.
+  const getEdgeZone = useCallback(() => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    return edgeZoneForRadius(rect ? rect.width / 2 : DEFAULT_SIZE / 2);
+  }, []);
+
   // Angle (degrees) from circle center to pointer, in Math.atan2 convention:
   //   0° = right,  90° = bottom,  ±180° = left,  -90° = top.
   // Used by isInTitleZone, getResizeCursor, and event logging.
@@ -235,7 +248,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       // BUT if the click landed on the SVG text/textPath/tspan itself (or any
       // element whose nearest SVG text ancestor is within the title zone), we
       // should open editing rather than ignoring the click.
-      if (dist >= EDGE_ZONE) {
+      if (dist >= getEdgeZone()) {
         const tgt = e.target;
         const isSvgText = tgt.nodeName === 'text' || tgt.nodeName === 'textPath' ||
                           tgt.nodeName === 'tspan' || !!tgt.closest('text');
@@ -400,7 +413,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       // near rim + title arc  → 'text'   (no hand gap between edit and resize)
       // near rim + elsewhere  → resize cursor
       // not near rim          → null (default pointer outside the edge zone)
-      const near    = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
+      const near    = getDistToEdge(e.clientX, e.clientY) < getEdgeZone();
       const inTitle = near && isInTitleArc(e.clientX, e.clientY);
       setEdgeCursorStyle(!near ? null : inTitle ? 'text' : getResizeCursor(e.clientX, e.clientY));
     };
@@ -449,7 +462,7 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       setIsResizing(false);
       EventLogger.log(`canvas-node resize end id=${id} moves=${resizeMoveCount.current}`);
 
-      const near    = getDistToEdge(e.clientX, e.clientY) < EDGE_ZONE;
+      const near    = getDistToEdge(e.clientX, e.clientY) < getEdgeZone();
       const inTitle = near && isInTitleArc(e.clientX, e.clientY);
       setEdgeCursorStyle(!near ? null : inTitle ? 'text' : getResizeCursor(e.clientX, e.clientY));
     };
@@ -497,11 +510,12 @@ export const CanvasNode = React.memo(function CanvasNode({ id, data, selected, w
       TitleZoneCorrection.delete(id);
       TitleZoneActive.delete(id);
     };
-  // All callbacks (getDistToEdge, getAngleFromCenter, getCircleCenter, getResizeCursor,
-  // isInTitleZone, mainFlow) are stable across renders (useCallback with no deps or
-  // stable deps). id is stable for the component's lifetime. State setters are stable.
-  // liveRef gives fresh isEditing/title/data/SIZE without re-registering listeners.
-  }, [id, mainFlow, getDistToEdge, getAngleFromCenter, getCircleCenter, getResizeCursor, isInTitleZone]);
+  // All callbacks (getDistToEdge, getEdgeZone, getAngleFromCenter, getCircleCenter,
+  // getResizeCursor, isInTitleZone, mainFlow) are stable across renders (useCallback
+  // with no deps or stable deps). id is stable for the component's lifetime. State
+  // setters are stable. liveRef gives fresh isEditing/title/data/SIZE without
+  // re-registering listeners.
+  }, [id, mainFlow, getDistToEdge, getEdgeZone, getAngleFromCenter, getCircleCenter, getResizeCursor, isInTitleZone]);
 
   // ── Derived values ────────────────────────────────────────────────────────
   const canvasData = data.canvasData || {

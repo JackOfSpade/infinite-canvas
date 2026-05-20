@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { TIMINGS } from '../utils/timings';
 
 /**
  * Reusable context menu component.
@@ -60,7 +61,7 @@ export function ContextMenu({ x, y, items, onClose }) {
   }, []);
   const scheduleClose = useCallback(() => {
     clearTimeout(closeTimerRef.current);
-    closeTimerRef.current = setTimeout(() => setActiveSubmenu(null), 120);
+    closeTimerRef.current = setTimeout(() => setActiveSubmenu(null), TIMINGS.SUBMENU_CLOSE_MS);
   }, []);
   const cancelClose = useCallback(() => clearTimeout(closeTimerRef.current), []);
 

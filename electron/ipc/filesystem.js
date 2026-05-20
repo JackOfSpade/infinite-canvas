@@ -7,6 +7,7 @@ import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { randomUUID } from 'crypto';
 
 /**
@@ -23,7 +24,14 @@ const activeWatchers = new Map();
  * Hardened: Max 10 simultaneous directory reads to prevent EMFILE errors.
  */
 let activeScans = 0;
-const MAX_SCAN_CONCURRENCY = 10;
+// Parallel directory-scan fan-out, scaled to the machine: more cores → more
+// concurrent walks. Clamped to a sane band (a tiny box stays responsive; a big
+// one doesn't thrash the disk or libuv threadpool). ~10 on a typical laptop.
+const MAX_SCAN_CONCURRENCY = (() => {
+  let cores = 8;
+  try { cores = os.cpus()?.length || 8; } catch { /* default */ }
+  return Math.max(4, Math.min(16, cores));
+})();
 
 async function scanPath(currentPath, visited, sender = null, depth = 0) {
   // Prevent infinite recursion from symlink loops or massive trees
@@ -294,8 +302,10 @@ export function registerFilesystemHandlers() {
     
     const stats = fs.statSync(targetPath);
     if (stats.size === 0) throw new Error('Workspace file is empty (0 bytes)');
-    // Safety guard against massive files that would OOM the V8 string parser
-    if (stats.size > 100 * 1024 * 1024) throw new Error(`Workspace file is excessively large (${(stats.size/1024/1024).toFixed(2)}MB). Limit is 100MB.`);
+    // Static safety bound (not adaptive): a workspace JSON larger than this would
+    // OOM the V8 string parser on read. Fixed by design.
+    const MAX_WORKSPACE_BYTES = 100 * 1024 * 1024; // 100MB
+    if (stats.size > MAX_WORKSPACE_BYTES) throw new Error(`Workspace file is excessively large (${(stats.size/1024/1024).toFixed(2)}MB). Limit is 100MB.`);
 
     const content = await fs.promises.readFile(targetPath, 'utf-8');
     try {

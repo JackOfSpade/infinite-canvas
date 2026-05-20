@@ -18,6 +18,7 @@ import {
   plainFetcher,
 } from './listingStatusCheck.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
+import { compsForPricing } from './resultCaps.js';
 import { logger } from '../logger.js';
 import { VISION_PRODUCT_ANALYSIS_SCHEMA, PRICE_SYNTHESIS_SCHEMA, buildPlatformFitSchema } from './aiSchemas.js';
 import {
@@ -460,6 +461,12 @@ Be specific about what you can clearly see. If you can't identify brand or model
     const byMatchDesc = (a, b) => scoreByTitleMatch(b) - scoreByTitleMatch(a);
     const sortedSold   = [...sold].sort(byMatchDesc);
     const sortedActive = [...active].sort(byMatchDesc);
+    // How many comps actually reach the model: scaled to what's available and
+    // bounded by the price-synthesis token budget (see resultCaps). The arrays
+    // are quality-ordered above, so these are the top-N most relevant.
+    const { sold: soldN, active: activeN } = compsForPricing(sortedSold.length, sortedActive.length);
+    const soldComps   = sortedSold.slice(0, soldN);
+    const activeComps = sortedActive.slice(0, activeN);
 
     const pricing = await callLLMText(`
 You are a pricing analyst and marketplace routing expert. Given these similar listings from multiple sources, recommend a selling price AND which platforms to list on. Use plain English in your justification — don't say "comp(s)" or "comparable"; say "similar listing(s)" or "sold listing(s)".
@@ -470,10 +477,10 @@ CONDITION: ${condition}
 The listings below are pre-sorted by how many ITEM keywords appear in each title (highest match first). Use that ordering as your first hint when identifying anchor vs. adjusted vs. bound listings, then refine using the spec details inside each listing.
 
 RECENTLY SOLD (what buyers actually paid):
-${JSON.stringify(sortedSold.slice(0, 25))}
+${JSON.stringify(soldComps)}
 
 CURRENTLY ACTIVE (competition):
-${JSON.stringify(sortedActive.slice(0, 15))}
+${JSON.stringify(activeComps)}
 
 WEIGHTING — rank each listing by how closely its spec matches the ITEM:
 - ANCHOR: same spec across the price-driving attributes (whatever those are for this category — capacity, size, generation, condition tier, included accessories, model variant, etc.). Weight these heaviest.
@@ -543,7 +550,7 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       // Cap scales with comp count — the prompt asks the AI to classify
       // each listing as anchor/adjusted/bound, so thinking tokens grow
       // roughly linearly with input size. See llm.js TASK_MAX_TOKENS.
-      hints: { itemCount: sortedSold.slice(0, 25).length + sortedActive.slice(0, 15).length },
+      hints: { itemCount: soldComps.length + activeComps.length },
       // Schema enforces: match_quality enum, comp_breakdown shape, platform
       // id enum, all numeric fields actually numeric. Eliminates the
       // recurring "AI returned invalid JSON" / "echoed the union type
@@ -552,16 +559,16 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
     });
 
     // soldUsed/activeUsed are the counts that ACTUALLY reached the model after
-    // the top-25/15 title-match slice above — the "used vs. found" gap is the
-    // sell-side analog of the jobs funnel's expected drops (by-design, not lost
-    // data). recommended_price=null is the "scraped comps but produced no
-    // price" signal.
+    // the quality-ordered, budget-bounded slice above (see resultCaps) — the
+    // "used vs. found" gap is the sell-side analog of the jobs funnel's expected
+    // drops (by-design, not lost data). recommended_price=null is the "scraped
+    // comps but produced no price" signal.
     marketplaceTelemetry.synthesis = {
       ts: Date.now(),
       soldFound: sold.length,
       activeFound: active.length,
-      soldUsed: sortedSold.slice(0, 25).length,
-      activeUsed: sortedActive.slice(0, 15).length,
+      soldUsed: soldComps.length,
+      activeUsed: activeComps.length,
       recommendedPrice: pricing?.recommended_price ?? null,
       matchQuality: pricing?.match_quality || '(unknown)',
     };

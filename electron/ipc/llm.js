@@ -1,6 +1,7 @@
 import { getAISettings } from './settings.js';
 import { callGeminiText, callGeminiVision, callGeminiDocument, parseGeminiJSON } from './gemini.js';
 import { callClaudeText, callClaudeVision, callClaudeDocument } from './claude.js';
+import { effectiveCap } from './tokenBudget.js';
 import { logger } from '../logger.js';
 
 /**
@@ -127,8 +128,13 @@ function pickModel(provider, task) {
 }
 
 function pickMaxTokens(task, hints = {}) {
-  const entry = TASK_MAX_TOKENS[resolveTask(task)] ?? TASK_MAX_TOKENS['default'];
-  return typeof entry === 'function' ? entry(hints) : entry;
+  const t = resolveTask(task);
+  const entry = TASK_MAX_TOKENS[t] ?? TASK_MAX_TOKENS['default'];
+  const seed = typeof entry === 'function' ? entry(hints) : entry;
+  // The TASK_MAX_TOKENS value above is the calibrated seed/floor. effectiveCap
+  // raises it toward observed p95 usage if a model has churned to use more than
+  // the formula assumed (never below the seed; never above the 24576 hard cap).
+  return effectiveCap(t, seed);
 }
 
 // ── Public callers ──────────────────────────────────────────────────────────
@@ -158,13 +164,13 @@ export async function callLLMText(prompt, opts = {}) {
   const maxTok   = pickMaxTokens(task, { promptLength: fullLen, ...hints });
   try {
     if (settings.provider === 'claude') {
-      const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, expectJson: true, responseSchema, cachedPrefix });
+      const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, expectJson: true, responseSchema, cachedPrefix, task });
       return parseGeminiJSON(raw);
     }
     // Gemini: prepend prefix into the prompt; implicit prefix caching on 2.5
     // models picks up the repeated content automatically.
     const merged = cachedPrefix ? `${cachedPrefix}\n\n${prompt}` : prompt;
-    return await callGeminiText(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema });
+    return await callGeminiText(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema, task });
   } catch (err) {
     throw enhanceLLMError(err, settings.provider);
   }
@@ -180,10 +186,10 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   const maxTok   = pickMaxTokens(task, { photoCount: imagePaths?.length || 0, promptLength: prompt?.length || 0, ...hints });
   try {
     if (settings.provider === 'claude') {
-      const raw = await callClaudeVision(imagePaths, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, expectJson: true, responseSchema });
+      const raw = await callClaudeVision(imagePaths, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, expectJson: true, responseSchema, task });
       return parseGeminiJSON(raw);
     }
-    return await callGeminiVision(imagePaths, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema });
+    return await callGeminiVision(imagePaths, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema, task });
   } catch (err) {
     throw enhanceLLMError(err, settings.provider);
   }
@@ -196,10 +202,10 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   const maxTok   = pickMaxTokens(task, { promptLength: prompt?.length || 0, ...hints });
   try {
     if (settings.provider === 'claude') {
-      const raw = await callClaudeDocument(filePath, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, expectJson: true, responseSchema });
+      const raw = await callClaudeDocument(filePath, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, expectJson: true, responseSchema, task });
       return parseGeminiJSON(raw);
     }
-    return await callGeminiDocument(filePath, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema });
+    return await callGeminiDocument(filePath, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema, task });
   } catch (err) {
     throw enhanceLLMError(err, settings.provider);
   }

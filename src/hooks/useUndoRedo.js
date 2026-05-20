@@ -2,8 +2,11 @@ import { useCallback, useRef, useEffect, useState } from 'react';
 import { DEFAULT_SHORTCUTS } from './useSettings';
 import { EventLogger } from '../utils/EventLogger';
 import { fingerprint } from '../utils/serializationUtils';
+import { TIMINGS, maxUndoHistory } from '../utils/timings';
 
-const MAX_HISTORY = 100;
+// Resolved once at module load — each snapshot is a full canvas clone, so this
+// scales down on low-memory devices (see maxUndoHistory).
+const MAX_HISTORY = maxUndoHistory();
 
 function matchesShortcut(e, binding) {
   if (!binding) return false;
@@ -116,13 +119,13 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     }
   }, [nodes, edges, drawings, syncHistoryLen, isInteractionRef]); // intentionally tight deps for instant reaction; isStateDirtyRef read via ref
 
-  // Auto-snapshot (500ms debounce) — safety net for changes not explicitly snapshotted
+  // Auto-snapshot (debounced) — safety net for changes not explicitly snapshotted
   useEffect(() => {
     if (isRestoringRef.current) return;
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-    debounceTimerRef.current = setTimeout(() => { 
-      takeSnapshot(); 
-    }, 500);
+    debounceTimerRef.current = setTimeout(() => {
+      takeSnapshot();
+    }, TIMINGS.UNDO_SNAPSHOT_DEBOUNCE_MS);
     return () => { if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current); };
   }, [nodes, edges, drawings, takeSnapshot]);
 

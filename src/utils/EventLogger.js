@@ -11,6 +11,7 @@
  * Also auto-captures JS errors and unhandled promise rejections so they
  * appear in the event timeline alongside user actions.
  */
+import { TIMINGS } from './timings';
 
 const MAX_BYTES = 500 * 1024; // 500 KB — covers ~6,000 lines at avg 85 bytes/line.
 // The entire useful event history for an immediate-report workflow is 20–50 lines;
@@ -205,8 +206,8 @@ class EventLoggerSingleton {
         if (initSettingsListener()) {
           clearInterval(handle);
         }
-      }, 100);
-      setTimeout(() => clearInterval(handle), 10000);
+      }, TIMINGS.SETTINGS_LISTENER_POLL_MS);
+      setTimeout(() => clearInterval(handle), TIMINGS.SETTINGS_LISTENER_GIVEUP_MS);
     }
   }
 }

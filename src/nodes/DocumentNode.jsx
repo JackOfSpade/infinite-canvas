@@ -4,6 +4,7 @@ import { Minimize2, Play, AudioLines, AlertTriangle, RefreshCw, FileText, ZoomIn
 import { marked } from 'marked';
 import { getFileCategoryInfo, THEME_COLORS, toLocalFileUrl } from '../utils/fileDisplayUtils';
 import { EventLogger } from '../utils/EventLogger';
+import { TIMINGS, docSaveDebounceMs } from '../utils/timings';
 import { NodeHandles } from './_shared/NodeHandles';
 import { LockBadge } from './_shared/LockBadge';
 
@@ -270,7 +271,6 @@ const AudioPlayer = React.memo(function AudioPlayer({ mediaRef, src, themeText, 
 // Configure marked for safe rendering.
 marked.setOptions({ breaks: true, gfm: true });
 
-const SAVE_DEBOUNCE_MS = 800; // ms of idle time after last keystroke before writing to disk
 
 // Absolute-positioned save-status dot. Rendered with fixed dimensions in every state
 // so toggling between idle/dirty/saving/saved/error never reflows the editor and the
@@ -421,13 +421,13 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
         // Sync the disk snapshot so the dirty check stays accurate
         dispatchDisk({ type: 'loaded', content, gen: diskState.gen });
         setSaveStatus('saved');
-        setTimeout(() => { if (isMountedRef.current) setSaveStatus('idle'); }, 1500);
+        setTimeout(() => { if (isMountedRef.current) setSaveStatus('idle'); }, TIMINGS.FEEDBACK_MS);
       } catch (err) {
         EventLogger.error('TextPreview write failed:', err);
         if (!isMountedRef.current) return;
         setSaveStatus('error');
       }
-    }, SAVE_DEBOUNCE_MS);
+    }, docSaveDebounceMs(content.length));  // longer idle window for longer docs
   }, [filePath, diskState.gen]);
 
   const handleChange = useCallback((e) => {

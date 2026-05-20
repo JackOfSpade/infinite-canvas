@@ -1,6 +1,17 @@
 import { logger } from '../../logger.js';
 import puppeteer from 'puppeteer-extra';
 import { getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath } from '../stealthBrowser.js';
+import { READINESS } from '../scrapeBudget.js';
+
+// ── Auth-window cadence ───────────────────────────────────────────────────────
+// Timing for the human-in-the-loop auth/captcha windows: how responsively we
+// detect a completed login, how long to keep a hidden window open waiting for
+// the user, and the diagnostic heartbeat cadence. These are interaction bounds
+// with no page baseline to learn from, so they're named constants (not adaptive).
+// (The captcha window's extractor-poll cadence is READINESS.CAPTCHA_POLL_MS.)
+const LOGIN_POLL_INTERVAL_MS    = 500;           // login-window auto-close poll cadence
+const AUTH_WINDOW_AUTO_CLOSE_MS = 5 * 60 * 1000; // max time a hidden auth/captcha window stays open
+const AUTH_HEARTBEAT_LOG_MS     = 10_000;        // "still waiting" diagnostic heartbeat interval
 
 /** Known platform login URLs */
 export const PLATFORM_LOGIN_URLS = {
@@ -127,8 +138,8 @@ export async function openLoginWindow(platformId, sender = null) {
     // Capped at 5 minutes so a tab the user walked away from doesn't poll
     // forever. User-initiated close still works the same way it always did.
     const LOGIN_URL_PATTERN = /\/(signin|sign-in|login|log-in|authenticate|auth(?!or))/i;
-    const AUTO_CLOSE_AFTER_MS = 5 * 60 * 1000;
-    const POLL_INTERVAL_MS = 500;
+    const AUTO_CLOSE_AFTER_MS = AUTH_WINDOW_AUTO_CLOSE_MS;
+    const POLL_INTERVAL_MS = LOGIN_POLL_INTERVAL_MS;
 
     // Diagnostic state for the poll — log URL transitions once and emit a
     // "still waiting" heartbeat every ~10s so the bug report's main-process
@@ -195,7 +206,7 @@ export async function openLoginWindow(platformId, sender = null) {
         }
 
         const now = Date.now();
-        if (now - lastHeartbeatLog > 10000) {
+        if (now - lastHeartbeatLog > AUTH_HEARTBEAT_LOG_MS) {
           lastHeartbeatLog = now;
           const cookieNote = expectedCookies?.length
             ? `expected cookies ${expectedCookies.join(',')} not set`
@@ -298,8 +309,8 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
   const originalHost = (() => { try { return new URL(url).host; } catch { return null; } })();
   // 'load' closes the goto promise on DOM + critical-resource readiness,
   // skipping the 1-3s 'networkidle2' wait for analytics/tracking pixels.
-  // Safe because the probe below gates extract on textLength > 1500, which
-  // is its own "page has real content" check.
+  // Safe because the probe below gates extract on textLength > BODY_TEXT_GATE,
+  // which is its own "page has real content" check.
   await page.goto(url, { waitUntil: 'load', timeout: 30000 }).catch(() => {});
 
   return new Promise((resolve) => {
@@ -308,10 +319,11 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     let autoCloseTimeout = null;
     let resolved = false; // true = challenge auto-detected as cleared
 
-    // 400ms gives sub-second detection after a user solve without hammering
-    // the page — page.evaluate is cheap but not free.
-    const POLL_INTERVAL_MS = 400;
-    const AUTO_CLOSE_AFTER_MS = 5 * 60 * 1000;
+    // Snappier cadence than the in-page loop for sub-second detection after a
+    // user solve (page.evaluate is cheap but not free). Centralized so the two
+    // readiness loops can't drift — see scrapeBudget.READINESS.
+    const POLL_INTERVAL_MS = READINESS.CAPTCHA_POLL_MS;
+    const AUTO_CLOSE_AFTER_MS = AUTH_WINDOW_AUTO_CLOSE_MS;
     // Visible challenge widgets — checking the DOM for these elements AND
     // their visibility is far more reliable than substring matching the
     // HTML source (which false-positives on script tags like
@@ -344,9 +356,11 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     let lastExtractCount = -1;     // item count from the previous poll
     let stableTicks = 0;           // consecutive polls with an unchanged (>0) count
     let zeroStreak = 0;            // consecutive polls returning 0 items
-    const STABLE_TICKS_REQUIRED = 2;     // count unchanged this many polls → settled
-    const MAX_ZERO_STREAK = 5;           // 0 items this many polls (~2s) → accept empty
-    const READINESS_CEILING_MS = 20000;  // hard cap after the gate clears (safety net)
+    // Shared with the in-page readiness loop (scrapeBudget.READINESS) so the
+    // two stay in lockstep. At CAPTCHA_POLL_MS cadence MAX_ZERO_READS ≈ 2.4s.
+    const STABLE_TICKS_REQUIRED = READINESS.STABLE_READS;  // unchanged count this many polls → settled
+    const MAX_ZERO_STREAK = READINESS.MAX_ZERO_READS;      // 0-item polls → accept empty
+    const READINESS_CEILING_MS = READINESS.CEILING_MS;     // hard cap after the gate clears (safety net)
 
     // Single probe tick — pulled out so we can run it immediately after
     // goto resolves AND on every setInterval. Without the immediate first
@@ -468,7 +482,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
               // keep polling in case results are still rendering.
             }
           }
-        } else if (noChallenge && probe.textLength > 1500) {
+        } else if (noChallenge && probe.textLength > READINESS.BODY_TEXT_GATE) {
           // ── No extractor (login / API source): fall back to the body-text
           // heuristic — there's no item count to stabilize on.
           await finishCleared(null);
@@ -476,7 +490,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
         }
 
         const now = Date.now();
-        if (now - lastHeartbeatLog > 10000) {
+        if (now - lastHeartbeatLog > AUTH_HEARTBEAT_LOG_MS) {
           lastHeartbeatLog = now;
           // Include the matching widgets / settle progress so future bug
           // reports show the exact cause instead of just "stillBlocked".

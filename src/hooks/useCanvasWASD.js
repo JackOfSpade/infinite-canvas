@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
+import { WASD_BASE_SPEED_PX_PER_SEC, WASD_SHIFT_MULTIPLIER } from '../utils/layoutGeometry';
 
 export function useCanvasWASD({ isAnimatingRef }) {
   const { getViewport, setViewport } = useReactFlow();
@@ -9,9 +10,9 @@ export function useCanvasWASD({ isAnimatingRef }) {
   useEffect(() => {
     const keys = { w: false, a: false, s: false, d: false, arrowup: false, arrowleft: false, arrowdown: false, arrowright: false, shift: false };
     let rafId = null;
-    const BASE_SPEED = 6; // pixels per frame at zoom=1
+    let lastTs = null; // rAF timestamp of the previous frame, for dt-based speed
 
-    const step = () => {
+    const step = (ts) => {
       const { w, a, s, d, arrowup, arrowleft, arrowdown, arrowright, shift } = keys;
       const moveUp    = w || arrowup;
       const moveLeft  = a || arrowleft;
@@ -21,13 +22,14 @@ export function useCanvasWASD({ isAnimatingRef }) {
       const dx = (moveRight ? -1 : 0) + (moveLeft ? 1 : 0);
       const dy = (moveDown ? -1 : 0) + (moveUp ? 1 : 0);
 
-      if (dx === 0 && dy === 0) { 
+      if (dx === 0 && dy === 0) {
         if (movingRef.current) {
           movingRef.current = false;
           EventLogger.log('WASD navigation stopped');
         }
-        rafId = null; 
-        return; 
+        rafId = null;
+        lastTs = null;   // reset so a resumed key-press doesn't see a stale dt
+        return;
       }
       
       if (!movingRef.current) {
@@ -38,15 +40,21 @@ export function useCanvasWASD({ isAnimatingRef }) {
       // Suspend WASD viewport updates during dive-in/dive-out animations
       if (!isAnimatingRef.current) {
         const vp = getViewport();
-        // Adjust speed by zoom level so it feels consistent at all distances
-        const speed = (shift ? BASE_SPEED * 4 : BASE_SPEED) / vp.zoom;
-        
+        // Time-based pan: pixels/second × frame delta, so speed is identical on
+        // 60Hz and 120Hz+ displays (was a fixed px-per-frame, 2× faster on 120Hz).
+        // Clamp dt so a stalled/backgrounded frame can't teleport the view.
+        // Zoom-divided so it feels consistent at all zoom levels.
+        const dt = lastTs == null ? 1 / 60 : Math.min((ts - lastTs) / 1000, 1 / 30);
+        const pxPerSec = (shift ? WASD_BASE_SPEED_PX_PER_SEC * WASD_SHIFT_MULTIPLIER : WASD_BASE_SPEED_PX_PER_SEC) / vp.zoom;
+        const delta = pxPerSec * dt;
+
         setViewport({
-          x: vp.x + dx * speed,
-          y: vp.y + dy * speed,
+          x: vp.x + dx * delta,
+          y: vp.y + dy * delta,
           zoom: vp.zoom,
         });
       }
+      lastTs = ts;
       rafId = requestAnimationFrame(step);
     };
 

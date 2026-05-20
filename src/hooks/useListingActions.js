@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
+import { TIMINGS } from '../utils/timings';
 
 /**
  * useListingActions — shared logic for ListingNode and SellHubNode.
@@ -96,7 +97,7 @@ export function useListingActions(id, data) {
       .then(() => {
         setCopied(true);
         if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current);
-        copiedTimeoutRef.current = setTimeout(() => { setCopied(false); }, 2000);
+        copiedTimeoutRef.current = setTimeout(() => { setCopied(false); }, TIMINGS.FEEDBACK_MS);
       })
       .catch((err) => {
         EventLogger.log('handleCopyListing: clipboard write failed: ' + (err?.message || String(err)));

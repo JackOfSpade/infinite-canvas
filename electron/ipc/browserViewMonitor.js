@@ -8,10 +8,13 @@
  *   - Each monitor is a hidden BrowserWindow (not BrowserView — deprecated in Electron 30+)
  *   - Human opens the window, navigates + logs in, bot takes over
  *   - Bot periodically refreshes and re-extracts data in the background
+ *   - Adaptive cadence: polls faster when a listing is changing, slower when
+ *     stable, and eases off under system load (all within 30s–5min bounds)
  *   - Session expiry detection → notifies user to re-authenticate
- *   - Exponential backoff: 30s → 60s → 120s → 300s (5 min cap)
+ *   - Exponential backoff on errors (×2 per failure, 5 min cap)
  *
- * Memory budget: ~50-150MB per instance. Default cap: 5 concurrent monitors.
+ * Memory budget: ~50-150MB per instance. Concurrent-monitor cap is derived from
+ * system RAM (~1 per 8GB, clamped 2–5).
  *
  * Public API:
  *   registerMonitorHandlers()  — register IPC handlers
@@ -22,16 +25,69 @@
  */
 import electronPkg from 'electron';
 const { BrowserWindow } = electronPkg;
+import os from 'os';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
-const MAX_CONCURRENT_MONITORS = 3;  // 24GB system: ~450MB budget leaves room for DaVinci + Chrome
-const MIN_REFRESH_INTERVAL_MS = 30_000;      // 30s minimum
-const MAX_REFRESH_INTERVAL_MS = 300_000;      // 5 min cap
-const DEFAULT_REFRESH_INTERVAL_MS = 60_000;   // 1 min default
-const SESSION_CHECK_INTERVAL_MS = 600_000;    // Check session health every 10 min
+// Hard safety bounds — adaptation NEVER crosses these.
+const MIN_REFRESH_INTERVAL_MS = 30_000;   // 30s floor — never hammer a platform faster
+const MAX_REFRESH_INTERVAL_MS = 300_000;  // 5 min cap
+
+const DEFAULT_REFRESH_INTERVAL_MS = 60_000; // starting cadence before adaptation kicks in
+
+// Adaptive change-frequency cadence: base cadence is no longer flat. A refresh
+// that DETECTS A CHANGE means the listing is volatile → tighten toward MIN to
+// catch the next change sooner; a refresh with NO change means it's stable →
+// relax toward MAX and stop burning reloads on a quiet page. Both bounded.
+const VOLATILE_TIGHTEN = 0.6;  // ×interval when data changed (poll faster)
+const STABLE_RELAX     = 1.4;  // ×interval when nothing changed (poll slower)
+
+// Error backoff (separate from change-adaptation — an error isn't a stability signal).
+const BACKOFF_MULTIPLIER     = 2;  // ×interval per consecutive error
+const MAX_CONSECUTIVE_ERRORS = 5;  // pause the monitor after this many in a row
+
+const JITTER_RATIO    = 0.1;   // ±10% so monitors don't refresh in lockstep
+const MAX_LOAD_FACTOR = 2.5;   // cap on how far system load can stretch cadence
+const MONITOR_SETTLE_MS = 3000; // beat after a reload for the page to hydrate before extracting
+
+// Concurrency cap derived from system RAM (each monitor is a hidden
+// BrowserWindow, ~50–150MB + a page reload per cycle): ~1 per 8GB, clamped so a
+// small box keeps ≥2 and a large one caps at 5. A 24GB machine resolves to 3
+// (the previous hardcoded value).
+const MAX_CONCURRENT_MONITORS = (() => {
+  let gb = 24;
+  try { gb = os.totalmem() / 1024 ** 3; } catch { /* fall back to default */ }
+  return Math.max(2, Math.min(5, Math.round(gb / 8)));
+})();
+
+/** Clamp any interval to the hard safety bounds. */
+const clampInterval = (ms) => Math.max(MIN_REFRESH_INTERVAL_MS, Math.min(MAX_REFRESH_INTERVAL_MS, ms));
+
+/** Count monitors currently in the active refresh loop. */
+function countActiveMonitors() {
+  let n = 0;
+  for (const m of monitors.values()) if (m.status === 'monitoring') n++;
+  return n;
+}
+
+/**
+ * Multiplier (≥1, capped at MAX_LOAD_FACTOR) that stretches refresh cadence
+ * under load — more concurrent monitors and a CPU-oversubscribed machine both
+ * ease the pool off. Never shrinks cadence (factor ≥ 1), so it only ever slows
+ * polling, never speeds it past the per-monitor interval.
+ */
+function systemLoadFactor() {
+  let factor = 1;
+  factor += Math.max(0, countActiveMonitors() - 1) * 0.2;  // each extra monitor adds reload pressure
+  try {
+    const cores = os.cpus()?.length || 1;
+    const load1 = os.loadavg?.()[0] || 0;  // 0 on Windows — guarded so we only use it where meaningful
+    if (load1 > 0) factor += Math.max(0, load1 / cores - 1) * 0.5;
+  } catch { /* ignore — load avg unavailable */ }
+  return Math.min(MAX_LOAD_FACTOR, factor);
+}
 
 // ── Monitor State ───────────────────────────────────────────────────────────
 
@@ -46,8 +102,9 @@ const monitors = new Map();
  * @property {string} extractorJS         — JS to run in page for data extraction
  * @property {BrowserWindow} window       — Electron BrowserWindow instance
  * @property {'setup'|'monitoring'|'paused'|'expired'} status
- * @property {number} refreshIntervalMs   — Current refresh interval (subject to backoff)
- * @property {number} baseRefreshMs       — Original refresh interval (for backoff reset)
+ * @property {number} refreshIntervalMs   — Next refresh delay (adaptiveBaseMs, or backed-off on errors)
+ * @property {number} adaptiveBaseMs       — Change-frequency-driven cadence (tightens/relaxes within MIN/MAX)
+ * @property {number} baseRefreshMs       — Original configured interval (reset target on re-auth)
  * @property {NodeJS.Timeout|null} timer  — Active refresh timer
  * @property {number} consecutiveErrors   — Error counter for backoff
  * @property {number} lastRefreshTime     — Timestamp of last successful refresh
@@ -125,7 +182,7 @@ function openMonitor({ platform, url, extractorJS, refreshMs = DEFAULT_REFRESH_I
   }
 
   const id = `monitor-${platform}-${++monitorIdCounter}`;
-  const clampedRefresh = Math.max(MIN_REFRESH_INTERVAL_MS, Math.min(MAX_REFRESH_INTERVAL_MS, refreshMs));
+  const clampedRefresh = clampInterval(refreshMs);
 
   // Create a visible BrowserWindow with persistent session data
   const win = new BrowserWindow({
@@ -155,6 +212,7 @@ function openMonitor({ platform, url, extractorJS, refreshMs = DEFAULT_REFRESH_I
     window: win,
     status: 'setup',
     refreshIntervalMs: clampedRefresh,
+    adaptiveBaseMs: clampedRefresh,
     baseRefreshMs: clampedRefresh,
     timer: null,
     consecutiveErrors: 0,
@@ -231,7 +289,7 @@ async function refreshMonitor(id) {
     if (!monitors.has(id)) return;
 
     // Wait for page to settle (network idle equivalent)
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, MONITOR_SETTLE_MS));
     if (!monitors.has(id)) return;
 
     // Re-fetch the live monitor record — the 3-second wait above is a meaningful
@@ -251,24 +309,30 @@ async function refreshMonitor(id) {
     liveMonitor.consecutiveErrors = 0;
     liveMonitor.lastRefreshTime = Date.now();
 
-    // Reset backoff on success
-    liveMonitor.refreshIntervalMs = liveMonitor.baseRefreshMs;
-
     // Diff: check if data has changed
     const newDataStr = JSON.stringify(data);
     const oldDataStr = JSON.stringify(liveMonitor.lastData);
+    const changed = newDataStr !== oldDataStr && Array.isArray(data) && data.length > 0;
 
-    if (newDataStr !== oldDataStr && Array.isArray(data) && data.length > 0) {
-      const prevCount = liveMonitor.lastData.length;
+    if (changed) {
       liveMonitor.lastData = data;
       liveMonitor.dataVersion++;
-
-      logger.info(`[Monitor ${id}] Data changed: ${prevCount} → ${data.length} items (v${liveMonitor.dataVersion})`);
-
-      // Notify the renderer about the update
       notifyDataChange(liveMonitor);
+    }
+
+    // Adaptive cadence: tighten toward MIN when the listing is changing, relax
+    // toward MAX when it's stable. This is the success path, so it also clears
+    // any error backoff by anchoring refreshIntervalMs to the adaptive base.
+    liveMonitor.adaptiveBaseMs = clampInterval(
+      liveMonitor.adaptiveBaseMs * (changed ? VOLATILE_TIGHTEN : STABLE_RELAX),
+    );
+    liveMonitor.refreshIntervalMs = liveMonitor.adaptiveBaseMs;
+    const cadenceSec = Math.round(liveMonitor.adaptiveBaseMs / 1000);
+
+    if (changed) {
+      logger.info(`[Monitor ${id}] Data changed: → ${data.length} items (v${liveMonitor.dataVersion}) — cadence ↓ ${cadenceSec}s`);
     } else {
-      logger.info(`[Monitor ${id}] Refresh OK — no changes (${(data || []).length} items)`);
+      logger.info(`[Monitor ${id}] Refresh OK — no changes (${(data || []).length} items) — cadence ↑ ${cadenceSec}s`);
     }
 
     // Check for session expiry signals (guard destroyed wc before getURL)
@@ -288,21 +352,20 @@ async function refreshMonitor(id) {
     m.consecutiveErrors++;
     logger.error(`[Monitor ${id}] Refresh failed (attempt ${m.consecutiveErrors}):`, error?.message || String(error));
 
-    // Exponential backoff: double the interval on each consecutive error
+    // Exponential backoff: grow the interval on each consecutive error. This
+    // rides on top of refreshIntervalMs and is cleared by the next success
+    // (which re-anchors to adaptiveBaseMs). Bounded by the hard MAX.
     if (m.consecutiveErrors > 1) {
-      m.refreshIntervalMs = Math.min(
-        MAX_REFRESH_INTERVAL_MS,
-        m.refreshIntervalMs * 2
-      );
+      m.refreshIntervalMs = clampInterval(m.refreshIntervalMs * BACKOFF_MULTIPLIER);
       logger.warn(`[Monitor ${id}] Backoff: next refresh in ${m.refreshIntervalMs / 1000}s`);
     }
 
-    // After 5 consecutive errors, pause the monitor
-    if (m.consecutiveErrors >= 5) {
+    // After too many consecutive errors, pause the monitor.
+    if (m.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
       m.status = 'paused';
       clearTimeout(m.timer);
       m.timer = null;
-      logger.error(`[Monitor ${id}] Paused after 5 consecutive errors`);
+      logger.error(`[Monitor ${id}] Paused after ${MAX_CONSECUTIVE_ERRORS} consecutive errors`);
       notifyMonitorPaused(m);
     }
   }
@@ -315,9 +378,12 @@ function scheduleNextRefresh(id) {
   const monitor = monitors.get(id);
   if (!monitor || monitor.status !== 'monitoring') return;
 
-  // Add jitter: ±10% to avoid synchronized refresh patterns
-  const jitter = monitor.refreshIntervalMs * 0.1 * (Math.random() * 2 - 1);
-  const delay = Math.round(monitor.refreshIntervalMs + jitter);
+  // Stretch the per-monitor interval by current system load (more monitors /
+  // CPU pressure → ease off), then add ±jitter so monitors don't refresh in
+  // lockstep. Clamped to the hard MIN/MAX bounds.
+  const loaded = clampInterval(monitor.refreshIntervalMs * systemLoadFactor());
+  const jitter = loaded * JITTER_RATIO * (Math.random() * 2 - 1);
+  const delay = Math.round(loaded + jitter);
 
   monitor.timer = setTimeout(async () => {
     await refreshMonitor(id);
@@ -362,6 +428,7 @@ function reopenMonitor(id) {
   monitor.status = 'setup';
   monitor.consecutiveErrors = 0;
   monitor.refreshIntervalMs = monitor.baseRefreshMs;
+  monitor.adaptiveBaseMs = monitor.baseRefreshMs;  // forget learned volatility on re-auth
 
   // Show the window for re-auth
   if (monitor.window && !monitor.window.isDestroyed()) {
@@ -384,6 +451,7 @@ function getActiveMonitors() {
     url: m.url,
     status: m.status,
     refreshIntervalMs: m.refreshIntervalMs,
+    adaptiveBaseMs: m.adaptiveBaseMs,
     lastRefreshTime: m.lastRefreshTime,
     itemCount: m.lastData.length,
     dataVersion: m.dataVersion,
