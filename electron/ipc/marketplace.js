@@ -72,6 +72,24 @@ function uniqueCompCount(items) {
 }
 
 /**
+ * Drop non-genuine listings before they reach the pricing model. eBay surfaces
+ * its own internal load/QA listings (titled "… Bidding Test generic N of x",
+ * priced $0.01–$0.90) inside ordinary sold/active search results — they are not
+ * real market comps, so they inflate counts and could skew pricing. Conservative
+ * on purpose: only the unmistakable test-harness title signature (no real phone
+ * listing is titled "bidding test"). Extend the pattern if other artifacts show
+ * up. Returns the kept comps + the rejected ones (so the report can name them).
+ */
+function filterJunkComps(items) {
+  const kept = [], rejected = [];
+  for (const it of (Array.isArray(items) ? items : [])) {
+    if (/\bbidding test\b/i.test(String(it?.title || ''))) rejected.push(it);
+    else kept.push(it);
+  }
+  return { kept, rejected };
+}
+
+/**
  * Price distribution {n, min, median, max} of a comp slice, for the report's
  * "kept vs. dropped by the cap" line — the evidence behind "by-design, not lost
  * data." If the DROPPED slice's prices reach into the KEPT band, the title-match
@@ -470,14 +488,22 @@ Be specific about what you can clearly see. If you can't identify brand or model
   // data). Kept separate so we never spend AI tokens on a request the user
   // hasn't approved.
   handleSafe('synthesize-price', async (event, { query, condition, comps, nodeId }, signal) => {
-    const sold = Array.isArray(comps?.sold) ? comps.sold : [];
-    const active = Array.isArray(comps?.active) ? comps.active : [];
+    // Reject non-genuine listings (eBay internal test items, etc.) at the single
+    // gate every comp passes through before pricing — covers both the scrape and
+    // captcha-resolve paths. The rejection is surfaced in the report (not silent).
+    const { kept: sold,   rejected: soldJunk }   = filterJunkComps(Array.isArray(comps?.sold) ? comps.sold : []);
+    const { kept: active, rejected: activeJunk } = filterJunkComps(Array.isArray(comps?.active) ? comps.active : []);
+    const junk = [...soldJunk, ...activeJunk];
+    if (junk.length > 0) {
+      logger.info(`[Marketplace][${nodeId}] Rejected ${junk.length} non-genuine listing(s) before pricing (e.g. "${(junk[0]?.title || '').slice(0, 60)}")`);
+    }
     const total = sold.length + active.length;
     logger.info(`[Marketplace][${nodeId}] Synthesizing price from ${sold.length} sold + ${active.length} active comps`);
 
     if (total === 0) {
       marketplaceTelemetry.synthesis = {
         ts: Date.now(), soldFound: 0, activeFound: 0, soldUsed: 0, activeUsed: 0,
+        junkRejected: junk.length, junkExample: junk[0]?.title ? String(junk[0].title).slice(0, 60) : null,
         recommendedPrice: null, matchQuality: 'none',
       };
       return {
@@ -631,6 +657,11 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       soldDroppedStats:   priceStats(sortedSold.slice(soldN)),
       activeKeptStats:    priceStats(activeComps),
       activeDroppedStats: priceStats(sortedActive.slice(activeN)),
+      // Non-genuine listings (eBay test items, …) removed before pricing — surfaced
+      // so the rejection is transparent, not a silent drop. soldFound/activeFound
+      // above are already the post-rejection counts.
+      junkRejected: junk.length,
+      junkExample: junk[0]?.title ? String(junk[0].title).slice(0, 60) : null,
       recommendedPrice: pricing?.recommended_price ?? null,
       matchQuality: pricing?.match_quality || '(unknown)',
     };

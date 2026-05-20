@@ -8,7 +8,7 @@ import { GoogleAuth } from 'google-auth-library';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { resolveServiceAccountPath } from './settings.js';
-import { recordTokenUsage } from './tokenBudget.js';
+import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 
 // Determinism for structured/JSON output (not a telemetry-learning candidate —
 // temperature is a quality knob, not a budget). Payload char cap is a 413
@@ -313,6 +313,10 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
 
   // MAX_TOKENS truncation produces JSON that's missing its closing braces
   if (finishReason === 'MAX_TOKENS') {
+    // Censored signal: real demand exceeded `cap`. Record it so effectiveCap
+    // provisions past this cap on the very next call (bypasses MIN_SAMPLES) —
+    // otherwise this task truncates + falls back to a weaker model every run.
+    recordTruncation(task, cap);
     const thoughts = usage?.thoughtsTokenCount || 0;
     const visible  = usage?.candidatesTokenCount ?? 0;
     const note = thoughts > visible

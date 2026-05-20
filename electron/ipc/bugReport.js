@@ -300,6 +300,11 @@ function buildMarketplacePipelineSnapshot() {
   if (t.synthesis) {
     const s = t.synthesis;
     lines.push(`\n### Price synthesis${ago(s.ts)}`);
+    if (s.junkRejected > 0) {
+      // Non-genuine listings dropped before pricing — reported so the rejection
+      // is transparent (and so a spike signals a new junk pattern to filter).
+      lines.push(`- 🧹 Rejected ${s.junkRejected} non-genuine listing(s) before pricing${s.junkExample ? ` (e.g. "${s.junkExample}")` : ''} — e.g. eBay internal test listings, not real comps.`);
+    }
     if (s.soldFound + s.activeFound === 0) {
       lines.push('- ⚠️ 0 comps available → no price synthesized (all sources empty or blocked).');
     } else {
@@ -987,12 +992,17 @@ ${formatted}
   const tokenBudgets = (() => { try { return getTokenBudgetSnapshot(); } catch { return {}; } })();
   const tokenBudgetLines = Object.entries(tokenBudgets)
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([task, s]) => `- \`${task}\`: p95 ${s.p95} / max ${s.max} tok over ${s.samples} call(s)`);
+    .map(([task, s]) => `- \`${task}\`: p95 ${s.p95} / max ${s.max} tok over ${s.samples} call(s)` +
+      (s.truncatedAt > 0
+        ? ` · ⚠️ truncated at cap ${s.truncatedAt} (budget grown past it — until then this task fell back to a weaker model)`
+        : ''));
   const tokenBudgetMarkdown = tokenBudgetLines.length
     ? `
 ### Learned Token Budgets
 > Observed output (visible + thinking) tokens per task — drives the self-calibrating
-> max_tokens cap. A p95 near the 24576 hard cap means that task is truncating.
+> max_tokens cap. A p95 near the 24576 hard cap means that task is truncating. A
+> ⚠️ truncated marker means a call hit its cap and silently fell back to a weaker
+> model; the cap has since been raised past that point so it shouldn't recur.
 ${tokenBudgetLines.join('\n')}`
     : '';
 

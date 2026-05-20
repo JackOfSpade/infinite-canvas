@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../logger.js';
-import { recordTokenUsage } from './tokenBudget.js';
+import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 
 const IMAGE_MIME_MAP = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
@@ -108,6 +108,9 @@ async function createMessage(anthropic, userContent, { model, maxTokens, signal,
   recordTokenUsage(task, usage?.output_tokens || 0);
 
   if (stopReason === 'max_tokens') {
+    // Censored signal: real demand exceeded the cap. Record it so effectiveCap
+    // provisions past this cap on the next call (bypasses MIN_SAMPLES).
+    recordTruncation(task, maxTokens);
     throw new Error(`AI response was truncated — hit the ${maxTokens}-token output cap (model wrote ${usage?.output_tokens ?? 'unknown'} tokens before being cut off). Try with fewer/smaller inputs, or raise the cap for this task in llm.js TASK_MAX_TOKENS.`);
   }
 
