@@ -348,16 +348,27 @@ export function SellHubNode({ id, data }) {
     try {
       const synthResult = await synthesizePrice(comps);
       if (cancelled()) return;
+      // Platform fit is assessed in a SECOND background AI call after pricing.
+      // If we render the marketplace list before it lands, every platform shows
+      // as "good" and then unfit ones collapse behind the toggle a few seconds
+      // later — a jarring "all good, then filtered" flicker. `platformFitPending`
+      // lets the priced UI hold the marketplace list in a "selecting…" state
+      // until the verdicts arrive. Only set it when we'll actually run the
+      // assessment — otherwise the list would spin forever.
+      const willAssessFit = !!(window.electronAPI?.assessPlatformFit && data.product);
       updateGlobal(currentId, {
         hubState: 'priced',
         pricing: synthResult.pricing,
         comps,
         scrapeWarnings: Array.isArray(scrapeWarnings) ? scrapeWarnings : [],
         platformFit: null,
+        platformFitPending: willAssessFit,
         errorMessage: null,
       });
-      // Fire platform-fit assessment in the background.
-      if (window.electronAPI?.assessPlatformFit && data.product) {
+      // Fire platform-fit assessment in the background; clear `pending` whether
+      // it succeeds OR fails (on failure platformFit stays null → the list falls
+      // back to showing every platform unfiltered, never a stuck spinner).
+      if (willAssessFit) {
         window.electronAPI.assessPlatformFit({
           product: data.product,
           platforms: SELL_PLATFORMS.map(p => ({ id: p.id, name: p.name })),
@@ -365,11 +376,15 @@ export function SellHubNode({ id, data }) {
         })
           .then(r => {
             if (cancelled()) return;
-            if (r?.fit && typeof r.fit === 'object') {
-              updateGlobal(currentId, { platformFit: r.fit });
-            }
+            updateGlobal(currentId, {
+              platformFit: (r?.fit && typeof r.fit === 'object') ? r.fit : null,
+              platformFitPending: false,
+            });
           })
-          .catch(err => EventLogger.error('[SellHub] Platform-fit assessment failed (non-fatal):', err));
+          .catch(err => {
+            EventLogger.error('[SellHub] Platform-fit assessment failed (non-fatal):', err);
+            if (!cancelled()) updateGlobal(currentId, { platformFitPending: false });
+          });
       }
       const rec = synthResult.pricing?.recommended_price;
       const warnCount = Array.isArray(scrapeWarnings) ? scrapeWarnings.length : 0;
@@ -400,7 +415,7 @@ export function SellHubNode({ id, data }) {
 
     resetCompProgress();
     spawnCompSourceCards();
-    updateGlobal(currentId, { hubState: 'researching', errorMessage: null, isRateLimit: false, pendingComps: null });
+    updateGlobal(currentId, { hubState: 'researching', errorMessage: null, isRateLimit: false, pendingComps: null, platformFit: null, platformFitPending: false });
 
     requestAnimationFrame(() => {
       fitView({ duration: fitViewDuration(PRICE_COMP_SOURCES.length), padding: 0.2 });
@@ -466,6 +481,7 @@ export function SellHubNode({ id, data }) {
           comps: mergedComps,
           scrapeWarnings: [],
           platformFit: null,
+          platformFitPending: false,
           errorMessage: null,
         });
         return;
@@ -935,6 +951,7 @@ export function SellHubNode({ id, data }) {
             onCheckAllStatuses={handleCheckAllStatuses}
             checkingAll={checkingAll}
             platformFit={data.platformFit || null}
+            platformFitPending={!!data.platformFitPending}
           />
         )}
       </HubContainer>

@@ -187,14 +187,26 @@ export function sanitizeNodesForSave(nodes) {
       : ['scrapeWarnings', 'pendingJobs', 'pendingTargetRole', 'errorMessage', 'isRateLimit'];
     const hasJobHubTransient = isJobHub && n.data && JOBHUB_TRANSIENT_KEYS.some(k => k in n.data);
 
-    if (!hasTransientData && !hasTransientOpacity && !hasTransientHubState && !hasJobHubTransient) return n;
+    // SellHub: platformFitPending gates the marketplace list on the in-flight
+    // fit-assessment AI call. It's a within-session UI flag — persisting it true
+    // (saved mid-assessment) would reload a priced hub stuck on the "selecting…"
+    // spinner with no call running. The fit RESULT (platformFit) is kept; only
+    // the pending flag is stripped, so a reloaded priced hub renders its verdicts
+    // immediately (or, if none were saved, the unfiltered list).
+    const SELLHUB_TRANSIENT_KEYS = ['platformFitPending'];
+    const hasSellHubTransient = isSellHub && n.data && SELLHUB_TRANSIENT_KEYS.some(k => k in n.data);
+
+    if (!hasTransientData && !hasTransientOpacity && !hasTransientHubState && !hasJobHubTransient && !hasSellHubTransient) return n;
 
     let result = n;
-    if (hasTransientData || hasTransientHubState || hasJobHubTransient) {
+    if (hasTransientData || hasTransientHubState || hasJobHubTransient || hasSellHubTransient) {
       const { isDropTarget: _idt, _hmr: _h, ...cleanData } = result.data || {};
       if (hasTransientHubState) cleanData.hubState = 'empty';
       if (hasJobHubTransient) {
         for (const k of JOBHUB_TRANSIENT_KEYS) delete cleanData[k];
+      }
+      if (hasSellHubTransient) {
+        for (const k of SELLHUB_TRANSIENT_KEYS) delete cleanData[k];
       }
       result = { ...result, data: cleanData };
     }

@@ -113,6 +113,12 @@ export function SellHubPricedState({
   // back to showing every platform unfiltered. Always-clickable; "unfit" only
   // hides the button behind an expandable section, never disables it.
   platformFit = null,
+  // True while the background fit assessment is still running. We hold the
+  // marketplace list in a "selecting…" state until it lands so the user never
+  // sees every platform flash as "good" and then collapse unfit ones a moment
+  // later. Cleared on success OR failure (failure → platformFit stays null →
+  // fall back to the unfiltered list below).
+  platformFitPending = false,
 }) {
   const [showUnfit, setShowUnfit] = useState(false);
   const { addToast } = useToast();
@@ -189,10 +195,17 @@ export function SellHubPricedState({
         <div className="text-white/30 text-[9px] leading-snug">
           Spawn a card for each marketplace you list on. Each card holds a listing URL you paste after posting manually.
         </div>
-        {(() => {
-          // Partition by AI fit verdict. Without a verdict (assessment still
-          // in flight, or it failed), treat every platform as "good" — never
-          // hide options when we don't have data to justify hiding them.
+        {platformFitPending ? (
+          // Fit assessment still running — hold the list rather than show every
+          // platform as "good" and then collapse unfit ones a moment later.
+          <div className="flex items-center gap-1.5 text-white/30 text-[10px] py-1">
+            <Activity size={10} className="animate-pulse" />
+            Selecting best marketplaces for this item…
+          </div>
+        ) : (() => {
+          // Partition by AI fit verdict. Without a verdict (assessment failed),
+          // treat every platform as "good" — never hide options when we don't
+          // have data to justify hiding them.
           const fitGood = [];
           const fitUnfit = [];
           for (const p of SELL_PLATFORMS) {
