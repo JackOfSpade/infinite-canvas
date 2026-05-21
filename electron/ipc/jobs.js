@@ -26,6 +26,7 @@ import {
   fetchRemoteOKJobs,
   fetchWeWorkRemotelyJobs,
   fetchDiceListings,
+  buildGeoTermSet,
 } from '../extractors/apiExtractors.js';
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory } from './jobsHistory.js';
 import { filterJobsByAge } from './jobDateFilter.js';
@@ -180,7 +181,7 @@ function selectTopAcrossSources(jobs, n) {
  * Fetch API-based sources in parallel (no Puppeteer needed).
  * @returns {{ sourceId: string, jobs: object[], error?: string }[]}
  */
-async function fetchApiSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS) {
+async function fetchApiSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = []) {
   const firstQuery = queries[0] || '';
   // Source credentials come from Settings (electron-store) with a legacy
   // process.env fallback handled inside getJobsSettings() for users still
@@ -188,13 +189,23 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
   const { usajobsApiKey: apiKey, usajobsEmail: email } = getJobsSettings();
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
 
+  // Keyword-less company-board / remote-feed sources keyword-filter client-side
+  // against the query. The query carries the candidate's city ("… Denver"), and
+  // these boards bake the city into the TITLE — so the location token alone
+  // matched every co-located role (a cinematographer pulled ~10 Datadog SWE/sales
+  // jobs). Pass the candidate's own location tokens so the matcher excludes them:
+  // location is a filter, not relevance. The dedicated scrapers (LinkedIn) and
+  // server-side keyword APIs (USAJobs/Dice) take location as a real param, so
+  // they're intentionally NOT geo-stripped.
+  const geoTerms = buildGeoTermSet(profileLocations);
+
   const apiTasks = [
     { sourceId: 'linkedin',       fn: (s) => fetchLinkedInJobs(firstQuery, s, days) },
-    { sourceId: 'greenhouse',     fn: (s) => fetchGreenhouseJobs(firstQuery, s) },
-    { sourceId: 'lever',          fn: (s) => fetchLeverJobs(firstQuery, s) },
+    { sourceId: 'greenhouse',     fn: (s) => fetchGreenhouseJobs(firstQuery, s, geoTerms) },
+    { sourceId: 'lever',          fn: (s) => fetchLeverJobs(firstQuery, s, geoTerms) },
     { sourceId: 'usajobs',        fn: (s) => fetchUSAJobs(firstQuery, apiKey, email, s, days) },
-    { sourceId: 'remoteok',       fn: (s) => fetchRemoteOKJobs(firstQuery, s) },
-    { sourceId: 'weworkremotely', fn: (s) => fetchWeWorkRemotelyJobs(firstQuery, s) },
+    { sourceId: 'remoteok',       fn: (s) => fetchRemoteOKJobs(firstQuery, s, geoTerms) },
+    { sourceId: 'weworkremotely', fn: (s) => fetchWeWorkRemotelyJobs(firstQuery, s, geoTerms) },
     { sourceId: 'dice',           fn: (s) => fetchDiceListings(firstQuery, '', s) },
   ];
 
@@ -274,7 +285,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries, nodeId, maxAgeDays, canvasFilePath }, signal) => {
+  handleSafe('search-jobs', async (event, { queries, nodeId, maxAgeDays, canvasFilePath, profileLocations }, signal) => {
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across 12 sources (maxAge=${ageDays}d)`);
 
@@ -330,7 +341,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
           url: sourceFirstUrl[sourceId] || null,
         });
       }, signal),
-      fetchApiSources(queries, event.sender, signal, nodeId, ageDays)
+      fetchApiSources(queries, event.sender, signal, nodeId, ageDays, profileLocations)
     ]);
 
     // Process Scraper Results

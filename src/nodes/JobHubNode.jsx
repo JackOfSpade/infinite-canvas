@@ -1029,6 +1029,11 @@ export function JobHubNode({ id, data }) {
         nodeId: currentId,
         maxAgeDays: data.maxAgeDays || 21,
         canvasFilePath,
+        // Candidate's own locations — the keyword-less company-board sources
+        // (Greenhouse/Lever/RemoteOK/WWR) must NOT treat the city baked into a
+        // job title as role relevance, or a Denver cinematographer pulls in
+        // every Denver SWE/sales posting at Datadog et al.
+        profileLocations: profile?.locations || [],
       });
       if (cancelled()) return;
 

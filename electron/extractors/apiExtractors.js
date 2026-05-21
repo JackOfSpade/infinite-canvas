@@ -218,21 +218,53 @@ const JOB_MATCH_STOPWORDS = new Set([
   'jobs', 'job', 'position', 'role', 'opening', 'opportunity', 'careers',
 ]);
 
-export function jobRelevanceMatch(roleText, query) {
+const EMPTY_GEO = new Set();
+
+/**
+ * Tokenize the candidate's locations (resume profile.locations, e.g.
+ * "Denver, CO") into a set of geo tokens to EXCLUDE from role matching.
+ * >=3 chars to mirror the meaningful-term threshold ("co" is already too short
+ * to qualify, so it's a no-op there but harmless to include the longer ones).
+ */
+export function buildGeoTermSet(locations = []) {
+  const set = new Set();
+  for (const loc of (Array.isArray(locations) ? locations : [])) {
+    for (const tok of String(loc).toLowerCase().split(/[^a-z0-9]+/)) {
+      if (tok.length >= 3) set.add(tok);
+    }
+  }
+  return set;
+}
+
+export function jobRelevanceMatch(roleText, query, geoTerms = EMPTY_GEO) {
   const text = String(roleText || '').toLowerCase();
   const terms = String(query || '').toLowerCase().split(/\s+/).filter(t => t.length >= 2);
-  // Meaningful = role/skill nouns. Require >=3 chars: a 2-char token is too short
-  // to match by substring without false positives — esp. location abbreviations
-  // ("Denver CO" → "co"), which matched every Datadog "aCCOunt / COntent /
-  // COmmercial / COordinator" title and leaked SWE jobs into a cinematographer
-  // search even after stopword removal. Real role tokens (camera, video, design,
-  // engineer…) are >=3; 2-char tech tokens (ml/ux/go) are carried by the longer
-  // noun in the same query (ML Engineer → "engineer").
+  // Meaningful = role/skill nouns. Three filters, each dropping a class of token
+  // that substring-matches too loosely on a keyword-less company board:
+  //  - >=3 chars: a 2-char token ("Denver CO" → "co") matched every
+  //    "aCCOunt / COntent / COordinator" title.
+  //  - not a generic stopword (seniority / work-mode / structural filler).
+  //  - not one of the CANDIDATE'S OWN location tokens. Tech boards bake the city
+  //    into the TITLE ("Account Executive - Denver", "Sales Dev Rep (Denver)"),
+  //    so a "denver"/"boulder" query token matched every co-located role and
+  //    flooded a cinematographer search with ~10 Datadog/Cloudflare SWE+sales
+  //    jobs. Location is a filter, never a role-relevance signal — the dedicated
+  //    scrapers (Indeed/Glassdoor/LinkedIn) already pass it as a search param.
+  // Real role tokens (camera, video, design, engineer…) survive all three.
+  const norm = t => t.replace(/[^a-z0-9]/g, '');
   const meaningful = terms.filter(t => {
-    const norm = t.replace(/[^a-z0-9]/g, '');
-    return norm.length >= 3 && !JOB_MATCH_STOPWORDS.has(norm);
+    const n = norm(t);
+    return n.length >= 3 && !JOB_MATCH_STOPWORDS.has(n) && !geoTerms.has(n);
   });
-  const useTerms = meaningful.length > 0 ? meaningful : terms;
+  // Fall back when a query is entirely generic (all stopwords) so we don't
+  // over-filter to zero — but only RELAX the stopword rule, never the >=3-char
+  // floor (a correctness guard against 2-char substring noise) or the geo
+  // exclusion. So "Senior Manager" still matches, while a bare "Denver CO"
+  // matches nothing rather than leaking via the "co" substring.
+  const useTerms = meaningful.length > 0
+    ? meaningful
+    : terms.filter(t => norm(t).length >= 3 && !geoTerms.has(norm(t)));
+  if (useTerms.length === 0) return false;
   return useTerms.some(t => text.includes(t));
 }
 
@@ -278,7 +310,7 @@ const GREENHOUSE_BOARDS = [
  * Fetch jobs from Greenhouse boards matching the query.
  * Searches board titles client-side (the API doesn't support keyword search).
  */
-export async function fetchGreenhouseJobs(query, signal = null) {
+export async function fetchGreenhouseJobs(query, signal = null, geoTerms = EMPTY_GEO) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   // Greenhouse fans out across dozens of board tokens; collect warnings
   // per-call and pick the strongest at the end so a wave of blocks across
@@ -297,7 +329,7 @@ export async function fetchGreenhouseJobs(query, signal = null) {
 
   // Filter by query relevance — role text only (title + company), not location.
   const matched = allJobs.filter(job =>
-    jobRelevanceMatch(`${job.title} ${job._company}`, query));
+    jobRelevanceMatch(`${job.title} ${job._company}`, query, geoTerms));
 
   const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
     title: job.title || '',
@@ -344,7 +376,7 @@ const LEVER_COMPANIES = [
 /**
  * Fetch jobs from Lever career pages matching the query.
  */
-export async function fetchLeverJobs(query, signal = null) {
+export async function fetchLeverJobs(query, signal = null, geoTerms = EMPTY_GEO) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const warnings = [];
   const allJobs = await processInBatches(LEVER_COMPANIES, 10, async ({ slug, company }) => {
@@ -361,7 +393,7 @@ export async function fetchLeverJobs(query, signal = null) {
   // Filter by query relevance — role text (title + company + team), not location.
   const matched = allJobs.filter(job => {
     const roleText = `${job.text} ${job._company} ${job.categories?.team || ''}`;
-    return jobRelevanceMatch(roleText, query);
+    return jobRelevanceMatch(roleText, query, geoTerms);
   });
 
   const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
@@ -464,7 +496,7 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
 /**
  * Fetch jobs from RemoteOK's open JSON API (bypasses Puppeteer entirely).
  */
-export async function fetchRemoteOKJobs(query, signal = null) {
+export async function fetchRemoteOKJobs(query, signal = null, geoTerms = EMPTY_GEO) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const r = await safeApiFetch('https://remoteok.com/api', {
     headers: {
@@ -486,7 +518,7 @@ export async function fetchRemoteOKJobs(query, signal = null) {
 
   // Filter by query relevance — role text (title + company + tags), not the JD body.
   const matched = jobs.filter(job =>
-    jobRelevanceMatch(`${job.position || ''} ${job.company || ''} ${(job.tags || []).join(' ')}`, query));
+    jobRelevanceMatch(`${job.position || ''} ${job.company || ''} ${(job.tags || []).join(' ')}`, query, geoTerms));
 
   const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
     title: job.position || '',
@@ -511,7 +543,7 @@ export async function fetchRemoteOKJobs(query, signal = null) {
 /**
  * Fetch jobs from WeWorkRemotely's RSS feed (bypasses Puppeteer entirely).
  */
-export async function fetchWeWorkRemotelyJobs(query, signal = null) {
+export async function fetchWeWorkRemotelyJobs(query, signal = null, geoTerms = EMPTY_GEO) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const r = await safeApiFetch('https://weworkremotely.com/remote-jobs.rss', {
     headers: {
@@ -554,7 +586,7 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null) {
 
     // Filter by query relevance — role text only ("Company: Role" title), not
     // the JD body (matching the description over-matches on ambient keywords).
-    if (!jobRelevanceMatch(title, query)) continue;
+    if (!jobRelevanceMatch(title, query, geoTerms)) continue;
 
     jobs.push({
       title: jobTitle,
