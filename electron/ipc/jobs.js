@@ -49,6 +49,12 @@ const UNSCORED_FALLBACK_SCORE = 50;
 // (e.g. a captcha-resolve scores pendingJobs with no fresh search). Mirrors
 // gemini.js's getGeminiTelemetry().
 const jobsTelemetry = {
+  // The hub node that produced this run. Stamped by every stage handler so the
+  // bug report can flag when the funnel belongs to a node that ISN'T in the
+  // canvas the report was generated from — this object is a main-process
+  // singleton shared by every open window/canvas, so without it a job search in
+  // one canvas leaks into another canvas's report.
+  nodeId:    null,
   search:    null, // { ts, queries, raw, deduped, ageDropped, historyDropped, kept }
   resolves:  {},   // { [sourceId]: { ts, extracted, ageDropped, historyDropped, kept } }
                    // keyed so a multi-source recovery (e.g. Indeed then LinkedIn)
@@ -56,6 +62,14 @@ const jobsTelemetry = {
                    // entry. Reset when a fresh search stamps so it's scoped to it.
   scoring:   null, // { ts, input, scored, placeholders, batches, failedBatches, unscored }
   bucketing: null, // { ts, input, categories }
+  // Per-source job-source-progress event trail for the current search, captured
+  // in the main process so it survives the source-card nodes being deleted (the
+  // renderer Event History shows WHEN a card was removed, but not the status/
+  // warning sequence that drove it). Answers "why did a blocked source's resolve
+  // card disappear before the user could act?" — e.g. did it ever emit a clean
+  // 'done' that auto-dismissed it. { [sourceId]: [{ t, status, code, severity }] }
+  sourceEvents:     {},
+  sourceEventsT0:   0, // search-start epoch; event `t` is relative ms from here
 };
 
 export function getJobsTelemetry() {
@@ -93,6 +107,25 @@ function jobKey(j) {
   const url = String(j?.url || '').trim();
   if (url) return url;
   return `${String(j?.title || '').toLowerCase().trim()}|${String(j?.company || '').toLowerCase().trim()}`;
+}
+
+// Synthesize a visible warning from a raw scrape error so a failed source can
+// render its reason + a Solve button the INSTANT it fails — not only after the
+// whole run finishes. Shared by the per-task progress event and the per-source
+// completion loop so a timed-out source isn't left "failed but unflagged" for
+// the (now much longer, deep-paginating) duration of the run — the window in
+// which its resolve card could be mistaken for an idle/clean card and dismissed.
+function synthScrapeWarning(errorMsg) {
+  const msg = String(errorMsg || 'Unknown error');
+  const isTimeout = /timed?\s*out|timeout/i.test(msg);
+  return {
+    code: isTimeout ? 'scrape-timeout' : 'scrape-failed',
+    severity: 'block',
+    evidence: msg.slice(0, 240),
+    suggestion: isTimeout
+      ? 'Site was unreachable or too slow within the budget. Often a soft block — try a fresh stealth profile or come back later.'
+      : 'Scrape failed before extracting jobs. Check logs for the full stack trace.',
+  };
 }
 
 // Build the per-source pagination stop callback for executeScrapePaginated. Stops
@@ -343,6 +376,29 @@ Be creative with suggestedRoleQueries — think about what career directions the
   handleSafe('search-jobs', async (event, { queries, nodeId, maxAgeDays, canvasFilePath, profileLocations }, signal) => {
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across 12 sources (maxAge=${ageDays}d)`);
+    jobsTelemetry.nodeId = nodeId;
+    jobsTelemetry.windowId = event.sender?.id ?? null;
+    // Fresh per-source event trail for this run (survives source-card deletion).
+    jobsTelemetry.sourceEvents = {};
+    jobsTelemetry.sourceEventsT0 = Date.now();
+    // Record every job-source-progress we send, then send it. The trail is what
+    // lets the bug report explain a "blocked source lost its resolve card" — it
+    // shows whether the source ever emitted a clean 'done' (which auto-dismisses
+    // the card) vs. only 'error', and how long after a failure the block warning
+    // actually landed (the window the card spent failed-but-unflagged).
+    const emitProgress = (payload) => {
+      if (event.sender.isDestroyed()) return;
+      const sid = payload.sourceId;
+      const arr = jobsTelemetry.sourceEvents[sid] || (jobsTelemetry.sourceEvents[sid] = []);
+      arr.push({
+        t: Date.now() - jobsTelemetry.sourceEventsT0,
+        status: payload.status,
+        code: payload.warning?.code || null,
+        severity: payload.warning?.severity || null,
+      });
+      if (arr.length > 10) arr.shift();
+      event.sender.send('job-source-progress', payload);
+    };
 
     const tasks = buildJobTasks(queries, ageDays, profileLocations);
 
@@ -365,12 +421,10 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // (which is the only path that previously carried url), so the card's
     // Solve button stayed hidden until every other source had finished.
     for (const sourceId of Object.keys(sourceTaskIds)) {
-      if (!event.sender.isDestroyed()) {
-        event.sender.send('job-source-progress', {
-          nodeId, sourceId, status: 'searching', count: 0,
-          url: sourceFirstUrl[sourceId] || null,
-        });
-      }
+      emitProgress({
+        nodeId, sourceId, status: 'searching', count: 0,
+        url: sourceFirstUrl[sourceId] || null,
+      });
     }
 
     const allJobs = [];
@@ -379,17 +433,19 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // 1. Run Scraper Tasks and API Tasks concurrently
     const [results, apiResults] = await Promise.all([
       scrapeMultiple(tasks, (res) => {
-        if (event.sender.isDestroyed()) return;
         const sourceId = res.id.replace(/-\d+$/, '');
         const count = Array.isArray(res.data) ? res.data.length : 0;
-        event.sender.send('job-source-progress', {
+        emitProgress({
           nodeId,
           sourceId,
           status: res.success ? 'done' : 'error',
           count,
-          // Forward anti-bot warning so the JobSourceCardNode can render
-          // the embedded text warning instead of silently showing 0 jobs.
-          warning: res.warning || null,
+          // Forward the anti-bot warning; if the task FAILED with no warning
+          // (a thrown timeout/nav error carries none), synthesize one NOW so the
+          // card shows the reason + Solve immediately and isn't left looking
+          // clean/dismissable until the per-source completion loop runs at the
+          // end of the (long) run.
+          warning: res.warning || (res.success ? null : synthScrapeWarning(res.error)),
           // Include url here too so the Solve button can render against
           // mid-scrape warnings without waiting for the per-source
           // completion event that fires only after EVERY source finishes.
@@ -423,20 +479,10 @@ Be creative with suggestedRoleQueries — think about what career directions the
       } else {
         sourceResults[sourceId].errors++;
         logger.warn(`[Jobs] Source ${result.id} failed:`, result.error);
-        // Synthesize a warning from the error message so the source card
-        // can render a reason instead of a bare "Failed". Without this,
-        // a Google 45s timeout (or any scrape error that wasn't anti-bot)
-        // ends up on the card as red text saying just "Failed".
-        const msg = String(result.error || 'Unknown error');
-        const isTimeout = /timed?\s*out|timeout/i.test(msg);
-        sourceResults[sourceId].warnings.push({
-          code: isTimeout ? 'scrape-timeout' : 'scrape-failed',
-          severity: 'block',
-          evidence: msg.slice(0, 240),
-          suggestion: isTimeout
-            ? 'Site was unreachable or too slow within 45s. Often a soft block — try a fresh stealth profile or come back later.'
-            : 'Scrape failed before extracting jobs. Check logs for the full stack trace.',
-        });
+        // Synthesize a warning from the error message so the source card can
+        // render a reason instead of a bare "Failed" (same warning the per-task
+        // progress event now sends live).
+        sourceResults[sourceId].warnings.push(synthScrapeWarning(result.error));
       }
     }
 
@@ -498,28 +544,28 @@ Be creative with suggestedRoleQueries — think about what career directions the
       else if (allFailed || hadBlock) status = 'error';
       else                      status = 'done';   // ran cleanly, 0 results
 
-      if (!event.sender.isDestroyed()) {
-        event.sender.send('job-source-progress', {
-          nodeId,
-          sourceId,
-          status,
-          count: data.jobs.length,
-          warning: strongest,
-          // Failed scrape URL (browser-pool sources only). Empty for API
-          // sources — their Solve button won't render, which is correct
-          // since opening a login URL doesn't help an extractor that
-          // doesn't share cookies anyway.
-          url: sourceFirstUrl[sourceId] || null,
-        });
-      }
+      emitProgress({
+        nodeId,
+        sourceId,
+        status,
+        count: data.jobs.length,
+        warning: strongest,
+        // Failed scrape URL (browser-pool sources only). Empty for API
+        // sources — their Solve button won't render, which is correct
+        // since opening a login URL doesn't help an extractor that
+        // doesn't share cookies anyway.
+        url: sourceFirstUrl[sourceId] || null,
+      });
     }
 
     // Flat per-source warning list returned with the response so the JobHub
-    // done state can render a copy-able "Scrape Warnings" panel.
+    // done state can render a copy-able "Scrape Warnings" panel. Carry each
+    // source's scrape `url` so the block gate can re-seed a Solve target if the
+    // blocked source's card was lost during the run (see ensureBlockedSourceCards).
     const scrapeWarnings = [];
     for (const [sourceId, data] of Object.entries(sourceResults)) {
       for (const w of data.warnings || []) {
-        scrapeWarnings.push({ sourceId, ...w });
+        scrapeWarnings.push({ sourceId, url: sourceFirstUrl[sourceId] || null, ...w });
       }
     }
 
@@ -718,6 +764,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
   handleSafe('score-jobs', async (event, { jobs, profile, nodeId, targetRole }, signal) => {
     const role = (targetRole || '').trim();
     logger.info(`[Jobs][${nodeId}] Scoring`, jobs.length, 'jobs', role ? `(target: ${role})` : '');
+    jobsTelemetry.nodeId = nodeId;
+    jobsTelemetry.windowId = event.sender?.id ?? null;
 
     // Budget cap: a widened gather (extra pages / query variants) can over-fill
     // the quota-bound scorer. Pre-rank to the top JOB_SCORE_CAP FAIRLY across
@@ -946,6 +994,8 @@ Rules:
   // uses to spawn the collapsible JobCategoryNode / JobBucketNode hierarchy.
   handleSafe('bucket-jobs', async (event, { jobs, nodeId }, signal) => {
     logger.info(`[Jobs][${nodeId}] Bucketing ${jobs.length} jobs into category/salary tree`);
+    jobsTelemetry.nodeId = nodeId;
+    jobsTelemetry.windowId = event.sender?.id ?? null;
     // Strip the scored jobs down to just what bucketing needs — careerDirection,
     // salary text, title, index. Drops the reasoning + resumeProfile + snippet
     // payload that would otherwise bloat the prompt and burn tokens on data

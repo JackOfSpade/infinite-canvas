@@ -42,6 +42,12 @@ import {
 // (scrolls). Each stage stamps independently — a captcha-resolve or single-
 // source rescrape can run without a fresh full scrape.
 const marketplaceTelemetry = {
+  // The hub node that produced this run. Stamped by every stage handler so the
+  // bug report can flag when the funnel belongs to a node that ISN'T in the
+  // canvas the report was generated from — these telemetry objects are
+  // main-process singletons shared by every open window/canvas, so without this
+  // a marketplace run from one canvas leaks into another canvas's report.
+  nodeId:    null,
   analyze:   null, // { ts, photos, title, mock }
   scrape:    null, // { ts, sold, active, sources, warnings, blocked }
   resolves:  {},   // { [sourceId]: { ts, extracted, category } } — keyed so a
@@ -414,6 +420,8 @@ export function registerMarketplaceHandlers() {
   // ── Analyze Product Photos ────────────────────────────────────────────────
   handleSafe('analyze-photos', async (event, { imagePaths, nodeId }, signal) => {
     logger.info(`[Marketplace][${nodeId}] Analyzing`, imagePaths.length, 'photos');
+    marketplaceTelemetry.nodeId = nodeId;
+    marketplaceTelemetry.windowId = event.sender?.id ?? null;
 
     const aiMeta = {}; // populated with the model that actually served this call
     const result = await callLLMVision(imagePaths, `
@@ -452,6 +460,8 @@ Be specific about what you can clearly see. If you can't identify brand or model
   // calls `synthesize-price` afterward with the comps it decides to use.
   handleSafe('scrape-price-comps', async (event, { query, nodeId }, signal) => {
     logger.info(`[Marketplace][${nodeId}] Scraping comps for:`, query);
+    marketplaceTelemetry.nodeId = nodeId;
+    marketplaceTelemetry.windowId = event.sender?.id ?? null;
 
     const tasks = buildCompTasks(query);
 
@@ -576,6 +586,8 @@ Be specific about what you can clearly see. If you can't identify brand or model
     }
     const total = sold.length + active.length;
     logger.info(`[Marketplace][${nodeId}] Synthesizing price from ${sold.length} sold + ${active.length} active comps`);
+    marketplaceTelemetry.nodeId = nodeId;
+    marketplaceTelemetry.windowId = event.sender?.id ?? null;
 
     if (total === 0) {
       marketplaceTelemetry.synthesis = {
@@ -838,6 +850,8 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
   // platforms behind a "show all" toggle.
   handleSafe('assess-platform-fit', async (event, { product, platforms, nodeId }, signal) => {
     logger.info(`[Marketplace][${nodeId}] Assessing platform fit across ${platforms?.length || 0} platforms`);
+    marketplaceTelemetry.nodeId = nodeId;
+    marketplaceTelemetry.windowId = event.sender?.id ?? null;
     if (!Array.isArray(platforms) || platforms.length === 0 || !product) {
       return { fit: {} };
     }

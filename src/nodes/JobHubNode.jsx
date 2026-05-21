@@ -820,6 +820,67 @@ export function JobHubNode({ id, data }) {
     });
   }, [id, getNode, getNodes, addElementsGlobally, addNodes, addEdges, fitView]);
 
+  // Guarantee every blocked source has a visible, actionable card when we pause
+  // in 'sources-ready'. The block decision is finalized only at search END, but
+  // source cards come and go DURING the (now long, deep-paginating) run — a card
+  // can be gone by the time we pause, leaving "1 source blocked but nothing to
+  // Solve." For any blocked source missing a card, spawn one SEEDED with the
+  // failure (the live progress event already fired before this card existed, so
+  // the reason + Solve target must come from persisted state). A blocked source
+  // that still HAS its card already carries the live warning — leave it.
+  const ensureBlockedSourceCards = useCallback((blockingWarnings) => {
+    const blocks = (blockingWarnings || []).filter(w => w?.severity === 'block' && w.sourceId);
+    if (blocks.length === 0) return;
+    const existing = getNodes().filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id);
+    const existingSourceIds = new Set(existing.map(n => n.data?.sourceId));
+    const missing = blocks.filter(w => !existingSourceIds.has(w.sourceId));
+    if (missing.length === 0) return;
+
+    const hubPos = getNode(id)?.position || { x: 0, y: 0 };
+    const HUB_W = 260, HUB_H = 140, CARD_W = 140, CARD_H = 50;
+    const cx = hubPos.x + HUB_W / 2;
+    const cy = hubPos.y + HUB_H / 2;
+    const total = existing.length + missing.length;
+    const stamp = Date.now();
+    const RADIUS = radialRadius({ count: total, cardW: CARD_W, cardH: CARD_H, hubW: HUB_W, hubH: HUB_H });
+
+    const newNodes = missing.map((w, i) => {
+      const source = JOB_SOURCES.find(s => s.id === w.sourceId) ||
+        { id: w.sourceId, name: w.sourceId, letter: (w.sourceId[0] || '?').toUpperCase(), color: '#ef4444', domain: '' };
+      const angleIdx = existing.length + i;
+      const angle = (angleIdx / total) * 2 * Math.PI - Math.PI / 2;
+      return {
+        id: `js-${id}-${source.id}-${stamp}`,
+        type: 'jobsourcecard',
+        position: {
+          x: cx + Math.cos(angle) * RADIUS - CARD_W / 2,
+          y: cy + Math.sin(angle) * RADIUS - CARD_H / 2,
+        },
+        data: {
+          sourceId: source.id, name: source.name, letter: source.letter,
+          color: source.color, domain: source.domain, hubId: id,
+          persistedProgress: {
+            status: 'error',
+            warning: { code: w.code, severity: w.severity, evidence: w.evidence, suggestion: w.suggestion },
+            url: w.url || null,
+            count: 0,
+          },
+        },
+      };
+    });
+    const newEdges = newNodes.map(n => ({
+      id: `edge-${id}-${n.id}`, source: id, target: n.id,
+      ...pickEdgeHandles(
+        { x: n.position.x + CARD_W / 2, y: n.position.y + CARD_H / 2 },
+        { x: cx, y: cy },
+      ),
+      ...structuralEdge('rgba(239,68,68,0.6)'),
+    }));
+    if (addElementsGlobally) addElementsGlobally(id, newNodes, newEdges, 'sibling');
+    else { addNodes(newNodes); addEdges(newEdges); }
+    EventLogger.log(`[JobHub][${id}] Re-spawned ${missing.length} blocked source card(s) to resolve: ${missing.map(w => w.sourceId).join(', ')}`);
+  }, [id, getNodes, getNode, addElementsGlobally, addNodes, addEdges]);
+
   // Re-apply all filters on mount — opacities are stripped from save files to keep them clean.
   // The score filter is "active" whenever the slider is above its dynamic min,
   // since the slider's bottom is the lowest spawned score (not 0).
@@ -1065,6 +1126,10 @@ export function JobHubNode({ id, data }) {
           jobCount: foundJobs.length,
           scrapeWarnings: searchWarnings,
         });
+        // Guarantee a Solve/Skip card exists for every blocked source — a card
+        // can be lost during the long run, which stranded the user with "1 source
+        // blocked but nothing to resolve."
+        ensureBlockedSourceCards(blockingWarnings);
         return;
       }
 
@@ -1126,7 +1191,7 @@ export function JobHubNode({ id, data }) {
         }
       }
     }
-  }, [id, updateGlobal, getNode, getNodes, canvasFilePath, data.maxAgeDays, data.targetRole, ensureSourceCards, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch]);
+  }, [id, updateGlobal, getNode, getNodes, canvasFilePath, data.maxAgeDays, data.targetRole, ensureSourceCards, ensureBlockedSourceCards, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch]);
 
   const startProcessing = useCallback((filePath) => runPipeline({ filePath }), [runPipeline]);
   const startProcessingWithProfile = useCallback((profile) => runPipeline({ profile }), [runPipeline]);

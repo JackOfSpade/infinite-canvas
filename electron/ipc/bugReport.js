@@ -40,6 +40,34 @@ const modelTag = (model) => {
   return ` · model: \`${model}\`${weak ? ' ⚠️ weak fallback' : ''}`;
 };
 
+// Pipeline telemetry (jobs + marketplace) is a main-process singleton SHARED by
+// every open canvas WINDOW, so the "last run" it holds may belong to a different
+// window than the one this report was generated from. The originating window id
+// (webContents id) is the authoritative scope: if it differs from the window
+// that requested the report, the run is another canvas's and is OMITTED — the
+// report only reflects the canvas it was triggered from.
+//
+// Node presence alone can't decide this: a node missing from the current canvas
+// could be another window's node OR this window's hub that the user DELETED after
+// the run (the telemetry deliberately outlives the hub — that's its whole point).
+// So node presence only refines the wording for same-window runs; windowId
+// decides inclusion. Unknown ids (older telemetry / no sender) → treat as local.
+const pipelineScope = (nodeId, windowId, currentNodeIds, reportWindowId) => {
+  if (windowId != null && reportWindowId != null && windowId !== reportWindowId) {
+    return {
+      foreign: true,
+      note: "> (No run recorded for this canvas this session — these pipeline tallies are a main-process singleton shared by every open window, and the most recent run was in a DIFFERENT window/canvas, so it is omitted here rather than misattributed to this one.)\n",
+    };
+  }
+  if (!nodeId) return { foreign: false, note: '' };
+  const short = String(nodeId).slice(0, 8);
+  const deleted = currentNodeIds && currentNodeIds.size > 0 && !currentNodeIds.has(nodeId);
+  return {
+    foreign: false,
+    note: `> Source node: \`${short}\`${deleted ? ' (hub since deleted from this canvas — telemetry retained so the run still reports)' : ''}.\n`,
+  };
+};
+
 /**
  * Returns the mtime (ms) of the newest main-process .js file actually running,
  * or null if scanning fails. We scan the directory that contains the running
@@ -171,11 +199,14 @@ function buildJobsConfigSnapshot() {
  * abort signal cut off before they were ever scored. A bare "Scored N jobs"
  * log line hides both.
  */
-function buildJobsPipelineSnapshot() {
+function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
   let t;
   try { t = getJobsTelemetry(); } catch { return ''; }
   const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
   if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing)) return '';
+
+  const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId);
+  if (scope.foreign) return `\n## Job Search Pipeline\n${scope.note}`;
 
   const lines = [];
 
@@ -215,6 +246,30 @@ function buildJobsPipelineSnapshot() {
       }
       if (zeroClean.length) {
         lines.push(`  - 0 results, no warning (genuinely empty / off-category): ${zeroClean.join(', ')}`);
+      }
+    }
+    // Per-source progress-event trail — the sequence of status/warning events the
+    // backend sent for each source, with timing relative to search start. This is
+    // what diagnoses "a source was blocked but its resolve card vanished": the
+    // renderer Event History shows WHEN a card node was removed, but only this
+    // shows whether the source ever emitted a clean 'done' (which auto-dismisses
+    // the card) or sat 'error'-without-warning for a long stretch (a card that
+    // looks idle). Shown only for sources that ended non-clean or flip-flopped
+    // between clean and failed — a plain searching→done source needs no trail.
+    if (t.sourceEvents && Object.keys(t.sourceEvents).length > 0) {
+      const interesting = Object.entries(t.sourceEvents).filter(([, evs]) => {
+        const statuses = new Set((evs || []).map(e => e.status));
+        const lastStatus = evs?.[evs.length - 1]?.status;
+        return lastStatus === 'error' || lastStatus === 'skipped' ||
+          (statuses.has('done') && (statuses.has('error') || statuses.has('skipped')));
+      });
+      if (interesting.length > 0) {
+        lines.push('- Source progress-event trail (status@+s from search start; ⚠ = warning carried):');
+        for (const [sid, evs] of interesting) {
+          const trail = (evs || []).map(e =>
+            `${e.status}${e.code ? `⚠${e.code}` : ''}@+${Math.round((e.t || 0) / 1000)}s`).join(' → ');
+          lines.push(`  - \`${sid}\`: ${trail}`);
+        }
       }
     }
   } else {
@@ -280,7 +335,7 @@ function buildJobsPipelineSnapshot() {
 
   return `
 ## Job Search Pipeline
-> Last run's funnel, captured in the main process so it survives hub deletion
+${scope.note}> Last run's funnel, captured in the main process so it survives hub deletion
 > and log-buffer scroll. The "found → analyzed" gap answers "did we analyze all
 > the jobs?": dedup / age / already-seen drops are expected; placeholder or
 > unscored jobs are not. Each stage stamps independently — a captcha-resolve
@@ -299,11 +354,14 @@ ${lines.join('\n')}
  * found?" is synthesis's used-vs-found gap (the top-25/15 slice is by-design;
  * a recommended_price of null means comps were scraped but no price came out).
  */
-function buildMarketplacePipelineSnapshot() {
+function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId) {
   let t;
   try { t = getMarketplaceTelemetry(); } catch { return ''; }
   const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
   if (!t || (!t.analyze && !t.scrape && !hasResolves && !t.synthesis && !t.fit)) return '';
+
+  const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId);
+  if (scope.foreign) return `\n## Marketplace Pipeline\n${scope.note}`;
 
   const lines = [];
 
@@ -455,7 +513,7 @@ function buildMarketplacePipelineSnapshot() {
 
   return `
 ## Marketplace Pipeline
-> Last sell-side run's funnel (photo analysis → comp scrape → price synthesis →
+${scope.note}> Last sell-side run's funnel (photo analysis → comp scrape → price synthesis →
 > platform fit), captured in the main process so it survives SellHub deletion
 > and log-buffer scroll — the sell-side analog of the Job Search Pipeline. The
 > "found → fed to the model" gap in synthesis answers "did we use all the comps
@@ -652,7 +710,7 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
 // ── Shared markdown generation ────────────────────────────────────────────────
 // Used by both the "save to file" and "copy to clipboard" handlers so the
 // report content is identical regardless of how the user chooses to export it.
-export function generateMarkdown(payload) {
+export function generateMarkdown(payload, reportWindowId = null) {
   const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, imageState, lastSaveError, activeEditableText } = payload;
 
   const systemInfo = {
@@ -1142,12 +1200,17 @@ ${aiConfig.provider === 'gemini' ? `
 - USAJobs key prefix: \`${jobsConfig.usajobsKeyPrefix}\`
 `;
 
+  // The node ids in THIS report's canvas — lets the pipeline snapshots flag a
+  // funnel whose originating node isn't here (the main-process telemetry is
+  // shared across all open windows/canvases, so it may be another canvas's run).
+  const currentNodeIds = new Set((nodes || []).map(n => n?.id).filter(Boolean));
+
   let jobsPipelineMarkdown = '';
-  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(); }
+  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId); }
   catch { /* never break the report on diagnostic failure */ }
 
   let marketplacePipelineMarkdown = '';
-  try { marketplacePipelineMarkdown = buildMarketplacePipelineSnapshot(); }
+  try { marketplacePipelineMarkdown = buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId); }
   catch { /* never break the report on diagnostic failure */ }
 
   let scraperAdaptationMarkdown = '';
@@ -1259,7 +1322,7 @@ export function registerBugReportHandlers() {
 
   // Save report to a file chosen by the user via a native save dialog.
   handleSafe('export-bug-report', async (event, payload) => {
-    const markdownContent = generateMarkdown(payload);
+    const markdownContent = generateMarkdown(payload, event.sender?.id ?? null);
 
     const { canceled, filePath } = await dialog.showSaveDialog({
       title: 'Save Bug Report',
@@ -1276,7 +1339,7 @@ export function registerBugReportHandlers() {
   // Return the report as a string so the renderer can copy it to the clipboard.
   // No file dialog, no disk I/O — just generate and return the markdown.
   handleSafe('generate-bug-report-markdown', async (event, payload) => {
-    const markdownContent = generateMarkdown(payload);
+    const markdownContent = generateMarkdown(payload, event.sender?.id ?? null);
     return { markdown: markdownContent };
   });
 }
