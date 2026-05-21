@@ -9,7 +9,7 @@ import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUER
 import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
-import { jobScoringBatchSize, HEAVY_WAF_QUERY_CAP, DEFAULT_QUERY_CAP } from './resultCaps.js';
+import { jobScoringBatchSize, HEAVY_WAF_QUERY_CAP, DEFAULT_QUERY_CAP, JOB_SCORE_CAP } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
@@ -88,31 +88,92 @@ function buildJobTasks(queries, maxAgeDays) {
   const gChip = googleDateChip(days);
   // Browser pool extractors — only platforms that REQUIRE Puppeteer rendering.
   // RemoteOK and WeWorkRemotely have been moved to fetchApiSources (direct HTTP).
+  //
+  // `pages` = how many result pages to fetch per query variant (bounded). Page 1
+  // alone is only the platform's relevance top-N — for a broad query it can be a
+  // small slice of what's actually in the look-back window, so the surfaced "best
+  // matches" are picked from an unrepresentative pool. Fetching a 2nd page widens
+  // that pool. We DON'T deep-paginate or touch heavy-WAF sources: the rate
+  // limiter's per-domain cooldown spaces page requests (the "delay" that keeps
+  // slow pagination from looking like a burst), MAX_PER_DOMAIN=1 serializes them,
+  // and a blocked/empty page-2 is dropped by the anti-bot detector — so this is a
+  // bounded, self-throttling, gracefully-degrading widen, verifiable live.
+  // `urlFn(q, page)` builds the page-`page` (0-based) URL; sources that can't
+  // paginate via a URL param (Google's embedded jobs widget) ignore `page`.
   const extractors = {
-    google:          { extractor: GOOGLE_JOBS_EXTRACTOR,      config: GOOGLE_JOBS_CONFIG,      urlFn: q => `https://www.google.com/search?q=${encodeURIComponent(q)}&ibp=htl;jobs&htichips=date_posted:${gChip}` },
-    indeed:          { extractor: INDEED_JOBS_EXTRACTOR,      config: INDEED_CONFIG,           urlFn: q => `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}&fromage=${days}` },
-    ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR,     config: ZIPRECRUITER_CONFIG,     urlFn: q => `https://www.ziprecruiter.com/jobs-search?search=${encodeURIComponent(q)}&days=${days}` },
-    glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,        config: GLASSDOOR_CONFIG,        urlFn: q => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}&fromAge=${days}` },
-    wellfound:       { extractor: WELLFOUND_EXTRACTOR,        config: WELLFOUND_CONFIG,        urlFn: q => `https://wellfound.com/role/${q.toLowerCase().replace(/\s+/g, '-')}` },
+    google:          { extractor: GOOGLE_JOBS_EXTRACTOR,  config: GOOGLE_JOBS_CONFIG,  pages: 1,
+                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}&ibp=htl;jobs&htichips=date_posted:${gChip}` },
+    indeed:          { extractor: INDEED_JOBS_EXTRACTOR,  config: INDEED_CONFIG,       pages: 2,
+                       urlFn: (q, page) => `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}&fromage=${days}${page > 0 ? `&start=${page * 10}` : ''}` },
+    ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, pages: 1, // heavy WAF — single page
+                       urlFn: (q) => `https://www.ziprecruiter.com/jobs-search?search=${encodeURIComponent(q)}&days=${days}` },
+    glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,    config: GLASSDOOR_CONFIG,    pages: 1, // heavy WAF — single page
+                       urlFn: (q) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}&fromAge=${days}` },
+    wellfound:       { extractor: WELLFOUND_EXTRACTOR,    config: WELLFOUND_CONFIG,    pages: 2,
+                       urlFn: (q, page) => `https://wellfound.com/role/${q.toLowerCase().replace(/\s+/g, '-')}${page > 0 ? `?page=${page + 1}` : ''}` },
   };
 
   const tasks = [];
-  // Remote-only boards get fewer queries; heavy WAF sites get only the first query
-  for (const [sourceId, { extractor, config, urlFn }] of Object.entries(extractors)) {
+  // Remote-only boards get fewer queries; heavy WAF sites get only the first query.
+  for (const [sourceId, { extractor, config, urlFn, pages = 1 }] of Object.entries(extractors)) {
     const isHeavyWAF = sourceId === 'ziprecruiter' || sourceId === 'glassdoor';
     const querySubset = isHeavyWAF ? queries.slice(0, HEAVY_WAF_QUERY_CAP) : queries.slice(0, DEFAULT_QUERY_CAP);
 
-    querySubset.forEach((q, i) => {
-      tasks.push({
-        id: `${sourceId}-${i}`,
-        sourceId,
-        url: urlFn(q),
-        extractorJS: extractor,
-        options: config,
-      });
-    });
+    // Flat index per source across (query × page) so `id` stays `${sourceId}-${n}`
+    // and `res.id.replace(/-\d+$/, '')` still maps a task result back to its source.
+    let idx = 0;
+    for (const q of querySubset) {
+      for (let page = 0; page < pages; page++) {
+        tasks.push({
+          id: `${sourceId}-${idx++}`,
+          sourceId,
+          url: urlFn(q, page),
+          extractorJS: extractor,
+          options: config,
+        });
+      }
+    }
   }
   return tasks;
+}
+
+/**
+ * Pick the top `n` jobs FAIRLY across sources (round-robin), preserving each
+ * source's gathered order (≈ platform relevance, page 1 before page 2) within
+ * its turn. Caps how many jobs reach the quota-bound LLM scorer when a widened
+ * gather over-fills the budget, so we score "the best slice across all sources"
+ * instead of letting whichever source returned most monopolize the scoring
+ * budget. Returns all jobs unchanged when there are <= n.
+ */
+function selectTopAcrossSources(jobs, n) {
+  const arr = Array.isArray(jobs) ? jobs : [];
+  if (n <= 0) return [];
+  if (arr.length <= n) return arr;
+  const groups = new Map();
+  for (const j of arr) {
+    const k = j?.source || 'unknown';
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(j);
+  }
+  // Deterministic source order (larger groups first, then name) so the cut
+  // doesn't depend on source-arrival order; gather order is kept within a group.
+  const sources = [...groups.keys()].sort((a, b) => {
+    const d = groups.get(b).length - groups.get(a).length;
+    return d !== 0 ? d : (a < b ? -1 : a > b ? 1 : 0);
+  });
+  const picked = [];
+  const cursor = new Map(sources.map(s => [s, 0]));
+  let advanced = true;
+  while (picked.length < n && advanced) {
+    advanced = false;
+    for (const s of sources) {
+      if (picked.length >= n) break;
+      const g = groups.get(s);
+      const i = cursor.get(s);
+      if (i < g.length) { picked.push(g[i]); cursor.set(s, i + 1); advanced = true; }
+    }
+  }
+  return picked;
 }
 
 /**
@@ -557,6 +618,17 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const role = (targetRole || '').trim();
     logger.info(`[Jobs][${nodeId}] Scoring`, jobs.length, 'jobs', role ? `(target: ${role})` : '');
 
+    // Budget cap: a widened gather (extra pages / query variants) can over-fill
+    // the quota-bound scorer. Pre-rank to the top JOB_SCORE_CAP FAIRLY across
+    // sources so we analyze the best slice of a wider pool at ~flat token cost.
+    // The overflow drop is reported (cappedForBudget) so it's never silent.
+    const gathered = Array.isArray(jobs) ? jobs : [];
+    const toScore = selectTopAcrossSources(gathered, JOB_SCORE_CAP);
+    const cappedForBudget = gathered.length - toScore.length;
+    if (cappedForBudget > 0) {
+      logger.info(`[Jobs][${nodeId}] Pre-rank cap: ${gathered.length} gathered → scoring top ${toScore.length} across sources (${cappedForBudget} lower-priority overflow not scored)`);
+    }
+
     // Batch size derived from the job-scoring token budget (see resultCaps);
     // shrinks automatically if a thinking-heavier model raises per-job cost.
     const BATCH_SIZE = jobScoringBatchSize();
@@ -623,12 +695,12 @@ IMPORTANT SCORING RULES:
 - "stretch" label is for plausible pivots where the candidate's experience only partially aligns.
 - Aim for 3-7 distinct careerDirection categories total. Merge small categories.`;
 
-    for (let i = 0; i < jobs.length; i += BATCH_SIZE) {
+    for (let i = 0; i < toScore.length; i += BATCH_SIZE) {
       // Guard: Check if window was closed between batches
       if (signal?.aborted) break;
 
       batches++;
-      const batch = jobs.slice(i, i + BATCH_SIZE);
+      const batch = toScore.slice(i, i + BATCH_SIZE);
       let batchResult;
 
       try {
@@ -685,15 +757,17 @@ ${JSON.stringify(slimBatch(batch))}`, {
     logger.info(`[Jobs] Scored ${scoredJobs.length} jobs across ${Object.keys(clusters).length} career directions`);
     jobsTelemetry.scoring = {
       ts: Date.now(),
-      input: jobs.length,
+      input: gathered.length,            // jobs the renderer handed us (post gather/dedup/age/history)
+      selectedForScoring: toScore.length, // after the across-source budget cap
+      cappedForBudget,                    // gathered − selected: by-design overflow, NOT a failure
       scored: scoredJobs.length,
       placeholders: placeholderCount,
       batches,
       failedBatches,
-      // >0 means the abort signal cut the batch loop short, so these jobs were
-      // never even sent to the scorer (distinct from placeholders, which were
-      // sent but came back unusable).
-      unscored: jobs.length - scoredJobs.length,
+      // >0 means the abort signal cut the batch loop short, so these SELECTED jobs
+      // were never sent to the scorer (distinct from cappedForBudget, which were
+      // intentionally not selected, and placeholders, which were sent but unusable).
+      unscored: toScore.length - scoredJobs.length,
     };
 
     return { scoredJobs, clusters };

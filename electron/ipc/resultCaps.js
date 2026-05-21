@@ -31,6 +31,16 @@ const BUDGET_SAFETY         = 0.8;   // leave headroom under the hard cap
 // ── Per-source extractor breadth cap (top-N a single source contributes) ──────
 export const JOB_RESULT_CAP = 30; // per job source (DOM + API)
 
+// ── LLM scoring budget (how many gathered jobs actually get LLM-scored) ───────
+// Pagination/widening grows the gathered pool so the surfaced "best matches" are
+// chosen from more of the in-window results — but every scored job costs LLM
+// tokens on a quota-bound free tier. So cap how many reach the scorer and pick
+// the top-N FAIRLY across sources (round-robin), turning "score whatever we
+// happened to scrape on page 1" into "score the best slice of a wider pool" at
+// ~flat token cost. If the gathered set is already <= this, nothing is dropped.
+// The drop is reported (not silent). Tune live against the Gemini quota.
+export const JOB_SCORE_CAP = 150;
+
 // ── Heavy-WAF query trim (how many query variants to fire per source) ─────────
 export const HEAVY_WAF_QUERY_CAP = 1; // bot-hardened sources (ZipRecruiter, Glassdoor)
 export const DEFAULT_QUERY_CAP   = 2; // everything else

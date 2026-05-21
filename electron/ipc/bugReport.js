@@ -205,8 +205,17 @@ function buildJobsPipelineSnapshot() {
   if (t.scoring) {
     const s = t.scoring;
     const clean = s.placeholders === 0 && s.unscored === 0;
+    const selected = s.selectedForScoring ?? s.input; // back-compat with pre-cap telemetry
     lines.push(`\n### Scoring${ago(s.ts)}`);
-    lines.push(`- Input: ${s.input} → scored: ${s.scored} ${clean ? '✅ all genuinely analyzed' : ''}`);
+    if (s.cappedForBudget > 0) {
+      // The budget cap is an intentional drop, surfaced so it's not silent:
+      // a wider gather means the kept jobs are the best slice across sources,
+      // not all of them. Widening the scrape improves WHICH jobs make this cut.
+      lines.push(`- Gathered: ${s.input} → pre-ranked to top **${selected}** across sources for scoring (${s.cappedForBudget} lower-priority overflow not scored — by-design budget cap to bound LLM cost, not a failure).`);
+      lines.push(`- Scored: ${s.scored}/${selected} ${clean ? '✅ all selected jobs genuinely analyzed' : ''}`);
+    } else {
+      lines.push(`- Input: ${s.input} → scored: ${s.scored} ${clean ? '✅ all genuinely analyzed' : ''}`);
+    }
     lines.push(`- Batches: ${s.batches} (${s.failedBatches} failed)`);
     if (s.placeholders > 0) {
       lines.push(`- ⚠️ **${s.placeholders} placeholder score(s)** — these jobs reached the scorer but came back unusable and were given a default matchScore=50. They were NOT genuinely analyzed.`);
