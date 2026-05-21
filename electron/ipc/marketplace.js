@@ -71,6 +71,60 @@ function uniqueCompCount(items) {
   return seen.size;
 }
 
+/** Count comps per source, for the report's kept/dropped composition. */
+function countBySource(items) {
+  const out = {};
+  for (const it of (Array.isArray(items) ? items : [])) {
+    const k = it?.source || 'unknown';
+    out[k] = (out[k] || 0) + 1;
+  }
+  return out;
+}
+
+/**
+ * Pick the top `n` comps for the model FAIRLY across sources (round-robin),
+ * best-title-match first within each source.
+ *
+ * Replaces a plain `sorted.slice(0, n)`, which was order-dependent and let one
+ * source monopolize the whole cap: when the title-match score can't discriminate
+ * (e.g. query "Apple iPhone X" → tokens drop the 1-char "x", so cases and real
+ * phones all tie), the slice degenerates to array order. A run where Poshmark
+ * (mostly $5-$35 cases) merged before eBay-sold kept all 25 sold slots as
+ * Poshmark and dropped every gold-standard eBay-sold phone — doubling the price
+ * ($85→$185) purely on merge order. Round-robin guarantees each source is
+ * represented regardless of order, and the source ordering is deterministic
+ * (best-in-group score, then name) so the result no longer depends on whether a
+ * source arrived via the headless scrape or a later captcha-resolve.
+ */
+function selectAcrossSources(items, n, scoreFn) {
+  const arr = Array.isArray(items) ? items : [];
+  if (n <= 0 || arr.length === 0) return [];
+  const groups = new Map();
+  for (const it of arr) {
+    const key = it?.source || 'unknown';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(it);
+  }
+  for (const g of groups.values()) g.sort((a, b) => scoreFn(b) - scoreFn(a));
+  const sources = [...groups.keys()].sort((a, b) => {
+    const d = scoreFn(groups.get(b)[0]) - scoreFn(groups.get(a)[0]);
+    return d !== 0 ? d : (a < b ? -1 : a > b ? 1 : 0);
+  });
+  const picked = [];
+  const cursor = new Map(sources.map(s => [s, 0]));
+  let advanced = true;
+  while (picked.length < n && advanced) {
+    advanced = false;
+    for (const s of sources) {
+      if (picked.length >= n) break;
+      const g = groups.get(s);
+      const i = cursor.get(s);
+      if (i < g.length) { picked.push(g[i]); cursor.set(s, i + 1); advanced = true; }
+    }
+  }
+  return picked;
+}
+
 /**
  * Drop non-genuine listings before they reach the pricing model. eBay surfaces
  * its own internal load/QA listings (titled "… Bidding Test generic N of x",
@@ -461,6 +515,15 @@ Be specific about what you can clearly see. If you can't identify brand or model
     }
 
     logger.info(`[Marketplace][${nodeId}] Scrape done: ${allComps.sold.length} sold, ${allComps.active.length} active, ${scrapeWarnings.length} warning(s)`);
+    // Per-source warning reason so the funnel can explain a count (esp. a 0):
+    // "swappa=0 ⚠️zero-extracted" tells stale-selectors/empty apart from a block,
+    // turning a silently-empty source into a diagnosable one.
+    const sourceWarnings = {};
+    for (const w of scrapeWarnings) {
+      if (w?.sourceId && !sourceWarnings[w.sourceId]) {
+        sourceWarnings[w.sourceId] = { code: w.code, severity: w.severity, evidence: w.evidence };
+      }
+    }
     marketplaceTelemetry.scrape = {
       ts: Date.now(),
       sold: allComps.sold.length,
@@ -472,6 +535,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
       blocked: scrapeWarnings.filter(w => w?.severity === 'block' && w?.code !== 'task-failed').length,
       errored: scrapeWarnings.filter(w => w?.code === 'task-failed').length,
       bySource,
+      sourceWarnings,
     };
     // A fresh full scrape starts a new run — drop any resolves recorded for a
     // previous product/run so the report's funnel only shows this run's.
@@ -535,14 +599,20 @@ Be specific about what you can clearly see. If you can't identify brand or model
       return hits;
     };
     const byMatchDesc = (a, b) => scoreByTitleMatch(b) - scoreByTitleMatch(a);
-    const sortedSold   = [...sold].sort(byMatchDesc);
-    const sortedActive = [...active].sort(byMatchDesc);
     // How many comps actually reach the model: scaled to what's available and
-    // bounded by the price-synthesis token budget (see resultCaps). The arrays
-    // are quality-ordered above, so these are the top-N most relevant.
-    const { sold: soldN, active: activeN } = compsForPricing(sortedSold.length, sortedActive.length);
-    const soldComps   = sortedSold.slice(0, soldN);
-    const activeComps = sortedActive.slice(0, activeN);
+    // bounded by the price-synthesis token budget (see resultCaps).
+    const { sold: soldN, active: activeN } = compsForPricing(sold.length, active.length);
+    // Pick FAIRLY across sources (round-robin), then present best-match-first so
+    // the prompt's "pre-sorted by keyword match" hint still holds. The plain
+    // top-N slice was order-dependent and let one source monopolize the cap when
+    // title-match couldn't discriminate (see selectAcrossSources).
+    const soldComps   = selectAcrossSources(sold, soldN, scoreByTitleMatch).sort(byMatchDesc);
+    const activeComps = selectAcrossSources(active, activeN, scoreByTitleMatch).sort(byMatchDesc);
+    // Dropped = everything not picked (for the report's kept-vs-dropped lines).
+    const soldKeptSet   = new Set(soldComps);
+    const activeKeptSet = new Set(activeComps);
+    const soldDropped   = sold.filter(x => !soldKeptSet.has(x));
+    const activeDropped = active.filter(x => !activeKeptSet.has(x));
 
     const pricing = await callLLMText(`
 You are a pricing analyst and marketplace routing expert. Given these similar listings from multiple sources, recommend a selling price AND which platforms to list on. Use plain English in your justification — don't say "comp(s)" or "comparable"; say "similar listing(s)" or "sold listing(s)".
@@ -654,9 +724,14 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       // kept band = low-relevance noise (cap working); dropped prices reaching
       // into the kept band = the title-match ranking dropped relevant comps.
       soldKeptStats:      priceStats(soldComps),
-      soldDroppedStats:   priceStats(sortedSold.slice(soldN)),
+      soldDroppedStats:   priceStats(soldDropped),
       activeKeptStats:    priceStats(activeComps),
-      activeDroppedStats: priceStats(sortedActive.slice(activeN)),
+      activeDroppedStats: priceStats(activeDropped),
+      // Per-source composition of kept vs dropped — surfaces a source monopoly
+      // (e.g. "kept: poshmark=25" while "dropped: ebay-sold=25") at a glance,
+      // instead of having to read the raw comp JSON.
+      soldKeptBySource:    countBySource(soldComps),
+      soldDroppedBySource: countBySource(soldDropped),
       // Non-genuine listings (eBay test items, …) removed before pricing — surfaced
       // so the rejection is transparent, not a silent drop. soldFound/activeFound
       // above are already the post-rejection counts.

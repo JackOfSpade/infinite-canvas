@@ -276,8 +276,15 @@ function buildMarketplacePipelineSnapshot() {
     if (s.bySource && Object.keys(s.bySource).length > 0) {
       // Per-source raw counts — pair with the synthesis "unique" line below to
       // spot a single source double-counting (e.g. a healthy-looking total
-      // that's mostly one source's duplicates).
-      lines.push(`- Per source (raw items): ${Object.entries(s.bySource).map(([id, n]) => `${id}=${n}`).join(', ')}`);
+      // that's mostly one source's duplicates). A ⚠️<code> after a count names
+      // WHY that source returned what it did — so a 0 isn't silently ambiguous.
+      const sw = s.sourceWarnings || {};
+      lines.push(`- Per source (raw items): ${Object.entries(s.bySource).map(([id, n]) => `${id}=${n}${sw[id] ? ` ⚠️${sw[id].code}` : ''}`).join(', ')}`);
+      // Spell out each flagged source's evidence (e.g. "extractor produced 0
+      // items (expected ≥ 3)" = stale selectors / empty vs. a tiny-body block).
+      for (const [id, w] of Object.entries(sw)) {
+        lines.push(`  - \`${id}\` (${w.severity}): ${w.evidence}`);
+      }
     }
     if (s.blocked > 0) {
       lines.push('- _(anti-bot-blocked sources contribute 0 comps until solved via the card\'s Solve button — see the resolve stage / Recent Logs)_');
@@ -346,6 +353,16 @@ function buildMarketplacePipelineSnapshot() {
             `- Dropped ${s.activeDroppedStats.n} active ${fmt(s.activeDroppedStats)}; kept ${fmt(s.activeKeptStats)}.` +
             (reachesA ? ' ⚠️ dropped active prices reach into the kept band.' : ''),
           );
+        }
+        // Per-source composition of the sold kept/dropped split — exposes a
+        // source monopoly (one source filling the cap while a better one is
+        // dropped) that the price-band lines alone can't show. The round-robin
+        // selection should keep this balanced; a lopsided split is the tell.
+        const bySrc = (m) => m && Object.keys(m).length
+          ? Object.entries(m).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(', ')
+          : '—';
+        if (s.soldKeptBySource || s.soldDroppedBySource) {
+          lines.push(`- Sold by source — kept: ${bySrc(s.soldKeptBySource)} · dropped: ${bySrc(s.soldDroppedBySource)}`);
         }
       }
       lines.push(`- Result: recommended_price=${s.recommendedPrice == null ? '**null** ⚠️ (comps scraped but no price produced)' : '$' + s.recommendedPrice}, match_quality=${s.matchQuality}`);

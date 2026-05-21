@@ -21,6 +21,15 @@
 // timeout for fast sources (never looser than this seed). `waitMs` is now
 // vestigial — the readiness-stabilization loop in browserPool decides when
 // results are ready, and the pre-read beat is sized from learned timing.
+//
+// `expectedMinItems` arms the anti-bot detector's volume check (antiBotDetector
+// Layer 4): if an established general/tech resale source returns fewer than this,
+// it's flagged (block if the body is also tiny, else "extractor produced 0 — stale
+// selectors or soft block"). Without it, a source silently returning 0 (e.g. a
+// stale-selector Swappa) looks identical to a clean empty result. Set ONLY on
+// broad sources that reliably have results for any real product — NOT on niche
+// sources (PriceCharting = games, Reverb = instruments) where 0 is expected for
+// off-category items and would false-positive.
 
 export const EBAY_SOLD_CONFIG = {
   waitMs: 2500,
@@ -29,6 +38,7 @@ export const EBAY_SOLD_CONFIG = {
   scrollFirst: true,
   dismissCookies: true,
   referer: 'https://www.google.com/',
+  expectedMinItems: 3,
 };
 
 export const EBAY_ACTIVE_CONFIG = {
@@ -38,6 +48,7 @@ export const EBAY_ACTIVE_CONFIG = {
   scrollFirst: true,
   dismissCookies: true,
   referer: 'https://www.google.com/',
+  expectedMinItems: 3,
 };
 
 export const POSHMARK_CONFIG = {
@@ -47,6 +58,7 @@ export const POSHMARK_CONFIG = {
   scrollFirst: true,
   dismissCookies: true,
   referer: 'https://www.google.com/',
+  expectedMinItems: 3,
 };
 
 export const SWAPPA_CONFIG = {
@@ -55,6 +67,7 @@ export const SWAPPA_CONFIG = {
   waitFor: '.search_result, .listing_row, .row.item',
   scrollFirst: false,
   dismissCookies: false,
+  expectedMinItems: 3,
 };
 
 // NOTE: StockX and Reverb configs removed — these platforms now use direct API
@@ -67,6 +80,7 @@ export const MERCARI_CONFIG = {
   scrollFirst: true,
   dismissCookies: true,
   referer: 'https://www.google.com/',
+  expectedMinItems: 3,
 };
 
 // PriceCharting publishes aggregated sold-price data for video games + retro

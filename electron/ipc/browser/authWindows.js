@@ -341,6 +341,18 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       { name: 'perimeterx',        selector: '[id*="px-captcha"], iframe[src*="perimeterx"]' },
       { name: 'press-and-hold',    selector: 'div[id*="px-captcha"][style*="block"]' },
     ];
+    // Cookie-consent overlays are NOT captchas, but they cover the page and
+    // gate/hide results the same way — and the user is mid-interaction with one.
+    // We must not declare the page "empty" and auto-close while one is up (that
+    // closed the Swappa window out from under a user about to accept cookies,
+    // reporting 0 results when results were rendered behind the panel). Named
+    // CMP roots first, then prominent generic cookie/consent/gdpr containers.
+    const CONSENT_SELECTOR_STRING = [
+      '#onetrust-banner-sdk', '#CybotCookiebotDialog', '.osano-cm-window',
+      '#usercentrics-root', '#truste-consent-track', '.qc-cmp2-container', '#didomi-host',
+      '[id*="cookie" i]', '[class*="cookie" i]', '[id*="consent" i]', '[class*="consent" i]',
+      '[id*="gdpr" i]', '[class*="gdpr" i]',
+    ].join(', ');
     let lastHeartbeatLog = 0;
     let firstProbeLogged = false;
     let extractedItems = null;
@@ -355,12 +367,20 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     let antiBotClearedAt = null;   // ms when challenge widgets first disappeared
     let lastExtractCount = -1;     // item count from the previous poll
     let stableTicks = 0;           // consecutive polls with an unchanged (>0) count
-    let zeroStreak = 0;            // consecutive polls returning 0 items
-    // Shared with the in-page readiness loop (scrapeBudget.READINESS) so the
-    // two stay in lockstep. At CAPTCHA_POLL_MS cadence MAX_ZERO_READS ≈ 2.4s.
+    let emptySince = null;         // ms when the page first read 0 items with no overlay
     const STABLE_TICKS_REQUIRED = READINESS.STABLE_READS;  // unchanged count this many polls → settled
-    const MAX_ZERO_STREAK = READINESS.MAX_ZERO_READS;      // 0-item polls → accept empty
-    const READINESS_CEILING_MS = READINESS.CEILING_MS;     // hard cap after the gate clears (safety net)
+    const READINESS_CEILING_MS = READINESS.CEILING_MS;     // hard cap for a slowly-climbing positive count
+    // CRITICAL: this is a HUMAN-DRIVEN window. A 0-item read usually means the
+    // user is still clearing something — a cookie wall, captcha, or login — that
+    // gates the results, NOT that the page is genuinely empty. The headless loop
+    // accepts empty after ~2.4s (READINESS.MAX_ZERO_READS @ CAPTCHA_POLL_MS),
+    // which is far too fast here: it closed the Swappa window out from under a
+    // user mid cookie-accept. Give a human-scale grace instead. Detection of the
+    // overlay is unreliable across sites (Swappa's panel slipped past the consent
+    // selectors), so the grace — not detection — is what guarantees the user has
+    // time. A detected consent overlay merely RESETS it; positive results settle
+    // immediately (below); the 5-min window timeout is the absolute backstop.
+    const RESOLVE_EMPTY_GRACE_MS = 30000;
 
     // Single probe tick — pulled out so we can run it immediately after
     // goto resolves AND on every setInterval. Without the immediate first
@@ -380,7 +400,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
         try { currentHost = new URL(currentUrl).host; } catch { /* ignored */ }
         if (originalHost && currentHost && currentHost !== originalHost) return;
 
-        const probe = await page.evaluate((selectors) => {
+        const probe = await page.evaluate((selectors, consentSel) => {
           // Visibility check — an element exists in the DOM but is hidden
           // (display:none / detached) doesn't count as "challenge on
           // screen." offsetParent is null for display:none AND for fixed
@@ -399,9 +419,23 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
               if (isVisible(el)) { hits.push(name); break; }
             }
           }
+          // A cookie-consent overlay is "present" only when visible AND
+          // prominent (a large box or a fixed/sticky bar) — so an incidental
+          // hidden element whose class merely contains "cookie" can't wedge the
+          // window open. Generous match is safe: it only blocks the empty/close
+          // conclusion (positive results still settle below).
+          let consentVisible = false;
+          for (const el of document.querySelectorAll(consentSel)) {
+            if (!isVisible(el)) continue;
+            const r = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            if (r.width * r.height >= 4000 || style.position === 'fixed' || style.position === 'sticky') {
+              consentVisible = true; break;
+            }
+          }
           const textLength = (document.body?.innerText || '').length;
-          return { hits, textLength };
-        }, CHALLENGE_SELECTORS).catch(() => null);
+          return { hits, textLength, consentVisible };
+        }, CHALLENGE_SELECTORS, CONSENT_SELECTOR_STRING).catch(() => null);
 
         if (!probe) return;
 
@@ -412,7 +446,9 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
           firstProbeLogged = true;
           const initial = probe.hits.length > 0
             ? `initial probe found visible challenge widgets: [${probe.hits.join(', ')}]`
-            : `initial probe found NO challenge widgets (textLen=${probe.textLength}) — page may never have shown a captcha to this visible session even though headless scrape was blocked`;
+            : probe.consentVisible
+              ? `initial probe found a cookie-consent wall (no captcha) — holding the window open for the user to accept/dismiss rather than closing it as empty`
+              : `initial probe found NO challenge widgets (textLen=${probe.textLength}) — page may never have shown a captcha to this visible session even though headless scrape was blocked`;
           logger.info(`[StealthBrowser] Captcha wait: host=${currentHost} — ${initial}`);
         }
 
@@ -437,7 +473,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
           if (!noChallenge) {
             // Still showing a challenge — reset the tracker so a post-solve
             // render starts measuring fresh.
-            antiBotClearedAt = null; lastExtractCount = -1; stableTicks = 0; zeroStreak = 0;
+            antiBotClearedAt = null; lastExtractCount = -1; stableTicks = 0; emptySince = null;
           } else {
             if (antiBotClearedAt == null) antiBotClearedAt = Date.now();
             let items = null;
@@ -463,28 +499,40 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
             if (count > 0) {
               stableTicks = (count === lastExtractCount) ? stableTicks + 1 : 0;
               lastExtractCount = count;
-              zeroStreak = 0;
+              emptySince = null;
               if (stableTicks >= STABLE_TICKS_REQUIRED || ceilingHit) {
                 logger.info(`[StealthBrowser] ${currentHost} results settled at ${count} item(s)${ceilingHit ? ' (readiness ceiling hit)' : ` after ${stableTicks} stable poll(s)`}`);
                 await finishCleared(items);
                 return;
               }
               // count still climbing — keep polling.
+            } else if (probe.consentVisible) {
+              // A cookie-consent wall is covering the page — the 0 is the wall
+              // (or content gated behind it), NOT a genuinely-empty result, and
+              // the user is mid-accept. Restart the empty grace so it only starts
+              // counting once the wall is gone, and reset the hydration ceiling so
+              // post-dismiss rendering is measured fresh.
+              emptySince = null;
+              antiBotClearedAt = null;
             } else {
-              // 0 items: the grid may still be hydrating. Wait a bounded number
-              // of polls before accepting a genuinely-empty result.
-              zeroStreak++;
-              if (zeroStreak >= MAX_ZERO_STREAK || ceilingHit) {
-                logger.info(`[StealthBrowser] ${currentHost} cleared but extractor found 0 items after ${zeroStreak} poll(s)${ceilingHit ? ' (readiness ceiling hit)' : ''} — accepting empty result`);
+              // 0 items and no overlay we recognize — but the user may still be
+              // clearing one we don't (Swappa's cookie panel slipped past the
+              // consent selectors). Give a HUMAN-scale grace before concluding
+              // empty, instead of the headless ~2.4s cadence that raced the user.
+              if (emptySince == null) emptySince = Date.now();
+              const emptyMs = Date.now() - emptySince;
+              if (emptyMs >= RESOLVE_EMPTY_GRACE_MS) {
+                logger.info(`[StealthBrowser] ${currentHost} found 0 items after ${Math.round(emptyMs / 1000)}s with no captcha/consent detected — accepting empty result`);
                 await finishCleared(items); // items === []
                 return;
               }
-              // keep polling in case results are still rendering.
+              // keep polling — give the user time to clear a cookie/login wall.
             }
           }
-        } else if (noChallenge && probe.textLength > READINESS.BODY_TEXT_GATE) {
+        } else if (noChallenge && !probe.consentVisible && probe.textLength > READINESS.BODY_TEXT_GATE) {
           // ── No extractor (login / API source): fall back to the body-text
-          // heuristic — there's no item count to stabilize on.
+          // heuristic — there's no item count to stabilize on. A consent wall
+          // gates this too (don't auto-close a login window mid cookie-accept).
           await finishCleared(null);
           return;
         }
@@ -496,9 +544,13 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
           // reports show the exact cause instead of just "stillBlocked".
           const reason = probe.hits.length > 0
             ? `visible challenge widgets: [${probe.hits.join(', ')}]`
-            : (inlineExtractorJS
-                ? `no widgets; extractor at ${lastExtractCount < 0 ? 0 : lastExtractCount} item(s), waiting for count to settle`
-                : `no widgets but textLen=${probe.textLength} below 1500 threshold`);
+            : probe.consentVisible
+              ? `cookie-consent wall up — waiting for the user to accept/dismiss (not closing as empty)`
+              : (inlineExtractorJS
+                  ? (lastExtractCount > 0
+                      ? `no widgets; extractor at ${lastExtractCount} item(s), waiting for count to settle`
+                      : `no widgets; 0 items so far — holding the window open up to ${RESOLVE_EMPTY_GRACE_MS / 1000}s for the user to clear a cookie/login wall before concluding empty`)
+                  : `no widgets but textLen=${probe.textLength} below 1500 threshold`);
           logger.info(`[StealthBrowser] Captcha wait: host=${currentHost} — ${reason}`);
         }
       } catch {
