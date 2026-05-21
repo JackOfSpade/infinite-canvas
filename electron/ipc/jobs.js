@@ -84,9 +84,21 @@ function googleDateChip(days) {
 
 // ── Source → URL + Extractor + Config mapping (DOM scrape sources only) ──────
 // LinkedIn has been moved to the API pool (fetchLinkedInJobs) — no Puppeteer needed.
-function buildJobTasks(queries, maxAgeDays) {
+function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
   const gChip = googleDateChip(days);
+  // Wellfound is the one browser source whose URL is a /role/{slug} SEO page, not
+  // a free-text search box. The query carries the candidate's city ("Cinematographer
+  // Denver"), and slugging the whole thing produced "/role/cinematographer-denver"
+  // — not a real role slug, so the page returned nothing and we logged a misleading
+  // "genuinely empty" 0. Same principle as the board-source geo fix: strip the
+  // candidate's own location tokens from the role identifier (location is a filter,
+  // not part of the role). The location-aware search sources (Indeed/Glassdoor/Zip/
+  // Google) keep the city below — they WANT it as a query term.
+  const geoTerms = buildGeoTermSet(profileLocations);
+  const roleSlug = (q) => String(q).toLowerCase().split(/\s+/)
+    .filter(tok => tok && !geoTerms.has(tok.replace(/[^a-z0-9]/g, '')))
+    .join('-');
   // Browser pool extractors — only platforms that REQUIRE Puppeteer rendering.
   // RemoteOK and WeWorkRemotely have been moved to fetchApiSources (direct HTTP).
   //
@@ -111,7 +123,7 @@ function buildJobTasks(queries, maxAgeDays) {
     glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,    config: GLASSDOOR_CONFIG,    pages: 1, // heavy WAF — single page
                        urlFn: (q) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}&fromAge=${days}` },
     wellfound:       { extractor: WELLFOUND_EXTRACTOR,    config: WELLFOUND_CONFIG,    pages: 2,
-                       urlFn: (q, page) => `https://wellfound.com/role/${q.toLowerCase().replace(/\s+/g, '-')}${page > 0 ? `?page=${page + 1}` : ''}` },
+                       urlFn: (q, page) => `https://wellfound.com/role/${roleSlug(q)}${page > 0 ? `?page=${page + 1}` : ''}` },
   };
 
   const tasks = [];
@@ -128,6 +140,7 @@ function buildJobTasks(queries, maxAgeDays) {
         tasks.push({
           id: `${sourceId}-${idx++}`,
           sourceId,
+          page,            // 0-based; surfaced as per-page yield in the funnel
           url: urlFn(q, page),
           extractorJS: extractor,
           options: config,
@@ -289,7 +302,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across 12 sources (maxAge=${ageDays}d)`);
 
-    const tasks = buildJobTasks(queries, ageDays);
+    const tasks = buildJobTasks(queries, ageDays, profileLocations);
 
     // Group tasks by source for per-source progress tracking
     const sourceTaskIds = {};
@@ -297,10 +310,14 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // card's Solve button has a target to open in the cookie-sharing browser
     // (mirrors marketplace's CompSourceCardNode `progress.url` flow).
     const sourceFirstUrl = {};
+    // Map each task id → its 0-based page so the result loop can tally per-page
+    // yield (answers "is the 2nd-page widen actually pulling extra jobs?").
+    const taskPageById = {};
     for (const t of tasks) {
       if (!sourceTaskIds[t.sourceId]) sourceTaskIds[t.sourceId] = [];
       sourceTaskIds[t.sourceId].push(t.id);
       if (!sourceFirstUrl[t.sourceId]) sourceFirstUrl[t.sourceId] = t.url;
+      taskPageById[t.id] = t.page || 0;
     }
 
     // Notify frontend that sources are starting. Include `url` from the
@@ -347,7 +364,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Process Scraper Results
     for (const result of results) {
       const sourceId = result.id.replace(/-\d+$/, '');
-      if (!sourceResults[sourceId]) sourceResults[sourceId] = { jobs: [], errors: 0, warnings: [] };
+      if (!sourceResults[sourceId]) sourceResults[sourceId] = { jobs: [], errors: 0, warnings: [], pageCounts: {} };
 
       // Capture anti-bot warning per source even on success — a "success
       // with 0 items" usually means a soft block returned a skeleton page.
@@ -358,6 +375,11 @@ Be creative with suggestedRoleQueries — think about what career directions the
         const tagged = result.data.map(j => ({ ...j, source: sourceId }));
         sourceResults[sourceId].jobs.push(...tagged);
         allJobs.push(...tagged);
+        // Tally raw items by page so the funnel can show whether page 2 added
+        // anything. Recorded even when count is 0 (page ran, returned nothing).
+        const page = taskPageById[result.id] || 0;
+        const pc = sourceResults[sourceId].pageCounts;
+        pc[page] = (pc[page] || 0) + tagged.length;
       } else {
         sourceResults[sourceId].errors++;
         logger.warn(`[Jobs] Source ${result.id} failed:`, result.error);
@@ -500,6 +522,13 @@ Be creative with suggestedRoleQueries — think about what career directions the
         || (data.warnings || []).find(x => x?.severity === 'info')
         || (data.warnings || [])[0] || null;
       bySource[sid] = { count: data.jobs.length, warning: w ? { code: w.code, severity: w.severity } : null };
+      // Per-page raw yield, only for the multi-page browser sources (Indeed,
+      // Wellfound) — a single-page source (or an API source) has nothing to show.
+      const pc = data.pageCounts || {};
+      const pageNums = Object.keys(pc).map(Number).sort((a, b) => a - b);
+      if (pageNums.length > 1 || pageNums.some(p => p > 0)) {
+        bySource[sid].pages = pageNums.map(p => ({ page: p + 1, count: pc[p] }));
+      }
     }
     jobsTelemetry.search = {
       ts: Date.now(),
@@ -665,6 +694,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     let placeholderCount = 0;
     let failedBatches = 0;
     let batches = 0;
+    const scoringModels = new Set(); // distinct models that served the score batches
     // Trim the per-job payload to what actually drives matching. Drop
     // metadata fields (url, source, posted) the scorer doesn't read; keep
     // title/company/location/salary/snippet. Snippet (JD body) dominates
@@ -727,6 +757,7 @@ IMPORTANT SCORING RULES:
       const batch = toScore.slice(i, i + BATCH_SIZE);
       let batchResult;
 
+      const batchMeta = {};
       try {
         batchResult = await callLLMText(`JOBS TO SCORE (array, indexed):
 ${JSON.stringify(slimBatch(batch))}`, {
@@ -735,7 +766,9 @@ ${JSON.stringify(slimBatch(batch))}`, {
           hints: { itemCount: batch.length },
           responseSchema: JOB_SCORING_SCHEMA,
           cachedPrefix,
+          meta: batchMeta,
         });
+        if (batchMeta.model) scoringModels.add(batchMeta.model);
       } catch (err) {
         if (signal?.aborted) throw err;
         logger.warn(`[Jobs] Batch scoring failed:`, err);
@@ -792,6 +825,9 @@ ${JSON.stringify(slimBatch(batch))}`, {
       // were never sent to the scorer (distinct from cappedForBudget, which were
       // intentionally not selected, and placeholders, which were sent but unusable).
       unscored: toScore.length - scoredJobs.length,
+      // Distinct model(s) that served the score batches — usually one, but the
+      // fallback chain can shift mid-run if a model starts 429ing between batches.
+      models: [...scoringModels],
     };
 
     return { scoredJobs, clusters };
@@ -872,6 +908,7 @@ Rules:
       title: j.title || '',
       salary: j.salary || '',
     }));
+    const bucketMeta = {}; // populated with the model that actually served this call
     const result = await callLLMText(`
 You are a career data analyst. Group these scored jobs by careerDirection, then within each category pick salary bucket boundaries that fit the actual salary distribution.
 
@@ -905,12 +942,14 @@ RULES:
       task: 'job-bucketing',
       hints: { itemCount: jobs.length },
       responseSchema: JOB_BUCKETING_SCHEMA,
+      meta: bucketMeta,
     });
     logger.info(`[Jobs][${nodeId}] Bucketed into ${result?.categories?.length || 0} categories`);
     jobsTelemetry.bucketing = {
       ts: Date.now(),
       input: jobs.length,
       categories: result?.categories?.length || 0,
+      model: bucketMeta.model || null,
     };
     return { categories: result?.categories || [] };
   });

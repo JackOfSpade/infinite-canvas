@@ -185,6 +185,17 @@ function buildJobsPipelineSnapshot() {
       const entries = Object.entries(s.bySource);
       const got = entries.filter(([, v]) => v.count > 0).map(([k, v]) => `${k}=${v.count}`);
       lines.push(`- Per source (raw gathered): ${got.length ? got.join(', ') : '(none)'}`);
+      // Per-page yield for the sources that fetch >1 page (Indeed, Wellfound).
+      // Answers "is the page-2 widen actually pulling extra jobs, or running for
+      // nothing?" Counts are raw per-page (pre cross-source dedup). A trailing
+      // p2=0 means the 2nd page added nothing this run — a pool smaller than one
+      // full page, an over-narrow query, or a soft-blocked page-2 served empty.
+      const paged = entries.filter(([, v]) => Array.isArray(v.pages) && v.pages.length > 1);
+      for (const [k, v] of paged) {
+        const tail = v.pages[v.pages.length - 1];
+        const flag = tail && tail.count === 0 ? ` ⚠️ (page ${tail.page} added 0 — widen idle for \`${k}\` this run)` : '';
+        lines.push(`  - \`${k}\` page yield: ${v.pages.map(p => `p${p.page}=${p.count}`).join(', ')}${flag}`);
+      }
       const zeroWarn = entries.filter(([, v]) => v.count === 0 && v.warning).map(([k, v]) => `${k} (${v.warning.code})`);
       const zeroClean = entries.filter(([, v]) => v.count === 0 && !v.warning).map(([k]) => k);
       if (zeroWarn.length) {
