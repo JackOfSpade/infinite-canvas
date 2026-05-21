@@ -196,6 +196,36 @@ export async function fetchLinkedInJobs(query, signal = null, maxAgeDays = null)
   return { items: allJobs.slice(0, JOB_RESULT_CAP), warning };
 }
 
+// ── Shared query-relevance filter (board/API sources) ────────────────────────
+// Greenhouse / Lever / RemoteOK / WeWorkRemotely fetch a fixed company board (or
+// the whole feed) and then keyword-filter by the query. The old filter — "match
+// if ANY ≥2-char query token appears anywhere in title+company+location+desc" —
+// was far too loose: a query like "Junior Cinematographer Denver" matched every
+// Datadog "Junior …" role (on "junior") and every Denver-based job (on "denver"),
+// flooding a cinematographer search with dozens of unrelated SWE jobs.
+//
+// Fix: relevance must come from the ROLE/skill nouns, so we (a) drop generic
+// tokens — seniority/role-modifiers, work-mode, and structural filler — that
+// match everything, and (b) match against the role text (title/company/team),
+// NOT the location field or the long JD body, so a city/"remote"/ambient-keyword
+// token can't pull in an off-target role. Falls back to any-term if the query is
+// entirely generic, so a weird query is never over-filtered to zero.
+const JOB_MATCH_STOPWORDS = new Set([
+  'junior', 'senior', 'jr', 'sr', 'entry', 'mid', 'midlevel', 'principal', 'staff',
+  'lead', 'associate', 'head', 'chief', 'director', 'manager', 'mgr', 'vp', 'svp',
+  'intern', 'internship', 'remote', 'hybrid', 'onsite', 'remotefirst',
+  'the', 'a', 'an', 'and', 'or', 'for', 'of', 'in', 'at', 'on', 'with', 'to',
+  'jobs', 'job', 'position', 'role', 'opening', 'opportunity', 'careers',
+]);
+
+export function jobRelevanceMatch(roleText, query) {
+  const text = String(roleText || '').toLowerCase();
+  const terms = String(query || '').toLowerCase().split(/\s+/).filter(t => t.length >= 2);
+  const meaningful = terms.filter(t => !JOB_MATCH_STOPWORDS.has(t.replace(/[^a-z0-9]/g, '')));
+  const useTerms = meaningful.length > 0 ? meaningful : terms;
+  return useTerms.some(t => text.includes(t));
+}
+
 // ── Greenhouse API ──────────────────────────────────────────────────────────
 // Public JSON endpoint: boards-api.greenhouse.io/v1/boards/{token}/jobs
 // Each company has a unique board token.
@@ -240,8 +270,6 @@ const GREENHOUSE_BOARDS = [
  */
 export async function fetchGreenhouseJobs(query, signal = null) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
-  const queryLower = query.toLowerCase();
-  const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
   // Greenhouse fans out across dozens of board tokens; collect warnings
   // per-call and pick the strongest at the end so a wave of blocks across
   // the whole platform shows up, not just an isolated 429 from one board.
@@ -257,11 +285,9 @@ export async function fetchGreenhouseJobs(query, signal = null) {
     return ((data && data.jobs) || []).map(job => ({ ...job, _company: company, _token: token }));
   }, signal);
 
-  // Filter by query relevance
-  const matched = allJobs.filter(job => {
-    const text = `${job.title} ${job._company} ${job.location?.name || ''}`.toLowerCase();
-    return queryTerms.some(term => text.includes(term));
-  });
+  // Filter by query relevance — role text only (title + company), not location.
+  const matched = allJobs.filter(job =>
+    jobRelevanceMatch(`${job.title} ${job._company}`, query));
 
   const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
     title: job.title || '',
@@ -310,8 +336,6 @@ const LEVER_COMPANIES = [
  */
 export async function fetchLeverJobs(query, signal = null) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
-  const queryLower = query.toLowerCase();
-  const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
   const warnings = [];
   const allJobs = await processInBatches(LEVER_COMPANIES, 10, async ({ slug, company }) => {
     const r = await safeApiFetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, {
@@ -324,10 +348,10 @@ export async function fetchLeverJobs(query, signal = null) {
     return (Array.isArray(data) ? data : []).map(job => ({ ...job, _company: company }));
   }, signal);
 
-  // Filter by query relevance
+  // Filter by query relevance — role text (title + company + team), not location.
   const matched = allJobs.filter(job => {
-    const text = `${job.text} ${job._company} ${job.categories?.location || ''} ${job.categories?.team || ''}`.toLowerCase();
-    return queryTerms.some(term => text.includes(term));
+    const roleText = `${job.text} ${job._company} ${job.categories?.team || ''}`;
+    return jobRelevanceMatch(roleText, query);
   });
 
   const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
@@ -449,14 +473,10 @@ export async function fetchRemoteOKJobs(query, signal = null) {
   const data = r.json;
   // First element is metadata, rest are jobs
   const jobs = Array.isArray(data) ? data.slice(1) : [];
-  const queryLower = query.toLowerCase();
-  const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
 
-  // Filter by query relevance
-  const matched = jobs.filter(job => {
-    const text = `${job.position || ''} ${job.company || ''} ${(job.tags || []).join(' ')} ${job.description || ''}`.toLowerCase();
-    return queryTerms.some(term => text.includes(term));
-  });
+  // Filter by query relevance — role text (title + company + tags), not the JD body.
+  const matched = jobs.filter(job =>
+    jobRelevanceMatch(`${job.position || ''} ${job.company || ''} ${(job.tags || []).join(' ')}`, query));
 
   const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
     title: job.position || '',
@@ -464,7 +484,10 @@ export async function fetchRemoteOKJobs(query, signal = null) {
     location: job.location || 'Remote',
     salary: job.salary || (job.salary_min ? `$${job.salary_min} - $${job.salary_max}` : ''),
     snippet: (job.tags || []).join(', '),
-    url: job.url ? `https://remoteok.com${job.url}` : '',
+    // RemoteOK's `url` is sometimes already absolute ("https://remoteOK.com/…")
+    // and sometimes a relative path; only prefix the relative form, else we get
+    // a doubled "https://remoteok.comhttps://remoteOK.com/…" broken link.
+    url: job.url ? (String(job.url).startsWith('http') ? job.url : `https://remoteok.com${job.url}`) : '',
     posted: job.date || '',
     source: 'remoteok',
   }));
@@ -495,8 +518,6 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null) {
   }
 
   const xml = r.text;
-  const queryLower = query.toLowerCase();
-  const queryTerms = queryLower.split(/\s+/).filter(t => t.length >= 2);
 
   // Parse RSS items with regex (no XML parser dependency needed)
   const itemPattern = /<item>([\s\S]*?)<\/item>/gi;
@@ -521,10 +542,9 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null) {
     const company = titleParts.length > 1 ? titleParts[0].trim() : '';
     const jobTitle = titleParts.length > 1 ? titleParts.slice(1).join(':').trim() : title;
 
-    // Filter by query relevance
-    const text = `${title} ${stripHtml(descMatch?.[1] || '')}`.toLowerCase();
-    const matches = queryTerms.some(term => text.includes(term));
-    if (!matches) continue;
+    // Filter by query relevance — role text only ("Company: Role" title), not
+    // the JD body (matching the description over-matches on ambient keywords).
+    if (!jobRelevanceMatch(title, query)) continue;
 
     jobs.push({
       title: jobTitle,

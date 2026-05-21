@@ -671,6 +671,19 @@ export function generateMarkdown(payload) {
         previewParts.push(`expanded: ${d.expanded ? 'true' : 'false'}`);
         if (Array.isArray(d.childIds)) previewParts.push(`children: ${d.childIds.length}`);
       }
+      // Transient source-progress cards (job + marketplace). Surface the source
+      // and its persisted progress status, and FLAG one that should have
+      // auto-dismissed but is still here — a clean 'done' or a 'skipped' card
+      // is supposed to disappear, so seeing it persisted is the "stuck card"
+      // bug at a glance (otherwise it's buried in the raw node JSON).
+      if (d.sourceId && d.persistedProgress) {
+        const p = d.persistedProgress;
+        const lingering = p.status === 'skipped' || (p.status === 'done' && !p.warning);
+        previewParts.push(
+          `source: ${d.sourceId}, progress: ${p.status || '?'}${p.warning?.code ? ` (${p.warning.code})` : ''}` +
+          (lingering ? ' ⚠️ should have auto-dismissed (lingering card)' : ''),
+        );
+      }
       if (d.platformId) previewParts.push(`platform: ${d.platformId}`);
       if (d.status) previewParts.push(`status: ${d.status}`);
       if (d.statusMessage) previewParts.push(`statusMsg: ${String(d.statusMessage).slice(0, 100)}`);

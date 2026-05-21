@@ -76,8 +76,15 @@ export function JobSourceCardNode({ id, data }) {
   // ensureSourceCards on the owning JobHub will respawn this card on the
   // next pipeline run, restoring it to the default circular layout slot.
   useEffect(() => {
-    const isCleanDone = progress?.status === 'done' && !progress.warning;
-    if (!isCleanDone) return;
+    // Auto-dismiss terminal cards that need no further action: a clean success
+    // OR a skip. 'skipped' was missing here — so a skipped card lingered on the
+    // canvas forever (the Skip button sets status:'skipped'+warning:null, and
+    // unlike marketplace — whose hub deletes the card on skip — nothing here
+    // removed the node). Warned/errored/blocked cards (incl. an info "skipped"
+    // like config-missing, which carries a warning) still stay so the user can
+    // Solve, Skip, or read the reason. ensureSourceCards respawns on the next run.
+    const isCleanTerminal = (progress?.status === 'done' || progress?.status === 'skipped') && !progress.warning;
+    if (!isCleanTerminal) return;
     const timeout = setTimeout(() => {
       deleteElements({ nodes: [{ id }] });
     }, 3000);
