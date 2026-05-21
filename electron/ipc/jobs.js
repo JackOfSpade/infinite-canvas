@@ -9,7 +9,7 @@ import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUER
 import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
-import { jobScoringBatchSize, HEAVY_WAF_QUERY_CAP, DEFAULT_QUERY_CAP, JOB_SCORE_CAP } from './resultCaps.js';
+import { jobScoringBatchSize, HEAVY_WAF_QUERY_CAP, DEFAULT_QUERY_CAP, JOB_SCORE_CAP, JOB_MAX_PAGES } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
@@ -29,7 +29,7 @@ import {
   buildGeoTermSet,
 } from '../extractors/apiExtractors.js';
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory } from './jobsHistory.js';
-import { filterJobsByAge } from './jobDateFilter.js';
+import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
 import { getJobsSettings } from './settings.js';
 
 const DEFAULT_MAX_AGE_DAYS = 21;
@@ -82,6 +82,43 @@ function googleDateChip(days) {
   return 'month';
 }
 
+// Human "reading" pause between page turns within a paginating source's
+// session (min/max ms, jittered in the browser pool). Speed is intentionally
+// sacrificed for a natural cadence — see JOB_MAX_PAGES.
+const PAGE_DELAY_MS = [6000, 14000];
+
+// Stable key for cross-page dedup: prefer the listing URL, else title|company
+// (mirrors the cross-source dedup in search-jobs).
+function jobKey(j) {
+  const url = String(j?.url || '').trim();
+  if (url) return url;
+  return `${String(j?.title || '').toLowerCase().trim()}|${String(j?.company || '').toLowerCase().trim()}`;
+}
+
+// Build the per-source pagination stop callback for executeScrapePaginated. Stops
+// the same-session walk the moment a page stops contributing NEW in-window jobs
+// — which is how "paginate until the date cutoff" actually manifests once the
+// source is date-filtered/-sorted: an empty page, a page entirely past the
+// cutoff, or a repeat of an earlier page (sites clamp past-the-last-page to the
+// last/first page). The browser pool independently stops on a hard block / the
+// page ceiling, so this never has to reason about anti-bot.
+function makeCutoffStop(maxAgeDays) {
+  const seen = new Set();
+  return ({ items }) => {
+    const arr = Array.isArray(items) ? items : [];
+    if (arr.length === 0) return { stop: true, reason: 'empty-page' };
+    const inWindow = filterJobsByAge(arr, maxAgeDays); // KEEPS unparseable dates
+    if (inWindow.length === 0) return { stop: true, reason: 'date-cutoff' };
+    let fresh = 0;
+    for (const j of inWindow) {
+      const k = jobKey(j);
+      if (!seen.has(k)) { seen.add(k); fresh++; }
+    }
+    if (fresh === 0) return { stop: true, reason: 'duplicate-page' };
+    return { stop: false };
+  };
+}
+
 // ── Source → URL + Extractor + Config mapping (DOM scrape sources only) ──────
 // LinkedIn has been moved to the API pool (fetchLinkedInJobs) — no Puppeteer needed.
 function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
@@ -102,50 +139,55 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
   // Browser pool extractors — only platforms that REQUIRE Puppeteer rendering.
   // RemoteOK and WeWorkRemotely have been moved to fetchApiSources (direct HTTP).
   //
-  // `pages` = how many result pages to fetch per query variant (bounded). Page 1
-  // alone is only the platform's relevance top-N — for a broad query it can be a
-  // small slice of what's actually in the look-back window, so the surfaced "best
-  // matches" are picked from an unrepresentative pool. Fetching a 2nd page widens
-  // that pool. We DON'T deep-paginate or touch heavy-WAF sources: the rate
-  // limiter's per-domain cooldown spaces page requests (the "delay" that keeps
-  // slow pagination from looking like a burst), MAX_PER_DOMAIN=1 serializes them,
-  // and a blocked/empty page-2 is dropped by the anti-bot detector — so this is a
-  // bounded, self-throttling, gracefully-degrading widen, verifiable live.
-  // `urlFn(q, page)` builds the page-`page` (0-based) URL; sources that can't
-  // paginate via a URL param (Google's embedded jobs widget) ignore `page`.
+  // `maxPages` = the hard ceiling on how deep we page (same stealth session) for
+  // each query variant. We walk forward — newest first — until a page stops
+  // adding NEW in-window jobs (makeCutoffStop), the anti-bot detector flags a
+  // block, or we hit the ceiling. `urlFn(q, page)` builds the 0-based page URL.
+  // Sources that DATE-FILTER server-side (Indeed fromage / Glassdoor fromAge /
+  // ZipRecruiter days) won't serve out-of-window rows, so deep paging exhausts
+  // the window naturally. Indeed also gets &sort=date so the walk is strictly
+  // newest→oldest (a clean date-cutoff stop). Page-param guesses degrade safely:
+  // a wrong param re-serves page 1, which the duplicate-page stop catches at p2.
+  // Google's embedded jobs widget can't be URL-paginated, so it stays 1 page.
   const extractors = {
-    google:          { extractor: GOOGLE_JOBS_EXTRACTOR,  config: GOOGLE_JOBS_CONFIG,  pages: 1,
+    google:          { extractor: GOOGLE_JOBS_EXTRACTOR,  config: GOOGLE_JOBS_CONFIG,  maxPages: 1,
                        urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}&ibp=htl;jobs&htichips=date_posted:${gChip}` },
-    indeed:          { extractor: INDEED_JOBS_EXTRACTOR,  config: INDEED_CONFIG,       pages: 2,
-                       urlFn: (q, page) => `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}&fromage=${days}${page > 0 ? `&start=${page * 10}` : ''}` },
-    ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, pages: 1, // heavy WAF — single page
-                       urlFn: (q) => `https://www.ziprecruiter.com/jobs-search?search=${encodeURIComponent(q)}&days=${days}` },
-    glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,    config: GLASSDOOR_CONFIG,    pages: 1, // heavy WAF — single page
-                       urlFn: (q) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}&fromAge=${days}` },
-    wellfound:       { extractor: WELLFOUND_EXTRACTOR,    config: WELLFOUND_CONFIG,    pages: 2,
+    indeed:          { extractor: INDEED_JOBS_EXTRACTOR,  config: INDEED_CONFIG,       maxPages: JOB_MAX_PAGES,
+                       urlFn: (q, page) => `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}&fromage=${days}&sort=date${page > 0 ? `&start=${page * 10}` : ''}` },
+    ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, maxPages: JOB_MAX_PAGES,
+                       urlFn: (q, page) => `https://www.ziprecruiter.com/jobs-search?search=${encodeURIComponent(q)}&days=${days}${page > 0 ? `&page=${page + 1}` : ''}` },
+    glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,    config: GLASSDOOR_CONFIG,    maxPages: JOB_MAX_PAGES,
+                       urlFn: (q, page) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}&fromAge=${days}${page > 0 ? `&p=${page + 1}` : ''}` },
+    wellfound:       { extractor: WELLFOUND_EXTRACTOR,    config: WELLFOUND_CONFIG,    maxPages: JOB_MAX_PAGES,
                        urlFn: (q, page) => `https://wellfound.com/role/${roleSlug(q)}${page > 0 ? `?page=${page + 1}` : ''}` },
   };
 
   const tasks = [];
   // Remote-only boards get fewer queries; heavy WAF sites get only the first query.
-  for (const [sourceId, { extractor, config, urlFn, pages = 1 }] of Object.entries(extractors)) {
+  for (const [sourceId, { extractor, config, urlFn, maxPages = 1 }] of Object.entries(extractors)) {
     const isHeavyWAF = sourceId === 'ziprecruiter' || sourceId === 'glassdoor';
     const querySubset = isHeavyWAF ? queries.slice(0, HEAVY_WAF_QUERY_CAP) : queries.slice(0, DEFAULT_QUERY_CAP);
 
-    // Flat index per source across (query × page) so `id` stays `${sourceId}-${n}`
-    // and `res.id.replace(/-\d+$/, '')` still maps a task result back to its source.
+    // One task per query. `id` stays `${sourceId}-${n}` so `res.id.replace(/-\d+$/,'')`
+    // still maps a result back to its source. A multi-page source runs as a SINGLE
+    // paginating task (same-session walk inside the browser pool); a single-page
+    // source (Google) runs as a one-shot scrape.
     let idx = 0;
     for (const q of querySubset) {
-      for (let page = 0; page < pages; page++) {
-        tasks.push({
-          id: `${sourceId}-${idx++}`,
-          sourceId,
-          page,            // 0-based; surfaced as per-page yield in the funnel
-          url: urlFn(q, page),
-          extractorJS: extractor,
-          options: config,
-        });
+      const base = { id: `${sourceId}-${idx++}`, sourceId, url: urlFn(q, 0), extractorJS: extractor };
+      if (maxPages > 1) {
+        base.options = {
+          ...config,
+          paginate: true,
+          maxPages,
+          nextUrl: (page) => urlFn(q, page),
+          onPageScraped: makeCutoffStop(days),
+          pageDelayMs: PAGE_DELAY_MS,
+        };
+      } else {
+        base.options = config;
       }
+      tasks.push(base);
     }
   }
   return tasks;
@@ -310,14 +352,10 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // card's Solve button has a target to open in the cookie-sharing browser
     // (mirrors marketplace's CompSourceCardNode `progress.url` flow).
     const sourceFirstUrl = {};
-    // Map each task id → its 0-based page so the result loop can tally per-page
-    // yield (answers "is the 2nd-page widen actually pulling extra jobs?").
-    const taskPageById = {};
     for (const t of tasks) {
       if (!sourceTaskIds[t.sourceId]) sourceTaskIds[t.sourceId] = [];
       sourceTaskIds[t.sourceId].push(t.id);
       if (!sourceFirstUrl[t.sourceId]) sourceFirstUrl[t.sourceId] = t.url;
-      taskPageById[t.id] = t.page || 0;
     }
 
     // Notify frontend that sources are starting. Include `url` from the
@@ -364,7 +402,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Process Scraper Results
     for (const result of results) {
       const sourceId = result.id.replace(/-\d+$/, '');
-      if (!sourceResults[sourceId]) sourceResults[sourceId] = { jobs: [], errors: 0, warnings: [], pageCounts: {} };
+      if (!sourceResults[sourceId]) sourceResults[sourceId] = { jobs: [], errors: 0, warnings: [], pagesWalked: 0, stopReasons: new Set() };
 
       // Capture anti-bot warning per source even on success — a "success
       // with 0 items" usually means a soft block returned a skeleton page.
@@ -375,11 +413,13 @@ Be creative with suggestedRoleQueries — think about what career directions the
         const tagged = result.data.map(j => ({ ...j, source: sourceId }));
         sourceResults[sourceId].jobs.push(...tagged);
         allJobs.push(...tagged);
-        // Tally raw items by page so the funnel can show whether page 2 added
-        // anything. Recorded even when count is 0 (page ran, returned nothing).
-        const page = taskPageById[result.id] || 0;
-        const pc = sourceResults[sourceId].pageCounts;
-        pc[page] = (pc[page] || 0) + tagged.length;
+        // How deep the same-session walk went, and why it stopped (paginating
+        // sources only; one-shot sources leave pagesWalked at 0). Aggregated
+        // across a source's query variants: deepest walk + the set of reasons.
+        if (result.pagesWalked != null) {
+          sourceResults[sourceId].pagesWalked = Math.max(sourceResults[sourceId].pagesWalked, result.pagesWalked);
+          if (result.stopReason) sourceResults[sourceId].stopReasons.add(result.stopReason);
+        }
       } else {
         sourceResults[sourceId].errors++;
         logger.warn(`[Jobs] Source ${result.id} failed:`, result.error);
@@ -508,6 +548,15 @@ Be creative with suggestedRoleQueries — think about what career directions the
       historyDropped = result.removed;
     }
 
+    // Newest posted first. Deep pagination gathers across many pages and several
+    // sources, so order the pool by recency before it reaches the fair per-source
+    // scoring cap (which preserves each source's order) — that way the best slice
+    // we score/surface is the most-recent, per the run's intent. Unparseable
+    // dates sort last (kept, not dropped); the sort is stable so same-date ties
+    // keep gather order (≈ platform relevance).
+    const postedMs = (j) => { const d = parsePostedDate(j?.posted); return d ? d.getTime() : -Infinity; };
+    kept.sort((a, b) => postedMs(b) - postedMs(a));
+
     logger.info(
       `[Jobs] ${kept.length} new jobs (raw=${allJobs.length}, dedup=${deduped.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped})`
     );
@@ -522,12 +571,11 @@ Be creative with suggestedRoleQueries — think about what career directions the
         || (data.warnings || []).find(x => x?.severity === 'info')
         || (data.warnings || [])[0] || null;
       bySource[sid] = { count: data.jobs.length, warning: w ? { code: w.code, severity: w.severity } : null };
-      // Per-page raw yield, only for the multi-page browser sources (Indeed,
-      // Wellfound) — a single-page source (or an API source) has nothing to show.
-      const pc = data.pageCounts || {};
-      const pageNums = Object.keys(pc).map(Number).sort((a, b) => a - b);
-      if (pageNums.length > 1 || pageNums.some(p => p > 0)) {
-        bySource[sid].pages = pageNums.map(p => ({ page: p + 1, count: pc[p] }));
+      // How deep the date-bounded walk went + why it stopped — only for the
+      // paginating browser sources (one-shot / API sources leave it unset).
+      if (data.pagesWalked > 0) {
+        bySource[sid].pagesWalked = data.pagesWalked;
+        bySource[sid].stopReason = [...(data.stopReasons || [])].join('/') || null;
       }
     }
     jobsTelemetry.search = {

@@ -104,7 +104,14 @@ function processQueue() {
     activeCount++;
     activeDomains.set(domain, (activeDomains.get(domain) || 0) + 1);
 
-    executeScrape(url, extractorJS, options)
+    // A task with `options.paginate` walks multiple result pages in ONE stealth
+    // session (date-bounded deep pagination); it occupies a single queue slot for
+    // the whole sequence, so domain gating / concurrency apply to the source, not
+    // each page. Everything else runs the one-shot path unchanged.
+    const run = options.paginate
+      ? executeScrapePaginated(extractorJS, options)
+      : executeScrape(url, extractorJS, options);
+    run
       .then(resolve)
       .catch((err) => {
         if (!isShuttingDown) reject(err);
@@ -395,6 +402,199 @@ async function executeScrape(url, extractorJS, options = {}) {
   }
 }
 
+// ── Same-session paginating scrape (date-bounded deep pagination) ────────────
+/** Jittered human "reading" pause (triangular ≈ gaussian — uniform is detectable). */
+function jitteredDelay(min, max) {
+  const t = (Math.random() + Math.random()) / 2; // central-tendency, not flat
+  return Math.round(min + t * (max - min));
+}
+
+/**
+ * Drive ONE stealth page through up to `maxPages` result pages of a single
+ * source, navigating page→page in the SAME context like a human clicking
+ * "Next". Keeping the session means the anti-bot clearance cookie
+ * (cf_clearance / session) and referer chain persist across pages — materially
+ * safer than a fresh context per page, which re-faces the bot challenge and
+ * looks like a visitor teleporting straight to page N (a bot tell). Speed is
+ * deliberately traded away: a jittered "reading" pause separates page loads,
+ * and we stop the instant a hard block appears (never paginate into a tripwire).
+ *
+ * Stays domain-agnostic — it knows nothing about job dates. The CALLER owns the
+ * "have we reached the date cutoff?" decision via `onPageScraped`, which returns
+ * { stop, reason }. browserPool only stops on its own for a hard anti-bot block
+ * or the `maxPages` ceiling.
+ *
+ * Mirrors executeScrape's per-page readiness + anti-bot block; the shared
+ * READINESS constants (scrapeBudget.js) keep the two loops from drifting — the
+ * same arrangement authWindows' captcha loop uses.
+ *
+ * options (beyond executeScrape's): nextUrl(pageIndex)→url, maxPages,
+ *   onPageScraped({items,warning,pageIndex})→{stop,reason}, pageDelayMs:[min,max].
+ * @returns {{ data: any[], warning: object|null, pagesWalked: number, stopReason: string }}
+ */
+async function executeScrapePaginated(extractorJS, options = {}) {
+  const {
+    timeoutMs = 30000,
+    waitFor = null,
+    scrollFirst = false,
+    dismissCookies = true,
+    referer = null,
+    maxPages = 1,
+    nextUrl,
+    onPageScraped = null,
+    pageDelayMs = [4000, 9000],
+    expectedMinItems = 0,
+  } = options;
+
+  if (typeof nextUrl !== 'function') throw new Error('executeScrapePaginated requires options.nextUrl');
+  const domain = extractDomain(nextUrl(0));
+  const sourceKey = options.sourceLabel || domain;
+  const { detectAntiBotSignal } = await import('./antiBotDetector.js');
+  const countItems = (r) => Array.isArray(r)
+    ? r.length
+    : (r && typeof r === 'object' && Array.isArray(r.items) ? r.items.length : (r ? -1 : 0));
+
+  const pageId = randomUUID();
+  let page = null;
+  let abortHandler = null;
+  const all = [];
+  let strongest = null;
+  let pagesWalked = 0;
+  let stopReason = 'ceiling';
+
+  try {
+    if (isShuttingDown) throw new Error('Browser pool is shutting down');
+    page = await createStealthPage();
+    pageHandles.set(pageId, { page, startTime: Date.now() });
+    if (options.signal) {
+      abortHandler = () => safeClose(page, 2000);
+      options.signal.addEventListener('abort', abortHandler, { once: true });
+    }
+    if (referer) {
+      await page.evaluateOnNewDocument((ref) => {
+        Object.defineProperty(document, 'referrer', { get: () => ref });
+      }, referer);
+    }
+
+    for (let p = 0; p < maxPages; p++) {
+      if (isShuttingDown || options.signal?.aborted) { stopReason = 'aborted'; break; }
+      const url = nextUrl(p);
+      const { timeoutMs: budgetMs, firstBeatMs } = resolveBudget(sourceKey, timeoutMs);
+      const pageStart = Date.now();
+      page.setDefaultNavigationTimeout(Math.max(5000, budgetMs - READINESS.DEFAULT_NAV_HEADROOM_MS));
+
+      let pageResponse = null;
+      try {
+        pageResponse = await page.goto(url, { waitUntil: options.waitUntil || 'domcontentloaded', timeout: Math.max(5000, budgetMs - READINESS.NAV_HEADROOM_MS) });
+      } catch (e) {
+        if (!e?.message?.includes('ERR_ABORTED') && !e?.message?.includes('net::ERR_') && !/timeout/i.test(e?.message || '')) throw e;
+      }
+
+      // Cookie/consent banner only appears once per session — dismiss on page 0.
+      if (p === 0 && dismissCookies) await dismissCookieBanner(page);
+      if (waitFor) {
+        try {
+          const selectorWait = Math.min(READINESS.SELECTOR_WAIT_MS, Math.max(2000, budgetMs - READINESS.READINESS_HEADROOM_MS));
+          await page.waitForSelector(waitFor, { timeout: selectorWait });
+        } catch { /* extractor may still find content */ }
+      }
+      if (scrollFirst) await humanScroll(page, 3); else await humanMouseMove(page);
+
+      // Readiness: poll the extractor until its item count stabilizes (shared
+      // READINESS constants with executeScrape). Per-page deadline off pageStart.
+      const readinessDeadline = pageStart + budgetMs - READINESS.READINESS_HEADROOM_MS;
+      await new Promise(r => setTimeout(r, firstBeatMs));
+      let extractorResult = null, lastCount = -2, stableReads = 0, zeroReads = 0, settledPositively = false;
+      while (true) {
+        if (options.signal?.aborted) break;
+        let r = null;
+        try { r = await page.evaluate(extractorJS); } catch { /* navigated mid-evaluate */ }
+        if (r != null) {
+          extractorResult = r;
+          const count = countItems(r);
+          if (count === -1) break;
+          if (count > 0) {
+            zeroReads = 0;
+            if (count === lastCount) { if (++stableReads >= READINESS.STABLE_READS) { settledPositively = true; break; } }
+            else { stableReads = 0; lastCount = count; }
+          } else if (++zeroReads >= READINESS.MAX_ZERO_READS) break;
+        }
+        if (Date.now() >= readinessDeadline) break;
+        await new Promise(res => setTimeout(res, READINESS.POLL_MS));
+      }
+      const stableElapsedMs = settledPositively ? Date.now() - pageStart : null;
+      if (extractorResult == null) { try { extractorResult = await page.evaluate(extractorJS); } catch { extractorResult = []; } }
+      const pageItems = Array.isArray(extractorResult)
+        ? extractorResult
+        : (Array.isArray(extractorResult?.items) ? extractorResult.items : []);
+
+      // Anti-bot detection on this page (mirrors executeScrape).
+      let warning = null;
+      try {
+        const html = await page.content().catch(() => '');
+        const finalUrl = page.url() || url;
+        const status = pageResponse?.status?.() ?? 0;
+        warning = detectAntiBotSignal({
+          status, finalUrl, html,
+          itemsExtracted: pageItems.length,
+          expectedMinItems,
+          expectedBodySize: getBodyBaseline(sourceKey),
+          sourceLabel: sourceKey,
+        });
+        if (warning) logger.warn(`[BrowserPool] Anti-bot signal on ${url} (p${p}): ${warning.code} — ${warning.evidence}`);
+        else if (pageItems.length > 0 && html) recordBodySize(sourceKey, String(html).length);
+      } catch (e) {
+        logger.warn('[BrowserPool] Anti-bot detector failed (non-fatal):', e?.message || String(e));
+      }
+
+      // Each page is a real request — feed the rate limiter per page so a block
+      // mid-pagination tightens the domain and counts toward escalation.
+      const severity = warning?.severity;
+      recordOutcome(domain, severity === 'block' ? 'block' : severity === 'throttle' ? 'throttle' : 'ok');
+      if (stableElapsedMs != null && severity !== 'block') recordReady(sourceKey, stableElapsedMs);
+
+      if (warning && (!strongest || (warning.severity === 'block' && strongest.severity !== 'block'))) strongest = warning;
+      all.push(...pageItems);
+      pagesWalked = p + 1;
+
+      if (severity === 'block') { stopReason = 'blocked'; break; }     // never paginate into a wall
+
+      // Caller decides the date-cutoff / no-new-jobs stop.
+      let decision = null;
+      if (onPageScraped) {
+        try { decision = await onPageScraped({ items: pageItems, warning, pageIndex: p }); }
+        catch (e) { logger.warn('[BrowserPool] onPageScraped threw (non-fatal):', e?.message || String(e)); }
+      }
+      if (decision?.stop) { stopReason = decision.reason || 'caller-stop'; break; }
+      if (p + 1 >= maxPages) { stopReason = 'ceiling'; break; }
+
+      // Human "reading" pause before turning the page; longer if throttled.
+      let delay = jitteredDelay(pageDelayMs[0], pageDelayMs[1]);
+      if (severity === 'throttle') delay *= 2;
+      await new Promise(r => setTimeout(r, delay));
+    }
+  } catch (error) {
+    const isAborted = options.signal?.aborted || error?.message === 'Aborted' || isShuttingDown;
+    if (!isAborted) {
+      logger.error(`[BrowserPool] Paginated scrape failed for ${sourceKey}:`, error);
+      recordOutcome(domain, 'error');
+    }
+    if (all.length === 0) {
+      pageHandles.delete(pageId);
+      if (options.signal && abortHandler) options.signal.removeEventListener('abort', abortHandler);
+      await safeClose(page, 2000);
+      throw error;   // total failure with nothing gathered → surface it
+    }
+    stopReason = isAborted ? 'aborted' : 'error';   // partial gather → keep what we have
+  } finally {
+    if (options.signal && abortHandler) options.signal.removeEventListener('abort', abortHandler);
+    pageHandles.delete(pageId);
+    await safeClose(page, 2000);
+  }
+
+  return { data: all, warning: strongest, pagesWalked, stopReason };
+}
+
 // ── Process Exit Cleanup ────────────────────────────────────────────────────
 /**
  * Forcefully close all active pages in the pool.
@@ -494,6 +694,11 @@ export async function scrapeMultiple(tasks, onProgress = null, signal = null) {
         const data = wrapped?.data ?? null;
         const warning = wrapped?.warning ?? null;
         const result = { id: task.id, success: true, data, warning };
+        // Paginated tasks also report how far they walked and why they stopped.
+        if (wrapped && wrapped.pagesWalked != null) {
+          result.pagesWalked = wrapped.pagesWalked;
+          result.stopReason = wrapped.stopReason;
+        }
         onProgress?.(result);
         return result;
       } catch (err) {
