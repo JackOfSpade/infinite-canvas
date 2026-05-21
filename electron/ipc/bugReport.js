@@ -29,6 +29,17 @@ const ago = (ts) => {
   return Number.isFinite(s) ? ` (${s}s ago)` : '';
 };
 
+// Renders the model that actually served an AI stage (recorded per stage via the
+// LLM layer's `meta` out-param). Flags a degraded run: `mock` = AI unconfigured,
+// and a `*-lite` model = the call fell through every stronger model (404/quota)
+// to the weakest fallback — so e.g. a "strong match" price is really flash-lite's
+// verdict, not a top model's. Empty when no model was recorded (older telemetry).
+const modelTag = (model) => {
+  if (!model) return '';
+  const weak = model === 'mock' || /lite/.test(model);
+  return ` · model: \`${model}\`${weak ? ' ⚠️ weak fallback' : ''}`;
+};
+
 /**
  * Returns the mtime (ms) of the newest main-process .js file actually running,
  * or null if scanning fails. We scan the directory that contains the running
@@ -244,7 +255,7 @@ function buildJobsPipelineSnapshot() {
     } else {
       lines.push(`- Input: ${s.input} → scored: ${s.scored} ${clean ? '✅ all genuinely analyzed' : ''}`);
     }
-    lines.push(`- Batches: ${s.batches} (${s.failedBatches} failed)`);
+    lines.push(`- Batches: ${s.batches} (${s.failedBatches} failed)${modelTag(s.models?.length ? s.models.join(', ') : null)}`);
     if (s.placeholders > 0) {
       lines.push(`- ⚠️ **${s.placeholders} placeholder score(s)** — these jobs reached the scorer but came back unusable and were given a default matchScore=50. They were NOT genuinely analyzed.`);
     }
@@ -258,7 +269,7 @@ function buildJobsPipelineSnapshot() {
   if (t.bucketing) {
     const b = t.bucketing;
     lines.push(`\n### Bucketing${ago(b.ts)}`);
-    lines.push(`- Input: ${b.input} → categories: ${b.categories}`);
+    lines.push(`- Input: ${b.input} → categories: ${b.categories}${modelTag(b.model)}`);
     if (b.categories === 0 && b.input > 0) {
       lines.push('- ⚠️ Bucketing returned 0 categories — the renderer will have fallen back to a flat spawn (jobs still shown, but the category/salary tree is lost).');
     }
@@ -298,7 +309,7 @@ function buildMarketplacePipelineSnapshot() {
   if (t.analyze) {
     const a = t.analyze;
     lines.push(`### Product analysis${ago(a.ts)}`);
-    lines.push(`- ${a.photos} photo(s) → "${a.title}"${a.mock ? ' ⚠️ **mock mode** (AI not configured — placeholder product)' : ''}`);
+    lines.push(`- ${a.photos} photo(s) → "${a.title}"${a.mock ? ' ⚠️ **mock mode** (AI not configured — placeholder product)' : ''}${modelTag(a.model)}`);
   }
 
   if (t.scrape) {
@@ -316,11 +327,23 @@ function buildMarketplacePipelineSnapshot() {
       // that's mostly one source's duplicates). A ⚠️<code> after a count names
       // WHY that source returned what it did — so a 0 isn't silently ambiguous.
       const sw = s.sourceWarnings || {};
-      lines.push(`- Per source (raw items): ${Object.entries(s.bySource).map(([id, n]) => `${id}=${n}${sw[id] ? ` ⚠️${sw[id].code}` : ''}`).join(', ')}`);
+      const atCap = s.bySourceAtCap || {};
+      // `(cap)` after a count = the source returned exactly its extraction cap,
+      // so the page almost certainly held MORE listings than we gathered. The
+      // count is a floor, not the full available total.
+      lines.push(`- Per source (raw items): ${Object.entries(s.bySource).map(([id, n]) => `${id}=${n}${atCap[id] ? ' (cap)' : ''}${sw[id] ? ` ⚠️${sw[id].code}` : ''}`).join(', ')}`);
       // Spell out each flagged source's evidence (e.g. "extractor produced 0
       // items (expected ≥ 3)" = stale selectors / empty vs. a tiny-body block).
       for (const [id, w] of Object.entries(sw)) {
         lines.push(`  - \`${id}\` (${w.severity}): ${w.evidence}`);
+      }
+      const cappedIds = Object.keys(atCap);
+      if (cappedIds.length > 0) {
+        // Answers "silently not gathered from scrape?": these per-source totals
+        // are floors. Not lost downstream (synthesis caps at 25 sold / 15 active
+        // and selects fairly across sources), but the gathered set under-counts
+        // what each page actually offered.
+        lines.push(`  - _(\`(cap)\` = hit the ${cappedIds.map(id => `${id}=${atCap[id]}`).join(', ')} extraction cap — page held more than gathered; these counts are floors. Not lost downstream: synthesis caps at 25 sold / 15 active and selects fairly across sources.)_`);
       }
     }
     if (s.blocked > 0) {
@@ -402,14 +425,31 @@ function buildMarketplacePipelineSnapshot() {
           lines.push(`- Sold by source — kept: ${bySrc(s.soldKeptBySource)} · dropped: ${bySrc(s.soldDroppedBySource)}`);
         }
       }
-      lines.push(`- Result: recommended_price=${s.recommendedPrice == null ? '**null** ⚠️ (comps scraped but no price produced)' : '$' + s.recommendedPrice}, match_quality=${s.matchQuality}`);
+      lines.push(`- Result: recommended_price=${s.recommendedPrice == null ? '**null** ⚠️ (comps scraped but no price produced)' : '$' + s.recommendedPrice}, match_quality=${s.matchQuality}${modelTag(s.model)}`);
+      // The model's own anchor/adjusted/bound split — the LAST place a comp can
+      // be dropped (the model weighting it out). The found→fed cap is reported
+      // above; this is the fed→actually-weighted gap. classified ≪ fed is normal
+      // (the model ignores off-spec listings), but a tiny anchor count on a big
+      // fed set is the tell that the price leans on very few real matches.
+      if (s.compBreakdown) {
+        const cb = s.compBreakdown;
+        const anchor = cb.anchor_count || 0, adjusted = cb.adjusted_count || 0, bound = cb.bound_count || 0;
+        const classified = anchor + adjusted + bound;
+        const fed = (s.soldUsed || 0) + (s.activeUsed || 0);
+        lines.push(
+          `- Model weighting: ${anchor} anchor + ${adjusted} adjusted + ${bound} bound = ${classified} of ${fed} fed classified` +
+          (classified < fed
+            ? ` — the model weighted out the other ${fed - classified} as off-spec. The price leans on ${anchor} exact-match anchor listing(s)${anchor <= 2 ? ' ⚠️ (thin anchor base — verify against the kept band above)' : ''}.`
+            : '.'),
+        );
+      }
     }
   }
 
   if (t.fit) {
     const f = t.fit;
     lines.push(`\n### Platform fit${ago(f.ts)}`);
-    lines.push(`- ${f.platforms} platform(s) → ${f.good} good / ${f.unfit} unfit`);
+    lines.push(`- ${f.platforms} platform(s) → ${f.good} good / ${f.unfit} unfit${modelTag(f.model)}`);
   }
 
   return `

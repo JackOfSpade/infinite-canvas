@@ -28,6 +28,7 @@ import {
   SWAPPA_EXTRACTOR, SWAPPA_CONFIG,
   MERCARI_SOLD_EXTRACTOR, MERCARI_CONFIG,
   PRICECHARTING_EXTRACTOR, PRICECHARTING_CONFIG,
+  COMP_EXTRACT_CAPS,
 } from '../extractors/marketplace.js';
 import {
   fetchReverbListings,
@@ -414,6 +415,7 @@ export function registerMarketplaceHandlers() {
   handleSafe('analyze-photos', async (event, { imagePaths, nodeId }, signal) => {
     logger.info(`[Marketplace][${nodeId}] Analyzing`, imagePaths.length, 'photos');
 
+    const aiMeta = {}; // populated with the model that actually served this call
     const result = await callLLMVision(imagePaths, `
 You are a marketplace listing expert. Analyze these product photos and identify what is being sold.
 
@@ -430,14 +432,15 @@ Return a JSON object:
   "search_query": "A short, neutral query string for marketplace search engines. Include ONLY brand + model + the 1-2 most price-driving specs (storage size, screen size, year, capacity, etc. — whatever's relevant for the category). EXCLUDE condition keywords ('For Parts', 'Used', 'Refurbished'), color (unless brand-defining), and marketing fluff. Goal: broad enough to surface variants for price comparison. Examples: 'Apple iPhone XS 512GB', 'Sony WH-1000XM4', 'Nintendo Switch OLED'."
 }
 
-Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`, { signal, task: 'vision-product-analysis', responseSchema: VISION_PRODUCT_ANALYSIS_SCHEMA });
+Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`, { signal, task: 'vision-product-analysis', responseSchema: VISION_PRODUCT_ANALYSIS_SCHEMA, meta: aiMeta });
 
-    logger.info(`[Marketplace][${nodeId}] Product identified:`, result?.generated_title || 'Unknown');
+    logger.info(`[Marketplace][${nodeId}] Product identified:`, result?.generated_title || 'Unknown', `(model: ${aiMeta.model || '?'})`);
     marketplaceTelemetry.analyze = {
       ts: Date.now(),
       photos: Array.isArray(imagePaths) ? imagePaths.length : 0,
       title: result?.generated_title || '(unknown)',
       mock: !!result?._mockMode,
+      model: aiMeta.model || null,
     };
     return { product: result };
   });
@@ -524,6 +527,15 @@ Be specific about what you can clearly see. If you can't identify brand or model
         sourceWarnings[w.sourceId] = { code: w.code, severity: w.severity, evidence: w.evidence };
       }
     }
+    // Flag sources whose returned count sits at their extraction cap — a strong
+    // "the page held more than we gathered" signal (see COMP_EXTRACT_CAPS). The
+    // funnel surfaces this so a per-source count isn't mistaken for the full
+    // available total.
+    const bySourceAtCap = {};
+    for (const [id, n] of Object.entries(bySource)) {
+      const cap = COMP_EXTRACT_CAPS[id];
+      if (cap != null && n >= cap) bySourceAtCap[id] = cap;
+    }
     marketplaceTelemetry.scrape = {
       ts: Date.now(),
       sold: allComps.sold.length,
@@ -535,6 +547,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
       blocked: scrapeWarnings.filter(w => w?.severity === 'block' && w?.code !== 'task-failed').length,
       errored: scrapeWarnings.filter(w => w?.code === 'task-failed').length,
       bySource,
+      bySourceAtCap,
       sourceWarnings,
     };
     // A fresh full scrape starts a new run — drop any resolves recorded for a
@@ -614,6 +627,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
     const soldDropped   = sold.filter(x => !soldKeptSet.has(x));
     const activeDropped = active.filter(x => !activeKeptSet.has(x));
 
+    const synthMeta = {}; // populated with the model that actually served this call
     const pricing = await callLLMText(`
 You are a pricing analyst and marketplace routing expert. Given these similar listings from multiple sources, recommend a selling price AND which platforms to list on. Use plain English in your justification — don't say "comp(s)" or "comparable"; say "similar listing(s)" or "sold listing(s)".
 
@@ -702,6 +716,7 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       // recurring "AI returned invalid JSON" / "echoed the union type
       // notation literally" failures we hit twice this session.
       responseSchema: PRICE_SYNTHESIS_SCHEMA,
+      meta: synthMeta,
     });
 
     // soldUsed/activeUsed are the counts that ACTUALLY reached the model after
@@ -739,6 +754,14 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       junkExample: junk[0]?.title ? String(junk[0].title).slice(0, 60) : null,
       recommendedPrice: pricing?.recommended_price ?? null,
       matchQuality: pricing?.match_quality || '(unknown)',
+      model: synthMeta.model || null,
+      // The model's OWN classification of the comps we fed it: anchor (weighted
+      // heaviest) vs adjusted (price-corrected) vs bound (ceiling/floor only).
+      // The sum is typically < fed because the model weights the rest out. This
+      // is the LAST funnel stage and the one place a "silent drop from analysis"
+      // could hide: the found→fed cap drop is reported above (kept/dropped bands),
+      // but the fed→actually-weighted gap was invisible until now.
+      compBreakdown: pricing?.comp_breakdown || null,
     };
 
     return { pricing };
@@ -831,6 +854,7 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       generated_description: product.generated_description,
     }, null, 2);
 
+    const fitMeta = {}; // populated with the model that actually served this call
     const verdict = await callLLMText(`
 You are a marketplace policy + audience expert. For each marketplace, decide whether this specific item is a GOOD fit or UNFIT to list there.
 
@@ -858,7 +882,7 @@ Notes:
 - Furniture / bulky home goods: Facebook (local) is good; everything else unfit (shipping kills the deal).
 - Collectibles / cards: Whatnot + eBay are good; others usually unfit.
 
-Be confident — don't mark everything "good." If you're unsure, lean "good" unless there's a real policy/audience reason.`, { signal, task: 'platform-fit-assessment', responseSchema: buildPlatformFitSchema(platforms.map(p => p.id)) });
+Be confident — don't mark everything "good." If you're unsure, lean "good" unless there's a real policy/audience reason.`, { signal, task: 'platform-fit-assessment', responseSchema: buildPlatformFitSchema(platforms.map(p => p.id)), meta: fitMeta });
 
     logger.info(`[Marketplace][${nodeId}] Fit verdicts:`, Object.entries(verdict || {}).map(([k, v]) => `${k}=${v?.fit}`).join(' '));
     const verdicts = Object.values(verdict || {});
@@ -867,6 +891,7 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
       platforms: platforms.length,
       good: verdicts.filter(v => v?.fit === 'good').length,
       unfit: verdicts.filter(v => v?.fit === 'unfit').length,
+      model: fitMeta.model || null,
     };
     return { fit: verdict || {} };
   });

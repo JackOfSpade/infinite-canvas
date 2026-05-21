@@ -250,9 +250,11 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  // `task` is metadata for token-usage telemetry, not a Gemini API field — pull
-  // it out so it never leaks into generationConfig (which would 400 the call).
-  const { signal, responseSchema, task, ...restGenConfig } = genConfig;
+  // `task` is metadata for token-usage telemetry and `meta` is a by-reference
+  // out-param the fallback loop writes the succeeded model into — neither is a
+  // Gemini API field, so pull them out so they never leak into generationConfig
+  // (which would 400 the call).
+  const { signal, responseSchema, task, meta: _meta, ...restGenConfig } = genConfig;
 
   const generationConfig = {
     temperature: GEMINI_TEMPERATURE,
@@ -350,6 +352,7 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   if (!apiKey && isMockMode) {
     const textPart = parts.find(p => p.text)?.text || '';
     logger.info('[Gemini] Mock Mode active. Returning dummy data for prompt.');
+    if (genConfig.meta && typeof genConfig.meta === 'object') genConfig.meta.model = 'mock';
     return MOCK_PREFIX + generateMockResponse(textPart);
   }
 
@@ -362,20 +365,28 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     throw new Error(`AI prompt too large (${totalTextLen} chars). Please select fewer nodes or a smaller group.`);
   }
 
+  // Best → worst across the models this API key can actually call. Verified
+  // against the live ListModels endpoint (generativelanguage v1beta) — every
+  // name here returns generateContent. The 3.x pro/flash models are published
+  // only under `-preview` names, and the 2.x flash family is `2.0` (not `2`);
+  // the previous list used `gemini-3.1-pro` / `gemini-3-flash` / `gemini-2-flash`
+  // / `gemini-2-flash-lite`, all of which 404 ("not found for v1beta") and burned
+  // a failed attempt on EVERY call before falling through. NOTE: `*-tts` /
+  // `*-image` / `computer-use` / `robotics` variants are excluded — they don't
+  // serve plain generateContent text/JSON. Keep this list in sync with
+  // ListModels; a 404 here means a name was renamed or dropped by Google.
   const GEMINI_MODEL_FALLBACKS = [
-    'gemini-3.1-pro',
+    'gemini-3.1-pro-preview',
+    'gemini-3-pro-preview',
     'gemini-2.5-pro',
     'gemini-3.5-flash',
-    'gemini-3-flash',
+    'gemini-3-flash-preview',
     'gemini-2.5-flash',
-    'gemini-2-flash',
+    'gemini-2.0-flash',
     'gemini-3.1-flash-lite',
     'gemini-2.5-flash-lite',
-    'gemini-2-flash-lite',
+    'gemini-2.0-flash-lite',
   ];
-  // NOTE: text-to-speech (`*-tts`) models are intentionally excluded — they
-  // cannot serve generateContent text/JSON output, so including them in this
-  // fallback chain only burned extra failed calls before the final error.
 
   const attemptedErrors = [];
 
@@ -398,6 +409,11 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
       const result = await callGeminiSingle(parts, apiKey, currentModel, genConfig);
 
       lastSuccessfulModel = currentModel;
+      // Report the model that actually served this call back to the caller (by
+      // reference) so per-stage telemetry can record WHICH model produced each
+      // result — e.g. a price synthesized by a weak flash-lite fallback after the
+      // stronger models 429'd looks identical in the output otherwise.
+      if (genConfig.meta && typeof genConfig.meta === 'object') genConfig.meta.model = currentModel;
       return result;
     } catch (err) {
       const errMsg = err.message || String(err);

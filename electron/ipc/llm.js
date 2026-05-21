@@ -158,6 +158,11 @@ function pickMaxTokens(task, hints = {}) {
  */
 export async function callLLMText(prompt, opts = {}) {
   const { signal, task, hints, responseSchema, cachedPrefix } = normalizeOpts(opts);
+  // Optional by-reference out-param: callers pass `meta: {}` and read back
+  // `meta.model` (the model that actually served the call) for per-stage
+  // telemetry. The Gemini fallback loop writes it; for Claude there's no
+  // fallback so we record the picked model directly.
+  const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const settings = getAISettings();
   const model    = pickModel(settings.provider === 'claude' ? 'claude' : 'gemini', task);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
@@ -165,12 +170,13 @@ export async function callLLMText(prompt, opts = {}) {
   try {
     if (settings.provider === 'claude') {
       const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, expectJson: true, responseSchema, cachedPrefix, task });
+      if (meta) meta.model = model;
       return parseGeminiJSON(raw);
     }
     // Gemini: prepend prefix into the prompt; implicit prefix caching on 2.5
     // models picks up the repeated content automatically.
     const merged = cachedPrefix ? `${cachedPrefix}\n\n${prompt}` : prompt;
-    return await callGeminiText(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema, task });
+    return await callGeminiText(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema, task, meta });
   } catch (err) {
     throw enhanceLLMError(err, settings.provider);
   }
@@ -178,6 +184,7 @@ export async function callLLMText(prompt, opts = {}) {
 
 export async function callLLMVision(imagePaths, prompt, opts = {}) {
   const { signal, task, hints, responseSchema } = normalizeOpts(opts);
+  const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const settings = getAISettings();
   const model    = pickModel(settings.provider === 'claude' ? 'claude' : 'gemini', task);
   // photoCount feeds the dynamic sizing function for tasks like
@@ -187,9 +194,10 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   try {
     if (settings.provider === 'claude') {
       const raw = await callClaudeVision(imagePaths, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, expectJson: true, responseSchema, task });
+      if (meta) meta.model = model;
       return parseGeminiJSON(raw);
     }
-    return await callGeminiVision(imagePaths, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema, task });
+    return await callGeminiVision(imagePaths, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema, task, meta });
   } catch (err) {
     throw enhanceLLMError(err, settings.provider);
   }
