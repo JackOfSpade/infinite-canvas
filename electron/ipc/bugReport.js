@@ -177,6 +177,23 @@ function buildJobsPipelineSnapshot() {
       `already-seen/history ${s.historyDropped} → **new: ${s.kept}**`,
     );
     lines.push('- _(dedup / age / history drops are by-design — not jobs we failed to analyze)_');
+    // Per-source raw counts — the "was this source silently not gathered?" line.
+    // A 0 WITH a warning is a real miss to chase; a clean 0 is genuinely-empty or
+    // off-category (e.g. a cinematographer on USAJobs/Dice). Without this you only
+    // saw the aggregate raw count and couldn't tell which sources contributed.
+    if (s.bySource && Object.keys(s.bySource).length > 0) {
+      const entries = Object.entries(s.bySource);
+      const got = entries.filter(([, v]) => v.count > 0).map(([k, v]) => `${k}=${v.count}`);
+      lines.push(`- Per source (raw gathered): ${got.length ? got.join(', ') : '(none)'}`);
+      const zeroWarn = entries.filter(([, v]) => v.count === 0 && v.warning).map(([k, v]) => `${k} (${v.warning.code})`);
+      const zeroClean = entries.filter(([, v]) => v.count === 0 && !v.warning).map(([k]) => k);
+      if (zeroWarn.length) {
+        lines.push(`  - ⚠️ 0 results + flagged (real miss to investigate): ${zeroWarn.join(', ')}`);
+      }
+      if (zeroClean.length) {
+        lines.push(`  - 0 results, no warning (genuinely empty / off-category): ${zeroClean.join(', ')}`);
+      }
+    }
   } else {
     lines.push('### Search\n- (no search recorded this session — e.g. scoring resumed from a captcha-resolve)');
   }

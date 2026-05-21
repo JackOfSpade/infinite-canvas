@@ -478,6 +478,18 @@ Be creative with suggestedRoleQueries — think about what career directions the
     logger.info(
       `[Jobs] ${kept.length} new jobs (raw=${allJobs.length}, dedup=${deduped.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped})`
     );
+    // Per-source raw gathered counts (+ strongest warning), for ALL sources so a
+    // 0 is visible — answers "was this source silently not gathered?" the way the
+    // marketplace funnel does. A 0 WITH a warning is a real miss to investigate; a
+    // clean 0 is genuinely-empty / off-category (e.g. a cinematographer on USAJobs).
+    const bySource = {};
+    for (const sid of ALL_SOURCE_IDS) {
+      const data = sourceResults[sid] || { jobs: [], warnings: [] };
+      const w = (data.warnings || []).find(x => x?.severity === 'block')
+        || (data.warnings || []).find(x => x?.severity === 'info')
+        || (data.warnings || [])[0] || null;
+      bySource[sid] = { count: data.jobs.length, warning: w ? { code: w.code, severity: w.severity } : null };
+    }
     jobsTelemetry.search = {
       ts: Date.now(),
       queries: queries.length,
@@ -486,6 +498,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       ageDropped,
       historyDropped,
       kept: kept.length,
+      bySource,
     };
     // A fresh search starts a new run — drop resolves recorded for a prior run.
     jobsTelemetry.resolves = {};

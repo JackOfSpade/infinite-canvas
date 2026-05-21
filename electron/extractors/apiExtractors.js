@@ -221,7 +221,17 @@ const JOB_MATCH_STOPWORDS = new Set([
 export function jobRelevanceMatch(roleText, query) {
   const text = String(roleText || '').toLowerCase();
   const terms = String(query || '').toLowerCase().split(/\s+/).filter(t => t.length >= 2);
-  const meaningful = terms.filter(t => !JOB_MATCH_STOPWORDS.has(t.replace(/[^a-z0-9]/g, '')));
+  // Meaningful = role/skill nouns. Require >=3 chars: a 2-char token is too short
+  // to match by substring without false positives — esp. location abbreviations
+  // ("Denver CO" → "co"), which matched every Datadog "aCCOunt / COntent /
+  // COmmercial / COordinator" title and leaked SWE jobs into a cinematographer
+  // search even after stopword removal. Real role tokens (camera, video, design,
+  // engineer…) are >=3; 2-char tech tokens (ml/ux/go) are carried by the longer
+  // noun in the same query (ML Engineer → "engineer").
+  const meaningful = terms.filter(t => {
+    const norm = t.replace(/[^a-z0-9]/g, '');
+    return norm.length >= 3 && !JOB_MATCH_STOPWORDS.has(norm);
+  });
   const useTerms = meaningful.length > 0 ? meaningful : terms;
   return useTerms.some(t => text.includes(t));
 }
