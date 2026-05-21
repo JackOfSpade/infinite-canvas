@@ -3,6 +3,7 @@ import { useReactFlow } from '@xyflow/react';
 import { getNodeDims } from '../utils/constants';
 
 import { safeClone, syncStackUpward, getCanvasData, deepUpdateNode, deepAddElements } from '../utils/navigationUtils';
+import { EventLogger } from '../utils/EventLogger';
 
 /**
  * Navigation stack for nested canvas dive-in / dive-out.
@@ -72,6 +73,8 @@ export function useCanvasNavigation({
       isNavigatingRef.current = false;
       return;
     }
+
+    EventLogger.log(`canvas dive-in id=${nodeId} (depth ${stackRef.current.length} → ${stackRef.current.length + 1})`);
 
     const halfDuration = animationDuration / 2;
 
@@ -157,6 +160,8 @@ export function useCanvasNavigation({
     const currentStack = stackRef.current;
     if (isNavigatingRef.current || targetIndex >= currentStack.length || targetIndex < 0) return;
     isNavigatingRef.current = true;
+
+    EventLogger.log(`canvas dive-out → depth ${targetIndex} (was ${currentStack.length})`);
 
     const halfDuration = animationDuration / 2;
     setIsAnimating(true);

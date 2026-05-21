@@ -30,14 +30,58 @@ const ago = (ts) => {
 };
 
 // Renders the model that actually served an AI stage (recorded per stage via the
-// LLM layer's `meta` out-param). Flags a degraded run: `mock` = AI unconfigured,
-// and a `*-lite` model = the call fell through every stronger model (404/quota)
-// to the weakest fallback — so e.g. a "strong match" price is really flash-lite's
-// verdict, not a top model's. Empty when no model was recorded (older telemetry).
+// LLM layer's `meta` out-param). Flags a degraded run: a `*-lite` model = the
+// call fell through every stronger model (404/quota) to the weakest fallback —
+// so e.g. a "strong match" price is really flash-lite's verdict, not a top
+// model's. Empty when no model was recorded (older telemetry).
 const modelTag = (model) => {
   if (!model) return '';
-  const weak = model === 'mock' || /lite/.test(model);
+  const weak = /lite/.test(model);
   return ` · model: \`${model}\`${weak ? ' ⚠️ weak fallback' : ''}`;
+};
+
+// Verdict for what the top-25/15 comp cap actually dropped. The question that
+// matters for "did the cap skew the price?" is whether the TYPICAL dropped comp
+// (its median) differs from the typical kept one — NOT whether some lone pricey
+// outlier exists in the dropped pile. The old test (dropped.max >= kept.median)
+// tripped on any single mid-priced dropped comp, so with dozens of drops it fired
+// on essentially every run — a false alarm that made a healthy price look broken.
+// Comparing medians distinguishes the four cases that actually change the answer:
+//   • dropped median below the kept range   → cheap noise, cap working (no flag)
+//   • dropped median ≈ kept median (≤15%)    → representative sample, price NOT skewed
+//   • dropped median well ABOVE kept median  → cap shed the pricier comps → price biased LOW
+//   • dropped median well BELOW kept median  → cap shed the cheaper comps → price biased HIGH
+const dropBandVerdict = (kept, dropped) => {
+  if (!kept || !dropped) return '';
+  if (dropped.median < kept.min) {
+    return ' Dropped sit below the kept band (low-relevance noise — cap working as intended).';
+  }
+  const rel = kept.median > 0 ? (dropped.median - kept.median) / kept.median : 0;
+  if (Math.abs(rel) <= 0.15) {
+    return ` ✅ dropped median $${dropped.median} ≈ kept median $${kept.median} — the cap dropped a representative sample, so the price is not skewed by it (the 25/15 cap is a by-design cost bound, not lost signal).`;
+  }
+  const pct = Math.round(Math.abs(rel) * 100);
+  return rel > 0
+    ? ` ⚠️ dropped median $${dropped.median} is ${pct}% ABOVE kept median $${kept.median} — the cap shed the pricier comps, so the price may be biased LOW (the title-match ranking isn't selecting the best comps; raise the cap or improve ranking).`
+    : ` ⚠️ dropped median $${dropped.median} is ${pct}% BELOW kept median $${kept.median} — the cap shed the cheaper comps, so the price may be biased HIGH.`;
+};
+
+// Long marketplace comp URLs (eBay's run 500-600 chars of tracking params) dominate
+// the JSON dump and add zero diagnostic value — the item path is the only useful
+// part. As a JSON.stringify replacer, truncate any oversized http(s) URL to
+// origin+path and drop the query/hash. General (not per-site): keys on URL shape
+// and length, so it trims any bloated URL string anywhere in the state.
+const truncateLongUrls = (key, value) => {
+  if (typeof value === 'string' && value.length > 120 && /^https?:\/\//i.test(value)) {
+    try {
+      const u = new URL(value);
+      const dropped = value.length - (u.origin.length + u.pathname.length);
+      return dropped > 0 ? `${u.origin}${u.pathname} …(+${dropped} chars of query/params trimmed)` : value;
+    } catch {
+      return value.slice(0, 120) + ` …(+${value.length - 120} chars trimmed)`;
+    }
+  }
+  return value;
 };
 
 // Pipeline telemetry (jobs + marketplace) is a main-process singleton SHARED by
@@ -133,7 +177,7 @@ function buildAIConfigSnapshot() {
     : (!!geminiKey || !!resolvedSAPath);
 
   // For Gemini, the runtime picks AI Studio when a key is set, Vertex when
-  // a service-account is resolvable, and Mock Mode otherwise. Surfacing the
+  // a service-account is resolvable, and has no usable credential otherwise. Surfacing the
   // effective endpoint (not just "which keys are set") means a future
   // "billing depleted on Vertex" vs "rate-limited on AI Studio" report is
   // immediately disambiguated.
@@ -145,7 +189,7 @@ function buildAIConfigSnapshot() {
   } else if (resolvedSAPath) {
     activeEndpoint = 'Vertex AI (aiplatform.googleapis.com via service-account)';
   } else {
-    activeEndpoint = 'Mock Mode (placeholder data)';
+    activeEndpoint = '(no credential — AI calls fail until a key is added in Settings)';
   }
 
   const telemetry = getGeminiTelemetry();
@@ -239,6 +283,16 @@ function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
         const flag = v.stopReason === 'blocked' ? ' ⚠️' : (v.stopReason === 'ceiling' ? ' ⚠️ (hit page cap — may be more)' : '');
         lines.push(`  - \`${k}\`: walked ${v.pagesWalked} page${v.pagesWalked === 1 ? '' : 's'}${v.stopReason ? ` → stopped: ${v.stopReason}` : ''}${flag}`);
       }
+      // API/feed sources don't paginate — they grab matches in document order and
+      // keep the top JOB_RESULT_CAP with no quality signal. When a source MATCHED
+      // more than it surfaced, that overflow was never gathered: the API analogue
+      // of the browser `ceiling` stop, and the one "silently not gathered" path the
+      // per-source counts above couldn't reveal (a capped source looks identical to
+      // an exhausted one). gathered is set only for API sources; > count = truncated.
+      const apiCapped = entries.filter(([, v]) => v.gathered != null && v.gathered > v.count);
+      for (const [k, v] of apiCapped) {
+        lines.push(`  - \`${k}\`: surfaced ${v.count} of ${v.gathered} in-window matches ⚠️ (per-source cap — ${v.gathered - v.count} more matched but not gathered; raise JOB_RESULT_CAP to widen)`);
+      }
       const zeroWarn = entries.filter(([, v]) => v.count === 0 && v.warning).map(([k, v]) => `${k} (${v.warning.code})`);
       const zeroClean = entries.filter(([, v]) => v.count === 0 && !v.warning).map(([k]) => k);
       if (zeroWarn.length) {
@@ -293,6 +347,25 @@ function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
       );
       if (r.extracted > 0 && r.kept === 0) {
         lines.push('  - _(every extracted job was already shown on a prior run — correctly suppressed, not re-analyzed)_');
+      }
+      // The "why" behind a 0-extract — turns "Solve did nothing" into a named
+      // cause: how the window closed, what the inline extractor returned, and
+      // whether a wall was up. Without it a 0 could be a stale extractor, a
+      // thrown extractor, a genuinely empty page, or a window closed too early.
+      const d = r.diag;
+      if (d) {
+        const bits = [`closed: ${d.closeReason}`, `extractor: ${d.extractOutcome}`];
+        if (d.textLen != null) bits.push(`page textLen ${d.textLen}`);
+        if (d.sawChallenge) bits.push('challenge seen');
+        if (d.sawConsent) bits.push('consent wall seen');
+        if (d.finalHost) bits.push(`host ${d.finalHost}`);
+        lines.push(`  - resolve detail: ${bits.join(' · ')}`);
+        // Stale-selector / changed-layout fingerprint: the extractor matched 0
+        // on a page that had real text and no challenge/consent that would have
+        // hidden the results — i.e. the page rendered but the selectors missed it.
+        if (r.extracted === 0 && d.extractOutcome === 'matched 0' && !d.sawChallenge && !d.sawConsent && (d.textLen || 0) > 0) {
+          lines.push('  - ⚠️ extractor matched 0 on a content-bearing page with no challenge/consent up — the source\'s layout likely changed (stale selectors), NOT a genuinely empty result. This is the "I solved it and saw jobs, but it failed" case.');
+        }
       }
     }
   }
@@ -368,7 +441,7 @@ function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId) {
   if (t.analyze) {
     const a = t.analyze;
     lines.push(`### Product analysis${ago(a.ts)}`);
-    lines.push(`- ${a.photos} photo(s) → "${a.title}"${a.mock ? ' ⚠️ **mock mode** (AI not configured — placeholder product)' : ''}${modelTag(a.model)}`);
+    lines.push(`- ${a.photos} photo(s) → "${a.title}"${modelTag(a.model)}`);
   }
 
   if (t.scrape) {
@@ -453,24 +526,21 @@ function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId) {
         lines.push(`- All ${s.soldFound} sold / ${s.activeFound} active comps are distinct (no duplicate inflation).`);
       }
       // What the cap actually dropped — the evidence behind "by-design, not lost
-      // data." If the dropped prices reach into the kept band, the title-match
-      // ranking dropped relevant comps (not just cheap noise) and is worth a look.
+      // data." dropBandVerdict compares the dropped slice's median to the kept
+      // band to say whether the drop SKEWED the price (and which way) vs. dropped
+      // a representative sample (price unaffected) vs. cheap noise (cap working).
       if (capped) {
         const fmt = (st) => st ? `$${st.min}–$${st.max} (median $${st.median})` : '—';
         if (s.soldDroppedStats) {
-          const reaches = s.soldKeptStats && s.soldDroppedStats.max >= s.soldKeptStats.median;
           lines.push(
             `- Dropped ${s.soldDroppedStats.n} sold ${fmt(s.soldDroppedStats)}; kept ${fmt(s.soldKeptStats)}.` +
-            (reaches
-              ? ' ⚠️ dropped prices reach into the kept band — title-match ranking dropped relevant comps, not just noise.'
-              : ' Dropped sit below the kept band (low-relevance noise — cap working as intended).'),
+            dropBandVerdict(s.soldKeptStats, s.soldDroppedStats),
           );
         }
         if (s.activeDroppedStats) {
-          const reachesA = s.activeKeptStats && s.activeDroppedStats.max >= s.activeKeptStats.median;
           lines.push(
             `- Dropped ${s.activeDroppedStats.n} active ${fmt(s.activeDroppedStats)}; kept ${fmt(s.activeKeptStats)}.` +
-            (reachesA ? ' ⚠️ dropped active prices reach into the kept band.' : ''),
+            dropBandVerdict(s.activeKeptStats, s.activeDroppedStats),
           );
         }
         // Per-source composition of the sold kept/dropped split — exposes a
@@ -713,6 +783,13 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
 export function generateMarkdown(payload, reportWindowId = null) {
   const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, imageState, lastSaveError, activeEditableText } = payload;
 
+  // A filter code (e.g. LEAN) may have dropped whole sections before the payload
+  // reached us. Track that so the summary can say "omitted by filter" rather than
+  // mislabel an omitted section as empty ("Nodes: 0").
+  const sectionOmitted = (name) =>
+    Array.isArray(payload.filterStats?.omittedSections) &&
+    payload.filterStats.omittedSections.includes(name);
+
   const systemInfo = {
     platform: process.platform,
     arch: process.arch,
@@ -829,11 +906,6 @@ export function generateMarkdown(payload, reportWindowId = null) {
       if (Array.isArray(d.watchUrls) && d.watchUrls.length > 0) {
         previewParts.push(`watchUrls: ${d.watchUrls.length}`);
       }
-      // Mock-mode flag is set by gemini.js when AI wasn't configured at call
-      // time. Surfacing it here turns "why is the product info wrong?" reports
-      // into a one-glance diagnosis.
-      if (d.product?._mockMode) previewParts.push('⚠️ mockMode: true');
-      if (d.resumeProfile?._mockMode) previewParts.push('⚠️ resume._mockMode: true');
       // Per-source ring progress lives in component state, not node data.
       // Compact it as `comp: ebay-sold=done/12,poshmark=searching/0,...` so a
       // "stale ring after re-research" report is diagnosable at a glance.
@@ -1183,7 +1255,7 @@ ${tokenBudgetLines.join('\n')}`
 - service-account.json configured path: \`${aiConfig.configuredSAPath}\`
 - service-account.json resolved path: \`${aiConfig.resolvedSAPath}\`
 - service-account.json usable: ${aiConfig.serviceAccountUsable ? '✅' : '❌'}
-- **Effectively configured for active provider**: ${aiConfig.effectivelyConfigured ? '✅' : '❌ — AI calls will fall back to Mock Mode (Gemini) or fail (Claude) until a key is added in Settings'}
+- **Effectively configured for active provider**: ${aiConfig.effectivelyConfigured ? '✅' : '❌ — AI calls will fail until a key is added in Settings'}
 ${aiConfig.provider === 'gemini' ? `
 ### Gemini Telemetry
 - Last attempted model: \`${aiConfig.geminiLastAttemptedModel}\`
@@ -1243,14 +1315,16 @@ ${aiConfig.provider === 'gemini' ? `
   const viewportLine = vp ? `- Viewport: zoom=${vp.zoom} x=${vp.x} y=${vp.y}` : '';
 
   const STATE_BUDGET_BYTES = 1024 * 1024; // 1MB budget for the JSON state block
-  let appStateJson = JSON.stringify(appState, null, 2);
+  // truncateLongUrls strips the tracking-param bloat from marketplace comp URLs
+  // (and any other oversized URL) — the item path is kept, the rest is dropped.
+  let appStateJson = JSON.stringify(appState, truncateLongUrls, 2);
   let stateWasTrimmed = false;
 
   if (Buffer.byteLength(appStateJson, 'utf8') > STATE_BUDGET_BYTES) {
     // If the full state is too large, it's almost always due to thousands of drawing points.
     // Omit the drawings but keep the rest of the metadata.
     const { drawings: _drawings, ...trimmedAppState } = appState;
-    appStateJson = JSON.stringify(trimmedAppState, null, 2);
+    appStateJson = JSON.stringify(trimmedAppState, truncateLongUrls, 2);
     stateWasTrimmed = true;
   }
 
@@ -1260,11 +1334,12 @@ ${aiConfig.provider === 'gemini' ? `
 
 ## Issue Description
 ${description}
+${payload.filterCode ? `\n**Filter code applied:** \`${payload.filterCode}\`${payload.filterStats ? ` — event log trimmed to ${payload.filterStats.eventsShown} of ${payload.filterStats.eventsTotal} line(s) (matched categories + nearby context)${payload.filterStats.omittedSections?.length ? `; sections omitted: ${payload.filterStats.omittedSections.join(', ')}` : ''}.` : '.'}\n*This is a filtered view — events outside the matched categories were dropped. Ask the user to re-export with code \`FULL\` if the timeline looks incomplete.*` : ''}
 
 ## Application State Summary
-- Nodes: ${nodes ? nodes.length : 0}
-- Edges: ${edges ? edges.length : 0}
-- Drawings: ${drawings ? drawings.length : 0} ${stateWasTrimmed ? '*(Omitted from JSON below due to size)*' : ''}
+- Nodes: ${sectionOmitted('nodes') ? '*(omitted by filter code)*' : (nodes ? nodes.length : 0)}
+- Edges: ${sectionOmitted('edges') ? '*(omitted by filter code)*' : (edges ? edges.length : 0)}
+- Drawings: ${sectionOmitted('drawings') ? '*(omitted by filter code)*' : `${drawings ? drawings.length : 0} ${stateWasTrimmed ? '*(Omitted from JSON below due to size)*' : ''}`}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}

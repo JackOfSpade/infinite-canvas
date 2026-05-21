@@ -48,7 +48,7 @@ const marketplaceTelemetry = {
   // main-process singletons shared by every open window/canvas, so without this
   // a marketplace run from one canvas leaks into another canvas's report.
   nodeId:    null,
-  analyze:   null, // { ts, photos, title, mock }
+  analyze:   null, // { ts, photos, title, model }
   scrape:    null, // { ts, sold, active, sources, warnings, blocked }
   resolves:  {},   // { [sourceId]: { ts, extracted, category } } — keyed so a
                    // multi-source recovery (e.g. Mercari then eBay) keeps every
@@ -153,9 +153,10 @@ function filterJunkComps(items) {
 /**
  * Price distribution {n, min, median, max} of a comp slice, for the report's
  * "kept vs. dropped by the cap" line — the evidence behind "by-design, not lost
- * data." If the DROPPED slice's prices reach into the KEPT band, the title-match
- * cap dropped relevant comps, not just noise; if they sit below it, the cap is
- * working as intended. Returns null for an empty/price-less slice.
+ * data." The report compares the DROPPED median to the KEPT band/median to judge
+ * whether the cap skewed the price (dropped median ≫/≪ kept) vs. dropped a
+ * representative sample (≈ kept) vs. cheap noise (below the band — cap working
+ * as intended). Returns null for an empty/price-less slice.
  */
 function priceStats(items) {
   if (!Array.isArray(items)) return null;
@@ -447,7 +448,6 @@ Be specific about what you can clearly see. If you can't identify brand or model
       ts: Date.now(),
       photos: Array.isArray(imagePaths) ? imagePaths.length : 0,
       title: result?.generated_title || '(unknown)',
-      mock: !!result?._mockMode,
       model: aiMeta.model || null,
     };
     return { product: result };
@@ -574,7 +574,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
   // (either all sources clean, or user clicked "Skip & Price" with partial
   // data). Kept separate so we never spend AI tokens on a request the user
   // hasn't approved.
-  handleSafe('synthesize-price', async (event, { query, condition, comps, nodeId }, signal) => {
+  handleSafe('synthesize-price', async (event, { query, condition, comps, nodeId, productSpec }, signal) => {
     // Reject non-genuine listings (eBay internal test items, etc.) at the single
     // gate every comp passes through before pricing — covers both the scrape and
     // captcha-resolve paths. The rejection is surfaced in the report (not silent).
@@ -605,23 +605,51 @@ Be specific about what you can clearly see. If you can't identify brand or model
       };
     }
 
-    // Deterministic pre-sort: rank each listing by how many tokens of the
-    // ITEM query its title contains, descending. This guarantees exact-spec
-    // matches survive the slice cap below — without it, similar-but-not-
-    // exact listings could push true exact matches out of the 25-item
-    // window the AI sees, leaving the AI to over-weight close variants
-    // when better data was available but truncated.
-    const queryTokens = String(query || '')
+    // Deterministic pre-sort: rank each listing by how closely its title matches
+    // the item, so exact-spec matches survive the slice cap below (without it,
+    // close-but-not-exact variants push true matches out of the 25-item window
+    // the AI sees). Two ideas keep the ranking from degenerating to "everything
+    // ties", which made the kept set arbitrary:
+    //   1. Score against the FULL extracted spec (model/color/condition/title),
+    //      not just `query`. The search query is deliberately broad — brand+model
+    //      only, condition/color stripped (see the search_query prompt) — so it
+    //      appears in nearly every title and can't discriminate. The spec words
+    //      ("Silver", "Good", "64GB") are what separate an exact match from an
+    //      XS-Max-gold-parts lot or a $5 charger whose title also says "iPhone XS".
+    //   2. Weight each token by inverse document frequency over the scraped
+    //      titles: a word in ~every title (the generic query) contributes ≈0; a
+    //      word in only some (the real discriminators) dominates. Fully general —
+    //      no per-category keyword lists, just whatever the AI extracted. Falls
+    //      back to query-only behaviour when productSpec is absent (older callers).
+    const tokenize = (s) => String(s || '')
       .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/[^a-z0-9]+/g, ' ')
       .split(/\s+/)
       .filter(t => t.length >= 2);
+    const specTokenSet = new Set([
+      ...tokenize(query),
+      ...tokenize(productSpec?.model),
+      ...tokenize(productSpec?.color),
+      ...tokenize(productSpec?.title),
+      ...tokenize(condition),
+    ]);
+    // df/idf over the union of everything we're ranking (sold + active titles),
+    // tokenized once per comp and cached by object identity (scoreFn is hot).
+    const rankPool = [...sold, ...active];
+    const compTokenCache = new Map();
+    const docFreq = new Map();
+    for (const c of rankPool) {
+      const toks = new Set(tokenize(c?.title));
+      compTokenCache.set(c, toks);
+      for (const t of toks) docFreq.set(t, (docFreq.get(t) || 0) + 1);
+    }
+    const poolSize = rankPool.length || 1;
+    const idf = (t) => Math.log(1 + poolSize / (1 + (docFreq.get(t) || 0)));
     const scoreByTitleMatch = (item) => {
-      const title = String(item?.title || '').toLowerCase();
-      if (!title) return 0;
-      let hits = 0;
-      for (const t of queryTokens) if (title.includes(t)) hits++;
-      return hits;
+      const toks = compTokenCache.get(item) || new Set(tokenize(item?.title));
+      let score = 0;
+      for (const t of specTokenSet) if (toks.has(t)) score += idf(t);
+      return score;
     };
     const byMatchDesc = (a, b) => scoreByTitleMatch(b) - scoreByTitleMatch(a);
     // How many comps actually reach the model: scaled to what's available and
@@ -646,7 +674,7 @@ You are a pricing analyst and marketplace routing expert. Given these similar li
 ITEM: ${query}
 CONDITION: ${condition}
 
-The listings below are pre-sorted by how many ITEM keywords appear in each title (highest match first). Use that ordering as your first hint when identifying anchor vs. adjusted vs. bound listings, then refine using the spec details inside each listing.
+The listings below are pre-sorted by how closely each title matches the ITEM's spec (best match first). Use that ordering as your first hint when identifying anchor vs. adjusted vs. bound listings, then refine using the spec details inside each listing.
 
 RECENTLY SOLD (what buyers actually paid):
 ${JSON.stringify(soldComps)}
@@ -747,9 +775,10 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       soldUsed: soldComps.length,
       activeUsed: activeComps.length,
       // Price distribution of what the cap KEPT vs. DROPPED, so "prices dropped
-      // from analysis?" is answerable from the report: dropped prices below the
-      // kept band = low-relevance noise (cap working); dropped prices reaching
-      // into the kept band = the title-match ranking dropped relevant comps.
+      // from analysis?" is answerable from the report: the renderer compares the
+      // dropped median to the kept band to tell a representative drop (price
+      // unaffected) from one that skewed the price (dropped median ≫/≪ kept) or
+      // cheap noise (dropped below the band — cap working as intended).
       soldKeptStats:      priceStats(soldComps),
       soldDroppedStats:   priceStats(soldDropped),
       activeKeptStats:    priceStats(activeComps),

@@ -141,16 +141,9 @@ async function fetchWithRetry(url, init, { label = 'fetch', maxAttempts = RETRY.
   throw lastErr;
 }
 
-// Internal sentinel prepended to mock responses so parseGeminiJSON can tag
-// the parsed object with `_mockMode: true`. Callers downstream (marketplace,
-// jobs) propagate this so the UI can show "data is fake until you configure
-// AI" instead of silently presenting placeholder values as real results.
-const MOCK_PREFIX = '__IC_MOCK__';
-
 let authClient = null;
 let projectId = null;
 let cachedKeyFile = null; // tracks which file the cached client was built from
-let isMockMode = false;
 
 async function getAuthClient() {
   const keyFile = resolveServiceAccountPath();
@@ -161,12 +154,12 @@ async function getAuthClient() {
   authClient = null;
   projectId = null;
   cachedKeyFile = null;
-  isMockMode = false;
 
   if (!keyFile) {
-    logger.warn('[Gemini] No service-account.json configured or found. Enabling Mock Mode for AI services.');
-    isMockMode = true;
-    return { auth: null, projectId: 'mock-project' };
+    // No API key and no service-account.json → no usable Gemini credential.
+    // Fail loudly instead of fabricating placeholder data, so a missing key can
+    // never be silently mistaken for a real AI result.
+    throw new Error('No Gemini credential configured — add a Gemini API key (or a service-account.json) in Settings to use AI features.');
   }
 
   let saRaw;
@@ -174,9 +167,7 @@ async function getAuthClient() {
     saRaw = await fs.promises.readFile(keyFile, 'utf8');
   } catch (err) {
     if (err.code === 'ENOENT') {
-      logger.warn(`[Gemini] Configured service-account file not found at ${keyFile}. Enabling Mock Mode.`);
-      isMockMode = true;
-      return { auth: null, projectId: 'mock-project' };
+      throw new Error(`Configured Gemini service-account file not found at ${keyFile} — fix the path or add a Gemini API key in Settings.`);
     }
     throw err;
   }
@@ -234,17 +225,8 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   if (apiKey) {
     endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-2.5-flash'}:generateContent?key=${apiKey}`;
   } else {
-    // Ensure getAuthClient runs to check for service-account.json and set isMockMode
-    await getAuthClient();
-
-    if (isMockMode) {
-      const textPart = parts.find(p => p.text)?.text || '';
-      logger.info('[Gemini] Mock Mode active. Returning dummy data for prompt.');
-      // Sentinel prefix lets parseGeminiJSON strip it and signal mock-ness to
-      // callers without changing the return type (still a JSON string).
-      return MOCK_PREFIX + generateMockResponse(textPart);
-    }
-
+    // No API key → Vertex AI via service-account.json. getToken() (→ getAuthClient)
+    // throws a clear "no credential" error if neither is configured.
     const token = await getToken();
     endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${model || GEMINI_MODEL}:generateContent`;
     headers['Authorization'] = `Bearer ${token}`;
@@ -347,14 +329,11 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
  * @returns {Promise<string>} — Raw text response from Gemini
  */
 async function callGemini(parts, apiKey, model, genConfig = {}) {
-  // If Mock Mode is active, we don't need fallback
-  await getAuthClient();
-  if (!apiKey && isMockMode) {
-    const textPart = parts.find(p => p.text)?.text || '';
-    logger.info('[Gemini] Mock Mode active. Returning dummy data for prompt.');
-    if (genConfig.meta && typeof genConfig.meta === 'object') genConfig.meta.model = 'mock';
-    return MOCK_PREFIX + generateMockResponse(textPart);
-  }
+  // Without an API key we use the Vertex/service-account path; verify that
+  // credential up front so a missing one fails fast with one clear error
+  // instead of throwing the same auth failure against all 10 fallback models.
+  // (With a key we hit AI Studio directly — no service-account probe needed.)
+  if (!apiKey) await getAuthClient();
 
   // Hardening: Prevent "Payload Too Large" errors by capping total prompt text.
   let totalTextLen = 0;
@@ -460,106 +439,11 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
 }
 
 /**
- * Generates a context-aware mock JSON string based on the provided prompt.
- * Ensures the app functions gracefully without Google Cloud credentials.
- */
-function generateMockResponse(prompt) {
-  if (prompt.includes('marketplace listing expert')) {
-    return JSON.stringify({
-      brand: "Mock Brand",
-      model: "Mock Model 123",
-      category: "Electronics > Mock Category",
-      condition: "Used - Good",
-      color: "Mock Color",
-      notable_features: "Minor scratches on mock surface",
-      generated_title: "Mock Brand Model 123 - Good Condition",
-      generated_description: "This is a mock description generated because the service-account.json file is missing. Please add the file to enable real AI analysis."
-    });
-  }
-  if (prompt.includes('pricing analyst and marketplace routing expert')) {
-    return JSON.stringify({
-      recommended_price: 49.99,
-      quick_sell_price: 39.99,
-      max_profit_price: 59.99,
-      justification: "This is a mock justification generated in Mock Mode. Prices are completely arbitrary.",
-      market_summary: { sold_count: 5, sold_median: 45, sold_low: 30, sold_high: 60, active_count: 3, active_lowest: 40 },
-      recommended_platforms: [
-        { id: "ebay", name: "eBay", reason: "High traffic for mock items.", estimated_fee_pct: 13, net_payout: 43.49 }
-      ]
-    });
-  }
-  if (prompt.includes('Analyze this resume/CV thoroughly')) {
-    return JSON.stringify({
-      titles: ["Senior Mock Engineer", "Mock Developer"],
-      skills: ["JavaScript", "React", "Node.js", "Python"],
-      experience_years: 5,
-      soft_skills: ["Communication", "Leadership"],
-      industries: ["Tech", "Software"],
-      locations: ["Remote", "New York"],
-      education: ["BS Computer Science"],
-      summary: "An experienced software engineer with a background in building mock applications."
-    });
-  }
-  if (prompt.includes('generate search queries')) {
-    return JSON.stringify({
-      titleQueries: ["Senior Mock Engineer remote", "Mock Developer remote"],
-      suggestedRoleQueries: ["Mock Architect remote", "Lead Mock Developer"],
-      skillsOnlyQueries: ["JavaScript React Python 5 years remote"]
-    });
-  }
-  if (prompt.includes('Score each job')) {
-    const match = prompt.match(/JOBS TO SCORE \(array\):\n(\[[\s\S]*?\])\n/);
-    let numJobs = 1;
-    if (match) {
-      try { numJobs = JSON.parse(match[1]).length; } catch { /* ignore parse error */ }
-    }
-    const scores = Array.from({ length: numJobs }).map((_, i) => ({
-      index: i,
-      matchScore: Math.max(50, 95 - (i * 3)), // Descending mock scores
-      reasoning: "This is mock reasoning generated in Mock Mode.",
-      careerDirection: i % 2 === 0 ? "Engineering" : "Leadership",
-      strengthLabel: i < 3 ? "strong" : "exploring"
-    }));
-    return JSON.stringify(scores);
-  }
-  if (prompt.includes('compelling cover letter')) {
-    return JSON.stringify({
-      coverLetter: "Dear Hiring Manager,\n\nI am writing to apply for this position. This is a mock cover letter generated because service-account.json is missing.\n\nSincerely,\nMock Applicant"
-    });
-  }
-  if (prompt.includes('expert career coach preparing a candidate')) {
-    return JSON.stringify({
-      questions: [
-        { type: "behavioral", question: "Tell me about a time you used mock data.", tip: "Highlight your problem-solving skills." },
-        { type: "technical", question: "How do you implement Mock Mode?", tip: "Discuss interception of API calls." },
-        { type: "company", question: "Why do you want to work here?", tip: "Reference their mission." },
-        { type: "behavioral", question: "Describe a challenge you overcame.", tip: "Focus on resilience." },
-        { type: "technical", question: "What is your favorite mock tool?", tip: "Be authentic." },
-        { type: "company", question: "How do you align with our values?", tip: "Show you researched them." },
-        { type: "behavioral", question: "Tell me about a conflict.", tip: "Use the STAR method." },
-        { type: "technical", question: "Explain a complex topic simply.", tip: "Use analogies." }
-      ]
-    });
-  }
-  
-  // Default JSON wrapper
-  return JSON.stringify({ mock: true, message: "Generic mock response" });
-}
-
-/**
  * Parse raw Gemini response text into JSON, stripping markdown fences if present.
  * Handles both ```json and bare ``` wrappers.
  */
 export function parseGeminiJSON(raw) {
   if (!raw) return null;
-
-  // Strip the mock-mode sentinel before parsing; remember whether it was
-  // present so we can tag the parsed object.
-  let isMock = false;
-  if (typeof raw === 'string' && raw.startsWith(MOCK_PREFIX)) {
-    isMock = true;
-    raw = raw.slice(MOCK_PREFIX.length);
-  }
 
   // Resilient JSON extraction: Find the first code block or the outer-most { } pair.
   // This handles instances where Gemini adds markdown fences OR conversational text.
@@ -603,13 +487,6 @@ export function parseGeminiJSON(raw) {
 
   try {
     const parsed = JSON.parse(jsonStr.trim());
-    // Tag mock-mode results so the UI can show "this is placeholder data"
-    // instead of presenting it as a real AI response. Plain objects only —
-    // arrays/primitives stay untouched (mock mode currently only returns
-    // objects, but be defensive).
-    if (isMock && parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      parsed._mockMode = true;
-    }
     return parsed;
   } catch (error) {
     // Log a window AROUND the failure position, not the head of the doc.

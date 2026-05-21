@@ -29,17 +29,21 @@ const JOB_TOKENS_PER_JOB    = 300;
 const BUDGET_SAFETY         = 0.8;   // leave headroom under the hard cap
 
 // ── Per-source extractor breadth cap (top-N a single source contributes) ──────
-export const JOB_RESULT_CAP = 30; // per job source (DOM + API)
+// UNCAPPED (Infinity): every API source returns ALL its in-window matches rather
+// than a top-N slice — `slice(0, Infinity)` is a no-op, so each fetcher's existing
+// slice line keeps working untouched. Uncapped on purpose while the free Gemini
+// tier is being retired; restore a numeric ceiling (was 30) when the paid API tier
+// lands and per-source breadth needs bounding again.
+export const JOB_RESULT_CAP = Infinity;
 
 // ── LLM scoring budget (how many gathered jobs actually get LLM-scored) ───────
-// Pagination/widening grows the gathered pool so the surfaced "best matches" are
-// chosen from more of the in-window results — but every scored job costs LLM
-// tokens on a quota-bound free tier. So cap how many reach the scorer and pick
-// the top-N FAIRLY across sources (round-robin), turning "score whatever we
-// happened to scrape on page 1" into "score the best slice of a wider pool" at
-// ~flat token cost. If the gathered set is already <= this, nothing is dropped.
-// The drop is reported (not silent). Tune live against the Gemini quota.
-export const JOB_SCORE_CAP = 150;
+// UNCAPPED (Infinity): score EVERY gathered job. selectTopAcrossSources(_, Infinity)
+// returns the whole pool unchanged, so cappedForBudget is always 0.
+// ⚠️ This is deliberately ABOVE what the FREE Gemini tier can sustain — scoring
+// hundreds of jobs will rate-limit (429) and fall back to weaker models until the
+// paid API tier lands. Restore a numeric budget (was 150, round-robin fair across
+// sources via selectTopAcrossSources) when on paid.
+export const JOB_SCORE_CAP = Infinity;
 
 // ── Heavy-WAF query trim (how many query variants to fire per source) ─────────
 export const HEAVY_WAF_QUERY_CAP = 1; // bot-hardened sources (ZipRecruiter, Glassdoor)

@@ -1,17 +1,21 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { Dialog } from './Dialog';
-import { Clipboard, Save } from 'lucide-react';
+import { Clipboard, Save, Sparkles, Copy, AlertTriangle } from 'lucide-react';
+import { EventLogger } from '../utils/EventLogger';
+import { previewBugReportCode, buildAiPrompt } from '../utils/bugReportCodes';
 
 // Persist the in-progress description across dialog open/close cycles but NOT
 // across app restarts/exit.
 const DRAFT_STORAGE_KEY = 'issue-reporter-draft';
 
 export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
-  const [description, setDescription]   = useState(() => {
+  const [description, setDescription] = useState(() => {
     try { return sessionStorage.getItem(DRAFT_STORAGE_KEY) || ''; } catch { return ''; }
   });
-  const [isSubmitting, setIsSubmitting]  = useState(false);
-  const [activeMode, setActiveMode]      = useState(null); // 'clipboard' | 'file'
+  const [filterCode, setFilterCode] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [activeMode, setActiveMode] = useState(null); // 'clipboard' | 'file'
+  const [promptCopied, setPromptCopied] = useState(false);
 
   // Mirror description to sessionStorage on every change so reopens
   // bring back what the user typed within the same session.
@@ -33,23 +37,40 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
     return () => { isMountedRef.current = false; };
   }, []);
 
+  // ── Live code preview ──────────────────────────────────────────────────────
+  // Recomputes whenever the filter code changes, showing count of matching log lines.
+  const codePreview = useMemo(() => {
+    const rawLogs = EventLogger.getLogs();
+    return previewBugReportCode(rawLogs, filterCode);
+  }, [filterCode]);
+
+  const hasValidCode  = filterCode.trim().length > 0;
+  const hasUnknown    = (codePreview.unknownCodes?.length ?? 0) > 0;
+  const codeIsClean   = hasValidCode && !hasUnknown && codePreview.matchedCodes.length > 0;
+  const codeIsPartial = hasValidCode && hasUnknown;
+
+  // ── Copy AI prompt to clipboard ───────────────────────────────────────────
+  const copyAIPrompt = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(buildAiPrompt(description));
+      setPromptCopied(true);
+      setTimeout(() => setPromptCopied(false), 2000);
+    } catch { /* ignore */ }
+  }, [description]);
+
+  // ── Submit ────────────────────────────────────────────────────────────────
   const submit = async (mode) => {
     if (!description.trim() || isSubmitting) return;
     setIsSubmitting(true);
     setActiveMode(mode);
     try {
-      await onSubmit(description, mode);
+      await onSubmit(description, filterCode, mode);
       if (!isMountedRef.current) return;
-      // NB: do NOT clear `description` here. Per user feedback, the draft
-      // should survive submit so reopening shows what was typed — useful for
-      // sending the same report through both Copy and Save, or refining and
-      // re-submitting.
       setIsSubmitting(false);
       setActiveMode(null);
       onClose();
     } catch {
       if (!isMountedRef.current) return;
-      // onSubmit handles its own error toasts; just reset UI state
       setIsSubmitting(false);
       setActiveMode(null);
     }
@@ -63,27 +84,134 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
     <Dialog onClose={onClose} title="Report an Issue">
       <form
         onSubmit={e => { e.preventDefault(); submit('clipboard'); }}
-        className="flex flex-col gap-4"
+        className="flex flex-col gap-3"
+        style={{ width: '380px' }}
       >
-        <textarea
-          autoFocus
-          className="w-full h-32 bg-black/40 border border-white/10 rounded-md p-3 text-sm
-                     text-white focus:border-blue-500 focus:outline-none resize-none transition-colors"
-          placeholder="What went wrong? Steps to reproduce?"
-          value={description}
-          onChange={e => setDescription(e.target.value)}
-        />
+        {/* ── Description ─────────────────────────────────────────────────── */}
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-medium text-white/60 uppercase tracking-wider">
+            What went wrong?
+          </label>
+          <textarea
+            autoFocus
+            className="w-full h-28 bg-black/40 border border-white/10 rounded-md p-3 text-sm
+                       text-white placeholder-white/40 focus:border-blue-500/60 focus:outline-none
+                       resize-none transition-colors"
+            placeholder="Describe the bug and steps to reproduce…"
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+          />
+        </div>
 
-        <div className="flex justify-end gap-2 mt-2">
+        {/* ── AI Filter Code ───────────────────────────────────────────────── */}
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-medium text-white/60 uppercase tracking-wider flex items-center gap-1.5">
+            <Sparkles size={11} className="text-violet-400" />
+            AI Filter Code
+            <span className="text-white/30 font-normal normal-case tracking-normal">(optional)</span>
+          </label>
+
+          {/* Copy AI prompt — embeds the user's description so the AI can pick
+              codes from it and reply with a code string. The user pastes that
+              into the field below; they never write a code by hand. */}
+          <button
+            type="button"
+            onClick={copyAIPrompt}
+            className="flex items-center justify-center gap-2 w-full px-3 py-2 rounded-md
+                       bg-violet-500/15 border border-violet-500/30 hover:bg-violet-500/25
+                       text-violet-300 hover:text-violet-200 transition-colors text-xs font-medium"
+          >
+            <Copy size={11} />
+            {promptCopied ? 'Copied — paste it to any AI assistant' : 'Copy AI Prompt to Clipboard'}
+          </button>
+          <p className="text-[11px] text-white/35 px-0.5 leading-snug">
+            Describe the bug above, copy this prompt to any AI assistant, then paste the code it replies with below.
+          </p>
+
+          {/* ── Code input ────────────────────────────────────────────────── */}
+          <div className="relative">
+            <input
+              type="text"
+              className={`w-full bg-black/40 border rounded-md px-3 py-2 text-sm font-mono
+                         text-white placeholder-white/30 focus:outline-none transition-colors pr-24
+                         ${codeIsClean   ? 'border-violet-500/50 focus:border-violet-400' :
+                           codeIsPartial ? 'border-amber-500/50  focus:border-amber-400'  :
+                           'border-white/10 focus:border-white/30'}`}
+              placeholder="Paste the code the AI gives you"
+              value={filterCode}
+              onChange={e => setFilterCode(e.target.value.toUpperCase())}
+              spellCheck={false}
+            />
+            {hasValidCode && (
+              <button
+                type="button"
+                onClick={() => setFilterCode('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-white/30
+                           hover:text-white/60 transition-colors text-xs px-1"
+              >
+                clear
+              </button>
+            )}
+          </div>
+
+          {/* ── Code preview / status ────────────────────────────────────── */}
+          {hasValidCode && (
+            <div className={`flex items-start gap-1.5 text-xs px-2 py-1.5 rounded-md
+                            ${codeIsClean   ? 'bg-violet-500/10 text-violet-300/80' :
+                              codeIsPartial ? 'bg-amber-500/10 text-amber-300/80'   :
+                              'bg-white/5 text-white/40'}`}>
+              {codeIsPartial && <AlertTriangle size={11} className="shrink-0 mt-0.5 text-amber-400" />}
+              <div className="flex flex-col gap-0.5">
+                {codeIsClean && (
+                  <>
+                    <span className="font-medium">{codePreview.label}</span>
+                    <span className="text-violet-400/70">
+                      {codePreview.count} of {codePreview.total} log line{codePreview.count !== 1 ? 's' : ''} selected
+                    </span>
+                  </>
+                )}
+                {codeIsPartial && (
+                  <>
+                    {codePreview.matchedCodes.length > 0 && (
+                      <span className="font-medium">{codePreview.label}</span>
+                    )}
+                    <span>
+                      Unknown code{codePreview.unknownCodes.length > 1 ? 's' : ''}:{' '}
+                      <span className="font-mono">{codePreview.unknownCodes.join(', ')}</span>
+                      {' '}— check the code list above
+                    </span>
+                    {codePreview.matchedCodes.length > 0 && (
+                      <span className="text-amber-400/70">
+                        {codePreview.count} of {codePreview.total} log lines selected (using matched codes)
+                      </span>
+                    )}
+                  </>
+                )}
+                {!codeIsClean && !codeIsPartial && (
+                  <span>No matching codes — use the list above or ask AI</span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {!hasValidCode && (
+            <p className="text-xs text-white/30 px-0.5">
+              No code? The full report will be included. Ask AI for a code to keep it focused.
+            </p>
+          )}
+        </div>
+
+        {/* ── Actions ──────────────────────────────────────────────────────── */}
+        <div className="flex justify-end gap-2 pt-1">
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-2 text-sm text-white/70 hover:text-white transition-colors"
+            className="px-4 py-2 text-sm text-white/50 hover:text-white/80 transition-colors"
           >
             Cancel
           </button>
 
-          {/* Save to file — secondary action, gray. Native save dialog. */}
+          {/* Save to file — secondary action */}
           <button
             type="button"
             disabled={noDesc || isSubmitting}
@@ -96,7 +224,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
             {activeMode === 'file' ? 'Saving…' : 'Save to File'}
           </button>
 
-          {/* Copy to clipboard — primary action, blue. Instant, no dialog. */}
+          {/* Copy to clipboard — primary action */}
           <button
             type="submit"
             disabled={noDesc || isSubmitting}

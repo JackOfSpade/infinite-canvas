@@ -1,6 +1,7 @@
 import { useCallback, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
+import { applyBugReportCode } from '../utils/bugReportCodes';
 
 export function useIssueReporter({
   nodes,
@@ -22,7 +23,7 @@ export function useIssueReporter({
     return () => { isMountedRef.current = false; };
   }, []);
 
-  const handleIssueSubmit = useCallback(async (description, mode = 'file') => {
+  const handleIssueSubmit = useCallback(async (description, filterCode, mode = 'file') => {
     if (!window.electronAPI) {
       addToast({ title: 'Bug Report', description: "Not running in Electron, can't generate report.", type: "error" });
       return;
@@ -149,8 +150,27 @@ export function useIssueReporter({
         issueReporterDraft.sessionStorageError = e?.message || String(e);
       }
 
-      const payload = {
+      // Apply the AI-issued filter code: selects which log lines and payload
+      // sections to include. This keeps reports focused and short.
+      const rawLogs = EventLogger.getLogs();
+      const { filteredLogs, sectionExclusions, label: filterLabel, unknownCodes } =
+        applyBugReportCode(rawLogs, {}, filterCode);
+
+      if (unknownCodes?.length > 0) {
+        // Surface unknown codes as a warning in the log so they appear in the report.
+        EventLogger.error(`Bug report filter: unknown code(s): ${unknownCodes.join(', ')}`);
+      }
+
+      // Build the full payload, then drop sections excluded by the filter code.
+      const fullPayload = {
         description,
+        filterCode: filterCode || null,
+        filterLabel: filterCode ? filterLabel : null,
+        filterStats: filterCode ? {
+          eventsShown: filteredLogs.length,
+          eventsTotal: rawLogs.length,
+          omittedSections: Array.from(sectionExclusions),
+        } : null,
         nodes,
         edges,
         drawings,
@@ -176,10 +196,16 @@ export function useIssueReporter({
         },
         nodeInternals,
         nodeComponentStates: EventLogger.getNodeStates(),
-        eventLogs: EventLogger.getLogs(),
+        eventLogs: filteredLogs,
         lastSaveError: EventLogger.getLastSaveError(),
         activeEditableText,
       };
+
+      // Drop sections the filter code says to omit (e.g. LEAN removes node dumps).
+      const payload = { ...fullPayload };
+      for (const section of sectionExclusions) {
+        delete payload[section];
+      }
 
       if (mode === 'clipboard') {
         const res = await window.electronAPI.generateBugReportMarkdown(payload);

@@ -7,8 +7,7 @@ const { dialog, BrowserWindow } = electronPkg;
 
 // Broadcasts a payload to every alive renderer. Used so that nodes already
 // mounted in the canvas can react to settings changes (e.g. clear "API key
-// missing" errors, surface a "re-analyze with real AI" CTA on stale mock data)
-// instead of requiring an app reload.
+// missing" errors) instead of requiring an app reload.
 function broadcastToAllRenderers(channel, payload) {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
@@ -77,7 +76,7 @@ export function registerSettingsHandlers() {
       }
     }
     // Tell every renderer the settings just changed so live nodes can react
-    // (drop mock data, clear "key missing" errors, etc.) without an app reload.
+    // (clear "key missing" errors, etc.) without an app reload.
     // We deliberately send only `changedSections` — not the values — so keys
     // never round-trip through extra channels.
     broadcastToAllRenderers('settings-changed', {

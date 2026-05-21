@@ -171,6 +171,14 @@ export function useListingActions(id, data) {
       query,
       nodeId: id,
       condition: product.condition || 'Used - Good',
+      // Full spec (not just the broad search query) so the backend can rank comps
+      // by what actually distinguishes this item — color/model/title carry the
+      // discriminating signal the deliberately-broad query strips out.
+      productSpec: {
+        model: product.model,
+        color: product.color,
+        title: product.generated_title,
+      },
       comps,
     });
     if (!result.success) {
@@ -182,7 +190,7 @@ export function useListingActions(id, data) {
       setPriceInput(result.pricing.recommended_price);
     }
     return result;
-  }, [buildSearchQuery, product.condition, id]);
+  }, [buildSearchQuery, product.condition, product.model, product.color, product.generated_title, id]);
 
   // ── Justification toggle ───────────────────────────────────────────────────
 

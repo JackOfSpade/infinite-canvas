@@ -229,15 +229,6 @@ export function SellHubNode({ id, data }) {
     }
   }, [data.imagePaths, hubState, data.errorMessage, startAnalysis]);
 
-  // Explicit re-run for the "Re-analyze with real AI" CTA on the mock banner.
-  // Resets product to a clean slate so the downstream useEffect picks up the
-  // empty state and re-invokes startAnalysis with the current imagePaths.
-  const handleReanalyze = useCallback(() => {
-    if (data.locked || processingRef.current) return;
-    if (!data.imagePaths?.length) return;
-    updateGlobal(id, { hubState: 'empty', product: null, pricing: null, comps: null, platformFit: null, errorMessage: null });
-  }, [data.locked, data.imagePaths, id, updateGlobal]);
-
   // React to settings changes. We log them for bug report telemetry but do NOT
   // auto-clear the error or revert the state without explicit user action.
   useEffect(() => {
@@ -908,7 +899,6 @@ export function SellHubNode({ id, data }) {
               handleConfirmDraft={handleConfirmDraft}
               locked={!!data.locked}
               imagePaths={data.imagePaths || []}
-              onReanalyze={handleReanalyze}
             />
           </>
         )}

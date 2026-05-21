@@ -173,20 +173,23 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
   // RemoteOK and WeWorkRemotely have been moved to fetchApiSources (direct HTTP).
   //
   // `maxPages` = the hard ceiling on how deep we page (same stealth session) for
-  // each query variant. We walk forward — newest first — until a page stops
+  // each query variant. We walk forward page by page until a page stops
   // adding NEW in-window jobs (makeCutoffStop), the anti-bot detector flags a
   // block, or we hit the ceiling. `urlFn(q, page)` builds the 0-based page URL.
   // Sources that DATE-FILTER server-side (Indeed fromage / Glassdoor fromAge /
   // ZipRecruiter days) won't serve out-of-window rows, so deep paging exhausts
-  // the window naturally. Indeed also gets &sort=date so the walk is strictly
-  // newest→oldest (a clean date-cutoff stop). Page-param guesses degrade safely:
+  // the window naturally and the walk stops on an empty/duplicate page or the
+  // ceiling. We leave each on its default RELEVANCE sort (no sort param) so the
+  // capped walk keeps the most-relevant in-window jobs — consistent with the
+  // relevance-sorted API sources; recency is handled by the date filter + the
+  // client age-filter, not by sorting. Page-param guesses degrade safely:
   // a wrong param re-serves page 1, which the duplicate-page stop catches at p2.
   // Google's embedded jobs widget can't be URL-paginated, so it stays 1 page.
   const extractors = {
     google:          { extractor: GOOGLE_JOBS_EXTRACTOR,  config: GOOGLE_JOBS_CONFIG,  maxPages: 1,
                        urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}&ibp=htl;jobs&htichips=date_posted:${gChip}` },
     indeed:          { extractor: INDEED_JOBS_EXTRACTOR,  config: INDEED_CONFIG,       maxPages: JOB_MAX_PAGES,
-                       urlFn: (q, page) => `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}&fromage=${days}&sort=date${page > 0 ? `&start=${page * 10}` : ''}` },
+                       urlFn: (q, page) => `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}&fromage=${days}${page > 0 ? `&start=${page * 10}` : ''}` },
     ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, maxPages: JOB_MAX_PAGES,
                        urlFn: (q, page) => `https://www.ziprecruiter.com/jobs-search?search=${encodeURIComponent(q)}&days=${days}${page > 0 ? `&page=${page + 1}` : ''}` },
     glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,    config: GLASSDOOR_CONFIG,    maxPages: JOB_MAX_PAGES,
@@ -294,7 +297,7 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
     { sourceId: 'usajobs',        fn: (s) => fetchUSAJobs(firstQuery, apiKey, email, s, days) },
     { sourceId: 'remoteok',       fn: (s) => fetchRemoteOKJobs(firstQuery, s, geoTerms) },
     { sourceId: 'weworkremotely', fn: (s) => fetchWeWorkRemotelyJobs(firstQuery, s, geoTerms) },
-    { sourceId: 'dice',           fn: (s) => fetchDiceListings(firstQuery, '', s) },
+    { sourceId: 'dice',           fn: (s) => fetchDiceListings(firstQuery, '', s, days) },
   ];
 
   // Notify frontend that API sources are starting
@@ -312,7 +315,11 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
       const result = await fn(signal);
       const jobs = Array.isArray(result) ? result : (result?.items || []);
       const warning = Array.isArray(result) ? null : (result?.warning || null);
-      return { sourceId, jobs, warning };
+      // Pre-cap match count: when it exceeds `jobs.length` the fetcher's
+      // JOB_RESULT_CAP slice dropped in-window jobs — surfaced in the funnel so an
+      // over-the-cap API source isn't a silent miss (mirrors the browser ceiling).
+      const gathered = Array.isArray(result) ? jobs.length : (result?.gathered ?? jobs.length);
+      return { sourceId, jobs, warning, gathered };
     } catch (error) {
       return { sourceId, jobs: [], error: error?.message || String(error) };
     }
@@ -489,6 +496,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Process API Results
     for (const res of apiResults) {
       if (!sourceResults[res.sourceId]) sourceResults[res.sourceId] = { jobs: [], errors: 0, warnings: [] };
+      // Pre-cap match count (one fetch per API source). > jobs gathered = the
+      // JOB_RESULT_CAP slice dropped in-window jobs the funnel should flag.
+      if (res.gathered != null) sourceResults[res.sourceId].gathered = res.gathered;
       // Each API fetcher now returns { items, warning }; the wrapper above
       // also passes warning through. Capture it so blocks/throttles on
       // API-based sources surface in the same UI panel as scraped sources.
@@ -623,6 +633,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
         bySource[sid].pagesWalked = data.pagesWalked;
         bySource[sid].stopReason = [...(data.stopReasons || [])].join('/') || null;
       }
+      // Pre-cap match count for API sources — the funnel flags when it exceeds
+      // `count` (the JOB_RESULT_CAP slice silently dropped in-window jobs).
+      if (data.gathered != null) bySource[sid].gathered = data.gathered;
     }
     jobsTelemetry.search = {
       ts: Date.now(),
@@ -1114,6 +1127,10 @@ RULES:
       ageDropped,
       historyDropped,
       kept: items.length,
+      // Why a 0-extract happened: how the window closed, what the extractor saw,
+      // and the page state — so "inline-extracted 0 → new 0" stops being an
+      // unexplained dead end in the bug report (see openCaptchaResolveWindow).
+      diag: result.diag || null,
     };
     return { resolved: !!result.resolved, items };
   });

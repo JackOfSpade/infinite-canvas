@@ -14,6 +14,7 @@ import { getRandomUA } from '../ipc/stealthBrowser.js';
 import { htmlToText } from 'html-to-text';
 import { resolveBudget } from '../ipc/scrapeBudget.js';
 import { JOB_RESULT_CAP } from '../ipc/resultCaps.js';
+import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
 // shared scrapeBudget store so they live in one place and share the budget
@@ -123,12 +124,23 @@ export async function fetchLinkedInJobs(query, signal = null, maxAgeDays = null)
   const allJobs = [];
   let warning = null;
 
-  // Fetch 2 pages (50 results max) to stay polite
-  for (let start = 0; start < 50; start += 25) {
+  // Walk up to 150 results (6 pages × 25). LinkedIn's guest API is heavily
+  // anti-bot, so depth is PACED, not blitzed:
+  //   • a jittered 4–8s human-scale gap before each page after the first (a fixed
+  //     2s drumbeat is a tell — irregular cadence is the main signal we control),
+  //   • an early-exit the moment a page adds no new cards (below), so a low-volume
+  //     query never walks all 6 pages — we only go deep when results justify it,
+  //   • bail on the first block/non-OK (below), returning whatever we gathered so
+  //     far rather than hammering through and turning a soft throttle into a 0.
+  const LINKEDIN_MAX_RESULTS = 150;
+  for (let start = 0; start < LINKEDIN_MAX_RESULTS; start += 25) {
     if (signal?.aborted) break;
+    // Human-scale jittered pause before each subsequent page.
+    if (start > 0) await new Promise(res => setTimeout(res, 4000 + Math.floor(Math.random() * 4000)));
     const params = new URLSearchParams({
       keywords: query,
       start: String(start),
+      sortBy: 'R', // explicit relevance (= LinkedIn's default; the value its own UI sends, so anti-bot-neutral)
     });
     // LinkedIn's "Time Posted" filter takes seconds (`r604800` = past week)
     if (maxAgeDays && maxAgeDays > 0) {
@@ -160,6 +172,7 @@ export async function fetchLinkedInJobs(query, signal = null, maxAgeDays = null)
     const cardPattern = /<li[\s\S]*?<\/li>/gi;
     const cards = html.match(cardPattern) || [];
 
+    const before = allJobs.length;
     for (const card of cards) {
       try {
         const titleMatch = card.match(/<h3[^>]*class="[^"]*base-search-card__title[^"]*"[^>]*>([\s\S]*?)<\/h3>/i) ||
@@ -189,11 +202,15 @@ export async function fetchLinkedInJobs(query, signal = null, maxAgeDays = null)
       }
     }
 
-    // Polite delay between pages — report recommends 2-3s minimum for LinkedIn
-    if (start < 25) await new Promise(r => setTimeout(r, 2000));
+    // Page added nothing new → results exhausted (or a soft block served an empty
+    // shell). Stop instead of spending more requests walking empty pages.
+    if (allJobs.length === before) break;
   }
 
-  return { items: allJobs.slice(0, JOB_RESULT_CAP), warning };
+  // `gathered` = pre-cap match count. When it exceeds the surfaced item count the
+  // slice silently dropped in-window jobs (the API analogue of the browser walk's
+  // `ceiling` stop); the bug-report funnel flags that so it isn't a silent miss.
+  return { items: allJobs.slice(0, JOB_RESULT_CAP), warning, gathered: allJobs.length };
 }
 
 // ── Shared query-relevance filter (board/API sources) ────────────────────────
@@ -342,7 +359,7 @@ export async function fetchGreenhouseJobs(query, signal = null, geoTerms = EMPTY
     source: 'greenhouse',
   }));
   const strongest = warnings.find(w => w.severity === 'block') || warnings[0] || null;
-  return { items, warning: strongest };
+  return { items, warning: strongest, gathered: matched.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
 
 
@@ -407,7 +424,7 @@ export async function fetchLeverJobs(query, signal = null, geoTerms = EMPTY_GEO)
     source: 'lever',
   }));
   const strongest = warnings.find(w => w.severity === 'block') || warnings[0] || null;
-  return { items, warning: strongest };
+  return { items, warning: strongest, gathered: matched.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
 
 
@@ -442,7 +459,7 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
 
   const params = new URLSearchParams({
     Keyword: query,
-    ResultsPerPage: '25',
+    ResultsPerPage: '150', // uncapped breadth; USAJobs DatePosted below already keeps these in-window
     DatePosted: String(Math.max(1, Math.floor(maxAgeDays || 30))),
   });
 
@@ -482,7 +499,7 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
       source: 'usajobs',
     };
   });
-  return { items, warning: r.warning };
+  return { items, warning: r.warning, gathered: resultItems.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
 
 
@@ -533,7 +550,7 @@ export async function fetchRemoteOKJobs(query, signal = null, geoTerms = EMPTY_G
     posted: job.date || '',
     source: 'remoteok',
   }));
-  return { items, warning: r.warning };
+  return { items, warning: r.warning, gathered: matched.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
 
 
@@ -600,7 +617,7 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null, geoTerms = E
     });
   }
 
-  return { items: jobs.slice(0, JOB_RESULT_CAP), warning: r.warning };
+  return { items: jobs.slice(0, JOB_RESULT_CAP), warning: r.warning, gathered: jobs.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
 
 
@@ -667,9 +684,10 @@ const DICE_API_KEY = '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
  * Fetch job listings from Dice via their public API (Tier 1).
  * @param {string} query — job search query
  * @param {string} [location] — optional location filter
+ * @param {number} [maxAgeDays] — keep only postings within this window (client-side)
  * @returns {Promise<Array>} — standardized job objects
  */
-export async function fetchDiceListings(query, location = '', signal = null) {
+export async function fetchDiceListings(query, location = '', signal = null, maxAgeDays = null) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const params = new URLSearchParams({
     q: query,
@@ -677,7 +695,17 @@ export async function fetchDiceListings(query, location = '', signal = null) {
     radius: '30',
     radiusUnit: 'mi',
     page: '1',
-    pageSize: '25',
+    // Pull a WIDE relevance-ranked page, then keep only in-window jobs and take
+    // the top JOB_RESULT_CAP of those (below) — so the cap holds the most-relevant
+    // RECENT matches, not a relevance mix that's mostly age-dropped downstream.
+    // We over-pull on purpose: relevance sort interleaves stale postings, and a
+    // tight window has a small in-window fraction (probed: ~3-4% at 1 day, ~32% at
+    // 7 days), so volume is what guarantees a full cap of in-window matches. Dice
+    // has no date sort that helps and `filters.postedDate` only spans 1/3/7 days —
+    // narrower than the 21-day default — so the window is enforced client-side.
+    // pageSize is honored well past this (probed to 1000+); still one call, no paging.
+    sortBy: 'relevance', // explicit (= Dice's default) so an API default change can't silently flip us off relevance
+    pageSize: '1000',
     ...(location ? { location } : {}),
   });
 
@@ -705,7 +733,7 @@ export async function fetchDiceListings(query, location = '', signal = null) {
 
   logger.info(`[Dice API] Found ${jobs.length} jobs for "${query}"`);
 
-  const items = jobs.map(job => ({
+  const mapped = jobs.map(job => ({
     title: job.title || '',
     company: job.companyName || '',
     location: job.jobLocation?.displayName || '',
@@ -718,7 +746,13 @@ export async function fetchDiceListings(query, location = '', signal = null) {
     employmentType: job.employmentType || '',
     easyApply: job.easyApply || false,
   }));
-  return { items, warning: r.warning };
+  // Date-filter the wide relevance pull, THEN cap — so the kept JOB_RESULT_CAP are
+  // the most-relevant IN-WINDOW jobs (reuses the shared age filter; same cutoff the
+  // global pass applies, so this is a no-op there, not a second policy). `gathered`
+  // = in-window matches before the cap, so the funnel flags when there were more.
+  const inWindow = maxAgeDays ? filterJobsByAge(mapped, maxAgeDays) : mapped;
+  const items = inWindow.slice(0, JOB_RESULT_CAP);
+  return { items, warning: r.warning, gathered: inWindow.length };
 }
 
 

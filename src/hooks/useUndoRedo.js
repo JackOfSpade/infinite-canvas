@@ -150,6 +150,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
 
     futureRef.current = [...futureRef.current, currentState];
 
+    EventLogger.log('undo');
     isRestoringRef.current = true;
     setNodes(previous.nodes);
     setEdges(previous.edges);
@@ -169,6 +170,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     futureRef.current = future.slice(0, -1);
     pastRef.current   = [...pastRef.current, deepCloneState()];
 
+    EventLogger.log('redo');
     isRestoringRef.current = true;
     setNodes(next.nodes);
     setEdges(next.edges);

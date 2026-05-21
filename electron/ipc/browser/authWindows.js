@@ -318,6 +318,18 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     let autoClosePoll = null;
     let autoCloseTimeout = null;
     let resolved = false; // true = challenge auto-detected as cleared
+    // ── Resolve diagnostics — answer "Solve opened, I saw the page, but the card
+    // still failed: why?" The resolve telemetry otherwise records only a count, so
+    // a 0 can't be told apart from a stale-selector miss, a thrown extractor, or a
+    // genuinely empty page. Captured here and returned in `diag` so the bug
+    // report's Captcha-resolve section can name the cause instead of guessing.
+    let everSawChallenge = false; // a challenge widget was visible at some tick
+    let everSawConsent = false;   // a cookie/consent wall was visible at some tick
+    let lastTextLen = 0;          // body innerText length on the last probe
+    let lastHost = null;          // host on the last probe (catches "wandered off")
+    let extractOutcome = null;    // inline-extract result: 'matched N' / 'matched 0' / 'threw' / 'non-array' / 'no-extractor'
+    let autoCloseReason = null;   // why finishCleared fired (set at each call site)
+    let pollTimedOut = false;     // auto-detect poll gave up before any resolve
 
     // Snappier cadence than the in-page loop for sub-second detection after a
     // user solve (page.evaluate is cheap but not free). Centralized so the two
@@ -439,6 +451,12 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
 
         if (!probe) return;
 
+        // Snapshot page state for the resolve diagnostics returned at close.
+        lastTextLen = probe.textLength;
+        lastHost = currentHost;
+        if (probe.hits.length) everSawChallenge = true;
+        if (probe.consentVisible) everSawConsent = true;
+
         // Log the FIRST probe so bug reports can tell "user solved fast"
         // from "captcha never appeared in this session." With only the 10s
         // heartbeat, a sub-10s resolve left zero diagnostic trail.
@@ -456,12 +474,13 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
 
         // Declare the challenge cleared, stash any extracted items, and close
         // (the window's `disconnected` → cleanup resolves with { resolved, items }).
-        const finishCleared = async (items) => {
+        const finishCleared = async (items, reason) => {
           if (items) {
             extractedItems = items;
             logger.info(`[StealthBrowser] Inline extract on ${currentHost} → ${items.length} item(s) (skipping headless rescrape)`);
           }
-          logger.info(`[StealthBrowser] Captcha auto-detected as cleared on ${currentHost} (no visible challenge widgets, textLen=${probe.textLength}) — closing window`);
+          autoCloseReason = reason || 'cleared';
+          logger.info(`[StealthBrowser] Captcha auto-detected as cleared on ${currentHost} (no visible challenge widgets, textLen=${probe.textLength}, reason=${autoCloseReason}) — closing window`);
           resolved = true;
           if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
           if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
@@ -480,8 +499,9 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
             try {
               const result = await page.evaluate(inlineExtractorJS);
               if (Array.isArray(result)) items = result;
-              else logger.warn(`[StealthBrowser] Inline extract returned non-array (${typeof result}); falling back to rescrape`);
+              else { extractOutcome = 'non-array'; logger.warn(`[StealthBrowser] Inline extract returned non-array (${typeof result}); falling back to rescrape`); }
             } catch (e) {
+              extractOutcome = 'threw';
               logger.warn(`[StealthBrowser] Inline extract failed (${e?.message || e}); falling back to rescrape`);
             }
 
@@ -491,18 +511,19 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
               // Extractor failed/non-array — no count to stabilize on. Treat the
               // page as cleared and close so the renderer's headless-rescrape
               // fallback runs (unchanged from the original behavior).
-              await finishCleared(null);
+              await finishCleared(null, 'extractor-error');
               return;
             }
 
             const count = items.length;
             if (count > 0) {
+              extractOutcome = `matched ${count}`; // latest positive read — survives an early close mid-hydration
               stableTicks = (count === lastExtractCount) ? stableTicks + 1 : 0;
               lastExtractCount = count;
               emptySince = null;
               if (stableTicks >= STABLE_TICKS_REQUIRED || ceilingHit) {
                 logger.info(`[StealthBrowser] ${currentHost} results settled at ${count} item(s)${ceilingHit ? ' (readiness ceiling hit)' : ` after ${stableTicks} stable poll(s)`}`);
-                await finishCleared(items);
+                await finishCleared(items, ceilingHit ? 'settled-ceiling' : 'settled');
                 return;
               }
               // count still climbing — keep polling.
@@ -522,8 +543,9 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
               if (emptySince == null) emptySince = Date.now();
               const emptyMs = Date.now() - emptySince;
               if (emptyMs >= RESOLVE_EMPTY_GRACE_MS) {
+                extractOutcome = 'matched 0';
                 logger.info(`[StealthBrowser] ${currentHost} found 0 items after ${Math.round(emptyMs / 1000)}s with no captcha/consent detected — accepting empty result`);
-                await finishCleared(items); // items === []
+                await finishCleared(items, 'empty-grace'); // items === []
                 return;
               }
               // keep polling — give the user time to clear a cookie/login wall.
@@ -533,7 +555,8 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
           // ── No extractor (login / API source): fall back to the body-text
           // heuristic — there's no item count to stabilize on. A consent wall
           // gates this too (don't auto-close a login window mid cookie-accept).
-          await finishCleared(null);
+          extractOutcome = 'no-extractor';
+          await finishCleared(null, 'body-text');
           return;
         }
 
@@ -566,6 +589,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
 
     autoCloseTimeout = setTimeout(() => {
       if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
+      pollTimedOut = true;
       logger.info(`[StealthBrowser] Captcha resolve window hit ${AUTO_CLOSE_AFTER_MS / 1000}s timeout without auto-detect`);
     }, AUTO_CLOSE_AFTER_MS);
 
@@ -608,7 +632,26 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       // manually." `items` is the inline-extracted comp data captured from
       // the visible session before close — when present, caller skips the
       // headless rescrape (which would re-trigger the same bot wall).
-      resolve({ success: true, resolved, items: extractedItems, closedByApp: sender?.isDestroyed?.() });
+      // `diag` carries the "why" for the bug report's resolve section (how the
+      // window closed, what the extractor saw, page state) so a 0-extract isn't
+      // an unexplained dead end — see openCaptchaResolveWindow's diag vars.
+      const closeReason = resolved ? (autoCloseReason || 'cleared')
+        : signal?.aborted ? 'aborted'
+        : sender?.isDestroyed?.() ? 'app-closed'
+        : pollTimedOut ? 'user-closed-after-timeout'
+        : 'user-closed';
+      resolve({
+        success: true, resolved, items: extractedItems,
+        closedByApp: sender?.isDestroyed?.(),
+        diag: {
+          closeReason,
+          extractOutcome: extractOutcome || (inlineExtractorJS ? 'never-extracted' : 'no-extractor'),
+          finalHost: lastHost,
+          sawChallenge: everSawChallenge,
+          sawConsent: everSawConsent,
+          textLen: lastTextLen,
+        },
+      });
     };
 
     if (sender) {

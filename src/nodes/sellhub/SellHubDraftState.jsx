@@ -1,5 +1,4 @@
 import React from 'react';
-import { AlertTriangle, RefreshCw } from 'lucide-react';
 import { EditableField } from '../../components/EditableField';
 import { PhotoStrip } from '../../components/PhotoStrip';
 
@@ -22,36 +21,10 @@ export function SellHubDraftState({
   handleConfirmDraft,
   locked = false,
   imagePaths = [],
-  onReanalyze,
 }) {
-  // _mockMode is set by the backend when Gemini fell back to mock data because
-  // no API key or service-account.json was configured at the time of the call.
-  // Show a yellow banner with a re-analyze CTA so the user can refresh now
-  // that they've configured AI in Settings, without deleting the node.
-  const isMock = !!product?._mockMode;
-
   return (
     <div className="p-3 space-y-2">
       <div className="text-amber-400/60 text-[10px] font-semibold uppercase tracking-wider">📝 Draft</div>
-
-      {isMock && (
-        <div className="flex items-start gap-1.5 px-2 py-1.5 rounded-md bg-yellow-500/15 border border-yellow-500/30 text-yellow-200/90 text-[10px]">
-          <AlertTriangle size={11} className="shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <div className="font-medium">Placeholder data</div>
-            <div className="opacity-80 leading-tight">AI wasn't configured when these photos were analyzed.</div>
-            {!locked && onReanalyze && (
-              <button
-                onClick={onReanalyze}
-                onPointerDown={(e) => e.stopPropagation()}
-                className="nodrag mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-yellow-500/25 hover:bg-yellow-500/40 text-yellow-100 text-[10px] font-medium border border-yellow-500/30 transition-colors"
-              >
-                <RefreshCw size={9} /> Re-analyze with real AI
-              </button>
-            )}
-          </div>
-        </div>
-      )}
 
       <PhotoStrip imagePaths={imagePaths} />
 
