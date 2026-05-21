@@ -2,10 +2,12 @@
  * Marketplace Price Comparison Extractors + Site Configs.
  *
  * Extraction strategies (in order of reliability, per 2026 deep research report):
- *   1. __PRELOADED_STATE__ — Redux hydration state (Poshmark, Swappa)
+ *   1. __PRELOADED_STATE__ — Redux hydration state (Poshmark)
  *   2. __NEXT_DATA__       — Next.js SSR payload (Mercari)
- *   3. Inline Script JSON  — variant pricing matrices (eBay)
- *   4. DOM                 — CSS selector scraping with fallbacks
+ *   3. schema.org microdata — itemprop="offers" Offer cards (Swappa; two-step,
+ *                             since its /search?q= is a model picker, not listings)
+ *   4. Inline Script JSON  — variant pricing matrices (eBay)
+ *   5. DOM                 — CSS selector scraping with fallbacks
  *
  * StockX and Reverb have been moved to API-based extraction in apiExtractors.js:
  *   - StockX: Algolia API bypass (extracts keys, queries Algolia directly)
@@ -64,7 +66,11 @@ export const POSHMARK_CONFIG = {
 export const SWAPPA_CONFIG = {
   waitMs: 2500,
   timeoutMs: 30000,
-  waitFor: '.search_result, .listing_row, .row.item',
+  // /search renders the product picker (server-side, no scroll needed); the
+  // extractor follows the best model link to /listings and reads Offer microdata.
+  // Wait on either the picker's product links OR an Offer card (if we landed on a
+  // listings page directly, e.g. in the Solve window).
+  waitFor: '#main_search_product_results a[href*="/listings/"], [itemprop="offers"]',
   scrollFirst: false,
   dismissCookies: false,
   expectedMinItems: 3,
@@ -93,6 +99,24 @@ export const PRICECHARTING_CONFIG = {
   waitFor: '.offers-table tr, table tr, #games_table',
   scrollFirst: false,
   dismissCookies: false,
+};
+
+// Per-source extraction cap — the `slice(0, N)` each extractor below applies to
+// its results. Mirrored here (KEEP IN SYNC with the slices) so the scrape funnel
+// can flag a source whose returned count EQUALS its cap: that page almost
+// certainly held MORE listings than we gathered, which is otherwise invisible —
+// a raw count of "25" reads identically whether 25 or 250 were on the page.
+// This is not lost downstream (synthesis caps at 25 sold / 15 active and selects
+// fairly across sources), but it makes "silently not gathered from scrape?"
+// answerable instead of ambiguous. PriceCharting is intentionally omitted: it's
+// a niche games source where a small/zero count is expected, never a truncation.
+export const COMP_EXTRACT_CAPS = {
+  'ebay-sold': 25,
+  'ebay-active': 20,
+  'poshmark': 25,
+  'swappa': 25,
+  'mercari': 20,
+  'reverb': 25,
 };
 
 
@@ -312,78 +336,121 @@ export const POSHMARK_SOLD_EXTRACTOR = `
 
 
 // ── Swappa Electronics Extractor ────────────────────────────────────────────
-// Strategy 0: Extract __PRELOADED_STATE__ from .js-content (Redux state)
-//   Contains pricing curves, condition-specific market floors, and device variants.
-// Strategy 1: DOM parsing fallback
+// Swappa is a server-rendered HTMX site — NOT a Redux/Next SPA — so there is no
+// __PRELOADED_STATE__ / __NEXT_DATA__ to read, and there is no JSON-LD. Critically,
+// the scrape URL `/search?q=<query>` is a PRODUCT DISAMBIGUATION page (it lists
+// matching MODELS, each linking to `/listings/<model-slug>`), NOT a page of priced
+// listings. The actual sold/active comps live one navigation away on the model's
+// listings page, where every card is standardized schema.org Offer microdata
+// (`itemprop="offers"` → `itemprop="price"` / `itemprop="description"`).
+//
+// So this extractor is two-step and site-agnostic by design (microdata, not CSS
+// class names that rot):
+//   1. If the current document already carries Offer microdata (e.g. the user
+//      navigated straight to a listings page in the Solve window), extract it.
+//   2. Otherwise we're on /search — resolve the `/listings/<slug>` link whose
+//      label best matches the `?q=` query, fetch that page SAME-ORIGIN (carries
+//      the session cookies that already passed the bot check), parse it, and read
+//      its Offer microdata.
+// The fetch is memoized on `window` so the readiness poll loop (which calls this
+// repeatedly until the count settles) only hits the network once. Returns a
+// Promise — both the headless pool and the inline-resolve window await it.
 export const SWAPPA_EXTRACTOR = `
 (function() {
-  const items = [];
-  
-  // Strategy 0: Parse __PRELOADED_STATE__ (Redux hydration from .js-content)
-  try {
-    const scripts = document.querySelectorAll('script');
-    for (const script of scripts) {
-      const text = script.textContent || '';
-      const match = text.match(/window\\.__PRELOADED_STATE__\\s*=\\s*(\\{.+?\\});\\s*(?:<|window|$)/s);
-      if (match) {
-        try {
-          const state = JSON.parse(match[1]);
-          // Navigate to listings/pricing data in Redux tree
-          const listings = state?.search?.results ||
-                           state?.listings?.items ||
-                           state?.catalog?.listings ||
-                           [];
-          
-          const listArr = Array.isArray(listings) ? listings : Object.values(listings || {});
-          
-          listArr.forEach(item => {
-            if (!item) return;
-            const price = item.price || item.asking_price || 0;
-            const priceNum = typeof price === 'string' ? parseFloat(price.replace(/[^0-9.]/g, '')) : price;
-            if (priceNum === 0 || !item.title) return;
-            
-            items.push({
-              title: item.title || item.device_name || '',
-              price: priceNum,
-              priceText: '$' + priceNum.toFixed(2),
-              condition: item.condition || item.condition_name || '',
-              url: (item.url || item.listing_url) ? ('https://swappa.com' + (item.url || item.listing_url)) : '',
-              source: 'swappa',
-            });
-          });
-          if (items.length > 0) return items.slice(0, 25);
-        } catch {}
-      }
-    }
-  } catch {}
-  
-  // Strategy 1: Fallback DOM parsing
-  const cards = document.querySelectorAll('.search_result, .listing_row, .row.item, [class*="ListingItem"], [class*="listing-card"]');
-  cards.forEach(card => {
-    try {
-      const titleEl = card.querySelector('h3, .listing_title, [class*="title"], a[href*="/listing/"]');
-      const priceEl = card.querySelector('.price, [class*="price"], .listing_price');
-      const conditionEl = card.querySelector('.condition, [class*="condition"], .badge');
-      const linkEl = card.querySelector('a[href*="/listing/"], a[href*="/buy/"]');
-      
-      const title = titleEl?.innerText?.trim() || '';
-      if (!title) return;
-      
-      const priceTextRaw = priceEl?.innerText?.trim() || '';
-      const priceText = priceTextRaw.split(/[\\n\\r]+/)[0];
-      const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
-      if (price === 0) return;
+  var ORIGIN = location.origin || 'https://swappa.com';
 
-      items.push({
-        title, price, priceText,
-        condition: conditionEl?.innerText?.trim() || '',
-        url: linkEl?.href || '',
-        source: 'swappa',
-      });
-    } catch {}
-  });
+  function abs(href) {
+    if (!href) return '';
+    try { return new URL(href, ORIGIN).href; } catch (e) { return href.charAt(0) === '/' ? ORIGIN + href : href; }
+  }
 
-  return items.slice(0, 25);
+  // Read comps from any document carrying schema.org Offer microdata.
+  function extractOffers(doc) {
+    var out = [];
+    var cards = doc.querySelectorAll('[itemprop="offers"][itemscope], [itemtype*="schema.org/Offer"]');
+    cards.forEach(function(card) {
+      try {
+        var priceEl = card.querySelector('[itemprop="price"]');
+        if (!priceEl) return;
+        var raw = priceEl.getAttribute('content') || priceEl.textContent || '';
+        var price = parseFloat(String(raw).replace(/[^0-9.]/g, '')) || 0;
+        if (price <= 0) return;
+        var descEl = card.querySelector('[itemprop="description"]') || card.querySelector('[itemprop="name"]');
+        var title = (descEl && (descEl.getAttribute('content') || descEl.textContent) || '').trim();
+        if (!title) return;
+        var linkEl = card.querySelector('a[href*="/listing/"]');
+        out.push({
+          title: title,
+          price: price,
+          priceText: '$' + price,
+          url: linkEl ? abs(linkEl.getAttribute('href')) : '',
+          source: 'swappa',
+        });
+      } catch (e) {}
+    });
+    return out;
+  }
+
+  function tokens(s) {
+    return String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  }
+
+  // From the /search disambiguation page, pick the bare /listings/<slug> link
+  // whose label best matches the query. Token overlap wins; extra tokens are
+  // lightly penalized so "iPhone XS" prefers .../apple-iphone-xs over the
+  // superset .../apple-iphone-xs-max; DOM order is the final tie-break.
+  function pickListingsLink(doc, query) {
+    var scope = doc.querySelector('#main_search_product_results') || doc;
+    var anchors = Array.prototype.slice.call(scope.querySelectorAll('a[href*="/listings/"]'));
+    var seen = {};
+    var cands = [];
+    anchors.forEach(function(a) {
+      var href = a.getAttribute('href') || '';
+      if (!/\\/listings\\/[a-z0-9-]+$/i.test(href)) return; // bare model pages only (skip ?carrier= variants)
+      if (seen[href]) return; seen[href] = 1;
+      var label = (a.getAttribute('title') || a.textContent || '').trim() || href.split('/').pop().replace(/-/g, ' ');
+      cands.push({ href: href, label: label });
+    });
+    if (!cands.length) return '';
+    var qt = tokens(query);
+    var best = null, bestScore = -Infinity;
+    cands.forEach(function(c, idx) {
+      var ct = tokens(c.label + ' ' + c.href);
+      var hits = 0;
+      qt.forEach(function(t) { if (ct.indexOf(t) !== -1) hits++; });
+      var extra = Math.max(0, ct.length - hits);
+      var score = hits * 100 - extra - idx * 0.01;
+      if (score > bestScore) { bestScore = score; best = c; }
+    });
+    return best ? abs(best.href) : '';
+  }
+
+  // Step 1 — already on a listings page? Extract directly.
+  var direct = extractOffers(document);
+  if (direct.length > 0) return direct.slice(0, 25);
+
+  // Step 2 — on /search: resolve + fetch the model's listings page (memoized).
+  if (window.__swappaComps) return window.__swappaComps;
+  if (!window.__swappaCompsPromise) {
+    var query = '';
+    try { query = new URLSearchParams(location.search).get('q') || ''; } catch (e) {}
+    if (!query) query = (document.title || '').replace(/\\s*[-|].*$/, '').trim();
+    var target = pickListingsLink(document, query);
+    window.__swappaCompsPromise = (async function() {
+      if (!target) return [];
+      try {
+        var res = await fetch(target, { credentials: 'include', headers: { 'Accept': 'text/html' } });
+        if (!res.ok) return [];
+        var html = await res.text();
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        return extractOffers(doc).slice(0, 25);
+      } catch (e) { return []; }
+    })().then(function(items) {
+      window.__swappaComps = items;
+      return items;
+    });
+  }
+  return window.__swappaCompsPromise;
 })()
 `;
 

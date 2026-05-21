@@ -205,20 +205,27 @@ export function detectAntiBotSignal(ctx = {}) {
     const suspiciousBelow = expectedBodySize > 0
       ? Math.min(SUSPICIOUS_MAX_BYTES, Math.max(SUSPICIOUS_MIN_BYTES, Math.round(expectedBodySize * SUSPICIOUS_BODY_RATIO)))
       : SUSPICIOUS_MIN_BYTES;
+    // Always stamp the landing URL: a 0-item result on a BIG body where the
+    // finalUrl isn't the expected results page is almost never selector rot —
+    // it's the scraper landing on a product-picker / disambiguation / login /
+    // interstitial page (e.g. Swappa's /search?q= is a model-picker, not a
+    // listings page). Without finalUrl in the evidence, "0 items" can't tell
+    // those apart, and a bug report shows a confusing "good on the site, 0 here."
+    const where = finalUrl ? ` [finalUrl=${finalUrl}]` : '';
     if (htmlLen < suspiciousBelow) {
       const vs = expectedBodySize > 0 ? ` (typical ~${Math.round(expectedBodySize)})` : '';
       return {
         code: 'suspicious-empty',
         severity: 'throttle',
-        evidence: `${label}returned ${itemsExtracted} items with only ${htmlLen} chars of body${vs}`,
+        evidence: `${label}returned ${itemsExtracted} items with only ${htmlLen} chars of body${vs}${where}`,
         suggestion: 'Response was suspiciously small AND empty of items. Most likely a soft block; retry with a fresh profile.',
       };
     }
     return {
       code: 'zero-extracted',
       severity: 'throttle',
-      evidence: `${label}extractor produced ${itemsExtracted} items (expected ≥ ${expectedMinItems})`,
-      suggestion: 'Extractor produced fewer items than expected — could be a layout change OR a soft block returning skeleton HTML. Inspect the page once.',
+      evidence: `${label}extractor produced ${itemsExtracted} items (expected ≥ ${expectedMinItems}) from ${htmlLen} chars of body${where}`,
+      suggestion: 'Extractor produced fewer items than expected. The body is NOT tiny, so this is not a hard block — check finalUrl: if it is not the expected results page, the scraper landed on a picker/disambiguation/login/interstitial page (wrong URL), not stale selectors. If it IS the right page, the layout changed.',
     };
   }
 
