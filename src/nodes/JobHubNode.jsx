@@ -747,36 +747,30 @@ export function JobHubNode({ id, data }) {
   useUnmountEffect(cleanupAllJobChildren);
 
   // ── Job-source platform cards (persistent, one per ACTIVE_JOB_SOURCE) ─────
-  // Replaces the orbital ring with real canvas nodes connected by edges.
-  // Each card subscribes to its own progress events and falls back to the
-  // hub's `finalSourceCounts` between runs so the last-known count is shown.
-  const ensureSourceCards = useCallback(() => {
+  // Replaces the orbital ring with real canvas nodes connected by edges. Cards
+  // are laid out in a circle around the hub — matches the SellHub →
+  // CompSourceCard pattern so edges fan to each card's nearest hub side
+  // instead of all bunching on one side. The user can drag any card anywhere
+  // afterward. Each card subscribes to its own progress events and falls back
+  // to the hub's `finalSourceCounts` between runs so the last-known count is
+  // shown. Shared by `ensureSourceCards` (idle spawn) and
+  // `ensureBlockedSourceCards` (post-run re-spawn for sources missing a card).
+  const spawnSourceCardsAround = useCallback((items, edgeColor) => {
+    if (items.length === 0) return 0;
     const existing = getNodes().filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id);
-    const existingSourceIds = new Set(existing.map(n => n.data?.sourceId));
-    const missing = ACTIVE_JOB_SOURCES
-      .map(sid => JOB_SOURCES.find(s => s.id === sid))
-      .filter(s => s && !existingSourceIds.has(s.id));
-    if (missing.length === 0) return;
-
     const hubPos = getNode(id)?.position || { x: 0, y: 0 };
-    // Lay cards out in a circle around the hub — matches the SellHub →
-    // CompSourceCard pattern so edges fan to each card's nearest hub side
-    // instead of all bunching on the left. The user can drag any card anywhere
-    // afterward.
-    const HUB_W = 260, HUB_H = 140;     // approx hub footprint while idle
-    const CARD_W = 140, CARD_H = 50;
+    const HUB_W = 260, HUB_H = 140, CARD_W = 140, CARD_H = 50;
     const cx = hubPos.x + HUB_W / 2;
     const cy = hubPos.y + HUB_H / 2;
-    const total = existing.length + missing.length;
+    const total = existing.length + items.length;
     const stamp = Date.now();
-    // Radius derived from card count + footprint so cards never overlap as the
-    // source list grows (replaces a fixed 320 that only worked for ~12 sources).
+    // Radius scales with card count so cards never overlap as the source list
+    // grows (replaces a fixed 320 that only worked for ~12 sources).
     const RADIUS = radialRadius({ count: total, cardW: CARD_W, cardH: CARD_H, hubW: HUB_W, hubH: HUB_H });
 
-    const newNodes = missing.map((source, i) => {
+    const newNodes = items.map(({ source, persistedProgress }, i) => {
       // Angle the card across the full circle; first card at top (-π/2).
-      const angleIdx = existing.length + i;
-      const angle = (angleIdx / total) * 2 * Math.PI - Math.PI / 2;
+      const angle = ((existing.length + i) / total) * 2 * Math.PI - Math.PI / 2;
       return {
         id: `js-${id}-${source.id}-${stamp}`,
         type: 'jobsourcecard',
@@ -791,13 +785,13 @@ export function JobHubNode({ id, data }) {
           color:    source.color,
           domain:   source.domain,
           hubId:    id,
+          ...(persistedProgress ? { persistedProgress } : {}),
         },
       };
     });
 
-    // Route each hub→card edge to the hub's nearest side. Both ends already
-    // render the NodeHandles slots; pickEdgeHandles picks which side to use
-    // so edges don't all bunch on the hub's right.
+    // pickEdgeHandles routes each hub→card edge to the hub's nearest side so
+    // edges don't all bunch on one side. Both ends render NodeHandles slots.
     const newEdges = newNodes.map(n => ({
       id: `edge-${id}-${n.id}`,
       source: id,
@@ -806,7 +800,7 @@ export function JobHubNode({ id, data }) {
         { x: n.position.x + CARD_W / 2, y: n.position.y + CARD_H / 2 },
         { x: cx,                        y: cy                       },
       ),
-      ...structuralEdge('rgba(96,165,250,0.5)'),
+      ...structuralEdge(edgeColor),
     }));
 
     if (addElementsGlobally) {
@@ -815,14 +809,31 @@ export function JobHubNode({ id, data }) {
       addNodes(newNodes);
       addEdges(newEdges);
     }
+    return total;
+  }, [id, getNode, getNodes, addElementsGlobally, addNodes, addEdges]);
 
-    // Frame the hub + the source-card grid we just spawned. requestAnimationFrame
-    // gives ReactFlow one tick to register the new nodes; a synchronous fitView
-    // would frame only the hub.
+  const ensureSourceCards = useCallback(() => {
+    const existingSourceIds = new Set(
+      getNodes()
+        .filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id)
+        .map(n => n.data?.sourceId),
+    );
+    const missing = ACTIVE_JOB_SOURCES
+      .map(sid => JOB_SOURCES.find(s => s.id === sid))
+      .filter(s => s && !existingSourceIds.has(s.id));
+    if (missing.length === 0) return;
+
+    const total = spawnSourceCardsAround(
+      missing.map(source => ({ source })),
+      'rgba(96,165,250,0.5)',
+    );
+
+    // requestAnimationFrame gives ReactFlow one tick to register the new nodes;
+    // a synchronous fitView would frame only the hub.
     requestAnimationFrame(() => {
       fitView({ duration: fitViewDuration(total), padding: 0.2 });
     });
-  }, [id, getNode, getNodes, addElementsGlobally, addNodes, addEdges, fitView]);
+  }, [id, getNodes, spawnSourceCardsAround, fitView]);
 
   // Guarantee every blocked source has a visible, actionable card when we pause
   // in 'sources-ready'. The block decision is finalized only at search END, but
@@ -835,55 +846,27 @@ export function JobHubNode({ id, data }) {
   const ensureBlockedSourceCards = useCallback((blockingWarnings) => {
     const blocks = (blockingWarnings || []).filter(w => (w?.severity === 'block' || w?.severity === 'paste') && w.sourceId);
     if (blocks.length === 0) return;
-    const existing = getNodes().filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id);
-    const existingSourceIds = new Set(existing.map(n => n.data?.sourceId));
+    const existingSourceIds = new Set(
+      getNodes()
+        .filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id)
+        .map(n => n.data?.sourceId),
+    );
     const missing = blocks.filter(w => !existingSourceIds.has(w.sourceId));
     if (missing.length === 0) return;
 
-    const hubPos = getNode(id)?.position || { x: 0, y: 0 };
-    const HUB_W = 260, HUB_H = 140, CARD_W = 140, CARD_H = 50;
-    const cx = hubPos.x + HUB_W / 2;
-    const cy = hubPos.y + HUB_H / 2;
-    const total = existing.length + missing.length;
-    const stamp = Date.now();
-    const RADIUS = radialRadius({ count: total, cardW: CARD_W, cardH: CARD_H, hubW: HUB_W, hubH: HUB_H });
-
-    const newNodes = missing.map((w, i) => {
-      const source = JOB_SOURCES.find(s => s.id === w.sourceId) ||
-        { id: w.sourceId, name: w.sourceId, letter: (w.sourceId[0] || '?').toUpperCase(), color: '#ef4444', domain: '' };
-      const angleIdx = existing.length + i;
-      const angle = (angleIdx / total) * 2 * Math.PI - Math.PI / 2;
-      return {
-        id: `js-${id}-${source.id}-${stamp}`,
-        type: 'jobsourcecard',
-        position: {
-          x: cx + Math.cos(angle) * RADIUS - CARD_W / 2,
-          y: cy + Math.sin(angle) * RADIUS - CARD_H / 2,
-        },
-        data: {
-          sourceId: source.id, name: source.name, letter: source.letter,
-          color: source.color, domain: source.domain, hubId: id,
-          persistedProgress: {
-            status: 'error',
-            warning: { code: w.code, severity: w.severity, evidence: w.evidence, suggestion: w.suggestion },
-            url: w.url || null,
-            count: 0,
-          },
-        },
-      };
-    });
-    const newEdges = newNodes.map(n => ({
-      id: `edge-${id}-${n.id}`, source: id, target: n.id,
-      ...pickEdgeHandles(
-        { x: n.position.x + CARD_W / 2, y: n.position.y + CARD_H / 2 },
-        { x: cx, y: cy },
-      ),
-      ...structuralEdge('rgba(239,68,68,0.6)'),
+    const items = missing.map(w => ({
+      source: JOB_SOURCES.find(s => s.id === w.sourceId) ||
+        { id: w.sourceId, name: w.sourceId, letter: (w.sourceId[0] || '?').toUpperCase(), color: '#ef4444', domain: '' },
+      persistedProgress: {
+        status:  'error',
+        warning: { code: w.code, severity: w.severity, evidence: w.evidence, suggestion: w.suggestion },
+        url:     w.url || null,
+        count:   0,
+      },
     }));
-    if (addElementsGlobally) addElementsGlobally(id, newNodes, newEdges, 'sibling');
-    else { addNodes(newNodes); addEdges(newEdges); }
+    spawnSourceCardsAround(items, 'rgba(239,68,68,0.6)');
     EventLogger.log(`[JobHub][${id}] Re-spawned ${missing.length} blocked source card(s) to resolve: ${missing.map(w => w.sourceId).join(', ')}`);
-  }, [id, getNodes, getNode, addElementsGlobally, addNodes, addEdges]);
+  }, [id, getNodes, spawnSourceCardsAround]);
 
   // Re-apply all filters on mount — opacities are stripped from save files to keep them clean.
   // The score filter is "active" whenever the slider is above its dynamic min,
