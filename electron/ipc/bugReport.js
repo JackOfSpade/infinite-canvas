@@ -64,11 +64,11 @@ const dropBandVerdict = (kept, dropped, keptScore, droppedScore) => {
   if (Math.abs(rel) <= 0.15) {
     return ` ✅ dropped median $${dropped.median} ≈ kept median $${kept.median} — the cap dropped a representative sample, so the price is not skewed by it (the 25/15 cap is a by-design cost bound, not lost signal).`;
   }
-  const pct  = Math.round(Math.abs(rel) * 100);
-  const dir  = rel > 0 ? 'ABOVE' : 'BELOW';
+  const pct = Math.round(Math.abs(rel) * 100);
+  const dir = rel > 0 ? 'ABOVE' : 'BELOW';
   const bias = rel > 0 ? 'LOW' : 'HIGH';  // dropped pricier ⇒ kept skews low; dropped cheaper ⇒ kept skews high
   const haveScores = keptScore != null && droppedScore != null && keptScore > 0;
-  const scoreNote  = haveScores ? ` (median match score ${droppedScore} vs kept ${keptScore})` : '';
+  const scoreNote = haveScores ? ` (median match score ${droppedScore} vs kept ${keptScore})` : '';
   // Dropped comps clearly less relevant than kept → the cap correctly kept the
   // closest matches; the price gap is the ranking working, not a bias.
   if (haveScores && droppedScore < keptScore * 0.85) {
@@ -672,7 +672,7 @@ function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId) {
       // Found vs. unique — a gap means an extractor emitted the same listing
       // multiple times, so the "found"/"used" totals overstate the real signal
       // the model saw (duplicates aren't lost data, they're phantom data).
-      const soldDup   = s.soldUnique   != null ? s.soldFound   - s.soldUnique   : 0;
+      const soldDup = s.soldUnique != null ? s.soldFound - s.soldUnique : 0;
       const activeDup = s.activeUnique != null ? s.activeFound - s.activeUnique : 0;
       if (soldDup > 0 || activeDup > 0) {
         lines.push(
@@ -765,17 +765,17 @@ function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId) {
       if (s.marketSummary) {
         const ms = s.marketSummary;
         const msActive = ms.active_count ?? null;
-        const msSold   = ms.sold_count ?? null;
+        const msSold = ms.sold_count ?? null;
         const soldPrices = (ms.sold_low != null && ms.sold_high != null)
           ? ` ($${ms.sold_low}–$${ms.sold_high}, median $${ms.sold_median ?? '?'})`
           : '';
         const activeFloor = ms.active_lowest != null ? ` (floor $${ms.active_lowest})` : '';
         const activeGap = msActive === 0 && (s.activeUsed || 0) > 0;
-        const soldGap   = msSold   != null && msSold < (s.soldUsed || 0) * 0.5 && (s.soldUsed || 0) > 4;
+        const soldGap = msSold != null && msSold < (s.soldUsed || 0) * 0.5 && (s.soldUsed || 0) > 4;
         lines.push(
           `- Model's own market summary: ${msSold ?? '?'} sold${soldPrices} · ${msActive ?? '?'} active${activeFloor}` +
           (activeGap ? ` ⚠️ model counted 0 active despite ${s.activeUsed} being fed — model classified them all as off-spec (accessories/parts/wrong-product)` : '') +
-          (soldGap   ? ` ⚠️ model counted only ${msSold} sold of ${s.soldUsed} fed — most were classified as off-spec` : ''),
+          (soldGap ? ` ⚠️ model counted only ${msSold} sold of ${s.soldUsed} fed — most were classified as off-spec` : ''),
         );
       }
     }
@@ -1286,13 +1286,13 @@ ${rows}
     // isn't. Deleted-node tasks (nodeId absent from currentNodeIds but still
     // registered) are the real signal; they're included when they can't be
     // attributed to a foreign canvas via the pipeline telemetry windowId.
-    const jobTelWindowId   = getJobsTelemetry()?.windowId ?? null;
-    const mktTelWindowId   = getMarketplaceTelemetry()?.windowId ?? null;
+    const jobTelWindowId = getJobsTelemetry()?.windowId ?? null;
+    const mktTelWindowId = getMarketplaceTelemetry()?.windowId ?? null;
     const knownForeignNodeIds = new Set([
-      jobTelWindowId   != null && jobTelWindowId   !== reportWindowId ? getJobsTelemetry()?.nodeId   : null,
-      mktTelWindowId   != null && mktTelWindowId   !== reportWindowId ? getMarketplaceTelemetry()?.nodeId : null,
+      jobTelWindowId != null && jobTelWindowId !== reportWindowId ? getJobsTelemetry()?.nodeId : null,
+      mktTelWindowId != null && mktTelWindowId !== reportWindowId ? getMarketplaceTelemetry()?.nodeId : null,
     ].filter(Boolean));
-    const localTasks   = tasks.filter(t => !knownForeignNodeIds.has(t.nodeId));
+    const localTasks = tasks.filter(t => !knownForeignNodeIds.has(t.nodeId));
     const foreignCount = tasks.length - localTasks.length;
     if (localTasks.length > 0) {
       const rows = localTasks
@@ -1367,8 +1367,13 @@ ${rows}
       const entry = cache[p.id];
       const traceStatus = entry?.lastTrace?.status;
       const staleMismatch = entry?.connected && traceStatus != null && traceStatus >= 400;
+      const mustContain = p.connectedFinalUrlMustContain;
+      const traceFinalUrl = (entry?.lastTrace?.finalUrl || '').toLowerCase();
+      const redirectMismatch = !staleMismatch && entry?.connected && mustContain && !traceFinalUrl.includes(mustContain.toLowerCase());
       const connected = entry?.connected
-        ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)` : '✅ true')
+        ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)`
+          : redirectMismatch ? `⚠️ true (redirected to ${entry.lastTrace.finalUrl} — expected path containing "${mustContain}")`
+            : '✅ true')
         : entry ? '❌ false' : '— (no entry)';
       const lastConfirmed = entry?.ts
         ? `${new Date(entry.ts).toISOString()} (${Math.round((Date.now() - entry.ts) / 1000)}s ago)`
@@ -1423,8 +1428,11 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
   // different UI context (Settings → Job Boards). A verify URL returning 404
   // means the platform changed its URL structure — that's only visible here,
   // not in the sell-monitor section above.
+  // Only include when this canvas actually has job nodes — don't bleed job
+  // login state into a marketplace-only report.
+  const hasJobNodes = (nodes || []).some(n => n?.type?.toLowerCase().startsWith('job'));
   let jobSessionsMarkdown = '';
-  try {
+  if (hasJobNodes) try {
     const platforms = getJobLoginPlatforms() || [];
     const cachePath = path.join(app.getPath('userData'), 'session-status-cache.json');
     let cache = {};
@@ -1437,8 +1445,13 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
       const entry = cache[p.id];
       const traceStatus = entry?.lastTrace?.status;
       const staleMismatch = entry?.connected && traceStatus != null && traceStatus >= 400;
+      const mustContain = p.connectedFinalUrlMustContain;
+      const traceFinalUrl = (entry?.lastTrace?.finalUrl || '').toLowerCase();
+      const redirectMismatch = !staleMismatch && entry?.connected && mustContain && !traceFinalUrl.includes(mustContain.toLowerCase());
       const connected = entry?.connected
-        ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)` : '✅ true')
+        ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)`
+          : redirectMismatch ? `⚠️ true (redirected to ${entry.lastTrace.finalUrl} — expected path containing "${mustContain}")`
+            : '✅ true')
         : entry ? '❌ false' : '— (no entry)';
       const lastConfirmed = entry?.ts
         ? `${new Date(entry.ts).toISOString()} (${Math.round((Date.now() - entry.ts) / 1000)}s ago)`
@@ -1638,8 +1651,7 @@ ${aiConfig.provider === 'gemini' ? `
     stateWasTrimmed = true;
   }
 
-  let baseMarkdown = `Do not change the bug report feature, just what it reports. First assess if this bug report has all the data you need to debug this. If not, improve the reporting. Then, fix the following bug:
-
+  let baseMarkdown = `
 # Bug Report
 
 ## Issue Description

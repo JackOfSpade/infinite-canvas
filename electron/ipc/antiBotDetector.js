@@ -47,6 +47,24 @@ const SUSPICIOUS_BODY_RATIO = 0.3;   // < 30% of the source's typical body = sus
 // those can't co-occur with a healthy 200 result page anyway.)
 const CONTENT_SERVED_MIN_ITEMS = 3;
 
+// Soft gates — contribution / account walls that appear ALONGSIDE partial
+// content rather than replacing it entirely. Unlike captchas, these don't zero
+// out the extractor, so they're checked BEFORE the contentServed guard.
+// Severity 'block' so the hub pauses and shows a Solve card: user opens the
+// page, fulfills the requirement, and the now-ungated page is re-extracted
+// inline by the resolve window (same flow as captcha resolve).
+const SOFT_GATE_SIGNALS = [
+  // Glassdoor "write a review / add a salary" contribution gate. Shows as an
+  // overlay on search results: the extractor still finds jobs from __NEXT_DATA__
+  // but "Show more" is hidden and only ~5 results come through. After the user
+  // writes a review in the resolve window the gate clears and the full result
+  // set becomes available for inline extraction.
+  { pat: /to restore your access|write a review.{0,30}(?:see|access|unlock|view)|add a salary.{0,30}(?:see|access|unlock|view)/i,
+    code: 'glassdoor-review-gate',
+    severity: 'block',
+    suggestion: 'Glassdoor is gating results behind a review. Click Solve — write a short company review or salary entry on the opened page, then the full job list will load and be captured automatically.' },
+];
+
 const KEYWORD_SIGNALS = [
   // Cloudflare interstitials
   { pat: /just a moment\s*\.\.\.|checking your browser|cf-challenge|cf-browser-verification|cf_chl_/i,
@@ -161,6 +179,24 @@ export function detectAntiBotSignal(ctx = {}) {
           code: s.code,
           severity: s.severity,
           evidence: `${label}Final URL ${finalUrl} matched ${s.code}`,
+          suggestion: s.suggestion,
+        };
+      }
+    }
+  }
+
+  // Layer 2.5 — soft gate scan (runs before contentServed check).
+  // These gates appear alongside partial content, so checking them only when
+  // itemsExtracted < CONTENT_SERVED_MIN_ITEMS would miss them.
+  if (html) {
+    const head = String(html).slice(0, HTML_SCAN_CHARS);
+    for (const s of SOFT_GATE_SIGNALS) {
+      const m = head.match(s.pat);
+      if (m) {
+        return {
+          code: s.code,
+          severity: s.severity,
+          evidence: `${label}body contained "${(m[0] || '').slice(0, 80)}" (${s.code})`,
           suggestion: s.suggestion,
         };
       }

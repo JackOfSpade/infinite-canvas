@@ -524,6 +524,11 @@ Be creative with suggestedRoleQueries — think about what career directions the
     logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across 12 sources (maxAge=${ageDays}d)`);
     jobsTelemetry.nodeId = nodeId;
     jobsTelemetry.windowId = event.sender?.id ?? null;
+    // Reset per-run state at search START, not at search end — a paste or captcha
+    // resolve can arrive mid-run (before the search result returns), and resetting
+    // at the end would wipe those records before the bug report reads them.
+    jobsTelemetry.resolves = {};
+    jobsTelemetry.pastedPastes = [];
     // Fresh per-source event trail for this run (survives source-card deletion).
     jobsTelemetry.sourceEvents = {};
     jobsTelemetry.sourceEventsT0 = Date.now();
@@ -811,12 +816,6 @@ Be creative with suggestedRoleQueries — think about what career directions the
       kept: kept.length,
       bySource,
     };
-    // A fresh search starts a new run — drop resolves AND prior pastes. A manual
-    // paste always happens AFTER its search (Google fails to scrape → user pastes),
-    // so clearing here scopes pastedPastes to the current run; without it, a prior
-    // session's paste would inflate the "gathered this session" tally.
-    jobsTelemetry.resolves = {};
-    jobsTelemetry.pastedPastes = [];
     return { jobs: kept, sourceResults, scrapeWarnings };
   });
 
