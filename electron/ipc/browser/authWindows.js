@@ -276,7 +276,7 @@ export async function openLoginWindow(platformId, sender = null) {
  * window manually. The caller is expected to retry the original scrape; this
  * function does not retry on its own.
  */
-export async function openCaptchaResolveWindow(url, sender = null, signal = null, inlineExtractorJS = null) {
+export async function openCaptchaResolveWindow(url, sender = null, signal = null, inlineExtractorJS = null, secondTabUrl = null) {
   if (!url) throw new Error('openCaptchaResolveWindow requires a url');
 
   const executablePath = process.env.CHROME_PATH || await findChromePath();
@@ -312,6 +312,15 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
   // Safe because the probe below gates extract on textLength > BODY_TEXT_GATE,
   // which is its own "page has real content" check.
   await page.goto(url, { waitUntil: 'load', timeout: 30000 }).catch(() => {});
+
+  // When the caller needs the user to act on a separate page (e.g. Glassdoor
+  // review gate: Tab 1 stays on job results for polling; Tab 2 is where the
+  // user writes their review). Tab 2 is opened last so it gets focus, keeping
+  // Tab 1 untouched and ready for the extractor poll.
+  if (secondTabUrl) {
+    const tab2 = await captchaBrowser.newPage();
+    await tab2.goto(secondTabUrl, { waitUntil: 'load', timeout: 30000 }).catch(() => {});
+  }
 
   return new Promise((resolve) => {
     let isTerminated = false;

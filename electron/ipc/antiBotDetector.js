@@ -56,13 +56,16 @@ const CONTENT_SERVED_MIN_ITEMS = 3;
 const SOFT_GATE_SIGNALS = [
   // Glassdoor "write a review / add a salary" contribution gate. Shows as an
   // overlay on search results: the extractor still finds jobs from __NEXT_DATA__
-  // but "Show more" is hidden and only ~5 results come through. After the user
-  // writes a review in the resolve window the gate clears and the full result
-  // set becomes available for inline extraction.
+  // but "Show more" is hidden and only ~5 results come through. The resolve
+  // window opens two tabs: Tab 1 stays on the job search URL for polling; Tab 2
+  // (same URL) is where the user clicks "Write a Review" / "Add a Salary" and
+  // completes the form. After submitting, the user switches to Tab 1, refreshes,
+  // and the now-ungated full result set is captured automatically.
   { pat: /to restore your access|write a review.{0,30}(?:see|access|unlock|view)|add a salary.{0,30}(?:see|access|unlock|view)/i,
     code: 'glassdoor-review-gate',
     severity: 'block',
-    suggestion: 'Glassdoor is gating results behind a review. Click Solve — write a short company review or salary entry on the opened page, then the full job list will load and be captured automatically.' },
+    openSecondTab: true,
+    suggestion: 'Glassdoor is gating results behind a review. Two tabs will open — use Tab 2 to write a company review or add a salary, then switch back to Tab 1 (job results) and refresh it. The full list will be captured and the window will close automatically.' },
 ];
 
 const KEYWORD_SIGNALS = [
@@ -198,6 +201,7 @@ export function detectAntiBotSignal(ctx = {}) {
           severity: s.severity,
           evidence: `${label}body contained "${(m[0] || '').slice(0, 80)}" (${s.code})`,
           suggestion: s.suggestion,
+          ...(s.openSecondTab ? { openSecondTab: true } : {}),
         };
       }
     }

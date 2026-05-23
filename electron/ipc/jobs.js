@@ -1307,9 +1307,9 @@ RULES:
   // pendingJobs and drop the warning. items is [] when no extractor is
   // available for the source (API sources can't be inline-extracted; their
   // Solve button doesn't render).
-  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, canvasFilePath, maxAgeDays } = {}, signal) => {
+  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, canvasFilePath, maxAgeDays, secondTabUrl } = {}, signal) => {
     if (!url) throw new Error('resolve-job-source requires a url');
-    logger.info(`[Jobs][${nodeId}] User opening resolve window for ${sourceId}: ${url}`);
+    logger.info(`[Jobs][${nodeId}] User opening resolve window for ${sourceId}: ${url}${secondTabUrl ? ' (2-tab)' : ''}`);
     // Map sourceId → the same extractor JS used by buildJobTasks. Only the
     // scrape sources (those needing Puppeteer) have an extractor here;
     // API sources don't expose a Solve button so this lookup never miss-
@@ -1322,7 +1322,7 @@ RULES:
       wellfound:    WELLFOUND_EXTRACTOR,
     };
     const inlineExtractorJS = SOURCE_EXTRACTORS[sourceId] || null;
-    const result = await openCaptchaResolveWindow(url, event.sender, signal, inlineExtractorJS);
+    const result = await openCaptchaResolveWindow(url, event.sender, signal, inlineExtractorJS, secondTabUrl || null);
     const extracted = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
 
     // Run the SAME age + history dedup the headless search path applies.

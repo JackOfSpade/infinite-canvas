@@ -123,6 +123,9 @@ export function JobSourceCardNode({ id, data }) {
         // jobs. maxAgeDays lives on the owning hub's data.
         canvasFilePath: nav?.currentFile || null,
         maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
+        // Soft-gate flows (e.g. Glassdoor review gate) need a second tab so
+        // Tab 1 stays on the job URL for polling while the user acts on Tab 2.
+        secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
       });
       // When the captcha-resolve window auto-detects the challenge as
       // cleared, the visible browser session that just bypassed the bot
