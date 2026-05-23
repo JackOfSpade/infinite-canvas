@@ -1031,10 +1031,10 @@ export function JobHubNode({ id, data }) {
       // so the user fixes login before we burn LLM tokens or browser slots.
       const JOB_LOGIN_IDS = ['indeed', 'glassdoor', 'ziprecruiter', 'wellfound'];
       const notLoggedIn = (await Promise.all(
-        JOB_LOGIN_IDS.map(async (id) => {
-          const res = await window.electronAPI.checkJobPlatformAuth?.({ platformId: id });
+        JOB_LOGIN_IDS.map(async (platformId) => {
+          const res = await window.electronAPI.checkJobPlatformAuth?.({ platformId });
           if (res?.connected) return null;
-          return JOB_SOURCES.find(s => s.id === id)?.name || id;
+          return JOB_SOURCES.find(s => s.id === platformId)?.name || platformId;
         })
       )).filter(Boolean);
       if (notLoggedIn.length > 0) {
@@ -1107,7 +1107,7 @@ export function JobHubNode({ id, data }) {
       // Backend login gate: if any browser-scraped platform isn't connected
       // the search handler returns early with notLoggedIn instead of running.
       if (!searchResult.success && Array.isArray(searchResult.notLoggedIn) && searchResult.notLoggedIn.length > 0) {
-        const names = searchResult.notLoggedIn.map(id => JOB_SOURCES.find(s => s.id === id)?.name || id);
+        const names = searchResult.notLoggedIn.map(loginId => JOB_SOURCES.find(s => s.id === loginId)?.name || loginId);
         throw Object.assign(
           new Error(`Log in to ${names.join(', ')} first (Settings → Job Platform Logins)`),
           { isLoginGate: true, notLoggedIn: searchResult.notLoggedIn }

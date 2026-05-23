@@ -42,7 +42,7 @@ export function useListingActions(id, data) {
   const [prevPlatforms, setPrevPlatforms] = useState(data.selectedPlatforms);
   if (JSON.stringify(data.selectedPlatforms) !== JSON.stringify(prevPlatforms)) {
     setPrevPlatforms(data.selectedPlatforms);
-    setSelectedPlatforms(data.selectedPlatforms);
+    setSelectedPlatforms(data.selectedPlatforms || ['ebay', 'facebook', 'mercari']);
   }
 
   const [prevExternalPrice, setPrevExternalPrice] = useState(data.userPrice || data.pricing?.recommended_price || '');

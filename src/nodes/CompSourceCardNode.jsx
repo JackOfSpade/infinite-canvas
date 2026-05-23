@@ -171,8 +171,8 @@ export function CompSourceCardNode({ id, data }) {
           onPointerDown={(e) => e.stopPropagation()}
           title="Copy this — paste back to debug"
         >
-          <div className="font-mono break-words">{warning.evidence}</div>
-          <div className="mt-0.5 opacity-80 break-words">{warning.suggestion}</div>
+          {warning.evidence && <div className="font-mono break-words">{warning.evidence}</div>}
+          {warning.suggestion && <div className="mt-0.5 opacity-80 break-words">{warning.suggestion}</div>}
         </div>
       )}
       {/* Two-button decision row for warned/errored cards — Solve opens the

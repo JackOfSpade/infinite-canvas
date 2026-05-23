@@ -108,7 +108,7 @@ export function ListingNode({ id, data }) {
           status: 'priced',
           pricing,
           comps: synthResult.comps || comps,
-          userPrice: pricing.recommended_price || '',
+          userPrice: pricing.recommended_price ?? '',
         });
       } else {
         // Synthesis ran but produced no usable price (typically no comps found).
