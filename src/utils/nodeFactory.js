@@ -30,7 +30,10 @@ export function createTextNode(position) {
   };
 }
 
-export function createLinkNode(position, extra = {}) {
+// Internal factories — callers use the NODE_FACTORIES lookup below instead of
+// importing these directly. (createTextNode is exported because Canvas.jsx
+// calls it directly to side-step the factory map; see its callsite.)
+function createLinkNode(position, extra = {}) {
   return {
     id: generateId(),
     type: 'link',
@@ -39,7 +42,7 @@ export function createLinkNode(position, extra = {}) {
   };
 }
 
-export function createGroupNode(position) {
+function createGroupNode(position) {
   return {
     id: generateId(), type: 'group', position,
     style: { width: 160, height: 160 },
@@ -50,14 +53,14 @@ export function createGroupNode(position) {
   };
 }
 
-export function createJobHubNode(position, extra = {}) {
+function createJobHubNode(position, extra = {}) {
   return {
     id: generateId(), type: 'jobhub', position,
     data: { hubState: 'empty', ...extra },
   };
 }
 
-export function createSellHubNode(position, extra = {}) {
+function createSellHubNode(position, extra = {}) {
   return {
     id: generateId(), type: 'sellhub', position,
     data: { hubState: 'empty', ...extra },
