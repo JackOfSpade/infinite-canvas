@@ -317,8 +317,49 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
   // review gate: Tab 1 stays on job results for polling; Tab 2 is where the
   // user writes their review). Tab 2 is opened last so it gets focus, keeping
   // Tab 1 untouched and ready for the extractor poll.
+  //
+  // Both tabs get a color-coded sticky banner injected via evaluateOnNewDocument
+  // (persists across SPA navigations within the tab) + an immediate evaluate call
+  // (catches the already-loaded initial page). The banners orient the user so they
+  // don't accidentally write the review on the polling tab.
   if (secondTabUrl) {
+    // Helper: inject once on every new document load in a tab.
+    // evaluateOnNewDocument args are serialized, so text/bg must be primitives.
+    const injectBanner = async (p, text, bg) => {
+      await p.evaluateOnNewDocument((t, b) => {
+        const inject = () => {
+          if (document.getElementById('__ic-tab-banner__')) return;
+          const el = document.createElement('div');
+          el.id = '__ic-tab-banner__';
+          el.style.cssText = `position:fixed;top:0;left:0;right:0;z-index:2147483647;background:${b};color:#fff;padding:9px 16px;font:500 13px/1.4 system-ui,sans-serif;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.35);pointer-events:none`;
+          el.textContent = t;
+          if (document.body) document.body.prepend(el);
+        };
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', inject);
+        else inject();
+      }, text, bg).catch(() => {});
+      // Also inject immediately into the already-loaded page.
+      await p.evaluate((t, b) => {
+        if (document.getElementById('__ic-tab-banner__')) return;
+        const el = document.createElement('div');
+        el.id = '__ic-tab-banner__';
+        el.style.cssText = `position:fixed;top:0;left:0;right:0;z-index:2147483647;background:${b};color:#fff;padding:9px 16px;font:500 13px/1.4 system-ui,sans-serif;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.35);pointer-events:none`;
+        el.textContent = t;
+        if (document.body) document.body.prepend(el);
+      }, text, bg).catch(() => {});
+    };
+
+    await injectBanner(
+      page,
+      '🔄  Tab 1 · Job Results — refresh this page after completing your task on Tab 2',
+      '#16a34a',
+    );
     const tab2 = await captchaBrowser.newPage();
+    await injectBanner(
+      tab2,
+      '✏️  Tab 2 · Complete your review or salary entry here — then switch to Tab 1 and refresh it',
+      '#2563eb',
+    );
     await tab2.goto(secondTabUrl, { waitUntil: 'load', timeout: 30000 }).catch(() => {});
   }
 
