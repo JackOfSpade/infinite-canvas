@@ -54,13 +54,92 @@ export const TARGET_BUCKETING_CATEGORY = 'Target Role';
 
 // Tree layout — column x-offsets and row stacking heights. With branches,
 // every level shifts one column right vs. the no-target layout.
-const COL_X_WITH_TARGET    = { branch: 400, category: 700, bucket: 1000, job: 1400 };
-const COL_X_WITHOUT_TARGET = { category: 400, bucket: 700, job: 1100 };
-const ROW_H = { branch: 90, category: 70, bucket: 70, job: 280 };
+export const COL_X_WITH_TARGET    = { branch: 400, category: 700, bucket: 1000, job: 1400 };
+export const COL_X_WITHOUT_TARGET = { category: 400, bucket: 700, job: 1100 };
+export const ROW_H = { branch: 90, category: 70, bucket: 70, job: 280 };
 
 // Per-bucket pagination — buckets reveal the first N jobs on expand; the
 // JobGroupNode component implements the Show-more interaction.
 const BUCKET_VISIBLE_DEFAULT = 10;
+
+/**
+ * Compute absolute canvas positions for every visible job-tree node owned by
+ * `hubId`, based on the current expanded/collapsed state in `nodes`. Called
+ * after every expand, collapse, or show-more so the layout is always tight
+ * rather than pre-spaced for the fully-expanded case.
+ *
+ * Returns a map of { [nodeId]: { x, y } }. Only nodes that are reachable from
+ * the hub's root groups (categories or branches) are included — other canvas
+ * nodes (source cards, other hubs) are untouched.
+ */
+export function computeLayoutPositions(nodes, hubId, COL_X, hubPos) {
+  const nodeById = new Map(nodes.map(n => [n.id, n]));
+
+  // Collect every ID that appears as a child of some group node for this hub
+  const allChildIds = new Set();
+  nodes.forEach(n => {
+    if (n.data?.hubId === hubId && Array.isArray(n.data?.childIds)) {
+      n.data.childIds.forEach(cid => allChildIds.add(cid));
+    }
+  });
+
+  // Root groups: hub-owned jobgroup nodes not listed as a child of any other group
+  const rootGroups = nodes
+    .filter(n => n.data?.hubId === hubId && n.type === 'jobgroup' && !allChildIds.has(n.id))
+    .sort((a, b) => (a.position?.y ?? 0) - (b.position?.y ?? 0));
+
+  const positions = {};
+
+  function layoutNode(nodeId, startY) {
+    const node = nodeById.get(nodeId);
+    if (!node) return startY;
+
+    const kind = node.data?.kind;
+    let x;
+    if (node.type === 'jobcard') {
+      x = hubPos.x + COL_X.job;
+    } else if (kind === 'bucket') {
+      x = hubPos.x + COL_X.bucket;
+    } else if (kind === 'category') {
+      x = hubPos.x + COL_X.category;
+    } else if (kind === 'branch') {
+      x = hubPos.x + COL_X.branch;
+    } else {
+      return startY;
+    }
+
+    positions[nodeId] = { x, y: startY };
+
+    if (node.type === 'jobcard') {
+      return startY + ROW_H.job;
+    }
+
+    if (!node.data?.expanded) {
+      const h = kind === 'branch' ? ROW_H.branch : ROW_H.bucket; // bucket === category === 70
+      return startY + h;
+    }
+
+    // Expanded: lay out visible children
+    const childIds = Array.isArray(node.data?.childIds) ? node.data.childIds : [];
+    const isBucketNode = kind === 'bucket';
+    const visCount = isBucketNode
+      ? Math.min(node.data?.visibleCount ?? BUCKET_VISIBLE_DEFAULT, childIds.length)
+      : childIds.length;
+
+    let nextY = startY;
+    for (let i = 0; i < visCount; i++) {
+      nextY = layoutNode(childIds[i], nextY);
+    }
+    return nextY;
+  }
+
+  let nextY = hubPos.y;
+  for (const root of rootGroups) {
+    nextY = layoutNode(root.id, nextY);
+  }
+
+  return positions;
+}
 
 // Stable per-job fingerprint. The search-side dedup pass already enforces
 // uniqueness on (title|company); url is defense-in-depth in case future
@@ -224,15 +303,15 @@ export function buildJobTreeNodes({
   // Spawn one category's buckets + jobs. Returns the category node id or
   // null when no surviving buckets remain (so callers can omit it from
   // their parent's childIds without dangling references).
-  const spawnCategorySubtree = (category, ci, baseY, parentId, idPrefix, parentColX, bucketColX, jobColX, keyFilter) => {
+  const spawnCategorySubtree = (category, catY, parentId, idPrefix, ci, parentColX, bucketColX, jobColX, keyFilter) => {
     const catId = `${idPrefix}-cat-${ci}`;
-    const catY  = baseY + ci * ROW_H.category;
     const catChildIds = [];
     let catJobCount = 0;
+    let nextBucY = catY;
 
     (category.buckets || []).forEach((bucket, bi) => {
       const bucId = `${catId}-buc-${bi}`;
-      const bucY  = catY + bi * ROW_H.bucket;
+      const bucY  = nextBucY;
       const bucChildIds = spawnBucketJobs(bucket.jobIndices, bucY, jobColX, keyFilter);
       bucChildIds.forEach(jobId => pushEdge(bucId, jobId));
       if (bucChildIds.length === 0) return; // skip empty bucket entirely
@@ -243,6 +322,8 @@ export function buildJobTreeNodes({
         childIds: bucChildIds, minSalary: bucket.minSalary, maxSalary: bucket.maxSalary,
       });
       pushEdge(catId, bucId);
+      // Minimal spacing at spawn — relayout corrects positions on first expand
+      nextBucY = bucY + ROW_H.bucket;
     });
 
     if (catChildIds.length === 0) return null;
@@ -257,7 +338,7 @@ export function buildJobTreeNodes({
       },
     });
     pushEdge(parentId, catId);
-    return catId;
+    return { catId, nextY: nextBucY };
   };
 
   // Single-bucket fallback for jobs the AI failed to bucket. Used both for
@@ -283,9 +364,10 @@ export function buildJobTreeNodes({
     const targetBranchChildIds = [];
     const targetBranchY = originalPos.y;
 
+    let nextTargetBucY = targetBranchY;
     (targetCategory?.buckets || []).forEach((bucket, bi) => {
       const bucId = `${targetBranchId}-buc-${bi}`;
-      const bucY  = targetBranchY + bi * ROW_H.bucket;
+      const bucY  = nextTargetBucY;
       const bucChildIds = spawnBucketJobs(bucket.jobIndices, bucY, COL_X.job, (k) => targetKeySet.has(k));
       bucChildIds.forEach(jobId => pushEdge(bucId, jobId));
       if (bucChildIds.length === 0) return;
@@ -295,6 +377,7 @@ export function buildJobTreeNodes({
         childIds: bucChildIds, minSalary: bucket.minSalary, maxSalary: bucket.maxSalary,
       });
       pushEdge(targetBranchId, bucId);
+      nextTargetBucY = bucY + ROW_H.bucket;
     });
 
     // Sweep any target jobs the AI missed into a synthetic "All" bucket so
@@ -303,11 +386,12 @@ export function buildJobTreeNodes({
     if (targetMissing.length > 0) {
       EventLogger.error(`[JobHub] Target bucketing missed ${targetMissing.length} job(s) — placing in synthetic "All"`);
       const bucId = `${targetBranchId}-buc-fallback`;
-      const bucY  = targetBranchY + (targetCategory?.buckets?.length || 0) * ROW_H.bucket;
+      const bucY  = nextTargetBucY;
       const bucChildIds = spawnFallbackBucket(targetMissing, bucId, bucY, COL_X.job);
       targetBranchChildIds.push(bucId);
       pushBucketNode({ id: bucId, x: COL_X.bucket, y: bucY, label: 'All', childIds: bucChildIds });
       pushEdge(targetBranchId, bucId);
+      nextTargetBucY = bucY + ROW_H.bucket;
     }
 
     // Target Role branch node — always visible, even when empty, so the
@@ -326,25 +410,28 @@ export function buildJobTreeNodes({
     // Other Strong Matches branch — only when non-empty.
     if (otherList.length > 0) {
       const otherBranchId = `${baseNodeId}-branch-other`;
-      const otherBranchY  = targetBranchY + Math.max(1, targetBranchChildIds.length) * ROW_H.category + ROW_H.branch;
+      const otherBranchY  = nextTargetBucY + ROW_H.branch;
       const otherCategories = bucketTree.filter(c => c.name !== TARGET_BUCKETING_CATEGORY);
       const otherKeyFilter = (k) => !targetKeySet.has(k);
       const otherBranchChildIds = [];
 
+      let nextCatY = otherBranchY;
       otherCategories.forEach((cat, ci) => {
-        const catId = spawnCategorySubtree(
-          cat, ci, otherBranchY, otherBranchId, otherBranchId,
+        const result = spawnCategorySubtree(
+          cat, nextCatY, otherBranchId, otherBranchId, ci,
           COL_X.category, COL_X.bucket, COL_X.job, otherKeyFilter,
         );
-        if (catId) otherBranchChildIds.push(catId);
+        if (result) {
+          otherBranchChildIds.push(result.catId);
+          nextCatY += ROW_H.category;
+        }
       });
 
       const otherMissing = otherList.filter(j => !spawnedKeys.has(keyOf(j)));
       if (otherMissing.length > 0) {
         EventLogger.error(`[JobHub] Other bucketing missed ${otherMissing.length} job(s) — placing in synthetic Uncategorized`);
-        const ci = otherCategories.length;
         const catId = `${otherBranchId}-cat-missing`;
-        const catY  = otherBranchY + ci * ROW_H.category;
+        const catY  = nextCatY;
         const bucId = `${catId}-buc-0`;
         const bucChildIds = spawnFallbackBucket(otherMissing, bucId, catY, COL_X.job);
         pushBucketNode({ id: bucId, x: COL_X.bucket, y: catY, label: 'All', childIds: bucChildIds });
@@ -376,19 +463,21 @@ export function buildJobTreeNodes({
     }
   } else if (bucketTree) {
     // No target role — original flat structure: categories direct under hub.
+    let nextCatY = originalPos.y;
     bucketTree.forEach((category, ci) => {
-      spawnCategorySubtree(
-        category, ci, originalPos.y, hubId, baseNodeId,
+      const result = spawnCategorySubtree(
+        category, nextCatY, hubId, baseNodeId, ci,
         COL_X.category, COL_X.bucket, COL_X.job, null,
       );
+      // Minimal spacing at spawn — relayout corrects positions on expand
+      if (result) nextCatY += ROW_H.category;
     });
     // Uncategorized sweep for any unbucketed scored jobs.
     const missing = scoredJobs.filter(j => !spawnedKeys.has(keyOf(j)));
     if (missing.length > 0) {
       EventLogger.error(`[JobHub] Bucketing missed ${missing.length} job(s) — placing in synthetic Uncategorized`);
-      const ci = bucketTree.length;
       const catId = `${baseNodeId}-cat-missing`;
-      const catY  = originalPos.y + ci * ROW_H.category;
+      const catY  = nextCatY;
       const bucId = `${catId}-buc-0`;
       const bucChildIds = spawnFallbackBucket(missing, bucId, catY, COL_X.job);
       pushBucketNode({ id: bucId, x: COL_X.bucket, y: catY, label: 'All', childIds: bucChildIds });

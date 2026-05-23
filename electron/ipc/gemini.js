@@ -236,7 +236,8 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   // out-param the fallback loop writes the succeeded model into — neither is a
   // Gemini API field, so pull them out so they never leak into generationConfig
   // (which would 400 the call).
-  const { signal, responseSchema, task, meta: _meta, ...restGenConfig } = genConfig;
+  const { signal, responseSchema, task, formulaSeed: _formulaSeed, meta: _meta, ...restGenConfig } = genConfig;
+  const formulaSeed = _formulaSeed ?? null;
 
   const generationConfig = {
     temperature: GEMINI_TEMPERATURE,
@@ -300,7 +301,7 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
     // Censored signal: real demand exceeded `cap`. Record it so effectiveCap
     // provisions past this cap on the very next call (bypasses MIN_SAMPLES) —
     // otherwise this task truncates + falls back to a weaker model every run.
-    recordTruncation(task, cap);
+    recordTruncation(task, cap, formulaSeed);
     const thoughts = usage?.thoughtsTokenCount || 0;
     const visible  = usage?.candidatesTokenCount ?? 0;
     const note = thoughts > visible

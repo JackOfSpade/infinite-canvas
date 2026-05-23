@@ -132,20 +132,41 @@ function selectAcrossSources(items, n, scoreFn) {
   return picked;
 }
 
+// Accessories FOR an item, not the item itself — cases, covers, chargers, etc.
+// These are the biggest comp pollutant: a marketplace like Poshmark (which bans
+// phone sales) returns a "sold iPhone XS" page that is almost entirely $5–$75
+// phone CASES. Their titles carry the full product name ("Apple iPhone XS
+// Silicone Case") with no negative signal, so the title-match ranking can't tell
+// them from a real phone — they tie, burn cap slots, and push genuine comps out
+// of the top-25. Site-agnostic (keys on the title, applies to every source).
+const ACCESSORY_RE = /\b(cases?|covers?|chargers?|cables?|screen\s+protectors?|tempered\s+glass|glass\s+protectors?|skins?|bumpers?|holsters?|wallets?|lanyards?|straps?|docks?|adapters?|mounts?|popsockets?)\b/i;
+// Strong "this is the actual device, not an accessory" signals — storage size,
+// unlock status, carrier. A listing with an accessory word AND one of these
+// (e.g. "iPhone XS 64GB Unlocked, charger included") is the device → kept. Keeps
+// the accessory filter from false-positiving on real listings that mention an
+// included accessory; absent for non-device categories, where the accessory word
+// alone is the signal.
+const DEVICE_SIGNAL_RE = /\b(\d{2,4}\s?gb|\dtb|unlocked|verizon|at&?t|t-?mobile|sprint|gsm|cdma|esim)\b/i;
+
 /**
- * Drop non-genuine listings before they reach the pricing model. eBay surfaces
- * its own internal load/QA listings (titled "… Bidding Test generic N of x",
- * priced $0.01–$0.90) inside ordinary sold/active search results — they are not
- * real market comps, so they inflate counts and could skew pricing. Conservative
- * on purpose: only the unmistakable test-harness title signature (no real phone
- * listing is titled "bidding test"). Extend the pattern if other artifacts show
- * up. Returns the kept comps + the rejected ones (so the report can name them).
+ * Drop non-genuine listings before they reach the pricing model. Two classes:
+ *  1. eBay internal load/QA listings ("… Bidding Test generic N of x", $0.01–$0.90)
+ *     surfaced inside ordinary search results.
+ *  2. ACCESSORIES for the item rather than the item itself (see ACCESSORY_RE).
+ *
+ * Accessory rejection is product-AWARE: it only fires when the ITEM being priced
+ * isn't itself that kind of accessory (so someone selling a phone case keeps their
+ * case comps), and it spares any listing carrying a real device signal. General,
+ * not per-site. Returns kept + rejected so the report names them (not a silent drop).
  */
-function filterJunkComps(items) {
+function filterJunkComps(items, opts = {}) {
+  const itemIsAccessory = ACCESSORY_RE.test(`${opts.query || ''} ${opts.productTitle || ''}`);
   const kept = [], rejected = [];
   for (const it of (Array.isArray(items) ? items : [])) {
-    if (/\bbidding test\b/i.test(String(it?.title || ''))) rejected.push(it);
-    else kept.push(it);
+    const title = String(it?.title || '');
+    if (/\bbidding test\b/i.test(title)) { rejected.push(it); continue; }
+    if (!itemIsAccessory && ACCESSORY_RE.test(title) && !DEVICE_SIGNAL_RE.test(title)) { rejected.push(it); continue; }
+    kept.push(it);
   }
   return { kept, rejected };
 }
@@ -176,6 +197,14 @@ function priceStats(items) {
 // Each task has a `category: 'sold' | 'active'` field so the aggregate loop can
 // classify results without a separately-maintained hardcoded ID list.
 function buildCompTasks(query) {
+  // Swappa's /search is a MODEL picker (indexes by model, not configuration), so
+  // an over-specific query like "Apple iPhone XS 64GB" can miss the model entirely
+  // and fall through to featured/trending products. Strip storage/capacity tokens
+  // — never part of a model slug — for Swappa ONLY; the full-text sources below
+  // (eBay/Poshmark/Mercari) still want them as filters. The match-quality gate in
+  // SWAPPA_EXTRACTOR guarantees correctness regardless, so this only raises
+  // Swappa's recall (more real comps), never its wrong-product risk.
+  const swappaQuery = String(query || '').replace(/\b\d+\s?(?:gb|tb)\b/gi, ' ').replace(/\s+/g, ' ').trim() || query;
   return [
     // Tier 1 — Sold comps (gold standard)
     {
@@ -192,7 +221,7 @@ function buildCompTasks(query) {
     },
     {
       id: 'swappa', category: 'sold',
-      url: `https://swappa.com/search?q=${encodeURIComponent(query)}`,
+      url: `https://swappa.com/search?q=${encodeURIComponent(swappaQuery)}`,
       extractorJS: SWAPPA_EXTRACTOR,
       options: SWAPPA_CONFIG,
     },
@@ -393,14 +422,26 @@ async function checkListingStatusMultiSource({
 
   // Watch URLs are almost always auth-walled (dashboards, notification
   // feeds), so route them through the cookie-bearing stealth browser. The
-  // canonical listing URL stays on plain fetch for speed. classifyMultipleUrls
-  // fetches all N URLs in parallel, then makes ONE consolidated LLM call so
-  // the instruction block + listing identity preamble is paid once instead
-  // of N times — meaningful savings when N≥2.
+  // canonical listing URL tries the fast unauthenticated fetch FIRST, but
+  // escalates to the authed browser when that hits an auth wall — some
+  // platforms (Facebook Marketplace) gate even the item page behind login, so
+  // a plain fetch always redirects to /login there regardless of whether the
+  // user is logged in. Escalating reads the real page instead of reporting a
+  // false "needs-login" for a logged-in user. classifyMultipleUrls fetches all
+  // N URLs in parallel, then makes ONE consolidated LLM call so the instruction
+  // block + listing identity preamble is paid once instead of N times.
+  const escalatingListingFetcher = async (u, sig) => {
+    const r = await plainFetcher(u, sig);
+    if (!r.ok) return r; // network error — let the classifier surface it
+    const fin = String(r.finalUrl || u).toLowerCase();
+    const walled = r.status === 401 || r.status === 403 ||
+      /\/(login|signin|sign-in|account\/login)/i.test(fin);
+    return walled ? fetchHtmlAuthed(u, sig) : r;
+  };
   const urlSpecs = all.map(({ url, source }) => ({
     url,
     urlLabel: source === 'listing' ? 'listing' : source === 'card-watch' ? 'card watch' : 'platform watch',
-    fetcher:  source === 'listing' ? plainFetcher : fetchHtmlAuthed,
+    fetcher:  source === 'listing' ? escalatingListingFetcher : fetchHtmlAuthed,
   }));
 
   const perUrl = await classifyMultipleUrls({
@@ -578,8 +619,9 @@ Be specific about what you can clearly see. If you can't identify brand or model
     // Reject non-genuine listings (eBay internal test items, etc.) at the single
     // gate every comp passes through before pricing — covers both the scrape and
     // captcha-resolve paths. The rejection is surfaced in the report (not silent).
-    const { kept: sold,   rejected: soldJunk }   = filterJunkComps(Array.isArray(comps?.sold) ? comps.sold : []);
-    const { kept: active, rejected: activeJunk } = filterJunkComps(Array.isArray(comps?.active) ? comps.active : []);
+    const junkOpts = { query, productTitle: productSpec?.title };
+    const { kept: sold,   rejected: soldJunk }   = filterJunkComps(Array.isArray(comps?.sold) ? comps.sold : [], junkOpts);
+    const { kept: active, rejected: activeJunk } = filterJunkComps(Array.isArray(comps?.active) ? comps.active : [], junkOpts);
     const junk = [...soldJunk, ...activeJunk];
     if (junk.length > 0) {
       logger.info(`[Marketplace][${nodeId}] Rejected ${junk.length} non-genuine listing(s) before pricing (e.g. "${(junk[0]?.title || '').slice(0, 60)}")`);
@@ -666,6 +708,31 @@ Be specific about what you can clearly see. If you can't identify brand or model
     const activeKeptSet = new Set(activeComps);
     const soldDropped   = sold.filter(x => !soldKeptSet.has(x));
     const activeDropped = active.filter(x => !activeKeptSet.has(x));
+
+    // Median title-match relevance of kept vs dropped. The cap selects by this
+    // score, so kept normally out-scores dropped; HOW MUCH is the signal the
+    // report needs to tell a price gap caused by correctly shedding low-relevance
+    // comps (kept score ≫ dropped) from one where comparably-relevant comps were
+    // dropped (a real cap/ranking skew).
+    const medianScore = (items) => {
+      const xs = (Array.isArray(items) ? items : []).map(scoreByTitleMatch).sort((a, b) => a - b);
+      return xs.length ? Math.round(xs[Math.floor(xs.length / 2)] * 100) / 100 : null;
+    };
+    // Median match score PER SOURCE among the kept comps. A source far below the
+    // rest is returning off-target results (e.g. Swappa serving "Apple Vision
+    // Pro" for an "Apple iPhone XS" query — title shares only the brand token),
+    // which the round-robin selection then forces into the priced set. The
+    // report uses this to name the wrong-product source instead of letting it
+    // blend into the aggregate.
+    const scoreBySource = (items) => {
+      const groups = {};
+      for (const it of (Array.isArray(items) ? items : [])) {
+        (groups[it?.source || 'unknown'] ||= []).push(it);
+      }
+      const out = {};
+      for (const [k, g] of Object.entries(groups)) out[k] = medianScore(g);
+      return out;
+    };
 
     const synthMeta = {}; // populated with the model that actually served this call
     const pricing = await callLLMText(`
@@ -783,11 +850,20 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       soldDroppedStats:   priceStats(soldDropped),
       activeKeptStats:    priceStats(activeComps),
       activeDroppedStats: priceStats(activeDropped),
+      // Median title-match relevance of kept vs dropped (the cap ranks on this),
+      // so the report can tell correct low-relevance shedding from a real skew.
+      soldKeptScore:      medianScore(soldComps),
+      soldDroppedScore:   medianScore(soldDropped),
+      activeKeptScore:    medianScore(activeComps),
+      activeDroppedScore: medianScore(activeDropped),
       // Per-source composition of kept vs dropped — surfaces a source monopoly
       // (e.g. "kept: poshmark=25" while "dropped: ebay-sold=25") at a glance,
       // instead of having to read the raw comp JSON.
       soldKeptBySource:    countBySource(soldComps),
       soldDroppedBySource: countBySource(soldDropped),
+      // Per-source median match score among kept comps — a source far below the
+      // overall kept score returned wrong-product results that polluted pricing.
+      soldKeptScoreBySource: scoreBySource(soldComps),
       // Non-genuine listings (eBay test items, …) removed before pricing — surfaced
       // so the rejection is transparent, not a silent drop. soldFound/activeFound
       // above are already the post-rejection counts.
@@ -803,6 +879,13 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       // could hide: the found→fed cap drop is reported above (kept/dropped bands),
       // but the fed→actually-weighted gap was invisible until now.
       compBreakdown: pricing?.comp_breakdown || null,
+      // The model's own market summary — how many sold/active it actually
+      // counted (its internal view after it classified each comp). The
+      // fed→model-counted gap is the last invisible drop: we feed 15 active
+      // comps but the model may count 0 if it judged them all as accessories/
+      // parts. Without this, the report shows "15 active fed" with no signal
+      // that the model internally rejected them all.
+      marketSummary: pricing?.market_summary || null,
     };
 
     return { pricing };
@@ -817,6 +900,21 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
     logger.info(`[Marketplace][${nodeId}] Rescraping single source: ${sourceId}`);
     const result = await scrapeOneSource(sourceId, query, event.sender, signal, nodeId);
     logger.info(`[Marketplace][${nodeId}] Rescrape ${sourceId} → ${result.items.length} item(s), warning=${result.warning?.code || 'none'}`);
+    // When this rescrape follows a captcha-resolve whose inline extract came back
+    // empty (the common case: inline fails with "Execution context destroyed",
+    // the renderer falls back here), update that resolve's tally so the report
+    // reflects the items the rescrape actually recovered — otherwise the resolve
+    // line keeps the inline 0 and a successful recovery looks like a failure.
+    // Guarded on an existing entry so a standalone rescrape never invents one.
+    const prior = marketplaceTelemetry.resolves[sourceId];
+    if (prior) {
+      marketplaceTelemetry.resolves[sourceId] = {
+        ts: Date.now(),
+        extracted: Array.isArray(result?.items) ? result.items.length : 0,
+        category: result.category || prior.category,
+        via: 'rescrape',
+      };
+    }
     return result;
   });
 
@@ -863,11 +961,17 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       });
     }
     // Keyed by sourceId so a multi-source recovery keeps every resolve;
-    // re-resolving the same source replaces its entry (latest wins).
+    // re-resolving the same source replaces its entry (latest wins). `via`
+    // records HOW the items were recovered: 'inline' = extracted in the visible
+    // session here. When inline comes back empty the renderer falls back to
+    // rescrape-source, which updates this entry to via:'rescrape' (see below) —
+    // without that, a rescrape recovery shows as "inline-extracted 0" and a
+    // successful recovery reads as a failure in the report.
     marketplaceTelemetry.resolves[sourceId] = {
       ts: Date.now(),
       extracted: Array.isArray(result?.items) ? result.items.length : 0,
       category,
+      via: 'inline',
     };
     return { ...result, category };
   });

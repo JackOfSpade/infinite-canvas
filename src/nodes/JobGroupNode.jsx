@@ -2,6 +2,11 @@ import React from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { ChevronRight, ChevronDown, Plus } from 'lucide-react';
 import { NodeHandles } from './_shared/NodeHandles';
+import {
+  computeLayoutPositions,
+  COL_X_WITH_TARGET,
+  COL_X_WITHOUT_TARGET,
+} from './jobhub/buildJobTree';
 
 /**
  * JobGroupNode — collapsible header that owns a slice of the job-tree.
@@ -63,6 +68,8 @@ export function JobGroupNode({ id, data }) {
     if (hubLocked) return;
     if (childIds.length === 0) return;
 
+    const hubPos = getNode(data.hubId)?.position || { x: 0, y: 0 };
+
     if (expanded) {
       // Collapsing: hide every descendant under this node, not just direct
       // children. A previously-expanded bucket under a category leaves its
@@ -80,55 +87,59 @@ export function JobGroupNode({ id, data }) {
         const grand = child?.data?.childIds;
         if (Array.isArray(grand)) queue.push(...grand);
       }
-      setNodes(nodes => nodes.map(n => {
-        if (n.id === id) {
-          // Collapse the clicked node itself. If it's a bucket, also reset
-          // visibleCount so re-expanding starts from the first page (not the
-          // last paginated cursor the user had grown the bucket to).
-          return {
-            ...n,
-            data: {
-              ...n.data,
-              expanded: false,
-              ...(isBucket
-                ? { visibleCount: Math.min(10, childIds.length) }
-                : {}),
-            },
-          };
-        }
-        if (toHide.has(n.id)) {
-          // Also collapse any group-node descendants so re-expanding the
-          // parent starts from a clean closed state. Buckets snap back to
-          // their first page.
-          const isGroup = n.type === 'jobgroup';
-          if (isGroup) {
+      setNodes(nodes => {
+        const after = nodes.map(n => {
+          if (n.id === id) {
             return {
               ...n,
-              hidden: true,
               data: {
                 ...n.data,
                 expanded: false,
-                ...(n.data?.kind === 'bucket'
-                  ? { visibleCount: Math.min(10, (n.data?.childIds || []).length) }
-                  : {}),
+                ...(isBucket ? { visibleCount: Math.min(10, childIds.length) } : {}),
               },
             };
           }
-          return { ...n, hidden: true };
-        }
-        return n;
-      }));
+          if (toHide.has(n.id)) {
+            const isGroup = n.type === 'jobgroup';
+            if (isGroup) {
+              return {
+                ...n,
+                hidden: true,
+                data: {
+                  ...n.data,
+                  expanded: false,
+                  ...(n.data?.kind === 'bucket'
+                    ? { visibleCount: Math.min(10, (n.data?.childIds || []).length) }
+                    : {}),
+                },
+              };
+            }
+            return { ...n, hidden: true };
+          }
+          return n;
+        });
+        const hasBranches = after.some(n => n.data?.hubId === data.hubId && n.data?.kind === 'branch');
+        const COL_X = hasBranches ? COL_X_WITH_TARGET : COL_X_WITHOUT_TARGET;
+        const positions = computeLayoutPositions(after, data.hubId, COL_X, hubPos);
+        return after.map(n => positions[n.id] ? { ...n, position: positions[n.id] } : n);
+      });
     } else {
       // Expanding. Buckets reveal up to `visibleCount` children (paginated);
       // branches/categories reveal all direct children at once.
       const revealSet = isBucket
         ? new Set(childIds.slice(0, visibleCount))
         : new Set(childIds);
-      setNodes(nodes => nodes.map(n => {
-        if (n.id === id) return { ...n, data: { ...n.data, expanded: true } };
-        if (revealSet.has(n.id)) return { ...n, hidden: false };
-        return n;
-      }));
+      setNodes(nodes => {
+        const after = nodes.map(n => {
+          if (n.id === id) return { ...n, data: { ...n.data, expanded: true } };
+          if (revealSet.has(n.id)) return { ...n, hidden: false };
+          return n;
+        });
+        const hasBranches = after.some(n => n.data?.hubId === data.hubId && n.data?.kind === 'branch');
+        const COL_X = hasBranches ? COL_X_WITH_TARGET : COL_X_WITHOUT_TARGET;
+        const positions = computeLayoutPositions(after, data.hubId, COL_X, hubPos);
+        return after.map(n => positions[n.id] ? { ...n, position: positions[n.id] } : n);
+      });
     }
   };
 
@@ -137,13 +148,18 @@ export function JobGroupNode({ id, data }) {
     if (!isBucket || !hasMore || hubLocked) return;
     const nextCount = Math.min(visibleCount + 10, childIds.length);
     const toReveal = new Set(childIds.slice(visibleCount, nextCount));
-    setNodes(nodes => nodes.map(n => {
-      if (n.id === id) {
-        return { ...n, data: { ...n.data, visibleCount: nextCount } };
-      }
-      if (toReveal.has(n.id)) return { ...n, hidden: false };
-      return n;
-    }));
+    const hubPos = getNode(data.hubId)?.position || { x: 0, y: 0 };
+    setNodes(nodes => {
+      const after = nodes.map(n => {
+        if (n.id === id) return { ...n, data: { ...n.data, visibleCount: nextCount } };
+        if (toReveal.has(n.id)) return { ...n, hidden: false };
+        return n;
+      });
+      const hasBranches = after.some(n => n.data?.hubId === data.hubId && n.data?.kind === 'branch');
+      const COL_X = hasBranches ? COL_X_WITH_TARGET : COL_X_WITHOUT_TARGET;
+      const positions = computeLayoutPositions(after, data.hubId, COL_X, hubPos);
+      return after.map(n => positions[n.id] ? { ...n, position: positions[n.id] } : n);
+    });
   };
 
   return (

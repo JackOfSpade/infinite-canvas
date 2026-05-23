@@ -122,8 +122,16 @@ export async function getStealthBrowser() {
   if (isShuttingDown) throw new Error('[StealthBrowser] Cannot get browser during shutdown');
   if (browserInstance?.isConnected?.()) return browserInstance;
 
-  // Clear a dead/crashed instance so it can be garbage collected.
-  if (browserInstance) browserInstance = null;
+  // Clear a dead/crashed instance. Killing the orphaned Chrome process releases
+  // the userDataDir lock — without this, the next puppeteer.launch() fails with
+  // "The browser is already running for [userDataDir]."
+  if (browserInstance) {
+    logger.warn('[StealthBrowser] Browser connection lost (crashed?) — killing orphaned process before relaunch');
+    try { browserInstance.process()?.kill('SIGTERM'); } catch {}
+    browserInstance = null;
+    // Give the OS a moment to release the profile lock.
+    await new Promise(r => setTimeout(r, 500));
+  }
 
   if (browserLaunchPromise) return browserLaunchPromise;
 
@@ -334,6 +342,30 @@ export async function closeStealthBrowser(forShutdown = false) {
 export { humanMouseMove, humanScroll, dismissCookieBanner } from './browser/humanEmulation.js';
 export { openLoginWindow, getSessionStatus, getAllSessionStatuses, getSupportedPlatforms } from './browser/authWindows.js';
 export { getRandomUA } from './browser/antiDetectProfiles.js';
+
+// ── Job Platform Login Registry ──────────────────────────────────────────────
+// Platforms that require browser login to serve multi-page results.
+// verifyUrl: a logged-in-only page that redirects to /login when anonymous.
+const JOB_LOGIN_PLATFORMS = {
+  indeed:       { name: 'Indeed',       verifyUrl: 'https://my.indeed.com/' },
+  // connectedFinalUrlMustContain: Glassdoor redirects anonymous users from
+  // /member/ URLs to the public jobs homepage (200 OK, no /login in URL).
+  // If finalUrl doesn't stay under /member/, the session isn't active.
+  glassdoor:    { name: 'Glassdoor',    verifyUrl: 'https://www.glassdoor.com/member/home/index.htm',  connectedFinalUrlMustContain: '/member/' },
+  // bodySignals: ZipRecruiter's /profile shows an inline login form without
+  // redirecting (finalUrl stays at /profile, status 200). The form heading
+  // "Log in to ZipRecruiter" distinguishes it from an authenticated profile.
+  ziprecruiter: { name: 'ZipRecruiter', verifyUrl: 'https://www.ziprecruiter.com/profile',              bodySignals: ['log in to ziprecruiter', 'sign in to ziprecruiter'] },
+  wellfound:    { name: 'Wellfound',    verifyUrl: 'https://wellfound.com/settings' },
+};
+
+export function getJobLoginPlatforms() {
+  return Object.entries(JOB_LOGIN_PLATFORMS).map(([id, cfg]) => ({ id, ...cfg }));
+}
+
+export function getJobLoginConfig(platformId) {
+  return JOB_LOGIN_PLATFORMS[platformId] || null;
+}
 
 // ── Sell Monitor Platform Registry ──────────────────────────────────────────
 // Centralized config for platforms that require login for sell monitoring.

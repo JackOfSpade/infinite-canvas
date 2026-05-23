@@ -108,6 +108,10 @@ export function JobHubNode({ id, data }) {
   const scrapeWarningsRef = useRef(data.scrapeWarnings);
   const hubStateRef = useRef(data.hubState);
   const pendingJobsRef = useRef(data.pendingJobs);
+  // Sources resolved via paste/captcha WHILE the search was running (cleared at
+  // each run start). The backend doesn't know about these; we use this to skip
+  // re-blocking them when the search result comes back with stale warnings.
+  const resolvedDuringSearchRef = useRef(new Set());
   const resumeScoringRef = useRef(null);
   const isMountedRef = useRef(true);
   const settingsDebounceTimerRef = useRef(null);
@@ -547,7 +551,7 @@ export function JobHubNode({ id, data }) {
           scrapeWarnings: filteredWarnings,
         });
 
-        const remainingBlocks = filteredWarnings.filter(w => w?.severity === 'block');
+        const remainingBlocks = filteredWarnings.filter(w => w?.severity === 'block' || w?.severity === 'paste');
         if (remainingBlocks.length === 0 && mergedPending.length > 0) {
           EventLogger.log(`[JobHub][${id}] Auto-resuming scoring from sources-ready state.`);
           processingRef.current = false;
@@ -829,7 +833,7 @@ export function JobHubNode({ id, data }) {
   // the reason + Solve target must come from persisted state). A blocked source
   // that still HAS its card already carries the live warning — leave it.
   const ensureBlockedSourceCards = useCallback((blockingWarnings) => {
-    const blocks = (blockingWarnings || []).filter(w => w?.severity === 'block' && w.sourceId);
+    const blocks = (blockingWarnings || []).filter(w => (w?.severity === 'block' || w?.severity === 'paste') && w.sourceId);
     if (blocks.length === 0) return;
     const existing = getNodes().filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id);
     const existingSourceIds = new Set(existing.map(n => n.data?.sourceId));
@@ -1039,6 +1043,24 @@ export function JobHubNode({ id, data }) {
     try {
       let profile = providedProfile;
 
+      // Pre-flight: check job platform logins before any expensive work.
+      // Browser-scraped sources cap at 1 page when anonymous; fail early
+      // so the user fixes login before we burn LLM tokens or browser slots.
+      const JOB_LOGIN_IDS = ['indeed', 'glassdoor', 'ziprecruiter', 'wellfound'];
+      const notLoggedIn = (await Promise.all(
+        JOB_LOGIN_IDS.map(async (id) => {
+          const res = await window.electronAPI.checkJobPlatformAuth?.({ platformId: id });
+          if (res?.connected) return null;
+          return JOB_SOURCES.find(s => s.id === id)?.name || id;
+        })
+      )).filter(Boolean);
+      if (notLoggedIn.length > 0) {
+        throw Object.assign(
+          new Error(`Log in to ${notLoggedIn.join(', ')} first (Settings → Job Platform Logins)`),
+          { isLoginGate: true, notLoggedIn }
+        );
+      }
+
       // Step 1: Parse resume (only when a fresh file path was supplied)
       if (filePath) {
         updateGlobal(currentId, { hubState: 'parsing' });
@@ -1084,6 +1106,7 @@ export function JobHubNode({ id, data }) {
       const allQueries = [...targetRoleQueries, ...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
 
       // Step 3: Search
+      resolvedDuringSearchRef.current.clear();
       updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length, queries: queriesResult.queries });
       const searchResult = await window.electronAPI.searchJobs({
         queries: allQueries,
@@ -1098,9 +1121,38 @@ export function JobHubNode({ id, data }) {
       });
       if (cancelled()) return;
 
+      // Backend login gate: if any browser-scraped platform isn't connected
+      // the search handler returns early with notLoggedIn instead of running.
+      if (!searchResult.success && Array.isArray(searchResult.notLoggedIn) && searchResult.notLoggedIn.length > 0) {
+        const names = searchResult.notLoggedIn.map(id => JOB_SOURCES.find(s => s.id === id)?.name || id);
+        throw Object.assign(
+          new Error(`Log in to ${names.join(', ')} first (Settings → Job Platform Logins)`),
+          { isLoginGate: true, notLoggedIn: searchResult.notLoggedIn }
+        );
+      }
       const searchWarnings = Array.isArray(searchResult.scrapeWarnings) ? searchResult.scrapeWarnings : [];
-      const blockingWarnings = searchWarnings.filter(w => w?.severity === 'block');
-      const foundJobs = (searchResult.success && Array.isArray(searchResult.jobs)) ? searchResult.jobs : [];
+      // Filter out warnings for sources the user already resolved via paste/captcha
+      // during the search — the backend doesn't know about those mid-run resolves
+      // and will always report them as failures (e.g. Google's paste-needed is
+      // injected unconditionally). Without this filter the hub re-blocks on an
+      // already-resolved source: spawns a duplicate card and overwrites pasted jobs.
+      const alreadyResolved = resolvedDuringSearchRef.current;
+      const effectiveWarnings = alreadyResolved.size > 0
+        ? searchWarnings.filter(w => !alreadyResolved.has(w?.sourceId))
+        : searchWarnings;
+      const blockingWarnings = effectiveWarnings.filter(w => w?.severity === 'block' || w?.severity === 'paste');
+
+      // Merge backend's foundJobs with any jobs already resolved via paste during
+      // the search — they're in pendingJobsRef but absent from the backend result.
+      let foundJobs = (searchResult.success && Array.isArray(searchResult.jobs)) ? searchResult.jobs : [];
+      if (alreadyResolved.size > 0) {
+        const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
+        const resolvedItems = prevPending.filter(j => alreadyResolved.has(j?.source));
+        if (resolvedItems.length > 0) {
+          const seen = new Set(foundJobs.map(j => `${j.title}|${j.company}|${j.url || ''}`));
+          foundJobs = [...foundJobs, ...resolvedItems.filter(j => !seen.has(`${j.title}|${j.company}|${j.url || ''}`))];
+        }
+      }
 
       // ── Block gate ──────────────────────────────────────────────────
       // If any source hit a block-severity warning (captcha, login wall),
@@ -1124,7 +1176,7 @@ export function JobHubNode({ id, data }) {
           pendingJobs: foundJobs,
           pendingTargetRole: activeTargetRole,
           jobCount: foundJobs.length,
-          scrapeWarnings: searchWarnings,
+          scrapeWarnings: effectiveWarnings,
         });
         // Guarantee a Solve/Skip card exists for every blocked source — a card
         // can be lost during the long run, which stranded the user with "1 source
@@ -1146,7 +1198,7 @@ export function JobHubNode({ id, data }) {
           scoreRangeMin: 0,
           scoreRangeMax: 100,
           scoreThreshold: 0,
-          scrapeWarnings: searchWarnings,
+          scrapeWarnings: effectiveWarnings,
         });
         return;
       }
@@ -1154,7 +1206,7 @@ export function JobHubNode({ id, data }) {
       await runScoringAndSpawn({
         profile,
         jobs: foundJobs,
-        scrapeWarnings: searchWarnings,
+        scrapeWarnings: effectiveWarnings,
         activeTargetRole,
         originalPos,
         cancelled,
@@ -1166,7 +1218,7 @@ export function JobHubNode({ id, data }) {
       // it, we'd write a useless errorMessage onto data that's about to
       // be discarded and log a misleading "pipeline failed" line.
       if (cancelled() || isNodeDeletedAbort(error)) return;
-      EventLogger.error('JobHubNode pipeline failed:', error);
+      if (!error?.isLoginGate) EventLogger.error('JobHubNode pipeline failed:', error);
       // Revert to the logical step ('done' if any results exist on the
       // canvas, else 'empty') and surface the failure via errorMessage so
       // HubErrorBanner picks it up.
@@ -1286,7 +1338,7 @@ export function JobHubNode({ id, data }) {
       // shown so the user knows why that source returned 0 but not requiring
       // action) and throttles should NOT keep the resume from firing — the
       // user already addressed every actionable block by this point.
-      const remainingBlocks = remaining.filter(w => w?.severity === 'block');
+      const remainingBlocks = remaining.filter(w => w?.severity === 'block' || w?.severity === 'paste');
       if (
         remainingBlocks.length === 0 &&
         hubStateRef.current === 'sources-ready' &&
@@ -1314,6 +1366,13 @@ export function JobHubNode({ id, data }) {
       const resolvedSourceId = e.detail?.sourceId;
       if (!resolvedSourceId) return;
       const items = Array.isArray(e.detail?.items) ? e.detail.items : [];
+      // Track sources resolved while the search is still running so the
+      // search-completion handler can skip re-blocking them with the stale
+      // backend warnings (e.g. Google's paste-needed always appears in the
+      // search result even after the user already pasted mid-run).
+      if (hubStateRef.current === 'searching') {
+        resolvedDuringSearchRef.current.add(resolvedSourceId);
+      }
       // Merge new items into pendingJobs, replacing same-source entries so
       // a retry brings fresh data rather than stacking on top of old.
       const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
@@ -1331,11 +1390,20 @@ export function JobHubNode({ id, data }) {
       const remaining = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== resolvedSourceId);
       scrapeWarningsRef.current = remaining;
       updateGlobal(id, { pendingJobs: mergedPending, jobCount: mergedPending.length, scrapeWarnings: remaining });
-      // Auto-resume on no remaining BLOCK warnings (info / throttle stays).
-      const remainingBlocks = remaining.filter(w => w?.severity === 'block');
-      // Record the merge so a "resolve extracted N jobs but only M got scored"
-      // discrepancy is visible in the bug-report event history (pair this with
-      // the main-process "Scoring N jobs" line to spot a stale-state regression).
+      // Auto-resume on no remaining BLOCK or PASTE warnings (info / throttle stays).
+      const remainingBlocks = remaining.filter(w => w?.severity === 'block' || w?.severity === 'paste');
+      // Report the actual merge outcome back to the main process so the bug
+      // report can show "net pendingJobs change" rather than just the IPC-side
+      // "kept" count. The IPC side doesn't know the renderer dropped same-source
+      // existing jobs first (replace-and-dedup), so without this the report says
+      // "new: 11" when the actual net change may be 0 (11 replaced 11).
+      window.electronAPI.recordResolveMerge?.({
+        sourceId: resolvedSourceId,
+        replacedExisting: prevPending.length - keep.length,
+        fresh: fresh.length,
+        pendingBefore: prevPending.length,
+        pendingAfter: mergedPending.length,
+      });
       EventLogger.log(`[JobHub][${id}] Resolved ${resolvedSourceId}: received ${items.length} item(s), +${fresh.length} new → pendingJobs ${prevPending.length}→${mergedPending.length}; ${remainingBlocks.length} block warning(s) remain`);
       if (
         remainingBlocks.length === 0 &&
@@ -1675,7 +1743,7 @@ export function JobHubNode({ id, data }) {
               // source — so counting warnings made it say "2 sources blocked"
               // with only one Indeed card visible. Skip/resolve already filters
               // warnings by sourceId, so distinct-source count is the truth.
-              blockedCount={new Set((data.scrapeWarnings || []).filter(w => w?.severity === 'block').map(w => w.sourceId)).size}
+              blockedCount={new Set((data.scrapeWarnings || []).filter(w => w?.severity === 'block' || w?.severity === 'paste').map(w => w.sourceId)).size}
               jobsAvailable={Array.isArray(data.pendingJobs) ? data.pendingJobs.length : (data.jobCount || 0)}
               resumeSummary={data.resumeSummary}
               locked={!!data.locked}

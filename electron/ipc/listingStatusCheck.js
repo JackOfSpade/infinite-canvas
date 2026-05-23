@@ -68,42 +68,46 @@ async function disambiguateAuthFailure({ platformId, status, finalUrl, url, urlL
   const finalLower = String(finalUrl || url).toLowerCase();
   const onLoginUrl = /\/(login|signin|sign-in|account\/login|auth(?!or))/i.test(finalLower);
 
-  // Fallback: no platform context → can't verify, keep legacy behavior.
-  if (!platformId) {
-    return {
-      status: 'needs-login',
-      message: `Auth wall (HTTP ${status} → ${finalUrl || url}). Log in via Settings → Marketplace Login.`,
-    };
-  }
+  const needsLogin = () => ({
+    status: 'needs-login',
+    message: `Auth wall (HTTP ${status} → ${finalUrl || url}). Log in via Settings → Marketplace Login.`,
+  });
 
-  if (onLoginUrl) {
-    // Redirected straight to a login URL — unambiguous. No need to verify.
-    return {
-      status: 'needs-login',
-      message: `Auth wall (HTTP ${status} → ${finalUrl || url}). Log in via Settings → Marketplace Login.`,
-    };
-  }
+  // No platform context → can't verify, keep legacy behavior.
+  if (!platformId) return needsLogin();
 
-  // 4xx without a login redirect — could be anti-bot. Consult the verifier.
+  // A redirect straight to /login is NOT proof of logout. The canonical listing
+  // URL is fetched UNAUTHENTICATED (plainFetcher, for speed), so a login-gated
+  // page — e.g. a Facebook Marketplace item — redirects to /login whether or
+  // not the user's saved session is alive. The verifier hits the platform's
+  // universal logged-in URL with the persistent cookies and is the source of
+  // truth, so consult it even on a login redirect; otherwise we tell a
+  // logged-in user to "log in via Settings" (the exact contradiction reported).
   let verdict;
   try {
     verdict = await verifyPlatformOnce(platformId);
   } catch (e) {
     logger.warn(`[ListingStatusCheck] verifier threw for ${platformId} (assuming auth wall):`, e?.message || String(e));
-    return {
-      status: 'needs-login',
-      message: `Auth wall (HTTP ${status} → ${finalUrl || url}). Log in via Settings → Marketplace Login.`,
-    };
+    return needsLogin();
   }
 
   if (verdict?.connected) {
-    // Verifier reached the universal logged-in URL → session is alive →
-    // this 4xx is anti-bot rate-limiting, not a logout.
-    return {
-      status: 'unknown',
-      message: `Anti-bot challenge (HTTP ${status} → ${finalUrl || url}); session is still logged in. Retry later or reduce request frequency.`,
-      warning: `[${urlLabel || hostOf(url)}] HTTP ${status} blocked by anti-bot — your session is still active, this is rate-limiting.`,
-    };
+    // Session is alive, so this is NOT a logout. Return 'unknown' (which ranks
+    // below a real signal, so an authenticated watch URL's verdict wins the
+    // aggregate) with a message that distinguishes the two causes:
+    //   - login redirect → a login-gated page the unauthenticated check can't read
+    //   - other 4xx      → anti-bot rate-limiting
+    return onLoginUrl
+      ? {
+          status: 'unknown',
+          message: `Listing page is login-gated (HTTP ${status} → ${finalUrl || url}), but your ${platformId} session is still active — the unauthenticated status check can't read it. Not a logout; an authenticated watch URL's status (if configured) is used instead.`,
+          warning: `[${urlLabel || hostOf(url)}] login-gated page, session still active — not a logout.`,
+        }
+      : {
+          status: 'unknown',
+          message: `Anti-bot challenge (HTTP ${status} → ${finalUrl || url}); session is still logged in. Retry later or reduce request frequency.`,
+          warning: `[${urlLabel || hostOf(url)}] HTTP ${status} blocked by anti-bot — your session is still active, this is rate-limiting.`,
+        };
   }
 
   // Verifier failed → genuine logout. Make sure the cache reflects that so
@@ -112,10 +116,7 @@ async function disambiguateAuthFailure({ platformId, status, finalUrl, url, urlL
   try {
     await writeStatusCache(platformId, false, { lastReason: verdict?.reason, lastTrace: verdict?.trace });
   } catch { /* cache write failures are non-fatal for this code path */ }
-  return {
-    status: 'needs-login',
-    message: `Auth wall (HTTP ${status} → ${finalUrl || url}). Log in via Settings → Marketplace Login.`,
-  };
+  return needsLogin();
 }
 
 // Strongest → weakest. Higher rank wins when aggregating across URLs.

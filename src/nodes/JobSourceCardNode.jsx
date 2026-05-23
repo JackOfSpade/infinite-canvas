@@ -43,6 +43,14 @@ export function JobSourceCardNode({ id, data }) {
   // Solve/Skip + warning text on this card. Doesn't touch hub state — the
   // next Re-run Search will refetch this source fresh and re-emit progress.
   const [dismissed, setDismissed] = useState(false);
+  // Google sunset its scrapeable jobs widget (now the JS-rendered, obfuscated
+  // udm=8 layout), so its card uses a MANUAL paste fallback instead of Solve:
+  // open the live page, copy the visible job text, paste it here, Submit.
+  const isManualPaste = data.sourceId === 'google';
+  const [pasteMode, setPasteMode] = useState(false);
+  const [pasteText, setPasteText] = useState('');
+  const [parsing, setParsing] = useState(false);
+  const [pasteError, setPasteError] = useState(null);
 
   useEffect(() => {
     if (!window.electronAPI?.onJobSourceProgress) return;
@@ -84,12 +92,23 @@ export function JobSourceCardNode({ id, data }) {
     // like config-missing, which carries a warning) still stay so the user can
     // Solve, Skip, or read the reason. ensureSourceCards respawns on the next run.
     const isCleanTerminal = (progress?.status === 'done' || progress?.status === 'skipped') && !progress.warning;
-    if (!isCleanTerminal) return;
+    // A manual-paste source (Google) hasn't actually done its job until the user
+    // pastes jobs in. Google's udm=8 results page is unscrapeable, so a "clean"
+    // 0-job finish (the norm — the loose waitFor often resolves and the extractor
+    // simply matches nothing) must NOT auto-dismiss the card, or it would vanish
+    // before the user can reach "Open & paste". Once a paste lands jobs (count>0)
+    // OR the user Skips (status:'skipped'), dismiss like any resolved card.
+    // Note: exclude 'skipped' from the unresolved check — a skipped Google card
+    // should dismiss just like any other skipped source. Without this, clicking
+    // Skip hid the action row (dismissed=true) but left the card node on canvas
+    // indefinitely (lingering card bug from the diagnostics report).
+    const manualPasteUnresolved = isManualPaste && progress?.status !== 'skipped' && !(progress?.count > 0);
+    if (!isCleanTerminal || manualPasteUnresolved) return;
     const timeout = setTimeout(() => {
       deleteElements({ nodes: [{ id }] });
     }, 3000);
     return () => clearTimeout(timeout);
-  }, [progress?.status, progress?.warning, id, deleteElements]);
+  }, [progress?.status, progress?.warning, progress?.count, isManualPaste, id, deleteElements]);
 
   const handleSolve = async () => {
     if (resolving || hubLocked || !progress?.url || !window.electronAPI?.resolveJobSource) return;
@@ -126,6 +145,7 @@ export function JobSourceCardNode({ id, data }) {
         // sources that finished cleanly the first time).
         setProgress(prev => prev ? {
           ...prev,
+          status: 'done', // flip off 'error' so it reads "{count} jobs" not "Failed", and auto-dismisses as clean-done
           warning: null,
           count: (prev.count || 0) + items.length,
         } : prev);
@@ -139,6 +159,96 @@ export function JobSourceCardNode({ id, data }) {
       }
     } finally {
       setResolving(false);
+    }
+  };
+
+  // Manual-paste fallback (Google): open the live page in the user's own browser
+  // so they can copy the visible job text at leisure (the stealth resolve window
+  // auto-closes and runs the dead extractor), then reveal the textarea + Submit.
+  // Open a Google Jobs search per ROLE the hub searches — not just the first
+  // query. The headless scrape and every other source cover multiple roles, so
+  // the paste fallback should let the user copy jobs across all of them (opening
+  // only one role is why a paste can come back with too few jobs). We open the
+  // title + target + suggested role queries (skills-only queries are keyword
+  // soups unsuited to the Google Jobs UI), deduped, and stagger the opens so we
+  // neither flood the browser nor hit Google with N instant searches at once.
+  const handleOpenForPaste = async () => {
+    if (hubLocked) return;
+    setPasteMode(true);
+    if (!window.electronAPI?.openExternal) return;
+    const q = getNode(data.hubId)?.data?.queries || {};
+    const roleQueries = [
+      ...(q.titleQueries || []),
+      ...(q.targetRoleQueries || []),
+      ...(q.suggestedRoleQueries || []),
+    ];
+    const seen = new Set();
+    const urls = [];
+    for (const s of roleQueries) {
+      const term = String(s || '').trim();
+      const key = term.toLowerCase();
+      if (term && !seen.has(key)) {
+        seen.add(key);
+        urls.push(`https://www.google.com/search?q=${encodeURIComponent(term)}&udm=8`);
+      }
+    }
+    // Fall back to the card's own URL if the hub somehow exposes no queries.
+    const toOpen = urls.length ? urls : (progress?.url ? [progress.url] : []);
+    for (let i = 0; i < toOpen.length; i++) {
+      window.electronAPI.openExternal(toOpen[i]);
+      if (i < toOpen.length - 1) await new Promise(r => setTimeout(r, 300));
+    }
+  };
+
+  // Submit: LLM-parse the pasted text into job objects, then hand them to the hub
+  // via the SAME `job-source-resolved` path the captcha-resolve uses (merge →
+  // resume scoring → bucket → spawn). Clearing the warning lets the 3s clean-done
+  // effect auto-dismiss the card, matching a normally-resolved source.
+  const handleParseSubmit = async () => {
+    const text = pasteText.trim();
+    if (parsing || hubLocked || !text || !window.electronAPI?.parsePastedJobs) return;
+    setParsing(true);
+    setPasteError(null);
+    try {
+      const result = await window.electronAPI.parsePastedJobs({
+        text,
+        sourceId: data.sourceId,
+        nodeId: data.hubId,
+      });
+      const items = Array.isArray(result?.jobs) ? result.jobs : [];
+      const error = result?.error || null;
+
+      // Hand over whatever parsed — even a partial batch (chunked parse where some
+      // chunks failed) — so nothing we DID extract is silently dropped.
+      if (items.length > 0) {
+        document.dispatchEvent(new CustomEvent('job-source-resolved', {
+          detail: { hubId: data.hubId, sourceId: data.sourceId, items },
+        }));
+      }
+
+      if (items.length > 0 && !error) {
+        // Full success → mark the card DONE + clear the warning so the status line
+        // flips from "Failed" to "{count} jobs" and the 3s clean-done effect then
+        // dismisses it. (Without status:'done' it stayed 'error' → showed "Failed"
+        // forever and never auto-dismissed, even though the warning was cleared.)
+        setDismissed(true);
+        setPasteMode(false);
+        setPasteText('');
+        setProgress(prev => prev ? { ...prev, status: 'done', warning: null, count: (prev.count || 0) + items.length } : prev);
+      } else {
+        // Total failure (0 jobs) OR partial (some chunks failed). KEEP the card so
+        // it does NOT auto-dismiss; show why. On partial the jobs WERE merged (bump
+        // the count) but the warning stays so the user can re-paste the rest.
+        if (items.length > 0) {
+          setProgress(prev => prev ? { ...prev, count: (prev.count || 0) + items.length } : prev);
+        }
+        setPasteError(error || 'No jobs parsed. A very large paste can exceed the parser’s limit and truncate — try submitting fewer jobs at a time.');
+      }
+    } catch (err) {
+      // IPC rejected (e.g. parse threw on truncated JSON). Keep the card; show why.
+      setPasteError(`Parse failed: ${String(err?.message || err).slice(0, 180)}. If the paste was large, try fewer jobs at a time.`);
+    } finally {
+      setParsing(false);
     }
   };
 
@@ -177,22 +287,29 @@ export function JobSourceCardNode({ id, data }) {
   const hasBlock    = warning?.severity === 'block';
   const hasThrottle = warning?.severity === 'throttle';
   const hasInfo     = warning?.severity === 'info';
+  // Google's udm=8 page is unscrapeable, so a "done" with no jobs yet isn't a
+  // success — it's a card waiting for the user to Open & paste. Treat it as an
+  // action-needed state (no green check, an honest label, amber accent) rather
+  // than a misleading "0 jobs ✓". Resolves once a paste lands jobs (count>0).
+  const manualPasteUnresolved = isManualPaste && isDone && !warning && !(count > 0);
 
   const statusLine = isError
     ? 'Failed'
     : isSkipped
       ? 'Skipped'
-      : isDone
-        ? `${count ?? 0} jobs`
-        : isSearching
-          ? 'Searching…'
-          : 'Idle';
+      : manualPasteUnresolved
+        ? 'Paste needed'
+        : isDone
+          ? `${count ?? 0} jobs`
+          : isSearching
+            ? 'Searching…'
+            : 'Idle';
 
-  // Red for hard failures, amber for throttles/skips (action available),
-  // platform color for healthy runs.
+  // Red for hard failures, amber for throttles/skips/paste-needed (action
+  // available), platform color for healthy runs.
   const accentColor = (isError || hasBlock)
     ? '#ef4444'
-    : (hasThrottle || hasInfo || isSkipped)
+    : (hasThrottle || hasInfo || isSkipped || manualPasteUnresolved)
       ? '#f59e0b'
       : data.color;
 
@@ -239,12 +356,12 @@ export function JobSourceCardNode({ id, data }) {
           </div>
           <div className="flex items-center gap-1 mt-0.5">
             {isSearching && <Loader2 size={9} className="text-white/40 animate-spin shrink-0" />}
-            {isDone && !warning && <CheckCircle2 size={9} className="text-emerald-400 shrink-0" />}
+            {isDone && !warning && !manualPasteUnresolved && <CheckCircle2 size={9} className="text-emerald-400 shrink-0" />}
             {(isError || hasBlock) && <ShieldAlert size={9} className="text-red-400 shrink-0" />}
-            {(hasThrottle || hasInfo || isSkipped) && !hasBlock && <ShieldAlert size={9} className="text-amber-400 shrink-0" />}
+            {(hasThrottle || hasInfo || isSkipped || manualPasteUnresolved) && !hasBlock && <ShieldAlert size={9} className="text-amber-400 shrink-0" />}
             <span
               className="text-[9px] truncate"
-              style={{ color: (isError || hasBlock) ? '#fca5a5' : (hasThrottle || hasInfo || isSkipped) ? '#fcd34d' : isDone ? '#a7f3d0' : 'rgba(255,255,255,0.45)' }}
+              style={{ color: (isError || hasBlock) ? '#fca5a5' : (hasThrottle || hasInfo || isSkipped || manualPasteUnresolved) ? '#fcd34d' : isDone ? '#a7f3d0' : 'rgba(255,255,255,0.45)' }}
             >
               {warning ? warning.code : statusLine}
             </span>
@@ -265,13 +382,63 @@ export function JobSourceCardNode({ id, data }) {
           {warning.suggestion && <div className="mt-0.5 opacity-80 break-words">{warning.suggestion}</div>}
         </div>
       )}
+      {/* Manual-paste textarea (Google fallback) — appears after "Open & paste".
+          select-text + nodrag + stopPropagation so typing/selecting doesn't drag
+          the node or toggle the hub's source filter. */}
+      {!dismissed && isManualPaste && pasteMode && (
+        <div
+          className="px-2.5 pb-1.5 pt-1 border-t border-white/10"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <textarea
+            value={pasteText}
+            onChange={(e) => setPasteText(e.target.value)}
+            placeholder="We opened a Google Jobs tab per role — copy jobs from each (visible text, not HTML) into here, then Submit. One or many."
+            rows={4}
+            className="nodrag select-text w-full text-[9px] leading-snug bg-black/40 border border-white/10 rounded p-1 text-white/80 resize-y focus:outline-none focus:border-white/30"
+          />
+          {pasteError && (
+            <div className="mt-1 text-[9px] leading-snug text-red-300 break-words select-text">{pasteError}</div>
+          )}
+        </div>
+      )}
       {/* Solve / Skip row — same pattern as CompSourceCardNode for marketplace.
           Solve only appears when we have a failed URL to open (browser-pool
           sources). For config-missing (USAJobs no API key) the suggestion text
-          above already directs the user to set the env var — no Solve button. */}
-      {warning && !dismissed && (
+          above already directs the user to set the env var — no Solve button.
+          Google can't be scraped, so its card swaps Solve for the paste flow.
+          The manual-paste source always shows its action row (even with no
+          warning — a clean 0-job Google finish still needs a paste), so the
+          "Open & paste" button is reachable regardless of how the scrape ended. */}
+      {(warning || isManualPaste) && !dismissed && (
         <div className="flex border-t border-white/10">
-          {progress?.url && !hasInfo && (
+          {isManualPaste ? (
+            pasteMode ? (
+              <button
+                onClick={(e) => { e.stopPropagation(); handleParseSubmit(); }}
+                onPointerDown={(e) => e.stopPropagation()}
+                disabled={parsing || hubLocked || !pasteText.trim()}
+                className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
+                title="Parse the pasted jobs and add them to this hub for scoring"
+              >
+                <CheckCircle2 size={9} />
+                {parsing ? 'Parsing…' : 'Submit'}
+              </button>
+            ) : (
+              <button
+                onClick={(e) => { e.stopPropagation(); handleOpenForPaste(); }}
+                onPointerDown={(e) => e.stopPropagation()}
+                disabled={hubLocked}
+                className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
+                title={hubLocked ? 'Hub is locked' : "Google can't be scraped — opens a Google Jobs tab for each role we search. Copy the visible job text from each into the box, then Submit."}
+              >
+                <ExternalLink size={9} />
+                Open &amp; paste
+              </button>
+            )
+          ) : (
+            progress?.url && !hasInfo && (
             <button
               onClick={(e) => { e.stopPropagation(); handleSolve(); }}
               onPointerDown={(e) => e.stopPropagation()}
@@ -284,6 +451,7 @@ export function JobSourceCardNode({ id, data }) {
               <ExternalLink size={9} />
               {resolving ? 'Window open…' : 'Solve'}
             </button>
+            )
           )}
           <button
             onClick={(e) => {

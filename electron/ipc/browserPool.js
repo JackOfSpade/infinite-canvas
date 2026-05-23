@@ -444,6 +444,10 @@ async function executeScrapePaginated(extractorJS, options = {}) {
     onPageScraped = null,
     pageDelayMs = [4000, 9000],
     expectedMinItems = 0,
+    // When set, p>0 iterations click this selector instead of navigating to a
+    // new URL. Glassdoor uses "Show more" infinite-scroll rather than page
+    // params, so URL pagination is broken — one load + N button clicks instead.
+    loadMoreSelector = null,
   } = options;
 
   if (typeof nextUrl !== 'function') throw new Error('executeScrapePaginated requires options.nextUrl');
@@ -461,6 +465,10 @@ async function executeScrapePaginated(extractorJS, options = {}) {
   let strongest = null;
   let pagesWalked = 0;
   let stopReason = 'ceiling';
+  // Tracks how many items the extractor had returned before the last "Show
+  // more" click — used to slice out only the newly-loaded items so we don't
+  // push the full accumulated list on every load-more iteration.
+  let loadMorePrevCount = 0;
 
   try {
     if (isShuttingDown) throw new Error('Browser pool is shutting down');
@@ -478,33 +486,52 @@ async function executeScrapePaginated(extractorJS, options = {}) {
 
     for (let p = 0; p < maxPages; p++) {
       if (isShuttingDown || options.signal?.aborted) { stopReason = 'aborted'; break; }
+
+      // Load-more mode: p>0 clicks a "Show more" button instead of navigating.
+      const useLoadMore = loadMoreSelector != null && p > 0;
+
       const url = nextUrl(p);
       const { timeoutMs: budgetMs, firstBeatMs } = resolveBudget(sourceKey, timeoutMs);
       const pageStart = Date.now();
-      page.setDefaultNavigationTimeout(Math.max(5000, budgetMs - READINESS.DEFAULT_NAV_HEADROOM_MS));
 
       let pageResponse = null;
-      try {
-        pageResponse = await page.goto(url, { waitUntil: options.waitUntil || 'domcontentloaded', timeout: Math.max(5000, budgetMs - READINESS.NAV_HEADROOM_MS) });
-      } catch (e) {
-        if (!e?.message?.includes('ERR_ABORTED') && !e?.message?.includes('net::ERR_') && !/timeout/i.test(e?.message || '')) throw e;
-      }
-
-      // Cookie/consent banner only appears once per session — dismiss on page 0.
-      if (p === 0 && dismissCookies) await dismissCookieBanner(page);
-      if (waitFor) {
+      if (useLoadMore) {
+        // Click the "Show more" button and wait a beat for the XHR to settle.
+        const clicked = await page.evaluate((sel) => {
+          const btn = document.querySelector(sel);
+          if (!btn || btn.disabled) return false;
+          btn.click();
+          return true;
+        }, loadMoreSelector).catch(() => false);
+        if (!clicked) { stopReason = 'empty-page'; break; }
+        // Fixed pre-poll wait — gives the XHR response time to land before
+        // the readiness loop starts counting stable items.
+        await new Promise(r => setTimeout(r, 3000));
+      } else {
+        page.setDefaultNavigationTimeout(Math.max(5000, budgetMs - READINESS.DEFAULT_NAV_HEADROOM_MS));
         try {
-          const selectorWait = Math.min(READINESS.SELECTOR_WAIT_MS, Math.max(2000, budgetMs - READINESS.READINESS_HEADROOM_MS));
-          await page.waitForSelector(waitFor, { timeout: selectorWait });
-        } catch { /* extractor may still find content */ }
+          pageResponse = await page.goto(url, { waitUntil: options.waitUntil || 'domcontentloaded', timeout: Math.max(5000, budgetMs - READINESS.NAV_HEADROOM_MS) });
+        } catch (e) {
+          if (!e?.message?.includes('ERR_ABORTED') && !e?.message?.includes('net::ERR_') && !/timeout/i.test(e?.message || '')) throw e;
+        }
+        // Cookie/consent banner only appears once per session — dismiss on page 0.
+        if (p === 0 && dismissCookies) await dismissCookieBanner(page);
+        if (waitFor) {
+          try {
+            const selectorWait = Math.min(READINESS.SELECTOR_WAIT_MS, Math.max(2000, budgetMs - READINESS.READINESS_HEADROOM_MS));
+            await page.waitForSelector(waitFor, { timeout: selectorWait });
+          } catch { /* extractor may still find content */ }
+        }
+        if (scrollFirst) await humanScroll(page, 3); else await humanMouseMove(page);
       }
-      if (scrollFirst) await humanScroll(page, 3); else await humanMouseMove(page);
 
       // Readiness: poll the extractor until its item count stabilizes (shared
       // READINESS constants with executeScrape). Per-page deadline off pageStart.
       const readinessDeadline = pageStart + budgetMs - READINESS.READINESS_HEADROOM_MS;
-      await new Promise(r => setTimeout(r, firstBeatMs));
-      let extractorResult = null, lastCount = -2, stableReads = 0, zeroReads = 0, settledPositively = false;
+      // Load-more: already waited 3s after clicking; seed lastCount at the
+      // previous accumulated total so we don't settle before new items arrive.
+      if (!useLoadMore) await new Promise(r => setTimeout(r, firstBeatMs));
+      let extractorResult = null, lastCount = useLoadMore ? loadMorePrevCount : -2, stableReads = 0, zeroReads = 0, settledPositively = false;
       while (true) {
         if (options.signal?.aborted) break;
         let r = null;
@@ -524,34 +551,44 @@ async function executeScrapePaginated(extractorJS, options = {}) {
       }
       const stableElapsedMs = settledPositively ? Date.now() - pageStart : null;
       if (extractorResult == null) { try { extractorResult = await page.evaluate(extractorJS); } catch { extractorResult = []; } }
-      const pageItems = Array.isArray(extractorResult)
+      const allExtracted = Array.isArray(extractorResult)
         ? extractorResult
         : (Array.isArray(extractorResult?.items) ? extractorResult.items : []);
+      // Load-more: the extractor returns all visible DOM items (old + new) — slice
+      // to get only the items added by this "Show more" click.
+      const pageItems = useLoadMore ? allExtracted.slice(loadMorePrevCount) : allExtracted;
+      if (useLoadMore) loadMorePrevCount = allExtracted.length;
 
-      // Anti-bot detection on this page (mirrors executeScrape).
+      // Anti-bot detection: load-more clicks are in-page XHR (no navigation, no
+      // HTTP status, URL unchanged) — skip detector for those iterations and only
+      // run it for real page loads.
       let warning = null;
-      try {
-        const html = await page.content().catch(() => '');
-        const finalUrl = page.url() || url;
-        const status = pageResponse?.status?.() ?? 0;
-        warning = detectAntiBotSignal({
-          status, finalUrl, html,
-          itemsExtracted: pageItems.length,
-          expectedMinItems,
-          expectedBodySize: getBodyBaseline(sourceKey),
-          sourceLabel: sourceKey,
-        });
-        if (warning) logger.warn(`[BrowserPool] Anti-bot signal on ${url} (p${p}): ${warning.code} — ${warning.evidence}`);
-        else if (pageItems.length > 0 && html) recordBodySize(sourceKey, String(html).length);
-      } catch (e) {
-        logger.warn('[BrowserPool] Anti-bot detector failed (non-fatal):', e?.message || String(e));
+      if (!useLoadMore) {
+        try {
+          const html = await page.content().catch(() => '');
+          const finalUrl = page.url() || url;
+          const status = pageResponse?.status?.() ?? 0;
+          warning = detectAntiBotSignal({
+            status, finalUrl, html,
+            itemsExtracted: allExtracted.length,
+            expectedMinItems,
+            expectedBodySize: getBodyBaseline(sourceKey),
+            sourceLabel: sourceKey,
+          });
+          if (warning) logger.warn(`[BrowserPool] Anti-bot signal on ${url} (p${p}): ${warning.code} — ${warning.evidence}`);
+          else if (allExtracted.length > 0 && html) recordBodySize(sourceKey, String(html).length);
+        } catch (e) {
+          logger.warn('[BrowserPool] Anti-bot detector failed (non-fatal):', e?.message || String(e));
+        }
       }
 
-      // Each page is a real request — feed the rate limiter per page so a block
-      // mid-pagination tightens the domain and counts toward escalation.
+      // Load-more clicks are not separate HTTP requests — only feed the rate
+      // limiter for real navigations so throttle signals aren't inflated.
       const severity = warning?.severity;
-      recordOutcome(domain, severity === 'block' ? 'block' : severity === 'throttle' ? 'throttle' : 'ok');
-      if (stableElapsedMs != null && severity !== 'block') recordReady(sourceKey, stableElapsedMs);
+      if (!useLoadMore) {
+        recordOutcome(domain, severity === 'block' ? 'block' : severity === 'throttle' ? 'throttle' : 'ok');
+        if (stableElapsedMs != null && severity !== 'block') recordReady(sourceKey, stableElapsedMs);
+      }
 
       if (warning && (!strongest || (warning.severity === 'block' && strongest.severity !== 'block'))) strongest = warning;
       all.push(...pageItems);

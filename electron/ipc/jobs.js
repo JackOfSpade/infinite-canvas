@@ -5,7 +5,8 @@
  *             Greenhouse API, Lever API, USAJobs API
  */
 import { callLLMDocument, callLLMText } from './llm.js';
-import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA } from './aiSchemas.js';
+import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA, PASTED_JOB_PARSE_SCHEMA } from './aiSchemas.js';
+import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
@@ -31,7 +32,9 @@ import {
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory } from './jobsHistory.js';
 import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
 import { getJobsSettings } from './settings.js';
+import { readStatusCache } from './accounts.js';
 
+const { ipcMain } = electronPkg;
 const DEFAULT_MAX_AGE_DAYS = 21;
 // Sentinel score for jobs the AI couldn't score (missing from the batch result,
 // or a whole batch that failed to parse). NOT adaptive: a fixed midpoint marks
@@ -61,7 +64,8 @@ const jobsTelemetry = {
                    // keeps every resolve; re-resolving a source replaces its
                    // entry. Reset when a fresh search stamps so it's scoped to it.
   scoring:   null, // { ts, input, scored, placeholders, batches, failedBatches, unscored }
-  bucketing: null, // { ts, input, categories }
+  bucketing: null, // { ts, input, categories, placed, missing, duplicated, model, error } — error set when the bucket call threw (flat-spawn fallback)
+  pastedPastes: [], // [{ ts, sourceId, chars, parsed, error }] — all manual paste→parse calls this run (Google fallback); array so multiple pastes (first mid-run, second after hub re-blocks) are all visible
   // Per-source job-source-progress event trail for the current search, captured
   // in the main process so it survives the source-card nodes being deleted (the
   // renderer Event History shows WHEN a card was removed, but not the status/
@@ -101,14 +105,6 @@ function googleDateChip(days) {
 // sacrificed for a natural cadence — see JOB_MAX_PAGES.
 const PAGE_DELAY_MS = [6000, 14000];
 
-// Stable key for cross-page dedup: prefer the listing URL, else title|company
-// (mirrors the cross-source dedup in search-jobs).
-function jobKey(j) {
-  const url = String(j?.url || '').trim();
-  if (url) return url;
-  return `${String(j?.title || '').toLowerCase().trim()}|${String(j?.company || '').toLowerCase().trim()}`;
-}
-
 // Synthesize a visible warning from a raw scrape error so a failed source can
 // render its reason + a Solve button the INSTANT it fails — not only after the
 // whole run finishes. Shared by the per-task progress event and the per-source
@@ -128,26 +124,20 @@ function synthScrapeWarning(errorMsg) {
   };
 }
 
-// Build the per-source pagination stop callback for executeScrapePaginated. Stops
-// the same-session walk the moment a page stops contributing NEW in-window jobs
-// — which is how "paginate until the date cutoff" actually manifests once the
-// source is date-filtered/-sorted: an empty page, a page entirely past the
-// cutoff, or a repeat of an earlier page (sites clamp past-the-last-page to the
-// last/first page). The browser pool independently stops on a hard block / the
-// page ceiling, so this never has to reason about anti-bot.
-function makeCutoffStop(maxAgeDays) {
-  const seen = new Set();
+// Per-source pagination stop callback for executeScrapePaginated. We walk the
+// FULL page ceiling (JOB_MAX_PAGES) on every source — the only early stop is a
+// genuinely EMPTY page, which is terminal and lossless (no results exist past an
+// empty offset, so paging further can only add empty requests). The old
+// date-cutoff and duplicate-page (seen-set) stops were removed deliberately: the
+// server-side date filter (fromage / days / fromAge / f_TPR) already bounds the
+// window, and the seen-set heuristic could false-positive under relevance sort
+// (a reshuffled page reads as all-seen) and prune real jobs from deeper pages.
+// Any clamped/repeated rows are removed downstream by the cross-source dedup.
+// The browser pool independently stops on a hard block / the ceiling.
+function makeEmptyPageStop() {
   return ({ items }) => {
     const arr = Array.isArray(items) ? items : [];
     if (arr.length === 0) return { stop: true, reason: 'empty-page' };
-    const inWindow = filterJobsByAge(arr, maxAgeDays); // KEEPS unparseable dates
-    if (inWindow.length === 0) return { stop: true, reason: 'date-cutoff' };
-    let fresh = 0;
-    for (const j of inWindow) {
-      const k = jobKey(j);
-      if (!seen.has(k)) { seen.add(k); fresh++; }
-    }
-    if (fresh === 0) return { stop: true, reason: 'duplicate-page' };
     return { stop: false };
   };
 }
@@ -173,17 +163,18 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
   // RemoteOK and WeWorkRemotely have been moved to fetchApiSources (direct HTTP).
   //
   // `maxPages` = the hard ceiling on how deep we page (same stealth session) for
-  // each query variant. We walk forward page by page until a page stops
-  // adding NEW in-window jobs (makeCutoffStop), the anti-bot detector flags a
-  // block, or we hit the ceiling. `urlFn(q, page)` builds the 0-based page URL.
-  // Sources that DATE-FILTER server-side (Indeed fromage / Glassdoor fromAge /
-  // ZipRecruiter days) won't serve out-of-window rows, so deep paging exhausts
-  // the window naturally and the walk stops on an empty/duplicate page or the
-  // ceiling. We leave each on its default RELEVANCE sort (no sort param) so the
-  // capped walk keeps the most-relevant in-window jobs — consistent with the
-  // relevance-sorted API sources; recency is handled by the date filter + the
-  // client age-filter, not by sorting. Page-param guesses degrade safely:
-  // a wrong param re-serves page 1, which the duplicate-page stop catches at p2.
+  // each query variant. We walk the FULL ceiling page by page, stopping only on a
+  // genuinely empty page (makeEmptyPageStop), an anti-bot block, or the ceiling.
+  // `urlFn(q, page)` builds the 0-based page URL. Sources that DATE-FILTER
+  // server-side (Indeed fromage / Glassdoor fromAge / ZipRecruiter days) won't
+  // serve out-of-window rows, so the walk gathers the in-window set; recency is
+  // handled by that filter + the client age-filter, not by sorting, and we leave
+  // each on its default RELEVANCE sort (no sort param) so the walk keeps the
+  // most-relevant in-window jobs — consistent with the relevance-sorted API
+  // sources. We do NOT short-circuit on repeated pages: a wrong page-param guess
+  // that re-serves page 1 just yields duplicates, which the cross-source dedup
+  // removes downstream (cheaper than a seen-set stop that can false-positive
+  // under relevance sort and prune real jobs from deeper pages).
   // Google's embedded jobs widget can't be URL-paginated, so it stays 1 page.
   const extractors = {
     google:          { extractor: GOOGLE_JOBS_EXTRACTOR,  config: GOOGLE_JOBS_CONFIG,  maxPages: 1,
@@ -191,16 +182,20 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
     indeed:          { extractor: INDEED_JOBS_EXTRACTOR,  config: INDEED_CONFIG,       maxPages: JOB_MAX_PAGES,
                        urlFn: (q, page) => `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}&fromage=${days}${page > 0 ? `&start=${page * 10}` : ''}` },
     ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, maxPages: JOB_MAX_PAGES,
-                       urlFn: (q, page) => `https://www.ziprecruiter.com/jobs-search?search=${encodeURIComponent(q)}&days=${days}${page > 0 ? `&page=${page + 1}` : ''}` },
+                       urlFn: (q, page) => `https://www.ziprecruiter.com/jobs-search${page > 0 ? `/${page + 1}` : ''}?search=${encodeURIComponent(q)}&days=${days}` },
+    // Glassdoor migrated to Next.js with infinite-scroll "Show more" pagination —
+    // the old ?p=N URL param is silently ignored (every "page" returns page 1).
+    // One URL load + JOB_MAX_PAGES-1 button clicks replaces the old N-page walk.
     glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,    config: GLASSDOOR_CONFIG,    maxPages: JOB_MAX_PAGES,
-                       urlFn: (q, page) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}&fromAge=${days}${page > 0 ? `&p=${page + 1}` : ''}` },
+                       urlFn: (q) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}&fromAge=${days}`,
+                       loadMoreSelector: '[data-test="load-more"]' },
     wellfound:       { extractor: WELLFOUND_EXTRACTOR,    config: WELLFOUND_CONFIG,    maxPages: JOB_MAX_PAGES,
                        urlFn: (q, page) => `https://wellfound.com/role/${roleSlug(q)}${page > 0 ? `?page=${page + 1}` : ''}` },
   };
 
   const tasks = [];
   // Remote-only boards get fewer queries; heavy WAF sites get only the first query.
-  for (const [sourceId, { extractor, config, urlFn, maxPages = 1 }] of Object.entries(extractors)) {
+  for (const [sourceId, { extractor, config, urlFn, maxPages = 1, loadMoreSelector = null }] of Object.entries(extractors)) {
     const isHeavyWAF = sourceId === 'ziprecruiter' || sourceId === 'glassdoor';
     const querySubset = isHeavyWAF ? queries.slice(0, HEAVY_WAF_QUERY_CAP) : queries.slice(0, DEFAULT_QUERY_CAP);
 
@@ -217,8 +212,9 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
           paginate: true,
           maxPages,
           nextUrl: (page) => urlFn(q, page),
-          onPageScraped: makeCutoffStop(days),
+          onPageScraped: makeEmptyPageStop(),
           pageDelayMs: PAGE_DELAY_MS,
+          ...(loadMoreSelector ? { loadMoreSelector } : {}),
         };
       } else {
         base.options = config;
@@ -326,6 +322,55 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
   }));
 }
 
+// ── Manual-paste chunking (Google fallback) ──────────────────────────────────
+// A large Google-Jobs paste produces more JSON+thinking than the parse-pasted-jobs
+// token cap can hold (and the global HARD_CAP is a deliberate cost/latency ceiling
+// we don't raise for one feature). So we split the paste into chunks that each fit
+// comfortably under the cap, parse them independently, and merge. ~8000 chars/chunk
+// keeps each call's cap (2500 + chars/200·400 ≈ 18.5k at 8k) well under HARD_CAP.
+const PASTE_CHUNK_CHARS = 8000;
+
+// Split on line boundaries (a Google job entry spans a few consecutive lines),
+// packing lines into chunks ≤ maxChars. A single over-long line is hard-split.
+// A job that straddles a boundary is recovered by the cross-chunk dedup downstream.
+function chunkPastedText(text, maxChars) {
+  if (text.length <= maxChars) return [text];
+  const chunks = [];
+  let cur = '';
+  for (const line of text.split('\n')) {
+    if (cur && cur.length + line.length + 1 > maxChars) { chunks.push(cur); cur = ''; }
+    cur = cur ? `${cur}\n${line}` : line;
+    while (cur.length > maxChars) { chunks.push(cur.slice(0, maxChars)); cur = cur.slice(maxChars); }
+  }
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
+// Parse ONE chunk of pasted job text → array of raw { title, company, location,
+// salary, snippet }. Throws on truncation / parse failure; the caller decides
+// whether one bad chunk should sink the whole submit.
+async function parsePastedChunk(chunk, signal) {
+  const result = await callLLMText(`
+You are parsing job listings a user copied as plain VISIBLE TEXT (not HTML) from a Google Jobs results page. Extract each DISTINCT job posting you can identify.
+
+Rules:
+- title is required — skip any entry without a discernible job title.
+- company / location / salary / snippet: fill if clearly present, else "".
+- Do NOT invent jobs or fields. Only extract what is actually in the text.
+- De-duplicate obvious repeats (the same title+company listed twice).
+
+Return JSON: { "jobs": [ { "title", "company", "location", "salary", "snippet" } ] }
+
+PASTED TEXT:
+${chunk}`, {
+    signal,
+    task: 'parse-pasted-jobs',
+    hints: { itemCount: Math.max(1, Math.round(chunk.length / 200)) },
+    responseSchema: PASTED_JOB_PARSE_SCHEMA,
+  });
+  return Array.isArray(result?.jobs) ? result.jobs : [];
+}
+
 /**
  * Register all Jobs IPC handlers.
  */
@@ -379,8 +424,102 @@ Be creative with suggestedRoleQueries — think about what career directions the
     return { queries: result };
   });
 
+  // ── Parse pasted job text → structured jobs (manual fallback) ──────────────
+  // For sources whose results we can't scrape (Google sunset its jobs widget to
+  // the JS-rendered, obfuscated udm=8 layout), the user opens the site, copies
+  // the visible job text, and pastes it into the source card. We LLM-parse it
+  // into the same job shape every other source produces, then it flows through
+  // the existing job-source-resolved → merge → score → bucket → spawn path.
+  // No reliable direct URL survives a copy-paste, so each job gets a Google Jobs
+  // *search* link (udm=8) for its title/company so the card's link button still
+  // lands the user on the listing instead of a dead href.
+  handleSafe('parse-pasted-jobs', async (event, { text, sourceId, nodeId } = {}, signal) => {
+    const raw = String(text || '').trim();
+    if (!raw) return { jobs: [] };
+    const src = sourceId || 'google';
+    const chunks = chunkPastedText(raw, PASTE_CHUNK_CHARS);
+    logger.info(`[Jobs][${nodeId}] Parsing pasted ${src} text (${raw.length} chars, ${chunks.length} chunk(s))`);
+    // Record the attempt (success / partial / failure) so the bug-report funnel
+    // shows the manual-paste step instead of leaving it inferable only from the
+    // token-budget truncation marker.
+    const stamp = (parsed, error) => {
+      jobsTelemetry.nodeId = nodeId;
+      jobsTelemetry.windowId = event.sender?.id ?? null;
+      jobsTelemetry.pastedPastes.push({ ts: Date.now(), sourceId: src, chars: raw.length, chunks: chunks.length, parsed, error: error || null });
+    };
+
+    // Parse chunks SEQUENTIALLY — the Gemini free tier is rate-limited, so
+    // concurrent calls just trigger more 429s. A failed chunk is recorded but
+    // doesn't sink the rest: partial success beats losing every job to one chunk.
+    const rawJobs = [];
+    let failedChunks = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      if (signal?.aborted) break;
+      try {
+        rawJobs.push(...await parsePastedChunk(chunks[i], signal));
+      } catch (err) {
+        failedChunks++;
+        logger.warn(`[Jobs][${nodeId}] Pasted-job chunk ${i + 1}/${chunks.length} failed: ${err?.message || err}`);
+      }
+    }
+
+    // Dedup across chunks by title|company (a boundary-split job can land in two
+    // chunks), then synthesize the Google Jobs search link per job (a paste can't
+    // carry a reliable direct URL — the card's "open" button lands the user on
+    // Google Jobs pre-searched for this role).
+    const seen = new Set();
+    const items = rawJobs
+      .filter(j => j && String(j.title || '').trim())
+      .filter(j => {
+        const k = `${String(j.title).toLowerCase().trim()}|${String(j.company || '').toLowerCase().trim()}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      })
+      .map(j => {
+        const title = String(j.title).trim();
+        const company = String(j.company || '').trim();
+        const location = String(j.location || '').trim();
+        const term = [title, company, location].filter(Boolean).join(' ');
+        const url = `https://www.google.com/search?q=${encodeURIComponent(term)}&udm=8`;
+        return {
+          title, company, location,
+          salary: String(j.salary || '').trim(),
+          snippet: String(j.snippet || '').trim(),
+          url,
+          source: src,
+        };
+      });
+
+    // Error semantics: nothing parsed at all → hard fail (card keeps itself);
+    // some chunks failed but we still got jobs → partial-success note (card keeps
+    // itself AND the jobs are merged, so missing ones can be re-pasted).
+    let error = null;
+    if (items.length === 0) {
+      error = failedChunks > 0
+        ? `Parsing failed on all ${chunks.length} chunk(s) — likely the AI quota is exhausted or the text was unparseable.`
+        : 'No jobs found in the pasted text.';
+    } else if (failedChunks > 0) {
+      error = `Parsed ${items.length} job(s), but ${failedChunks} of ${chunks.length} chunk(s) failed — some jobs may be missing. Re-paste the missing section if needed.`;
+    }
+    logger.info(`[Jobs][${nodeId}] Parsed ${items.length} job(s) from pasted ${src} text (${chunks.length} chunk(s), ${failedChunks} failed)`);
+    stamp(items.length, error);
+    return { jobs: items, error };
+  });
+
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
   handleSafe('search-jobs', async (event, { queries, nodeId, maxAgeDays, canvasFilePath, profileLocations }, signal) => {
+    // Gate: require fresh verified login for all browser-scraped job platforms.
+    // These sources return only 1 page when anonymous; login is required for
+    // multi-page results. Block early so the user gets a clear message rather
+    // than silently getting 5-job results from every browser source.
+    const cache = await readStatusCache();
+    const BROWSER_JOB_PLATFORMS = ['indeed', 'glassdoor', 'ziprecruiter', 'wellfound'];
+    const notLoggedIn = BROWSER_JOB_PLATFORMS.filter(id => !cache[id]?.connected);
+    if (notLoggedIn.length > 0) {
+      return { success: false, notLoggedIn, error: `Not logged in to: ${notLoggedIn.join(', ')}. Open Settings → Job Platforms to connect.` };
+    }
+
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across 12 sources (maxAge=${ageDays}d)`);
     jobsTelemetry.nodeId = nodeId;
@@ -568,6 +707,24 @@ Be creative with suggestedRoleQueries — think about what career directions the
       });
     }
 
+    // Google Jobs is unscrapeable (the udm=8 widget is JS-rendered and obfuscated),
+    // so a clean 0-job result is expected — the user must manually copy/paste.
+    // Inject a 'paste' severity warning BEFORE both the scrapeWarnings loop and
+    // the bySource build so: (a) the hub's block gate sees it in scrapeWarnings
+    // and pauses in 'sources-ready', and (b) the bug-report funnel sees it in
+    // bySource.google.warning instead of silently listing Google as "0 results,
+    // no warning (genuinely empty)" — which was the misleading pre-fix state.
+    const googleData = sourceResults.google;
+    if (googleData && googleData.jobs.length === 0 &&
+        !googleData.warnings.some(w => w?.severity === 'block')) {
+      googleData.warnings.push({
+        code: 'paste-needed',
+        severity: 'paste',
+        evidence: null,
+        suggestion: null,
+      });
+    }
+
     // Flat per-source warning list returned with the response so the JobHub
     // done state can render a copy-able "Scrape Warnings" panel. Carry each
     // source's scrape `url` so the block gate can re-seed a Solve target if the
@@ -587,6 +744,13 @@ Be creative with suggestedRoleQueries — think about what career directions the
       seen.add(key);
       return true;
     });
+    // Per-source unique survivors of the dedup — lets the funnel tell a genuine
+    // page-ceiling ("50 gathered, 50 unique → may be more") apart from a CLAMPING
+    // source that re-served the same page across the walk ("50 gathered, 5 unique
+    // → not more, the page param is repeating"). The removed duplicate-page stop
+    // used to make this call implicitly; now the funnel shows the raw↔unique gap.
+    const uniqueBySource = {};
+    for (const j of deduped) { const s = j.source || '?'; uniqueBySource[s] = (uniqueBySource[s] || 0) + 1; }
 
     // Drop entries whose `posted` string parses to older than maxAgeDays.
     // Sources without a URL date param rely entirely on this pass; those
@@ -626,7 +790,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       const w = (data.warnings || []).find(x => x?.severity === 'block')
         || (data.warnings || []).find(x => x?.severity === 'info')
         || (data.warnings || [])[0] || null;
-      bySource[sid] = { count: data.jobs.length, warning: w ? { code: w.code, severity: w.severity } : null };
+      bySource[sid] = { count: data.jobs.length, unique: uniqueBySource[sid] || 0, warning: w ? { code: w.code, severity: w.severity } : null };
       // How deep the date-bounded walk went + why it stopped — only for the
       // paginating browser sources (one-shot / API sources leave it unset).
       if (data.pagesWalked > 0) {
@@ -647,8 +811,12 @@ Be creative with suggestedRoleQueries — think about what career directions the
       kept: kept.length,
       bySource,
     };
-    // A fresh search starts a new run — drop resolves recorded for a prior run.
+    // A fresh search starts a new run — drop resolves AND prior pastes. A manual
+    // paste always happens AFTER its search (Google fails to scrape → user pastes),
+    // so clearing here scopes pastedPastes to the current run; without it, a prior
+    // session's paste would inflate the "gathered this session" tally.
     jobsTelemetry.resolves = {};
+    jobsTelemetry.pastedPastes = [];
     return { jobs: kept, sourceResults, scrapeWarnings };
   });
 
@@ -1020,7 +1188,9 @@ Rules:
       salary: j.salary || '',
     }));
     const bucketMeta = {}; // populated with the model that actually served this call
-    const result = await callLLMText(`
+    let result;
+    try {
+      result = await callLLMText(`
 You are a career data analyst. Group these scored jobs by careerDirection, then within each category pick salary bucket boundaries that fit the actual salary distribution.
 
 JOBS:
@@ -1054,13 +1224,73 @@ RULES:
       hints: { itemCount: jobs.length },
       responseSchema: JOB_BUCKETING_SCHEMA,
       meta: bucketMeta,
-    });
+      });
+    } catch (err) {
+      // Bucketing threw (e.g. the Claude streaming-required rejection, an LLM
+      // truncation, or a fallback-chain exhaustion). The renderer catches this
+      // and falls back to spawning a FLAT job list — no categories. Stamp the
+      // funnel with the failure so a bug report distinguishes "bucketing threw"
+      // (jobs shown uncategorized, with a recorded reason) from "bucketing never
+      // ran this session" (the null slot). Re-throw so handleSafe still returns
+      // the error to the renderer for its flat-spawn fallback.
+      //
+      // An ABORT (user cancelled / deleted the node mid-run) is not a bucketing
+      // failure — same distinction handleSafe draws — so don't stamp a spurious
+      // "FAILED" for it; just propagate.
+      if (!signal?.aborted) {
+        jobsTelemetry.bucketing = {
+          ts: Date.now(),
+          input: jobs.length,
+          categories: 0,
+          placed: 0,
+          missing: jobs.length,
+          duplicated: 0,
+          model: bucketMeta.model || null,
+          error: err?.message || String(err),
+        };
+      }
+      throw err;
+    }
     logger.info(`[Jobs][${nodeId}] Bucketed into ${result?.categories?.length || 0} categories`);
+    // Verify the bucketer placed EVERY scored job exactly once (the prompt requires
+    // jobIndices to be the complete 0..N-1 set). Weak fallback models — common now
+    // under quota pressure — can omit or duplicate indices; the renderer's
+    // missing-sweep rescues omitted jobs into Uncategorized so they aren't dropped,
+    // but the funnel must SHOW when that happened — otherwise the "all jobs
+    // accounted for" chain stops at the category count and can't confirm placement.
+    const placedCounts = new Map();
+    for (const cat of result?.categories || []) {
+      for (const buc of cat?.buckets || []) {
+        for (const idx of buc?.jobIndices || []) {
+          if (Number.isInteger(idx) && idx >= 0 && idx < jobs.length) {
+            placedCounts.set(idx, (placedCounts.get(idx) || 0) + 1);
+          }
+        }
+      }
+    }
+    const placed = placedCounts.size;
+    const missing = jobs.length - placed; // omitted by the bucketer → renderer sweeps into Uncategorized
+    let duplicated = 0;
+    for (const n of placedCounts.values()) if (n > 1) duplicated++;
+    // Which indices were omitted — needed to debug "1 missing" without re-running.
+    const missingIndices = missing > 0
+      ? Array.from({ length: jobs.length }, (_, i) => i).filter(i => !placedCounts.has(i))
+      : [];
+    if (missing > 0 || duplicated > 0) {
+      logger.warn(`[Jobs][${nodeId}] Bucketing placement gap: ${placed}/${jobs.length} placed, ${missing} missing, ${duplicated} duplicated`);
+    }
     jobsTelemetry.bucketing = {
       ts: Date.now(),
       input: jobs.length,
       categories: result?.categories?.length || 0,
+      placed,
+      missing,
+      duplicated,
+      // Indices (0-based) of jobs the bucketer omitted — cross-reference against
+      // the job titles in the scoring funnel to identify the specific job(s).
+      missingIndices,
       model: bucketMeta.model || null,
+      error: null,
     };
     return { categories: result?.categories || [] };
   });
@@ -1133,5 +1363,17 @@ RULES:
       diag: result.diag || null,
     };
     return { resolved: !!result.resolved, items };
+  });
+
+  // Renderer calls this after it merges captcha-resolve items into pendingJobs.
+  // The IPC-side `resolve-job-source` only knows about history-dedup; the
+  // renderer does a replace-and-dedup (drops same-source existing jobs, then
+  // deduplicates incoming items against the remainder). Without this update the
+  // bug report shows "new: N" from the IPC side, which can overstate the actual
+  // contribution when the resolver re-opened the same page as the initial scrape
+  // (kept=11 from IPC but pendingJobs 28→28 because 11 replaced 11).
+  ipcMain.handle('record-resolve-merge', (_event, { sourceId, replacedExisting, fresh, pendingBefore, pendingAfter } = {}) => {
+    if (!sourceId || !jobsTelemetry.resolves[sourceId]) return;
+    jobsTelemetry.resolves[sourceId].merge = { replacedExisting, fresh, pendingBefore, pendingAfter };
   });
 }

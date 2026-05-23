@@ -232,16 +232,6 @@ export function detectAntiBotSignal(ctx = {}) {
   return null;
 }
 
-/**
- * Human-friendly one-liner for embedding in a card's status text.
- * Format: "⚠️ <code>: <evidence> — <suggestion>"
- */
-export function formatAntiBotWarning(signal) {
-  if (!signal) return '';
-  const icon = signal.severity === 'block' ? '⛔' : '⚠️';
-  return `${icon} ${signal.code}: ${signal.evidence} — ${signal.suggestion}`;
-}
-
 // ── API-side detection ──────────────────────────────────────────────────────
 // The HTML-shaped detector above misses JSON/REST API blocks because APIs
 // don't serve Cloudflare interstitials — they serve 429s and JSON error

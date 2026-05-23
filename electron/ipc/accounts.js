@@ -15,6 +15,8 @@ import {
   getSupportedPlatforms,
   getSellMonitorPlatforms,
   getSellMonitorConfig,
+  getJobLoginPlatforms,
+  getJobLoginConfig,
   fetchHtmlClean,
 } from './stealthBrowser.js';
 
@@ -68,7 +70,7 @@ export async function verifySellMonitorLogin(platformId) {
   // returns `{ success: false }` and writeStatusCache is never called,
   // leaving a stale cache entry and an opaque renderer toast.
   try {
-    const config = getSellMonitorConfig(platformId);
+    const config = getSellMonitorConfig(platformId) || getJobLoginConfig(platformId);
     // Prefer verifyUrl (universal logged-in page like /my/account) over
     // sellerUrl (seller-specific, may redirect non-seller accounts through
     // signin.* hosts that trip our login-redirect regex). Falls back to
@@ -107,9 +109,27 @@ export async function verifySellMonitorLogin(platformId) {
     if (r.status === 401 || r.status === 403) {
       return { connected: false, reason: `Auth wall (HTTP ${r.status}) — not logged in.`, trace };
     }
+    // 404 on a "logged-in-only" page gives no signal — the URL may have been
+    // renamed/removed on the platform's side, making it return 404 for everyone
+    // (both logged-in and anonymous). Accepting it as "connected" would mask
+    // expired cookies permanently. Treat as unverifiable rather than connected.
+    if (r.status === 404) {
+      return { connected: false, reason: `Verify URL returned 404 — the URL may have changed on the platform's side. Update verifyUrl in JOB_LOGIN_PLATFORMS / SELL_MONITOR_PLATFORMS.`, trace };
+    }
     const finalUrlLower = String(r.finalUrl || '').toLowerCase();
     if (/\/(login|signin|sign-in|account\/login|auth)/i.test(finalUrlLower)) {
       return { connected: false, reason: `Redirected to ${r.finalUrl} — login not completed.`, trace };
+    }
+
+    // Platform-specific redirect guard: some platforms redirect anonymous users
+    // to a public page (200 OK, no /login in URL) rather than to a login URL.
+    // connectedFinalUrlMustContain lets the platform config specify a path
+    // fragment that the final URL must contain; absence means not logged in.
+    if (config?.connectedFinalUrlMustContain) {
+      const mustContain = config.connectedFinalUrlMustContain.toLowerCase();
+      if (!finalUrlLower.includes(mustContain)) {
+        return { connected: false, reason: `Redirected to ${r.finalUrl} — expected URL to contain "${config.connectedFinalUrlMustContain}" for a logged-in session.`, trace };
+      }
     }
 
     // Body-content sniff — catches "soft" login walls where the response is
@@ -127,6 +147,8 @@ export async function verifySellMonitorLogin(platformId) {
       'log in to continue',
       'enter your email or username',
       'enter your password',
+      // Platform-specific signals merged from platform config
+      ...(config?.bodySignals || []),
     ];
     const matched = softWallSignals.find(s => head.includes(s));
     if (matched) {
@@ -450,6 +472,27 @@ export function registerAccountsHandlers() {
       lastConfirmedAt: cached?.ts || null,
       name: config.name,
       sellerUrl: config.sellerUrl,
+    };
+  });
+
+  // ── Job Platform Auth ──────────────────────────────────────────────────────
+
+  handleSafe('get-job-platforms', async () => {
+    return { platforms: getJobLoginPlatforms() };
+  });
+
+  // Check whether the user is logged into a job platform.
+  // Truth source is the disk cache (same as sell monitor auth).
+  handleSafe('check-job-platform-auth', async (_event, { platformId }) => {
+    const config = getJobLoginConfig(platformId);
+    if (!config) return { platform: platformId, connected: false, error: 'Unknown platform' };
+    const cache = await readStatusCache();
+    const cached = cache[platformId];
+    return {
+      platform: platformId,
+      connected: !!cached?.connected,
+      lastConfirmedAt: cached?.ts || null,
+      name: config.name,
     };
   });
 }

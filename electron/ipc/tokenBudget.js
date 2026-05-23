@@ -31,7 +31,11 @@ const store = new Store({ name: 'token-budgets' });
 const WINDOW       = 30;     // rolling samples kept per task
 const MIN_SAMPLES  = 8;      // trust the learned cap only after this many
 const HEADROOM     = 1.2;    // p95 × this — bias upward (truncation is billed)
-const HARD_CAP     = 24576;  // absolute ceiling — bounds runaway billing
+const HARD_CAP     = 32768;  // absolute ceiling — bounds runaway billing
+// Note: tasks whose formula seeds above the old 24576 hard cap (e.g. job-bucketing
+// at 52+ jobs: 4096+52×400=24896) were permanently stuck — effectiveCap kept
+// returning 24576 even when the self-calibration wanted to raise it higher.
+// 32768 gives the self-calibration room to grow past the 24576 truncation floor.
 
 function allUsage() {
   return store.get('usage') || {};
@@ -61,11 +65,21 @@ export function recordTokenUsage(task, totalOutputTokens) {
  * silently truncates and falls back to a weaker model on every call before the
  * learned p95 ever engages. We track the largest cap a task has truncated at so
  * the next call provisions past it.
+ *
+ * `formulaSeed` is optional — the raw TASK_MAX_TOKENS value before effectiveCap
+ * adjustment. Stored for diagnostics: a truncatedAt >> formulaSeed means the
+ * formula was the bottleneck (self-calibration tried to compensate but couldn't
+ * catch up fast enough); truncatedAt ≈ formulaSeed means the formula is fine
+ * but the self-calibration hadn't yet grown past it.
  */
-export function recordTruncation(task, capHit) {
+export function recordTruncation(task, capHit, formulaSeed) {
   if (!task || !(capHit > 0)) return;
   const all = allTruncations();
-  all[task] = Math.max(all[task] || 0, Math.round(capHit));
+  const prev = all[task] || {};
+  const prevCap = typeof prev === 'number' ? prev : (prev.capHit || 0);
+  if (Math.round(capHit) > prevCap) {
+    all[task] = { capHit: Math.round(capHit), formulaSeed: formulaSeed != null ? Math.round(formulaSeed) : null };
+  }
   store.set('truncations', all);
 }
 
@@ -83,7 +97,9 @@ export function effectiveCap(task, formulaSeed) {
   // ABOVE that cap, so provision past it (× headroom) right away. This bypasses
   // the MIN_SAMPLES gate on purpose — a truncation is unambiguous, and waiting
   // for a p95 window means truncating + falling back on every call until then.
-  const truncatedAt = (task && allTruncations()[task]) || 0;
+  const truncRec    = task ? allTruncations()[task] : null;
+  // Support both the old plain-number format and the new {capHit, formulaSeed} shape.
+  const truncatedAt = truncRec ? (typeof truncRec === 'number' ? truncRec : (truncRec.capHit || 0)) : 0;
   const truncFloor  = truncatedAt > 0 ? Math.round(truncatedAt * HEADROOM) : 0;
 
   // Learned p95 floor: only trusted once we have a stable window, and only ever
@@ -100,6 +116,9 @@ export function effectiveCap(task, formulaSeed) {
   return Math.min(HARD_CAP, Math.max(seed, truncFloor, learned));
 }
 
+/** The absolute max-tokens ceiling. Exported so bug reports can detect a stuck cap. */
+export const TOKEN_HARD_CAP = HARD_CAP;
+
 /** Diagnostic snapshot for bug reports: per-task sample count + observed p95. */
 export function getTokenBudgetSnapshot() {
   const all = allUsage();
@@ -108,13 +127,19 @@ export function getTokenBudgetSnapshot() {
   for (const [task, arr] of Object.entries(all)) {
     if (!Array.isArray(arr) || arr.length === 0) continue;
     const sorted = [...arr].sort((a, b) => a - b);
+    const truncRec   = truncs[task];
+    const truncatedAt = truncRec ? (typeof truncRec === 'number' ? truncRec : (truncRec.capHit || 0)) : 0;
+    const formulaSeed = truncRec && typeof truncRec === 'object' ? (truncRec.formulaSeed ?? null) : null;
     out[task] = {
       samples: arr.length,
       p95: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))],
       max: sorted[sorted.length - 1],
       // > 0 means this task has truncated at this cap (and the budget has since
       // grown past it); a truncation = the model fell back to a weaker model.
-      truncatedAt: truncs[task] || 0,
+      truncatedAt,
+      // The raw TASK_MAX_TOKENS formula output at the time of the highest
+      // truncation — null if the truncation was recorded before this field was added.
+      formulaSeedAtTruncation: formulaSeed,
     };
   }
   return out;

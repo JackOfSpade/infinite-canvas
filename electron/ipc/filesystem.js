@@ -262,7 +262,7 @@ export function registerFilesystemHandlers() {
     
     if (hubs.length > 0) {
       data.transientProgress = { hubs, cards };
-      logger.info('[FileSystem] Embedded progress state in canvas JSON data');
+      logger.info(`[FileSystem] Embedded progress state in canvas JSON data: ${path.basename(targetPath)} (${hubs.length} hub(s), ${cards.length} card(s))`);
     } else {
       delete data.transientProgress;
     }

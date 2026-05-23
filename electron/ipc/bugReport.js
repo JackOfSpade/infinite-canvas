@@ -6,14 +6,14 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
 import { getAISettings, resolveServiceAccountPath, getJobsSettings } from './settings.js';
-import { getSellMonitorPlatforms } from './stealthBrowser.js';
+import { getSellMonitorPlatforms, getJobLoginPlatforms } from './stealthBrowser.js';
 import { getRecentLogs } from '../logger.js';
 import { getGeminiTelemetry } from './gemini.js';
 import { getJobsTelemetry } from './jobs.js';
 import { getMarketplaceTelemetry } from './marketplace.js';
 import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
-import { getTokenBudgetSnapshot } from './tokenBudget.js';
+import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -40,18 +40,22 @@ const modelTag = (model) => {
   return ` · model: \`${model}\`${weak ? ' ⚠️ weak fallback' : ''}`;
 };
 
-// Verdict for what the top-25/15 comp cap actually dropped. The question that
-// matters for "did the cap skew the price?" is whether the TYPICAL dropped comp
-// (its median) differs from the typical kept one — NOT whether some lone pricey
-// outlier exists in the dropped pile. The old test (dropped.max >= kept.median)
-// tripped on any single mid-priced dropped comp, so with dozens of drops it fired
-// on essentially every run — a false alarm that made a healthy price look broken.
-// Comparing medians distinguishes the four cases that actually change the answer:
-//   • dropped median below the kept range   → cheap noise, cap working (no flag)
-//   • dropped median ≈ kept median (≤15%)    → representative sample, price NOT skewed
-//   • dropped median well ABOVE kept median  → cap shed the pricier comps → price biased LOW
-//   • dropped median well BELOW kept median  → cap shed the cheaper comps → price biased HIGH
-const dropBandVerdict = (kept, dropped) => {
+// Verdict for what the top-25/15 comp cap actually dropped — does it skew the
+// price? Two facts matter. (1) Compare the TYPICAL dropped comp (its median) to
+// the typical kept one, not a lone outlier — the old dropped.max ≥ kept.median
+// test fired on essentially every run. (2) Crucially, the cap selects by
+// title-match RELEVANCE, not price. So a kept/dropped PRICE gap is only a skew if
+// the cap dropped comps as on-spec as the ones it kept; when the dropped comps
+// are clearly less relevant (the cap shedding off-spec/junk listings, which tend
+// to be cheap), a price gap is the EXPECTED result of good ranking, not a bias.
+// Without that relevance check a well-ranked run that correctly drops cheap junk
+// looks "biased HIGH" — a false alarm. keptScore/droppedScore are the median
+// title-match scores (see marketplace.js medianScore).
+//   • dropped median below the kept range      → cheap noise, cap working (no flag)
+//   • dropped median ≈ kept median (≤15%)       → representative sample, NOT skewed
+//   • price gap >15% but dropped less relevant  → cap shed off-spec comps, ranking working (no flag)
+//   • price gap >15% at comparable relevance    → cap shed equally on-spec comps → price biased
+const dropBandVerdict = (kept, dropped, keptScore, droppedScore) => {
   if (!kept || !dropped) return '';
   if (dropped.median < kept.min) {
     return ' Dropped sit below the kept band (low-relevance noise — cap working as intended).';
@@ -60,10 +64,17 @@ const dropBandVerdict = (kept, dropped) => {
   if (Math.abs(rel) <= 0.15) {
     return ` ✅ dropped median $${dropped.median} ≈ kept median $${kept.median} — the cap dropped a representative sample, so the price is not skewed by it (the 25/15 cap is a by-design cost bound, not lost signal).`;
   }
-  const pct = Math.round(Math.abs(rel) * 100);
-  return rel > 0
-    ? ` ⚠️ dropped median $${dropped.median} is ${pct}% ABOVE kept median $${kept.median} — the cap shed the pricier comps, so the price may be biased LOW (the title-match ranking isn't selecting the best comps; raise the cap or improve ranking).`
-    : ` ⚠️ dropped median $${dropped.median} is ${pct}% BELOW kept median $${kept.median} — the cap shed the cheaper comps, so the price may be biased HIGH.`;
+  const pct  = Math.round(Math.abs(rel) * 100);
+  const dir  = rel > 0 ? 'ABOVE' : 'BELOW';
+  const bias = rel > 0 ? 'LOW' : 'HIGH';  // dropped pricier ⇒ kept skews low; dropped cheaper ⇒ kept skews high
+  const haveScores = keptScore != null && droppedScore != null && keptScore > 0;
+  const scoreNote  = haveScores ? ` (median match score ${droppedScore} vs kept ${keptScore})` : '';
+  // Dropped comps clearly less relevant than kept → the cap correctly kept the
+  // closest matches; the price gap is the ranking working, not a bias.
+  if (haveScores && droppedScore < keptScore * 0.85) {
+    return ` dropped median $${dropped.median} is ${pct}% ${dir} kept median $${kept.median}, but the dropped comps are less relevant${scoreNote} — the cap kept the closest-matching listings and shed lower-relevance ${rel > 0 ? 'pricier' : 'cheaper'} ones, so the gap is the ranking working as intended, not a price bias.`;
+  }
+  return ` ⚠️ dropped median $${dropped.median} is ${pct}% ${dir} kept median $${kept.median} at comparable relevance${scoreNote} — the cap shed comps as on-spec as those it kept, so the price may be biased ${bias} (raise the cap or improve the comp ranking).`;
 };
 
 // Long marketplace comp URLs (eBay's run 500-600 chars of tracking params) dominate
@@ -96,6 +107,19 @@ const truncateLongUrls = (key, value) => {
 // the run (the telemetry deliberately outlives the hub — that's its whole point).
 // So node presence only refines the wording for same-window runs; windowId
 // decides inclusion. Unknown ids (older telemetry / no sender) → treat as local.
+// Produce a short but meaningful identifier for any node ID.
+// UUID-style IDs (e.g. "3539d90c-e09d-…") are unique in their first segment,
+// so we show the first 8 chars. All other IDs (e.g. "job-1779484861758-job-0",
+// "job-1779484861758-cat-2-buc-1") embed a shared timestamp prefix that makes
+// the first 8 chars identical across every job node — we show the last 8 chars
+// instead so the unique suffix ("-job-0", "-buc-1") is visible.
+const shortId = (id) => {
+  const s = String(id);
+  if (s.length <= 8) return s;
+  if (/^[0-9a-f]{8}-/.test(s)) return s.slice(0, 8); // UUID: first segment is unique
+  return `…${s.slice(-8)}`;                           // timestamp-prefixed: show suffix
+};
+
 const pipelineScope = (nodeId, windowId, currentNodeIds, reportWindowId) => {
   if (windowId != null && reportWindowId != null && windowId !== reportWindowId) {
     return {
@@ -104,7 +128,7 @@ const pipelineScope = (nodeId, windowId, currentNodeIds, reportWindowId) => {
     };
   }
   if (!nodeId) return { foreign: false, note: '' };
-  const short = String(nodeId).slice(0, 8);
+  const short = shortId(nodeId);
   const deleted = currentNodeIds && currentNodeIds.size > 0 && !currentNodeIds.has(nodeId);
   return {
     foreign: false,
@@ -247,10 +271,18 @@ function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
   let t;
   try { t = getJobsTelemetry(); } catch { return ''; }
   const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
-  if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing)) return '';
+  const hasPastes = Array.isArray(t?.pastedPastes) ? t.pastedPastes.length > 0 : !!t?.pastedParse; // back-compat with old single-object field
+  if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing && !hasPastes)) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId);
   if (scope.foreign) return `\n## Job Search Pipeline\n${scope.note}`;
+
+  // Read session cache once — used to annotate pagination warnings with login status.
+  let sessionCache = {};
+  try {
+    const cachePath = path.join(app.getPath('userData'), 'session-status-cache.json');
+    sessionCache = JSON.parse(fs.readFileSync(cachePath, 'utf8')) || {};
+  } catch { /* cache absent is fine — treat all platforms as unconfirmed */ }
 
   const lines = [];
 
@@ -280,7 +312,30 @@ function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
       // have no walk and don't appear here.
       const walked = entries.filter(([, v]) => v.pagesWalked > 0);
       for (const [k, v] of walked) {
-        const flag = v.stopReason === 'blocked' ? ' ⚠️' : (v.stopReason === 'ceiling' ? ' ⚠️ (hit page cap — may be more)' : '');
+        let flag = '';
+        if (v.stopReason === 'blocked') {
+          flag = ' ⚠️';
+        } else if (v.stopReason === 'ceiling') {
+          // A page-ceiling where most rows deduped away means the page param
+          // re-served the same page (clamping) — NOT genuine depth, so "may be
+          // more" would mislead. The raw↔unique gap is the tell.
+          const raw = v.count || 0, uniq = v.unique;
+          const notLoggedIn = !sessionCache[k]?.connected;
+          const isReserved = uniq != null && raw > 0 && uniq <= raw / 2;
+          const loginNote = notLoggedIn ? ` Not logged in at search time — platform may ignore pagination without a session.` : '';
+          // Re-served pages while cache says connected is a red flag: the most
+          // common cause of silent re-serving is an invalid/expired session that
+          // the verifier mistakenly accepted (false positive). Surface it so the
+          // user knows to re-verify their login rather than chase a code bug.
+          const falsePosNote = (!notLoggedIn && isReserved)
+            ? ` Cache says logged in — but re-served pages are the signature of a blocked (unauthenticated) session. The verify URL may be producing a false positive; try logging out and back in via Settings → Job Platform Logins.`
+            : '';
+          if (isReserved) {
+            flag = ` ⚠️ (hit page cap, but ${raw} gathered → only ${uniq} unique: re-served/clamped pages, likely NOT more — the page-param is probably repeating.${loginNote}${falsePosNote})`;
+          } else {
+            flag = ` ⚠️ (hit page cap — may be more.${loginNote})`;
+          }
+        }
         lines.push(`  - \`${k}\`: walked ${v.pagesWalked} page${v.pagesWalked === 1 ? '' : 's'}${v.stopReason ? ` → stopped: ${v.stopReason}` : ''}${flag}`);
       }
       // API/feed sources don't paginate — they grab matches in document order and
@@ -293,8 +348,12 @@ function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
       for (const [k, v] of apiCapped) {
         lines.push(`  - \`${k}\`: surfaced ${v.count} of ${v.gathered} in-window matches ⚠️ (per-source cap — ${v.gathered - v.count} more matched but not gathered; raise JOB_RESULT_CAP to widen)`);
       }
-      const zeroWarn = entries.filter(([, v]) => v.count === 0 && v.warning).map(([k, v]) => `${k} (${v.warning.code})`);
+      const zeroPaste = entries.filter(([, v]) => v.count === 0 && v.warning?.code === 'paste-needed').map(([k]) => k);
+      const zeroWarn = entries.filter(([, v]) => v.count === 0 && v.warning && v.warning.code !== 'paste-needed').map(([k, v]) => `${k} (${v.warning.code})`);
       const zeroClean = entries.filter(([, v]) => v.count === 0 && !v.warning).map(([k]) => k);
+      if (zeroPaste.length) {
+        lines.push(`  - ⏳ paste-needed (hub paused waiting for manual copy/paste — expected, not a scrape failure): ${zeroPaste.join(', ')}`);
+      }
       if (zeroWarn.length) {
         lines.push(`  - ⚠️ 0 results + flagged (real miss to investigate): ${zeroWarn.join(', ')}`);
       }
@@ -341,12 +400,30 @@ function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
     const entries = Object.entries(t.resolves).sort((a, b) => (b[1]?.ts || 0) - (a[1]?.ts || 0));
     lines.push('\n### Captcha-resolve / Solve');
     for (const [sourceId, r] of entries) {
+      // If the renderer reported the actual merge outcome, show net pendingJobs
+      // change. Without it, "new: N" from the IPC side overstates the contribution
+      // when the resolver re-opened a page the initial scrape already captured
+      // (same-source jobs are replaced, so the net change may be 0 even if kept=N).
+      const m = r.merge;
+      let mergeNote;
+      if (m != null) {
+        const netChange = m.pendingAfter - m.pendingBefore;
+        const netStr = netChange >= 0 ? `+${netChange}` : `${netChange}`;
+        mergeNote = ` → replaced ${m.replacedExisting} existing → **net pendingJobs ${netStr} (${m.pendingBefore}→${m.pendingAfter})**`;
+      } else {
+        mergeNote = ` → **new (to history): ${r.kept}**`;
+      }
       lines.push(
         `- \`${sourceId}\`${ago(r.ts)}: inline-extracted ${r.extracted} → age-dropped ${r.ageDropped} → ` +
-        `already-seen/history ${r.historyDropped} → **new: ${r.kept}**`,
+        `already-seen/history ${r.historyDropped}${mergeNote}`,
       );
       if (r.extracted > 0 && r.kept === 0) {
         lines.push('  - _(every extracted job was already shown on a prior run — correctly suppressed, not re-analyzed)_');
+      }
+      // Net change = 0 means the resolve refreshed existing same-source jobs but
+      // added nothing to the scoring queue. Explains "new: N" vs "scored: M" gaps.
+      if (m != null && m.pendingAfter === m.pendingBefore && m.replacedExisting > 0) {
+        lines.push(`  - _(replaced ${m.replacedExisting} existing ${sourceId} jobs with fresh data; net pendingJobs unchanged — these count toward scoring already)_`);
       }
       // The "why" behind a 0-extract — turns "Solve did nothing" into a named
       // cause: how the window closed, what the inline extractor returned, and
@@ -370,6 +447,31 @@ function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
     }
   }
 
+  // Manual paste → parse (Google fallback). A failed/0 submit is the "I pasted
+  // and clicked Submit but it failed" case — usually the parse output exceeded
+  // its token cap and truncated. Surfaced here so it's not inferable only from
+  // the job-scoring token-budget truncation marker.
+  // Back-compat: older builds wrote a single pastedParse object; new builds write
+  // a pastedPastes array so multiple mid-run + post-reblock pastes are all visible.
+  const allPastes = Array.isArray(t.pastedPastes) && t.pastedPastes.length > 0
+    ? t.pastedPastes
+    : (t.pastedParse ? [t.pastedParse] : []);
+  if (allPastes.length > 0) {
+    lines.push('\n### Manual paste (Google fallback)');
+    for (const p of allPastes) {
+      lines.push(
+        `- \`${p.sourceId}\`${ago(p.ts)}: pasted ${p.chars} chars${p.chunks > 1 ? ` in ${p.chunks} chunks` : ''} → **parsed ${p.parsed} job(s)**` +
+        (p.error ? ` ⚠️ ${p.error}` : ' → merged into pendingJobs for scoring'),
+      );
+      if (p.error && p.parsed === 0) {
+        lines.push('  - _(this submit added NO jobs — not silently dropped: the card stays so the user can retry with a smaller paste)_');
+      }
+    }
+    if (allPastes.length > 1) {
+      lines.push(`  - _(${allPastes.length} paste submissions this run — multiple pastes indicate the hub re-blocked and required a second resolve)_`);
+    }
+  }
+
   if (t.scoring) {
     const s = t.scoring;
     const clean = s.placeholders === 0 && s.unscored === 0;
@@ -383,6 +485,26 @@ function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
       lines.push(`- Scored: ${s.scored}/${selected} ${clean ? '✅ all selected jobs genuinely analyzed' : ''}`);
     } else {
       lines.push(`- Input: ${s.input} → scored: ${s.scored} ${clean ? '✅ all genuinely analyzed' : ''}`);
+    }
+    // Reconcile the scorer's input against what was actually gathered THIS session
+    // (search + paste + captcha-resolves). When input exceeds that, the surplus was
+    // carried over from a PRIOR run — job cards persisted on the canvas, re-scored
+    // alongside this session's gather. They weren't gathered this session, so their
+    // scrape funnel isn't in this report. Surfaced so a "99 scored but only 65
+    // gathered here" gap reads as carry-over, not jobs appearing from nowhere.
+    // Use merge.net (renderer-side) when available — it accounts for same-source
+    // replacement (resolver re-opens a page the initial scrape already captured,
+    // so kept=11 IPC-side but net pendingJobs change=0). Without it, sessionGathered
+    // overstates by replacedExisting, making scoring input look like carry-over.
+    const pastedTotal = allPastes.reduce((sum, p) => sum + (p.parsed || 0), 0);
+    const sessionGathered = (t.search?.kept || 0) + pastedTotal +
+      Object.values(t.resolves || {}).reduce((sum, r) => {
+        const m = r?.merge;
+        return sum + (m != null ? (m.pendingAfter - m.pendingBefore) : (r?.kept || 0));
+      }, 0);
+    const carried = s.input - sessionGathered;
+    if (carried > 0) {
+      lines.push(`  - _(${sessionGathered} gathered this session; the other **${carried}** were carried over from a prior run — already on the canvas, re-scored here. Not gathered this session, so their scrape funnel isn't above — and not silently added.)_`);
     }
     lines.push(`- Batches: ${s.batches} (${s.failedBatches} failed)${modelTag(s.models?.length ? s.models.join(', ') : null)}`);
     if (s.placeholders > 0) {
@@ -398,8 +520,31 @@ function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
   if (t.bucketing) {
     const b = t.bucketing;
     lines.push(`\n### Bucketing${ago(b.ts)}`);
-    lines.push(`- Input: ${b.input} → categories: ${b.categories}${modelTag(b.model)}`);
-    if (b.categories === 0 && b.input > 0) {
+    if (b.error) {
+      // The bucket call threw (e.g. Claude's "streaming required" rejection at a
+      // high max_tokens cap, an LLM truncation, or fallback-chain exhaustion).
+      // The renderer caught it and spawned a FLAT job list. Surface the error and
+      // its consequence so this is never mistaken for a clean run OR for the
+      // "never ran" null slot below — both of which hide that categorization died.
+      lines.push(`- ❌ **Bucketing FAILED** on ${b.input} scored job(s)${modelTag(b.model)} — jobs were spawned as a FLAT, uncategorized list (none dropped, but the category/salary tree is lost).`);
+      lines.push(`  - Error: ${b.error}`);
+    } else if (b.placed != null) {
+      // Placement check: did the bucketer assign every scored job to a bucket?
+      const clean = b.missing === 0 && b.duplicated === 0;
+      lines.push(`- Input: ${b.input} → **${b.placed} placed** across ${b.categories} categories${clean ? ' ✅ all jobs placed' : ''}${modelTag(b.model)}`);
+      if (b.missing > 0) {
+        const idxNote = Array.isArray(b.missingIndices) && b.missingIndices.length > 0
+          ? ` Missing indices (0-based): [${b.missingIndices.join(', ')}]`
+          : '';
+        lines.push(`  - ⚠️ **${b.missing} scored job(s) NOT placed by the bucketer** (it broke the "every job in exactly one bucket" rule — common on the weak fallback models quota forces). The renderer's missing-sweep rescues them into an Uncategorized branch — shown, not dropped, but uncategorized.${idxNote}`);
+      }
+      if (b.duplicated > 0) {
+        lines.push(`  - ⚠️ ${b.duplicated} job(s) placed in more than one bucket by the bucketer (deduped on spawn).`);
+      }
+    } else {
+      lines.push(`- Input: ${b.input} → categories: ${b.categories}${modelTag(b.model)}`);
+    }
+    if (!b.error && b.categories === 0 && b.input > 0) {
       lines.push('- ⚠️ Bucketing returned 0 categories — the renderer will have fallen back to a flat spawn (jobs still shown, but the category/salary tree is lost).');
     }
   } else {
@@ -492,7 +637,15 @@ function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId) {
     const entries = Object.entries(t.resolves).sort((a, b) => (b[1]?.ts || 0) - (a[1]?.ts || 0));
     lines.push('\n### Captcha-resolve / Solve');
     for (const [sourceId, r] of entries) {
-      lines.push(`- \`${sourceId}\`${ago(r.ts)}: inline-extracted ${r.extracted} ${r.category} comp(s) merged into the pricing set`);
+      // `via` distinguishes how the items reached the pricing set: 'inline' =
+      // pulled directly from the visible captcha-resolve session; 'rescrape' =
+      // inline came back empty and a headless rescrape recovered them. Reporting
+      // the rescrape count (not the inline 0) is what keeps a successful recovery
+      // from looking like a failure.
+      const line = r.via === 'rescrape'
+        ? `- \`${sourceId}\`${ago(r.ts)}: rescraped ${r.extracted} ${r.category} comp(s) into the pricing set (inline extract failed; recovered via headless rescrape)`
+        : `- \`${sourceId}\`${ago(r.ts)}: inline-extracted ${r.extracted} ${r.category} comp(s) merged into the pricing set`;
+      lines.push(line + (r.extracted === 0 ? ' ⚠️ recovered 0 — source contributed nothing to pricing' : ''));
     }
   }
 
@@ -502,7 +655,11 @@ function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId) {
     if (s.junkRejected > 0) {
       // Non-genuine listings dropped before pricing — reported so the rejection
       // is transparent (and so a spike signals a new junk pattern to filter).
-      lines.push(`- 🧹 Rejected ${s.junkRejected} non-genuine listing(s) before pricing${s.junkExample ? ` (e.g. "${s.junkExample}")` : ''} — e.g. eBay internal test listings, not real comps.`);
+      // Two classes today (see filterJunkComps): accessories FOR the item (cases,
+      // chargers, screen protectors — the bulk, esp. from Poshmark) and eBay
+      // internal test listings. Keep the description in sync with the filter so
+      // the example never contradicts the explanation.
+      lines.push(`- 🧹 Rejected ${s.junkRejected} non-genuine listing(s) before pricing${s.junkExample ? ` (e.g. "${s.junkExample}")` : ''} — accessories for the item (cases/chargers/etc.) and eBay internal test listings, not real comps.`);
     }
     if (s.soldFound + s.activeFound === 0) {
       lines.push('- ⚠️ 0 comps available → no price synthesized (all sources empty or blocked).');
@@ -534,13 +691,13 @@ function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId) {
         if (s.soldDroppedStats) {
           lines.push(
             `- Dropped ${s.soldDroppedStats.n} sold ${fmt(s.soldDroppedStats)}; kept ${fmt(s.soldKeptStats)}.` +
-            dropBandVerdict(s.soldKeptStats, s.soldDroppedStats),
+            dropBandVerdict(s.soldKeptStats, s.soldDroppedStats, s.soldKeptScore, s.soldDroppedScore),
           );
         }
         if (s.activeDroppedStats) {
           lines.push(
             `- Dropped ${s.activeDroppedStats.n} active ${fmt(s.activeDroppedStats)}; kept ${fmt(s.activeKeptStats)}.` +
-            dropBandVerdict(s.activeKeptStats, s.activeDroppedStats),
+            dropBandVerdict(s.activeKeptStats, s.activeDroppedStats, s.activeKeptScore, s.activeDroppedScore),
           );
         }
         // Per-source composition of the sold kept/dropped split — exposes a
@@ -553,6 +710,21 @@ function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId) {
         if (s.soldKeptBySource || s.soldDroppedBySource) {
           lines.push(`- Sold by source — kept: ${bySrc(s.soldKeptBySource)} · dropped: ${bySrc(s.soldDroppedBySource)}`);
         }
+        // Wrong-product detector: a kept source whose comps barely match the
+        // query (median match score collapsed to ~brand-only, well below the
+        // overall kept score) returned off-target results — e.g. Swappa serving
+        // Apple Vision Pro for an iPhone XS query. Round-robin selection forces
+        // each source's "best" in even when that best is the wrong item, so this
+        // junk reaches pricing silently unless named here.
+        if (s.soldKeptScoreBySource && s.soldKeptScore > 0) {
+          const offenders = Object.entries(s.soldKeptScoreBySource)
+            .filter(([src, sc]) => sc != null && sc < s.soldKeptScore * 0.5 && (s.soldKeptBySource?.[src] || 0) >= 2)
+            .sort((a, b) => a[1] - b[1])
+            .map(([src, sc]) => `${src} (median match ${sc} vs overall ${s.soldKeptScore}, ${s.soldKeptBySource[src]} kept)`);
+          if (offenders.length) {
+            lines.push(`- ⚠️ Off-target source(s) in the priced set: ${offenders.join('; ')} — these kept comps barely match the query (likely wrong-product results), polluting the pricing input. Their prices skew the kept band above.`);
+          }
+        }
       }
       lines.push(`- Result: recommended_price=${s.recommendedPrice == null ? '**null** ⚠️ (comps scraped but no price produced)' : '$' + s.recommendedPrice}, match_quality=${s.matchQuality}${modelTag(s.model)}`);
       // The model's own anchor/adjusted/bound split — the LAST place a comp can
@@ -562,14 +734,48 @@ function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId) {
       // fed set is the tell that the price leans on very few real matches.
       if (s.compBreakdown) {
         const cb = s.compBreakdown;
-        const anchor = cb.anchor_count || 0, adjusted = cb.adjusted_count || 0, bound = cb.bound_count || 0;
-        const classified = anchor + adjusted + bound;
-        const fed = (s.soldUsed || 0) + (s.activeUsed || 0);
+        // Guard a malformed breakdown: the model occasionally fumbles this nested
+        // object (leaks the inner counts / tool-call XML instead of nesting them),
+        // so cb arrives as a string or with non-numeric counts. claude.js repairs
+        // it, but if a malformed one still reaches here, say so — don't render the
+        // misleading "0 anchor + 0 adjusted + 0 bound … thin anchor base" that a
+        // raw `|| 0` would produce (the model DID classify; the shape was broken).
+        const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+        const wellFormed = cb && typeof cb === 'object' && !Array.isArray(cb) &&
+          (isNum(cb.anchor_count) || isNum(cb.adjusted_count) || isNum(cb.bound_count));
+        if (!wellFormed) {
+          lines.push(`- ⚠️ Model weighting unavailable — comp_breakdown came back malformed (${JSON.stringify(cb).slice(0, 80)}). The model's anchor/adjusted/bound split couldn't be read (structured-output shape error); the price itself is unaffected.`);
+        } else {
+          const anchor = cb.anchor_count || 0, adjusted = cb.adjusted_count || 0, bound = cb.bound_count || 0;
+          const classified = anchor + adjusted + bound;
+          const fed = (s.soldUsed || 0) + (s.activeUsed || 0);
+          lines.push(
+            `- Model weighting: ${anchor} anchor + ${adjusted} adjusted + ${bound} bound = ${classified} of ${fed} fed classified` +
+            (classified < fed
+              ? ` — the model weighted out the other ${fed - classified} as off-spec. The price leans on ${anchor} exact-match anchor listing(s)${anchor <= 2 ? ' ⚠️ (thin anchor base — verify against the kept band above)' : ''}.`
+              : '.'),
+          );
+        }
+      }
+      // Model's own market summary — its internal tally of what it counted as
+      // genuine comps (after its own classification). The fed→model-counted gap
+      // is the last invisible drop: we feed N active but the model may count 0
+      // if it judged them all as accessories/parts. Flag when active_count=0
+      // despite activeUsed>0 so that's visible rather than a mystery.
+      if (s.marketSummary) {
+        const ms = s.marketSummary;
+        const msActive = ms.active_count ?? null;
+        const msSold   = ms.sold_count ?? null;
+        const soldPrices = (ms.sold_low != null && ms.sold_high != null)
+          ? ` ($${ms.sold_low}–$${ms.sold_high}, median $${ms.sold_median ?? '?'})`
+          : '';
+        const activeFloor = ms.active_lowest != null ? ` (floor $${ms.active_lowest})` : '';
+        const activeGap = msActive === 0 && (s.activeUsed || 0) > 0;
+        const soldGap   = msSold   != null && msSold < (s.soldUsed || 0) * 0.5 && (s.soldUsed || 0) > 4;
         lines.push(
-          `- Model weighting: ${anchor} anchor + ${adjusted} adjusted + ${bound} bound = ${classified} of ${fed} fed classified` +
-          (classified < fed
-            ? ` — the model weighted out the other ${fed - classified} as off-spec. The price leans on ${anchor} exact-match anchor listing(s)${anchor <= 2 ? ' ⚠️ (thin anchor base — verify against the kept band above)' : ''}.`
-            : '.'),
+          `- Model's own market summary: ${msSold ?? '?'} sold${soldPrices} · ${msActive ?? '?'} active${activeFloor}` +
+          (activeGap ? ` ⚠️ model counted 0 active despite ${s.activeUsed} being fed — model classified them all as off-spec (accessories/parts/wrong-product)` : '') +
+          (soldGap   ? ` ⚠️ model counted only ${msSold} sold of ${s.soldUsed} fed — most were classified as off-spec` : ''),
         );
       }
     }
@@ -591,7 +797,9 @@ ${scope.note}> Last sell-side run's funnel (photo analysis → comp scrape → p
 > a found≫unique gap (an extractor double-counting) are not. Per-source raw
 > counts + the unique line localize a silent inflation; anti-bot blocks and
 > internal scrape errors are reported separately (a browser-launch/profile-lock
-> race is NOT a captcha). Each stage stamps independently (resolve/rescrape alone).
+> race is NOT a captcha). "Model's own market summary" is the final funnel step:
+> active_count=0 despite N fed means the model classified every active listing as
+> off-spec (accessories/parts). Each stage stamps independently (resolve/rescrape alone).
 
 ${lines.join('\n')}
 `;
@@ -751,7 +959,7 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
         if (Array.isArray(d.scrapeWarnings) && d.scrapeWarnings.length) hits.push(`scrapeWarnings=${d.scrapeWarnings.length}`);
         if (Array.isArray(d.pendingJobs) && d.pendingJobs.length) hits.push(`pendingJobs=${d.pendingJobs.length}`);
         if ('pendingTargetRole' in d && d.pendingTargetRole) hits.push('pendingTargetRole=set');
-        if (hits.length) offenders.push(`  - \`${String(n.id).slice(0, 8)}\` (${n.type}): ${hits.join(', ')}`);
+        if (hits.length) offenders.push(`  - \`${shortId(n.id)}\` (${n.type}): ${hits.join(', ')}`);
       }
       if (n?.type === 'group' && n.data?.canvasData?.nodes) walk(n.data.canvasData.nodes);
     }
@@ -827,6 +1035,7 @@ export function generateMarkdown(payload, reportWindowId = null) {
     const rows = nodeInternals.map(n => {
       const cs = compStateById[n.id] || {};
       const flags = [
+        n.hidden ? 'hidden' : null,
         cs.isEditing ? 'editing' : null,
         cs.isResizing ? 'resizing' : null,
         cs.hasEdgeCursor ? 'edgeCursor' : null,
@@ -859,6 +1068,7 @@ export function generateMarkdown(payload, reportWindowId = null) {
       if (d.file) previewParts.push(`file: ${d.file.name || d.file}`);
       if (d.filePath) previewParts.push(`filePath: ${path.basename(String(d.filePath))}`);
       if (d.resumeProfile) previewParts.push('resumeProfile: ✓');
+      if (typeof d.matchScore === 'number') previewParts.push(`score: ${d.matchScore}`);
       if (d.url) previewParts.push(`url: ${String(d.url).slice(0, 50)}`);
       if (d.product?.brand) previewParts.push(`brand: ${d.product.brand}`);
       // Marketplace-card surface: status + statusMessage are the most common
@@ -882,7 +1092,10 @@ export function generateMarkdown(payload, reportWindowId = null) {
       // bug at a glance (otherwise it's buried in the raw node JSON).
       if (d.sourceId && d.persistedProgress) {
         const p = d.persistedProgress;
-        const lingering = p.status === 'skipped' || (p.status === 'done' && !p.warning);
+        // Google Jobs (isManualPaste source) intentionally stays visible at done+0+no-warning
+        // while the hub is paused waiting for the user to paste — not a lingering bug.
+        const isPasteWaiting = d.sourceId === 'google' && p.status === 'done' && !p.warning && !(p.count > 0);
+        const lingering = !isPasteWaiting && (p.status === 'skipped' || (p.status === 'done' && !p.warning));
         previewParts.push(
           `source: ${d.sourceId}, progress: ${p.status || '?'}${p.warning?.code ? ` (${p.warning.code})` : ''}` +
           (lingering ? ' ⚠️ should have auto-dismissed (lingering card)' : ''),
@@ -941,7 +1154,7 @@ export function generateMarkdown(payload, reportWindowId = null) {
       const dataPreview = previewParts.join(', ');
 
       return (
-        `| \`${n.id.slice(0, 8)}\` ` +
+        `| \`${shortId(n.id)}\` ` +
         `| ${n.type} ` +
         `| ${n.selected ? '✅' : '—'} ` +
         `| (${n.position?.x?.toFixed(0)}, ${n.position?.y?.toFixed(0)}) ` +
@@ -961,7 +1174,7 @@ export function generateMarkdown(payload, reportWindowId = null) {
 > **Size columns**: mismatches reveal ResizeObserver/setNodes race conditions.
 > **Component state**: React state at the moment the report was generated.
 
-| ID (first 8) | Type | Selected | Position | Font | T-Color | B-Color | width (prop) | style.width | measured.width | currentSize | state flags | data preview |
+| ID | Type | Selected | Position | Font | T-Color | B-Color | width (prop) | style.width | measured.width | currentSize | state flags | data preview |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 ${rows}
 `;
@@ -1067,24 +1280,38 @@ ${rows}
   let activeTasksMarkdown = '';
   try {
     const tasks = snapshotActiveNodeTasks() || [];
-    if (tasks.length > 0) {
-      const rows = tasks
-        .map(t => `| \`${String(t.nodeId).slice(0, 8)}\` | ${t.taskCount} |`)
+    // Only show tasks whose nodeId is in THIS canvas. A node from another
+    // canvas window that's actively running is expected and normal — showing
+    // it here makes it look like a stuck/leaked task in this canvas when it
+    // isn't. Deleted-node tasks (nodeId absent from currentNodeIds but still
+    // registered) are the real signal; they're included when they can't be
+    // attributed to a foreign canvas via the pipeline telemetry windowId.
+    const jobTelWindowId   = getJobsTelemetry()?.windowId ?? null;
+    const mktTelWindowId   = getMarketplaceTelemetry()?.windowId ?? null;
+    const knownForeignNodeIds = new Set([
+      jobTelWindowId   != null && jobTelWindowId   !== reportWindowId ? getJobsTelemetry()?.nodeId   : null,
+      mktTelWindowId   != null && mktTelWindowId   !== reportWindowId ? getMarketplaceTelemetry()?.nodeId : null,
+    ].filter(Boolean));
+    const localTasks   = tasks.filter(t => !knownForeignNodeIds.has(t.nodeId));
+    const foreignCount = tasks.length - localTasks.length;
+    if (localTasks.length > 0) {
+      const rows = localTasks
+        .map(t => `| \`${shortId(t.nodeId)}\` | ${t.taskCount} |`)
         .join('\n');
       activeTasksMarkdown = `
 ## Active IPC Tasks
 > Nodes with backend AbortControllers still registered at report time.
 > A node showing tasks here while its UI looks idle means a cancel/abort
-> request never reached the backend.
+> request never reached the backend.${foreignCount > 0 ? ` (${foreignCount} task(s) from other canvas windows omitted.)` : ''}
 
-| Node ID (first 8) | Active task count |
+| Node ID | Active task count |
 |---|---|
 ${rows}
 `;
     } else {
       activeTasksMarkdown = `
 ## Active IPC Tasks
-- ✅ None registered.
+- ✅ None registered${foreignCount > 0 ? ` (${foreignCount} task(s) running in other canvas windows — expected, not shown here)` : ''}.
 `;
     }
   } catch { /* never break the report on diagnostic failure */ }
@@ -1138,7 +1365,11 @@ ${rows}
 
     const rows = platforms.map(p => {
       const entry = cache[p.id];
-      const connected = entry?.connected ? '✅ true' : entry ? '❌ false' : '— (no entry)';
+      const traceStatus = entry?.lastTrace?.status;
+      const staleMismatch = entry?.connected && traceStatus != null && traceStatus >= 400;
+      const connected = entry?.connected
+        ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)` : '✅ true')
+        : entry ? '❌ false' : '— (no entry)';
       const lastConfirmed = entry?.ts
         ? `${new Date(entry.ts).toISOString()} (${Math.round((Date.now() - entry.ts) / 1000)}s ago)`
         : '—';
@@ -1187,6 +1418,65 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
 `;
   } catch { /* never break the report on diagnostic failure */ }
 
+  // ── Job platform session snapshot ─────────────────────────────────────────
+  // Same cache as sell-monitor; shown separately because job platforms have
+  // different UI context (Settings → Job Boards). A verify URL returning 404
+  // means the platform changed its URL structure — that's only visible here,
+  // not in the sell-monitor section above.
+  let jobSessionsMarkdown = '';
+  try {
+    const platforms = getJobLoginPlatforms() || [];
+    const cachePath = path.join(app.getPath('userData'), 'session-status-cache.json');
+    let cache = {};
+    try {
+      const raw = fs.readFileSync(cachePath, 'utf8');
+      cache = JSON.parse(raw) || {};
+    } catch { /* file may not exist yet */ }
+
+    const rows = platforms.map(p => {
+      const entry = cache[p.id];
+      const traceStatus = entry?.lastTrace?.status;
+      const staleMismatch = entry?.connected && traceStatus != null && traceStatus >= 400;
+      const connected = entry?.connected
+        ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)` : '✅ true')
+        : entry ? '❌ false' : '— (no entry)';
+      const lastConfirmed = entry?.ts
+        ? `${new Date(entry.ts).toISOString()} (${Math.round((Date.now() - entry.ts) / 1000)}s ago)`
+        : '—';
+      const reason = entry?.lastReason ? entry.lastReason.replace(/\|/g, '\\|') : '—';
+      return `| \`${p.id}\` | ${p.name} | ${connected} | ${lastConfirmed} | ${reason} |`;
+    }).join('\n');
+
+    const traceBlocks = platforms.map(p => {
+      const t = cache[p.id]?.lastTrace;
+      if (!t) return '';
+      const lines = [
+        `**${p.name}** (\`${p.id}\`):`,
+        `  - target: \`${t.target || '—'}\``,
+        t.finalUrl != null ? `  - finalUrl: \`${t.finalUrl}\`` : null,
+        t.status != null ? `  - HTTP status: \`${t.status}\`` : null,
+        t.htmlBytes != null ? `  - htmlBytes: \`${t.htmlBytes}\`` : null,
+        t.softWallMatch ? `  - softWallMatch: \`${t.softWallMatch}\`` : null,
+        t.error ? `  - error: \`${t.error}\`` : null,
+        t.bodyHead ? `  - bodyHead: \`${t.bodyHead.replace(/`/g, "'").slice(0, 240)}\`` : null,
+      ].filter(Boolean);
+      return lines.join('\n');
+    }).filter(Boolean).join('\n\n');
+
+    jobSessionsMarkdown = `
+## Job Platform Sessions
+> Disk cache state for job-board logins — same \`session-status-cache.json\`
+> as marketplace sessions. A verify URL returning 404 means the platform
+> changed its URL structure; update \`verifyUrl\` in \`JOB_LOGIN_PLATFORMS\`
+> in stealthBrowser.js. "No entry" = never logged in via the app.
+
+| Platform ID | Name | Cached connected | Last confirmed | Last reason |
+|---|---|---|---|---|
+${rows}
+
+${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : ''}`;
+  } catch { /* never break the report on diagnostic failure */ }
+
   // ── Recent main-process logs ──────────────────────────────────────────────
   // Last ~50 main-process log lines, captured by the in-memory ring buffer
   // in logger.js. Critical for diagnosing "the IPC silently failed" reports:
@@ -1230,17 +1520,37 @@ ${formatted}
   const tokenBudgets = (() => { try { return getTokenBudgetSnapshot(); } catch { return {}; } })();
   const tokenBudgetLines = Object.entries(tokenBudgets)
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([task, s]) => `- \`${task}\`: p95 ${s.p95} / max ${s.max} tok over ${s.samples} call(s)` +
-      (s.truncatedAt > 0
-        ? ` · ⚠️ truncated at cap ${s.truncatedAt} (budget grown past it — until then this task fell back to a weaker model)`
-        : ''));
+    .map(([task, s]) => {
+      // Mirrors tokenBudget.js HEADROOM=1.2: truncation floor = truncatedAt × 1.2.
+      // This is the minimum next cap (effectiveCap also folds in seed + learned p95,
+      // so the real next cap is ≥ this floor). Showing it makes "will self-heal?"
+      // answerable without manual arithmetic.
+      const nextCapFloor = s.truncatedAt > 0 ? Math.round(s.truncatedAt * 1.2) : 0;
+      // formulaSeedAtTruncation distinguishes "formula is wrong" (seed << truncatedAt,
+      // formula needs raising) from "self-calibration lag" (seed ≈ truncatedAt, formula
+      // was fine but the observed p95 hadn't yet driven effectiveCap past it).
+      const seedNote = (s.truncatedAt > 0 && s.formulaSeedAtTruncation != null)
+        ? `formula seed: ${s.formulaSeedAtTruncation}` : '';
+      // If the truncation happened AT the hard cap, the self-calibration is permanently
+      // stuck — nextCapFloor > HARD_CAP can never be reached and "next cap ≥X" is false.
+      const stuckAtHardCap = s.truncatedAt >= TOKEN_HARD_CAP;
+      const healNote = stuckAtHardCap
+        ? `⛔ AT hard cap (${TOKEN_HARD_CAP}) — self-calibration cannot self-heal; formula or hard cap must be raised`
+        : `next cap ≥${nextCapFloor} — until self-healed this task fell back to a weaker model`;
+      const detail = seedNote ? `${seedNote}, ${healNote}` : healNote;
+      return `- \`${task}\`: p95 ${s.p95} / max ${s.max} tok over ${s.samples} call(s)` +
+        (s.truncatedAt > 0
+          ? ` · ⚠️ truncated at cap ${s.truncatedAt} (${detail})`
+          : '');
+    });
   const tokenBudgetMarkdown = tokenBudgetLines.length
     ? `
 ### Learned Token Budgets
 > Observed output (visible + thinking) tokens per task — drives the self-calibrating
-> max_tokens cap. A p95 near the 24576 hard cap means that task is truncating. A
+> max_tokens cap. A p95 near the ${TOKEN_HARD_CAP} hard cap means that task is truncating. A
 > ⚠️ truncated marker means a call hit its cap and silently fell back to a weaker
 > model; the cap has since been raised past that point so it shouldn't recur.
+> ⛔ AT hard cap means self-calibration is permanently stuck and the formula must be changed.
 ${tokenBudgetLines.join('\n')}`
     : '';
 
@@ -1343,7 +1653,7 @@ ${payload.filterCode ? `\n**Filter code applied:** \`${payload.filterCode}\`${pa
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceSessionsMarkdown}${scraperAdaptationMarkdown}${mainProcessLogsMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${scraperAdaptationMarkdown}${mainProcessLogsMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 <details>
 <summary><b>Click here to expand the full JSON Application State</b></summary>
 

@@ -8,7 +8,7 @@ import {
 import { ANIMATION_DURATIONS, DEFAULT_SHORTCUTS } from '../hooks/useSettings';
 import { useSyncWhileFocused } from '../hooks/useSyncWhileFocused';
 import { useToast } from './ToastProvider';
-import { SELL_PLATFORMS } from '../utils/constants';
+import { SELL_PLATFORMS, JOB_SOURCES } from '../utils/constants';
 import { PlatformBadge } from './PlatformBadge';
 
 const SPEED_OPTIONS = [
@@ -181,6 +181,91 @@ function PlatformWatchUrlsRow({ platform, urls, connected, pending, onLogin, onC
           One URL per line. Each is fetched (logged-in if you're signed in) and scanned by AI for THIS listing's status. The strongest signal across all URLs wins.
         </div>
       </div>
+    </div>
+  );
+}
+
+// IDs of the browser-scraped platforms that require login.
+const JOB_LOGIN_IDS = ['indeed', 'glassdoor', 'ziprecruiter', 'wellfound'];
+const JOB_LOGIN_PLATFORMS = JOB_SOURCES.filter(s => JOB_LOGIN_IDS.includes(s.id));
+
+function JobPlatformLoginsSection() {
+  const [authByPlatform, setAuthByPlatform] = useState({});
+  const [pendingByPlatform, setPendingByPlatform] = useState({});
+  const { addToast } = useToast();
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(JOB_LOGIN_PLATFORMS.map(async (p) => {
+      try {
+        const res = await window.electronAPI?.checkJobPlatformAuth?.({ platformId: p.id });
+        return [p.id, !!res?.connected];
+      } catch { return [p.id, false]; }
+    })).then(entries => {
+      if (!cancelled) setAuthByPlatform(Object.fromEntries(entries));
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleLogin = useCallback(async (platformId) => {
+    setPendingByPlatform(prev => ({ ...prev, [platformId]: true }));
+    try {
+      const res = await window.electronAPI?.openLoginWindow?.({ platformId });
+      const connected = !!res?.connected;
+      setAuthByPlatform(prev => ({ ...prev, [platformId]: connected }));
+      const niceName = JOB_LOGIN_PLATFORMS.find(p => p.id === platformId)?.name || platformId;
+      if (connected) {
+        addToast({ title: `${niceName}: logged in`, description: res?.reason || 'Session verified.', type: 'success' });
+      } else {
+        addToast({ title: `${niceName}: login not verified`, description: res?.reason || 'Closed without completing sign-in.', type: 'error' });
+      }
+    } catch (err) {
+      addToast({ title: 'Login failed', description: err?.message || String(err), type: 'error' });
+    } finally {
+      setPendingByPlatform(prev => ({ ...prev, [platformId]: false }));
+    }
+  }, [addToast]);
+
+  return (
+    <div className="space-y-3">
+      {JOB_LOGIN_PLATFORMS.map(platform => {
+        const connected = authByPlatform[platform.id];
+        const pending = !!pendingByPlatform[platform.id];
+        return (
+          <div key={platform.id} className="bg-white/[0.02] border border-white/5 rounded-lg p-3">
+            <div className="flex items-center gap-2">
+              <PlatformBadge name={platform.name} letter={platform.letter} color={platform.color} domain={platform.domain} size={20} />
+              <div className="flex-1 text-white/80 text-xs font-semibold">{platform.name}</div>
+              {pending ? (
+                <span
+                  className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border bg-white/[0.04] border-white/10 text-white/50 select-none"
+                  title="Verifying session…"
+                >
+                  <Loader2 size={10} className="animate-spin" />
+                  Verifying<span className="login-pending-dots" />
+                </span>
+              ) : connected ? (
+                <span
+                  className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border bg-emerald-500/10 border-emerald-500/30 text-emerald-300 select-none"
+                  title="Session active — the app will flip this back to Log in automatically when it expires."
+                >
+                  <Check size={10} />
+                  Logged in
+                </span>
+              ) : (
+                <button
+                  onClick={() => handleLogin(platform.id)}
+                  className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border transition-colors bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20"
+                  title="Open a window to log into this job board"
+                >
+                  <LogIn size={10} />
+                  Log in
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -530,6 +615,22 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
             ) : (
               <div className="text-white/30 text-xs text-center py-2">Loading settings...</div>
             )}
+          </div>
+
+          <div className="w-full h-px bg-white/[0.06]" />
+
+          {/* ── Job Platform Logins ───────────────────────────────────── */}
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <Briefcase size={13} className="text-white/30" />
+              <span className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">
+                Job Platform Logins
+              </span>
+            </div>
+            <div className="text-white/40 text-[11px] mb-3 leading-relaxed">
+              Log in to each job board so searches can page through results. Without login these sites return only 1 page. Job searches are blocked until all platforms are connected.
+            </div>
+            <JobPlatformLoginsSection />
           </div>
 
           <div className="w-full h-px bg-white/[0.06]" />

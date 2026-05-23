@@ -146,6 +146,16 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['mediaState', 'imageState'],
   },
 
+  // ── Composite lenses ──────────────────────────────────────────────────────
+
+  JOBS: {
+    label: 'Job Search Pipeline',
+    description: 'Job-search pipeline audit — the search→score→bucket funnel, per-source gather counts, and AI/scraper telemetry that confirm no jobs were silently dropped or not gathered. Drops the heavy node/edge/media dumps and narrows the event log to job-pipeline events (the pipeline / AI / scraper sections are built main-process-side and are always kept).',
+    logFilter: line =>
+      /\bjob|career|resume|scrape|gemini|bucket|scoring|funnel/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   // ── Presets ───────────────────────────────────────────────────────────────
 
   FULL: {
@@ -169,7 +179,7 @@ export function buildAiPrompt(description) {
   const bug = (description || '').trim() || '[describe what went wrong here]';
   return `I'm using the Infinite Canvas app and hit this issue:
 
-${bug}
+"${bug}"
 
 From the filter codes below, pick the one(s) that capture the telemetry needed to debug this and reply with ONLY the code string (e.g. "CRASH+UI+LEAN"). Combine codes with "+". I'll paste it straight into the bug reporter to attach exactly the relevant data — I won't edit the code by hand.
 
@@ -237,8 +247,8 @@ export function applyBugReportCode(logs, payload, codeString) {
       continue;
     }
     matchedCodes.push(code);
-    if (def.logFilter)       logFilters.push(def.logFilter);
-    if (def.logExclude)      logExclusions.push(def.logExclude);
+    if (def.logFilter) logFilters.push(def.logFilter);
+    if (def.logExclude) logExclusions.push(def.logExclude);
     if (def.logSlice != null) {
       // Take the smallest slice if multiple slice codes given
       logSlice = logSlice === null ? def.logSlice : Math.min(logSlice, def.logSlice);

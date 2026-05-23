@@ -59,6 +59,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   onJobSourceProgress: createListener('job-source-progress'),
   resolveJobSource: (args) => ipcRenderer.invoke('resolve-job-source', args),
+  recordResolveMerge: (args) => ipcRenderer.invoke('record-resolve-merge', args),
+  parsePastedJobs: (args) => ipcRenderer.invoke('parse-pasted-jobs', args),
   bucketJobs: (args) => ipcRenderer.invoke('bucket-jobs', args),
 
   // ── Marketplace Module ──────────────────────────────────────────────────
@@ -75,6 +77,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   checkSellMonitorAuth: async (args) => {
     const res = await ipcRenderer.invoke('check-sell-monitor-auth', args);
+    return res.success ? res : { platform: args.platformId, connected: false };
+  },
+  getJobPlatforms: async () => {
+    const res = await ipcRenderer.invoke('get-job-platforms');
+    return res.success ? (res.platforms || []) : [];
+  },
+  checkJobPlatformAuth: async (args) => {
+    const res = await ipcRenderer.invoke('check-job-platform-auth', args);
     return res.success ? res : { platform: args.platformId, connected: false };
   },
 

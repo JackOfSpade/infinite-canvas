@@ -24,6 +24,73 @@ function getAnthropicClient(apiKey) {
   return new Anthropic({ apiKey, maxRetries: ANTHROPIC_MAX_RETRIES });
 }
 
+// "2" → 2, "4.5" → 4.5, "moderate" → "moderate". Used when pulling a value out
+// of leaked tool-call XML, which always arrives as a string even for an integer
+// field — so the rebuilt object matches the schema's numeric types.
+function coerceScalar(s) {
+  const t = String(s).trim();
+  if (t === '') return t;
+  const n = Number(t);
+  return Number.isFinite(n) && String(n) === t ? n : t;
+}
+
+/**
+ * Repair a model-emitted tool-use `input` against its schema. Tool-use forces a
+ * tool CALL but does NOT strictly validate the input the model fills in: for a
+ * NESTED object property the model can fumble the nesting, leaking the inner
+ * fields up to the parent level and/or dumping raw tool-call XML
+ * (`<parameter name="x">v`) into a string value. Observed in a price-synthesis
+ * call where `comp_breakdown` arrived as
+ *   comp_breakdown: "\n<parameter name=\"anchor_count\">2", adjusted_count: 4, bound_count: 4
+ * instead of { anchor_count: 2, adjusted_count: 4, bound_count: 4 } — which made
+ * the downstream consumer read 0/0/0 and report a "thin anchor base" that was
+ * never real.
+ *
+ * Walks the schema and, for each object-typed property that did NOT arrive as a
+ * plain object, reconstructs it from (a) `<parameter name="k">v` pairs embedded
+ * in the malformed value and (b) the property's own sub-keys that leaked to this
+ * level (only keys not legitimately defined at this level, so a real sibling is
+ * never stolen). Schema-driven → repairs ANY structured-output call, and a no-op
+ * when the input is already well-formed. Returns whether anything was repaired.
+ */
+function repairToolInput(value, schema, repaired = { count: 0 }) {
+  if (!schema || typeof value !== 'object' || value === null) return repaired;
+  if (schema.type === 'object' && schema.properties) {
+    for (const [key, sub] of Object.entries(schema.properties)) {
+      if (!sub) continue;
+      if (sub.type === 'object' && sub.properties) {
+        const current = value[key];
+        if (current && typeof current === 'object' && !Array.isArray(current)) {
+          repairToolInput(current, sub, repaired); // already an object — recurse for deeper nesting
+          continue;
+        }
+        const rebuilt = {};
+        if (typeof current === 'string') {
+          for (const m of current.matchAll(/<parameter\s+name="([^"]+)">\s*([^<]*)/g)) {
+            rebuilt[m[1]] = coerceScalar(m[2]);
+          }
+        }
+        for (const subKey of Object.keys(sub.properties)) {
+          if (subKey in rebuilt) continue;
+          // Only adopt a leaked field — one that belongs to the sub-object but
+          // isn't a legitimate property at this level.
+          if (subKey in value && !(subKey in schema.properties)) {
+            rebuilt[subKey] = value[subKey];
+            delete value[subKey];
+          }
+        }
+        if (Object.keys(rebuilt).length > 0) {
+          value[key] = rebuilt;
+          repaired.count++;
+        }
+      } else if (sub.type === 'array' && sub.items && Array.isArray(value[key])) {
+        for (const el of value[key]) repairToolInput(el, sub.items, repaired);
+      }
+    }
+  }
+  return repaired;
+}
+
 /**
  * Send a request and, if `expectJson` is true, pre-fill the assistant turn
  * with `{` so Claude continues straight into JSON instead of preambling
@@ -33,7 +100,7 @@ function getAnthropicClient(apiKey) {
  * Saves a handful of output tokens per call and makes downstream parsing
  * more reliable (no `Sure!`-style chatter to strip).
  */
-async function createMessage(anthropic, userContent, { model, maxTokens, signal, expectJson, responseSchema, cachedPrefix, task }) {
+async function createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, cachedPrefix, task }) {
   // If a cachedPrefix is provided, split the user turn into a cache-marked
   // text block + the original dynamic content. Anthropic's `ephemeral` cache
   // gives subsequent calls within ~5 minutes a ~90% cost reduction on the
@@ -63,11 +130,11 @@ async function createMessage(anthropic, userContent, { model, maxTokens, signal,
 
   const messages = [{ role: 'user', content: messageContent }];
   // Tool-use mode: when a responseSchema is provided, force Claude to call a
-  // dummy tool whose input_schema is the desired output shape. Anthropic
-  // guarantees the tool's input matches the schema (valid JSON + correct
-  // types + no missing required fields + enum values respected), which
-  // eliminates the entire class of "invalid JSON" / "wrong enum value"
-  // bugs. JSON-prefill ('{') is incompatible with tool_choice so skip it.
+  // dummy tool whose input_schema is the desired output shape. This gives valid
+  // JSON and the right top-level keys, but Anthropic does NOT strictly validate
+  // the model's input against the schema — for a nested object the model can
+  // still fumble the nesting (see repairToolInput below). JSON-prefill ('{') is
+  // incompatible with tool_choice so skip it.
   const params = {
     model,
     max_tokens: maxTokens,
@@ -83,7 +150,16 @@ async function createMessage(anthropic, userContent, { model, maxTokens, signal,
   } else if (expectJson) {
     messages.push({ role: 'assistant', content: '{' });
   }
-  const response = await anthropic.messages.create(params, { signal });
+  // Stream rather than the one-shot `.create()`. With our high per-task caps
+  // (job-bucketing provisions up to ~24576 output tokens) a single non-streaming
+  // request can exceed the SDK's 10-minute non-streaming guard and is rejected
+  // outright with "Streaming is required for operations that may take longer
+  // than 10 minutes" — which is exactly what broke job-bucketing on Claude.
+  // `.finalMessage()` accumulates the SSE stream into the identical Message
+  // shape (content/tool_use blocks, usage incl. cache_read/creation tokens,
+  // stop_reason), so every downstream read below is unchanged. The AbortSignal
+  // is honored the same way via the request options arg.
+  const response = await anthropic.messages.stream(params, { signal }).finalMessage();
 
   const stopReason = response.stop_reason;
   const usage = response.usage;
@@ -110,17 +186,24 @@ async function createMessage(anthropic, userContent, { model, maxTokens, signal,
   if (stopReason === 'max_tokens') {
     // Censored signal: real demand exceeded the cap. Record it so effectiveCap
     // provisions past this cap on the next call (bypasses MIN_SAMPLES).
-    recordTruncation(task, maxTokens);
+    recordTruncation(task, maxTokens, formulaSeed);
     throw new Error(`AI response was truncated — hit the ${maxTokens}-token output cap (model wrote ${usage?.output_tokens ?? 'unknown'} tokens before being cut off). Try with fewer/smaller inputs, or raise the cap for this task in llm.js TASK_MAX_TOKENS.`);
   }
 
-  // Tool-use response: pull the tool_use block's `input` (already a parsed
-  // object matching the schema) and re-stringify so the shared
-  // parseGeminiJSON downstream can just JSON.parse it like any other JSON.
+  // Tool-use response: pull the tool_use block's `input`, repair any nested
+  // object the model mis-emitted (leaked fields / tool-call XML in a string),
+  // then re-stringify so the shared parseGeminiJSON downstream can JSON.parse it
+  // like any other JSON.
   if (responseSchema) {
     const toolBlock = response.content.find(b => b.type === 'tool_use');
     if (!toolBlock) {
       throw new Error(`Claude tool-use response missing tool_use block (stop_reason=${stopReason || 'unknown'}).`);
+    }
+    const { count } = repairToolInput(toolBlock.input, responseSchema);
+    if (count > 0) {
+      // Surface the repair so a bug report shows the model emitted non-conforming
+      // structured output (rather than the silent 0/0/0 it used to produce).
+      logger.warn(`[Claude] Repaired ${count} malformed nested field(s) in tool input for task '${task || 'unknown'}' — model leaked sub-fields/param-XML instead of nesting them.`);
     }
     return JSON.stringify(toolBlock.input);
   }
@@ -135,12 +218,12 @@ async function createMessage(anthropic, userContent, { model, maxTokens, signal,
   return text.trimStart().startsWith('{') ? text : '{' + text;
 }
 
-export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens = 2048, expectJson = false, responseSchema = null, cachedPrefix = null, task = null } = {}) {
+export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, expectJson = false, responseSchema = null, cachedPrefix = null, task = null } = {}) {
   const anthropic = getAnthropicClient(apiKey);
-  return createMessage(anthropic, prompt, { model, maxTokens, signal, expectJson, responseSchema, cachedPrefix, task });
+  return createMessage(anthropic, prompt, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, cachedPrefix, task });
 }
 
-export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal, { maxTokens = 2048, expectJson = false, responseSchema = null, task = null } = {}) {
+export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, expectJson = false, responseSchema = null, task = null } = {}) {
   const anthropic = getAnthropicClient(apiKey);
   const tempFiles = [];
 
@@ -186,7 +269,7 @@ export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal
     }));
 
     const userContent = [...contentParts, { type: 'text', text: prompt }];
-    return await createMessage(anthropic, userContent, { model, maxTokens, signal, expectJson, responseSchema, task });
+    return await createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, task });
   } finally {
     if (tempFiles.length > 0) {
       const { cleanupTempFile } = await import('./heicUtils.js');
@@ -195,11 +278,11 @@ export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal
   }
 }
 
-export async function callClaudeDocument(filePath, prompt, model, apiKey, signal, { maxTokens = 2048, expectJson = false, responseSchema = null, task = null } = {}) {
+export async function callClaudeDocument(filePath, prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, expectJson = false, responseSchema = null, task = null } = {}) {
   const ext = path.extname(filePath).toLowerCase();
 
   if (IMAGE_MIME_MAP[ext]) {
-    return callClaudeVision([filePath], prompt, model, apiKey, signal, { maxTokens, expectJson, responseSchema, task });
+    return callClaudeVision([filePath], prompt, model, apiKey, signal, { maxTokens, formulaSeed, expectJson, responseSchema, task });
   }
 
   if (ext === '.doc') {
@@ -221,9 +304,9 @@ export async function callClaudeDocument(filePath, prompt, model, apiKey, signal
       },
       { type: 'text', text: prompt }
     ];
-    return createMessage(anthropic, userContent, { model, maxTokens, signal, expectJson, responseSchema, task });
+    return createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, task });
   }
 
   const textContent = await fs.promises.readFile(filePath, 'utf8');
-  return callClaudeText(`${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n${textContent}`, model, apiKey, signal, { maxTokens, expectJson, responseSchema });
+  return callClaudeText(`${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n${textContent}`, model, apiKey, signal, { maxTokens, formulaSeed, expectJson, responseSchema });
 }

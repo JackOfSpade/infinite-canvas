@@ -70,7 +70,10 @@ export const SWAPPA_CONFIG = {
   // extractor follows the best model link to /listings and reads Offer microdata.
   // Wait on either the picker's product links OR an Offer card (if we landed on a
   // listings page directly, e.g. in the Solve window).
-  waitFor: '#main_search_product_results a[href*="/listings/"], [itemprop="offers"]',
+  // Three-way OR: product links on the picker (products found), the container
+  // itself (picker loaded but no matching products → genuine 0, skips the 8s
+  // selector timeout), or an Offer card (direct listings page).
+  waitFor: '#main_search_product_results a[href*="/listings/"], #main_search_product_results, [itemprop="offers"]',
   scrollFirst: false,
   dismissCookies: false,
   expectedMinItems: 3,
@@ -413,16 +416,34 @@ export const SWAPPA_EXTRACTOR = `
     });
     if (!cands.length) return '';
     var qt = tokens(query);
-    var best = null, bestScore = -Infinity;
+    // Union of every candidate's tokens — tells us which query tokens are even
+    // matchable on this page. A query carries slug-absent descriptors (storage
+    // "64gb", color, carrier) that no Swappa model slug contains; excluding them
+    // means the winner isn't penalized for missing what nothing could match.
+    var pool = {};
+    cands.forEach(function(c) { tokens(c.label + ' ' + c.href).forEach(function(t) { pool[t] = 1; }); });
+    var matchable = 0;
+    qt.forEach(function(t) { if (pool[t]) matchable++; });
+    var best = null, bestScore = -Infinity, bestHits = 0;
     cands.forEach(function(c, idx) {
       var ct = tokens(c.label + ' ' + c.href);
       var hits = 0;
       qt.forEach(function(t) { if (ct.indexOf(t) !== -1) hits++; });
       var extra = Math.max(0, ct.length - hits);
       var score = hits * 100 - extra - idx * 0.01;
-      if (score > bestScore) { bestScore = score; best = c; }
+      if (score > bestScore) { bestScore = score; best = c; bestHits = hits; }
     });
-    return best ? abs(best.href) : '';
+    // Match-quality gate: the picked model must (a) share more than a single
+    // generic brand token with the query, AND (b) match EVERY query token that is
+    // matchable on this page — if another candidate matches a query token the
+    // winner misses, the winner is the wrong model (e.g. "iphone-16-pro" beating
+    // a query for "iphone xs" on brand+line alone). When the picker has no real
+    // match — an over-specific query, or only featured/trending products like
+    // "Apple Vision Pro" for an iPhone search — both checks fail and we return ''
+    // so the source reports a visible 0 instead of fetching the wrong product.
+    var minHits = Math.min(2, qt.length);
+    if (!best || bestHits < minHits || bestHits < matchable) return '';
+    return abs(best.href);
   }
 
   // Step 1 — already on a listings page? Extract directly.

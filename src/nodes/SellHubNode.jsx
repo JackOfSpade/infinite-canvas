@@ -261,9 +261,21 @@ export function SellHubNode({ id, data }) {
     });
   }, [id, getNodes, getEdges, deleteElements]);
 
-  // If the hub is deleted mid-research, reap its ephemeral comp cards so they
-  // don't strand on the canvas with no listener for their progress events.
-  useUnmountEffect(cleanupCompSourceCards);
+  // On hub DELETE, reap EVERYTHING that belongs to it — the ephemeral comp-source
+  // cards AND the marketplacecard platform cards spawned after pricing (the
+  // eBay/Swappa/… listing cards). cleanupCompSourceCards above is reused for
+  // pre-run/cancel cleanup, which must leave the spawned platform cards alone, so
+  // the unmount cascade needs its own wider sweep. Mirrors JobHub's cleanupAllJobChildren.
+  const cleanupAllHubChildren = useCallback(() => {
+    deleteChildrenByHubId({
+      getNodes, getEdges, deleteElements, hubId: id,
+      childTypes: ['compsourcecard', 'marketplacecard'],
+    });
+  }, [id, getNodes, getEdges, deleteElements]);
+
+  // If the hub is deleted, reap its comp cards (no listener for their progress
+  // events otherwise) and its spawned marketplace cards (orphaned otherwise).
+  useUnmountEffect(cleanupAllHubChildren);
 
   const spawnCompSourceCards = useCallback(() => {
     // Defensive: clear any leftovers from a previous (interrupted) run.

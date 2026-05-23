@@ -33,6 +33,7 @@ const TASK_MODELS = {
   'job-query-generation':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash'      },
   'job-scoring':               { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
   'job-bucketing':             { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash'      },
+  'parse-pasted-jobs':         { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash'      },
   'cover-letter-generation':   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
   'interview-prep-generation': { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
   'text-polish':               { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash-lite' },
@@ -65,20 +66,23 @@ const TASK_MAX_TOKENS = {
   // case on a 7-photo upload, so multi-photo cases now start above that.
   'vision-product-analysis':   ({ photoCount = 1 } = {}) =>
     Math.min(4096, 1024 + Math.max(0, photoCount - 1) * 200),
-  // Gemini 2.5 Flash thinks against this same cap (thoughtsTokenCount counts
-  // toward MAX_TOKENS). Thinking budget scales roughly linearly with comp
-  // count — the new anchor/adjusted/bound classification prompt asks the
-  // model to reason about each item individually. Real-world calibration:
-  // 90 comps → ~7861 thinking + ~317 visible tokens, blew the prior
-  // static 8192 cap.
-  //
-  // Formula: ~100 thinking tokens per comp + ~3000 visible budget for the
-  // JSON output (pricing + match_quality + comp_breakdown + justification +
-  // recommended_platforms). Capped at 24576 so a pathological input can't
-  // request runaway billing.
+  // Thinking budget scales roughly linearly with comp count — the
+  // anchor/adjusted/bound classification prompt asks the model to reason
+  // about each item individually. Real-world calibration:
+  //   - gemini-2.5-flash (preferred): 90 comps → ~7861 thinking + ~317 visible
+  //   - gemini-3-flash-preview (fallback): 40 comps → ~8048 thinking + ~317 visible
+  //     (truncated at 8383; formula seed was 7000 — the formula was the bug).
+  // The fallback uses ~200 tok/comp vs ~87 for the preferred model. Formula must
+  // accommodate the fallback chain: ~200 thinking/comp + ~600 visible budget.
+  // 40 items → 11000 (above the 8648 observed need + headroom); capped at 24576.
   'price-synthesis':           ({ itemCount = 40 } = {}) =>
-    Math.min(24576, 3000 + itemCount * 100),
-  'platform-fit-assessment':   1024,  // per-platform fit verdict + short reason
+    Math.min(24576, 3000 + itemCount * 200),
+  // Thinking-heavy fallback models (gemini-3-flash-preview etc.) consume
+  // ~1460 thinking + ~50–230 visible tokens for this task — real-world p95 is
+  // 1374, max 1510. The old 1024 seed forced self-calibration to catch up over
+  // truncation cycles. 2048 is above the observed max so the cap is adequate
+  // even on a fresh install with no learned state.
+  'platform-fit-assessment':   2048,  // per-platform fit verdict + short reason
   'page-status-classify':      512,   // 5-way enum + one sentence
   'resume-parse':              4096,  // full structured profile
   // Gemini 2.5 Flash (the active model for this task) engages thinking which
@@ -108,6 +112,14 @@ const TASK_MAX_TOKENS = {
   // observed truncation point), 50→24k, capped at 24576 to bound billing.
   'job-bucketing':             ({ itemCount = 15 } = {}) =>
     Math.min(24576, 4096 + itemCount * 400),
+  // Extraction is thinking-heavy AND reproduces most of the input as JSON, so it
+  // scales steeply with paste size — a ~45-job paste truncated at the old 10.5k.
+  // 2500 base + 400/item → 45 jobs ≈ 20.5k; ~55 jobs hits the 24576 hard cap (a
+  // paste that big should be split — the handler returns a clear error and the
+  // card surfaces it rather than failing silently). tokenBudget.js also
+  // self-calibrates this upward whenever it observes a truncation.
+  'parse-pasted-jobs':         ({ itemCount = 8 } = {}) =>
+    Math.min(24576, 2500 + itemCount * 400),
   'cover-letter-generation':   2048,  // a paragraph-length letter
   'interview-prep-generation': 2048,  // bulleted prep
   'text-polish':               1024,  // light edit
@@ -134,7 +146,7 @@ function pickMaxTokens(task, hints = {}) {
   // The TASK_MAX_TOKENS value above is the calibrated seed/floor. effectiveCap
   // raises it toward observed p95 usage if a model has churned to use more than
   // the formula assumed (never below the seed; never above the 24576 hard cap).
-  return effectiveCap(t, seed);
+  return { cap: effectiveCap(t, seed), seed };
 }
 
 // ── Public callers ──────────────────────────────────────────────────────────
@@ -166,17 +178,17 @@ export async function callLLMText(prompt, opts = {}) {
   const settings = getAISettings();
   const model    = pickModel(settings.provider === 'claude' ? 'claude' : 'gemini', task);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
-  const maxTok   = pickMaxTokens(task, { promptLength: fullLen, ...hints });
+  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: fullLen, ...hints });
   try {
     if (settings.provider === 'claude') {
-      const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, expectJson: true, responseSchema, cachedPrefix, task });
+      const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, cachedPrefix, task });
       if (meta) meta.model = model;
       return parseGeminiJSON(raw);
     }
     // Gemini: prepend prefix into the prompt; implicit prefix caching on 2.5
     // models picks up the repeated content automatically.
     const merged = cachedPrefix ? `${cachedPrefix}\n\n${prompt}` : prompt;
-    return await callGeminiText(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema, task, meta });
+    return await callGeminiText(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, meta });
   } catch (err) {
     throw enhanceLLMError(err, settings.provider);
   }
@@ -190,14 +202,14 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   // photoCount feeds the dynamic sizing function for tasks like
   // vision-product-analysis. Caller-supplied hints win on conflict so a future
   // call site can override when it knows better than the default heuristic.
-  const maxTok   = pickMaxTokens(task, { photoCount: imagePaths?.length || 0, promptLength: prompt?.length || 0, ...hints });
+  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { photoCount: imagePaths?.length || 0, promptLength: prompt?.length || 0, ...hints });
   try {
     if (settings.provider === 'claude') {
-      const raw = await callClaudeVision(imagePaths, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, expectJson: true, responseSchema, task });
+      const raw = await callClaudeVision(imagePaths, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });
       if (meta) meta.model = model;
       return parseGeminiJSON(raw);
     }
-    return await callGeminiVision(imagePaths, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema, task, meta });
+    return await callGeminiVision(imagePaths, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, meta });
   } catch (err) {
     throw enhanceLLMError(err, settings.provider);
   }
@@ -207,13 +219,13 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   const { signal, task, hints, responseSchema } = normalizeOpts(opts);
   const settings = getAISettings();
   const model    = pickModel(settings.provider === 'claude' ? 'claude' : 'gemini', task);
-  const maxTok   = pickMaxTokens(task, { promptLength: prompt?.length || 0, ...hints });
+  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: prompt?.length || 0, ...hints });
   try {
     if (settings.provider === 'claude') {
-      const raw = await callClaudeDocument(filePath, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, expectJson: true, responseSchema, task });
+      const raw = await callClaudeDocument(filePath, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });
       return parseGeminiJSON(raw);
     }
-    return await callGeminiDocument(filePath, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, responseSchema, task });
+    return await callGeminiDocument(filePath, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task });
   } catch (err) {
     throw enhanceLLMError(err, settings.provider);
   }
