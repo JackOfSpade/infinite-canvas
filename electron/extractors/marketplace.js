@@ -1,17 +1,15 @@
 /**
  * Marketplace Price Comparison Extractors + Site Configs.
  *
- * Extraction strategies (in order of reliability, per 2026 deep research report):
- *   1. __PRELOADED_STATE__ — Redux hydration state (Poshmark)
- *   2. __NEXT_DATA__       — Next.js SSR payload (Mercari)
- *   3. schema.org microdata — itemprop="offers" Offer cards (Swappa; two-step,
- *                             since its /search?q= is a model picker, not listings)
- *   4. Inline Script JSON  — variant pricing matrices (eBay)
- *   5. DOM                 — CSS selector scraping with fallbacks
+ * Each platform has ONE best strategy (highest-signal source: JSON state > DOM).
+ * If it returns 0 results, the extractor throws SITE_CHANGED — surfaced as a
+ * 'stale-selectors' warning so the user is told to update the code rather than
+ * silently getting 0 comps. No fallback chains.
  *
- * StockX and Reverb have been moved to API-based extraction in apiExtractors.js:
- *   - StockX: Algolia API bypass (extracts keys, queries Algolia directly)
- *   - Reverb: Internal REST API (api.reverb.com/api/listings/all)
+ * Exceptions: Swappa (0 = no model match, not broken),
+ *             PriceCharting (niche games source, 0 is valid for non-games).
+ *
+ * StockX and Reverb use direct API calls in apiExtractors.js.
  *
  * All extractors return the standard comp shape:
  *   { title, price, priceText, url, source, soldDate?, condition?, seller? }
@@ -36,7 +34,7 @@
 export const EBAY_SOLD_CONFIG = {
   waitMs: 2500,
   timeoutMs: 40000,
-  waitFor: '.srp-results .s-item, .srp-results .s-card',
+  waitFor: '.srp-results li.s-card',
   scrollFirst: true,
   dismissCookies: true,
   referer: 'https://www.google.com/',
@@ -46,7 +44,7 @@ export const EBAY_SOLD_CONFIG = {
 export const EBAY_ACTIVE_CONFIG = {
   waitMs: 2500,
   timeoutMs: 40000,
-  waitFor: '.srp-results .s-item, .srp-results .s-card',
+  waitFor: '.srp-results li.s-card',
   scrollFirst: true,
   dismissCookies: true,
   referer: 'https://www.google.com/',
@@ -85,7 +83,8 @@ export const SWAPPA_CONFIG = {
 export const MERCARI_CONFIG = {
   waitMs: 3000,
   timeoutMs: 40000,
-  waitFor: '[data-testid="SearchResults"], [class*="SearchResults"], [class*="ItemContainer"], #__NEXT_DATA__',
+  // Mercari is fully client-side (styled-components, no SSR). Wait for product links.
+  waitFor: 'a[href*="/us/item/"]',
   scrollFirst: true,
   dismissCookies: true,
   referer: 'https://www.google.com/',
@@ -124,216 +123,114 @@ export const COMP_EXTRACT_CAPS = {
 
 
 // ── eBay Sold Listings Extractor ────────────────────────────────────────────
-// Strategy 0: Extract inline variant JSON from <script> tags (pricing matrices)
-// Strategy 1: DOM parsing (eBay HTML is relatively stable)
+// eBay migrated to the "su-*" design system (2025). Old selectors (.s-item__title,
+// .s-item__price, .SECONDARY_INFO, .POSITIVE) are dead. The inline JSON strategy
+// (itemSummaries/listingItems) is also dead — replaced by single-letter obfuscated
+// keys in a $M_* global that aren't reliably parseable.
+// Current structure (as of 2026-05):
+//   .srp-results li.s-card           — card root (old .s-item matches ghost nodes)
+//   span.su-styled-text.primary.default — title
+//   span.s-card__price               — price (kept s-card__ namespace)
+//   span.su-styled-text.positive.default — sold date ("Sold May 23, 2026")
+//   span.su-styled-text.secondary.default — condition (first match; strips trailing " ·")
+//   a.s-card__link                   — listing URL
 export const EBAY_SOLD_EXTRACTOR = `
 (function() {
   const items = [];
-  
-  // Strategy 0: Extract structured data from inline scripts (variant pricing)
-  try {
-    const scripts = document.querySelectorAll('script');
-    for (const script of scripts) {
-      const text = script.textContent || '';
-      // eBay embeds search results as JSON in srp-main-content data
-      if (text.includes('"itemSummaries"') || text.includes('"listingItems"')) {
-        const match = text.match(/"itemSummaries"\\s*:\\s*(\\[.+?\\])\\s*[,}]/s) ||
-                      text.match(/"listingItems"\\s*:\\s*(\\[.+?\\])\\s*[,}]/s);
-        if (match) {
-          try {
-            const listings = JSON.parse(match[1]);
-            if (Array.isArray(listings)) {
-              listings.forEach(item => {
-                const price = item.price?.value || item.currentBidPrice?.value || 0;
-                if (!price || !item.title) return;
-                items.push({
-                  title: item.title || '',
-                  price: parseFloat(price),
-                  priceText: '$' + parseFloat(price).toFixed(2),
-                  soldDate: item.endDate || item.listingInfo?.endTime || '',
-                  condition: item.condition?.conditionDisplayName || item.conditionDisplayName || '',
-                  url: item.itemWebUrl || item.viewItemURL || '',
-                  source: 'ebay-sold',
-                });
-              });
-            }
-            if (items.length > 0) return items.slice(0, 25);
-          } catch {}
-        }
-      }
-    }
-  } catch {}
 
-  // Strategy 1: DOM parsing
-  const cards = document.querySelectorAll('.s-item, .s-card');
-  
+  const cards = document.querySelectorAll('.srp-results li.s-card');
+
   cards.forEach(card => {
     try {
-      const titleEl = card.querySelector('.s-item__title, .s-card__title, [class*="title"]');
-      const priceEl = card.querySelector('.s-item__price, .s-card__price, [class*="price"]');
-      const dateEl = card.querySelector('.s-item__title--tag, .s-item__ended-date, .POSITIVE, .s-card__caption');
-      const linkEl = card.querySelector('.s-item__link, .s-card__link');
-      const conditionEl = card.querySelector('.SECONDARY_INFO, .s-card__subtitle');
-      
+      const titleEl = card.querySelector('span.su-styled-text.primary');
       const title = titleEl?.innerText?.trim() || '';
       if (!title || title === 'Shop on eBay') return;
-      
-      const priceTextRaw = priceEl?.innerText?.trim() || '';
-      const priceText = priceTextRaw.split(/[\\n\\r]+/)[0];
+
+      const priceEl = card.querySelector('.s-card__price');
+      const priceText = priceEl?.innerText?.trim() || '';
       const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
       if (price === 0) return;
+
+      const dateEl = card.querySelector('span.su-styled-text.positive.default');
+      const linkEl = card.querySelector('a.s-card__link');
+      // First secondary.default span is condition; later ones are specs (model, storage, carrier)
+      const condEl = card.querySelector('span.su-styled-text.secondary.default');
+      const condition = (condEl?.innerText?.trim() || '').replace(/\\s*·\\s*$/, '');
 
       items.push({
         title, price, priceText,
         soldDate: dateEl?.innerText?.trim() || '',
-        condition: conditionEl?.innerText?.trim() || '',
+        condition,
         url: linkEl?.href || '',
         source: 'ebay-sold',
       });
     } catch {}
   });
 
+  if (items.length === 0) throw new Error('SITE_CHANGED: ebay-sold su-styled-text extractor returned 0 — eBay design system may have changed');
   return items.slice(0, 25);
 })()
 `;
 
 // ── eBay Active Listings Extractor ──────────────────────────────────────────
+// Same su-* design system migration as EBAY_SOLD — identical selectors, no soldDate.
 export const EBAY_ACTIVE_EXTRACTOR = `
 (function() {
   const items = [];
-  const cards = document.querySelectorAll('.s-item, .s-card');
-  
+
+  const cards = document.querySelectorAll('.srp-results li.s-card');
+
   cards.forEach(card => {
     try {
-      const titleEl = card.querySelector('.s-item__title, .s-card__title, [class*="title"]');
-      const priceEl = card.querySelector('.s-item__price, .s-card__price, [class*="price"]');
-      const linkEl = card.querySelector('.s-item__link, .s-card__link');
-      
+      const titleEl = card.querySelector('span.su-styled-text.primary');
       const title = titleEl?.innerText?.trim() || '';
       if (!title || title === 'Shop on eBay') return;
-      
-      const priceTextRaw = priceEl?.innerText?.trim() || '';
-      const priceText = priceTextRaw.split(/[\\n\\r]+/)[0];
+
+      const priceEl = card.querySelector('.s-card__price');
+      const priceText = priceEl?.innerText?.trim() || '';
       const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
       if (price === 0) return;
 
+      const linkEl = card.querySelector('a.s-card__link');
       items.push({ title, price, priceText, url: linkEl?.href || '', source: 'ebay-active' });
     } catch {}
   });
 
+  if (items.length === 0) throw new Error('SITE_CHANGED: ebay-active su-styled-text extractor returned 0 — eBay design system may have changed');
   return items.slice(0, 20);
 })()
 `;
 
 
 // ── Poshmark Sold Extractor ─────────────────────────────────────────────────
-// Strategy 0: Extract __PRELOADED_STATE__ (Poshmark is React/Redux, NOT Next.js)
-//   Contains sold prices, days-to-sell, and seller performance metrics.
-// Strategy 1: DOM parsing with sold overlay detection
+// Strategy: tile-grid-redesign DOM (Poshmark is a Vue.js SPA — no embedded
+// JSON state, no __PRELOADED_STATE__, no XHR listings endpoint). Sold items
+// render as tile cards; the SOLD overlay sets
+// .tile-grid-redesign__listing-status-word to "Sold".
+// Throws SITE_CHANGED if 0 sold listings are extracted.
 export const POSHMARK_SOLD_EXTRACTOR = `
 (function() {
   const items = [];
-
-  // Collapse repeats of the same listing. Key on the listing URL when present;
-  // fall back to title+price for the (link-less) stripped twins the nested-DOM
-  // match used to emit. Keeps the first, drops later copies.
-  const dedupeComps = (arr) => {
-    const seen = new Set();
-    return arr.filter(i => {
-      const key = (i && i.url) ? String(i.url) : ((i && i.title) || '') + '|' + ((i && i.price) || 0);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  };
-
-  // Strategy 0: Parse __PRELOADED_STATE__ (Redux hydration state)
-  try {
-    const scripts = document.querySelectorAll('script');
-    for (const script of scripts) {
-      const text = script.textContent || '';
-      const match = text.match(/window\\.__PRELOADED_STATE__\\s*=\\s*(\\{.+?\\});\\s*(?:<|window|$)/s);
-      if (match) {
-        try {
-          const state = JSON.parse(match[1]);
-          // Navigate Redux state tree to find listings
-          const listings = state?.search?.searchResults ||
-                           state?.closet?.listings ||
-                           state?.listing?.listings ||
-                           (state?.data ? Object.values(state.data).filter(v => v?.title && v?.price_amount) : []) ||
-                           [];
-          
-          const listArr = Array.isArray(listings) ? listings : Object.values(listings || {});
-          
-          listArr.forEach(listing => {
-            if (!listing || !listing.title) return;
-            const price = listing.price_amount?.val || listing.sold_price || listing.price || 0;
-            const priceNum = typeof price === 'string' ? parseFloat(price.replace(/[^0-9.]/g, '')) : price;
-            if (priceNum === 0) return;
-            
-            items.push({
-              title: listing.title || '',
-              price: priceNum,
-              priceText: '$' + priceNum.toFixed(2),
-              soldDate: listing.sold_at || listing.updated_at || '',
-              condition: listing.condition || '',
-              seller: listing.creator_username || '',
-              url: listing.id ? ('https://poshmark.com/listing/' + listing.id) : '',
-              source: 'poshmark',
-            });
-          });
-          // Redux state can list the same listing in multiple slices
-          // (search.searchResults + the data map), so dedup before returning.
-          if (items.length > 0) return dedupeComps(items).slice(0, 25);
-        } catch {}
-      }
-    }
-  } catch {}
-
-  // Strategy 1: DOM parsing
-  // Poshmark nests matching wrappers — a single listing renders as
-  // .tile > [class*="ListingTile"] > [data-et-name="listing"], so the
-  // selector union below matches the SAME listing 2-3× (ancestor +
-  // descendants). Each match re-extracts the same title/price (the innermost
-  // one lacks the link + sold badge, producing an empty-url stripped twin),
-  // which previously triple-counted every listing into the pricing set with
-  // no dedup. Keep only the OUTERMOST match per listing so each renders once.
-  const matched = Array.from(document.querySelectorAll('.tile-grid-redesign__media--wrapper, [data-et-name="listing"], .card--small, .tile, [class*="ListingTile"]'));
-  const cards = matched.filter(el => !matched.some(other => other !== el && other.contains(el)));
-  cards.forEach(card => {
+  const cards = document.querySelectorAll('[data-et-name="listing"]');
+  for (const card of cards) {
     try {
-      const titleEl = card.querySelector('.tile-grid-redesign__title, [data-et-name="title"], .title__condition, .tile__title, [class*="itemTitle"]');
-      const priceEl = card.querySelector('.tile-grid-redesign__price-current, [data-et-name="price"], .fw--bold, .tile__price, [class*="itemPrice"]');
-      const linkEl = card.querySelector('a[href*="/listing/"]');
-      const listingId = card.querySelector('[data-et-prop-listing_id]')?.getAttribute('data-et-prop-listing_id');
-      const soldBadge = card.querySelector('.tile-grid-redesign__listing-status-word, .sold-tag, [class*="sold"], .badge--sold, .item__sold-tag');
-      
-      const title = titleEl?.innerText?.trim() || '';
-      if (!title) return;
-      
-      const priceTextRaw = priceEl?.innerText?.trim() || '';
-      const priceText = priceTextRaw.split(/[\\n\\r]+/)[0];
-      const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
-      if (price === 0) return;
-      let url = linkEl?.href || '';
-      if (!url && listingId) {
-        url = 'https://poshmark.com/listing/' + title.replace(/[^a-zA-Z0-9]/g, '-') + '-' + listingId;
-      } else if (url && !url.startsWith('http')) {
-        url = 'https://poshmark.com' + url;
-      }
-
-      items.push({
-        title, price, priceText,
-        soldDate: soldBadge ? 'Sold' : '',
-        url,
-        source: 'poshmark',
-      });
+      const statusEl = card.querySelector('.tile-grid-redesign__listing-status-word');
+      if ((statusEl?.textContent || '').trim().toLowerCase() !== 'sold') continue;
+      const titleEl = card.querySelector('.tile-grid-redesign__title');
+      const priceEl = card.querySelector('.tile-grid-redesign__price-current');
+      const linkEl  = card.querySelector('a[href*="/listing/"]');
+      const title    = titleEl?.textContent?.trim() || '';
+      const priceText = priceEl?.textContent?.trim() || '';
+      const price    = parseFloat(priceText.replace(/[^0-9.]/g, ''));
+      const href     = linkEl?.getAttribute('href') || '';
+      const url      = href ? 'https://poshmark.com' + href : '';
+      if (!title || !price || !url) continue;
+      items.push({ title, price, priceText, url, source: 'poshmark' });
     } catch {}
-  });
-
-  // Defensive final dedup (outermost-only selection above should already
-  // prevent nested double-counts, but guard against repeated listing ids).
-  return dedupeComps(items).slice(0, 25);
+  }
+  if (items.length === 0) throw new Error('SITE_CHANGED: poshmark tile-grid-redesign extractor returned 0 — selectors or page structure may have changed');
+  const seen = new Set();
+  return items.filter(i => { if (seen.has(i.url)) return false; seen.add(i.url); return true; }).slice(0, 25);
 })()
 `;
 
@@ -483,104 +380,59 @@ export const SWAPPA_EXTRACTOR = `
 
 
 // ── Mercari Sold Extractor ──────────────────────────────────────────────────
-// Strategy 0: __NEXT_DATA__ (Mercari is Next.js — sold listing data preserved in state)
-// Strategy 1: DOM parsing with broad selectors (Mercari uses React with dynamic classes)
+// Mercari is fully client-side — styled-components, no SSR data in __NEXT_DATA__
+// (only Sentry traces). All strategies relying on __NEXT_DATA__ or data-testid
+// selectors are dead as of 2026-05.
+// Current structure: product cards are <a href*="/us/item/"> anchors.
+//   - Title: img[alt] (only location carrying the product name; strip " - App..." suffix)
+//   - Price: the single <p> inside the anchor
+//   - URL: anchor href (stable /us/item/ pattern)
+// No sold date or condition visible in the search result card format.
 export const MERCARI_SOLD_EXTRACTOR = `
 (function() {
   const items = [];
 
-  // Strategy 0: Parse __NEXT_DATA__ (Mercari strips JSON-LD on sold items)
-  try {
-    const ndEl = document.getElementById('__NEXT_DATA__');
-    if (ndEl) {
-      try {
-        const nd = JSON.parse(ndEl.textContent);
-        const results = nd?.props?.pageProps?.searchResults ||
-                        nd?.props?.pageProps?.items ||
-                        nd?.props?.pageProps?.data?.search?.itemsList ||
-                        [];
-        
-        const resArr = Array.isArray(results) ? results : Object.values(results || {});
+  const cards = document.querySelectorAll('a[href*="/us/item/"]');
 
-        resArr.forEach(item => {
-          if (!item) return;
-          const price = item.price || item.currentPrice || 0;
-          const priceNum = typeof price === 'string' ? parseFloat(price.replace(/[^0-9.]/g, '')) : price;
-          if (priceNum === 0 || !item.name) return;
-          
-          items.push({
-            title: item.name || item.itemName || '',
-            price: priceNum,
-            priceText: '$' + priceNum.toFixed(2),
-            soldDate: item.updated || item.sold_at || '',
-            url: item.id ? ('https://www.mercari.com/item/' + item.id + '/') : '',
-            source: 'mercari',
-          });
-        });
-        if (items.length > 0) {
-          const seen = new Set();
-          return items.filter(i => { if (seen.has(i.url)) return false; seen.add(i.url); return true; }).slice(0, 20);
-        }
-      } catch {}
-    }
-  } catch {}
-
-  // Strategy 1: DOM parsing with broad selectors
-  const cards = document.querySelectorAll(
-    '[data-testid="ItemContainer"], [class*="ItemContainer"], [class*="ItemCell"], ' +
-    '[class*="SearchResultItem"], [class*="item-cell"], a[href*="/item/"]'
-  );
-  
-  // If direct card approach fails, try finding items by link pattern
-  const targets = cards.length > 0 ? cards : document.querySelectorAll('a[href*="/item/m"]');
-  
-  targets.forEach(card => {
+  cards.forEach(card => {
     try {
-      // Walk up to find the container if we matched a link
-      const container = card.closest('[class*="Item"]') || card.closest('[data-testid="ItemContainer"]') || card;
-      
-      const priceEl = container.querySelector('[data-testid="ItemPrice"], [data-testid="ProductThumbItemPrice"], [class*="itemPrice"], [class*="ItemPrice"], [class*="price"]');
-      const linkEl = container.querySelector('a[href*="/item/"]') || (container.tagName === 'A' ? container : container.closest('a'));
+      // Normalize URL — strip ?ref=... and other query params so the second
+      // result-pass variants (?ref=search_results) dedup against the first.
+      const rawUrl = card.href || '';
+      if (!rawUrl) return;
+      const url = rawUrl.split('?')[0];
 
-      // Title resolution. The old bare "p, span" fallback grabbed the FIRST
-      // child paragraph/span — which on a Mercari card is the discount badge
-      // ("76%") or the "SOLD" overlay, not the product name. Prefer the explicit
-      // name node, then the thumbnail alt / link aria-label (Mercari puts the
-      // product name there), and reject anything that's clearly a badge /
-      // status word / bare price rather than a title.
-      const isJunkTitle = (t) =>
-        !t || t.length < 4 || /^\\d+%$/.test(t) || /^(sold|free|new|used)$/i.test(t) || /^\\$?\\d[\\d.,]*$/.test(t);
-      let title = (container.querySelector('[data-testid="ItemName"], [class*="itemName"], [class*="ItemName"]')?.innerText || '').trim();
-      if (isJunkTitle(title)) {
-        const alt = (container.querySelector('img[alt]')?.getAttribute('alt') || '').trim();
-        if (!isJunkTitle(alt)) title = alt;
-      }
-      if (isJunkTitle(title)) {
-        const aria = (linkEl?.getAttribute?.('aria-label') || '').trim();
-        if (!isJunkTitle(aria)) title = aria;
-      }
-      if (isJunkTitle(title)) return; // no real product title found — skip this card
+      // Title from image alt — the only place Mercari puts the product name in the card
+      const imgEl = card.querySelector('img[alt]');
+      const title = (imgEl?.alt || '').replace(/\\s*-\\s*App\\w*\\s*$/, '').trim();
+      if (!title || title.length < 3) return;
 
-      const priceTextRaw = priceEl?.innerText?.trim() || '';
-      const priceText = priceTextRaw.split(/[\\n\\r]+/)[0];
+      // Price: find the first <p> that contains a $ sign. Mercari cards can
+      // also have a <p> with a discount percentage ("24%") or a <p> holding the
+      // title text — both yield nonsense when parsed as a number. Requiring "$"
+      // skips those and lands on the actual price element.
+      const pEls = card.querySelectorAll('p');
+      let priceEl = null;
+      for (const p of pEls) {
+        if ((p.innerText || '').includes('$')) { priceEl = p; break; }
+      }
+      if (!priceEl) return;
+      const priceText = priceEl.innerText.trim();
       const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
       if (price === 0) return;
 
-      items.push({
-        title, price, priceText,
-        url: linkEl?.href ? (linkEl.href.startsWith('http') ? linkEl.href : 'https://www.mercari.com' + linkEl.getAttribute('href')) : '',
-        source: 'mercari',
-      });
+      items.push({ title, price, priceText, url, source: 'mercari' });
     } catch {}
   });
 
-  // Deduplicate by URL
   const seen = new Set();
-  return items.filter(item => {
+  const deduped = items.filter(item => {
     if (seen.has(item.url)) return false;
     seen.add(item.url);
     return true;
-  }).slice(0, 20);
+  });
+  if (deduped.length === 0) throw new Error('SITE_CHANGED: mercari a[href*="/us/item/"] extractor returned 0 — URL pattern or card structure may have changed');
+  return deduped.slice(0, 20);
 })()
 `;
 

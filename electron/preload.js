@@ -103,6 +103,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const res = await ipcRenderer.invoke('get-cached-session-statuses');
     return res.success ? (res.statuses || []) : [];
   },
+  getVerifyState: async () => {
+    const res = await ipcRenderer.invoke('get-verify-state');
+    return res.success ? res : { verifying: [], statuses: {} };
+  },
+  onSessionVerifyStart:  createListener('accounts:verify-start'),
+  onSessionVerifyUpdate: createListener('accounts:verify-update'),
+  onSessionVerifyDone:   createListener('accounts:verify-done'),
   getSystemConfigStatus: async () => {
     const res = await ipcRenderer.invoke('get-system-config-status');
     return res.success ? (res.config || {}) : {};

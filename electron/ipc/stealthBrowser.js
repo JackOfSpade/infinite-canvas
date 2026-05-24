@@ -17,9 +17,11 @@ import electronPkg from 'electron';
 const { app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { logger } from '../logger.js';
 
 import { getSessionProfile } from './browser/antiDetectProfiles.js';
+import { saveDiceApiKey } from './settings.js';
 
 // Apply stealth evasions
 puppeteer.use(StealthPlugin());
@@ -150,6 +152,11 @@ export async function getStealthBrowser() {
         headless: 'new',
         executablePath,
         userDataDir: await getUserDataDir(),
+        // Strip --enable-automation (Puppeteer adds it by default) — same as
+        // the captcha-resolve visible browser. Combined with
+        // --disable-blink-features=AutomationControlled below, this removes
+        // two of the most-checked automation signals.
+        ignoreDefaultArgs: ['--enable-automation'],
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -331,10 +338,23 @@ export async function closeStealthBrowser(forShutdown = false) {
   }
   browserLaunchPromise = null; // Prevent anyone from waiting on a pending launch
   if (browserInstance) {
+    const proc = browserInstance.process();
     try {
       await browserInstance.close();
     } catch { /* already closed */ }
     browserInstance = null;
+    // Wait for the Chrome process to fully exit and release the userDataDir
+    // lock. Browser.close() only sends the exit signal — the process takes
+    // a moment to die. Without this wait, the next puppeteer.launch() on the
+    // same profile races the dying process and Chrome falls back to a temp
+    // empty profile, causing page.goto() to silently land on about:blank.
+    if (proc && !proc.killed) {
+      await new Promise(resolve => {
+        const done = () => resolve();
+        proc.once('exit', done);
+        setTimeout(() => { proc.removeListener('exit', done); resolve(); }, 2000);
+      });
+    }
   }
 }
 
@@ -348,10 +368,12 @@ export { getRandomUA } from './browser/antiDetectProfiles.js';
 // verifyUrl: a logged-in-only page that redirects to /login when anonymous.
 const JOB_LOGIN_PLATFORMS = {
   indeed:       { name: 'Indeed',       verifyUrl: 'https://my.indeed.com/' },
-  // connectedFinalUrlMustContain: Glassdoor redirects anonymous users from
-  // /member/ URLs to the public jobs homepage (200 OK, no /login in URL).
-  // If finalUrl doesn't stay under /member/, the session isn't active.
-  glassdoor:    { name: 'Glassdoor',    verifyUrl: 'https://www.glassdoor.com/member/home/index.htm',  connectedFinalUrlMustContain: '/member/' },
+  // Glassdoor changed URL structure: logged-in users who hit /member/home/
+  // now redirect to /Job/index.htm (same as anonymous), so the old
+  // connectedFinalUrlMustContain: '/member/' check was firing for valid
+  // sessions. Anonymous users on /Job/index.htm are caught by body signals
+  // (login CTAs that don't appear once logged in).
+  glassdoor:    { name: 'Glassdoor',    verifyUrl: 'https://www.glassdoor.com/member/home/index.htm',  bodySignals: ['sign in to glassdoor', 'create a free glassdoor account', 'join glassdoor for free', 'log in to glassdoor'] },
   // bodySignals: ZipRecruiter's /profile shows an inline login form without
   // redirecting (finalUrl stays at /profile, status 200). The form heading
   // "Log in to ZipRecruiter" distinguishes it from an authenticated profile.
@@ -365,6 +387,100 @@ export function getJobLoginPlatforms() {
 
 export function getJobLoginConfig(platformId) {
   return JOB_LOGIN_PLATFORMS[platformId] || null;
+}
+
+// ── Dice API Key Auto-Refresh ─────────────────────────────────────────────────
+// Dice's public search API requires an x-api-key that is embedded in their
+// frontend JS and rotates periodically. When fetchDiceListings detects a 500,
+// it calls refreshDiceApiKey() which:
+//   1. Launches a throwaway headless browser (separate userDataDir — no conflict
+//      with the main stealth browser or the visible manual-scraper browser)
+//   2. Navigates dice.com/jobs, which triggers the React app to call dhigroupinc.com
+//   3. Intercepts the outgoing XHR and reads the x-api-key header
+//   4. Saves the fresh key to persistent settings
+//   5. Returns the key so fetchDiceListings can retry immediately
+//
+// The singleton promise prevents concurrent 500s from launching multiple browsers.
+
+let _diceRefreshInFlight = null;
+
+export async function refreshDiceApiKey() {
+  if (_diceRefreshInFlight) return _diceRefreshInFlight;
+
+  _diceRefreshInFlight = (async () => {
+    const tmpDir = path.join(os.tmpdir(), `ic-dice-refresh-${Date.now()}`);
+    let browser;
+    try {
+      const executablePath = process.env.CHROME_PATH || await findChromePath();
+
+      logger.info('[Dice API] HTTP 500 detected — launching key-refresh browser');
+
+      // Must be non-headless: dice.com runs Sift bot detection which suppresses
+      // the search API XHR in headless sessions, so the key never fires.
+      browser = await puppeteer.launch({
+        headless: false,
+        executablePath,
+        userDataDir: tmpDir,
+        ignoreDefaultArgs: ['--enable-automation'],
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-blink-features=AutomationControlled',
+          '--window-size=1,1',
+          '--window-position=9999,9999',
+        ],
+        defaultViewport: { width: 1280, height: 800 },
+        ignoreHTTPSErrors: true,
+      });
+
+      const page = await browser.newPage();
+      let resolveKey;
+      const keyPromise = new Promise(resolve => { resolveKey = resolve; });
+
+      // Intercept outgoing requests from the dice.com page and grab x-api-key from
+      // any request that carries it — intentionally NOT filtering to dhigroupinc.com
+      // so a domain change on Dice's side doesn't silently break the refresh.
+      // Also log all external domains seen so a future failure gives us a clear trail.
+      const seenDomains = new Set();
+      page.on('request', req => {
+        try {
+          const url = new URL(req.url());
+          if (url.hostname !== 'www.dice.com') seenDomains.add(url.hostname);
+          const key = req.headers()['x-api-key'];
+          if (key) resolveKey(key);
+        } catch { /* malformed URL — ignore */ }
+      });
+
+      // Navigate to a Dice search. The React app's mount triggers the search API
+      // XHR automatically. domcontentloaded is enough to kick off the JS; the key
+      // race below waits up to 20s for the XHR to fire.
+      await page.goto(
+        'https://www.dice.com/jobs?q=software+engineer&countryCode2=US&radius=30&radiusUnit=mi&page=1&pageSize=20&language=en',
+        { waitUntil: 'domcontentloaded', timeout: 15000 },
+      ).catch(() => {}); // navigation timeout is fine — XHR may still fire
+
+      const newKey = await Promise.race([
+        keyPromise,
+        new Promise(r => setTimeout(() => r(null), 20000)),
+      ]);
+
+      if (newKey) {
+        saveDiceApiKey(newKey);
+        logger.info('[Dice API] API key auto-refreshed successfully');
+      } else {
+        const domains = seenDomains.size > 0 ? [...seenDomains].join(', ') : '(none)';
+        logger.warn(`[Dice API] Key refresh failed — no x-api-key header seen in 20s. External domains called: ${domains}`);
+      }
+
+      return newKey;
+    } finally {
+      _diceRefreshInFlight = null;
+      if (browser) await browser.close().catch(() => {});
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    }
+  })();
+
+  return _diceRefreshInFlight;
 }
 
 // ── Sell Monitor Platform Registry ──────────────────────────────────────────
@@ -383,7 +499,7 @@ const SELL_MONITOR_PLATFORMS = {
   ebay:      { name: 'eBay',       sellerUrl: 'https://www.ebay.com/sh/lst/active',                 verifyUrl: 'https://www.ebay.com/mye/myebay/summary' },
   poshmark:  { name: 'Poshmark',   sellerUrl: 'https://poshmark.com/closet',                         verifyUrl: 'https://poshmark.com/feed' },
   mercari:   { name: 'Mercari',    sellerUrl: 'https://www.mercari.com/mypage/listings/',            verifyUrl: 'https://www.mercari.com/mypage/' },
-  swappa:    { name: 'Swappa',     sellerUrl: 'https://swappa.com/user/listings',                    verifyUrl: 'https://swappa.com/account' },
+  swappa:    { name: 'Swappa',     sellerUrl: 'https://swappa.com/user/listings',                    verifyUrl: 'https://swappa.com/my/swappa' },
   facebook:  { name: 'Facebook',   sellerUrl: 'https://www.facebook.com/marketplace/you/selling',    verifyUrl: 'https://www.facebook.com/me' },
 };
 

@@ -31,6 +31,7 @@ export function CompSourceCardNode({ id, data }) {
   // (none will arrive — the scrape isn't running on reload).
   const [progress, setProgress] = useState(data.persistedProgress || null);
   const [resolving, setResolving] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const { deleteElements, updateNodeData, getNode } = useReactFlow();
 
   // Hub-cascading lock: when the owning SellHub is locked, Solve/Skip
@@ -118,18 +119,19 @@ export function CompSourceCardNode({ id, data }) {
   const isError     = status === 'error';
   const hasBlock    = warning?.severity === 'block';
   const hasThrottle = warning?.severity === 'throttle';
+  const hasWarn     = warning?.severity === 'warn';
 
   const statusLine = isError
-    ? 'Blocked'
+    ? (hasWarn ? 'HTML changed' : 'Blocked')
     : isDone
       ? `${count ?? 0} found`
       : status === 'searching'
         ? 'Scanning…'
         : 'Queued';
 
-  // Block flag wins over the friendly "X found" status — a 0-found page
-  // that got blocked is the exact case the user wanted made visible.
-  const accentColor = (isError || hasBlock) ? '#ef4444' : hasThrottle ? '#f59e0b' : data.color;
+  // Stale-selector errors (warn severity) are amber, not red — they need a code
+  // fix, not a captcha solve, and the red accent misleadingly implies a bot block.
+  const accentColor = ((isError && !hasWarn) || hasBlock) ? '#ef4444' : (hasThrottle || hasWarn) ? '#f59e0b' : data.color;
 
   return (
     <div
@@ -151,11 +153,11 @@ export function CompSourceCardNode({ id, data }) {
           <div className="flex items-center gap-1 mt-0.5">
             {isSearching && <Loader2 size={9} className="text-white/40 animate-spin shrink-0" />}
             {isDone && !warning && <CheckCircle2 size={9} className="text-emerald-400 shrink-0" />}
-            {(isError || hasBlock) && <ShieldAlert size={9} className="text-red-400 shrink-0" />}
-            {hasThrottle && !hasBlock && <ShieldAlert size={9} className="text-amber-400 shrink-0" />}
+            {((isError && !hasWarn) || hasBlock) && <ShieldAlert size={9} className="text-red-400 shrink-0" />}
+            {(hasThrottle || hasWarn) && !hasBlock && <ShieldAlert size={9} className="text-amber-400 shrink-0" />}
             <span
               className="text-[9px] truncate"
-              style={{ color: (isError || hasBlock) ? '#fca5a5' : hasThrottle ? '#fcd34d' : isDone ? '#a7f3d0' : 'rgba(255,255,255,0.45)' }}
+              style={{ color: ((isError && !hasWarn) || hasBlock) ? '#fca5a5' : (hasThrottle || hasWarn) ? '#fcd34d' : isDone ? '#a7f3d0' : 'rgba(255,255,255,0.45)' }}
             >
               {warning ? warning.code : statusLine}
             </span>
@@ -175,21 +177,48 @@ export function CompSourceCardNode({ id, data }) {
           {warning.suggestion && <div className="mt-0.5 opacity-80 break-words">{warning.suggestion}</div>}
         </div>
       )}
-      {/* Two-button decision row for warned/errored cards — Solve opens the
-          failed URL in our cookie-shared browser; Skip tells the hub this
-          source is OK to omit from pricing. When all warned cards are
-          resolved-or-skipped, the hub auto-fires synthesis. */}
+      {/* Decision row — action depends on what went wrong:
+          stale-selectors (code fix needed) → Retry re-runs the extractor after rebuild.
+          bot block → Solve opens the URL in a cookie-shared browser.
+          Skip always available so the hub can proceed without this source. */}
       {(warning || isError) && (
         <div className="flex border-t border-white/10">
-          {progress?.url && (
+          {hasWarn ? (
+            <button
+              onClick={async (e) => {
+                e.stopPropagation();
+                if (retrying || hubLocked) return;
+                const hubProduct = getNode(data.hubId)?.data?.product || {};
+                const query = hubProduct.search_query?.trim()
+                  || `${hubProduct.brand || ''} ${hubProduct.model || ''} ${hubProduct.generated_title || ''}`.trim();
+                if (!query || !window.electronAPI?.rescrapeSource) return;
+                setRetrying(true);
+                try {
+                  const result = await window.electronAPI.rescrapeSource({ sourceId: data.sourceId, query, nodeId: data.hubId });
+                  if (result?.items?.length > 0) {
+                    document.dispatchEvent(new CustomEvent('comp-captcha-resolved', {
+                      detail: { hubId: data.hubId, sourceId: data.sourceId, items: result.items, category: result.category || 'sold' },
+                    }));
+                  }
+                } finally {
+                  setRetrying(false);
+                }
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+              disabled={retrying || hubLocked}
+              className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
+              title={hubLocked ? 'Hub is locked' : 'Re-run the extractor — update the scraper code and rebuild first'}
+            >
+              <ExternalLink size={9} />
+              {retrying ? 'Retrying…' : 'Retry'}
+            </button>
+          ) : progress?.url && (
             <button
               onClick={(e) => { e.stopPropagation(); handleResolveCaptcha(); }}
               onPointerDown={(e) => e.stopPropagation()}
               disabled={resolving || hubLocked}
               className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
-              title={hubLocked
-                ? 'Hub is locked'
-                : 'Open the failed page so you can solve the captcha — cookies will carry over to the next refresh'}
+              title={hubLocked ? 'Hub is locked' : 'Open the failed page so you can solve the captcha — cookies will carry over to the next refresh'}
             >
               <ExternalLink size={9} />
               {resolving ? 'Window open…' : 'Solve'}

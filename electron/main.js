@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { registerFilesystemHandlers } from './ipc/filesystem.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
-import { registerAccountsHandlers, revalidateStaleSessions } from './ipc/accounts.js';
+import { registerAccountsHandlers, verifyAllPlatforms } from './ipc/accounts.js';
 import { registerMonitorHandlers, closeAllMonitors } from './ipc/browserViewMonitor.js';
 import { closeAllPages } from './ipc/browserPool.js';
 import { closeStealthBrowser } from './ipc/stealthBrowser.js';
@@ -596,11 +596,16 @@ if (!gotTheLock) {
     setupApplicationMenu();
     createWindow({ mode: 'auto' });
 
-    // Re-verify any session entries that are older than the TTL so a stale
-    // "Logged in" pill doesn't outlive the actual cookie. Deferred so the
-    // user sees the window before background Chrome work begins; runs
-    // sequentially and silently swallows transient errors.
-    setTimeout(() => { revalidateStaleSessions().catch(() => {}); }, 5000);
+    // Verify all platforms immediately. Cache starts empty each launch so there's
+    // nothing to trust. Progress events are broadcast to every canvas window so
+    // hub nodes can block drops until their platforms are confirmed.
+    verifyAllPlatforms({
+      notify: (event, data) => {
+        for (const win of canvasWindows) {
+          if (!win.isDestroyed()) win.webContents.send(event, data);
+        }
+      },
+    }).catch(() => {});
 
     app.on('activate', () => {
       // macOS: re-opening from the dock with no windows restores the last

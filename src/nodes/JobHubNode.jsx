@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useCallback, useContext } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
+import { usePlatformsVerifyingProgress } from '../contexts/SessionStatusContext';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
 import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
@@ -24,6 +25,11 @@ import {
   buildJobTreeNodes,
   LIKELY_THRESHOLD,
 } from './jobhub/buildJobTree';
+
+// ─── TESTING: skip AI scoring after collection ───────────────────────────────
+// Set to false (or remove the block below) to re-enable the full pipeline.
+const SKIP_AI_FOR_TESTING = true;
+// ─────────────────────────────────────────────────────────────────────────────
 
 // "Other Strong Matches" cutoff for the append path. Prefer the per-hub gate
 // persisted by the initial run (data.strongMatchGate) so appended jobs bucket
@@ -127,8 +133,13 @@ export function JobHubNode({ id, data }) {
   }, []);
   // Stable ref to startProcessing so handleDrop can call it without a stale closure.
   const startProcessingRef = useRef(null);
+  // Persists the last file path dropped this session so retry works even when
+  // the login-gate fires before the resume is parsed (at which point neither
+  // data.filePath nor data.resumeProfile are set yet).
+  const lastDroppedPathRef = useRef(null);
 
   const hubState = data.hubState || 'empty';
+  const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(['indeed', 'glassdoor', 'ziprecruiter', 'wellfound']);
   const statusLabel = STATE_LABELS[hubState];
   const sourceFilter = data.sourceFilter || null;
 
@@ -1104,6 +1115,11 @@ export function JobHubNode({ id, data }) {
       });
       if (cancelled()) return;
 
+      // Dice API hard failure: retries exhausted on 5xx — abort entire pipeline.
+      if (!searchResult.success && searchResult.diceApiDown) {
+        throw new Error(searchResult.error || 'Dice API is unavailable — search cancelled');
+      }
+
       // Backend login gate: if any browser-scraped platform isn't connected
       // the search handler returns early with notLoggedIn instead of running.
       if (!searchResult.success && Array.isArray(searchResult.notLoggedIn) && searchResult.notLoggedIn.length > 0) {
@@ -1182,6 +1198,23 @@ export function JobHubNode({ id, data }) {
           scoreRangeMax: 100,
           scoreThreshold: 0,
           scrapeWarnings: effectiveWarnings,
+        });
+        return;
+      }
+
+      if (SKIP_AI_FOR_TESTING) {
+        EventLogger.log(`[JobHub][${currentId}] SKIP_AI_FOR_TESTING — ${foundJobs.length} jobs collected, stopping before AI scoring`);
+        updateGlobal(currentId, {
+          hubState: 'done',
+          resultCount: 0,
+          totalScoredCount: 0,
+          targetCount: 0,
+          otherCount: 0,
+          scoreRangeMin: 0,
+          scoreRangeMax: 100,
+          scoreThreshold: 0,
+          scrapeWarnings: effectiveWarnings,
+          errorMessage: `[Test mode] ${foundJobs.length} jobs collected — AI scoring disabled (SKIP_AI_FOR_TESTING in JobHubNode.jsx)`,
         });
         return;
       }
@@ -1444,6 +1477,7 @@ export function JobHubNode({ id, data }) {
 
     const path = resume.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(resume) : '');
     if (path) {
+      lastDroppedPathRef.current = path;
       EventLogger.log(`[JobHub][${id}] Drop accepted: ${resume.name}`);
       startProcessingRef.current?.(path);
     }
@@ -1470,6 +1504,7 @@ export function JobHubNode({ id, data }) {
     // leaving filePath set after a reset to 'empty' would immediately re-parse
     // the same resume — the user clicked Reset, not Retry. They can drop the
     // resume again or click Try Again on the error state.
+    lastDroppedPathRef.current = null;
     updateGlobal(id, { hubState: 'empty', filePath: null, errorMessage: null, isRateLimit: false });
     resetSourceProgress();
     cleanupAllJobChildren();
@@ -1595,7 +1630,8 @@ export function JobHubNode({ id, data }) {
 
   const handleRerun = useCallback(() => {
     if (data.locked || processingRef.current) return;
-    if (!data.filePath && !data.resumeProfile) {
+    const effectivePath = data.filePath || lastDroppedPathRef.current;
+    if (!effectivePath && !data.resumeProfile) {
       addToast({ title: 'No Resume', description: 'Drop a resume file onto the hub to search again.', type: 'error' });
       return;
     }
@@ -1612,9 +1648,9 @@ export function JobHubNode({ id, data }) {
     // resume the previous attempt's partial results.
     updateGlobal(id, { pendingJobs: null, pendingTargetRole: null });
     resetSourceProgress();
-    if (data.filePath) {
+    if (effectivePath) {
       // File still accessible — re-parse for freshness then run full pipeline
-      startProcessingRef.current?.(data.filePath);
+      startProcessingRef.current?.(effectivePath);
     } else {
       // File gone but profile is persisted — run from query step onward
       addToast({ title: 'Re-running Search', description: 'Using stored resume profile — original file not needed.', type: 'info' });
@@ -1665,6 +1701,8 @@ export function JobHubNode({ id, data }) {
       height={undefined}
       minHeight={hubState === 'empty' ? 140 : 100}
       onDrop={handleDrop}
+      dropsBlocked={platformsVerifying}
+      verifyProgress={platformsVerifying ? { done: verifyDone, total: verifyTotal } : null}
     >
         {/* Empty state — drop zone (+ banner if a prior attempt failed) */}
         {hubState === 'empty' && (
@@ -1672,8 +1710,12 @@ export function JobHubNode({ id, data }) {
             {banner}
             <div className="flex flex-col items-center justify-center py-8 px-4 cursor-pointer">
               <Briefcase size={28} className="text-blue-400/40 mb-3" />
-              <p className="text-white/40 text-sm font-medium">Drop resume here</p>
-              <div
+              {platformsVerifying ? (
+                <p className="text-white/40 text-sm font-medium">Checking connections…</p>
+              ) : (
+                <p className="text-white/40 text-sm font-medium">Drop resume here</p>
+              )}
+              {!platformsVerifying && <div
                 className="nodrag mt-4 w-full flex flex-col items-stretch gap-1.5 text-[10px] text-white/40"
                 onPointerDown={(e) => e.stopPropagation()}
               >
@@ -1696,7 +1738,7 @@ export function JobHubNode({ id, data }) {
                   />
                   <span>days</span>
                 </div>
-              </div>
+              </div>}
             </div>
           </>
         )}

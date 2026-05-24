@@ -42,6 +42,10 @@ const store = new Store({
     jobs: {
       usajobsApiKey: '',
       usajobsEmail: '',
+      // Dice's internal API key (extracted from their web app). Auto-refreshed
+      // when the app detects a 500 from dhigroupinc.com — this default is the
+      // bootstrap value used until a live key is captured from dice.com.
+      diceApiKey: '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8',
     },
   },
 });
@@ -115,6 +119,14 @@ export function getJobsSettings() {
     usajobsApiKey: jobs.usajobsApiKey || process.env.USAJOBS_API_KEY || '',
     usajobsEmail:  jobs.usajobsEmail  || process.env.USAJOBS_EMAIL  || '',
   };
+}
+
+export function getDiceApiKey() {
+  return store.get('jobs.diceApiKey') || '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
+}
+
+export function saveDiceApiKey(key) {
+  if (typeof key === 'string' && key.length > 10) store.set('jobs.diceApiKey', key);
 }
 
 /**

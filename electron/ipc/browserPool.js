@@ -288,7 +288,10 @@ async function executeScrape(url, extractorJS, options = {}) {
           if (isSettled || options.signal?.aborted) break;
           let r = null;
           try { r = await page.evaluate(extractorJS); }
-          catch { /* navigated mid-evaluate — retry next tick */ }
+          catch (evalErr) {
+            if (/SITE_CHANGED/i.test(evalErr?.message || '')) throw evalErr;
+            /* navigated mid-evaluate — retry next tick */
+          }
           if (r != null) {
             extractorResult = r;                 // always keep the freshest result
             const count = countItems(r);
@@ -310,7 +313,11 @@ async function executeScrape(url, extractorJS, options = {}) {
         const stableElapsedMs = settledPositively ? Date.now() - scrapeStart : null;
         // Guarantee a value even if every evaluate threw (rare).
         if (extractorResult == null) {
-          try { extractorResult = await page.evaluate(extractorJS); } catch { extractorResult = []; }
+          try { extractorResult = await page.evaluate(extractorJS); }
+          catch (evalErr) {
+            if (/SITE_CHANGED/i.test(evalErr?.message || '')) throw evalErr;
+            extractorResult = [];
+          }
         }
 
         // Run anti-bot detection on what we observed. Both the raw extractor
@@ -387,8 +394,26 @@ async function executeScrape(url, extractorJS, options = {}) {
     } else {
       logger.error(`[BrowserPool] Scrape failed for ${url}:`, error);
       recordOutcome(domain, 'error');  // network/nav-timeout/hard-timeout → tighten
+      // Capture page state at the moment of failure so timeouts aren't opaque.
+      // Only for non-abort failures — page may still be open while scrapePromise
+      // tears down. Best-effort: don't let diagnostic errors mask the real one.
+      if (page && error?.message?.includes('timed out')) {
+        try {
+          const failUrl = page.url?.() || 'unknown';
+          const diag = await page.evaluate(() => ({
+            bodyLen: document.body?.innerText?.length ?? 0,
+            bodyHead: (document.body?.innerText ?? '').substring(0, 300),
+            title: document.title ?? '',
+          })).catch(() => null);
+          logger.info(
+            `[BrowserPool] Timeout state — finalUrl=${failUrl} ` +
+            `bodyLen=${diag?.bodyLen ?? 0} title="${diag?.title ?? ''}" ` +
+            `bodyHead="${(diag?.bodyHead ?? '').replace(/\s+/g, ' ').substring(0, 200)}"`
+          );
+        } catch { /* ignored */ }
+      }
     }
-    
+
     // Clean up handle
     pageHandles.delete(pageId);
 

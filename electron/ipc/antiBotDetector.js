@@ -25,8 +25,11 @@
 // Keyword-scan windows: how far into a body we look for block markers. Block
 // interstitials always put their markers near the top, so these are structural
 // "scan the head" bounds (not page-content thresholds) — kept fixed.
-const HTML_SCAN_CHARS = 5000; // HTML body keyword sniff
-const API_SCAN_CHARS  = 2000; // raw API body keyword sniff
+const HTML_SCAN_CHARS      = 5000;   // hard-block keyword sniff (captcha/403 pages replace the whole page, text is at the top)
+const SOFT_GATE_SCAN_CHARS = 100000; // soft-gate keyword sniff — contribution gates appear alongside partial content
+                                     // and are buried past large <head> sections (Glassdoor: "To restore your access"
+                                     // appears at ~50-100KB into 775KB HTML, past the old 5000-char window)
+const API_SCAN_CHARS       = 2000;   // raw API body keyword sniff
 
 // Suspicious-empty ("soft block returns a stripped 200") thresholds. The body
 // size is judged against the source's LEARNED typical good-response size when
@@ -190,9 +193,11 @@ export function detectAntiBotSignal(ctx = {}) {
 
   // Layer 2.5 — soft gate scan (runs before contentServed check).
   // These gates appear alongside partial content, so checking them only when
-  // itemsExtracted < CONTENT_SERVED_MIN_ITEMS would miss them.
+  // itemsExtracted < CONTENT_SERVED_MIN_ITEMS would miss them. Uses a larger
+  // window than the hard-block scan because soft-gate text is buried past the
+  // site's <head> section (Glassdoor's review gate appears at ~50-100KB).
   if (html) {
-    const head = String(html).slice(0, HTML_SCAN_CHARS);
+    const head = String(html).slice(0, SOFT_GATE_SCAN_CHARS);
     for (const s of SOFT_GATE_SIGNALS) {
       const m = head.match(s.pat);
       if (m) {

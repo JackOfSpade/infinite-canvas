@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
 import { getAISettings, resolveServiceAccountPath } from './settings.js';
 import { getSellMonitorPlatforms, getJobLoginPlatforms } from './stealthBrowser.js';
+import { getStatusCacheSync } from './accounts.js';
 import { getRecentLogs } from '../logger.js';
 import { getGeminiTelemetry } from './gemini.js';
 import { getJobsTelemetry } from './jobs.js';
@@ -57,9 +58,10 @@ const truncateLongUrls = (_key, value) => {
 function getNewestMainProcessSourceMtime() {
   try {
     const here = path.dirname(fileURLToPath(import.meta.url));
-    // Scan `here` and one level up — covers both `dist-electron/` (flat) and
-    // `electron/ipc/` (which has main.js and preload.js one level up in dev).
-    const dirs = [here, path.join(here, '..')];
+    // Scan `here`, one level up, and known subdirectories.
+    // `browser/` (manualScraper, authWindows, etc.) and `bugReport/` (snapshot builders)
+    // must be included or changes to those files won't trigger the stale-build warning.
+    const dirs = [here, path.join(here, '..'), path.join(here, 'browser'), path.join(here, 'bugReport')];
     let newest = 0;
     for (const dir of dirs) {
       let entries = [];
@@ -335,6 +337,15 @@ export function generateMarkdown(payload, reportWindowId = null) {
   const sectionOmitted = (name) =>
     Array.isArray(payload.filterStats?.omittedSections) &&
     payload.filterStats.omittedSections.includes(name);
+
+  // Canvas-content guards — gate module-specific sections on whether this canvas
+  // actually has nodes of that type, so sell-side sections don't bleed into a
+  // job-only canvas and vice versa.
+  const hasJobNodes = (nodes || []).some(n => n?.type?.toLowerCase().startsWith('job'));
+  const hasSellNodes = (nodes || []).some(n => {
+    const t = n?.type?.toLowerCase();
+    return t === 'sellhub' || t === 'marketplacecard' || t === 'listing' || t === 'compsourcecard';
+  });
 
   const systemInfo = {
     platform: process.platform,
@@ -685,21 +696,13 @@ ${rows}
   catch { /* never break the report on diagnostic failure */ }
 
   // ── Marketplace session snapshot ──────────────────────────────────────────
-  // Disk cache (session-status-cache.json, written by accounts.js after a
-  // verified openLoginWindow flow) is the truth source for the "Log in" vs
-  // "Logged in · refresh" pill in Settings → Marketplace Monitors. When the
-  // pill says one thing and the user expects the other, this section is what
-  // confirms which of the two is wrong — without it, the bug is invisible
-  // to anyone reading the report later.
+  // In-memory session cache (populated by verifyAllPlatforms on startup and
+  // by writeStatusCache after each login flow). Truth source for the "Log in"
+  // vs "Logged in · refresh" pill in Settings → Marketplace Monitors.
   let marketplaceSessionsMarkdown = '';
-  try {
+  if (hasSellNodes) try {
     const platforms = getSellMonitorPlatforms() || [];
-    const cachePath = path.join(app.getPath('userData'), 'session-status-cache.json');
-    let cache = {};
-    try {
-      const raw = fs.readFileSync(cachePath, 'utf8');
-      cache = JSON.parse(raw) || {};
-    } catch { /* file may not exist yet — empty cache is fine */ }
+    const cache = getStatusCacheSync();
 
     const rows = platforms.map(p => {
       const entry = cache[p.id];
@@ -743,22 +746,19 @@ ${rows}
 
     marketplaceSessionsMarkdown = `
 ## Marketplace Sessions
-> Disk cache state (\`session-status-cache.json\`) — the only source of truth
-> for the "Logged in" pill in Settings. An entry only exists after a
-> verified \`openLoginWindow\` flow; "no entry" means we never confirmed a
-> login for that platform. Stale entries (large "ago" with the user
-> reporting a logged-out experience) point at cookie expiry; \`false\` with
-> the user reporting "I just logged in" points at \`verifySellMonitorLogin\`
-> failing — \`bodyHead\` + \`softWallMatch\` in the trace below distinguish
+> In-memory session cache — verified fresh on every startup. An entry only
+> exists after \`verifyAllPlatforms\` has reached that platform (or after a
+> manual \`openLoginWindow\` flow). "No entry" means startup verify hasn't
+> finished yet or the platform was skipped. \`false\` with the user reporting
+> "I just logged in" points at \`verifySellMonitorLogin\` failing —
+> \`bodyHead\` + \`softWallMatch\` in the trace below distinguish
 > anti-bot challenges from real login redirects from genuine logout.
 
 | Platform ID | Name | Cached connected | Last confirmed | Last reason |
 |---|---|---|---|---|
 ${rows}
 
-${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : ''}
-- Cache file: \`${cachePath}\`
-`;
+${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : ''}`;
   } catch { /* never break the report on diagnostic failure */ }
 
   // ── Job platform session snapshot ─────────────────────────────────────────
@@ -768,16 +768,10 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
   // not in the sell-monitor section above.
   // Only include when this canvas actually has job nodes — don't bleed job
   // login state into a marketplace-only report.
-  const hasJobNodes = (nodes || []).some(n => n?.type?.toLowerCase().startsWith('job'));
   let jobSessionsMarkdown = '';
   if (hasJobNodes) try {
     const platforms = getJobLoginPlatforms() || [];
-    const cachePath = path.join(app.getPath('userData'), 'session-status-cache.json');
-    let cache = {};
-    try {
-      const raw = fs.readFileSync(cachePath, 'utf8');
-      cache = JSON.parse(raw) || {};
-    } catch { /* file may not exist yet */ }
+    const cache = getStatusCacheSync();
 
     const rows = platforms.map(p => {
       const entry = cache[p.id];
@@ -816,10 +810,10 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
 
     jobSessionsMarkdown = `
 ## Job Platform Sessions
-> Disk cache state for job-board logins — same \`session-status-cache.json\`
-> as marketplace sessions. A verify URL returning 404 means the platform
+> In-memory session cache for job-board logins — same startup verify as
+> marketplace sessions. A verify URL returning 404 means the platform
 > changed its URL structure; update \`verifyUrl\` in \`JOB_LOGIN_PLATFORMS\`
-> in stealthBrowser.js. "No entry" = never logged in via the app.
+> in stealthBrowser.js. "No entry" = startup verify hasn't reached this platform yet.
 
 | Platform ID | Name | Cached connected | Last confirmed | Last reason |
 |---|---|---|---|---|
@@ -925,13 +919,15 @@ ${aiConfig.provider === 'gemini' ? `
 ` : ''}${tokenBudgetMarkdown}
 `;
 
-  const jobsConfig = buildJobsConfigSnapshot();
-  const jobsConfigMarkdown = `
+  const jobsConfigMarkdown = hasJobNodes ? (() => {
+    const jobsConfig = buildJobsConfigSnapshot();
+    return `
 ## Job Search API Configuration
 - USAJobs API key set: ${jobsConfig.hasUsajobsKey ? '✅' : '❌'}
 - USAJobs Email set: ${jobsConfig.hasUsajobsEmail ? '✅' : '❌'}
 - USAJobs key prefix: \`${jobsConfig.usajobsKeyPrefix}\`
 `;
+  })() : '';
 
   // The node ids in THIS report's canvas — lets the pipeline snapshots flag a
   // funnel whose originating node isn't here (the main-process telemetry is
@@ -947,8 +943,8 @@ ${aiConfig.provider === 'gemini' ? `
   catch { /* never break the report on diagnostic failure */ }
 
   let scraperAdaptationMarkdown = '';
-  try { scraperAdaptationMarkdown = buildScraperAdaptationSnapshot(); }
-  catch { /* never break the report on diagnostic failure */ }
+  if (hasJobNodes || hasSellNodes) try { scraperAdaptationMarkdown = buildScraperAdaptationSnapshot(); }
+    catch { /* never break the report on diagnostic failure */ }
 
   let issueReporterDraftMarkdown = '';
   if (payload.issueReporterDraft) {
@@ -989,7 +985,8 @@ ${aiConfig.provider === 'gemini' ? `
     stateWasTrimmed = true;
   }
 
-  let baseMarkdown = `
+  let baseMarkdown = `At the end of your debug, assess whether new bug reporting filter codes need to be implemented. This occurs when even if the user used another existing code or a combination of existing codes, it would not have been enough reporting data to debug this issue smoothly.
+
 # Bug Report
 
 ## Issue Description

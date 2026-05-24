@@ -97,11 +97,18 @@ export async function openLoginWindow(platformId, sender = null) {
   // didn't always reach disk in time for verifySellMonitorLogin.
   await closeStealthBrowser();
 
-  // Launch a SEPARATE visible browser for login (now has exclusive access to userDataDir)
+  // Launch a SEPARATE visible browser for login (now has exclusive access to userDataDir).
+  // ignoreDefaultArgs removes --enable-automation which puppeteer adds by default —
+  // it's what triggers the "Chrome is being controlled by automated test software"
+  // banner AND the window.cdc_... properties that sites like Glassdoor use to detect
+  // puppeteer and return a blank page. --disable-blink-features=AutomationControlled
+  // already removes navigator.webdriver; stripping --enable-automation makes the
+  // login window indistinguishable from a regular Chrome session.
   const loginBrowser = await puppeteer.launch({
     headless: false,
     executablePath,
     userDataDir: await getUserDataDir(),
+    ignoreDefaultArgs: ['--enable-automation'],
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -110,13 +117,54 @@ export async function openLoginWindow(platformId, sender = null) {
       '--window-size=1100,800',
       '--lang=en-US,en',
     ],
-    defaultViewport: null, // Use the window size as viewport
+    defaultViewport: null,
     ignoreHTTPSErrors: true,
   });
 
   const pages = await loginBrowser.pages();
   const page = pages[0] || await loginBrowser.newPage();
-  await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+
+  // Clear stale service worker registrations AND cache storage for the login
+  // origin via CDP. SWs are origin-scoped and can only be unregistered from
+  // within that origin — so page.evaluate() from about:blank does nothing.
+  // CDP's Storage.clearDataForOrigin bypasses that restriction and works from
+  // any page context. This matters for Glassdoor: the headless scraping browser
+  // visits glassdoor.com during startup verification, which activates and
+  // caches Glassdoor's SW in the shared userDataDir. When the login window
+  // opens on the same profile, that stale SW intercepts the navigation and
+  // serves a cached SPA shell that never renders — resulting in about:blank.
+  // cache_storage is included so a stale SW cache can't re-serve the shell.
+  // Cookies are intentionally excluded so login state isn't lost.
+  try {
+    const cdp = await page.createCDPSession();
+    await cdp.send('Storage.clearDataForOrigin', {
+      origin: new URL(url).origin,
+      storageTypes: 'service_workers,cache_storage',
+    });
+    await cdp.detach();
+  } catch { /* CDP unavailable or URL unparseable — proceed anyway */ }
+
+  // Navigate via window.location.href rather than page.goto().
+  //
+  // page.goto() uses CDP's Page.navigate command under the hood. Cloudflare's
+  // bot-mitigation layer detects the CDP navigation timing signature and
+  // silently hangs the TCP connection — it never sends an HTTP response —
+  // so domcontentloaded never fires and the page stays at about:blank until
+  // the 30 s timeout fires (by which point the user has been staring at a
+  // blank window for half a minute).
+  //
+  // Assigning window.location.href from within the page's JS context triggers
+  // a native browser navigation that is indistinguishable from a user typing
+  // the URL into the address bar. Chrome handles the request through its
+  // normal network stack without any CDP Page.navigate fingerprint, and
+  // Cloudflare serves the page normally. The evaluate() resolves as soon as
+  // the assignment executes; page-context destruction mid-navigate is expected
+  // and caught below.
+  await page.evaluate((targetUrl) => {
+    window.location.href = targetUrl;
+  }, url).catch((err) => {
+    logger.warn(`[StealthBrowser] Login window navigate ${url} failed: ${err?.message || String(err)}`);
+  });
 
   // Wait for the user to close the browser window or the app window to be destroyed
   return new Promise((resolve) => {
@@ -290,6 +338,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     headless: false,
     executablePath,
     userDataDir: await getUserDataDir(),
+    ignoreDefaultArgs: ['--enable-automation'],
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -311,7 +360,15 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
   // skipping the 1-3s 'networkidle2' wait for analytics/tracking pixels.
   // Safe because the probe below gates extract on textLength > BODY_TEXT_GATE,
   // which is its own "page has real content" check.
-  await page.goto(url, { waitUntil: 'load', timeout: 30000 }).catch(() => {});
+  // Same window.location.href pattern as openLoginWindow — avoids the CDP
+  // Page.navigate fingerprint that Cloudflare silently hangs. The evaluate()
+  // resolves immediately after the assignment; the probe poll handles about:blank
+  // gracefully by skipping it until the navigation completes.
+  await page.evaluate((targetUrl) => {
+    window.location.href = targetUrl;
+  }, url).catch((err) => {
+    logger.warn(`[StealthBrowser] Captcha window navigate ${url} failed: ${err?.message || String(err)}`);
+  });
 
   // When the caller needs the user to act on a separate page (e.g. Glassdoor
   // review gate: Tab 1 stays on job results for polling; Tab 2 is where the
@@ -360,7 +417,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       '✏️  Tab 2 · Complete your review or salary entry here — then switch to Tab 1 and refresh it',
       '#2563eb',
     );
-    await tab2.goto(secondTabUrl, { waitUntil: 'load', timeout: 30000 }).catch(() => {});
+    await tab2.evaluate((u) => { window.location.href = u; }, secondTabUrl).catch(() => {});
   }
 
   return new Promise((resolve) => {
@@ -379,6 +436,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     let lastHost = null;          // host on the last probe (catches "wandered off")
     let extractOutcome = null;    // inline-extract result: 'matched N' / 'matched 0' / 'threw' / 'non-array' / 'no-extractor'
     let autoCloseReason = null;   // why finishCleared fired (set at each call site)
+    let siteChangedError = null;  // non-null when inline extract threw SITE_CHANGED (code fix needed, not captcha)
     let pollTimedOut = false;     // auto-detect poll gave up before any resolve
 
     // Snappier cadence than the in-page loop for sub-second detection after a
@@ -544,6 +602,13 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
             // render starts measuring fresh.
             antiBotClearedAt = null; lastExtractCount = -1; stableTicks = 0; emptySince = null;
           } else {
+            // If the page body is empty, the navigation is still in flight or the
+            // site is serving a blank page to this visible session. Running the
+            // extractor now produces a spurious SITE_CHANGED (e.g. indeed
+            // __NEXT_DATA__ missing on a blank page) that auto-closes the window
+            // after only ~4 seconds — before the user can interact. Wait for real
+            // content before attempting extraction.
+            if (probe.textLength === 0) return;
             if (antiBotClearedAt == null) antiBotClearedAt = Date.now();
             let items = null;
             try {
@@ -552,7 +617,25 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
               else { extractOutcome = 'non-array'; logger.warn(`[StealthBrowser] Inline extract returned non-array (${typeof result}); falling back to rescrape`); }
             } catch (e) {
               extractOutcome = 'threw';
-              logger.warn(`[StealthBrowser] Inline extract failed (${e?.message || e}); falling back to rescrape`);
+              const isSC = /SITE_CHANGED/i.test(e?.message || '');
+              logger.warn(`[StealthBrowser] Inline extract failed (${e?.message || e}); ${isSC ? 'code fix needed — not triggering auto-rescrape' : 'falling back to rescrape'}`);
+              if (isSC) {
+                // Guard against concurrent probe calls (multiple evaluates in-flight
+                // when the page finishes loading) both hitting this handler. The
+                // second one's warn/close would be a harmless duplicate, but it
+                // produces a confusing double WARN in the log.
+                if (isTerminated) return;
+                isTerminated = true;
+                // The extractor is broken (not the captcha) — closing the window
+                // and rescraping headless would just fail again. Surface as
+                // stale-selectors via the resolve payload so marketplace.js can
+                // emit the right warning to the source card (Retry, not Solve).
+                siteChangedError = e?.message || String(e);
+                if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
+                if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
+                await captchaBrowser.close().catch(() => {});
+                return;
+              }
             }
 
             const ceilingHit = Date.now() - antiBotClearedAt >= READINESS_CEILING_MS;
@@ -686,12 +769,14 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       // window closed, what the extractor saw, page state) so a 0-extract isn't
       // an unexplained dead end — see openCaptchaResolveWindow's diag vars.
       const closeReason = resolved ? (autoCloseReason || 'cleared')
+        : siteChangedError ? 'site-changed-auto-close'
         : signal?.aborted ? 'aborted'
         : sender?.isDestroyed?.() ? 'app-closed'
         : pollTimedOut ? 'user-closed-after-timeout'
         : 'user-closed';
       resolve({
         success: true, resolved, items: extractedItems,
+        siteChangedError: siteChangedError || null,
         closedByApp: sender?.isDestroyed?.(),
         diag: {
           closeReason,

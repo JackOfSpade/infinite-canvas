@@ -214,6 +214,25 @@ export const JOB_BUCKETING_SCHEMA = {
   },
 };
 
+// ── Bucketing retry: place the handful of jobs the main bucketer dropped ──────
+export const BUCKETING_PLACEMENT_SCHEMA = {
+  type: 'object',
+  required: ['placements'],
+  properties: {
+    placements: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['index', 'categoryName'],
+        properties: {
+          index:        { type: 'integer', description: '0-based index from the input job array' },
+          categoryName: { type: 'string',  description: 'Exact category name from the available list' },
+        },
+      },
+    },
+  },
+};
+
 // ── Resume parse: file → structured profile ────────────────────────────────
 export const RESUME_PARSE_SCHEMA = {
   type: 'object',

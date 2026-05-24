@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useContext } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
+import { usePlatformsVerifyingProgress } from '../contexts/SessionStatusContext';
 import { HubContainer } from '../components/HubContainer';
 import { Camera } from 'lucide-react';
 import { PRICE_COMP_SOURCES, SELL_PLATFORMS } from '../utils/constants';
@@ -141,6 +142,7 @@ export function SellHubNode({ id, data }) {
   const [queuedResolvesCount, setQueuedResolvesCount] = useState(0);
 
   const hubState = data.hubState || 'empty';
+  const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(['ebay', 'poshmark', 'mercari', 'swappa', 'facebook']);
 
   // Per-source comp progress populated from backend `price-source-progress`
   // events. Reset before each fresh run so stale counts don't bleed in.
@@ -875,6 +877,8 @@ export function SellHubNode({ id, data }) {
       height={undefined}
       minHeight={nodeHeight}
       onDrop={handleDrop}
+      dropsBlocked={platformsVerifying}
+      verifyProgress={platformsVerifying ? { done: verifyDone, total: verifyTotal } : null}
       interactiveStates={['draft', 'priced', 'comps-ready']}
     >
         {/* ── Empty: drop zone (+ banner if a prior attempt failed) ─────── */}
@@ -883,8 +887,17 @@ export function SellHubNode({ id, data }) {
             {banner}
             <div className="flex flex-col items-center justify-center py-8 px-4 cursor-pointer">
               <Camera size={28} className="text-emerald-400/40 mb-3" />
-              <p className="text-white/40 text-sm font-medium">Drop product photos</p>
-              <p className="text-white/20 text-[10px] mt-1">AI identifies & prices</p>
+              {platformsVerifying ? (
+                <>
+                  <p className="text-white/40 text-sm font-medium">Checking connections…</p>
+                  <p className="text-white/20 text-[10px] mt-1">Verifying marketplace logins</p>
+                </>
+              ) : (
+                <>
+                  <p className="text-white/40 text-sm font-medium">Drop product photos</p>
+                  <p className="text-white/20 text-[10px] mt-1">AI identifies & prices</p>
+                </>
+              )}
             </div>
           </>
         )}

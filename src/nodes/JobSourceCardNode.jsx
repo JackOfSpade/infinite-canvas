@@ -136,29 +136,43 @@ export function JobSourceCardNode({ id, data }) {
       // from this source would persist even after a successful solve.
       if (result?.resolved) {
         const items = Array.isArray(result?.items) ? result.items : [];
-        setDismissed(true);
-        // Clear the warning AND bump the count on the card's local
-        // progress state so the status line flips from "captcha-presented"
-        // back to "{count} jobs" with the green checkmark. Without this,
-        // dismissed only hides the inline warning panel — the small status
-        // line still reads the warning code, making it look like the
-        // resolve didn't take effect even though it fully did.
-        // The 3-second auto-dismiss effect on clean-done cards then kicks
-        // in, removing the card entirely (matching the post-search UX for
-        // sources that finished cleanly the first time).
-        setProgress(prev => prev ? {
-          ...prev,
-          status: 'done', // flip off 'error' so it reads "{count} jobs" not "Failed", and auto-dismisses as clean-done
-          warning: null,
-          count: (prev.count || 0) + items.length,
-        } : prev);
         document.dispatchEvent(new CustomEvent('job-source-resolved', {
-          detail: {
-            hubId: data.hubId,
-            sourceId: data.sourceId,
-            items,
-          },
+          detail: { hubId: data.hubId, sourceId: data.sourceId, items },
         }));
+        if (result.nextBlockedUrl) {
+          // Another query for this source was also blocked. Keep the card visible
+          // and re-arm it with the next URL so the user can solve in sequence
+          // without re-running the full search.
+          setProgress(prev => prev ? {
+            ...prev,
+            status: 'error',
+            url: result.nextBlockedUrl,
+            count: (prev.count || 0) + items.length,
+            warning: {
+              code: 'http-403',
+              severity: 'block',
+              evidence: 'An additional search query for this source was also blocked.',
+              suggestion: 'Click Solve again to retrieve jobs from the next search query for this source.',
+            },
+          } : prev);
+        } else {
+          setDismissed(true);
+          // Clear the warning AND bump the count on the card's local
+          // progress state so the status line flips from "captcha-presented"
+          // back to "{count} jobs" with the green checkmark. Without this,
+          // dismissed only hides the inline warning panel — the small status
+          // line still reads the warning code, making it look like the
+          // resolve didn't take effect even though it fully did.
+          // The 3-second auto-dismiss effect on clean-done cards then kicks
+          // in, removing the card entirely (matching the post-search UX for
+          // sources that finished cleanly the first time).
+          setProgress(prev => prev ? {
+            ...prev,
+            status: 'done', // flip off 'error' so it reads "{count} jobs" not "Failed", and auto-dismisses as clean-done
+            warning: null,
+            count: (prev.count || 0) + items.length,
+          } : prev);
+        }
       }
     } finally {
       setResolving(false);
@@ -290,6 +304,7 @@ export function JobSourceCardNode({ id, data }) {
   const hasBlock    = warning?.severity === 'block';
   const hasThrottle = warning?.severity === 'throttle';
   const hasInfo     = warning?.severity === 'info';
+  const hasWarn     = warning?.severity === 'warn';
   // Google's udm=8 page is unscrapeable, so a "done" with no jobs yet isn't a
   // success — it's a card waiting for the user to Open & paste. Treat it as an
   // action-needed state (no green check, an honest label, amber accent) rather
@@ -308,11 +323,12 @@ export function JobSourceCardNode({ id, data }) {
             ? 'Searching…'
             : 'Idle';
 
-  // Red for hard failures, amber for throttles/skips/paste-needed (action
-  // available), platform color for healthy runs.
-  const accentColor = (isError || hasBlock)
+  // Red for hard failures/blocks, amber for throttles/skips/paste-needed/warn
+  // (action available), platform color for healthy runs. Stale-selector errors
+  // (warn severity) are amber — they need a code fix, not a captcha solve.
+  const accentColor = ((isError && !hasWarn) || hasBlock)
     ? '#ef4444'
-    : (hasThrottle || hasInfo || isSkipped || manualPasteUnresolved)
+    : (hasThrottle || hasInfo || hasWarn || isSkipped || manualPasteUnresolved)
       ? '#f59e0b'
       : data.color;
 
@@ -441,7 +457,7 @@ export function JobSourceCardNode({ id, data }) {
               </button>
             )
           ) : (
-            progress?.url && !hasInfo && (
+            progress?.url && !hasInfo && !hasWarn && (
             <button
               onClick={(e) => { e.stopPropagation(); handleSolve(); }}
               onPointerDown={(e) => e.stopPropagation()}

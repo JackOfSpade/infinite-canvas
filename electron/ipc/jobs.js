@@ -5,10 +5,10 @@
  *             Greenhouse API, Lever API, USAJobs API
  */
 import { callLLMDocument, callLLMText } from './llm.js';
-import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA, PASTED_JOB_PARSE_SCHEMA } from './aiSchemas.js';
+import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, BUCKETING_PLACEMENT_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA, PASTED_JOB_PARSE_SCHEMA } from './aiSchemas.js';
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
-import { scrapeMultiple } from './browserPool.js';
+import { scrapeManualSources } from './browser/manualScraper.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
 import { jobScoringBatchSize, HEAVY_WAF_QUERY_CAP, DEFAULT_QUERY_CAP, JOB_SCORE_CAP, JOB_MAX_PAGES } from './resultCaps.js';
 import { logger } from '../logger.js';
@@ -113,6 +113,14 @@ const PAGE_DELAY_MS = [6000, 14000];
 // which its resolve card could be mistaken for an idle/clean card and dismissed.
 function synthScrapeWarning(errorMsg) {
   const msg = String(errorMsg || 'Unknown error');
+  if (/SITE_CHANGED/i.test(msg)) {
+    return {
+      code: 'stale-selectors',
+      severity: 'warn',
+      evidence: msg.slice(0, 240),
+      suggestion: 'Extractor returned 0 results — the site HTML may have changed. Update the scraper code in electron/extractors/jobs.js, rebuild, and retry.',
+    };
+  }
   const isTimeout = /timed?\s*out|timeout/i.test(msg);
   return {
     code: isTimeout ? 'scrape-timeout' : 'scrape-failed',
@@ -205,7 +213,7 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
     // source (Google) runs as a one-shot scrape.
     let idx = 0;
     for (const q of querySubset) {
-      const base = { id: `${sourceId}-${idx++}`, sourceId, url: urlFn(q, 0), extractorJS: extractor };
+      const base = { id: `${sourceId}-${idx++}`, sourceId, url: urlFn(q, 0), extractorJS: extractor, query: q };
       if (maxPages > 1) {
         base.options = {
           ...config,
@@ -268,7 +276,7 @@ function selectTopAcrossSources(jobs, n) {
  * Fetch API-based sources in parallel (no Puppeteer needed).
  * @returns {{ sourceId: string, jobs: object[], error?: string }[]}
  */
-async function fetchApiSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = []) {
+async function fetchApiSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], pipelineAbort = null) {
   const firstQuery = queries[0] || '';
   // Source credentials come from Settings (electron-store) with a legacy
   // process.env fallback handled inside getJobsSettings() for users still
@@ -287,7 +295,7 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
   const geoTerms = buildGeoTermSet(profileLocations);
 
   const apiTasks = [
-    { sourceId: 'linkedin',       fn: (s) => fetchLinkedInJobs(firstQuery, s, days) },
+    { sourceId: 'linkedin',       fn: (s) => fetchLinkedInJobs(queries.slice(0, 3), s, days) },
     { sourceId: 'greenhouse',     fn: (s) => fetchGreenhouseJobs(firstQuery, s, geoTerms) },
     { sourceId: 'lever',          fn: (s) => fetchLeverJobs(firstQuery, s, geoTerms) },
     { sourceId: 'usajobs',        fn: (s) => fetchUSAJobs(firstQuery, apiKey, email, s, days) },
@@ -529,6 +537,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // at the end would wipe those records before the bug report reads them.
     jobsTelemetry.resolves = {};
     jobsTelemetry.pastedPastes = [];
+    jobsTelemetry.sourceBlockedUrls = {}; // sourceId → [url, ...] for multi-query sequential solve
     // Fresh per-source event trail for this run (survives source-card deletion).
     jobsTelemetry.sourceEvents = {};
     jobsTelemetry.sourceEventsT0 = Date.now();
@@ -559,6 +568,12 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // card's Solve button has a target to open in the cookie-sharing browser
     // (mirrors marketplace's CompSourceCardNode `progress.url` flow).
     const sourceFirstUrl = {};
+    // Quick lookup from task id → URL, used in the per-task callback to record
+    // which URL triggered a block so multi-query sources (e.g. Indeed with 2
+    // queries both 403'd) can offer sequential solve cards instead of losing
+    // the second query entirely.
+    const taskUrlById = new Map(tasks.map(t => [t.id, t.url]));
+    const sourceBlockedUrls = {}; // sourceId → [url, ...] in task order
     for (const t of tasks) {
       if (!sourceTaskIds[t.sourceId]) sourceTaskIds[t.sourceId] = [];
       sourceTaskIds[t.sourceId].push(t.id);
@@ -581,30 +596,33 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const allJobs = [];
     const sourceResults = {};
 
-    // 1. Run Scraper Tasks and API Tasks concurrently
-    const [results, apiResults] = await Promise.all([
-      scrapeMultiple(tasks, (res) => {
-        const sourceId = res.id.replace(/-\d+$/, '');
-        const count = Array.isArray(res.data) ? res.data.length : 0;
-        emitProgress({
-          nodeId,
-          sourceId,
-          status: res.success ? 'done' : 'error',
-          count,
-          // Forward the anti-bot warning; if the task FAILED with no warning
-          // (a thrown timeout/nav error carries none), synthesize one NOW so the
-          // card shows the reason + Solve immediately and isn't left looking
-          // clean/dismissable until the per-source completion loop runs at the
-          // end of the (long) run.
-          warning: res.warning || (res.success ? null : synthScrapeWarning(res.error)),
-          // Include url here too so the Solve button can render against
-          // mid-scrape warnings without waiting for the per-source
-          // completion event that fires only after EVERY source finishes.
-          url: sourceFirstUrl[sourceId] || null,
-        });
-      }, signal),
-      fetchApiSources(queries, event.sender, signal, nodeId, ageDays, profileLocations)
-    ]);
+    // 1. Run browser collection (manual) and API sources concurrently.
+    // pipelineAbort allows a future unrecoverable failure to abort both halves.
+    // Individual API source failures (e.g. Dice 500) are source-level errors —
+    // they return 0 jobs with a warning and do NOT abort the pipeline.
+    const pipelineAbort = new AbortController();
+    const combinedSignal = AbortSignal.any([pipelineAbort.signal, signal].filter(s => s instanceof AbortSignal));
+
+    let results, apiResults;
+    try {
+      [results, apiResults] = await Promise.all([
+        scrapeManualSources(tasks, (res) => {
+          const sourceId = res.id.replace(/-\d+$/, '');
+          const count = Array.isArray(res.data) ? res.data.length : 0;
+          emitProgress({
+            nodeId,
+            sourceId,
+            status: res.warning?.severity === 'block' ? 'error' : 'done',
+            count,
+            warning: res.warning || null,
+            url: sourceFirstUrl[sourceId] || null,
+          });
+        }, combinedSignal),
+        fetchApiSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, pipelineAbort),
+      ]);
+    } catch (err) {
+      throw err;
+    }
 
     // Process Scraper Results
     for (const result of results) {
@@ -636,6 +654,31 @@ Be creative with suggestedRoleQueries — think about what career directions the
         sourceResults[sourceId].warnings.push(synthScrapeWarning(result.error));
       }
     }
+
+    // Glassdoor behavioral contribution-gate detection. The body-text soft gate in
+    // antiBotDetector.js already has the right pattern, but Glassdoor's 775KB HTML
+    // buries "To restore your access" far past the HTML_SCAN_CHARS=5000 window, so
+    // it never fires during the headless scrape. Behavioral signal is more reliable:
+    // a logged-in session that extracts ≤10 jobs then hits an empty "Show more" is
+    // almost certainly gated (Glassdoor caps free-account results at ~5), not sparse.
+    // Inject a block-severity warning so the card shows a Solve button — the user
+    // opens the two-tab resolve window, submits a review/salary in Tab 2, then
+    // Tab 1 auto-extracts the full ungated result set.
+    const gdData = sourceResults.glassdoor;
+    if (gdData && gdData.jobs.length > 0 && gdData.jobs.length <= 10 &&
+        gdData.pagesWalked <= 1 &&
+        !gdData.warnings.some(w => w?.severity === 'block')) {
+      gdData.warnings.push({
+        code: 'glassdoor-review-gate',
+        severity: 'block',
+        evidence: `Glassdoor returned only ${gdData.jobs.length} job(s) before hitting an empty page — consistent with the contribution gate.`,
+        openSecondTab: true,
+        suggestion: 'Glassdoor is gating results behind a review. Two tabs will open — use Tab 2 to write a company review or add a salary, then switch back to Tab 1 (job results) and refresh it. The full list will be captured and the window will close automatically.',
+      });
+    }
+
+    // Persist blocked URLs for the resolve handler to use post-search.
+    jobsTelemetry.sourceBlockedUrls = sourceBlockedUrls;
 
     // Process API Results
     for (const res of apiResults) {
@@ -737,7 +780,15 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const scrapeWarnings = [];
     for (const [sourceId, data] of Object.entries(sourceResults)) {
       for (const w of data.warnings || []) {
-        scrapeWarnings.push({ sourceId, url: sourceFirstUrl[sourceId] || null, ...w });
+        // A scrape-timeout on one query while OTHER queries for the same source
+        // succeeded is a partial failure, not a full block. Downgrade severity so
+        // ensureBlockedSourceCards doesn't re-spawn a blocking Solve card for a
+        // source that already returned results — the user got jobs; a late "error"
+        // card 8 minutes later is jarring and misleading.
+        const effectiveSeverity = (data.jobs.length > 0 && w.code === 'scrape-timeout')
+          ? 'warn'
+          : w.severity;
+        scrapeWarnings.push({ sourceId, url: sourceFirstUrl[sourceId] || null, ...w, severity: effectiveSeverity });
       }
     }
 
@@ -1278,16 +1329,61 @@ RULES:
     if (missing > 0 || duplicated > 0) {
       logger.warn(`[Jobs][${nodeId}] Bucketing placement gap: ${placed}/${jobs.length} placed, ${missing} missing, ${duplicated} duplicated`);
     }
+
+    // Targeted retry for any jobs the bucketer dropped. Sends only the missing
+    // jobs with a minimal prompt — small input is reliable even on haiku.
+    // Mutates result.categories in place so the return value and telemetry both
+    // reflect the rescued state.
+    if (missing > 0 && !signal?.aborted) {
+      const missingCompact = missingIndices.map(i => compact[i]);
+      const categoryNames = (result?.categories || []).map(c => c.name).join(', ');
+      const retryMeta = {};
+      try {
+        const retryResult = await callLLMText(
+          `A job bucketer omitted ${missing} job(s). Place each in the correct category.\n\nAVAILABLE CATEGORIES: ${categoryNames}\n\nJOBS:\n${JSON.stringify(missingCompact, null, 2)}\n\nEvery job must appear in exactly one placement. Use only the available category names.`,
+          { signal, task: 'job-bucketing', responseSchema: BUCKETING_PLACEMENT_SCHEMA, meta: retryMeta },
+        );
+        for (const p of retryResult?.placements || []) {
+          if (!Number.isInteger(p?.index) || p.index < 0 || p.index >= jobs.length) continue;
+          const cat = (result.categories || []).find(c => c.name === p.categoryName) ?? result.categories?.[0];
+          if (!cat) continue;
+          let bucket = cat.buckets.find(b => b.label === 'Unspecified');
+          if (!bucket) {
+            bucket = { label: 'Unspecified', minSalary: 0, maxSalary: 0, jobIndices: [] };
+            cat.buckets.push(bucket);
+          }
+          if (!bucket.jobIndices.includes(p.index)) bucket.jobIndices.push(p.index);
+        }
+        logger.info(`[Jobs][${nodeId}] Bucketing retry rescued ${retryResult?.placements?.length || 0} missing job(s) via ${retryMeta.model || 'unknown'}`);
+      } catch {
+        // Retry failed — renderer's missing-sweep still handles it
+      }
+    }
+
+    // Recount after any retry so telemetry reflects the final state.
+    const finalPlacedCounts = new Map();
+    for (const cat of result?.categories || []) {
+      for (const buc of cat?.buckets || []) {
+        for (const idx of buc?.jobIndices || []) {
+          if (Number.isInteger(idx) && idx >= 0 && idx < jobs.length)
+            finalPlacedCounts.set(idx, (finalPlacedCounts.get(idx) || 0) + 1);
+        }
+      }
+    }
+    const finalPlaced = finalPlacedCounts.size;
+    const finalMissing = jobs.length - finalPlaced;
+    const finalMissingIndices = finalMissing > 0
+      ? Array.from({ length: jobs.length }, (_, i) => i).filter(i => !finalPlacedCounts.has(i))
+      : [];
+
     jobsTelemetry.bucketing = {
       ts: Date.now(),
       input: jobs.length,
       categories: result?.categories?.length || 0,
-      placed,
-      missing,
+      placed: finalPlaced,
+      missing: finalMissing,
       duplicated,
-      // Indices (0-based) of jobs the bucketer omitted — cross-reference against
-      // the job titles in the scoring funnel to identify the specific job(s).
-      missingIndices,
+      missingIndices: finalMissingIndices,
       model: bucketMeta.model || null,
       error: null,
     };
@@ -1361,7 +1457,15 @@ RULES:
       // unexplained dead end in the bug report (see openCaptchaResolveWindow).
       diag: result.diag || null,
     };
-    return { resolved: !!result.resolved, items };
+    // Multi-query sequential solve: if this source had more than one blocked query
+    // (e.g. Indeed 403s both "cinematographer Denver" and "camera operator Colorado"),
+    // pop the just-resolved URL and return the next one so the frontend can re-raise
+    // a Solve card for it without requiring a full re-run.
+    const remaining = (jobsTelemetry.sourceBlockedUrls?.[sourceId] || []).filter(u => u !== url);
+    if (jobsTelemetry.sourceBlockedUrls) jobsTelemetry.sourceBlockedUrls[sourceId] = remaining;
+    const nextBlockedUrl = remaining[0] || null;
+    if (nextBlockedUrl) logger.info(`[Jobs][${nodeId}] Next blocked URL for ${sourceId}: ${nextBlockedUrl}`);
+    return { resolved: !!result.resolved, items, nextBlockedUrl };
   });
 
   // Renderer calls this after it merges captcha-resolve items into pendingJobs.

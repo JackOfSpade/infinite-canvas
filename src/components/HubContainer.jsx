@@ -1,15 +1,17 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { NodeHandles } from '../nodes/_shared/NodeHandles';
 
-export function HubContainer({ 
-  hubState, 
-  theme = 'blue', // 'blue' | 'amber' 
-  width = 260, 
-  height, 
+export function HubContainer({
+  hubState,
+  theme = 'blue', // 'blue' | 'amber'
+  width = 260,
+  height,
   minHeight = 140,
   onDrop,
+  dropsBlocked = false,
+  verifyProgress = null, // { done: number, total: number } — drives the progress bar while dropsBlocked
   extras,
-  children 
+  children
 }) {
   const isProcessing = !['empty', 'done', 'priced', 'error'].includes(hubState);
 
@@ -33,21 +35,24 @@ export function HubContainer({
   }, []);
 
   const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation(); // prevent canvas from also processing this drop
     dragCounterRef.current = 0;
     setIsDragOver(false);
+    if (dropsBlocked) return;
     onDrop?.(e);
-  }, [onDrop]);
+  }, [dropsBlocked, onDrop]);
 
   const handleDragOver = useCallback((e) => {
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-  }, []);
+    e.stopPropagation(); // prevent canvas from overriding our dropEffect
+    e.dataTransfer.dropEffect = dropsBlocked ? 'none' : 'copy';
+  }, [dropsBlocked]);
 
   const getContainerClasses = () => {
     let classes = 'relative z-10 rounded-xl border-2 transition-all duration-300 ease-in-out pointer-events-auto ';
 
-    if (isDragOver) {
-      // Drag-over: highlight border + subtle tinted background
+    if (isDragOver && !dropsBlocked) {
       classes += 'border-solid ';
       if (theme === 'blue')  classes += 'border-blue-400/80 bg-blue-500/10';
       if (theme === 'amber') classes += 'border-amber-400/80 bg-amber-500/10';
@@ -88,8 +93,8 @@ export function HubContainer({
         />
       )}
 
-      {/* Drag-over outer glow halo */}
-      {isDragOver && (
+      {/* Drag-over outer glow halo — hidden when blocked so there's no hover indicator */}
+      {isDragOver && !dropsBlocked && (
         <div
           className="absolute -inset-[3px] rounded-[14px] -z-10 pointer-events-none"
           style={{
@@ -108,8 +113,8 @@ export function HubContainer({
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
       >
-        {/* Floating drop chip — visible only while dragging over */}
-        {isDragOver && (
+        {/* Floating drop chip — only when not blocked */}
+        {isDragOver && !dropsBlocked && (
           <div className="absolute inset-x-0 top-0 z-50 flex justify-center -translate-y-1/2 pointer-events-none">
             <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border backdrop-blur-md shadow-lg ${
               isBlue
@@ -119,6 +124,15 @@ export function HubContainer({
               <span>{chipIcon}</span>
               <span>{chipLabel}</span>
             </div>
+          </div>
+        )}
+        {/* Verification progress bar — thin strip at bottom, animates as each platform clears */}
+        {dropsBlocked && verifyProgress && verifyProgress.total > 0 && (
+          <div className="absolute bottom-0 left-0 right-0 h-[2px] overflow-hidden rounded-b-xl">
+            <div
+              className="h-full bg-white/25 transition-[width] duration-500 ease-out"
+              style={{ width: `${Math.round((verifyProgress.done / verifyProgress.total) * 100)}%` }}
+            />
           </div>
         )}
         {children}

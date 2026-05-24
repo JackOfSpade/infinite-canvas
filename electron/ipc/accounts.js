@@ -2,8 +2,6 @@
  * Accounts IPC handlers — platform login, session management.
  * Opens visible browser windows for login and checks cookie health.
  */
-import electronPkg from 'electron';
-const { app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 import { handleSafe } from './ipcUtils.js';
@@ -21,30 +19,21 @@ import {
 } from './stealthBrowser.js';
 
 // Timeout for a session-verify page fetch. Not a freshness/density signal —
-// it's an auth-check network bound (fixed, like STALE_SESSION_TTL_MS below).
+// it's an auth-check network bound (fixed).
 const SESSION_VERIFY_TIMEOUT_MS = 25000;
 
-// ── Session status disk cache ─────────────────────────────────────────────────────────
-// Avoids launching Chrome just to display status on panel open.
-// In-memory copy is the single source of truth during the process lifetime;
-// disk is the persistence layer between sessions.
-let _statusCache = null;
+// ── Session status in-memory cache ───────────────────────────────────────────
+// Pure in-memory: starts empty each launch, populated by verifyAllPlatforms on
+// startup and by writeStatusCache after each login flow. No disk persistence —
+// every startup does a fresh verify so a stale file would only add noise.
+let _statusCache = {};
 
-// Resolved lazily on first access (after app is ready and getPath is available).
-let _statusCachePath = null;
-function getStatusCachePath() {
-  if (!_statusCachePath) _statusCachePath = path.join(app.getPath('userData'), 'session-status-cache.json');
-  return _statusCachePath;
-}
 export async function readStatusCache() {
-  if (_statusCache) return _statusCache;
-  try {
-    const p = getStatusCachePath();
-    const data = await fs.promises.readFile(p, 'utf8').catch(() => null);
-    if (!data) { _statusCache = {}; return _statusCache; }
-    _statusCache = JSON.parse(data);
-    return _statusCache;
-  } catch { _statusCache = {}; return _statusCache; }
+  return _statusCache;
+}
+
+export function getStatusCacheSync() {
+  return _statusCache;
 }
 /**
  * After the login window closes, verify the user actually completed login
@@ -179,66 +168,46 @@ function stripTags(html) {
 }
 
 export async function writeStatusCache(platformId, connected, extras = {}) {
-  try {
-    const cache = await readStatusCache(); // returns the in-memory object
-    cache[platformId] = { connected, ts: Date.now(), ...extras };
-    // Atomic write: write to a .tmp sibling then rename, so a crash during
-    // the write never leaves a partially-written (corrupt) JSON file.
-    const finalPath = getStatusCachePath();
-    const tmpPath   = finalPath + '.tmp';
-    await fs.promises.writeFile(tmpPath, JSON.stringify(cache));
-    await fs.promises.rename(tmpPath, finalPath);
-  } catch (e) {
-    logger.warn('[Accounts] Cache write failed:', e?.message || String(e));
-  }
+  _statusCache[platformId] = { connected, ts: Date.now(), ...extras };
 }
 
-// ── Background revalidation ─────────────────────────────────────────────────
-// On app start, walk the cache and re-verify any `connected: true` entries
-// older than the TTL. Catches platforms whose cookies expired since last open
-// so the user doesn't see a stale "Logged in" pill that then fails at scrape
-// time. Runs sequentially in the background; transient errors (Chrome busy,
-// stealth browser torn down by an unrelated user click) DO NOT downgrade the
-// cache — only a real verdict from the verifier overwrites a cached value.
-const STALE_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+// ── Startup verification ──────────────────────────────────────────────────────
+// Verifies ALL known platforms on every launch. Cache starts empty, so there's
+// nothing to trust — every startup is a clean check. Runs sequentially to avoid
+// racing Chrome instances on the shared userDataDir. Pushes progress events to
+// the renderer via the notify callback so hub nodes can block drops until their
+// relevant platforms are confirmed.
+let _verifyingPlatforms = new Set();
 
-export async function revalidateStaleSessions({ maxAgeMs = STALE_SESSION_TTL_MS } = {}) {
-  try {
-    const cache = await readStatusCache();
-    const now = Date.now();
-    const stale = Object.entries(cache)
-      .filter(([, v]) => v?.connected && (now - (v.ts || 0) > maxAgeMs))
-      .map(([platformId]) => platformId);
-    if (!stale.length) {
-      logger.info('[Accounts] Background revalidate: no stale connected sessions');
-      return;
+export async function verifyAllPlatforms({ notify = () => {} } = {}) {
+  const sellIds = getSellMonitorPlatforms().map(p => p.id);
+  const jobIds  = getJobLoginPlatforms().map(p => p.id);
+  const allIds  = [...sellIds, ...jobIds];
+
+  _verifyingPlatforms = new Set(allIds);
+  notify('accounts:verify-start', { platformIds: allIds });
+  logger.info(`[Accounts] Startup verify: ${allIds.length} platforms (${allIds.join(', ')})`);
+
+  for (const platformId of allIds) {
+    if (activeLoginFlows.has(platformId)) {
+      logger.info(`[Accounts] Startup verify skipping ${platformId} — login flow in flight`);
+      _verifyingPlatforms.delete(platformId);
+      notify('accounts:verify-update', { platformId, connected: _statusCache[platformId]?.connected ?? false });
+      continue;
     }
-    logger.info(`[Accounts] Background revalidate: ${stale.length} stale connected entries (${stale.join(', ')})`);
-    for (const platformId of stale) {
-      // Skip platforms with an active login flow — the user is already
-      // interacting with them, and our verify would race their window's
-      // close/verify cycle on the shared userDataDir.
-      if (activeLoginFlows.has(platformId)) {
-        logger.info(`[Accounts] Background revalidate skipping ${platformId} — login flow in flight`);
-        continue;
-      }
-      try {
-        const verdict = await verifySellMonitorLogin(platformId);
-        if (verdict.trace?.error) {
-          // Transient (network blip, browser torn down mid-fetch). Don't
-          // overwrite — wait for the next app open or a real user click.
-          logger.info(`[Accounts] Background revalidate ${platformId} transient error — keeping cached value: ${verdict.reason}`);
-          continue;
-        }
-        await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
-        logger.info(`[Accounts] Background revalidate ${platformId}: ${verdict.connected ? 'still logged in' : 'session expired'}`);
-      } catch (e) {
-        logger.warn(`[Accounts] Background revalidate ${platformId} threw:`, e?.message || String(e));
-      }
+    try {
+      const verdict = await verifySellMonitorLogin(platformId);
+      await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
+      logger.info(`[Accounts] Startup verify ${platformId}: ${verdict.connected ? 'connected' : 'not connected'}`);
+    } catch (e) {
+      logger.warn(`[Accounts] Startup verify ${platformId} threw:`, e?.message || String(e));
     }
-  } catch (e) {
-    logger.warn('[Accounts] Background revalidate setup failed:', e?.message || String(e));
+    _verifyingPlatforms.delete(platformId);
+    notify('accounts:verify-update', { platformId, connected: _statusCache[platformId]?.connected ?? false });
   }
+
+  notify('accounts:verify-done', {});
+  logger.info('[Accounts] Startup verify complete');
 }
 
 // ── Single-flight login dedup ────────────────────────────────────────────────
@@ -257,6 +226,17 @@ const activeLoginFlows = new Map(); // platformId → Promise<verdict>
  * Register all Accounts IPC handlers.
  */
 export function registerAccountsHandlers() {
+  // Current verification state — renderer calls this on mount to sync with
+  // whatever state the startup verify has already reached before the window loaded.
+  handleSafe('get-verify-state', async () => {
+    return {
+      verifying: [..._verifyingPlatforms],
+      statuses: Object.fromEntries(
+        Object.entries(_statusCache).map(([id, v]) => [id, { connected: v.connected }])
+      ),
+    };
+  });
+
   // Get CACHED session statuses — instant, no Chrome launch.
   // Use this for panel display. The full (Chrome-based) check is get-session-statuses.
   handleSafe('get-cached-session-statuses', async () => {

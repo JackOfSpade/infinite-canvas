@@ -10,7 +10,8 @@
  */
 import { logger } from '../logger.js';
 import { queueScrape } from '../ipc/browserPool.js';
-import { getRandomUA } from '../ipc/stealthBrowser.js';
+import { getRandomUA, refreshDiceApiKey } from '../ipc/stealthBrowser.js';
+import { getDiceApiKey } from '../ipc/settings.js';
 import { htmlToText } from 'html-to-text';
 import { resolveBudget } from '../ipc/scrapeBudget.js';
 import { JOB_RESULT_CAP } from '../ipc/resultCaps.js';
@@ -117,94 +118,112 @@ function stripHtml(html) {
 
 /**
  * Fetch jobs from LinkedIn's public API endpoint (no login needed).
- * This replaces the Puppeteer-based LinkedIn scraper.
+ * Accepts a single query string or an array of up to 3 query strings.
+ * Multiple queries are walked sequentially with an inter-query jitter pause
+ * and deduplicated by job URL so the same posting isn't returned twice.
  */
-export async function fetchLinkedInJobs(query, signal = null, maxAgeDays = null) {
+export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = null) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
+  const queryList = Array.isArray(queries) ? queries : [queries];
+  const seenUrls = new Set();
   const allJobs = [];
   let warning = null;
 
-  // Walk up to 150 results (6 pages × 25). LinkedIn's guest API is heavily
-  // anti-bot, so depth is PACED, not blitzed:
-  //   • a jittered 4–8s human-scale gap before each page after the first (a fixed
-  //     2s drumbeat is a tell — irregular cadence is the main signal we control),
-  //   • an early-exit the moment a page adds no new cards (below), so a low-volume
-  //     query never walks all 6 pages — we only go deep when results justify it,
-  //   • bail on the first block/non-OK (below), returning whatever we gathered so
-  //     far rather than hammering through and turning a soft throttle into a 0.
-  const LINKEDIN_MAX_RESULTS = 150;
-  for (let start = 0; start < LINKEDIN_MAX_RESULTS; start += 25) {
+  for (let qi = 0; qi < queryList.length; qi++) {
     if (signal?.aborted) break;
-    // Human-scale jittered pause before each subsequent page.
-    if (start > 0) await new Promise(res => setTimeout(res, 4000 + Math.floor(Math.random() * 4000)));
-    const params = new URLSearchParams({
-      keywords: query,
-      start: String(start),
-      sortBy: 'R', // explicit relevance (= LinkedIn's default; the value its own UI sends, so anti-bot-neutral)
-    });
-    // LinkedIn's "Time Posted" filter takes seconds (`r604800` = past week)
-    if (maxAgeDays && maxAgeDays > 0) {
-      params.set('f_TPR', `r${Math.floor(maxAgeDays * 86400)}`);
-    }
+    // Stop querying if a previous query was blocked — subsequent ones will be too.
+    if (warning) break;
+    // Inter-query pause (not before the first query). Irregular cadence like the
+    // inter-page jitter so a multi-query walk doesn't look like a fixed drumbeat.
+    if (qi > 0) await new Promise(res => setTimeout(res, 3000 + Math.floor(Math.random() * 3000)));
 
-    const r = await safeApiFetch(`https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?${params}`, {
-      headers: {
-        'Accept': 'text/html',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'Referer': 'https://www.linkedin.com/jobs/search/',
-      },
-      signal: createTimeoutSignal(signal, apiTimeout('linkedin-api')),
-    }, 'linkedin');
-
-    // First detected warning wins — the rest of the loop bails. LinkedIn is
-    // a heavy anti-bot source so if page 0 is blocked, page 1 will be too.
-    if (r.warning && !warning) warning = r.warning;
-    if (!r.ok) {
-      logger.warn(`[LinkedIn API] Page ${start / 25} returned ${r.status}${r.warning ? ` (${r.warning.code})` : ''}`);
-      break;
-    }
-
-    const html = r.text;
-    if (!html || html.trim().length < 50) break;
-
-    // Parse HTML snippets with regex — LinkedIn returns <li> cards
-    // Each card has: title in <h3>, company in <h4>, location, link, datetime
-    const cardPattern = /<li[\s\S]*?<\/li>/gi;
-    const cards = html.match(cardPattern) || [];
-
-    const before = allJobs.length;
-    for (const card of cards) {
-      try {
-        const titleMatch = card.match(/<h3[^>]*class="[^"]*base-search-card__title[^"]*"[^>]*>([\s\S]*?)<\/h3>/i) ||
-                           card.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
-        const companyMatch = card.match(/<h4[^>]*class="[^"]*base-search-card__subtitle[^"]*"[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i) ||
-                             card.match(/<h4[^>]*>([\s\S]*?)<\/h4>/i);
-        const locationMatch = card.match(/<span[^>]*class="[^"]*job-search-card__location[^"]*"[^>]*>([\s\S]*?)<\/span>/i);
-        const linkMatch = card.match(/<a[^>]*class="[^"]*base-card__full-link[^"]*"[^>]*href="([^"]+)"/i) ||
-                          card.match(/href="(https:\/\/www\.linkedin\.com\/jobs\/view\/[^"]+)"/i);
-        const dateMatch = card.match(/<time[^>]*datetime="([^"]+)"[^>]*>([\s\S]*?)<\/time>/i);
-
-        const title = stripHtml(titleMatch?.[1] || '').trim();
-        if (!title) continue;
-
-        allJobs.push({
-          title,
-          company: stripHtml(companyMatch?.[1] || companyMatch?.[2] || '').trim(),
-          location: stripHtml(locationMatch?.[1] || '').trim(),
-          salary: '',
-          snippet: '',
-          url: linkMatch?.[1]?.split('?')[0] || '', // Strip tracking params
-          posted: dateMatch?.[2] ? stripHtml(dateMatch[2]).trim() : (dateMatch?.[1] || ''),
-          source: 'linkedin',
-        });
-      } catch {
-        // Skip malformed cards
+    const query = queryList[qi];
+    // Walk up to 150 results (6 pages × 25). LinkedIn's guest API is heavily
+    // anti-bot, so depth is PACED, not blitzed:
+    //   • a jittered 4–8s human-scale gap before each page after the first (a fixed
+    //     2s drumbeat is a tell — irregular cadence is the main signal we control),
+    //   • an early-exit the moment a page adds no new cards (below), so a low-volume
+    //     query never walks all 6 pages — we only go deep when results justify it,
+    //   • bail on the first block/non-OK (below), returning whatever we gathered so
+    //     far rather than hammering through and turning a soft throttle into a 0.
+    const LINKEDIN_MAX_RESULTS = 150;
+    for (let start = 0; start < LINKEDIN_MAX_RESULTS; start += 25) {
+      if (signal?.aborted) break;
+      // Human-scale jittered pause before each subsequent page.
+      if (start > 0) await new Promise(res => setTimeout(res, 4000 + Math.floor(Math.random() * 4000)));
+      const params = new URLSearchParams({
+        keywords: query,
+        start: String(start),
+        sortBy: 'R', // explicit relevance (= LinkedIn's default; the value its own UI sends, so anti-bot-neutral)
+      });
+      // LinkedIn's "Time Posted" filter takes seconds (`r604800` = past week)
+      if (maxAgeDays && maxAgeDays > 0) {
+        params.set('f_TPR', `r${Math.floor(maxAgeDays * 86400)}`);
       }
-    }
 
-    // Page added nothing new → results exhausted (or a soft block served an empty
-    // shell). Stop instead of spending more requests walking empty pages.
-    if (allJobs.length === before) break;
+      const r = await safeApiFetch(`https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?${params}`, {
+        headers: {
+          'Accept': 'text/html',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          'Referer': 'https://www.linkedin.com/jobs/search/',
+        },
+        signal: createTimeoutSignal(signal, apiTimeout('linkedin-api')),
+      }, 'linkedin');
+
+      // First detected warning wins — the rest of the loop bails. LinkedIn is
+      // a heavy anti-bot source so if page 0 is blocked, page 1 will be too.
+      if (r.warning && !warning) warning = r.warning;
+      if (!r.ok) {
+        logger.warn(`[LinkedIn API] Query ${qi + 1}/${queryList.length} page ${start / 25} returned ${r.status}${r.warning ? ` (${r.warning.code})` : ''}`);
+        break;
+      }
+
+      const html = r.text;
+      if (!html || html.trim().length < 50) break;
+
+      // Parse HTML snippets with regex — LinkedIn returns <li> cards
+      // Each card has: title in <h3>, company in <h4>, location, link, datetime
+      const cardPattern = /<li[\s\S]*?<\/li>/gi;
+      const cards = html.match(cardPattern) || [];
+
+      const before = allJobs.length;
+      for (const card of cards) {
+        try {
+          const titleMatch = card.match(/<h3[^>]*class="[^"]*base-search-card__title[^"]*"[^>]*>([\s\S]*?)<\/h3>/i) ||
+                             card.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+          const companyMatch = card.match(/<h4[^>]*class="[^"]*base-search-card__subtitle[^"]*"[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i) ||
+                               card.match(/<h4[^>]*>([\s\S]*?)<\/h4>/i);
+          const locationMatch = card.match(/<span[^>]*class="[^"]*job-search-card__location[^"]*"[^>]*>([\s\S]*?)<\/span>/i);
+          const linkMatch = card.match(/<a[^>]*class="[^"]*base-card__full-link[^"]*"[^>]*href="([^"]+)"/i) ||
+                            card.match(/href="(https:\/\/www\.linkedin\.com\/jobs\/view\/[^"]+)"/i);
+          const dateMatch = card.match(/<time[^>]*datetime="([^"]+)"[^>]*>([\s\S]*?)<\/time>/i);
+
+          const title = stripHtml(titleMatch?.[1] || '').trim();
+          if (!title) continue;
+
+          const url = linkMatch?.[1]?.split('?')[0] || '';
+          if (url && seenUrls.has(url)) continue; // cross-query dedup by job URL
+          if (url) seenUrls.add(url);
+
+          allJobs.push({
+            title,
+            company: stripHtml(companyMatch?.[1] || companyMatch?.[2] || '').trim(),
+            location: stripHtml(locationMatch?.[1] || '').trim(),
+            salary: '',
+            snippet: '',
+            url,
+            posted: dateMatch?.[2] ? stripHtml(dateMatch[2]).trim() : (dateMatch?.[1] || ''),
+            source: 'linkedin',
+          });
+        } catch {
+          // Skip malformed cards
+        }
+      }
+
+      // Page added nothing new → results exhausted (or a soft block served an empty
+      // shell). Stop instead of spending more requests walking empty pages.
+      if (allJobs.length === before) break;
+    }
   }
 
   // `gathered` = pre-cap match count. When it exceeds the surfaced item count the
@@ -678,7 +697,8 @@ export async function fetchReverbListings(query, soldOnly = false, signal = null
 // Discovered during tier upgrade audit: previously Tier 3 (Puppeteer),
 // now upgraded to Tier 1 (direct API).
 
-const DICE_API_KEY = '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
+// Dice API key is persisted in settings (getDiceApiKey) and auto-refreshed
+// by refreshDiceApiKey() when the server returns 500 — see stealthBrowser.js.
 
 /**
  * Fetch job listings from Dice via their public API (Tier 1).
@@ -687,6 +707,9 @@ const DICE_API_KEY = '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
  * @param {number} [maxAgeDays] — keep only postings within this window (client-side)
  * @returns {Promise<Array>} — standardized job objects
  */
+const DICE_MAX_RETRIES = 3;
+const DICE_RETRY_DELAYS_MS = [1000, 2000, 4000];
+
 export async function fetchDiceListings(query, location = '', signal = null, maxAgeDays = null) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const params = new URLSearchParams({
@@ -709,23 +732,56 @@ export async function fetchDiceListings(query, location = '', signal = null, max
     ...(location ? { location } : {}),
   });
 
-  const r = await safeApiFetch(
-    `https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search?${params}`,
-    {
+  const url = `https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search?${params}`;
+  let r;
+  for (let attempt = 0; attempt <= DICE_MAX_RETRIES; attempt++) {
+    if (signal?.aborted) throw new Error('Aborted');
+    if (attempt > 0) {
+      const delay = DICE_RETRY_DELAYS_MS[attempt - 1] ?? 4000;
+      logger.info(`[Dice API] Retry ${attempt}/${DICE_MAX_RETRIES} in ${delay}ms (last status: ${r?.status ?? '?'})`);
+      await new Promise(res => setTimeout(res, delay));
+      if (signal?.aborted) throw new Error('Aborted');
+    }
+    r = await safeApiFetch(url, {
       headers: {
         'User-Agent': getRandomUA(),
-        'x-api-key': DICE_API_KEY,
+        'x-api-key': getDiceApiKey(),
         'Accept': 'application/json',
       },
       signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
-    },
-    'dice'
-  );
+    }, 'dice');
+    if (r.ok) break;
+    if (r.status >= 500 && attempt < DICE_MAX_RETRIES) continue; // retry on server errors
+    break; // non-5xx or retries exhausted — fall through to error handling
+  }
 
   if (!r.ok) {
-    if (r.warning) logger.warn(`[Dice API] ${r.warning.code}: ${r.warning.evidence}`);
-    else logger.warn(`[Dice API] Returned ${r.status}`);
-    return { items: [], warning: r.warning };
+    if (r.status >= 500) {
+      // API key may have rotated — intercept the current key from dice.com and retry once.
+      const newKey = await refreshDiceApiKey();
+      if (newKey) {
+        logger.info('[Dice API] Retrying with refreshed key');
+        const retryR = await safeApiFetch(url, {
+          headers: {
+            'User-Agent': getRandomUA(),
+            'x-api-key': newKey,
+            'Accept': 'application/json',
+          },
+          signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
+        }, 'dice');
+        if (retryR.ok) {
+          r = retryR; // use the successful retry response going forward
+        } else {
+          throw new Error(`Dice API unavailable — returned HTTP ${r.status} after ${DICE_MAX_RETRIES + 1} attempts + 1 key-refresh retry.`);
+        }
+      } else {
+        throw new Error(`Dice API unavailable — returned HTTP ${r.status} after ${DICE_MAX_RETRIES + 1} attempt(s). Key refresh also failed — try again later.`);
+      }
+    } else {
+      if (r.warning) logger.warn(`[Dice API] ${r.warning.code}: ${r.warning.evidence}`);
+      else logger.warn(`[Dice API] Returned ${r.status}`);
+      return { items: [], warning: r.warning };
+    }
   }
 
   const data = r.json;

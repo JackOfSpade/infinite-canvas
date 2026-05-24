@@ -1,10 +1,13 @@
 /**
  * Job Search Extractors + Site Configs.
  *
- * Extraction strategies (in order of reliability):
- *   1. JSON State — parse window.__NEXT_DATA__, window.mosaic, apolloState
- *   2. JSON-LD   — parse <script type="application/ld+json"> schemas
- *   3. DOM       — fallback CSS selector scraping (fragile, breaks often)
+ * Each platform has ONE best strategy. If it returns 0 results, the extractor
+ * throws SITE_CHANGED so the failure surfaces immediately as a 'stale-selectors'
+ * warning — the user is told to update the scraper code rather than silently
+ * getting 0 jobs. There are no fallback chains.
+ *
+ * Exceptions: Google (legitimately unscrapeable, has paste fallback),
+ * Swappa (0 = no model match, not broken), PriceCharting (niche source, 0 is valid).
  *
  * Each source exports:
  *   - An extractor JS string (IIFE that runs in page context)
@@ -20,8 +23,12 @@
 
 export const GOOGLE_JOBS_CONFIG = {
   waitMs: 2500,
-  timeoutMs: 45000,
-  waitFor: '.iFjolb, .PwjeAc, [data-ved] li',
+  timeoutMs: 25000, // reduced from 45s — Google headless consistently times out; fail fast so the manual-paste UI appears sooner
+  // waitFor intentionally omitted: the selector (.EimVGf / jscontroller="b11o3b") never
+  // appears in bot-throttled sessions, burning the full SELECTOR_WAIT_MS (8s) before the
+  // readiness loop even starts. Without it, MAX_ZERO_READS exits in ~3s and the paste
+  // fallback UI surfaces immediately. Positive sessions rely on firstBeatMs + the loop.
+  waitFor: null,
   scrollFirst: false,
   dismissCookies: true,
   waitUntil: 'domcontentloaded',
@@ -37,47 +44,49 @@ export const INDEED_CONFIG = {
 };
 
 // ── Google Jobs ─────────────────────────────────────────────────────────────
+// Card structure (as of 2026-05): .EimVGf root, jscontroller="b11o3b".
+// URL lives on data-share-url (no <a> tags in cards — old card.querySelector('a')
+// was always returning empty). Title/company/location are positional children of
+// the content grouping div (.GoEOPd); bare class-less <span> elements carry
+// posted date and employment type. All obfuscated class names need periodic
+// revalidation when Google rotates its frontend.
+// NOTE: no SITE_CHANGED throw — Google Jobs is legitimately unscrapeable
+// (JS-rendered, obfuscated). 0 results triggers the paste-fallback UI path.
 export const GOOGLE_JOBS_EXTRACTOR = `
 (function() {
   const jobs = [];
-  const cards = document.querySelectorAll('[data-ved] .iFjolb, [jscontroller] li[data-ved], .PwjeAc, .gws-plugins-horizon-jobs__tl-lif');
-  
-  if (cards.length === 0) {
-    const allLinks = document.querySelectorAll('a[href*="jobs"], a[href*="careers"]');
-    allLinks.forEach(link => {
-      const text = link.closest('div')?.innerText || '';
-      if (text.length > 30 && text.length < 500) {
-        jobs.push({
-          title: link.innerText?.trim() || '',
-          company: '', location: '', salary: '',
-          snippet: text.substring(0, 200),
-          url: link.href || '', posted: '', source: 'google'
-        });
-      }
-    });
-    return jobs.slice(0, 30);
-  }
+
+  const cards = document.querySelectorAll('.EimVGf, [jscontroller="b11o3b"]');
 
   cards.forEach(card => {
     try {
-      const titleEl = card.querySelector('[role="heading"], h3, .BjJfJf, .sH3zFe');
-      const companyEl = card.querySelector('.vNEEBe, .nJlQNd, [class*="company"]');
-      const locationEl = card.querySelector('.Qk80Jf, [class*="location"]');
-      const salaryEl = card.querySelector('[class*="salary"], [class*="pay"]');
-      const snippetEl = card.querySelector('.HBvzbc, [class*="snippet"], [class*="description"]');
-      const postedEl = card.querySelector('[class*="posted"], [class*="date"], .SuWscb');
-      
+      // URL: data-share-url is the stable anchor — cards have no <a> tags
+      const url = card.getAttribute('data-share-url') || '';
+
+      // Title: .tNxQIb is current; [role="heading"] is the semantic fallback
+      const titleEl = card.querySelector('.tNxQIb, [role="heading"], h3');
       const title = titleEl?.innerText?.trim() || '';
-      if (!title) return;
+      if (!title || title === 'Jobs') return;
+
+      // Company + location: positional children of the content grouping div.
+      // nth-child is more resilient than the obfuscated sibling class names.
+      const contentGroup = card.querySelector('.GoEOPd') || titleEl?.parentElement;
+      const contentDivs = contentGroup ? Array.from(contentGroup.querySelectorAll(':scope > div')) : [];
+      const company = contentDivs[1]?.innerText?.trim() || '';
+      const locationRaw = contentDivs[2]?.innerText?.trim() || '';
+      // Strip " • via LinkedIn" / " • via Indeed" suffix
+      const location = locationRaw.split(' • ')[0].trim();
+
+      // Posted date + employment type: bare <span> elements (no class by design)
+      const bareSpans = Array.from(card.querySelectorAll('span:not([class])'))
+        .map(s => s.innerText?.trim()).filter(Boolean);
+      const posted = bareSpans.find(s => /\\d+\\s+(day|week|hour|month)/i.test(s) || s === 'Just now') || '';
+      const empType = bareSpans.find(s => /full[- ]?time|part[- ]?time|contract|intern/i.test(s)) || '';
 
       jobs.push({
-        title,
-        company: companyEl?.innerText?.trim() || '',
-        location: locationEl?.innerText?.trim() || '',
-        salary: salaryEl?.innerText?.trim() || '',
-        snippet: snippetEl?.innerText?.trim()?.substring(0, 300) || '',
-        url: card.querySelector('a')?.href || '',
-        posted: postedEl?.innerText?.trim() || '',
+        title, company, location, salary: '',
+        snippet: empType,
+        url, posted,
         source: 'google'
       });
     } catch {}
@@ -88,212 +97,128 @@ export const GOOGLE_JOBS_EXTRACTOR = `
 `;
 
 // ── Indeed ──────────────────────────────────────────────────────────────────
-// Strategy 0: __NEXT_DATA__ (Indeed migrated to Next.js)
-// Strategy 1: window.mosaic.providerData JSON state (legacy, immune to CSS randomization)
-// Strategy 2: DOM selector scraping
+// Strategy: __NEXT_DATA__ first (Pages Router), then DOM fallback (.job_seen_beacon
+// cards). Indeed has been migrating between Next.js router versions; __NEXT_DATA__
+// disappears on App Router pages. Only throws SITE_CHANGED when both paths fail
+// AND the page has real content (bodyLen > 500), so a captcha/blank page doesn't
+// surface as a code-broken error.
 export const INDEED_JOBS_EXTRACTOR = `
 (function() {
   const jobs = [];
-  
-  // Strategy 0: Parse __NEXT_DATA__ (Indeed Next.js migration)
-  try {
-    const ndEl = document.getElementById('__NEXT_DATA__');
-    if (ndEl) {
+
+  // ── Path 1: __NEXT_DATA__ (Pages Router) ──────────────────────────────────
+  const ndEl = document.getElementById('__NEXT_DATA__');
+  if (ndEl) {
+    try {
       const nd = JSON.parse(ndEl.textContent);
       const results = nd?.props?.pageProps?.initialData?.jobSearchResults ||
                       nd?.props?.pageProps?.searchResults?.results ||
                       nd?.props?.pageProps?.results ||
                       [];
-      
       results.forEach(r => {
-        const job = r.job || r;
-        if (!job.title) return;
-        const salary = job.extractedSalary || job.salaryInfo;
-        jobs.push({
-          title: job.title || '',
-          company: job.company || job.companyName || job.employer?.name || '',
-          location: job.formattedLocation || job.location || '',
-          salary: salary?.max ? ('$' + salary.min + ' - $' + salary.max) : (job.salarySnippet?.text || ''),
-          snippet: (job.snippet || job.description || '').replace(/<[^>]*>/g, ' ').substring(0, 300),
-          url: job.link ? ('https://www.indeed.com' + job.link) : (job.jobkey ? ('https://www.indeed.com/viewjob?jk=' + job.jobkey) : ''),
-          posted: job.formattedRelativeTime || job.pubDate || '',
-          source: 'indeed'
-        });
-      });
-      if (jobs.length > 0) return jobs.slice(0, 30);
-    }
-  } catch {}
-
-  // Strategy 1: Parse mosaic provider JSON state (legacy)
-  try {
-    const scripts = document.querySelectorAll('script');
-    for (const script of scripts) {
-      const text = script.textContent || '';
-      const match = text.match(/window\\.mosaic\\.providerData\\["mosaic-provider-jobcards"\\]\\s*=\\s*(\\{.+?\\});/s);
-      if (match) {
-        const data = JSON.parse(match[1]);
-        const results = data?.metaData?.mosaicProviderJobCardsModel?.results ||
-                        data?.results ||
-                        [];
-        
-        results.forEach(r => {
-          if (!r.title) return;
+        try {
+          const job = r.job || r;
+          if (!job.title) return;
+          const salary = job.extractedSalary || job.salaryInfo;
           jobs.push({
-            title: r.title || '',
-            company: r.company || r.companyName || '',
-            location: r.formattedLocation || r.location || '',
-            salary: r.extractedSalary?.max ? ('$' + r.extractedSalary.min + ' - $' + r.extractedSalary.max) : (r.salarySnippet?.text || ''),
-            snippet: (r.snippet || r.jobSnippet || '').substring(0, 300),
-            url: r.link ? ('https://www.indeed.com' + r.link) : (r.jobkey ? ('https://www.indeed.com/viewjob?jk=' + r.jobkey) : ''),
-            posted: r.formattedRelativeTime || r.pubDate || '',
+            title: job.title || '',
+            company: job.company || job.companyName || job.employer?.name || '',
+            location: job.formattedLocation || job.location || '',
+            salary: salary?.max ? ('$' + salary.min + ' - $' + salary.max) : (job.salarySnippet?.text || ''),
+            snippet: (job.snippet || job.description || '').replace(/<[^>]*>/g, ' ').substring(0, 300),
+            url: job.link ? ('https://www.indeed.com' + job.link) : (job.jobkey ? ('https://www.indeed.com/viewjob?jk=' + job.jobkey) : ''),
+            posted: job.formattedRelativeTime || job.pubDate || '',
             source: 'indeed'
           });
-        });
-        if (jobs.length > 0) return jobs.slice(0, 30);
-      }
-    }
-  } catch {}
-  
-  // Strategy 2: Fallback DOM parsing
-  const cards = document.querySelectorAll('.job_seen_beacon, .resultContent, .tapItem, [data-jk]');
+        } catch {}
+      });
+    } catch {}
+  }
+
+  if (jobs.length > 0) return jobs.slice(0, 30);
+
+  // ── Path 2: DOM fallback (.job_seen_beacon cards) ─────────────────────────
+  // Used when __NEXT_DATA__ is absent (App Router migration) or its job paths moved.
+  const cards = document.querySelectorAll('.job_seen_beacon, [data-testid="job-card-container"]');
   cards.forEach(card => {
     try {
-      const titleEl = card.querySelector('.jobTitle a, .jcs-JobTitle, h2 a, [data-jk] a');
-      const companyEl = card.querySelector('.companyName, [data-testid="company-name"], .css-1h7lukg');
-      const locationEl = card.querySelector('.companyLocation, [data-testid="text-location"], .css-1restlb');
-      const salaryEl = card.querySelector('.salary-snippet-container, .estimated-salary, [class*="salary"]');
-      const snippetEl = card.querySelector('.job-snippet, .css-9446fg, [class*="snippet"]');
-      const postedEl = card.querySelector('.date, [class*="date"]');
-      
-      const title = titleEl?.innerText?.trim() || '';
+      const titleEl = card.querySelector('[data-testid="jobTitle"] a, .jobTitle a, h2 a');
+      const title = titleEl?.innerText?.trim() || titleEl?.getAttribute('aria-label') || '';
       if (!title) return;
-
-      jobs.push({
-        title,
-        company: companyEl?.innerText?.trim() || '',
-        location: locationEl?.innerText?.trim() || '',
-        salary: salaryEl?.innerText?.trim() || '',
-        snippet: snippetEl?.innerText?.trim()?.substring(0, 300) || '',
-        url: titleEl?.href ? (titleEl.href.startsWith('http') ? titleEl.href : 'https://www.indeed.com' + titleEl.getAttribute('href')) : '',
-        posted: postedEl?.innerText?.trim() || '',
-        source: 'indeed'
-      });
+      const jk = card.getAttribute('data-jk') || titleEl?.href?.match(/jk=([a-f0-9]+)/)?.[1] || '';
+      const url = jk ? ('https://www.indeed.com/viewjob?jk=' + jk) : (titleEl?.href || '');
+      const company = (card.querySelector('[data-testid="company-name"], .companyName')?.innerText || '').trim();
+      const location = (card.querySelector('[data-testid="text-location"], .companyLocation')?.innerText || '').trim();
+      const salary = (card.querySelector('[data-testid="attribute_snippet_testid"], .salary-snippet')?.innerText || '').trim();
+      const posted = (card.querySelector('[data-testid="myJobsStateDate"], .date')?.innerText || '').trim();
+      const snippet = (card.querySelector('[data-testid="job-snippet"], .summary')?.innerText || '').trim().substring(0, 300);
+      jobs.push({ title, company, location, salary, snippet, url, posted, source: 'indeed' });
     } catch {}
   });
 
-  return jobs.slice(0, 30);
+  if (jobs.length > 0) return jobs.slice(0, 30);
+
+  // ── Both paths failed ──────────────────────────────────────────────────────
+  // Only throw SITE_CHANGED when the page has real content — a blank or captcha page
+  // with no job structure is expected during the solve flow, not a code bug.
+  const bodyLen = (document.body?.innerText || '').length;
+  if (bodyLen > 500) {
+    throw new Error('SITE_CHANGED: indeed extractor returned 0 — neither __NEXT_DATA__ nor .job_seen_beacon cards found on a page with content');
+  }
+  return [];  // empty page / still loading — let the probe loop retry
 })()
 `;
 
 // ── ZipRecruiter ────────────────────────────────────────────────────────────
 
 export const ZIPRECRUITER_CONFIG = {
-  waitMs: 3000,
+  waitMs: 1500,
   timeoutMs: 40000,
-  waitFor: '.job_content, .jobList article, [data-testid="job-card"]',
-  scrollFirst: true,
+  // JSON-LD is server-rendered — available on DOMContentLoaded, no DOM selector needed
+  waitFor: 'script[type="application/ld+json"]',
+  scrollFirst: false,
   dismissCookies: true,
   referer: 'https://www.google.com/',
+  waitUntil: 'domcontentloaded',
 };
 
-// Strategy 0: __NEXT_DATA__ (ZipRecruiter is Next.js — contains salary ranges JSON-LD omits)
-// Strategy 1: JSON-LD schema
-// Strategy 2: DOM fallback
+// Strategy: JSON-LD ItemList — ZipRecruiter's only structured data post-App-Router
+// migration (no __NEXT_DATA__). ItemList entries have only name + url; company and
+// location are parsed from the URL: /c/{Company}/Job/{Title}/-in-{City},{State}?jid=
+// Throws SITE_CHANGED if no ItemList is found or 0 jobs are extracted.
 export const ZIPRECRUITER_EXTRACTOR = `
 (function() {
   const jobs = [];
-  
-  // Strategy 0: Parse __NEXT_DATA__ (richer data than JSON-LD)
-  try {
-    const ndEl = document.getElementById('__NEXT_DATA__');
-    if (ndEl) {
-      const nd = JSON.parse(ndEl.textContent);
-      const listings = nd?.props?.pageProps?.jobListings ||
-                       nd?.props?.pageProps?.jobs ||
-                       nd?.props?.pageProps?.searchResults?.jobs ||
-                       [];
-      
-      listings.forEach(item => {
-        const job = item.job || item;
-        if (!job.title && !job.name) return;
-        
-        const salary = job.salary || job.compensation;
-        const salaryStr = salary?.min ? ('$' + salary.min + (salary.max ? ' - $' + salary.max : '') + (salary.interval ? '/' + salary.interval : '')) : '';
-        
-        jobs.push({
-          title: job.title || job.name || '',
-          company: job.hiring_company?.name || job.companyName || job.hiringOrganization?.name || '',
-          location: job.location || (job.city ? (job.city + (job.state ? ', ' + job.state : '')) : ''),
-          salary: salaryStr || job.salary_text || '',
-          snippet: (job.snippet || job.description || '').replace(/<[^>]*>/g, ' ').substring(0, 300),
-          url: job.url || job.save_url || '',
-          posted: job.posted_time || job.posted_time_friendly || '',
-          source: 'ziprecruiter'
-        });
-      });
-      if (jobs.length > 0) return jobs.slice(0, 30);
-    }
-  } catch {}
 
-  // Strategy 1: Parse JSON-LD structured data
-  try {
-    const ldScripts = document.querySelectorAll('script[type="application/ld+json"]');
-    for (const script of ldScripts) {
-      const data = JSON.parse(script.textContent);
-      // Handle both single JobPosting and ItemList containing JobPostings
-      const items = data['@type'] === 'ItemList' ? (data.itemListElement || []) :
-                    data['@type'] === 'JobPosting' ? [data] :
-                    Array.isArray(data) ? data : [];
-      
-      items.forEach(item => {
-        const posting = item.item || item;
-        if (posting['@type'] !== 'JobPosting') return;
-        
-        const salary = posting.baseSalary?.value;
-        const salaryStr = salary ? ('$' + (salary.minValue || '') + (salary.maxValue ? ' - $' + salary.maxValue : '') + (salary.unitText ? '/' + salary.unitText : '')) : '';
-        
-        jobs.push({
-          title: posting.title || '',
-          company: posting.hiringOrganization?.name || '',
-          location: posting.jobLocation?.address?.addressLocality ? (posting.jobLocation.address.addressLocality + (posting.jobLocation.address.addressRegion ? ', ' + posting.jobLocation.address.addressRegion : '')) : '',
-          salary: salaryStr,
-          snippet: (posting.description || '').replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim().substring(0, 300),
-          url: posting.url || '',
-          posted: posting.datePosted || '',
-          source: 'ziprecruiter'
-        });
-      });
-    }
-    if (jobs.length > 0) return jobs.slice(0, 30);
-  } catch {}
-  
-  // Strategy 2: Fallback DOM parsing
-  const cards = document.querySelectorAll('.job_content, .jobList article, [data-testid="job-card"], .job_result_card');
-  cards.forEach(card => {
+  const ldScripts = document.querySelectorAll('script[type="application/ld+json"]');
+  for (const script of ldScripts) {
     try {
-      const titleEl = card.querySelector('.job_title a, h2 a, [data-testid="job-title"], .job_title');
-      const companyEl = card.querySelector('.t_org_link, [data-testid="company-name"], .company_name, .hiring_company');
-      const locationEl = card.querySelector('.location, [data-testid="location"], .job_location');
-      const salaryEl = card.querySelector('.salary, [data-testid="salary"], .job_salary, .compensation');
-      const snippetEl = card.querySelector('.job_snippet, [data-testid="description"], .snippet');
-      const postedEl = card.querySelector('.posted, [data-testid="posted"], .job_age, time');
-      
-      const title = titleEl?.innerText?.trim() || '';
-      if (!title) return;
+      const data = JSON.parse(script.textContent);
+      if (data['@type'] !== 'ItemList') continue;
+      const items = data.itemListElement || [];
 
-      jobs.push({
-        title,
-        company: companyEl?.innerText?.trim() || '',
-        location: locationEl?.innerText?.trim() || '',
-        salary: salaryEl?.innerText?.trim() || '',
-        snippet: snippetEl?.innerText?.trim()?.substring(0, 300) || '',
-        url: titleEl?.href || titleEl?.closest('a')?.href || '',
-        posted: postedEl?.innerText?.trim() || '',
-        source: 'ziprecruiter'
+      items.forEach(item => {
+        if (item['@type'] !== 'ListItem') return;
+        const title = (item.name || '').trim();
+        const url = item.url || '';
+        if (!title || !url) return;
+
+        let company = '';
+        let location = '';
+        try {
+          const cMatch = url.match(new RegExp('/c/([^/]+)/Job/'));
+          if (cMatch) company = cMatch[1].replace(/-/g, ' ');
+          const lMatch = url.match(new RegExp('/-in-([^?]+)'));
+          if (lMatch) location = lMatch[1].replace(/-/g, ' ');
+        } catch {}
+
+        jobs.push({ title, company, location, salary: '', snippet: '', url, posted: '', source: 'ziprecruiter' });
       });
+      if (jobs.length > 0) break;
     } catch {}
-  });
+  }
 
+  if (jobs.length === 0) throw new Error('SITE_CHANGED: ziprecruiter ItemList JSON-LD extractor returned 0 — JSON-LD structure or @type may have changed');
   return jobs.slice(0, 30);
 })()
 `;
@@ -309,111 +234,41 @@ export const GLASSDOOR_CONFIG = {
   referer: 'https://www.google.com/',
 };
 
-// Strategy 0: __NEXT_DATA__ > apolloCache (Glassdoor migrated to Next.js)
-// Strategy 1: apolloState regex from inline script
-// Strategy 2: DOM selector scraping (works even with login overlay)
+// Strategy: __NEXT_DATA__ > apolloCache (Glassdoor migrated to Next.js + Apollo).
+// Looks for cache entries with JobListing keys and a jobTitleText field.
+// Note: returning 1–10 jobs before hitting "Show more" is the Glassdoor review
+// gate (detected by the IPC layer separately). Returning 0 means the apolloCache
+// structure changed → SITE_CHANGED.
 export const GLASSDOOR_EXTRACTOR = `
 (function() {
   const jobs = [];
-  
-  // Strategy 0: Parse __NEXT_DATA__ > apolloCache
-  try {
-    const ndEl = document.getElementById('__NEXT_DATA__');
-    if (ndEl) {
-      const nd = JSON.parse(ndEl.textContent);
-      const cache = nd?.props?.pageProps?.apolloCache || nd?.props?.pageProps?.apollo?.cache || {};
-      
-      for (const [key, value] of Object.entries(cache)) {
-        if (!value || typeof value !== 'object') continue;
-        const isJob = key.includes('JobListing') || key.includes('jobListingSe') || 
-                      (value.__typename && value.__typename.includes('Job'));
-        if (!isJob || !value.jobTitleText) continue;
-        
-        const employer = value.employer ? cache[value.employer.__ref || ''] || value.employer : {};
-        
-        jobs.push({
-          title: value.jobTitleText || value.jobTitle || '',
-          company: employer.shortName || employer.name || value.employerName || '',
-          location: value.locationName || value.location || '',
-          salary: value.salarySource?.payRange ? (value.salarySource.payRange) : (value.salaryEstimate || ''),
-          snippet: (employer.overallRating ? 'Rating: ' + employer.overallRating + '/5 | ' : '') + (value.jobDescription || '').substring(0, 250),
-          url: value.seoJobLink ? ('https://www.glassdoor.com' + value.seoJobLink) : (value.jobLink || ''),
-          posted: value.ageInDays != null ? (value.ageInDays + 'd ago') : '',
-          source: 'glassdoor'
-        });
-      }
-      if (jobs.length > 0) return jobs.slice(0, 30);
-    }
-  } catch {}
 
-  // Strategy 1: Parse Apollo GraphQL state from inline script
-  try {
-    const scripts = document.querySelectorAll('script');
-    for (const script of scripts) {
-      const text = script.textContent || '';
-      if (!text.includes('apolloState')) continue;
-      
-      const match = text.match(/"apolloState"\\s*:\\s*(\\{.+\\})\\s*[,}]/s);
-      if (!match) continue;
-      
-      const state = JSON.parse(match[1]);
-      
-      // Apollo state keys are like 'JobListingSearchResult:12345' or contain job data
-      for (const [key, value] of Object.entries(state)) {
-        if (!value || typeof value !== 'object') continue;
-        
-        // Look for job listing objects in the Apollo cache
-        const isJob = key.includes('JobListing') || key.includes('jobListingSe') || 
-                      (value.__typename && value.__typename.includes('Job'));
-        if (!isJob || !value.jobTitleText) continue;
-        
-        const employer = value.employer ? state[value.employer.__ref || ''] || value.employer : {};
-        
-        jobs.push({
-          title: value.jobTitleText || value.jobTitle || '',
-          company: employer.shortName || employer.name || value.employerName || '',
-          location: value.locationName || value.location || '',
-          salary: value.salarySource?.payRange ? (value.salarySource.payRange) : (value.salaryEstimate || ''),
-          snippet: (employer.overallRating ? 'Rating: ' + employer.overallRating + '/5 | ' : '') + (value.jobDescription || '').substring(0, 250),
-          url: value.seoJobLink ? ('https://www.glassdoor.com' + value.seoJobLink) : (value.jobLink || ''),
-          posted: value.ageInDays != null ? (value.ageInDays + 'd ago') : '',
-          source: 'glassdoor'
-        });
-      }
-      if (jobs.length > 0) return jobs.slice(0, 30);
-    }
-  } catch {}
-  
-  // Strategy 2: Fallback DOM parsing (works even with login overlay)
-  const cards = document.querySelectorAll('[data-test="jobListing"], .JobCard_jobCardWrapper, .react-job-listing, li[data-id]');
-  cards.forEach(card => {
-    try {
-      const titleEl = card.querySelector('[data-test="job-title"], .job-title, .JobCard_jobTitle, a[data-test="job-link"]');
-      const companyEl = card.querySelector('[data-test="emp-name"], .EmployerProfile_employerName, .job-search-key-l2q5hy');
-      const locationEl = card.querySelector('[data-test="emp-location"], .location, .JobCard_location');
-      const salaryEl = card.querySelector('[data-test="detailSalary"], .salary-estimate, .SalaryEstimate');
-      const ratingEl = card.querySelector('[data-test="rating"], .rating, .CompanyRating');
-      const linkEl = card.querySelector('a[href*="/job-listing/"], a[data-test="job-link"]');
-      
-      const title = titleEl?.innerText?.trim() || '';
-      if (!title) return;
+  const ndEl = document.getElementById('__NEXT_DATA__');
+  if (!ndEl) throw new Error('SITE_CHANGED: glassdoor __NEXT_DATA__ element missing');
+  const nd = JSON.parse(ndEl.textContent);
+  const cache = nd?.props?.pageProps?.apolloCache || nd?.props?.pageProps?.apollo?.cache || {};
 
-      const rating = ratingEl?.innerText?.trim() || '';
-      const salary = salaryEl?.innerText?.trim() || '';
+  for (const [key, value] of Object.entries(cache)) {
+    if (!value || typeof value !== 'object') continue;
+    const isJob = key.includes('JobListing') || key.includes('jobListingSe') ||
+                  (value.__typename && value.__typename.includes('Job'));
+    if (!isJob || !value.jobTitleText) continue;
 
-      jobs.push({
-        title,
-        company: companyEl?.innerText?.trim() || '',
-        location: locationEl?.innerText?.trim() || '',
-        salary: salary,
-        snippet: rating ? 'Rating: ' + rating + (salary ? ' | ' + salary : '') : '',
-        url: linkEl?.href || '',
-        posted: '',
-        source: 'glassdoor'
-      });
-    } catch {}
-  });
+    const employer = value.employer ? cache[value.employer.__ref || ''] || value.employer : {};
 
+    jobs.push({
+      title: value.jobTitleText || value.jobTitle || '',
+      company: employer.shortName || employer.name || value.employerName || '',
+      location: value.locationName || value.location || '',
+      salary: value.salarySource?.payRange ? (value.salarySource.payRange) : (value.salaryEstimate || ''),
+      snippet: (employer.overallRating ? 'Rating: ' + employer.overallRating + '/5 | ' : '') + (value.jobDescription || '').substring(0, 250),
+      url: value.seoJobLink ? ('https://www.glassdoor.com' + value.seoJobLink) : (value.jobLink || ''),
+      posted: value.ageInDays != null ? (value.ageInDays + 'd ago') : '',
+      source: 'glassdoor'
+    });
+  }
+
+  if (jobs.length === 0) throw new Error('SITE_CHANGED: glassdoor apolloCache extractor returned 0 — cache key patterns or jobTitleText field may have changed');
   return jobs.slice(0, 30);
 })()
 `;
@@ -422,75 +277,59 @@ export const GLASSDOOR_EXTRACTOR = `
 export const WELLFOUND_CONFIG = {
   waitMs: 3000,
   timeoutMs: 40000,
-  waitFor: '#__NEXT_DATA__, [class*="styles_result"], [class*="JobListing"]',
+  // Jobs load client-side via GraphQL — wait for the rendered card semantic attr
+  waitFor: '[data-testid="job-listing-list"]',
   scrollFirst: false,
   dismissCookies: true,
   referer: 'https://www.google.com/',
 };
 
+// Wellfound migrated to a client-side GraphQL architecture (Apollo, no SSR job data).
+// __NEXT_DATA__ only carries the logged-in user's profile, not listings.
+// Jobs are rendered client-side; structure as of 2026-05:
+//   [data-testid="job-listing-list"] — one card per job (stable semantic attr)
+//     a[href*="/jobs/"]              — relative link; prefix with wellfound.com
+//     [class*="styles_title__"]      — job title
+//     [class*="styles_location__"]   — location text
+//     [class*="styles_compensation__"] — salary + equity (strip " • X%" equity suffix)
+//     [class*="styles_tags__"]       — posted date text
+// Company name is not present in this card format (Wellfound's "Apply on Wellfound"
+// anonymous flow); left empty rather than fabricating.
+// CSS module hashes rotate on deploys — wildcard fallbacks guard against that.
 export const WELLFOUND_EXTRACTOR = `
 (function() {
   const jobs = [];
-  
-  // Strategy 1: Parse __NEXT_DATA__ JSON (most reliable)
-  const nextData = document.getElementById('__NEXT_DATA__');
-  if (nextData) {
-    try {
-      const parsed = JSON.parse(nextData.textContent);
-      const listings = parsed?.props?.pageProps?.listings ||
-                       parsed?.props?.pageProps?.data?.seoLandingPage?.startupSearchResults?.edges ||
-                       parsed?.props?.pageProps?.jobListings ||
-                       [];
-      
-      const items = Array.isArray(listings) ? listings : (listings.edges || listings.nodes || []);
-      
-      items.forEach(item => {
-        const node = item.node || item;
-        const startup = node.startup || node.company || {};
-        const title = node.title || node.role || '';
-        if (!title) return;
-        
-        jobs.push({
-          title,
-          company: startup.name || startup.companyName || '',
-          location: node.locationNames?.length ? node.locationNames.join(', ') : (node.remote ? 'Remote' : ''),
-          salary: node.compensation ? node.compensation : '',
-          snippet: startup.highConcept || startup.oneLiner || '',
-          url: node.slug ? 'https://wellfound.com/jobs/' + node.slug : (node.url || ''),
-          posted: node.liveStartAt || '',
-          source: 'wellfound'
-        });
-      });
-    } catch {}
-  }
-  
-  // Strategy 2: Fallback DOM parsing
-  if (jobs.length === 0) {
-    const cards = document.querySelectorAll('[class*="styles_result"], [class*="JobListing"], [data-test="StartupResult"]');
-    cards.forEach(card => {
-      try {
-        const titleEl = card.querySelector('[class*="jobTitle"], [class*="title"] a, h4 a');
-        const companyEl = card.querySelector('[class*="startup-link"], [class*="companyName"], h2 a');
-        const locationEl = card.querySelector('[class*="location"], [class*="tags"] span');
-        const salaryEl = card.querySelector('[class*="compensation"], [class*="salary"]');
-        
-        const title = titleEl?.innerText?.trim() || '';
-        if (!title) return;
-        
-        jobs.push({
-          title,
-          company: companyEl?.innerText?.trim() || '',
-          location: locationEl?.innerText?.trim() || '',
-          salary: salaryEl?.innerText?.trim() || '',
-          snippet: '',
-          url: titleEl?.href || '',
-          posted: '',
-          source: 'wellfound'
-        });
-      } catch {}
-    });
-  }
 
+  const cards = document.querySelectorAll('[data-testid="job-listing-list"]');
+
+  cards.forEach(card => {
+    try {
+      const titleEl = card.querySelector('[class*="styles_title__"]');
+      const title = titleEl?.innerText?.trim() || '';
+      if (!title) return;
+
+      const locationEl = card.querySelector('[class*="styles_location__"]');
+      const location = locationEl?.innerText?.trim() || '';
+
+      const salaryEl = card.querySelector('[class*="styles_compensation__"]');
+      const salaryRaw = salaryEl?.innerText?.trim() || '';
+      // Strip equity suffix: "$220k – $260k • 0.0% – 0.1%" → "$220k – $260k"
+      const salary = salaryRaw.split(' • ')[0].trim();
+
+      const linkEl = card.querySelector('a[href*="/jobs/"]');
+      const href = linkEl?.getAttribute('href') || '';
+      const url = href.startsWith('http') ? href : (href ? 'https://wellfound.com' + href : '');
+
+      const tagsEl = card.querySelector('[class*="styles_tags__"]');
+      const tagsText = tagsEl?.innerText || '';
+      const postedMatch = tagsText.match(/Posted\\s+([^\\n]+)/i);
+      const posted = postedMatch ? postedMatch[1].trim() : '';
+
+      jobs.push({ title, company: '', location, salary, snippet: '', url, posted, source: 'wellfound' });
+    } catch {}
+  });
+
+  if (jobs.length === 0) throw new Error('SITE_CHANGED: wellfound extractor returned 0 — data-testid or styles_* CSS module selectors may have changed');
   return jobs.slice(0, 30);
 })()
 `;

@@ -152,7 +152,15 @@ export const CODE_DEFINITIONS = {
     label: 'Job Search Pipeline',
     description: 'Job-search pipeline audit — the search→score→bucket funnel, per-source gather counts, and AI/scraper telemetry that confirm no jobs were silently dropped or not gathered. Drops the heavy node/edge/media dumps and narrows the event log to job-pipeline events (the pipeline / AI / scraper sections are built main-process-side and are always kept).',
     logFilter: line =>
-      /\bjob|career|resume|scrape|gemini|bucket|scoring|funnel/i.test(line),
+      /\bjob|career|resume|scrape|gemini|bucket|scoring|funnel|dice|linkedin|usajobs|lever|greenhouse|remoteok|weworkremotely|wellfound|glassdoor|ziprecruiter|indeed/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  MARKET: {
+    label: 'Marketplace Pricing Pipeline',
+    description: 'Sell-hub pricing audit — photo analysis, multi-source comp scrape (per-source counts, warnings, blocks), captcha resolve outcomes, AI synthesis (FMV, match quality), and platform-fit results. Drops heavy node/edge/media dumps and narrows the event log to marketplace pipeline events (the marketplaceTelemetry section is always kept).',
+    logFilter: line =>
+      /price|pric|sell.?hub|marketplace|comp.?source|scrape|captcha|resolve|block|throttle|stale.?selector|fmv|synthesis|platform.?fit|ebay|poshmark|mercari|swappa|stockx|reverb/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 

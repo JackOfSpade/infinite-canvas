@@ -18,6 +18,7 @@ import {
   plainFetcher,
 } from './listingStatusCheck.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
+import { getStatusCacheSync } from './accounts.js';
 import { compsForPricing } from './resultCaps.js';
 import { logger } from '../logger.js';
 import { VISION_PRODUCT_ANALYSIS_SCHEMA, PRICE_SYNTHESIS_SCHEMA, buildPlatformFitSchema } from './aiSchemas.js';
@@ -281,19 +282,53 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
 
   // Browser-pool source (ebay-sold, poshmark, swappa, ebay-active, mercari).
   if (task) {
+    // Short-circuit for platforms that require authentication: the extractor
+    // legitimately returns 0 when not logged in (not a code bug), so SITE_CHANGED
+    // would be a false alarm. Skip immediately with a login-required warning
+    // so the source card shows "Log in" guidance instead of "update the scraper."
+    if (task.requiresLoginPlatform) {
+      const session = getStatusCacheSync()[task.requiresLoginPlatform];
+      if (!session?.connected) {
+        const loginWarning = {
+          code: 'login-required', severity: 'block',
+          evidence: `${task.requiresLoginPlatform} is not logged in — sold listings are not available without authentication.`,
+          suggestion: `Log in to ${task.requiresLoginPlatform} in Settings > Accounts to enable this source.`,
+        };
+        send('error', 0, loginWarning, null);
+        return { sourceId, items: [], warning: loginWarning, category: taskCategoryMap[sourceId] || 'sold' };
+      }
+    }
+
     send('searching', 0);
     const results = await scrapeMultiple([task], (res) => {
       if (sender && !sender.isDestroyed()) {
         const items = Array.isArray(res.data) ? res.data : [];
-        send(res.success ? 'done' : 'error', items.length, res.warning || null, task.url);
+        // Mirror the SITE_CHANGED detection from the multi-source path — when
+        // page.evaluate() throws SITE_CHANGED the BrowserPool returns success:false
+        // with error='SITE_CHANGED:...' and warning:null (anti-bot detector never
+        // ran). Without this, the card receives warning:null → hasWarn:false →
+        // Solve button reappears even though the extractor needs a code fix.
+        const cbWarning = res.warning || (!res.success && /SITE_CHANGED/i.test(res.error || '')
+          ? { code: 'stale-selectors', severity: 'warn', evidence: String(res.error || '').slice(0, 240), suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.' }
+          : null);
+        send(res.success ? 'done' : 'error', items.length, cbWarning, task.url);
       }
     }, signal);
     const r = results[0];
     if (!r?.success) {
+      const isSiteChanged = /SITE_CHANGED/i.test(r?.error || '');
       return {
         sourceId,
         items: [],
-        warning: { code: 'task-failed', severity: 'block', evidence: r?.error || 'unknown', suggestion: 'Scrape threw before completing.' },
+        warning: isSiteChanged ? {
+          code: 'stale-selectors', severity: 'warn',
+          evidence: String(r?.error || '').slice(0, 240),
+          suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.',
+        } : {
+          code: 'task-failed', severity: 'block',
+          evidence: r?.error || 'unknown',
+          suggestion: 'Scrape threw before completing.',
+        },
         category: taskCategoryMap[sourceId] || 'sold',
       };
     }
@@ -504,11 +539,34 @@ Be specific about what you can clearly see. If you can't identify brand or model
     marketplaceTelemetry.nodeId = nodeId;
     marketplaceTelemetry.windowId = event.sender?.id ?? null;
 
-    const tasks = buildCompTasks(query);
+    const allTasks = buildCompTasks(query);
 
-    for (const t of tasks) {
+    // Pre-check login-required sources: skip scraping and emit login-required
+    // immediately so the source card shows "Log in" guidance instead of running
+    // the extractor (which would return 0 and falsely trigger SITE_CHANGED).
+    const sessionCache = getStatusCacheSync();
+    const loginSkipped = new Set();
+    for (const t of allTasks) {
+      if (t.requiresLoginPlatform && !sessionCache[t.requiresLoginPlatform]?.connected) {
+        loginSkipped.add(t.id);
+      }
+    }
+    const tasks = allTasks.filter(t => !loginSkipped.has(t.id));
+
+    for (const t of allTasks) {
       if (!event.sender.isDestroyed()) {
-        event.sender.send('price-source-progress', { nodeId, sourceId: t.id, status: 'searching', count: 0 });
+        if (loginSkipped.has(t.id)) {
+          event.sender.send('price-source-progress', {
+            nodeId, sourceId: t.id, status: 'error', count: 0, url: null,
+            warning: {
+              code: 'login-required', severity: 'block',
+              evidence: `${t.requiresLoginPlatform} is not logged in — sold listings are not available without authentication.`,
+              suggestion: `Log in to ${t.requiresLoginPlatform} in Settings > Accounts to enable this source.`,
+            },
+          });
+        } else {
+          event.sender.send('price-source-progress', { nodeId, sourceId: t.id, status: 'searching', count: 0 });
+        }
       }
     }
 
@@ -516,12 +574,15 @@ Be specific about what you can clearly see. If you can't identify brand or model
     const scrapeResultsPromise = scrapeMultiple(tasks, (res) => {
       if (event.sender.isDestroyed()) return;
       const items = Array.isArray(res.data) ? res.data : [];
+      const warning = res.warning || (!res.success && /SITE_CHANGED/i.test(res.error || '')
+        ? { code: 'stale-selectors', severity: 'warn', evidence: String(res.error || '').slice(0, 240), suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.' }
+        : null);
       event.sender.send('price-source-progress', {
         nodeId,
         sourceId: res.id,
         status: res.success ? 'done' : 'error',
         count: items.length,
-        warning: res.warning || null,
+        warning,
         url: sourceUrlById[res.id] || null,
       });
     }, signal);
@@ -547,11 +608,18 @@ Be specific about what you can clearly see. If you can't identify brand or model
     for (const r of scrapeResults) {
       if (!r.success) {
         logger.warn(`[Marketplace] A scrape task for ${r.id} was rejected: ${r.error}`);
-        // code 'task-failed' = the scrape threw before completing (browser-launch
-        // / profile-lock conflict, network, nav timeout) — an INTERNAL error, not
-        // an anti-bot wall. The report classifies it separately so a self-inflicted
-        // browser-lock race never masquerades as a captcha the user must "solve."
-        scrapeWarnings.push({ sourceId: r.id, severity: 'block', code: 'task-failed', evidence: r.error, suggestion: 'Scrape threw before completing — likely a browser-launch/profile-lock conflict or network error, NOT anti-bot. Check Recent Main-Process Logs in the bug report.' });
+        const isSiteChanged = /SITE_CHANGED/i.test(r.error || '');
+        scrapeWarnings.push(isSiteChanged ? {
+          sourceId: r.id, severity: 'warn', code: 'stale-selectors',
+          evidence: String(r.error || '').slice(0, 240),
+          suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.',
+        } : {
+          // code 'task-failed' = browser-launch/profile-lock conflict or network error,
+          // NOT anti-bot. Classified separately so it doesn't masquerade as a captcha.
+          sourceId: r.id, severity: 'block', code: 'task-failed',
+          evidence: r.error,
+          suggestion: 'Scrape threw before completing — likely a browser-launch/profile-lock conflict or network error, NOT anti-bot. Check Recent Main-Process Logs in the bug report.',
+        });
         bySource[r.id] = 0;
         continue;
       }
@@ -943,6 +1011,24 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
     // beyond the in-canvas state that spawned it.
     const result = await openCaptchaResolveWindow(url, event.sender, signal, inlineExtractorJS);
     logger.info(`[Marketplace][${nodeId}] Captcha-resolve window closed for ${sourceId}; auto-detected=${result.resolved}, items=${result.items?.length ?? 'none'}`);
+
+    // The inline extractor threw SITE_CHANGED — this means the scraper code is
+    // broken, not the captcha. Flip the source card from Solve (block) to Retry
+    // (stale-selectors/warn) so the user knows to fix the extractor, not solve a
+    // captcha. Don't trigger a headless rescrape — it would fail identically.
+    if (result.siteChangedError && !event.sender.isDestroyed()) {
+      const evidence = String(result.siteChangedError).slice(0, 240);
+      event.sender.send('price-source-progress', {
+        nodeId, sourceId, status: 'error',
+        warning: {
+          code: 'stale-selectors', severity: 'warn', evidence,
+          suggestion: 'Extractor returned 0 results — the site HTML may have changed. Update the scraper code in electron/extractors/marketplace.js, rebuild, and retry.',
+        },
+        url: null,
+      });
+      marketplaceTelemetry.resolves[sourceId] = { ts: Date.now(), extracted: 0, category, via: 'inline' };
+      return { ...result, category };
+    }
 
     // Sync the card's visible state with the merged data. Without this fake
     // "done, no warning" event, the comp-source-card keeps showing its
