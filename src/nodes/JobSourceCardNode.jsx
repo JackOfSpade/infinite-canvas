@@ -427,10 +427,10 @@ export function JobSourceCardNode({ id, data }) {
           sources). For config-missing (USAJobs no API key) the suggestion text
           above already directs the user to set the env var — no Solve button.
           Google can't be scraped, so its card swaps Solve for the paste flow.
-          The manual-paste source always shows its action row (even with no
-          warning — a clean 0-job Google finish still needs a paste), so the
-          "Open & paste" button is reachable regardless of how the scrape ended. */}
-      {(warning || isManualPaste) && !dismissed && (
+          The manual-paste source shows its action row only once the source has
+          finished (done or error) — not while the hub is still processing.
+          "Open & paste" is reachable once the scrape ends and a paste is needed. */}
+      {(warning || (isManualPaste && (isDone || isError))) && !dismissed && (
         <div className="flex border-t border-white/10">
           {isManualPaste ? (
             pasteMode ? (

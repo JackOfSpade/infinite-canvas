@@ -21,7 +21,11 @@ export const PLATFORM_LOGIN_URLS = {
   glassdoor:     'https://www.glassdoor.com/profile/login_input.htm',
   ziprecruiter:  'https://www.ziprecruiter.com/login',
   dice:          'https://www.dice.com/dashboard/login',
-  wellfound:     'https://wellfound.com/login',
+  // Navigate directly to an auth-gated page so Wellfound's own redirect
+  // handles the login flow: unauthenticated → /login?redirect_url=/settings;
+  // after login → back to /settings. Landing on /settings = confirmed logged in.
+  // Avoids the ~35s wait on /jobs for the lazy-rendered sign-out dropdown.
+  wellfound:     'https://wellfound.com/settings',
   // Marketplace — selling destinations
   ebay:          'https://signin.ebay.com/ws/eBayISAPI.dll?SignIn',
   facebook:      'https://www.facebook.com/login',
@@ -50,6 +54,21 @@ export const PLATFORM_AUTH_COOKIES = {
   facebook:    ['c_user'],          // numeric user id; absent or "0" when logged out
   linkedin:    ['li_at'],           // long-lived session token
   // Others fall through to DOM signal — add here as we confirm them.
+  // NOTE: Wellfound detection is handled via PLATFORM_AUTH_GATED_URLS (URL-based,
+  // faster and more reliable than cookie/DOM for this SPA).
+};
+
+/**
+ * Auth-gated URL substrings per platform. When the browser lands on a URL
+ * containing this string (and it's not a login/auth URL itself), the user MUST
+ * be logged in — the site's own redirect would have sent them to /login first if
+ * not. Close immediately without any cookie or DOM check.
+ *
+ * Only add entries here for pages that are genuinely auth-required (return a
+ * login redirect for anonymous users, not just empty content).
+ */
+export const PLATFORM_AUTH_GATED_URLS = {
+  wellfound: '/settings',  // anonymous → redirected to /login?redirect_url=/settings first
 };
 
 /** Cookie domains to check per platform */
@@ -208,6 +227,20 @@ export async function openLoginWindow(platformId, sender = null) {
           lastNonLoginUrl = currentUrl;
         }
 
+        // Auth-gated URL fast-path — the URL itself proves logged-in state.
+        // If the platform has a known auth-gated path and the browser landed
+        // there, the site's own redirect already handled the auth check; no
+        // cookie or DOM signal needed. Fires before the cookie/DOM checks so
+        // SPAs that lazy-render their nav (Wellfound) don't block auto-close.
+        const authGatedPath = PLATFORM_AUTH_GATED_URLS[platformId];
+        if (authGatedPath && currentUrl.includes(authGatedPath)) {
+          logger.info(`[StealthBrowser] Auto-detected logged-in state for ${platformId} via auth-gated URL ${currentUrl} — closing window`);
+          if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
+          if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
+          await loginBrowser.close().catch(() => {});
+          return;
+        }
+
         // Cookie signal — preferred for SPAs (Facebook etc.) where the
         // account menu is lazy-rendered and "Log out" text isn't in the
         // initial DOM. HttpOnly cookies ARE visible via CDP, so this works
@@ -298,6 +331,14 @@ export async function openLoginWindow(platformId, sender = null) {
       try {
         await loginBrowser.close();
       } catch { /* ignored */ }
+      // Chrome's `disconnected` event fires when the CDP WebSocket drops, but
+      // SQLite cookie writes may still be in flight. Without this pause the verify
+      // browser launches on the same userDataDir, reads a stale cookie store, and
+      // returns 403 even for a successful login (observed: 1ms gap between
+      // "last page closed" and "Verifying... Launching Chrome"). 800ms is enough
+      // for Chrome's cookie flush on the slowest test machines while still feeling
+      // instantaneous to the user.
+      await new Promise(r => setTimeout(r, 800));
       resolve({ success: true, platform: platformId, closedByApp: sender?.isDestroyed?.() });
     };
 

@@ -45,10 +45,6 @@ export const JOB_RESULT_CAP = Infinity;
 // sources via selectTopAcrossSources) when on paid.
 export const JOB_SCORE_CAP = Infinity;
 
-// ── Heavy-WAF query trim (how many query variants to fire per source) ─────────
-export const HEAVY_WAF_QUERY_CAP = 1; // bot-hardened sources (ZipRecruiter, Glassdoor)
-export const DEFAULT_QUERY_CAP   = 2; // everything else
-
 // ── Date-bounded deep pagination ──────────────────────────────────────────────
 // Browser sources page forward (same stealth session) until they run out of
 // in-window jobs / hit a block, capped by this hard ceiling. Start generous and

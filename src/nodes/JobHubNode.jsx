@@ -1094,10 +1094,7 @@ export function JobHubNode({ id, data }) {
       const {
         titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [], targetRoleQueries = [],
       } = queriesResult.queries || {};
-      // Target-role queries first so the limited-query subsets per source
-      // (1-2 queries on heavy-WAF sites) bias toward the pivot the user
-      // actually asked for.
-      const allQueries = [...targetRoleQueries, ...titleQueries, ...suggestedRoleQueries, ...skillsOnlyQueries];
+      const allQueries = [...targetRoleQueries, ...titleQueries, ...suggestedRoleQueries];
 
       // Step 3: Search
       resolvedDuringSearchRef.current.clear();

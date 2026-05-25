@@ -120,13 +120,20 @@ export const INDEED_JOBS_EXTRACTOR = `
           const job = r.job || r;
           if (!job.title) return;
           const salary = job.extractedSalary || job.salaryInfo;
+          // Use job.jobkey (canonical DB key) for URL — job.link for sponsored/pagead
+          // jobs is a tracking redirect whose jk= param can differ from data-jk in the
+          // DOM, causing card-click failures. job.jobkey is always the canonical key
+          // that matches data-jk. Store it as jobkey so expandDescriptions can use it
+          // directly instead of re-parsing from the URL.
+          const canonicalKey = job.jobkey || job.key || '';
           jobs.push({
             title: job.title || '',
             company: job.company || job.companyName || job.employer?.name || '',
             location: job.formattedLocation || job.location || '',
             salary: salary?.max ? ('$' + salary.min + ' - $' + salary.max) : (job.salarySnippet?.text || ''),
             snippet: (job.snippet || job.description || '').replace(/<[^>]*>/g, ' ').substring(0, 300),
-            url: job.link ? ('https://www.indeed.com' + job.link) : (job.jobkey ? ('https://www.indeed.com/viewjob?jk=' + job.jobkey) : ''),
+            url: canonicalKey ? ('https://www.indeed.com/viewjob?jk=' + canonicalKey) : (job.link ? ('https://www.indeed.com' + job.link) : ''),
+            jobkey: canonicalKey,
             posted: job.formattedRelativeTime || job.pubDate || '',
             source: 'indeed'
           });

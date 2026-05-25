@@ -346,7 +346,7 @@ const GREENHOUSE_BOARDS = [
  * Fetch jobs from Greenhouse boards matching the query.
  * Searches board titles client-side (the API doesn't support keyword search).
  */
-export async function fetchGreenhouseJobs(query, signal = null, geoTerms = EMPTY_GEO) {
+export async function fetchGreenhouseJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   // Greenhouse fans out across dozens of board tokens; collect warnings
   // per-call and pick the strongest at the end so a wave of blocks across
@@ -363,9 +363,10 @@ export async function fetchGreenhouseJobs(query, signal = null, geoTerms = EMPTY
     return ((data && data.jobs) || []).map(job => ({ ...job, _company: company, _token: token }));
   }, signal);
 
-  // Filter by query relevance — role text only (title + company), not location.
+  // Filter: job matches if relevant to ANY query (OR logic across all queries).
+  const qs = Array.isArray(queries) ? queries : [queries];
   const matched = allJobs.filter(job =>
-    jobRelevanceMatch(`${job.title} ${job._company}`, query, geoTerms));
+    qs.some(q => jobRelevanceMatch(`${job.title} ${job._company}`, q, geoTerms)));
 
   const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
     title: job.title || '',
@@ -412,7 +413,7 @@ const LEVER_COMPANIES = [
 /**
  * Fetch jobs from Lever career pages matching the query.
  */
-export async function fetchLeverJobs(query, signal = null, geoTerms = EMPTY_GEO) {
+export async function fetchLeverJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const warnings = [];
   const allJobs = await processInBatches(LEVER_COMPANIES, 10, async ({ slug, company }) => {
@@ -426,10 +427,11 @@ export async function fetchLeverJobs(query, signal = null, geoTerms = EMPTY_GEO)
     return (Array.isArray(data) ? data : []).map(job => ({ ...job, _company: company }));
   }, signal);
 
-  // Filter by query relevance — role text (title + company + team), not location.
+  // Filter: job matches if relevant to ANY query (OR logic across all queries).
+  const qs = Array.isArray(queries) ? queries : [queries];
   const matched = allJobs.filter(job => {
     const roleText = `${job.text} ${job._company} ${job.categories?.team || ''}`;
-    return jobRelevanceMatch(roleText, query, geoTerms);
+    return qs.some(q => jobRelevanceMatch(roleText, q, geoTerms));
   });
 
   const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
@@ -532,7 +534,7 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
 /**
  * Fetch jobs from RemoteOK's open JSON API (bypasses Puppeteer entirely).
  */
-export async function fetchRemoteOKJobs(query, signal = null, geoTerms = EMPTY_GEO) {
+export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const r = await safeApiFetch('https://remoteok.com/api', {
     headers: {
@@ -552,9 +554,12 @@ export async function fetchRemoteOKJobs(query, signal = null, geoTerms = EMPTY_G
   // First element is metadata, rest are jobs
   const jobs = Array.isArray(data) ? data.slice(1) : [];
 
-  // Filter by query relevance — role text (title + company + tags), not the JD body.
-  const matched = jobs.filter(job =>
-    jobRelevanceMatch(`${job.position || ''} ${job.company || ''} ${(job.tags || []).join(' ')}`, query, geoTerms));
+  // Filter: job matches if relevant to ANY query (OR logic across all queries).
+  const qs = Array.isArray(queries) ? queries : [queries];
+  const matched = jobs.filter(job => {
+    const roleText = `${job.position || ''} ${job.company || ''} ${(job.tags || []).join(' ')}`;
+    return qs.some(q => jobRelevanceMatch(roleText, q, geoTerms));
+  });
 
   const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
     title: job.position || '',
@@ -579,7 +584,7 @@ export async function fetchRemoteOKJobs(query, signal = null, geoTerms = EMPTY_G
 /**
  * Fetch jobs from WeWorkRemotely's RSS feed (bypasses Puppeteer entirely).
  */
-export async function fetchWeWorkRemotelyJobs(query, signal = null, geoTerms = EMPTY_GEO) {
+export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const r = await safeApiFetch('https://weworkremotely.com/remote-jobs.rss', {
     headers: {
@@ -596,6 +601,7 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null, geoTerms = E
   }
 
   const xml = r.text;
+  const qs = Array.isArray(queries) ? queries : [queries];
 
   // Parse RSS items with regex (no XML parser dependency needed)
   const itemPattern = /<item>([\s\S]*?)<\/item>/gi;
@@ -620,9 +626,8 @@ export async function fetchWeWorkRemotelyJobs(query, signal = null, geoTerms = E
     const company = titleParts.length > 1 ? titleParts[0].trim() : '';
     const jobTitle = titleParts.length > 1 ? titleParts.slice(1).join(':').trim() : title;
 
-    // Filter by query relevance — role text only ("Company: Role" title), not
-    // the JD body (matching the description over-matches on ambient keywords).
-    if (!jobRelevanceMatch(title, query, geoTerms)) continue;
+    // Filter: job matches if relevant to ANY query (OR logic across all queries).
+    if (!qs.some(q => jobRelevanceMatch(title, q, geoTerms))) continue;
 
     jobs.push({
       title: jobTitle,

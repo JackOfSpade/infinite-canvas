@@ -10,7 +10,7 @@ import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { scrapeManualSources } from './browser/manualScraper.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
-import { jobScoringBatchSize, HEAVY_WAF_QUERY_CAP, DEFAULT_QUERY_CAP, JOB_SCORE_CAP, JOB_MAX_PAGES } from './resultCaps.js';
+import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
@@ -202,10 +202,8 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
   };
 
   const tasks = [];
-  // Remote-only boards get fewer queries; heavy WAF sites get only the first query.
   for (const [sourceId, { extractor, config, urlFn, maxPages = 1, loadMoreSelector = null }] of Object.entries(extractors)) {
-    const isHeavyWAF = sourceId === 'ziprecruiter' || sourceId === 'glassdoor';
-    const querySubset = isHeavyWAF ? queries.slice(0, HEAVY_WAF_QUERY_CAP) : queries.slice(0, DEFAULT_QUERY_CAP);
+    const querySubset = queries;
 
     // One task per query. `id` stays `${sourceId}-${n}` so `res.id.replace(/-\d+$/,'')`
     // still maps a result back to its source. A multi-page source runs as a SINGLE
@@ -276,8 +274,25 @@ function selectTopAcrossSources(jobs, n) {
  * Fetch API-based sources in parallel (no Puppeteer needed).
  * @returns {{ sourceId: string, jobs: object[], error?: string }[]}
  */
+// Fan-out a single-query fetcher across all queries concurrently, merge and
+// deduplicate by title+company. Returns the same { items, warning } shape.
+async function queryFanOut(queries, fetcher, signal) {
+  const results = await Promise.all(
+    queries.map(q => fetcher(q, signal).catch(() => ({ items: [] })))
+  );
+  const seen = new Set();
+  const items = [];
+  for (const r of results) {
+    for (const job of (r?.items || [])) {
+      const key = `${(job.title || '').toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}`;
+      if (!seen.has(key)) { seen.add(key); items.push(job); }
+    }
+  }
+  const warning = [...results].reverse().find(r => r?.warning)?.warning ?? null;
+  return { items, warning };
+}
+
 async function fetchApiSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], pipelineAbort = null) {
-  const firstQuery = queries[0] || '';
   // Source credentials come from Settings (electron-store) with a legacy
   // process.env fallback handled inside getJobsSettings() for users still
   // on the old .env config.
@@ -295,13 +310,13 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
   const geoTerms = buildGeoTermSet(profileLocations);
 
   const apiTasks = [
-    { sourceId: 'linkedin',       fn: (s) => fetchLinkedInJobs(queries.slice(0, 3), s, days) },
-    { sourceId: 'greenhouse',     fn: (s) => fetchGreenhouseJobs(firstQuery, s, geoTerms) },
-    { sourceId: 'lever',          fn: (s) => fetchLeverJobs(firstQuery, s, geoTerms) },
-    { sourceId: 'usajobs',        fn: (s) => fetchUSAJobs(firstQuery, apiKey, email, s, days) },
-    { sourceId: 'remoteok',       fn: (s) => fetchRemoteOKJobs(firstQuery, s, geoTerms) },
-    { sourceId: 'weworkremotely', fn: (s) => fetchWeWorkRemotelyJobs(firstQuery, s, geoTerms) },
-    { sourceId: 'dice',           fn: (s) => fetchDiceListings(firstQuery, '', s, days) },
+    { sourceId: 'linkedin',       fn: (s) => fetchLinkedInJobs(queries, s, days) },
+    { sourceId: 'greenhouse',     fn: (s) => fetchGreenhouseJobs(queries, s, geoTerms) },
+    { sourceId: 'lever',          fn: (s) => fetchLeverJobs(queries, s, geoTerms) },
+    { sourceId: 'usajobs',        fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days), s) },
+    { sourceId: 'remoteok',       fn: (s) => fetchRemoteOKJobs(queries, s, geoTerms) },
+    { sourceId: 'weworkremotely', fn: (s) => fetchWeWorkRemotelyJobs(queries, s, geoTerms) },
+    { sourceId: 'dice',           fn: (s) => queryFanOut(queries, (q, sig) => fetchDiceListings(q, '', sig, days), s) },
   ];
 
   // Notify frontend that API sources are starting
