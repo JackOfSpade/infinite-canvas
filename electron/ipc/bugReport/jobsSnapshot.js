@@ -3,6 +3,7 @@ const { app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 import { getJobsTelemetry } from '../jobs.js';
+import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings } from '../settings.js';
 import { ago, modelTag, pipelineScope } from './helpers.js';
 
@@ -41,9 +42,12 @@ export function buildJobsConfigSnapshot() {
 export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
   let t;
   try { t = getJobsTelemetry(); } catch { return ''; }
+  let browserScrape = null;
+  try { browserScrape = getManualScraperTelemetry(); } catch { /* scraper may not be loaded */ }
   const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
   const hasPastes = Array.isArray(t?.pastedPastes) ? t.pastedPastes.length > 0 : !!t?.pastedParse; // back-compat with old single-object field
-  if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing && !hasPastes)) return '';
+  const hasBrowserScrape = !!browserScrape?.active || (browserScrape?.events || []).length > 0;
+  if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing && !hasPastes && !hasBrowserScrape)) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId);
   if (scope.foreign) return `\n## Job Search Pipeline\n${scope.note}`;
@@ -120,7 +124,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
         lines.push(`  - \`${k}\`: surfaced ${v.count} of ${v.gathered} in-window matches ⚠️ (per-source cap — ${v.gathered - v.count} more matched but not gathered; raise JOB_RESULT_CAP to widen)`);
       }
       const zeroPaste = entries.filter(([, v]) => v.count === 0 && v.warning?.code === 'paste-needed').map(([k]) => k);
-      const zeroWarn = entries.filter(([, v]) => v.count === 0 && v.warning && v.warning.code !== 'paste-needed').map(([k, v]) => `${k} (${v.warning.code})`);
+      const zeroWarn = entries
+        .filter(([, v]) => v.count === 0 && v.warning && v.warning.code !== 'paste-needed')
+        .map(([k, v]) => {
+          const evidence = v.warning?.evidence ? ` — ${String(v.warning.evidence).slice(0, 220)}` : '';
+          return `${k} (${v.warning.code})${evidence}`;
+        });
       const zeroClean = entries.filter(([, v]) => v.count === 0 && !v.warning).map(([k]) => k);
       if (zeroPaste.length) {
         lines.push(`  - ⏳ paste-needed (hub paused waiting for manual copy/paste — expected, not a scrape failure): ${zeroPaste.join(', ')}`);
@@ -158,6 +167,48 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
     }
   } else {
     lines.push('### Search\n- (no search recorded this session — e.g. scoring resumed from a captcha-resolve)');
+  }
+
+  if (hasBrowserScrape) {
+    lines.push('\n### Active Browser Scrape');
+    const a = browserScrape.active;
+    if (a) {
+      const ageMs = Date.now() - (a.ts || Date.now());
+      const bits = [
+        a.phase ? `phase ${a.phase}` : null,
+        a.srcName || a.sourceId ? `source ${a.srcName || a.sourceId}` : null,
+        a.queryIndex && a.queryTotal ? `query ${a.queryIndex}/${a.queryTotal}` : null,
+        a.pageNum ? `page ${a.pageNum}` : null,
+        a.count != null ? `count ${a.count}` : null,
+        `updated ${Math.max(0, Math.round(ageMs / 1000))}s ago`,
+      ].filter(Boolean);
+      lines.push(`- Current: ${bits.join(' · ')}`);
+      if (a.url) lines.push(`  - URL: ${String(a.url).slice(0, 240)}`);
+      if (a.reason) lines.push(`  - Reason: ${a.reason}`);
+      if (a.key) lines.push(`  - Key: ${a.key}`);
+      if (a.evidence) lines.push(`  - Evidence: ${String(a.evidence).slice(0, 360)}`);
+      if (a.pageState) {
+        lines.push(`  - Page state: ${JSON.stringify(a.pageState).slice(0, 360)}`);
+      }
+    } else {
+      lines.push('- Current: (no active scrape)');
+    }
+    const recent = (browserScrape.events || []).slice(-8);
+    if (recent.length > 0) {
+      lines.push('- Recent browser-scrape phases:');
+      for (const e of recent) {
+        const ageMs = Date.now() - (e.ts || Date.now());
+        const label = [
+          e.phase || 'event',
+          e.srcName || e.sourceId || null,
+          e.queryIndex && e.queryTotal ? `q${e.queryIndex}/${e.queryTotal}` : null,
+          e.pageNum ? `p${e.pageNum}` : null,
+          e.key ? `key=${e.key}` : null,
+          `-${Math.max(0, Math.round(ageMs / 1000))}s`,
+        ].filter(Boolean).join(' ');
+        lines.push(`  - ${label}`);
+      }
+    }
   }
 
   // Captcha-resolve / Solve path. Indeed (and other captcha-walled sources)

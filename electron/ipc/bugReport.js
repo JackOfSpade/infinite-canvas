@@ -328,7 +328,76 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
 // ── Shared markdown generation ────────────────────────────────────────────────
 // Used by both the "save to file" and "copy to clipboard" handlers so the
 // report content is identical regardless of how the user chooses to export it.
-export function generateMarkdown(payload, reportWindowId = null) {
+const CLIPBOARD_BUG_REPORT_MAX_CHARS = 50_000;
+
+function buildFencedTextBlock(lines, emptyFallback) {
+  if (!Array.isArray(lines) || lines.length === 0) return `${emptyFallback}\n`;
+  return `\`\`\`text\n${lines.join('\n')}\n\`\`\`\n`;
+}
+
+function buildMainProcessLogsMarkdown(lines) {
+  if (!Array.isArray(lines) || lines.length === 0) return '';
+  return `
+## Recent Main-Process Logs
+> Last ~60 lines from the main process's logger (ring buffer). Use this to
+> see what \`[Accounts]\` / \`[StealthBrowser]\` / \`[Marketplace]\` actually
+> did and any errors that were swallowed by an IPC handler before the
+> renderer got a useful response.
+
+\`\`\`
+${lines.join('\n')}
+\`\`\`
+`;
+}
+
+function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProcessLogLines, maxChars) {
+  let eventWorking = Array.isArray(eventLines) ? [...eventLines] : [];
+  let logWorking = Array.isArray(mainProcessLogLines) ? [...mainProcessLogLines] : [];
+  let trimmedEventCount = 0;
+  let trimmedLogCount = 0;
+
+  const compose = (notice = '') => (
+    `${notice}${baseMarkdown}${buildMainProcessLogsMarkdown(logWorking)}## Event History\n${buildFencedTextBlock(eventWorking, '*(No events recorded)*')}`
+  );
+
+  let markdown = compose();
+  while (markdown.length > maxChars && eventWorking.length > 0) {
+    eventWorking.shift();
+    trimmedEventCount++;
+    markdown = compose();
+  }
+  while (markdown.length > maxChars && logWorking.length > 0) {
+    logWorking.shift();
+    trimmedLogCount++;
+    markdown = compose();
+  }
+
+  let hardTruncated = false;
+  let notice = '';
+  if (trimmedEventCount > 0 || trimmedLogCount > 0) {
+    const parts = [];
+    if (trimmedEventCount > 0) parts.push(`${trimmedEventCount} oldest event history line(s)`);
+    if (trimmedLogCount > 0) parts.push(`${trimmedLogCount} oldest main-process log line(s)`);
+    notice = `> Clipboard export truncated to ${maxChars} chars by dropping ${parts.join(' and ')} first.\n\n`;
+  }
+
+  markdown = compose(notice);
+  if (markdown.length > maxChars) {
+    hardTruncated = true;
+    const suffix = `\n\n> Clipboard export hit the hard ${maxChars}-character limit; remaining tail content was truncated.\n`;
+    markdown = markdown.slice(0, Math.max(0, maxChars - suffix.length)) + suffix;
+  }
+
+  return {
+    markdown,
+    truncated: trimmedEventCount > 0 || trimmedLogCount > 0 || hardTruncated,
+    trimmedEventCount,
+    trimmedLogCount,
+    hardTruncated,
+  };
+}
+
+export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, imageState, lastSaveError, activeEditableText } = payload;
 
   // A filter code (e.g. LEAN) may have dropped whole sections before the payload
@@ -741,6 +810,19 @@ ${rows}
         t.error ? `  - error: \`${t.error}\`` : null,
         t.bodyHead ? `  - bodyHead: \`${t.bodyHead.replace(/`/g, "'").slice(0, 240)}\`` : null,
       ].filter(Boolean);
+      if (Array.isArray(t.checks) && t.checks.length > 0) {
+        lines.push('  - checks:');
+        for (const check of t.checks) {
+          const parts = [
+            check.target || '—',
+            check.status != null ? `HTTP ${check.status}` : null,
+            check.finalUrl || null,
+            check.softWallMatch ? `softWall=${check.softWallMatch}` : null,
+            check.error ? `error=${check.error}` : null,
+          ].filter(Boolean);
+          lines.push(`    - ${parts.join(' | ').replace(/`/g, "'").slice(0, 320)}`);
+        }
+      }
       return lines.join('\n');
     }).filter(Boolean).join('\n\n');
 
@@ -805,6 +887,19 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
         t.error ? `  - error: \`${t.error}\`` : null,
         t.bodyHead ? `  - bodyHead: \`${t.bodyHead.replace(/`/g, "'").slice(0, 240)}\`` : null,
       ].filter(Boolean);
+      if (Array.isArray(t.checks) && t.checks.length > 0) {
+        lines.push('  - checks:');
+        for (const check of t.checks) {
+          const parts = [
+            check.target || '—',
+            check.status != null ? `HTTP ${check.status}` : null,
+            check.finalUrl || null,
+            check.softWallMatch ? `softWall=${check.softWallMatch}` : null,
+            check.error ? `error=${check.error}` : null,
+          ].filter(Boolean);
+          lines.push(`    - ${parts.join(' | ').replace(/`/g, "'").slice(0, 320)}`);
+        }
+      }
       return lines.join('\n');
     }).filter(Boolean).join('\n\n');
 
@@ -829,31 +924,21 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
   // hit stdout (which users never see) are surfaced here. Skip lines older
   // than this process start so we don't drag in stale logs from a previous
   // run that happened to share the ring buffer state.
-  let mainProcessLogsMarkdown = '';
+  let mainProcessLogLines = [];
   try {
     const logs = (getRecentLogs(60) || []).filter(l => l.ts >= PROCESS_START_MS);
     if (logs.length > 0) {
-      const formatted = logs.map(l => {
+      mainProcessLogLines = logs.map(l => {
         const t = new Date(l.ts).toISOString().slice(11, 23); // HH:MM:SS.mmm
         const lvl = l.level.toUpperCase().padEnd(5, ' ');
         // Trim each line to a reasonable max so a single fat error doesn't
         // blow the section past the JSON payload's byte budget.
         const msg = (l.message || '').replace(/\r?\n/g, ' ⏎ ').slice(0, 500);
         return `[${t}] ${lvl} ${msg}`;
-      }).join('\n');
-      mainProcessLogsMarkdown = `
-## Recent Main-Process Logs
-> Last ~60 lines from the main process's logger (ring buffer). Use this to
-> see what \`[Accounts]\` / \`[StealthBrowser]\` / \`[Marketplace]\` actually
-> did and any errors that were swallowed by an IPC handler before the
-> renderer got a useful response.
-
-\`\`\`
-${formatted}
-\`\`\`
-`;
+      });
     }
   } catch { /* never break the report on diagnostic failure */ }
+  const mainProcessLogsMarkdown = buildMainProcessLogsMarkdown(mainProcessLogLines);
 
   // ── AI configuration snapshot ─────────────────────────────────────────────
   // Surfaces missing keys / wrong provider — the most common cause of
@@ -985,7 +1070,7 @@ ${aiConfig.provider === 'gemini' ? `
     stateWasTrimmed = true;
   }
 
-  let baseMarkdown = `At the end of your debug, assess whether new bug reporting filter codes need to be implemented. This occurs when even if the user used another existing code or a combination of existing codes, it would not have been enough reporting data to debug this issue smoothly.
+  let baseMarkdown = `At the end of your debug, assess whether new bug reporting filter codes need to be implemented (which will all be included in the "FULL" filter code). This occurs when even if the user used the "FULL" filter code, it would not have been enough reporting data to debug this issue smoothly.
 
 # Bug Report
 
@@ -1020,33 +1105,38 @@ ${appStateJson}
   const events = payload.eventLogs || [];
   const remainingBytes = MAX_BUDGET_BYTES - bufferBytes;
 
+  let includedEventLines = [];
   let trimmedEventsMarkdown = '';
   if (remainingBytes > 0 && events.length > 0) {
     const eventsBlockOpen = `\`\`\`text\n`;
     const eventsBlockClose = `\n\`\`\`\n`;
     let eventsBytes = Buffer.byteLength(eventsBlockOpen) + Buffer.byteLength(eventsBlockClose);
 
-    const includedEvents = [];
     for (let i = events.length - 1; i >= 0; i--) {
-      const eventStr = events[i] + '\n';
+      const eventLine = String(events[i]);
+      const eventStr = eventLine + '\n';
       const eventBytes = Buffer.byteLength(eventStr, 'utf8');
       if (eventsBytes + eventBytes < remainingBytes) {
         eventsBytes += eventBytes;
-        includedEvents.push(eventStr);
+        includedEventLines.push(eventLine);
       } else {
         break;
       }
     }
-    includedEvents.reverse(); // restore chronological order
+    includedEventLines.reverse(); // restore chronological order
 
-    trimmedEventsMarkdown = eventsBlockOpen + includedEvents.join('') + eventsBlockClose;
+    trimmedEventsMarkdown = buildFencedTextBlock(includedEventLines, '*(No events recorded)*');
   } else if (remainingBytes <= 0) {
     trimmedEventsMarkdown = `*(Event history omitted due to size limit)*\n`;
   } else {
     trimmedEventsMarkdown = `*(No events recorded)*\n`;
   }
 
-  return baseMarkdown + trimmedEventsMarkdown;
+  const fullMarkdown = baseMarkdown + trimmedEventsMarkdown;
+  if (options?.maxChars) {
+    return enforceClipboardMarkdownCap(baseMarkdown, includedEventLines, mainProcessLogLines, options.maxChars);
+  }
+  return { markdown: fullMarkdown, truncated: false, trimmedEventCount: 0, trimmedLogCount: 0, hardTruncated: false };
 }
 
 // ── IPC handlers ──────────────────────────────────────────────────────────────
@@ -1054,7 +1144,7 @@ export function registerBugReportHandlers() {
 
   // Save report to a file chosen by the user via a native save dialog.
   handleSafe('export-bug-report', async (event, payload) => {
-    const markdownContent = generateMarkdown(payload, event.sender?.id ?? null);
+    const { markdown: markdownContent } = generateMarkdown(payload, event.sender?.id ?? null);
 
     const { canceled, filePath } = await dialog.showSaveDialog({
       title: 'Save Bug Report',
@@ -1071,7 +1161,6 @@ export function registerBugReportHandlers() {
   // Return the report as a string so the renderer can copy it to the clipboard.
   // No file dialog, no disk I/O — just generate and return the markdown.
   handleSafe('generate-bug-report-markdown', async (event, payload) => {
-    const markdownContent = generateMarkdown(payload, event.sender?.id ?? null);
-    return { markdown: markdownContent };
+    return generateMarkdown(payload, event.sender?.id ?? null, { maxChars: CLIPBOARD_BUG_REPORT_MAX_CHARS });
   });
 }

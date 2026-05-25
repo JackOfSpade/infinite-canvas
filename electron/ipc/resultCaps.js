@@ -18,6 +18,13 @@
  * constant into ~10 template literals for a fixed breadth ceiling).
  */
 
+// ── Dev / test mode ──────────────────────────────────────────────────────────
+// Flip TEST_MODE to true while debugging. Encompasses:
+//   • Scroll / load-more preload depth  (JOB_QUERY_TARGET):  150 → 5
+//   • Per-source API result cap         (JOB_RESULT_CAP):    Infinity → 5
+//   • AI scoring                        (JOB_SCORE_CAP):     skipped (→ 0)
+export const TEST_MODE = true;
+
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // Mirrors llm.js TASK_MAX_TOKENS shapes (price-synthesis / job-scoring).
@@ -34,7 +41,7 @@ const BUDGET_SAFETY         = 0.8;   // leave headroom under the hard cap
 // slice line keeps working untouched. Uncapped on purpose while the free Gemini
 // tier is being retired; restore a numeric ceiling (was 30) when the paid API tier
 // lands and per-source breadth needs bounding again.
-export const JOB_RESULT_CAP = Infinity;
+export const JOB_RESULT_CAP = TEST_MODE ? 5 : Infinity;
 
 // ── LLM scoring budget (how many gathered jobs actually get LLM-scored) ───────
 // UNCAPPED (Infinity): score EVERY gathered job. selectTopAcrossSources(_, Infinity)
@@ -43,7 +50,7 @@ export const JOB_RESULT_CAP = Infinity;
 // hundreds of jobs will rate-limit (429) and fall back to weaker models until the
 // paid API tier lands. Restore a numeric budget (was 150, round-robin fair across
 // sources via selectTopAcrossSources) when on paid.
-export const JOB_SCORE_CAP = Infinity;
+export const JOB_SCORE_CAP = TEST_MODE ? 0 : Infinity;
 
 // ── Date-bounded deep pagination ──────────────────────────────────────────────
 // Browser sources page forward (same stealth session) until they run out of

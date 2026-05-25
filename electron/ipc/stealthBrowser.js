@@ -20,7 +20,7 @@ import path from 'path';
 import os from 'os';
 import { logger } from '../logger.js';
 
-import { getSessionProfile } from './browser/antiDetectProfiles.js';
+import { getRandomUA, getSessionProfile } from './browser/antiDetectProfiles.js';
 import { saveDiceApiKey } from './settings.js';
 
 // Apply stealth evasions
@@ -129,7 +129,7 @@ export async function getStealthBrowser() {
   // "The browser is already running for [userDataDir]."
   if (browserInstance) {
     logger.warn('[StealthBrowser] Browser connection lost (crashed?) — killing orphaned process before relaunch');
-    try { browserInstance.process()?.kill('SIGTERM'); } catch {}
+    try { browserInstance.process()?.kill('SIGTERM'); } catch { /* already dead */ }
     browserInstance = null;
     // Give the OS a moment to release the profile lock.
     await new Promise(r => setTimeout(r, 500));
@@ -361,13 +361,25 @@ export async function closeStealthBrowser(forShutdown = false) {
 // Forward exports from extracted modules for backwards compatibility with other files
 export { humanMouseMove, humanScroll, dismissCookieBanner } from './browser/humanEmulation.js';
 export { openLoginWindow, getSessionStatus, getAllSessionStatuses, getSupportedPlatforms } from './browser/authWindows.js';
-export { getRandomUA } from './browser/antiDetectProfiles.js';
+export { getRandomUA };
 
 // ── Job Platform Login Registry ──────────────────────────────────────────────
 // Platforms that require browser login to serve multi-page results.
 // verifyUrl: a logged-in-only page that redirects to /login when anonymous.
 const JOB_LOGIN_PLATFORMS = {
-  indeed:       { name: 'Indeed',       verifyUrl: 'https://my.indeed.com/' },
+  indeed:       {
+    name: 'Indeed',
+    verifyUrls: [
+      'https://my.indeed.com/',
+      'https://www.indeed.com/jobs?q=software%20engineer&fromage=1',
+    ],
+    bodySignals: [
+      'upload your resume sign in',
+      'sign in employers / post job',
+      'sign in to indeed',
+    ],
+    bodyScanChars: 1200,
+  },
   // Glassdoor changed URL structure: logged-in users who hit /member/home/
   // now redirect to /Job/index.htm (same as anonymous), so the old
   // connectedFinalUrlMustContain: '/member/' check was firing for valid
@@ -565,7 +577,7 @@ async function _browserRefreshDiceApiKey() {
     return newKey;
   } finally {
     if (browser) await browser.close().catch(() => {});
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort temp cleanup */ }
   }
 }
 

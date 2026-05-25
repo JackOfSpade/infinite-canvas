@@ -214,7 +214,13 @@ export function useIssueReporter({
         if (res.success) {
           try {
             await navigator.clipboard.writeText(res.markdown);
-            addToast({ title: 'Bug Report Copied', description: 'Report copied to clipboard.', type: "success" });
+            addToast({
+              title: 'Bug Report Copied',
+              description: res.truncated
+                ? 'Report copied to clipboard. Oldest event recordings were trimmed to fit the clipboard size cap.'
+                : 'Report copied to clipboard.',
+              type: "success",
+            });
           } catch (clipErr) {
             EventLogger.error('Clipboard failed:', clipErr);
             addToast({ title: 'Clipboard Error', description: 'Generated report but could not copy to clipboard automatically.', type: "warning" });

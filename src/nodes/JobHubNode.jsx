@@ -523,6 +523,7 @@ export function JobHubNode({ id, data }) {
         maxAgeDays: data.maxAgeDays || 21,
         canvasFilePath,
         nodeId: currentId,
+        preferredLocation: (data.preferredLocation || '').trim(),
       });
 
       if (cancelled()) return;
@@ -620,7 +621,7 @@ export function JobHubNode({ id, data }) {
         pendingUSAJobsRefreshRef.current = false;
       }
     }
-  }, [id, data.maxAgeDays, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas]);
+  }, [id, data.maxAgeDays, data.preferredLocation, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas]);
 
   const handleJobsSettingsChange = useCallback(async () => {
     if (settingsDebounceTimerRef.current) {
@@ -744,6 +745,10 @@ export function JobHubNode({ id, data }) {
   const targetRole = data.targetRole || '';
   const setTargetRole = useCallback((val) => {
     updateGlobal(id, { targetRole: typeof val === 'string' ? val : '' });
+  }, [id, updateGlobal]);
+  const preferredLocation = data.preferredLocation || '';
+  const setPreferredLocation = useCallback((val) => {
+    updateGlobal(id, { preferredLocation: typeof val === 'string' ? val : '' });
   }, [id, updateGlobal]);
 
   // Cascade-delete every spawned child on hub unmount.
@@ -993,6 +998,8 @@ export function JobHubNode({ id, data }) {
       hubState: 'done',
       resultCount: flatJobsToSpawn.length,
       totalScoredCount: scoreResult.scoredJobs.length,
+      scrapedCount: jobs.length,
+      testMode: !!scoreResult.testMode,
       targetCount: hasTarget ? targetList.length : 0,
       otherCount: hasTarget ? otherList.length : 0,
       // Persist this run's "Other Strong" cutoff so later appends (USAJobs
@@ -1082,8 +1089,9 @@ export function JobHubNode({ id, data }) {
 
       // Step 2: Query construction
       const activeTargetRole = (data.targetRole || '').trim();
+      const activePreferredLocation = (data.preferredLocation || '').trim();
       const queriesResult = await window.electronAPI.generateJobQueries({
-        profile, nodeId: currentId, targetRole: activeTargetRole,
+        profile, nodeId: currentId, targetRole: activeTargetRole, preferredLocation: activePreferredLocation,
       });
       if (cancelled()) return;
       if (!queriesResult.success) {
@@ -1092,7 +1100,7 @@ export function JobHubNode({ id, data }) {
         throw err;
       }
       const {
-        titleQueries = [], suggestedRoleQueries = [], skillsOnlyQueries = [], targetRoleQueries = [],
+        titleQueries = [], suggestedRoleQueries = [], targetRoleQueries = [],
       } = queriesResult.queries || {};
       const allQueries = [...targetRoleQueries, ...titleQueries, ...suggestedRoleQueries];
 
@@ -1104,6 +1112,7 @@ export function JobHubNode({ id, data }) {
         nodeId: currentId,
         maxAgeDays: data.maxAgeDays || 21,
         canvasFilePath,
+        preferredLocation: activePreferredLocation,
         // Candidate's own locations — the keyword-less company-board sources
         // (Greenhouse/Lever/RemoteOK/WWR) must NOT treat the city baked into a
         // job title as role relevance, or a Denver cinematographer pulls in
@@ -1256,7 +1265,7 @@ export function JobHubNode({ id, data }) {
         }
       }
     }
-  }, [id, updateGlobal, getNode, getNodes, canvasFilePath, data.maxAgeDays, data.targetRole, ensureSourceCards, ensureBlockedSourceCards, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch]);
+  }, [id, updateGlobal, getNode, getNodes, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, ensureSourceCards, ensureBlockedSourceCards, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch]);
 
   const startProcessing = useCallback((filePath) => runPipeline({ filePath }), [runPipeline]);
   const startProcessingWithProfile = useCallback((profile) => runPipeline({ profile }), [runPipeline]);
@@ -1464,13 +1473,21 @@ export function JobHubNode({ id, data }) {
     const exts = files.map(f => (f.name.match(/\.[a-z0-9]+$/i)?.[0] || '?').toLowerCase());
     EventLogger.log(`[JobHub][${id}] Drop attempt: ${files.length} file(s) ext=[${exts.join(', ') || 'none'}]`);
 
-    // Accept any file — the backend (gemini.js/claude.js callDocument) handles
-    // PDFs/DOCX inline, images via vision, and falls back to utf8 text for
-    // everything else. The only true rejection is legacy .doc (binary blob
-    // the API can't ingest) and oversize files, both of which surface clean
-    // backend errors via the parseResume catch path below.
+    // Accept most file types — the backend handles PDFs/DOCX inline, images via
+    // vision, and falls back to utf8 text for everything else. Reject obvious
+    // app bundles here so the user gets a clear message before the pipeline
+    // starts; the backend still validates all retry/alternate entry paths.
     const resume = files[0];
     if (!resume) return;
+    if (/\.app$/i.test(resume.name || '')) {
+      EventLogger.log(`[JobHub][${id}] Drop rejected: app bundle (${resume.name})`);
+      addToast({
+        title: 'Not a Resume File',
+        description: `${resume.name} is a macOS app, not a resume. Drop a PDF, DOCX, TXT, or image of your resume instead.`,
+        type: 'error',
+      });
+      return;
+    }
 
     const path = resume.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(resume) : '');
     if (path) {
@@ -1478,7 +1495,7 @@ export function JobHubNode({ id, data }) {
       EventLogger.log(`[JobHub][${id}] Drop accepted: ${resume.name}`);
       startProcessingRef.current?.(path);
     }
-  }, [data.locked, hubState, id]);
+  }, [addToast, data.locked, hubState, id]);
 
   const resetHandler = useCallback((e) => {
     e?.stopPropagation();
@@ -1723,6 +1740,13 @@ export function JobHubNode({ id, data }) {
                   placeholder="Target role (optional) — e.g. Product Manager"
                   className="w-full px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25"
                 />
+                <input
+                  type="text"
+                  value={preferredLocation}
+                  onChange={(e) => setPreferredLocation(e.target.value)}
+                  placeholder="Preferred location (optional) — e.g. Chicago, hybrid, remote"
+                  className="w-full px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25"
+                />
                 <div className="flex items-center justify-center gap-1.5">
                   <span>Look back</span>
                   <input
@@ -1780,6 +1804,8 @@ export function JobHubNode({ id, data }) {
             {banner}
             <JobHubDoneState
               resultCount={data.resultCount}
+              scrapedCount={data.scrapedCount}
+              testMode={!!data.testMode}
               targetCount={data.targetCount || 0}
               otherCount={data.otherCount || 0}
               sourceFilter={sourceFilter}
@@ -1796,6 +1822,8 @@ export function JobHubNode({ id, data }) {
               jobCards={connectedJobCards}
               maxAgeDays={maxAgeDays}
               setMaxAgeDays={setMaxAgeDays}
+              preferredLocation={preferredLocation}
+              setPreferredLocation={setPreferredLocation}
               targetRole={targetRole}
               setTargetRole={setTargetRole}
               onCheckAllStatuses={handleCheckAllStatuses}

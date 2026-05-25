@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { JOB_SOURCES } from '../../utils/constants';
-import { SlidersHorizontal, X, RefreshCw, Activity, Target } from 'lucide-react';
+import { SlidersHorizontal, X, RefreshCw, Activity, Target, MapPin } from 'lucide-react';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
 
@@ -8,6 +8,8 @@ const STATUS_OPTIONS = ['New', 'Applied', 'Interview', 'Offer', 'Rejected'];
 
 export function JobHubDoneState({
   resultCount,
+  scrapedCount,
+  testMode = false,
   targetCount = 0,
   otherCount = 0,
   sourceFilter,
@@ -27,6 +29,8 @@ export function JobHubDoneState({
   // Search controls (passed back to the hub for next run)
   maxAgeDays = 21,
   setMaxAgeDays,
+  preferredLocation = '',
+  setPreferredLocation,
   // Target/pivot role input — surfaces on the done state so the user can
   // tweak it before re-running without going back to empty state.
   targetRole = '',
@@ -56,8 +60,8 @@ export function JobHubDoneState({
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1">
 
       {/* Result count */}
-      <div className="text-emerald-400 text-2xl font-bold">{resultCount || 0}</div>
-      <p className="text-white/40 text-xs">jobs matched</p>
+      <div className="text-emerald-400 text-2xl font-bold">{testMode ? (scrapedCount ?? 0) : (resultCount || 0)}</div>
+      <p className="text-white/40 text-xs">{testMode ? 'jobs scraped' : 'jobs matched'}</p>
       {(targetCount > 0 || otherCount > 0) && (
         <p className="text-white/30 text-[10px] mt-0.5">
           {targetCount > 0 && <><span className="text-purple-300/80">{targetCount} target</span></>}
@@ -168,6 +172,17 @@ export function JobHubDoneState({
               placeholder="Target role (optional)"
               className="flex-1 min-w-0 px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-purple-400/50 placeholder:text-white/25"
               title="Set or change the role to pivot into. Applies on next Re-run Search."
+            />
+          </div>
+          <div className="flex items-center gap-1.5 text-[10px] text-white/40">
+            <MapPin size={10} className="text-blue-300/70 shrink-0" />
+            <input
+              type="text"
+              value={preferredLocation}
+              onChange={(e) => setPreferredLocation?.(e.target.value)}
+              placeholder="Preferred location (optional)"
+              className="flex-1 min-w-0 px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25"
+              title="Free-text location preference for the next search, e.g. Chicago, remote, Midwest, hybrid in Denver."
             />
           </div>
           <div

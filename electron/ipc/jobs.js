@@ -4,13 +4,15 @@
  *             ZipRecruiter, Glassdoor, Dice, Wellfound,
  *             Greenhouse API, Lever API, USAJobs API
  */
+import fs from 'fs';
+import path from 'path';
 import { callLLMDocument, callLLMText } from './llm.js';
 import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, BUCKETING_PLACEMENT_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA, PASTED_JOB_PARSE_SCHEMA } from './aiSchemas.js';
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { scrapeManualSources } from './browser/manualScraper.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
-import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES } from './resultCaps.js';
+import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES, TEST_MODE } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
@@ -130,6 +132,18 @@ function synthScrapeWarning(errorMsg) {
       ? 'Site was unreachable or too slow within the budget. Often a soft block — try a fresh stealth profile or come back later.'
       : 'Scrape failed before extracting jobs. Check logs for the full stack trace.',
   };
+}
+
+function getEffectiveSourceWarning(warning, jobCount) {
+  if (!warning) return null;
+  // A timeout on one query variant after other variants already returned jobs is
+  // a partial scrape miss, not a source-level block that should masquerade as
+  // an unresolved captcha/login problem. Keep the evidence, but downgrade the
+  // severity for terminal status + source-card presentation.
+  if (jobCount > 0 && warning.code === 'scrape-timeout' && warning.severity === 'block') {
+    return { ...warning, severity: 'warn' };
+  }
+  return warning;
 }
 
 // Per-source pagination stop callback for executeScrapePaginated. We walk the
@@ -292,12 +306,13 @@ async function queryFanOut(queries, fetcher, signal) {
   return { items, warning };
 }
 
-async function fetchApiSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], pipelineAbort = null) {
+async function fetchApiSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], preferredLocation = '', pipelineAbort = null) {
   // Source credentials come from Settings (electron-store) with a legacy
   // process.env fallback handled inside getJobsSettings() for users still
   // on the old .env config.
   const { usajobsApiKey: apiKey, usajobsEmail: email } = getJobsSettings();
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+  const location = String(preferredLocation || '').trim();
 
   // Keyword-less company-board / remote-feed sources keyword-filter client-side
   // against the query. The query carries the candidate's city ("… Denver"), and
@@ -313,10 +328,10 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
     { sourceId: 'linkedin',       fn: (s) => fetchLinkedInJobs(queries, s, days) },
     { sourceId: 'greenhouse',     fn: (s) => fetchGreenhouseJobs(queries, s, geoTerms) },
     { sourceId: 'lever',          fn: (s) => fetchLeverJobs(queries, s, geoTerms) },
-    { sourceId: 'usajobs',        fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days), s) },
+    { sourceId: 'usajobs',        fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days, location), s) },
     { sourceId: 'remoteok',       fn: (s) => fetchRemoteOKJobs(queries, s, geoTerms) },
     { sourceId: 'weworkremotely', fn: (s) => fetchWeWorkRemotelyJobs(queries, s, geoTerms) },
-    { sourceId: 'dice',           fn: (s) => queryFanOut(queries, (q, sig) => fetchDiceListings(q, '', sig, days), s) },
+    { sourceId: 'dice',           fn: (s) => queryFanOut(queries, (q, sig) => fetchDiceListings(q, location, sig, days), s) },
   ];
 
   // Notify frontend that API sources are starting
@@ -338,8 +353,23 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
       // JOB_RESULT_CAP slice dropped in-window jobs — surfaced in the funnel so an
       // over-the-cap API source isn't a silent miss (mirrors the browser ceiling).
       const gathered = Array.isArray(result) ? jobs.length : (result?.gathered ?? jobs.length);
+      // Emit live completion so the source card updates as soon as this source
+      // finishes — without this, all API cards stay "Searching..." until the
+      // browser scraper finishes too (the final per-source loop runs post-Promise.all).
+      if (sender && !sender.isDestroyed()) {
+        sender.send('job-source-progress', {
+          nodeId,
+          sourceId,
+          status: warning?.severity === 'block' ? 'error' : 'done',
+          count: jobs.length,
+          warning: warning || null,
+        });
+      }
       return { sourceId, jobs, warning, gathered };
     } catch (error) {
+      if (sender && !sender.isDestroyed()) {
+        sender.send('job-source-progress', { nodeId, sourceId, status: 'error', count: 0 });
+      }
       return { sourceId, jobs: [], error: error?.message || String(error) };
     }
   }));
@@ -400,6 +430,22 @@ ${chunk}`, {
 export function registerJobsHandlers() {
   handleSafe('parse-resume', async (event, { filePath, nodeId }, signal) => {
     logger.info(`[Jobs][${nodeId}] Parsing resume:`, filePath);
+    const displayName = filePath ? path.basename(filePath) : 'Selected item';
+    let stats = null;
+    try {
+      stats = await fs.promises.stat(filePath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') {
+        throw new Error(`${displayName} could not be found. Pick a resume file and try again.`);
+      }
+      throw err;
+    }
+    if (!stats.isFile()) {
+      if (/\.app$/i.test(displayName)) {
+        throw new Error(`${displayName} is a macOS app, not a resume. Drop a PDF, DOCX, TXT, or image of your resume instead.`);
+      }
+      throw new Error(`${displayName} is a folder or package, not a resume file. Drop a PDF, DOCX, TXT, or image of your resume instead.`);
+    }
     const profile = await callLLMDocument(filePath, `
 Analyze this resume/CV thoroughly. Return a JSON object with:
 {
@@ -418,17 +464,23 @@ Extract everything you can find. Be thorough.`, { signal, task: 'resume-parse', 
     return { profile };
   });
 
-  handleSafe('generate-job-queries', async (event, { profile, targetRole }, signal) => {
+  handleSafe('generate-job-queries', async (event, { profile, targetRole, preferredLocation }, signal) => {
     const role = (targetRole || '').trim();
+    const location = String(preferredLocation || '').trim();
     const targetBlock = role ? `
 TARGET ROLE PRIORITY: The user explicitly wants to pivot into or land the role: ${role}.
 This is the top priority — bias query construction toward this role even if their resume doesn't fully align.` : '';
+    const locationBlock = location ? `
+PREFERRED SEARCH LOCATION: ${location}
+Use this as search context. It is free-form user input and may be a city, state, region, "remote", "hybrid in Chicago", "Midwest", etc. Interpret it naturally.
+Only include it in queries when it improves the search. Do NOT force it into every query.` : `
+No preferred search location was provided. Do NOT add location terms to queries by default.`;
     const targetQueryInstruction = role
-      ? `"targetRoleQueries": ["3-5 queries that hunt specifically for '${role}' postings. Include seniority + remoteness variants (e.g. '${role} senior', '${role} remote', '${role} junior') and include the candidate's location in at least one. These are the highest-priority queries."]`
+      ? `"targetRoleQueries": ["3-5 queries that hunt specifically for '${role}' postings. Include seniority + remoteness variants (e.g. '${role} senior', '${role} remote', '${role} junior'). If a preferred search location was provided, you may include it in 1-2 entries where it improves precision. These are the highest-priority queries."]`
       : `"targetRoleQueries": []`;
 
     const result = await callLLMText(`
-You are a career strategist. Given this professional profile, generate search queries for a job search.${targetBlock}
+You are a career strategist. Given this professional profile, generate search queries for a job search.${targetBlock}${locationBlock}
 
 Profile:
 ${JSON.stringify(profile)}
@@ -436,13 +488,13 @@ ${JSON.stringify(profile)}
 Return a JSON object with four arrays of search query strings:
 
 {
-  "titleQueries": ["2-3 queries using their exact job titles + location, e.g. 'senior backend engineer denver'"],
-  "suggestedRoleQueries": ["3-5 queries for roles they could transition into — adjacent, stretch, and pivot roles they may not have considered. Think creatively: a backend engineer could be an engineering manager, developer advocate, solutions architect, technical PM, etc. Include the location."],
+  "titleQueries": ["2-3 queries using their exact job titles. Do not include location unless a preferred search location was explicitly provided and it clearly helps."],
+  "suggestedRoleQueries": ["3-5 queries for roles they could transition into — adjacent, stretch, and pivot roles they may not have considered. Think creatively: a backend engineer could be an engineering manager, developer advocate, solutions architect, technical PM, etc. Do not include location unless a preferred search location was explicitly provided and it clearly helps."],
   "skillsOnlyQueries": ["2-3 queries using ONLY their skills and experience level, NO job title at all, e.g. 'python kubernetes 8 years team lead distributed systems'. This is intentionally broad to surface unexpected matches."],
   ${targetQueryInstruction}
 }
 
-Be creative with suggestedRoleQueries — think about what career directions their skills unlock that they might not have considered.${role ? ` Always include the literal string ${role} in at least one targetRoleQueries entry, paired with the candidate's location.` : ''}`, { signal, task: 'job-query-generation', responseSchema: JOB_QUERY_GENERATION_SCHEMA });
+Be creative with suggestedRoleQueries — think about what career directions their skills unlock that they might not have considered.${role ? ` Always include the literal string ${role} in at least one targetRoleQueries entry.` : ''}`, { signal, task: 'job-query-generation', responseSchema: JOB_QUERY_GENERATION_SCHEMA });
 
     return { queries: result };
   });
@@ -531,7 +583,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries, nodeId, maxAgeDays, canvasFilePath, profileLocations }, signal) => {
+  handleSafe('search-jobs', async (event, { queries, nodeId, maxAgeDays, canvasFilePath, profileLocations, preferredLocation }, signal) => {
     // Gate: require fresh verified login for all browser-scraped job platforms.
     // These sources return only 1 page when anonymous; login is required for
     // multi-page results. Block early so the user gets a clear message rather
@@ -633,7 +685,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
             url: sourceFirstUrl[sourceId] || null,
           });
         }, combinedSignal),
-        fetchApiSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, pipelineAbort),
+        fetchApiSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, preferredLocation, pipelineAbort),
       ]);
     } catch (err) {
       throw err;
@@ -737,23 +789,25 @@ Be creative with suggestedRoleQueries — think about what career directions the
     //   - 'idle'    → reserved for "never got a progress event" (renderer fallback)
     for (const sourceId of ALL_SOURCE_IDS) {
       const data = sourceResults[sourceId] || { jobs: [], errors: 0, warnings: [] };
+      const effectiveWarnings = (data.warnings || []).map(w => getEffectiveSourceWarning(w, data.jobs.length));
       // Block > info > throttle > nothing. Block wins for visual urgency;
       // info wins over throttle so a config-missing reason isn't hidden by
       // a soft warning.
       const strongest =
-        data.warnings.find(w => w?.severity === 'block') ||
-        data.warnings.find(w => w?.severity === 'info')  ||
-        data.warnings[0] ||
+        effectiveWarnings.find(w => w?.severity === 'block') ||
+        effectiveWarnings.find(w => w?.severity === 'info')  ||
+        effectiveWarnings[0] ||
         null;
 
-      const hadBlock = data.warnings.some(w => w?.severity === 'block');
-      const hadInfoSkip = data.warnings.some(w => w?.severity === 'info');
+      const hadBlock = effectiveWarnings.some(w => w?.severity === 'block');
+      const hadInfoSkip = effectiveWarnings.some(w => w?.severity === 'info');
       const allFailed = data.errors > 0 && data.jobs.length === 0;
 
       let status;
-      if (data.jobs.length > 0) status = 'done';
-      else if (hadInfoSkip)     status = 'skipped';
-      else if (allFailed || hadBlock) status = 'error';
+      if (hadInfoSkip)          status = 'skipped';
+      else if (hadBlock)        status = 'error';
+      else if (data.jobs.length > 0) status = 'done';
+      else if (allFailed)       status = 'error';
       else                      status = 'done';   // ran cleanly, 0 results
 
       emitProgress({
@@ -795,15 +849,12 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const scrapeWarnings = [];
     for (const [sourceId, data] of Object.entries(sourceResults)) {
       for (const w of data.warnings || []) {
-        // A scrape-timeout on one query while OTHER queries for the same source
-        // succeeded is a partial failure, not a full block. Downgrade severity so
-        // ensureBlockedSourceCards doesn't re-spawn a blocking Solve card for a
-        // source that already returned results — the user got jobs; a late "error"
-        // card 8 minutes later is jarring and misleading.
-        const effectiveSeverity = (data.jobs.length > 0 && w.code === 'scrape-timeout')
-          ? 'warn'
-          : w.severity;
-        scrapeWarnings.push({ sourceId, url: sourceFirstUrl[sourceId] || null, ...w, severity: effectiveSeverity });
+        const effectiveWarning = getEffectiveSourceWarning(w, data.jobs.length) || w;
+        scrapeWarnings.push({
+          sourceId,
+          url: sourceFirstUrl[sourceId] || null,
+          ...effectiveWarning,
+        });
       }
     }
 
@@ -861,7 +912,15 @@ Be creative with suggestedRoleQueries — think about what career directions the
       const w = (data.warnings || []).find(x => x?.severity === 'block')
         || (data.warnings || []).find(x => x?.severity === 'info')
         || (data.warnings || [])[0] || null;
-      bySource[sid] = { count: data.jobs.length, unique: uniqueBySource[sid] || 0, warning: w ? { code: w.code, severity: w.severity } : null };
+      bySource[sid] = {
+        count: data.jobs.length,
+        unique: uniqueBySource[sid] || 0,
+        warning: w ? {
+          code: w.code,
+          severity: w.severity,
+          evidence: w.evidence ? String(w.evidence).slice(0, 700) : null,
+        } : null,
+      };
       // How deep the date-bounded walk went + why it stopped — only for the
       // paginating browser sources (one-shot / API sources leave it unset).
       if (data.pagesWalked > 0) {
@@ -885,9 +944,10 @@ Be creative with suggestedRoleQueries — think about what career directions the
     return { jobs: kept, sourceResults, scrapeWarnings };
   });
 
-  handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId }, signal) => {
+  handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId, preferredLocation }, signal) => {
     logger.info(`[Jobs] Background single-source search for ${sourceId} with query "${query}"`);
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+    const location = String(preferredLocation || '').trim();
 
     let jobs = [];
     let warning = null;
@@ -927,7 +987,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       }
 
       try {
-        const result = await fetchUSAJobs(query, apiKey, email, signal, ageDays);
+        const result = await fetchUSAJobs(query, apiKey, email, signal, ageDays, location);
         jobs = Array.isArray(result) ? result : (result?.items || []);
         warning = Array.isArray(result) ? null : (result?.warning || null);
       } catch (err) {
@@ -1172,7 +1232,7 @@ ${JSON.stringify(slimBatch(batch))}`, {
       models: [...scoringModels],
     };
 
-    return { scoredJobs, clusters };
+    return { scoredJobs, clusters, testMode: TEST_MODE };
   });
 
   // ── Generate Cover Letter ─────────────────────────────────────────────────

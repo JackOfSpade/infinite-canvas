@@ -257,15 +257,12 @@ export function registerFilesystemHandlers() {
       targetPath = dialogPath;
     }
 
-    // Embedded Progress System: Extract progress data if in sources-ready state
-    const { hubs, cards } = extractSidecarData(data.nodes || []);
-    
-    if (hubs.length > 0) {
-      data.transientProgress = { hubs, cards };
-      logger.info(`[FileSystem] Embedded progress state in canvas JSON data: ${path.basename(targetPath)} (${hubs.length} hub(s), ${cards.length} card(s))`);
-    } else {
-      delete data.transientProgress;
-    }
+    // The renderer-side sanitizer already preserves actionable paused state
+    // directly on the nodes we keep. Re-embedding job progress into a top-level
+    // transientProgress blob caused it to be written back on every save, which
+    // then replayed on every reload. Keep load-time migration for legacy files,
+    // but stop generating fresh embedded progress on save.
+    delete data.transientProgress;
 
     // Delete legacy separate sidecar progress file if present
     try {
@@ -497,4 +494,3 @@ export async function cleanupTempFiles(targetDir) {
     logger.warn('[Filesystem] Startup cleanup failed:', err?.message || String(err));
   }
 }
-

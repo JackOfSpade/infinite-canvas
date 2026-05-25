@@ -459,7 +459,7 @@ export async function fetchLeverJobs(queries, signal = null, geoTerms = EMPTY_GE
  * @param {string} apiKey — USAJobs API key (from .env or config)
  * @param {string} email — registered email for User-Agent header
  */
-export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDays = 30) {
+export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDays = 30, location = '') {
   if (!apiKey) {
     logger.warn('[USAJobs] No API key configured — skipping');
     // Surface the skip reason as a `warning` so the source card can render
@@ -482,6 +482,7 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
     Keyword: query,
     ResultsPerPage: '150', // uncapped breadth; USAJobs DatePosted below already keeps these in-window
     DatePosted: String(Math.max(1, Math.floor(maxAgeDays || 30))),
+    ...(location ? { LocationName: location } : {}),
   });
 
   const r = await safeApiFetch(`https://data.usajobs.gov/api/search?${params}`, {

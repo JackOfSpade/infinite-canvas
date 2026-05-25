@@ -305,6 +305,7 @@ export function JobSourceCardNode({ id, data }) {
   const hasThrottle = warning?.severity === 'throttle';
   const hasInfo     = warning?.severity === 'info';
   const hasWarn     = warning?.severity === 'warn';
+  const warningLabel = warning?.shortLabel || warning?.code || null;
   // Google's udm=8 page is unscrapeable, so a "done" with no jobs yet isn't a
   // success — it's a card waiting for the user to Open & paste. Treat it as an
   // action-needed state (no green check, an honest label, amber accent) rather
@@ -382,7 +383,7 @@ export function JobSourceCardNode({ id, data }) {
               className="text-[9px] truncate"
               style={{ color: (isError || hasBlock) ? '#fca5a5' : (hasThrottle || hasInfo || isSkipped || manualPasteUnresolved) ? '#fcd34d' : isDone ? '#a7f3d0' : 'rgba(255,255,255,0.45)' }}
             >
-              {warning ? warning.code : statusLine}
+              {warning ? warningLabel : statusLine}
             </span>
           </div>
         </div>

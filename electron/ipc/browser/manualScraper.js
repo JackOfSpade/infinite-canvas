@@ -19,18 +19,20 @@
 import puppeteer from 'puppeteer-extra';
 import { closeStealthBrowser, getUserDataDir, findChromePath } from '../stealthBrowser.js';
 import { logger } from '../../logger.js';
+import { TEST_MODE } from '../resultCaps.js';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
 const NAV_SETTLE_MS          = 2000;          // settle after navigation before first action
 const CONTENT_POLL_MS        = 600;           // poll interval while waiting for content/challenge
 const CONTENT_TIMEOUT_MS     = 20_000;        // max wait for content before proceeding anyway
 const CHALLENGE_TIMEOUT_MS   = 5 * 60_000;   // 5 min for user to solve challenge
+const CHALLENGE_STABLE_MS    = 1_500;         // page must be challenge-free for this long before resuming — guards against re-serves
 const DESC_CHANGE_POLL_MS    = 200;           // poll interval waiting for description panel update
 const DESC_CHANGE_TIMEOUT_MS = 3_000;         // max wait for description to change after a card click
 const DESC_CLICK_DELAY_MS    = 600;           // pause between card clicks (natural pacing)
 const SITE_CHANGED_ABORT_THRESHOLD = 3;
 const DESC_STALE_THRESHOLD   = 3;             // consecutive click/panel failures before flagging stale selectors
-const JOB_QUERY_TARGET        = 150;          // per-query depth target for scroll / load-more sources
+const JOB_QUERY_TARGET        = TEST_MODE ? 5 : 150; // per-query depth target for scroll / load-more sources
 
 // Returns ms scaled by a random factor in [0.75, 1.40] — human timing is never metronome-regular.
 const jitter = (ms) => Math.round(ms * (0.75 + Math.random() * 0.65));
@@ -48,6 +50,19 @@ const hasDeadListingText = (text = '') => {
   return DEAD_LISTING_PHRASES.some(phrase => lower.includes(phrase));
 };
 
+function countDistinctJobs(jobs) {
+  if (!Array.isArray(jobs) || jobs.length === 0) return 0;
+  const seen = new Set();
+  let count = 0;
+  for (const job of jobs) {
+    const key = `${job?.title || ''}|${job?.company || ''}|${job?.url || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    count++;
+  }
+  return count;
+}
+
 // ── Per-source configs ────────────────────────────────────────────────────────
 const SOURCE_LABELS = {
   google:       'Google Jobs',
@@ -56,6 +71,37 @@ const SOURCE_LABELS = {
   glassdoor:    'Glassdoor',
   wellfound:    'Wellfound',
 };
+
+const manualScraperTelemetry = {
+  active: null,
+  events: [],
+};
+
+function recordManualScraperTelemetry(event) {
+  const entry = {
+    ts: Date.now(),
+    ...event,
+  };
+  manualScraperTelemetry.events.push(entry);
+  if (manualScraperTelemetry.events.length > 30) manualScraperTelemetry.events.shift();
+  manualScraperTelemetry.active = {
+    ...(manualScraperTelemetry.active || {}),
+    ...entry,
+  };
+}
+
+function clearManualScraperTelemetry(status = 'idle') {
+  manualScraperTelemetry.active = manualScraperTelemetry.active
+    ? { ...manualScraperTelemetry.active, ts: Date.now(), phase: status }
+    : null;
+}
+
+export function getManualScraperTelemetry() {
+  return {
+    active: manualScraperTelemetry.active ? { ...manualScraperTelemetry.active } : null,
+    events: manualScraperTelemetry.events.map(e => ({ ...e })),
+  };
+}
 
 // Selector confirming real page content is present (vs bot-challenge page).
 // null = no reliable selector; skip content check, rely solely on challenge detection.
@@ -105,10 +151,6 @@ const LOAD_MORE_SELECTORS = {
 //   panelSelector — CSS selector for the description panel that updates after each click
 //   panelMulti    — if true, querySelectorAll + join textContent (for split-element panels)
 //   closeSelector — if set, click this after reading to close a modal before the next card
-//   preScroll     — if true, scroll to each card’s proportional list position before
-//                   clicking it (per-card, not a bulk top→bottom sweep). Used when the
-//                   extractor reads from embedded JSON but the React virtual list only
-//                   renders visible cards on demand.
 const DESC_CONFIGS = {
   google: {
     keyParam:      'htidocid',
@@ -121,7 +163,6 @@ const DESC_CONFIGS = {
     panelSelector: '.OOyDTc, .ejCXj',
     panelMulti:    true,         // description split across visible + hidden spans
     closeSelector: null,
-    preScroll:     false,
   },
   indeed: {
     keyParam:      'jk',
@@ -135,7 +176,6 @@ const DESC_CONFIGS = {
     panelSelector: '#jobDescriptionText',
     panelMulti:    false,
     closeSelector: null,
-    preScroll:     false,
     // walkCards: instead of bulk-extracting all keys from __NEXT_DATA__ upfront
     // (which only captures the initially-rendered ~10 cards), scroll the virtual
     // list incrementally and record each job as it's clicked — count climbs
@@ -155,7 +195,6 @@ const DESC_CONFIGS = {
     panelSelector: '.jobDescriptionSection, [data-testid="jobDescriptionSection"], #job-description-container, [class*="jobDescription"]',
     panelMulti:    false,
     closeSelector: null,
-    preScroll:     false,
     expandViaNavigation: true,
     navUrlField:         'url',  // job.url is already the individual job page
   },
@@ -170,7 +209,6 @@ const DESC_CONFIGS = {
     panelSelector: '[data-brandviews*="joblisting-description"]',
     panelMulti:    false,
     closeSelector: null,
-    preScroll:     false,
   },
   wellfound: {
     keyParam:      null,
@@ -183,34 +221,108 @@ const DESC_CONFIGS = {
     panelSelector: '#job-description',
     panelMulti:    false,
     closeSelector: '[data-test="closeButton"]',
-    preScroll:     false,
   },
 };
 
 // ── Challenge detection ───────────────────────────────────────────────────────
-async function detectChallengePage(page) {
+async function getChallengeSignals(page) {
   return page.evaluate(() => {
-    if (document.querySelector('#challenge-form, #cf-challenge-running')) return true;
-    if (/^just a moment/i.test(document.title || '')) return true;
-    if (document.querySelector('#px-captcha, #px-block-page-container')) return true;
-    // reCAPTCHA v3 / enterprise injects invisible iframes (height=0, display:none)
-    // on every page as background bot telemetry — those are NOT a user challenge.
-    // Only flag when the iframe is actually rendered with non-zero visible area,
-    // which is what reCAPTCHA v2 (checkbox / image puzzle) produces.
-    if ([...document.querySelectorAll('iframe[src*="recaptcha/api2"], iframe[src*="recaptcha/enterprise"]')]
-      .some(fr => { const r = fr.getBoundingClientRect(); return r.width > 0 && r.height > 0; })) return true;
-    if ([...document.querySelectorAll('iframe[src*="hcaptcha.com"]')]
-      .some(fr => { const r = fr.getBoundingClientRect(); return r.width > 0 && r.height > 0; })) return true;
-    if (document.querySelector('iframe[src*="challenges.cloudflare.com"]')) return true;
-    // Cloudflare "Additional Verification Required" / Turnstile soft-block
-    if (/^just a moment/i.test(document.title || '')) return true;
-    if (typeof window.INDEED_CLOUDFLARE_STATIC_PAGE !== 'undefined') return true;
-    if (document.querySelector('script[src*="challenge-platform"]')) return true;
-    const bodyText = (document.body?.innerText || '').toLowerCase();
-    if (bodyText.includes('your ray id for this request')) return true;
-    if (bodyText.includes('additional verification required')) return true;
-    return false;
-  }).catch(() => false);
+    const bodyTextRaw = document.body?.innerText || '';
+    const bodyText = bodyTextRaw.toLowerCase();
+    const titleRaw = document.title || '';
+    const title = titleRaw.toLowerCase();
+    const hasChallengeShell = !!document.querySelector('#challenge-form, #cf-challenge-running, [data-testid="challenge"]');
+    const hasPerimeterXBlock = !!document.querySelector('#px-captcha, #px-block-page-container');
+    // After the checkbox is solved Cloudflare shows "Verification successful.
+    // Waiting for www.indeed.com to respond" (in #ijUz0) before auto-redirecting.
+    // Treat this as still-challenge so cleanSince only starts after the redirect.
+    const hasVerificationSuccessful =
+      bodyText.includes('verification successful') ||
+      (bodyText.includes('waiting for') && bodyText.includes('indeed.com to respond'));
+    const hasVerificationText =
+      hasVerificationSuccessful ||
+      bodyText.includes('verify you are human') ||
+      bodyText.includes('let us know you') ||
+      bodyText.includes('security check') ||
+      bodyText.includes('your ray id for this request') ||
+      bodyText.includes('additional verification required') ||
+      bodyText.includes('i am not a robot');
+    const hasNormalContent = !!document.querySelector(
+      'main [data-jk], main a[href*="/viewjob"], main [data-testid="jobDescriptionSection"], main #jobDescriptionSection, main h1'
+    );
+    const visibleRecaptchaFrames = [...document.querySelectorAll('iframe[src*="recaptcha/api2"], iframe[src*="recaptcha/enterprise"]')]
+      .filter(fr => { const r = fr.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).length;
+    const visibleHCaptchaFrames = [...document.querySelectorAll('iframe[src*="hcaptcha.com"]')]
+      .filter(fr => { const r = fr.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).length;
+    const hasCloudflareChallengeFrame = !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+    const hasIndeedCloudflareMarker = typeof window.INDEED_CLOUDFLARE_STATIC_PAGE !== 'undefined';
+
+    let reason = 'none';
+    if (hasChallengeShell || hasPerimeterXBlock) reason = 'challenge-shell';
+    else if (title.startsWith('just a moment')) reason = 'just-a-moment-title';
+    else if (hasVerificationText) reason = 'verification-text';
+    else if (visibleRecaptchaFrames > 0 && !hasNormalContent) reason = 'visible-recaptcha-without-content';
+    else if (visibleHCaptchaFrames > 0 && !hasNormalContent) reason = 'visible-hcaptcha-without-content';
+    else if (hasCloudflareChallengeFrame) reason = 'cloudflare-challenge-frame';
+    else if (hasIndeedCloudflareMarker && !hasNormalContent) reason = 'indeed-cloudflare-static-without-content';
+
+    return {
+      isChallenge: reason !== 'none',
+      verificationCompleted: hasVerificationSuccessful,
+      reason,
+      url: window.location.href,
+      title: titleRaw.slice(0, 120),
+      bodyHead: bodyTextRaw.replace(/\s+/g, ' ').trim().slice(0, 240),
+      hasChallengeShell,
+      hasPerimeterXBlock,
+      hasVerificationText,
+      hasNormalContent,
+      visibleRecaptchaFrames,
+      visibleHCaptchaFrames,
+      hasCloudflareChallengeFrame,
+      hasIndeedCloudflareMarker,
+    };
+  }).catch(() => ({
+    isChallenge: false,
+    verificationCompleted: false,
+    reason: 'evaluate-failed',
+    url: page.url(),
+    title: '',
+    bodyHead: '',
+    hasChallengeShell: false,
+    hasPerimeterXBlock: false,
+    hasVerificationText: false,
+    hasNormalContent: false,
+    visibleRecaptchaFrames: 0,
+    visibleHCaptchaFrames: 0,
+    hasCloudflareChallengeFrame: false,
+    hasIndeedCloudflareMarker: false,
+  }));
+}
+
+function formatChallengeEvidence(signals, key = null) {
+  if (!signals) return 'challenge signals unavailable';
+  const bits = [
+    key ? `key=${key}` : null,
+    signals.reason ? `reason=${signals.reason}` : null,
+    signals.url ? `url=${signals.url}` : null,
+    signals.title ? `title=${JSON.stringify(signals.title)}` : null,
+    `normalContent=${signals.hasNormalContent ? 'yes' : 'no'}`,
+    signals.hasChallengeShell ? 'challengeShell=yes' : null,
+    signals.hasPerimeterXBlock ? 'perimeterX=yes' : null,
+    signals.hasVerificationText ? 'verificationText=yes' : null,
+    signals.visibleRecaptchaFrames ? `recaptchaFrames=${signals.visibleRecaptchaFrames}` : null,
+    signals.visibleHCaptchaFrames ? `hcaptchaFrames=${signals.visibleHCaptchaFrames}` : null,
+    signals.hasCloudflareChallengeFrame ? 'cfFrame=yes' : null,
+    signals.hasIndeedCloudflareMarker ? 'indeedCfMarker=yes' : null,
+    signals.bodyHead ? `bodyHead=${JSON.stringify(signals.bodyHead)}` : null,
+  ].filter(Boolean);
+  return bits.join(' | ').slice(0, 700);
+}
+
+async function detectChallengePage(page) {
+  const signals = await getChallengeSignals(page);
+  return !!signals?.isChallenge;
 }
 
 // ── Overlay ───────────────────────────────────────────────────────────────────
@@ -345,18 +457,22 @@ async function waitIfPaused(page, signal) {
 async function waitForReady(page, sourceId, overlayBase, signal) {
   const contentSel    = CONTENT_SELECTORS[sourceId];
   const contentDL     = Date.now() + CONTENT_TIMEOUT_MS;
-  let inChallenge     = false;
-  let challengeDL     = 0;
+  let inChallenge              = false;
+  let challengeDL              = 0;
+  let cleanSince               = null; // tracks when page first went challenge-free
+  let shownVerifiedOverlay     = false;
 
   while (true) {
     if (signal?.aborted) return 'abort';
 
-    const isChallenge = await detectChallengePage(page);
+    const signals     = await getChallengeSignals(page);
+    const isChallenge = !!signals?.isChallenge;
     const hasContent  = !contentSel || await page.evaluate(
       s => !!document.querySelector(s), contentSel
     ).catch(() => false);
 
     if (isChallenge && !hasContent) {
+      cleanSince = null; // challenge present or re-served — reset stable timer
       if (!inChallenge) {
         inChallenge = true;
         challengeDL = Date.now() + CHALLENGE_TIMEOUT_MS;
@@ -367,6 +483,15 @@ async function waitForReady(page, sourceId, overlayBase, signal) {
         });
         logger.info(`[BrowserScraper] ${overlayBase.srcName}: bot challenge detected — waiting for user`);
       }
+      if (!shownVerifiedOverlay && signals?.verificationCompleted) {
+        shownVerifiedOverlay = true;
+        await updateOverlay(page, {
+          ...overlayBase,
+          status:    'Verification complete — waiting for Indeed to redirect…',
+          challenge: true,
+        });
+        logger.info(`[BrowserScraper] ${overlayBase.srcName}: verification successful — waiting for Cloudflare redirect`);
+      }
       if (Date.now() > challengeDL) {
         logger.warn(`[BrowserScraper] ${overlayBase.srcName}: challenge not solved within ${CHALLENGE_TIMEOUT_MS / 60000} min — skipping source`);
         return 'skip';
@@ -376,7 +501,14 @@ async function waitForReady(page, sourceId, overlayBase, signal) {
     }
 
     if (inChallenge) {
-      // Challenge just cleared — let the page finish rendering
+      // Page is currently clean — start or advance the stable-clean timer.
+      // If Cloudflare re-serves the challenge, the isChallenge branch above
+      // resets cleanSince, so the full CHALLENGE_STABLE_MS must elapse again.
+      if (cleanSince === null) cleanSince = Date.now();
+      if (Date.now() - cleanSince < CHALLENGE_STABLE_MS) {
+        await new Promise(r => setTimeout(r, CONTENT_POLL_MS));
+        continue;
+      }
       await new Promise(r => setTimeout(r, jitter(1000)));
       await updateOverlay(page, { ...overlayBase, status: 'Extracting jobs…' });
       logger.info(`[BrowserScraper] ${overlayBase.srcName}: challenge resolved — resuming`);
@@ -387,6 +519,89 @@ async function waitForReady(page, sourceId, overlayBase, signal) {
 
     await new Promise(r => setTimeout(r, CONTENT_POLL_MS));
   }
+}
+
+async function waitForMidCardChallenge(page, overlayBase, count, key, signal) {
+  const initialSignals = await getChallengeSignals(page);
+  if (!initialSignals?.isChallenge) return { status: 'none', evidence: null };
+  const initialEvidence = formatChallengeEvidence(initialSignals, key);
+  recordManualScraperTelemetry({
+    phase: 'mid-card-challenge',
+    srcName: overlayBase?.srcName || null,
+    key,
+    evidence: initialEvidence,
+    url: initialSignals?.url || page.url(),
+  });
+
+  await updateOverlay(page, {
+    ...overlayBase,
+    count,
+    status:    '⚠️ Complete the challenge above to retry this job',
+    challenge: true,
+  });
+  logger.info(`[BrowserScraper] ${overlayBase.srcName}: bot challenge detected after card click (key="${key}") — waiting before retry. Evidence: ${initialEvidence}`);
+
+  // Track when the page first went challenge-free. Only declare resolved
+  // once it stays clean for CHALLENGE_STABLE_MS — if Cloudflare/Indeed
+  // re-serves the challenge (any number of times), cleanSince resets and
+  // the user must solve again before the timer restarts.
+  let cleanSince = null;
+  let shownVerifiedOverlay = false;
+  const challengeDeadline = Date.now() + CHALLENGE_TIMEOUT_MS;
+  while (Date.now() < challengeDeadline) {
+    if (signal?.aborted || page.isClosed()) return { status: 'abort', evidence: initialEvidence };
+    await new Promise(r => setTimeout(r, CONTENT_POLL_MS));
+    const signals = await getChallengeSignals(page);
+    if (signals?.isChallenge) {
+      cleanSince = null; // re-served or still present — reset stable timer
+      // Show "waiting for redirect" overlay once Cloudflare confirms the checkbox
+      // was solved — the page still counts as a challenge until it redirects, so
+      // the user would otherwise keep seeing "Complete the challenge" even though
+      // they already did.
+      if (!shownVerifiedOverlay && signals.verificationCompleted) {
+        shownVerifiedOverlay = true;
+        await updateOverlay(page, {
+          ...overlayBase,
+          count,
+          status: 'Verification complete — waiting for Indeed to redirect…',
+          challenge: true,
+        });
+        logger.info(`[BrowserScraper] ${overlayBase.srcName}: verification successful (key="${key}") — waiting for Cloudflare redirect`);
+      }
+    } else {
+      if (cleanSince === null) cleanSince = Date.now();
+      if (Date.now() - cleanSince >= CHALLENGE_STABLE_MS) {
+        await new Promise(r => setTimeout(r, jitter(1000)));
+        await injectOverlay(page);
+        await updateOverlay(page, {
+          ...overlayBase,
+          count,
+          status: 'Challenge resolved — retrying this job…',
+        });
+        logger.info(`[BrowserScraper] ${overlayBase.srcName}: challenge resolved after card click (key="${key}") — retrying same card. Initial evidence: ${initialEvidence}`);
+        recordManualScraperTelemetry({
+          phase: 'mid-card-challenge-resolved',
+          srcName: overlayBase?.srcName || null,
+          key,
+          evidence: initialEvidence,
+          url: page.url(),
+        });
+        return { status: 'resolved', evidence: initialEvidence };
+      }
+    }
+  }
+
+  const timeoutSignals = await getChallengeSignals(page);
+  const timeoutEvidence = formatChallengeEvidence(timeoutSignals, key);
+  logger.warn(`[BrowserScraper] ${overlayBase.srcName}: challenge after card click not solved within ${CHALLENGE_TIMEOUT_MS / 60000} min (key="${key}"). Evidence: ${timeoutEvidence}`);
+  recordManualScraperTelemetry({
+    phase: 'mid-card-challenge-timeout',
+    srcName: overlayBase?.srcName || null,
+    key,
+    evidence: timeoutEvidence || initialEvidence,
+    url: timeoutSignals?.url || page.url(),
+  });
+  return { status: 'timeout', evidence: timeoutEvidence || initialEvidence };
 }
 
 // ── Extractor runner ──────────────────────────────────────────────────────────
@@ -454,30 +669,21 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         await page.evaluate(u => { window.location.href = u; }, viewUrl).catch(() => {});
         await new Promise(r => setTimeout(r, jitter(2000)));
 
-        // Detect human verification / challenge redirects and expired listings.
+        const isChallenge = await detectChallengePage(page);
+        // Detect expired listings separately from challenge redirects.
         const pageInfo = await page.evaluate(() => {
           const bodyText = (document.body?.innerText || '').toLowerCase();
           const title    = (document.title || '').toLowerCase();
-          const isChallenge =
-            bodyText.includes('verify you are human') ||
-            bodyText.includes('let us know you') ||
-            bodyText.includes('security check') ||
-            bodyText.includes('your ray id for this request') ||
-            bodyText.includes('additional verification required') ||
-            title.includes('verif') ||
-            title.includes('just a moment') ||
-            typeof window.INDEED_CLOUDFLARE_STATIC_PAGE !== 'undefined' ||
-            !!document.querySelector('#challenge-form, #cf-challenge-running, [data-testid="challenge"], script[src*="challenge-platform"]');
           const isNotFound =
             bodyText.includes('page not found') ||
             bodyText.includes("we can't find this page") ||
             bodyText.includes('no longer available') ||
             bodyText.includes('this job has expired') ||
             title.includes('404');
-          return { isChallenge, isNotFound };
-        }).catch(() => ({ isChallenge: false, isNotFound: false }));
+          return { isNotFound };
+        }).catch(() => ({ isNotFound: false }));
 
-        if (pageInfo.isChallenge) {
+        if (isChallenge) {
           await updateOverlay(page, {
             ...overlayBase,
             count:     baseCount + i + 1,
@@ -490,19 +696,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           let solved = false;
           while (Date.now() < challengeDeadline) {
             await new Promise(r => setTimeout(r, 1500));
-            const stillChallenge = await page.evaluate(() => {
-              const text  = (document.body?.innerText || '').toLowerCase();
-              const title = (document.title || '').toLowerCase();
-              return text.includes('verify you are human') ||
-                text.includes('let us know you') ||
-                text.includes('security check') ||
-                text.includes('your ray id for this request') ||
-                text.includes('additional verification required') ||
-                title.includes('verif') ||
-                title.includes('just a moment') ||
-                typeof window.INDEED_CLOUDFLARE_STATIC_PAGE !== 'undefined' ||
-                !!document.querySelector('#challenge-form, #cf-challenge-running, script[src*="challenge-platform"]');
-            }).catch(() => true);
+            const stillChallenge = await detectChallengePage(page);
             if (!stillChallenge) { solved = true; break; }
           }
           if (!solved) break; // skip/timeout — stop expanding and return what we have
@@ -560,14 +754,57 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     };
   };
 
+  // ── Reveal pass ───────────────────────────────────────────────────────────────
+  // Scroll through all job cards once to ensure they're loaded into the DOM, then
+  // reset to the top of the list. Mirrors walkDomCards' reveal pass and Google's
+  // preloadContent: we know the full count N before clicking begins, giving stable
+  // "Reading job X/N" progress rather than a blind scroll-per-card approach.
+  {
+    let revealedCount = 0;
+    for (let ri = 0; ri < enhanced.length; ri++) {
+      if (signal?.aborted || page.isClosed()) break;
+      const job = enhanced[ri];
+      const rawKey = (cfg.keyField && job[cfg.keyField])
+        ? job[cfg.keyField]
+        : cfg.keyRegex
+          ? job.url?.match(new RegExp(cfg.keyRegex))?.[1]
+          : job.url?.match(new RegExp(`[?&]${cfg.keyParam}=([^&]+)`))?.[1];
+      if (!rawKey) continue;
+      const key = cfg.keyDecode ? decodeURIComponent(rawKey) : rawKey;
+
+      const found = await page.evaluate((cardAttr, cardIdPrefix, cardHrefKey, k) => {
+        let card;
+        if (cardAttr) {
+          card = document.querySelector(`[${cardAttr}="${k}"]`) || document.querySelector(`a[href*="${k}"]`);
+        } else if (cardHrefKey != null) {
+          card = document.querySelector(`a[href*="${cardHrefKey}${k}-"]`);
+        } else {
+          card = document.getElementById((cardIdPrefix || '') + k);
+        }
+        if (!card) return false;
+        card.scrollIntoView({ block: 'center', behavior: 'instant' });
+        return true;
+      }, cfg.cardAttr ?? null, cfg.cardIdPrefix ?? null, cfg.cardHrefKey ?? null, key).catch(() => false);
+
+      if (found) revealedCount++;
+      await updateOverlay(page, {
+        ...overlayBase,
+        count:  baseCount,
+        status: `Revealing cards… ${ri + 1}/${enhanced.length}`,
+      }).catch(() => {});
+      await new Promise(r => setTimeout(r, 50));
+    }
+    await page.evaluate(() => { window.scrollTo(0, 0); }).catch(() => {});
+    await new Promise(r => setTimeout(r, 200));
+    logger.info(`[BrowserScraper] expandDescriptions(${sourceId}): reveal pass found ${revealedCount}/${enhanced.length} cards — starting click pass`);
+  }
+
   for (let i = 0; i < enhanced.length; i++) {
     const clickPause = await waitIfPaused(page, signal);
     if (clickPause === 'abort') break;
 
     const job = enhanced[i];
 
-    // keyField takes precedence: the extractor stored the canonical key on the job object,
-    // bypassing URL parsing entirely (e.g. Indeed's jobkey avoids pagead URL mismatches).
     const rawKey = (cfg.keyField && job[cfg.keyField])
       ? job[cfg.keyField]
       : cfg.keyRegex
@@ -579,59 +816,37 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     await updateOverlay(page, {
       ...overlayBase,
       count:  baseCount + i + 1,
-      status: `Expanding descriptions… ${i + 1}/${enhanced.length}`,
+      status: `Reading job ${i + 1}/${enhanced.length}…`,
     });
 
     try {
-      if (cfg.preScroll) {
-        // Scroll until the target card appears in the DOM, then centre it.
-        // Beats proportional scroll for virtual lists (e.g. Indeed) — we know
-        // React has rendered the card before we try to click it.
-        await page.evaluate((cardAttr, key) => {
-          return new Promise(resolve => {
-            const SCROLL_PX = 400;
-            const MAX_STEPS = 40;    // 40 × 400 px ≈ 16 000 px safety cap
-            let steps = 0;
-            const tick = () => {
-              const card = (cardAttr ? document.querySelector(`[${cardAttr}="${key}"]`) : null)
-                        || document.querySelector(`a[href*="${key}"]`);
-              if (card) {
-                card.scrollIntoView({ block: 'center', behavior: 'instant' });
-                return resolve(true);
-              }
-              if (++steps > MAX_STEPS) return resolve(false);
-              window.scrollBy(0, SCROLL_PX);
-              setTimeout(tick, 150);   // one React render cycle
-            };
-            tick();
-          });
-        }, cfg.cardAttr ?? null, key);
-        await new Promise(r => setTimeout(r, jitter(150)));
-      }
-
-      const clicked = await page.evaluate((cardAttr, cardIdPrefix, cardHrefKey, clickSel, key) => {
+      // Scroll card into view and get coordinates for a real mouse click.
+      // Real mouse events are reliably intercepted by the SPA's React event handlers;
+      // untrusted DOM .click() may not be and can follow the raw href instead.
+      const clickTarget = await page.evaluate((cardAttr, cardIdPrefix, cardHrefKey, clickSel, k) => {
         let card;
         if (cardAttr) {
-          card = document.querySelector(`[${cardAttr}="${key}"]`);
-          // Fallback: find an <a> whose href contains the key — handles cases where
-          // the DOM attribute value doesn't match the URL key (e.g. Indeed sponsored
-          // jobs where data-jk uses the canonical key but the stored URL has a
-          // session/impression tracking variant of the key).
-          if (!card) card = document.querySelector(`a[href*="${key}"]`);
-        } else if (cardHrefKey !== null && cardHrefKey !== undefined) {
-          card = document.querySelector(`a[href*="${cardHrefKey}${key}-"]`);
+          card = document.querySelector(`[${cardAttr}="${k}"]`) || document.querySelector(`a[href*="${k}"]`);
+        } else if (cardHrefKey != null) {
+          card = document.querySelector(`a[href*="${cardHrefKey}${k}-"]`);
         } else {
-          card = document.getElementById((cardIdPrefix || '') + key);
+          card = document.getElementById((cardIdPrefix || '') + k);
         }
-        if (!card) return false;
+        if (!card) return { ok: false };
         const target = clickSel ? card.querySelector(clickSel) : card;
-        if (!target) return false;
+        if (!target) return { ok: false };
         target.scrollIntoView({ block: 'nearest', behavior: 'instant' });
-        target.click();
-        return true;
-      }, cfg.cardAttr, cfg.cardIdPrefix, cfg.cardHrefKey ?? null, cfg.clickSelector, key);
+        const rect = target.getBoundingClientRect();
+        if (!rect.width || !rect.height) return { ok: false };
+        return {
+          ok: true,
+          x: rect.left + Math.min(rect.width - 1, Math.max(1, rect.width * 0.35)),
+          y: rect.top + Math.min(rect.height - 1, Math.max(1, rect.height * 0.5)),
+        };
+      }, cfg.cardAttr ?? null, cfg.cardIdPrefix ?? null, cfg.cardHrefKey ?? null, cfg.clickSelector ?? null, key)
+        .catch(() => ({ ok: false }));
 
-      if (!clicked) {
+      if (!clickTarget.ok) {
         consecutiveClickFails++;
         consecutivePanelTimeouts = 0;
         if (consecutiveClickFails >= DESC_STALE_THRESHOLD) {
@@ -643,8 +858,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         }
         continue;
       }
-
       consecutiveClickFails = 0;
+
+      await page.mouse.move(clickTarget.x, clickTarget.y).catch(() => {});
+      await page.mouse.click(clickTarget.x, clickTarget.y, { delay: jitter(80) }).catch(() => {});
 
       let gotDescription = false;
       const dl = Date.now() + DESC_CHANGE_TIMEOUT_MS;
@@ -735,28 +952,216 @@ async function restoreSearchPageAfterDeadListing(page, sourceId, listUrl, overla
   }
 }
 
+async function resetWalkCardListToTop(page, cardAttr) {
+  await page.evaluate((attr) => {
+    const cards = document.querySelectorAll(`[${attr}]`);
+    const first = cards[0];
+    if (first) first.scrollIntoView({ block: 'start', behavior: 'instant' });
+    window.scrollTo(0, 0);
+  }, cardAttr).catch(() => {});
+}
+
+async function getWalkResultsState(page, cardAttr) {
+  return page.evaluate((attr) => {
+    const cards = Array.from(document.querySelectorAll(`[${attr}]`));
+    const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+    return {
+      url: window.location.href,
+      title: document.title || '',
+      cardCount: cards.length,
+      hasResultsShell: !!document.querySelector('.job_seen_beacon, .resultContent, [data-testid="job-card-container"]') || cards.length > 0,
+      bodyHead: bodyText.slice(0, 220),
+    };
+  }, cardAttr).catch(() => ({
+    url: page.url(),
+    title: '',
+    cardCount: 0,
+    hasResultsShell: false,
+    bodyHead: '',
+  }));
+}
+
+async function ensureWalkCardVisible(page, cardAttr, key, options = {}) {
+  const {
+    signal = null,
+    resetToTop = false,
+    maxScrolls = 16,
+  } = options;
+
+  if (resetToTop) {
+    await resetWalkCardListToTop(page, cardAttr);
+    await new Promise(r => setTimeout(r, 150));
+  }
+
+  for (let attempt = 0; attempt < maxScrolls; attempt++) {
+    if (signal?.aborted || page.isClosed()) return false;
+
+    const cardFound = await page.evaluate((attr, k) => {
+      const el = document.querySelector(`[${attr}="${k}"]`);
+      if (!el) return false;
+      const card = (el.tagName === 'A')
+        ? (el.closest('.job_seen_beacon, [data-testid="job-card-container"], li, article') || el)
+        : el;
+      card.scrollIntoView({ block: 'center', behavior: 'instant' });
+      return true;
+    }, cardAttr, key).catch(() => false);
+    if (cardFound) return true;
+
+    await page.evaluate((attr) => {
+      const cards = document.querySelectorAll(`[${attr}]`);
+      const last = cards[cards.length - 1];
+      if (last) last.scrollIntoView({ block: 'end', behavior: 'instant' });
+      else window.scrollBy(0, 400);
+    }, cardAttr).catch(() => {});
+
+    const pollDeadline = Date.now() + 1000;
+    while (Date.now() < pollDeadline) {
+      if (signal?.aborted || page.isClosed()) return false;
+      await new Promise(r => setTimeout(r, 100));
+      const cardVisible = await page.evaluate((attr, k) =>
+        !!document.querySelector(`[${attr}="${k}"]`),
+      cardAttr, key).catch(() => false);
+      if (cardVisible) break;
+    }
+  }
+
+  return false;
+}
+
+async function revealWalkCardKeys(page, cardAttr, overlayBase, count, signal) {
+  const revealedKeys = [];
+  const revealedSet = new Set();
+  let noNewCardScrolls = 0;
+  const MAX_EMPTY_SCROLLS = 6; // 6 × 400 px = 2 400 px past last card
+
+  while (true) {
+    if (signal?.aborted || page.isClosed()) break;
+
+    const cardKeys = await page.evaluate((attr) =>
+      [...new Set(
+        Array.from(document.querySelectorAll(`[${attr}]`))
+          .map(el => el.getAttribute(attr))
+          .filter(Boolean),
+      )],
+    cardAttr).catch(() => []);
+
+    let added = 0;
+    for (const key of cardKeys) {
+      if (revealedSet.has(key)) continue;
+      revealedSet.add(key);
+      revealedKeys.push(key);
+      added++;
+    }
+
+    await updateOverlay(page, {
+      ...overlayBase,
+      count,
+      status: `Revealing jobs… ${revealedKeys.length}`,
+    }).catch(() => {});
+
+    if (added === 0) {
+      if (noNewCardScrolls++ >= MAX_EMPTY_SCROLLS) break;
+    } else {
+      noNewCardScrolls = 0;
+    }
+
+    await page.evaluate((attr) => {
+      const cards = document.querySelectorAll(`[${attr}]`);
+      const last = cards[cards.length - 1];
+      if (last) last.scrollIntoView({ block: 'end', behavior: 'instant' });
+      else window.scrollBy(0, 400);
+    }, cardAttr).catch(() => {});
+
+    const pollDeadline = Date.now() + 1000;
+    while (Date.now() < pollDeadline) {
+      if (signal?.aborted || page.isClosed()) break;
+      await new Promise(r => setTimeout(r, 100));
+      const polledKeys = await page.evaluate(
+        (attr) => [...new Set(
+          Array.from(document.querySelectorAll(`[${attr}]`))
+            .map(el => el.getAttribute(attr)).filter(Boolean),
+        )],
+        cardAttr,
+      ).catch(() => []);
+      if (polledKeys.some(k => !revealedSet.has(k))) break;
+    }
+  }
+
+  return revealedKeys;
+}
+
+async function restoreSearchPageAndRefindCard(page, sourceId, listUrl, overlayBase, count, signal, cardAttr, key) {
+  if (signal?.aborted || page.isClosed()) return false;
+
+  await updateOverlay(page, {
+    ...overlayBase,
+    count,
+    status: 'Returning to search results…',
+  }).catch(() => {});
+
+  try {
+    await page.evaluate(u => { window.location.href = u; }, listUrl).catch(() => {});
+    await new Promise(r => setTimeout(r, jitter(NAV_SETTLE_MS)));
+    await injectOverlay(page);
+    const ready = await waitForReady(page, sourceId, overlayBase, signal);
+    if (ready !== 'ok') return false;
+
+    await updateOverlay(page, {
+      ...overlayBase,
+      count,
+      status: 'Finding the interrupted job…',
+    }).catch(() => {});
+    return await ensureWalkCardVisible(page, cardAttr, key, { signal, resetToTop: true, maxScrolls: 16 });
+  } catch {
+    // Best-effort restore; caller will surface the failure.
+  }
+
+  return false;
+}
+
 // ── Pre-loader for scroll / load-more sources ─────────────────────────────────
 // Scrolls or clicks "load more" until JOB_QUERY_TARGET jobs are visible on the
 // page — used for sources without traditional pagination. Must be called BEFORE
 // runExtractor so extraction sees the full loaded set in one pass.
-// Breaks early if no new content appears after a load action (safe even if the
-// source never actually responds to scroll — it just exits after 1 quiet attempt).
+// Breaks as soon as a reveal action stops increasing the extractor-visible job
+// count; otherwise keeps going until the per-query target is reached.
 async function preloadContent(page, sourceId, extractorJS, overlayBase, signal) {
   const isScroll    = SCROLL_SOURCES.has(sourceId);
   const loadMoreSel = LOAD_MORE_SELECTORS[sourceId];
   if (!isScroll && !loadMoreSel) return;
 
   let prevCount = -1;
-  for (let attempt = 0; attempt < 20; attempt++) {
+  while (true) {
     if (signal?.aborted) break;
     const raw   = await page.evaluate(extractorJS).catch(() => []);
-    const count = Array.isArray(raw) ? raw.length : 0;
+    const count = countDistinctJobs(raw);
     await updateOverlay(page, { ...overlayBase, status: `Loading jobs… ${count}/${JOB_QUERY_TARGET}` });
     if (count >= JOB_QUERY_TARGET) break;
     if (count === prevCount) break;  // no new content after last action
     prevCount = count;
     if (isScroll) {
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      if (sourceId === 'google') {
+        // Google Jobs renders cards in its own scrollable container inside the page.
+        // Walk up from the first card to find that container and scroll it; also
+        // scroll document.body so either trigger path gets hit.
+        await page.evaluate(() => {
+          const card = document.querySelector('.EimVGf, [jscontroller="b11o3b"]');
+          if (card) {
+            let el = card.parentElement;
+            while (el && el !== document.body) {
+              const s = getComputedStyle(el);
+              if (s.overflowY === 'auto' || s.overflowY === 'scroll') {
+                el.scrollTop = el.scrollHeight;
+                break;
+              }
+              el = el.parentElement;
+            }
+          }
+          window.scrollTo(0, document.body.scrollHeight);
+        });
+      } else {
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      }
     } else {
       const clicked = await page.evaluate(sel => {
         const btn = document.querySelector(sel);
@@ -787,15 +1192,14 @@ async function walkDomCards(page, sourceId, overlayBase, allJobs, seen, signal) 
   if (!cfg?.walkCards) return { jobsFound: 0, descError: null };
 
   const listUrl                  = page.url();
-  const visitedKeys              = new Set();
   let   skippedDeadListings      = 0;
   let   prevPanelText            = '';
   let   consecutiveClickFails    = 0;
   let   consecutivePanelTimeouts = 0;
   let   consecutiveNullJobData   = 0;  // increments when card DOM extraction returns null
   let   descError                = null;
-  let   noNewCardScrolls         = 0;
-  const MAX_EMPTY_SCROLLS        = 6; // 6 × 400 px = 2 400 px past last card
+  let   consecutiveRevealMisses  = 0;
+  let   cardsWalked              = 0;
   // Indeed puts sponsored/featured cards at the top of results; these have a
   // different DOM structure than organic cards and return null jobData. The
   // threshold must be large enough to absorb a full sponsored block before
@@ -803,89 +1207,79 @@ async function walkDomCards(page, sourceId, overlayBase, allJobs, seen, signal) 
   // sponsored cards at the top aborted before any organic card was reached.
   const NULL_DATA_THRESHOLD      = 10; // 10 consecutive null-data cards = selectors broken
 
-  const abortWithError = async (evidence, suggestion) => {
+  const abortWithError = async (evidence, suggestion, options = {}) => {
     logger.warn(`[BrowserScraper] ${sourceId}: ${evidence}`);
     await updateOverlay(page, {
       ...overlayBase,
       count:  allJobs.length,
-      status: 'Desc selector broken — fix selector code and restart.',
+      status: options.status || 'Desc selector broken — fix selector code and restart.',
       error:  true,
     }).catch(() => {});
     await new Promise(r => setTimeout(r, 3000));
-    descError = { code: 'stale-desc-selectors', severity: 'block', evidence, suggestion };
+    descError = { code: options.code || 'stale-desc-selectors', severity: 'block', evidence, suggestion };
   };
 
-  outer: while (true) {
-    if (signal?.aborted || page.isClosed()) break;
+  const revealedKeys = await revealWalkCardKeys(page, cfg.cardAttr, overlayBase, allJobs.length, signal);
+  if (signal?.aborted || page.isClosed()) return { jobsFound: 0, descError };
+  if (revealedKeys.length === 0) return { jobsFound: 0, descError };
 
-    const pauseResult = await waitIfPaused(page, signal);
-    if (pauseResult === 'abort' || signal?.aborted) break;
+  await resetWalkCardListToTop(page, cfg.cardAttr);
+  await new Promise(r => setTimeout(r, 200));
 
-    // All card keys currently rendered in the DOM (virtual list = sliding window).
-    // De-duplicate at the source: Indeed puts data-jk on both the card wrapper AND the
-    // nested <a> link, so a naive querySelectorAll returns each key twice.
-    const cardKeys = await page.evaluate((attr) =>
-      [...new Set(
-        Array.from(document.querySelectorAll(`[${attr}]`))
-          .map(el => el.getAttribute(attr))
-          .filter(Boolean),
-      )],
-    cfg.cardAttr).catch(() => []);
-
-    const newKeys = cardKeys.filter(k => !visitedKeys.has(k));
-
-    if (newKeys.length === 0) {
-      // No unvisited cards visible — scroll down to trigger more virtual-list renders.
-      // Use scrollIntoView on the last rendered card (not window.scrollBy) so we scroll
-      // the correct container: Indeed's card list is in a scrollable div, not the window,
-      // and window.scrollBy silently does nothing for it. block:'end' places the last
-      // card at the viewport floor, nudging the virtual list to render the next batch.
-      if (noNewCardScrolls++ >= MAX_EMPTY_SCROLLS) break;
-      await page.evaluate((attr) => {
-        const cards = document.querySelectorAll(`[${attr}]`);
-        const last  = cards[cards.length - 1];
-        if (last) last.scrollIntoView({ block: 'end', behavior: 'instant' });
-        else      window.scrollBy(0, 400); // fallback if no cards in DOM yet
-      }, cfg.cardAttr).catch(() => {});
-      // Poll until a new (unvisited) card key appears or 1 s elapses.
-      // Avoids a fixed sleep: on fast machines we continue immediately;
-      // on slow ones we wait as long as React actually needs.
-      const pollDeadline = Date.now() + 1000;
-      while (Date.now() < pollDeadline) {
-        await new Promise(r => setTimeout(r, 100));
-        const polledKeys = await page.evaluate(
-          (attr) => [...new Set(
-            Array.from(document.querySelectorAll(`[${attr}]`))
-              .map(el => el.getAttribute(attr)).filter(Boolean),
-          )],
-          cfg.cardAttr,
-        ).catch(() => []);
-        if (polledKeys.some(k => !visitedKeys.has(k))) break;
-      }
-      continue;
-    }
-
-    noNewCardScrolls = 0;       // reset whenever new cards appear
-    consecutiveNullJobData = 0; // new scroll batch = fresh start; prior nulls were likely sponsored/featured cards
-
-    for (const key of newKeys) {
+  outer: for (let keyIndex = 0; keyIndex < revealedKeys.length; keyIndex++) {
+      const key = revealedKeys[keyIndex];
       if (signal?.aborted || page.isClosed()) break outer;
 
       const pr2 = await waitIfPaused(page, signal);
       if (pr2 === 'abort' || signal?.aborted) break outer;
 
-      visitedKeys.add(key);
-
-      // Scroll card to centre so React keeps it rendered while we interact.
-      // resolveCard: if data-jk is on the <a> title link rather than the wrapper,
-      // navigate up to the enclosing li/article (the actual card container).
-      await page.evaluate((attr, k) => {
-        const el = document.querySelector(`[${attr}="${k}"]`);
-        const card = (el?.tagName === 'A')
-          ? (el.closest('.job_seen_beacon, [data-testid="job-card-container"], li, article') || el)
-          : el;
-        if (card) card.scrollIntoView({ block: 'center', behavior: 'instant' });
-      }, cfg.cardAttr, key).catch(() => {});
+      let cardVisible = false;
+      const pageState = await getWalkResultsState(page, cfg.cardAttr);
+      if (!pageState.hasResultsShell) {
+        logger.warn(
+          `[BrowserScraper] walkDomCards(${sourceId}): page drifted away from search results before key="${key}" — restoring list. State: ${JSON.stringify(pageState)}`,
+        );
+        recordManualScraperTelemetry({
+          phase: 'restore-search-results',
+          sourceId,
+          key,
+          pageState,
+          reason: 'missing-results-shell-before-card',
+        });
+        cardVisible = await restoreSearchPageAndRefindCard(
+          page,
+          sourceId,
+          listUrl,
+          overlayBase,
+          allJobs.length,
+          signal,
+          cfg.cardAttr,
+          key,
+        );
+      } else {
+        cardVisible = await ensureWalkCardVisible(page, cfg.cardAttr, key, { signal, maxScrolls: 8 });
+      }
+      if (!cardVisible) {
+        logger.warn(`[BrowserScraper] walkDomCards(${sourceId}): key="${key}" could not be re-shown after reveal pass — skipping`);
+        recordManualScraperTelemetry({
+          phase: 'reveal-key-missing',
+          sourceId,
+          key,
+          missed: consecutiveRevealMisses + 1,
+          revealed: revealedKeys.length,
+          url: page.url(),
+        });
+        consecutiveRevealMisses++;
+        if (consecutiveRevealMisses >= 3) {
+          logger.warn(
+            `[BrowserScraper] walkDomCards(${sourceId}): ${consecutiveRevealMisses} consecutive reveal-pass misses — abandoning remaining keys on this page to avoid a long virtual-list stall`,
+          );
+          break outer;
+        }
+        continue;
+      }
+      consecutiveRevealMisses = 0;
+      cardsWalked++;
       await new Promise(r => setTimeout(r, jitter(100)));
 
       // Extract job metadata from the card DOM element.
@@ -951,13 +1345,7 @@ async function walkDomCards(page, sourceId, overlayBase, allJobs, seen, signal) 
 
       if (!jobData || jobData.__diag) {
         if (jobData?.__diag === 'el-not-found') {
-          // Virtual-list drop: the element existed when keys were scanned but was
-          // unmounted by the time this evaluate ran. This is NOT a broken-selector
-          // signal — don't count toward the null threshold. Remove from visitedKeys
-          // so the outer loop can re-discover this card if the virtual list re-renders
-          // it (e.g. after the scroll position settles).
-          visitedKeys.delete(key);
-          logger.warn(`[BrowserScraper] walkDomCards(${sourceId}): key="${key}" not in DOM (virtualized), removing from visited for retry`);
+          logger.warn(`[BrowserScraper] walkDomCards(${sourceId}): key="${key}" dropped out of DOM before metadata read — skipping`);
           continue;
         }
         // 'title-empty' or evaluate-threw → genuine selector failure, count toward threshold.
@@ -989,6 +1377,31 @@ async function walkDomCards(page, sourceId, overlayBase, allJobs, seen, signal) 
       // snippet: undefined = click never registered (skip push); '' = no description; string = valid
       let snippet;
       let restoredAfterDeadListing = false;
+      let driftedOffSearchPage = false;
+      const recoverAfterChallenge = async () => {
+        const recovered = await restoreSearchPageAndRefindCard(
+          page,
+          sourceId,
+          listUrl,
+          overlayBase,
+          allJobs.length,
+          signal,
+          cfg.cardAttr,
+          key,
+        );
+        if (recovered) return true;
+        await abortWithError(
+          `Challenge resolved but ${sourceId} could not restore the interrupted results card (key="${key}")`,
+          `Verification passed, but the scraper could not navigate back to the saved ${sourceId} results and refind the interrupted card. Restart the search so ${sourceId} can reopen a fresh results page and continue cleanly.`,
+          {
+            code: 'challenge-resume-card-missing',
+            shortLabel: 'Resume failed after verify',
+            status: 'Verification passed, but the interrupted job could not be restored — restart the search.',
+          },
+        );
+        return false;
+      };
+
       for (let attempt = 0; attempt <= 1; attempt++) {
 
         // ── Click ──────────────────────────────────────────────────────────────
@@ -1019,6 +1432,63 @@ async function walkDomCards(page, sourceId, overlayBase, allJobs, seen, signal) 
         }, cfg.cardAttr, cfg.clickSelector, key).catch(() => ({ ok: false, reason: 'evaluate-threw' }));
 
         const clicked = !!clickTarget?.ok;
+
+        // Sponsored cards use an rc/clk tracking URL as their href. React Router
+        // does NOT intercept those clicks — the browser follows the href directly,
+        // Cloudflare sees an automated request and serves a challenge. Skip the
+        // mouse-click entirely and navigate to viewjob?jk=KEY instead, which is a
+        // clean URL that loads the same description without the tracking redirect.
+        if (clicked && clickTarget.href?.includes('/rc/clk')) {
+          logger.info(
+            `[BrowserScraper] walkDomCards(${sourceId}): key="${key}" is a sponsored card (rc/clk href) — navigating to viewjob to avoid Cloudflare`,
+          );
+          const viewjobUrl = `https://www.indeed.com/viewjob?jk=${key}`;
+          let navDescription = '';
+          try {
+            await page.evaluate(u => { window.location.href = u; }, viewjobUrl).catch(() => {});
+            // Poll for the description selector directly — don't use waitForReady here.
+            // waitForReady's indeed contentSel (.job_seen_beacon) is a search-results
+            // selector that never exists on individual viewjob pages; it would burn the
+            // full 20s CONTENT_TIMEOUT before giving up, costing ~25s per sponsored card.
+            let descDL = Date.now() + 8_000;
+            let viewjobChallengeRetries = 0;
+            while (Date.now() < descDL) {
+              if (signal?.aborted || page.isClosed()) break;
+              await new Promise(r => setTimeout(r, 300));
+              // Cloudflare can challenge the viewjob page or the redirect it issues.
+              // Without this check the poll silently times out and the challenge is
+              // never surfaced to the user.
+              if (await detectChallengePage(page)) {
+                const challengeRes = await waitForMidCardChallenge(page, overlayBase, allJobs.length, key, signal);
+                if (challengeRes.status === 'abort') break outer;
+                if (challengeRes.status === 'timeout') break; // give up on this card
+                // Resolved — re-navigate to viewjob. Reset the deadline: solving can
+                // take >8s and if descDL already expired the while exits immediately
+                // without ever polling, leaving navDescription empty despite success.
+                // Cap retries: some viewjob URLs get re-challenged on every navigation
+                // (Cloudflare bot-manages the page itself). After 2 solves with no
+                // description, give up rather than looping indefinitely.
+                if (++viewjobChallengeRetries > 2) {
+                  logger.warn(`[BrowserScraper] walkDomCards(${sourceId}): key="${key}" re-challenged ${viewjobChallengeRetries} times without description — skipping card`);
+                  break;
+                }
+                descDL = Date.now() + 8_000;
+                await page.evaluate(u => { window.location.href = u; }, viewjobUrl).catch(() => {});
+                continue;
+              }
+              navDescription = await page.evaluate(
+                sel => document.querySelector(sel)?.innerText?.trim() || '',
+                cfg.panelSelector,
+              ).catch(() => '');
+              if (navDescription) break;
+            }
+          } catch { /* best-effort */ }
+          await restoreSearchPageAfterDeadListing(page, sourceId, listUrl, overlayBase, allJobs.length, signal);
+          consecutivePanelTimeouts = 0;
+          snippet = navDescription || '';
+          break;
+        }
+
         if (clicked) {
           await page.mouse.move(clickTarget.x, clickTarget.y).catch(() => {});
           await page.mouse.click(clickTarget.x, clickTarget.y, { delay: jitter(80) }).catch(() => {});
@@ -1036,6 +1506,25 @@ async function walkDomCards(page, sourceId, overlayBase, allJobs, seen, signal) 
         }
         consecutiveClickFails = 0;
 
+        const challengeAfterClick = await waitForMidCardChallenge(page, overlayBase, allJobs.length, key, signal);
+        if (challengeAfterClick.status === 'abort') break outer;
+        if (challengeAfterClick.status === 'timeout') {
+          await abortWithError(
+            `Challenge after card click timed out (${sourceId}, key="${key}"). ${challengeAfterClick.evidence || ''}`.trim(),
+            `The browser scraper stopped because ${sourceId} required human verification while opening a job card and it was not solved in time.`,
+            {
+              code: 'challenge-timeout',
+              status: 'Challenge timed out — restart the search when ready.',
+            },
+          );
+          break outer;
+        }
+        if (challengeAfterClick.status === 'resolved') {
+          if (!(await recoverAfterChallenge())) break outer;
+          attempt--;
+          continue;
+        }
+
         // ── Poll ───────────────────────────────────────────────────────────────
         // prevPanelText is intentionally NOT updated until we confirm a valid
         // description below — dead-panel error strings must not become the new
@@ -1043,9 +1532,31 @@ async function walkDomCards(page, sourceId, overlayBase, allJobs, seen, signal) 
         // → full timeout → consecutivePanelTimeouts++ → eventual abortWithError).
         let description = '';
         let pageLevelDeadListing = null;
+        let retrySameCardAfterChallenge = false;
+        driftedOffSearchPage = false;
         const dl = Date.now() + DESC_CHANGE_TIMEOUT_MS;
         while (Date.now() < dl) {
           await new Promise(r => setTimeout(r, DESC_CHANGE_POLL_MS));
+
+          const challengeDuringPoll = await waitForMidCardChallenge(page, overlayBase, allJobs.length, key, signal);
+          if (challengeDuringPoll.status === 'abort') break outer;
+          if (challengeDuringPoll.status === 'timeout') {
+            await abortWithError(
+              `Challenge during panel read timed out (${sourceId}, key="${key}"). ${challengeDuringPoll.evidence || ''}`.trim(),
+              `The browser scraper stopped because ${sourceId} required human verification while reading a job card and it was not solved in time.`,
+              {
+                code: 'challenge-timeout',
+                status: 'Challenge timed out — restart the search when ready.',
+              },
+            );
+            break outer;
+          }
+          if (challengeDuringPoll.status === 'resolved') {
+            if (!(await recoverAfterChallenge())) break outer;
+            retrySameCardAfterChallenge = true;
+            break;
+          }
+
           const state = await page.evaluate((panelSel) => {
             const panelText = document.querySelector(panelSel)?.innerText?.trim() || '';
             const bodyText  = (document.body?.innerText || '').trim();
@@ -1085,8 +1596,20 @@ async function walkDomCards(page, sourceId, overlayBase, allJobs, seen, signal) 
             // Dead-panel strings may appear transiently while the SPA navigates.
             // Keep polling so the content can settle into a real description.
             // Only break early on genuine job content.
-            if (!hasDeadListingText(text)) break;
+            if (!hasDeadListingText(text)) {
+              // If the search results shell is gone the click caused a full-page
+              // navigation to viewjob instead of loading the side panel. The
+              // description is still valid — record the drift so we restore the
+              // search page before moving to the next card.
+              if (!state.hasResultsShell) driftedOffSearchPage = true;
+              break;
+            }
           }
+        }
+
+        if (retrySameCardAfterChallenge) {
+          attempt--;
+          continue;
         }
 
         // ── Analyze ────────────────────────────────────────────────────────────
@@ -1111,7 +1634,6 @@ async function walkDomCards(page, sourceId, overlayBase, allJobs, seen, signal) 
             );
             consecutivePanelTimeouts = 0;
             await restoreSearchPageAfterDeadListing(page, sourceId, listUrl, overlayBase, allJobs.length, signal);
-            noNewCardScrolls = 0;
             if (attempt === 0) continue;
             skippedDeadListings++;
             restoredAfterDeadListing = true;
@@ -1170,19 +1692,33 @@ async function walkDomCards(page, sourceId, overlayBase, allJobs, seen, signal) 
         await updateOverlay(page, {
           ...overlayBase,
           count:  allJobs.length,
-          status: `Reading job ${allJobs.length}…`,
+          status: `Reading job ${keyIndex + 1}/${revealedKeys.length}…`,
         }).catch(() => {});
       }
 
+      // Non-sponsored card click drifted to a full viewjob page instead of
+      // loading the side panel. Description was captured above — navigate back
+      // to the search results, then scroll to ensure the next card is in the DOM
+      // before the loop tries to click it (page restores to top, so cards below
+      // the fold may not be rendered yet).
+      if (driftedOffSearchPage) {
+        logger.info(`[BrowserScraper] walkDomCards(${sourceId}): non-sponsored click navigated to full viewjob page (key="${key}") — restoring search results`);
+        await restoreSearchPageAfterDeadListing(page, sourceId, listUrl, overlayBase, allJobs.length, signal);
+        const nextKey = revealedKeys[keyIndex + 1];
+        if (nextKey) {
+          await ensureWalkCardVisible(page, cfg.cardAttr, nextKey, { signal, resetToTop: false, maxScrolls: 16 });
+        }
+        driftedOffSearchPage = false;
+      }
+
       await new Promise(r => setTimeout(r, jitter(DESC_CLICK_DELAY_MS)));
-    }
   }
 
   if (skippedDeadListings > 0) {
     logger.info(`[BrowserScraper] walkDomCards(${sourceId}): skipped ${skippedDeadListings} stale/dead listing(s)`);
   }
 
-  return { jobsFound: visitedKeys.size, descError };
+  return { jobsFound: cardsWalked, descError };
 }
 // ── Main export ───────────────────────────────────────────────────────────────
 /**
@@ -1259,6 +1795,14 @@ export async function scrapeManualSources(tasks, onResult, signal) {
       let sourceSkipped            = false; // set true when challenge times out — skips remaining queries for this source
 
       logger.info(`[BrowserScraper] Starting ${si + 1}/${sourceList.length}: ${srcName} (${sourceTasks.length} queries)`);
+      recordManualScraperTelemetry({
+        phase: 'source-start',
+        sourceId,
+        srcName,
+        sourceIndex: si + 1,
+        sourceTotal: sourceList.length,
+        queryTotal: sourceTasks.length,
+      });
 
       for (let qi = 0; qi < sourceTasks.length; qi++) {
         if (earlyExit || sourceSkipped || signal?.aborted) break;
@@ -1273,6 +1817,14 @@ export async function scrapeManualSources(tasks, onResult, signal) {
         };
 
         logger.info(`[BrowserScraper] ${srcName} query ${qi + 1}/${sourceTasks.length}: ${task.url}`);
+        recordManualScraperTelemetry({
+          phase: 'query-start',
+          sourceId,
+          srcName,
+          queryIndex: qi + 1,
+          queryTotal: sourceTasks.length,
+          url: task.url,
+        });
 
         // Navigate via window.location.href — avoids CDP Page.navigate fingerprint
         await page.evaluate(u => { window.location.href = u; }, task.url).catch(() => {});
@@ -1315,6 +1867,16 @@ export async function scrapeManualSources(tasks, onResult, signal) {
             ...overlayBase,
             count:  allJobs.length,
             status: pageNum > 1 ? `Extracting page ${pageNum}…` : 'Extracting jobs…',
+          });
+          recordManualScraperTelemetry({
+            phase: 'page-extract',
+            sourceId,
+            srcName,
+            queryIndex: qi + 1,
+            queryTotal: sourceTasks.length,
+            pageNum,
+            count: allJobs.length,
+            url: page.url(),
           });
 
           // ── Walk-cards path (e.g. Indeed): scroll DOM, click each card, record
@@ -1392,7 +1954,8 @@ export async function scrapeManualSources(tasks, onResult, signal) {
           }
 
           // Expand descriptions for this page's new jobs (all 5 sources)
-          const { jobs: enhanced, descError } = await expandDescriptions(page, newJobs, sourceId, overlayBase, allJobs.length + newJobs.length, signal);
+          const jobsToExpand = newJobs.slice(0, JOB_QUERY_TARGET);
+          const { jobs: enhanced, descError } = await expandDescriptions(page, jobsToExpand, sourceId, overlayBase, allJobs.length + jobsToExpand.length, signal);
           allJobs.push(...enhanced);
 
           if (descError) {
@@ -1446,6 +2009,7 @@ export async function scrapeManualSources(tasks, onResult, signal) {
   } finally {
     clearInterval(overlayKeepAlive);
     if (!browserClosed) await browser.close().catch(() => {});
+    clearManualScraperTelemetry(signal?.aborted ? 'aborted' : 'finished');
   }
 
   // Emit empty results for sources we never reached

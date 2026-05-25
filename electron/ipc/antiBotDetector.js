@@ -102,8 +102,10 @@ const KEYWORD_SIGNALS = [
     severity: 'block',
     suggestion: 'DataDome challenge. Hard to bypass without a residential proxy; consider an official API if available.' },
 
-  // CAPTCHA (generic)
-  { pat: /\b(captcha|recaptcha|hcaptcha)\b|g-recaptcha|grecaptcha\.execute/i,
+  // CAPTCHA (generic) — only count rendered challenge/widget markers, not
+  // ambient bot-scoring scripts. Many normal pages load reCAPTCHA Enterprise
+  // or hCaptcha assets in the background without presenting a challenge.
+  { pat: /class=["'][^"']*\bg-recaptcha\b|data-sitekey=|recaptcha challenge expires|i am not a robot|please (?:complete|solve).{0,40}captcha|hcaptcha-box|cf-turnstile/i,
     code: 'captcha-presented',
     severity: 'block',
     suggestion: 'CAPTCHA was served instead of content. Manual solve via a visible browser window or rotate session.' },

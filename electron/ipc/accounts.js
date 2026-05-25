@@ -60,92 +60,105 @@ export async function verifySellMonitorLogin(platformId) {
   // leaving a stale cache entry and an opaque renderer toast.
   try {
     const config = getSellMonitorConfig(platformId) || getJobLoginConfig(platformId);
-    // Prefer verifyUrl (universal logged-in page like /my/account) over
-    // sellerUrl (seller-specific, may redirect non-seller accounts through
-    // signin.* hosts that trip our login-redirect regex). Falls back to
-    // sellerUrl when verifyUrl isn't set for backward compat.
-    const target = config?.verifyUrl || config?.sellerUrl;
-    if (!target) {
+    // Prefer verifyUrls / verifyUrl (universal logged-in pages like /my/account)
+    // over sellerUrl. Some job boards split auth by host, so a profile URL can
+    // look connected while the job-search host is logged out.
+    const targets = Array.isArray(config?.verifyUrls) && config.verifyUrls.length > 0
+      ? config.verifyUrls
+      : [config?.verifyUrl || config?.sellerUrl].filter(Boolean);
+    if (targets.length === 0) {
       return { connected: false, reason: 'No verify URL configured for this platform.', trace: { target: null } };
     }
-    logger.info(`[Accounts] Verifying ${platformId} login via ${target}`);
-    let r;
-    try {
-      // fetchHtmlClean (not fetchHtmlAuthed) — the latter installs request
-      // interception that aborts every image, which marketplaces' anti-bot
-      // systems flag and respond to with a login wall even for fully-
-      // authenticated sessions. The clean path uses the same persistent
-      // cookies but loads images normally so eBay/etc don't fingerprint us
-      // as a bot.
-      r = await fetchHtmlClean(target, { timeoutMs: SESSION_VERIFY_TIMEOUT_MS });
-    } catch (e) {
-      const trace = { target, error: e?.message || String(e) };
-      return { connected: false, reason: `Verification fetch failed: ${e?.message || String(e)}`, trace };
-    }
-    if (!r.ok) {
-      const trace = { target, error: r.error };
-      return { connected: false, reason: `Verification fetch error: ${r.error}`, trace };
-    }
+    const traces = [];
 
-    const trace = {
-      target,
-      finalUrl: r.finalUrl,
-      status: r.status,
-      htmlBytes: r.html?.length || 0,
-      bodyHead: stripTags(r.html || '').slice(0, 300),
-    };
+    for (const target of targets) {
+      logger.info(`[Accounts] Verifying ${platformId} login via ${target}`);
+      let r;
+      try {
+        // fetchHtmlClean (not fetchHtmlAuthed) — the latter installs request
+        // interception that aborts every image, which marketplaces' anti-bot
+        // systems flag and respond to with a login wall even for fully-
+        // authenticated sessions. The clean path uses the same persistent
+        // cookies but loads images normally so eBay/etc don't fingerprint us
+        // as a bot.
+        r = await fetchHtmlClean(target, { timeoutMs: SESSION_VERIFY_TIMEOUT_MS });
+      } catch (e) {
+        const trace = { target, error: e?.message || String(e) };
+        return { connected: false, reason: `Verification fetch failed: ${e?.message || String(e)}`, trace: { target, checks: [...traces, trace] } };
+      }
+      if (!r.ok) {
+        const trace = { target, error: r.error };
+        return { connected: false, reason: `Verification fetch error: ${r.error}`, trace: { target, checks: [...traces, trace] } };
+      }
 
-    if (r.status === 401 || r.status === 403) {
-      return { connected: false, reason: `Auth wall (HTTP ${r.status}) — not logged in.`, trace };
-    }
-    // 404 on a "logged-in-only" page gives no signal — the URL may have been
-    // renamed/removed on the platform's side, making it return 404 for everyone
-    // (both logged-in and anonymous). Accepting it as "connected" would mask
-    // expired cookies permanently. Treat as unverifiable rather than connected.
-    if (r.status === 404) {
-      return { connected: false, reason: `Verify URL returned 404 — the URL may have changed on the platform's side. Update verifyUrl in JOB_LOGIN_PLATFORMS / SELL_MONITOR_PLATFORMS.`, trace };
-    }
-    const finalUrlLower = String(r.finalUrl || '').toLowerCase();
-    if (/\/(login|signin|sign-in|account\/login|auth)/i.test(finalUrlLower)) {
-      return { connected: false, reason: `Redirected to ${r.finalUrl} — login not completed.`, trace };
-    }
+      const visibleText = stripTags(r.html || '');
+      const trace = {
+        target,
+        finalUrl: r.finalUrl,
+        status: r.status,
+        htmlBytes: r.html?.length || 0,
+        bodyHead: visibleText.slice(0, 300),
+      };
+      traces.push(trace);
 
-    // Platform-specific redirect guard: some platforms redirect anonymous users
-    // to a public page (200 OK, no /login in URL) rather than to a login URL.
-    // connectedFinalUrlMustContain lets the platform config specify a path
-    // fragment that the final URL must contain; absence means not logged in.
-    if (config?.connectedFinalUrlMustContain) {
-      const mustContain = config.connectedFinalUrlMustContain.toLowerCase();
-      if (!finalUrlLower.includes(mustContain)) {
-        return { connected: false, reason: `Redirected to ${r.finalUrl} — expected URL to contain "${config.connectedFinalUrlMustContain}" for a logged-in session.`, trace };
+      if (r.status === 401 || r.status === 403) {
+        return { connected: false, reason: `Auth wall at ${target} (HTTP ${r.status}) — not logged in.`, trace: { target, checks: traces } };
+      }
+      // 404 on a "logged-in-only" page gives no signal — the URL may have been
+      // renamed/removed on the platform's side, making it return 404 for everyone
+      // (both logged-in and anonymous). Accepting it as "connected" would mask
+      // expired cookies permanently. Treat as unverifiable rather than connected.
+      if (r.status === 404) {
+        return { connected: false, reason: `Verify URL returned 404 at ${target} — the URL may have changed on the platform's side. Update verifyUrl in JOB_LOGIN_PLATFORMS / SELL_MONITOR_PLATFORMS.`, trace: { target, checks: traces } };
+      }
+      const finalUrlLower = String(r.finalUrl || '').toLowerCase();
+      if (/\/(login|signin|sign-in|account\/login|auth)/i.test(finalUrlLower)) {
+        return { connected: false, reason: `Redirected to ${r.finalUrl} — login not completed.`, trace: { target, checks: traces } };
+      }
+
+      // Platform-specific redirect guard: some platforms redirect anonymous users
+      // to a public page (200 OK, no /login in URL) rather than to a login URL.
+      // connectedFinalUrlMustContain lets the platform config specify a path
+      // fragment that the final URL must contain; absence means not logged in.
+      if (config?.connectedFinalUrlMustContain) {
+        const mustContain = config.connectedFinalUrlMustContain.toLowerCase();
+        if (!finalUrlLower.includes(mustContain)) {
+          return { connected: false, reason: `Redirected to ${r.finalUrl} — expected URL to contain "${config.connectedFinalUrlMustContain}" for a logged-in session.`, trace: { target, checks: traces } };
+        }
+      }
+
+      // Body-content sniff — catches "soft" login walls where the response is
+      // 200 OK with the original URL but the body is actually a sign-in form
+      // (eBay does this when anti-bot kicks in). Looks for high-signal phrases
+      // in a configurable visible-text prefix, scoped to avoid false positives
+      // from a stray "Sign in" link in nav chrome unless the platform opts in.
+      const scanChars = config?.bodyScanChars || 300;
+      const head = visibleText.slice(0, scanChars).toLowerCase();
+      const softWallSignals = [
+        'sign in to your account',
+        'sign in to ebay',
+        'sign in to continue',
+        'please sign in',
+        'log in to your account',
+        'log in to continue',
+        'enter your email or username',
+        'enter your password',
+        // Platform-specific signals merged from platform config
+        ...(config?.bodySignals || []),
+      ];
+      const matched = softWallSignals.find(s => head.includes(s));
+      if (matched) {
+        trace.softWallMatch = matched;
+        return { connected: false, reason: `Page body looks logged out at ${target} ("${matched}") despite URL ${r.finalUrl}.`, trace: { target, checks: traces } };
       }
     }
 
-    // Body-content sniff — catches "soft" login walls where the response is
-    // 200 OK with the original URL but the body is actually a sign-in form
-    // (eBay does this when anti-bot kicks in). Looks for high-signal phrases
-    // in the first chunk of stripped text, scoped to avoid false positives
-    // from a stray "Sign in" link in nav chrome.
-    const head = trace.bodyHead.toLowerCase();
-    const softWallSignals = [
-      'sign in to your account',
-      'sign in to ebay',
-      'sign in to continue',
-      'please sign in',
-      'log in to your account',
-      'log in to continue',
-      'enter your email or username',
-      'enter your password',
-      // Platform-specific signals merged from platform config
-      ...(config?.bodySignals || []),
-    ];
-    const matched = softWallSignals.find(s => head.includes(s));
-    if (matched) {
-      trace.softWallMatch = matched;
-      return { connected: false, reason: `Page body looks like a sign-in form ("${matched}") despite URL ${r.finalUrl} — likely anti-bot challenge.`, trace };
-    }
-
-    return { connected: true, reason: `Reached ${r.finalUrl} (HTTP ${r.status}) without auth redirect or sign-in body.`, trace };
+    const lastTrace = traces[traces.length - 1];
+    return {
+      connected: true,
+      reason: `Reached ${targets.length} verify URL(s); last ${lastTrace.finalUrl} (HTTP ${lastTrace.status}) without auth redirect or sign-in body.`,
+      trace: { target: targets[0], checks: traces, finalUrl: lastTrace.finalUrl, status: lastTrace.status, htmlBytes: lastTrace.htmlBytes, bodyHead: lastTrace.bodyHead },
+    };
   } catch (e) {
     logger.error(`[Accounts] verifySellMonitorLogin unexpected error for ${platformId}:`, e);
     return {

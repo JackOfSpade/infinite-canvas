@@ -92,7 +92,7 @@ export const GOOGLE_JOBS_EXTRACTOR = `
     } catch {}
   });
 
-  return jobs.slice(0, 30);
+  return jobs;
 })()
 `;
 
@@ -142,7 +142,7 @@ export const INDEED_JOBS_EXTRACTOR = `
     } catch {}
   }
 
-  if (jobs.length > 0) return jobs.slice(0, 30);
+  if (jobs.length > 0) return jobs;
 
   // ── Path 2: DOM fallback (.job_seen_beacon cards) ─────────────────────────
   // Used when __NEXT_DATA__ is absent (App Router migration) or its job paths moved.
@@ -163,7 +163,7 @@ export const INDEED_JOBS_EXTRACTOR = `
     } catch {}
   });
 
-  if (jobs.length > 0) return jobs.slice(0, 30);
+  if (jobs.length > 0) return jobs;
 
   // ── Both paths failed ──────────────────────────────────────────────────────
   // Only throw SITE_CHANGED when the page has real content — a blank or captcha page
@@ -226,7 +226,7 @@ export const ZIPRECRUITER_EXTRACTOR = `
   }
 
   if (jobs.length === 0) throw new Error('SITE_CHANGED: ziprecruiter ItemList JSON-LD extractor returned 0 — JSON-LD structure or @type may have changed');
-  return jobs.slice(0, 30);
+  return jobs;
 })()
 `;
 
@@ -276,7 +276,7 @@ export const GLASSDOOR_EXTRACTOR = `
   }
 
   if (jobs.length === 0) throw new Error('SITE_CHANGED: glassdoor apolloCache extractor returned 0 — cache key patterns or jobTitleText field may have changed');
-  return jobs.slice(0, 30);
+  return jobs;
 })()
 `;
 // ── Wellfound (AngelList) ───────────────────────────────────────────────────
@@ -337,7 +337,7 @@ export const WELLFOUND_EXTRACTOR = `
   });
 
   if (jobs.length === 0) throw new Error('SITE_CHANGED: wellfound extractor returned 0 — data-testid or styles_* CSS module selectors may have changed');
-  return jobs.slice(0, 30);
+  return jobs;
 })()
 `;
 
