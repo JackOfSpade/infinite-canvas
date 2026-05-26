@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useCallback, useContext, useState } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
-import { usePlatformsVerifyingProgress } from '../contexts/SessionStatusContext';
+import { usePlatformsVerifyingProgress } from '../contexts/useSessionStatus';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
 import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
@@ -29,7 +29,7 @@ import {
 
 // ─── TESTING: skip AI scoring after collection ───────────────────────────────
 // Set to false (or remove the block below) to re-enable the full pipeline.
-const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fullRun;
+const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // "Other Strong Matches" cutoff for the append path. Prefer the per-hub gate
@@ -163,9 +163,11 @@ export function JobHubNode({ id, data }) {
   const statusLabel = STATE_LABELS[hubState];
   const sourceFilter = data.sourceFilter || null;
 
-  scrapeWarningsRef.current = data.scrapeWarnings;
-  hubStateRef.current       = data.hubState;
-  pendingJobsRef.current    = data.pendingJobs;
+  useEffect(() => {
+    scrapeWarningsRef.current = data.scrapeWarnings;
+    hubStateRef.current = data.hubState;
+    pendingJobsRef.current = data.pendingJobs;
+  }, [data.scrapeWarnings, data.hubState, data.pendingJobs]);
 
   // Per-source progress state populated by backend `job-source-progress`
   // events. Reset via `resetSourceProgress` before each fresh run so stale
@@ -1265,7 +1267,7 @@ export function JobHubNode({ id, data }) {
       //
       // info-severity warnings (USAJobs config-missing) and throttles don't
       // gate — they're informational and shouldn't require a manual click.
-      if (blockingWarnings.length > 0) {
+      if (blockingWarnings.length > 0 && !SKIP_AI_FOR_TESTING) {
         updateGlobal(currentId, {
           hubState: 'sources-ready',
           pendingJobs: foundJobs,
@@ -1435,7 +1437,9 @@ export function JobHubNode({ id, data }) {
     }
   }, [id, data.resumeProfile, data.pendingTargetRole, data.targetRole, epoch, getNode, runScoringAndSpawn, updateGlobal, triggerUSAJobsBackgroundSearch]);
 
-  resumeScoringRef.current = resumeScoring;
+  useEffect(() => {
+    resumeScoringRef.current = resumeScoring;
+  }, [resumeScoring]);
 
   // Listen for individual job-source skips dispatched from JobSourceCardNode.
   // Each event drops the matching warning from data.scrapeWarnings; once the
@@ -1548,7 +1552,9 @@ export function JobHubNode({ id, data }) {
   }, [id, data.hubState, updateGlobal, resumeScoring, scheduleCleanSourceCardDismiss]);
 
   // Keep the ref up-to-date so handleDrop always calls the latest version.
-  startProcessingRef.current = startProcessing;
+  useEffect(() => {
+    startProcessingRef.current = startProcessing;
+  }, [startProcessing]);
 
   // Auto-start when drop-created (must come after startProcessing is declared
   // — referencing it earlier would hit the const TDZ on first render).
@@ -1578,6 +1584,7 @@ export function JobHubNode({ id, data }) {
 
   const handleDrop = useCallback((e) => {
     if (data.locked) return;
+    if (platformsVerifying) return;
     if (PROCESSING_STATES.includes(hubState)) return;
 
     e.preventDefault();
@@ -1596,12 +1603,13 @@ export function JobHubNode({ id, data }) {
 
     const path = resume.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(resume) : '');
     acceptResumePath(path, resume.name);
-  }, [acceptResumePath, data.locked, hubState, id]);
+  }, [acceptResumePath, data.locked, hubState, id, platformsVerifying]);
 
   useEffect(() => {
     const handler = (e) => {
       if (e.detail?.hubId !== id) return;
       if (data.locked) return;
+      if (platformsVerifying) return;
       if (PROCESSING_STATES.includes(hubStateRef.current)) return;
       const file = e.detail?.files?.[0];
       if (!file?.filePath) return;
@@ -1610,7 +1618,7 @@ export function JobHubNode({ id, data }) {
     };
     document.addEventListener('canvas-file-nodes-dropped-on-hub', handler);
     return () => document.removeEventListener('canvas-file-nodes-dropped-on-hub', handler);
-  }, [acceptResumePath, data.locked, id]);
+  }, [acceptResumePath, data.locked, id, platformsVerifying]);
 
   const resetHandler = useCallback((e) => {
     e?.stopPropagation();

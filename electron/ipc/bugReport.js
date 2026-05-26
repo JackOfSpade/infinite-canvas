@@ -19,6 +19,10 @@ import { shortId } from './bugReport/helpers.js';
 import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { getAuthWindowDiagnostics } from './browser/authWindows.js';
+import {
+  getJobHubTransientKeysForSave,
+  TRANSIENT_PROCESSING_HUB_STATES,
+} from '../../src/utils/persistenceTransientState.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -59,22 +63,32 @@ const truncateLongUrls = (_key, value) => {
 function getNewestMainProcessSourceMtime() {
   try {
     const here = path.dirname(fileURLToPath(import.meta.url));
-    // Scan `here`, one level up, and known subdirectories.
-    // `browser/` (manualScraper, authWindows, etc.) and `bugReport/` (snapshot builders)
-    // must be included or changes to those files won't trigger the stale-build warning.
-    const dirs = [here, path.join(here, '..'), path.join(here, 'browser'), path.join(here, 'bugReport')];
+    const roots = [here, path.join(here, '..')];
     let newest = 0;
-    for (const dir of dirs) {
+    const seen = new Set();
+
+    const walk = (dir) => {
+      const resolved = path.resolve(dir);
+      if (seen.has(resolved)) return;
+      seen.add(resolved);
+
       let entries = [];
-      try { entries = fs.readdirSync(dir); } catch { continue; }
-      for (const name of entries) {
-        if (!name.endsWith('.js')) continue;
+      try { entries = fs.readdirSync(resolved, { withFileTypes: true }); } catch { return; }
+      for (const entry of entries) {
+        const fullPath = path.join(resolved, entry.name);
+        if (entry.isDirectory()) {
+          walk(fullPath);
+          continue;
+        }
+        if (!entry.isFile() || !entry.name.endsWith('.js')) continue;
         try {
-          const stat = fs.statSync(path.join(dir, name));
-          if (stat.isFile() && stat.mtimeMs > newest) newest = stat.mtimeMs;
+          const stat = fs.statSync(fullPath);
+          if (stat.mtimeMs > newest) newest = stat.mtimeMs;
         } catch { /* skip */ }
       }
-    }
+    };
+
+    for (const root of roots) walk(root);
     return newest || null;
   } catch {
     return null;
@@ -222,14 +236,6 @@ ${budgetLines.length ? budgetLines.join('\n') : '- (no source has a recorded sam
 `;
 }
 
-// Mid-run hubStates that should NEVER survive to disk — they are single-session
-// pipeline state. Alongside the data keys checked inline below (errorMessage,
-// isRateLimit, scrapeWarnings, pendingJobs, pendingTargetRole) these are exactly
-// what sanitizeNodesForSave strips; if any show up in the PERSISTED workspace
-// file the auto-loaded canvas replays them on every restart. Kept in sync with
-// sanitizeNodesForSave in serializationUtils.js.
-const PERSISTED_TRANSIENT_HUB_STATES = ['parsing', 'querying', 'searching', 'scoring', 'analyzing', 'researching'];
-
 /**
  * Reads the auto-loaded workspace file from disk and reports whether any hub
  * node carries transient state that should have been stripped before save.
@@ -294,12 +300,21 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
         hubCount++;
         const d = n.data || {};
         const hits = [];
-        if (PERSISTED_TRANSIENT_HUB_STATES.includes(d.hubState)) hits.push(`hubState=${d.hubState}`);
-        if (d.errorMessage) hits.push(`errorMessage="${String(d.errorMessage).slice(0, 60)}"`);
-        if (d.isRateLimit) hits.push('isRateLimit=true');
-        if (Array.isArray(d.scrapeWarnings) && d.scrapeWarnings.length) hits.push(`scrapeWarnings=${d.scrapeWarnings.length}`);
-        if (Array.isArray(d.pendingJobs) && d.pendingJobs.length) hits.push(`pendingJobs=${d.pendingJobs.length}`);
-        if ('pendingTargetRole' in d && d.pendingTargetRole) hits.push('pendingTargetRole=set');
+        if (TRANSIENT_PROCESSING_HUB_STATES.includes(d.hubState)) hits.push(`hubState=${d.hubState}`);
+        if (n.type === 'jobhub') {
+          for (const key of getJobHubTransientKeysForSave(d.hubState)) {
+            if (key === 'errorMessage' && d.errorMessage) hits.push(`errorMessage="${String(d.errorMessage).slice(0, 60)}"`);
+            if (key === 'isRateLimit' && d.isRateLimit) hits.push('isRateLimit=true');
+            if (key === 'scrapeWarnings' && Array.isArray(d.scrapeWarnings) && d.scrapeWarnings.length) {
+              hits.push(`scrapeWarnings=${d.scrapeWarnings.length}`);
+            }
+            if (key === 'pendingJobs' && Array.isArray(d.pendingJobs) && d.pendingJobs.length) {
+              hits.push(`pendingJobs=${d.pendingJobs.length}`);
+            }
+            if (key === 'pendingTargetRole' && d.pendingTargetRole) hits.push('pendingTargetRole=set');
+          }
+        }
+        if (n.type === 'sellhub' && d.platformFitPending) hits.push('platformFitPending=true');
         if (hits.length) offenders.push(`  - \`${shortId(n.id)}\` (${n.type}): ${hits.join(', ')}`);
       }
       if (n?.type === 'group' && n.data?.canvasData?.nodes) walk(n.data.canvasData.nodes);

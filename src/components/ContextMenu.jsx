@@ -151,7 +151,6 @@ function SubmenuPanel({ items, direction, onMouseEnter, onMouseLeave, onClose })
       if (rect.top + vOffset < 8) {
         vOffset = -rect.top + 8;
       }
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setVerticalOffset(vOffset);
       setMeasured(true);
     }

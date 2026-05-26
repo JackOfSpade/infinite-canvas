@@ -1,6 +1,5 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-
-const Ctx = createContext({ statuses: {}, verifying: new Set() });
+import React, { useEffect, useState } from 'react';
+import { SessionStatusContext } from './sessionStatusShared';
 
 export function SessionStatusProvider({ children }) {
   const [statuses, setStatuses] = useState({});
@@ -33,20 +32,8 @@ export function SessionStatusProvider({ children }) {
   }, []);
 
   return (
-    <Ctx.Provider value={{ statuses, verifying }}>
+    <SessionStatusContext.Provider value={{ statuses, verifying }}>
       {children}
-    </Ctx.Provider>
+    </SessionStatusContext.Provider>
   );
-}
-
-export function usePlatformsVerifying(platformIds) {
-  const { verifying } = useContext(Ctx);
-  return platformIds.some(id => verifying.has(id));
-}
-
-export function usePlatformsVerifyingProgress(platformIds) {
-  const { verifying } = useContext(Ctx);
-  const total = platformIds.length;
-  const done = platformIds.filter(id => !verifying.has(id)).length;
-  return { verifying: platformIds.some(id => verifying.has(id)), done, total };
 }

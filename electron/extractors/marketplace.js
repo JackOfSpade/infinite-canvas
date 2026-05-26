@@ -143,11 +143,11 @@ export const EBAY_SOLD_EXTRACTOR = `
   cards.forEach(card => {
     try {
       const titleEl = card.querySelector('span.su-styled-text.primary');
-      const title = titleEl?.innerText?.trim() || '';
+      const title = (titleEl?.innerText || titleEl?.textContent || '').trim();
       if (!title || title === 'Shop on eBay') return;
 
       const priceEl = card.querySelector('.s-card__price');
-      const priceText = priceEl?.innerText?.trim() || '';
+      const priceText = (priceEl?.innerText || priceEl?.textContent || '').trim();
       const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
       if (price === 0) return;
 
@@ -155,11 +155,11 @@ export const EBAY_SOLD_EXTRACTOR = `
       const linkEl = card.querySelector('a.s-card__link');
       // First secondary.default span is condition; later ones are specs (model, storage, carrier)
       const condEl = card.querySelector('span.su-styled-text.secondary.default');
-      const condition = (condEl?.innerText?.trim() || '').replace(/\\s*·\\s*$/, '');
+      const condition = ((condEl?.innerText || condEl?.textContent || '').trim()).replace(/\\s*·\\s*$/, '');
 
       items.push({
         title, price, priceText,
-        soldDate: dateEl?.innerText?.trim() || '',
+        soldDate: (dateEl?.innerText || dateEl?.textContent || '').trim(),
         condition,
         url: linkEl?.href || '',
         source: 'ebay-sold',
@@ -183,11 +183,11 @@ export const EBAY_ACTIVE_EXTRACTOR = `
   cards.forEach(card => {
     try {
       const titleEl = card.querySelector('span.su-styled-text.primary');
-      const title = titleEl?.innerText?.trim() || '';
+      const title = (titleEl?.innerText || titleEl?.textContent || '').trim();
       if (!title || title === 'Shop on eBay') return;
 
       const priceEl = card.querySelector('.s-card__price');
-      const priceText = priceEl?.innerText?.trim() || '';
+      const priceText = (priceEl?.innerText || priceEl?.textContent || '').trim();
       const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
       if (price === 0) return;
 
@@ -414,10 +414,10 @@ export const MERCARI_SOLD_EXTRACTOR = `
       const pEls = card.querySelectorAll('p');
       let priceEl = null;
       for (const p of pEls) {
-        if ((p.innerText || '').includes('$')) { priceEl = p; break; }
+        if ((p.innerText || p.textContent || '').includes('$')) { priceEl = p; break; }
       }
       if (!priceEl) return;
-      const priceText = priceEl.innerText.trim();
+      const priceText = (priceEl.innerText || priceEl.textContent || '').trim();
       const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
       if (price === 0) return;
 

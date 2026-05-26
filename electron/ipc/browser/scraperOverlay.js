@@ -9,7 +9,7 @@
  *
  * updateOverlay(page, state) — updates the visible panel fields. All fields
  *   are optional; omitted fields are left unchanged.
- *   state: { srcLabel, srcName, qLabel, qText, count, status, challenge, error }
+ *   state: { srcLabel, srcName, qLabel, qText, count, status, progressText, challenge, error }
  */
 
 export function buildOverlayScript({ withPause = true } = {}) {
@@ -86,11 +86,12 @@ export function buildOverlayScript({ withPause = true } = {}) {
   const el = document.createElement('div');
   el.id = '__ic-panel';
   el.style.cssText = [
-    'position:fixed;bottom:20px;right:20px;z-index:2147483647',
+    'position:fixed;bottom:max(12px,env(safe-area-inset-bottom));right:max(12px,env(safe-area-inset-right));transform:translateY(-33.3333%);z-index:2147483647',
     'background:#0f172a;color:#e2e8f0;border-radius:14px',
-    'padding:18px 20px;width:272px',
+    'padding:18px 20px;width:min(272px,calc(100vw - 24px));max-width:calc(100vw - 24px);box-sizing:border-box',
     'font:13px/1.5 system-ui,-apple-system,sans-serif',
     'box-shadow:0 16px 48px rgba(0,0,0,.8);border:1px solid rgba(255,255,255,.1)',
+    'max-height:calc(100vh - 24px);overflow:hidden',
     'pointer-events:auto',
   ].join(';');
 
@@ -108,7 +109,7 @@ export function buildOverlayScript({ withPause = true } = {}) {
       'text-overflow:ellipsis;margin-bottom:11px"></div>',
     '<div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px">',
       '<span id="ic-count" style="font-size:32px;font-weight:800;line-height:1;color:#f8fafc">0</span>',
-      '<span style="font-size:12px;color:#64748b">jobs collected</span>',
+      '<span id="ic-count-meta" style="font-size:12px;color:#64748b">jobs collected</span>',
     '</div>',
     '<div id="ic-status" style="font-size:11px;color:#64748b;margin-bottom:${statusMargin}px;min-height:16px;',
       'line-height:1.55"></div>',
@@ -136,6 +137,7 @@ export async function updateOverlay(page, state) {
     set('ic-q-label',   s.qLabel);
     set('ic-q-text',    s.qText);
     if (s.count != null) set('ic-count', s.count);
+    set('ic-count-meta', s.progressText ?? 'jobs collected');
     set('ic-status',    s.status ?? '');
 
     const dot = g('ic-dot');

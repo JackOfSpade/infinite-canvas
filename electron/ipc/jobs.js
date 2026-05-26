@@ -13,7 +13,7 @@ import { handleSafe } from './ipcUtils.js';
 import { clearBrowserSession } from './stealthBrowser.js';
 import { scrapeManualSources } from './browser/manualScraper.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
-import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES, TEST_MODE } from './resultCaps.js';
+import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES, FAST_TEST } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
@@ -889,6 +889,10 @@ Be creative with suggestedRoleQueries — think about what career directions the
       const result = dedupAgainstHistory(ageFiltered, history);
       kept = result.kept;
       historyDropped = result.removed;
+      // Record pre-scoring so test-mode runs and aborted/crashed runs still
+      // mark these jobs as seen. appendJobsHistory deduplicates internally,
+      // so the renderer-side write after scoring is a safe no-op for these rows.
+      appendJobsHistory(canvasFilePath, kept).catch(() => {});
     }
 
     // Newest posted first. Deep pagination gathers across many pages and several
@@ -1234,7 +1238,7 @@ ${JSON.stringify(slimBatch(batch))}`, {
       models: [...scoringModels],
     };
 
-    return { scoredJobs, clusters, testMode: TEST_MODE };
+    return { scoredJobs, clusters, testMode: FAST_TEST };
   });
 
   // ── Generate Cover Letter ─────────────────────────────────────────────────
@@ -1539,6 +1543,35 @@ RULES:
     const nextBlockedUrl = remaining[0] || null;
     if (nextBlockedUrl) logger.info(`[Jobs][${nodeId}] Next blocked URL for ${sourceId}: ${nextBlockedUrl}`);
     return { resolved: !!result.resolved, items, nextBlockedUrl };
+  });
+
+  // Resume an Indeed scrape that was interrupted by a login-wall mid-pagination.
+  // The user re-authenticates via Settings, then clicks Continue on the source
+  // card. Runs only the remaining queries starting from the challenged page so
+  // we don't repeat work already captured in pendingJobs.
+  handleSafe('resume-job-source', async (event, { sourceId, nodeId, canvasFilePath, maxAgeDays, resumeState } = {}, signal) => {
+    if (sourceId !== 'indeed') throw new Error('resume-job-source only supports indeed');
+    const { remainingQueries, startPage = 0 } = resumeState || {};
+    if (!Array.isArray(remainingQueries) || remainingQueries.length === 0) {
+      return { resolved: false, items: [] };
+    }
+    logger.info(`[Jobs][${nodeId}] Resuming Indeed: ${remainingQueries.length} remaining queries from page ${startPage + 1}`);
+    const result = await fetchIndeedListingsBrowser(remainingQueries, signal, maxAgeDays || DEFAULT_MAX_AGE_DAYS, null, null, startPage);
+    const extracted = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
+    const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+    const ageFiltered = filterJobsByAge(extracted, ageDays);
+    const ageDropped = extracted.length - ageFiltered.length;
+    let items = ageFiltered;
+    let historyDropped = 0;
+    if (canvasFilePath) {
+      const history = await loadJobsHistory(canvasFilePath);
+      const deduped = dedupAgainstHistory(ageFiltered, history);
+      items = deduped.kept;
+      historyDropped = deduped.removed;
+    }
+    logger.info(`[Jobs][${nodeId}] Indeed resume complete: extracted=${extracted.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, new=${items.length}`);
+    const resolved = items.length > 0 || !result?.warning;
+    return { resolved, items };
   });
 
   // Renderer calls this after it merges captcha-resolve items into pendingJobs.

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useContext } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
-import { usePlatformsVerifyingProgress } from '../contexts/SessionStatusContext';
+import { usePlatformsVerifyingProgress } from '../contexts/useSessionStatus';
 import { HubContainer } from '../components/HubContainer';
 import { Camera } from 'lucide-react';
 import { PRICE_COMP_SOURCES, SELL_PLATFORMS } from '../utils/constants';
@@ -214,7 +214,9 @@ export function SellHubNode({ id, data }) {
   }, [id, updateGlobal, addToast, epoch, resetCompProgress]);
 
   // Keep ref in sync so handleDrop always invokes the latest closure.
-  startAnalysisRef.current = startAnalysis;
+  useEffect(() => {
+    startAnalysisRef.current = startAnalysis;
+  }, [startAnalysis]);
 
   // Auto-start analysis if images were dropped (must come after startAnalysis is declared
   // — referencing it earlier would hit the const TDZ on first render).
@@ -769,6 +771,7 @@ export function SellHubNode({ id, data }) {
 
   const handleDrop = useCallback((e) => {
     if (data.locked) return; // Locked nodes don't accept new drops
+    if (platformsVerifying) return;
 
     e.preventDefault();
     e.stopPropagation();
@@ -785,12 +788,13 @@ export function SellHubNode({ id, data }) {
       .map(f => f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : ''))
       .filter(Boolean);
     acceptImagePaths(imagePaths, files.length);
-  }, [acceptImagePaths, data.locked, id]);
+  }, [acceptImagePaths, data.locked, id, platformsVerifying]);
 
   useEffect(() => {
     const handler = (e) => {
       if (e.detail?.hubId !== id) return;
       if (data.locked) return;
+      if (platformsVerifying) return;
       const files = e.detail?.files || [];
       const imagePaths = files
         .filter(f => PRODUCT_IMAGE_EXT_RE.test(f.filename || f.filePath || ''))
@@ -801,7 +805,7 @@ export function SellHubNode({ id, data }) {
     };
     document.addEventListener('canvas-file-nodes-dropped-on-hub', handler);
     return () => document.removeEventListener('canvas-file-nodes-dropped-on-hub', handler);
-  }, [acceptImagePaths, data.locked, id]);
+  }, [acceptImagePaths, data.locked, id, platformsVerifying]);
 
   const resetHandler = useCallback((e) => {
     e?.stopPropagation();
@@ -841,7 +845,7 @@ export function SellHubNode({ id, data }) {
     cleanupCompSourceCards();
     // Drop queued early-resolves — they belong to the cancelled run and
     // would otherwise leak into the next scrape's drain pass.
-    pendingMergesRef.current = [];
+    pendingMergesRef.current.splice(0);
     setQueuedResolvesCount(0);
     processingRef.current = false;
     processingPriceRef.current = false;

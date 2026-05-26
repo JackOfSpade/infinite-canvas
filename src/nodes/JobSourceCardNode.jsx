@@ -93,22 +93,30 @@ export function JobSourceCardNode({ id, data }) {
   }, [data.hubId, progress?.status, progress?.warning, progress?.count, isManualPaste, id, deleteElements]);
 
   const handleSolve = async () => {
-    if (resolving || hubLocked || !progress?.url || !window.electronAPI?.resolveJobSource) return;
+    if (resolving || hubLocked) return;
+    const resumeState = progress?.warning?.resumeState;
+    if (!resumeState && (!progress?.url || !window.electronAPI?.resolveJobSource)) return;
     setResolving(true);
     try {
-      const result = await window.electronAPI.resolveJobSource({
-        url: progress.url,
-        sourceId: data.sourceId,
-        nodeId: data.hubId,
-        // Let the resolve handler apply the same age + history dedup the
-        // headless search does, so re-solving doesn't re-surface already-seen
-        // jobs. maxAgeDays lives on the owning hub's data.
-        canvasFilePath: nav?.currentFile || null,
-        maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
-        // Soft-gate flows (e.g. Glassdoor review gate) need a second tab so
-        // Tab 1 stays on the job URL for polling while the user acts on Tab 2.
-        secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
-      });
+      let result;
+      if (resumeState) {
+        result = await window.electronAPI.resumeJobSource?.({
+          sourceId: data.sourceId,
+          nodeId: data.hubId,
+          canvasFilePath: nav?.currentFile || null,
+          maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
+          resumeState,
+        });
+      } else {
+        result = await window.electronAPI.resolveJobSource({
+          url: progress.url,
+          sourceId: data.sourceId,
+          nodeId: data.hubId,
+          canvasFilePath: nav?.currentFile || null,
+          maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
+          secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
+        });
+      }
       // When the captcha-resolve window auto-detects the challenge as
       // cleared, the visible browser session that just bypassed the bot
       // wall also runs the extractor in-page — so any jobs the user
@@ -439,7 +447,7 @@ export function JobSourceCardNode({ id, data }) {
               </button>
             )
           ) : (
-            progress?.url && !hasInfo && !hasWarn && (
+            (progress?.url || progress?.warning?.resumeState) && !hasInfo && !hasWarn && (
             <button
               onClick={(e) => { e.stopPropagation(); handleSolve(); }}
               onPointerDown={(e) => e.stopPropagation()}
@@ -447,10 +455,12 @@ export function JobSourceCardNode({ id, data }) {
               className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
               title={hubLocked
                 ? 'Hub is locked'
-                : 'Open the failed page in a browser sharing your session — solve the captcha or log in, cookies persist for the next Re-run Search'}
+                : progress?.warning?.resumeState
+                  ? 'Log in via Settings → Job Sources first, then click Continue to resume the search from where Indeed blocked'
+                  : 'Open the failed page in a browser sharing your session — solve the captcha or log in, cookies persist for the next Re-run Search'}
             >
               <ExternalLink size={9} />
-              {resolving ? 'Window open…' : 'Solve'}
+              {resolving ? 'Running…' : progress?.warning?.resumeState ? 'Continue' : 'Solve'}
             </button>
             )
           )}

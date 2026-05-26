@@ -1,8 +1,5 @@
-import electronPkg from 'electron';
-const { app } = electronPkg;
 import {
   fetchLinkedInJobs,
-  fetchUSAJobs,
   fetchRemoteOKJobs,
   fetchWeWorkRemotelyJobs,
   fetchDiceListings,
@@ -10,8 +7,8 @@ import {
   fetchReverbListings
 } from '../electron/extractors/apiExtractors.js';
 
-app.whenReady().then(async () => {
-  console.log('Testing Api Extractors (Electron Context)...');
+async function run() {
+  console.log('Testing API extractors...');
   const results = {};
 
   const safeCall = async (name, fn) => {
@@ -28,9 +25,12 @@ app.whenReady().then(async () => {
   await safeCall('WeWorkRemotely', () => fetchWeWorkRemotelyJobs('frontend'));
   await safeCall('Dice', () => fetchDiceListings('software engineer'));
   await safeCall('StockX', () => fetchStockXListings('iphone 15 pro', false));
-  await safeCall('Reverb', () => fetchReverbListings('fender stratocaster', true, 'excellent'));
+  await safeCall('Reverb', () => fetchReverbListings('fender stratocaster', true));
 
   console.log(JSON.stringify(results, null, 2));
+}
 
-  app.quit();
+run().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
 });

@@ -10,6 +10,7 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import path from 'path';
+import { execFile } from 'node:child_process';
 import electronPkg from 'electron';
 import { logger } from '../logger.js';
 import { findChromePath, findSystemChromePath, getUserDataDir } from '../ipc/stealthBrowser.js';
@@ -45,6 +46,14 @@ const LAUNCH_ARGS = [
   '--lang=en-US,en',
 ];
 
+// Kill any Chrome process holding the given userDataDir (zombie cleanup after a crash).
+// Uses pkill -f on macOS/Linux; silently no-ops on failure or unsupported platforms.
+function killChromeHoldingProfile(dir) {
+  return new Promise(resolve => {
+    execFile('pkill', ['-f', dir], () => resolve());
+  });
+}
+
 // Page and query delays mirror the probe script step 7 (7.9s/page avg achieved).
 const PAGE_DELAY_MS  = [1500, 3000];
 const QUERY_DELAY_MS = [3000, 5000];
@@ -77,12 +86,12 @@ async function humanClick(page, selector, idx) {
 // Click each job card on the current search results page and read the full
 // description from the right panel that updates in place. Matches descriptions
 // back to jobs via the vjk= URL param that Indeed sets on each card click.
-async function enrichWithDescriptions(page, pageJobs, signal) {
+async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null, totalSoFar = 0) {
   await page.waitForSelector(CARD_SELECTOR, { timeout: 5000 }).catch(() => {});
   const cardCount = await page.evaluate(
     (sel) => document.querySelectorAll(sel).length, CARD_SELECTOR
   ).catch(() => 0);
-  if (!cardCount) return;
+  if (!cardCount) return { enriched: 0, cfBlankAt: null };
 
   const keyToJob = new Map();
   for (const job of pageJobs) { if (job.jobkey) keyToJob.set(job.jobkey, job); }
@@ -92,6 +101,14 @@ async function enrichWithDescriptions(page, pageJobs, signal) {
 
   for (let i = 0; i < limit; i++) {
     if (signal?.aborted) break;
+    if (overlayBase) {
+      await updateOverlay(page, {
+        ...overlayBase,
+        count: totalSoFar + i + 1,
+        status: `Enriching ${limit} jobs…`,
+        progressText: `${i + 1}/${limit}`,
+      }).catch(() => {});
+    }
 
     const panelBefore = await page.$eval(PANEL_SELECTOR, el => el.textContent?.slice(0, 80) || '').catch(() => '');
 
@@ -125,12 +142,20 @@ async function enrichWithDescriptions(page, pageJobs, signal) {
     if (description) {
       const job = keyToJob.get(vjk) || pageJobs[i];
       if (job) { job.description = description; enriched++; }
+    } else {
+      // Blank panel — may be early CF interference before the full challenge page appears.
+      const sigs = await getChallengeSignals(page);
+      if (sigs.isChallenge) {
+        logger.warn(`[Indeed/Browser] CF signal during enrichment at card ${i + 1}/${limit} (${sigs.reason})`);
+        return { enriched, cfBlankAt: i };
+      }
     }
 
     if (i < limit - 1) await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 600)));
   }
 
   if (enriched > 0) logger.info(`[Indeed/Browser] Enriched ${enriched}/${limit} jobs with full descriptions`);
+  return { enriched, cfBlankAt: null };
 }
 
 async function getChallengeSignals(page) {
@@ -172,7 +197,7 @@ async function getChallengeSignals(page) {
  * @param {string} [profileDir] — override for the Puppeteer userDataDir
  * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
  */
-export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null) {
+export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0) {
   const userDataDir  = profileDir || await getUserDataDir().catch(() => getProfileDir());
   const queryList    = Array.isArray(queries) ? queries.filter(Boolean) : [queries].filter(Boolean);
   const days         = maxAgeDays ? Math.max(1, Math.floor(maxAgeDays)) : 21;
@@ -193,19 +218,34 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     };
   }
 
+  const launchOpts = {
+    headless: false,
+    executablePath,
+    userDataDir,
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: LAUNCH_ARGS,
+    defaultViewport: { width: 1400, height: 900 },
+    ignoreHTTPSErrors: true,
+  };
+
   let browser;
   try {
-    browser = await puppeteer.launch({
-      headless: false,
-      executablePath,
-      userDataDir,
-      ignoreDefaultArgs: ['--enable-automation'],
-      args: LAUNCH_ARGS,
-      defaultViewport: { width: 1400, height: 900 },
-      ignoreHTTPSErrors: true,
-    });
+    try {
+      browser = await puppeteer.launch(launchOpts);
+    } catch (launchErr) {
+      if (/browser is already running/i.test(launchErr.message)) {
+        // A Chrome zombie from a previous crashed session is holding the profile lock.
+        // Kill it and retry once.
+        logger.warn('[Indeed/Browser] Chrome zombie detected — killing stale process and retrying launch');
+        await killChromeHoldingProfile(userDataDir);
+        await new Promise(r => setTimeout(r, 1500));
+        browser = await puppeteer.launch(launchOpts);
+      } else {
+        throw launchErr;
+      }
+    }
 
-    const page = await browser.newPage();
+    let page = await browser.newPage();
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
     await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
 
@@ -247,17 +287,32 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
     logger.info(`[Indeed/Browser] Authenticated. ${queryList.length} queries × up to ${maxPages} pages`);
 
+    const MAX_CONSECUTIVE_RESTARTS = 3;
+    let consecutiveRestarts = 0;
+
     const allJobs = [];
     const seenKeys = new Set();
     let totalChallenges = 0;
     let loginWallHit = false;
+    let challengedQi = -1;
+    let challengedPage = 0;
 
     outer:
     for (let qi = 0; qi < queryList.length; qi++) {
       const q = queryList[qi];
       if (signal?.aborted) break;
 
-      for (let p = 0; p < maxPages; p++) {
+      // Cloudflare challenge pages can detach the Puppeteer frame mid-navigation.
+      // If the frame is dead, no further queries can succeed — stop cleanly.
+      if (qi > 0) {
+        const alive = await page.evaluate(() => true).catch(() => false);
+        if (!alive) {
+          logger.warn('[Indeed/Browser] Page frame detached after challenge — skipping remaining queries');
+          break;
+        }
+      }
+
+      for (let p = (qi === 0 ? startPage : 0); p < maxPages; p++) {
         if (signal?.aborted) break outer;
         if (allJobs.length >= resultCap) break outer;
 
@@ -284,7 +339,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         }
 
         await injectOverlay(page);
-        await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: `Loading page ${p + 1}…` });
+        await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: `Loading page ${p + 1}…`, progressText: '0/0' });
         await new Promise(r => setTimeout(r, 2000 + Math.round(Math.random() * 1000)));
         if (signal?.aborted) break outer;
 
@@ -297,11 +352,81 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           }).catch(() => null);
           logger.warn(`[Indeed/Browser] Challenge (${signals.reason}) q="${q}" p=${p + 1}${rayId ? ` Ray=${rayId}` : ''}`);
           await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: `⚠️ ${signals.reason}`, challenge: true });
-          if (signals.reason === 'indeed-login-wall') { loginWallHit = true; break outer; }
-          break;
+          // Cloudflare has fingerprinted this CDP session. A fresh browser resets
+          // the session fingerprint while keeping profile cookies — restart and
+          // retry the same page. Cap restarts as a safety valve.
+          if (signals.reason !== 'indeed-login-wall') {
+            if (consecutiveRestarts >= MAX_CONSECUTIVE_RESTARTS) {
+              logger.warn(`[Indeed/Browser] ${MAX_CONSECUTIVE_RESTARTS} consecutive restarts without loading q="${q}" p=${p + 1} — stopping`);
+              break outer;
+            }
+            const backoffMs = consecutiveRestarts === 0 ? 5000 : Math.min(consecutiveRestarts * 30000, 300000);
+            logger.info(`[Indeed/Browser] cf challenge at q=${qi + 1} p=${p + 1} — restarting browser (attempt ${consecutiveRestarts + 1}, backoff ${backoffMs / 1000}s)`);
+            // Clear the __cf_bm bot-score cookie before closing so the fresh browser
+            // starts with a neutral CF fingerprint rather than the tainted one.
+            await page.deleteCookie({ name: '__cf_bm', domain: 'indeed.com' }, { name: '__cf_bm', domain: '.indeed.com' }).catch(() => {});
+            await browser.close().catch(() => {});
+            await killChromeHoldingProfile(userDataDir);
+            await new Promise(r => setTimeout(r, backoffMs));
+            browser = await puppeteer.launch(launchOpts);
+            consecutiveRestarts++;
+            page = await browser.newPage();
+            await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+            await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
+            p--;
+            continue;
+          }
+          // Keep the CDP window open and let the user log in directly in it.
+          // Disable overlay so it doesn't block the login form.
+          await page.evaluate(() => {
+            const panel = document.getElementById('__ic-panel');
+            if (panel) panel.style.pointerEvents = 'none';
+          }).catch(() => {});
+          await updateOverlay(page, {
+            ...overlayBase,
+            count: allJobs.length,
+            status: 'Sign in to Indeed to continue — waiting…',
+            challenge: true,
+          });
+
+          const LOGIN_POLL_MS = 2000;
+          const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+          const loginDeadline = Date.now() + LOGIN_TIMEOUT_MS;
+          let loggedIn = false;
+
+          while (Date.now() < loginDeadline) {
+            if (signal?.aborted) break;
+            await new Promise(r => setTimeout(r, LOGIN_POLL_MS));
+            if (signal?.aborted) break;
+            const currentUrl = page.url();
+            const isAuthPage = /secure\.indeed\.com\/(auth|login)|indeed\.com\/(auth|login|signin)/i.test(currentUrl);
+            if (currentUrl.includes('indeed.com') && !isAuthPage) {
+              loggedIn = true;
+              logger.info(`[Indeed/Browser] Login complete — resuming q=${qi + 1} p=${p + 1}`);
+              break;
+            }
+          }
+
+          if (!loggedIn || signal?.aborted) {
+            challengedQi = qi; challengedPage = p; loginWallHit = true; break outer;
+          }
+
+          // Re-enable overlay and retry this page (p-- makes the outer loop revisit same index)
+          await page.evaluate(() => {
+            const panel = document.getElementById('__ic-panel');
+            if (panel) panel.style.pointerEvents = 'auto';
+          }).catch(() => {});
+          p--;
+          continue;
         }
 
-        const html       = await page.content();
+        let html;
+        try {
+          html = await page.content();
+        } catch (e) {
+          logger.warn(`[Indeed/Browser] page.content() error q="${q}" p=${p + 1}: ${e.message}`);
+          break outer;
+        }
         const htmlKB     = Math.round(html.length / 1024);
         const rawPageJobs = extractIndeedJobsFromHtml(html);
         const pageJobs   = rawPageJobs.slice(0, JOB_PER_PAGE_CAP);
@@ -325,20 +450,66 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         if (rawPageJobs.length === 0) break;
 
         // Click each card on this page to load full descriptions from the right panel.
-        await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: `Enriching ${pageJobs.length} jobs…` });
-        await enrichWithDescriptions(page, pageJobs, signal).catch(e => {
-          logger.warn(`[Indeed/Browser] Description enrichment failed p=${p + 1}: ${e.message}`);
+        await updateOverlay(page, {
+          ...overlayBase,
+          count: allJobs.length,
+          status: `Enriching ${pageJobs.length} jobs…`,
+          progressText: `0/${pageJobs.length}`,
         });
+        let enrichResult;
+        try {
+          enrichResult = await enrichWithDescriptions(page, pageJobs, signal, overlayBase, allJobs.length);
+        } catch (e) {
+          logger.warn(`[Indeed/Browser] Description enrichment failed p=${p + 1}: ${e.message}`);
+          enrichResult = { enriched: 0, cfBlankAt: null };
+        }
+
+        if (enrichResult.cfBlankAt != null) {
+          totalChallenges++;
+          if (consecutiveRestarts >= MAX_CONSECUTIVE_RESTARTS) {
+            logger.warn(`[Indeed/Browser] ${MAX_CONSECUTIVE_RESTARTS} consecutive restarts without progress q="${q}" p=${p + 1} — stopping`);
+            break outer;
+          }
+          const backoffMs = consecutiveRestarts === 0 ? 5000 : Math.min(consecutiveRestarts * 30000, 300000);
+          logger.info(`[Indeed/Browser] CF blank at card ${enrichResult.cfBlankAt + 1} q=${qi + 1} p=${p + 1} — restarting browser (attempt ${consecutiveRestarts + 1}, backoff ${backoffMs / 1000}s)`);
+          await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: '⚠️ cf-blank-enrichment', challenge: true });
+          await page.deleteCookie({ name: '__cf_bm', domain: 'indeed.com' }, { name: '__cf_bm', domain: '.indeed.com' }).catch(() => {});
+          await browser.close().catch(() => {});
+          await killChromeHoldingProfile(userDataDir);
+          await new Promise(r => setTimeout(r, backoffMs));
+          browser = await puppeteer.launch(launchOpts);
+          consecutiveRestarts++;
+          page = await browser.newPage();
+          await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+          await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
+          p--;
+          continue;
+        }
+
+        // Past both challenge check and enrichment cleanly — reset consecutive-restart counter.
+        consecutiveRestarts = 0;
         if (signal?.aborted) break outer;
 
-        for (const job of pageJobs) {
+        for (let i = 0; i < pageJobs.length; i++) {
+          const job = pageJobs[i];
           const dk = job.jobkey || job.url || `${(job.title || '').toLowerCase()}|${(job.company || '').toLowerCase()}`;
           if (seenKeys.has(dk)) continue;
           seenKeys.add(dk);
           allJobs.push(job);
+          await updateOverlay(page, {
+            ...overlayBase,
+            count: allJobs.length,
+            status: `Collected ${allJobs.length} jobs…`,
+            progressText: `${i + 1}/${pageJobs.length}`,
+          });
           if (allJobs.length >= resultCap) break;
         }
-        await updateOverlay(page, { count: allJobs.length, status: `Page ${p + 1} done` });
+        await updateOverlay(page, {
+          ...overlayBase,
+          count: allJobs.length,
+          status: `Page ${p + 1} done`,
+          progressText: `${pageJobs.length}/${pageJobs.length}`,
+        });
 
         if (rawPageJobs.length < 10 || hasNextPage === false) break;
 
@@ -365,7 +536,11 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         code: 'needs-login',
         severity: 'block',
         evidence: 'Indeed session expired — login wall hit during pagination.',
-        suggestion: 'Open Settings → Job Sources → Connect Indeed to refresh your login.',
+        suggestion: 'Open Settings → Job Sources → Connect Indeed to refresh your login, then click Continue on the source card.',
+        resumeState: {
+          remainingQueries: queryList.slice(challengedQi),
+          startPage: challengedPage,
+        },
       };
     } else if (totalChallenges > 0 && items.length === 0) {
       warning = {
@@ -386,6 +561,12 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     return { items, warning, gathered: inWindow.length };
 
   } finally {
-    if (browser) await browser.close().catch(() => {});
+    if (browser) {
+      await browser.close().catch(e => logger.warn(`[Indeed/Browser] browser.close() failed: ${e.message}`));
+      // Kill by profile path rather than Puppeteer's process reference — CDP disconnect
+      // can null out browser._process before we reach here, making kill() a no-op and
+      // leaving Chrome alive to hold the SingletonLock for the next launch.
+      await killChromeHoldingProfile(userDataDir);
+    }
   }
 }

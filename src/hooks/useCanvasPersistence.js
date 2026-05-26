@@ -1,4 +1,4 @@
-import { useCallback, useState, useRef, useEffect } from 'react';
+import { useCallback, useState, useRef, useEffect, useEffectEvent } from 'react';
 import { toPng } from 'html-to-image';
 import { EventLogger } from '../utils/EventLogger';
 import { migrateGroupNodes, sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
@@ -32,6 +32,7 @@ export function useCanvasPersistence({
   const [currentFile, setCurrentFile] = useState(null);
   const [saveState, setSaveState] = useState('idle');
   const isMountedRef = useRef(true);
+
   useEffect(() => {
     return () => { isMountedRef.current = false; };
   }, []);
@@ -63,38 +64,6 @@ export function useCanvasPersistence({
   // without listing saveState as a dep (same pattern as hasUnsavedChangesRef).
   const saveStateRef = useRef(saveState);
   useEffect(() => { saveStateRef.current = saveState; }, [saveState]);
-
-  useEffect(() => {
-    // ── Quit Handshake ──────────────────────────────────────────────────────
-    // Listens for the main process signaling a quit intent (e.g., Cmd+Q).
-    const unlistenQuit = window.electronAPI?.onQuitRequest?.(() => {
-      window.electronAPI.sendQuitResponse(hasUnsavedChangesRef.current);
-    });
-
-    // ── Preload Listeners ────────────────────────────────────────────────────
-    const unlistenSaveAndRespond = window.electronAPI?.onRequestSaveAndRespond?.(async () => {
-      const success = await saveCanvasRef.current?.(true); // force save
-      window.electronAPI.sendSaveResponse(success);
-    });
-
-    // ── Window Unload Guard ──────────────────────────────────────────────────
-    // Standard browser/electron safety for closing the window tab directly.
-    const handleBeforeUnload = (e) => {
-      if (hasUnsavedChangesRef.current) {
-        e.preventDefault();
-        e.returnValue = ''; // Required for Chrome/Electron to show the prompt
-      }
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-
-    return () => {
-      unlistenQuit?.();
-      unlistenSaveAndRespond?.();
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-      if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
-      if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
-    };
-  }, []); // Stable: reads live value via ref — no need to re-register on change
 
   const saveCanvas = useCallback(async () => {
     if (!window.electronAPI || saveStateRef.current !== 'idle' || isAnimatingRef?.current) return;
@@ -157,12 +126,39 @@ export function useCanvasPersistence({
     }
   }, [addToast, flushStack, isAnimatingRef, updateSetting]); // currentFile read via ref — omitted intentionally
 
-  // Expose stable references for the IPC listeners.
-  // Direct render-body assignment is the correct pattern for ref syncing in ESLint v7+
-  // (react-hooks/immutability disallows mutation inside useEffect).
-  const saveCanvasRef = useRef(saveCanvas);
-  // eslint-disable-next-line react-hooks/immutability -- render-body ref sync is the correct pattern when useEffect mutation is also disallowed by the same rule
-  saveCanvasRef.current = saveCanvas;
+  const handleSaveRequest = useEffectEvent(async () => saveCanvas());
+
+  useEffect(() => {
+    // ── Quit Handshake ──────────────────────────────────────────────────────
+    // Listens for the main process signaling a quit intent (e.g., Cmd+Q).
+    const unlistenQuit = window.electronAPI?.onQuitRequest?.(() => {
+      window.electronAPI.sendQuitResponse(hasUnsavedChangesRef.current);
+    });
+
+    // ── Preload Listeners ────────────────────────────────────────────────────
+    const unlistenSaveAndRespond = window.electronAPI?.onRequestSaveAndRespond?.(async () => {
+      const success = await handleSaveRequest(); // force save
+      window.electronAPI.sendSaveResponse(success);
+    });
+
+    // ── Window Unload Guard ──────────────────────────────────────────────────
+    // Standard browser/electron safety for closing the window tab directly.
+    const handleBeforeUnload = (e) => {
+      if (hasUnsavedChangesRef.current) {
+        e.preventDefault();
+        e.returnValue = ''; // Required for Chrome/Electron to show the prompt
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      unlistenQuit?.();
+      unlistenSaveAndRespond?.();
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
+      if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+    };
+  }, []); // Stable: reads live value via ref / useEffectEvent — no need to re-register on change
 
   const handleUnsavedChanges = useCallback(async (actionName) => {
     if (!hasUnsavedChangesRef.current) return true;

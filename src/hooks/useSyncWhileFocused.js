@@ -18,7 +18,6 @@ export function useSyncWhileFocused(externalValue) {
   const focusRef = useRef(false);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!focusRef.current) setValue(externalValue);
   }, [externalValue]);
 

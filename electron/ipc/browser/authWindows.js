@@ -4,7 +4,6 @@ import { getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath,
 import { READINESS } from '../scrapeBudget.js';
 import { execFile as execFileCb, spawn } from 'child_process';
 import fs from 'fs';
-import path from 'path';
 import { promisify } from 'util';
 
 // ── Auth-window cadence ───────────────────────────────────────────────────────

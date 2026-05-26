@@ -1,4 +1,4 @@
-import React, { useCallback, useContext, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { ExternalLink, FileText, ChevronDown, ChevronUp, X, Download, StickyNote, BrainCircuit, Clock, RefreshCw } from 'lucide-react';
@@ -53,7 +53,10 @@ export function JobCardNode({ id, data }) {
   const { addToast } = useToast();
 
   // Cache ID for closure safely
-  const idRef = useRef(id); idRef.current = id;
+  const idRef = useRef(id);
+  useEffect(() => {
+    idRef.current = id;
+  }, [id]);
 
   // Notes debounce ref — avoids updateGlobal on every keystroke
   const notesTimerRef = useRef(null);
@@ -63,6 +66,22 @@ export function JobCardNode({ id, data }) {
 
   const accentColor = STRENGTH_COLORS[strength] || '#888';
   const status = data.status || 'New';
+  const [timeTick, setTimeTick] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!data.appliedAt || !['Applied', 'Interview', 'Offer'].includes(status)) {
+      return undefined;
+    }
+    const timerId = window.setInterval(() => setTimeTick(Date.now()), 60 * 60 * 1000);
+    return () => window.clearInterval(timerId);
+  }, [data.appliedAt, status]);
+
+  const appliedDays = useMemo(() => {
+    if (!data.appliedAt || !['Applied', 'Interview', 'Offer'].includes(status)) return null;
+    const appliedAtMs = new Date(data.appliedAt).getTime();
+    if (Number.isNaN(appliedAtMs)) return null;
+    return Math.floor((timeTick - appliedAtMs) / 86400000);
+  }, [data.appliedAt, status, timeTick]);
 
   const handleStatusChange = useCallback((newStatus) => {
     const update = { status: newStatus };
@@ -274,15 +293,12 @@ export function JobCardNode({ id, data }) {
             {STATUS_OPTIONS.map(s => <option key={s} value={s} className="bg-[#1a1a1a]">{s}</option>)}
           </select>
           {/* Days-since badge for Applied / Interview */}
-          {data.appliedAt && (status === 'Applied' || status === 'Interview' || status === 'Offer') && (() => {
-            const days = Math.floor((Date.now() - new Date(data.appliedAt).getTime()) / 86400000);
-            return days >= 0 ? (
-              <span className="flex items-center gap-0.5 text-[9px] text-white/25">
-                <Clock size={8} />
-                {days === 0 ? 'today' : `${days}d`}
-              </span>
-            ) : null;
-          })()}
+          {appliedDays !== null && appliedDays >= 0 && (
+            <span className="flex items-center gap-0.5 text-[9px] text-white/25">
+              <Clock size={8} />
+              {appliedDays === 0 ? 'today' : `${appliedDays}d`}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-1">

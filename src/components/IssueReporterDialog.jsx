@@ -42,7 +42,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
   const codePreview = useMemo(() => {
     const rawLogs = EventLogger.getLogs();
     return previewBugReportCode(rawLogs, filterCode);
-  }, [filterCode, isOpen]);
+  }, [filterCode]);
 
   const hasValidCode  = filterCode.trim().length > 0;
   const hasUnknown    = (codePreview.unknownCodes?.length ?? 0) > 0;

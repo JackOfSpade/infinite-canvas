@@ -11,10 +11,12 @@ export const TARGET_JOB_PLATFORM = 'indeed';
 export const JOB_SEARCH_TEST_MODE = {
   enabled: true,
   sourceId: TARGET_JOB_PLATFORM,
-  // fullRun: production caps + full AI scoring, but still scoped to one platform.
-  // false = limited caps + skip AI (quick smoke test).
-  // true  = full pipeline run (validate end-to-end quality for this platform).
+  // Run tier — only meaningful when enabled:true. All tiers skip AI scoring.
+  // fullRun:false + mediumRun:false → fast   (1 job/page, 10 pages)
+  // fullRun:false + mediumRun:true  → medium (5 jobs/page, 10 pages)
+  // fullRun:true                    → full   (150 jobs/page, 10 pages)
   fullRun: false,
+  mediumRun: true,
 };
 
 export function getScopedJobSourceIds(allSourceIds = []) {

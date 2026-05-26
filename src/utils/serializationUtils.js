@@ -1,4 +1,9 @@
 import { getNodeDims } from './constants';
+import {
+  getJobHubTransientKeysForSave,
+  SELLHUB_TRANSIENT_KEYS,
+  TRANSIENT_PROCESSING_HUB_STATES,
+} from './persistenceTransientState';
 
 /** Stable, pure snapshot fingerprint — no hook needed. */
 export function fingerprint(snap) {
@@ -172,8 +177,7 @@ export function sanitizeNodesForSave(nodes) {
     const isJobHub = n.type === 'jobhub';
     const isSellHub = n.type === 'sellhub';
     const isHub = isJobHub || isSellHub;
-    const transientHubStates = ['parsing', 'querying', 'searching', 'scoring', 'analyzing', 'researching'];
-    const hasTransientHubState = isHub && n.data && transientHubStates.includes(n.data.hubState);
+    const hasTransientHubState = isHub && n.data && TRANSIENT_PROCESSING_HUB_STATES.includes(n.data.hubState);
 
     // Hub-specific transient data fields. These are diagnostic / pending-flow
     // state generated within a single session — once the app restarts the
@@ -181,10 +185,7 @@ export function sanitizeNodesForSave(nodes) {
     // "report an issue" banners from runs they don't remember. Stripping on
     // save means the same-session experience is unchanged (the fields live
     // in React state until the next save) but a fresh session loads clean.
-    const isSourcesReady = isJobHub && n.data?.hubState === 'sources-ready';
-    const JOBHUB_TRANSIENT_KEYS = isSourcesReady
-      ? ['errorMessage', 'isRateLimit']
-      : ['scrapeWarnings', 'pendingJobs', 'pendingTargetRole', 'errorMessage', 'isRateLimit'];
+    const JOBHUB_TRANSIENT_KEYS = getJobHubTransientKeysForSave(n.data?.hubState);
     const hasJobHubTransient = isJobHub && n.data && JOBHUB_TRANSIENT_KEYS.some(k => k in n.data);
 
     // SellHub: platformFitPending gates the marketplace list on the in-flight
@@ -193,7 +194,6 @@ export function sanitizeNodesForSave(nodes) {
     // spinner with no call running. The fit RESULT (platformFit) is kept; only
     // the pending flag is stripped, so a reloaded priced hub renders its verdicts
     // immediately (or, if none were saved, the unfiltered list).
-    const SELLHUB_TRANSIENT_KEYS = ['platformFitPending'];
     const hasSellHubTransient = isSellHub && n.data && SELLHUB_TRANSIENT_KEYS.some(k => k in n.data);
 
     if (!hasTransientData && !hasTransientOpacity && !hasTransientHubState && !hasJobHubTransient && !hasSellHubTransient) return n;
@@ -217,4 +217,3 @@ export function sanitizeNodesForSave(nodes) {
     return result;
   });
 }
-

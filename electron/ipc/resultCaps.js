@@ -20,9 +20,14 @@ import { JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
  * constant into ~10 template literals for a fixed breadth ceiling).
  */
 
-// TEST_MODE = limited caps + skip AI scoring.
-// Decoupled from enabled so a fullRun can scope to one platform without cutting caps.
-export const TEST_MODE = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fullRun;
+// Four named modes — exactly one is true at runtime:
+//   FAST_TEST     : 1 job/page,   10 pages, AI skipped
+//   MEDIUM_TEST    : 5 jobs/page,  10 pages, AI skipped
+//   FULL_TEST : 150 jobs/page, 10 pages, AI skipped
+//   production     : 150 jobs/page, 10 pages, full AI  (all three false)
+export const FAST_TEST      = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fullRun && !JOB_SEARCH_TEST_MODE.mediumRun;
+export const MEDIUM_TEST     = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fullRun &&  JOB_SEARCH_TEST_MODE.mediumRun;
+export const FULL_TEST  = JOB_SEARCH_TEST_MODE.enabled &&  JOB_SEARCH_TEST_MODE.fullRun;
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -44,7 +49,7 @@ export const JOB_RESULT_CAP = Infinity;
 // Unified per-page/per-query cap for ALL browser scrapers (manualScraper + indeedBrowser).
 // 150 is the scroll-depth target for Google Jobs and a soft ceiling for Indeed pages
 // (which have ~10 jobs/page in practice, so 150 is effectively unlimited in prod).
-export const JOB_PER_PAGE_CAP = TEST_MODE ? 1 : 150;
+export const JOB_PER_PAGE_CAP = FAST_TEST ? 1 : MEDIUM_TEST ? 5 : 150;
 
 // ── LLM scoring budget (how many gathered jobs actually get LLM-scored) ───────
 // UNCAPPED (Infinity): score EVERY gathered job. selectTopAcrossSources(_, Infinity)
@@ -53,7 +58,7 @@ export const JOB_PER_PAGE_CAP = TEST_MODE ? 1 : 150;
 // hundreds of jobs will rate-limit (429) and fall back to weaker models until the
 // paid API tier lands. Restore a numeric budget (was 150, round-robin fair across
 // sources via selectTopAcrossSources) when on paid.
-export const JOB_SCORE_CAP = TEST_MODE ? 0 : Infinity;
+export const JOB_SCORE_CAP = JOB_SEARCH_TEST_MODE.enabled ? 0 : Infinity;
 
 // ── Date-bounded deep pagination ──────────────────────────────────────────────
 // Browser sources page forward (same stealth session) until they run out of
@@ -61,7 +66,7 @@ export const JOB_SCORE_CAP = TEST_MODE ? 0 : Infinity;
 // walk DOWN if a source starts getting blocked — volume is the anti-bot trigger,
 // not speed, so the ceiling is the real safety knob. The scorer cap (above) still
 // bounds how many of the wider pool reach the LLM.
-export const JOB_MAX_PAGES = TEST_MODE ? 1 : 10;
+export const JOB_MAX_PAGES = 10;
 
 // ── LLM-input caps (adaptive: scale to availability, bounded by token budget) ─
 const SOLD_COMP_TARGET    = 25; // statistically-sufficient "sold" comps for an FMV

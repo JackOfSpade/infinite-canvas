@@ -6,7 +6,7 @@ import { getJobsTelemetry } from '../jobs.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings } from '../settings.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
-import { TEST_MODE, JOB_RESULT_CAP, JOB_PER_PAGE_CAP } from '../resultCaps.js';
+import { FAST_TEST, MEDIUM_TEST, FULL_TEST, JOB_RESULT_CAP, JOB_PER_PAGE_CAP } from '../resultCaps.js';
 import { ago, modelTag, pipelineScope } from './helpers.js';
 
 export function buildJobsConfigSnapshot() {
@@ -26,10 +26,9 @@ export function buildJobsConfigSnapshot() {
     hasScrapflyKey: !!scrapflyKey,
     scrapflyKeyPrefix,
     testMode: {
-      active: TEST_MODE,
+      mode: FAST_TEST ? 'fast' : MEDIUM_TEST ? 'medium' : FULL_TEST ? 'full' : 'production',
       enabled: JOB_SEARCH_TEST_MODE.enabled,
       sourceId: JOB_SEARCH_TEST_MODE.sourceId || null,
-      fullRun: JOB_SEARCH_TEST_MODE.fullRun,
       jobResultCap: JOB_RESULT_CAP,
       jobPerPageCap: JOB_PER_PAGE_CAP,
     },

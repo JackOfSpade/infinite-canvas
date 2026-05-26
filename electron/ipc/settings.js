@@ -80,6 +80,14 @@ function getStore() {
   return _store;
 }
 
+function tryGetStore() {
+  try {
+    return getStore();
+  } catch {
+    return null;
+  }
+}
+
 export function registerSettingsHandlers() {
   handleSafe('get-settings', async () => {
     return getStore().store;
@@ -121,7 +129,7 @@ export function registerSettingsHandlers() {
 }
 
 export function getAISettings() {
-  return getStore().get('ai');
+  return tryGetStore()?.get('ai') || {};
 }
 
 /**
@@ -131,7 +139,7 @@ export function getAISettings() {
  * .env-based config (purely additive — UI-configured values take precedence).
  */
 export function getJobsSettings() {
-  const jobs = getStore().get('jobs') || {};
+  const jobs = tryGetStore()?.get('jobs') || {};
   return {
     usajobsApiKey:  jobs.usajobsApiKey  || process.env.USAJOBS_API_KEY  || '',
     usajobsEmail:   jobs.usajobsEmail   || process.env.USAJOBS_EMAIL    || '',
@@ -140,11 +148,11 @@ export function getJobsSettings() {
 }
 
 export function getDiceApiKey() {
-  return getStore().get('jobs.diceApiKey') || '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
+  return tryGetStore()?.get('jobs.diceApiKey') || '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
 }
 
 export function saveDiceApiKey(key) {
-  if (typeof key === 'string' && key.length > 10) getStore().set('jobs.diceApiKey', key);
+  if (typeof key === 'string' && key.length > 10) tryGetStore()?.set('jobs.diceApiKey', key);
 }
 
 /**
@@ -155,7 +163,7 @@ export function saveDiceApiKey(key) {
  */
 export function getMarketplaceWatchUrls(platformId) {
   if (!platformId) return [];
-  const all = getStore().get('marketplaceWatchUrls') || {};
+  const all = tryGetStore()?.get('marketplaceWatchUrls') || {};
   const list = all[platformId];
   return Array.isArray(list) ? list.filter(u => typeof u === 'string' && u.trim().length > 0) : [];
 }
