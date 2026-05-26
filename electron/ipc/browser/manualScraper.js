@@ -689,7 +689,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       if (!rawKey) continue;
       const key = cfg.keyDecode ? decodeURIComponent(rawKey) : rawKey;
 
-      const found = await page.evaluate((cardAttr, cardIdPrefix, cardHrefKey, k) => {
+      const found = await page.evaluate(async (cardAttr, cardIdPrefix, cardHrefKey, k) => {
         let card;
         if (cardAttr) {
           card = document.querySelector(`[${cardAttr}="${k}"]`) || document.querySelector(`a[href*="${k}"]`);
@@ -699,7 +699,17 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           card = document.getElementById((cardIdPrefix || '') + k);
         }
         if (!card) return false;
-        card.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const rect = card.getBoundingClientRect();
+        if (rect.top < 0 || rect.bottom > window.innerHeight) {
+          const dest = window.scrollY + rect.top - window.innerHeight * 0.35;
+          const start = window.scrollY;
+          const delta = dest - start;
+          const steps = 4 + Math.floor(Math.random() * 4);
+          for (let s = 1; s <= steps; s++) {
+            window.scrollTo(0, start + delta * s / steps);
+            await new Promise(r => setTimeout(r, 25 + Math.random() * 45));
+          }
+        }
         return true;
       }, cfg.cardAttr ?? null, cfg.cardIdPrefix ?? null, cfg.cardHrefKey ?? null, key).catch(() => false);
 
@@ -711,7 +721,14 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       }).catch(() => {});
       await new Promise(r => setTimeout(r, humanDelay(50)));
     }
-    await page.evaluate(() => { window.scrollTo(0, 0); }).catch(() => {});
+    await page.evaluate(async () => {
+      const start = window.scrollY;
+      const steps = 4 + Math.floor(Math.random() * 4);
+      for (let s = 1; s <= steps; s++) {
+        window.scrollTo(0, start * (1 - s / steps));
+        await new Promise(r => setTimeout(r, 25 + Math.random() * 55));
+      }
+    }).catch(() => {});
     await new Promise(r => setTimeout(r, humanDelay(200)));
     logger.info(`[BrowserScraper] expandDescriptions(${sourceId}): reveal pass found ${revealedCount}/${enhanced.length} cards — starting click pass`);
   }
@@ -740,7 +757,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       // Scroll card into view and get coordinates for a real mouse click.
       // Real mouse events are reliably intercepted by the SPA's React event handlers;
       // untrusted DOM .click() may not be and can follow the raw href instead.
-      const clickTarget = await page.evaluate((cardAttr, cardIdPrefix, cardHrefKey, clickSel, k) => {
+      const clickTarget = await page.evaluate(async (cardAttr, cardIdPrefix, cardHrefKey, clickSel, k) => {
         let card;
         if (cardAttr) {
           card = document.querySelector(`[${cardAttr}="${k}"]`) || document.querySelector(`a[href*="${k}"]`);
@@ -752,7 +769,17 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         if (!card) return { ok: false };
         const target = clickSel ? card.querySelector(clickSel) : card;
         if (!target) return { ok: false };
-        target.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        const rect0 = target.getBoundingClientRect();
+        if (rect0.top < 0 || rect0.bottom > window.innerHeight) {
+          const dest = window.scrollY + rect0.top - window.innerHeight * 0.3;
+          const start = window.scrollY;
+          const delta = dest - start;
+          const steps = 4 + Math.floor(Math.random() * 4);
+          for (let s = 1; s <= steps; s++) {
+            window.scrollTo(0, start + delta * s / steps);
+            await new Promise(r => setTimeout(r, 25 + Math.random() * 45));
+          }
+        }
         const rect = target.getBoundingClientRect();
         if (!rect.width || !rect.height) return { ok: false };
         return {
@@ -877,29 +904,53 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal) 
         // Google Jobs renders cards in its own scrollable container inside the page.
         // Walk up from the first card to find that container and scroll it; also
         // scroll document.body so either trigger path gets hit.
-        await page.evaluate(() => {
+        await page.evaluate(async () => {
           const card = document.querySelector('.EimVGf, [jscontroller="b11o3b"]');
           if (card) {
             let el = card.parentElement;
             while (el && el !== document.body) {
               const s = getComputedStyle(el);
               if (s.overflowY === 'auto' || s.overflowY === 'scroll') {
-                el.scrollTop = el.scrollHeight;
+                const step = Math.floor(el.clientHeight * (0.55 + Math.random() * 0.3));
+                while (el.scrollTop + el.clientHeight < el.scrollHeight - 10) {
+                  el.scrollTop += step;
+                  await new Promise(r => setTimeout(r, 55 + Math.random() * 90));
+                }
                 break;
               }
               el = el.parentElement;
             }
           }
-          window.scrollTo(0, document.body.scrollHeight);
+          const step = Math.floor(window.innerHeight * (0.55 + Math.random() * 0.3));
+          while (window.scrollY + window.innerHeight < document.body.scrollHeight - 10) {
+            window.scrollBy(0, step);
+            await new Promise(r => setTimeout(r, 55 + Math.random() * 90));
+          }
         });
       } else {
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.evaluate(async () => {
+          const step = Math.floor(window.innerHeight * (0.55 + Math.random() * 0.3));
+          while (window.scrollY + window.innerHeight < document.body.scrollHeight - 10) {
+            window.scrollBy(0, step);
+            await new Promise(r => setTimeout(r, 55 + Math.random() * 90));
+          }
+        });
       }
     } else {
-      const clicked = await page.evaluate(sel => {
+      const clicked = await page.evaluate(async sel => {
         const btn = document.querySelector(sel);
         if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
-        btn.scrollIntoView({ block: 'nearest' });
+        const rect = btn.getBoundingClientRect();
+        if (rect.top < 0 || rect.bottom > window.innerHeight) {
+          const dest = window.scrollY + rect.top - window.innerHeight * 0.35;
+          const start = window.scrollY;
+          const delta = dest - start;
+          const steps = 3 + Math.floor(Math.random() * 3);
+          for (let s = 1; s <= steps; s++) {
+            window.scrollTo(0, start + delta * s / steps);
+            await new Promise(r => setTimeout(r, 30 + Math.random() * 40));
+          }
+        }
         btn.click();
         return true;
       }, loadMoreSel);
