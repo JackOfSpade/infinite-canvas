@@ -40,6 +40,11 @@ tmp/
 temp/
 scratch/
 
+# Dev/probe scripts and browser profile data
+scripts/probe-data/
+scripts/indeed-probe.mjs
+electron/extractors/_archive/
+
 # Agent / editor local config (personal — keep out of the repo)
 .claude/
 
