@@ -26,8 +26,13 @@
  */
 import Store from 'electron-store';
 import { logger } from '../logger.js';
+import { humanDelay } from '../utils/humanDelay.js';
 
-const store = new Store({ name: 'scrape-budgets' });
+// Lazy-initialized — new Store() calls app.getPath('userData') which requires
+// app.whenReady(). Module-level init runs before that, causing the v11 error.
+let _store = null;
+const store = { get: (...a) => getStore().get(...a), set: (...a) => getStore().set(...a) };
+function getStore() { return _store ??= new Store({ name: 'scrape-budgets' }); }
 
 // ── Budget derivation knobs ──────────────────────────────────────────────────
 const EMA_ALPHA = 0.3;            // weight of the newest sample in the moving average
@@ -95,9 +100,13 @@ export function resolveBudget(key, seedTimeoutMs) {
   // the MIN_BUDGET_MS floor would otherwise push past a small seed (e.g. an
   // API source with an 8s seed). min() last guarantees timeoutMs ≤ seed always.
   const timeoutMs = Math.min(seed, learnedBudget);
-  const firstBeatMs = Math.max(
+  const calculatedBeat = Math.max(
     READINESS.FIRST_BEAT_MIN_MS,
     Math.min(Math.round(stats.ema * FIRST_BEAT_RATIO), READINESS.FIRST_BEAT_MAX_MS),
+  );
+  const firstBeatMs = Math.max(
+    READINESS.FIRST_BEAT_MIN_MS,
+    Math.min(humanDelay(calculatedBeat), READINESS.FIRST_BEAT_MAX_MS),
   );
   return { timeoutMs, firstBeatMs, learned: true };
 }

@@ -1,7 +1,11 @@
 import { logger } from '../../logger.js';
 import puppeteer from 'puppeteer-extra';
-import { getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath } from '../stealthBrowser.js';
+import { getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath } from '../stealthBrowser.js';
 import { READINESS } from '../scrapeBudget.js';
+import { execFile as execFileCb, spawn } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import { promisify } from 'util';
 
 // ── Auth-window cadence ───────────────────────────────────────────────────────
 // Timing for the human-in-the-loop auth/captcha windows: how responsively we
@@ -12,12 +16,115 @@ import { READINESS } from '../scrapeBudget.js';
 const LOGIN_POLL_INTERVAL_MS    = 500;           // login-window auto-close poll cadence
 const AUTH_WINDOW_AUTO_CLOSE_MS = 5 * 60 * 1000; // max time a hidden auth/captcha window stays open
 const AUTH_HEARTBEAT_LOG_MS     = 10_000;        // "still waiting" diagnostic heartbeat interval
+const NATIVE_LOGIN_COOKIE_FLUSH_MS = 2_500;      // let OAuth/session cookies reach disk before verify
+const execFile = promisify(execFileCb);
+
+// Google rejects sign-in attempts from CDP-controlled Chrome. Indeed commonly
+// delegates auth to Google SSO, so use a plain Chrome process for that flow.
+const NATIVE_LOGIN_PLATFORMS = new Set(['indeed']);
+const NATIVE_LOGIN_SUCCESS_URLS = {
+  indeed: [
+    'www.indeed.com/jobs',
+  ],
+};
+
+const activeAuthWindows = new Map();
+let lastAuthWindowDiagnostic = null;
+
+function updateAuthWindowDiagnostic(platformId, patch = {}) {
+  const previous = activeAuthWindows.get(platformId) || {};
+  const next = {
+    platformId,
+    startedAt: previous.startedAt || new Date().toISOString(),
+    ...previous,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  activeAuthWindows.set(platformId, next);
+  lastAuthWindowDiagnostic = next;
+  return next;
+}
+
+function finishAuthWindowDiagnostic(platformId, patch = {}) {
+  const next = updateAuthWindowDiagnostic(platformId, {
+    ...patch,
+    finishedAt: new Date().toISOString(),
+  });
+  activeAuthWindows.delete(platformId);
+  lastAuthWindowDiagnostic = next;
+}
+
+export function getAuthWindowDiagnostics() {
+  return {
+    active: Array.from(activeAuthWindows.values()),
+    last: lastAuthWindowDiagnostic,
+  };
+}
+
+async function findGoogleSafeChromePath(fallbackPath) {
+  const candidates = process.platform === 'darwin'
+    ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+    : process.platform === 'win32'
+      ? [
+          'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+          'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        ]
+      : ['/usr/bin/google-chrome'];
+
+  for (const candidate of candidates) {
+    try {
+      await fs.promises.access(candidate);
+      return candidate;
+    } catch { /* try next */ }
+  }
+  return fallbackPath;
+}
+
+async function getNativeChromeTabs() {
+  if (process.platform !== 'darwin') return [];
+  const script = `
+tell application "Google Chrome"
+  set output to ""
+  repeat with w in windows
+    repeat with t in tabs of w
+      set output to output & (URL of t as string) & "||" & (title of t as string) & linefeed
+    end repeat
+  end repeat
+  return output
+end tell`;
+  try {
+    const { stdout } = await execFile('/usr/bin/osascript', ['-e', script], { timeout: 3000 });
+    return String(stdout || '')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean)
+      .map(line => {
+        const [url = '', title = ''] = line.split('||');
+        return { url, title };
+      });
+  } catch (error) {
+    return [{ url: '', title: '', error: error?.message || String(error) }];
+  }
+}
+
+function isNativeLoginSuccess(platformId, url, title = '') {
+  const lower = String(url || '').toLowerCase();
+  const titleLower = String(title || '').toLowerCase();
+  if (/\/account\/googleauth\b/i.test(lower)) return false;
+  if (!lower || /accounts\.google\.com|\/auth\b|\/login\b|\/signin\b|sign-in/i.test(lower)) return false;
+  if (titleLower.includes('just a moment') || titleLower.includes('sign in')) return false;
+  return (NATIVE_LOGIN_SUCCESS_URLS[platformId] || []).some(marker => lower.includes(marker));
+}
 
 /** Known platform login URLs */
 export const PLATFORM_LOGIN_URLS = {
   // Job platforms
+  // Navigate to myaccount directly — unauthenticated users are redirected to
+  // accounts.google.com/signin?continue=myaccount; after login Google redirects
+  // to google.com/account/about/ (PLATFORM_AUTH_GATED_URLS fires → auto-closes).
+  google:        'https://myaccount.google.com/',
   linkedin:      'https://www.linkedin.com/login',
-  indeed:        'https://secure.indeed.com/auth',
+  indeed:        'https://secure.indeed.com/auth?continue=https%3A%2F%2Fwww.indeed.com%2Fjobs%3Fq%3Dsoftware%2520engineer%26fromage%3D1',
   glassdoor:     'https://www.glassdoor.com/profile/login_input.htm',
   ziprecruiter:  'https://www.ziprecruiter.com/login',
   dice:          'https://www.dice.com/dashboard/login',
@@ -68,12 +175,14 @@ export const PLATFORM_AUTH_COOKIES = {
  * login redirect for anonymous users, not just empty content).
  */
 export const PLATFORM_AUTH_GATED_URLS = {
-  wellfound: '/settings',  // anonymous → redirected to /login?redirect_url=/settings first
+  google:    'google.com/account/about',  // logged-in: myaccount.google.com → google.com/account/about/?hl=…; anonymous → accounts.google.com/signin
+  wellfound: '/settings',             // anonymous → redirected to /login?redirect_url=/settings first
 };
 
 /** Cookie domains to check per platform */
 export const PLATFORM_COOKIE_DOMAINS = {
   // Job platforms
+  google:        ['.google.com'],
   linkedin:      ['.linkedin.com'],
   indeed:        ['.indeed.com'],
   glassdoor:     ['.glassdoor.com'],
@@ -104,8 +213,21 @@ export async function openLoginWindow(platformId, sender = null) {
   const url = PLATFORM_LOGIN_URLS[platformId];
   if (!url) throw new Error(`Unknown platform: ${platformId}`);
 
-  const executablePath = process.env.CHROME_PATH || await findChromePath();
-  logger.info(`[StealthBrowser] Opening login window for ${platformId}`);
+  // For native-login platforms (e.g. Indeed) the login window and the scraper
+  // MUST use the same Chrome executable. On macOS, Chrome derives its cookie
+  // encryption key from the app's bundle ID via the system Keychain. Playwright's
+  // "Google Chrome for Testing" (com.google.Chrome.for.Testing) and system Google
+  // Chrome (com.google.Chrome) have different bundle IDs → different Keychain
+  // entries → cookies written by one cannot be decrypted by the other. Always
+  // use system Chrome for native-login platforms so the encryption key matches
+  // the scraper (which uses findSystemChromePath). Fall back to findChromePath
+  // for Puppeteer-login platforms where both login and scraper share the same
+  // executable through the normal path.
+  const executablePath = process.env.CHROME_PATH ||
+    (NATIVE_LOGIN_PLATFORMS.has(platformId)
+      ? (await findSystemChromePath() ?? await findChromePath())
+      : await findChromePath());
+  logger.info(`[StealthBrowser] Opening login window for ${platformId} (executable: ${executablePath})`);
 
   // Close the headless scraping browser FIRST. Chrome locks userDataDir per
   // process — if the singleton is still running when we try to launch the
@@ -115,6 +237,10 @@ export async function openLoginWindow(platformId, sender = null) {
   // logged-out even after a successful prior login, and post-login cookies
   // didn't always reach disk in time for verifySellMonitorLogin.
   await closeStealthBrowser();
+
+  if (NATIVE_LOGIN_PLATFORMS.has(platformId)) {
+    return openNativeLoginWindow({ platformId, url, executablePath, sender });
+  }
 
   // Launch a SEPARATE visible browser for login (now has exclusive access to userDataDir).
   // ignoreDefaultArgs removes --enable-automation which puppeteer adds by default —
@@ -142,6 +268,13 @@ export async function openLoginWindow(platformId, sender = null) {
 
   const pages = await loginBrowser.pages();
   const page = pages[0] || await loginBrowser.newPage();
+  updateAuthWindowDiagnostic(platformId, {
+    mode: 'puppeteer-visible',
+    loginUrl: url,
+    currentUrl: page.url(),
+    executable: executablePath,
+    userDataDir: await getUserDataDir(),
+  });
 
   // Clear stale service worker registrations AND cache storage for the login
   // origin via CDP. SWs are origin-scoped and can only be unregistered from
@@ -220,6 +353,11 @@ export async function openLoginWindow(platformId, sender = null) {
         if (page.isClosed?.()) return;
         const currentUrl = page.url();
         if (!currentUrl || currentUrl === 'about:blank') return;
+        updateAuthWindowDiagnostic(platformId, {
+          mode: 'puppeteer-visible',
+          currentUrl,
+          title: await page.title().catch(() => ''),
+        });
         if (LOGIN_URL_PATTERN.test(currentUrl)) return; // still on a login page — wait
 
         if (lastNonLoginUrl !== currentUrl) {
@@ -339,6 +477,7 @@ export async function openLoginWindow(platformId, sender = null) {
       // for Chrome's cookie flush on the slowest test machines while still feeling
       // instantaneous to the user.
       await new Promise(r => setTimeout(r, 800));
+      finishAuthWindowDiagnostic(platformId, { result: 'closed' });
       resolve({ success: true, platform: platformId, closedByApp: sender?.isDestroyed?.() });
     };
 
@@ -351,6 +490,146 @@ export async function openLoginWindow(platformId, sender = null) {
     }
 
     loginBrowser.on('disconnected', cleanup);
+  });
+}
+
+async function openNativeLoginWindow({ platformId, url, executablePath, sender = null }) {
+  const userDataDir = await getUserDataDir();
+  const nativeExecutablePath = await findGoogleSafeChromePath(executablePath);
+  logger.info(`[StealthBrowser] Opening native Chrome login window for ${platformId} (no CDP automation)`);
+  updateAuthWindowDiagnostic(platformId, {
+    mode: 'native-chrome',
+    loginUrl: url,
+    currentUrl: url,
+    executable: nativeExecutablePath,
+    userDataDir,
+  });
+
+  const chromeArgs = [
+    `--user-data-dir=${userDataDir}`,
+    '--profile-directory=Default',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--window-size=1100,800',
+    '--lang=en-US,en',
+    `--app=${url}`,
+  ];
+  updateAuthWindowDiagnostic(platformId, { chromeArgs });
+
+  const child = spawn(nativeExecutablePath, chromeArgs, {
+    stdio: 'ignore',
+    detached: false,
+  });
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeout = null;
+    let poll = null;
+    let closeAfterSuccessTimer = null;
+    let pendingSuccessResult = null;
+    let lastSeenUrl = '';
+    let lastHeartbeatLog = 0;
+
+    const settle = async (result) => {
+      if (settled) return;
+      settled = true;
+      if (poll) clearInterval(poll);
+      if (timeout) clearTimeout(timeout);
+      if (closeAfterSuccessTimer) clearTimeout(closeAfterSuccessTimer);
+      if (sender) sender.removeListener('destroyed', onSenderDestroyed);
+      await new Promise(r => setTimeout(r, 800));
+      finishAuthWindowDiagnostic(platformId, result);
+      resolve({
+        success: true,
+        platform: platformId,
+        nativeChrome: true,
+        closedByApp: result.closedByApp,
+        result: result.result,
+        currentUrl: result.currentUrl,
+        title: result.title,
+      });
+    };
+
+    const onSenderDestroyed = () => {
+      try { child.kill('SIGTERM'); } catch { /* already closed */ }
+      settle({ result: 'app-window-destroyed', closedByApp: true });
+    };
+
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      if (sender) sender.removeListener('destroyed', onSenderDestroyed);
+      finishAuthWindowDiagnostic(platformId, { result: 'launch-error', error: error?.message || String(error) });
+      reject(error);
+    });
+
+    child.once('exit', (code, signal) => {
+      logger.info(`[StealthBrowser] Native Chrome login window for ${platformId} exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`);
+      settle(pendingSuccessResult || { result: 'closed', exitCode: code, signal });
+    });
+
+    poll = setInterval(async () => {
+      if (settled) return;
+      const tabs = await getNativeChromeTabs();
+      const matchingTab = tabs.find(t =>
+        String(t.url || '').includes('indeed.com') ||
+        String(t.url || '').includes('accounts.google.com') ||
+        String(t.title || '').toLowerCase().includes('indeed')
+      ) || tabs[0];
+
+      if (!matchingTab) return;
+      updateAuthWindowDiagnostic(platformId, {
+        mode: 'native-chrome',
+        currentUrl: matchingTab.url || '',
+        title: matchingTab.title || '',
+        nativePollError: matchingTab.error || null,
+      });
+
+      if (matchingTab.url && matchingTab.url !== lastSeenUrl) {
+        lastSeenUrl = matchingTab.url;
+        logger.info(`[StealthBrowser] Native ${platformId} login URL now ${matchingTab.url}`);
+      }
+
+      if (isNativeLoginSuccess(platformId, matchingTab.url, matchingTab.title)) {
+        if (poll) {
+          clearInterval(poll);
+          poll = null;
+        }
+        pendingSuccessResult = { result: 'auto-detected', currentUrl: matchingTab.url, title: matchingTab.title };
+        updateAuthWindowDiagnostic(platformId, {
+          result: 'auto-detected',
+          currentUrl: matchingTab.url,
+          title: matchingTab.title,
+        });
+        logger.info(`[StealthBrowser] Auto-detected logged-in state for ${platformId} via native URL ${matchingTab.url} — waiting ${NATIVE_LOGIN_COOKIE_FLUSH_MS}ms before closing window`);
+        closeAfterSuccessTimer = setTimeout(() => {
+          try { child.kill('SIGTERM'); } catch { /* already closed */ }
+          settle(pendingSuccessResult);
+        }, NATIVE_LOGIN_COOKIE_FLUSH_MS);
+        return;
+      }
+
+      const now = Date.now();
+      if (now - lastHeartbeatLog > AUTH_HEARTBEAT_LOG_MS) {
+        lastHeartbeatLog = now;
+        logger.info(`[StealthBrowser] Native ${platformId} auto-close waiting: URL ${matchingTab.url || 'unknown'}; title=${matchingTab.title || 'unknown'}`);
+      }
+    }, LOGIN_POLL_INTERVAL_MS * 2);
+
+    timeout = setTimeout(() => {
+      logger.info(`[StealthBrowser] Native Chrome login window for ${platformId} timed out — closing process`);
+      try { child.kill('SIGTERM'); } catch { /* already closed */ }
+      settle({ result: 'timeout', timedOut: true });
+    }, AUTH_WINDOW_AUTO_CLOSE_MS);
+
+    if (sender) {
+      if (sender.isDestroyed()) {
+        onSenderDestroyed();
+        return;
+      }
+      sender.once('destroyed', onSenderDestroyed);
+    }
   });
 }
 

@@ -1,3 +1,5 @@
+import { getScopedJobSourceIds } from './jobSourceScope';
+
 export const DEFAULT_EDGE_OPTIONS = { type: 'smoothstep', animated: true, style: { strokeWidth: 3, opacity: 0.8 } };
 export const EDGE_STYLE = { stroke: '#a855f7', strokeWidth: 3 };
 
@@ -35,11 +37,13 @@ export const JOB_SOURCES = [
   { id: 'usajobs',        name: 'USAJobs',     letter: 'US', color: '#003366', domain: 'usajobs.gov' },
 ];
 
-export const ACTIVE_JOB_SOURCES = [
+export const ALL_JOB_SOURCE_IDS = [
   'google', 'indeed', 'linkedin', 'remoteok', 'weworkremotely',
   'ziprecruiter', 'glassdoor', 'dice', 'wellfound',
   'greenhouse', 'lever', 'usajobs',
 ];
+
+export const ACTIVE_JOB_SOURCES = getScopedJobSourceIds(ALL_JOB_SOURCE_IDS);
 
 /** Price comparison sources for marketplace research.
  *  `color` matches the matching SELL_PLATFORMS entry so a marketplace and its

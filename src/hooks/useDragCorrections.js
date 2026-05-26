@@ -7,10 +7,98 @@ import { findNonOverlappingPlacement } from '../utils/layoutUtils';
 
 // ────────────────────────────────────────────────────────────────────────────
 
-export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef, isInteractionRef }) {
+const HUB_DROP_TARGET_TYPES = new Set(['jobhub', 'sellhub']);
+const JOB_HUB_BUSY_STATES = new Set(['parsing', 'querying', 'searching', 'scoring']);
+const PRODUCT_IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|heic|heif)$/i;
+
+function filePayloadFromDraggedNodes(nodes) {
+  return (nodes || [])
+    .filter(n => n?.type === 'document' && typeof n.data?.filePath === 'string' && n.data.filePath.trim())
+    .map(n => ({
+      nodeId: n.id,
+      filePath: n.data.filePath,
+      filename: n.data.filename || n.data.filePath.split(/[\\/]/).pop() || 'file',
+    }));
+}
+
+function fileSupportedByHub(hubType, file) {
+  const name = file?.filename || file?.filePath || '';
+  if (hubType === 'jobhub') return !/\.app$/i.test(name);
+  if (hubType === 'sellhub') return PRODUCT_IMAGE_EXT_RE.test(name);
+  return false;
+}
+
+function hubCanAcceptDrop(targetHub) {
+  if (!targetHub || targetHub.data?.locked) return false;
+  if (targetHub.type === 'jobhub') {
+    return !JOB_HUB_BUSY_STATES.has(targetHub.data?.hubState || 'empty');
+  }
+  if (targetHub.type === 'sellhub') return true;
+  return false;
+}
+
+function buildHubHoverState(targetHub, dragSet) {
+  if (!targetHub) return null;
+  if (targetHub.data?.locked) {
+    return { kind: 'reject', label: 'Locked' };
+  }
+  if (targetHub.type === 'jobhub' && JOB_HUB_BUSY_STATES.has(targetHub.data?.hubState || 'empty')) {
+    return { kind: 'reject', label: 'Busy' };
+  }
+
+  const filePayload = filePayloadFromDraggedNodes(dragSet);
+  if (filePayload.length === 0) {
+    return { kind: 'reject', label: 'Unsupported component' };
+  }
+
+  const acceptedFiles = filePayload.filter(file => fileSupportedByHub(targetHub.type, file));
+  if (acceptedFiles.length === 0) {
+    return {
+      kind: 'reject',
+      label: targetHub.type === 'jobhub' ? 'Unsupported resume file' : 'Images only',
+    };
+  }
+
+  return {
+    kind: 'accept',
+    label: targetHub.type === 'jobhub' ? 'Use as resume' : 'Use as photos',
+  };
+}
+
+function findHubDropTarget(dragSet, getIntersectingNodes) {
+  for (const dragged of dragSet) {
+    const intersections = getIntersectingNodes(dragged);
+    const targetHub = intersections.find(n =>
+      HUB_DROP_TARGET_TYPES.has(n.type) &&
+      n.id !== dragged.id &&
+      !n.data?.locked
+    );
+    if (targetHub) return targetHub;
+  }
+  return null;
+}
+
+export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef, isInteractionRef }) {
   const resizeDragActiveRef    = useRef(new Set());
   const titleZoneDragActiveRef = useRef(new Set());
   const targetGroupIdRef       = useRef(null);
+  const targetHubIdRef         = useRef(null);
+  const dragStartPositionsRef  = useRef(new Map());
+
+  const clearHubHover = useCallback(() => {
+    if (!targetHubIdRef.current) return;
+    updateNodeData(targetHubIdRef.current, { dragHover: null });
+    targetHubIdRef.current = null;
+  }, [updateNodeData]);
+
+  const restoreDragStartPositions = useCallback((ids) => {
+    const idSet = new Set(ids);
+    setNodes(nds => nds.map(n => {
+      if (!idSet.has(n.id)) return n;
+      const position = dragStartPositionsRef.current.get(n.id);
+      return position ? { ...n, position: { ...position } } : n;
+    }));
+  }, [setNodes]);
 
   const onNodeDragStart = useCallback((e, node) => {
     if (isAnimatingRef?.current) return;
@@ -20,6 +108,12 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
     if (takeSnapshot) takeSnapshot();
     
     EventLogger.log(`rf-drag-start id=${node.id} type=${node.type} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
+    dragStartPositionsRef.current.clear();
+    const currentNodes = getNodes ? getNodes() : [node];
+    const draggedAtStart = currentNodes.filter(n => n.id === node.id || n.selected);
+    for (const n of draggedAtStart.length > 0 ? draggedAtStart : [node]) {
+      dragStartPositionsRef.current.set(n.id, { ...n.position });
+    }
 
     // Tag this RF drag as resize-initiated if a resize is currently active.
     if (ResizeActive.has(node.id)) {
@@ -29,11 +123,17 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
     if (TitleZoneActive.has(node.id)) {
       titleZoneDragActiveRef.current.add(node.id);
     }
-  }, [isAnimatingRef, takeSnapshot, isInteractionRef]);
+  }, [getNodes, isAnimatingRef, takeSnapshot, isInteractionRef]);
 
   const onNodeDrag = useCallback((e, node) => {
     if (isAnimatingRef?.current) return;
     if (resizeDragActiveRef.current.has(node.id) || titleZoneDragActiveRef.current.has(node.id)) return;
+
+    const dragSet = (() => {
+      const currentNodes = getNodes ? getNodes() : [node];
+      const selected = currentNodes.filter(n => n.id === node.id || n.selected);
+      return selected.length > 0 ? selected : [node];
+    })();
     
     if (getIntersectingNodes && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'sellhub') {
       const intersections = getIntersectingNodes(node);
@@ -45,8 +145,21 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
         if (newTargetId) updateNodeData(newTargetId, { isDropTarget: true });
         targetGroupIdRef.current = newTargetId;
       }
+
+      const targetHub = findHubDropTarget(dragSet, getIntersectingNodes);
+      const newHubId = targetHub?.id || null;
+      const hoverState = targetHub ? buildHubHoverState(targetHub, dragSet) : null;
+      if (newHubId !== targetHubIdRef.current) {
+        clearHubHover();
+        if (newHubId && hoverState) {
+          updateNodeData(newHubId, { dragHover: hoverState });
+          targetHubIdRef.current = newHubId;
+        }
+      } else if (newHubId && hoverState) {
+        updateNodeData(newHubId, { dragHover: hoverState });
+      }
     }
-  }, [getIntersectingNodes, updateNodeData, isAnimatingRef]);
+  }, [getIntersectingNodes, updateNodeData, isAnimatingRef, getNodes, clearHubHover]);
 
   const onNodeDragStop = useCallback((e, node, draggedNodes) => {
     if (isAnimatingRef?.current) return;
@@ -54,14 +167,12 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
 
     EventLogger.log(`rf-drag-stop id=${node.id} x=${node.position.x.toFixed(1)} y=${node.position.y.toFixed(1)}`);
 
-    // Snapshot the FINAL resting position so the "Redo" stack is cleared and history is consistent.
-    if (takeSnapshot) takeSnapshot();
-
     // Clear the drop target visual indicator if active
     if (targetGroupIdRef.current) {
       updateNodeData(targetGroupIdRef.current, { isDropTarget: false });
       targetGroupIdRef.current = null;
     }
+    clearHubHover();
 
     const wasResizeDrag    = resizeDragActiveRef.current.has(node.id);
     const wasTitleZoneDrag = titleZoneDragActiveRef.current.has(node.id);
@@ -120,6 +231,45 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
       return; 
     }
 
+    // Existing document nodes can be dropped onto workflow hubs as shortcuts to
+    // their underlying files. Keep the document node on the canvas and let the
+    // hub run the same pipeline it would run for a Finder file drop.
+    if (!wasResizeDrag && !wasTitleZoneDrag && getIntersectingNodes && !HUB_DROP_TARGET_TYPES.has(node.type)) {
+      const dragSet = (draggedNodes && draggedNodes.length > 0) ? draggedNodes : [node];
+      const targetHub = findHubDropTarget(dragSet, getIntersectingNodes);
+      const filePayload = filePayloadFromDraggedNodes(dragSet);
+      if (targetHub) {
+        const draggedIds = dragSet.map(n => n.id);
+        if (filePayload.length === 0) {
+          restoreDragStartPositions(draggedIds);
+          EventLogger.log(`Rejected non-file node drop onto ${targetHub.type}; restored drag position`);
+          return;
+        }
+
+        const acceptedFiles = filePayload.filter(file => fileSupportedByHub(targetHub.type, file));
+        if (acceptedFiles.length === 0 || !hubCanAcceptDrop(targetHub)) {
+          restoreDragStartPositions(draggedIds);
+          if (!hubCanAcceptDrop(targetHub)) {
+            EventLogger.log(`Rejected document node drop for busy ${targetHub.type}; restored drag position`);
+            return;
+          }
+          EventLogger.log(`Rejected ${filePayload.length} document node(s) for ${targetHub.type}; restored drag position`);
+          return;
+        }
+
+        document.dispatchEvent(new CustomEvent('canvas-file-nodes-dropped-on-hub', {
+          detail: {
+            hubId: targetHub.id,
+            hubType: targetHub.type,
+            files: acceptedFiles,
+          },
+        }));
+        restoreDragStartPositions(draggedIds);
+        EventLogger.log(`Dropped ${acceptedFiles.length}/${filePayload.length} document node(s) onto ${targetHub.type} ${targetHub.id}`);
+        return;
+      }
+    }
+
     // Check if the node was dropped inside a group (nested canvas)
     // Only standard nodes (no groups) are absorbed, to prevent deep recursion complexities.
     if (!wasResizeDrag && !wasTitleZoneDrag && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'sellhub') {
@@ -168,10 +318,15 @@ export function useDragCorrections({ setNodes, setEdges, getEdges, getIntersecti
             addElementsGlobally(targetGroup.id, newNodesPayload, edgesToTransfer);
           }
           EventLogger.log(`Absorbed ${absorbedIds.size} node(s) and ${edgesToTransfer.length} edge(s) into group ${targetGroup.id}`);
+          return;
         }
       }
     }
-  }, [setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef, isInteractionRef]);
+
+    // Snapshot the final resting canvas state for ordinary drags only. Hub-input
+    // drops return earlier because they intentionally snap back to the start.
+    if (takeSnapshot) takeSnapshot();
+  }, [setNodes, setEdges, getEdges, getIntersectingNodes, getNode, takeSnapshot, updateNodeData, addElementsGlobally, extractToLevel, isAnimatingRef, isInteractionRef, restoreDragStartPositions, clearHubHover]);
 
   return { onNodeDragStart, onNodeDrag, onNodeDragStop };
 }

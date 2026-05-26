@@ -5,6 +5,8 @@ import path from 'path';
 import { getJobsTelemetry } from '../jobs.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings } from '../settings.js';
+import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
+import { TEST_MODE, JOB_RESULT_CAP, JOB_PER_PAGE_CAP } from '../resultCaps.js';
 import { ago, modelTag, pipelineScope } from './helpers.js';
 
 export function buildJobsConfigSnapshot() {
@@ -13,12 +15,24 @@ export function buildJobsConfigSnapshot() {
 
   const usajobsKey = jobs.usajobsApiKey;
   const usajobsEmail = jobs.usajobsEmail;
+  const scrapflyKey = jobs.scrapflyApiKey;
   const keyPrefix = usajobsKey ? `${String(usajobsKey).slice(0, 5)}…` : '(none)';
+  const scrapflyKeyPrefix = scrapflyKey ? `${String(scrapflyKey).slice(0, 8)}…` : '(none)';
 
   return {
     hasUsajobsKey: !!usajobsKey,
     hasUsajobsEmail: !!usajobsEmail,
     usajobsKeyPrefix: keyPrefix,
+    hasScrapflyKey: !!scrapflyKey,
+    scrapflyKeyPrefix,
+    testMode: {
+      active: TEST_MODE,
+      enabled: JOB_SEARCH_TEST_MODE.enabled,
+      sourceId: JOB_SEARCH_TEST_MODE.sourceId || null,
+      fullRun: JOB_SEARCH_TEST_MODE.fullRun,
+      jobResultCap: JOB_RESULT_CAP,
+      jobPerPageCap: JOB_PER_PAGE_CAP,
+    },
   };
 }
 
@@ -198,15 +212,51 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
       lines.push('- Recent browser-scrape phases:');
       for (const e of recent) {
         const ageMs = Date.now() - (e.ts || Date.now());
+        // Chrome-spawn/connect phases get extra fields surfaced directly in the
+        // report so the reader immediately knows pid/alive/poll-count without
+        // having to cross-reference the raw log.
+        const isChromephase = typeof e.phase === 'string' && e.phase.startsWith('chrome-');
         const label = [
           e.phase || 'event',
           e.srcName || e.sourceId || null,
           e.queryIndex && e.queryTotal ? `q${e.queryIndex}/${e.queryTotal}` : null,
           e.pageNum ? `p${e.pageNum}` : null,
           e.key ? `key=${e.key}` : null,
+          isChromephase && e.pid != null    ? `pid=${e.pid}`                                    : null,
+          isChromephase && e.outcome        ? `outcome=${e.outcome}`                             : null,
+          isChromephase && e.alive != null  ? `alive=${e.alive}`                                 : null,
+          isChromephase && e.polls != null  ? `polls=${e.polls}`                                 : null,
+          isChromephase && e.elapsedMs != null ? `elapsed=${(e.elapsedMs / 1000).toFixed(1)}s`  : null,
+          isChromephase && e.error          ? `err=${e.error}`                                   : null,
+          isChromephase && e.stderr         ? `stderr=${String(e.stderr).slice(0, 200)}`          : null,
           `-${Math.max(0, Math.round(ageMs / 1000))}s`,
         ].filter(Boolean).join(' ');
         lines.push(`  - ${label}`);
+      }
+    }
+  }
+
+  // Browser-side console errors / network failures captured by the Puppeteer
+  // stealth page — the signals that used to require manual DevTools export.
+  const consoleLogs   = browserScrape?.consoleLogs   || [];
+  const networkErrors = browserScrape?.networkErrors || [];
+  if (consoleLogs.length > 0 || networkErrors.length > 0) {
+    lines.push('\n### Browser Console & Network Errors');
+    lines.push('> Captured automatically from the Puppeteer stealth page. Timestamps are seconds before this report was generated.');
+    if (networkErrors.length > 0) {
+      lines.push('**Network:**');
+      for (const e of networkErrors.slice(-20)) {
+        const ageS = Math.max(0, Math.round((Date.now() - e.ts) / 1000));
+        const detail = e.status ? `HTTP ${e.status}` : e.errorText;
+        lines.push(`- [-${ageS}s] ${e.method} ${e.url} → ${detail}`);
+      }
+    }
+    if (consoleLogs.length > 0) {
+      lines.push('**Console:**');
+      for (const e of consoleLogs.slice(-40)) {
+        const ageS = Math.max(0, Math.round((Date.now() - e.ts) / 1000));
+        const src = e.url ? ` (${e.url.split('/').pop().slice(0, 60)}${e.line != null ? `:${e.line}` : ''})` : '';
+        lines.push(`- [-${ageS}s] [${e.type}] ${e.text}${src}`);
       }
     }
   }

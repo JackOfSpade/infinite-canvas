@@ -143,13 +143,14 @@ function PlatformWatchUrlsRow({ platform, urls, connected, pending, onLogin, onC
             Verifying<span className="login-pending-dots" />
           </span>
         ) : connected ? (
-          <span
-            className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border bg-emerald-500/10 border-emerald-500/30 text-emerald-300 select-none"
-            title="Session active — the app will flip this back to Log in automatically when it expires."
+          <button
+            onClick={() => onLogin(platform.id)}
+            className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border transition-colors bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
+            title="Re-open login window to refresh this marketplace session"
           >
             <Check size={10} />
-            Logged in
-          </span>
+            Re-login
+          </button>
         ) : (
           <button
             onClick={() => onLogin(platform.id)}
@@ -186,7 +187,7 @@ function PlatformWatchUrlsRow({ platform, urls, connected, pending, onLogin, onC
 }
 
 // IDs of the browser-scraped platforms that require login.
-const JOB_LOGIN_IDS = ['indeed', 'glassdoor', 'ziprecruiter', 'wellfound'];
+const JOB_LOGIN_IDS = ['google', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound'];
 const JOB_LOGIN_PLATFORMS = JOB_SOURCES.filter(s => JOB_LOGIN_IDS.includes(s.id));
 
 function JobPlatformLoginsSection() {
@@ -245,13 +246,14 @@ function JobPlatformLoginsSection() {
                   Verifying<span className="login-pending-dots" />
                 </span>
               ) : connected ? (
-                <span
-                  className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border bg-emerald-500/10 border-emerald-500/30 text-emerald-300 select-none"
-                  title="Session active — the app will flip this back to Log in automatically when it expires."
+                <button
+                  onClick={() => handleLogin(platform.id)}
+                  className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border transition-colors bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
+                  title="Re-open login window to refresh this job board session"
                 >
                   <Check size={10} />
-                  Logged in
-                </span>
+                  Re-login
+                </button>
               ) : (
                 <button
                   onClick={() => handleLogin(platform.id)}
@@ -576,41 +578,45 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
               Some job boards require an API key. Paste your credentials here to enable that source — keys are stored locally and persist between sessions.
             </div>
             {jobsSettings ? (
-              <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
-                <div className="flex items-center justify-between">
-                  <div className="text-white/70 text-[11px] font-medium">USAJobs</div>
-                  <a
-                    href="https://developer.usajobs.gov/apirequest/"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[9px] text-blue-400 hover:underline"
-                  >
-                    Get Free Key
-                  </a>
+              <div className="space-y-4">
+                {/* USAJobs */}
+                <div className="bg-white/[0.02] border border-white/5 p-3 rounded-lg space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-white/70 text-[11px] font-medium">USAJobs</div>
+                    <a
+                      href="https://developer.usajobs.gov/apirequest/"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[9px] text-blue-400 hover:underline"
+                    >
+                      Get Free Key
+                    </a>
+                  </div>
+                  <div>
+                    <div className="text-white/50 text-[11px] mb-1">API Key</div>
+                    <input
+                      type="password"
+                      placeholder="Authorization-Key"
+                      value={jobsSettings.usajobsApiKey || ''}
+                      onChange={(e) => updateJobsSetting('usajobsApiKey', e.target.value)}
+                      className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
+                    />
+                  </div>
+                  <div>
+                    <div className="text-white/50 text-[11px] mb-1">Email</div>
+                    <input
+                      type="email"
+                      placeholder="you@example.com"
+                      value={jobsSettings.usajobsEmail || ''}
+                      onChange={(e) => updateJobsSetting('usajobsEmail', e.target.value)}
+                      className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
+                    />
+                  </div>
+                  <div className="text-white/30 text-[10px] leading-snug">
+                    USAJobs requires both your API key and the email address it was issued to.
+                  </div>
                 </div>
-                <div>
-                  <div className="text-white/50 text-[11px] mb-1">API Key</div>
-                  <input
-                    type="password"
-                    placeholder="Authorization-Key"
-                    value={jobsSettings.usajobsApiKey || ''}
-                    onChange={(e) => updateJobsSetting('usajobsApiKey', e.target.value)}
-                    className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
-                  />
-                </div>
-                <div>
-                  <div className="text-white/50 text-[11px] mb-1">Email</div>
-                  <input
-                    type="email"
-                    placeholder="you@example.com"
-                    value={jobsSettings.usajobsEmail || ''}
-                    onChange={(e) => updateJobsSetting('usajobsEmail', e.target.value)}
-                    className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
-                  />
-                </div>
-                <div className="text-white/30 text-[10px] leading-snug">
-                  USAJobs requires both your API key and the email address it was issued to.
-                </div>
+
               </div>
             ) : (
               <div className="text-white/30 text-xs text-center py-2">Loading settings...</div>
@@ -628,7 +634,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
               </span>
             </div>
             <div className="text-white/40 text-[11px] mb-3 leading-relaxed">
-              Log in to each job board so searches can page through results. Without login these sites return only 1 page. Job searches are blocked until all platforms are connected.
+              Log in to enable full results. Most sources require login to page past the first page; Google Jobs works without login but a session reduces bot-detection risk.
             </div>
             <JobPlatformLoginsSection />
           </div>

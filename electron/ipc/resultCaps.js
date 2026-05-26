@@ -1,3 +1,5 @@
+import { JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
+
 /**
  * Result-count caps — how many results reach the LLM, and the per-source
  * breadth ceilings, in one place.
@@ -18,12 +20,9 @@
  * constant into ~10 template literals for a fixed breadth ceiling).
  */
 
-// ── Dev / test mode ──────────────────────────────────────────────────────────
-// Flip TEST_MODE to true while debugging. Encompasses:
-//   • Scroll / load-more preload depth  (JOB_QUERY_TARGET):  150 → 5
-//   • Per-source API result cap         (JOB_RESULT_CAP):    Infinity → 5
-//   • AI scoring                        (JOB_SCORE_CAP):     skipped (→ 0)
-export const TEST_MODE = true;
+// TEST_MODE = limited caps + skip AI scoring.
+// Decoupled from enabled so a fullRun can scope to one platform without cutting caps.
+export const TEST_MODE = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fullRun;
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -41,7 +40,11 @@ const BUDGET_SAFETY         = 0.8;   // leave headroom under the hard cap
 // slice line keeps working untouched. Uncapped on purpose while the free Gemini
 // tier is being retired; restore a numeric ceiling (was 30) when the paid API tier
 // lands and per-source breadth needs bounding again.
-export const JOB_RESULT_CAP = TEST_MODE ? 5 : Infinity;
+export const JOB_RESULT_CAP = Infinity;
+// Unified per-page/per-query cap for ALL browser scrapers (manualScraper + indeedBrowser).
+// 150 is the scroll-depth target for Google Jobs and a soft ceiling for Indeed pages
+// (which have ~10 jobs/page in practice, so 150 is effectively unlimited in prod).
+export const JOB_PER_PAGE_CAP = TEST_MODE ? 1 : 150;
 
 // ── LLM scoring budget (how many gathered jobs actually get LLM-scored) ───────
 // UNCAPPED (Infinity): score EVERY gathered job. selectTopAcrossSources(_, Infinity)
@@ -58,7 +61,7 @@ export const JOB_SCORE_CAP = TEST_MODE ? 0 : Infinity;
 // walk DOWN if a source starts getting blocked — volume is the anti-bot trigger,
 // not speed, so the ceiling is the real safety knob. The scorer cap (above) still
 // bounds how many of the wider pool reach the LLM.
-export const JOB_MAX_PAGES = 10;
+export const JOB_MAX_PAGES = TEST_MODE ? 1 : 10;
 
 // ── LLM-input caps (adaptive: scale to availability, bounded by token budget) ─
 const SOLD_COMP_TARGET    = 25; // statistically-sufficient "sold" comps for an FMV

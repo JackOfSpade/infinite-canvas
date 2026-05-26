@@ -1,6 +1,9 @@
 import React, { useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Briefcase, Camera, ArrowRight, Sparkles, MousePointerClick } from 'lucide-react';
+import { ACTIVE_JOB_SOURCES } from '../utils/constants';
+
+const activeJobSourceLabel = `${ACTIVE_JOB_SOURCES.length} source${ACTIVE_JOB_SOURCES.length === 1 ? '' : 's'}`;
 
 const STEPS = [
   {
@@ -47,7 +50,7 @@ const STEPS = [
           </div>
         </div>
         <p className="text-white/40 text-xs text-center mt-1">
-          Drop a resume → AI finds matching jobs across 12 sources<br/>
+          Drop a resume → AI finds matching jobs across {activeJobSourceLabel}<br/>
           Drop photos → AI creates a listing with price research
         </p>
       </div>

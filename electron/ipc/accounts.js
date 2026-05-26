@@ -17,6 +17,7 @@ import {
   getJobLoginConfig,
   fetchHtmlClean,
 } from './stealthBrowser.js';
+import { detectAntiBotSignal } from './antiBotDetector.js';
 
 // Timeout for a session-verify page fetch. Not a freshness/density signal —
 // it's an auth-check network bound (fixed).
@@ -100,8 +101,26 @@ export async function verifySellMonitorLogin(platformId) {
         bodyHead: visibleText.slice(0, 300),
       };
       traces.push(trace);
+      const finalUrlLower = String(r.finalUrl || '').toLowerCase();
+      const antiBot = detectAntiBotSignal({
+        status: r.status,
+        finalUrl: r.finalUrl,
+        html: r.html,
+        sourceLabel: config?.name || platformId,
+      });
 
       if (r.status === 401 || r.status === 403) {
+        // Record anti-bot signal in the trace for diagnostics, but do NOT
+        // use cookie presence to override a 401/403 as "connected". A CF/bot
+        // challenge on the verify URL means we cannot confirm the session is
+        // live — stale cookies satisfy session?.connected just as well as fresh
+        // ones. Return not-connected; the caller will open a fresh login window.
+        if (antiBot) {
+          const session = await getSessionStatus(platformId).catch(() => ({ connected: false, cookieCount: 0 }));
+          trace.antiBot = antiBot.code;
+          trace.sessionCookieHeuristic = !!session?.connected;
+          trace.sessionCookieCount = session?.cookieCount || 0;
+        }
         return { connected: false, reason: `Auth wall at ${target} (HTTP ${r.status}) — not logged in.`, trace: { target, checks: traces } };
       }
       // 404 on a "logged-in-only" page gives no signal — the URL may have been
@@ -111,7 +130,6 @@ export async function verifySellMonitorLogin(platformId) {
       if (r.status === 404) {
         return { connected: false, reason: `Verify URL returned 404 at ${target} — the URL may have changed on the platform's side. Update verifyUrl in JOB_LOGIN_PLATFORMS / SELL_MONITOR_PLATFORMS.`, trace: { target, checks: traces } };
       }
-      const finalUrlLower = String(r.finalUrl || '').toLowerCase();
       if (/\/(login|signin|sign-in|account\/login|auth)/i.test(finalUrlLower)) {
         return { connected: false, reason: `Redirected to ${r.finalUrl} — login not completed.`, trace: { target, checks: traces } };
       }
@@ -184,6 +202,30 @@ export async function writeStatusCache(platformId, connected, extras = {}) {
   _statusCache[platformId] = { connected, ts: Date.now(), ...extras };
 }
 
+function isTrustedNativeLoginResult(platformId, result) {
+  const currentUrl = String(result?.currentUrl || '').toLowerCase();
+  if (!result?.nativeChrome || result?.result !== 'auto-detected') return false;
+  if (platformId !== 'indeed') return false;
+  return currentUrl.includes('https://www.indeed.com/jobs');
+}
+
+function buildTrustedNativeLoginVerdict(platformId, result) {
+  return {
+    connected: true,
+    reason: `Native Chrome reached logged-in ${platformId} job-search page at ${result.currentUrl}.`,
+    trace: {
+      target: result.currentUrl,
+      nativeChrome: true,
+      checks: [{
+        target: 'native-chrome-login-window',
+        finalUrl: result.currentUrl,
+        title: result.title || '',
+        status: 'auto-detected',
+      }],
+    },
+  };
+}
+
 // ── Startup verification ──────────────────────────────────────────────────────
 // Verifies ALL known platforms on every launch. Cache starts empty, so there's
 // nothing to trust — every startup is a clean check. Runs sequentially to avoid
@@ -234,6 +276,68 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
 // starting a new one. New flows only start once the prior one fully
 // settles (window closed + verify cached).
 const activeLoginFlows = new Map(); // platformId → Promise<verdict>
+
+export async function ensureJobPlatformLogin(platformId, sender = null, { force = false } = {}) {
+  const config = getJobLoginConfig(platformId);
+  if (!config) {
+    return { platform: platformId, connected: false, error: 'Unknown platform' };
+  }
+
+  if (!force) {
+    const cache = await readStatusCache();
+    if (cache[platformId]?.connected) {
+      return { platform: platformId, connected: true, loginOpened: false, reason: cache[platformId]?.lastReason || null };
+    }
+  }
+
+  const existing = activeLoginFlows.get(platformId);
+  if (existing) {
+    logger.info(`[Accounts] Runtime login for ${platformId} deduping to in-flight login`);
+    const result = await existing;
+    return { platform: platformId, connected: !!result?.connected, loginOpened: true, reason: result?.reason, error: result?.error };
+  }
+
+  const flow = (async () => {
+    try {
+      logger.info(`[Accounts] Runtime job scrape login opening for ${platformId}${force ? ' (forced)' : ''}`);
+      const result = await openLoginWindow(platformId, sender);
+      if (isTrustedNativeLoginResult(platformId, result)) {
+        // Chrome was killed after login. Wait for SQLite WAL checkpoint before
+        // the scraper opens the same user-data-dir; without this delay the
+        // scraper sees no session cookies and appears logged out.
+        await new Promise(r => setTimeout(r, 2500));
+        const verdict = buildTrustedNativeLoginVerdict(platformId, result);
+        await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
+        logger.info(`[Accounts] ${platformId} runtime native login verified (post-flush wait complete): ${verdict.reason}`);
+        return { ...(result || {}), connected: true, reason: verdict.reason, loginOpened: true };
+      }
+
+      const verdict = await verifySellMonitorLogin(platformId);
+      await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
+      if (!verdict.connected) {
+        logger.info(`[Accounts] ${platformId} runtime login did not verify: ${verdict.reason}`);
+      } else {
+        logger.info(`[Accounts] ${platformId} runtime login verified: ${verdict.reason}`);
+      }
+      return { ...(result || {}), connected: verdict.connected, reason: verdict.reason, loginOpened: true };
+    } catch (error) {
+      const msg = error?.message || String(error);
+      logger.error(`[Accounts] Runtime login failed for ${platformId}:`, msg);
+      await writeStatusCache(platformId, false, {
+        lastReason: msg,
+        lastTrace: { error: msg, stack: error?.stack?.slice(0, 600), stage: 'ensureJobPlatformLogin' },
+      });
+      return { platform: platformId, connected: false, loginOpened: true, reason: msg, error: msg };
+    }
+  })();
+
+  activeLoginFlows.set(platformId, flow);
+  try {
+    return await flow;
+  } finally {
+    activeLoginFlows.delete(platformId);
+  }
+}
 
 /**
  * Register all Accounts IPC handlers.
@@ -320,19 +424,10 @@ export function registerAccountsHandlers() {
   // actually completed login — closing without signing in still got
   // marked as connected.
   handleSafe('open-login-window', async (_event, { platformId }) => {
-    // Cache shortcut: when the user clicks "Logged in · refresh," they want
-    // to re-verify the cached session, not pop another window. If the disk
-    // cache already says connected, skip openLoginWindow entirely and just
-    // re-run verifySellMonitorLogin against the persisted cookies. If verify
-    // comes back negative, the cache is updated to false and the next click
-    // falls through to the normal launch-window path.
-    const cache = await readStatusCache();
-    if (cache[platformId]?.connected) {
-      logger.info(`[Accounts] ${platformId} cached as connected — re-verifying without opening window`);
-      const verdict = await verifySellMonitorLogin(platformId);
-      await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
-      return { connected: verdict.connected, reason: verdict.reason, skippedWindow: true };
-    }
+    // Always open the login window — even when the cache says connected.
+    // The cache-shortcut (re-verify silently, skip window) was removed because
+    // stale cookies can make verifySellMonitorLogin return a false positive,
+    // leaving the user with no way to force a fresh browser login from the UI.
 
     // Single-flight: if a login flow for this platform is already in flight
     // (window open OR verify running), return the same promise. Rapid double-
@@ -348,6 +443,13 @@ export function registerAccountsHandlers() {
     const flow = (async () => {
       try {
         const result = await openLoginWindow(platformId, _event.sender);
+        if (isTrustedNativeLoginResult(platformId, result)) {
+          const verdict = buildTrustedNativeLoginVerdict(platformId, result);
+          await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
+          logger.info(`[Accounts] ${platformId} native login verified: ${verdict.reason}`);
+          return { ...(result || {}), connected: true, reason: verdict.reason };
+        }
+
         const verdict = await verifySellMonitorLogin(platformId);
         await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
         if (!verdict.connected) {

@@ -1,7 +1,6 @@
 import electronPkg from 'electron';
 const { app, BrowserWindow, Menu, protocol } = electronPkg;
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { registerFilesystemHandlers } from './ipc/filesystem.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
@@ -49,8 +48,8 @@ const LOCAL_FILE_MIME_TYPES = {
   '.json': 'application/json; charset=utf-8',
 };
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// In the Rollup CJS bundle, __dirname and __filename are CJS globals — no
+// declaration needed. This file is always built as CJS (see vite.config.js).
 
 // ── Global Exception Handlers ────────────────────────────────────────────────
 // Prevents the main process from crashing unexpectedly in production due to 

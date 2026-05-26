@@ -9,6 +9,7 @@ const STATUS_OPTIONS = ['New', 'Applied', 'Interview', 'Offer', 'Rejected'];
 export function JobHubDoneState({
   resultCount,
   scrapedCount,
+  gatheredCount,
   testMode = false,
   targetCount = 0,
   otherCount = 0,
@@ -61,7 +62,17 @@ export function JobHubDoneState({
 
       {/* Result count */}
       <div className="text-emerald-400 text-2xl font-bold">{testMode ? (scrapedCount ?? 0) : (resultCount || 0)}</div>
-      <p className="text-white/40 text-xs">{testMode ? 'jobs scraped' : 'jobs matched'}</p>
+      <p className="text-white/40 text-xs">{testMode ? 'jobs collected' : 'jobs matched'}</p>
+      {testMode && gatheredCount > 0 && gatheredCount !== scrapedCount && (
+        <p className="text-white/25 text-[10px]">{gatheredCount} scraped total</p>
+      )}
+      {!testMode && (scrapedCount > 0 || gatheredCount > 0) && (
+        <p className="text-white/25 text-[10px]">
+          {gatheredCount > 0 && gatheredCount !== scrapedCount
+            ? `from ${scrapedCount} new / ${gatheredCount} scraped`
+            : `from ${scrapedCount || gatheredCount} scraped`}
+        </p>
+      )}
       {(targetCount > 0 || otherCount > 0) && (
         <p className="text-white/30 text-[10px] mt-0.5">
           {targetCount > 0 && <><span className="text-purple-300/80">{targetCount} target</span></>}

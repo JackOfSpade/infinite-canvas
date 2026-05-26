@@ -130,6 +130,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const res = await ipcRenderer.invoke('check-and-login', args);
     return res.success ? res : { platform: args.platformId, connected: false, loginOpened: false };
   },
+  clearBrowserSession: async () => {
+    const res = await ipcRenderer.invoke('clear-browser-session');
+    return res?.success ?? false;
+  },
 
   // ── Tier 4 Monitor Module ─────────────────────────────────────────────
   // Human-assisted BrowserView monitors for hostile platforms (Facebook, etc.)
@@ -154,6 +158,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateSettings: (updates) => ipcRenderer.invoke('update-settings', updates),
   pickServiceAccountFile: () => ipcRenderer.invoke('pick-service-account-file'),
   onSettingsChanged: createListener('settings-changed'),
+
+  // ── Chrome manual-launch handshake ──────────────────────────────────────
+  // Fired when the app couldn't auto-launch Chrome with the debug port and
+  // needs the user to do it manually. Payload: { terminalCommand, port }.
+  onChromeLaunchNeeded:    createListener('browser-chrome-launch-needed'),
+  // Fired when the user's manually-launched Chrome is detected on the debug
+  // port and puppeteer has connected — clears the instruction overlay.
+  onChromeLaunchConnected: createListener('browser-chrome-connected'),
+  // Fired when the 5-minute wait expires or the task is aborted.
+  onChromeLaunchDismissed: createListener('browser-chrome-launch-dismissed'),
 
   // ── Lifecycle Control ────────────────────────────────────────────────────
   cancelNodeTask: (nodeId) => ipcRenderer.send('cancel-node-task', nodeId),

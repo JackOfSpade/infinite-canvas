@@ -120,7 +120,7 @@ export function Canvas() {
   const snapshotTakenForDeleteRef = useRef(false);
   const takeSnapshotRef = useRef(null);
 
-  const { screenToFlowPosition, getIntersectingNodes, getNode, getEdges, updateNodeData } = useReactFlow();
+  const { screenToFlowPosition, getIntersectingNodes, getNode, getNodes, getEdges, updateNodeData } = useReactFlow();
 
   const snapshotOnDelete = useCallback((changes) => {
     if (changes.some(c => c.type === 'remove') && !snapshotTakenForDeleteRef.current) {
@@ -234,6 +234,7 @@ export function Canvas() {
   const { onNodeDragStart, onNodeDrag, onNodeDragStop } = useDragCorrections({
     setNodes,
     setEdges,
+    getNodes,
     getEdges,
     getIntersectingNodes,
     getNode,

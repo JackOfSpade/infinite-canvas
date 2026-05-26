@@ -34,15 +34,6 @@ export const GOOGLE_JOBS_CONFIG = {
   waitUntil: 'domcontentloaded',
 };
 
-export const INDEED_CONFIG = {
-  waitMs: 3000,
-  timeoutMs: 40000,
-  waitFor: '.job_seen_beacon, .resultContent, .tapItem',
-  scrollFirst: true,
-  dismissCookies: true,
-  referer: 'https://www.google.com/',
-};
-
 // ── Google Jobs ─────────────────────────────────────────────────────────────
 // Card structure (as of 2026-05): .EimVGf root, jscontroller="b11o3b".
 // URL lives on data-share-url (no <a> tags in cards — old card.querySelector('a')
@@ -93,86 +84,6 @@ export const GOOGLE_JOBS_EXTRACTOR = `
   });
 
   return jobs;
-})()
-`;
-
-// ── Indeed ──────────────────────────────────────────────────────────────────
-// Strategy: __NEXT_DATA__ first (Pages Router), then DOM fallback (.job_seen_beacon
-// cards). Indeed has been migrating between Next.js router versions; __NEXT_DATA__
-// disappears on App Router pages. Only throws SITE_CHANGED when both paths fail
-// AND the page has real content (bodyLen > 500), so a captcha/blank page doesn't
-// surface as a code-broken error.
-export const INDEED_JOBS_EXTRACTOR = `
-(function() {
-  const jobs = [];
-
-  // ── Path 1: __NEXT_DATA__ (Pages Router) ──────────────────────────────────
-  const ndEl = document.getElementById('__NEXT_DATA__');
-  if (ndEl) {
-    try {
-      const nd = JSON.parse(ndEl.textContent);
-      const results = nd?.props?.pageProps?.initialData?.jobSearchResults ||
-                      nd?.props?.pageProps?.searchResults?.results ||
-                      nd?.props?.pageProps?.results ||
-                      [];
-      results.forEach(r => {
-        try {
-          const job = r.job || r;
-          if (!job.title) return;
-          const salary = job.extractedSalary || job.salaryInfo;
-          // Use job.jobkey (canonical DB key) for URL — job.link for sponsored/pagead
-          // jobs is a tracking redirect whose jk= param can differ from data-jk in the
-          // DOM, causing card-click failures. job.jobkey is always the canonical key
-          // that matches data-jk. Store it as jobkey so expandDescriptions can use it
-          // directly instead of re-parsing from the URL.
-          const canonicalKey = job.jobkey || job.key || '';
-          jobs.push({
-            title: job.title || '',
-            company: job.company || job.companyName || job.employer?.name || '',
-            location: job.formattedLocation || job.location || '',
-            salary: salary?.max ? ('$' + salary.min + ' - $' + salary.max) : (job.salarySnippet?.text || ''),
-            snippet: (job.snippet || job.description || '').replace(/<[^>]*>/g, ' ').substring(0, 300),
-            url: canonicalKey ? ('https://www.indeed.com/viewjob?jk=' + canonicalKey) : (job.link ? ('https://www.indeed.com' + job.link) : ''),
-            jobkey: canonicalKey,
-            posted: job.formattedRelativeTime || job.pubDate || '',
-            source: 'indeed'
-          });
-        } catch {}
-      });
-    } catch {}
-  }
-
-  if (jobs.length > 0) return jobs;
-
-  // ── Path 2: DOM fallback (.job_seen_beacon cards) ─────────────────────────
-  // Used when __NEXT_DATA__ is absent (App Router migration) or its job paths moved.
-  const cards = document.querySelectorAll('.job_seen_beacon, [data-testid="job-card-container"]');
-  cards.forEach(card => {
-    try {
-      const titleEl = card.querySelector('[data-testid="jobTitle"] a, .jobTitle a, h2 a');
-      const title = titleEl?.innerText?.trim() || titleEl?.getAttribute('aria-label') || '';
-      if (!title) return;
-      const jk = card.getAttribute('data-jk') || titleEl?.href?.match(/jk=([a-f0-9]+)/)?.[1] || '';
-      const url = jk ? ('https://www.indeed.com/viewjob?jk=' + jk) : (titleEl?.href || '');
-      const company = (card.querySelector('[data-testid="company-name"], .companyName')?.innerText || '').trim();
-      const location = (card.querySelector('[data-testid="text-location"], .companyLocation')?.innerText || '').trim();
-      const salary = (card.querySelector('[data-testid="attribute_snippet_testid"], .salary-snippet')?.innerText || '').trim();
-      const posted = (card.querySelector('[data-testid="myJobsStateDate"], .date')?.innerText || '').trim();
-      const snippet = (card.querySelector('[data-testid="job-snippet"], .summary')?.innerText || '').trim().substring(0, 300);
-      jobs.push({ title, company, location, salary, snippet, url, posted, source: 'indeed' });
-    } catch {}
-  });
-
-  if (jobs.length > 0) return jobs;
-
-  // ── Both paths failed ──────────────────────────────────────────────────────
-  // Only throw SITE_CHANGED when the page has real content — a blank or captcha page
-  // with no job structure is expected during the solve flow, not a code bug.
-  const bodyLen = (document.body?.innerText || '').length;
-  if (bodyLen > 500) {
-    throw new Error('SITE_CHANGED: indeed extractor returned 0 — neither __NEXT_DATA__ nor .job_seen_beacon cards found on a page with content');
-  }
-  return [];  // empty page / still loading — let the probe loop retry
 })()
 `;
 
@@ -340,4 +251,3 @@ export const WELLFOUND_EXTRACTOR = `
   return jobs;
 })()
 `;
-

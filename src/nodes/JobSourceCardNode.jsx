@@ -77,38 +77,20 @@ export function JobSourceCardNode({ id, data }) {
     updateNodeData(id, { persistedProgress: progress });
   }, [progress, id, updateNodeData]);
 
-  // Auto-dismiss clean-success cards after 3s — mirrors the
-  // CompSourceCardNode UX from marketplace so the canvas stays uncluttered
-  // once a source has reported its result. Blocked/errored/throttled cards
-  // stay visible indefinitely so the user can Solve or Skip.
-  // ensureSourceCards on the owning JobHub will respawn this card on the
-  // next pipeline run, restoring it to the default circular layout slot.
+  // The owning JobHub coordinates clean-card dismissal after ALL source cards
+  // have reported terminal progress. That keeps the source counts visible as a
+  // set, while blocked/errored/manual-action cards still remain actionable.
   useEffect(() => {
-    // Auto-dismiss terminal cards that need no further action: a clean success
-    // OR a skip. 'skipped' was missing here — so a skipped card lingered on the
-    // canvas forever (the Skip button sets status:'skipped'+warning:null, and
-    // unlike marketplace — whose hub deletes the card on skip — nothing here
-    // removed the node). Warned/errored/blocked cards (incl. an info "skipped"
-    // like config-missing, which carries a warning) still stay so the user can
-    // Solve, Skip, or read the reason. ensureSourceCards respawns on the next run.
-    const isCleanTerminal = (progress?.status === 'done' || progress?.status === 'skipped') && !progress.warning;
-    // A manual-paste source (Google) hasn't actually done its job until the user
-    // pastes jobs in. Google's udm=8 results page is unscrapeable, so a "clean"
-    // 0-job finish (the norm — the loose waitFor often resolves and the extractor
-    // simply matches nothing) must NOT auto-dismiss the card, or it would vanish
-    // before the user can reach "Open & paste". Once a paste lands jobs (count>0)
-    // OR the user Skips (status:'skipped'), dismiss like any resolved card.
-    // Note: exclude 'skipped' from the unresolved check — a skipped Google card
-    // should dismiss just like any other skipped source. Without this, clicking
-    // Skip hid the action row (dismissed=true) but left the card node on canvas
-    // indefinitely (lingering card bug from the diagnostics report).
-    const manualPasteUnresolved = isManualPaste && progress?.status !== 'skipped' && !(progress?.count > 0);
-    if (!isCleanTerminal || manualPasteUnresolved) return;
-    const timeout = setTimeout(() => {
+    const onDismiss = (event) => {
+      if (event.detail?.hubId !== data.hubId) return;
+      const isCleanTerminal = (progress?.status === 'done' || progress?.status === 'skipped') && !progress.warning;
+      const manualPasteUnresolved = isManualPaste && progress?.status !== 'skipped' && !(progress?.count > 0);
+      if (!isCleanTerminal || manualPasteUnresolved) return;
       deleteElements({ nodes: [{ id }] });
-    }, 3000);
-    return () => clearTimeout(timeout);
-  }, [progress?.status, progress?.warning, progress?.count, isManualPaste, id, deleteElements]);
+    };
+    document.addEventListener('job-source-dismiss-clean', onDismiss);
+    return () => document.removeEventListener('job-source-dismiss-clean', onDismiss);
+  }, [data.hubId, progress?.status, progress?.warning, progress?.count, isManualPaste, id, deleteElements]);
 
   const handleSolve = async () => {
     if (resolving || hubLocked || !progress?.url || !window.electronAPI?.resolveJobSource) return;
@@ -163,9 +145,8 @@ export function JobSourceCardNode({ id, data }) {
           // dismissed only hides the inline warning panel — the small status
           // line still reads the warning code, making it look like the
           // resolve didn't take effect even though it fully did.
-          // The 3-second auto-dismiss effect on clean-done cards then kicks
-          // in, removing the card entirely (matching the post-search UX for
-          // sources that finished cleanly the first time).
+          // The owning hub will dismiss clean source cards together after the
+          // all-sources terminal grace period.
           setProgress(prev => prev ? {
             ...prev,
             status: 'done', // flip off 'error' so it reads "{count} jobs" not "Failed", and auto-dismisses as clean-done
@@ -219,8 +200,8 @@ export function JobSourceCardNode({ id, data }) {
 
   // Submit: LLM-parse the pasted text into job objects, then hand them to the hub
   // via the SAME `job-source-resolved` path the captcha-resolve uses (merge →
-  // resume scoring → bucket → spawn). Clearing the warning lets the 3s clean-done
-  // effect auto-dismiss the card, matching a normally-resolved source.
+  // resume scoring → bucket → spawn). Clearing the warning lets the hub dismiss
+  // this with the other clean terminal cards after the shared grace period.
   const handleParseSubmit = async () => {
     const text = pasteText.trim();
     if (parsing || hubLocked || !text || !window.electronAPI?.parsePastedJobs) return;
@@ -245,8 +226,8 @@ export function JobSourceCardNode({ id, data }) {
 
       if (items.length > 0 && !error) {
         // Full success → mark the card DONE + clear the warning so the status line
-        // flips from "Failed" to "{count} jobs" and the 3s clean-done effect then
-        // dismisses it. (Without status:'done' it stayed 'error' → showed "Failed"
+        // flips from "Failed" to "{count} jobs" and hub-coordinated cleanup can
+        // dismiss it. (Without status:'done' it stayed 'error' → showed "Failed"
         // forever and never auto-dismissed, even though the warning was cleared.)
         setDismissed(true);
         setPasteMode(false);
@@ -321,7 +302,7 @@ export function JobSourceCardNode({ id, data }) {
         : isDone
           ? `${count ?? 0} jobs`
           : isSearching
-            ? 'Searching…'
+            ? (progress?.detail ? `Searching… ${progress.detail}` : 'Searching…')
             : 'Idle';
 
   // Red for hard failures/blocks, amber for throttles/skips/paste-needed/warn

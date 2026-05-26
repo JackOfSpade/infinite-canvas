@@ -21,6 +21,8 @@ import { useSourceProgress } from '../hooks/useSourceProgress';
 import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 
+const PRODUCT_IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|heic|heif)$/i;
+
 /**
  * SellHubNode — draggable canvas module for marketplace selling.
  *
@@ -720,6 +722,51 @@ export function SellHubNode({ id, data }) {
     return () => document.removeEventListener('comp-captcha-resolved', onResolved);
   }, [id, addToast, updateGlobal, epoch]);
 
+  const acceptImagePaths = useCallback((paths, attemptedCount = paths?.length || 0) => {
+    const validPaths = [...new Set((paths || []).filter(p => typeof p === 'string' && p.trim()))];
+    if (validPaths.length === 0) {
+      // Tell the user instead of silently doing nothing — the previous early
+      // return left the empty-state UI looking unchanged, which is the exact
+      // "nothing happened" failure mode this bug report described.
+      if (attemptedCount > 0) {
+        EventLogger.log(`[SellHub][${id}] Drop rejected: 0 supported images of ${attemptedCount} file(s)`);
+        addToast({
+          title: 'Unsupported file type',
+          description: `Dropped ${attemptedCount} file(s) but none are supported images. Accepted: PNG, JPG, WEBP, GIF, HEIC, HEIF.`,
+          type: 'error',
+        });
+      }
+      return;
+    }
+
+    EventLogger.log(`[SellHub][${id}] Drop accepted: ${validPaths.length}/${attemptedCount} images`);
+
+    // In any state where the user has work in flight or completed, append
+    // photos rather than restarting analysis. Includes 'comps-ready' so a
+    // drop during the resolve/skip pause doesn't wipe pendingComps + warned
+    // comp cards by kicking off a fresh analysis.
+    if (
+      hubState === 'draft' ||
+      hubState === 'priced' ||
+      hubState === 'analyzing' ||
+      hubState === 'researching' ||
+      hubState === 'comps-ready'
+    ) {
+      const existing = data.imagePaths || [];
+      const merged = [...new Set([...existing, ...validPaths])]; // deduplicate
+      updateGlobal(id, { imagePaths: merged });
+      addToast({
+        title: `${validPaths.length} Photo${validPaths.length > 1 ? 's' : ''} Added`,
+        description: `${merged.length} total photo${merged.length > 1 ? 's' : ''} — listing preserved`,
+        type: 'success'
+      });
+      return;
+    }
+
+    // Empty / error state: start fresh analysis
+    startAnalysisRef.current?.(validPaths);
+  }, [addToast, data.imagePaths, hubState, id, updateGlobal]);
+
   const handleDrop = useCallback((e) => {
     if (data.locked) return; // Locked nodes don't accept new drops
 
@@ -733,56 +780,28 @@ export function SellHubNode({ id, data }) {
     const exts = files.map(f => (f.name.match(/\.[a-z0-9]+$/i)?.[0] || '?').toLowerCase());
     EventLogger.log(`[SellHub][${id}] Drop attempt: ${files.length} file(s) ext=[${exts.join(', ') || 'none'}]`);
 
-    const ACCEPTED_RE = /\.(png|jpe?g|webp|gif|heic|heif)$/i;
-    const images = files.filter(f => ACCEPTED_RE.test(f.name));
-    const validImages = images.map(f => {
-      const path = f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : '');
-      return { ...f, resolvedPath: path };
-    }).filter(f => f.resolvedPath);
+    const imagePaths = files
+      .filter(f => PRODUCT_IMAGE_EXT_RE.test(f.name))
+      .map(f => f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : ''))
+      .filter(Boolean);
+    acceptImagePaths(imagePaths, files.length);
+  }, [acceptImagePaths, data.locked, id]);
 
-    if (validImages.length === 0) {
-      // Tell the user instead of silently doing nothing — the previous early
-      // return left the empty-state UI looking unchanged, which is the exact
-      // "nothing happened" failure mode this bug report described.
-      if (files.length > 0) {
-        EventLogger.log(`[SellHub][${id}] Drop rejected: 0 supported images of ${files.length} file(s)`);
-        addToast({
-          title: 'Unsupported file type',
-          description: `Dropped ${files.length} file(s) but none are supported images. Accepted: PNG, JPG, WEBP, GIF, HEIC, HEIF.`,
-          type: 'error',
-        });
-      }
-      return;
-    }
-
-    EventLogger.log(`[SellHub][${id}] Drop accepted: ${validImages.length}/${files.length} images`);
-
-    // In any state where the user has work in flight or completed, append
-    // photos rather than restarting analysis. Includes 'comps-ready' so a
-    // drop during the resolve/skip pause doesn't wipe pendingComps + warned
-    // comp cards by kicking off a fresh analysis.
-    if (
-      hubState === 'draft' ||
-      hubState === 'priced' ||
-      hubState === 'analyzing' ||
-      hubState === 'researching' ||
-      hubState === 'comps-ready'
-    ) {
-      const newPaths = validImages.map(f => f.resolvedPath);
-      const existing = data.imagePaths || [];
-      const merged = [...new Set([...existing, ...newPaths])]; // deduplicate
-      updateGlobal(id, { imagePaths: merged });
-      addToast({
-        title: `${newPaths.length} Photo${newPaths.length > 1 ? 's' : ''} Added`,
-        description: `${merged.length} total photo${merged.length > 1 ? 's' : ''} — listing preserved`,
-        type: 'success'
-      });
-      return;
-    }
-
-    // Empty / error state: start fresh analysis
-    startAnalysisRef.current?.(validImages.map(f => f.resolvedPath));
-  }, [data.locked, data.imagePaths, hubState, id, updateGlobal, addToast]);
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.detail?.hubId !== id) return;
+      if (data.locked) return;
+      const files = e.detail?.files || [];
+      const imagePaths = files
+        .filter(f => PRODUCT_IMAGE_EXT_RE.test(f.filename || f.filePath || ''))
+        .map(f => f.filePath)
+        .filter(Boolean);
+      EventLogger.log(`[SellHub][${id}] Document-node drop received: ${files.length} file(s)`);
+      acceptImagePaths(imagePaths, files.length);
+    };
+    document.addEventListener('canvas-file-nodes-dropped-on-hub', handler);
+    return () => document.removeEventListener('canvas-file-nodes-dropped-on-hub', handler);
+  }, [acceptImagePaths, data.locked, id]);
 
   const resetHandler = useCallback((e) => {
     e?.stopPropagation();
@@ -879,6 +898,7 @@ export function SellHubNode({ id, data }) {
       onDrop={handleDrop}
       dropsBlocked={platformsVerifying}
       verifyProgress={platformsVerifying ? { done: verifyDone, total: verifyTotal } : null}
+      dragHover={data.dragHover || null}
       interactiveStates={['draft', 'priced', 'comps-ready']}
     >
         {/* ── Empty: drop zone (+ banner if a prior attempt failed) ─────── */}

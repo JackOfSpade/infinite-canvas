@@ -18,6 +18,7 @@ import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { shortId } from './bugReport/helpers.js';
 import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
+import { getAuthWindowDiagnostics } from './browser/authWindows.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -415,6 +416,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     const t = n?.type?.toLowerCase();
     return t === 'sellhub' || t === 'marketplacecard' || t === 'listing' || t === 'compsourcecard';
   });
+  const wantsAuthDiagnostics = /login|log in|logged|sign.?in|auth|account|indeed|glassdoor|ziprecruiter|wellfound/i.test(description || '');
 
   const systemInfo = {
     platform: process.platform,
@@ -447,6 +449,13 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // nodeInternals is intentionally stripped of `data` to keep its shape small.
   const nodeDataById = {};
   (nodes || []).forEach(n => { nodeDataById[n.id] = n.data || {}; });
+  const sourceCardsByHub = {};
+  (nodes || []).forEach(n => {
+    if (n?.type !== 'jobsourcecard') return;
+    const hubId = n?.data?.hubId;
+    if (!hubId) return;
+    (sourceCardsByHub[hubId] ||= []).push(n);
+  });
 
   let nodeDiagMarkdown = '';
   if (nodeInternals && nodeInternals.length > 0) {
@@ -465,6 +474,8 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       const d = nodeDataById[n.id] || {};
       const previewParts = [];
       if (d.hubState) previewParts.push(`hubState: ${d.hubState}`);
+      if (typeof d.scrapedCount === 'number') previewParts.push(`scraped: ${d.scrapedCount}`);
+      if (typeof d.resultCount === 'number' && d.hubState === 'done') previewParts.push(`results: ${d.resultCount}`);
       if (d.errorMessage) previewParts.push(`err: ${String(d.errorMessage).slice(0, 60)}`);
       if (d.isRateLimit) previewParts.push(`rateLimit: true`);
       // Warnings: show total + block-severity + DISTINCT source breakdown. The
@@ -504,16 +515,31 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
         if (Array.isArray(d.childIds)) previewParts.push(`children: ${d.childIds.length}`);
       }
       // Transient source-progress cards (job + marketplace). Surface the source
-      // and its persisted progress status, and FLAG one that should have
-      // auto-dismissed but is still here — a clean 'done' or a 'skipped' card
-      // is supposed to disappear, so seeing it persisted is the "stuck card"
-      // bug at a glance (otherwise it's buried in the raw node JSON).
+      // and its persisted progress status. Only flag a card as lingering once
+      // every sibling source card for the same hub is already in a clean
+      // terminal state; until then, JobHub intentionally keeps clean cards
+      // visible so the source-count set stays intact while other sources are
+      // still searching or blocked.
       if (d.sourceId && d.persistedProgress) {
         const p = d.persistedProgress;
         // Google Jobs (isManualPaste source) intentionally stays visible at done+0+no-warning
         // while the hub is paused waiting for the user to paste — not a lingering bug.
         const isPasteWaiting = d.sourceId === 'google' && p.status === 'done' && !p.warning && !(p.count > 0);
-        const lingering = !isPasteWaiting && (p.status === 'skipped' || (p.status === 'done' && !p.warning));
+        const isCleanTerminal = (p.status === 'skipped' || p.status === 'done') && !p.warning;
+        const siblingCards = sourceCardsByHub[d.hubId] || [];
+        const allSiblingCardsCleanTerminal = siblingCards.length > 0 && siblingCards.every(card => {
+          const siblingProgress = card?.data?.persistedProgress;
+          if (!siblingProgress) return false;
+          const siblingManualPasteWaiting =
+            card?.data?.sourceId === 'google' &&
+            siblingProgress.status === 'done' &&
+            !siblingProgress.warning &&
+            !(siblingProgress.count > 0);
+          return !siblingManualPasteWaiting &&
+            (siblingProgress.status === 'done' || siblingProgress.status === 'skipped') &&
+            !siblingProgress.warning;
+        });
+        const lingering = !isPasteWaiting && isCleanTerminal && allSiblingCardsCleanTerminal;
         previewParts.push(
           `source: ${d.sourceId}, progress: ${p.status || '?'}${p.warning?.code ? ` (${p.warning.code})` : ''}` +
           (lingering ? ' ⚠️ should have auto-dismissed (lingering card)' : ''),
@@ -851,7 +877,7 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
   // Only include when this canvas actually has job nodes — don't bleed job
   // login state into a marketplace-only report.
   let jobSessionsMarkdown = '';
-  if (hasJobNodes) try {
+  if (hasJobNodes || wantsAuthDiagnostics) try {
     const platforms = getJobLoginPlatforms() || [];
     const cache = getStatusCacheSync();
 
@@ -915,6 +941,41 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
 ${rows}
 
 ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : ''}`;
+  } catch { /* never break the report on diagnostic failure */ }
+
+  // ── Active auth/login window snapshot ─────────────────────────────────────
+  // Login bugs can happen with zero canvas nodes. This captures the visible
+  // auth browser mode and current URL/title when the report is taken, which is
+  // the decisive signal for Google's "browser or app may not be secure" block.
+  let authWindowMarkdown = '';
+  if (wantsAuthDiagnostics) try {
+    const diag = getAuthWindowDiagnostics?.();
+    const entries = [
+      ...(Array.isArray(diag?.active) ? diag.active.map(d => ({ ...d, state: 'active' })) : []),
+      diag?.last ? { ...diag.last, state: 'last' } : null,
+    ].filter(Boolean);
+    if (entries.length > 0) {
+      const rows = entries.map(d => {
+        const age = d.updatedAt ? `${Math.round((Date.now() - new Date(d.updatedAt).getTime()) / 1000)}s ago` : '—';
+        return `| ${d.state} | \`${d.platformId || '—'}\` | ${d.mode || '—'} | \`${String(d.currentUrl || d.loginUrl || '—').replace(/`/g, "'").slice(0, 180)}\` | ${String(d.title || '—').replace(/\|/g, '\\|').slice(0, 80)} | ${d.result || '—'} | ${age} |`;
+      }).join('\n');
+      const argsRows = entries
+        .filter(d => Array.isArray(d.chromeArgs) && d.chromeArgs.length > 0)
+        .map(d => `**${d.platformId ?? '?'} (${d.state})**: \`${d.chromeArgs.join(' ')}\``);
+      const argsSection = argsRows.length > 0
+        ? `\n### Chrome launch args\n${argsRows.join('\n')}\n`
+        : '';
+      authWindowMarkdown = `
+## Auth Window Diagnostics
+> Snapshot of visible login/captcha windows. \`mode=native-chrome\` means the
+> login was launched without Puppeteer/CDP automation so Google SSO should not
+> reject it as an unsafe browser.
+
+| State | Platform | Mode | Current/Login URL | Title | Result | Updated |
+|---|---|---|---|---|---|---|
+${rows}
+${argsSection}`;
+    }
   } catch { /* never break the report on diagnostic failure */ }
 
   // ── Recent main-process logs ──────────────────────────────────────────────
@@ -1011,6 +1072,8 @@ ${aiConfig.provider === 'gemini' ? `
 - USAJobs API key set: ${jobsConfig.hasUsajobsKey ? '✅' : '❌'}
 - USAJobs Email set: ${jobsConfig.hasUsajobsEmail ? '✅' : '❌'}
 - USAJobs key prefix: \`${jobsConfig.usajobsKeyPrefix}\`
+- Scrapfly API key set: ${jobsConfig.hasScrapflyKey ? '✅' : '❌'}
+- Scrapfly key prefix: \`${jobsConfig.scrapflyKeyPrefix}\`
 `;
   })() : '';
 
@@ -1085,7 +1148,7 @@ ${payload.filterCode ? `\n**Filter code applied:** \`${payload.filterCode}\`${pa
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${scraperAdaptationMarkdown}${mainProcessLogsMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${mainProcessLogsMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 <details>
 <summary><b>Click here to expand the full JSON Application State</b></summary>
 

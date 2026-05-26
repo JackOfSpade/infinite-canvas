@@ -72,8 +72,9 @@ const SOFT_GATE_SIGNALS = [
 ];
 
 const KEYWORD_SIGNALS = [
-  // Cloudflare interstitials
-  { pat: /just a moment\s*\.\.\.|checking your browser|cf-challenge|cf-browser-verification|cf_chl_/i,
+  // Cloudflare interstitials — includes both interactive challenges ("Just a
+  // moment…") and hard Ray-ID blocks ("Additional Verification Required").
+  { pat: /just a moment\s*\.\.\.|checking your browser|cf-challenge|cf-browser-verification|cf_chl_|additional verification required/i,
     code: 'cloudflare-challenge',
     severity: 'block',
     suggestion: 'Cloudflare anti-bot. Switching to puppeteer-stealth with a longer waitFor and a real Chrome may bypass; for high-volume scrapes consider a residential proxy.' },

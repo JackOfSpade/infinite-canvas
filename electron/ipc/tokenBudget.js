@@ -26,7 +26,11 @@
  */
 import Store from 'electron-store';
 
-const store = new Store({ name: 'token-budgets' });
+// Lazy-initialized — new Store() calls app.getPath('userData') which requires
+// app.whenReady(). Module-level init runs before that, causing the v11 error.
+let _store = null;
+const store = { get: (...a) => getStore().get(...a), set: (...a) => getStore().set(...a) };
+function getStore() { return _store ??= new Store({ name: 'token-budgets' }); }
 
 const WINDOW       = 30;     // rolling samples kept per task
 const MIN_SAMPLES  = 8;      // trust the learned cap only after this many

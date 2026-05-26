@@ -1,10 +1,11 @@
-import React, { useRef, useEffect, useCallback, useContext } from 'react';
+import React, { useRef, useEffect, useCallback, useContext, useState } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { usePlatformsVerifyingProgress } from '../contexts/SessionStatusContext';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
 import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
+import { getScopedJobSourceIds, isJobSourceEnabledInScope, JOB_SEARCH_TEST_MODE } from '../utils/jobSourceScope';
 import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
 import { EventLogger } from '../utils/EventLogger';
 import { useToast } from '../components/ToastProvider';
@@ -28,7 +29,7 @@ import {
 
 // ─── TESTING: skip AI scoring after collection ───────────────────────────────
 // Set to false (or remove the block below) to re-enable the full pipeline.
-const SKIP_AI_FOR_TESTING = true;
+const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fullRun;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // "Other Strong Matches" cutoff for the append path. Prefer the per-hub gate
@@ -55,6 +56,8 @@ const STATE_LABELS = {
 };
 
 const PROCESSING_STATES = ['parsing', 'querying', 'searching', 'scoring'];
+const SOURCE_CARD_DISMISS_GRACE_MS = 10_000;
+const TERMINAL_SOURCE_STATUSES = new Set(['done', 'error', 'skipped']);
 
 // Monitor-status codes (set by "Check All Statuses") that mean the posting is
 // no longer open — eligible for "Clear closed". 'expired' is the back-compat
@@ -121,6 +124,7 @@ export function JobHubNode({ id, data }) {
   const resumeScoringRef = useRef(null);
   const isMountedRef = useRef(true);
   const settingsDebounceTimerRef = useRef(null);
+  const sourceDismissTimerRef = useRef(null);
   const epoch = useEpochCancellation();
   const { addToast } = useToast();
   useEffect(() => {
@@ -128,6 +132,9 @@ export function JobHubNode({ id, data }) {
       isMountedRef.current = false;
       if (settingsDebounceTimerRef.current) {
         clearTimeout(settingsDebounceTimerRef.current);
+      }
+      if (sourceDismissTimerRef.current) {
+        clearTimeout(sourceDismissTimerRef.current);
       }
     };
   }, []);
@@ -140,6 +147,19 @@ export function JobHubNode({ id, data }) {
 
   const hubState = data.hubState || 'empty';
   const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(['indeed', 'glassdoor', 'ziprecruiter', 'wellfound']);
+
+  // Chrome manual-launch overlay — shown when the app couldn't auto-launch
+  // Chrome with the debug port and the user needs to do it via Terminal.
+  // Payload: { terminalCommand, port } or null.
+  const [chromeLaunchInfo, setChromeLaunchInfo] = useState(null);
+
+  useEffect(() => {
+    if (!window.electronAPI?.onChromeLaunchNeeded) return;
+    const c1 = window.electronAPI.onChromeLaunchNeeded((payload) => setChromeLaunchInfo(payload));
+    const c2 = window.electronAPI.onChromeLaunchConnected?.(() => setChromeLaunchInfo(null));
+    const c3 = window.electronAPI.onChromeLaunchDismissed?.(() => setChromeLaunchInfo(null));
+    return () => { c1?.(); c2?.(); c3?.(); };
+  }, []);
   const statusLabel = STATE_LABELS[hubState];
   const sourceFilter = data.sourceFilter || null;
 
@@ -155,6 +175,49 @@ export function JobHubNode({ id, data }) {
     lastActive: lastActiveSource,
     reset: resetSourceProgress,
   } = useSourceProgress(window.electronAPI?.onJobSourceProgress, id);
+
+  const scheduleCleanSourceCardDismiss = useCallback((reason = 'all-sources-terminal') => {
+    if (sourceDismissTimerRef.current) return;
+    sourceDismissTimerRef.current = setTimeout(() => {
+      sourceDismissTimerRef.current = null;
+      document.dispatchEvent(new CustomEvent('job-source-dismiss-clean', {
+        detail: { hubId: id, reason },
+      }));
+    }, SOURCE_CARD_DISMISS_GRACE_MS);
+  }, [id]);
+
+  const cancelCleanSourceCardDismiss = useCallback(() => {
+    if (!sourceDismissTimerRef.current) return;
+    clearTimeout(sourceDismissTimerRef.current);
+    sourceDismissTimerRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    const sourceCards = getNodes().filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id);
+    if (sourceCards.length === 0) {
+      cancelCleanSourceCardDismiss();
+      return;
+    }
+
+    const allVisibleCardsTerminal = sourceCards.every(node => {
+      const live = sourceProgress[node.data?.sourceId];
+      const persisted = node.data?.persistedProgress;
+      const persistedCleanTerminal =
+        (persisted?.status === 'done' || persisted?.status === 'skipped') && !persisted.warning;
+      const effective = live?.status === 'searching'
+        ? live
+        : persistedCleanTerminal
+          ? persisted
+          : (live || persisted);
+      return !!effective && TERMINAL_SOURCE_STATUSES.has(effective.status);
+    });
+
+    if (allVisibleCardsTerminal) {
+      scheduleCleanSourceCardDismiss();
+    } else {
+      cancelCleanSourceCardDismiss();
+    }
+  }, [sourceProgress, id, getNodes, scheduleCleanSourceCardDismiss, cancelCleanSourceCardDismiss]);
 
   const getPrimaryQuery = useCallback(() => {
     const q = data.queries;
@@ -500,6 +563,11 @@ export function JobHubNode({ id, data }) {
 
   const triggerUSAJobsBackgroundSearch = useCallback(async () => {
     if (processingRef.current) return;
+    if (!isJobSourceEnabledInScope('usajobs')) {
+      EventLogger.log(`[JobHub][${id}] USAJobs background search skipped by job source test-mode scope.`);
+      return;
+    }
+
     const query = getPrimaryQuery();
     if (!query) {
       EventLogger.log(`[JobHub][${id}] No stored queries found to run USAJobs background search.`);
@@ -828,10 +896,29 @@ export function JobHubNode({ id, data }) {
     return total;
   }, [id, getNode, getNodes, addElementsGlobally, addNodes, addEdges]);
 
+  const pruneDisabledSourceCards = useCallback(() => {
+    const allowedSourceIds = new Set(ACTIVE_JOB_SOURCES);
+    const staleCards = getNodes().filter(
+      n => n.type === 'jobsourcecard' && n.data?.hubId === id && !allowedSourceIds.has(n.data?.sourceId),
+    );
+    if (staleCards.length === 0) return;
+    deleteElements({ nodes: staleCards.map(n => ({ id: n.id })) });
+  }, [id, getNodes, deleteElements]);
+
+  useEffect(() => {
+    pruneDisabledSourceCards();
+  }, [pruneDisabledSourceCards]);
+
   const ensureSourceCards = useCallback(() => {
+    const existingCards = getNodes().filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id);
+    const allowedSourceIds = new Set(ACTIVE_JOB_SOURCES);
+    const staleCards = existingCards.filter(n => !allowedSourceIds.has(n.data?.sourceId));
+    if (staleCards.length > 0) {
+      deleteElements({ nodes: staleCards.map(n => ({ id: n.id })) });
+    }
     const existingSourceIds = new Set(
-      getNodes()
-        .filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id)
+      existingCards
+        .filter(n => allowedSourceIds.has(n.data?.sourceId))
         .map(n => n.data?.sourceId),
     );
     const missing = ACTIVE_JOB_SOURCES
@@ -849,7 +936,7 @@ export function JobHubNode({ id, data }) {
     requestAnimationFrame(() => {
       fitView({ duration: fitViewDuration(total), padding: 0.2 });
     });
-  }, [id, getNodes, spawnSourceCardsAround, fitView]);
+  }, [id, getNodes, deleteElements, spawnSourceCardsAround, fitView]);
 
   // Guarantee every blocked source has a visible, actionable card when we pause
   // in 'sources-ready'. The block decision is finalized only at search END, but
@@ -862,12 +949,13 @@ export function JobHubNode({ id, data }) {
   const ensureBlockedSourceCards = useCallback((blockingWarnings) => {
     const blocks = (blockingWarnings || []).filter(w => (w?.severity === 'block' || w?.severity === 'paste') && w.sourceId);
     if (blocks.length === 0) return;
+    const allowedSourceIds = new Set(ACTIVE_JOB_SOURCES);
     const existingSourceIds = new Set(
       getNodes()
         .filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id)
         .map(n => n.data?.sourceId),
     );
-    const missing = blocks.filter(w => !existingSourceIds.has(w.sourceId));
+    const missing = blocks.filter(w => allowedSourceIds.has(w.sourceId) && !existingSourceIds.has(w.sourceId));
     if (missing.length === 0) return;
 
     const items = missing.map(w => ({
@@ -904,7 +992,7 @@ export function JobHubNode({ id, data }) {
    * synthesizeAndPrice pattern.
    */
   const runScoringAndSpawn = useCallback(async ({
-    profile, jobs, scrapeWarnings, activeTargetRole, originalPos, cancelled,
+    profile, jobs, gatheredCount, scrapeWarnings, activeTargetRole, originalPos, cancelled,
   }) => {
     const currentId = id;
 
@@ -999,6 +1087,7 @@ export function JobHubNode({ id, data }) {
       resultCount: flatJobsToSpawn.length,
       totalScoredCount: scoreResult.scoredJobs.length,
       scrapedCount: jobs.length,
+      gatheredCount: gatheredCount ?? jobs.length,
       testMode: !!scoreResult.testMode,
       targetCount: hasTarget ? targetList.length : 0,
       otherCount: hasTarget ? otherList.length : 0,
@@ -1025,6 +1114,7 @@ export function JobHubNode({ id, data }) {
     if (!window.electronAPI || processingRef.current) return;
     if (!filePath && !providedProfile) return;
     processingRef.current = true;
+    cancelCleanSourceCardDismiss();
     resetSourceProgress();
     const currentId = id;
     // Capture cancellation epoch at start; cancelled() returns true after
@@ -1042,12 +1132,11 @@ export function JobHubNode({ id, data }) {
     const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
 
     try {
+      updateGlobal(currentId, { errorMessage: null, isRateLimit: false, testModeNote: null });
       let profile = providedProfile;
 
       // Pre-flight: check job platform logins before any expensive work.
-      // Browser-scraped sources cap at 1 page when anonymous; fail early
-      // so the user fixes login before we burn LLM tokens or browser slots.
-      const JOB_LOGIN_IDS = ['indeed', 'glassdoor', 'ziprecruiter', 'wellfound'];
+      const JOB_LOGIN_IDS = getScopedJobSourceIds(['google', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound']);
       const notLoggedIn = (await Promise.all(
         JOB_LOGIN_IDS.map(async (platformId) => {
           const res = await window.electronAPI.checkJobPlatformAuth?.({ platformId });
@@ -1150,6 +1239,7 @@ export function JobHubNode({ id, data }) {
       // Merge backend's foundJobs with any jobs already resolved via paste during
       // the search — they're in pendingJobsRef but absent from the backend result.
       let foundJobs = (searchResult.success && Array.isArray(searchResult.jobs)) ? searchResult.jobs : [];
+      const rawGatheredCount = searchResult.rawCount ?? foundJobs.length;
       if (alreadyResolved.size > 0) {
         const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
         const resolvedItems = prevPending.filter(j => alreadyResolved.has(j?.source));
@@ -1213,6 +1303,9 @@ export function JobHubNode({ id, data }) {
         updateGlobal(currentId, {
           hubState: 'done',
           resultCount: 0,
+          scrapedCount: foundJobs.length,
+          gatheredCount: rawGatheredCount,
+          testMode: true,
           totalScoredCount: 0,
           targetCount: 0,
           otherCount: 0,
@@ -1220,7 +1313,7 @@ export function JobHubNode({ id, data }) {
           scoreRangeMax: 100,
           scoreThreshold: 0,
           scrapeWarnings: effectiveWarnings,
-          errorMessage: `[Test mode] ${foundJobs.length} jobs collected — AI scoring disabled (SKIP_AI_FOR_TESTING in JobHubNode.jsx)`,
+          testModeNote: `[Test mode] ${foundJobs.length} jobs collected — AI scoring disabled`,
         });
         return;
       }
@@ -1228,6 +1321,7 @@ export function JobHubNode({ id, data }) {
       await runScoringAndSpawn({
         profile,
         jobs: foundJobs,
+        gatheredCount: rawGatheredCount,
         scrapeWarnings: effectiveWarnings,
         activeTargetRole,
         originalPos,
@@ -1265,7 +1359,7 @@ export function JobHubNode({ id, data }) {
         }
       }
     }
-  }, [id, updateGlobal, getNode, getNodes, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, ensureSourceCards, ensureBlockedSourceCards, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch]);
+  }, [id, updateGlobal, getNode, getNodes, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, ensureSourceCards, ensureBlockedSourceCards, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss]);
 
   const startProcessing = useCallback((filePath) => runPipeline({ filePath }), [runPipeline]);
   const startProcessingWithProfile = useCallback((profile) => runPipeline({ profile }), [runPipeline]);
@@ -1366,6 +1460,7 @@ export function JobHubNode({ id, data }) {
         hubStateRef.current === 'sources-ready' &&
         !processingRef.current
       ) {
+        scheduleCleanSourceCardDismiss('all-blocks-skipped');
         // resumeScoring scores pendingJobs, or finishes in empty 'done' when
         // none were collected — so skipping the last blocked source never
         // leaves the hub stuck on the paused screen.
@@ -1374,7 +1469,7 @@ export function JobHubNode({ id, data }) {
     };
     document.addEventListener('job-source-skip', onSkip);
     return () => document.removeEventListener('job-source-skip', onSkip);
-  }, [id, updateGlobal]);
+  }, [id, updateGlobal, scheduleCleanSourceCardDismiss]);
 
   // Listen for job-source-resolved dispatched after a successful Solve.
   // Carries `items` — jobs extracted inline from the visible browser session
@@ -1432,6 +1527,7 @@ export function JobHubNode({ id, data }) {
         hubStateRef.current === 'sources-ready' &&
         !processingRef.current
       ) {
+        scheduleCleanSourceCardDismiss('all-blocks-resolved');
         // resumeScoring scores the merged jobs, or finishes in empty 'done' if
         // the resolve cleared the last block but yielded nothing to score.
         resumeScoringRef.current?.();
@@ -1439,7 +1535,7 @@ export function JobHubNode({ id, data }) {
     };
     document.addEventListener('job-source-resolved', onResolved);
     return () => document.removeEventListener('job-source-resolved', onResolved);
-  }, [id, updateGlobal]);
+  }, [id, updateGlobal, scheduleCleanSourceCardDismiss]);
 
   // "Score current results" button on the paused-state UI: clear all
   // remaining warnings (user chose to proceed without resolving) and resume.
@@ -1447,8 +1543,9 @@ export function JobHubNode({ id, data }) {
     if (data.hubState !== 'sources-ready') return;
     scrapeWarningsRef.current = [];
     updateGlobal(id, { scrapeWarnings: [] });
+    scheduleCleanSourceCardDismiss('score-current-results');
     resumeScoring();
-  }, [id, data.hubState, updateGlobal, resumeScoring]);
+  }, [id, data.hubState, updateGlobal, resumeScoring, scheduleCleanSourceCardDismiss]);
 
   // Keep the ref up-to-date so handleDrop always calls the latest version.
   startProcessingRef.current = startProcessing;
@@ -1462,6 +1559,23 @@ export function JobHubNode({ id, data }) {
   }, [data.filePath, hubState, startProcessing]);
 
   // Handle file drops directly onto this node
+  const acceptResumePath = useCallback((path, filename = 'file') => {
+    if (!path) return;
+    if (/\.app$/i.test(filename || path)) {
+      EventLogger.log(`[JobHub][${id}] Drop rejected: app bundle (${filename})`);
+      addToast({
+        title: 'Not a Resume File',
+        description: `${filename} is a macOS app, not a resume. Drop a PDF, DOCX, TXT, or image of your resume instead.`,
+        type: 'error',
+      });
+      return;
+    }
+
+    lastDroppedPathRef.current = path;
+    EventLogger.log(`[JobHub][${id}] Drop accepted: ${filename}`);
+    startProcessingRef.current?.(path);
+  }, [addToast, id]);
+
   const handleDrop = useCallback((e) => {
     if (data.locked) return;
     if (PROCESSING_STATES.includes(hubState)) return;
@@ -1479,23 +1593,24 @@ export function JobHubNode({ id, data }) {
     // starts; the backend still validates all retry/alternate entry paths.
     const resume = files[0];
     if (!resume) return;
-    if (/\.app$/i.test(resume.name || '')) {
-      EventLogger.log(`[JobHub][${id}] Drop rejected: app bundle (${resume.name})`);
-      addToast({
-        title: 'Not a Resume File',
-        description: `${resume.name} is a macOS app, not a resume. Drop a PDF, DOCX, TXT, or image of your resume instead.`,
-        type: 'error',
-      });
-      return;
-    }
 
     const path = resume.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(resume) : '');
-    if (path) {
-      lastDroppedPathRef.current = path;
-      EventLogger.log(`[JobHub][${id}] Drop accepted: ${resume.name}`);
-      startProcessingRef.current?.(path);
-    }
-  }, [addToast, data.locked, hubState, id]);
+    acceptResumePath(path, resume.name);
+  }, [acceptResumePath, data.locked, hubState, id]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.detail?.hubId !== id) return;
+      if (data.locked) return;
+      if (PROCESSING_STATES.includes(hubStateRef.current)) return;
+      const file = e.detail?.files?.[0];
+      if (!file?.filePath) return;
+      EventLogger.log(`[JobHub][${id}] Document-node drop received: ${file.filename || file.filePath}`);
+      acceptResumePath(file.filePath, file.filename);
+    };
+    document.addEventListener('canvas-file-nodes-dropped-on-hub', handler);
+    return () => document.removeEventListener('canvas-file-nodes-dropped-on-hub', handler);
+  }, [acceptResumePath, data.locked, id]);
 
   const resetHandler = useCallback((e) => {
     e?.stopPropagation();
@@ -1519,11 +1634,12 @@ export function JobHubNode({ id, data }) {
     // the same resume — the user clicked Reset, not Retry. They can drop the
     // resume again or click Try Again on the error state.
     lastDroppedPathRef.current = null;
-    updateGlobal(id, { hubState: 'empty', filePath: null, errorMessage: null, isRateLimit: false });
+    updateGlobal(id, { hubState: 'empty', filePath: null, errorMessage: null, isRateLimit: false, testModeNote: null });
+    cancelCleanSourceCardDismiss();
     resetSourceProgress();
     cleanupAllJobChildren();
     processingRef.current = false;
-  }, [data.locked, id, updateGlobal, epoch, resetSourceProgress, cleanupAllJobChildren]);
+  }, [data.locked, id, updateGlobal, epoch, resetSourceProgress, cleanupAllJobChildren, cancelCleanSourceCardDismiss]);
 
   // Bulk job-card status checks via the shared hook (same one SellHubNode
   // uses for marketplace cards). The hook also exposes getConnectedCards()
@@ -1661,6 +1777,7 @@ export function JobHubNode({ id, data }) {
     // Clear any paused-pipeline buffer so the new run doesn't accidentally
     // resume the previous attempt's partial results.
     updateGlobal(id, { pendingJobs: null, pendingTargetRole: null });
+    cancelCleanSourceCardDismiss();
     resetSourceProgress();
     if (effectivePath) {
       // File still accessible — re-parse for freshness then run full pipeline
@@ -1670,16 +1787,28 @@ export function JobHubNode({ id, data }) {
       addToast({ title: 'Re-running Search', description: 'Using stored resume profile — original file not needed.', type: 'info' });
       startProcessingWithProfile(data.resumeProfile);
     }
-  }, [data.locked, data.filePath, data.resumeProfile, id, getNodes, getEdges, deleteElements, addToast, startProcessingWithProfile, resetSourceProgress, updateGlobal]);
+  }, [data.locked, data.filePath, data.resumeProfile, id, getNodes, getEdges, deleteElements, addToast, startProcessingWithProfile, resetSourceProgress, updateGlobal, cancelCleanSourceCardDismiss]);
 
   const isProcessing = PROCESSING_STATES.includes(hubState);
 
   // Compute running total from per-source progress
   const totalSourceJobs = Object.values(sourceProgress).reduce((sum, p) => sum + (p.count || 0), 0);
 
+  const clearSessionBtnRef = useRef(null);
+  const handleClearBrowserSession = useCallback(async () => {
+    EventLogger.log(`[JobHub][${id}] User cleared browser session`);
+    const btn = clearSessionBtnRef.current;
+    if (btn) btn.textContent = 'Clearing…';
+    await window.electronAPI?.clearBrowserSession?.();
+    if (btn) {
+      btn.textContent = 'Session cleared';
+      setTimeout(() => { if (clearSessionBtnRef.current) clearSessionBtnRef.current.textContent = 'Reset browser session'; }, 2000);
+    }
+  }, [id]);
+
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[JobHub][${id}] User clicked Dismiss Error`);
-    updateGlobal(id, { errorMessage: null, isRateLimit: false });
+    updateGlobal(id, { errorMessage: null, isRateLimit: false, testModeNote: null });
     // Cleanup orphaned platform cards if there are no job result nodes on the canvas
     const hubChildrenOnCanvas = getNodes().some(n =>
       (n.type === 'jobcard' || n.type === 'jobgroup') && n.data?.hubId === id
@@ -1693,7 +1822,7 @@ export function JobHubNode({ id, data }) {
   const handleRetryFailed = useCallback(() => {
     if (data.locked) return;
     EventLogger.log(`[JobHub][${id}] User clicked Try Again on error banner`);
-    updateGlobal(id, { errorMessage: null, isRateLimit: false });
+    updateGlobal(id, { errorMessage: null, isRateLimit: false, testModeNote: null });
     handleRerun();
   }, [data.locked, id, updateGlobal, handleRerun]);
 
@@ -1705,6 +1834,10 @@ export function JobHubNode({ id, data }) {
       onRetry={handleRetryFailed}
       onDismiss={handleDismissError}
     />
+  ) : data.testModeNote ? (
+    <div className="m-2 p-2 rounded-md bg-blue-500/10 border border-blue-500/20" onPointerDown={(e) => e.stopPropagation()}>
+      <div className="text-blue-300/80 text-[10px] leading-snug">{data.testModeNote}</div>
+    </div>
   ) : null;
 
   return (
@@ -1717,6 +1850,7 @@ export function JobHubNode({ id, data }) {
       onDrop={handleDrop}
       dropsBlocked={platformsVerifying}
       verifyProgress={platformsVerifying ? { done: verifyDone, total: verifyTotal } : null}
+      dragHover={data.dragHover || null}
     >
         {/* Empty state — drop zone (+ banner if a prior attempt failed) */}
         {hubState === 'empty' && (
@@ -1759,6 +1893,14 @@ export function JobHubNode({ id, data }) {
                   />
                   <span>days</span>
                 </div>
+                <button
+                  ref={clearSessionBtnRef}
+                  className="nodrag mt-1 w-full text-[9px] text-white/20 hover:text-white/45 transition-colors bg-transparent border-0 cursor-pointer py-0.5"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={handleClearBrowserSession}
+                >
+                  Reset browser session
+                </button>
               </div>}
             </div>
           </>
@@ -1773,6 +1915,7 @@ export function JobHubNode({ id, data }) {
             resumeSummary={data.resumeSummary}
             activeSourceId={lastActiveSource}
             onReset={resetHandler}
+            chromeLaunchInfo={chromeLaunchInfo}
           />
         )}
 
@@ -1805,6 +1948,7 @@ export function JobHubNode({ id, data }) {
             <JobHubDoneState
               resultCount={data.resultCount}
               scrapedCount={data.scrapedCount}
+              gatheredCount={data.gatheredCount}
               testMode={!!data.testMode}
               targetCount={data.targetCount || 0}
               otherCount={data.otherCount || 0}

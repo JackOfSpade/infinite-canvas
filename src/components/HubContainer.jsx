@@ -10,6 +10,7 @@ export function HubContainer({
   onDrop,
   dropsBlocked = false,
   verifyProgress = null, // { done: number, total: number } — drives the progress bar while dropsBlocked
+  dragHover = null, // { kind: 'accept' | 'reject', label: string } — canvas-node drag feedback
   extras,
   children
 }) {
@@ -51,6 +52,14 @@ export function HubContainer({
 
   const getContainerClasses = () => {
     let classes = 'relative z-10 rounded-xl border-2 transition-all duration-300 ease-in-out pointer-events-auto ';
+
+    if (dragHover && !dropsBlocked) {
+      classes += 'border-solid ';
+      classes += dragHover.kind === 'accept'
+        ? (theme === 'blue' ? 'border-blue-400/80 bg-blue-500/10' : 'border-amber-400/80 bg-amber-500/10')
+        : 'border-red-400/80 bg-red-500/10';
+      return classes;
+    }
 
     if (isDragOver && !dropsBlocked) {
       classes += 'border-solid ';
@@ -94,11 +103,13 @@ export function HubContainer({
       )}
 
       {/* Drag-over outer glow halo — hidden when blocked so there's no hover indicator */}
-      {isDragOver && !dropsBlocked && (
+      {(isDragOver || dragHover) && !dropsBlocked && (
         <div
           className="absolute -inset-[3px] rounded-[14px] -z-10 pointer-events-none"
           style={{
-            boxShadow: isBlue
+            boxShadow: dragHover?.kind === 'reject'
+              ? '0 0 0 2px rgba(248,113,113,0.7), 0 0 28px rgba(248,113,113,0.25)'
+              : isBlue
               ? '0 0 0 2px rgba(96,165,250,0.7), 0 0 28px rgba(96,165,250,0.25)'
               : '0 0 0 2px rgba(251,191,36,0.7),  0 0 28px rgba(251,191,36,0.25)',
           }}
@@ -114,15 +125,17 @@ export function HubContainer({
         onDragLeave={handleDragLeave}
       >
         {/* Floating drop chip — only when not blocked */}
-        {isDragOver && !dropsBlocked && (
+        {(isDragOver || dragHover) && !dropsBlocked && (
           <div className="absolute inset-x-0 top-0 z-50 flex justify-center -translate-y-1/2 pointer-events-none">
-            <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border backdrop-blur-md shadow-lg ${
-              isBlue
-                ? 'bg-blue-500/30 border-blue-400/50 text-blue-100'
-                : 'bg-amber-500/30 border-amber-400/50 text-amber-100'
+            <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border backdrop-blur-md shadow-lg transition-colors ${
+              dragHover?.kind === 'reject'
+                ? 'bg-red-500/30 border-red-400/50 text-red-100'
+                : isBlue
+                  ? 'bg-blue-500/30 border-blue-400/50 text-blue-100'
+                  : 'bg-amber-500/30 border-amber-400/50 text-amber-100'
             }`}>
-              <span>{chipIcon}</span>
-              <span>{chipLabel}</span>
+              <span>{dragHover?.kind === 'reject' ? '✕' : chipIcon}</span>
+              <span>{dragHover?.label || chipLabel}</span>
             </div>
           </div>
         )}

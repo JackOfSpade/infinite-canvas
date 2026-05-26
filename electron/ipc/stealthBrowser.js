@@ -18,7 +18,10 @@ const { app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { execFile as execFileCb } from 'child_process';
+import { promisify } from 'util';
 import { logger } from '../logger.js';
+const execFile = promisify(execFileCb);
 
 import { getRandomUA, getSessionProfile } from './browser/antiDetectProfiles.js';
 import { saveDiceApiKey } from './settings.js';
@@ -45,6 +48,60 @@ export async function getUserDataDir() {
   }
   _userDataDir = dir;
   return _userDataDir;
+}
+
+// ── Real Chrome Profile ───────────────────────────────────────────────────────
+// Returns the path to the user's default Chrome profile directory.
+// On macOS this is ~/Library/Application Support/Google/Chrome, which holds
+// the profile(s) the user uses day-to-day — already signed in to everything.
+// Using this instead of our isolated "browser-data" dir means the scraper
+// inherits the user's real session without any separate login flow.
+export function findRealChromeUserDataDir() {
+  const home = os.homedir();
+  if (process.platform === 'darwin') {
+    return path.join(home, 'Library', 'Application Support', 'Google', 'Chrome');
+  }
+  if (process.platform === 'win32') {
+    return path.join(
+      process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'),
+      'Google', 'Chrome', 'User Data'
+    );
+  }
+  // Linux
+  return path.join(home, '.config', 'google-chrome');
+}
+
+/**
+ * Like findRealChromeUserDataDir() but async — returns the path only if the
+ * directory exists and is accessible, null otherwise.
+ */
+export async function getRealChromeUserDataDir() {
+  const dir = findRealChromeUserDataDir();
+  try {
+    await fs.promises.access(dir);
+    return dir;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Gracefully close the user's running Chrome so the profile lock is released
+ * before Puppeteer re-opens Chrome with --remote-debugging-port.
+ * Resolves once Chrome has had time to finish writing SQLite WAL files.
+ */
+export async function closeSystemChrome() {
+  try {
+    if (process.platform === 'darwin') {
+      await execFile('/usr/bin/osascript', ['-e', 'tell application "Google Chrome" to quit'], { timeout: 5000 });
+    } else if (process.platform === 'win32') {
+      await execFile('taskkill', ['/F', '/IM', 'chrome.exe'], { timeout: 5000 });
+    }
+    logger.info('[StealthBrowser] System Chrome closed — waiting for profile lock to release');
+  } catch {
+    // Chrome wasn't running — nothing to do
+  }
+  await new Promise(r => setTimeout(r, 2000));
 }
 
 // ── Chrome Executable Discovery ─────────────────────────────────────────────
@@ -75,10 +132,7 @@ async function findPlaywrightChromiumPath() {
   }
 }
 
-export async function findChromePath() {
-  const playwrightPath = await findPlaywrightChromiumPath();
-  if (playwrightPath) return playwrightPath;
-
+export async function findSystemChromePath() {
   const platform = process.platform;
   const candidates = platform === 'darwin'
     ? [
@@ -105,6 +159,15 @@ export async function findChromePath() {
       // Ignored
     }
   }
+  return null;
+}
+
+export async function findChromePath() {
+  const playwrightPath = await findPlaywrightChromiumPath();
+  if (playwrightPath) return playwrightPath;
+
+  const systemChromePath = await findSystemChromePath();
+  if (systemChromePath) return systemChromePath;
 
   // Electron's own executable can't be used as a puppeteer-core target (it
   // spawns a renderer, not a standalone browser). Either install Playwright's
@@ -304,7 +367,6 @@ export async function fetchHtmlClean(url, { timeoutMs = 25000, signal } = {}) {
     page = await browser.newPage();
     // Match createStealthPage's headers so cookies + UA are consistent; just
     // skip request interception entirely.
-    const { getSessionProfile } = await import('./browser/antiDetectProfiles.js');
     const profile = getSessionProfile();
     await page.setUserAgent(profile.ua, profile.clientHints);
     await page.setViewport({ ...profile.viewport, deviceScaleFactor: 2 });
@@ -358,6 +420,13 @@ export async function closeStealthBrowser(forShutdown = false) {
   }
 }
 
+export async function clearBrowserSession() {
+  await closeStealthBrowser(false);
+  const dir = await getUserDataDir();
+  await fs.promises.rm(dir, { recursive: true, force: true });
+  _userDataDir = null; // reset cache so next launch recreates the dir
+}
+
 // Forward exports from extracted modules for backwards compatibility with other files
 export { humanMouseMove, humanScroll, dismissCookieBanner } from './browser/humanEmulation.js';
 export { openLoginWindow, getSessionStatus, getAllSessionStatuses, getSupportedPlatforms } from './browser/authWindows.js';
@@ -367,11 +436,18 @@ export { getRandomUA };
 // Platforms that require browser login to serve multi-page results.
 // verifyUrl: a logged-in-only page that redirects to /login when anonymous.
 const JOB_LOGIN_PLATFORMS = {
+  // Google Jobs — login is optional (scraper works without it) but a session
+  // reduces bot-detection risk and may improve result quality.
+  google: {
+    name: 'Google',
+    verifyUrl: 'https://myaccount.google.com/',
+    // Logged-in users are redirected from myaccount.google.com → google.com/account/about/
+    connectedFinalUrlMustContain: 'google.com/account',
+  },
   indeed:       {
     name: 'Indeed',
     verifyUrls: [
-      'https://my.indeed.com/',
-      'https://www.indeed.com/jobs?q=software%20engineer&fromage=1',
+      'https://secure.indeed.com/settings/account',
     ],
     bodySignals: [
       'upload your resume sign in',
@@ -415,6 +491,7 @@ export function getJobLoginConfig(platformId) {
 // The singleton promise prevents concurrent 500s from launching multiple browsers.
 
 let _diceRefreshInFlight = null;
+const DICE_API_KEY_RE = /['"]x-api-key['"]\s*[,:{]\s*['"]([A-Za-z0-9]{25,80})['"]/i;
 
 export async function refreshDiceApiKey() {
   if (_diceRefreshInFlight) return _diceRefreshInFlight;
@@ -462,6 +539,15 @@ async function _fetchDiceKeyFromBundle() {
     return null;
   }
 
+  // First scan the HTML itself. Dice now ships large Next.js hydration blobs
+  // inline; if the key ever moves there we can avoid the extra bundle fetches.
+  const inlineMatch = html.match(DICE_API_KEY_RE);
+  if (inlineMatch?.[1]) {
+    saveDiceApiKey(inlineMatch[1]);
+    logger.info('[Dice API] API key extracted from page HTML');
+    return inlineMatch[1];
+  }
+
   // Extract Next.js JS bundle URLs — prioritise config/api/app/main chunks first
   const allBundleUrls = [...html.matchAll(/<script[^>]+src="([^"]+\.js[^"]*)"/g)]
     .map(m => m[1].startsWith('http') ? m[1] : `https://www.dice.com${m[1]}`)
@@ -472,9 +558,6 @@ async function _fetchDiceKeyFromBundle() {
   }).slice(0, 20);
 
   logger.info(`[Dice API] Searching ${bundleUrls.length} JS bundles for API key (parallel)`);
-
-  // Matches: "x-api-key":"VALUE"  or  "x-api-key","VALUE"  (set() call form)
-  const KEY_RE = /"x-api-key"\s*[,:{]\s*"([A-Za-z0-9]{25,60})"/i;
 
   // Fetch in parallel batches of 5 to avoid the 20×10s=200s sequential worst case
   for (let i = 0; i < bundleUrls.length; i += 5) {
@@ -487,7 +570,7 @@ async function _fetchDiceKeyFromBundle() {
         });
         if (!r.ok) return null;
         const code = await r.text();
-        const m = code.match(KEY_RE);
+        const m = code.match(DICE_API_KEY_RE);
         return m ? m[1] : null;
       } catch { return null; }
     }));
@@ -543,7 +626,14 @@ async function _browserRefreshDiceApiKey() {
       Object.defineProperty(navigator, 'webdriver',           { get: () => false });
     });
 
+    let settled = false;
     let resolveKey;
+    const resolveIfKey = (value) => {
+      if (!settled && value) {
+        settled = true;
+        resolveKey(value);
+      }
+    };
     const keyPromise = new Promise(resolve => { resolveKey = resolve; });
 
     const seenDomains = new Set();
@@ -552,14 +642,47 @@ async function _browserRefreshDiceApiKey() {
         const url = new URL(req.url());
         if (url.hostname !== 'www.dice.com') seenDomains.add(url.hostname);
         const key = req.headers()['x-api-key'];
-        if (key) resolveKey(key);
+        if (key) resolveIfKey(key);
       } catch { /* malformed URL — ignore */ }
+    });
+    page.on('response', async (res) => {
+      try {
+        const url = res.url();
+        const ct = (res.headers()['content-type'] || '').toLowerCase();
+        if (!/javascript|json|html/.test(ct) && !/\.js(\?|$)/i.test(url)) return;
+        const text = await res.text();
+        const match = text.match(DICE_API_KEY_RE);
+        if (match?.[1]) resolveIfKey(match[1]);
+      } catch {
+        // Best-effort only; some responses are binary/streamed and unreadable.
+      }
     });
 
     await page.goto(
       'https://www.dice.com/jobs?q=software+engineer&countryCode2=US&radius=30&radiusUnit=mi&page=1&pageSize=20&language=en',
       { waitUntil: 'domcontentloaded', timeout: 15000 },
     ).catch(() => {});
+
+    // Best-effort consent accept. Dice's CMP is rendered in a shadow root, so
+    // the button is not reachable via a plain document querySelector.
+    await page.evaluate(() => {
+      const host = document.querySelector('#cmpwrapper');
+      const root = host?.shadowRoot;
+      const btn =
+        root?.querySelector('#cmpwelcomebtnyes a, #cmpwelcomebtnyes [role="button"], .cmpboxbtnyes') ||
+        null;
+      btn?.click?.();
+    }).catch(() => {});
+
+    // If Dice inlines everything server-side, there may be no client XHR at
+    // all. Scan the final HTML once too so the browser fallback can still win.
+    try {
+      const html = await page.content();
+      const match = html.match(DICE_API_KEY_RE);
+      if (match?.[1]) resolveIfKey(match[1]);
+    } catch {
+      // Best-effort only.
+    }
 
     const newKey = await Promise.race([
       keyPromise,

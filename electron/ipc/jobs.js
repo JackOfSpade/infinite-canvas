@@ -10,13 +10,13 @@ import { callLLMDocument, callLLMText } from './llm.js';
 import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, BUCKETING_PLACEMENT_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA, PASTED_JOB_PARSE_SCHEMA } from './aiSchemas.js';
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
+import { clearBrowserSession } from './stealthBrowser.js';
 import { scrapeManualSources } from './browser/manualScraper.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
 import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES, TEST_MODE } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
-  INDEED_JOBS_EXTRACTOR, INDEED_CONFIG,
   ZIPRECRUITER_EXTRACTOR, ZIPRECRUITER_CONFIG,
   GLASSDOOR_EXTRACTOR, GLASSDOOR_CONFIG,
   WELLFOUND_EXTRACTOR, WELLFOUND_CONFIG,
@@ -31,10 +31,12 @@ import {
   fetchDiceListings,
   buildGeoTermSet,
 } from '../extractors/apiExtractors.js';
+import { fetchIndeedListingsBrowser } from '../extractors/indeedBrowser.js';
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory } from './jobsHistory.js';
 import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
 import { getJobsSettings } from './settings.js';
 import { readStatusCache } from './accounts.js';
+import { getScopedJobSourceIds } from '../../src/utils/jobSourceScope.js';
 
 const { ipcMain } = electronPkg;
 const DEFAULT_MAX_AGE_DAYS = 21;
@@ -88,8 +90,10 @@ const ALL_SOURCE_IDS = [
   'ziprecruiter', 'glassdoor', 'dice', 'wellfound',
   'greenhouse', 'lever', 'usajobs',
 ];
+const ACTIVE_SOURCE_IDS = getScopedJobSourceIds(ALL_SOURCE_IDS);
 
-// Sources that moved from browser pool to direct API (per deep research report):
+// Sources that moved from browser pool to direct API:
+// - indeed: Scrapfly REST API with ASP, cache, and a cost budget (no local browser).
 // - remoteok: Open JSON API at remoteok.com/api (zero WAF)
 // - weworkremotely: RSS feed at weworkremotely.com/remote-jobs.rss (zero WAF)
 
@@ -181,28 +185,26 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
   const roleSlug = (q) => String(q).toLowerCase().split(/\s+/)
     .filter(tok => tok && !geoTerms.has(tok.replace(/[^a-z0-9]/g, '')))
     .join('-');
-  // Browser pool extractors — only platforms that REQUIRE Puppeteer rendering.
-  // RemoteOK and WeWorkRemotely have been moved to fetchApiSources (direct HTTP).
+  // Browser pool extractors — only platforms that REQUIRE local browser rendering.
+  // Indeed, RemoteOK, and WeWorkRemotely have been moved to fetchApiSources.
   //
   // `maxPages` = the hard ceiling on how deep we page (same stealth session) for
   // each query variant. We walk the FULL ceiling page by page, stopping only on a
   // genuinely empty page (makeEmptyPageStop), an anti-bot block, or the ceiling.
   // `urlFn(q, page)` builds the 0-based page URL. Sources that DATE-FILTER
-  // server-side (Indeed fromage / Glassdoor fromAge / ZipRecruiter days) won't
-  // serve out-of-window rows, so the walk gathers the in-window set; recency is
-  // handled by that filter + the client age-filter, not by sorting, and we leave
-  // each on its default RELEVANCE sort (no sort param) so the walk keeps the
-  // most-relevant in-window jobs — consistent with the relevance-sorted API
-  // sources. We do NOT short-circuit on repeated pages: a wrong page-param guess
-  // that re-serves page 1 just yields duplicates, which the cross-source dedup
-  // removes downstream (cheaper than a seen-set stop that can false-positive
-  // under relevance sort and prune real jobs from deeper pages).
+  // server-side (Glassdoor fromAge / ZipRecruiter days) won't serve out-of-window
+  // rows, so the walk gathers the in-window set; recency is handled by that filter
+  // + the client age-filter, not by sorting, and we leave each on its default
+  // RELEVANCE sort (no sort param) so the walk keeps the most-relevant in-window
+  // jobs — consistent with the relevance-sorted API sources. We do NOT short-
+  // circuit on repeated pages: a wrong page-param guess that re-serves page 1 just
+  // yields duplicates, which the cross-source dedup removes downstream (cheaper
+  // than a seen-set stop that can false-positive under relevance sort and prune
+  // real jobs from deeper pages).
   // Google's embedded jobs widget can't be URL-paginated, so it stays 1 page.
   const extractors = {
     google:          { extractor: GOOGLE_JOBS_EXTRACTOR,  config: GOOGLE_JOBS_CONFIG,  maxPages: 1,
                        urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}&ibp=htl;jobs&htichips=date_posted:${gChip}` },
-    indeed:          { extractor: INDEED_JOBS_EXTRACTOR,  config: INDEED_CONFIG,       maxPages: JOB_MAX_PAGES,
-                       urlFn: (q, page) => `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}&fromage=${days}${page > 0 ? `&start=${page * 10}` : ''}` },
     ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, maxPages: JOB_MAX_PAGES,
                        urlFn: (q, page) => `https://www.ziprecruiter.com/jobs-search${page > 0 ? `/${page + 1}` : ''}?search=${encodeURIComponent(q)}&days=${days}` },
     // Glassdoor migrated to Next.js with infinite-scroll "Show more" pagination —
@@ -217,6 +219,7 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
 
   const tasks = [];
   for (const [sourceId, { extractor, config, urlFn, maxPages = 1, loadMoreSelector = null }] of Object.entries(extractors)) {
+    if (!ACTIVE_SOURCE_IDS.includes(sourceId)) continue;
     const querySubset = queries;
 
     // One task per query. `id` stays `${sourceId}-${n}` so `res.id.replace(/-\d+$/,'')`
@@ -253,6 +256,16 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
  * instead of letting whichever source returned most monopolize the scoring
  * budget. Returns all jobs unchanged when there are <= n.
  */
+function dedupByTitleCompany(arr) {
+  const seen = new Set();
+  return (Array.isArray(arr) ? arr : []).filter(job => {
+    const key = `${(job.title || '').toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function selectTopAcrossSources(jobs, n) {
   const arr = Array.isArray(jobs) ? jobs : [];
   if (n <= 0) return [];
@@ -306,7 +319,7 @@ async function queryFanOut(queries, fetcher, signal) {
   return { items, warning };
 }
 
-async function fetchApiSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], preferredLocation = '', pipelineAbort = null) {
+async function fetchApiSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], preferredLocation = '') {
   // Source credentials come from Settings (electron-store) with a legacy
   // process.env fallback handled inside getJobsSettings() for users still
   // on the old .env config.
@@ -325,14 +338,17 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
   const geoTerms = buildGeoTermSet(profileLocations);
 
   const apiTasks = [
-    { sourceId: 'linkedin',       fn: (s) => fetchLinkedInJobs(queries, s, days) },
-    { sourceId: 'greenhouse',     fn: (s) => fetchGreenhouseJobs(queries, s, geoTerms) },
-    { sourceId: 'lever',          fn: (s) => fetchLeverJobs(queries, s, geoTerms) },
-    { sourceId: 'usajobs',        fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days, location), s) },
-    { sourceId: 'remoteok',       fn: (s) => fetchRemoteOKJobs(queries, s, geoTerms) },
-    { sourceId: 'weworkremotely', fn: (s) => fetchWeWorkRemotelyJobs(queries, s, geoTerms) },
-    { sourceId: 'dice',           fn: (s) => queryFanOut(queries, (q, sig) => fetchDiceListings(q, location, sig, days), s) },
-  ];
+    { sourceId: 'indeed',        fn: (s) => fetchIndeedListingsBrowser(queries, s, days, null, (detail) => {
+      if (sender && !sender.isDestroyed()) sender.send('job-source-progress', { nodeId, sourceId: 'indeed', status: 'searching', count: 0, detail });
+    }) },
+    { sourceId: 'linkedin',      fn: (s) => fetchLinkedInJobs(queries, s, days) },
+    { sourceId: 'greenhouse',    fn: (s) => fetchGreenhouseJobs(queries, s, geoTerms) },
+    { sourceId: 'lever',         fn: (s) => fetchLeverJobs(queries, s, geoTerms) },
+    { sourceId: 'usajobs',       fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days, location), s) },
+    { sourceId: 'remoteok',      fn: (s) => fetchRemoteOKJobs(queries, s, geoTerms) },
+    { sourceId: 'weworkremotely',fn: (s) => fetchWeWorkRemotelyJobs(queries, s, geoTerms) },
+    { sourceId: 'dice',          fn: (s) => queryFanOut(queries, (q, sig) => fetchDiceListings(q, location, sig, days), s) },
+  ].filter(task => ACTIVE_SOURCE_IDS.includes(task.sourceId));
 
   // Notify frontend that API sources are starting
   for (const { sourceId } of apiTasks) {
@@ -584,19 +600,20 @@ Be creative with suggestedRoleQueries — think about what career directions the
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
   handleSafe('search-jobs', async (event, { queries, nodeId, maxAgeDays, canvasFilePath, profileLocations, preferredLocation }, signal) => {
-    // Gate: require fresh verified login for all browser-scraped job platforms.
-    // These sources return only 1 page when anonymous; login is required for
-    // multi-page results. Block early so the user gets a clear message rather
-    // than silently getting 5-job results from every browser source.
+    if (ACTIVE_SOURCE_IDS.length === 0) {
+      return { success: false, error: 'No active job sources configured for job search test mode.' };
+    }
+
+    // Gate: require verified login for all browser-scraped job platforms.
+    const BROWSER_JOB_PLATFORMS = getScopedJobSourceIds(['google', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound']);
     const cache = await readStatusCache();
-    const BROWSER_JOB_PLATFORMS = ['indeed', 'glassdoor', 'ziprecruiter', 'wellfound'];
     const notLoggedIn = BROWSER_JOB_PLATFORMS.filter(id => !cache[id]?.connected);
     if (notLoggedIn.length > 0) {
       return { success: false, notLoggedIn, error: `Not logged in to: ${notLoggedIn.join(', ')}. Open Settings → Job Platforms to connect.` };
     }
 
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
-    logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across 12 sources (maxAge=${ageDays}d)`);
+    logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across ${ACTIVE_SOURCE_IDS.length} source(s) (maxAge=${ageDays}d)`);
     jobsTelemetry.nodeId = nodeId;
     jobsTelemetry.windowId = event.sender?.id ?? null;
     // Reset per-run state at search START, not at search end — a paste or captcha
@@ -635,11 +652,6 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // card's Solve button has a target to open in the cookie-sharing browser
     // (mirrors marketplace's CompSourceCardNode `progress.url` flow).
     const sourceFirstUrl = {};
-    // Quick lookup from task id → URL, used in the per-task callback to record
-    // which URL triggered a block so multi-query sources (e.g. Indeed with 2
-    // queries both 403'd) can offer sequential solve cards instead of losing
-    // the second query entirely.
-    const taskUrlById = new Map(tasks.map(t => [t.id, t.url]));
     const sourceBlockedUrls = {}; // sourceId → [url, ...] in task order
     for (const t of tasks) {
       if (!sourceTaskIds[t.sourceId]) sourceTaskIds[t.sourceId] = [];
@@ -670,26 +682,21 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const pipelineAbort = new AbortController();
     const combinedSignal = AbortSignal.any([pipelineAbort.signal, signal].filter(s => s instanceof AbortSignal));
 
-    let results, apiResults;
-    try {
-      [results, apiResults] = await Promise.all([
-        scrapeManualSources(tasks, (res) => {
-          const sourceId = res.id.replace(/-\d+$/, '');
-          const count = Array.isArray(res.data) ? res.data.length : 0;
-          emitProgress({
-            nodeId,
-            sourceId,
-            status: res.warning?.severity === 'block' ? 'error' : 'done',
-            count,
-            warning: res.warning || null,
-            url: sourceFirstUrl[sourceId] || null,
-          });
-        }, combinedSignal),
-        fetchApiSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, preferredLocation, pipelineAbort),
-      ]);
-    } catch (err) {
-      throw err;
-    }
+    const [results, apiResults] = await Promise.all([
+      scrapeManualSources(tasks, (res) => {
+        const sourceId = res.id.replace(/-\d+$/, '');
+        const count = Array.isArray(res.data) ? res.data.length : 0;
+        emitProgress({
+          nodeId,
+          sourceId,
+          status: res.warning?.severity === 'block' ? 'error' : 'done',
+          count,
+          warning: res.warning || null,
+          url: sourceFirstUrl[sourceId] || null,
+        });
+      }, combinedSignal),
+      fetchApiSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, preferredLocation),
+    ]);
 
     // Process Scraper Results
     for (const result of results) {
@@ -787,7 +794,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     //   - 'error'   → fetched but every attempt failed (errors > 0 OR every
     //                 attempt produced a block warning and no jobs)
     //   - 'idle'    → reserved for "never got a progress event" (renderer fallback)
-    for (const sourceId of ALL_SOURCE_IDS) {
+    for (const sourceId of ACTIVE_SOURCE_IDS) {
       const data = sourceResults[sourceId] || { jobs: [], errors: 0, warnings: [] };
       const effectiveWarnings = (data.warnings || []).map(w => getEffectiveSourceWarning(w, data.jobs.length));
       // Block > info > throttle > nothing. Block wins for visual urgency;
@@ -859,13 +866,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     }
 
     // Deduplicate by normalized company + title
-    const seen = new Set();
-    const deduped = allJobs.filter(job => {
-      const key = `${(job.title || '').toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    const deduped = dedupByTitleCompany(allJobs);
     // Per-source unique survivors of the dedup — lets the funnel tell a genuine
     // page-ceiling ("50 gathered, 50 unique → may be more") apart from a CLAMPING
     // source that re-served the same page across the walk ("50 gathered, 5 unique
@@ -902,12 +903,12 @@ Be creative with suggestedRoleQueries — think about what career directions the
     logger.info(
       `[Jobs] ${kept.length} new jobs (raw=${allJobs.length}, dedup=${deduped.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped})`
     );
-    // Per-source raw gathered counts (+ strongest warning), for ALL sources so a
+    // Per-source raw gathered counts (+ strongest warning), for active sources so a
     // 0 is visible — answers "was this source silently not gathered?" the way the
     // marketplace funnel does. A 0 WITH a warning is a real miss to investigate; a
     // clean 0 is genuinely-empty / off-category (e.g. a cinematographer on USAJobs).
     const bySource = {};
-    for (const sid of ALL_SOURCE_IDS) {
+    for (const sid of ACTIVE_SOURCE_IDS) {
       const data = sourceResults[sid] || { jobs: [], warnings: [] };
       const w = (data.warnings || []).find(x => x?.severity === 'block')
         || (data.warnings || []).find(x => x?.severity === 'info')
@@ -941,11 +942,19 @@ Be creative with suggestedRoleQueries — think about what career directions the
       kept: kept.length,
       bySource,
     };
-    return { jobs: kept, sourceResults, scrapeWarnings };
+    return { jobs: kept, rawCount: allJobs.length, sourceResults, scrapeWarnings };
   });
 
   handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId, preferredLocation }, signal) => {
     logger.info(`[Jobs] Background single-source search for ${sourceId} with query "${query}"`);
+    if (!ACTIVE_SOURCE_IDS.includes(sourceId)) {
+      return {
+        success: false,
+        disabled: true,
+        error: `Job source "${sourceId}" is disabled by the current job search test-mode scope.`,
+      };
+    }
+
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     const location = String(preferredLocation || '').trim();
 
@@ -1018,14 +1027,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     }
 
     const tagged = jobs.map(j => ({ ...j, source: sourceId }));
-    
-    const seen = new Set();
-    const deduped = tagged.filter(job => {
-      const key = `${(job.title || '').toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    const deduped = dedupByTitleCompany(tagged);
 
     const ageFiltered = filterJobsByAge(deduped, ageDays);
     let kept = ageFiltered;
@@ -1487,7 +1489,6 @@ RULES:
     // fires for them.
     const SOURCE_EXTRACTORS = {
       google:       GOOGLE_JOBS_EXTRACTOR,
-      indeed:       INDEED_JOBS_EXTRACTOR,
       ziprecruiter: ZIPRECRUITER_EXTRACTOR,
       glassdoor:    GLASSDOOR_EXTRACTOR,
       wellfound:    WELLFOUND_EXTRACTOR,
@@ -1499,10 +1500,8 @@ RULES:
     // Run the SAME age + history dedup the headless search path applies.
     // Without it, this path returned raw items, so every job the user already
     // saw on a prior run re-appeared (and got re-scored) each time they
-    // re-solved a source's captcha — the "I keep seeing the same 15 Indeed
-    // jobs" report. Indeed is the acute case: it's permanently captcha-walled,
-    // so the headless scrape contributes 0 Indeed jobs and they ONLY arrive
-    // here — meaning history suppression never touched them at all.
+    // re-solved a source's captcha. This path now only applies to browser-backed
+    // sources; Indeed runs through Scrapfly and does not use resolve windows.
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     const ageFiltered = filterJobsByAge(extracted, ageDays);
     const ageDropped = extracted.length - ageFiltered.length;
@@ -1532,8 +1531,7 @@ RULES:
       // unexplained dead end in the bug report (see openCaptchaResolveWindow).
       diag: result.diag || null,
     };
-    // Multi-query sequential solve: if this source had more than one blocked query
-    // (e.g. Indeed 403s both "cinematographer Denver" and "camera operator Colorado"),
+    // Multi-query sequential solve: if this source had more than one blocked query,
     // pop the just-resolved URL and return the next one so the frontend can re-raise
     // a Solve card for it without requiring a full re-run.
     const remaining = (jobsTelemetry.sourceBlockedUrls?.[sourceId] || []).filter(u => u !== url);
@@ -1553,5 +1551,10 @@ RULES:
   ipcMain.handle('record-resolve-merge', (_event, { sourceId, replacedExisting, fresh, pendingBefore, pendingAfter } = {}) => {
     if (!sourceId || !jobsTelemetry.resolves[sourceId]) return;
     jobsTelemetry.resolves[sourceId].merge = { replacedExisting, fresh, pendingBefore, pendingAfter };
+  });
+
+  handleSafe('clear-browser-session', async () => {
+    await clearBrowserSession();
+    return { success: true };
   });
 }

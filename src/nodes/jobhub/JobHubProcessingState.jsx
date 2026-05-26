@@ -1,21 +1,67 @@
 import React from 'react';
-import { Loader2, XCircle } from 'lucide-react';
+import { Loader2, XCircle, Terminal } from 'lucide-react';
 
-export function JobHubProcessingState({ 
-  statusLabel, 
-  hubState, 
-  totalSourceJobs, 
+export function JobHubProcessingState({
+  statusLabel,
+  hubState,
+  totalSourceJobs,
   resumeSummary,
   activeSourceId,
-  onReset
+  onReset,
+  chromeLaunchInfo,
 }) {
   const sourceNames = {
-    google: 'Google', indeed: 'Indeed', linkedin: 'LinkedIn', 
+    google: 'Google', indeed: 'Indeed', linkedin: 'LinkedIn',
     remoteok: 'RemoteOK', weworkremotely: 'WWR',
-    ziprecruiter: 'ZipRecruiter', glassdoor: 'Glassdoor', 
+    ziprecruiter: 'ZipRecruiter', glassdoor: 'Glassdoor',
     dice: 'Dice', wellfound: 'Wellfound',
     greenhouse: 'Greenhouse', lever: 'Lever', usajobs: 'USAJobs'
   };
+
+  const handleCopy = () => {
+    if (chromeLaunchInfo?.terminalCommand) {
+      navigator.clipboard.writeText(chromeLaunchInfo.terminalCommand).catch(() => {});
+    }
+  };
+
+  if (chromeLaunchInfo) {
+    return (
+      <div className="group flex flex-col py-4 px-3 relative gap-2.5">
+        {onReset && (
+          <button
+            onClick={onReset}
+            className="absolute top-2 right-2 p-1 text-white/30 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all rounded"
+            title="Cancel/Reset Task"
+          >
+            <XCircle size={14} />
+          </button>
+        )}
+        <div className="flex items-center gap-1.5 text-amber-400">
+          <Terminal size={13} />
+          <span className="text-[11px] font-semibold">Open Chrome for Indeed</span>
+        </div>
+        <p className="text-white/50 text-[10px] leading-snug">
+          Paste this in Terminal. A separate Chrome window will open — <strong className="text-white/70">log into Indeed</strong> and we'll connect automatically. Your login is saved for next time.
+        </p>
+        <div
+          className="nodrag bg-black/40 border border-white/10 rounded px-2 py-1.5 cursor-pointer hover:border-amber-400/40 transition-colors group/cmd"
+          onClick={handleCopy}
+          title="Click to copy"
+        >
+          <p className="text-[9px] text-white/30 mb-0.5 group-hover/cmd:text-amber-400/60 transition-colors">
+            click to copy
+          </p>
+          <p className="text-[9px] text-white/60 font-mono break-all leading-snug">
+            {chromeLaunchInfo.terminalCommand}
+          </p>
+        </div>
+        <div className="flex items-center gap-1.5 text-white/25">
+          <Loader2 size={10} className="animate-spin shrink-0" />
+          <span className="text-[9px]">Waiting for Chrome on port {chromeLaunchInfo.port}…</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="group flex flex-col items-center justify-center py-6 px-4 relative">

@@ -1,5 +1,5 @@
 /**
- * API-Based Job Extractors — LinkedIn, Greenhouse, Lever, USAJobs.
+ * API-Based Job Extractors — Indeed/Scrapfly, LinkedIn, Greenhouse, Lever, USAJobs.
  *
  * These bypass Puppeteer entirely, using plain HTTP fetch() against
  * publicly accessible JSON APIs or hidden HTML endpoints.
@@ -11,8 +11,9 @@
 import { logger } from '../logger.js';
 import { queueScrape } from '../ipc/browserPool.js';
 import { getRandomUA, refreshDiceApiKey } from '../ipc/stealthBrowser.js';
-import { getDiceApiKey } from '../ipc/settings.js';
+import { getDiceApiKey, getJobsSettings } from '../ipc/settings.js';
 import { htmlToText } from 'html-to-text';
+import { JSDOM } from 'jsdom';
 import { resolveBudget } from '../ipc/scrapeBudget.js';
 import { JOB_RESULT_CAP } from '../ipc/resultCaps.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
@@ -33,6 +34,7 @@ const API_TIMEOUT_SEEDS = {
   'reverb-api':     12000,
   'dice-api':       10000,
   'stockx-api':     10000,
+  'scrapfly-api':  160000, // Scrapfly default read timeout is 155s; leave client overhead.
 };
 
 /** Resolve an API fetch timeout from its seed via the shared budget store. */
@@ -68,7 +70,7 @@ async function processInBatches(items, batchSize, processFn, signal = null) {
  * Prevents fetch requests from hanging forever if the backend drops connection.
  */
 function createTimeoutSignal(baseSignal, timeoutMs) {
-  if (typeof AbortSignal.any === 'function') {
+  if (typeof AbortSignal.any === 'function' && typeof AbortSignal.timeout === 'function') {
     return AbortSignal.any([baseSignal, AbortSignal.timeout(timeoutMs)].filter(Boolean));
   }
 
@@ -705,6 +707,577 @@ export async function fetchReverbListings(query, soldOnly = false, signal = null
 
 // Dice API key is persisted in settings (getDiceApiKey) and auto-refreshed
 // by refreshDiceApiKey() when the server returns 500 — see stealthBrowser.js.
+
+// ── Indeed (Scrapfly REST API) ───────────────────────────────────────────────
+// Scrapfly is now the ONLY Indeed collection path. The old visible-browser /
+// Puppeteer flow is intentionally bypassed because Indeed's challenge stack made
+// local browser automation unreliable and expensive in user time.
+//
+// Cost strategy:
+//   1. Start with raw HTML: asp=true, US geo, no render_js, datacenter default.
+//      ASP may upgrade proxy/fingerprint only if Indeed actually requires it.
+//   2. Use a short Scrapfly cache TTL so immediate re-runs during iteration do
+//      not pay for the same query/page repeatedly.
+//   3. Set a per-request cost_budget high enough for the observed raw-HTML path.
+//      Live probe on 2026-05-25 succeeded at 80 credits for page 1; use 100 as
+//      headroom so minor Scrapfly target-cost variance does not hard-fail.
+
+const SCRAPFLY_SCRAPE_ENDPOINT = 'https://api.scrapfly.io/scrape';
+const SCRAPFLY_INDEED_MAX_PAGES = 5;
+const SCRAPFLY_INDEED_CACHE_TTL_SECONDS = 15 * 60;
+const SCRAPFLY_INDEED_COST_BUDGET = 100;
+const SCRAPFLY_PAGE_DELAY_MS = 600;
+
+function decodeScriptText(text) {
+  return String(text || '')
+    .replace(/&quot;/g, '"')
+    .replace(/&#34;/g, '"')
+    .replace(/&#x22;/gi, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function compactText(value, maxLen = 500) {
+  if (value == null) return '';
+  const text = stripHtml(typeof value === 'string' ? value : String(value));
+  return text.replace(/\s+/g, ' ').trim().slice(0, maxLen);
+}
+
+function firstText(...values) {
+  for (const value of values) {
+    const text = compactText(value);
+    if (text) return text;
+  }
+  return '';
+}
+
+function getNested(obj, path) {
+  let cur = obj;
+  for (const part of path) {
+    if (!cur || typeof cur !== 'object') return undefined;
+    cur = cur[part];
+  }
+  return cur;
+}
+
+function readBalancedJsonObject(text, startIndex) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = startIndex; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0) return text.slice(startIndex, i + 1);
+    }
+  }
+  return null;
+}
+
+function parseJsonSafely(raw) {
+  if (!raw) return null;
+  const variants = [String(raw), decodeScriptText(raw)];
+  for (const candidate of variants) {
+    try { return JSON.parse(candidate); } catch { /* try decoded variant */ }
+  }
+  return null;
+}
+
+function extractJobKeyFromUrl(rawUrl) {
+  if (!rawUrl) return '';
+  try {
+    const url = new URL(String(rawUrl), 'https://www.indeed.com');
+    return url.searchParams.get('jk') || '';
+  } catch {
+    const m = String(rawUrl).match(/[?&]jk=([^&]+)/i);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+}
+
+function normalizeIndeedJobKey(value) {
+  const key = String(value || '').trim();
+  return /^[a-z0-9_-]{8,}$/i.test(key) ? key : '';
+}
+
+function salaryText(salary, fallback = '') {
+  if (!salary) return compactText(fallback, 160);
+  if (typeof salary === 'string') return compactText(salary, 160);
+  if (typeof salary !== 'object') return compactText(fallback, 160);
+  if (salary.text) return compactText(salary.text, 160);
+  if (salary.salaryText) return compactText(salary.salaryText, 160);
+  if (salary.max || salary.min) {
+    const min = salary.min ? `$${salary.min}` : '';
+    const max = salary.max ? `$${salary.max}` : '';
+    return [min, max].filter(Boolean).join(' - ');
+  }
+  return compactText(fallback, 160);
+}
+
+function normalizeIndeedUrl(rawUrl, jobkey) {
+  const key = normalizeIndeedJobKey(jobkey) || extractJobKeyFromUrl(rawUrl);
+  if (key) return `https://www.indeed.com/viewjob?jk=${encodeURIComponent(key)}`;
+  if (!rawUrl) return '';
+  try { return new URL(String(rawUrl), 'https://www.indeed.com').href; } catch { return ''; }
+}
+
+function looksLikeIndeedJobRecord(record) {
+  if (!record || typeof record !== 'object') return false;
+  const job = record.job && typeof record.job === 'object' ? record.job : record;
+  const title = job.title || job.displayTitle || job.normTitle || job.jobTitle || job.jobTitleText || job.name;
+  if (!title) return false;
+  const key = normalizeIndeedJobKey(job.jobkey || job.jobKey || job.key || job.jobId) ||
+    extractJobKeyFromUrl(job.link || job.url || job.jobUrl || job.viewJobLink);
+  const company = job.company || job.companyName || job.employer?.name || job.hiringOrganization?.name;
+  const detailSignal = job.formattedLocation || job.location || job.locationName ||
+    job.snippet || job.description || job.salarySnippet || job.formattedRelativeTime || job.pubDate;
+  return !!key || (!!company && !!detailSignal);
+}
+
+function normalizeIndeedCandidate(record) {
+  if (!looksLikeIndeedJobRecord(record)) return null;
+  const job = record.job && typeof record.job === 'object' ? record.job : record;
+  const rawUrl = job.link || job.url || job.jobUrl || job.viewJobLink || job.jobCardLink || '';
+  const key = normalizeIndeedJobKey(job.jobkey || job.jobKey || job.key || job.jobId) ||
+    extractJobKeyFromUrl(rawUrl);
+  const title = firstText(job.title, job.displayTitle, job.normTitle, job.jobTitle, job.jobTitleText, job.name);
+  if (!title) return null;
+
+  return {
+    title,
+    company: firstText(job.company, job.companyName, job.employer?.name, job.hiringOrganization?.name),
+    location: firstText(job.formattedLocation, job.location, job.locationName, job.jobLocation?.address?.addressLocality),
+    salary: salaryText(job.extractedSalary || job.salaryInfo || job.salarySnippet || job.salary),
+    snippet: firstText(job.snippet?.htmlSnippet, job.snippet?.text, job.snippet, job.description, job.jobDescription),
+    url: normalizeIndeedUrl(rawUrl, key),
+    jobkey: key,
+    posted: firstText(job.formattedRelativeTime, job.relativeTime, job.pubDate, job.datePublished, job.postedDate),
+    source: 'indeed',
+  };
+}
+
+function dedupeIndeedJobs(jobs) {
+  const seen = new Set();
+  const out = [];
+  for (const job of jobs) {
+    if (!job?.title) continue;
+    const key = job.jobkey || job.url ||
+      `${job.title.toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}|${(job.location || '').toLowerCase().trim()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(job);
+  }
+  return out;
+}
+
+function collectIndeedJobsFromObject(root) {
+  const jobs = [];
+  const seenObjects = new WeakSet();
+  const stack = [root];
+  let inspected = 0;
+
+  while (stack.length && inspected < 60000) {
+    const node = stack.pop();
+    inspected++;
+    if (!node || typeof node !== 'object') continue;
+    if (seenObjects.has(node)) continue;
+    seenObjects.add(node);
+
+    const normalized = normalizeIndeedCandidate(node);
+    if (normalized) jobs.push(normalized);
+
+    if (Array.isArray(node)) {
+      for (let i = node.length - 1; i >= 0; i--) stack.push(node[i]);
+    } else {
+      for (const value of Object.values(node)) {
+        if (value && typeof value === 'object') stack.push(value);
+      }
+    }
+  }
+
+  return dedupeIndeedJobs(jobs);
+}
+
+function extractNextDataJobs(html) {
+  const match = String(html || '').match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
+  const data = parseJsonSafely(match?.[1]);
+  if (!data) return [];
+
+  const knownResultPaths = [
+    ['props', 'pageProps', 'initialData', 'jobSearchResults'],
+    ['props', 'pageProps', 'searchResults', 'results'],
+    ['props', 'pageProps', 'results'],
+  ];
+  const direct = [];
+  for (const path of knownResultPaths) {
+    const value = getNested(data, path);
+    if (Array.isArray(value)) direct.push(...value);
+  }
+  const jobs = direct.length > 0 ? collectIndeedJobsFromObject(direct) : [];
+  return jobs.length > 0 ? jobs : collectIndeedJobsFromObject(data);
+}
+
+function extractMosaicJobs(html) {
+  const text = String(html || '');
+  const marker = 'mosaic-provider-jobcards';
+  const markerIndex = text.indexOf(marker);
+  if (markerIndex < 0) return [];
+  const objectStart = text.indexOf('{', markerIndex);
+  if (objectStart < 0) return [];
+  const rawJson = readBalancedJsonObject(text, objectStart);
+  const data = parseJsonSafely(rawJson);
+  if (!data) return [];
+  const results = data?.metaData?.mosaicProviderJobCardsModel?.results;
+  return collectIndeedJobsFromObject(Array.isArray(results) ? results : data);
+}
+
+function extractDomJobs(html) {
+  let document;
+  try {
+    document = new JSDOM(String(html || '')).window.document;
+  } catch {
+    return [];
+  }
+
+  const cards = document.querySelectorAll('.job_seen_beacon, [data-testid="job-card-container"], [data-jk]');
+  const jobs = [];
+  cards.forEach(node => {
+    try {
+      const card = node.matches?.('a[data-jk]')
+        ? (node.closest('.job_seen_beacon, [data-testid="job-card-container"], li, article') || node)
+        : node;
+      const titleEl = card.matches?.('a') ? card : card.querySelector(
+        '[data-testid="jobTitle"] a, [data-testid="job-title"], .jobTitle a, h2 a, h3 a, a[data-jk]'
+      );
+      const title = compactText(titleEl?.textContent, 220);
+      if (!title) return;
+      const rawUrl = titleEl?.getAttribute('href') || '';
+      const key = normalizeIndeedJobKey(card.getAttribute?.('data-jk')) ||
+        normalizeIndeedJobKey(titleEl?.getAttribute?.('data-jk')) ||
+        extractJobKeyFromUrl(rawUrl);
+      jobs.push({
+        title,
+        company: compactText(card.querySelector('[data-testid="company-name"], .companyName')?.textContent, 180),
+        location: compactText(card.querySelector('[data-testid="text-location"], .companyLocation')?.textContent, 180),
+        salary: compactText(card.querySelector('[data-testid="attribute_snippet_testid"], .salary-snippet, [data-testid="desktopSalaryOnlySnippet"]')?.textContent, 160),
+        snippet: compactText(card.querySelector('[data-testid="job-snippet"], .summary')?.textContent, 300),
+        url: normalizeIndeedUrl(rawUrl, key),
+        jobkey: key,
+        posted: compactText(card.querySelector('[data-testid="myJobsStateDate"], .date')?.textContent, 120),
+        source: 'indeed',
+      });
+    } catch { /* skip malformed card */ }
+  });
+
+  return dedupeIndeedJobs(jobs);
+}
+
+export function extractIndeedJobsFromHtml(html) {
+  return dedupeIndeedJobs([
+    ...extractNextDataJobs(html),
+    ...extractMosaicJobs(html),
+    ...extractDomJobs(html),
+  ]);
+}
+
+function buildIndeedSearchUrl(query, days, page) {
+  const params = new URLSearchParams({
+    q: query,
+    fromage: String(days),
+  });
+  if (page > 0) params.set('start', String(page * 10));
+  return `https://www.indeed.com/jobs?${params}`;
+}
+
+function buildScrapflyIndeedUrl(apiKey, targetUrl, { proxyPool = null, cacheClear = false, correlationId = null } = {}) {
+  const params = new URLSearchParams({
+    key: apiKey,
+    url: targetUrl,
+    asp: 'true',
+    country: 'us',
+    lang: 'en-US,en',
+    format: 'raw',
+    retry: 'true',
+    cache: 'true',
+    cache_ttl: String(SCRAPFLY_INDEED_CACHE_TTL_SECONDS),
+    cost_budget: String(SCRAPFLY_INDEED_COST_BUDGET),
+  });
+  if (proxyPool) params.set('proxy_pool', proxyPool);
+  if (cacheClear) params.set('cache_clear', 'true');
+  if (correlationId) params.set('correlation_id', correlationId);
+  return `${SCRAPFLY_SCRAPE_ENDPOINT}?${params}`;
+}
+
+async function readScrapflyContent(result, apiKey, signal) {
+  const content = result?.content;
+  if (!content) return '';
+  const format = String(result?.format || '').toLowerCase();
+  if (format !== 'clob' && format !== 'blob') return String(content);
+
+  const url = new URL(content);
+  url.searchParams.set('key', apiKey);
+  const response = await fetch(url, {
+    signal: createTimeoutSignal(signal, apiTimeout('scrapfly-api')),
+    headers: { Accept: 'text/html,application/xhtml+xml,text/plain,*/*' },
+  });
+  if (!response.ok) throw new Error(`Scrapfly large-object download failed: HTTP ${response.status}`);
+  return response.text();
+}
+
+function scrapflyErrorWarning(issue, totalJobs) {
+  const code = issue?.code || '';
+  const message = issue?.message || issue?.description || 'Scrapfly request failed';
+  const severity = totalJobs > 0 ? 'warn' : 'block';
+  let suggestion = 'Indeed is fetched through Scrapfly. Check the Scrapfly dashboard log for this request, then retry.';
+  let warningCode = 'scrapfly-failed';
+
+  if (/QUOTA|PAYMENT|CREDIT|BUDGET/i.test(code) || /quota|payment|credit|budget/i.test(message)) {
+    warningCode = code.includes('COST_BUDGET') ? 'scrapfly-cost-budget' : 'scrapfly-quota';
+    suggestion = code.includes('COST_BUDGET')
+      ? `Scrapfly needed more than the per-request ${SCRAPFLY_INDEED_COST_BUDGET}-credit budget for Indeed. Raise the budget in code only if that spend is acceptable.`
+      : 'Scrapfly quota or billing blocked the request. Add credits or update billing in Scrapfly, then retry.';
+  } else if (/CONCURRENT|THROTTLE|429/i.test(code) || /concurrent|throttle|too many/i.test(message)) {
+    warningCode = 'scrapfly-throttled';
+    suggestion = 'Scrapfly throttled the request. Retry later or reduce concurrent job searches.';
+  } else if (/CONFIG|401|403/i.test(code) || /api key|unauthorized|forbidden/i.test(message)) {
+    warningCode = 'scrapfly-config';
+    suggestion = 'Verify the Scrapfly API key in Settings → Job Sources.';
+  }
+
+  return {
+    code: warningCode,
+    severity,
+    evidence: `${code ? `${code}: ` : ''}${message}`.slice(0, 500),
+    suggestion,
+  };
+}
+
+async function scrapeIndeedPageWithScrapfly(apiKey, targetUrl, signal, options = {}) {
+  const scrapflyUrl = buildScrapflyIndeedUrl(apiKey, targetUrl, options);
+  const startedAt = Date.now();
+  const response = await fetch(scrapflyUrl, {
+    signal: createTimeoutSignal(signal, apiTimeout('scrapfly-api')),
+    headers: {
+      Accept: 'application/json',
+      'Accept-Encoding': 'gzip',
+    },
+  });
+
+  let payload = null;
+  let rawBody = '';
+  try {
+    rawBody = await response.text();
+    payload = rawBody ? JSON.parse(rawBody) : null;
+  } catch {
+    payload = null;
+  }
+
+  const cost = Number(response.headers.get('x-scrapfly-api-cost') || payload?.context?.cost?.total || 0) || 0;
+  const remaining = response.headers.get('x-scrapfly-remaining-api-credit') || null;
+  const logUuid = response.headers.get('x-scrapfly-log') || payload?.uuid || payload?.context?.log?.uuid || null;
+  const headerCode = response.headers.get('x-scrapfly-reject-code') || '';
+  const headerDocsUrl = response.headers.get('x-scrapfly-reject-description') || '';
+  const headerRetryable = response.headers.get('x-scrapfly-reject-retryable') === 'true';
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      cost,
+      remaining,
+      logUuid,
+      retryable: headerRetryable || response.status >= 500 || response.status === 429,
+      error: {
+        http_code: response.status,
+        code: headerCode || payload?.code || payload?.error?.code || `HTTP_${response.status}`,
+        message: payload?.message || payload?.error?.message || rawBody.slice(0, 300),
+        docsUrl: headerDocsUrl || undefined,
+      },
+    };
+  }
+
+  const result = payload?.result || {};
+  const resultError = result?.error || payload?.error || null;
+  if (resultError || result?.success === false) {
+    return {
+      ok: false,
+      cost,
+      remaining,
+      logUuid,
+      retryable: !!resultError?.retryable,
+      error: resultError || {
+        http_code: result?.status_code || 422,
+        code: 'SCRAPFLY_RESULT_FAILED',
+        message: result?.reason || 'Scrapfly returned an unsuccessful scrape result',
+      },
+    };
+  }
+
+  if (result?.status_code && result.status_code >= 400) {
+    return {
+      ok: false,
+      cost,
+      remaining,
+      logUuid,
+      retryable: result.status_code >= 500 || result.status_code === 429,
+      error: {
+        http_code: result.status_code,
+        code: 'INDEED_UPSTREAM_ERROR',
+        message: `Indeed returned HTTP ${result.status_code}`,
+      },
+    };
+  }
+
+  const content = await readScrapflyContent(result, apiKey, signal);
+  return {
+    ok: true,
+    content,
+    cost,
+    remaining,
+    logUuid,
+    elapsedMs: Date.now() - startedAt,
+    cacheState: payload?.context?.cache?.state || null,
+  };
+}
+
+async function scrapeIndeedPageWithRetries(apiKey, targetUrl, signal, options) {
+  let attempt = await scrapeIndeedPageWithScrapfly(apiKey, targetUrl, signal, options);
+  if (attempt.ok) return attempt;
+
+  const code = attempt.error?.code || '';
+  if (code === 'ERR::PROXY::POOL_NOT_AVAILABLE_FOR_TARGET') {
+    attempt = await scrapeIndeedPageWithScrapfly(apiKey, targetUrl, signal, {
+      ...options,
+      proxyPool: 'public_residential_pool',
+    });
+  } else if (attempt.retryable && !signal?.aborted) {
+    await new Promise(r => setTimeout(r, 1000));
+    attempt = await scrapeIndeedPageWithScrapfly(apiKey, targetUrl, signal, {
+      ...options,
+      cacheClear: true,
+    });
+  }
+
+  return attempt;
+}
+
+/**
+ * Fetch Indeed job listings via Scrapfly's ASP bypass.
+ * @param {string[]} queries — array of job search queries
+ * @param {AbortSignal|null} signal
+ * @param {number|null} maxAgeDays
+ * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
+ */
+export async function fetchIndeedListings(queries, signal = null, maxAgeDays = null) {
+  const { scrapflyApiKey } = getJobsSettings();
+  const apiKey = String(scrapflyApiKey || '').trim();
+  if (!apiKey) {
+    return {
+      items: [],
+      warning: {
+        code: 'config-missing',
+        severity: 'info',
+        evidence: 'Scrapfly API key not set',
+        suggestion: 'Open Settings → Job Sources and paste a Scrapfly API key to enable Indeed.',
+      },
+      gathered: 0,
+    };
+  }
+
+  const queryList = Array.isArray(queries) ? queries.filter(Boolean) : [queries].filter(Boolean);
+  const days = maxAgeDays ? Math.max(1, Math.floor(maxAgeDays)) : 21;
+  const resultCap = Number.isFinite(JOB_RESULT_CAP) ? JOB_RESULT_CAP : Infinity;
+  const maxPages = Number.isFinite(resultCap)
+    ? Math.max(1, Math.min(SCRAPFLY_INDEED_MAX_PAGES, Math.ceil(resultCap / 10)))
+    : SCRAPFLY_INDEED_MAX_PAGES;
+  const allJobs = [];
+  const seenKeys = new Set();
+  const issues = [];
+  let totalCost = 0;
+  let lastRemaining = null;
+
+  outer:
+  for (const query of queryList) {
+    if (signal?.aborted) break;
+
+    for (let page = 0; page < maxPages; page++) {
+      if (signal?.aborted) break outer;
+      if (allJobs.length >= resultCap) break outer;
+
+      const indeedUrl = buildIndeedSearchUrl(query, days, page);
+      const correlationId = `indeed-${Date.now()}-${page}`;
+      let scrape;
+      try {
+        scrape = await scrapeIndeedPageWithRetries(apiKey, indeedUrl, signal, {
+          correlationId,
+        });
+      } catch (err) {
+        if (signal?.aborted) break outer;
+        issues.push({ code: 'SCRAPFLY_FETCH_EXCEPTION', message: err?.message || String(err) });
+        logger.warn(`[Indeed/Scrapfly] Fetch exception query="${query}" page=${page + 1}: ${err?.message || err}`);
+        break;
+      }
+
+      totalCost += scrape.cost || 0;
+      lastRemaining = scrape.remaining || lastRemaining;
+
+      if (!scrape.ok) {
+        issues.push(scrape.error);
+        logger.warn(
+          `[Indeed/Scrapfly] ${scrape.error?.code || 'error'} query="${query}" page=${page + 1}` +
+          `${scrape.logUuid ? ` log=${scrape.logUuid}` : ''}: ${scrape.error?.message || ''}`
+        );
+        break;
+      }
+
+      const pageJobs = extractIndeedJobsFromHtml(scrape.content);
+
+      logger.info(
+        `[Indeed/Scrapfly] query="${query}" page=${page + 1} jobs=${pageJobs.length}` +
+        ` cost=${scrape.cost || 0}${scrape.cacheState ? ` cache=${scrape.cacheState}` : ''}` +
+        `${scrape.logUuid ? ` log=${scrape.logUuid}` : ''}`
+      );
+
+      if (pageJobs.length === 0) break;
+
+      for (const job of pageJobs) {
+        const dk = job.jobkey || job.url ||
+          `${(job.title || '').toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}|${(job.location || '').toLowerCase().trim()}`;
+        if (seenKeys.has(dk)) continue;
+        seenKeys.add(dk);
+        allJobs.push(job);
+        if (allJobs.length >= resultCap) break;
+      }
+
+      if (pageJobs.length < 10) break;
+      if (page < maxPages - 1) await new Promise(r => setTimeout(r, SCRAPFLY_PAGE_DELAY_MS));
+    }
+  }
+
+  logger.info(
+    `[Indeed/Scrapfly] Total: ${allJobs.length} unique jobs across ${queryList.length} quer(y|ies), ` +
+    `cost=${totalCost}${lastRemaining ? `, remaining=${lastRemaining}` : ''}`
+  );
+
+  const inWindow = maxAgeDays ? filterJobsByAge(allJobs, maxAgeDays) : allJobs;
+  const items = inWindow.slice(0, JOB_RESULT_CAP);
+  const warning = issues.length > 0
+    ? scrapflyErrorWarning(issues[issues.length - 1], items.length)
+    : null;
+  return { items, warning, gathered: inWindow.length };
+}
+
 
 /**
  * Fetch job listings from Dice via their public API (Tier 1).
