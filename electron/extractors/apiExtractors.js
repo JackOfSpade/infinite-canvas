@@ -580,6 +580,8 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
     posted: job.date || '',
     source: 'remoteok',
   }));
+  const withDesc = items.filter(j => j.description).length;
+  logger.info(`[RemoteOK API] ${items.length} jobs matched, ${withDesc}/${items.length} have descriptions`);
   return { items, warning: r.warning, gathered: matched.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
 
