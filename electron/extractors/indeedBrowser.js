@@ -345,6 +345,10 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     let loginWallHit = false;
     let challengedQi = -1;
     let challengedPage = 0;
+    // Per-query CF telemetry — logged as compact summaries at run end so the
+    // full picture fits in the 60-line ring buffer regardless of run length.
+    const perQueryChallenges = {}; // qi → challenge count
+    const perQueryGaveUp     = {}; // qi → give-up page count
 
     // workList drives all work: initial queries plus deferred retries pushed by
     // the CF escalation logic. retryCount=0 means first attempt; availableAt=0
@@ -377,6 +381,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     //   'give-up'        — all escalation levels exhausted; caller should break inner loop
     const handleCFHit = (q, qi, hitCount, trigger, p) => {
       totalChallenges++;
+      perQueryChallenges[qi] = (perQueryChallenges[qi] || 0) + 1;
       if (hitCount === 0) {
         // First hit on a fresh entry — restart inline so no other queries run during the 5s wait.
         logger.info(`[Indeed/Browser] ${trigger} q="${q}" p=${p + 1} — restarting browser (${CF_ESCALATION_MS[0] / 1000}s inline backoff)`);
@@ -386,6 +391,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         logger.warn(`[Indeed/Browser] ${trigger} q="${q}" p=${p + 1} — all retries exhausted, giving up on this page`);
         gaveUpCount++;
         gaveUpPages.push({ q, p: p + 1 });
+        perQueryGaveUp[qi] = (perQueryGaveUp[qi] || 0) + 1;
         return 'give-up';
       }
       const cooldownMs = humanCooldown(CF_ESCALATION_MS[hitCount]);
@@ -669,6 +675,15 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       wi++;
     }
 
+    // Compact per-query summary — 1 line per query so the full run picture fits
+    // within the 60-line ring buffer regardless of how long the scrape ran.
+    for (let i = 0; i < queryList.length; i++) {
+      const cf      = perQueryChallenges[i] || 0;
+      const skipped = perQueryGaveUp[i]     || 0;
+      const cfNote      = cf      ? ` ${cf} CF`            : ' clean';
+      const skippedNote = skipped ? ` ⚠️ ${skipped} skipped` : '';
+      logger.info(`[Indeed/Browser] q${i + 1} "${queryList[i]}":${cfNote}${skippedNote}`);
+    }
     logger.info(`[Indeed/Browser] ${allJobs.length} unique jobs, ${totalChallenges} challenges, ${queryList.length} queries`);
 
     const inWindow = maxAgeDays ? filterJobsByAge(allJobs, maxAgeDays) : allJobs;
