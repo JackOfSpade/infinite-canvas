@@ -6,6 +6,7 @@ import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
 import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
 import { getScopedJobSourceIds, isJobSourceEnabledInScope, JOB_SEARCH_TEST_MODE } from '../utils/jobSourceScope';
+import { dedupeJobsByKey, jobTitleCompanyUrlKey, uniqueJobsNotIn } from '../utils/jobIdentity';
 import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
 import { EventLogger } from '../utils/EventLogger';
 import { useToast } from '../components/ToastProvider';
@@ -635,13 +636,7 @@ export function JobHubNode({ id, data }) {
 
       if (currentState === 'sources-ready') {
         const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
-        const seen = new Set(prevPending.map(j => `${j.title}|${j.company}|${j.url || ''}`));
-        const fresh = freshJobs.filter(j => {
-          const k = `${j.title}|${j.company}|${j.url || ''}`;
-          if (seen.has(k)) return false;
-          seen.add(k);
-          return true;
-        });
+        const fresh = uniqueJobsNotIn(prevPending, freshJobs, jobTitleCompanyUrlKey);
         const mergedPending = [...prevPending, ...fresh];
         pendingJobsRef.current = mergedPending;
         scrapeWarningsRef.current = filteredWarnings;
@@ -1259,11 +1254,10 @@ export function JobHubNode({ id, data }) {
         );
       }
       const searchWarnings = Array.isArray(searchResult.scrapeWarnings) ? searchResult.scrapeWarnings : [];
-      // Filter out warnings for sources the user already resolved via paste/captcha
+      // Filter out warnings for sources the user already resolved via captcha
       // during the search — the backend doesn't know about those mid-run resolves
-      // and will always report them as failures (e.g. Google's paste-needed is
-      // injected unconditionally). Without this filter the hub re-blocks on an
-      // already-resolved source: spawns a duplicate card and overwrites pasted jobs.
+      // and will always report them as failures. Without this filter the hub
+      // re-blocks on an already-resolved source and spawns a duplicate card.
       const alreadyResolved = resolvedDuringSearchRef.current;
       const effectiveWarnings = alreadyResolved.size > 0
         ? searchWarnings.filter(w => !alreadyResolved.has(w?.sourceId))
@@ -1278,8 +1272,7 @@ export function JobHubNode({ id, data }) {
         const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
         const resolvedItems = prevPending.filter(j => alreadyResolved.has(j?.source));
         if (resolvedItems.length > 0) {
-          const seen = new Set(foundJobs.map(j => `${j.title}|${j.company}|${j.url || ''}`));
-          foundJobs = [...foundJobs, ...resolvedItems.filter(j => !seen.has(`${j.title}|${j.company}|${j.url || ''}`))];
+          foundJobs = dedupeJobsByKey([...foundJobs, ...resolvedItems], jobTitleCompanyUrlKey);
         }
       }
 
@@ -1536,8 +1529,7 @@ export function JobHubNode({ id, data }) {
       const items = Array.isArray(e.detail?.items) ? e.detail.items : [];
       // Track sources resolved while the search is still running so the
       // search-completion handler can skip re-blocking them with the stale
-      // backend warnings (e.g. Google's paste-needed always appears in the
-      // search result even after the user already pasted mid-run).
+      // backend warnings.
       if (hubStateRef.current === 'searching') {
         resolvedDuringSearchRef.current.add(resolvedSourceId);
       }
@@ -1545,13 +1537,7 @@ export function JobHubNode({ id, data }) {
       // a retry brings fresh data rather than stacking on top of old.
       const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
       const keep = prevPending.filter(j => j?.source !== resolvedSourceId);
-      const seen = new Set(keep.map(j => `${j.title}|${j.company}|${j.url || ''}`));
-      const fresh = items.filter(j => {
-        const k = `${j.title}|${j.company}|${j.url || ''}`;
-        if (seen.has(k)) return false;
-        seen.add(k);
-        return true;
-      });
+      const fresh = uniqueJobsNotIn(keep, items, jobTitleCompanyUrlKey);
       const mergedPending = [...keep, ...fresh];
       pendingJobsRef.current = mergedPending;
       // Drop the resolved source's warning.

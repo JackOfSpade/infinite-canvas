@@ -512,24 +512,15 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       // still searching or blocked.
       if (d.sourceId && d.persistedProgress) {
         const p = d.persistedProgress;
-        // Google Jobs (isManualPaste source) intentionally stays visible at done+0+no-warning
-        // while the hub is paused waiting for the user to paste — not a lingering bug.
-        const isPasteWaiting = d.sourceId === 'google' && p.status === 'done' && !p.warning && !(p.count > 0);
         const isCleanTerminal = (p.status === 'skipped' || p.status === 'done') && !p.warning;
         const siblingCards = sourceCardsByHub[d.hubId] || [];
         const allSiblingCardsCleanTerminal = siblingCards.length > 0 && siblingCards.every(card => {
           const siblingProgress = card?.data?.persistedProgress;
           if (!siblingProgress) return false;
-          const siblingManualPasteWaiting =
-            card?.data?.sourceId === 'google' &&
-            siblingProgress.status === 'done' &&
-            !siblingProgress.warning &&
-            !(siblingProgress.count > 0);
-          return !siblingManualPasteWaiting &&
-            (siblingProgress.status === 'done' || siblingProgress.status === 'skipped') &&
+          return (siblingProgress.status === 'done' || siblingProgress.status === 'skipped') &&
             !siblingProgress.warning;
         });
-        const lingering = !isPasteWaiting && isCleanTerminal && allSiblingCardsCleanTerminal;
+        const lingering = isCleanTerminal && allSiblingCardsCleanTerminal;
         previewParts.push(
           `source: ${d.sourceId}, progress: ${p.status || '?'}${p.warning?.code ? ` (${p.warning.code})` : ''}` +
           (lingering ? ' ⚠️ should have auto-dismissed (lingering card)' : ''),

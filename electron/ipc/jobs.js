@@ -7,7 +7,7 @@
 import fs from 'fs';
 import path from 'path';
 import { callLLMDocument, callLLMText } from './llm.js';
-import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, BUCKETING_PLACEMENT_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA, PASTED_JOB_PARSE_SCHEMA } from './aiSchemas.js';
+import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, BUCKETING_PLACEMENT_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA } from './aiSchemas.js';
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { clearBrowserSession } from './stealthBrowser.js';
@@ -37,6 +37,7 @@ import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
 import { getJobsSettings } from './settings.js';
 import { readStatusCache } from './accounts.js';
 import { getScopedJobSourceIds } from '../../src/utils/jobSourceScope.js';
+import { dedupeJobsByKey, jobTitleCompanyKey } from '../../src/utils/jobIdentity.js';
 
 const { ipcMain, app } = electronPkg;
 const DEFAULT_MAX_AGE_DAYS = 21;
@@ -246,7 +247,6 @@ const jobsTelemetry = {
                    // entry. Reset when a fresh search stamps so it's scoped to it.
   scoring:   null, // { ts, input, scored, placeholders, batches, failedBatches, unscored }
   bucketing: null, // { ts, input, categories, placed, missing, duplicated, model, error } — error set when the bucket call threw (flat-spawn fallback)
-  pastedPastes: [], // [{ ts, sourceId, chars, parsed, error }] — all manual paste→parse calls this run (Google fallback); array so multiple pastes (first mid-run, second after hub re-blocks) are all visible
   // Per-source job-source-progress event trail for the current search, captured
   // in the main process so it survives the source-card nodes being deleted (the
   // renderer Event History shows WHEN a card was removed, but not the status/
@@ -434,13 +434,7 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
  * budget. Returns all jobs unchanged when there are <= n.
  */
 function dedupByTitleCompany(arr) {
-  const seen = new Set();
-  return (Array.isArray(arr) ? arr : []).filter(job => {
-    const key = `${(job.title || '').toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return dedupeJobsByKey(arr, jobTitleCompanyKey);
 }
 
 function selectTopAcrossSources(jobs, n) {
@@ -484,14 +478,10 @@ async function queryFanOut(queries, fetcher, signal) {
   const results = await Promise.all(
     queries.map(q => fetcher(q, signal).catch(() => ({ items: [] })))
   );
-  const seen = new Set();
-  const items = [];
-  for (const r of results) {
-    for (const job of (r?.items || [])) {
-      const key = `${(job.title || '').toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}`;
-      if (!seen.has(key)) { seen.add(key); items.push(job); }
-    }
-  }
+  const items = dedupeJobsByKey(
+    results.flatMap(r => r?.items || []),
+    jobTitleCompanyKey,
+  );
   const warning = [...results].reverse().find(r => r?.warning)?.warning ?? null;
   return { items, warning };
 }
@@ -566,55 +556,6 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
       return { sourceId, jobs: [], error: error?.message || String(error) };
     }
   }));
-}
-
-// ── Manual-paste chunking (Google fallback) ──────────────────────────────────
-// A large Google-Jobs paste produces more JSON+thinking than the parse-pasted-jobs
-// token cap can hold (and the global HARD_CAP is a deliberate cost/latency ceiling
-// we don't raise for one feature). So we split the paste into chunks that each fit
-// comfortably under the cap, parse them independently, and merge. ~8000 chars/chunk
-// keeps each call's cap (2500 + chars/200·400 ≈ 18.5k at 8k) well under HARD_CAP.
-const PASTE_CHUNK_CHARS = 8000;
-
-// Split on line boundaries (a Google job entry spans a few consecutive lines),
-// packing lines into chunks ≤ maxChars. A single over-long line is hard-split.
-// A job that straddles a boundary is recovered by the cross-chunk dedup downstream.
-function chunkPastedText(text, maxChars) {
-  if (text.length <= maxChars) return [text];
-  const chunks = [];
-  let cur = '';
-  for (const line of text.split('\n')) {
-    if (cur && cur.length + line.length + 1 > maxChars) { chunks.push(cur); cur = ''; }
-    cur = cur ? `${cur}\n${line}` : line;
-    while (cur.length > maxChars) { chunks.push(cur.slice(0, maxChars)); cur = cur.slice(maxChars); }
-  }
-  if (cur) chunks.push(cur);
-  return chunks;
-}
-
-// Parse ONE chunk of pasted job text → array of raw { title, company, location,
-// salary, snippet }. Throws on truncation / parse failure; the caller decides
-// whether one bad chunk should sink the whole submit.
-async function parsePastedChunk(chunk, signal) {
-  const result = await callLLMText(`
-You are parsing job listings a user copied as plain VISIBLE TEXT (not HTML) from a Google Jobs results page. Extract each DISTINCT job posting you can identify.
-
-Rules:
-- title is required — skip any entry without a discernible job title.
-- company / location / salary / snippet: fill if clearly present, else "".
-- Do NOT invent jobs or fields. Only extract what is actually in the text.
-- De-duplicate obvious repeats (the same title+company listed twice).
-
-Return JSON: { "jobs": [ { "title", "company", "location", "salary", "snippet" } ] }
-
-PASTED TEXT:
-${chunk}`, {
-    signal,
-    task: 'parse-pasted-jobs',
-    hints: { itemCount: Math.max(1, Math.round(chunk.length / 200)) },
-    responseSchema: PASTED_JOB_PARSE_SCHEMA,
-  });
-  return Array.isArray(result?.jobs) ? result.jobs : [];
 }
 
 /**
@@ -692,89 +633,6 @@ Be creative with suggestedRoleQueries — think about what career directions the
     return { queries: result };
   });
 
-  // ── Parse pasted job text → structured jobs (manual fallback) ──────────────
-  // For sources whose results we can't scrape (Google sunset its jobs widget to
-  // the JS-rendered, obfuscated udm=8 layout), the user opens the site, copies
-  // the visible job text, and pastes it into the source card. We LLM-parse it
-  // into the same job shape every other source produces, then it flows through
-  // the existing job-source-resolved → merge → score → bucket → spawn path.
-  // No reliable direct URL survives a copy-paste, so each job gets a Google Jobs
-  // *search* link (udm=8) for its title/company so the card's link button still
-  // lands the user on the listing instead of a dead href.
-  handleSafe('parse-pasted-jobs', async (event, { text, sourceId, nodeId } = {}, signal) => {
-    const raw = String(text || '').trim();
-    if (!raw) return { jobs: [] };
-    const src = sourceId || 'google';
-    const chunks = chunkPastedText(raw, PASTE_CHUNK_CHARS);
-    logger.info(`[Jobs][${nodeId}] Parsing pasted ${src} text (${raw.length} chars, ${chunks.length} chunk(s))`);
-    // Record the attempt (success / partial / failure) so the bug-report funnel
-    // shows the manual-paste step instead of leaving it inferable only from the
-    // token-budget truncation marker.
-    const stamp = (parsed, error) => {
-      jobsTelemetry.nodeId = nodeId;
-      jobsTelemetry.windowId = event.sender?.id ?? null;
-      jobsTelemetry.pastedPastes.push({ ts: Date.now(), sourceId: src, chars: raw.length, chunks: chunks.length, parsed, error: error || null });
-    };
-
-    // Parse chunks SEQUENTIALLY — the Gemini free tier is rate-limited, so
-    // concurrent calls just trigger more 429s. A failed chunk is recorded but
-    // doesn't sink the rest: partial success beats losing every job to one chunk.
-    const rawJobs = [];
-    let failedChunks = 0;
-    for (let i = 0; i < chunks.length; i++) {
-      if (signal?.aborted) break;
-      try {
-        rawJobs.push(...await parsePastedChunk(chunks[i], signal));
-      } catch (err) {
-        failedChunks++;
-        logger.warn(`[Jobs][${nodeId}] Pasted-job chunk ${i + 1}/${chunks.length} failed: ${err?.message || err}`);
-      }
-    }
-
-    // Dedup across chunks by title|company (a boundary-split job can land in two
-    // chunks), then synthesize the Google Jobs search link per job (a paste can't
-    // carry a reliable direct URL — the card's "open" button lands the user on
-    // Google Jobs pre-searched for this role).
-    const seen = new Set();
-    const items = rawJobs
-      .filter(j => j && String(j.title || '').trim())
-      .filter(j => {
-        const k = `${String(j.title).toLowerCase().trim()}|${String(j.company || '').toLowerCase().trim()}`;
-        if (seen.has(k)) return false;
-        seen.add(k);
-        return true;
-      })
-      .map(j => {
-        const title = String(j.title).trim();
-        const company = String(j.company || '').trim();
-        const location = String(j.location || '').trim();
-        const term = [title, company, location].filter(Boolean).join(' ');
-        const url = `https://www.google.com/search?q=${encodeURIComponent(term)}&udm=8`;
-        return {
-          title, company, location,
-          salary: String(j.salary || '').trim(),
-          snippet: String(j.snippet || '').trim(),
-          url,
-          source: src,
-        };
-      });
-
-    // Error semantics: nothing parsed at all → hard fail (card keeps itself);
-    // some chunks failed but we still got jobs → partial-success note (card keeps
-    // itself AND the jobs are merged, so missing ones can be re-pasted).
-    let error = null;
-    if (items.length === 0) {
-      error = failedChunks > 0
-        ? `Parsing failed on all ${chunks.length} chunk(s) — likely the AI quota is exhausted or the text was unparseable.`
-        : 'No jobs found in the pasted text.';
-    } else if (failedChunks > 0) {
-      error = `Parsed ${items.length} job(s), but ${failedChunks} of ${chunks.length} chunk(s) failed — some jobs may be missing. Re-paste the missing section if needed.`;
-    }
-    logger.info(`[Jobs][${nodeId}] Parsed ${items.length} job(s) from pasted ${src} text (${chunks.length} chunk(s), ${failedChunks} failed)`);
-    stamp(items.length, error);
-    return { jobs: items, error };
-  });
-
   handleSafe('get-last-job-analysis-snapshot', async () => {
     try {
       const { snapshot, paths } = await loadJobAnalysisSnapshot();
@@ -846,7 +704,6 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // resolve can arrive mid-run (before the search result returns), and resetting
     // at the end would wipe those records before the bug report reads them.
     jobsTelemetry.resolves = {};
-    jobsTelemetry.pastedPastes = [];
     jobsTelemetry.sourceBlockedUrls = {}; // sourceId → [url, ...] for multi-query sequential solve
     // Fresh per-source event trail for this run (survives source-card deletion).
     jobsTelemetry.sourceEvents = {};
@@ -1054,24 +911,6 @@ Be creative with suggestedRoleQueries — think about what career directions the
         // since opening a login URL doesn't help an extractor that
         // doesn't share cookies anyway.
         url: sourceFirstUrl[sourceId] || null,
-      });
-    }
-
-    // Google Jobs is unscrapeable (the udm=8 widget is JS-rendered and obfuscated),
-    // so a clean 0-job result is expected — the user must manually copy/paste.
-    // Inject a 'paste' severity warning BEFORE both the scrapeWarnings loop and
-    // the bySource build so: (a) the hub's block gate sees it in scrapeWarnings
-    // and pauses in 'sources-ready', and (b) the bug-report funnel sees it in
-    // bySource.google.warning instead of silently listing Google as "0 results,
-    // no warning (genuinely empty)" — which was the misleading pre-fix state.
-    const googleData = sourceResults.google;
-    if (googleData && googleData.jobs.length === 0 &&
-        !googleData.warnings.some(w => w?.severity === 'block')) {
-      googleData.warnings.push({
-        code: 'paste-needed',
-        severity: 'paste',
-        evidence: null,
-        suggestion: null,
       });
     }
 

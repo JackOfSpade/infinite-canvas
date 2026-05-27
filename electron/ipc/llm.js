@@ -33,7 +33,6 @@ const TASK_MODELS = {
   'job-query-generation':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash'      },
   'job-scoring':               { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
   'job-bucketing':             { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash'      },
-  'parse-pasted-jobs':         { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash'      },
   'cover-letter-generation':   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
   'interview-prep-generation': { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
   'text-polish':               { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash-lite' },
@@ -114,12 +113,6 @@ const TASK_MAX_TOKENS = {
     Math.min(24576, 4096 + itemCount * 400),
   // Extraction is thinking-heavy AND reproduces most of the input as JSON, so it
   // scales steeply with paste size — a ~45-job paste truncated at the old 10.5k.
-  // 2500 base + 400/item → 45 jobs ≈ 20.5k; ~55 jobs hits the 24576 hard cap (a
-  // paste that big should be split — the handler returns a clear error and the
-  // card surfaces it rather than failing silently). tokenBudget.js also
-  // self-calibrates this upward whenever it observes a truncation.
-  'parse-pasted-jobs':         ({ itemCount = 8 } = {}) =>
-    Math.min(24576, 2500 + itemCount * 400),
   'cover-letter-generation':   2048,  // a paragraph-length letter
   'interview-prep-generation': 2048,  // bulleted prep
   'text-polish':               1024,  // light edit

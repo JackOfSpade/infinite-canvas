@@ -58,9 +58,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
   let browserScrape = null;
   try { browserScrape = getManualScraperTelemetry(); } catch { /* scraper may not be loaded */ }
   const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
-  const hasPastes = Array.isArray(t?.pastedPastes) ? t.pastedPastes.length > 0 : !!t?.pastedParse; // back-compat with old single-object field
   const hasBrowserScrape = !!browserScrape?.active || (browserScrape?.events || []).length > 0;
-  if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing && !hasPastes && !hasBrowserScrape)) return '';
+  if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing && !hasBrowserScrape)) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId);
   if (scope.foreign) return `\n## Job Search Pipeline\n${scope.note}`;
@@ -136,17 +135,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
       for (const [k, v] of apiCapped) {
         lines.push(`  - \`${k}\`: surfaced ${v.count} of ${v.gathered} in-window matches ⚠️ (per-source cap — ${v.gathered - v.count} more matched but not gathered; raise JOB_RESULT_CAP to widen)`);
       }
-      const zeroPaste = entries.filter(([, v]) => v.count === 0 && v.warning?.code === 'paste-needed').map(([k]) => k);
       const zeroWarn = entries
-        .filter(([, v]) => v.count === 0 && v.warning && v.warning.code !== 'paste-needed')
+        .filter(([, v]) => v.count === 0 && v.warning)
         .map(([k, v]) => {
           const evidence = v.warning?.evidence ? ` — ${String(v.warning.evidence).slice(0, 220)}` : '';
           return `${k} (${v.warning.code})${evidence}`;
         });
       const zeroClean = entries.filter(([, v]) => v.count === 0 && !v.warning).map(([k]) => k);
-      if (zeroPaste.length) {
-        lines.push(`  - ⏳ paste-needed (hub paused waiting for manual copy/paste — expected, not a scrape failure): ${zeroPaste.join(', ')}`);
-      }
       if (zeroWarn.length) {
         lines.push(`  - ⚠️ 0 results + flagged (real miss to investigate): ${zeroWarn.join(', ')}`);
       }
@@ -318,31 +313,6 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
     }
   }
 
-  // Manual paste → parse (Google fallback). A failed/0 submit is the "I pasted
-  // and clicked Submit but it failed" case — usually the parse output exceeded
-  // its token cap and truncated. Surfaced here so it's not inferable only from
-  // the job-scoring token-budget truncation marker.
-  // Back-compat: older builds wrote a single pastedParse object; new builds write
-  // a pastedPastes array so multiple mid-run + post-reblock pastes are all visible.
-  const allPastes = Array.isArray(t.pastedPastes) && t.pastedPastes.length > 0
-    ? t.pastedPastes
-    : (t.pastedParse ? [t.pastedParse] : []);
-  if (allPastes.length > 0) {
-    lines.push('\n### Manual paste (Google fallback)');
-    for (const p of allPastes) {
-      lines.push(
-        `- \`${p.sourceId}\`${ago(p.ts)}: pasted ${p.chars} chars${p.chunks > 1 ? ` in ${p.chunks} chunks` : ''} → **parsed ${p.parsed} job(s)**` +
-        (p.error ? ` ⚠️ ${p.error}` : ' → merged into pendingJobs for scoring'),
-      );
-      if (p.error && p.parsed === 0) {
-        lines.push('  - _(this submit added NO jobs — not silently dropped: the card stays so the user can retry with a smaller paste)_');
-      }
-    }
-    if (allPastes.length > 1) {
-      lines.push(`  - _(${allPastes.length} paste submissions this run — multiple pastes indicate the hub re-blocked and required a second resolve)_`);
-    }
-  }
-
   if (t.scoring) {
     const s = t.scoring;
     const clean = s.placeholders === 0 && s.unscored === 0;
@@ -367,8 +337,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
     // replacement (resolver re-opens a page the initial scrape already captured,
     // so kept=11 IPC-side but net pendingJobs change=0). Without it, sessionGathered
     // overstates by replacedExisting, making scoring input look like carry-over.
-    const pastedTotal = allPastes.reduce((sum, p) => sum + (p.parsed || 0), 0);
-    const sessionGathered = (t.search?.kept || 0) + pastedTotal +
+    const sessionGathered = (t.search?.kept || 0) +
       Object.values(t.resolves || {}).reduce((sum, r) => {
         const m = r?.merge;
         return sum + (m != null ? (m.pendingAfter - m.pendingBefore) : (r?.kept || 0));

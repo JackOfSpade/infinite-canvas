@@ -309,27 +309,3 @@ export const JOB_SCORING_SCHEMA = {
   },
 };
 
-// ── Pasted-job parse: free visible text (Google Jobs, manual) → structured jobs ─
-// Google sunset its scrapeable jobs widget, so the user copies the visible job
-// text off the page and we extract it here. No `url` — a paste can't yield a
-// reliable direct link, so the handler synthesizes a Google Jobs *search* link.
-export const PASTED_JOB_PARSE_SCHEMA = {
-  type: 'object',
-  required: ['jobs'],
-  properties: {
-    jobs: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['title'],
-        properties: {
-          title:    { type: 'string', description: 'Job title (required; skip entries with none)' },
-          company:  { type: 'string', description: 'Employer name, or "" if absent' },
-          location: { type: 'string', description: 'City/state, or "" if absent' },
-          salary:   { type: 'string', description: 'Pay/salary text, or "" if absent' },
-          snippet:  { type: 'string', description: 'One-line description, or "" if absent' },
-        },
-      },
-    },
-  },
-};

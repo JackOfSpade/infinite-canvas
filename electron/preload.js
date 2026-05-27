@@ -63,7 +63,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   resolveJobSource: (args) => ipcRenderer.invoke('resolve-job-source', args),
   resumeJobSource:  (args) => ipcRenderer.invoke('resume-job-source', args),
   recordResolveMerge: (args) => ipcRenderer.invoke('record-resolve-merge', args),
-  parsePastedJobs: (args) => ipcRenderer.invoke('parse-pasted-jobs', args),
   bucketJobs: (args) => ipcRenderer.invoke('bucket-jobs', args),
 
   // ── Marketplace Module ──────────────────────────────────────────────────
