@@ -704,7 +704,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           await new Promise(r => setTimeout(r, 1200 + Math.round(Math.random() * 800)));
           const sigs = await getChallengeSignals(page);
           if (sigs.isChallenge) {
-            logger.warn(`[Indeed/Browser] Re-enrich: CF challenge (${sigs.reason}) on job page — stopping re-enrichment early`);
+            logger.warn(`[Indeed/Browser] Re-enrich: CF active (${sigs.reason}) — skipping remaining ${missingDescJobs.length - ri}, CF window still hot`);
             break;
           }
           const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
