@@ -675,6 +675,40 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       wi++;
     }
 
+    // ── Post-run re-enrichment pass ─────────────────────────────────────────────
+    // Jobs with empty descriptions after the main pass may be silent CF blanks —
+    // the panel loaded empty without triggering a visible challenge page.
+    // One retry navigating directly to each job URL reveals the truth:
+    // genuine empties stay empty; CF-blanked ones populate.
+    const missingDescJobs = allJobs.filter(j => !j.description || j.description.trim() === '');
+    let reEnriched = 0;
+    if (missingDescJobs.length > 0 && !signal?.aborted) {
+      logger.info(`[Indeed/Browser] Re-enriching ${missingDescJobs.length} jobs with missing descriptions`);
+      for (let ri = 0; ri < missingDescJobs.length; ri++) {
+        if (signal?.aborted) break;
+        const job = missingDescJobs[ri];
+        const jobUrl = job.url || (job.jobkey ? `https://www.indeed.com/viewjob?jk=${job.jobkey}` : null);
+        if (!jobUrl) continue;
+        try {
+          await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          await new Promise(r => setTimeout(r, 1200 + Math.round(Math.random() * 800)));
+          const sigs = await getChallengeSignals(page);
+          if (sigs.isChallenge) {
+            logger.warn(`[Indeed/Browser] Re-enrich: CF challenge on job page — stopping re-enrichment early`);
+            break;
+          }
+          const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
+          if (desc) { job.description = desc; reEnriched++; }
+          if (ri < missingDescJobs.length - 1) {
+            await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 600)));
+          }
+        } catch (e) {
+          logger.warn(`[Indeed/Browser] Re-enrich failed (${job.jobkey || 'no-key'}): ${e.message}`);
+        }
+      }
+      logger.info(`[Indeed/Browser] Re-enrich complete: ${reEnriched}/${missingDescJobs.length} recovered`);
+    }
+
     // Compact per-query summary — 1 line per query so the full run picture fits
     // within the 60-line ring buffer regardless of how long the scrape ran.
     for (let i = 0; i < queryList.length; i++) {
@@ -684,7 +718,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       const skippedNote = skipped ? ` ⚠️ ${skipped} skipped` : '';
       logger.info(`[Indeed/Browser] q${i + 1} "${queryList[i]}":${cfNote}${skippedNote}`);
     }
-    logger.info(`[Indeed/Browser] ${allJobs.length} unique jobs, ${totalChallenges} challenges, ${queryList.length} queries`);
+    logger.info(`[Indeed/Browser] ${allJobs.length} unique jobs, ${totalChallenges} challenges, ${queryList.length} queries${reEnriched > 0 ? `, ${reEnriched} re-enriched` : ''}`);
 
     const inWindow = maxAgeDays ? filterJobsByAge(allJobs, maxAgeDays) : allJobs;
     const items    = inWindow.slice(0, resultCap);
