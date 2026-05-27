@@ -86,6 +86,23 @@ function parseSalaryToNumeric(salaryStr) {
   return val;
 }
 
+function buildResumeSummary(profile) {
+  if (!profile || typeof profile !== 'object') return '';
+  const skills = Array.isArray(profile.skills) ? profile.skills.slice(0, 3).join(', ') : '';
+  return `${skills}${profile.experience_years ? `${skills ? ' · ' : ''}${profile.experience_years}y exp` : ''}`.trim();
+}
+
+function getSavedAnalysisWarning(meta, currentHubId, currentCanvasFilePath) {
+  if (!meta) return '';
+  if (meta.canvasFilePath && currentCanvasFilePath && meta.canvasFilePath !== currentCanvasFilePath) {
+    return 'Saved from a different canvas file.';
+  }
+  if (meta.sourceHubId && currentHubId && meta.sourceHubId !== currentHubId) {
+    return 'Saved from a different job search hub.';
+  }
+  return '';
+}
+
 /**
  * JobHubNode — draggable canvas module for job search.
  * Phase 2: Per-source independent status tracking + source filtering.
@@ -127,6 +144,8 @@ export function JobHubNode({ id, data }) {
   const sourceDismissTimerRef = useRef(null);
   const epoch = useEpochCancellation();
   const { addToast } = useToast();
+  const [savedAnalysisMeta, setSavedAnalysisMeta] = useState(null);
+  const [savedAnalysisLoading, setSavedAnalysisLoading] = useState(false);
   useEffect(() => {
     return () => {
       isMountedRef.current = false;
@@ -654,6 +673,11 @@ export function JobHubNode({ id, data }) {
             profile,
             nodeId: currentId,
             targetRole: activeTargetRole,
+            snapshotContext: {
+              sourceHubId: currentId,
+              canvasFilePath,
+              resumeSummary: buildResumeSummary(profile),
+            },
           });
 
           if (cancelled()) return;
@@ -1001,7 +1025,15 @@ export function JobHubNode({ id, data }) {
     // Step 4: Scoring
     updateGlobal(currentId, { hubState: 'scoring', jobCount: jobs.length });
     const scoreResult = await window.electronAPI.scoreJobs({
-      jobs, profile, nodeId: currentId, targetRole: activeTargetRole,
+      jobs,
+      profile,
+      nodeId: currentId,
+      targetRole: activeTargetRole,
+      snapshotContext: {
+        sourceHubId: currentId,
+        canvasFilePath,
+        resumeSummary: buildResumeSummary(profile),
+      },
     });
     if (cancelled()) return;
     if (!scoreResult.success) {
@@ -1168,7 +1200,7 @@ export function JobHubNode({ id, data }) {
         updateGlobal(currentId, {
           hubState: 'querying',
           resumeProfile: profile,
-          resumeSummary: `${profile.skills?.slice(0, 3).join(', ')}${profile.experience_years ? ` · ${profile.experience_years}y exp` : ''}`,
+          resumeSummary: buildResumeSummary(profile),
           resumeContext: {
             skills: profile.skills,
             experience: profile.experience_years,
@@ -1301,6 +1333,21 @@ export function JobHubNode({ id, data }) {
       }
 
       if (SKIP_AI_FOR_TESTING) {
+        try {
+          await window.electronAPI?.saveJobAnalysisSnapshot?.({
+            jobs: foundJobs,
+            profile,
+            nodeId: currentId,
+            targetRole: activeTargetRole,
+            snapshotContext: {
+              sourceHubId: currentId,
+              canvasFilePath,
+              resumeSummary: buildResumeSummary(profile),
+            },
+          });
+        } catch (err) {
+          EventLogger.error(`[JobHub][${currentId}] Failed to save test-mode prompt snapshot:`, err);
+        }
         EventLogger.log(`[JobHub][${currentId}] SKIP_AI_FOR_TESTING — ${foundJobs.length} jobs collected, stopping before AI scoring`);
         updateGlobal(currentId, {
           hubState: 'done',
@@ -1814,6 +1861,132 @@ export function JobHubNode({ id, data }) {
     }
   }, [id]);
 
+  useEffect(() => {
+    if (!['empty', 'done', 'sources-ready'].includes(hubState)) return;
+    let cancelled = false;
+    void (async () => {
+      if (!window.electronAPI?.getLastJobAnalysisSnapshot) {
+        if (!cancelled) setSavedAnalysisMeta(null);
+        return;
+      }
+      try {
+        const res = await window.electronAPI.getLastJobAnalysisSnapshot();
+        if (cancelled) return;
+        if (
+          res?.success &&
+          res.exists &&
+          res.meta &&
+          Array.isArray(res.snapshot?.jobs) &&
+          res.snapshot.jobs.length > 0 &&
+          res.snapshot?.profile
+        ) {
+          setSavedAnalysisMeta(res.meta);
+        } else {
+          setSavedAnalysisMeta(null);
+        }
+      } catch {
+        if (!cancelled) setSavedAnalysisMeta(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [hubState]);
+
+  const handleOpenSavedPrompt = useCallback(async () => {
+    if (!savedAnalysisMeta?.promptPath) return;
+    try {
+      await window.electronAPI?.openFile?.(savedAnalysisMeta.promptPath);
+    } catch (err) {
+      addToast({
+        title: 'Could Not Open Saved Prompt',
+        description: err?.message || String(err),
+        type: 'error',
+      });
+    }
+  }, [savedAnalysisMeta, addToast]);
+
+  const handleResumeSavedScrape = useCallback(async () => {
+    if (data.locked || processingRef.current || platformsVerifying) return;
+    if (!window.electronAPI?.getLastJobAnalysisSnapshot) return;
+
+    setSavedAnalysisLoading(true);
+    try {
+      const res = await window.electronAPI.getLastJobAnalysisSnapshot();
+      const snapshot = res?.success && res.exists ? res.snapshot : null;
+      const savedJobs = Array.isArray(snapshot?.jobs) ? snapshot.jobs : [];
+      const profile = snapshot?.profile;
+      if (!snapshot || !profile || savedJobs.length === 0) {
+        addToast({
+          title: 'No Saved Scrape',
+          description: 'No saved scrape data is available to resume.',
+          type: 'error',
+        });
+        setSavedAnalysisMeta(null);
+        return;
+      }
+
+      EventLogger.log(`[JobHub][${id}] Resuming from saved scrape (${savedJobs.length} job(s))`);
+      processingRef.current = true;
+      cancelCleanSourceCardDismiss();
+      resetSourceProgress();
+      if (hubState === 'done') {
+        deleteChildrenByHubId({
+          getNodes,
+          getEdges,
+          deleteElements,
+          hubId: id,
+          childTypes: ['jobcard', 'jobgroup'],
+        });
+      }
+      const currentId = id;
+      const cancelled = epoch.start();
+      const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
+      const activeTargetRole = String(snapshot.targetRole || '').trim();
+      updateGlobal(currentId, {
+        errorMessage: null,
+        isRateLimit: false,
+        testModeNote: null,
+        pendingJobs: null,
+        pendingTargetRole: null,
+        resumeProfile: profile,
+        resumeSummary: buildResumeSummary(profile),
+        resumeContext: {
+          skills: profile.skills,
+          experience: profile.experience_years,
+        },
+        targetRole: activeTargetRole,
+      });
+
+      try {
+        await runScoringAndSpawn({
+          profile,
+          jobs: savedJobs,
+          gatheredCount: snapshot.gatheredJobCount ?? savedJobs.length,
+          scrapeWarnings: [],
+          activeTargetRole,
+          originalPos,
+          cancelled,
+        });
+      } catch (error) {
+        if (cancelled() || isNodeDeletedAbort(error)) return;
+        EventLogger.error('[JobHub] Resume from saved scrape failed:', error);
+        const hubChildrenOnCanvas = getNodes().some(n =>
+          (n.type === 'jobcard' || n.type === 'jobgroup') && n.data?.hubId === currentId
+        );
+        updateGlobal(currentId, {
+          hubState: hubChildrenOnCanvas ? 'done' : 'empty',
+          errorMessage: error?.message || String(error),
+          isRateLimit: !!error?.isRateLimit,
+        });
+      } finally {
+        if (isMountedRef.current) processingRef.current = false;
+      }
+    } finally {
+      if (isMountedRef.current) setSavedAnalysisLoading(false);
+    }
+  }, [addToast, cancelCleanSourceCardDismiss, data.locked, deleteElements, epoch, getEdges, getNode, getNodes, hubState, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal]);
+
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[JobHub][${id}] User clicked Dismiss Error`);
     updateGlobal(id, { errorMessage: null, isRateLimit: false, testModeNote: null });
@@ -1833,6 +2006,47 @@ export function JobHubNode({ id, data }) {
     updateGlobal(id, { errorMessage: null, isRateLimit: false, testModeNote: null });
     handleRerun();
   }, [data.locked, id, updateGlobal, handleRerun]);
+
+  const savedAnalysisWarning = getSavedAnalysisWarning(savedAnalysisMeta, id, canvasFilePath);
+  const savedAnalysisPanel = savedAnalysisMeta ? (
+    <div className="mt-2 w-full rounded-md border border-white/10 bg-white/5 px-2 py-2 text-left">
+      <div className="text-[9px] uppercase tracking-[0.14em] text-white/25">Saved Scrape</div>
+      <div className="mt-1 text-[10px] text-white/65">
+        {savedAnalysisMeta.gatheredJobCount} scraped
+        {savedAnalysisMeta.selectedJobCount ? ` • ${savedAnalysisMeta.selectedJobCount} selected for AI` : ''}
+      </div>
+      {!!savedAnalysisMeta.targetRole && (
+        <div className="text-[9px] text-white/35">{savedAnalysisMeta.targetRole}</div>
+      )}
+      <div className="text-[9px] text-white/30">
+        {savedAnalysisMeta.createdAt ? new Date(savedAnalysisMeta.createdAt).toLocaleString() : 'Saved locally'}
+      </div>
+      {!!savedAnalysisMeta.resumeSummary && (
+        <div className="mt-1 text-[9px] text-white/25">{savedAnalysisMeta.resumeSummary}</div>
+      )}
+      {!!savedAnalysisWarning && (
+        <div className="mt-1 text-[9px] text-amber-300/80">{savedAnalysisWarning}</div>
+      )}
+      <div className="mt-2 flex gap-1.5">
+        <button
+          className="nodrag flex-1 rounded border border-blue-400/30 bg-blue-400/10 px-2 py-1 text-[9px] text-blue-100 hover:bg-blue-400/15 disabled:cursor-default disabled:opacity-50"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={handleResumeSavedScrape}
+          disabled={savedAnalysisLoading}
+        >
+          {savedAnalysisLoading ? 'Resuming…' : 'Resume saved scrape'}
+        </button>
+        <button
+          className="nodrag rounded border border-white/10 bg-white/5 px-2 py-1 text-[9px] text-white/55 hover:bg-white/10"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={handleOpenSavedPrompt}
+          type="button"
+        >
+          Open prompt
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   const banner = data.errorMessage ? (
     <HubErrorBanner
@@ -1909,6 +2123,7 @@ export function JobHubNode({ id, data }) {
                 >
                   Reset browser session
                 </button>
+                {savedAnalysisPanel}
               </div>}
             </div>
           </>
@@ -1946,6 +2161,11 @@ export function JobHubNode({ id, data }) {
               locked={!!data.locked}
               onScoreCurrent={handleScoreCurrentResults}
             />
+            {savedAnalysisPanel && (
+              <div className="w-full px-3 pb-3" onPointerDown={(e) => e.stopPropagation()}>
+                {savedAnalysisPanel}
+              </div>
+            )}
           </>
         )}
 
@@ -1983,6 +2203,11 @@ export function JobHubNode({ id, data }) {
               onClearClosed={handleClearClosed}
               scrapeWarnings={data.scrapeWarnings || []}
             />
+            {savedAnalysisPanel && (
+              <div className="w-full px-3 pb-3" onPointerDown={(e) => e.stopPropagation()}>
+                {savedAnalysisPanel}
+              </div>
+            )}
           </>
         )}
       </HubContainer>

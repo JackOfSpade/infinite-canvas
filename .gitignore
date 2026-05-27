@@ -47,6 +47,8 @@ electron/extractors/_archive/
 
 # Agent / editor local config (personal — keep out of the repo)
 .claude/
+.codex/
+.cursor/
 
 # Backup / merge leftovers
 *~
@@ -69,3 +71,9 @@ Thumbs.db
 ._*
 .AppleDouble
 .LSOverride
+
+# Local caches / shell env helpers
+.cache/
+.eslintcache
+.direnv/
+.envrc

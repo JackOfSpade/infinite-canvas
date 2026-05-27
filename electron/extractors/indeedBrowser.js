@@ -18,6 +18,7 @@ import { extractIndeedJobsFromHtml } from './apiExtractors.js';
 import { JOB_MAX_PAGES, JOB_RESULT_CAP, JOB_PER_PAGE_CAP } from '../ipc/resultCaps.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from '../ipc/browser/scraperOverlay.js';
+import { humanCooldown } from '../utils/humanDelay.js';
 
 // Display-only overlay — no pause button or exposeFunction CDP bindings (Cloudflare fingerprint risk).
 const OVERLAY_SCRIPT = buildOverlayScript({ withPause: false });
@@ -45,6 +46,31 @@ const LAUNCH_ARGS = [
   '--window-position=60,60',
   '--lang=en-US,en',
 ];
+
+// Waits for `ms` milliseconds, calling onTick(secondsRemaining) every second.
+async function waitWithCountdown(ms, onTick) {
+  const deadline = Date.now() + ms;
+  while (true) {
+    const remaining = Math.ceil((deadline - Date.now()) / 1000);
+    if (remaining <= 0) break;
+    onTick(remaining);
+    await new Promise(r => setTimeout(r, Math.min(1000, deadline - Date.now())));
+  }
+}
+
+// Clears CF bot-score cookie, closes the browser, waits out the backoff, then launches
+// a fresh browser and returns the new { browser, page }.
+async function restartBrowserForCF(page, browser, backoffMs, { userDataDir, launchOpts, onProgress }) {
+  await page.deleteCookie({ name: '__cf_bm', domain: 'indeed.com' }, { name: '__cf_bm', domain: '.indeed.com' }).catch(() => {});
+  await browser.close().catch(() => {});
+  await killChromeHoldingProfile(userDataDir);
+  await waitWithCountdown(backoffMs, (s) => onProgress?.(`CF cooldown ${s}s…`));
+  const newBrowser = await puppeteer.launch(launchOpts);
+  const newPage    = await newBrowser.newPage();
+  await newPage.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+  await newPage.evaluateOnNewDocument(OVERLAY_SCRIPT);
+  return { browser: newBrowser, page: newPage };
+}
 
 // Kill any Chrome process holding the given userDataDir (zombie cleanup after a crash).
 // Uses pkill -f on macOS/Linux; silently no-ops on failure or unsupported platforms.
@@ -126,7 +152,23 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
     }
 
     if (navigatedAway) {
-      logger.warn('[Indeed/Browser] Card click navigated away — recovering');
+      const awayUrl = page.url();
+      logger.warn(`[Indeed/Browser] Card click navigated away → ${awayUrl}`);
+      // Already on the full job page — grab the description before going back.
+      const awayVjk = await page.evaluate(() => {
+        try { return new URL(location.href).searchParams.get('vjk') || ''; } catch { return ''; }
+      }).catch(() => '');
+      const awayDesc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
+      if (awayDesc) {
+        const job = keyToJob.get(awayVjk) || pageJobs[i];
+        if (job) { job.description = awayDesc; enriched++; }
+      } else {
+        const sigs = await getChallengeSignals(page);
+        if (sigs.isChallenge) {
+          logger.warn(`[Indeed/Browser] CF signal on navigated-away page at card ${i + 1}/${limit} (${sigs.reason})`);
+          return { enriched, cfBlankAt: i };
+        }
+      }
       await page.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
       await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 400)));
       continue;
@@ -287,24 +329,119 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
     logger.info(`[Indeed/Browser] Authenticated. ${queryList.length} queries × up to ${maxPages} pages`);
 
-    const MAX_CONSECUTIVE_RESTARTS = 3;
-    let consecutiveRestarts = 0;
+    // ── Escalation table ────────────────────────────────────────────────────
+    // Cooldown after the Nth failure before the (N+1)th attempt. Other queries
+    // run during this window, so actual elapsed time may be longer.
+    // Index = retryCount of the entry that just failed.
+    // retryCount ≥ CF_ESCALATION_MS.length → all retries exhausted, give up.
+    const CF_ESCALATION_MS = [5_000, 30_000, 60_000, 0];
 
     const allJobs = [];
     const seenKeys = new Set();
     let totalChallenges = 0;
+    let gaveUpCount = 0;
+    const gaveUpPages = []; // { q, p } for each page that exhausted all retries
     let loginWallHit = false;
     let challengedQi = -1;
     let challengedPage = 0;
 
+    // workList drives all work: initial queries plus deferred retries pushed by
+    // the CF escalation logic. retryCount=0 means first attempt; availableAt=0
+    // means ready immediately. Multiple entries can have independent cooldowns
+    // running simultaneously — the outer loop always picks the soonest-ready one.
+    const workList = queryList.map((q, qi) => ({
+      q, qi,
+      startPage: qi === 0 ? startPage : 0,
+      retryCount: 0,
+      availableAt: 0,
+    }));
+
+    // nextPageAdvanced tracks which (qi, startPage) pairs have already been
+    // injected as opportunistic next-page entries so the same advance isn't
+    // created twice during a single cooldown window (Bug: without this guard,
+    // a completed next-page entry returns to a still-cooling original, finds
+    // the same candidate again, and re-creates the identical entry).
+    const nextPageAdvanced = new Set();
+
+    // Defined once here (not inside the loop) — only needs workList,
+    // totalChallenges, gaveUpCount, and CF_ESCALATION_MS from this scope.
+    // q/qi/hitCount are passed explicitly so the function isn't tied to
+    // whichever entry happens to be current when it's called.
+    //
+    // hitCount = entry.retryCount + any inline restarts already done this pass.
+    // Returns:
+    //   'restart-inline' — caller must await restartBrowserForCF(backoff=CF_ESCALATION_MS[0]),
+    //                       increment hitCount, p--, continue (no other queries run during wait)
+    //   'deferred'       — entry pushed to workList; caller should break inner loop
+    //   'give-up'        — all escalation levels exhausted; caller should break inner loop
+    const handleCFHit = (q, qi, hitCount, trigger, p) => {
+      totalChallenges++;
+      if (hitCount === 0) {
+        // First hit on a fresh entry — restart inline so no other queries run during the 5s wait.
+        logger.info(`[Indeed/Browser] ${trigger} q="${q}" p=${p + 1} — restarting browser (${CF_ESCALATION_MS[0] / 1000}s inline backoff)`);
+        return 'restart-inline';
+      }
+      if (hitCount >= CF_ESCALATION_MS.length) {
+        logger.warn(`[Indeed/Browser] ${trigger} q="${q}" p=${p + 1} — all retries exhausted, giving up on this page`);
+        gaveUpCount++;
+        gaveUpPages.push({ q, p: p + 1 });
+        return 'give-up';
+      }
+      const cooldownMs = humanCooldown(CF_ESCALATION_MS[hitCount]);
+      const nextRetry = hitCount + 1;
+      logger.warn(`[Indeed/Browser] ${trigger} q="${q}" p=${p + 1} — defer retry ${nextRetry}/${CF_ESCALATION_MS.length} (cooldown ${(cooldownMs / 1000).toFixed(1)}s)`);
+      workList.push({ q, qi, startPage: p, retryCount: nextRetry, availableAt: Date.now() + cooldownMs });
+      return 'deferred';
+    };
+
+    let wi = 0;
     outer:
-    for (let qi = 0; qi < queryList.length; qi++) {
-      const q = queryList[qi];
+    while (wi < workList.length) {
       if (signal?.aborted) break;
 
+      const entry = workList[wi];
+
+      // ── Ready check: skip entries still in their cooldown window ──────────
+      if (entry.availableAt > Date.now()) {
+        // Find the next already-ready entry later in the list and bring it forward.
+        const readyIdx = workList.findIndex((e, i) => i > wi && e.availableAt <= Date.now());
+        if (readyIdx !== -1) {
+          workList.splice(wi, 0, workList.splice(readyIdx, 1)[0]);
+          continue; // re-evaluate workList[wi] (the newly moved entry) without advancing wi
+        }
+
+        // All remaining entries are still cooling down.
+        // Before idle-waiting, try advancing a deferred query to its next page —
+        // a different URL is less likely to hit the same CF sliding-window block.
+        const nextPageCandidate = workList.slice(wi).find(e => {
+          const nextPage = e.startPage + 1;
+          return nextPage < maxPages && !nextPageAdvanced.has(`${e.qi}:${nextPage}`);
+        });
+        if (nextPageCandidate) {
+          const nextPage = nextPageCandidate.startPage + 1;
+          nextPageAdvanced.add(`${nextPageCandidate.qi}:${nextPage}`);
+          workList.splice(wi, 0, {
+            q: nextPageCandidate.q, qi: nextPageCandidate.qi,
+            startPage: nextPage,
+            retryCount: 0, availableAt: 0,
+          });
+          continue; // process the fresh next-page entry immediately
+        }
+
+        // No next pages available — idle-wait until the soonest entry is ready.
+        const soonestAt = Math.min(...workList.slice(wi).map(e => e.availableAt));
+        const waitMs = Math.max(0, soonestAt - Date.now());
+        if (waitMs > 0) {
+          logger.info(`[Indeed/Browser] All pending entries cooling down — idle ${Math.ceil(waitMs / 1000)}s`);
+          await waitWithCountdown(waitMs, (s) => onProgress?.(`CF idle cooldown ${s}s…`));
+        }
+        continue; // don't advance wi
+      }
+
+      // ── Liveness check ────────────────────────────────────────────────────
       // Cloudflare challenge pages can detach the Puppeteer frame mid-navigation.
       // If the frame is dead, no further queries can succeed — stop cleanly.
-      if (qi > 0) {
+      if (wi > 0 || entry.retryCount > 0) {
         const alive = await page.evaluate(() => true).catch(() => false);
         if (!alive) {
           logger.warn('[Indeed/Browser] Page frame detached after challenge — skipping remaining queries');
@@ -312,19 +449,34 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         }
       }
 
-      for (let p = (qi === 0 ? startPage : 0); p < maxPages; p++) {
+      // ── Browser restart for deferred entries ──────────────────────────────
+      // The cooldown already elapsed while other queries were running, so
+      // backoffMs=0 — we still need a fresh fingerprint (close + reopen, clear __cf_bm).
+      if (entry.retryCount > 0) {
+        logger.info(`[Indeed/Browser] Resuming deferred q="${entry.q}" p=${entry.startPage + 1} (retry ${entry.retryCount}/${CF_ESCALATION_MS.length})`);
+        ({ browser, page } = await restartBrowserForCF(page, browser, 0, { userDataDir, launchOpts, onProgress }));
+      }
+
+      const { q, qi, retryCount } = entry;
+      // hitCount starts at entry.retryCount and increments for each inline restart done
+      // this pass, so the escalation level stays correct if a retry also hits CF inline.
+      let hitCount = retryCount;
+
+      const overlayBase = {
+        srcName:  'Indeed',
+        srcLabel: retryCount > 0
+          ? `Retry ${retryCount}/${CF_ESCALATION_MS.length} q${qi + 1}/${queryList.length}`
+          : `Query ${qi + 1} of ${queryList.length}`,
+        qLabel:   'Searching',
+        qText:    q,
+      };
+
+      for (let p = entry.startPage; p < maxPages; p++) {
         if (signal?.aborted) break outer;
         if (allJobs.length >= resultCap) break outer;
 
         const start = p * 10;
         const url   = `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}&fromage=${days}${start > 0 ? `&start=${start}` : ''}`;
-
-        const overlayBase = {
-          srcName:  'Indeed',
-          srcLabel: `Query ${qi + 1} of ${queryList.length}`,
-          qLabel:   'Searching',
-          qText:    q,
-        };
 
         try {
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -345,38 +497,25 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
         const signals = await getChallengeSignals(page);
         if (signals.isChallenge) {
-          totalChallenges++;
           const rayId = await page.evaluate(() => {
             const m = (document.body?.innerHTML || '').match(/Ray ID[^:]*:\s*([0-9a-f]+)/i);
             return m ? m[1] : null;
           }).catch(() => null);
           logger.warn(`[Indeed/Browser] Challenge (${signals.reason}) q="${q}" p=${p + 1}${rayId ? ` Ray=${rayId}` : ''}`);
           await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: `⚠️ ${signals.reason}`, challenge: true });
-          // Cloudflare has fingerprinted this CDP session. A fresh browser resets
-          // the session fingerprint while keeping profile cookies — restart and
-          // retry the same page. Cap restarts as a safety valve.
+
           if (signals.reason !== 'indeed-login-wall') {
-            if (consecutiveRestarts >= MAX_CONSECUTIVE_RESTARTS) {
-              logger.warn(`[Indeed/Browser] ${MAX_CONSECUTIVE_RESTARTS} consecutive restarts without loading q="${q}" p=${p + 1} — stopping`);
-              break outer;
+            const cfAction = handleCFHit(q, qi, hitCount, `cf-challenge (${signals.reason})`, p);
+            if (cfAction === 'restart-inline') {
+              hitCount++;
+              ({ browser, page } = await restartBrowserForCF(page, browser, humanCooldown(CF_ESCALATION_MS[0]), { userDataDir, launchOpts, onProgress }));
+              p--;
+              continue;
             }
-            const backoffMs = consecutiveRestarts === 0 ? 5000 : Math.min(consecutiveRestarts * 30000, 300000);
-            logger.info(`[Indeed/Browser] cf challenge at q=${qi + 1} p=${p + 1} — restarting browser (attempt ${consecutiveRestarts + 1}, backoff ${backoffMs / 1000}s)`);
-            // Clear the __cf_bm bot-score cookie before closing so the fresh browser
-            // starts with a neutral CF fingerprint rather than the tainted one.
-            await page.deleteCookie({ name: '__cf_bm', domain: 'indeed.com' }, { name: '__cf_bm', domain: '.indeed.com' }).catch(() => {});
-            await browser.close().catch(() => {});
-            await killChromeHoldingProfile(userDataDir);
-            await new Promise(r => setTimeout(r, backoffMs));
-            browser = await puppeteer.launch(launchOpts);
-            consecutiveRestarts++;
-            page = await browser.newPage();
-            await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-            await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
-            p--;
-            continue;
+            break;
           }
-          // Keep the CDP window open and let the user log in directly in it.
+
+          // Login wall — keep the CDP window open and let the user log in directly.
           // Disable overlay so it doesn't block the login form.
           await page.evaluate(() => {
             const panel = document.getElementById('__ic-panel');
@@ -411,7 +550,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
             challengedQi = qi; challengedPage = p; loginWallHit = true; break outer;
           }
 
-          // Re-enable overlay and retry this page (p-- makes the outer loop revisit same index)
+          // Re-enable overlay and retry this page (p-- makes the loop revisit same index)
           await page.evaluate(() => {
             const panel = document.getElementById('__ic-panel');
             if (panel) panel.style.pointerEvents = 'auto';
@@ -435,6 +574,13 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         // Normal search pages are ~1500KB; anything under 150KB with 0 jobs is suspect.
         if (html.length < 150_000 && rawPageJobs.length === 0) {
           logger.warn(`[Indeed/Browser] Soft block suspected — ${htmlKB}KB, 0 jobs q="${q}" p=${p + 1}`);
+          const cfAction = handleCFHit(q, qi, hitCount, 'soft-block', p);
+          if (cfAction === 'restart-inline') {
+            hitCount++;
+            ({ browser, page } = await restartBrowserForCF(page, browser, humanCooldown(CF_ESCALATION_MS[0]), { userDataDir, launchOpts, onProgress }));
+            p--;
+            continue;
+          }
           break;
         }
 
@@ -445,7 +591,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         ).catch(() => null);
 
         logger.info(`[Indeed/Browser] q="${q}" p=${p + 1}: ${pageJobs.length} jobs (${htmlKB}KB${hasNextPage === false ? ', last page' : ''})`);
-        onProgress?.(`q${qi + 1}/${queryList.length} · p${p + 1}`);
+        onProgress?.(`q${qi + 1}/${queryList.length} · p${p + 1}${retryCount > 0 ? ` (retry ${retryCount})` : ''}`);
 
         if (rawPageJobs.length === 0) break;
 
@@ -465,29 +611,18 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         }
 
         if (enrichResult.cfBlankAt != null) {
-          totalChallenges++;
-          if (consecutiveRestarts >= MAX_CONSECUTIVE_RESTARTS) {
-            logger.warn(`[Indeed/Browser] ${MAX_CONSECUTIVE_RESTARTS} consecutive restarts without progress q="${q}" p=${p + 1} — stopping`);
-            break outer;
-          }
-          const backoffMs = consecutiveRestarts === 0 ? 5000 : Math.min(consecutiveRestarts * 30000, 300000);
-          logger.info(`[Indeed/Browser] CF blank at card ${enrichResult.cfBlankAt + 1} q=${qi + 1} p=${p + 1} — restarting browser (attempt ${consecutiveRestarts + 1}, backoff ${backoffMs / 1000}s)`);
+          logger.warn(`[Indeed/Browser] CF blank at card ${enrichResult.cfBlankAt + 1} q=${qi + 1} p=${p + 1}`);
           await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: '⚠️ cf-blank-enrichment', challenge: true });
-          await page.deleteCookie({ name: '__cf_bm', domain: 'indeed.com' }, { name: '__cf_bm', domain: '.indeed.com' }).catch(() => {});
-          await browser.close().catch(() => {});
-          await killChromeHoldingProfile(userDataDir);
-          await new Promise(r => setTimeout(r, backoffMs));
-          browser = await puppeteer.launch(launchOpts);
-          consecutiveRestarts++;
-          page = await browser.newPage();
-          await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-          await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
-          p--;
-          continue;
+          const cfAction = handleCFHit(q, qi, hitCount, 'cf-blank-enrichment', p);
+          if (cfAction === 'restart-inline') {
+            hitCount++;
+            ({ browser, page } = await restartBrowserForCF(page, browser, humanCooldown(CF_ESCALATION_MS[0]), { userDataDir, launchOpts, onProgress }));
+            p--;
+            continue;
+          }
+          break;
         }
 
-        // Past both challenge check and enrichment cleanly — reset consecutive-restart counter.
-        consecutiveRestarts = 0;
         if (signal?.aborted) break outer;
 
         for (let i = 0; i < pageJobs.length; i++) {
@@ -519,10 +654,13 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         }
       }
 
-      if (qi < queryList.length - 1 && !signal?.aborted) {
+      // Query delay only for fresh (non-retry) entries to avoid double-penalizing retries.
+      if (retryCount === 0 && !signal?.aborted) {
         const delay = QUERY_DELAY_MS[0] + Math.round(Math.random() * (QUERY_DELAY_MS[1] - QUERY_DELAY_MS[0]));
         await new Promise(r => setTimeout(r, delay));
       }
+
+      wi++;
     }
 
     logger.info(`[Indeed/Browser] ${allJobs.length} unique jobs, ${totalChallenges} challenges, ${queryList.length} queries`);
@@ -549,11 +687,11 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         evidence: `${totalChallenges} Cloudflare challenge(s) — no jobs extracted.`,
         suggestion: 'Try again in a few minutes.',
       };
-    } else if (totalChallenges > 0) {
+    } else if (gaveUpCount > 0) {
       warning = {
         code: 'scrape-partial',
         severity: 'warn',
-        evidence: `${totalChallenges} Cloudflare challenge(s) — some queries may be incomplete.`,
+        evidence: `${gaveUpCount} page(s) skipped after persistent Cloudflare challenges — some results may be missing.${gaveUpPages.length ? ` Skipped: ${gaveUpPages.map(({ q, p }) => `"${q}" p${p}`).join(', ')}.` : ''}`,
         suggestion: null,
       };
     }

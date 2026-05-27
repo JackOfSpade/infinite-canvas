@@ -13,7 +13,7 @@ import { handleSafe } from './ipcUtils.js';
 import { clearBrowserSession } from './stealthBrowser.js';
 import { scrapeManualSources } from './browser/manualScraper.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
-import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES, FAST_TEST } from './resultCaps.js';
+import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES, MEDIUM_TEST, FULL_TEST } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
@@ -38,7 +38,7 @@ import { getJobsSettings } from './settings.js';
 import { readStatusCache } from './accounts.js';
 import { getScopedJobSourceIds } from '../../src/utils/jobSourceScope.js';
 
-const { ipcMain } = electronPkg;
+const { ipcMain, app } = electronPkg;
 const DEFAULT_MAX_AGE_DAYS = 21;
 // Sentinel score for jobs the AI couldn't score (missing from the batch result,
 // or a whole batch that failed to parse). NOT adaptive: a fixed midpoint marks
@@ -46,6 +46,183 @@ const DEFAULT_MAX_AGE_DAYS = 21;
 // these (placeholderCount) so a scoring failure stays visible instead of being
 // laundered into a plausible number.
 const UNSCORED_FALLBACK_SCORE = 50;
+const JOB_ANALYSIS_SNAPSHOT_VERSION = 1;
+const JOB_ANALYSIS_DIR = 'job-search';
+const JOB_ANALYSIS_JSON = 'job-search-last-scrape.json';
+const JOB_ANALYSIS_MD = 'job-search-last-prompt.md';
+
+function getJobAnalysisPaths() {
+  const dir = path.join(app.getPath('userData'), JOB_ANALYSIS_DIR);
+  return {
+    dir,
+    jsonPath: path.join(dir, JOB_ANALYSIS_JSON),
+    mdPath: path.join(dir, JOB_ANALYSIS_MD),
+  };
+}
+
+function formatSavedPromptMarkdown(snapshot) {
+  const {
+    createdAt,
+    targetRole,
+    gatheredJobCount,
+    selectedJobCount,
+    jobScoreCap,
+    batchSize,
+    profile,
+    cachedPrefix,
+    batches,
+  } = snapshot;
+
+  const lines = [
+    '# Job Search AI Prompt Snapshot',
+    '',
+    `Created: ${createdAt}`,
+    `Target role: ${targetRole || '(none)'}`,
+    `Jobs gathered: ${gatheredJobCount}`,
+    `Jobs selected for scoring: ${selectedJobCount}`,
+    `Score cap: ${jobScoreCap}`,
+    `Batch size: ${batchSize}`,
+    '',
+    '## Candidate Profile',
+    '',
+    '```json',
+    JSON.stringify(profile, null, 2),
+    '```',
+    '',
+    '## Cached Prefix',
+    '',
+    '```text',
+    cachedPrefix,
+    '```',
+    '',
+    '## Scoring Batches',
+    '',
+  ];
+
+  for (const batch of batches) {
+    lines.push(`### Batch ${batch.batchNumber}`);
+    lines.push('');
+    lines.push(`Jobs in batch: ${batch.jobCount}`);
+    lines.push('');
+    lines.push('```text');
+    lines.push(batch.prompt);
+    lines.push('```');
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+async function saveJobAnalysisSnapshot(snapshot) {
+  const { dir, jsonPath, mdPath } = getJobAnalysisPaths();
+  await fs.promises.mkdir(dir, { recursive: true });
+  await fs.promises.writeFile(jsonPath, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+  await fs.promises.writeFile(mdPath, formatSavedPromptMarkdown(snapshot), 'utf8');
+  return { jsonPath, mdPath };
+}
+
+async function loadJobAnalysisSnapshot() {
+  const { jsonPath, mdPath } = getJobAnalysisPaths();
+  const raw = await fs.promises.readFile(jsonPath, 'utf8');
+  const parsed = JSON.parse(raw);
+  return {
+    snapshot: parsed,
+    paths: { jsonPath, mdPath },
+  };
+}
+
+function buildJobAnalysisSnapshot({ jobs, profile, nodeId, targetRole, snapshotContext }) {
+  const role = (targetRole || '').trim();
+  const gathered = Array.isArray(jobs) ? jobs : [];
+  const toScore = selectTopAcrossSources(gathered, JOB_SCORE_CAP);
+  const cappedForBudget = gathered.length - toScore.length;
+  const batchSize = jobScoringBatchSize();
+  const slimBatch = (batch) => batch.map((j, idx) => ({
+    index: idx,
+    title:    j.title || '',
+    company:  j.company || '',
+    location: j.location || '',
+    salary:   j.salary || '',
+    snippet:  j.snippet || '',
+  }));
+
+  const targetBlock = role ? `
+
+TARGET ROLE: The user wants to pivot into / land: ${role}.
+For each job, set isTargetRoleMatch=true ONLY if the job is reasonably for the target role ${role} (same role family, adjacent seniority, or a near-equivalent title). Set false for everything else, including strong fits in unrelated directions.
+Score target-role jobs by the candidate's chance of GETTING AN INTERVIEW for that role — even when their resume is a partial fit, a meaningful pivot opportunity with score 40-60 is more useful than perfect non-target matches.` : `
+
+NO TARGET ROLE was supplied. Set isTargetRoleMatch=false for every job — the field is unused this run.`;
+  const cachedPrefix = `You are a career matching expert. Score each job against this candidate's profile.
+
+CANDIDATE PROFILE:
+${JSON.stringify(profile)}${targetBlock}
+
+Return JSON of the form { "scores": [ ... one object per job in the array I send next ... ] }:
+{
+  "scores": [
+    {
+      "index": 0,
+      "matchScore": 85,
+      "reasoning": "1-2 sentences explaining WHY this matches or doesn't. Read between the lines — a startup wanting a 'manager with engineering depth' is a match for an experienced engineer even without management title.",
+      "careerDirection": "Engineering | Leadership | Product | DevRel | Consulting | Design | Data | Operations | Teaching | Other",
+      "strengthLabel": "strong | exploring | stretch | unexpected",
+      "isTargetRoleMatch": ${role ? 'true | false (per the target role rules above)' : 'false (no target role this run)'}
+    }
+  ]
+}
+
+IMPORTANT SCORING RULES:
+- matchScore is your HOLISTIC judgment of the candidate's chance of getting an interview — NOT a mechanical formula like (skills matched / skills wanted). Read the JD wording carefully: weigh must-haves more than nice-to-haves; consider seniority signal, growth potential, cultural fit, and how a reviewing recruiter would react.
+- Don't just match title-to-title. A startup "manager" role that wants someone who's been in the trenches IS a match for an experienced IC.
+- Skills-only matches without title match can still score 70%+ if requirements align.
+- Score 85%+ only for genuinely strong matches; 65-84 = good chance of interview; 40-64 = stretch / longshot; <40 = unlikely.
+- "unexpected" label is for jobs from the skills-only queries that reveal surprising career paths.
+- "stretch" label is for plausible pivots where the candidate's experience only partially aligns.
+- Aim for 3-7 distinct careerDirection categories total. Merge small categories.`;
+
+  const scoringBatchPayloads = [];
+  for (let i = 0; i < toScore.length; i += batchSize) {
+    const batch = toScore.slice(i, i + batchSize);
+    scoringBatchPayloads.push({
+      batchNumber: Math.floor(i / batchSize) + 1,
+      jobCount: batch.length,
+      jobs: slimBatch(batch),
+    });
+  }
+
+  return {
+    role,
+    gathered,
+    toScore,
+    cappedForBudget,
+    batchSize,
+    slimBatch,
+    cachedPrefix,
+    snapshot: {
+      version: JOB_ANALYSIS_SNAPSHOT_VERSION,
+      createdAt: new Date().toISOString(),
+      nodeId: nodeId || null,
+      sourceHubId: snapshotContext?.sourceHubId || nodeId || null,
+      canvasFilePath: snapshotContext?.canvasFilePath || null,
+      resumeSummary: snapshotContext?.resumeSummary || '',
+      targetRole: role,
+      gatheredJobCount: gathered.length,
+      selectedJobCount: toScore.length,
+      cappedForBudget,
+      jobScoreCap: JOB_SCORE_CAP,
+      batchSize,
+      profile,
+      jobs: gathered,
+      selectedJobs: toScore,
+      cachedPrefix,
+      batches: scoringBatchPayloads.map((batch) => ({
+        ...batch,
+        prompt: `JOBS TO SCORE (array, indexed):\n${JSON.stringify(batch.jobs)}`,
+      })),
+    },
+  };
+}
 
 // ── Pipeline telemetry ───────────────────────────────────────────────────────
 // Records the last job-search funnel so the bug reporter can answer "did we
@@ -598,6 +775,55 @@ Be creative with suggestedRoleQueries — think about what career directions the
     return { jobs: items, error };
   });
 
+  handleSafe('get-last-job-analysis-snapshot', async () => {
+    try {
+      const { snapshot, paths } = await loadJobAnalysisSnapshot();
+      const jobs = Array.isArray(snapshot?.jobs) ? snapshot.jobs : [];
+      const profile = snapshot?.profile && typeof snapshot.profile === 'object' ? snapshot.profile : null;
+      return {
+        exists: true,
+        snapshot: {
+          ...snapshot,
+          jobs,
+          profile,
+        },
+        meta: {
+          version: snapshot?.version ?? null,
+          createdAt: snapshot?.createdAt ?? null,
+          targetRole: snapshot?.targetRole ?? '',
+          gatheredJobCount: snapshot?.gatheredJobCount ?? jobs.length,
+          selectedJobCount: snapshot?.selectedJobCount ?? jobs.length,
+          sourceHubId: snapshot?.sourceHubId ?? snapshot?.nodeId ?? null,
+          canvasFilePath: snapshot?.canvasFilePath ?? null,
+          resumeSummary: snapshot?.resumeSummary ?? '',
+          promptPath: paths.mdPath,
+          jsonPath: paths.jsonPath,
+        },
+      };
+    } catch (err) {
+      if (err?.code === 'ENOENT') return { exists: false };
+      throw err;
+    }
+  });
+
+  handleSafe('save-job-analysis-snapshot', async (event, { jobs, profile, nodeId, targetRole, snapshotContext } = {}) => {
+    const { snapshot } = buildJobAnalysisSnapshot({ jobs, profile, nodeId, targetRole, snapshotContext });
+    const paths = await saveJobAnalysisSnapshot(snapshot);
+    logger.info(`[Jobs][${nodeId}] Saved AI prompt snapshot to ${paths.jsonPath}`);
+    return {
+      saved: true,
+      meta: {
+        version: snapshot.version,
+        createdAt: snapshot.createdAt,
+        targetRole: snapshot.targetRole,
+        gatheredJobCount: snapshot.gatheredJobCount,
+        selectedJobCount: snapshot.selectedJobCount,
+        promptPath: paths.mdPath,
+        jsonPath: paths.jsonPath,
+      },
+    };
+  });
+
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
   handleSafe('search-jobs', async (event, { queries, nodeId, maxAgeDays, canvasFilePath, profileLocations, preferredLocation }, signal) => {
     if (ACTIVE_SOURCE_IDS.length === 0) {
@@ -1073,26 +1299,16 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // ── Score Jobs Against Resume ─────────────────────────────────────────────
-  handleSafe('score-jobs', async (event, { jobs, profile, nodeId, targetRole }, signal) => {
-    const role = (targetRole || '').trim();
-    logger.info(`[Jobs][${nodeId}] Scoring`, jobs.length, 'jobs', role ? `(target: ${role})` : '');
+  handleSafe('score-jobs', async (event, { jobs, profile, nodeId, targetRole, snapshotContext } = {}, signal) => {
+    const { role, gathered, toScore, cappedForBudget, batchSize: BATCH_SIZE, slimBatch, cachedPrefix, snapshot } =
+      buildJobAnalysisSnapshot({ jobs, profile, nodeId, targetRole, snapshotContext });
+    logger.info(`[Jobs][${nodeId}] Scoring`, gathered.length, 'jobs', role ? `(target: ${role})` : '');
     jobsTelemetry.nodeId = nodeId;
     jobsTelemetry.windowId = event.sender?.id ?? null;
-
-    // Budget cap: a widened gather (extra pages / query variants) can over-fill
-    // the quota-bound scorer. Pre-rank to the top JOB_SCORE_CAP FAIRLY across
-    // sources so we analyze the best slice of a wider pool at ~flat token cost.
-    // The overflow drop is reported (cappedForBudget) so it's never silent.
-    const gathered = Array.isArray(jobs) ? jobs : [];
-    const toScore = selectTopAcrossSources(gathered, JOB_SCORE_CAP);
-    const cappedForBudget = gathered.length - toScore.length;
     if (cappedForBudget > 0) {
       logger.info(`[Jobs][${nodeId}] Pre-rank cap: ${gathered.length} gathered → scoring top ${toScore.length} across sources (${cappedForBudget} lower-priority overflow not scored)`);
     }
 
-    // Batch size derived from the job-scoring token budget (see resultCaps);
-    // shrinks automatically if a thinking-heavier model raises per-job cost.
-    const BATCH_SIZE = jobScoringBatchSize();
     const scoredJobs = [];
     // Telemetry: a job is a "placeholder" when it was emitted with a default
     // matchScore (50) because its batch's LLM call failed or the response was
@@ -1103,59 +1319,12 @@ Be creative with suggestedRoleQueries — think about what career directions the
     let failedBatches = 0;
     let batches = 0;
     const scoringModels = new Set(); // distinct models that served the score batches
-    // Trim the per-job payload to what actually drives matching. Drop
-    // metadata fields (url, source, posted) the scorer doesn't read; keep
-    // title/company/location/salary/snippet. Snippet (JD body) dominates
-    // the payload, so this is a small but free saving across all batches.
-    const slimBatch = (batch) => batch.map((j, idx) => ({
-      index: idx,
-      title:    j.title || '',
-      company:  j.company || '',
-      location: j.location || '',
-      salary:   j.salary || '',
-      snippet:  j.snippet || '',
-    }));
-
-    // Static prefix shared across every batch — passed to callLLMText as
-    // `cachedPrefix` so providers that support prefix caching (Claude
-    // ephemeral, Gemini 2.5 implicit) bill the prefix once at write rate
-    // and at ~0.1x on subsequent batch reads. Order matters: static content
-    // (instructions + profile + target rules + output spec) all goes here;
-    // the dynamic per-batch job payload goes in the user prompt below.
-    const targetBlock = role ? `
-
-TARGET ROLE: The user wants to pivot into / land: ${role}.
-For each job, set isTargetRoleMatch=true ONLY if the job is reasonably for the target role ${role} (same role family, adjacent seniority, or a near-equivalent title). Set false for everything else, including strong fits in unrelated directions.
-Score target-role jobs by the candidate's chance of GETTING AN INTERVIEW for that role — even when their resume is a partial fit, a meaningful pivot opportunity with score 40-60 is more useful than perfect non-target matches.` : `
-
-NO TARGET ROLE was supplied. Set isTargetRoleMatch=false for every job — the field is unused this run.`;
-    const cachedPrefix = `You are a career matching expert. Score each job against this candidate's profile.
-
-CANDIDATE PROFILE:
-${JSON.stringify(profile)}${targetBlock}
-
-Return JSON of the form { "scores": [ ... one object per job in the array I send next ... ] }:
-{
-  "scores": [
-    {
-      "index": 0,
-      "matchScore": 85,
-      "reasoning": "1-2 sentences explaining WHY this matches or doesn't. Read between the lines — a startup wanting a 'manager with engineering depth' is a match for an experienced engineer even without management title.",
-      "careerDirection": "Engineering | Leadership | Product | DevRel | Consulting | Design | Data | Operations | Teaching | Other",
-      "strengthLabel": "strong | exploring | stretch | unexpected",
-      "isTargetRoleMatch": ${role ? 'true | false (per the target role rules above)' : 'false (no target role this run)'}
+    try {
+      const paths = await saveJobAnalysisSnapshot(snapshot);
+      logger.info(`[Jobs][${nodeId}] Saved AI prompt snapshot to ${paths.jsonPath}`);
+    } catch (err) {
+      logger.warn(`[Jobs][${nodeId}] Failed to save AI prompt snapshot:`, err);
     }
-  ]
-}
-
-IMPORTANT SCORING RULES:
-- matchScore is your HOLISTIC judgment of the candidate's chance of getting an interview — NOT a mechanical formula like (skills matched / skills wanted). Read the JD wording carefully: weigh must-haves more than nice-to-haves; consider seniority signal, growth potential, cultural fit, and how a reviewing recruiter would react.
-- Don't just match title-to-title. A startup "manager" role that wants someone who's been in the trenches IS a match for an experienced IC.
-- Skills-only matches without title match can still score 70%+ if requirements align.
-- Score 85%+ only for genuinely strong matches; 65-84 = good chance of interview; 40-64 = stretch / longshot; <40 = unlikely.
-- "unexpected" label is for jobs from the skills-only queries that reveal surprising career paths.
-- "stretch" label is for plausible pivots where the candidate's experience only partially aligns.
-- Aim for 3-7 distinct careerDirection categories total. Merge small categories.`;
 
     for (let i = 0; i < toScore.length; i += BATCH_SIZE) {
       // Guard: Check if window was closed between batches
@@ -1164,11 +1333,12 @@ IMPORTANT SCORING RULES:
       batches++;
       const batch = toScore.slice(i, i + BATCH_SIZE);
       let batchResult;
+      const batchPrompt = `JOBS TO SCORE (array, indexed):
+${JSON.stringify(slimBatch(batch))}`;
 
       const batchMeta = {};
       try {
-        batchResult = await callLLMText(`JOBS TO SCORE (array, indexed):
-${JSON.stringify(slimBatch(batch))}`, {
+        batchResult = await callLLMText(batchPrompt, {
           signal,
           task: 'job-scoring',
           hints: { itemCount: batch.length },
@@ -1238,7 +1408,7 @@ ${JSON.stringify(slimBatch(batch))}`, {
       models: [...scoringModels],
     };
 
-    return { scoredJobs, clusters, testMode: FAST_TEST };
+    return { scoredJobs, clusters, testMode: MEDIUM_TEST || FULL_TEST };
   });
 
   // ── Generate Cover Letter ─────────────────────────────────────────────────

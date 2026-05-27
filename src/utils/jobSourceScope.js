@@ -12,11 +12,9 @@ export const JOB_SEARCH_TEST_MODE = {
   enabled: true,
   sourceId: TARGET_JOB_PLATFORM,
   // Run tier — only meaningful when enabled:true. All tiers skip AI scoring.
-  // fullRun:false + mediumRun:false → fast   (1 job/page, 10 pages)
-  // fullRun:false + mediumRun:true  → medium (5 jobs/page, 10 pages)
-  // fullRun:true                    → full   (150 jobs/page, 10 pages)
-  fullRun: false,
-  mediumRun: true,
+  // fullRun:false → medium (5 jobs/page, 10 pages)
+  // fullRun:true  → full   (150 jobs/page, 10 pages)
+  fullRun: true,
 };
 
 export function getScopedJobSourceIds(allSourceIds = []) {

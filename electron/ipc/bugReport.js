@@ -1082,13 +1082,17 @@ ${aiConfig.provider === 'gemini' ? `
 
   const jobsConfigMarkdown = hasJobNodes ? (() => {
     const jobsConfig = buildJobsConfigSnapshot();
+    const tm = jobsConfig.testMode;
+    const testModeLines = tm
+      ? `\n### Job Search Test Mode\n- Mode: **${tm.mode}**${tm.mode !== 'production' ? ` (${tm.jobPerPageCap} jobs/page, AI skipped)` : ' (full AI)'}\n- Enabled: ${tm.enabled ? '✅' : '❌'}\n- Scoped source: ${tm.sourceId ? `\`${tm.sourceId}\`` : '*(all sources)*'}\n- Per-page cap: ${tm.jobPerPageCap}, Result cap: ${tm.jobResultCap === Infinity ? 'unlimited' : tm.jobResultCap}`
+      : '';
     return `
 ## Job Search API Configuration
 - USAJobs API key set: ${jobsConfig.hasUsajobsKey ? '✅' : '❌'}
 - USAJobs Email set: ${jobsConfig.hasUsajobsEmail ? '✅' : '❌'}
 - USAJobs key prefix: \`${jobsConfig.usajobsKeyPrefix}\`
 - Scrapfly API key set: ${jobsConfig.hasScrapflyKey ? '✅' : '❌'}
-- Scrapfly key prefix: \`${jobsConfig.scrapflyKeyPrefix}\`
+- Scrapfly key prefix: \`${jobsConfig.scrapflyKeyPrefix}\`${testModeLines}
 `;
   })() : '';
 

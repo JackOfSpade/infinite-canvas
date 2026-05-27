@@ -16,8 +16,9 @@
  */
 export function mergeSourceProgress(prev, payload) {
   return {
-    status: payload.status,
-    count:  payload.count,
+    status:  payload.status,
+    count:   payload.count,
+    detail:  payload.detail ?? null,
     warning: payload.warning !== undefined ? payload.warning : prev?.warning ?? null,
     url:     payload.url     !== undefined ? payload.url     : prev?.url     ?? null,
   };

@@ -20,14 +20,12 @@ import { JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
  * constant into ~10 template literals for a fixed breadth ceiling).
  */
 
-// Four named modes — exactly one is true at runtime:
-//   FAST_TEST     : 1 job/page,   10 pages, AI skipped
-//   MEDIUM_TEST    : 5 jobs/page,  10 pages, AI skipped
-//   FULL_TEST : 150 jobs/page, 10 pages, AI skipped
-//   production     : 150 jobs/page, 10 pages, full AI  (all three false)
-export const FAST_TEST      = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fullRun && !JOB_SEARCH_TEST_MODE.mediumRun;
-export const MEDIUM_TEST     = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fullRun &&  JOB_SEARCH_TEST_MODE.mediumRun;
-export const FULL_TEST  = JOB_SEARCH_TEST_MODE.enabled &&  JOB_SEARCH_TEST_MODE.fullRun;
+// Three named modes — exactly one is true at runtime:
+//   MEDIUM_TEST : 5 jobs/page,   10 pages, AI skipped
+//   FULL_TEST   : 150 jobs/page, 10 pages, AI skipped
+//   production  : 150 jobs/page, 10 pages, full AI  (both false)
+export const MEDIUM_TEST = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fullRun;
+export const FULL_TEST   = JOB_SEARCH_TEST_MODE.enabled &&  JOB_SEARCH_TEST_MODE.fullRun;
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -49,7 +47,7 @@ export const JOB_RESULT_CAP = Infinity;
 // Unified per-page/per-query cap for ALL browser scrapers (manualScraper + indeedBrowser).
 // 150 is the scroll-depth target for Google Jobs and a soft ceiling for Indeed pages
 // (which have ~10 jobs/page in practice, so 150 is effectively unlimited in prod).
-export const JOB_PER_PAGE_CAP = FAST_TEST ? 1 : MEDIUM_TEST ? 5 : 150;
+export const JOB_PER_PAGE_CAP = MEDIUM_TEST ? 5 : 150;
 
 // ── LLM scoring budget (how many gathered jobs actually get LLM-scored) ───────
 // UNCAPPED (Infinity): score EVERY gathered job. selectTopAcrossSources(_, Infinity)
