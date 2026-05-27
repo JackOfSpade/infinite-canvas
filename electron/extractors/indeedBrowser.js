@@ -680,9 +680,19 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // the panel loaded empty without triggering a visible challenge page.
     // One retry navigating directly to each job URL reveals the truth:
     // genuine empties stay empty; CF-blanked ones populate.
+    //
+    // If the run was CF-heavy, wait for the sliding window to cool before
+    // navigating to job URLs — starting immediately after 90 challenges means
+    // CF is still active and the re-enrichment gets blocked on the first request.
+    // Heuristic: 30s per 10 challenges, capped at 120s.
     const missingDescJobs = allJobs.filter(j => !j.description || j.description.trim() === '');
     let reEnriched = 0;
     if (missingDescJobs.length > 0 && !signal?.aborted) {
+      if (totalChallenges > 0) {
+        const cooldownMs = Math.min(120_000, Math.ceil(totalChallenges / 10) * 30_000);
+        logger.info(`[Indeed/Browser] Re-enrich: waiting ${cooldownMs / 1000}s CF cooldown before re-enrichment (${totalChallenges} challenges this run)`);
+        await waitWithCountdown(cooldownMs, (s) => onProgress?.(`Re-enrich CF cooldown ${s}s…`));
+      }
       logger.info(`[Indeed/Browser] Re-enriching ${missingDescJobs.length} jobs with missing descriptions`);
       for (let ri = 0; ri < missingDescJobs.length; ri++) {
         if (signal?.aborted) break;
@@ -694,7 +704,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           await new Promise(r => setTimeout(r, 1200 + Math.round(Math.random() * 800)));
           const sigs = await getChallengeSignals(page);
           if (sigs.isChallenge) {
-            logger.warn(`[Indeed/Browser] Re-enrich: CF challenge on job page — stopping re-enrichment early`);
+            logger.warn(`[Indeed/Browser] Re-enrich: CF challenge (${sigs.reason}) on job page — stopping re-enrichment early`);
             break;
           }
           const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
