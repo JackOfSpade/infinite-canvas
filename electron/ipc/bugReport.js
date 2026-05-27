@@ -31,23 +31,6 @@ import {
 // it doing the new thing?" failure mode.
 const PROCESS_START_MS = Date.now();
 
-// Long marketplace comp URLs (eBay's run 500-600 chars of tracking params) dominate
-// the JSON dump and add zero diagnostic value — the item path is the only useful
-// part. As a JSON.stringify replacer, truncate any oversized http(s) URL to
-// origin+path and drop the query/hash. General (not per-site): keys on URL shape
-// and length, so it trims any bloated URL string anywhere in the state.
-const truncateLongUrls = (_key, value) => {
-  if (typeof value === 'string' && value.length > 120 && /^https?:\/\//i.test(value)) {
-    try {
-      const u = new URL(value);
-      const dropped = value.length - (u.origin.length + u.pathname.length);
-      return dropped > 0 ? `${u.origin}${u.pathname} …(+${dropped} chars of query/params trimmed)` : value;
-    } catch {
-      return value.slice(0, 120) + ` …(+${value.length - 120} chars trimmed)`;
-    }
-  }
-  return value;
-};
 
 /**
  * Returns the mtime (ms) of the newest main-process .js file actually running,
@@ -444,14 +427,6 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     freeMemMB: Math.round(os.freemem() / 1024 / 1024),
   };
 
-  const appState = {
-    systemInfo,
-    frontEndState,
-    nodes,
-    edges,
-    drawings,
-    timestamp: new Date().toISOString(),
-  };
 
   // ── Diagnostic section: group node size fields ─────────────────────────────
   // Shows style.width / measured.width / width prop separately.
@@ -1024,39 +999,32 @@ ${argsSection}`;
   // which drive the self-calibrating max_tokens cap (effectiveCap). A p95 near
   // the 24576 hard cap means a task is truncating and the cap has grown to match.
   const tokenBudgets = (() => { try { return getTokenBudgetSnapshot(); } catch { return {}; } })();
-  const tokenBudgetLines = Object.entries(tokenBudgets)
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([task, s]) => {
-      // Mirrors tokenBudget.js HEADROOM=1.2: truncation floor = truncatedAt × 1.2.
-      // This is the minimum next cap (effectiveCap also folds in seed + learned p95,
-      // so the real next cap is ≥ this floor). Showing it makes "will self-heal?"
-      // answerable without manual arithmetic.
-      const nextCapFloor = s.truncatedAt > 0 ? Math.round(s.truncatedAt * 1.2) : 0;
-      // formulaSeedAtTruncation distinguishes "formula is wrong" (seed << truncatedAt,
-      // formula needs raising) from "self-calibration lag" (seed ≈ truncatedAt, formula
-      // was fine but the observed p95 hadn't yet driven effectiveCap past it).
-      const seedNote = (s.truncatedAt > 0 && s.formulaSeedAtTruncation != null)
-        ? `formula seed: ${s.formulaSeedAtTruncation}` : '';
-      // If the truncation happened AT the hard cap, the self-calibration is permanently
-      // stuck — nextCapFloor > HARD_CAP can never be reached and "next cap ≥X" is false.
-      const stuckAtHardCap = s.truncatedAt >= TOKEN_HARD_CAP;
-      const healNote = stuckAtHardCap
-        ? `⛔ AT hard cap (${TOKEN_HARD_CAP}) — self-calibration cannot self-heal; formula or hard cap must be raised`
-        : `next cap ≥${nextCapFloor} — until self-healed this task fell back to a weaker model`;
-      const detail = seedNote ? `${seedNote}, ${healNote}` : healNote;
-      return `- \`${task}\`: p95 ${s.p95} / max ${s.max} tok over ${s.samples} call(s)` +
-        (s.truncatedAt > 0
-          ? ` · ⚠️ truncated at cap ${s.truncatedAt} (${detail})`
-          : '');
-    });
+  // Only surface tasks that have actually truncated — clean tasks are noise for
+  // almost every bug report. A footer line summarises how many are healthy so
+  // the section doesn't mislead ("only 2 tasks?" when there are really 9).
+  const tokenBudgetLines = [];
+  let tokenBudgetCleanCount = 0;
+  for (const [task, s] of Object.entries(tokenBudgets).sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (s.truncatedAt <= 0) { tokenBudgetCleanCount++; continue; }
+    // Mirrors tokenBudget.js HEADROOM=1.2: truncation floor = truncatedAt × 1.2.
+    const nextCapFloor = Math.round(s.truncatedAt * 1.2);
+    const seedNote = s.formulaSeedAtTruncation != null ? `formula seed: ${s.formulaSeedAtTruncation}` : '';
+    const stuckAtHardCap = s.truncatedAt >= TOKEN_HARD_CAP;
+    const healNote = stuckAtHardCap
+      ? `⛔ AT hard cap (${TOKEN_HARD_CAP}) — self-calibration cannot self-heal; formula or hard cap must be raised`
+      : `next cap ≥${nextCapFloor} — until self-healed this task fell back to a weaker model`;
+    const detail = seedNote ? `${seedNote}, ${healNote}` : healNote;
+    tokenBudgetLines.push(
+      `- \`${task}\`: p95 ${s.p95} / max ${s.max} tok over ${s.samples} call(s)` +
+      ` · ⚠️ truncated at cap ${s.truncatedAt} (${detail})`,
+    );
+  }
+  if (tokenBudgetCleanCount > 0) tokenBudgetLines.push(`- *(${tokenBudgetCleanCount} task(s) within budget — not shown)*`);
   const tokenBudgetMarkdown = tokenBudgetLines.length
     ? `
 ### Learned Token Budgets
-> Observed output (visible + thinking) tokens per task — drives the self-calibrating
-> max_tokens cap. A p95 near the ${TOKEN_HARD_CAP} hard cap means that task is truncating. A
-> ⚠️ truncated marker means a call hit its cap and silently fell back to a weaker
-> model; the cap has since been raised past that point so it shouldn't recur.
-> ⛔ AT hard cap means self-calibration is permanently stuck and the formula must be changed.
+> Only tasks that have truncated are shown — ⚠️ means a call hit its cap and fell
+> back to a weaker model; the cap has since been raised. ⛔ AT hard cap = stuck.
 ${tokenBudgetLines.join('\n')}`
     : '';
 
@@ -1138,19 +1106,6 @@ ${aiConfig.provider === 'gemini' ? `
   const vp = frontEndState?.viewport;
   const viewportLine = vp ? `- Viewport: zoom=${vp.zoom} x=${vp.x} y=${vp.y}` : '';
 
-  const STATE_BUDGET_BYTES = 1024 * 1024; // 1MB budget for the JSON state block
-  // truncateLongUrls strips the tracking-param bloat from marketplace comp URLs
-  // (and any other oversized URL) — the item path is kept, the rest is dropped.
-  let appStateJson = JSON.stringify(appState, truncateLongUrls, 2);
-  let stateWasTrimmed = false;
-
-  if (Buffer.byteLength(appStateJson, 'utf8') > STATE_BUDGET_BYTES) {
-    // If the full state is too large, it's almost always due to thousands of drawing points.
-    // Omit the drawings but keep the rest of the metadata.
-    const { drawings: _drawings, ...trimmedAppState } = appState;
-    appStateJson = JSON.stringify(trimmedAppState, truncateLongUrls, 2);
-    stateWasTrimmed = true;
-  }
 
   let baseMarkdown = `At the end of your debug, assess whether new bug reporting filter codes need to be implemented (which will all be included in the "FULL" filter code). This occurs when even if the user used the "FULL" filter code, it would not have been enough reporting data to debug this issue smoothly.
 
@@ -1163,21 +1118,11 @@ ${payload.filterCode ? `\n**Filter code applied:** \`${payload.filterCode}\`${pa
 ## Application State Summary
 - Nodes: ${sectionOmitted('nodes') ? '*(omitted by filter code)*' : (nodes ? nodes.length : 0)}
 - Edges: ${sectionOmitted('edges') ? '*(omitted by filter code)*' : (edges ? edges.length : 0)}
-- Drawings: ${sectionOmitted('drawings') ? '*(omitted by filter code)*' : `${drawings ? drawings.length : 0} ${stateWasTrimmed ? '*(Omitted from JSON below due to size)*' : ''}`}
+- Drawings: ${sectionOmitted('drawings') ? '*(omitted by filter code)*' : (drawings ? drawings.length : 0)}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${mainProcessLogsMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
-<details>
-<summary><b>Click here to expand the full JSON Application State</b></summary>
-
-\`\`\`json
-${appStateJson}
-\`\`\`
-
-</details>
-
-## Event History
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   // Static safety bound (not adaptive): keeps the assembled bug-report payload
@@ -1214,7 +1159,9 @@ ${appStateJson}
     trimmedEventsMarkdown = `*(No events recorded)*\n`;
   }
 
-  const fullMarkdown = baseMarkdown + trimmedEventsMarkdown;
+  // Logs and the Event History heading live outside baseMarkdown so the
+  // clipboard path (enforceClipboardMarkdownCap) can trim them independently.
+  const fullMarkdown = baseMarkdown + mainProcessLogsMarkdown + '\n## Event History\n' + trimmedEventsMarkdown;
   if (options?.maxChars) {
     return enforceClipboardMarkdownCap(baseMarkdown, includedEventLines, mainProcessLogLines, options.maxChars);
   }
