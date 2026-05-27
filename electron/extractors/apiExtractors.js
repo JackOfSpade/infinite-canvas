@@ -17,6 +17,7 @@ import { JSDOM } from 'jsdom';
 import { resolveBudget } from '../ipc/scrapeBudget.js';
 import { JOB_RESULT_CAP } from '../ipc/resultCaps.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
+import { jobTitleCompanyLocationKey } from '../../src/utils/jobIdentity.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
 // shared scrapeBudget store so they live in one place and share the budget
@@ -570,6 +571,8 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
     location: job.location || 'Remote',
     salary: job.salary || (job.salary_min ? `$${job.salary_min} - $${job.salary_max}` : ''),
     snippet: (job.tags || []).join(', '),
+    // RemoteOK's API returns description as raw HTML — strip tags to plain text.
+    description: job.description ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '',
     // RemoteOK's `url` is sometimes already absolute ("https://remoteOK.com/…")
     // and sometimes a relative path; only prefix the relative form, else we get
     // a doubled "https://remoteok.comhttps://remoteOK.com/…" broken link.
@@ -873,8 +876,7 @@ function dedupeIndeedJobs(jobs) {
   const out = [];
   for (const job of jobs) {
     if (!job?.title) continue;
-    const key = job.jobkey || job.url ||
-      `${job.title.toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}|${(job.location || '').toLowerCase().trim()}`;
+    const key = job.jobkey || job.url || jobTitleCompanyLocationKey(job);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(job);
@@ -1252,8 +1254,7 @@ export async function fetchIndeedListings(queries, signal = null, maxAgeDays = n
       if (pageJobs.length === 0) break;
 
       for (const job of pageJobs) {
-        const dk = job.jobkey || job.url ||
-          `${(job.title || '').toLowerCase().trim()}|${(job.company || '').toLowerCase().trim()}|${(job.location || '').toLowerCase().trim()}`;
+        const dk = job.jobkey || job.url || jobTitleCompanyLocationKey(job);
         if (seenKeys.has(dk)) continue;
         seenKeys.add(dk);
         allJobs.push(job);
