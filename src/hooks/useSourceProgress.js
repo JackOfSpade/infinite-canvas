@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { mergeSourceProgress } from '../utils/sourceProgress';
 
 /**
  * useSourceProgress — subscribe to per-source progress events from the
@@ -36,17 +37,11 @@ export function useSourceProgress(subscribe, hubId) {
   useEffect(() => {
     if (!subscribe) return undefined;
     const cleanup = subscribe((payload) => {
-      const { nodeId, sourceId, status, count, warning } = payload;
+      const { nodeId, sourceId, status } = payload;
       if (nodeId && nodeId !== hubId) return; // multi-hub safety
       setProgress(prev => ({
         ...prev,
-        [sourceId]: {
-          status,
-          count,
-          // Sticky: only overwrite warning when the new payload explicitly
-          // includes one (undefined ≠ null — null means "explicitly cleared").
-          warning: warning !== undefined ? warning : prev?.[sourceId]?.warning ?? null,
-        },
+        [sourceId]: mergeSourceProgress(prev?.[sourceId], payload),
       }));
       if (status === 'searching') setLastActive(sourceId);
     });

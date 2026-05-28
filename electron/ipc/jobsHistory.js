@@ -141,7 +141,11 @@ export async function loadJobsHistory(canvasFilePath) {
   try {
     content = await fs.promises.readFile(filePath, 'utf8');
   } catch (err) {
-    if (err.code !== 'ENOENT') logger.warn('[JobsHistory] Read failed:', err.message);
+    if (err.code === 'ENOENT') {
+      logger.info('[JobsHistory] No history file found — treating as fresh start');
+    } else {
+      logger.warn('[JobsHistory] Read failed:', err.message);
+    }
     return [];
   }
   const lines = content.split(/\r?\n/).filter(l => l.length > 0);

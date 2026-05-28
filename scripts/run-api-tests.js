@@ -3,31 +3,45 @@ import {
   fetchRemoteOKJobs,
   fetchWeWorkRemotelyJobs,
   fetchDiceListings,
-  fetchStockXListings,
-  fetchReverbListings
+  fetchGreenhouseJobs,
+  fetchLeverJobs,
 } from '../electron/extractors/apiExtractors.js';
 
 async function run() {
-  console.log('Testing API extractors...');
+  console.log('Testing job API extractors...');
   const results = {};
 
   const safeCall = async (name, fn) => {
     try {
       const data = await fn();
-      results[name] = { success: true, count: Array.isArray(data) ? data.length : 'unknown', sample: data[0] };
+      const items = Array.isArray(data) ? data : (data?.items || []);
+      const warning = Array.isArray(data) ? null : (data?.warning || null);
+      results[name] = {
+        success: warning?.severity !== 'block',
+        count: items.length,
+        warning,
+        sample: items[0] ? {
+          title: items[0].title,
+          company: items[0].company,
+          source: items[0].source,
+        } : null,
+      };
     } catch (e) {
       results[name] = { success: false, error: e.message };
     }
   };
 
-  await safeCall('LinkedIn', () => fetchLinkedInJobs('software engineer'));
-  await safeCall('RemoteOK', () => fetchRemoteOKJobs('react'));
-  await safeCall('WeWorkRemotely', () => fetchWeWorkRemotelyJobs('frontend'));
-  await safeCall('Dice', () => fetchDiceListings('software engineer'));
-  await safeCall('StockX', () => fetchStockXListings('iphone 15 pro', false));
-  await safeCall('Reverb', () => fetchReverbListings('fender stratocaster', true));
+  await safeCall('LinkedIn', () => fetchLinkedInJobs(['software engineer'], null, 7));
+  await safeCall('RemoteOK', () => fetchRemoteOKJobs(['react']));
+  await safeCall('WeWorkRemotely', () => fetchWeWorkRemotelyJobs(['frontend']));
+  await safeCall('Dice', () => fetchDiceListings('software engineer', '', null, 7));
+  await safeCall('Greenhouse', () => fetchGreenhouseJobs(['software engineer']));
+  await safeCall('Lever', () => fetchLeverJobs(['software engineer']));
 
   console.log(JSON.stringify(results, null, 2));
+  if (Object.values(results).some(r => !r.success)) {
+    process.exitCode = 1;
+  }
 }
 
 run().catch((error) => {

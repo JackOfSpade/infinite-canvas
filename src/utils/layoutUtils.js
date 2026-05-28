@@ -1,5 +1,5 @@
-import { getNodeDims } from './constants';
-import { gridSpacing, spiralStep } from './layoutGeometry';
+import { getNodeDims } from './constants.js';
+import { gridSpacing, spiralStep } from './layoutGeometry.js';
 
 /**
  * Computes a tidied grid layout for the provided nodes.

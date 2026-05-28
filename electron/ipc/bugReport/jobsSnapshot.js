@@ -173,6 +173,43 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
         }
       }
     }
+
+    // Snippet length stats — answers "did we get full descriptions?" without
+    // requiring a separate file read outside the bug report. Reads the saved
+    // snapshot (written by SKIP_AI_FOR_TESTING and the normal scoring path)
+    // and reports min/median/max per source. Empty-snippet jobs are flagged
+    // with ⚠️ so truncated or unenriched sources surface immediately.
+    try {
+      const snapPath = path.join(app.getPath('userData'), 'job-search', 'job-search-last-scrape.json');
+      const snapData = JSON.parse(fs.readFileSync(snapPath, 'utf8'));
+      const snapJobs = Array.isArray(snapData?.jobs) ? snapData.jobs : [];
+      if (snapJobs.length > 0) {
+        const bySource = {};
+        for (const j of snapJobs) {
+          const src = j.source || 'unknown';
+          if (!bySource[src]) bySource[src] = [];
+          bySource[src].push((j.snippet || '').length);
+        }
+        const entries = Object.entries(bySource);
+        if (entries.length === 1) {
+          const [[, lens]] = entries;
+          lens.sort((a, b) => a - b);
+          const min = lens[0], median = lens[Math.floor(lens.length / 2)], max = lens[lens.length - 1];
+          const empty = lens.filter(l => l === 0).length;
+          const emptyFlag = empty > 0 ? ` ⚠️ ${empty} empty` : '';
+          lines.push(`- Snippet lengths (saved snapshot): min ${min} / median ${median} / max ${max} chars${emptyFlag}`);
+        } else {
+          lines.push('- Snippet lengths per source (saved snapshot):');
+          for (const [src, lens] of entries) {
+            lens.sort((a, b) => a - b);
+            const min = lens[0], median = lens[Math.floor(lens.length / 2)], max = lens[lens.length - 1];
+            const empty = lens.filter(l => l === 0).length;
+            const emptyFlag = empty > 0 ? ` ⚠️ ${empty} empty` : '';
+            lines.push(`  - \`${src}\`: min ${min} / median ${median} / max ${max} chars${emptyFlag}`);
+          }
+        }
+      }
+    } catch { /* snapshot absent or unreadable — omit silently */ }
   } else {
     lines.push('### Search\n- (no search recorded this session — e.g. scoring resumed from a captcha-resolve)');
   }

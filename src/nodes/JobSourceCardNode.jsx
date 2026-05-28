@@ -63,10 +63,19 @@ export function JobSourceCardNode({ id, data }) {
   // a warning or error, so writing intermediate 'searching' states is wasted
   // — and worse, it dirties the workspace on every progress event during a
   // scrape (~7 sources × multiple updates = constant auto-save churn).
+  // doneAt is stamped on the FIRST terminal write so the bug reporter can
+  // distinguish "just finished, grace period still running" from a card that
+  // genuinely survived past the auto-dismiss window.
   useEffect(() => {
     if (!progress) return;
     if (progress.status !== 'done' && progress.status !== 'error' && progress.status !== 'skipped') return;
-    updateNodeData(id, { persistedProgress: progress });
+    updateNodeData(id, (node) => {
+      const existing = node?.data?.persistedProgress;
+      // Preserve doneAt from the first terminal write — don't overwrite it on
+      // subsequent terminal events (e.g. status flip from error → done).
+      const doneAt = existing?.doneAt ?? Date.now();
+      return { persistedProgress: { ...progress, doneAt } };
+    });
   }, [progress, id, updateNodeData]);
 
   // The owning JobHub coordinates clean-card dismissal after ALL source cards

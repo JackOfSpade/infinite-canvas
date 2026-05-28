@@ -3,7 +3,7 @@
  * Eliminates duplicate inline node construction across hooks.
  */
 
-import { generateId } from './idGenerator';
+import { generateId } from './idGenerator.js';
 
 /**
  * Read the user's last-applied text/link customization from settings so that

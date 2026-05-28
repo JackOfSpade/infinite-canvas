@@ -3,7 +3,7 @@ import { useReactFlow } from '@xyflow/react';
 import { Loader2, CheckCircle2, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
-import { mergeSourceProgress } from './_shared/sourceProgress';
+import { mergeSourceProgress } from '../utils/sourceProgress';
 
 /**
  * CompSourceCardNode — ephemeral card spawned by SellHubNode during price

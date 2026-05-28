@@ -1,4 +1,4 @@
-import { generateId } from './idGenerator';
+import { generateId } from './idGenerator.js';
 
 export function sqr(x) { return x * x; }
 

@@ -18,27 +18,29 @@ import { logger } from '../logger.js';
  *     compounds or the output is user-facing.
  *   - Haiku 4.5: page status classify, query gen, text polish — short
  *     structured outputs where Sonnet adds no value (3x cheaper).
- *   - Gemini Flash: matches Sonnet's tasks (good enough, 10x cheaper).
- *   - Gemini Flash-Lite: matches Haiku's tasks (3x cheaper than Flash).
+ *   - Gemini 3.5 Flash: matches Sonnet's tasks (good enough, materially
+ *     newer than the 2.5 Flash line Google is restricting on June 15, 2026).
+ *   - Gemini 3.1 Flash-Lite: matches Haiku's tasks while avoiding the 2.5
+ *     Flash-Lite access restriction for new/inactive projects.
  *   - Opus: not used. 5x input / 1.67x output over Sonnet with no current
  *     task needing the delta. Add a row here if a future agentic flow
  *     actually justifies it.
  */
 const TASK_MODELS = {
-  'vision-product-analysis':   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
-  'price-synthesis':           { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
-  'platform-fit-assessment':   { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash-lite' },
-  'page-status-classify':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash-lite' },
-  'resume-parse':              { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
-  'job-query-generation':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash'      },
-  'job-scoring':               { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
-  'job-bucketing':             { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash'      },
-  'cover-letter-generation':   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
-  'interview-prep-generation': { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
-  'text-polish':               { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-2.5-flash-lite' },
+  'vision-product-analysis':   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
+  'price-synthesis':           { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
+  'platform-fit-assessment':   { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
+  'page-status-classify':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
+  'resume-parse':              { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
+  'job-query-generation':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.5-flash'      },
+  'job-scoring':               { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
+  'job-bucketing':             { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.5-flash'      },
+  'cover-letter-generation':   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
+  'interview-prep-generation': { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
+  'text-polish':               { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
   // Default — used when a caller forgets to pass `task`. Logged as a warning
   // below so we notice unmapped sites; tuned to a safe-middle.
-  'default':                   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-2.5-flash'      },
+  'default':                   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
 };
 
 /**
@@ -68,15 +70,16 @@ const TASK_MAX_TOKENS = {
   // Thinking budget scales roughly linearly with comp count — the
   // anchor/adjusted/bound classification prompt asks the model to reason
   // about each item individually. Real-world calibration:
-  //   - gemini-2.5-flash (preferred): 90 comps → ~7861 thinking + ~317 visible
-  //   - gemini-3-flash-preview (fallback): 40 comps → ~8048 thinking + ~317 visible
+  //   - preferred Flash-tier Gemini: 90 comps → ~7861 thinking + ~317 visible
+  //   - older fallback Gemini: 40 comps → ~8048 thinking + ~317 visible
   //     (truncated at 8383; formula seed was 7000 — the formula was the bug).
-  // The fallback uses ~200 tok/comp vs ~87 for the preferred model. Formula must
+  // The heavier fallback used ~200 tok/comp vs ~87 for the preferred model.
+  // Formula must
   // accommodate the fallback chain: ~200 thinking/comp + ~600 visible budget.
   // 40 items → 11000 (above the 8648 observed need + headroom); capped at 24576.
   'price-synthesis':           ({ itemCount = 40 } = {}) =>
     Math.min(24576, 3000 + itemCount * 200),
-  // Thinking-heavy fallback models (gemini-3-flash-preview etc.) consume
+  // Thinking-heavy fallback models consume
   // ~1460 thinking + ~50–230 visible tokens for this task — real-world p95 is
   // 1374, max 1510. The old 1024 seed forced self-calibration to catch up over
   // truncation cycles. 2048 is above the observed max so the cap is adequate
@@ -100,9 +103,9 @@ const TASK_MAX_TOKENS = {
     Math.min(24576, 2500 + itemCount * 300),
   // Bucketing reasons over salaries per category — thinking-heavy (the model
   // weighs each job's salary against its category's distribution). The old
-  // static 6144 was calibrated against gemini-2.5-flash's light thinking and
-  // an over-optimistic "~500 visible" estimate; on newer thinking-heavy models
-  // it truncated — real telemetry on a 15-job run: gemini-3.5-flash emitted
+  // static 6144 was calibrated against an older lighter-thinking Flash model
+  // and an over-optimistic "~500 visible" estimate; on newer thinking-heavy
+  // models it truncated — real telemetry on a 15-job run: gemini-3.5-flash emitted
   // 3229 thinking + 2899 visible (=6128) and was STILL cut off at 6144, only
   // surviving because the dynamic fallback reached a model that didn't think.
   // Both thinking and visible scale ~linearly with job count (one jobIndex per

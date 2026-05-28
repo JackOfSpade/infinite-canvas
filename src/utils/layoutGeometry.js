@@ -1,4 +1,4 @@
-import { getNodeDims } from './constants';
+import { getNodeDims } from './constants.js';
 
 /**
  * Derived layout & navigation geometry — replaces the scattered hardcoded

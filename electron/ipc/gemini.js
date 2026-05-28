@@ -19,7 +19,7 @@ const MAX_PROMPT_CHARS   = 100000;
 // base64 adds ~33%, so cap raw image/document files here to avoid a 413 / OOM.
 const MAX_AI_FILE_BYTES  = 15 * 1024 * 1024; // 15MB
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.5-flash';
 const LOCATION = 'us-central1';
 
 /**
@@ -223,7 +223,7 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   let headers = { 'Content-Type': 'application/json' };
   
   if (apiKey) {
-    endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-2.5-flash'}:generateContent?key=${apiKey}`;
+    endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-3.5-flash'}:generateContent?key=${apiKey}`;
   } else {
     // No API key → Vertex AI via service-account.json. getToken() (→ getAuthClient)
     // throws a clear "no credential" error if neither is configured.
@@ -321,7 +321,8 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
 
 /**
  * Core Gemini call — sends parts (text + optional images) to Vertex AI or AI Studio,
- * automatically falling back across the 12 available models in descending capability order
+ * automatically falling back across the available text/JSON-capable Gemini models
+ * in descending capability order
  * when rate limits or quotas are exceeded.
  * @param {Array} parts — Array of { text } or { inlineData: { mimeType, data } } objects
  * @param {string} apiKey - Optional Gemini API Key. If missing, falls back to Vertex AI.
@@ -345,27 +346,16 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     throw new Error(`AI prompt too large (${totalTextLen} chars). Please select fewer nodes or a smaller group.`);
   }
 
-  // Best → worst across the models this API key can actually call. Verified
-  // against the live ListModels endpoint (generativelanguage v1beta) — every
-  // name here returns generateContent. The 3.x pro/flash models are published
-  // only under `-preview` names, and the 2.x flash family is `2.0` (not `2`);
-  // the previous list used `gemini-3.1-pro` / `gemini-3-flash` / `gemini-2-flash`
-  // / `gemini-2-flash-lite`, all of which 404 ("not found for v1beta") and burned
-  // a failed attempt on EVERY call before falling through. NOTE: `*-tts` /
-  // `*-image` / `computer-use` / `robotics` variants are excluded — they don't
-  // serve plain generateContent text/JSON. Keep this list in sync with
-  // ListModels; a 404 here means a name was renamed or dropped by Google.
+  // Best → worst across the text/JSON-capable Gemini models we want this app
+  // to use after July 2026. Anything Google is restricting in June 2026 or
+  // retiring by June 17, 2026 is intentionally excluded from this chain.
+  // NOTE: `*-tts` / `*-image` / `computer-use` / `robotics` variants are
+  // excluded — they don't serve plain generateContent text/JSON.
   const GEMINI_MODEL_FALLBACKS = [
     'gemini-3.1-pro-preview',
-    'gemini-3-pro-preview',
-    'gemini-2.5-pro',
     'gemini-3.5-flash',
-    'gemini-3-flash-preview',
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
+    'gemini-3-pro-preview',
     'gemini-3.1-flash-lite',
-    'gemini-2.5-flash-lite',
-    'gemini-2.0-flash-lite',
   ];
 
   const attemptedErrors = [];
@@ -623,7 +613,7 @@ export function registerGeminiHandlers() {
     const { getAISettings } = await import('./settings.js');
     const settings = getAISettings();
     const model = settings.provider === 'gemini'
-      ? 'gemini-2.5-flash-lite'   // matches TASK_MODELS['text-polish'].gemini
+      ? 'gemini-3.1-flash-lite'   // matches TASK_MODELS['text-polish'].gemini
       : null;
     // If user picked Claude, polish via Claude Haiku 4.5 directly. Avoids
     // forcing them onto Gemini just for this one helper.

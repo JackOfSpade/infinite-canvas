@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Store, BarChart3, Briefcase, Bug } from 'lucide-react';
 
 import { JobsTab } from './sidebar/JobsTab';
@@ -34,6 +34,7 @@ function getStats(nodes) {
 export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClick }) {
   const [collapsed, setCollapsed] = useState(true);
   const [activeTab, setActiveTab] = useState('jobs');
+  const sidebarRef = useRef(null);
 
   const handleTabClick = useCallback((tab) => {
     if (activeTab === tab && !collapsed) {
@@ -54,16 +55,28 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
     e.dataTransfer.effectAllowed = 'copy';
   }, []);
 
+  useEffect(() => {
+    if (collapsed) return;
+
+    const handleDocumentPointerDown = (event) => {
+      if (sidebarRef.current?.contains(event.target)) return;
+      setCollapsed(true);
+    };
+
+    document.addEventListener('pointerdown', handleDocumentPointerDown, { capture: true });
+    return () => document.removeEventListener('pointerdown', handleDocumentPointerDown, { capture: true });
+  }, [collapsed]);
+
   const { jobCardsCount, sellHubsCount, appliedJobsCount, totalValue } = React.useMemo(() => getStats(nodes), [nodes]);
 
   const tabs = [
-    { id: 'jobs', icon: Briefcase, label: 'Jobs' },
     { id: 'sell', icon: Store, label: 'Sell' },
+    { id: 'jobs', icon: Briefcase, label: 'Jobs' },
     { id: 'dashboard', icon: BarChart3, label: 'Stats' },
   ];
 
   return (
-    <div className="h-full flex shrink-0 overflow-hidden">
+    <div ref={sidebarRef} className="h-full flex shrink-0 overflow-hidden">
       {/* Tab strip */}
       <div className="w-12 h-full bg-[#0d0d0d] border-r border-white/5 flex flex-col items-center py-3 gap-1.5 shrink-0 z-10 relative">
         {tabs.map((tab, i) => {

@@ -10,6 +10,8 @@
     "dev": "vite",
     "build": "vite build && electron-builder",
     "lint": "eslint .",
+    "test": "node scripts/test-runner.js",
+    "test:job-apis": "node scripts/run-api-tests.js",
     "preview": "vite preview"
   },
   "build": {

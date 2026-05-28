@@ -3,7 +3,7 @@ const { dialog, app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { fileURLToPath } from 'url';
+
 import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
 import { getAISettings, resolveServiceAccountPath } from './settings.js';
 import { getSellMonitorPlatforms, getJobLoginPlatforms } from './stealthBrowser.js';
@@ -45,8 +45,9 @@ const PROCESS_START_MS = Date.now();
  */
 function getNewestMainProcessSourceMtime() {
   try {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    const roots = [here, path.join(here, '..')];
+    // app.getAppPath() = project root — always correct regardless of whether
+    // import.meta.url resolves to the source file or a vite-bundled virtual path.
+    const electronDir = path.join(app.getAppPath(), 'electron');
     let newest = 0;
     const seen = new Set();
 
@@ -71,7 +72,7 @@ function getNewestMainProcessSourceMtime() {
       }
     };
 
-    for (const root of roots) walk(root);
+    walk(electronDir);
     return newest || null;
   } catch {
     return null;
@@ -520,7 +521,13 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
           return (siblingProgress.status === 'done' || siblingProgress.status === 'skipped') &&
             !siblingProgress.warning;
         });
-        const lingering = isCleanTerminal && allSiblingCardsCleanTerminal;
+        // Only flag as lingering if the auto-dismiss grace window (10s) has
+        // clearly elapsed. Cards that completed within the last ~15s are still
+        // in the grace period — flagging them is a false positive. doneAt is
+        // stamped by JobSourceCardNode on the first terminal state write.
+        const DISMISS_GRACE_MS = 15_000; // 10s grace + 5s buffer for render lag
+        const gracePeriodElapsed = !p.doneAt || (Date.now() - p.doneAt) > DISMISS_GRACE_MS;
+        const lingering = isCleanTerminal && allSiblingCardsCleanTerminal && gracePeriodElapsed;
         previewParts.push(
           `source: ${d.sourceId}, progress: ${p.status || '?'}${p.warning?.code ? ` (${p.warning.code})` : ''}` +
           (lingering ? ' ⚠️ should have auto-dismissed (lingering card)' : ''),
@@ -752,9 +759,11 @@ ${rows}
   const startedAt = new Date(PROCESS_START_MS).toISOString();
   const newestSrcStr = newestSrcMs ? new Date(newestSrcMs).toISOString() : '(unknown)';
   const isStale = !!(newestSrcMs && newestSrcMs > PROCESS_START_MS);
-  const stalenessLine = isStale
-    ? `⚠️ **STALE BUILD**: a tracked main-process source file was modified ${Math.round((newestSrcMs - PROCESS_START_MS) / 1000)}s after the process started. The running app is NOT executing the current source on disk — fully restart Electron (not just Vite) before treating this report as authoritative.`
-    : '✅ Up to date — no tracked main-process source has been modified since the process started.';
+  const stalenessLine = !newestSrcMs
+    ? '⚠️ **Cannot determine build freshness** — unable to read main-process source file mtimes. If you have edited any Electron main-process files since starting the app, restart before treating this report as authoritative.'
+    : isStale
+      ? `⚠️ **STALE BUILD**: a tracked main-process source file was modified ${Math.round((newestSrcMs - PROCESS_START_MS) / 1000)}s after the process started. The running app is NOT executing the current source on disk — fully restart Electron (not just Vite) before treating this report as authoritative.`
+      : '✅ Up to date — no tracked main-process source has been modified since the process started.';
   const buildFreshnessMarkdown = `
 ## Build Freshness
 - Main process started: \`${startedAt}\` (uptime ${Math.round(uptimeMs / 1000)}s)

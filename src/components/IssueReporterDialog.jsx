@@ -7,12 +7,13 @@ import { previewBugReportCode, buildAiPrompt } from '../utils/bugReportCodes';
 // Persist the in-progress description across dialog open/close cycles but NOT
 // across app restarts/exit.
 const DRAFT_STORAGE_KEY = 'issue-reporter-draft';
+const DEFAULT_FILTER_CODE = 'FULL';
 
 export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
   const [description, setDescription] = useState(() => {
     try { return sessionStorage.getItem(DRAFT_STORAGE_KEY) || ''; } catch { return ''; }
   });
-  const [filterCode, setFilterCode] = useState('');
+  const [filterCode, setFilterCode] = useState(DEFAULT_FILTER_CODE);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeMode, setActiveMode] = useState(null); // 'clipboard' | 'file'
   const [promptCopied, setPromptCopied] = useState(false);
@@ -37,6 +38,11 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
     return () => { isMountedRef.current = false; };
   }, []);
 
+  const handleClose = useCallback(() => {
+    setFilterCode(DEFAULT_FILTER_CODE);
+    onClose();
+  }, [onClose]);
+
   // ── Live code preview ──────────────────────────────────────────────────────
   // Recomputes whenever the filter code changes, showing count of matching log lines.
   const codePreview = useMemo(() => {
@@ -59,7 +65,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
   }, [description]);
 
   // ── Submit ────────────────────────────────────────────────────────────────
-  const submit = async (mode) => {
+  const submit = useCallback(async (mode) => {
     if (!description.trim() || isSubmitting) return;
     setIsSubmitting(true);
     setActiveMode(mode);
@@ -68,20 +74,20 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
       if (!isMountedRef.current) return;
       setIsSubmitting(false);
       setActiveMode(null);
-      onClose();
+      handleClose();
     } catch {
       if (!isMountedRef.current) return;
       setIsSubmitting(false);
       setActiveMode(null);
     }
-  };
+  }, [filterCode, handleClose, isSubmitting, onSubmit, description]);
 
   if (!isOpen) return null;
 
   const noDesc = !description.trim();
 
   return (
-    <Dialog onClose={onClose} title="Report an Issue">
+    <Dialog onClose={handleClose} title="Report an Issue">
       <form
         onSubmit={e => { e.preventDefault(); submit('clipboard'); }}
         className="flex flex-col gap-3"
@@ -205,7 +211,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
         <div className="flex justify-end gap-2 pt-1">
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             className="px-4 py-2 text-sm text-white/50 hover:text-white/80 transition-colors"
           >
             Cancel

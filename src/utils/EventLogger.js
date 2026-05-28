@@ -11,7 +11,7 @@
  * Also auto-captures JS errors and unhandled promise rejections so they
  * appear in the event timeline alongside user actions.
  */
-import { TIMINGS } from './timings';
+import { TIMINGS } from './timings.js';
 
 const MAX_BYTES = 500 * 1024; // 500 KB — covers ~6,000 lines at avg 85 bytes/line.
 // The entire useful event history for an immediate-report workflow is 20–50 lines;

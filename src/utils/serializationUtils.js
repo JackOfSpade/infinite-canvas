@@ -1,9 +1,9 @@
-import { getNodeDims } from './constants';
+import { getNodeDims } from './constants.js';
 import {
   getJobHubTransientKeysForSave,
   SELLHUB_TRANSIENT_KEYS,
   TRANSIENT_PROCESSING_HUB_STATES,
-} from './persistenceTransientState';
+} from './persistenceTransientState.js';
 
 /** Stable, pure snapshot fingerprint — no hook needed. */
 export function fingerprint(snap) {

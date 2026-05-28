@@ -126,6 +126,75 @@ function getSidecarPath(filePath) {
   return filePath.endsWith('.json') ? filePath.slice(0, -5) + '.progress.json' : filePath + '.progress.json';
 }
 
+function relativePortablePath(canvasPath, filePath) {
+  if (!canvasPath || !filePath || typeof filePath !== 'string') return null;
+  if (!path.isAbsolute(filePath)) return filePath;
+  const rel = path.relative(path.dirname(canvasPath), filePath);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return rel.includes(path.sep) ? rel : `.${path.sep}${rel}`;
+}
+
+function resolvePortablePath(canvasPath, filePath, relativePath) {
+  const baseDir = path.dirname(canvasPath);
+  if (filePath && typeof filePath === 'string' && fs.existsSync(filePath)) return filePath;
+  if (filePath && typeof filePath === 'string') {
+    const candidate = path.join(baseDir, path.basename(filePath));
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  if (relativePath && typeof relativePath === 'string') {
+    const candidate = path.resolve(baseDir, relativePath);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return filePath;
+}
+
+function traverseCanvasNodes(nodes, fn) {
+  if (!Array.isArray(nodes)) return;
+  for (const node of nodes) {
+    fn(node);
+    if (node?.type === 'group' && node.data?.canvasData?.nodes) {
+      traverseCanvasNodes(node.data.canvasData.nodes, fn);
+    }
+  }
+}
+
+function annotatePortableFilePaths(data, canvasPath) {
+  traverseCanvasNodes(data?.nodes, (node) => {
+    const d = node?.data;
+    if (!d) return;
+
+    const rel = relativePortablePath(canvasPath, d.filePath);
+    if (rel) d.relativeFilePath = rel;
+    else delete d.relativeFilePath;
+
+    if (Array.isArray(d.imagePaths)) {
+      d.relativeImagePaths = d.imagePaths.map(p => relativePortablePath(canvasPath, p));
+      if (!d.relativeImagePaths.some(Boolean)) delete d.relativeImagePaths;
+    } else {
+      delete d.relativeImagePaths;
+    }
+  });
+}
+
+function resolvePortableFilePaths(data, canvasPath) {
+  traverseCanvasNodes(data?.nodes, (node) => {
+    const d = node?.data;
+    if (!d) return;
+
+    if (d.filePath) {
+      d.filePath = resolvePortablePath(canvasPath, d.filePath, d.relativeFilePath);
+      const rel = relativePortablePath(canvasPath, d.filePath);
+      if (rel) d.relativeFilePath = rel;
+    }
+
+    if (Array.isArray(d.imagePaths)) {
+      d.imagePaths = d.imagePaths.map((p, i) => resolvePortablePath(canvasPath, p, d.relativeImagePaths?.[i]));
+      const rels = d.imagePaths.map(p => relativePortablePath(canvasPath, p));
+      if (rels.some(Boolean)) d.relativeImagePaths = rels;
+    }
+  });
+}
+
 /**
  * Extracts volatile transient/paused state from the nodes array and returns it,
  * while stripping the transient keys and resetting states in the original nodes
@@ -263,6 +332,7 @@ export function registerFilesystemHandlers() {
     // then replayed on every reload. Keep load-time migration for legacy files,
     // but stop generating fresh embedded progress on save.
     delete data.transientProgress;
+    annotatePortableFilePaths(data, targetPath);
 
     // Delete legacy separate sidecar progress file if present
     try {
@@ -307,6 +377,7 @@ export function registerFilesystemHandlers() {
     const content = await fs.promises.readFile(targetPath, 'utf-8');
     try {
       const data = JSON.parse(content);
+      resolvePortableFilePaths(data, targetPath);
       logger.info(`[FileSystem] Loaded workspace: ${targetPath} (${stats.size} bytes)`);
 
       // Clean up legacy separate progress sidecar file if it exists

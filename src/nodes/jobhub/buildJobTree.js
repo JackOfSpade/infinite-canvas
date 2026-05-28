@@ -1,5 +1,6 @@
-import { structuralEdge } from '../_shared/edgeHelpers';
-import { EventLogger } from '../../utils/EventLogger';
+import { structuralEdge } from '../_shared/edgeHelpers.js';
+import { EventLogger } from '../../utils/EventLogger.js';
+import { jobTitleCompanyUrlKey } from '../../utils/jobIdentity.js';
 
 /**
  * Pure helpers for turning scored jobs + a bucket tree into the React Flow
@@ -144,7 +145,7 @@ export function computeLayoutPositions(nodes, hubId, COL_X, hubPos) {
 // Stable per-job fingerprint. The search-side dedup pass already enforces
 // uniqueness on (title|company); url is defense-in-depth in case future
 // sources surface duplicate listings.
-const keyOf = (job) => `${job?.title}|${job?.company}|${job?.url || ''}`;
+const keyOf = jobTitleCompanyUrlKey;
 
 /**
  * Split scored jobs into:

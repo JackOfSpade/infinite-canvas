@@ -93,6 +93,14 @@ function buildResumeSummary(profile) {
   return `${skills}${profile.experience_years ? `${skills ? ' · ' : ''}${profile.experience_years}y exp` : ''}`.trim();
 }
 
+function buildQueryCacheKey({ resumeFingerprint, targetRole, preferredLocation }) {
+  return JSON.stringify({
+    resumeFingerprint: String(resumeFingerprint || ''),
+    targetRole: String(targetRole || '').trim(),
+    preferredLocation: String(preferredLocation || '').trim(),
+  });
+}
+
 function getSavedAnalysisWarning(meta, currentHubId, currentCanvasFilePath) {
   if (!meta) return '';
   if (meta.canvasFilePath && currentCanvasFilePath && meta.canvasFilePath !== currentCanvasFilePath) {
@@ -1163,9 +1171,13 @@ export function JobHubNode({ id, data }) {
     try {
       updateGlobal(currentId, { errorMessage: null, isRateLimit: false, testModeNote: null });
       let profile = providedProfile;
+      let resumeFingerprint = data.resumeFingerprint || '';
 
       // Pre-flight: check job platform logins before any expensive work.
-      const JOB_LOGIN_IDS = getScopedJobSourceIds(['google', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound']);
+      // linkedin included: without a session, browser enrichment hits an authwall
+      // and all 160 job descriptions come back empty — gating here is cheaper
+      // than a 5+ min scrape that produces nothing useful.
+      const JOB_LOGIN_IDS = getScopedJobSourceIds(['linkedin', 'google', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound']);
       const notLoggedIn = (await Promise.all(
         JOB_LOGIN_IDS.map(async (platformId) => {
           const res = await window.electronAPI.checkJobPlatformAuth?.({ platformId });
@@ -1182,25 +1194,47 @@ export function JobHubNode({ id, data }) {
 
       // Step 1: Parse resume (only when a fresh file path was supplied)
       if (filePath) {
-        updateGlobal(currentId, { hubState: 'parsing' });
-        const parseResult = await window.electronAPI.parseResume({ filePath, nodeId: currentId });
-        if (cancelled()) return;
-        if (!parseResult.success) {
-          const err = new Error(parseResult.error || 'Failed to parse resume');
-          if (parseResult.isRateLimit) err.isRateLimit = true;
-          throw err;
+        let fingerprintResult = null;
+        if (window.electronAPI?.getResumeFingerprint) {
+          fingerprintResult = await window.electronAPI.getResumeFingerprint({ filePath });
+          if (cancelled()) return;
         }
-        profile = parseResult.profile;
+        const nextFingerprint = fingerprintResult?.success ? String(fingerprintResult.fingerprint || '') : '';
+        const canReuseProfile = !!(
+          nextFingerprint &&
+          data.resumeProfile &&
+          data.resumeFingerprint &&
+          data.resumeFingerprint === nextFingerprint
+        );
 
-        updateGlobal(currentId, {
-          hubState: 'querying',
-          resumeProfile: profile,
-          resumeSummary: buildResumeSummary(profile),
-          resumeContext: {
-            skills: profile.skills,
-            experience: profile.experience_years,
-          },
-        });
+        if (canReuseProfile) {
+          profile = data.resumeProfile;
+          resumeFingerprint = nextFingerprint;
+          updateGlobal(currentId, { hubState: 'querying' });
+          EventLogger.log(`[JobHub][${currentId}] Resume unchanged — reusing stored parsed profile`);
+        } else {
+          updateGlobal(currentId, { hubState: 'parsing' });
+          const parseResult = await window.electronAPI.parseResume({ filePath, nodeId: currentId });
+          if (cancelled()) return;
+          if (!parseResult.success) {
+            const err = new Error(parseResult.error || 'Failed to parse resume');
+            if (parseResult.isRateLimit) err.isRateLimit = true;
+            throw err;
+          }
+          profile = parseResult.profile;
+          resumeFingerprint = String(parseResult.fingerprint || nextFingerprint || '');
+
+          updateGlobal(currentId, {
+            hubState: 'querying',
+            resumeProfile: profile,
+            resumeSummary: buildResumeSummary(profile),
+            resumeFingerprint,
+            resumeContext: {
+              skills: profile.skills,
+              experience: profile.experience_years,
+            },
+          });
+        }
       } else {
         updateGlobal(currentId, { hubState: 'querying' });
       }
@@ -1208,23 +1242,52 @@ export function JobHubNode({ id, data }) {
       // Step 2: Query construction
       const activeTargetRole = (data.targetRole || '').trim();
       const activePreferredLocation = (data.preferredLocation || '').trim();
-      const queriesResult = await window.electronAPI.generateJobQueries({
-        profile, nodeId: currentId, targetRole: activeTargetRole, preferredLocation: activePreferredLocation,
+      const queryCacheKey = buildQueryCacheKey({
+        resumeFingerprint,
+        targetRole: activeTargetRole,
+        preferredLocation: activePreferredLocation,
       });
-      if (cancelled()) return;
-      if (!queriesResult.success) {
-        const err = new Error(queriesResult.error || 'Failed to generate queries');
-        if (queriesResult.isRateLimit) err.isRateLimit = true;
-        throw err;
+      const canReuseQueries = !!(
+        profile &&
+        data.queries &&
+        data.queryCacheKey &&
+        data.queryCacheKey === queryCacheKey
+      );
+      let queriesResult = null;
+      if (canReuseQueries) {
+        queriesResult = {
+          success: true,
+          queries: data.queries,
+          queryModel: data.queryModel || null,
+        };
+        EventLogger.log(`[JobHub][${currentId}] Resume/query inputs unchanged — reusing stored search queries`);
+      } else {
+        queriesResult = await window.electronAPI.generateJobQueries({
+          profile, nodeId: currentId, targetRole: activeTargetRole, preferredLocation: activePreferredLocation,
+        });
+        if (cancelled()) return;
+        if (!queriesResult.success) {
+          const err = new Error(queriesResult.error || 'Failed to generate queries');
+          if (queriesResult.isRateLimit) err.isRateLimit = true;
+          throw err;
+        }
       }
       const {
         titleQueries = [], suggestedRoleQueries = [], targetRoleQueries = [],
       } = queriesResult.queries || {};
       const allQueries = [...targetRoleQueries, ...titleQueries, ...suggestedRoleQueries];
+      const queryModel = queriesResult.queryModel || null;
 
       // Step 3: Search
       resolvedDuringSearchRef.current.clear();
-      updateGlobal(currentId, { hubState: 'searching', queryCount: allQueries.length, queries: queriesResult.queries });
+      updateGlobal(currentId, {
+        hubState: 'searching',
+        queryCount: allQueries.length,
+        queries: queriesResult.queries,
+        queryModel,
+        queryCacheKey,
+        resumeFingerprint,
+      });
       const searchResult = await window.electronAPI.searchJobs({
         queries: allQueries,
         nodeId: currentId,
@@ -1401,7 +1464,7 @@ export function JobHubNode({ id, data }) {
         }
       }
     }
-  }, [id, updateGlobal, getNode, getNodes, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, ensureSourceCards, ensureBlockedSourceCards, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss]);
+  }, [id, updateGlobal, getNode, getNodes, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, data.resumeProfile, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, ensureBlockedSourceCards, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss]);
 
   const startProcessing = useCallback((filePath) => runPipeline({ filePath }), [runPipeline]);
   const startProcessingWithProfile = useCallback((profile) => runPipeline({ profile }), [runPipeline]);
@@ -2163,6 +2226,7 @@ export function JobHubNode({ id, data }) {
               resultCount={data.resultCount}
               scrapedCount={data.scrapedCount}
               gatheredCount={data.gatheredCount}
+              queryModel={data.queryModel || null}
               testMode={!!data.testMode}
               targetCount={data.targetCount || 0}
               otherCount={data.otherCount || 0}
