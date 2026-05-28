@@ -6,8 +6,7 @@
  * warning — the user is told to update the scraper code rather than silently
  * getting 0 jobs. There are no fallback chains.
  *
- * Exceptions: Google (legitimately unscrapeable, has paste fallback),
- * Swappa (0 = no model match, not broken), PriceCharting (niche source, 0 is valid).
+ * Exceptions: Swappa (0 = no model match, not broken), PriceCharting (niche source, 0 is valid).
  *
  * Each source exports:
  *   - An extractor JS string (IIFE that runs in page context)
@@ -20,72 +19,6 @@
 // timeout for fast sources (never looser than this seed). `waitMs` is now
 // vestigial — the readiness-stabilization loop in browserPool decides when
 // results are ready, and the pre-read beat is sized from learned timing.
-
-export const GOOGLE_JOBS_CONFIG = {
-  waitMs: 2500,
-  timeoutMs: 25000, // reduced from 45s — Google headless consistently times out; fail fast so the manual-paste UI appears sooner
-  // waitFor intentionally omitted: the selector (.EimVGf / jscontroller="b11o3b") never
-  // appears in bot-throttled sessions, burning the full SELECTOR_WAIT_MS (8s) before the
-  // readiness loop even starts. Without it, MAX_ZERO_READS exits in ~3s and the paste
-  // fallback UI surfaces immediately. Positive sessions rely on firstBeatMs + the loop.
-  waitFor: null,
-  scrollFirst: false,
-  dismissCookies: true,
-  waitUntil: 'domcontentloaded',
-};
-
-// ── Google Jobs ─────────────────────────────────────────────────────────────
-// Card structure (as of 2026-05): .EimVGf root, jscontroller="b11o3b".
-// URL lives on data-share-url (no <a> tags in cards — old card.querySelector('a')
-// was always returning empty). Title/company/location are positional children of
-// the content grouping div (.GoEOPd); bare class-less <span> elements carry
-// posted date and employment type. All obfuscated class names need periodic
-// revalidation when Google rotates its frontend.
-// NOTE: no SITE_CHANGED throw — Google Jobs is legitimately unscrapeable
-// (JS-rendered, obfuscated). 0 results triggers the paste-fallback UI path.
-export const GOOGLE_JOBS_EXTRACTOR = `
-(function() {
-  const jobs = [];
-
-  const cards = document.querySelectorAll('.EimVGf, [jscontroller="b11o3b"]');
-
-  cards.forEach(card => {
-    try {
-      // URL: data-share-url is the stable anchor — cards have no <a> tags
-      const url = card.getAttribute('data-share-url') || '';
-
-      // Title: .tNxQIb is current; [role="heading"] is the semantic fallback
-      const titleEl = card.querySelector('.tNxQIb, [role="heading"], h3');
-      const title = titleEl?.innerText?.trim() || '';
-      if (!title || title === 'Jobs') return;
-
-      // Company + location: positional children of the content grouping div.
-      // nth-child is more resilient than the obfuscated sibling class names.
-      const contentGroup = card.querySelector('.GoEOPd') || titleEl?.parentElement;
-      const contentDivs = contentGroup ? Array.from(contentGroup.querySelectorAll(':scope > div')) : [];
-      const company = contentDivs[1]?.innerText?.trim() || '';
-      const locationRaw = contentDivs[2]?.innerText?.trim() || '';
-      // Strip " • via LinkedIn" / " • via Indeed" suffix
-      const location = locationRaw.split(' • ')[0].trim();
-
-      // Posted date + employment type: bare <span> elements (no class by design)
-      const bareSpans = Array.from(card.querySelectorAll('span:not([class])'))
-        .map(s => s.innerText?.trim()).filter(Boolean);
-      const posted = bareSpans.find(s => /\\d+\\s+(day|week|hour|month)/i.test(s) || s === 'Just now') || '';
-      const empType = bareSpans.find(s => /full[- ]?time|part[- ]?time|contract|intern/i.test(s)) || '';
-
-      jobs.push({
-        title, company, location, salary: '',
-        snippet: empType,
-        url, posted,
-        source: 'google'
-      });
-    } catch {}
-  });
-
-  return jobs;
-})()
-`;
 
 // ── ZipRecruiter ────────────────────────────────────────────────────────────
 
@@ -179,7 +112,7 @@ export const GLASSDOOR_EXTRACTOR = `
       company: employer.shortName || employer.name || value.employerName || '',
       location: value.locationName || value.location || '',
       salary: value.salarySource?.payRange ? (value.salarySource.payRange) : (value.salaryEstimate || ''),
-      snippet: (employer.overallRating ? 'Rating: ' + employer.overallRating + '/5 | ' : '') + (value.jobDescription || '').substring(0, 250),
+      snippet: (employer.overallRating ? 'Rating: ' + employer.overallRating + '/5 | ' : '') + (value.jobDescription || ''),
       url: value.seoJobLink ? ('https://www.glassdoor.com' + value.seoJobLink) : (value.jobLink || ''),
       posted: value.ageInDays != null ? (value.ageInDays + 'd ago') : '',
       source: 'glassdoor'
@@ -248,6 +181,61 @@ export const WELLFOUND_EXTRACTOR = `
   });
 
   if (jobs.length === 0) throw new Error('SITE_CHANGED: wellfound extractor returned 0 — data-testid or styles_* CSS module selectors may have changed');
+  return jobs;
+})()
+`;
+
+// ── Google Jobs ──────────────────────────────────────────────────────────────
+
+export const GOOGLE_JOBS_CONFIG = {
+  waitMs: 2500,
+  timeoutMs: 25000,
+  // waitFor intentionally null — bot-throttled sessions never reach the selector
+  // and we'd hang for the full timeout. Scrolling is handled by SCROLL_SOURCES
+  // in manualScraper.js after domcontentloaded fires.
+  waitFor: null,
+  scrollFirst: false,
+  dismissCookies: true,
+  waitUntil: 'domcontentloaded',
+};
+
+// Google Jobs renders cards client-side inside the ibp=htl;jobs search panel.
+// Class names like .tNxQIb / .EimVGf are obfuscated hashes that rotate on
+// deploys — always pair them with semantic fallbacks ([role="heading"] etc.).
+// data-share-url is the most stable URL anchor; cards have no <a> tags.
+//
+// Does NOT throw SITE_CHANGED on 0 — bot detection legitimately blocks the
+// jobs panel entirely; 0 means "blocked", not "broken selectors".
+export const GOOGLE_JOBS_EXTRACTOR = `
+(function() {
+  const jobs = [];
+  const cards = document.querySelectorAll('.EimVGf, [jscontroller="b11o3b"]');
+
+  cards.forEach(card => {
+    try {
+      const url = card.getAttribute('data-share-url') || '';
+
+      const titleEl = card.querySelector('.tNxQIb, [role="heading"], h3');
+      const title = titleEl?.innerText?.trim() || '';
+      if (!title || title === 'Jobs') return;
+
+      // Company + location: positional children of the content grouping div.
+      const contentGroup = card.querySelector('.GoEOPd') || titleEl?.parentElement;
+      const contentDivs = contentGroup ? Array.from(contentGroup.querySelectorAll(':scope > div')) : [];
+      const company = contentDivs[1]?.innerText?.trim() || '';
+      const locationRaw = contentDivs[2]?.innerText?.trim() || '';
+      const location = locationRaw.split(' • ')[0].trim();
+
+      // Posted date + employment type from bare <span> elements (no class attr).
+      const bareSpans = Array.from(card.querySelectorAll('span:not([class])'))
+        .map(s => s.innerText?.trim()).filter(Boolean);
+      const posted = bareSpans.find(s => /\\d+\\s+(day|week|hour|month)/i.test(s) || s === 'Just now') || '';
+      const empType = bareSpans.find(s => /full[- ]?time|part[- ]?time|contract|intern/i.test(s)) || '';
+
+      jobs.push({ title, company, location, salary: '', snippet: empType, url, posted, source: 'google' });
+    } catch {}
+  });
+
   return jobs;
 })()
 `;

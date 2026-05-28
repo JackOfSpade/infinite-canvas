@@ -162,7 +162,7 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
       const awayDesc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
       if (awayDesc) {
         const job = keyToJob.get(awayVjk) || pageJobs[i];
-        if (job) { job.description = awayDesc; enriched++; }
+        if (job) { job.description = awayDesc; job.snippet = awayDesc; enriched++; }
       } else {
         const sigs = await getChallengeSignals(page);
         if (sigs.isChallenge) {
@@ -184,7 +184,7 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
     const description = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
     if (description) {
       const job = keyToJob.get(vjk) || pageJobs[i];
-      if (job) { job.description = description; enriched++; }
+      if (job) { job.description = description; job.snippet = description; enriched++; }
     } else {
       // Blank panel — may be early CF interference before the full challenge page appears.
       const sigs = await getChallengeSignals(page);
@@ -708,7 +708,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
             break;
           }
           const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
-          if (desc) { job.description = desc; reEnriched++; }
+          if (desc) { job.description = desc; job.snippet = desc; reEnriched++; }
           if (ri < missingDescJobs.length - 1) {
             await new Promise(r => setTimeout(r, 800 + Math.round(Math.random() * 600)));
           }

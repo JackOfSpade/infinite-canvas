@@ -1,41 +1,43 @@
 /**
  * Jobs IPC handlers — resume parsing, multi-source job search, AI scoring.
- * 12 Sources: Google, Indeed, LinkedIn, RemoteOK, WeWorkRemotely,
- *             ZipRecruiter, Glassdoor, Dice, Wellfound,
- *             Greenhouse API, Lever API, USAJobs API
+ * 9 Sources: Google, Indeed, LinkedIn, RemoteOK, WeWorkRemotely,
+ *            ZipRecruiter, Glassdoor, Dice, Wellfound, USAJobs
  */
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { callLLMDocument, callLLMText } from './llm.js';
 import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, BUCKETING_PLACEMENT_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA } from './aiSchemas.js';
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
-import { clearBrowserSession } from './stealthBrowser.js';
+import { clearBrowserSession, openLoginWindow } from './stealthBrowser.js';
 import { scrapeManualSources } from './browser/manualScraper.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
 import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES, MEDIUM_TEST, FULL_TEST } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
-  GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
   ZIPRECRUITER_EXTRACTOR, ZIPRECRUITER_CONFIG,
   GLASSDOOR_EXTRACTOR, GLASSDOOR_CONFIG,
   WELLFOUND_EXTRACTOR, WELLFOUND_CONFIG,
+  GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
 } from '../extractors/jobs.js';
 import {
   fetchLinkedInJobs,
-  fetchGreenhouseJobs,
-  fetchLeverJobs,
   fetchUSAJobs,
   fetchRemoteOKJobs,
   fetchWeWorkRemotelyJobs,
   fetchDiceListings,
+  enrichDiceDescriptions,
+  enrichLinkedInDescriptions,   // eslint-disable-line no-unused-vars — kept as fetch-based reference
+  enrichLinkedInDescriptionsBrowser,
+  warmDiceApiKey,
   buildGeoTermSet,
 } from '../extractors/apiExtractors.js';
 import { fetchIndeedListingsBrowser } from '../extractors/indeedBrowser.js';
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory } from './jobsHistory.js';
 import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
 import { getJobsSettings } from './settings.js';
-import { readStatusCache } from './accounts.js';
+import { readStatusCache, verifySellMonitorLogin } from './accounts.js';
 import { getScopedJobSourceIds } from '../../src/utils/jobSourceScope.js';
 import { dedupeJobsByKey, jobTitleCompanyKey } from '../../src/utils/jobIdentity.js';
 
@@ -51,6 +53,45 @@ const JOB_ANALYSIS_SNAPSHOT_VERSION = 1;
 const JOB_ANALYSIS_DIR = 'job-search';
 const JOB_ANALYSIS_JSON = 'job-search-last-scrape.json';
 const JOB_ANALYSIS_MD = 'job-search-last-prompt.md';
+
+async function assertReadableResumeFile(filePath) {
+  const displayName = filePath ? path.basename(filePath) : 'Selected item';
+  let stats = null;
+  try {
+    stats = await fs.promises.stat(filePath);
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      throw new Error(`${displayName} could not be found. Pick a resume file and try again.`);
+    }
+    if (err?.code === 'EPERM' || err?.code === 'EACCES') {
+      throw new Error(`${displayName} can't be accessed — permission denied. Check the file's permissions, or drop a different resume.`);
+    }
+    throw err;
+  }
+  if (!stats.isFile()) {
+    if (/\.app$/i.test(displayName)) {
+      throw new Error(`${displayName} is a macOS app, not a resume. Drop a PDF, DOCX, TXT, or image of your resume instead.`);
+    }
+    throw new Error(`${displayName} is a folder or package, not a resume file. Drop a PDF, DOCX, TXT, or image of your resume instead.`);
+  }
+  try {
+    await fs.promises.access(filePath, fs.constants.R_OK);
+  } catch {
+    throw new Error(`${displayName} exists but can't be read — the file may be locked or have restrictive permissions. Try again, or drop a different resume.`);
+  }
+  return { displayName, stats };
+}
+
+async function computeFileSha256(filePath) {
+  const hash = crypto.createHash('sha256');
+  await new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', chunk => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return hash.digest('hex');
+}
 
 function getJobAnalysisPaths() {
   const dir = path.join(app.getPath('userData'), JOB_ANALYSIS_DIR);
@@ -265,7 +306,7 @@ export function getJobsTelemetry() {
 const ALL_SOURCE_IDS = [
   'google', 'indeed', 'linkedin', 'remoteok', 'weworkremotely',
   'ziprecruiter', 'glassdoor', 'dice', 'wellfound',
-  'greenhouse', 'lever', 'usajobs',
+  'usajobs',
 ];
 const ACTIVE_SOURCE_IDS = getScopedJobSourceIds(ALL_SOURCE_IDS);
 
@@ -273,15 +314,6 @@ const ACTIVE_SOURCE_IDS = getScopedJobSourceIds(ALL_SOURCE_IDS);
 // - indeed: Scrapfly REST API with ASP, cache, and a cost budget (no local browser).
 // - remoteok: Open JSON API at remoteok.com/api (zero WAF)
 // - weworkremotely: RSS feed at weworkremotely.com/remote-jobs.rss (zero WAF)
-
-// Google Jobs chip parameter: closest discrete bucket ≥ requested age.
-// Sources that take a raw day count get the number unmodified.
-function googleDateChip(days) {
-  if (days <= 1) return 'today';
-  if (days <= 3) return '3days';
-  if (days <= 7) return 'week';
-  return 'month';
-}
 
 // Human "reading" pause between page turns within a paginating source's
 // session (min/max ms, jittered in the browser pool). Speed is intentionally
@@ -349,7 +381,6 @@ function makeEmptyPageStop() {
 // LinkedIn has been moved to the API pool (fetchLinkedInJobs) — no Puppeteer needed.
 function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
-  const gChip = googleDateChip(days);
   // Wellfound is the one browser source whose URL is a /role/{slug} SEO page, not
   // a free-text search box. The query carries the candidate's city ("Cinematographer
   // Denver"), and slugging the whole thing produced "/role/cinematographer-denver"
@@ -378,10 +409,12 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
   // yields duplicates, which the cross-source dedup removes downstream (cheaper
   // than a seen-set stop that can false-positive under relevance sort and prune
   // real jobs from deeper pages).
-  // Google's embedded jobs widget can't be URL-paginated, so it stays 1 page.
   const extractors = {
+    // Google Jobs: single-page scroll-loaded panel (ibp=htl;jobs). No pagination —
+    // scroll logic is handled by SCROLL_SOURCES in manualScraper.js. Does not throw
+    // SITE_CHANGED on 0 (bot detection can block the panel entirely).
     google:          { extractor: GOOGLE_JOBS_EXTRACTOR,  config: GOOGLE_JOBS_CONFIG,  maxPages: 1,
-                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}&ibp=htl;jobs&htichips=date_posted:${gChip}` },
+                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(q + ' jobs')}&ibp=htl;jobs` },
     ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, maxPages: JOB_MAX_PAGES,
                        urlFn: (q, page) => `https://www.ziprecruiter.com/jobs-search${page > 0 ? `/${page + 1}` : ''}?search=${encodeURIComponent(q)}&days=${days}` },
     // Glassdoor migrated to Next.js with infinite-scroll "Show more" pagination —
@@ -472,12 +505,47 @@ function selectTopAcrossSources(jobs, n) {
  * Fetch API-based sources in parallel (no Puppeteer needed).
  * @returns {{ sourceId: string, jobs: object[], error?: string }[]}
  */
-// Fan-out a single-query fetcher across all queries concurrently, merge and
-// deduplicate by title+company. Returns the same { items, warning } shape.
-async function queryFanOut(queries, fetcher, signal) {
-  const results = await Promise.all(
-    queries.map(q => fetcher(q, signal).catch(() => ({ items: [] })))
-  );
+// Fan-out a single-query fetcher across all queries, merge and deduplicate by
+// title+company. Returns the same { items, warning } shape.
+//
+// `concurrency`    — max simultaneous in-flight fetcher calls (default: unbounded).
+// `minIntervalMs`  — minimum ms between consecutive dispatch times, shared across
+//                    all workers. Prevents request bursts that trigger per-key
+//                    rate limits (e.g. Dice returns 500 when several queries fire
+//                    within the same second). JS is single-threaded between awaits,
+//                    so reading + bumping `nextSlotTime` is atomic — no two workers
+//                    can claim the same slot.
+async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, minIntervalMs = 0) {
+  let results;
+  if (!isFinite(concurrency) || concurrency >= queries.length) {
+    // Fast path — all concurrent (original behaviour for most sources)
+    results = await Promise.all(
+      queries.map(q => fetcher(q, signal).catch(() => ({ items: [] })))
+    );
+  } else {
+    results = new Array(queries.length);
+    let next = 0;
+    // Shared dispatch clock: each worker atomically claims the next available
+    // slot, then waits until that slot time before firing its request.
+    let nextSlotTime = minIntervalMs > 0 ? Date.now() : 0;
+    async function worker() {
+      while (next < queries.length) {
+        const idx = next++;
+        if (minIntervalMs > 0) {
+          // Claim the next slot. `Math.max` handles the case where a worker
+          // re-enters after a long retry — it doesn't skip ahead of a slot
+          // already claimed by another worker, but it also doesn't stall
+          // behind a slot that's already in the past.
+          const slotTime = Math.max(Date.now(), nextSlotTime);
+          nextSlotTime = slotTime + minIntervalMs;
+          const waitMs = slotTime - Date.now();
+          if (waitMs > 0) await new Promise(res => setTimeout(res, waitMs));
+        }
+        results[idx] = await fetcher(queries[idx], signal).catch(() => ({ items: [] }));
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(concurrency, queries.length) }, worker));
+  }
   const items = dedupeJobsByKey(
     results.flatMap(r => r?.items || []),
     jobTitleCompanyKey,
@@ -509,12 +577,21 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
       if (sender && !sender.isDestroyed()) sender.send('job-source-progress', { nodeId, sourceId: 'indeed', status: 'searching', count: 0, detail });
     }) },
     { sourceId: 'linkedin',      fn: (s) => fetchLinkedInJobs(queries, s, days) },
-    { sourceId: 'greenhouse',    fn: (s) => fetchGreenhouseJobs(queries, s, geoTerms) },
-    { sourceId: 'lever',         fn: (s) => fetchLeverJobs(queries, s, geoTerms) },
     { sourceId: 'usajobs',       fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days, location), s) },
     { sourceId: 'remoteok',      fn: (s) => fetchRemoteOKJobs(queries, s, geoTerms) },
     { sourceId: 'weworkremotely',fn: (s) => fetchWeWorkRemotelyJobs(queries, s, geoTerms) },
-    { sourceId: 'dice',          fn: (s) => queryFanOut(queries, (q, sig) => fetchDiceListings(q, location, sig, days), s) },
+    { sourceId: 'dice',          fn: async (s) => {
+      // Pre-warm the key before fan-out so all queries use a fresh key.
+      // Dice rate-limits by request rate (not just concurrency): firing several
+      // requests within the same second triggers 500 even with a fresh key.
+      // minIntervalMs=350 spaces queries ~350ms apart (12 queries ≈ 4s total),
+      // keeping each request well within the per-key burst window.
+      // Enrichment (detail fetch) is deferred to after history dedup so we
+      // only fetch descriptions for jobs that will actually be scored/shown.
+      await warmDiceApiKey();
+      logger.info(`[Dice API] Fan-out starting: ${queries.length} queries, 350ms interval`);
+      return queryFanOut(queries, (q, sig) => fetchDiceListings(q, location, sig, days), s, 4, 350);
+    }},
   ].filter(task => ACTIVE_SOURCE_IDS.includes(task.sourceId));
 
   // Notify frontend that API sources are starting
@@ -564,22 +641,8 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
 export function registerJobsHandlers() {
   handleSafe('parse-resume', async (event, { filePath, nodeId }, signal) => {
     logger.info(`[Jobs][${nodeId}] Parsing resume:`, filePath);
-    const displayName = filePath ? path.basename(filePath) : 'Selected item';
-    let stats = null;
-    try {
-      stats = await fs.promises.stat(filePath);
-    } catch (err) {
-      if (err?.code === 'ENOENT') {
-        throw new Error(`${displayName} could not be found. Pick a resume file and try again.`);
-      }
-      throw err;
-    }
-    if (!stats.isFile()) {
-      if (/\.app$/i.test(displayName)) {
-        throw new Error(`${displayName} is a macOS app, not a resume. Drop a PDF, DOCX, TXT, or image of your resume instead.`);
-      }
-      throw new Error(`${displayName} is a folder or package, not a resume file. Drop a PDF, DOCX, TXT, or image of your resume instead.`);
-    }
+    await assertReadableResumeFile(filePath);
+    const fingerprint = await computeFileSha256(filePath);
     const profile = await callLLMDocument(filePath, `
 Analyze this resume/CV thoroughly. Return a JSON object with:
 {
@@ -595,7 +658,17 @@ Analyze this resume/CV thoroughly. Return a JSON object with:
 Extract everything you can find. Be thorough.`, { signal, task: 'resume-parse', responseSchema: RESUME_PARSE_SCHEMA });
 
     logger.info(`[Jobs][${nodeId}] Resume parsed:`, profile.titles?.join(', '));
-    return { profile };
+    return { profile, fingerprint };
+  });
+
+  handleSafe('get-resume-fingerprint', async (event, { filePath }) => {
+    const { stats } = await assertReadableResumeFile(filePath);
+    const fingerprint = await computeFileSha256(filePath);
+    return {
+      fingerprint,
+      size: stats.size,
+      mtimeMs: stats.mtimeMs,
+    };
   });
 
   handleSafe('generate-job-queries', async (event, { profile, targetRole, preferredLocation }, signal) => {
@@ -613,6 +686,7 @@ No preferred search location was provided. Do NOT add location terms to queries 
       ? `"targetRoleQueries": ["3-5 queries that hunt specifically for '${role}' postings. Include seniority + remoteness variants (e.g. '${role} senior', '${role} remote', '${role} junior'). If a preferred search location was provided, you may include it in 1-2 entries where it improves precision. These are the highest-priority queries."]`
       : `"targetRoleQueries": []`;
 
+    const queryMeta = {};
     const result = await callLLMText(`
 You are a career strategist. Given this professional profile, generate search queries for a job search.${targetBlock}${locationBlock}
 
@@ -628,9 +702,9 @@ Return a JSON object with four arrays of search query strings:
   ${targetQueryInstruction}
 }
 
-Be creative with suggestedRoleQueries — think about what career directions their skills unlock that they might not have considered.${role ? ` Always include the literal string ${role} in at least one targetRoleQueries entry.` : ''}`, { signal, task: 'job-query-generation', responseSchema: JOB_QUERY_GENERATION_SCHEMA });
+Be creative with suggestedRoleQueries — think about what career directions their skills unlock that they might not have considered.${role ? ` Always include the literal string ${role} in at least one targetRoleQueries entry.` : ''}`, { signal, task: 'job-query-generation', responseSchema: JOB_QUERY_GENERATION_SCHEMA, meta: queryMeta });
 
-    return { queries: result };
+    return { queries: result, queryModel: queryMeta.model || null };
   });
 
   handleSafe('get-last-job-analysis-snapshot', async () => {
@@ -689,7 +763,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     }
 
     // Gate: require verified login for all browser-scraped job platforms.
-    const BROWSER_JOB_PLATFORMS = getScopedJobSourceIds(['google', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound']);
+    const BROWSER_JOB_PLATFORMS = getScopedJobSourceIds(['indeed', 'glassdoor', 'ziprecruiter', 'wellfound']);
     const cache = await readStatusCache();
     const notLoggedIn = BROWSER_JOB_PLATFORMS.filter(id => !cache[id]?.connected);
     if (notLoggedIn.length > 0) {
@@ -951,6 +1025,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     let historyDropped = 0;
     if (canvasFilePath) {
       const history = await loadJobsHistory(canvasFilePath);
+      logger.info(`[Jobs][${nodeId}] History: ${history.length} entries loaded from ${path.basename(canvasFilePath)}`);
       const result = dedupAgainstHistory(ageFiltered, history);
       kept = result.kept;
       historyDropped = result.removed;
@@ -958,6 +1033,60 @@ Be creative with suggestedRoleQueries — think about what career directions the
       // mark these jobs as seen. appendJobsHistory deduplicates internally,
       // so the renderer-side write after scoring is a safe no-op for these rows.
       appendJobsHistory(canvasFilePath, kept).catch(() => {});
+    } else {
+      logger.info(`[Jobs][${nodeId}] History: skipped (no canvas path)`);
+    }
+
+    // Enrich Dice jobs with full descriptions — runs after all filtering so we
+    // only fetch detail pages for jobs that will actually be scored/shown.
+    const diceKept = kept.filter(j => j.source === 'dice');
+    if (diceKept.length > 0) {
+      const enriched = await enrichDiceDescriptions(diceKept, combinedSignal);
+      const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
+      kept = kept.map(j => j.source === 'dice' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
+    }
+
+    // Enrich LinkedIn jobs with full descriptions via the shared stealth browser.
+    // Plain fetch() returns HTTP 999; the browser bypasses that wall.
+    // One tab is opened on the already-running browser, navigated through each
+    // job URL sequentially, then closed. Stops early on a login wall.
+    const linkedinKept = kept.filter(j => j.source === 'linkedin');
+    if (linkedinKept.length > 0) {
+      // Re-enter 'searching' before browser enrichment so the source card stays
+      // visible and its dismiss timer is cancelled. Without this, the card gets
+      // its 'done' event when the API fetch finishes (10+ min ago), then the
+      // 10 s grace fires and the card disappears while the hub is still running.
+      emitProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: linkedinKept.length, detail: 'enriching descriptions' });
+      const { jobs: enriched, loginWall, loginWallUrl } = await enrichLinkedInDescriptionsBrowser(linkedinKept, combinedSignal);
+      const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
+      kept = kept.map(j => j.source === 'linkedin' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
+
+      if (loginWall) {
+        // LinkedIn's session has expired — surface this as a user-actionable
+        // error on the source card so the user knows they need to log in again.
+        const sessionWarning = {
+          code: 'linkedin-session-expired',
+          severity: 'block',
+          shortLabel: 'Session expired',
+          evidence: loginWallUrl ? `Redirected to: ${loginWallUrl.slice(0, 120)}` : 'LinkedIn requires login',
+          suggestion: 'Click Solve to log in — descriptions will be re-fetched automatically.',
+        };
+        emitProgress({
+          nodeId,
+          sourceId: 'linkedin',
+          count: linkedinKept.length,
+          status: 'error',
+          url: 'https://www.linkedin.com/login',
+          warning: sessionWarning,
+        });
+        // Include in scrapeWarnings so the JobHub done-state panel surfaces it too.
+        scrapeWarnings.push({ sourceId: 'linkedin', url: loginWallUrl || null, ...sessionWarning });
+      } else {
+        // Emit final done so the card transitions to its terminal state and the
+        // dismiss timer restarts (10 s grace after enrichment completes, not after
+        // the API fetch).
+        emitProgress({ nodeId, sourceId: 'linkedin', count: linkedinKept.length, status: 'done' });
+      }
     }
 
     // Newest posted first. Deep pagination gathers across many pages and several
@@ -1496,12 +1625,106 @@ RULES:
   handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, canvasFilePath, maxAgeDays, secondTabUrl } = {}, signal) => {
     if (!url) throw new Error('resolve-job-source requires a url');
     logger.info(`[Jobs][${nodeId}] User opening resolve window for ${sourceId}: ${url}${secondTabUrl ? ' (2-tab)' : ''}`);
+
+    // LinkedIn session expiry: the captcha-resolve window auto-closes immediately
+    // on a login page (no captcha widgets + body text present → fires "cleared").
+    // Route through the proper accounts login window instead, which waits for the
+    // user to actually sign in and then verifies the session via the /feed URL.
+    // After a successful login, re-enrich the LinkedIn jobs that came back with
+    // empty descriptions — the hub merge logic replaces existing LinkedIn jobs
+    // with the returned items, so returning enriched jobs here means the user
+    // does not need to re-run the full 5+ minute search.
+    const isLinkedInLogin = sourceId === 'linkedin' && /\/(login|authwall)/i.test(url);
+    if (isLinkedInLogin) {
+      // ── TEMP: LinkedIn account restricted — ID verification gate ────────────
+      // Remove this block once account is confirmed restored.
+      const LINKEDIN_ID_VERIFY_GATE = true;
+      if (LINKEDIN_ID_VERIFY_GATE) {
+        const sendProgress = (payload) => event.sender?.send?.('source-progress', payload);
+        sendProgress({
+          nodeId,
+          sourceId: 'linkedin',
+          status: 'error',
+          url: 'https://www.linkedin.com/checkpoint/challenge/verify',
+          warning: {
+            code: 'linkedin-id-verify-required',
+            severity: 'block',
+            shortLabel: 'ID verification',
+            evidence: 'LinkedIn has temporarily restricted this account and requires government-issued ID verification.',
+            suggestion: 'Complete verification at linkedin.com first, then click Solve to log in.',
+          },
+        });
+        return { resolved: false, items: [], nextBlockedUrl: null };
+      }
+      // ── END TEMP ─────────────────────────────────────────────────────────────
+
+      await openLoginWindow('linkedin', event.sender);
+      const verdict = await verifySellMonitorLogin('linkedin');
+      logger.info(`[Jobs][${nodeId}] LinkedIn login window closed — session ${verdict.connected ? 'verified' : 'not verified'}: ${verdict.reason}`);
+
+      if (!verdict.connected) {
+        return { resolved: false, items: [], nextBlockedUrl: null };
+      }
+
+      // Session confirmed — re-enrich LinkedIn jobs that still have empty
+      // descriptions. The last-scrape snapshot (written before AI scoring)
+      // contains the raw job objects; filter for this hub's LinkedIn jobs and
+      // run browser enrichment now that the session cookie is live.
+      const sendProgress = (payload) => event.sender?.send?.('source-progress', payload);
+      let items = [];
+      try {
+        const { snapshot } = await loadJobAnalysisSnapshot();
+        // Guard against a snapshot from a different hub (e.g. user ran hub B
+        // after hub A's session-expired card was left open).
+        const snapshotIsThisHub = !snapshot.sourceHubId || snapshot.sourceHubId === nodeId;
+        const allLinkedIn = snapshotIsThisHub
+          ? (snapshot?.jobs || []).filter(j => j.source === 'linkedin')
+          : [];
+        const needEnrich = allLinkedIn.filter(j => !j.snippet || j.snippet.length < 100);
+
+        if (needEnrich.length > 0) {
+          logger.info(`[Jobs][${nodeId}] LinkedIn re-enrichment: ${needEnrich.length}/${allLinkedIn.length} job(s) with empty descriptions`);
+          sendProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: needEnrich.length, detail: 're-enriching descriptions' });
+          const { jobs: enriched, loginWall: wall2 } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal);
+          if (wall2) {
+            // Session verification was optimistic — still hitting the wall.
+            logger.warn(`[Jobs][${nodeId}] LinkedIn re-enrichment hit login wall — session may have expired between verify and enrichment`);
+            sendProgress({
+              nodeId, sourceId: 'linkedin', count: needEnrich.length, status: 'error',
+              url: 'https://www.linkedin.com/login',
+              warning: { code: 'linkedin-session-expired', severity: 'block', shortLabel: 'Session expired', evidence: 'Login wall hit during re-enrichment', suggestion: 'Click Solve to log in again.' },
+            });
+            return { resolved: false, items: [], nextBlockedUrl: null };
+          }
+          // Merge enriched results back into the full LinkedIn set (keeps jobs
+          // that were already enriched before the wall was hit).
+          const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
+          items = allLinkedIn.map(j => enrichedByUrl.get(j.url) || j);
+          sendProgress({ nodeId, sourceId: 'linkedin', count: items.length, status: 'done' });
+          logger.info(`[Jobs][${nodeId}] LinkedIn re-enrichment complete: ${enriched.length} enriched, ${items.length} total returning`);
+        } else if (allLinkedIn.length > 0) {
+          // All jobs already have descriptions — return them so the hub merge
+          // still replaces the pending set (clears the error state cleanly).
+          logger.info(`[Jobs][${nodeId}] LinkedIn session active — all ${allLinkedIn.length} jobs already have descriptions`);
+          items = allLinkedIn;
+          sendProgress({ nodeId, sourceId: 'linkedin', count: allLinkedIn.length, status: 'done' });
+        } else {
+          logger.warn(`[Jobs][${nodeId}] LinkedIn re-enrichment: snapshot has no LinkedIn jobs for this hub (sourceHubId=${snapshot.sourceHubId}) — returning empty items`);
+        }
+      } catch (err) {
+        // Snapshot unreadable or malformed — fall through with items: [].
+        // The card will clear (resolved: true) but no jobs are replaced.
+        logger.warn(`[Jobs][${nodeId}] LinkedIn re-enrichment skipped — snapshot unavailable: ${err.message}`);
+      }
+
+      return { resolved: true, items, nextBlockedUrl: null };
+    }
+
     // Map sourceId → the same extractor JS used by buildJobTasks. Only the
     // scrape sources (those needing Puppeteer) have an extractor here;
     // API sources don't expose a Solve button so this lookup never miss-
     // fires for them.
     const SOURCE_EXTRACTORS = {
-      google:       GOOGLE_JOBS_EXTRACTOR,
       ziprecruiter: ZIPRECRUITER_EXTRACTOR,
       glassdoor:    GLASSDOOR_EXTRACTOR,
       wellfound:    WELLFOUND_EXTRACTOR,

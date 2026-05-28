@@ -10,7 +10,8 @@
  */
 import { logger } from '../logger.js';
 import { queueScrape } from '../ipc/browserPool.js';
-import { getRandomUA, refreshDiceApiKey } from '../ipc/stealthBrowser.js';
+import { getRandomUA, refreshDiceApiKey, getStealthBrowser } from '../ipc/stealthBrowser.js';
+import { humanDelay } from '../utils/humanDelay.js';
 import { getDiceApiKey, getJobsSettings } from '../ipc/settings.js';
 import { htmlToText } from 'html-to-text';
 import { JSDOM } from 'jsdom';
@@ -27,6 +28,7 @@ import { jobTitleCompanyLocationKey } from '../../src/utils/jobIdentity.js';
 // magic literals and leaves a single hook to switch on learning later.
 const API_TIMEOUT_SEEDS = {
   'linkedin-api':   10000,
+  'linkedin-detail': 15000,
   'greenhouse-api':  8000,
   'lever-api':       8000,
   'usajobs-api':    10000,
@@ -189,6 +191,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
       const cardPattern = /<li[\s\S]*?<\/li>/gi;
       const cards = html.match(cardPattern) || [];
 
+      let pageUrlMisses = 0;
       const before = allJobs.length;
       for (const card of cards) {
         try {
@@ -197,23 +200,41 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
           const companyMatch = card.match(/<h4[^>]*class="[^"]*base-search-card__subtitle[^"]*"[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i) ||
                                card.match(/<h4[^>]*>([\s\S]*?)<\/h4>/i);
           const locationMatch = card.match(/<span[^>]*class="[^"]*job-search-card__location[^"]*"[^>]*>([\s\S]*?)<\/span>/i);
-          const linkMatch = card.match(/<a[^>]*class="[^"]*base-card__full-link[^"]*"[^>]*href="([^"]+)"/i) ||
-                            card.match(/href="(https:\/\/www\.linkedin\.com\/jobs\/view\/[^"]+)"/i);
+          // Try multiple href-extraction strategies in order of specificity:
+          // 1. class="base-card__full-link" followed by href (common order)
+          // 2. href followed by class="base-card__full-link" (reversed attribute order)
+          // 3. Any absolute linkedin.com/jobs/view href
+          // 4. Any relative /jobs/view href → prepend domain
+          const linkMatch =
+            card.match(/<a[^>]*class="[^"]*base-card__full-link[^"]*"[^>]*href="([^"]+)"/i) ||
+            card.match(/<a[^>]*href="([^"]+)"[^>]*class="[^"]*base-card__full-link[^"]*"/i) ||
+            card.match(/href="(https:\/\/www\.linkedin\.com\/jobs\/view\/[^"]+)"/i) ||
+            card.match(/href="(\/jobs\/view\/[^"?]+)/i);
           const dateMatch = card.match(/<time[^>]*datetime="([^"]+)"[^>]*>([\s\S]*?)<\/time>/i);
 
           const title = stripHtml(titleMatch?.[1] || '').trim();
           if (!title) continue;
 
-          const url = linkMatch?.[1]?.split('?')[0] || '';
+          let rawUrl = linkMatch?.[1]?.split('?')[0] || '';
+          // Normalize relative /jobs/view/ paths to absolute URLs
+          if (rawUrl.startsWith('/')) rawUrl = `https://www.linkedin.com${rawUrl}`;
+          const url = rawUrl;
+          if (!url) pageUrlMisses++;
           if (url && seenUrls.has(url)) continue; // cross-query dedup by job URL
           if (url) seenUrls.add(url);
+
+          // LinkedIn cards occasionally include a short description excerpt in
+          // <p class="job-search-card__snippet">. It's ~100–200 chars — not a
+          // full JD, but better than nothing and costs zero extra requests.
+          const snippetMatch = card.match(/<p[^>]*class="[^"]*job-search-card__snippet[^"]*"[^>]*>([\s\S]*?)<\/p>/i);
+          const snippet = snippetMatch ? stripHtml(snippetMatch[1]).trim() : '';
 
           allJobs.push({
             title,
             company: stripHtml(companyMatch?.[1] || companyMatch?.[2] || '').trim(),
             location: stripHtml(locationMatch?.[1] || '').trim(),
             salary: '',
-            snippet: '',
+            snippet,
             url,
             posted: dateMatch?.[2] ? stripHtml(dateMatch[2]).trim() : (dateMatch?.[1] || ''),
             source: 'linkedin',
@@ -221,6 +242,11 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
         } catch {
           // Skip malformed cards
         }
+      }
+
+      // Log URL extraction misses so we can diagnose degraded card HTML.
+      if (pageUrlMisses > 0) {
+        logger.warn(`[LinkedIn API] Query ${qi + 1} page ${start / 25}: ${pageUrlMisses} card(s) had no extractable URL`);
       }
 
       // Page added nothing new → results exhausted (or a soft block served an empty
@@ -233,6 +259,350 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
   // slice silently dropped in-window jobs (the API analogue of the browser walk's
   // `ceiling` stop); the bug-report funnel flags that so it isn't a silent miss.
   return { items: allJobs.slice(0, JOB_RESULT_CAP), warning, gathered: allJobs.length };
+}
+
+/**
+ * Second-pass enrichment: fetch full job descriptions from LinkedIn public
+ * job detail pages for each job in the already-deduped list.
+ *
+ * LinkedIn's guest search API (/jobs-guest/...) returns no description field.
+ * Job detail pages (linkedin.com/jobs/view/{id}) theoretically server-render a
+ * JobPosting JSON-LD schema with the full description, but LinkedIn returns
+ * HTTP 999 to plain Node.js fetch() — a browser (Puppeteer) would be needed
+ * to bypass this. This function is kept in place for future Puppeteer upgrade
+ * and to surface the failure clearly in logs.
+ *
+ * Strategy: parse <script type="application/ld+json"> for a JobPosting entry
+ * and strip its HTML description. Falls back to regex-extracting the
+ * description container div if JSON-LD is absent or malformed.
+ *
+ * Batched at 5 concurrent. Logs failure reasons (status code, anti-bot warning)
+ * so the ring buffer shows exactly why descriptions weren't fetched.
+ *
+ * @param {Array}       jobs   — deduped job objects from fetchLinkedInJobs
+ * @param {AbortSignal} signal — propagated abort signal
+ * @returns {Promise<Array>}   — same jobs with `description` + `snippet` enriched
+ */
+export async function enrichLinkedInDescriptions(jobs, signal) {
+  if (!jobs?.length) return jobs;
+  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
+
+  const BATCH = 5;
+  const enriched = [];
+  let failNonOk = 0;
+  let failNoText = 0;
+  let failNoParse = 0;
+  let firstFailStatus = null;
+  let firstFailWarning = null;
+
+  for (let i = 0; i < jobs.length; i += BATCH) {
+    if (signal?.aborted) break;
+    const batch = jobs.slice(i, i + BATCH);
+    const results = await Promise.all(batch.map(async (job) => {
+      if (!job.url) return job;
+      try {
+        const r = await safeApiFetch(job.url, {
+          headers: {
+            'User-Agent': getRandomUA(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.linkedin.com/jobs/search/',
+          },
+          signal: createTimeoutSignal(signal, apiTimeout('linkedin-detail')),
+        }, 'linkedin');
+        if (!r.ok) {
+          failNonOk++;
+          if (firstFailStatus === null) firstFailStatus = r.status;
+          if (firstFailWarning === null && r.warning) firstFailWarning = r.warning.code || r.warning;
+          return job;
+        }
+        if (!r.text) { failNoText++; return job; }
+
+        // Prefer JSON-LD JobPosting schema — stable across LinkedIn deploys.
+        // LinkedIn includes this for SEO/Google Jobs indexing on all public pages.
+        const ldMatches = [...r.text.matchAll(/<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)];
+        for (const match of ldMatches) {
+          try {
+            const ld = JSON.parse(match[1]);
+            // May be a single object or an array
+            const entries = Array.isArray(ld) ? ld : [ld];
+            for (const entry of entries) {
+              if (entry?.['@type'] !== 'JobPosting') continue;
+              const descHtml = entry.description || '';
+              if (!descHtml) continue;
+              const descText = descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+              if (descText) return { ...job, description: descText, snippet: descText };
+            }
+          } catch {}
+        }
+
+        // Fallback: extract from the description container div.
+        // Class names rotate on deploys — try both known variants.
+        const domMatch = r.text.match(
+          /<div[^>]+class="[^"]*(?:description__text|show-more-less-html__markup)[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
+        );
+        if (domMatch) {
+          const descText = domMatch[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+          if (descText) return { ...job, description: descText, snippet: descText };
+        }
+
+        // Page loaded but no description found — bot-wall or login redirect
+        if (r.warning) {
+          if (firstFailWarning === null) firstFailWarning = r.warning.code || r.warning;
+        }
+        failNoParse++;
+        return job;
+      } catch {
+        return job; // keep existing snippet on error — don't drop the job
+      }
+    }));
+    enriched.push(...results);
+  }
+
+  const withDesc = enriched.filter(j => j.description && j.description.length > 100).length;
+  const failDetail = [
+    failNonOk   > 0 ? `${failNonOk} non-OK (first status: ${firstFailStatus}${firstFailWarning ? `, warning: ${firstFailWarning}` : ''})` : null,
+    failNoText  > 0 ? `${failNoText} empty-body` : null,
+    failNoParse > 0 ? `${failNoParse} loaded-but-no-description${firstFailWarning && failNonOk === 0 ? ` (first warning: ${firstFailWarning})` : ''}` : null,
+  ].filter(Boolean).join(', ');
+  logger.info(`[LinkedIn] Enriched ${enriched.length} jobs — ${withDesc}/${enriched.length} have descriptions${failDetail ? ` — failures: ${failDetail}` : ''}`);
+  return enriched;
+}
+
+/**
+ * Browser-based second-pass enrichment for LinkedIn job descriptions.
+ *
+ * LinkedIn returns HTTP 999 to plain Node.js fetch(), so plain HTTP is a dead
+ * end. This function reuses the already-running shared stealth browser
+ * (getStealthBrowser), opens ONE new page (tab), navigates it sequentially
+ * through each job URL, extracts the JobPosting JSON-LD description, and
+ * closes the tab when done. No browser launch/close overhead per job.
+ *
+ * Stops immediately if a login wall is detected (LinkedIn starts requiring
+ * auth after N rapid navigations). Logs how many succeeded before the wall.
+ *
+ * @param {Array}       jobs   — deduped job objects from fetchLinkedInJobs
+ * @param {AbortSignal} signal — propagated abort signal
+ * @returns {Promise<{ jobs: Array, loginWall: boolean, loginWallUrl: string|null }>}
+ *   jobs       — same jobs array with description + snippet where extractable
+ *   loginWall  — true if enrichment was stopped by a LinkedIn auth redirect
+ *   loginWallUrl — the redirect URL that triggered the wall (for error surfacing)
+ */
+export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
+  if (!jobs?.length) return { jobs, loginWall: false, loginWallUrl: null };
+
+  // Count jobs without URLs before touching the browser — these are silently
+  // skipped in the loop and would otherwise make the success rate look wrong.
+  const noUrlCount = jobs.filter(j => !j.url).length;
+  if (noUrlCount > 0) {
+    logger.warn(`[LinkedIn/Browser] ${noUrlCount}/${jobs.length} jobs have no URL — will be skipped in enrichment`);
+  }
+
+  let browser;
+  try {
+    browser = await getStealthBrowser();
+  } catch (err) {
+    logger.warn(`[LinkedIn/Browser] Cannot get shared browser for enrichment: ${err.message}`);
+    return { jobs, loginWall: false, loginWallUrl: null };
+  }
+
+  // Open the enrichment tab in an isolated context with NO cookies.
+  // When the shared browser context is used (browser.newPage()), the new tab
+  // inherits the LinkedIn login cookies → LinkedIn serves the React SPA version
+  // of job detail pages, which has zero JSON-LD and no server-rendered description.
+  // An isolated context is anonymous to LinkedIn → it serves the guest/SEO version,
+  // which server-renders a full JobPosting JSON-LD block at DOMContentLoaded.
+  // The stealth-browser flags (UA, WebGL, etc.) still apply — the page looks like
+  // a real Chrome tab, just not logged in to LinkedIn.
+  let isolatedCtx;
+  let page;
+  try {
+    isolatedCtx = await browser.createBrowserContext();
+    page = await isolatedCtx.newPage();
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+  } catch (err) {
+    logger.warn(`[LinkedIn/Browser] Cannot open tab for enrichment: ${err.message}`);
+    await isolatedCtx?.close().catch(() => {});
+    return { jobs, loginWall: false, loginWallUrl: null };
+  }
+
+  const enriched = [...jobs];
+  let successCount = 0;
+  let navErrors = 0;
+  let noDesc = 0;
+  let evalErrors = 0;
+  let loginWallAt = null;
+  // The exact URL LinkedIn redirected to when a wall was detected — returned
+  // to the caller so it can surface a user-actionable error on the source card.
+  let loginWallUrl = null;
+  // Capture the first failure's URL + reason for ring-buffer diagnostics.
+  let firstFailNote = null;
+  // Consecutive eval-error counter. LinkedIn's JS-redirect soft block causes
+  // page.evaluate() to throw by navigating away before the evaluate context
+  // resolves — the HTTP-redirect login wall check passes because page.url()
+  // is still the jobs/view URL at that moment. 3+ in a row = stop.
+  let consecutiveEvalErrors = 0;
+  const JS_REDIRECT_WALL_THRESHOLD = 3;
+
+  // Shared login-wall URL pattern. Applied to both the pre-evaluate finalUrl
+  // (HTTP redirects) and the post-evaluate page.url() (JS redirects).
+  const LOGIN_WALL_RE = /\/(login|uas\/|checkpoint|authwall|signup|join|session)\b/i;
+
+  try {
+    for (let i = 0; i < enriched.length; i++) {
+      if (signal?.aborted) break;
+      const job = enriched[i];
+      if (!job.url) continue;
+
+      try {
+        await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+        const finalUrl = page.url();
+
+        // HTTP-redirect login wall: LinkedIn changed the URL to an auth page.
+        if (LOGIN_WALL_RE.test(finalUrl)) {
+          loginWallAt = i;
+          loginWallUrl = finalUrl;
+          logger.warn(`[LinkedIn/Browser] Login wall at job ${i + 1}/${enriched.length} — stopping enrichment (${finalUrl})`);
+          break;
+        }
+
+        // Description extractor — runs inside the page context (no closures).
+        // Tries JSON-LD first (server-rendered for SEO / unauthenticated crawlers),
+        // then falls back to CSS selectors covering both the guest page layout and
+        // the authenticated React SPA layout. Returns ldCount + ldTypes so the
+        // no-desc log is self-diagnosing without a separate browser session.
+        const extractDesc = function () {
+          const pageTitle = (document.title || '').slice(0, 80);
+
+          // ── JSON-LD path ─────────────────────────────────────────────────
+          const ldScripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+          for (const script of ldScripts) {
+            try {
+              const data = JSON.parse(script.textContent || '');
+              const entries = Array.isArray(data) ? data : [data];
+              for (const entry of entries) {
+                if (entry?.['@type'] !== 'JobPosting' || !entry.description) continue;
+                const div = document.createElement('div');
+                div.innerHTML = entry.description;
+                const text = (div.textContent || div.innerText || '').replace(/\s+/g, ' ').trim();
+                if (text.length > 50) return { ok: true, text };
+              }
+            } catch {}
+          }
+
+          // ── CSS-selector path ────────────────────────────────────────────
+          // Covers: guest/unauthenticated view, authenticated app view (current
+          // and older class names). LinkedIn rotates class names on deploys so
+          // keep a broad list; first match with ≥50 chars wins.
+          const sels = [
+            // Authenticated SPA layout (2024 +)
+            '#job-details',
+            '.jobs-description-content__text',
+            '.jobs-description__content',
+            '.jobs-box__html-content',
+            // Guest / older class names
+            '.description__text',
+            '.show-more-less-html__markup',
+          ];
+          for (const sel of sels) {
+            const el = document.querySelector(sel);
+            if (el) {
+              const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+              if (text.length > 50) return { ok: true, text };
+            }
+          }
+
+          // No description — return diagnostics so the log is self-explaining.
+          const ldTypes = ldScripts.slice(0, 4).map(s => {
+            try {
+              const d = JSON.parse(s.textContent);
+              return Array.isArray(d)
+                ? d.map(e => e?.['@type']).filter(Boolean).join('|')
+                : (d?.['@type'] || null);
+            } catch { return 'parse-err'; }
+          }).filter(Boolean);
+          return { ok: false, pageTitle, ldCount: ldScripts.length, ldTypes };
+        };
+
+        const evalCatch = () => {
+          // page.evaluate() throwing means LinkedIn's JS navigated away mid-call.
+          // Capture page.url() synchronously to see the redirect target.
+          const postEvalUrl = page.url();
+          return { ok: false, pageTitle: '(eval error)', evalFailed: true, postEvalUrl };
+        };
+
+        // Guest/SEO page: description is server-rendered in JSON-LD at
+        // domcontentloaded — no hydration wait needed.
+        const result = await page.evaluate(extractDesc).catch(evalCatch);
+
+        if (result.ok) {
+          enriched[i] = { ...job, description: result.text, snippet: result.text };
+          successCount++;
+          consecutiveEvalErrors = 0; // reset streak on success
+        } else if (result.evalFailed) {
+          evalErrors++;
+          consecutiveEvalErrors++;
+          if (firstFailNote === null) {
+            firstFailNote = `eval-error · post-eval URL: ${(result.postEvalUrl || '?').slice(0, 80)} · job: ${finalUrl.slice(0, 60)}`;
+          }
+          // JS-redirect login wall: LinkedIn redirected mid-evaluate.
+          if (LOGIN_WALL_RE.test(result.postEvalUrl || '')) {
+            loginWallAt = i;
+            loginWallUrl = result.postEvalUrl;
+            logger.warn(`[LinkedIn/Browser] JS-redirect login wall at job ${i + 1}/${enriched.length} — redirected to ${result.postEvalUrl}`);
+            break;
+          }
+          // N consecutive eval errors without a URL-matchable redirect → still
+          // treat as a systematic login wall and stop to avoid wasting time.
+          if (consecutiveEvalErrors >= JS_REDIRECT_WALL_THRESHOLD) {
+            loginWallAt = i - (consecutiveEvalErrors - 1);
+            loginWallUrl = result.postEvalUrl || null;
+            logger.warn(`[LinkedIn/Browser] ${consecutiveEvalErrors} consecutive eval errors — JS-redirect login wall presumed, stopping (last post-eval URL: ${result.postEvalUrl})`);
+            break;
+          }
+        } else {
+          noDesc++;
+          consecutiveEvalErrors = 0;
+          if (firstFailNote === null) {
+            const ldDiag = result.ldCount != null
+              ? ` (${result.ldCount} JSON-LD${result.ldTypes?.length ? `: ${result.ldTypes.join(',')}` : ''})`
+              : '';
+            firstFailNote = `no-desc${ldDiag} · title="${result.pageTitle}" · ${finalUrl.slice(0, 80)}`;
+          }
+        }
+      } catch (err) {
+        if (signal?.aborted) break;
+        navErrors++;
+        consecutiveEvalErrors = 0; // nav errors are distinct from eval errors
+        if (firstFailNote === null) {
+          firstFailNote = `nav-error · ${String(err.message || err).slice(0, 100)} · ${job.url.slice(0, 80)}`;
+        }
+      }
+
+      // Brief pause between navigations — only when there are more jobs to visit.
+      // humanDelay gives a log-normal spread around the anchor (~500ms ±20%)
+      // so the cadence looks organic rather than a fixed drumbeat.
+      if (i < enriched.length - 1 && !signal?.aborted && loginWallAt === null) {
+        const hasMoreWithUrl = enriched.slice(i + 1).some(j => j.url);
+        if (hasMoreWithUrl) await new Promise(r => setTimeout(r, humanDelay(500)));
+      }
+    }
+  } finally {
+    // Closing the isolated context also closes its pages and frees cookies.
+    await isolatedCtx?.close().catch(() => {});
+  }
+
+  const attempted = loginWallAt !== null ? loginWallAt : enriched.length;
+  const failParts = [];
+  if (navErrors > 0) failParts.push(`${navErrors} nav-err`);
+  if (evalErrors > 0) failParts.push(`${evalErrors} eval-err`);
+  if (noDesc > 0) failParts.push(`${noDesc} no-desc`);
+  const failSuffix = failParts.length ? ` (${failParts.join(', ')})` : '';
+  const wallSuffix = loginWallAt !== null ? ` — login wall at job ${loginWallAt + 1}, ${enriched.length - loginWallAt - 1} skipped` : '';
+  const firstFailSuffix = firstFailNote !== null ? ` — first fail: ${firstFailNote}` : '';
+  logger.info(`[LinkedIn/Browser] ${successCount}/${attempted} descriptions enriched${failSuffix}${wallSuffix}${firstFailSuffix}`);
+  return { jobs: enriched, loginWall: loginWallAt !== null, loginWallUrl };
 }
 
 // ── Shared query-relevance filter (board/API sources) ────────────────────────
@@ -355,15 +725,19 @@ export async function fetchGreenhouseJobs(queries, signal = null, geoTerms = EMP
   // per-call and pick the strongest at the end so a wave of blocks across
   // the whole platform shows up, not just an isolated 429 from one board.
   const warnings = [];
+  let ghApiErrors = 0;
+  let ghEmptyBoards = 0;
   const allJobs = await processInBatches(GREENHOUSE_BOARDS, 10, async ({ token, company }) => {
     const r = await safeApiFetch(`https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`, {
       headers: { 'Accept': 'application/json' },
       signal: createTimeoutSignal(signal, apiTimeout('greenhouse-api')),
     }, 'greenhouse');
     if (r.warning) warnings.push(r.warning);
-    if (!r.ok) return [];
+    if (!r.ok) { ghApiErrors++; return []; }
     const data = r.json;
-    return ((data && data.jobs) || []).map(job => ({ ...job, _company: company, _token: token }));
+    const jobs = (data && data.jobs) || [];
+    if (jobs.length === 0) ghEmptyBoards++;
+    return jobs.map(job => ({ ...job, _company: company, _token: token }));
   }, signal);
 
   // Filter: job matches if relevant to ANY query (OR logic across all queries).
@@ -371,16 +745,23 @@ export async function fetchGreenhouseJobs(queries, signal = null, geoTerms = EMP
   const matched = allJobs.filter(job =>
     qs.some(q => jobRelevanceMatch(`${job.title} ${job._company}`, q, geoTerms)));
 
-  const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
-    title: job.title || '',
-    company: job._company || '',
-    location: job.location?.name || '',
-    salary: '',
-    snippet: stripHtml(job.content || '').substring(0, 300),
-    url: `https://boards.greenhouse.io/${job._token}/jobs/${job.id}`,
-    posted: job.updated_at ? new Date(job.updated_at).toLocaleDateString() : '',
-    source: 'greenhouse',
-  }));
+  const items = matched.slice(0, JOB_RESULT_CAP).map(job => {
+    const description = stripHtml(job.content || '');
+    return {
+      title: job.title || '',
+      company: job._company || '',
+      location: job.location?.name || '',
+      salary: '',
+      description,
+      snippet: description.substring(0, 300),
+      url: `https://boards.greenhouse.io/${job._token}/jobs/${job.id}`,
+      posted: job.updated_at ? new Date(job.updated_at).toLocaleDateString() : '',
+      source: 'greenhouse',
+    };
+  });
+  const withDesc = items.filter(j => j.description).length;
+  const boardsWithJobs = new Set(allJobs.map(j => j._company)).size;
+  logger.info(`[Greenhouse API] ${allJobs.length} jobs fetched from ${boardsWithJobs}/${GREENHOUSE_BOARDS.length} boards (${ghApiErrors} API errors, ${ghEmptyBoards} empty boards) → ${matched.length} matched query → ${items.length} returned, ${withDesc}/${items.length} have descriptions`);
   const strongest = warnings.find(w => w.severity === 'block') || warnings[0] || null;
   return { items, warning: strongest, gathered: matched.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
@@ -389,28 +770,38 @@ export async function fetchGreenhouseJobs(queries, signal = null, geoTerms = EMP
 // ── Lever API ───────────────────────────────────────────────────────────────
 // Public JSON endpoint: api.lever.co/v0/postings/{company}?mode=json
 
-/** Curated list of top tech companies using Lever ATS. */
+/**
+ * Curated list of companies using Lever ATS.
+ * Slugs map to: api.lever.co/v0/postings/{slug}?mode=json
+ *
+ * When a slug is wrong or the company moved off Lever, the API returns a
+ * non-2xx response — the extractor logs "(N API errors)" per run so stale
+ * entries are immediately visible. Audit by checking jobs.lever.co/{slug}.
+ *
+ * Last audited: 2026-05-27 — removed confirmed non-Lever / dead entries:
+ *   netflix  → custom ATS (jobs.netflix.com)
+ *   openai   → Greenhouse (boards.greenhouse.io/openai)
+ *   supabase → Ashby
+ *   linear   → Ashby
+ *   clearbit → acquired by HubSpot 2023; Lever board inactive
+ *   loom     → acquired by Atlassian 2023; Lever board inactive
+ *   resend   → unverified; likely Ashby
+ * Also fixed slugs: grafana→grafanalabs, dbt-labs→dbtlabs
+ */
 const LEVER_COMPANIES = [
-  { slug: 'netflix', company: 'Netflix' },
-  { slug: 'openai', company: 'OpenAI' },
   { slug: 'anthropic', company: 'Anthropic' },
-  { slug: 'coinbase', company: 'Coinbase' },
+  { slug: 'samsara', company: 'Samsara' },
+  { slug: 'snyk', company: 'Snyk' },
+  { slug: 'retool', company: 'Retool' },
+  { slug: 'zapier', company: 'Zapier' },
+  { slug: 'mux', company: 'Mux' },
   { slug: 'twilio', company: 'Twilio' },
   { slug: 'netlify', company: 'Netlify' },
   { slug: 'postman', company: 'Postman' },
-  { slug: 'samsara', company: 'Samsara' },
-  { slug: 'clearbit', company: 'Clearbit' },
-  { slug: 'grafana', company: 'Grafana Labs' },
-  { slug: 'supabase', company: 'Supabase' },
-  { slug: 'linear', company: 'Linear' },
-  { slug: 'retool', company: 'Retool' },
-  { slug: 'snyk', company: 'Snyk' },
-  { slug: 'mux', company: 'Mux' },
+  { slug: 'coinbase', company: 'Coinbase' },
+  { slug: 'grafanalabs', company: 'Grafana Labs' },
+  { slug: 'dbtlabs', company: 'dbt Labs' },
   { slug: 'fly', company: 'Fly.io' },
-  { slug: 'zapier', company: 'Zapier' },
-  { slug: 'resend', company: 'Resend' },
-  { slug: 'dbt-labs', company: 'dbt Labs' },
-  { slug: 'loom', company: 'Loom' },
 ];
 
 /**
@@ -419,15 +810,19 @@ const LEVER_COMPANIES = [
 export async function fetchLeverJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const warnings = [];
+  let leverApiErrors = 0;
+  let leverEmptyBoards = 0;
   const allJobs = await processInBatches(LEVER_COMPANIES, 10, async ({ slug, company }) => {
     const r = await safeApiFetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, {
       headers: { 'Accept': 'application/json' },
       signal: createTimeoutSignal(signal, apiTimeout('lever-api')),
     }, 'lever');
     if (r.warning) warnings.push(r.warning);
-    if (!r.ok) return [];
+    if (!r.ok) { leverApiErrors++; return []; }
     const data = r.json;
-    return (Array.isArray(data) ? data : []).map(job => ({ ...job, _company: company }));
+    const jobs = Array.isArray(data) ? data : [];
+    if (jobs.length === 0) leverEmptyBoards++;
+    return jobs.map(job => ({ ...job, _company: company }));
   }, signal);
 
   // Filter: job matches if relevant to ANY query (OR logic across all queries).
@@ -437,16 +832,23 @@ export async function fetchLeverJobs(queries, signal = null, geoTerms = EMPTY_GE
     return qs.some(q => jobRelevanceMatch(roleText, q, geoTerms));
   });
 
-  const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
-    title: job.text || '',
-    company: job._company || '',
-    location: job.categories?.location || '',
-    salary: '',
-    snippet: stripHtml(job.descriptionPlain || job.description || '').substring(0, 300),
-    url: job.hostedUrl || job.applyUrl || '',
-    posted: job.createdAt ? new Date(job.createdAt).toLocaleDateString() : '',
-    source: 'lever',
-  }));
+  const items = matched.slice(0, JOB_RESULT_CAP).map(job => {
+    const description = stripHtml(job.descriptionPlain || job.description || '');
+    return {
+      title: job.text || '',
+      company: job._company || '',
+      location: job.categories?.location || '',
+      salary: '',
+      description,
+      snippet: description.substring(0, 300),
+      url: job.hostedUrl || job.applyUrl || '',
+      posted: job.createdAt ? new Date(job.createdAt).toLocaleDateString() : '',
+      source: 'lever',
+    };
+  });
+  const withDesc = items.filter(j => j.description).length;
+  const companiesWithJobs = new Set(allJobs.map(j => j._company)).size;
+  logger.info(`[Lever API] ${allJobs.length} jobs fetched from ${companiesWithJobs}/${LEVER_COMPANIES.length} companies (${leverApiErrors} API errors, ${leverEmptyBoards} empty boards) → ${matched.length} matched query → ${items.length} returned, ${withDesc}/${items.length} have descriptions`);
   const strongest = warnings.find(w => w.severity === 'block') || warnings[0] || null;
   return { items, warning: strongest, gathered: matched.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
@@ -518,7 +920,15 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
       company: pos.OrganizationName || pos.DepartmentName || '',
       location: pos.PositionLocationDisplay || '',
       salary: salaryStr,
-      snippet: stripHtml(pos.QualificationSummary || pos.UserArea?.Details?.MajorDuties?.[0] || '').substring(0, 300),
+      snippet: (() => {
+        const d = pos.UserArea?.Details || {};
+        const duties = Array.isArray(d.MajorDuties) ? d.MajorDuties.join('\n') : (d.MajorDuties || '');
+        return [
+          stripHtml(pos.QualificationSummary || ''),
+          stripHtml(duties),
+          stripHtml(d.Requirements || ''),
+        ].filter(Boolean).join('\n\n');
+      })(),
       url: pos.PositionURI || pos.ApplyURI?.[0] || '',
       posted: pos.PublicationStartDate || '',
       source: 'usajobs',
@@ -637,17 +1047,24 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
     // Filter: job matches if relevant to ANY query (OR logic across all queries).
     if (!qs.some(q => jobRelevanceMatch(title, q, geoTerms))) continue;
 
+    // WWR RSS <description> CDATA is the full job HTML — strip tags to plain text.
+    const descText = stripHtml(descMatch?.[1] || '').trim();
+
     jobs.push({
       title: jobTitle,
       company,
       location: regionMatch?.[1]?.trim() || 'Remote',
       salary: '',
-      snippet: stripHtml(descMatch?.[1] || '').substring(0, 300),
+      snippet: descText,
+      description: descText,
       url: linkMatch?.[1]?.trim() || '',
       posted: pubDateMatch?.[1] ? new Date(pubDateMatch[1]).toLocaleDateString() : '',
       source: 'weworkremotely',
     });
   }
+
+  const withDesc = jobs.filter(j => j.description).length;
+  logger.info(`[WWR RSS] ${jobs.length} jobs matched, ${withDesc}/${jobs.length} have descriptions`);
 
   return { items: jobs.slice(0, JOB_RESULT_CAP), warning: r.warning, gathered: jobs.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
@@ -1292,6 +1709,13 @@ export async function fetchIndeedListings(queries, signal = null, maxAgeDays = n
 const DICE_MAX_RETRIES = 3;
 const DICE_RETRY_DELAYS_MS = [1000, 2000, 4000];
 
+// Once we observe that a bundle scan returns the same key that was already
+// stored, we know the 500s are transient server errors (not key rotation).
+// Skip the expensive bundle scan on subsequent 500s this session and use a
+// plain backoff instead. Resets to false on app restart (safe — worst case
+// we do one unnecessary scan before confirming stability again).
+let _diceKeyIsStable = false;
+
 export async function fetchDiceListings(query, location = '', signal = null, maxAgeDays = null) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const params = new URLSearchParams({
@@ -1333,20 +1757,42 @@ export async function fetchDiceListings(query, location = '', signal = null, max
       signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
     }, 'dice');
     if (r.ok) break;
+    // When the key is confirmed stable, 500s are transient server errors —
+    // retrying with the same key won't help. Break immediately and let the
+    // stable-backoff handler below wait 3s, saving 7s of pointless retry delay.
+    if (r.status >= 500 && _diceKeyIsStable) break;
     if (r.status >= 500 && attempt < DICE_MAX_RETRIES) continue; // retry on server errors
     break; // non-5xx or retries exhausted — fall through to error handling
   }
 
   if (!r.ok) {
     if (r.status >= 500) {
-      // API key may have rotated — intercept the current key from dice.com and retry once.
-      const newKey = await refreshDiceApiKey();
-      if (newKey) {
+      let retryKey;
+      if (_diceKeyIsStable) {
+        // Key has been confirmed unchanged this session — 500s are transient.
+        // Skip the bundle scan and just wait out the transient error.
+        logger.info('[Dice API] Key stable — skipping bundle scan, using 3s backoff for transient 500');
+        await new Promise(res => setTimeout(res, 3000));
+        retryKey = getDiceApiKey();
+      } else {
+        // First time (or key genuinely rotated): do the full bundle scan.
+        const oldKey = getDiceApiKey();
+        retryKey = await refreshDiceApiKey();
+        if (retryKey) {
+          if (retryKey === oldKey) {
+            _diceKeyIsStable = true;
+            logger.info('[Dice API] Key unchanged after refresh — 500s are transient (not key rotation). Future 500s will skip bundle scan.');
+          } else {
+            logger.info('[Dice API] Key rotated — retrying with new key');
+          }
+        }
+      }
+      if (retryKey) {
         logger.info('[Dice API] Retrying with refreshed key');
         const retryR = await safeApiFetch(url, {
           headers: {
             'User-Agent': getRandomUA(),
-            'x-api-key': newKey,
+            'x-api-key': retryKey,
             'Accept': 'application/json',
           },
           signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
@@ -1371,19 +1817,34 @@ export async function fetchDiceListings(query, location = '', signal = null, max
 
   logger.info(`[Dice API] Found ${jobs.length} jobs for "${query}"`);
 
-  const mapped = jobs.map(job => ({
-    title: job.title || '',
-    company: job.companyName || '',
-    location: job.jobLocation?.displayName || '',
-    salary: job.salary || '',
-    snippet: (job.summary || '').substring(0, 300),
-    url: job.detailsPageUrl || `https://www.dice.com/job-detail/${job.guid || job.id}`,
-    posted: job.postedDate || '',
-    source: 'dice',
-    remote: job.workFromHomeAvailability === 'TRUE',
-    employmentType: job.employmentType || '',
-    easyApply: job.easyApply || false,
-  }));
+  const mapped = jobs.map(job => {
+    // List API returns `summary` (short blurb) but rarely `description` (full HTML).
+    // Use summary as a placeholder — a second enrichment pass fetches full descriptions
+    // per-job via the detail endpoint after all queries are merged and deduped.
+    const descFromHtml = job.description
+      ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+      : '';
+    const descText = descFromHtml || (job.summary || '').trim();
+    const snippetText = descText;
+    return {
+      title: job.title || '',
+      company: job.companyName || '',
+      location: job.jobLocation?.displayName || '',
+      salary: job.salary || '',
+      snippet: snippetText,
+      description: descText,
+      url: job.detailsPageUrl || `https://www.dice.com/job-detail/${job.guid || job.id}`,
+      posted: job.postedDate || '',
+      source: 'dice',
+      remote: job.workFromHomeAvailability === 'TRUE',
+      employmentType: job.employmentType || '',
+      easyApply: job.easyApply || false,
+      // Internal field — used by enrichDiceDescriptions(), stripped before returning
+      _diceId: job.guid || job.id || '',
+    };
+  });
+  const withDesc = mapped.filter(j => j.description).length;
+  logger.info(`[Dice API] ${mapped.length} jobs for "${query}", ${withDesc}/${mapped.length} have descriptions (pre-enrichment)`);
   // Date-filter the wide relevance pull, THEN cap — so the kept JOB_RESULT_CAP are
   // the most-relevant IN-WINDOW jobs (reuses the shared age filter; same cutoff the
   // global pass applies, so this is a no-op there, not a second policy). `gathered`
@@ -1391,6 +1852,86 @@ export async function fetchDiceListings(query, location = '', signal = null, max
   const inWindow = maxAgeDays ? filterJobsByAge(mapped, maxAgeDays) : mapped;
   const items = inWindow.slice(0, JOB_RESULT_CAP);
   return { items, warning: r.warning, gathered: inWindow.length };
+}
+
+/**
+ * Pre-warm the Dice API key before kicking off the query fan-out, so the key
+ * is fresh for all queries and we don't hit 500 → retry → refresh mid-run.
+ * Fails silently — the reactive 500-triggered refresh is still the fallback.
+ */
+export async function warmDiceApiKey() {
+  try {
+    const key = await refreshDiceApiKey();
+    if (key) {
+      logger.info('[Dice API] API key pre-warmed successfully');
+    } else {
+      logger.warn('[Dice API] API key pre-warm failed — will fall back to reactive refresh on 500');
+    }
+  } catch (err) {
+    logger.warn('[Dice API] API key pre-warm error:', err?.message || String(err));
+  }
+}
+
+/**
+ * Second-pass enrichment: fetch full job descriptions from the Dice detail
+ * endpoint for each job in the already-deduped list.
+ *
+ * The list search API only returns a short `summary`; the detail endpoint
+ * returns the full HTML description. Runs after all queries are merged and
+ * deduped so we only fetch for unique jobs, not per-query duplicates.
+ *
+ * Batched at 10 concurrent requests to avoid hammering the API.
+ * Fails gracefully per job — keeps summary as fallback if detail fetch fails.
+ *
+ * @param {Array}       jobs   — deduped job objects (each must have `_diceId`)
+ * @param {AbortSignal} signal — propagated abort signal
+ * @returns {Promise<Array>}   — same jobs with `description` + `snippet` enriched
+ */
+export async function enrichDiceDescriptions(jobs, signal) {
+  if (!jobs?.length) return jobs;
+  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
+
+  const BATCH = 10;
+  const enriched = [];
+
+  for (let i = 0; i < jobs.length; i += BATCH) {
+    if (signal?.aborted) break;
+    const batch = jobs.slice(i, i + BATCH);
+    const results = await Promise.all(batch.map(async (job) => {
+      const id = job._diceId;
+      if (!id) return job;
+      try {
+        const url = `https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/${id}`;
+        const r = await safeApiFetch(url, {
+          headers: {
+            'User-Agent': getRandomUA(),
+            'x-api-key': getDiceApiKey(),
+            'Accept': 'application/json',
+          },
+          signal: createTimeoutSignal(signal, 10000),
+        }, 'dice');
+        if (!r.ok) return job;
+        // Detail endpoint returns either a single object or { data: {...} }
+        const detail = r.json?.data ?? r.json;
+        const descHtml = detail?.description || '';
+        if (!descHtml) return job;
+        const descText = descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!descText) return job;
+        const { _diceId: _removed, ...rest } = job;
+        return { ...rest, description: descText, snippet: descText };
+      } catch {
+        return job; // keep summary on error
+      }
+    }));
+    enriched.push(...results);
+  }
+
+  // Strip _diceId from any jobs not enriched above (e.g. aborted mid-run)
+  const cleaned = enriched.map(({ _diceId: _removed, ...rest }) => rest);
+
+  const withFullDesc = cleaned.filter(j => j.description && j.description.length > 300).length;
+  logger.info(`[Dice API] Enriched ${cleaned.length} jobs — ${withFullDesc}/${cleaned.length} have full descriptions`);
+  return cleaned;
 }
 
 
