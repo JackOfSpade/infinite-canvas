@@ -54,7 +54,7 @@ function countDistinctJobs(jobs) {
 
 // ── Per-source configs ────────────────────────────────────────────────────────
 const SOURCE_LABELS = {
-  google:       'Google Jobs',
+  google:       'Google for Jobs',
   ziprecruiter: 'ZipRecruiter',
   glassdoor:    'Glassdoor',
   wellfound:    'Wellfound',
@@ -118,7 +118,7 @@ const NEXT_PAGE_SELECTORS = {
 };
 
 // Sources that load more jobs by scrolling to the bottom (infinite scroll).
-// Google Jobs (ibp=htl;jobs mode) lazy-loads more cards as you scroll — initial
+// Google for Jobs (ibp=htl;jobs mode) lazy-loads more cards as you scroll — initial
 // render is ~10 cards; scrolling reveals the rest before we run the extractor.
 const SCROLL_SOURCES = new Set(['ziprecruiter', 'google']);
 
@@ -901,7 +901,7 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal) 
     prevCount = count;
     if (isScroll) {
       if (sourceId === 'google') {
-        // Google Jobs renders cards in its own scrollable container inside the page.
+        // Google for Jobs renders cards in its own scrollable container inside the page.
         // Walk up from the first card to find that container and scroll it; also
         // scroll document.body so either trigger path gets hit.
         await page.evaluate(async () => {
@@ -1257,13 +1257,12 @@ export async function scrapeManualSources(tasks, onResult, signal) {
             if (!seen.has(key)) { seen.add(key); newJobs.push(job); }
           }
 
-          // Expand descriptions for up to JOB_PER_PAGE_CAP jobs; push ALL newJobs
-          // so jobs beyond the cap aren't silently dropped (they keep their
-          // listing-page data, just no enriched description).
+          // Expand descriptions for up to JOB_PER_PAGE_CAP jobs; drop any beyond
+          // the cap rather than keeping them without descriptions (a job with no
+          // description is less useful than not having the job at all).
           const jobsToExpand = newJobs.slice(0, JOB_PER_PAGE_CAP);
-          const overflow = newJobs.slice(JOB_PER_PAGE_CAP);
           const { jobs: enhanced, descError } = await expandDescriptions(page, jobsToExpand, sourceId, overlayBase, allJobs.length + newJobs.length, signal);
-          allJobs.push(...enhanced, ...overflow);
+          allJobs.push(...enhanced);
 
           if (descError) {
             if (!sourceSiteChangedWarning) sourceSiteChangedWarning = descError;
@@ -1277,7 +1276,7 @@ export async function scrapeManualSources(tasks, onResult, signal) {
             status: 'Looking for next page…',
           });
 
-          logger.info(`[BrowserScraper] ${srcName} page ${pageNum}: ${newJobs.length} new jobs (${allJobs.length} total)`);
+          logger.info(`[BrowserScraper] ${srcName} page ${pageNum}: ${enhanced.length} new jobs (${allJobs.length} total)`);
 
           const didPage = await clickNextPage(page, sourceId);
           if (!didPage) break;

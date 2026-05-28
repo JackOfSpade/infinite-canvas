@@ -45,7 +45,7 @@ const BUDGET_SAFETY         = 0.8;   // leave headroom under the hard cap
 // lands and per-source breadth needs bounding again.
 export const JOB_RESULT_CAP = Infinity;
 // Unified per-page/per-query cap for ALL browser scrapers (manualScraper + indeedBrowser).
-// 150 is the scroll-depth target for Google Jobs and a soft ceiling for Indeed pages
+// 150 is the scroll-depth target for Google for Jobs and a soft ceiling for Indeed pages
 // (which have ~10 jobs/page in practice, so 150 is effectively unlimited in prod).
 export const JOB_PER_PAGE_CAP = MEDIUM_TEST ? 5 : 150;
 

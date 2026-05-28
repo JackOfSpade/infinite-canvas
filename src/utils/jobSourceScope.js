@@ -6,7 +6,7 @@
 //
 // Keep this file framework-agnostic so both `src/` and `electron/` can import it.
 
-export const TARGET_JOB_PLATFORM = 'indeed';
+export const TARGET_JOB_PLATFORM = 'google';
 
 export const JOB_SEARCH_TEST_MODE = {
   enabled: true,

@@ -436,13 +436,23 @@ export { getRandomUA };
 // Platforms that require browser login to serve multi-page results.
 // verifyUrl: a logged-in-only page that redirects to /login when anonymous.
 const JOB_LOGIN_PLATFORMS = {
-  // Google Jobs — login is optional (scraper works without it) but a session
+  // LinkedIn — session required for browser-based description enrichment.
+  // Logged-in users stay on /feed; anonymous users redirect to /authwall or /login.
+  // Uses the li_at session cookie (NATIVE_LOGIN_COOKIE_NAMES) as the primary
+  // post-login signal; the feed URL check is the startup-verify fallback.
+  linkedin: {
+    name: 'LinkedIn',
+    verifyUrl: 'https://www.linkedin.com/feed',
+    connectedFinalUrlMustContain: 'linkedin.com/feed',
+  },
+  // Google for Jobs — login is optional (scraper works without it) but a session
   // reduces bot-detection risk and may improve result quality.
   google: {
-    name: 'Google',
+    name: 'Google for Jobs',
     verifyUrl: 'https://myaccount.google.com/',
-    // Logged-in users are redirected from myaccount.google.com → google.com/account/about/
-    connectedFinalUrlMustContain: 'google.com/account',
+    // Logged-in users stay on myaccount.google.com; not-logged-in users are
+    // redirected to accounts.google.com/signin/... so the hostname check is sufficient.
+    connectedFinalUrlMustContain: 'myaccount.google.com',
   },
   indeed:       {
     name: 'Indeed',
@@ -491,7 +501,10 @@ export function getJobLoginConfig(platformId) {
 // The singleton promise prevents concurrent 500s from launching multiple browsers.
 
 let _diceRefreshInFlight = null;
-const DICE_API_KEY_RE = /['"]x-api-key['"]\s*[,:{]\s*['"]([A-Za-z0-9]{25,80})['"]/i;
+// Matches the Dice API key in two forms:
+//   Legacy (Pages Router): "x-api-key":"<key>"
+//   App Router / NEXT_PUBLIC env: NEXT_PUBLIC_JOB_SEARCH_API_KEY:"<key>"
+const DICE_API_KEY_RE = /(?:['"]x-api-key['"]\s*[,:{]\s*['"]|NEXT_PUBLIC_JOB_SEARCH_API_KEY['":\s,{]+)([A-Za-z0-9]{25,80})/i;
 
 export async function refreshDiceApiKey() {
   if (_diceRefreshInFlight) return _diceRefreshInFlight;
@@ -555,7 +568,7 @@ async function _fetchDiceKeyFromBundle() {
   const bundleUrls = [...allBundleUrls].sort((a, b) => {
     const hi = s => /config|api|app|main|index/i.test(s) ? 0 : 1;
     return hi(a) - hi(b);
-  }).slice(0, 20);
+  }).slice(0, 35);
 
   logger.info(`[Dice API] Searching ${bundleUrls.length} JS bundles for API key (parallel)`);
 

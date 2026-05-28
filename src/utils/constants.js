@@ -1,4 +1,4 @@
-import { getScopedJobSourceIds } from './jobSourceScope';
+import { getScopedJobSourceIds } from './jobSourceScope.js';
 
 export const DEFAULT_EDGE_OPTIONS = { type: 'smoothstep', animated: true, style: { strokeWidth: 3, opacity: 0.8 } };
 export const EDGE_STYLE = { stroke: '#a855f7', strokeWidth: 3 };
@@ -20,10 +20,10 @@ export const SELL_PLATFORMS = [
   { id: 'whatnot',   name: 'Whatnot',    letter: 'Wn', color: '#fff200', domain: 'whatnot.com',   postUrl: 'https://www.whatnot.com/sell' },
 ];
 
-/** Job search sources — 12 platforms: DOM scrape + API.
+/** Job search sources — 10 platforms.
  *  `color` is sampled from the live favicon so card outlines match. */
 export const JOB_SOURCES = [
-  { id: 'google',         name: 'Google Jobs', letter: 'G',  color: '#4285f4', domain: 'google.com' },
+  { id: 'google',         name: 'Google for Jobs', letter: 'GJ', color: '#4285f4', domain: 'google.com' },
   { id: 'indeed',         name: 'Indeed',      letter: 'IN', color: '#2164f3', domain: 'indeed.com' },
   { id: 'linkedin',       name: 'LinkedIn',    letter: 'Li', color: '#0a66c2', domain: 'linkedin.com' },
   { id: 'remoteok',       name: 'RemoteOK',    letter: 'RO', color: '#1a1a1a', domain: 'remoteok.com' },
@@ -32,15 +32,13 @@ export const JOB_SOURCES = [
   { id: 'glassdoor',      name: 'Glassdoor',   letter: 'GD', color: '#0caa41', domain: 'glassdoor.com' },
   { id: 'dice',           name: 'Dice',        letter: 'Di', color: '#eb1c26', domain: 'dice.com' },
   { id: 'wellfound',      name: 'Wellfound',   letter: 'WF', color: '#000000', domain: 'wellfound.com' },
-  { id: 'greenhouse',     name: 'Greenhouse',  letter: 'GH', color: '#24a47f', domain: 'greenhouse.io' },
-  { id: 'lever',          name: 'Lever',       letter: 'Lv', color: '#3fbb6f', domain: 'lever.co' },
   { id: 'usajobs',        name: 'USAJobs',     letter: 'US', color: '#003366', domain: 'usajobs.gov' },
 ];
 
 export const ALL_JOB_SOURCE_IDS = [
   'google', 'indeed', 'linkedin', 'remoteok', 'weworkremotely',
   'ziprecruiter', 'glassdoor', 'dice', 'wellfound',
-  'greenhouse', 'lever', 'usajobs',
+  'usajobs',
 ];
 
 export const ACTIVE_JOB_SOURCES = getScopedJobSourceIds(ALL_JOB_SOURCE_IDS);

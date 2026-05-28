@@ -187,7 +187,10 @@ function PlatformWatchUrlsRow({ platform, urls, connected, pending, onLogin, onC
 }
 
 // IDs of the browser-scraped platforms that require login.
-const JOB_LOGIN_IDS = ['google', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound'];
+// linkedin is included for the Settings Log-In button even though the API
+// fetch works without login — only browser-based description enrichment needs
+// a session, and that failure is handled gracefully on the source card.
+const JOB_LOGIN_IDS = ['linkedin', 'google', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound'];
 const JOB_LOGIN_PLATFORMS = JOB_SOURCES.filter(s => JOB_LOGIN_IDS.includes(s.id));
 
 function JobPlatformLoginsSection() {
@@ -634,7 +637,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
               </span>
             </div>
             <div className="text-white/40 text-[11px] mb-3 leading-relaxed">
-              Log in to enable full results. Most sources require login to page past the first page; Google Jobs works without login but a session reduces bot-detection risk.
+              Log in to enable full results. Most sources require login to page past the first page; Google for Jobs works without login but a session reduces bot-detection risk.
             </div>
             <JobPlatformLoginsSection />
           </div>
