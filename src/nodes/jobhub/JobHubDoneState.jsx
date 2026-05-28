@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { JOB_SOURCES } from '../../utils/constants';
+import { JOB_SOURCE_BY_ID } from '../../utils/constants';
 import { SlidersHorizontal, X, RefreshCw, Activity, Target, MapPin, Bot } from 'lucide-react';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
@@ -112,7 +112,7 @@ export function JobHubDoneState({
       <div className="flex flex-wrap justify-center gap-1 mt-1 min-h-[18px]">
         {sourceFilter && (
           <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-400/80 text-[9px]">
-            {JOB_SOURCES.find(s => s.id === sourceFilter)?.name || sourceFilter}
+            {JOB_SOURCE_BY_ID[sourceFilter]?.name || sourceFilter}
             {!locked && (
               <button onClick={() => toggleSourceFilter(sourceFilter)} onPointerDown={(e) => e.stopPropagation()}>
                 <X size={8} />

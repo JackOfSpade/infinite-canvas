@@ -29,6 +29,7 @@ export function buildJobsConfigSnapshot() {
       mode: MEDIUM_TEST ? 'medium' : FULL_TEST ? 'full' : 'production',
       enabled: JOB_SEARCH_TEST_MODE.enabled,
       sourceId: JOB_SEARCH_TEST_MODE.sourceId || null,
+      skipAI: JOB_SEARCH_TEST_MODE.skipAI || false,
       jobResultCap: JOB_RESULT_CAP,
       jobPerPageCap: JOB_PER_PAGE_CAP,
     },
@@ -52,7 +53,7 @@ export function buildJobsConfigSnapshot() {
  * abort signal cut off before they were ever scored. A bare "Scored N jobs"
  * log line hides both.
  */
-export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
+export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath) {
   let t;
   try { t = getJobsTelemetry(); } catch { return ''; }
   let browserScrape = null;
@@ -179,8 +180,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
     // snapshot (written by SKIP_AI_FOR_TESTING and the normal scoring path)
     // and reports min/median/max per source. Empty-snippet jobs are flagged
     // with ⚠️ so truncated or unenriched sources surface immediately.
+    // Also runs field-quality checks for salary/posted to catch selector
+    // regressions (e.g. salary="Monday to Friday", posted all-empty).
     try {
-      const snapPath = path.join(app.getPath('userData'), 'job-search', 'job-search-last-scrape.json');
+      const snapPath = canvasFilePath
+        ? path.join(path.dirname(canvasFilePath), 'job-search-last-scrape.json')
+        : path.join(app.getPath('userData'), 'job-search', 'job-search-last-scrape.json');
       const snapData = JSON.parse(fs.readFileSync(snapPath, 'utf8'));
       const snapJobs = Array.isArray(snapData?.jobs) ? snapData.jobs : [];
       if (snapJobs.length > 0) {
@@ -207,6 +212,84 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId) {
             const emptyFlag = empty > 0 ? ` ⚠️ ${empty} empty` : '';
             lines.push(`  - \`${src}\`: min ${min} / median ${median} / max ${max} chars${emptyFlag}`);
           }
+        }
+
+        // ── Field-quality checks ───────────────────────────────────────────
+        // Salary: non-empty values that don't look monetary are selector
+        // regressions (the DOM node picked up schedule/benefit text instead).
+        // Posted: 100% empty on a source means the date selector broke.
+        // URL: any missing URLs means jobs can't be opened or deduped properly.
+        // Fields like title/company/location are too free-form to validate here.
+        const looksLikeMoney = (s) =>
+          /\$|\d+\s*k\b|per (?:hour|year|week|month)|\/h(?:r|our)|\/yr|\/year|hourly|annually|\ba year\b|\ban hour\b/i.test(s);
+
+        const qualBySource = {};
+        for (const j of snapJobs) {
+          const src = j.source || 'unknown';
+          const q = qualBySource[src] || (qualBySource[src] = {
+            total: 0,
+            salaryPresent: 0, salaryGarbage: 0, salaryGarbageEx: [],
+            postedEmpty: 0,
+            urlMissing: 0,
+            companyEmpty: 0,
+            titleEmpty: 0,
+          });
+          q.total++;
+          const sal = (j.salary || '').trim();
+          if (sal) {
+            q.salaryPresent++;
+            if (!looksLikeMoney(sal)) {
+              q.salaryGarbage++;
+              if (q.salaryGarbageEx.length < 3) q.salaryGarbageEx.push(`"${sal.slice(0, 50)}"`);
+            }
+          }
+          if (!(j.posted || '').trim())  q.postedEmpty++;
+          if (!(j.url || '').trim())     q.urlMissing++;
+          if (!(j.company || '').trim()) q.companyEmpty++;
+          if (!(j.title || '').trim())   q.titleEmpty++;
+        }
+
+        let anyQualityIssue = false;
+        for (const [src, q] of Object.entries(qualBySource)) {
+          const issues = [];
+          // Salary: reported against POPULATED count, not total — 158/158 garbage
+          // is the alarming signal; 158/686 of total dilutes it. A source where
+          // salary is legitimately rare (e.g. LinkedIn API) lights up correctly
+          // only when the values it DOES carry are garbage.
+          if (q.salaryGarbage > 0) {
+            const pct = Math.round((q.salaryGarbage / q.salaryPresent) * 100);
+            const sev = pct >= 80 ? '🔥' : '⚠';
+            issues.push(
+              `${sev} salary garbage: ${q.salaryGarbage}/${q.salaryPresent} (${pct}%) of present salaries are non-monetary` +
+              ` — e.g. ${q.salaryGarbageEx.join(', ')} — check salary selector`,
+            );
+          }
+          if (q.postedEmpty === q.total) {
+            issues.push(`🔥 posted: ALL ${q.total} empty — date selector broken`);
+          } else if (q.postedEmpty > 0 && q.postedEmpty / q.total >= 0.8) {
+            issues.push(`⚠ posted: ${q.postedEmpty}/${q.total} (${Math.round((q.postedEmpty / q.total) * 100)}%) empty — date selector may be broken`);
+          }
+          if (q.titleEmpty > 0) {
+            issues.push(`🔥 title missing: ${q.titleEmpty}/${q.total} — title selector broken`);
+          }
+          if (q.companyEmpty > 0 && q.companyEmpty / q.total >= 0.2) {
+            issues.push(`⚠ company missing: ${q.companyEmpty}/${q.total} (${Math.round((q.companyEmpty / q.total) * 100)}%) — company selector may be intermittent`);
+          }
+          if (q.urlMissing > 0) {
+            issues.push(`🔥 url missing: ${q.urlMissing}/${q.total} — broken card link, breaks dedup`);
+          }
+          if (issues.length > 0) {
+            if (!anyQualityIssue) {
+              lines.push('- ⚠️ **Field quality issues (scrape selectors may be broken):**');
+              anyQualityIssue = true;
+            }
+            for (const msg of issues) {
+              lines.push(`  - \`${src}\`: ${msg}`);
+            }
+          }
+        }
+        if (!anyQualityIssue && Object.keys(qualBySource).length > 0) {
+          lines.push('- Field quality (saved snapshot): ✅ salary, posted, and url look correct');
         }
       }
     } catch { /* snapshot absent or unreadable — omit silently */ }

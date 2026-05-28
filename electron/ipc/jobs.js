@@ -28,7 +28,6 @@ import {
   fetchWeWorkRemotelyJobs,
   fetchDiceListings,
   enrichDiceDescriptions,
-  enrichLinkedInDescriptions,   // eslint-disable-line no-unused-vars — kept as fetch-based reference
   enrichLinkedInDescriptionsBrowser,
   warmDiceApiKey,
   buildGeoTermSet,
@@ -52,7 +51,7 @@ const UNSCORED_FALLBACK_SCORE = 50;
 const JOB_ANALYSIS_SNAPSHOT_VERSION = 1;
 const JOB_ANALYSIS_DIR = 'job-search';
 const JOB_ANALYSIS_JSON = 'job-search-last-scrape.json';
-const JOB_ANALYSIS_MD = 'job-search-last-prompt.md';
+const JOB_ANALYSIS_PROMPT = 'job-search-scoring-AI-prompt.txt';
 
 async function assertReadableResumeFile(filePath) {
   const displayName = filePath ? path.basename(filePath) : 'Selected item';
@@ -93,83 +92,63 @@ async function computeFileSha256(filePath) {
   return hash.digest('hex');
 }
 
-function getJobAnalysisPaths() {
-  const dir = path.join(app.getPath('userData'), JOB_ANALYSIS_DIR);
+function getJobAnalysisPaths(canvasFilePath) {
+  const dir = canvasFilePath
+    ? path.dirname(canvasFilePath)
+    : path.join(app.getPath('userData'), JOB_ANALYSIS_DIR);
   return {
     dir,
     jsonPath: path.join(dir, JOB_ANALYSIS_JSON),
-    mdPath: path.join(dir, JOB_ANALYSIS_MD),
+    promptPath: path.join(dir, JOB_ANALYSIS_PROMPT),
   };
 }
 
-function formatSavedPromptMarkdown(snapshot) {
-  const {
-    createdAt,
-    targetRole,
-    gatheredJobCount,
-    selectedJobCount,
-    jobScoreCap,
-    batchSize,
-    profile,
-    cachedPrefix,
-    batches,
-  } = snapshot;
+// Writes the exact text sent to the AI: the cached prefix followed by each
+// batch payload. Uses previewBatches (all gathered jobs, ignoring score cap)
+// so the file is populated even when AI scoring is skipped in test mode.
+function formatPromptFile(snapshot) {
+  const { createdAt, gatheredJobCount, cachedPrefix, previewBatches } = snapshot;
+  const ts = createdAt ? new Date(createdAt).toLocaleString() : '';
+  const batches = previewBatches ?? [];
+  const sep = '='.repeat(72);
 
   const lines = [
-    '# Job Search AI Prompt Snapshot',
+    `Complete AI scoring prompt — ${ts}`,
+    `${gatheredJobCount ?? 0} jobs gathered, ${batches.length} batch${batches.length === 1 ? '' : 'es'}`,
     '',
-    `Created: ${createdAt}`,
-    `Target role: ${targetRole || '(none)'}`,
-    `Jobs gathered: ${gatheredJobCount}`,
-    `Jobs selected for scoring: ${selectedJobCount}`,
-    `Score cap: ${jobScoreCap}`,
-    `Batch size: ${batchSize}`,
+    sep,
+    'CACHED PREFIX  (sent once; reused across every batch via prompt caching)',
+    sep,
     '',
-    '## Candidate Profile',
-    '',
-    '```json',
-    JSON.stringify(profile, null, 2),
-    '```',
-    '',
-    '## Cached Prefix',
-    '',
-    '```text',
-    cachedPrefix,
-    '```',
-    '',
-    '## Scoring Batches',
-    '',
+    cachedPrefix ?? '',
   ];
 
-  for (const batch of batches) {
-    lines.push(`### Batch ${batch.batchNumber}`);
-    lines.push('');
-    lines.push(`Jobs in batch: ${batch.jobCount}`);
-    lines.push('');
-    lines.push('```text');
-    lines.push(batch.prompt);
-    lines.push('```');
-    lines.push('');
+  if (batches.length === 0) {
+    lines.push('', '(no jobs — scoring was skipped or no jobs were gathered)');
+  } else {
+    for (const batch of batches) {
+      lines.push('', sep, `BATCH ${batch.batchNumber} of ${batches.length}  (${batch.jobCount} jobs)`, sep, '', batch.prompt);
+    }
   }
 
   return lines.join('\n');
 }
 
 async function saveJobAnalysisSnapshot(snapshot) {
-  const { dir, jsonPath, mdPath } = getJobAnalysisPaths();
-  await fs.promises.mkdir(dir, { recursive: true });
+  const { dir, jsonPath, promptPath } = getJobAnalysisPaths(snapshot.canvasFilePath);
+  if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
   await fs.promises.writeFile(jsonPath, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
-  await fs.promises.writeFile(mdPath, formatSavedPromptMarkdown(snapshot), 'utf8');
-  return { jsonPath, mdPath };
+  await fs.promises.writeFile(promptPath, formatPromptFile(snapshot), 'utf8');
+  return { jsonPath, promptPath };
 }
 
-async function loadJobAnalysisSnapshot() {
-  const { jsonPath, mdPath } = getJobAnalysisPaths();
+async function loadJobAnalysisSnapshot(canvasFilePath) {
+  const { jsonPath, promptPath } = getJobAnalysisPaths(canvasFilePath);
   const raw = await fs.promises.readFile(jsonPath, 'utf8');
   const parsed = JSON.parse(raw);
   return {
     snapshot: parsed,
-    paths: { jsonPath, mdPath },
+    paths: { jsonPath, promptPath },
   };
 }
 
@@ -233,6 +212,18 @@ IMPORTANT SCORING RULES:
     });
   }
 
+  // Preview batches use ALL gathered jobs (ignoring score cap) so the prompt
+  // file is populated even when scoring is skipped in test mode.
+  const previewBatchPayloads = [];
+  for (let i = 0; i < gathered.length; i += batchSize) {
+    const batch = gathered.slice(i, i + batchSize);
+    previewBatchPayloads.push({
+      batchNumber: Math.floor(i / batchSize) + 1,
+      jobCount: batch.length,
+      jobs: slimBatch(batch),
+    });
+  }
+
   return {
     role,
     gathered,
@@ -259,6 +250,10 @@ IMPORTANT SCORING RULES:
       selectedJobs: toScore,
       cachedPrefix,
       batches: scoringBatchPayloads.map((batch) => ({
+        ...batch,
+        prompt: `JOBS TO SCORE (array, indexed):\n${JSON.stringify(batch.jobs)}`,
+      })),
+      previewBatches: previewBatchPayloads.map((batch) => ({
         ...batch,
         prompt: `JOBS TO SCORE (array, indexed):\n${JSON.stringify(batch.jobs)}`,
       })),
@@ -309,6 +304,20 @@ const ALL_SOURCE_IDS = [
   'usajobs',
 ];
 const ACTIVE_SOURCE_IDS = getScopedJobSourceIds(ALL_SOURCE_IDS);
+const ACTIVE_SOURCE_ID_SET = new Set(ACTIVE_SOURCE_IDS);
+
+function getQueryProgressTotal(queries) {
+  return Math.max(1, Array.isArray(queries) ? queries.filter(Boolean).length : 1);
+}
+
+function getCompletedQueriesFromDetail(detail, total) {
+  const match = String(detail || '').match(/\bq(\d+)\/(\d+)\b/i);
+  if (!match) return 0;
+  const currentQuery = Number.parseInt(match[1], 10);
+  const detailTotal = Number.parseInt(match[2], 10);
+  const effectiveTotal = Number.isFinite(detailTotal) && detailTotal > 0 ? detailTotal : total;
+  return Math.max(0, Math.min(effectiveTotal, currentQuery - 1));
+}
 
 // Sources that moved from browser pool to direct API:
 // - indeed: Scrapfly REST API with ASP, cache, and a cost budget (no local browser).
@@ -429,7 +438,7 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
 
   const tasks = [];
   for (const [sourceId, { extractor, config, urlFn, maxPages = 1, loadMoreSelector = null }] of Object.entries(extractors)) {
-    if (!ACTIVE_SOURCE_IDS.includes(sourceId)) continue;
+    if (!ACTIVE_SOURCE_ID_SET.has(sourceId)) continue;
     const querySubset = queries;
 
     // One task per query. `id` stays `${sourceId}-${n}` so `res.id.replace(/-\d+$/,'')`
@@ -561,6 +570,7 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
   const { usajobsApiKey: apiKey, usajobsEmail: email } = getJobsSettings();
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
   const location = String(preferredLocation || '').trim();
+  const queryTotal = getQueryProgressTotal(queries);
 
   // Keyword-less company-board / remote-feed sources keyword-filter client-side
   // against the query. The query carries the candidate's city ("… Denver"), and
@@ -574,7 +584,17 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
 
   const apiTasks = [
     { sourceId: 'indeed',        fn: (s) => fetchIndeedListingsBrowser(queries, s, days, null, (detail) => {
-      if (sender && !sender.isDestroyed()) sender.send('job-source-progress', { nodeId, sourceId: 'indeed', status: 'searching', count: 0, detail });
+      if (sender && !sender.isDestroyed()) {
+        sender.send('job-source-progress', {
+          nodeId,
+          sourceId: 'indeed',
+          status: 'searching',
+          count: 0,
+          detail,
+          completed: getCompletedQueriesFromDetail(detail, queryTotal),
+          total: queryTotal,
+        });
+      }
     }) },
     { sourceId: 'linkedin',      fn: (s) => fetchLinkedInJobs(queries, s, days) },
     { sourceId: 'usajobs',       fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days, location), s) },
@@ -592,12 +612,12 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
       logger.info(`[Dice API] Fan-out starting: ${queries.length} queries, 350ms interval`);
       return queryFanOut(queries, (q, sig) => fetchDiceListings(q, location, sig, days), s, 4, 350);
     }},
-  ].filter(task => ACTIVE_SOURCE_IDS.includes(task.sourceId));
+  ].filter(task => ACTIVE_SOURCE_ID_SET.has(task.sourceId));
 
   // Notify frontend that API sources are starting
   for (const { sourceId } of apiTasks) {
     if (!sender.isDestroyed()) {
-      sender.send('job-source-progress', { nodeId, sourceId, status: 'searching', count: 0 });
+      sender.send('job-source-progress', { nodeId, sourceId, status: 'searching', count: 0, completed: 0, total: queryTotal });
     }
   }
 
@@ -623,12 +643,14 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
           status: warning?.severity === 'block' ? 'error' : 'done',
           count: jobs.length,
           warning: warning || null,
+          completed: queryTotal,
+          total: queryTotal,
         });
       }
       return { sourceId, jobs, warning, gathered };
     } catch (error) {
       if (sender && !sender.isDestroyed()) {
-        sender.send('job-source-progress', { nodeId, sourceId, status: 'error', count: 0 });
+        sender.send('job-source-progress', { nodeId, sourceId, status: 'error', count: 0, completed: queryTotal, total: queryTotal });
       }
       return { sourceId, jobs: [], error: error?.message || String(error) };
     }
@@ -707,9 +729,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
     return { queries: result, queryModel: queryMeta.model || null };
   });
 
-  handleSafe('get-last-job-analysis-snapshot', async () => {
+  handleSafe('get-last-job-analysis-snapshot', async (event, { canvasFilePath } = {}) => {
     try {
-      const { snapshot, paths } = await loadJobAnalysisSnapshot();
+      const { snapshot, paths } = await loadJobAnalysisSnapshot(canvasFilePath);
       const jobs = Array.isArray(snapshot?.jobs) ? snapshot.jobs : [];
       const profile = snapshot?.profile && typeof snapshot.profile === 'object' ? snapshot.profile : null;
       return {
@@ -728,7 +750,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
           sourceHubId: snapshot?.sourceHubId ?? snapshot?.nodeId ?? null,
           canvasFilePath: snapshot?.canvasFilePath ?? null,
           resumeSummary: snapshot?.resumeSummary ?? '',
-          promptPath: paths.mdPath,
+          promptPath: paths.promptPath,
           jsonPath: paths.jsonPath,
         },
       };
@@ -825,6 +847,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
     for (const sourceId of Object.keys(sourceTaskIds)) {
       emitProgress({
         nodeId, sourceId, status: 'searching', count: 0,
+        completed: 0,
+        total: sourceTaskIds[sourceId]?.length || 1,
         url: sourceFirstUrl[sourceId] || null,
       });
     }
@@ -843,11 +867,15 @@ Be creative with suggestedRoleQueries — think about what career directions the
       scrapeManualSources(tasks, (res) => {
         const sourceId = res.id.replace(/-\d+$/, '');
         const count = Array.isArray(res.data) ? res.data.length : 0;
+        const total = sourceTaskIds[sourceId]?.length || 1;
+        const blocked = res.warning?.severity === 'block';
         emitProgress({
           nodeId,
           sourceId,
-          status: res.warning?.severity === 'block' ? 'error' : 'done',
+          status: blocked ? 'error' : 'done',
           count,
+          completed: total,
+          total,
           warning: res.warning || null,
           url: sourceFirstUrl[sourceId] || null,
         });
@@ -953,6 +981,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     //   - 'idle'    → reserved for "never got a progress event" (renderer fallback)
     for (const sourceId of ACTIVE_SOURCE_IDS) {
       const data = sourceResults[sourceId] || { jobs: [], errors: 0, warnings: [] };
+      const progressTotal = sourceTaskIds[sourceId]?.length || getQueryProgressTotal(queries);
       const effectiveWarnings = (data.warnings || []).map(w => getEffectiveSourceWarning(w, data.jobs.length));
       // Block > info > throttle > nothing. Block wins for visual urgency;
       // info wins over throttle so a config-missing reason isn't hidden by
@@ -979,6 +1008,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
         sourceId,
         status,
         count: data.jobs.length,
+        completed: progressTotal,
+        total: progressTotal,
         warning: strongest,
         // Failed scrape URL (browser-pool sources only). Empty for API
         // sources — their Solve button won't render, which is correct
@@ -1056,7 +1087,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       // visible and its dismiss timer is cancelled. Without this, the card gets
       // its 'done' event when the API fetch finishes (10+ min ago), then the
       // 10 s grace fires and the card disappears while the hub is still running.
-      emitProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: linkedinKept.length, detail: 'enriching descriptions' });
+      emitProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: linkedinKept.length, detail: 'enriching descriptions', completed: 0, total: 1 });
       const { jobs: enriched, loginWall, loginWallUrl } = await enrichLinkedInDescriptionsBrowser(linkedinKept, combinedSignal);
       const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
       kept = kept.map(j => j.source === 'linkedin' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
@@ -1078,6 +1109,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
           status: 'error',
           url: 'https://www.linkedin.com/login',
           warning: sessionWarning,
+          completed: 1,
+          total: 1,
         });
         // Include in scrapeWarnings so the JobHub done-state panel surfaces it too.
         scrapeWarnings.push({ sourceId: 'linkedin', url: loginWallUrl || null, ...sessionWarning });
@@ -1085,7 +1118,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
         // Emit final done so the card transitions to its terminal state and the
         // dismiss timer restarts (10 s grace after enrichment completes, not after
         // the API fetch).
-        emitProgress({ nodeId, sourceId: 'linkedin', count: linkedinKept.length, status: 'done' });
+        emitProgress({ nodeId, sourceId: 'linkedin', count: linkedinKept.length, status: 'done', completed: 1, total: 1 });
       }
     }
 
@@ -1145,7 +1178,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
 
   handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId, preferredLocation }, signal) => {
     logger.info(`[Jobs] Background single-source search for ${sourceId} with query "${query}"`);
-    if (!ACTIVE_SOURCE_IDS.includes(sourceId)) {
+    if (!ACTIVE_SOURCE_ID_SET.has(sourceId)) {
       return {
         success: false,
         disabled: true,
@@ -1166,6 +1199,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
         status: 'searching',
         count: 0,
         warning: null,
+        completed: 0,
+        total: 1,
       });
     }
 
@@ -1185,6 +1220,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
             status: 'skipped',
             count: 0,
             warning: synthesizedWarning,
+            completed: 1,
+            total: 1,
           });
         }
         return {
@@ -1212,6 +1249,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
             status: 'error',
             count: 0,
             warning: synthWarning,
+            completed: 1,
+            total: 1,
           });
         }
         return {
@@ -1246,6 +1285,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
         status,
         count: kept.length,
         warning,
+        completed: 1,
+        total: 1,
       });
     }
 
@@ -1673,7 +1714,7 @@ RULES:
       const sendProgress = (payload) => event.sender?.send?.('source-progress', payload);
       let items = [];
       try {
-        const { snapshot } = await loadJobAnalysisSnapshot();
+        const { snapshot } = await loadJobAnalysisSnapshot(canvasFilePath);
         // Guard against a snapshot from a different hub (e.g. user ran hub B
         // after hub A's session-expired card was left open).
         const snapshotIsThisHub = !snapshot.sourceHubId || snapshot.sourceHubId === nodeId;

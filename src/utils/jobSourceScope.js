@@ -6,15 +6,19 @@
 //
 // Keep this file framework-agnostic so both `src/` and `electron/` can import it.
 
-export const TARGET_JOB_PLATFORM = 'google';
+export const TARGET_JOB_PLATFORM = 'glassdoor';
 
 export const JOB_SEARCH_TEST_MODE = {
   enabled: true,
   sourceId: TARGET_JOB_PLATFORM,
-  // Run tier — only meaningful when enabled:true. All tiers skip AI scoring.
-  // fullRun:false → medium (5 jobs/page, 10 pages)
-  // fullRun:true  → full   (150 jobs/page, 10 pages)
-  fullRun: true,
+  // Run tier — only meaningful when enabled:true.
+  // fullRun:false → medium (5 jobs/page, AI skipped — quick smoke test)
+  // fullRun:true  → full   (150 jobs/page, AI per skipAI flag below)
+  fullRun: false,
+  // skipAI: override AI scoring independently of fullRun.
+  // true  → AI skipped regardless of fullRun (collect jobs, stop before scoring)
+  // false → AI runs when fullRun:true; still skipped when fullRun:false
+  skipAI: false,
 };
 
 export function getScopedJobSourceIds(allSourceIds = []) {

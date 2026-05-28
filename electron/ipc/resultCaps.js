@@ -21,9 +21,9 @@ import { JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
  */
 
 // Three named modes — exactly one is true at runtime:
-//   MEDIUM_TEST : 5 jobs/page,   10 pages, AI skipped
-//   FULL_TEST   : 150 jobs/page, 10 pages, AI skipped
-//   production  : 150 jobs/page, 10 pages, full AI  (both false)
+//   MEDIUM_TEST : 5 jobs/page,   10 pages, AI skipped  (quick smoke test)
+//   FULL_TEST   : 150 jobs/page, 10 pages, AI per skipAI flag (full pipeline, scoped source)
+//   production  : 150 jobs/page, 10 pages, full AI     (all sources)
 export const MEDIUM_TEST = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fullRun;
 export const FULL_TEST   = JOB_SEARCH_TEST_MODE.enabled &&  JOB_SEARCH_TEST_MODE.fullRun;
 
@@ -56,7 +56,7 @@ export const JOB_PER_PAGE_CAP = MEDIUM_TEST ? 5 : 150;
 // hundreds of jobs will rate-limit (429) and fall back to weaker models until the
 // paid API tier lands. Restore a numeric budget (was 150, round-robin fair across
 // sources via selectTopAcrossSources) when on paid.
-export const JOB_SCORE_CAP = JOB_SEARCH_TEST_MODE.enabled ? 0 : Infinity;
+export const JOB_SCORE_CAP = (MEDIUM_TEST || JOB_SEARCH_TEST_MODE.skipAI) ? 0 : Infinity;
 
 // ── Date-bounded deep pagination ──────────────────────────────────────────────
 // Browser sources page forward (same stealth session) until they run out of

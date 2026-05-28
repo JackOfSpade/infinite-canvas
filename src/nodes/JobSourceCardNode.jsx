@@ -205,6 +205,21 @@ export function JobSourceCardNode({ id, data }) {
   const hasInfo     = warning?.severity === 'info';
   const hasWarn     = warning?.severity === 'warn';
   const warningLabel = warning?.shortLabel || warning?.code || null;
+  const progressTotal = Number.isFinite(progress?.total) && progress.total > 0 ? progress.total : null;
+  const progressDone = progressTotal && Number.isFinite(progress?.completed)
+    ? Math.max(0, Math.min(progress.completed, progressTotal))
+    : null;
+  const hasMeasuredProgress = progressTotal != null && progressDone != null;
+  const progressPercent = (isDone || isSkipped || isError)
+    ? 100
+    : isSearching
+      ? hasMeasuredProgress
+        ? Math.max(8, Math.min(96, (progressDone / progressTotal) * 100))
+        : 42
+      : 0;
+  const progressText = hasMeasuredProgress && isSearching
+    ? `${progressDone}/${progressTotal}`
+    : null;
 
   const statusLine = isError
     ? 'Failed'
@@ -277,7 +292,24 @@ export function JobSourceCardNode({ id, data }) {
             >
               {warning ? warningLabel : statusLine}
             </span>
+            {progressText && (
+              <span className="ml-auto text-[8px] text-white/30 tabular-nums shrink-0">
+                {progressText}
+              </span>
+            )}
           </div>
+        </div>
+      </div>
+      <div className="px-2.5 pb-1.5">
+        <div className="h-1 overflow-hidden rounded-full bg-white/10">
+          <div
+            className={`h-full rounded-full transition-all duration-500 ease-out ${isSearching && !hasMeasuredProgress ? 'animate-pulse' : ''}`}
+            style={{
+              width: `${progressPercent}%`,
+              backgroundColor: accentColor,
+              opacity: progressPercent > 0 ? 0.9 : 0,
+            }}
+          />
         </div>
       </div>
       {/* Embedded warning text — selectable so the user can copy/paste the

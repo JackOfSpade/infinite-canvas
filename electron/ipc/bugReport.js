@@ -834,6 +834,8 @@ ${rows}
             check.status != null ? `HTTP ${check.status}` : null,
             check.finalUrl || null,
             check.softWallMatch ? `softWall=${check.softWallMatch}` : null,
+            check.antiBot ? `antiBot=${check.antiBot}` : null,
+            check.sessionCookieCount != null ? `cookies=${check.sessionCookieCount}` : null,
             check.error ? `error=${check.error}` : null,
           ].filter(Boolean);
           lines.push(`    - ${parts.join(' | ').replace(/`/g, "'").slice(0, 320)}`);
@@ -911,6 +913,8 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
             check.status != null ? `HTTP ${check.status}` : null,
             check.finalUrl || null,
             check.softWallMatch ? `softWall=${check.softWallMatch}` : null,
+            check.antiBot ? `antiBot=${check.antiBot}` : null,
+            check.sessionCookieCount != null ? `cookies=${check.sessionCookieCount}` : null,
             check.error ? `error=${check.error}` : null,
           ].filter(Boolean);
           lines.push(`    - ${parts.join(' | ').replace(/`/g, "'").slice(0, 320)}`);
@@ -1052,7 +1056,7 @@ ${aiConfig.provider === 'gemini' ? `
     const jobsConfig = buildJobsConfigSnapshot();
     const tm = jobsConfig.testMode;
     const testModeLines = tm
-      ? `\n### Job Search Test Mode\n- Mode: **${tm.mode}**${tm.mode !== 'production' ? ` (${tm.jobPerPageCap} jobs/page, AI skipped)` : ' (full AI)'}\n- Enabled: ${tm.enabled ? '✅' : '❌'}\n- Scoped source: ${tm.sourceId ? `\`${tm.sourceId}\`` : '*(all sources)*'}\n- Per-page cap: ${tm.jobPerPageCap}, Result cap: ${tm.jobResultCap === Infinity ? 'unlimited' : tm.jobResultCap}`
+      ? `\n### Job Search Test Mode\n- Mode: **${tm.mode}**${(tm.mode === 'medium' || tm.skipAI) ? ` (${tm.jobPerPageCap} jobs/page, AI skipped)` : ` (${tm.jobPerPageCap} jobs/page, full AI)`}\n- Enabled: ${tm.enabled ? '✅' : '❌'}\n- Scoped source: ${tm.sourceId ? `\`${tm.sourceId}\`` : '*(all sources)*'}\n- Per-page cap: ${tm.jobPerPageCap}, Result cap: ${tm.jobResultCap === Infinity ? 'unlimited' : tm.jobResultCap}`
       : '';
     return `
 ## Job Search API Configuration
@@ -1069,8 +1073,9 @@ ${aiConfig.provider === 'gemini' ? `
   // shared across all open windows/canvases, so it may be another canvas's run).
   const currentNodeIds = new Set((nodes || []).map(n => n?.id).filter(Boolean));
 
+  const canvasFilePath = frontEndState?.currentFile || frontEndState?.settings?.lastOpenedWorkspace || null;
   let jobsPipelineMarkdown = '';
-  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId); }
+  try { jobsPipelineMarkdown = buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvasFilePath); }
   catch { /* never break the report on diagnostic failure */ }
 
   let marketplacePipelineMarkdown = '';

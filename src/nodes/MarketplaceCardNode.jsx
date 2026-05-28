@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { ExternalLink, RefreshCw, Eye, ChevronDown, ChevronRight, AlertTriangle, Info } from 'lucide-react';
-import { SELL_PLATFORMS } from '../utils/constants';
+import { SELL_PLATFORM_BY_ID } from '../utils/constants';
 import { MonitorStatusBadge } from '../components/MonitorStatusBadge';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { useMonitorCheck } from '../hooks/useMonitorCheck';
@@ -41,7 +41,7 @@ export function MarketplaceCardNode({ id, data }) {
   const { value: watchDraft, setValue: setWatchDraft, focusProps: watchFocusProps, focusRef: watchFocusRef } =
     useSyncWhileFocused((data.watchUrls || []).join('\n'));
 
-  const platform = SELL_PLATFORMS.find(p => p.id === data.platformId);
+  const platform = SELL_PLATFORM_BY_ID[data.platformId];
   const url = data.listingUrl?.trim() || '';
   const watchUrls = Array.isArray(data.watchUrls) ? data.watchUrls : [];
 

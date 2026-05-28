@@ -7,7 +7,7 @@ import { QuickPriceButtons } from '../components/QuickPriceButtons';
 import { PlatformToggles } from '../components/PlatformToggles';
 import { Camera, Loader2, ExternalLink, Copy, Check } from 'lucide-react';
 import { NodeHandles } from './_shared/NodeHandles';
-import { SELL_PLATFORMS } from '../utils/constants';
+import { SELL_PLATFORM_BY_ID } from '../utils/constants';
 import { useListingActions } from '../hooks/useListingActions';
 import { EventLogger } from '../utils/EventLogger';
 
@@ -140,7 +140,7 @@ export function ListingNode({ id, data }) {
           return;
         }
       }
-      const platform = SELL_PLATFORMS.find(p => p.id === platformId);
+      const platform = SELL_PLATFORM_BY_ID[platformId];
       if (platform?.postUrl) window.electronAPI?.openExternal?.(platform.postUrl);
     }
   }, [selectedPlatforms]);
@@ -296,7 +296,7 @@ export function ListingNode({ id, data }) {
                         if (result.connected) {
                           setLoginPrompt(null);
                           // Re-trigger the listing flow now that we're logged in
-                          window.electronAPI?.openExternal?.(loginPrompt.sellerUrl || SELL_PLATFORMS.find(p => p.id === loginPrompt.platformId)?.url);
+                          window.electronAPI?.openExternal?.(loginPrompt.sellerUrl || SELL_PLATFORM_BY_ID[loginPrompt.platformId]?.url);
                         } else {
                           // User closed login window without logging in — keep prompt
                         }

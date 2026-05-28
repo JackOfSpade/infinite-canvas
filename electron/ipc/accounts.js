@@ -226,6 +226,29 @@ function buildTrustedNativeLoginVerdict(platformId, result) {
   };
 }
 
+// Puppeteer login window confirmed login via DOM/cookie/auth-gated-URL signal.
+// Skip the HTTP re-verify — Cloudflare challenges the verify URL on new browser
+// sessions even when the session is genuinely live, causing false "not connected"
+// verdicts immediately after a successful login.
+function isTrustedPuppeteerLoginResult(result) {
+  return result?.loginDetected === true && !!result?.loginUrl;
+}
+
+function buildTrustedPuppeteerLoginVerdict(platformId, result) {
+  return {
+    connected: true,
+    reason: `Auto-detected logged-in state for ${platformId} at ${result.loginUrl} (DOM/cookie/auth-gated signal) — HTTP re-verify skipped.`,
+    trace: {
+      target: result.loginUrl,
+      checks: [{
+        target: 'puppeteer-login-window',
+        finalUrl: result.loginUrl,
+        status: 'auto-detected',
+      }],
+    },
+  };
+}
+
 // ── Startup verification ──────────────────────────────────────────────────────
 // Verifies ALL known platforms on every launch. Cache starts empty, so there's
 // nothing to trust — every startup is a clean check. Runs sequentially to avoid
@@ -309,6 +332,12 @@ export async function ensureJobPlatformLogin(platformId, sender = null, { force 
         const verdict = buildTrustedNativeLoginVerdict(platformId, result);
         await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
         logger.info(`[Accounts] ${platformId} runtime native login verified (post-flush wait complete): ${verdict.reason}`);
+        return { ...(result || {}), connected: true, reason: verdict.reason, loginOpened: true };
+      }
+      if (isTrustedPuppeteerLoginResult(result)) {
+        const verdict = buildTrustedPuppeteerLoginVerdict(platformId, result);
+        await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
+        logger.info(`[Accounts] ${platformId} runtime login auto-detected: ${verdict.reason}`);
         return { ...(result || {}), connected: true, reason: verdict.reason, loginOpened: true };
       }
 
@@ -447,6 +476,12 @@ export function registerAccountsHandlers() {
           const verdict = buildTrustedNativeLoginVerdict(platformId, result);
           await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
           logger.info(`[Accounts] ${platformId} native login verified: ${verdict.reason}`);
+          return { ...(result || {}), connected: true, reason: verdict.reason };
+        }
+        if (isTrustedPuppeteerLoginResult(result)) {
+          const verdict = buildTrustedPuppeteerLoginVerdict(platformId, result);
+          await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
+          logger.info(`[Accounts] ${platformId} login auto-detected: ${verdict.reason}`);
           return { ...(result || {}), connected: true, reason: verdict.reason };
         }
 

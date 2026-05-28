@@ -165,21 +165,37 @@ const DESC_CONFIGS = {
     clickSelector: null,
     // ItemList JSON-LD gives us the individual job page URL directly, so navigate
     // there instead of card-clicking on the virtualized list page.
-    panelSelector: '.jobDescriptionSection, [data-testid="jobDescriptionSection"], #job-description-container, [class*="jobDescription"]',
+    // JSON-LD JobPosting.description (server-rendered) is tried first; panelSelector
+    // is a CSS fallback in case the ld+json block is absent.
+    // ZipRecruiter uses Tailwind CSS — no semantic class names. The description container
+    // uniquely carries the `whitespace-pre-line` utility token; fallbacks are legacy selectors.
+    panelSelector: '[class~="whitespace-pre-line"], .jobDescriptionSection, [data-testid="jobDescriptionSection"], #job-description-container, [class*="jobDescription"], .job_description, #job_desc',
     panelMulti:    false,
     closeSelector: null,
     expandViaNavigation: true,
     navUrlField:         'url',  // job.url is already the individual job page
+    jsonLdType:          'JobPosting',
+    jsonLdField:         'description',
+    // __NEXT_DATA__ fallback — path will be confirmed/corrected from desc-miss diag log.
+    nextDataField:       'props.pageProps.job.description',
   },
   glassdoor: {
     keyParam:      'jl',
     keyRegex:      null,
     keyDecode:     false,
-    cardAttr:      'data-jobid',  // <li data-jobid="...">; jl param in URL matches this ID
+    cardAttr:      'data-jobid',
     cardIdPrefix:  null,
     cardHrefKey:   null,
-    clickSelector: null,          // click the <li> itself — React handler loads right panel
-    panelSelector: '[data-brandviews*="joblisting-description"]',
+    clickSelector: null,
+    // Navigate to each job page in a background tab — individual job pages carry a
+    // JSON-LD JobPosting with description (primary) and [class*="JobDetails_jobDescription"]
+    // as DOM fallback. [data-brandviews*="joblisting-description"] only exists on search
+    // results pages, not on individual job-listing pages.
+    expandViaNavigation: true,
+    navUrlField:         'url',
+    jsonLdType:          'JobPosting',
+    jsonLdField:         'description',
+    panelSelector: '[class*="JobDetails_jobDescription"]',
     panelMulti:    false,
     closeSelector: null,
   },
@@ -228,6 +244,12 @@ async function getChallengeSignals(page) {
     const visibleHCaptchaFrames = [...document.querySelectorAll('iframe[src*="hcaptcha.com"]')]
       .filter(fr => { const r = fr.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).length;
     const hasCloudflareChallengeFrame = !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+    // Turnstile widget container — present as soon as the CF Turnstile JS injects
+    // its DOM node, even before the inner iframe has its src attribute populated.
+    // Catches the checkbox challenge that ZipRecruiter triggers mid-session.
+    // Using CF-specific selectors only (.cf-turnstile, cf-chl-widget-* IDs) to
+    // avoid false-positive matches on reCAPTCHA/hCaptcha [data-sitekey] elements.
+    const hasCloudflareTurnstileWidget = !!document.querySelector('[id*="cf-chl-widget"], .cf-turnstile');
     const hasIndeedCloudflareMarker = typeof window.INDEED_CLOUDFLARE_STATIC_PAGE !== 'undefined';
 
     let reason = 'none';
@@ -236,7 +258,7 @@ async function getChallengeSignals(page) {
     else if (hasVerificationText) reason = 'verification-text';
     else if (visibleRecaptchaFrames > 0 && !hasNormalContent) reason = 'visible-recaptcha-without-content';
     else if (visibleHCaptchaFrames > 0 && !hasNormalContent) reason = 'visible-hcaptcha-without-content';
-    else if (hasCloudflareChallengeFrame) reason = 'cloudflare-challenge-frame';
+    else if (hasCloudflareChallengeFrame || hasCloudflareTurnstileWidget) reason = 'cloudflare-challenge-frame';
     else if (hasIndeedCloudflareMarker && !hasNormalContent) reason = 'indeed-cloudflare-static-without-content';
 
     // Hard block: verification text is present but there is NO interactive widget
@@ -247,6 +269,7 @@ async function getChallengeSignals(page) {
     // wasted time; callers should skip immediately when this is true.
     const isHardBlock = reason === 'verification-text' &&
                         !hasCloudflareChallengeFrame &&
+                        !hasCloudflareTurnstileWidget &&
                         visibleRecaptchaFrames === 0 &&
                         visibleHCaptchaFrames === 0 &&
                         !hasNormalContent;
@@ -267,6 +290,7 @@ async function getChallengeSignals(page) {
       visibleRecaptchaFrames,
       visibleHCaptchaFrames,
       hasCloudflareChallengeFrame,
+      hasCloudflareTurnstileWidget,
       hasIndeedCloudflareMarker,
     };
   }).catch(() => ({
@@ -284,6 +308,7 @@ async function getChallengeSignals(page) {
     visibleRecaptchaFrames: 0,
     visibleHCaptchaFrames: 0,
     hasCloudflareChallengeFrame: false,
+    hasCloudflareTurnstileWidget: false,
     hasIndeedCloudflareMarker: false,
   }));
 }
@@ -302,6 +327,7 @@ function formatChallengeEvidence(signals, key = null) {
     signals.visibleRecaptchaFrames ? `recaptchaFrames=${signals.visibleRecaptchaFrames}` : null,
     signals.visibleHCaptchaFrames ? `hcaptchaFrames=${signals.visibleHCaptchaFrames}` : null,
     signals.hasCloudflareChallengeFrame ? 'cfFrame=yes' : null,
+    signals.hasCloudflareTurnstileWidget ? 'turnstileWidget=yes' : null,
     signals.hasIndeedCloudflareMarker ? 'indeedCfMarker=yes' : null,
     signals.bodyHead ? `bodyHead=${JSON.stringify(signals.bodyHead)}` : null,
   ].filter(Boolean);
@@ -414,7 +440,7 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
       s => !!document.querySelector(s), contentSel
     ).catch(() => false);
 
-    if (isChallenge && !hasContent) {
+    if (isChallenge) {
       cleanSince = null; // challenge present or re-served — reset stable timer
       if (justRecovered) {
         // Challenge appeared immediately after navigating back to the resume URL —
@@ -553,96 +579,214 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   // the corresponding card DOM elements — making card-click expansion unreliable.
   if (cfg.expandViaNavigation && (cfg.navUrlTemplate || cfg.navUrlField)) {
     const listUrl = page.url();
-    for (let i = 0; i < enhanced.length; i++) {
-      const job = enhanced[i];
-      let viewUrl;
-      if (cfg.navUrlField) {
-        viewUrl = job[cfg.navUrlField] || '';
-      } else {
-        const rawKey = (cfg.keyField && job[cfg.keyField])
-          ? job[cfg.keyField]
-          : cfg.keyRegex
-            ? job.url?.match(new RegExp(cfg.keyRegex))?.[1]
-            : job.url?.match(new RegExp(`[?&]${cfg.keyParam}=([^&]+)`))?.[1];
-        if (!rawKey) continue;
-        const key = cfg.keyDecode ? decodeURIComponent(rawKey) : rawKey;
-        viewUrl = cfg.navUrlTemplate.replace('{key}', key);
-      }
-      if (!viewUrl) continue;
 
-      const navPause = await waitIfPaused(page, signal);
-      if (navPause === 'abort') break;
+    // Open a dedicated background page for detail fetches so the main list page
+    // stays put — eliminates the visual ping-pong between search results and
+    // individual job pages. Falls back to the main page if newPage() fails.
+    let detailPage = null;
+    try {
+      detailPage = await page.browser().newPage();
+      await detailPage.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver',           { get: () => false });
+        Object.defineProperty(navigator, 'platform',            { get: () => 'MacIntel' });
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+        Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8 });
+        Object.defineProperty(navigator, 'maxTouchPoints',      { get: () => 0 });
+      }).catch(() => {});
+      const ua = await page.evaluate(() => navigator.userAgent).catch(() => null);
+      if (ua) await detailPage.setUserAgent(ua).catch(() => {});
+      const vp = page.viewport();
+      if (vp) await detailPage.setViewport(vp).catch(() => {});
+    } catch {
+      detailPage = null;
+    }
+    const fetchPage = detailPage ?? page;
 
-      await updateOverlay(page, {
-        ...overlayBase,
-        count:  baseCount + i + 1,
-        status: `Fetching descriptions… ${i + 1}/${enhanced.length}`,
-      });
+    try {
+      for (let i = 0; i < enhanced.length; i++) {
+        const job = enhanced[i];
+        let viewUrl;
+        if (cfg.navUrlField) {
+          viewUrl = job[cfg.navUrlField] || '';
+        } else {
+          const rawKey = (cfg.keyField && job[cfg.keyField])
+            ? job[cfg.keyField]
+            : cfg.keyRegex
+              ? job.url?.match(new RegExp(cfg.keyRegex))?.[1]
+              : job.url?.match(new RegExp(`[?&]${cfg.keyParam}=([^&]+)`))?.[1];
+          if (!rawKey) continue;
+          const key = cfg.keyDecode ? decodeURIComponent(rawKey) : rawKey;
+          viewUrl = cfg.navUrlTemplate.replace('{key}', key);
+        }
+        if (!viewUrl) continue;
 
-      try {
-        await page.evaluate(u => { window.location.href = u; }, viewUrl).catch(() => {});
-        await new Promise(r => setTimeout(r, humanDelay(2000)));
+        const navPause = await waitIfPaused(page, signal);
+        if (navPause === 'abort') break;
 
-        const isChallenge = await detectChallengePage(page);
-        // Detect expired listings separately from challenge redirects.
-        const pageInfo = await page.evaluate(() => {
-          const bodyText = (document.body?.innerText || '').toLowerCase();
-          const title    = (document.title || '').toLowerCase();
-          const isNotFound =
-            bodyText.includes('page not found') ||
-            bodyText.includes("we can't find this page") ||
-            bodyText.includes('no longer available') ||
-            bodyText.includes('this job has expired') ||
-            title.includes('404');
-          return { isNotFound };
-        }).catch(() => ({ isNotFound: false }));
+        await updateOverlay(page, {
+          ...overlayBase,
+          count:  baseCount + i + 1,
+          status: `Fetching descriptions… ${i + 1}/${enhanced.length}`,
+        });
 
-        if (isChallenge) {
-          await updateOverlay(page, {
-            ...overlayBase,
-            count:     baseCount + i + 1,
-            status:    '⚠️ Complete the verification to continue',
-            challenge: true,
-          });
-          logger.info(`[BrowserScraper] ${overlayBase.srcName}: human verification detected during description expansion`);
-          // Poll until the challenge clears or the timeout expires.
-          const challengeDeadline = Date.now() + CHALLENGE_TIMEOUT_MS;
-          let solved = false;
-          while (Date.now() < challengeDeadline) {
-            await new Promise(r => setTimeout(r, 1500));
-            if (await recoverFromChallengeHomeLanding(page, overlayBase, signal, viewUrl, baseCount + i + 1)) {
+        try {
+          // goto() + domcontentloaded: JSON-LD is server-rendered so it's ready
+          // immediately; no need for networkidle which ZipRecruiter's analytics
+          // would delay indefinitely.
+          await fetchPage.goto(viewUrl, { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {});
+
+          const isChallenge = await detectChallengePage(fetchPage);
+          // Detect expired listings separately from challenge redirects.
+          const pageInfo = await fetchPage.evaluate(() => {
+            const bodyText = (document.body?.innerText || '').toLowerCase();
+            const title    = (document.title || '').toLowerCase();
+            const isNotFound =
+              bodyText.includes('page not found') ||
+              bodyText.includes("we can't find this page") ||
+              bodyText.includes('no longer available') ||
+              bodyText.includes('this job has expired') ||
+              title.includes('404');
+            return { isNotFound };
+          }).catch(() => ({ isNotFound: false }));
+
+          if (isChallenge) {
+            if (detailPage) {
+              // Challenge appeared on the background tab — the user can't see it
+              // to solve it, so drop this job's description and keep moving.
+              enhanced[i] = null;
               continue;
             }
-            const stillChallenge = await detectChallengePage(page);
-            if (!stillChallenge) { solved = true; break; }
+            // Fallback path: main page is being used, challenge is visible.
+            await updateOverlay(page, {
+              ...overlayBase,
+              count:     baseCount + i + 1,
+              status:    '⚠️ Complete the verification to continue',
+              challenge: true,
+            });
+            logger.info(`[BrowserScraper] ${overlayBase.srcName}: human verification detected during description expansion`);
+            const challengeDeadline = Date.now() + CHALLENGE_TIMEOUT_MS;
+            let solved = false;
+            while (Date.now() < challengeDeadline) {
+              await new Promise(r => setTimeout(r, 1500));
+              if (await recoverFromChallengeHomeLanding(page, overlayBase, signal, viewUrl, baseCount + i + 1)) {
+                continue;
+              }
+              const stillChallenge = await detectChallengePage(page);
+              if (!stillChallenge) { solved = true; break; }
+            }
+            if (!solved) break;
+            await updateOverlay(page, {
+              ...overlayBase,
+              count:  baseCount + i + 1,
+              status: `Fetching descriptions… ${i + 1}/${enhanced.length}`,
+            });
+            i--; // retry this job now that the challenge is solved
+            continue;
           }
-          if (!solved) break; // skip/timeout — stop expanding and return what we have
-          await updateOverlay(page, {
-            ...overlayBase,
-            count:  baseCount + i + 1,
-            status: `Fetching descriptions… ${i + 1}/${enhanced.length}`,
-          });
-          i--; // retry this job now that the challenge is solved
-          continue;
+
+          if (pageInfo.isNotFound) { enhanced[i] = null; continue; } // expired listing — drop it
+
+          // Try JSON-LD JobPosting.description first (server-rendered, selector-free).
+          // Fall back to __NEXT_DATA__ pageProps probe, then CSS panelSelector.
+          let text = '';
+          if (cfg.jsonLdType) {
+            text = await fetchPage.evaluate((type, field) => {
+              for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+                try {
+                  const d = JSON.parse(s.textContent);
+                  if (d['@type'] === type && d[field]) {
+                    const tmp = document.createElement('div');
+                    tmp.innerHTML = d[field];
+                    return tmp.innerText?.trim() || '';
+                  }
+                } catch {
+                  // Ignore malformed JSON-LD blocks and keep probing fallbacks.
+                }
+              }
+              return '';
+            }, cfg.jsonLdType, cfg.jsonLdField).catch(() => '');
+          }
+          // __NEXT_DATA__ fallback: walk a dot-separated field path into pageProps.
+          if (!text && cfg.nextDataField) {
+            text = await fetchPage.evaluate(fieldPath => {
+              try {
+                const nd = JSON.parse(document.getElementById('__NEXT_DATA__')?.textContent || 'null');
+                if (!nd) return '';
+                const parts = fieldPath.split('.');
+                let node = nd;
+                for (const p of parts) {
+                  if (node == null || typeof node !== 'object') return '';
+                  node = node[p];
+                }
+                if (!node || typeof node !== 'string') return '';
+                const tmp = document.createElement('div');
+                tmp.innerHTML = node;
+                return tmp.innerText?.trim() || '';
+              } catch { return ''; }
+            }, cfg.nextDataField).catch(() => '');
+          }
+          if (!text) {
+            text = await fetchPage.evaluate(sel => {
+              return document.querySelector(sel)?.innerText?.trim() || '';
+            }, cfg.panelSelector).catch(() => '');
+          }
+          if (!text) {
+            // Structural fallback: find "Job description" heading and grab next sibling.
+            text = await fetchPage.evaluate(() => {
+              for (const h of document.querySelectorAll('h2, h3')) {
+                if (h.textContent?.trim() === 'Job description') {
+                  return h.nextElementSibling?.innerText?.trim() || '';
+                }
+              }
+              return '';
+            }).catch(() => '');
+          }
+          // Diagnostic: first miss per batch — log page context for next bug report.
+          if (!text && i === 0) {
+            const diag = await fetchPage.evaluate(() => {
+              const ldTypes = Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
+                .map(s => { try { return JSON.parse(s.textContent)['@type']; } catch { return '?'; } });
+              let ndKeys = '';
+              try {
+                const nd = JSON.parse(document.getElementById('__NEXT_DATA__')?.textContent || 'null');
+                ndKeys = Object.keys(nd?.props?.pageProps || {}).slice(0, 8).join(',');
+              } catch {
+                // Diagnostic-only probe; missing/invalid Next data is expected.
+              }
+              return {
+                url:       location.href.slice(0, 120),
+                title:     document.title?.slice(0, 80),
+                ldTypes,
+                hasNextData: !!document.getElementById('__NEXT_DATA__'),
+                ndPagePropKeys: ndKeys,
+                bodyHead:  (document.body?.innerText || '').slice(0, 200).replace(/\s+/g, ' '),
+              };
+            }).catch(() => null);
+            if (diag) {
+              logger.info(`[BrowserScraper] ${overlayBase.srcName} desc-miss diag: url="${diag.url}" title="${diag.title}" ldTypes=[${diag.ldTypes.join(',')}] nextData=${diag.hasNextData} ndKeys="${diag.ndPagePropKeys}" body="${diag.bodyHead}"`);
+            }
+          }
+          if (text) enhanced[i] = { ...job, snippet: text };
+        } catch {
+          // Per-listing navigation errors are non-fatal; keep the batch moving.
         }
+      }
+    } finally {
+      await detailPage?.close().catch(() => {});
+    }
 
-        if (pageInfo.isNotFound) { enhanced[i] = null; continue; } // expired listing — drop it
-
-        const text = await page.evaluate(sel => {
-          return document.querySelector(sel)?.innerText?.trim() || '';
-        }, cfg.panelSelector).catch(() => '');
-        if (text) enhanced[i] = { ...job, snippet: text };
+    // If the main page was used as fallback, return it to the list URL.
+    // If detailPage was used, the main page never navigated — just re-inject overlay.
+    if (!detailPage) {
+      try {
+        await page.evaluate(u => { window.location.href = u; }, listUrl).catch(() => {});
+        await new Promise(r => setTimeout(r, humanDelay(2000)));
       } catch {
-        // Per-listing navigation errors are non-fatal; keep the batch moving.
+        // Best-effort return to the list; the caller can still continue or stop cleanly.
       }
     }
-    // Navigate back to the list URL so the caller can continue pagination.
-    try {
-      await page.evaluate(u => { window.location.href = u; }, listUrl).catch(() => {});
-      await new Promise(r => setTimeout(r, humanDelay(2000)));
-      await injectOverlay(page);
-    } catch {
-      // Best-effort return to the list; the caller can still continue or stop cleanly.
+    try { await injectOverlay(page); } catch {
+      // Overlay reinjection is best-effort after detail navigation.
     }
     return { jobs: enhanced.filter(Boolean), descError: null };
   }
@@ -912,9 +1056,11 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal) 
               const s = getComputedStyle(el);
               if (s.overflowY === 'auto' || s.overflowY === 'scroll') {
                 const step = Math.floor(el.clientHeight * (0.55 + Math.random() * 0.3));
-                while (el.scrollTop + el.clientHeight < el.scrollHeight - 10) {
+                let innerSteps = 0;
+                while (el.scrollTop + el.clientHeight < el.scrollHeight - 10 && innerSteps < 20) {
                   el.scrollTop += step;
                   await new Promise(r => setTimeout(r, 55 + Math.random() * 90));
+                  innerSteps++;
                 }
                 break;
               }
@@ -922,17 +1068,27 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal) 
             }
           }
           const step = Math.floor(window.innerHeight * (0.55 + Math.random() * 0.3));
-          while (window.scrollY + window.innerHeight < document.body.scrollHeight - 10) {
+          let steps = 0;
+          while (window.scrollY + window.innerHeight < document.body.scrollHeight - 10 && steps < 20) {
             window.scrollBy(0, step);
             await new Promise(r => setTimeout(r, 55 + Math.random() * 90));
+            steps++;
           }
         });
       } else {
+        // Cap scroll steps to prevent an infinite loop on true infinite-scroll pages
+        // (e.g. ZipRecruiter "Director of Brand Marketing") where scrollHeight grows
+        // as you scroll — without a cap the evaluate() runs until Puppeteer's 3-min
+        // CDP protocol timeout kills the whole scrape. The outer preloadContent loop
+        // re-runs after each evaluate() and stops when job count stops increasing, so
+        // 20 steps per call is plenty to reveal new content while staying bounded.
         await page.evaluate(async () => {
           const step = Math.floor(window.innerHeight * (0.55 + Math.random() * 0.3));
-          while (window.scrollY + window.innerHeight < document.body.scrollHeight - 10) {
+          let steps = 0;
+          while (window.scrollY + window.innerHeight < document.body.scrollHeight - 10 && steps < 20) {
             window.scrollBy(0, step);
             await new Promise(r => setTimeout(r, 55 + Math.random() * 90));
+            steps++;
           }
         });
       }
@@ -1005,9 +1161,13 @@ export async function scrapeManualSources(tasks, onResult, signal) {
     headless: false,
     executablePath,
     userDataDir,
+    // Strip --enable-automation (Puppeteer default) and disable the blink
+    // AutomationControlled feature flag — these two are the most-checked
+    // automation signals and what ZipRecruiter's fingerprint JS reads.
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
       ...sandboxArgs,
+      '--disable-blink-features=AutomationControlled',
       '--disable-infobars',
       '--window-size=1280,900',
       '--lang=en-US,en',
@@ -1017,6 +1177,22 @@ export async function scrapeManualSources(tasks, onResult, signal) {
   });
 
   const page = await browser.newPage();
+
+  // Mask automation-specific navigator/screen properties on every document
+  // (including iframes and post-navigation pages). Mirrors createStealthPage()
+  // in stealthBrowser.js — keeps the fingerprint coherent across the session.
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver',           { get: () => false });
+    Object.defineProperty(navigator, 'platform',            { get: () => 'MacIntel' });
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+    Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8 });
+    Object.defineProperty(navigator, 'maxTouchPoints',      { get: () => 0 });
+    if (navigator.connection) {
+      Object.defineProperty(navigator.connection, 'rtt',           { get: () => 50 });
+      Object.defineProperty(navigator.connection, 'downlink',      { get: () => 10 });
+      Object.defineProperty(navigator.connection, 'effectiveType', { get: () => '4g' });
+    }
+  });
 
   // Expose pause state bridge — must be before evaluateOnNewDocument so
   // the overlay script can call __icGetPaused on init. Puppeteer re-registers
@@ -1262,6 +1438,18 @@ export async function scrapeManualSources(tasks, onResult, signal) {
           // description is less useful than not having the job at all).
           const jobsToExpand = newJobs.slice(0, JOB_PER_PAGE_CAP);
           const { jobs: enhanced, descError } = await expandDescriptions(page, jobsToExpand, sourceId, overlayBase, allJobs.length + newJobs.length, signal);
+
+          const withSnippet = enhanced.filter(j => j.snippet?.length > 0).length;
+          const descCfg = DESC_CONFIGS[sourceId];
+          if (descCfg?.panelSelector || descCfg?.expandViaNavigation) {
+            const strategy = [
+              descCfg?.jsonLdType    && `jsonLd(${descCfg.jsonLdType})`,
+              descCfg?.nextDataField && `nd(${descCfg.nextDataField.split('.').slice(-1)[0]})`,
+              'sel',
+            ].filter(Boolean).join('+');
+            logger.info(`[BrowserScraper] ${srcName} q${qi + 1} descriptions: ${withSnippet}/${jobsToExpand.length} expanded (${strategy}: ${descCfg?.panelSelector?.slice(0, 40) ?? 'none'})`);
+          }
+
           allJobs.push(...enhanced);
 
           if (descError) {

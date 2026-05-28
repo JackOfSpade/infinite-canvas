@@ -20,6 +20,8 @@ export const SELL_PLATFORMS = [
   { id: 'whatnot',   name: 'Whatnot',    letter: 'Wn', color: '#fff200', domain: 'whatnot.com',   postUrl: 'https://www.whatnot.com/sell' },
 ];
 
+export const SELL_PLATFORM_BY_ID = Object.fromEntries(SELL_PLATFORMS.map(platform => [platform.id, platform]));
+
 /** Job search sources — 10 platforms.
  *  `color` is sampled from the live favicon so card outlines match. */
 export const JOB_SOURCES = [
@@ -35,12 +37,8 @@ export const JOB_SOURCES = [
   { id: 'usajobs',        name: 'USAJobs',     letter: 'US', color: '#003366', domain: 'usajobs.gov' },
 ];
 
-export const ALL_JOB_SOURCE_IDS = [
-  'google', 'indeed', 'linkedin', 'remoteok', 'weworkremotely',
-  'ziprecruiter', 'glassdoor', 'dice', 'wellfound',
-  'usajobs',
-];
-
+export const JOB_SOURCE_BY_ID = Object.fromEntries(JOB_SOURCES.map(source => [source.id, source]));
+export const ALL_JOB_SOURCE_IDS = JOB_SOURCES.map(source => source.id);
 export const ACTIVE_JOB_SOURCES = getScopedJobSourceIds(ALL_JOB_SOURCE_IDS);
 
 /** Price comparison sources for marketplace research.

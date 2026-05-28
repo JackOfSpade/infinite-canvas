@@ -69,7 +69,11 @@ export const ZIPRECRUITER_EXTRACTOR = `
     } catch {}
   }
 
-  if (jobs.length === 0) throw new Error('SITE_CHANGED: ziprecruiter ItemList JSON-LD extractor returned 0 — JSON-LD structure or @type may have changed');
+  if (jobs.length === 0) {
+    // Titles like "0 Category Manager Jobs..." = genuine empty results page, not a breakage.
+    if (/^0\\s/.test((document.title || '').trim())) return [];
+    throw new Error('SITE_CHANGED: ziprecruiter ItemList JSON-LD extractor returned 0 — JSON-LD structure or @type may have changed');
+  }
   return jobs;
 })()
 `;
@@ -85,41 +89,84 @@ export const GLASSDOOR_CONFIG = {
   referer: 'https://www.google.com/',
 };
 
-// Strategy: __NEXT_DATA__ > apolloCache (Glassdoor migrated to Next.js + Apollo).
-// Looks for cache entries with JobListing keys and a jobTitleText field.
-// Note: returning 1–10 jobs before hitting "Show more" is the Glassdoor review
-// gate (detected by the IPC layer separately). Returning 0 means the apolloCache
-// structure changed → SITE_CHANGED.
+// Strategy 1: __NEXT_DATA__ Apollo cache (server-rendered, fast).
+// Strategy 2: DOM card extraction (fallback — Glassdoor may not inject __NEXT_DATA__
+//   when using Next.js App Router or client-side rendering on subsequent navigations).
+// Throws SITE_CHANGED only when both strategies yield 0 results.
 export const GLASSDOOR_EXTRACTOR = `
 (function() {
   const jobs = [];
 
-  const ndEl = document.getElementById('__NEXT_DATA__');
-  if (!ndEl) throw new Error('SITE_CHANGED: glassdoor __NEXT_DATA__ element missing');
-  const nd = JSON.parse(ndEl.textContent);
-  const cache = nd?.props?.pageProps?.apolloCache || nd?.props?.pageProps?.apollo?.cache || {};
+  // Strategy 1: __NEXT_DATA__ Apollo cache
+  try {
+    const ndEl = document.getElementById('__NEXT_DATA__');
+    if (ndEl) {
+      const nd = JSON.parse(ndEl.textContent);
+      const cache = nd?.props?.pageProps?.apolloCache || nd?.props?.pageProps?.apollo?.cache || {};
+      for (const [key, value] of Object.entries(cache)) {
+        if (!value || typeof value !== 'object') continue;
+        const isJob = key.includes('JobListing') || key.includes('jobListingSe') ||
+                      (value.__typename && value.__typename.includes('Job'));
+        if (!isJob || !value.jobTitleText) continue;
+        const employer = value.employer ? cache[value.employer.__ref || ''] || value.employer : {};
+        jobs.push({
+          title: value.jobTitleText || value.jobTitle || '',
+          company: employer.shortName || employer.name || value.employerName || '',
+          location: value.locationName || value.location || '',
+          salary: value.salarySource?.payRange ? String(value.salarySource.payRange) : (value.salaryEstimate || ''),
+          snippet: (employer.overallRating ? 'Rating: ' + employer.overallRating + '/5 | ' : '') + (value.jobDescription || ''),
+          url: value.seoJobLink ? ('https://www.glassdoor.com' + value.seoJobLink) : (value.jobLink || ''),
+          posted: value.ageInDays != null ? (value.ageInDays + 'd ago') : '',
+          source: 'glassdoor'
+        });
+      }
+    }
+  } catch {}
 
-  for (const [key, value] of Object.entries(cache)) {
-    if (!value || typeof value !== 'object') continue;
-    const isJob = key.includes('JobListing') || key.includes('jobListingSe') ||
-                  (value.__typename && value.__typename.includes('Job'));
-    if (!isJob || !value.jobTitleText) continue;
+  // Strategy 2: DOM card extraction
+  if (jobs.length === 0) {
+    const cards = document.querySelectorAll('[data-test="jobListing"], .JobCard_jobCardWrapper, li[data-jobid]');
+    cards.forEach(card => {
+      try {
+        const jobId = card.getAttribute('data-jobid') || '';
 
-    const employer = value.employer ? cache[value.employer.__ref || ''] || value.employer : {};
+        const titleEl = card.querySelector(
+          '[data-test="jobTitle"], a[data-test="job-title"], h3, h2, a[class*="trackingLink"], a[class*="jobTitle"]'
+        );
+        const title = titleEl?.innerText?.trim() || '';
+        if (!title) return;
 
-    jobs.push({
-      title: value.jobTitleText || value.jobTitle || '',
-      company: employer.shortName || employer.name || value.employerName || '',
-      location: value.locationName || value.location || '',
-      salary: value.salarySource?.payRange ? (value.salarySource.payRange) : (value.salaryEstimate || ''),
-      snippet: (employer.overallRating ? 'Rating: ' + employer.overallRating + '/5 | ' : '') + (value.jobDescription || ''),
-      url: value.seoJobLink ? ('https://www.glassdoor.com' + value.seoJobLink) : (value.jobLink || ''),
-      posted: value.ageInDays != null ? (value.ageInDays + 'd ago') : '',
-      source: 'glassdoor'
+        const linkEl = card.querySelector('a[href*="jl="], a[href*="partner/jobListing"], a[href*="JobViewIAF"]')
+                    || (titleEl?.tagName === 'A' ? titleEl : null)
+                    || titleEl?.closest('a')
+                    || card.querySelector('a[href*=".htm"]');
+        const href = linkEl?.getAttribute('href') || (jobId ? '/partner/jobListing.htm?jl=' + jobId : '');
+        const url = href.startsWith('http') ? href : (href ? 'https://www.glassdoor.com' + href : '');
+
+        const companyEl = card.querySelector(
+          '[data-test="detailRecruiter"], [data-test="employer-name"], [class*="EmployerProfile_employerName"], [class*="employer-name"]'
+        );
+        const company = companyEl?.innerText?.trim() || '';
+
+        const locationEl = card.querySelector('[data-test="location"], [data-test="emp-location"]');
+        const location = locationEl?.innerText?.trim() || '';
+
+        const salaryEl = card.querySelector('[data-test="detailSalary"], [class*="salary" i]');
+        const salary = salaryEl?.innerText?.trim() || '';
+
+        const dateEl = card.querySelector('[data-test="job-age"], [class*="jobAge"]');
+        const posted = dateEl?.innerText?.trim() || '';
+
+        jobs.push({ title, company, location, salary, snippet: '', url, posted, source: 'glassdoor' });
+      } catch {}
     });
   }
 
-  if (jobs.length === 0) throw new Error('SITE_CHANGED: glassdoor apolloCache extractor returned 0 — cache key patterns or jobTitleText field may have changed');
+  if (jobs.length === 0) {
+    const bodyText = document.body?.innerText || '';
+    if (/no jobs found|0 jobs|no matching jobs|we couldn.t find/i.test(bodyText)) return [];
+    throw new Error('SITE_CHANGED: glassdoor extractor returned 0 — __NEXT_DATA__ Apollo cache absent and DOM card selectors matched nothing');
+  }
   return jobs;
 })()
 `;

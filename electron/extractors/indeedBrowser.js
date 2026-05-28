@@ -578,8 +578,16 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           logger.warn(`[Indeed/Browser] page.content() error q="${q}" p=${p + 1}: ${e.message}`);
           break outer;
         }
-        const htmlKB     = Math.round(html.length / 1024);
-        const rawPageJobs = extractIndeedJobsFromHtml(html);
+        const htmlKB = Math.round(html.length / 1024);
+        // Extract structured job data (salary, dates) from window.mosaic at runtime —
+        // the HTML-based mosaic marker hits a CSS URL in browser-rendered pages, not data.
+        const windowMosaicResults = await page.evaluate(() => {
+          try {
+            return window.mosaic?.providerData?.['mosaic-provider-jobcards']
+              ?.metaData?.mosaicProviderJobCardsModel?.results ?? null;
+          } catch { return null; }
+        }).catch(() => null);
+        const rawPageJobs = extractIndeedJobsFromHtml(html, windowMosaicResults);
         const pageJobs   = rawPageJobs.slice(0, JOB_PER_PAGE_CAP);
 
         // Soft block: Indeed returns a tiny near-empty page instead of a hard challenge.

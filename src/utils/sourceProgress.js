@@ -11,5 +11,7 @@ export function mergeSourceProgress(prev, payload) {
     detail:  payload.detail ?? null,
     warning: payload.warning !== undefined ? payload.warning : prev?.warning ?? null,
     url:     payload.url     !== undefined ? payload.url     : prev?.url     ?? null,
+    completed: payload.completed !== undefined ? payload.completed : prev?.completed ?? null,
+    total:     payload.total     !== undefined ? payload.total     : prev?.total     ?? null,
   };
 }

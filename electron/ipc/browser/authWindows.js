@@ -174,8 +174,9 @@ export const PLATFORM_AUTH_COOKIES = {
  * login redirect for anonymous users, not just empty content).
  */
 export const PLATFORM_AUTH_GATED_URLS = {
-  google:    'google.com/account/about',  // logged-in: myaccount.google.com → google.com/account/about/?hl=…; anonymous → accounts.google.com/signin
-  wellfound: '/settings',             // anonymous → redirected to /login?redirect_url=/settings first
+  google:       'google.com/account/about',  // logged-in: myaccount.google.com → google.com/account/about/?hl=…; anonymous → accounts.google.com/signin
+  wellfound:    '/settings',                 // anonymous → redirected to /login?redirect_url=/settings first
+  ziprecruiter: '/jobseeker/',               // post-login landing /jobseeker/home; anonymous → redirected to /user/login
 };
 
 /** Cookie domains to check per platform */
@@ -345,6 +346,9 @@ export async function openLoginWindow(platformId, sender = null) {
     // log buffer reveals WHY auto-close didn't fire (vs. silent failure).
     let lastNonLoginUrl = null;
     let lastHeartbeatLog = 0;
+    // Set by any auto-detection path — carried through cleanup() → resolve()
+    // so the caller can skip the HTTP re-verify when we already confirmed login.
+    let autoDetectedLoginUrl = null;
 
     autoClosePoll = setInterval(async () => {
       if (isTerminated) return;
@@ -372,6 +376,7 @@ export async function openLoginWindow(platformId, sender = null) {
         const authGatedPath = PLATFORM_AUTH_GATED_URLS[platformId];
         if (authGatedPath && currentUrl.includes(authGatedPath)) {
           logger.info(`[StealthBrowser] Auto-detected logged-in state for ${platformId} via auth-gated URL ${currentUrl} — closing window`);
+          autoDetectedLoginUrl = currentUrl;
           if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
           if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
           await loginBrowser.close().catch(() => {});
@@ -414,6 +419,7 @@ export async function openLoginWindow(platformId, sender = null) {
         if (cookieSignal || domSignal) {
           const via = cookieSignal ? 'auth cookie' : 'DOM signal';
           logger.info(`[StealthBrowser] Auto-detected logged-in state for ${platformId} via ${via} at ${currentUrl} — closing window`);
+          autoDetectedLoginUrl = currentUrl;
           if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
           if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
           // Programmatic close fires the 'disconnected' event → cleanup
@@ -477,7 +483,7 @@ export async function openLoginWindow(platformId, sender = null) {
       // instantaneous to the user.
       await new Promise(r => setTimeout(r, 800));
       finishAuthWindowDiagnostic(platformId, { result: 'closed' });
-      resolve({ success: true, platform: platformId, closedByApp: sender?.isDestroyed?.() });
+      resolve({ success: true, platform: platformId, closedByApp: sender?.isDestroyed?.(), loginDetected: !!autoDetectedLoginUrl, loginUrl: autoDetectedLoginUrl });
     };
 
     if (sender) {

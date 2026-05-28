@@ -333,7 +333,9 @@ export async function enrichLinkedInDescriptions(jobs, signal) {
               const descText = descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
               if (descText) return { ...job, description: descText, snippet: descText };
             }
-          } catch {}
+          } catch {
+            // Ignore malformed structured data and fall back to DOM extraction.
+          }
         }
 
         // Fallback: extract from the description container div.
@@ -488,7 +490,9 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
                 const text = (div.textContent || div.innerText || '').replace(/\s+/g, ' ').trim();
                 if (text.length > 50) return { ok: true, text };
               }
-            } catch {}
+            } catch {
+              // Ignore malformed structured data and fall back to selectors.
+            }
           }
 
           // ── CSS-selector path ────────────────────────────────────────────
@@ -1281,7 +1285,7 @@ function normalizeIndeedCandidate(record) {
     title,
     company: firstText(job.company, job.companyName, job.employer?.name, job.hiringOrganization?.name),
     location: firstText(job.formattedLocation, job.location, job.locationName, job.jobLocation?.address?.addressLocality),
-    salary: salaryText(job.extractedSalary || job.salaryInfo || job.salarySnippet || job.salary),
+    salary: salaryText(job.salarySnippet || job.salaryInfo || job.extractedSalary || job.salary),
     snippet: firstText(job.snippet?.htmlSnippet, job.snippet?.text, job.snippet, job.description, job.jobDescription),
     url: normalizeIndeedUrl(rawUrl, key),
     jobkey: key,
@@ -1360,8 +1364,17 @@ function extractMosaicJobs(html) {
   const rawJson = readBalancedJsonObject(text, objectStart);
   const data = parseJsonSafely(rawJson);
   if (!data) return [];
-  const results = data?.metaData?.mosaicProviderJobCardsModel?.results;
-  return collectIndeedJobsFromObject(Array.isArray(results) ? results : data);
+  // Try known result paths before falling back to full traversal.
+  const knownPaths = [
+    ['metaData', 'mosaicProviderJobCardsModel', 'results'],
+    ['jobCards'],
+    ['results'],
+  ];
+  for (const p of knownPaths) {
+    const val = getNested(data, p);
+    if (Array.isArray(val) && val.length > 0) return collectIndeedJobsFromObject(val);
+  }
+  return collectIndeedJobsFromObject(data);
 }
 
 function extractDomJobs(html) {
@@ -1392,11 +1405,11 @@ function extractDomJobs(html) {
         title,
         company: compactText(card.querySelector('[data-testid="company-name"], .companyName')?.textContent, 180),
         location: compactText(card.querySelector('[data-testid="text-location"], .companyLocation')?.textContent, 180),
-        salary: compactText(card.querySelector('[data-testid="attribute_snippet_testid"], .salary-snippet, [data-testid="desktopSalaryOnlySnippet"]')?.textContent, 160),
+        salary: compactText(card.querySelector('.salary-snippet-container, [data-testid="desktopSalaryOnlySnippet"], .salary-snippet')?.textContent, 160),
         snippet: compactText(card.querySelector('[data-testid="job-snippet"], .summary')?.textContent, 300),
         url: normalizeIndeedUrl(rawUrl, key),
         jobkey: key,
-        posted: compactText(card.querySelector('[data-testid="myJobsStateDate"], .date')?.textContent, 120),
+        posted: compactText(card.querySelector('[data-testid="job-age"], .date, [class*="jobAge"], [class*="datePosted"]')?.textContent, 120),
         source: 'indeed',
       });
     } catch { /* skip malformed card */ }
@@ -1405,12 +1418,18 @@ function extractDomJobs(html) {
   return dedupeIndeedJobs(jobs);
 }
 
-export function extractIndeedJobsFromHtml(html) {
-  return dedupeIndeedJobs([
-    ...extractNextDataJobs(html),
-    ...extractMosaicJobs(html),
-    ...extractDomJobs(html),
-  ]);
+// windowMosaicResults: pre-extracted array from window.mosaic.providerData
+// ['mosaic-provider-jobcards'].metaData.mosaicProviderJobCardsModel.results
+// passed in by the Puppeteer scraper via page.evaluate(). When provided it
+// replaces the broken HTML marker approach (which hits a CSS URL, not data).
+export function extractIndeedJobsFromHtml(html, windowMosaicResults = null) {
+  const nextData = extractNextDataJobs(html);
+  const mosaic   = windowMosaicResults
+    ? collectIndeedJobsFromObject(windowMosaicResults)
+    : extractMosaicJobs(html);
+  const dom      = extractDomJobs(html);
+  logger.info(`[Indeed/extract] __NEXT_DATA__: ${nextData.length}, mosaic: ${mosaic.length}, dom: ${dom.length}`);
+  return dedupeIndeedJobs([...nextData, ...mosaic, ...dom]);
 }
 
 function buildIndeedSearchUrl(query, days, page) {
@@ -1917,7 +1936,8 @@ export async function enrichDiceDescriptions(jobs, signal) {
         if (!descHtml) return job;
         const descText = descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
         if (!descText) return job;
-        const { _diceId: _removed, ...rest } = job;
+        const rest = { ...job };
+        delete rest._diceId;
         return { ...rest, description: descText, snippet: descText };
       } catch {
         return job; // keep summary on error
@@ -1927,7 +1947,11 @@ export async function enrichDiceDescriptions(jobs, signal) {
   }
 
   // Strip _diceId from any jobs not enriched above (e.g. aborted mid-run)
-  const cleaned = enriched.map(({ _diceId: _removed, ...rest }) => rest);
+  const cleaned = enriched.map((job) => {
+    const rest = { ...job };
+    delete rest._diceId;
+    return rest;
+  });
 
   const withFullDesc = cleaned.filter(j => j.description && j.description.length > 300).length;
   logger.info(`[Dice API] Enriched ${cleaned.length} jobs — ${withFullDesc}/${cleaned.length} have full descriptions`);

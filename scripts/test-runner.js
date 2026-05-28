@@ -412,14 +412,19 @@ const tests = [
         warning: { code: 'captcha', severity: 'block' },
         url: 'https://example.com/jobs',
         detail: 'page 1',
+        completed: 0,
+        total: 10,
       });
       const terminal = mergeSourceProgress(first, { status: 'done', count: 12 });
       assert(terminal.warning?.code === 'captcha', 'Source progress merge: warning should stay sticky when omitted');
       assert(terminal.url === 'https://example.com/jobs', 'Source progress merge: url should stay sticky when omitted');
       assert(terminal.detail === null, 'Source progress merge: detail should not stay sticky');
+      assert(terminal.completed === 0 && terminal.total === 10, 'Source progress merge: completed/total should stay sticky when omitted');
+      const advanced = mergeSourceProgress(terminal, { status: 'searching', count: 12, completed: 4, total: 10 });
+      assert(advanced.completed === 4 && advanced.total === 10, 'Source progress merge: completed/total should update when provided');
       const cleared = mergeSourceProgress(terminal, { status: 'done', count: 12, warning: null, url: null });
       assert(cleared.warning === null && cleared.url === null, 'Source progress merge: explicit null should clear sticky fields');
-      return { terminal, cleared };
+      return { terminal, advanced, cleared };
     },
   },
   {

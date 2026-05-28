@@ -8,7 +8,7 @@ import {
 import { ANIMATION_DURATIONS, DEFAULT_SHORTCUTS } from '../hooks/useSettings';
 import { useSyncWhileFocused } from '../hooks/useSyncWhileFocused';
 import { useToast } from './ToastProvider';
-import { SELL_PLATFORMS, JOB_SOURCES } from '../utils/constants';
+import { SELL_PLATFORMS, SELL_PLATFORM_BY_ID, JOB_SOURCES, JOB_SOURCE_BY_ID } from '../utils/constants';
 import { PlatformBadge } from './PlatformBadge';
 
 const SPEED_OPTIONS = [
@@ -217,7 +217,7 @@ function JobPlatformLoginsSection() {
       const res = await window.electronAPI?.openLoginWindow?.({ platformId });
       const connected = !!res?.connected;
       setAuthByPlatform(prev => ({ ...prev, [platformId]: connected }));
-      const niceName = JOB_LOGIN_PLATFORMS.find(p => p.id === platformId)?.name || platformId;
+      const niceName = JOB_SOURCE_BY_ID[platformId]?.name || platformId;
       if (connected) {
         addToast({ title: `${niceName}: logged in`, description: res?.reason || 'Session verified.', type: 'success' });
       } else {
@@ -313,7 +313,7 @@ function MarketplaceMonitorSection({ watchUrlsByPlatform, onChangeWatchUrls }) {
       const res = await window.electronAPI?.openLoginWindow?.({ platformId });
       const connected = !!res?.connected;
       setAuthByPlatform(prev => ({ ...prev, [platformId]: connected }));
-      const niceName = SELL_PLATFORMS.find(p => p.id === platformId)?.name || platformId;
+      const niceName = SELL_PLATFORM_BY_ID[platformId]?.name || platformId;
       if (connected) {
         addToast({ title: `${niceName}: logged in`, description: res?.reason || 'Session verified.', type: 'success' });
       } else {

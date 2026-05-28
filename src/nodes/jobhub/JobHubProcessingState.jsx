@@ -1,5 +1,6 @@
 import React from 'react';
 import { Loader2, XCircle, Terminal } from 'lucide-react';
+import { JOB_SOURCE_BY_ID } from '../../utils/constants';
 
 export function JobHubProcessingState({
   statusLabel,
@@ -10,17 +11,11 @@ export function JobHubProcessingState({
   onReset,
   chromeLaunchInfo,
 }) {
-  const sourceNames = {
-    google: 'Google', indeed: 'Indeed', linkedin: 'LinkedIn',
-    remoteok: 'RemoteOK', weworkremotely: 'WWR',
-    ziprecruiter: 'ZipRecruiter', glassdoor: 'Glassdoor',
-    dice: 'Dice', wellfound: 'Wellfound',
-    greenhouse: 'Greenhouse', lever: 'Lever', usajobs: 'USAJobs'
-  };
-
   const handleCopy = () => {
     if (chromeLaunchInfo?.terminalCommand) {
-      navigator.clipboard.writeText(chromeLaunchInfo.terminalCommand).catch(() => {});
+      navigator.clipboard.writeText(chromeLaunchInfo.terminalCommand).catch(() => {
+        // Clipboard permissions vary by shell/webview; the command remains visible.
+      });
     }
   };
 
@@ -76,7 +71,7 @@ export function JobHubProcessingState({
       )}
       <Loader2 size={22} className="animate-spin text-blue-400 mb-2" />
       <p className="text-white/60 text-xs font-medium">
-        {hubState === 'searching' && activeSourceId ? `Scanning ${sourceNames[activeSourceId] || activeSourceId}...` : statusLabel}
+        {hubState === 'searching' && activeSourceId ? `Scanning ${JOB_SOURCE_BY_ID[activeSourceId]?.name || activeSourceId}...` : statusLabel}
       </p>
       {hubState === 'searching' && totalSourceJobs > 0 && (
         <p className="text-blue-400/60 text-[10px] mt-1">

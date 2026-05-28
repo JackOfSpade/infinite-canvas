@@ -4,7 +4,7 @@ import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { usePlatformsVerifyingProgress } from '../contexts/useSessionStatus';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
-import { JOB_SOURCES, ACTIVE_JOB_SOURCES } from '../utils/constants';
+import { JOB_SOURCE_BY_ID, ACTIVE_JOB_SOURCES } from '../utils/constants';
 import { getScopedJobSourceIds, isJobSourceEnabledInScope, JOB_SEARCH_TEST_MODE } from '../utils/jobSourceScope';
 import { dedupeJobsByKey, jobTitleCompanyUrlKey, uniqueJobsNotIn } from '../utils/jobIdentity';
 import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
@@ -30,7 +30,7 @@ import {
 
 // ─── TESTING: skip AI scoring after collection ───────────────────────────────
 // Set to false (or remove the block below) to re-enable the full pipeline.
-const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled;
+const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled && (!JOB_SEARCH_TEST_MODE.fullRun || JOB_SEARCH_TEST_MODE.skipAI);
 // ─────────────────────────────────────────────────────────────────────────────
 
 // "Other Strong Matches" cutoff for the append path. Prefer the per-hub gate
@@ -951,7 +951,7 @@ export function JobHubNode({ id, data }) {
         .map(n => n.data?.sourceId),
     );
     const missing = ACTIVE_JOB_SOURCES
-      .map(sid => JOB_SOURCES.find(s => s.id === sid))
+      .map(sid => JOB_SOURCE_BY_ID[sid])
       .filter(s => s && !existingSourceIds.has(s.id));
     if (missing.length === 0) return;
 
@@ -988,7 +988,7 @@ export function JobHubNode({ id, data }) {
     if (missing.length === 0) return;
 
     const items = missing.map(w => ({
-      source: JOB_SOURCES.find(s => s.id === w.sourceId) ||
+      source: JOB_SOURCE_BY_ID[w.sourceId] ||
         { id: w.sourceId, name: w.sourceId, letter: (w.sourceId[0] || '?').toUpperCase(), color: '#ef4444', domain: '' },
       persistedProgress: {
         status:  'error',
@@ -1182,7 +1182,7 @@ export function JobHubNode({ id, data }) {
         JOB_LOGIN_IDS.map(async (platformId) => {
           const res = await window.electronAPI.checkJobPlatformAuth?.({ platformId });
           if (res?.connected) return null;
-          return JOB_SOURCES.find(s => s.id === platformId)?.name || platformId;
+          return JOB_SOURCE_BY_ID[platformId]?.name || platformId;
         })
       )).filter(Boolean);
       if (notLoggedIn.length > 0) {
@@ -1310,7 +1310,7 @@ export function JobHubNode({ id, data }) {
       // Backend login gate: if any browser-scraped platform isn't connected
       // the search handler returns early with notLoggedIn instead of running.
       if (!searchResult.success && Array.isArray(searchResult.notLoggedIn) && searchResult.notLoggedIn.length > 0) {
-        const names = searchResult.notLoggedIn.map(loginId => JOB_SOURCES.find(s => s.id === loginId)?.name || loginId);
+        const names = searchResult.notLoggedIn.map(loginId => JOB_SOURCE_BY_ID[loginId]?.name || loginId);
         throw Object.assign(
           new Error(`Log in to ${names.join(', ')} first (Settings → Job Platform Logins)`),
           { isLoginGate: true, notLoggedIn: searchResult.notLoggedIn }
@@ -1919,7 +1919,7 @@ export function JobHubNode({ id, data }) {
         return;
       }
       try {
-        const res = await window.electronAPI.getLastJobAnalysisSnapshot();
+        const res = await window.electronAPI.getLastJobAnalysisSnapshot({ canvasFilePath });
         if (cancelled) return;
         if (
           res?.success &&

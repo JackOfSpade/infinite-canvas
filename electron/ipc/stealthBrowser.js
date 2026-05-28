@@ -472,10 +472,12 @@ const JOB_LOGIN_PLATFORMS = {
   // sessions. Anonymous users on /Job/index.htm are caught by body signals
   // (login CTAs that don't appear once logged in).
   glassdoor:    { name: 'Glassdoor',    verifyUrl: 'https://www.glassdoor.com/member/home/index.htm',  bodySignals: ['sign in to glassdoor', 'create a free glassdoor account', 'join glassdoor for free', 'log in to glassdoor'] },
-  // bodySignals: ZipRecruiter's /profile shows an inline login form without
-  // redirecting (finalUrl stays at /profile, status 200). The form heading
-  // "Log in to ZipRecruiter" distinguishes it from an authenticated profile.
-  ziprecruiter: { name: 'ZipRecruiter', verifyUrl: 'https://www.ziprecruiter.com/profile',              bodySignals: ['log in to ziprecruiter', 'sign in to ziprecruiter'] },
+  // /jobseeker/home is the post-login landing page — authenticated sessions stay
+  // there; anonymous requests redirect to /user/login (connectedFinalUrlMustContain
+  // catches the redirect). Avoids /profile which Cloudflare challenges on new
+  // browser sessions (HTTP 403, not a real auth failure) and caused false
+  // "not logged in" verdicts on every app restart after cf_clearance expired.
+  ziprecruiter: { name: 'ZipRecruiter', verifyUrl: 'https://www.ziprecruiter.com/jobseeker/home', connectedFinalUrlMustContain: 'ziprecruiter.com/jobseeker', bodySignals: ['log in to ziprecruiter', 'sign in to ziprecruiter'] },
   wellfound:    { name: 'Wellfound',    verifyUrl: 'https://wellfound.com/settings' },
 };
 
