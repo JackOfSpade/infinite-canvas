@@ -35,6 +35,7 @@ coverage/
 
 # Build caches and scratch dirs
 *.tsbuildinfo
+main.cjs
 out/
 tmp/
 temp/
