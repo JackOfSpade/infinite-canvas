@@ -219,9 +219,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // regressions (the DOM node picked up schedule/benefit text instead).
         // Posted: 100% empty on a source means the date selector broke.
         // URL: any missing URLs means jobs can't be opened or deduped properly.
+        // Description: the full JD is stored in `snippet` on the saved
+        // snapshot (existing snippet-length stats above already flag empty
+        // counts). The additional signal here is "non-empty but very short" —
+        // typically means the per-card description expansion silently fell
+        // back to the listing-card excerpt. Per-query `X/Y expanded` log
+        // lines otherwise need to be eyeballed to notice.
         // Fields like title/company/location are too free-form to validate here.
         const looksLikeMoney = (s) =>
           /\$|\d+\s*k\b|per (?:hour|year|week|month)|\/h(?:r|our)|\/yr|\/year|hourly|annually|\ba year\b|\ban hour\b/i.test(s);
+        const SHORT_DESC_THRESHOLD = 400; // listing snippets are typically <300 chars
 
         const qualBySource = {};
         for (const j of snapJobs) {
@@ -233,6 +240,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             urlMissing: 0,
             companyEmpty: 0,
             titleEmpty: 0,
+            descEmpty: 0, descShort: 0, descShortLens: [],
           });
           q.total++;
           const sal = (j.salary || '').trim();
@@ -247,6 +255,19 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           if (!(j.url || '').trim())     q.urlMissing++;
           if (!(j.company || '').trim()) q.companyEmpty++;
           if (!(j.title || '').trim())   q.titleEmpty++;
+          // Full JD lives in `snippet` on the saved snapshot (the field is named
+          // for the original list-card excerpt but is overwritten with the
+          // expanded description). Two distinct failure modes:
+          //   • empty  → enrichment never populated it (e.g. LinkedIn guest
+          //     authwall hit mid-run, leaving the rest with no description),
+          //   • short  → snippet-leak (listing-card text mistaken for full JD).
+          const desc = (j.snippet || '').trim();
+          if (!desc) {
+            q.descEmpty++;
+          } else if (desc.length < SHORT_DESC_THRESHOLD) {
+            q.descShort++;
+            if (q.descShortLens.length < 3) q.descShortLens.push(desc.length);
+          }
         }
 
         let anyQualityIssue = false;
@@ -278,6 +299,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           if (q.urlMissing > 0) {
             issues.push(`🔥 url missing: ${q.urlMissing}/${q.total} — broken card link, breaks dedup`);
           }
+          // Empty descriptions: a high rate means enrichment broke for most jobs
+          // (e.g. LinkedIn's guest authwall stops enrichment after a few requests,
+          // leaving the remainder with no description). Reported as a hard issue so
+          // the field-quality line can't bless a source that's 99% empty while the
+          // snippet-length line above already screams "N empty".
+          // Below ~10% empty is within normal enrichment-miss tolerance (and the
+          // snippet-length line above still shows the exact empty count); only a
+          // meaningful fraction warrants a field-quality flag.
+          if (q.descEmpty / q.total >= 0.5) {
+            issues.push(`🔥 description missing: ${q.descEmpty}/${q.total} (${Math.round((q.descEmpty / q.total) * 100)}%) empty — enrichment failed for most jobs (e.g. authwall mid-run)`);
+          } else if (q.descEmpty / q.total >= 0.1) {
+            issues.push(`⚠ description missing: ${q.descEmpty}/${q.total} (${Math.round((q.descEmpty / q.total) * 100)}%) empty — some jobs never got a description`);
+          }
+          if (q.descShort > 0) {
+            const lensStr = q.descShortLens.join(', ');
+            issues.push(`⚠ description short (<${SHORT_DESC_THRESHOLD} chars): ${q.descShort}/${q.total} — likely got the listing snippet instead of the full JD (sample lengths: ${lensStr})`);
+          }
           if (issues.length > 0) {
             if (!anyQualityIssue) {
               lines.push('- ⚠️ **Field quality issues (scrape selectors may be broken):**');
@@ -289,7 +327,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           }
         }
         if (!anyQualityIssue && Object.keys(qualBySource).length > 0) {
-          lines.push('- Field quality (saved snapshot): ✅ salary, posted, and url look correct');
+          lines.push('- Field quality (saved snapshot): ✅ salary, posted, url, and snippet look correct');
         }
       }
     } catch { /* snapshot absent or unreadable — omit silently */ }
@@ -386,6 +424,22 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const entries = Object.entries(t.resolves).sort((a, b) => (b[1]?.ts || 0) - (a[1]?.ts || 0));
     lines.push('\n### Captcha-resolve / Solve');
     for (const [sourceId, r] of entries) {
+      // LinkedIn's Solve isn't a captcha-extract — it's an anonymous description
+      // re-fetch (no login: descriptions come from cookieless guest pages, so the
+      // session is irrelevant). Its own outcome fields render on a dedicated line.
+      if (r.kind === 'linkedin-reenrich') {
+        const rot = r.contextRotations != null ? `, ${r.contextRotations} ctx-rotation(s)` : '';
+        if (r.skippedSameIp) {
+          lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → **skipped, IP unchanged**${r.warmIp ? ` (still ${r.warmIp})` : ''} — the VPN switch hadn't taken effect, so re-fetch was not re-attempted on the same rate-limited IP.`);
+        } else if (r.walled) {
+          lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → re-fetch **hit IP ceiling** after +${r.enrichSuccess ?? 0}/${r.needEnrich ?? '?'}${rot}${r.stillEmpty != null ? `, ${r.stillEmpty} still empty` : ''}${r.warmIp ? `, IP ${r.warmIp} now warm` : ''}. _Anonymous guest rate-limit, not a login issue — switch VPN to a fresh IP, then Solve to fetch more._`);
+        } else if (r.needEnrich != null) {
+          lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → re-fetched +${r.enrichSuccess ?? 0}/${r.needEnrich}${rot}${r.stillEmpty != null ? `, ${r.stillEmpty} still empty` : ''}`);
+        } else {
+          lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → re-fetch (no jobs needed descriptions)`);
+        }
+        continue;
+      }
       // If the renderer reported the actual merge outcome, show net pendingJobs
       // change. Without it, "new: N" from the IPC side overstates the contribution
       // when the resolver re-opened a page the initial scrape already captured
@@ -430,6 +484,50 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           lines.push('  - ⚠️ extractor matched 0 on a content-bearing page with no challenge/consent up — the source\'s layout likely changed (stale selectors), NOT a genuinely empty result. This is the "I solved it and saw jobs, but it failed" case.');
         }
       }
+    }
+  }
+
+  // LinkedIn anonymous-enrichment egress-IP trail. The guest description limit
+  // is per-IP, so the whole "switch your VPN and Solve again" loop hinges on the
+  // egress IP actually changing — the one variable the rest of this report is
+  // blind to (the resolve telemetry keeps only the latest Solve and records no
+  // IP). This block makes it explicit per pass: which IP it ran on, whether that
+  // changed, and whether the lookup even worked. A null IP means the same-IP
+  // guard is inert (it always proceeds); a never-changing IP means the VPN isn't
+  // switching egress; distinct IPs that all still wall means the exit IPs are
+  // shared/pre-warmed. Those three are indistinguishable without this.
+  const enrichTrail = Array.isArray(t.linkedinEnrich) ? t.linkedinEnrich : [];
+  if (enrichTrail.length > 0) {
+    lines.push('\n### LinkedIn enrichment — egress IP trail');
+    lines.push('> Guest description quota is per-IP. "Switch VPN → Solve" only helps if the egress IP actually changes.');
+    let prevIp = null;
+    for (const e of enrichTrail) {
+      const kind = e.kind === 'solve' ? 'Solve' : 'search';
+      let ipStr;
+      if (e.ipOk === false) ipStr = '**IP lookup FAILED** (null)';
+      else if (e.ip) {
+        const changed = prevIp == null ? '' : (e.ip === prevIp ? ' **(unchanged ⚠)**' : ' (changed ✓)');
+        ipStr = `IP ${e.ip}${changed}`;
+      } else ipStr = 'IP not looked up (clean pass)';
+      let outcome;
+      if (e.skippedSameIp) outcome = 'skipped — same warm IP, not re-attempted';
+      else if (e.walled) outcome = `walled, +${e.enriched ?? 0}${e.stillEmpty != null ? `, ${e.stillEmpty} still empty` : ''}${e.contextRotations != null ? `, ${e.contextRotations} rot` : ''}`;
+      else outcome = `clean finish, +${e.enriched ?? 0}${e.stillEmpty ? `, ${e.stillEmpty} still empty` : ''}`;
+      lines.push(`- ${kind}${ago(e.ts)}: ${ipStr} → ${outcome}`);
+      if (e.ip) prevIp = e.ip;
+    }
+    // Cross-pass verdict — the actual answer to "is the IP switch working?".
+    const solves = enrichTrail.filter(e => e.kind === 'solve');
+    const seenIps = enrichTrail.filter(e => e.ip).map(e => e.ip);
+    const distinctIps = new Set(seenIps);
+    const nullLookups = enrichTrail.filter(e => e.ipOk === false).length;
+    if (nullLookups > 0) {
+      lines.push(`- ⚠️ **egress IP lookup failed on ${nullLookups} pass(es)** — api.ipify.org unreachable (a VPN may block it). The same-IP guard needs a non-null IP, so with these it silently proceeds every time and can NOT catch "you haven't switched yet."`);
+    }
+    if (solves.length >= 1 && seenIps.length >= 2 && distinctIps.size === 1) {
+      lines.push(`- 🔥 **IP never changed across ${seenIps.length} passes (${[...distinctIps][0]})** — the VPN switch is NOT changing the egress IP LinkedIn sees. Re-Solving on the same warm IP just re-walls; the switch isn't working.`);
+    } else if (solves.length >= 2 && distinctIps.size > 1 && solves.every(e => e.walled || e.skippedSameIp)) {
+      lines.push(`- ℹ️ **${distinctIps.size} distinct IPs but every Solve still walled** — the IP IS changing, so the switch "works", but each exit IP is already rate-limited (shared/pre-warmed commercial-VPN endpoints). Switching can't reliably land a cold IP; a residential IP or waiting out the per-IP cooldown is the realistic path.`);
     }
   }
 

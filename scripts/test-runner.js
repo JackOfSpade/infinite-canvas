@@ -21,6 +21,8 @@ import {
   uniqueJobsNotIn,
 } from '../src/utils/jobIdentity.js';
 import { mergeSourceProgress } from '../src/utils/sourceProgress.js';
+import { applyJobCardFiltersToNodes, getJobCardFilterOpacity, isJobCardVisible } from '../src/utils/jobCardFilters.js';
+import { mergeResolvedSourceItems } from '../src/utils/jobSourceResolveMerge.js';
 import {
   LIKELY_THRESHOLD,
   TARGET_BUCKETING_CATEGORY,
@@ -30,7 +32,7 @@ import {
   partitionJobsForBranches,
   strongMatchGate,
 } from '../src/nodes/jobhub/buildJobTree.js';
-import { extractIndeedJobsFromHtml } from '../electron/extractors/apiExtractors.js';
+import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch } from '../electron/extractors/apiExtractors.js';
 import {
   fingerprint,
   migrateGroupNodes,
@@ -56,6 +58,8 @@ import { FILE_CATEGORIES, getFileCategoryInfo, toLocalFileUrl } from '../src/uti
 import { parsePostedDate, filterJobsByAge } from '../electron/ipc/jobDateFilter.js';
 import { compsForPricing, jobScoringBatchSize, JOB_MAX_PAGES, JOB_PER_PAGE_CAP } from '../electron/ipc/resultCaps.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
+import { createJobSearchTestMode, parseJobSearchEnvBoolean } from '../src/utils/jobSourceScope.js';
+import { getJobAuthPreflightSourceIds, JOB_AUTH_PREFLIGHT_SOURCE_IDS } from '../src/utils/jobAuthPreflight.js';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -367,6 +371,68 @@ const tests = [
     },
   },
   {
+    name: 'Job board relevance filtering',
+    run: () => {
+      const geoTerms = buildGeoTermSet(['Denver, CO', 'hybrid in Chicago']);
+      assert(geoTerms.has('denver') && geoTerms.has('chicago'), 'Job board relevance filtering: geo terms should include city tokens');
+      assert(!geoTerms.has('co'), 'Job board relevance filtering: short state token should be ignored');
+      assert(
+        !jobRelevanceMatch('Account Executive - Denver', 'Junior Cinematographer Denver', geoTerms),
+        'Job board relevance filtering: location/seniority tokens should not pull unrelated board roles',
+      );
+      assert(
+        jobRelevanceMatch('Senior Cinematographer', 'Junior Cinematographer Denver', geoTerms),
+        'Job board relevance filtering: surviving role noun should match',
+      );
+      assert(
+        !jobRelevanceMatch('Account Executive - Chicago', 'Product Designer Chicago', geoTerms),
+        'Job board relevance filtering: preferred-location token should not become role relevance',
+      );
+      assert(
+        jobRelevanceMatch('Engineering Manager', 'Senior Manager', new Set()),
+        'Job board relevance filtering: all-generic role query should still fall back rather than match nothing',
+      );
+      return { geoTerms: [...geoTerms].sort(), fallback: true };
+    },
+  },
+  {
+    name: 'Job source test-mode env parsing',
+    run: () => {
+      const off = createJobSearchTestMode({});
+      assert(off.enabled === false && off.sourceId === null, 'Job source test-mode env parsing: default should be production/all-source mode');
+      const disabledWithSource = createJobSearchTestMode({ JOB_SEARCH_TEST_SOURCE: 'linkedin' });
+      assert(disabledWithSource.sourceId === null, 'Job source test-mode env parsing: source should be ignored unless enabled');
+      const full = createJobSearchTestMode({
+        JOB_SEARCH_TEST_ENABLED: 'true',
+        JOB_SEARCH_TEST_SOURCE: 'linkedin',
+        JOB_SEARCH_TEST_FULL_RUN: '1',
+        JOB_SEARCH_TEST_SKIP_AI: 'yes',
+      });
+      assert(full.enabled && full.sourceId === 'linkedin' && full.fullRun && full.skipAI, 'Job source test-mode env parsing: plain env values not parsed');
+      const vite = createJobSearchTestMode({
+        VITE_JOB_SEARCH_TEST_ENABLED: 'on',
+        VITE_JOB_SEARCH_TEST_SOURCE: 'indeed',
+        VITE_JOB_SEARCH_TEST_FULL_RUN: '0',
+      });
+      assert(vite.enabled && vite.sourceId === 'indeed' && !vite.fullRun, 'Job source test-mode env parsing: VITE env values not parsed');
+      assert(parseJobSearchEnvBoolean('not-a-bool', true) === true, 'Job source test-mode env parsing: invalid bool should use fallback');
+      return { defaultEnabled: off.enabled, fullSource: full.sourceId, viteSource: vite.sourceId };
+    },
+  },
+  {
+    name: 'Job auth preflight sources',
+    run: () => {
+      const required = getJobAuthPreflightSourceIds(ids => ids);
+      assert(!required.includes('linkedin'), 'Job auth preflight sources: LinkedIn should not block anonymous public job search');
+      assert(required.includes('indeed') && required.includes('glassdoor'), 'Job auth preflight sources: browser sources should still be gated');
+      const scopedLinkedIn = getJobAuthPreflightSourceIds(ids => ids.filter(id => id === 'linkedin'));
+      assert(scopedLinkedIn.length === 0, 'Job auth preflight sources: LinkedIn-only test scope should require no login preflight');
+      const scopedIndeed = getJobAuthPreflightSourceIds(ids => ids.filter(id => id === 'indeed'));
+      assert(scopedIndeed.join(',') === 'indeed', 'Job auth preflight sources: source scope should still gate required browser sources');
+      return { required: JOB_AUTH_PREFLIGHT_SOURCE_IDS.length, scopedLinkedIn: scopedLinkedIn.length };
+    },
+  },
+  {
     name: 'Bug report code filtering',
     run: () => {
       const logs = [
@@ -425,6 +491,55 @@ const tests = [
       const cleared = mergeSourceProgress(terminal, { status: 'done', count: 12, warning: null, url: null });
       assert(cleared.warning === null && cleared.url === null, 'Source progress merge: explicit null should clear sticky fields');
       return { terminal, advanced, cleared };
+    },
+  },
+  {
+    name: 'Job card filters',
+    run: () => {
+      const job = { source: 'indeed', matchScore: 72, status: 'New' };
+      assert(isJobCardVisible(job, { sourceFilter: 'indeed', scoreThreshold: 70 }), 'Job card filters: matching source and score should be visible');
+      assert(!isJobCardVisible(job, { sourceFilter: 'linkedin' }), 'Job card filters: non-matching source should be hidden');
+      assert(!isJobCardVisible(job, { scoreThreshold: 80 }), 'Job card filters: score below threshold should be hidden');
+      assert(isJobCardVisible({ ...job, status: undefined }, { statusFilters: ['New'] }), 'Job card filters: missing status should default to New');
+      assert(!isJobCardVisible(job, { statusFilters: ['Filled'] }), 'Job card filters: non-matching status should be hidden');
+      assert(getJobCardFilterOpacity(job, { sourceFilter: 'linkedin' }) === 0.15, 'Job card filters: hidden opacity should match UI contract');
+      const otherHubCard = { id: 'other', type: 'jobcard', style: {}, data: { ...job, hubId: 'hub-b', source: 'linkedin' } };
+      const alreadyHidden = { id: 'hidden', type: 'jobcard', style: { opacity: 0.15 }, data: { ...job, hubId: 'hub-a', source: 'linkedin' } };
+      const nodes = [
+        { id: 'visible', type: 'jobcard', style: {}, data: { ...job, hubId: 'hub-a' } },
+        { id: 'to-hide', type: 'jobcard', style: {}, data: { ...job, hubId: 'hub-a', source: 'linkedin' } },
+        otherHubCard,
+        alreadyHidden,
+      ];
+      const filteredNodes = applyJobCardFiltersToNodes(nodes, 'hub-a', { sourceFilter: 'indeed' });
+      assert(filteredNodes[0] === nodes[0], 'Job card filters: already-visible cards should preserve node identity');
+      assert(filteredNodes[1].style.opacity === 0.15, 'Job card filters: hidden same-hub cards should get hidden opacity');
+      assert(filteredNodes[2] === otherHubCard, 'Job card filters: cards from other hubs should not be mutated');
+      assert(filteredNodes[3] === alreadyHidden, 'Job card filters: unchanged opacity should preserve node identity');
+      return { visible: getJobCardFilterOpacity(job, { sourceFilter: 'indeed' }), nodes: filteredNodes.length };
+    },
+  },
+  {
+    name: 'Job source resolve merge',
+    run: () => {
+      const existing = [
+        { title: 'Indeed A', company: 'Acme', url: 'https://jobs/a', source: 'indeed' },
+        { title: 'LinkedIn A', company: 'Acme', url: 'https://jobs/li-a', source: 'linkedin', snippet: '' },
+        { title: 'Other', company: 'Beta', url: 'https://jobs/b', source: 'remoteok' },
+      ];
+      const incremental = mergeResolvedSourceItems(existing, [
+        { title: 'Indeed B', company: 'Acme', url: 'https://jobs/indeed-b', source: 'indeed' },
+      ], 'indeed');
+      assert(incremental.replacedExisting === 0, 'Job source resolve merge: incremental source should not drop existing same-source jobs');
+      assert(incremental.mergedPending.filter(j => j.source === 'indeed').length === 2, 'Job source resolve merge: incremental source should append fresh jobs');
+
+      const replacement = mergeResolvedSourceItems(existing, [
+        { title: 'LinkedIn A', company: 'Acme', url: 'https://jobs/li-a', source: 'linkedin', snippet: 'full description' },
+        { title: 'LinkedIn B', company: 'Acme', url: 'https://jobs/li-b', source: 'linkedin', snippet: 'full description' },
+      ], 'linkedin', { replaceSourceItems: true });
+      assert(replacement.replacedExisting === 1, 'Job source resolve merge: replacement source should drop stale same-source jobs');
+      assert(replacement.mergedPending.filter(j => j.source === 'linkedin').length === 2, 'Job source resolve merge: replacement source should use returned full source set');
+      return { incremental: incremental.mergedPending.length, replacement: replacement.mergedPending.length };
     },
   },
   {

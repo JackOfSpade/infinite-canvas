@@ -5,8 +5,11 @@ import { usePlatformsVerifyingProgress } from '../contexts/useSessionStatus';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
 import { JOB_SOURCE_BY_ID, ACTIVE_JOB_SOURCES } from '../utils/constants';
-import { getScopedJobSourceIds, isJobSourceEnabledInScope, JOB_SEARCH_TEST_MODE } from '../utils/jobSourceScope';
+import { isJobSourceEnabledInScope, JOB_SEARCH_TEST_MODE } from '../utils/jobSourceScope';
 import { dedupeJobsByKey, jobTitleCompanyUrlKey, uniqueJobsNotIn } from '../utils/jobIdentity';
+import { applyJobCardFiltersToNodes } from '../utils/jobCardFilters';
+import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
+import { mergeResolvedSourceItems } from '../utils/jobSourceResolveMerge';
 import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
 import { EventLogger } from '../utils/EventLogger';
 import { useToast } from '../components/ToastProvider';
@@ -784,15 +787,12 @@ export function JobHubNode({ id, data }) {
     const activeScore = st  !== undefined ? st  : (data.scoreThreshold ?? 0);
     const activeStats = stf !== undefined ? stf : (data.statusFilters || []);
 
-    setNodes(nodes => nodes.map(n => {
-      if (n.type !== 'jobcard') return n;
-      const srcOk    = !activeSrc   || n.data?.source === activeSrc;
-      const scoreOk  = (n.data?.matchScore ?? 0) >= activeScore;
-      const statusOk = activeStats.length === 0 || activeStats.includes(n.data?.status || 'New');
-      const visible  = srcOk && scoreOk && statusOk;
-      return { ...n, style: { ...n.style, opacity: visible ? 1 : 0.15 } };
+    setNodes(nodes => applyJobCardFiltersToNodes(nodes, id, {
+      sourceFilter: activeSrc,
+      scoreThreshold: activeScore,
+      statusFilters: activeStats,
     }));
-  }, [data.sourceFilter, data.scoreThreshold, data.statusFilters, setNodes]);
+  }, [data.sourceFilter, data.scoreThreshold, data.statusFilters, id, setNodes]);
 
   // Source click-through filtering. Now invoked from the JobSourceCardNode
   // children (via a CustomEvent) rather than the old orbital ring icons.
@@ -1173,11 +1173,10 @@ export function JobHubNode({ id, data }) {
       let profile = providedProfile;
       let resumeFingerprint = data.resumeFingerprint || '';
 
-      // Pre-flight: check job platform logins before any expensive work.
-      // linkedin included: without a session, browser enrichment hits an authwall
-      // and all 160 job descriptions come back empty — gating here is cheaper
-      // than a 5+ min scrape that produces nothing useful.
-      const JOB_LOGIN_IDS = getScopedJobSourceIds(['linkedin', 'google', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound']);
+      // Pre-flight: check only sources that require a browser session before
+      // expensive scraping starts. LinkedIn is intentionally excluded; its job
+      // fetch + description enrichment are anonymous/public flows.
+      const JOB_LOGIN_IDS = getJobAuthPreflightSourceIds();
       const notLoggedIn = (await Promise.all(
         JOB_LOGIN_IDS.map(async (platformId) => {
           const res = await window.electronAPI.checkJobPlatformAuth?.({ platformId });
@@ -1596,15 +1595,29 @@ export function JobHubNode({ id, data }) {
       if (hubStateRef.current === 'searching') {
         resolvedDuringSearchRef.current.add(resolvedSourceId);
       }
-      // Merge new items into pendingJobs, replacing same-source entries so
-      // a retry brings fresh data rather than stacking on top of old.
+      // Merge new items into pendingJobs. LinkedIn re-fetch returns the full
+      // source set and requests replacement; captcha/Continue flows return
+      // incremental pages and keep already-captured same-source jobs.
       const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
-      const keep = prevPending.filter(j => j?.source !== resolvedSourceId);
-      const fresh = uniqueJobsNotIn(keep, items, jobTitleCompanyUrlKey);
-      const mergedPending = [...keep, ...fresh];
+      const replaceSourceItems = !!e.detail?.replaceSourceItems;
+      const { fresh, mergedPending, replacedExisting } = mergeResolvedSourceItems(
+        prevPending,
+        items,
+        resolvedSourceId,
+        { replaceSourceItems },
+      );
       pendingJobsRef.current = mergedPending;
-      // Drop the resolved source's warning.
+      // Drop the resolved source's warning — then re-add it if the resolve came
+      // back STILL warned (LinkedIn re-enrich hit the per-IP guest ceiling again,
+      // or the VPN switch hadn't taken so it's the same warm IP). This keeps the
+      // done-state ScrapeWarningsPanel mirroring the card's actionable state
+      // instead of clearing on every attempt regardless of outcome. Captcha /
+      // resume resolves carry no warning, so they clear cleanly as before.
+      const resolveWarning = e.detail?.warning || null;
       const remaining = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== resolvedSourceId);
+      if (resolveWarning) {
+        remaining.push({ sourceId: resolvedSourceId, ...resolveWarning });
+      }
       scrapeWarningsRef.current = remaining;
       updateGlobal(id, { pendingJobs: mergedPending, jobCount: mergedPending.length, scrapeWarnings: remaining });
       // Auto-resume on no remaining BLOCK or PASTE warnings (info / throttle stays).
@@ -1616,7 +1629,7 @@ export function JobHubNode({ id, data }) {
       // "new: 11" when the actual net change may be 0 (11 replaced 11).
       window.electronAPI.recordResolveMerge?.({
         sourceId: resolvedSourceId,
-        replacedExisting: prevPending.length - keep.length,
+        replacedExisting,
         fresh: fresh.length,
         pendingBefore: prevPending.length,
         pendingAfter: mergedPending.length,
@@ -1636,6 +1649,30 @@ export function JobHubNode({ id, data }) {
     document.addEventListener('job-source-resolved', onResolved);
     return () => document.removeEventListener('job-source-resolved', onResolved);
   }, [id, updateGlobal, scheduleCleanSourceCardDismiss]);
+
+  // Optimistic counterpart to onResolved: JobSourceCardNode dispatches this the
+  // instant the user clicks Solve (before the resolve runs). Drop the matching
+  // non-blocking warning so the done-state "N throttled" panel reflects the
+  // in-flight retry immediately instead of sitting stale through a multi-minute
+  // re-fetch — onResolved re-adds it if the attempt comes back still-warned.
+  // Block/paste warnings are intentionally left untouched: they gate the paused
+  // 'sources-ready' state, and dropping one here could mis-fire auto-resume
+  // before the block is actually cleared.
+  useEffect(() => {
+    const onRetryStart = (e) => {
+      if (e.detail?.hubId !== id) return;
+      const sid = e.detail?.sourceId;
+      if (!sid) return;
+      const current = scrapeWarningsRef.current || [];
+      const w = current.find(x => x.sourceId === sid);
+      if (!w || w.severity === 'block' || w.severity === 'paste') return;
+      const remaining = current.filter(x => x.sourceId !== sid);
+      scrapeWarningsRef.current = remaining;
+      updateGlobal(id, { scrapeWarnings: remaining });
+    };
+    document.addEventListener('job-source-retry-start', onRetryStart);
+    return () => document.removeEventListener('job-source-retry-start', onRetryStart);
+  }, [id, updateGlobal]);
 
   // "Score current results" button on the paused-state UI: clear all
   // remaining warnings (user chose to proceed without resolving) and resume.
@@ -1879,8 +1916,12 @@ export function JobHubNode({ id, data }) {
     });
 
     // Clear any paused-pipeline buffer so the new run doesn't accidentally
-    // resume the previous attempt's partial results.
-    updateGlobal(id, { pendingJobs: null, pendingTargetRole: null });
+    // resume the previous attempt's partial results. Also wipe the prior run's
+    // scrape warnings so the "N throttled" panel doesn't linger if this re-run
+    // errors out before its completion handler can overwrite them with the new
+    // run's outcome.
+    scrapeWarningsRef.current = [];
+    updateGlobal(id, { pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [] });
     cancelCleanSourceCardDismiss();
     resetSourceProgress();
     if (effectivePath) {
@@ -1940,7 +1981,7 @@ export function JobHubNode({ id, data }) {
     return () => {
       cancelled = true;
     };
-  }, [hubState]);
+  }, [hubState, canvasFilePath]);
 
   const handleOpenSavedPrompt = useCallback(async () => {
     if (!savedAnalysisMeta?.promptPath) return;
@@ -1961,7 +2002,7 @@ export function JobHubNode({ id, data }) {
 
     setSavedAnalysisLoading(true);
     try {
-      const res = await window.electronAPI.getLastJobAnalysisSnapshot();
+      const res = await window.electronAPI.getLastJobAnalysisSnapshot({ canvasFilePath });
       const snapshot = res?.success && res.exists ? res.snapshot : null;
       const savedJobs = Array.isArray(snapshot?.jobs) ? snapshot.jobs : [];
       const profile = snapshot?.profile;
@@ -2034,7 +2075,7 @@ export function JobHubNode({ id, data }) {
     } finally {
       if (isMountedRef.current) setSavedAnalysisLoading(false);
     }
-  }, [addToast, cancelCleanSourceCardDismiss, data.locked, deleteElements, epoch, getEdges, getNode, getNodes, hubState, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal]);
+  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.locked, deleteElements, epoch, getEdges, getNode, getNodes, hubState, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal]);
 
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[JobHub][${id}] User clicked Dismiss Error`);

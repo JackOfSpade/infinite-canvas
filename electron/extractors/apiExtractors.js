@@ -45,6 +45,14 @@ function apiTimeout(key) {
   return resolveBudget(key, API_TIMEOUT_SEEDS[key] ?? 10000).timeoutMs;
 }
 
+function allEndpointFetchesFailedWarning(sourceName, failed, total) {
+  return {
+    code: 'api-source-unavailable',
+    severity: 'block',
+    evidence: `${sourceName} returned no usable boards (${failed}/${total} endpoint requests failed).`,
+    suggestion: `Audit the configured ${sourceName} board list or the API endpoint; the source is currently returning a clean zero because every request failed.`,
+  };
+}
 
 /**
  * Process a list of items concurrently in batches.
@@ -138,15 +146,17 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     if (signal?.aborted) break;
     // Stop querying if a previous query was blocked — subsequent ones will be too.
     if (warning) break;
-    // Inter-query pause (not before the first query). Irregular cadence like the
-    // inter-page jitter so a multi-query walk doesn't look like a fixed drumbeat.
-    if (qi > 0) await new Promise(res => setTimeout(res, 3000 + Math.floor(Math.random() * 3000)));
+    // Inter-query pause (not before the first query). humanDelay gives a
+    // log-normal spread around the anchor so a multi-query walk doesn't look
+    // like a fixed drumbeat (anchor ≈ the old 3–6s uniform window's midpoint).
+    if (qi > 0) await new Promise(res => setTimeout(res, humanDelay(4500)));
 
     const query = queryList[qi];
     // Walk up to 150 results (6 pages × 25). LinkedIn's guest API is heavily
     // anti-bot, so depth is PACED, not blitzed:
-    //   • a jittered 4–8s human-scale gap before each page after the first (a fixed
-    //     2s drumbeat is a tell — irregular cadence is the main signal we control),
+    //   • a humanDelay log-normal gap (~6s anchor) before each page after the first
+    //     (a fixed 2s drumbeat is a tell — an organically-spread cadence is the
+    //     main signal we control),
     //   • an early-exit the moment a page adds no new cards (below), so a low-volume
     //     query never walks all 6 pages — we only go deep when results justify it,
     //   • bail on the first block/non-OK (below), returning whatever we gathered so
@@ -154,8 +164,8 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     const LINKEDIN_MAX_RESULTS = 150;
     for (let start = 0; start < LINKEDIN_MAX_RESULTS; start += 25) {
       if (signal?.aborted) break;
-      // Human-scale jittered pause before each subsequent page.
-      if (start > 0) await new Promise(res => setTimeout(res, 4000 + Math.floor(Math.random() * 4000)));
+      // Human-scale log-normal pause before each subsequent page.
+      if (start > 0) await new Promise(res => setTimeout(res, humanDelay(6000)));
       const params = new URLSearchParams({
         keywords: query,
         start: String(start),
@@ -408,20 +418,35 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
     return { jobs, loginWall: false, loginWallUrl: null };
   }
 
-  // Open the enrichment tab in an isolated context with NO cookies.
+  // Enrichment runs in an isolated context with NO cookies.
   // When the shared browser context is used (browser.newPage()), the new tab
   // inherits the LinkedIn login cookies → LinkedIn serves the React SPA version
-  // of job detail pages, which has zero JSON-LD and no server-rendered description.
-  // An isolated context is anonymous to LinkedIn → it serves the guest/SEO version,
-  // which server-renders a full JobPosting JSON-LD block at DOMContentLoaded.
-  // The stealth-browser flags (UA, WebGL, etc.) still apply — the page looks like
-  // a real Chrome tab, just not logged in to LinkedIn.
-  let isolatedCtx;
-  let page;
-  try {
+  // of job detail pages, which has zero JSON-LD and no server-rendered description
+  // (probe-confirmed 2026-05-28). An isolated context is anonymous → it serves the
+  // guest/SEO version, which server-renders a full JobPosting JSON-LD block at
+  // DOMContentLoaded. Stealth flags (UA, WebGL, etc.) still apply.
+  //
+  // Context rotation (the wall lever): LinkedIn walls anonymous guest access to
+  // job-view pages after ~4 requests. If that ceiling is tracked per guest
+  // *session* (cookies on the isolated context) rather than per IP, recreating
+  // the context resets it — letting us stay on the clean JSON-LD path without
+  // logging in. We rotate reactively: on a wall, spin up a fresh context and
+  // retry the job. If a FRESH context walls before completing any job, the limit
+  // is IP/fingerprint-based (rotation can't help) and we stop.
+  const MAX_CONTEXT_ROTATIONS = 80; // safety cap (~255 jobs / ~4 per ctx ≈ 64)
+  let isolatedCtx = null;
+  let page = null;
+  let contextRotations = 0;
+  let jobsThisContext = 0; // completed (non-walling) navigations on the current context
+  const rotateContext = async () => {
+    await isolatedCtx?.close().catch(() => {});
     isolatedCtx = await browser.createBrowserContext();
     page = await isolatedCtx.newPage();
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    jobsThisContext = 0;
+  };
+  try {
+    await rotateContext(); // initial context (contextRotations stays 0 — see below)
   } catch (err) {
     logger.warn(`[LinkedIn/Browser] Cannot open tab for enrichment: ${err.message}`);
     await isolatedCtx?.close().catch(() => {});
@@ -450,6 +475,30 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
   // (HTTP redirects) and the post-evaluate page.url() (JS redirects).
   const LOGIN_WALL_RE = /\/(login|uas\/|checkpoint|authwall|signup|join|session)\b/i;
 
+  // Wall handler: rotate the guest context and retry, OR stop. Returns true if
+  // the caller should STOP (set loginWallAt first); false means "rotated, retry
+  // this job" (caller does i--; continue). A fresh context that walls before
+  // completing any job ⇒ IP-based limit ⇒ stop (rotation is futile).
+  const handleWall = async (wallUrl, atIndex) => {
+    if (contextRotations > 0 && jobsThisContext === 0) {
+      loginWallAt = atIndex;
+      loginWallUrl = wallUrl;
+      logger.warn(`[LinkedIn/Browser] wall persists on a FRESH guest context (job ${atIndex + 1}, after ${contextRotations} rotation(s)) — IP/fingerprint-based limit, rotation can't help. Stopping.`);
+      return true;
+    }
+    if (contextRotations >= MAX_CONTEXT_ROTATIONS) {
+      loginWallAt = atIndex;
+      loginWallUrl = wallUrl;
+      logger.warn(`[LinkedIn/Browser] hit max ${MAX_CONTEXT_ROTATIONS} context rotations — stopping.`);
+      return true;
+    }
+    logger.info(`[LinkedIn/Browser] guest wall at job ${atIndex + 1} after ${jobsThisContext} job(s) on this context — rotating guest context (#${contextRotations + 1}) and retrying`);
+    contextRotations++;
+    await rotateContext();
+    consecutiveEvalErrors = 0; // fresh context — reset the eval-error streak
+    return false;
+  };
+
   try {
     for (let i = 0; i < enriched.length; i++) {
       if (signal?.aborted) break;
@@ -463,10 +512,8 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
 
         // HTTP-redirect login wall: LinkedIn changed the URL to an auth page.
         if (LOGIN_WALL_RE.test(finalUrl)) {
-          loginWallAt = i;
-          loginWallUrl = finalUrl;
-          logger.warn(`[LinkedIn/Browser] Login wall at job ${i + 1}/${enriched.length} — stopping enrichment (${finalUrl})`);
-          break;
+          if (await handleWall(finalUrl, i)) break;
+          i--; continue; // retry this job on the fresh context
         }
 
         // Description extractor — runs inside the page context (no closures).
@@ -552,18 +599,15 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
           }
           // JS-redirect login wall: LinkedIn redirected mid-evaluate.
           if (LOGIN_WALL_RE.test(result.postEvalUrl || '')) {
-            loginWallAt = i;
-            loginWallUrl = result.postEvalUrl;
-            logger.warn(`[LinkedIn/Browser] JS-redirect login wall at job ${i + 1}/${enriched.length} — redirected to ${result.postEvalUrl}`);
-            break;
+            if (await handleWall(result.postEvalUrl, i)) break;
+            i--; continue; // retry this job on the fresh context
           }
           // N consecutive eval errors without a URL-matchable redirect → still
-          // treat as a systematic login wall and stop to avoid wasting time.
+          // treat as a systematic wall; rotate-and-retry (handleWall stops if a
+          // fresh context fails too).
           if (consecutiveEvalErrors >= JS_REDIRECT_WALL_THRESHOLD) {
-            loginWallAt = i - (consecutiveEvalErrors - 1);
-            loginWallUrl = result.postEvalUrl || null;
-            logger.warn(`[LinkedIn/Browser] ${consecutiveEvalErrors} consecutive eval errors — JS-redirect login wall presumed, stopping (last post-eval URL: ${result.postEvalUrl})`);
-            break;
+            if (await handleWall(result.postEvalUrl || page.url(), i - (consecutiveEvalErrors - 1))) break;
+            i--; continue; // retry on the fresh context
           }
         } else {
           noDesc++;
@@ -583,6 +627,11 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
           firstFailNote = `nav-error · ${String(err.message || err).slice(0, 100)} · ${job.url.slice(0, 80)}`;
         }
       }
+
+      // Reaching here means the navigation completed WITHOUT triggering a wall
+      // rotation (wall paths do `i--; continue` and skip this). Counts toward the
+      // current context's tally — used to detect "fresh context walled immediately".
+      jobsThisContext++;
 
       // Brief pause between navigations — only when there are more jobs to visit.
       // humanDelay gives a log-normal spread around the anchor (~500ms ±20%)
@@ -604,9 +653,10 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
   if (noDesc > 0) failParts.push(`${noDesc} no-desc`);
   const failSuffix = failParts.length ? ` (${failParts.join(', ')})` : '';
   const wallSuffix = loginWallAt !== null ? ` — login wall at job ${loginWallAt + 1}, ${enriched.length - loginWallAt - 1} skipped` : '';
+  const rotateSuffix = contextRotations > 0 ? ` — ${contextRotations} context rotation(s)` : '';
   const firstFailSuffix = firstFailNote !== null ? ` — first fail: ${firstFailNote}` : '';
-  logger.info(`[LinkedIn/Browser] ${successCount}/${attempted} descriptions enriched${failSuffix}${wallSuffix}${firstFailSuffix}`);
-  return { jobs: enriched, loginWall: loginWallAt !== null, loginWallUrl };
+  logger.info(`[LinkedIn/Browser] ${successCount}/${attempted} descriptions enriched${failSuffix}${rotateSuffix}${wallSuffix}${firstFailSuffix}`);
+  return { jobs: enriched, loginWall: loginWallAt !== null, loginWallUrl, successCount, attempted, contextRotations };
 }
 
 // ── Shared query-relevance filter (board/API sources) ────────────────────────
@@ -766,6 +816,9 @@ export async function fetchGreenhouseJobs(queries, signal = null, geoTerms = EMP
   const withDesc = items.filter(j => j.description).length;
   const boardsWithJobs = new Set(allJobs.map(j => j._company)).size;
   logger.info(`[Greenhouse API] ${allJobs.length} jobs fetched from ${boardsWithJobs}/${GREENHOUSE_BOARDS.length} boards (${ghApiErrors} API errors, ${ghEmptyBoards} empty boards) → ${matched.length} matched query → ${items.length} returned, ${withDesc}/${items.length} have descriptions`);
+  if (ghApiErrors === GREENHOUSE_BOARDS.length) {
+    warnings.push(allEndpointFetchesFailedWarning('Greenhouse API', ghApiErrors, GREENHOUSE_BOARDS.length));
+  }
   const strongest = warnings.find(w => w.severity === 'block') || warnings[0] || null;
   return { items, warning: strongest, gathered: matched.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
@@ -782,30 +835,17 @@ export async function fetchGreenhouseJobs(queries, signal = null, geoTerms = EMP
  * non-2xx response — the extractor logs "(N API errors)" per run so stale
  * entries are immediately visible. Audit by checking jobs.lever.co/{slug}.
  *
- * Last audited: 2026-05-27 — removed confirmed non-Lever / dead entries:
- *   netflix  → custom ATS (jobs.netflix.com)
- *   openai   → Greenhouse (boards.greenhouse.io/openai)
- *   supabase → Ashby
- *   linear   → Ashby
- *   clearbit → acquired by HubSpot 2023; Lever board inactive
- *   loom     → acquired by Atlassian 2023; Lever board inactive
- *   resend   → unverified; likely Ashby
- * Also fixed slugs: grafana→grafanalabs, dbt-labs→dbtlabs
+ * Last audited: 2026-05-28 — kept only slugs returning HTTP 200 from
+ * api.lever.co. The previous broad list had fully stale 404 boards, causing
+ * Lever to report a clean zero even though every request failed.
  */
 const LEVER_COMPANIES = [
-  { slug: 'anthropic', company: 'Anthropic' },
-  { slug: 'samsara', company: 'Samsara' },
-  { slug: 'snyk', company: 'Snyk' },
-  { slug: 'retool', company: 'Retool' },
-  { slug: 'zapier', company: 'Zapier' },
-  { slug: 'mux', company: 'Mux' },
-  { slug: 'twilio', company: 'Twilio' },
-  { slug: 'netlify', company: 'Netlify' },
-  { slug: 'postman', company: 'Postman' },
-  { slug: 'coinbase', company: 'Coinbase' },
-  { slug: 'grafanalabs', company: 'Grafana Labs' },
-  { slug: 'dbtlabs', company: 'dbt Labs' },
-  { slug: 'fly', company: 'Fly.io' },
+  { slug: 'palantir', company: 'Palantir' },
+  { slug: 'mistral', company: 'Mistral AI' },
+  { slug: 'zoox', company: 'Zoox' },
+  { slug: 'spotify', company: 'Spotify' },
+  { slug: 'plaid', company: 'Plaid' },
+  { slug: 'wealthsimple', company: 'Wealthsimple' },
 ];
 
 /**
@@ -853,6 +893,9 @@ export async function fetchLeverJobs(queries, signal = null, geoTerms = EMPTY_GE
   const withDesc = items.filter(j => j.description).length;
   const companiesWithJobs = new Set(allJobs.map(j => j._company)).size;
   logger.info(`[Lever API] ${allJobs.length} jobs fetched from ${companiesWithJobs}/${LEVER_COMPANIES.length} companies (${leverApiErrors} API errors, ${leverEmptyBoards} empty boards) → ${matched.length} matched query → ${items.length} returned, ${withDesc}/${items.length} have descriptions`);
+  if (leverApiErrors === LEVER_COMPANIES.length) {
+    warnings.push(allEndpointFetchesFailedWarning('Lever API', leverApiErrors, LEVER_COMPANIES.length));
+  }
   const strongest = warnings.find(w => w.severity === 'block') || warnings[0] || null;
   return { items, warning: strongest, gathered: matched.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }

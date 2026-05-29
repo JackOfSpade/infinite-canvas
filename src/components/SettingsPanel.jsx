@@ -187,9 +187,9 @@ function PlatformWatchUrlsRow({ platform, urls, connected, pending, onLogin, onC
 }
 
 // IDs of the browser-scraped platforms that require login.
-// linkedin is included for the Settings Log-In button even though the API
-// fetch works without login — only browser-based description enrichment needs
-// a session, and that failure is handled gracefully on the source card.
+// LinkedIn remains available here as an optional session utility, but job search
+// no longer requires it: listings and description enrichment use public guest
+// endpoints and handle guest rate limits on the source card.
 const JOB_LOGIN_IDS = ['linkedin', 'google', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound'];
 const JOB_LOGIN_PLATFORMS = JOB_SOURCES.filter(s => JOB_LOGIN_IDS.includes(s.id));
 

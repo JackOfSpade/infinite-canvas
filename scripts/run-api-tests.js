@@ -16,10 +16,12 @@ async function run() {
       const data = await fn();
       const items = Array.isArray(data) ? data : (data?.items || []);
       const warning = Array.isArray(data) ? null : (data?.warning || null);
+      const emptyWithoutWarning = items.length === 0 && warning?.severity !== 'block';
       results[name] = {
-        success: warning?.severity !== 'block',
+        success: warning?.severity !== 'block' && !emptyWithoutWarning,
         count: items.length,
         warning,
+        error: emptyWithoutWarning ? 'Source returned zero jobs without a blocking warning' : undefined,
         sample: items[0] ? {
           title: items[0].title,
           company: items[0].company,
@@ -32,7 +34,7 @@ async function run() {
   };
 
   await safeCall('LinkedIn', () => fetchLinkedInJobs(['software engineer'], null, 7));
-  await safeCall('RemoteOK', () => fetchRemoteOKJobs(['react']));
+  await safeCall('RemoteOK', () => fetchRemoteOKJobs(['engineer', 'developer']));
   await safeCall('WeWorkRemotely', () => fetchWeWorkRemotelyJobs(['frontend']));
   await safeCall('Dice', () => fetchDiceListings('software engineer', '', null, 7));
   await safeCall('Greenhouse', () => fetchGreenhouseJobs(['software engineer']));

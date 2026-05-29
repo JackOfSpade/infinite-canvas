@@ -33,9 +33,21 @@ const CHALLENGE_TIMEOUT_MS   = 5 * 60_000;   // 5 min for user to solve challeng
 const CHALLENGE_STABLE_MS    = 1_500;         // page must be challenge-free for this long before resuming — guards against re-serves
 const DESC_CHANGE_POLL_MS    = 200;           // poll interval waiting for description panel update
 const DESC_CHANGE_TIMEOUT_MS = 3_000;         // max wait for description to change after a card click
+const DESC_RETRY_PAUSE_MS    = 900;           // pause before re-clicking when the first attempt's panel never updated (catches transient anti-bot 403s)
 const DESC_CLICK_DELAY_MS    = 600;           // pause between card clicks (natural pacing)
 const SITE_CHANGED_ABORT_THRESHOLD = 3;
 const DESC_STALE_THRESHOLD   = 3;             // consecutive click/panel failures before flagging stale selectors
+
+// Cooldown BETWEEN queries (not before the first). Firing N back-to-back
+// full-page navigations to different search URLs is a velocity signal that
+// anti-bot systems flag — a human-scale pause between them lowers that signal.
+// All values are anchors fed through humanDelay() at the call site, so the
+// actual wait is organically spread (never a fixed cadence). DataDome-fronted
+// sources (Wellfound) get a longer anchor because they're the most sensitive.
+const DEFAULT_INTER_QUERY_COOLDOWN_MS = 2500;
+const INTER_QUERY_COOLDOWN_MS = {
+  wellfound: 6000,
+};
 // JOB_PER_PAGE_CAP (from resultCaps) is the unified per-page/per-query depth for all browser scrapers.
 
 
@@ -251,11 +263,20 @@ async function getChallengeSignals(page) {
     // avoid false-positive matches on reCAPTCHA/hCaptcha [data-sitekey] elements.
     const hasCloudflareTurnstileWidget = !!document.querySelector('[id*="cf-chl-widget"], .cf-turnstile');
     const hasIndeedCloudflareMarker = typeof window.INDEED_CLOUDFLARE_STATIC_PAGE !== 'undefined';
+    // DataDome (Wellfound, and an increasing share of other sites) renders a slider
+    // captcha inside a cross-origin sandboxed iframe — so document.body.innerText is
+    // empty and the user-visible "Verification Required" / "Slide right to secure
+    // your access" strings live in a different origin we can't read. Detect via the
+    // outer-frame DOM: a captcha-delivery.com iframe or the inline `var dd={...}`
+    // script that DataDome injects on every challenge page.
+    const hasDataDomeFrame  = !!document.querySelector('iframe[src*="captcha-delivery.com"], iframe[title*="DataDome"]');
+    const hasDataDomeScript = !!document.querySelector('script[src*="captcha-delivery.com"]');
 
     let reason = 'none';
     if (hasChallengeShell || hasPerimeterXBlock) reason = 'challenge-shell';
     else if (title.startsWith('just a moment')) reason = 'just-a-moment-title';
     else if (hasVerificationText) reason = 'verification-text';
+    else if (hasDataDomeFrame || hasDataDomeScript) reason = 'datadome-captcha';
     else if (visibleRecaptchaFrames > 0 && !hasNormalContent) reason = 'visible-recaptcha-without-content';
     else if (visibleHCaptchaFrames > 0 && !hasNormalContent) reason = 'visible-hcaptcha-without-content';
     else if (hasCloudflareChallengeFrame || hasCloudflareTurnstileWidget) reason = 'cloudflare-challenge-frame';
@@ -292,6 +313,8 @@ async function getChallengeSignals(page) {
       hasCloudflareChallengeFrame,
       hasCloudflareTurnstileWidget,
       hasIndeedCloudflareMarker,
+      hasDataDomeFrame,
+      hasDataDomeScript,
     };
   }).catch(() => ({
     isChallenge: false,
@@ -310,6 +333,8 @@ async function getChallengeSignals(page) {
     hasCloudflareChallengeFrame: false,
     hasCloudflareTurnstileWidget: false,
     hasIndeedCloudflareMarker: false,
+    hasDataDomeFrame: false,
+    hasDataDomeScript: false,
   }));
 }
 
@@ -329,6 +354,8 @@ function formatChallengeEvidence(signals, key = null) {
     signals.hasCloudflareChallengeFrame ? 'cfFrame=yes' : null,
     signals.hasCloudflareTurnstileWidget ? 'turnstileWidget=yes' : null,
     signals.hasIndeedCloudflareMarker ? 'indeedCfMarker=yes' : null,
+    signals.hasDataDomeFrame ? 'dataDomeFrame=yes' : null,
+    signals.hasDataDomeScript ? 'dataDomeScript=yes' : null,
     signals.bodyHead ? `bodyHead=${JSON.stringify(signals.bodyHead)}` : null,
   ].filter(Boolean);
   return bits.join(' | ').slice(0, 700);
@@ -414,7 +441,7 @@ async function waitIfPaused(_page, signal) {
   while (true) {
     if (signal?.aborted) return 'abort';
     if (!manualScraperTelemetry.paused) return 'ok';
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, humanDelay(500)));
   }
 }
 
@@ -468,7 +495,7 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
           status: `🚫 ${overlayBase.srcName} hard-blocked this session — open it in Chrome, log in, then retry`,
           error:  true,
         }).catch(() => {});
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, humanDelay(2000)));
         return 'hard-block';
       }
       if (!inChallenge) {
@@ -667,7 +694,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             const challengeDeadline = Date.now() + CHALLENGE_TIMEOUT_MS;
             let solved = false;
             while (Date.now() < challengeDeadline) {
-              await new Promise(r => setTimeout(r, 1500));
+              await new Promise(r => setTimeout(r, humanDelay(1500)));
               if (await recoverFromChallengeHomeLanding(page, overlayBase, signal, viewUrl, baseCount + i + 1)) {
                 continue;
               }
@@ -806,7 +833,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       status: 'Desc selector broken — fix selector code and restart.',
       error:  true,
     }).catch(() => {});
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, humanDelay(3000)));
     descError = {
       code:       'stale-desc-selectors',
       severity:   'block',
@@ -951,23 +978,38 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       await page.mouse.move(clickTarget.x, clickTarget.y).catch(() => {});
       await page.mouse.click(clickTarget.x, clickTarget.y, { delay: humanDelay(80) }).catch(() => {});
 
-      let gotDescription = false;
-      const dl = Date.now() + DESC_CHANGE_TIMEOUT_MS;
-      while (Date.now() < dl) {
-        await new Promise(r => setTimeout(r, DESC_CHANGE_POLL_MS));
-        const text = await page.evaluate((panelSel, panelMulti) => {
-          if (panelMulti) {
-            return Array.from(document.querySelectorAll(panelSel))
-              .map(e => e.textContent?.trim()).filter(Boolean).join('\n\n').trim();
-          }
-          return document.querySelector(panelSel)?.innerText?.trim() || '';
-        }, cfg.panelSelector, cfg.panelMulti || false).catch(() => '');
-        if (text && text !== prevPanelText) {
-          enhanced[i] = { ...job, snippet: text };
-          prevPanelText = text;
-          gotDescription = true;
-          break;
+      const pollPanel = async () => {
+        const dl = Date.now() + DESC_CHANGE_TIMEOUT_MS;
+        while (Date.now() < dl) {
+          await new Promise(r => setTimeout(r, DESC_CHANGE_POLL_MS));
+          const text = await page.evaluate((panelSel, panelMulti) => {
+            if (panelMulti) {
+              return Array.from(document.querySelectorAll(panelSel))
+                .map(e => e.textContent?.trim()).filter(Boolean).join('\n\n').trim();
+            }
+            return document.querySelector(panelSel)?.innerText?.trim() || '';
+          }, cfg.panelSelector, cfg.panelMulti || false).catch(() => '');
+          if (text && text !== prevPanelText) return text;
         }
+        return null;
+      };
+
+      let panelText = await pollPanel();
+      if (!panelText) {
+        // Transient panel-data fetch failures (e.g. Glassdoor /graph 403s)
+        // leave the right panel stuck on the previous card so the change-poll
+        // times out. A brief cool-off then one fresh click catches most of
+        // these without slowing the happy path.
+        await new Promise(r => setTimeout(r, humanDelay(DESC_RETRY_PAUSE_MS)));
+        await page.mouse.click(clickTarget.x, clickTarget.y, { delay: humanDelay(80) }).catch(() => {});
+        panelText = await pollPanel();
+      }
+
+      let gotDescription = false;
+      if (panelText) {
+        enhanced[i] = { ...job, snippet: panelText };
+        prevPanelText = panelText;
+        gotDescription = true;
       }
 
       if (gotDescription) {
@@ -1234,10 +1276,24 @@ export async function scrapeManualSources(tasks, onResult, signal) {
     if (manualScraperTelemetry.networkErrors.length > 30) manualScraperTelemetry.networkErrors.shift();
   });
 
+  // Tracks the status code of the most recent main-frame document response.
+  // Used to distinguish "anti-bot blocked the page load" from "selectors stale"
+  // when the extractor returns 0 results — a 4xx/5xx main-frame response means
+  // the body we're extracting against was a block/error page, not stale markup.
+  // Reset at each per-query navigation.
+  const navStatusRef = { last: null };
+
   // Capture HTTP 4xx/5xx responses. Skip analytics/tracking that fail routinely
   // and add no debug value (t.indeed.com/signals, GTM, Sift, Intercom, etc.).
   page.on('response', res => {
     const status = res.status();
+    // Main-frame document status is captured regardless of code so the SITE_CHANGED
+    // branch can tell apart "200 but selectors don't match" from "403 block page".
+    try {
+      if (res.request().resourceType() === 'document' && res.frame() === page.mainFrame()) {
+        navStatusRef.last = status;
+      }
+    } catch { /* frame may be detached on rapid navigations — skip */ }
     if (status < 400) return;
     const url = res.url();
     if (/t\.indeed\.com\/signals|googletagmanager|\.analytics\.|sift\.com|intercom\.io|clarity\.ms|bat\.bing|munchkin\.marketo|cdn\.branch\.io/.test(url)) return;
@@ -1307,6 +1363,15 @@ export async function scrapeManualSources(tasks, onResult, signal) {
           qText:    task.query || '',
         };
 
+        // Human-scale cooldown between queries (not before the first) — see
+        // INTER_QUERY_COOLDOWN_MS. Honors pause/abort while waiting.
+        if (qi > 0) {
+          const cooldownAnchor = INTER_QUERY_COOLDOWN_MS[sourceId] ?? DEFAULT_INTER_QUERY_COOLDOWN_MS;
+          await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: 'Pacing before next query…' }).catch(() => {});
+          if (await waitIfPaused(page, signal) === 'abort' || signal?.aborted) { earlyExit = true; break; }
+          await new Promise(r => setTimeout(r, humanDelay(cooldownAnchor)));
+        }
+
         logger.info(`[BrowserScraper] ${srcName} query ${qi + 1}/${sourceTasks.length}: ${task.url}`);
         recordManualScraperTelemetry({
           phase: 'query-start',
@@ -1318,6 +1383,7 @@ export async function scrapeManualSources(tasks, onResult, signal) {
         });
 
         // Navigate via window.location.href — avoids CDP Page.navigate fingerprint
+        navStatusRef.last = null;
         await page.evaluate(u => { window.location.href = u; }, task.url).catch(() => {});
         await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
 
@@ -1400,19 +1466,34 @@ export async function scrapeManualSources(tasks, onResult, signal) {
             logger.warn(`[BrowserScraper] ${srcName} SITE_CHANGED (${siteChangedStreak}/${SITE_CHANGED_ABORT_THRESHOLD}): ${siteChangedError.message}`);
 
             if (siteChangedStreak >= SITE_CHANGED_ABORT_THRESHOLD) {
-              siteChangedWarning = {
-                code:       'stale-selectors',
-                severity:   'block',
-                evidence:   siteChangedError.message.slice(0, 280),
-                suggestion: `The ${srcName} extractor failed ${SITE_CHANGED_ABORT_THRESHOLD} times in a row — the site structure likely changed. Update the extractor in electron/extractors/jobs.js, rebuild, and try again.`,
-              };
+              // If the main-frame nav itself 4xx/5xx'd, the extractor ran against
+              // a block/error page — selectors aren't stale, the page never loaded.
+              // Steer the user toward re-login/IP cool-off instead of the extractor.
+              const navStatus = navStatusRef.last;
+              if (navStatus != null && navStatus >= 400) {
+                siteChangedWarning = {
+                  code:       'anti-bot-block',
+                  severity:   'block',
+                  evidence:   `${srcName} returned HTTP ${navStatus} on the main-frame navigation to ${task.url} — the body our extractor ran against was an anti-bot/error page, not job listings.`,
+                  suggestion: `${srcName} is showing a captcha or bot-detection wall. Re-run the search — if a captcha appears in the browser window, solve it to continue. If the block repeats without a solvable captcha, your IP/session may be flagged — try again in a few hours or change network.`,
+                };
+              } else {
+                siteChangedWarning = {
+                  code:       'stale-selectors',
+                  severity:   'block',
+                  evidence:   siteChangedError.message.slice(0, 280),
+                  suggestion: `The ${srcName} extractor failed ${SITE_CHANGED_ABORT_THRESHOLD} times in a row — the site structure likely changed. Update the extractor in electron/extractors/jobs.js, rebuild, and try again.`,
+                };
+              }
               await updateOverlay(page, {
                 ...overlayBase,
                 count:  allJobs.length,
-                status: 'Extractor broken — site structure changed. Fix selector code and restart.',
+                status: siteChangedWarning.code === 'anti-bot-block'
+                  ? `Anti-bot block (HTTP ${navStatusRef.last}) — re-login to ${srcName} and retry.`
+                  : 'Extractor broken — site structure changed. Fix selector code and restart.',
                 error:  true,
               }).catch(() => {});
-              await new Promise(r => setTimeout(r, 3000));
+              await new Promise(r => setTimeout(r, humanDelay(3000)));
               earlyExit = true;
               break;
             }

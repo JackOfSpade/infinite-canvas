@@ -10,7 +10,7 @@ import { callLLMDocument, callLLMText } from './llm.js';
 import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, BUCKETING_PLACEMENT_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA } from './aiSchemas.js';
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
-import { clearBrowserSession, openLoginWindow } from './stealthBrowser.js';
+import { clearBrowserSession } from './stealthBrowser.js';
 import { scrapeManualSources } from './browser/manualScraper.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
 import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES, MEDIUM_TEST, FULL_TEST } from './resultCaps.js';
@@ -36,7 +36,7 @@ import { fetchIndeedListingsBrowser } from '../extractors/indeedBrowser.js';
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory } from './jobsHistory.js';
 import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
 import { getJobsSettings } from './settings.js';
-import { readStatusCache, verifySellMonitorLogin } from './accounts.js';
+import { readStatusCache } from './accounts.js';
 import { getScopedJobSourceIds } from '../../src/utils/jobSourceScope.js';
 import { dedupeJobsByKey, jobTitleCompanyKey } from '../../src/utils/jobIdentity.js';
 
@@ -269,6 +269,34 @@ IMPORTANT SCORING RULES:
 // because the stages are separate IPC calls that don't always run together
 // (e.g. a captcha-resolve scores pendingJobs with no fresh search). Mirrors
 // gemini.js's getGeminiTelemetry().
+
+// Best-effort egress (public) IP lookup. Used to verify a VPN switch actually
+// changed the IP before retrying LinkedIn enrichment — the guest rate-limit is
+// per-IP, so retrying on the same warm IP just walls instantly. Returns null on
+// any failure so callers degrade gracefully (proceed without the guard).
+async function getEgressIp() {
+  let timer = null;
+  try {
+    const ctrl = new AbortController();
+    timer = setTimeout(() => ctrl.abort(), 4000);
+    const res = await fetch('https://api.ipify.org?format=json', { signal: ctrl.signal });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data && typeof data.ip === 'string') ? data.ip : null;
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// The egress IP at which LinkedIn last hit its per-IP guest ceiling. Set when a
+// re-fetch walls; checked on the next retry — if the IP hasn't changed, the user
+// hasn't switched their VPN yet, so we prompt instead of wasting a pass on the
+// same warm IP. Cleared when enrichment completes without hitting the ceiling.
+// Process-scoped (resets on app restart), which is fine — a warm IP cools anyway.
+let linkedinLastCeilingIp = null;
+
 const jobsTelemetry = {
   // The hub node that produced this run. Stamped by every stage handler so the
   // bug report can flag when the funnel belongs to a node that ISN'T in the
@@ -291,10 +319,30 @@ const jobsTelemetry = {
   // 'done' that auto-dismissed it. { [sourceId]: [{ t, status, code, severity }] }
   sourceEvents:     {},
   sourceEventsT0:   0, // search-start epoch; event `t` is relative ms from here
+  // LinkedIn anonymous-enrichment pass trail: the initial search's enrichment
+  // pass plus every Solve re-fetch, newest-last, capped. The guest description
+  // limit is per-IP, so "switch your VPN and Solve again" only helps if the
+  // egress IP actually changes — and that is the ONE variable the rest of the
+  // report is blind to. Recording the IP (and whether the lookup even worked)
+  // per pass is what lets a checkup distinguish "IP never changed / lookup
+  // failing → same-IP guard is dead" from "IP changed but every shared VPN exit
+  // is pre-warmed → switching can't help". { ts, kind, ip, ipOk, walled,
+  // skippedSameIp, enriched, stillEmpty, contextRotations }
+  linkedinEnrich:   [],
 };
 
 export function getJobsTelemetry() {
   return jobsTelemetry;
+}
+
+// Append one LinkedIn enrichment-pass record to the capped trail (see
+// jobsTelemetry.linkedinEnrich). ipOk distinguishes "ran on IP x" from "egress
+// lookup returned null" — the latter means the same-IP VPN guard can't function.
+function recordLinkedinEnrichPass(entry) {
+  jobsTelemetry.linkedinEnrich.push({ ts: Date.now(), ...entry });
+  // Keep the last dozen — enough to see the cross-Solve IP trend across a test
+  // session without unbounded growth.
+  if (jobsTelemetry.linkedinEnrich.length > 12) jobsTelemetry.linkedinEnrich.shift();
 }
 
 // All source IDs — defines the complete set for progress tracking and reporting.
@@ -388,7 +436,13 @@ function makeEmptyPageStop() {
 
 // ── Source → URL + Extractor + Config mapping (DOM scrape sources only) ──────
 // LinkedIn has been moved to the API pool (fetchLinkedInJobs) — no Puppeteer needed.
-function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
+function getLocationTerms(profileLocations = [], preferredLocation = '') {
+  const terms = Array.isArray(profileLocations) ? [...profileLocations] : [];
+  if (preferredLocation) terms.push(preferredLocation);
+  return terms;
+}
+
+function buildJobTasks(queries, maxAgeDays, profileLocations = [], preferredLocation = '') {
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
   // Wellfound is the one browser source whose URL is a /role/{slug} SEO page, not
   // a free-text search box. The query carries the candidate's city ("Cinematographer
@@ -398,7 +452,7 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = []) {
   // candidate's own location tokens from the role identifier (location is a filter,
   // not part of the role). The location-aware search sources (Indeed/Glassdoor/Zip/
   // Google) keep the city below — they WANT it as a query term.
-  const geoTerms = buildGeoTermSet(profileLocations);
+  const geoTerms = buildGeoTermSet(getLocationTerms(profileLocations, preferredLocation));
   const roleSlug = (q) => String(q).toLowerCase().split(/\s+/)
     .filter(tok => tok && !geoTerms.has(tok.replace(/[^a-z0-9]/g, '')))
     .join('-');
@@ -580,7 +634,7 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
   // location is a filter, not relevance. The dedicated scrapers (LinkedIn) and
   // server-side keyword APIs (USAJobs/Dice) take location as a real param, so
   // they're intentionally NOT geo-stripped.
-  const geoTerms = buildGeoTermSet(profileLocations);
+  const geoTerms = buildGeoTermSet(getLocationTerms(profileLocations, preferredLocation));
 
   const apiTasks = [
     { sourceId: 'indeed',        fn: (s) => fetchIndeedListingsBrowser(queries, s, days, null, (detail) => {
@@ -804,6 +858,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Fresh per-source event trail for this run (survives source-card deletion).
     jobsTelemetry.sourceEvents = {};
     jobsTelemetry.sourceEventsT0 = Date.now();
+    jobsTelemetry.linkedinEnrich = []; // fresh egress-IP trail per run (see definition)
     // Record every job-source-progress we send, then send it. The trail is what
     // lets the bug report explain a "blocked source lost its resolve card" — it
     // shows whether the source ever emitted a clean 'done' (which auto-dismisses
@@ -823,7 +878,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       event.sender.send('job-source-progress', payload);
     };
 
-    const tasks = buildJobTasks(queries, ageDays, profileLocations);
+    const tasks = buildJobTasks(queries, ageDays, profileLocations, preferredLocation);
 
     // Group tasks by source for per-source progress tracking
     const sourceTaskIds = {};
@@ -1088,37 +1143,54 @@ Be creative with suggestedRoleQueries — think about what career directions the
       // its 'done' event when the API fetch finishes (10+ min ago), then the
       // 10 s grace fires and the card disappears while the hub is still running.
       emitProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: linkedinKept.length, detail: 'enriching descriptions', completed: 0, total: 1 });
-      const { jobs: enriched, loginWall, loginWallUrl } = await enrichLinkedInDescriptionsBrowser(linkedinKept, combinedSignal);
+      const { jobs: enriched, loginWall, successCount: lkSuccess = 0 } = await enrichLinkedInDescriptionsBrowser(linkedinKept, combinedSignal);
       const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
       kept = kept.map(j => j.source === 'linkedin' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
 
       if (loginWall) {
-        // LinkedIn's session has expired — surface this as a user-actionable
-        // error on the source card so the user knows they need to log in again.
-        const sessionWarning = {
-          code: 'linkedin-session-expired',
-          severity: 'block',
-          shortLabel: 'Session expired',
-          evidence: loginWallUrl ? `Redirected to: ${loginWallUrl.slice(0, 120)}` : 'LinkedIn requires login',
-          suggestion: 'Click Solve to log in — descriptions will be re-fetched automatically.',
+        // NOT a session/login problem: descriptions are fetched anonymously
+        // (cookieless guest JSON-LD), so this is LinkedIn's per-IP guest
+        // rate-limit. Capture the warm IP so the next retry can verify a VPN
+        // switch actually changed it before re-attempting, and tell the user to
+        // switch VPN (a fresh IP resets the per-IP quota) — logging in does nothing.
+        linkedinLastCeilingIp = await getEgressIp();
+        const stillEmpty = kept.filter(j => j.source === 'linkedin' && (!j.snippet || j.snippet.length < 100)).length;
+        const ipNote = linkedinLastCeilingIp ? ` (IP ${linkedinLastCeilingIp})` : '';
+        const rateWarning = {
+          code: 'linkedin-rate-limited',
+          severity: 'throttle', // 'throttle' keeps the Solve button visible (hidden for 'warn'/'info') and renders amber, not block-red
+          shortLabel: 'Switch VPN',
+          evidence: `LinkedIn's anonymous guest limit stopped enrichment after ${lkSuccess} description(s)${ipNote} — ${stillEmpty} job(s) still without one.`,
+          suggestion: 'This IP is rate-limited. Switch your VPN to a new location, then click Solve to fetch the next batch. (Logging in does not help — descriptions are fetched anonymously.)',
         };
         emitProgress({
           nodeId,
           sourceId: 'linkedin',
           count: linkedinKept.length,
           status: 'error',
-          url: 'https://www.linkedin.com/login',
-          warning: sessionWarning,
+          url: 'https://www.linkedin.com/jobs',
+          warning: rateWarning,
           completed: 1,
           total: 1,
         });
         // Include in scrapeWarnings so the JobHub done-state panel surfaces it too.
-        scrapeWarnings.push({ sourceId: 'linkedin', url: loginWallUrl || null, ...sessionWarning });
+        scrapeWarnings.push({ sourceId: 'linkedin', url: null, ...rateWarning });
+        // Baseline pass for the egress-IP trail: this is the warm IP every
+        // subsequent Solve is trying to escape. ipOk:false here means the lookup
+        // itself failed — the same-IP guard then has nothing to compare against.
+        recordLinkedinEnrichPass({
+          kind: 'search', ip: linkedinLastCeilingIp, ipOk: !!linkedinLastCeilingIp,
+          walled: true, enriched: lkSuccess, stillEmpty,
+        });
       } else {
+        linkedinLastCeilingIp = null; // enrichment finished without the ceiling — reset
         // Emit final done so the card transitions to its terminal state and the
         // dismiss timer restarts (10 s grace after enrichment completes, not after
         // the API fetch).
         emitProgress({ nodeId, sourceId: 'linkedin', count: linkedinKept.length, status: 'done', completed: 1, total: 1 });
+        // Clean pass — no wall, so no IP-switch question. Record it (no IP
+        // lookup, to avoid paying the ipify round-trip on the happy path).
+        recordLinkedinEnrichPass({ kind: 'search', ip: null, ipOk: null, walled: false, enriched: lkSuccess });
       }
     }
 
@@ -1667,56 +1739,34 @@ RULES:
     if (!url) throw new Error('resolve-job-source requires a url');
     logger.info(`[Jobs][${nodeId}] User opening resolve window for ${sourceId}: ${url}${secondTabUrl ? ' (2-tab)' : ''}`);
 
-    // LinkedIn session expiry: the captcha-resolve window auto-closes immediately
-    // on a login page (no captcha widgets + body text present → fires "cleared").
-    // Route through the proper accounts login window instead, which waits for the
-    // user to actually sign in and then verifies the session via the /feed URL.
-    // After a successful login, re-enrich the LinkedIn jobs that came back with
-    // empty descriptions — the hub merge logic replaces existing LinkedIn jobs
-    // with the returned items, so returning enriched jobs here means the user
-    // does not need to re-run the full 5+ minute search.
-    const isLinkedInLogin = sourceId === 'linkedin' && /\/(login|authwall)/i.test(url);
-    if (isLinkedInLogin) {
-      // ── TEMP: LinkedIn account restricted — ID verification gate ────────────
-      // Remove this block once account is confirmed restored.
-      const LINKEDIN_ID_VERIFY_GATE = true;
-      if (LINKEDIN_ID_VERIFY_GATE) {
-        const sendProgress = (payload) => event.sender?.send?.('source-progress', payload);
-        sendProgress({
-          nodeId,
-          sourceId: 'linkedin',
-          status: 'error',
-          url: 'https://www.linkedin.com/checkpoint/challenge/verify',
-          warning: {
-            code: 'linkedin-id-verify-required',
-            severity: 'block',
-            shortLabel: 'ID verification',
-            evidence: 'LinkedIn has temporarily restricted this account and requires government-issued ID verification.',
-            suggestion: 'Complete verification at linkedin.com first, then click Solve to log in.',
-          },
-        });
-        return { resolved: false, items: [], nextBlockedUrl: null };
-      }
-      // ── END TEMP ─────────────────────────────────────────────────────────────
+    // LinkedIn "Solve" = re-fetch descriptions, NOT log in. Descriptions come
+    // from ANONYMOUS guest pages (the cookieless JSON-LD; the logged-in SPA has
+    // none — probe-confirmed), so the user's LinkedIn session is irrelevant to
+    // enrichment and the wall is LinkedIn's per-IP guest rate-limit, not an
+    // expired login. We therefore do NOT open a login window here — that was the
+    // "opens then instantly closes" the user saw: they're already logged in, so
+    // /login auto-redirects to /feed and the window self-closes with nothing to
+    // do. Solve just re-runs anonymous enrichment, which (via context rotation)
+    // fills another batch as LinkedIn's guest quota cools down.
+    const isLinkedInReEnrich = sourceId === 'linkedin';
+    if (isLinkedInReEnrich) {
+      // Resolve-attempt telemetry — the LinkedIn branch returns directly and
+      // never reaches the generic resolves[] recorder below, so without this the
+      // bug report's "Captcha-resolve / Solve" section is blank for LinkedIn.
+      const recordResolve = (extra) => {
+        jobsTelemetry.resolves[sourceId] = {
+          ts: Date.now(), kind: 'linkedin-reenrich',
+          ...(jobsTelemetry.resolves[sourceId]?.kind === 'linkedin-reenrich' ? jobsTelemetry.resolves[sourceId] : {}),
+          ...extra,
+        };
+      };
+      const sendProgress = (payload) => event.sender?.send?.('job-source-progress', payload);
 
-      await openLoginWindow('linkedin', event.sender);
-      const verdict = await verifySellMonitorLogin('linkedin');
-      logger.info(`[Jobs][${nodeId}] LinkedIn login window closed — session ${verdict.connected ? 'verified' : 'not verified'}: ${verdict.reason}`);
-
-      if (!verdict.connected) {
-        return { resolved: false, items: [], nextBlockedUrl: null };
-      }
-
-      // Session confirmed — re-enrich LinkedIn jobs that still have empty
-      // descriptions. The last-scrape snapshot (written before AI scoring)
-      // contains the raw job objects; filter for this hub's LinkedIn jobs and
-      // run browser enrichment now that the session cookie is live.
-      const sendProgress = (payload) => event.sender?.send?.('source-progress', payload);
       let items = [];
       try {
         const { snapshot } = await loadJobAnalysisSnapshot(canvasFilePath);
         // Guard against a snapshot from a different hub (e.g. user ran hub B
-        // after hub A's session-expired card was left open).
+        // after hub A's rate-limit card was left open).
         const snapshotIsThisHub = !snapshot.sourceHubId || snapshot.sourceHubId === nodeId;
         const allLinkedIn = snapshotIsThisHub
           ? (snapshot?.jobs || []).filter(j => j.source === 'linkedin')
@@ -1724,41 +1774,94 @@ RULES:
         const needEnrich = allLinkedIn.filter(j => !j.snippet || j.snippet.length < 100);
 
         if (needEnrich.length > 0) {
-          logger.info(`[Jobs][${nodeId}] LinkedIn re-enrichment: ${needEnrich.length}/${allLinkedIn.length} job(s) with empty descriptions`);
-          sendProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: needEnrich.length, detail: 're-enriching descriptions' });
-          const { jobs: enriched, loginWall: wall2 } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal);
-          if (wall2) {
-            // Session verification was optimistic — still hitting the wall.
-            logger.warn(`[Jobs][${nodeId}] LinkedIn re-enrichment hit login wall — session may have expired between verify and enrichment`);
-            sendProgress({
-              nodeId, sourceId: 'linkedin', count: needEnrich.length, status: 'error',
-              url: 'https://www.linkedin.com/login',
-              warning: { code: 'linkedin-session-expired', severity: 'block', shortLabel: 'Session expired', evidence: 'Login wall hit during re-enrichment', suggestion: 'Click Solve to log in again.' },
-            });
-            return { resolved: false, items: [], nextBlockedUrl: null };
+          logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch: ${needEnrich.length}/${allLinkedIn.length} job(s) still without descriptions`);
+
+          // IP-changed guard: the guest rate-limit is per-IP, so retrying on the
+          // SAME warm IP just walls instantly. If we previously hit the ceiling
+          // and the egress IP hasn't changed, the user hasn't switched their VPN
+          // yet — prompt instead of wasting a pass. (Null IP = lookup failed;
+          // degrade gracefully and just proceed.)
+          const currentIp = await getEgressIp();
+          if (linkedinLastCeilingIp && currentIp && currentIp === linkedinLastCeilingIp) {
+            const switchWarning = {
+              code: 'linkedin-rate-limited', severity: 'throttle', shortLabel: 'Switch VPN',
+              evidence: `Still on IP ${currentIp} — the one LinkedIn rate-limited. The VPN switch hasn't taken effect.`,
+              suggestion: 'Switch your VPN to a new location (confirm the IP actually changes), then click Solve to continue. Logging in does not help — descriptions are fetched anonymously.',
+            };
+            recordResolve({ needEnrich: needEnrich.length, enrichSuccess: 0, walled: true, skippedSameIp: true, warmIp: currentIp });
+            recordLinkedinEnrichPass({ kind: 'solve', ip: currentIp, ipOk: !!currentIp, walled: false, skippedSameIp: true, enriched: 0 });
+            logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch skipped — egress IP unchanged (${currentIp}); prompting VPN switch`);
+            sendProgress({ nodeId, sourceId: 'linkedin', count: allLinkedIn.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: switchWarning });
+            return { resolved: true, items: allLinkedIn, warning: switchWarning, replaceSourceItems: true, nextBlockedUrl: null };
           }
-          // Merge enriched results back into the full LinkedIn set (keeps jobs
-          // that were already enriched before the wall was hit).
+
+          sendProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: needEnrich.length, detail: 're-fetching descriptions', warning: null });
+          const { jobs: enriched, loginWall: walled, successCount = 0, contextRotations = 0 } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal);
+          // Merge whatever we got this pass back into the full set (keeps prior
+          // descriptions for jobs enriched before the ceiling was hit).
           const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
           items = allLinkedIn.map(j => enrichedByUrl.get(j.url) || j);
+          const stillEmpty = items.filter(j => !j.snippet || j.snippet.length < 100).length;
+          recordResolve({ needEnrich: needEnrich.length, enrichSuccess: successCount, contextRotations, walled, stillEmpty });
+          // Egress-IP trail entry for this Solve. `walled` distinguishes the
+          // re-walled outcome from a clean finish; comparing `ip` to the prior
+          // pass's is what answers "did the VPN switch actually change the IP?".
+          recordLinkedinEnrichPass({ kind: 'solve', ip: currentIp, ipOk: !!currentIp, walled, enriched: successCount, stillEmpty, contextRotations });
+          logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch: +${successCount} description(s), ${stillEmpty} still empty (${contextRotations} ctx-rotation(s)${walled ? ', hit IP ceiling' : ''})`);
+
+          // Persist this pass's descriptions back to the snapshot. Without this,
+          // re-fetch always re-reads the SAME stale "N empty" snapshot and re-does
+          // the first batch — so a retry hits the warm-IP ceiling earlier and adds
+          // nothing new (observed: two retries both read 272 empty, both re-did the
+          // first jobs). Re-saving shrinks needEnrich each pass so retries actually
+          // walk DEEPER into the list as LinkedIn's guest quota cools.
+          if (successCount > 0) {
+            try {
+              const itemsByUrl = new Map(items.map(j => [j.url, j]));
+              const mergedJobs = (snapshot.jobs || []).map(j =>
+                j.source === 'linkedin' ? (itemsByUrl.get(j.url) || j) : j);
+              await saveJobAnalysisSnapshot({ ...snapshot, jobs: mergedJobs, canvasFilePath });
+            } catch (e) {
+              logger.warn(`[Jobs][${nodeId}] LinkedIn re-fetch: could not persist descriptions to snapshot — ${e.message}`);
+            }
+          }
+
+          if (walled && stillEmpty > 0) {
+            // Got a batch but hit LinkedIn's per-IP guest ceiling again. Remember
+            // THIS IP as warm so the next retry's guard can require a VPN switch.
+            // severity 'throttle' (not 'warn') keeps the action button visible (the
+            // card hides it for 'warn'/'info') and renders amber rather than
+            // block-red. Return resolved:true (so the descriptions we DID get merge
+            // in) AND the warning (so the renderer keeps it, not a clean done).
+            linkedinLastCeilingIp = currentIp || linkedinLastCeilingIp;
+            const ipNote = currentIp ? ` (IP ${currentIp})` : '';
+            const rateWarning = {
+              code: 'linkedin-rate-limited', severity: 'throttle', shortLabel: 'Switch VPN',
+              evidence: `LinkedIn's anonymous guest limit stopped after +${successCount} this pass${ipNote} — ${stillEmpty} job(s) still without a description.`,
+              suggestion: 'This IP is now rate-limited. Switch your VPN to a new location, then click Solve to fetch the next batch. Logging in does not help — descriptions are fetched anonymously.',
+            };
+            sendProgress({ nodeId, sourceId: 'linkedin', count: items.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: rateWarning });
+            return { resolved: true, items, warning: rateWarning, replaceSourceItems: true, nextBlockedUrl: null };
+          }
+          linkedinLastCeilingIp = null; // finished without hitting the ceiling — reset
           sendProgress({ nodeId, sourceId: 'linkedin', count: items.length, status: 'done' });
-          logger.info(`[Jobs][${nodeId}] LinkedIn re-enrichment complete: ${enriched.length} enriched, ${items.length} total returning`);
+          return { resolved: true, items, replaceSourceItems: true, nextBlockedUrl: null };
         } else if (allLinkedIn.length > 0) {
-          // All jobs already have descriptions — return them so the hub merge
-          // still replaces the pending set (clears the error state cleanly).
-          logger.info(`[Jobs][${nodeId}] LinkedIn session active — all ${allLinkedIn.length} jobs already have descriptions`);
+          // Everything already has a description — return them so the hub merge
+          // still replaces the pending set (clears the warning cleanly).
+          logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch: all ${allLinkedIn.length} jobs already have descriptions`);
           items = allLinkedIn;
           sendProgress({ nodeId, sourceId: 'linkedin', count: allLinkedIn.length, status: 'done' });
+          return { resolved: true, items, replaceSourceItems: true, nextBlockedUrl: null };
         } else {
-          logger.warn(`[Jobs][${nodeId}] LinkedIn re-enrichment: snapshot has no LinkedIn jobs for this hub (sourceHubId=${snapshot.sourceHubId}) — returning empty items`);
+          logger.warn(`[Jobs][${nodeId}] LinkedIn re-fetch: snapshot has no LinkedIn jobs for this hub (sourceHubId=${snapshot.sourceHubId}) — returning empty items`);
         }
       } catch (err) {
         // Snapshot unreadable or malformed — fall through with items: [].
-        // The card will clear (resolved: true) but no jobs are replaced.
-        logger.warn(`[Jobs][${nodeId}] LinkedIn re-enrichment skipped — snapshot unavailable: ${err.message}`);
+        logger.warn(`[Jobs][${nodeId}] LinkedIn re-fetch skipped — snapshot unavailable: ${err.message}`);
       }
 
-      return { resolved: true, items, nextBlockedUrl: null };
+      return { resolved: false, items: [], nextBlockedUrl: null };
     }
 
     // Map sourceId → the same extractor JS used by buildJobTasks. Only the

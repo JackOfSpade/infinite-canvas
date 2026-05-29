@@ -97,6 +97,26 @@ export function JobSourceCardNode({ id, data }) {
     const resumeState = progress?.warning?.resumeState;
     if (!resumeState && (!progress?.url || !window.electronAPI?.resolveJobSource)) return;
     setResolving(true);
+    // Optimistically clear the red error/warning so the card reads as "working"
+    // the instant Solve is clicked — not after the (now multi-minute) resolve
+    // returns. Every backend outcome re-emits a terminal event (done / error /
+    // searching) via onJobSourceProgress, so the correct final state always
+    // lands; this just bridges the gap until the first event arrives. Snapshot
+    // the prior state so a solve that returns resolved:false WITHOUT emitting a
+    // fresh event (some captcha sources) can be restored to its actionable red.
+    const prevForRestore = progress;
+    setProgress(prev => prev ? { ...prev, status: 'searching', warning: null, detail: 'Solving…' } : prev);
+    // Mirror that optimistic clear on the owning hub. The hub's done-state
+    // ScrapeWarningsPanel ("N throttled") reads data.scrapeWarnings, which only
+    // gets the resolved source dropped once the resolve COMPLETES — so through a
+    // multi-minute LinkedIn re-fetch it sits stale while this card already reads
+    // as "working". Dispatching here drops the matching non-blocking warning the
+    // instant Solve is clicked; onResolved re-adds it if the attempt comes back
+    // still-warned (re-walled / same-IP). Block/paste warnings are left to the
+    // hub (they gate the paused 'sources-ready' state).
+    document.dispatchEvent(new CustomEvent('job-source-retry-start', {
+      detail: { hubId: data.hubId, sourceId: data.sourceId },
+    }));
     try {
       let result;
       if (resumeState) {
@@ -126,8 +146,17 @@ export function JobSourceCardNode({ id, data }) {
       // from this source would persist even after a successful solve.
       if (result?.resolved) {
         const items = Array.isArray(result?.items) ? result.items : [];
+        const resolvedCount = items.length;
+        const replaceSourceItems = !!result.replaceSourceItems;
+        const nextCount = (prev) => replaceSourceItems
+          ? resolvedCount
+          : (prev?.count || 0) + resolvedCount;
         document.dispatchEvent(new CustomEvent('job-source-resolved', {
-          detail: { hubId: data.hubId, sourceId: data.sourceId, items },
+          // Carry the resolve's own warning (if any) so the hub can re-derive
+          // its ScrapeWarningsPanel: clear it on a clean success, or re-show it
+          // when the source comes back still-warned (LinkedIn re-walled / same
+          // warm IP). Captcha/resume paths don't return a warning → stays null.
+          detail: { hubId: data.hubId, sourceId: data.sourceId, items, replaceSourceItems, warning: result.warning || null },
         }));
         if (result.nextBlockedUrl) {
           // Another query for this source was also blocked. Keep the card visible
@@ -137,7 +166,7 @@ export function JobSourceCardNode({ id, data }) {
             ...prev,
             status: 'error',
             url: result.nextBlockedUrl,
-            count: (prev.count || 0) + items.length,
+            count: nextCount(prev),
             warning: {
               code: 'http-403',
               severity: 'block',
@@ -145,9 +174,21 @@ export function JobSourceCardNode({ id, data }) {
               suggestion: 'Click Solve again to retrieve jobs from the next search query for this source.',
             },
           } : prev);
+        } else if (result.warning) {
+          // Partial success that's still flagged (e.g. LinkedIn rate-limit: got
+          // some descriptions but hit the guest IP ceiling). Keep the returned
+          // warning + action button so the user can retry later, rather than
+          // clearing to a clean done. LinkedIn replacement responses show the
+          // replacement size; incremental captcha/Continue responses add.
+          setProgress(prev => prev ? {
+            ...prev,
+            status: 'error',
+            warning: result.warning,
+            count: nextCount(prev),
+          } : prev);
         } else {
           setDismissed(true);
-          // Clear the warning AND bump the count on the card's local
+          // Clear the warning AND update the card's local
           // progress state so the status line flips from "captcha-presented"
           // back to "{count} jobs" with the green checkmark. Without this,
           // dismissed only hides the inline warning panel — the small status
@@ -159,9 +200,15 @@ export function JobSourceCardNode({ id, data }) {
             ...prev,
             status: 'done', // flip off 'error' so it reads "{count} jobs" not "Failed", and auto-dismisses as clean-done
             warning: null,
-            count: (prev.count || 0) + items.length,
+            count: nextCount(prev),
           } : prev);
         }
+      } else if (prevForRestore) {
+        // Solve didn't complete. Restore the actionable warning so the card goes
+        // back to red — but only if our optimistic 'Solving…' state is still in
+        // place (a fresh backend event, e.g. LinkedIn's re-emitted error, would
+        // have replaced detail, and we must not clobber that newer state).
+        setProgress(prev => (prev && prev.detail === 'Solving…') ? prevForRestore : prev);
       }
     } finally {
       setResolving(false);
