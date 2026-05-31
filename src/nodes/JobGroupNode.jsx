@@ -4,64 +4,60 @@ import { ChevronRight, ChevronDown, Plus } from 'lucide-react';
 import { NodeHandles } from './_shared/NodeHandles';
 import {
   computeLayoutPositions,
-  COL_X_WITH_TARGET,
-  COL_X_WITHOUT_TARGET,
+  COL_X,
 } from './jobhub/buildJobTree';
 
 /**
  * JobGroupNode — collapsible header that owns a slice of the job-tree.
  *
- * Three kinds share this component (different accent + indent + child type):
- *   - kind='branch'   — top-level split when a target role is active.
- *                       Children are categories (Other Strong Matches) or
- *                       buckets (Target Role — no category level).
- *   - kind='category' — role grouping (Engineering, Leadership, …) under a
- *                       branch (or under the hub when no target role).
- *                       Children are JobGroupNode (kind='bucket').
- *   - kind='bucket'   — salary range inside a category. Children are
- *                       JobCardNode. Supports paginated reveal: only the
- *                       first `visibleCount` (default 10) are shown on
- *                       expand; "Show more" reveals the next 10.
+ * Three kinds share this component (different accent; one layout, deepest last):
+ *   - kind='likelihood' — interview-likelihood band (top level). Children are
+ *                         salary-range groups. Reveals all on expand.
+ *   - kind='salary'     — salary range inside a band. Children are role groups.
+ *                         Reveals all on expand.
+ *   - kind='role'       — job-role grouping (the LEAF). Children are JobCardNode.
+ *                         Paginated: only the first `visibleCount` (default 10)
+ *                         are shown on expand; "Show more" reveals the next 10.
  *
- * Click toggles expand. Expanding flips `hidden: false` on each direct child
- * up to `visibleCount` (buckets only — branches/categories show all direct
- * children at once). Collapsing recursively re-hides EVERYTHING under this
- * node so a closed parent never leaves stale visible descendants.
+ * Click toggles expand. Expanding flips `hidden: false` on each direct child up
+ * to `visibleCount` (role leaves only — likelihood/salary show all direct
+ * children at once). Collapsing recursively re-hides EVERYTHING under this node
+ * so a closed parent never leaves stale visible descendants.
  *
  * data shape:
  *   {
- *     kind: 'branch' | 'category' | 'bucket',
+ *     kind: 'likelihood' | 'salary' | 'role',
  *     label: string,
  *     count: number,
  *     hubId: string,
  *     childIds: string[],
  *     expanded?: boolean,
- *     visibleCount?: number,  // bucket only — how many jobs are currently revealed
+ *     visibleCount?: number,  // role only — how many cards are currently revealed
  *   }
  */
 export function JobGroupNode({ id, data }) {
   const { setNodes, getNode, getNodes } = useReactFlow();
 
   const expanded = !!data.expanded;
-  const kind = data.kind || 'category';
-  const isBranch   = kind === 'branch';
-  const isCategory = kind === 'category';
-  const isBucket   = kind === 'bucket';
+  const kind = data.kind || 'role';
+  const isLikelihood = kind === 'likelihood';
+  const isSalary     = kind === 'salary';
+  const isLeaf       = kind === 'role'; // leaf group: paginates its job cards
   // Hub-cascading lock: when the owning JobHub is locked, expand/collapse
   // becomes a no-op so the canvas state can't be mutated.
   const hubLocked = !!getNode(data.hubId)?.data?.locked;
 
-  const accent = isBranch
+  const accent = isLikelihood
     ? { border: '#a855f755', text: 'text-purple-100', count: 'bg-purple-500/25 text-purple-100' }
-    : isCategory
+    : isSalary
       ? { border: '#3b82f655', text: 'text-blue-200',  count: 'bg-blue-500/25 text-blue-100' }
       : { border: '#14b8a655', text: 'text-teal-100',  count: 'bg-teal-500/25 text-teal-100' };
 
   const childIds = Array.isArray(data.childIds) ? data.childIds : [];
-  const visibleCount = isBucket
+  const visibleCount = isLeaf
     ? Math.min(data.visibleCount ?? 10, childIds.length)
     : childIds.length;
-  const hasMore = isBucket && visibleCount < childIds.length;
+  const hasMore = isLeaf && visibleCount < childIds.length;
 
   const toggle = (e) => {
     e.stopPropagation();
@@ -95,7 +91,7 @@ export function JobGroupNode({ id, data }) {
               data: {
                 ...n.data,
                 expanded: false,
-                ...(isBucket ? { visibleCount: Math.min(10, childIds.length) } : {}),
+                ...(isLeaf ? { visibleCount: Math.min(10, childIds.length) } : {}),
               },
             };
           }
@@ -108,7 +104,7 @@ export function JobGroupNode({ id, data }) {
                 data: {
                   ...n.data,
                   expanded: false,
-                  ...(n.data?.kind === 'bucket'
+                  ...(n.data?.kind === 'role'
                     ? { visibleCount: Math.min(10, (n.data?.childIds || []).length) }
                     : {}),
                 },
@@ -118,15 +114,13 @@ export function JobGroupNode({ id, data }) {
           }
           return n;
         });
-        const hasBranches = after.some(n => n.data?.hubId === data.hubId && n.data?.kind === 'branch');
-        const COL_X = hasBranches ? COL_X_WITH_TARGET : COL_X_WITHOUT_TARGET;
         const positions = computeLayoutPositions(after, data.hubId, COL_X, hubPos);
         return after.map(n => positions[n.id] ? { ...n, position: positions[n.id] } : n);
       });
     } else {
-      // Expanding. Buckets reveal up to `visibleCount` children (paginated);
-      // branches/categories reveal all direct children at once.
-      const revealSet = isBucket
+      // Expanding. Role leaves reveal up to `visibleCount` cards (paginated);
+      // likelihood/salary groups reveal all direct children at once.
+      const revealSet = isLeaf
         ? new Set(childIds.slice(0, visibleCount))
         : new Set(childIds);
       setNodes(nodes => {
@@ -135,8 +129,6 @@ export function JobGroupNode({ id, data }) {
           if (revealSet.has(n.id)) return { ...n, hidden: false };
           return n;
         });
-        const hasBranches = after.some(n => n.data?.hubId === data.hubId && n.data?.kind === 'branch');
-        const COL_X = hasBranches ? COL_X_WITH_TARGET : COL_X_WITHOUT_TARGET;
         const positions = computeLayoutPositions(after, data.hubId, COL_X, hubPos);
         return after.map(n => positions[n.id] ? { ...n, position: positions[n.id] } : n);
       });
@@ -145,7 +137,7 @@ export function JobGroupNode({ id, data }) {
 
   const showMore = (e) => {
     e.stopPropagation();
-    if (!isBucket || !hasMore || hubLocked) return;
+    if (!isLeaf || !hasMore || hubLocked) return;
     const nextCount = Math.min(visibleCount + 10, childIds.length);
     const toReveal = new Set(childIds.slice(visibleCount, nextCount));
     const hubPos = getNode(data.hubId)?.position || { x: 0, y: 0 };
@@ -155,8 +147,6 @@ export function JobGroupNode({ id, data }) {
         if (toReveal.has(n.id)) return { ...n, hidden: false };
         return n;
       });
-      const hasBranches = after.some(n => n.data?.hubId === data.hubId && n.data?.kind === 'branch');
-      const COL_X = hasBranches ? COL_X_WITH_TARGET : COL_X_WITHOUT_TARGET;
       const positions = computeLayoutPositions(after, data.hubId, COL_X, hubPos);
       return after.map(n => positions[n.id] ? { ...n, position: positions[n.id] } : n);
     });

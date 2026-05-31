@@ -3,6 +3,7 @@ import { useReactFlow } from '@xyflow/react';
 import { Loader2, CheckCircle2, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
+import { SourceWarningPanel } from './_shared/SourceWarningPanel';
 import { mergeSourceProgress } from '../utils/sourceProgress';
 
 /**
@@ -166,17 +167,7 @@ export function CompSourceCardNode({ id, data }) {
       </div>
       {/* Selectable embedded warning text — full evidence + suggestion so the
           user can copy/paste the whole line into a bug report or chat. */}
-      {warning && (
-        <div
-          className="px-2.5 pb-1.5 pt-1 text-[9px] leading-snug select-text cursor-text"
-          style={{ color: hasBlock ? '#fca5a5' : '#fcd34d', borderTop: `1px solid ${hasBlock ? '#ef444433' : '#f59e0b33'}` }}
-          onPointerDown={(e) => e.stopPropagation()}
-          title="Copy this — paste back to debug"
-        >
-          {warning.evidence && <div className="font-mono break-words">{warning.evidence}</div>}
-          {warning.suggestion && <div className="mt-0.5 opacity-80 break-words">{warning.suggestion}</div>}
-        </div>
-      )}
+      <SourceWarningPanel warning={warning} hasBlock={hasBlock} />
       {/* Decision row — action depends on what went wrong:
           stale-selectors (code fix needed) → Retry re-runs the extractor after rebuild.
           bot block → Solve opens the URL in a cookie-shared browser.

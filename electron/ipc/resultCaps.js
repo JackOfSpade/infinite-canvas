@@ -8,7 +8,7 @@ import { JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
  * part: they scale to how many quality results actually exist and stay bounded
  * by the downstream output-token budget. They mirror llm.js TASK_MAX_TOKENS,
  * whose price-synthesis / job-scoring caps grow ~linearly with item count
- * (≈100 tok/comp, ≈300 tok/job on top of a base) up to a 24576 hard cap — so a
+ * (≈200 tok/comp, ≈300 tok/job on top of a base) up to a 24576 hard cap — so a
  * comp set / scoring batch can never request a budget the model can't honor.
  * (Coordinates with tokenBudget.js, which self-calibrates that cap on churn.)
  *
@@ -20,22 +20,40 @@ import { JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
  * constant into ~10 template literals for a fixed breadth ceiling).
  */
 
-// Three named modes — exactly one is true at runtime:
+// Four named modes — exactly one is true at runtime (fast takes precedence over
+// the fullRun medium/full split):
+//   FAST_TEST   : 2 queries; browser 2 pages × 3 jobs (=12); API ≤12/source; AI per skipAI
 //   MEDIUM_TEST : 5 jobs/page,   10 pages, AI skipped  (quick smoke test)
 //   FULL_TEST   : 150 jobs/page, 10 pages, AI per skipAI flag (full pipeline, scoped source)
 //   production  : 150 jobs/page, 10 pages, full AI     (all sources)
-export const MEDIUM_TEST = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fullRun;
-export const FULL_TEST   = JOB_SEARCH_TEST_MODE.enabled &&  JOB_SEARCH_TEST_MODE.fullRun;
+export const FAST_TEST   = JOB_SEARCH_TEST_MODE.enabled &&  JOB_SEARCH_TEST_MODE.fast;
+export const MEDIUM_TEST = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fast && !JOB_SEARCH_TEST_MODE.fullRun;
+export const FULL_TEST   = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fast &&  JOB_SEARCH_TEST_MODE.fullRun;
+
+// FAST_TEST breadth knobs — kept as named constants so the 12-per-source target
+// is traceable: 2 queries × (2 pages × 3 jobs) browser, 2 queries × 6 results API.
+const FAST_QUERY_CAP     = 2;  // first N generated queries kept (both browser + API)
+const FAST_PAGES         = 2;  // browser pages walked per query
+const FAST_JOBS_PER_PAGE = 3;  // browser jobs kept per page
+const FAST_API_PER_QUERY = 6;  // API results targeted per query (enforced as a per-source total)
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-// Mirrors llm.js TASK_MAX_TOKENS shapes (price-synthesis / job-scoring).
+// Single source of truth for the price-synthesis token shape — llm.js
+// TASK_MAX_TOKENS['price-synthesis'] imports priceSynthesisMaxTokens() below, so
+// the output budget and the comp-count ceiling (MAX_COMPS_BY_BUDGET) are derived
+// from the SAME constants and can never drift apart. 200 tok/comp is the
+// heavy-fallback-model calibration (the binding constraint — the preferred Flash
+// model uses ~87/comp); see llm.js for the real-world telemetry behind it.
 const TOKEN_HARD_CAP        = 24576;
 const PRICE_BASE_TOKENS     = 3000;
-const PRICE_TOKENS_PER_COMP = 100;
+const PRICE_TOKENS_PER_COMP = 200;
 const JOB_BASE_TOKENS       = 2500;
 const JOB_TOKENS_PER_JOB    = 300;
-const BUDGET_SAFETY         = 0.8;   // leave headroom under the hard cap
+// Headroom factor for the job-scoring batch budget (jobScoringBatchSize below).
+// The comp ceiling no longer applies a safety factor — it's derived exactly from
+// priceSynthesisMaxTokens so the count fed and the budget granted stay in lockstep.
+const BUDGET_SAFETY         = 0.8;
 
 // ── Per-source extractor breadth cap (top-N a single source contributes) ──────
 // UNCAPPED (Infinity): every API source returns ALL its in-window matches rather
@@ -47,7 +65,20 @@ export const JOB_RESULT_CAP = Infinity;
 // Unified per-page/per-query cap for ALL browser scrapers (manualScraper + indeedBrowser).
 // 150 is the scroll-depth target for Google for Jobs and a soft ceiling for Indeed pages
 // (which have ~10 jobs/page in practice, so 150 is effectively unlimited in prod).
-export const JOB_PER_PAGE_CAP = MEDIUM_TEST ? 5 : 150;
+export const JOB_PER_PAGE_CAP = FAST_TEST ? FAST_JOBS_PER_PAGE : MEDIUM_TEST ? 5 : 150;
+
+// ── Query cap (FAST mode only) ────────────────────────────────────────────────
+// First N generated queries kept, applied once in the search-jobs handler so it
+// bounds BOTH the browser scrape tasks and the API fan-out. Infinity = no cap.
+export const JOB_TEST_QUERY_CAP = FAST_TEST ? FAST_QUERY_CAP : Infinity;
+
+// ── API per-source result cap (FAST mode only) ────────────────────────────────
+// Enforced at the fetchApiSources collection point — a single slice per source —
+// rather than via JOB_RESULT_CAP, because API fetchers apply that cap
+// inconsistently (per-query for the fan-out sources usajobs/dice, whole-feed for
+// remoteok/weworkremotely/linkedin/indeed). 12 = FAST_QUERY_CAP × FAST_API_PER_QUERY,
+// i.e. "2 queries × 6 each" as a per-source aggregate. Infinity = no cap.
+export const JOB_API_PER_SOURCE_CAP = FAST_TEST ? FAST_QUERY_CAP * FAST_API_PER_QUERY : Infinity;
 
 // ── LLM scoring budget (how many gathered jobs actually get LLM-scored) ───────
 // UNCAPPED (Infinity): score EVERY gathered job. selectTopAcrossSources(_, Infinity)
@@ -56,6 +87,9 @@ export const JOB_PER_PAGE_CAP = MEDIUM_TEST ? 5 : 150;
 // hundreds of jobs will rate-limit (429) and fall back to weaker models until the
 // paid API tier lands. Restore a numeric budget (was 150, round-robin fair across
 // sources via selectTopAcrossSources) when on paid.
+// MEDIUM skips AI (0); FAST and FULL both score (Infinity) unless skipAI — in FAST
+// the gathered pool is only ~12/source, so Infinity scores that whole small set
+// without straining the quota (the whole point of the fast end-to-end smoke).
 export const JOB_SCORE_CAP = (MEDIUM_TEST || JOB_SEARCH_TEST_MODE.skipAI) ? 0 : Infinity;
 
 // ── Date-bounded deep pagination ──────────────────────────────────────────────
@@ -64,26 +98,41 @@ export const JOB_SCORE_CAP = (MEDIUM_TEST || JOB_SEARCH_TEST_MODE.skipAI) ? 0 : 
 // walk DOWN if a source starts getting blocked — volume is the anti-bot trigger,
 // not speed, so the ceiling is the real safety knob. The scorer cap (above) still
 // bounds how many of the wider pool reach the LLM.
-export const JOB_MAX_PAGES = 10;
+export const JOB_MAX_PAGES = FAST_TEST ? FAST_PAGES : 10;
 
-// ── LLM-input caps (adaptive: scale to availability, bounded by token budget) ─
-const SOLD_COMP_TARGET    = 25; // statistically-sufficient "sold" comps for an FMV
-const ACTIVE_COMP_TARGET  = 15; // "active competition" comps
-const MAX_COMPS_BY_BUDGET = Math.floor((TOKEN_HARD_CAP * BUDGET_SAFETY - PRICE_BASE_TOKENS) / PRICE_TOKENS_PER_COMP);
+// ── Price-synthesis output-token budget (single source of truth) ──────────────
+/**
+ * Output-token budget for the price-synthesis LLM call, sized to the comp count
+ * so the model has room to classify every listing (anchor/adjusted/bound)
+ * without truncating. llm.js TASK_MAX_TOKENS['price-synthesis'] calls this, and
+ * MAX_COMPS_BY_BUDGET below is derived from the SAME formula — so the count we
+ * feed can never request a budget the hard cap won't honor.
+ */
+export function priceSynthesisMaxTokens(itemCount = 40) {
+  const n = Math.max(0, Number(itemCount) || 0);
+  return Math.min(TOKEN_HARD_CAP, PRICE_BASE_TOKENS + n * PRICE_TOKENS_PER_COMP);
+}
+
+// ── LLM-input cap (unbounded: feed all comps, limited only by the token budget) ─
+// The largest comp count whose budget still fits UNDER the hard cap — beyond it
+// priceSynthesisMaxTokens() clamps and the synthesis could truncate. Derived from
+// the same constants as the budget formula, so the count fed and the budget
+// granted stay in lockstep no matter how either is tuned.
+const MAX_COMPS_BY_BUDGET = Math.floor((TOKEN_HARD_CAP - PRICE_BASE_TOKENS) / PRICE_TOKENS_PER_COMP);
 
 /**
- * How many sold/active comps to feed the price-synthesis LLM. Sends what's
- * available up to the statistically-sufficient target (the caller pre-sorts by
- * title-match quality, so the top-N are the most relevant), and trims
- * proportionally if the targets ever exceed what the token budget can reason
- * about — so "enough comps for a meaningful price" without blowing the cap.
+ * How many sold/active comps to feed the price-synthesis LLM. UNBOUNDED: feeds
+ * EVERY available comp (the caller pre-sorts by title-match relevance, so the
+ * ordering is preserved), limited only by MAX_COMPS_BY_BUDGET — the point past
+ * which the token budget would clamp. If the combined set exceeds that ceiling,
+ * both sides scale down proportionally so the sold/active mix is preserved.
  * @returns {{ sold:number, active:number }}
  */
 export function compsForPricing(soldAvailable = 0, activeAvailable = 0) {
   // Coerce defensively: a non-numeric/NaN count would otherwise propagate to
   // slice(0, NaN) → [] (silently dropping every comp).
-  let sold   = Math.min(Math.max(0, Number(soldAvailable)   || 0), SOLD_COMP_TARGET);
-  let active = Math.min(Math.max(0, Number(activeAvailable) || 0), ACTIVE_COMP_TARGET);
+  let sold   = Math.max(0, Number(soldAvailable)   || 0);
+  let active = Math.max(0, Number(activeAvailable) || 0);
   const total = sold + active;
   if (total > MAX_COMPS_BY_BUDGET && total > 0) {
     const scale = MAX_COMPS_BY_BUDGET / total;

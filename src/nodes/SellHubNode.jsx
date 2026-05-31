@@ -4,7 +4,7 @@ import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { usePlatformsVerifyingProgress } from '../contexts/useSessionStatus';
 import { HubContainer } from '../components/HubContainer';
 import { Camera } from 'lucide-react';
-import { PRICE_COMP_SOURCES, SELL_PLATFORMS } from '../utils/constants';
+import { ACTIVE_COMP_SOURCES, SELL_PLATFORMS } from '../utils/constants';
 import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
 import { useListingActions } from '../hooks/useListingActions';
 import { useToast } from '../components/ToastProvider';
@@ -20,8 +20,7 @@ import { useEpochCancellation, isNodeDeletedAbort } from '../hooks/useEpochCance
 import { useSourceProgress } from '../hooks/useSourceProgress';
 import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
-
-const PRODUCT_IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|heic|heif)$/i;
+import { PRODUCT_IMAGE_EXT_RE } from '../utils/fileExtensions';
 
 /**
  * SellHubNode — draggable canvas module for marketplace selling.
@@ -93,7 +92,18 @@ export function SellHubNode({ id, data }) {
     if (data.locked) return;
     if (spawnedMarketplaceIds.includes(platformId)) return;
     const hubPos = getNode(id)?.position || { x: 0, y: 0 };
-    const index = spawnedMarketplaceIds.length;
+    // Place the card in the first vertical slot not already occupied by a sibling
+    // marketplace card. Using the live count instead collided after a deletion:
+    // spawn ebay(0)+mercari(1), delete ebay, spawn poshmark → count is 1 again →
+    // poshmark lands on mercari's row. Deriving the slot from existing positions
+    // reuses the freed row instead.
+    const usedSlots = new Set(
+      getNodes()
+        .filter(n => n.type === 'marketplacecard' && n.data?.hubId === id)
+        .map(n => Math.round(((n.position?.y ?? hubPos.y) - hubPos.y) / 260))
+    );
+    let index = 0;
+    while (usedSlots.has(index)) index++;
     const cardId = `mkt-${id}-${platformId}-${Date.now()}`;
     const newNode = {
       id: cardId,
@@ -131,7 +141,7 @@ export function SellHubNode({ id, data }) {
       addEdges([newEdge]);
     }
   }, [
-    data.locked, spawnedMarketplaceIds, id, getNode, product, data.pricing?.recommended_price,
+    data.locked, spawnedMarketplaceIds, id, getNode, getNodes, product, data.pricing?.recommended_price,
     addElementsGlobally, addNodes, addEdges,
   ]);
 
@@ -290,7 +300,7 @@ export function SellHubNode({ id, data }) {
     const hubPos = getNode(id)?.position || { x: 0, y: 0 };
     // Lay the cards out in a circle around the hub, centered roughly on the
     // hub's body.
-    const count  = PRICE_COMP_SOURCES.length;
+    const count  = ACTIVE_COMP_SOURCES.length;
     const HUB_W = 280, HUB_H = 240;     // approx hub footprint while researching
     const CARD_W = 140, CARD_H = 48;
     // Radius derived from card count + footprint so cards clear the hub and
@@ -300,7 +310,7 @@ export function SellHubNode({ id, data }) {
     const cy = hubPos.y + HUB_H / 2;
     const stamp = Date.now();
 
-    const newNodes = PRICE_COMP_SOURCES.map((source, i) => {
+    const newNodes = ACTIVE_COMP_SOURCES.map((source, i) => {
       const angle = (i / count) * 2 * Math.PI - Math.PI / 2;
       return {
         id: `comp-${id}-${source.id}-${stamp}`,
@@ -427,12 +437,32 @@ export function SellHubNode({ id, data }) {
     updateGlobal(currentId, { hubState: 'researching', errorMessage: null, isRateLimit: false, pendingComps: null, platformFit: null, platformFitPending: false });
 
     requestAnimationFrame(() => {
-      fitView({ duration: fitViewDuration(PRICE_COMP_SOURCES.length), padding: 0.2 });
+      fitView({ duration: fitViewDuration(ACTIVE_COMP_SOURCES.length), padding: 0.2 });
     });
 
     try {
       const scrapeResult = await scrapePriceComps();
       if (cancelled()) return;
+
+      // Hard login preflight (policy): the backend blocked the run because one or
+      // more in-scope marketplaces aren't logged in. Terminal "log in first" state
+      // — no synthesis and no Skip (unlike a resolvable per-source block). Return
+      // to 'draft' so logging in (Settings > Accounts) and re-confirming re-runs.
+      if (scrapeResult.preflightBlocked) {
+        const missing = Array.isArray(scrapeResult.missingLogins) ? scrapeResult.missingLogins : [];
+        updateGlobal(currentId, {
+          hubState: 'draft',
+          errorMessage: `Price check needs login on: ${missing.join(', ')}. Log in (Settings → Accounts) and re-run.`,
+          isRateLimit: false, pendingComps: null, scrapeWarnings: [],
+          platformFit: null, platformFitPending: false,
+        });
+        addToast({
+          title: 'Log in to run a price check',
+          description: `Not logged in: ${missing.join(', ')}. This run requires login on all in-scope marketplaces.`,
+          type: 'warning',
+        });
+        return;
+      }
 
       const comps = scrapeResult.comps || { sold: [], active: [] };
       const scrapeWarnings = Array.isArray(scrapeResult.scrapeWarnings) ? scrapeResult.scrapeWarnings : [];

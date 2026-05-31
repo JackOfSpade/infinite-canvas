@@ -18,6 +18,20 @@ const AUTH_HEARTBEAT_LOG_MS     = 10_000;        // "still waiting" diagnostic h
 const NATIVE_LOGIN_COOKIE_FLUSH_MS = 2_500;      // let OAuth/session cookies reach disk before verify
 const execFile = promisify(execFileCb);
 
+// Human-verification / challenge / signup interstitials are NOT a logged-in state —
+// the user is still mid-flow. These slip past LOGIN_URL_PATTERN in the auto-close
+// poll (eBay's captcha splash is /splashui/captcha, and the /signin in its `ru=`
+// query is URL-encoded so the login pattern misses it), and such a splash page
+// carries enough nav chrome ("Sign out") to false-trip the DOM logged-in heuristic
+// — which auto-closed the window WHILE the user was still solving the captcha
+// (the reported bug). The poll keeps WAITING while this matches, auto-closing only
+// once the URL settles on a real post-auth page. Tokens are chosen to never match a
+// logged-in home (ebay.com, /feed, /mypage, /jobseeker/home, …) — see test-runner.
+const AUTH_CHALLENGE_URL_PATTERN = /captcha|splashui|\/challenge|checkpoint|\/signup|verif(y|ication)|two[-_]?step|two[-_]?factor|\/2fa|\/otp/i;
+export function isAuthChallengeUrl(url) {
+  return AUTH_CHALLENGE_URL_PATTERN.test(String(url || ''));
+}
+
 // Google rejects sign-in attempts from CDP-controlled Chrome. Indeed commonly
 // delegates auth to Google SSO, so use a plain Chrome process for that flow.
 const NATIVE_LOGIN_PLATFORMS = new Set(['indeed']);
@@ -127,11 +141,6 @@ export const PLATFORM_LOGIN_URLS = {
   glassdoor:     'https://www.glassdoor.com/profile/login_input.htm',
   ziprecruiter:  'https://www.ziprecruiter.com/login',
   dice:          'https://www.dice.com/dashboard/login',
-  // Navigate directly to an auth-gated page so Wellfound's own redirect
-  // handles the login flow: unauthenticated → /login?redirect_url=/settings;
-  // after login → back to /settings. Landing on /settings = confirmed logged in.
-  // Avoids the ~35s wait on /jobs for the lazy-rendered sign-out dropdown.
-  wellfound:     'https://wellfound.com/settings',
   // Marketplace — selling destinations
   ebay:          'https://signin.ebay.com/ws/eBayISAPI.dll?SignIn',
   facebook:      'https://www.facebook.com/login',
@@ -160,8 +169,6 @@ export const PLATFORM_AUTH_COOKIES = {
   facebook:    ['c_user'],          // numeric user id; absent or "0" when logged out
   linkedin:    ['li_at'],           // long-lived session token
   // Others fall through to DOM signal — add here as we confirm them.
-  // NOTE: Wellfound detection is handled via PLATFORM_AUTH_GATED_URLS (URL-based,
-  // faster and more reliable than cookie/DOM for this SPA).
 };
 
 /**
@@ -175,7 +182,6 @@ export const PLATFORM_AUTH_COOKIES = {
  */
 export const PLATFORM_AUTH_GATED_URLS = {
   google:       'google.com/account/about',  // logged-in: myaccount.google.com → google.com/account/about/?hl=…; anonymous → accounts.google.com/signin
-  wellfound:    '/settings',                 // anonymous → redirected to /login?redirect_url=/settings first
   ziprecruiter: '/jobseeker/',               // post-login landing /jobseeker/home; anonymous → redirected to /user/login
 };
 
@@ -188,7 +194,6 @@ export const PLATFORM_COOKIE_DOMAINS = {
   glassdoor:     ['.glassdoor.com'],
   ziprecruiter:  ['.ziprecruiter.com'],
   dice:          ['.dice.com'],
-  wellfound:     ['.wellfound.com'],
   // Marketplace — selling + pricing
   ebay:          ['.ebay.com'],
   facebook:      ['.facebook.com'],
@@ -202,10 +207,47 @@ export const PLATFORM_COOKIE_DOMAINS = {
 };
 
 /**
+ * Close a visible login browser robustly. Two failure modes this guards against,
+ * both reported as "the browser goes into the wheel of death and won't close
+ * after login" (depop, eBay):
+ *
+ *   1. beforeunload prompts — OAuth/signup/SPA login pages often register a
+ *      "Leave site? Changes may not be saved" handler. A programmatic close then
+ *      pops a NATIVE modal that blocks the window from closing and beachballs it.
+ *      We best-effort null out window.onbeforeunload on every page first.
+ *   2. silent hangs — browser.close() resolves when the CDP socket drops, but the
+ *      OS Chrome process can linger (the stuck window the user sees). We wait for
+ *      the process to actually exit and, if it doesn't within the timeout, LOG it
+ *      (so a stuck close is visible in the bug report instead of looking clean)
+ *      and SIGKILL it so the window can never linger forever.
+ */
+async function closeLoginBrowserSafely(browser, label) {
+  const proc = browser.process?.();
+  try {
+    const pages = await browser.pages().catch(() => []);
+    await Promise.all(pages.map(p =>
+      p.evaluate(() => { window.onbeforeunload = null; }).catch(() => {})
+    ));
+  } catch { /* best effort — page may be navigating/closed */ }
+  await browser.close().catch(() => {});
+  if (proc && !proc.killed) {
+    const exited = await new Promise((res) => {
+      const done = () => res(true);
+      proc.once('exit', done);
+      setTimeout(() => { proc.removeListener('exit', done); res(false); }, 3000);
+    });
+    if (!exited) {
+      logger.warn(`[StealthBrowser] ${label} login window did NOT terminate within 3s of close() — visible Chrome was likely stuck on a beforeunload prompt or hung renderer (the "wheel of death"); force-killing so it can't linger.`);
+      try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+  }
+}
+
+/**
  * Open a VISIBLE browser window for the user to log into a platform.
  * Uses the same persistent userDataDir so cookies are shared with scraping.
  * Returns when the user closes the window.
- * 
+ *
  * Hardening: Monitors the IPC sender; if the sender is destroyed (e.g. window closed),
  * the login browser is closed immediately to prevent process leaks.
  */
@@ -361,7 +403,7 @@ export async function openLoginWindow(platformId, sender = null) {
           currentUrl,
           title: await page.title().catch(() => ''),
         });
-        if (LOGIN_URL_PATTERN.test(currentUrl)) return; // still on a login page — wait
+        if (LOGIN_URL_PATTERN.test(currentUrl) || isAuthChallengeUrl(currentUrl)) return; // still in the login / captcha / challenge flow — wait
 
         if (lastNonLoginUrl !== currentUrl) {
           if (!lastNonLoginUrl) logger.info(`[StealthBrowser] ${platformId} URL transitioned past login: ${currentUrl}`);
@@ -379,7 +421,7 @@ export async function openLoginWindow(platformId, sender = null) {
           autoDetectedLoginUrl = currentUrl;
           if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
           if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
-          await loginBrowser.close().catch(() => {});
+          await closeLoginBrowserSafely(loginBrowser, platformId);
           return;
         }
 
@@ -425,7 +467,7 @@ export async function openLoginWindow(platformId, sender = null) {
           // Programmatic close fires the 'disconnected' event → cleanup
           // below → resolves the promise → caller's verify runs and the
           // cache + Settings pill update with the success result.
-          await loginBrowser.close().catch(() => {});
+          await closeLoginBrowserSafely(loginBrowser, platformId);
           return;
         }
 
@@ -460,7 +502,7 @@ export async function openLoginWindow(platformId, sender = null) {
         const remaining = await loginBrowser.pages();
         if (remaining.length === 0) {
           logger.info(`[StealthBrowser] ${platformId} last page closed by user — closing browser`);
-          await loginBrowser.close().catch(() => {});
+          await closeLoginBrowserSafely(loginBrowser, platformId);
         }
       } catch { /* browser may already be tearing down */ }
     });
@@ -472,7 +514,7 @@ export async function openLoginWindow(platformId, sender = null) {
       if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
       if (sender) sender.removeListener('destroyed', cleanup);
       try {
-        await loginBrowser.close();
+        await closeLoginBrowserSafely(loginBrowser, platformId);
       } catch { /* ignored */ }
       // Chrome's `disconnected` event fires when the CDP WebSocket drops, but
       // SQLite cookie writes may still be in flight. Without this pause the verify
@@ -639,6 +681,46 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
 }
 
 /**
+ * Launch a VISIBLE Chrome window with a hard timeout + lifecycle logging.
+ *
+ * A bare `puppeteer.launch()` can hang INDEFINITELY when the shared userDataDir
+ * is still locked by an active scrape browser, or when macOS is blocking on a
+ * first-launch permission prompt the user never sees. Symptom: the user clicks
+ * Solve, nothing happens, the IPC task stays registered, and the bug report
+ * shows "Opening …" as the last line with no outcome — impossible to debug.
+ *
+ * The timeout converts that silent hang into a surfaced, LOGGED error; the
+ * success/failure logs make the window-open outcome visible in every bug report.
+ */
+async function launchVisibleWindow(label, url, launchOpts) {
+  const LAUNCH_TIMEOUT_MS = 30000;
+  const launchP = puppeteer.launch(launchOpts);
+  let timer = null;
+  let timedOut = false;
+  // If the launch resolves AFTER we've given up, close the orphan so a slow
+  // Chrome doesn't leak a process the caller no longer holds a handle to.
+  launchP.then((b) => { if (timedOut) b.close().catch(() => {}); }, () => {});
+  try {
+    const browser = await Promise.race([
+      launchP,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error(`${label} launch did not complete within ${LAUNCH_TIMEOUT_MS / 1000}s — Chrome may be blocked on a macOS permission prompt, or the userDataDir is still locked by an active scrape browser (url: ${url})`));
+        }, LAUNCH_TIMEOUT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    logger.info(`[StealthBrowser] ${label} Chrome launched (url: ${url})`);
+    return browser;
+  } catch (err) {
+    clearTimeout(timer);
+    logger.error(`[StealthBrowser] ${label} launch FAILED: ${err?.message || String(err)}`);
+    throw err;
+  }
+}
+
+/**
  * Open a VISIBLE browser window for the user to manually clear a captcha or
  * anti-bot challenge that blocked a scrape. Mirrors openLoginWindow's
  * lifecycle (same userDataDir so the cleared challenge cookies persist for
@@ -653,28 +735,46 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
   if (!url) throw new Error('openCaptchaResolveWindow requires a url');
 
   const executablePath = process.env.CHROME_PATH || await findChromePath();
-  logger.info(`[StealthBrowser] Opening captcha-resolve window for ${url}`);
+  logger.info(`[StealthBrowser] Opening captcha-resolve window for ${url} (executable: ${executablePath})`);
+
+  // Register with the auth-window diagnostic tracker BEFORE the launch so a hung
+  // launch is captured as an in-flight entry in the bug report (it was previously
+  // invisible — only login windows registered, so "window not opening" had no
+  // trace). Keyed by host so it doesn't collide with platform login entries.
+  const diagKey = `captcha:${(() => { try { return new URL(url).host; } catch { return 'unknown'; } })()}`;
+  updateAuthWindowDiagnostic(diagKey, { mode: 'captcha-resolve', loginUrl: url, currentUrl: url, title: '', result: 'launching' });
 
   // Same userDataDir-lock dance as openLoginWindow — Chrome won't let the
-  // visible browser launch on a dir the headless scraper still holds.
+  // visible browser launch on a dir the headless scraper still holds. Bracketed
+  // with logs so a hang HERE (waiting on the scrape browser to exit) is
+  // distinguishable in the bug report from a hang in the launch below.
+  logger.info('[StealthBrowser] Captcha window: closing stealth browser to release the profile lock…');
   await closeStealthBrowser();
+  logger.info('[StealthBrowser] Captcha window: stealth browser closed — launching visible window');
 
-  const captchaBrowser = await puppeteer.launch({
-    headless: false,
-    executablePath,
-    userDataDir: await getUserDataDir(),
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-infobars',
-      '--window-size=1100,800',
-      '--lang=en-US,en',
-    ],
-    defaultViewport: null,
-    ignoreHTTPSErrors: true,
-  });
+  let captchaBrowser;
+  try {
+    captchaBrowser = await launchVisibleWindow('Captcha-resolve window', url, {
+      headless: false,
+      executablePath,
+      userDataDir: await getUserDataDir(),
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-infobars',
+        '--window-size=1100,800',
+        '--lang=en-US,en',
+      ],
+      defaultViewport: null,
+      ignoreHTTPSErrors: true,
+    });
+  } catch (err) {
+    finishAuthWindowDiagnostic(diagKey, { result: 'launch-error', error: err?.message || String(err) });
+    throw err;
+  }
+  updateAuthWindowDiagnostic(diagKey, { result: 'open' });
 
   const pages = await captchaBrowser.pages();
   const page = pages[0] || await captchaBrowser.newPage();
@@ -762,6 +862,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     let extractOutcome = null;    // inline-extract result: 'matched N' / 'matched 0' / 'threw' / 'non-array' / 'no-extractor'
     let autoCloseReason = null;   // why finishCleared fired (set at each call site)
     let siteChangedError = null;  // non-null when inline extract threw SITE_CHANGED (code fix needed, not captcha)
+    let siteChangedHandled = false; // de-dupe guard for the SITE_CHANGED branch — must NOT be `isTerminated`, see below
     let pollTimedOut = false;     // auto-detect poll gave up before any resolve
 
     // Snappier cadence than the in-page loop for sub-second detection after a
@@ -949,8 +1050,19 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
                 // when the page finishes loading) both hitting this handler. The
                 // second one's warn/close would be a harmless duplicate, but it
                 // produces a confusing double WARN in the log.
-                if (isTerminated) return;
-                isTerminated = true;
+                //
+                // CRITICAL: this guard must NOT reuse `isTerminated`. That flag is
+                // cleanup()'s idempotency latch — setting it here makes the
+                // `disconnected` → cleanup() handler bail at its own `if
+                // (isTerminated) return`, so resolve() and finishAuthWindowDiagnostic()
+                // never fire. The Chrome window closes, but the awaiting
+                // resolve-job-source IPC never returns: the node's task stays
+                // registered and the source card spins on "resolving" forever
+                // (observed as "Glassdoor stuck" with a dangling Active IPC Task and
+                // an Auth Window stuck at result=open). Use a dedicated flag and let
+                // `close()` → cleanup() do the real teardown + resolve.
+                if (siteChangedHandled) return;
+                siteChangedHandled = true;
                 // The extractor is broken (not the captcha) — closing the window
                 // and rescraping headless would just fail again. Surface as
                 // stale-selectors via the resolve payload so marketplace.js can
@@ -1081,36 +1193,44 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     const cleanup = async () => {
       if (isTerminated) return;
       isTerminated = true;
-      if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
-      if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
-      if (signal) signal.removeEventListener?.('abort', onAbort);
-      if (sender) sender.removeListener('destroyed', cleanup);
-      try { await captchaBrowser.close(); } catch { /* ignored */ }
-      // `resolved` distinguishes "auto-detected cleared" from "user closed
-      // manually." `items` is the inline-extracted comp data captured from
-      // the visible session before close — when present, caller skips the
-      // headless rescrape (which would re-trigger the same bot wall).
-      // `diag` carries the "why" for the bug report's resolve section (how the
-      // window closed, what the extractor saw, page state) so a 0-extract isn't
-      // an unexplained dead end — see openCaptchaResolveWindow's diag vars.
+      // Compute the resolve "why" up front. `resolved` distinguishes
+      // "auto-detected cleared" from "user closed manually." `diag` carries the
+      // close reason + what the extractor saw + page state so a 0-extract isn't an
+      // unexplained dead end.
       const closeReason = resolved ? (autoCloseReason || 'cleared')
         : siteChangedError ? 'site-changed-auto-close'
         : signal?.aborted ? 'aborted'
         : sender?.isDestroyed?.() ? 'app-closed'
         : pollTimedOut ? 'user-closed-after-timeout'
         : 'user-closed';
+      const diag = {
+        closeReason,
+        extractOutcome: extractOutcome || (inlineExtractorJS ? 'never-extracted' : 'no-extractor'),
+        finalHost: lastHost,
+        sawChallenge: everSawChallenge,
+        sawConsent: everSawConsent,
+        textLen: lastTextLen,
+        siteChangedError: siteChangedError || null,
+      };
+      // Persist the diag ONTO the auth-window record (not just the resolve return
+      // value). The bug report renders these fields, so a hung/odd resolve is
+      // self-explaining without the 60-line main-log ring buffer — which is where
+      // the SITE_CHANGED close reason lived in the "Glassdoor stuck" report, one
+      // long-running window away from scrolling out entirely.
+      finishAuthWindowDiagnostic(diagKey, { result: resolved ? 'cleared' : 'closed', ...diag });
+      if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
+      if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
+      if (signal) signal.removeEventListener?.('abort', onAbort);
+      if (sender) sender.removeListener('destroyed', cleanup);
+      try { await captchaBrowser.close(); } catch { /* ignored */ }
+      // `items` is the inline-extracted comp data captured from the visible
+      // session before close — when present, caller skips the headless rescrape
+      // (which would re-trigger the same bot wall).
       resolve({
         success: true, resolved, items: extractedItems,
         siteChangedError: siteChangedError || null,
         closedByApp: sender?.isDestroyed?.(),
-        diag: {
-          closeReason,
-          extractOutcome: extractOutcome || (inlineExtractorJS ? 'never-extracted' : 'no-extractor'),
-          finalHost: lastHost,
-          sawChallenge: everSawChallenge,
-          sawConsent: everSawConsent,
-          textLen: lastTextLen,
-        },
+        diag,
       });
     };
 

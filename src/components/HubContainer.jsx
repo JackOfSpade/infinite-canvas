@@ -87,7 +87,7 @@ export function HubContainer({
   };
 
   const isBlue  = theme === 'blue';
-  const chipLabel = isBlue ? 'Drop resume' : 'Drop photos';
+  const chipLabel = isBlue ? 'Drop career files' : 'Drop photos';
   const chipIcon  = isBlue ? '📄' : '📷';
 
   return (

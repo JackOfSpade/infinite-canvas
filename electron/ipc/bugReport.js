@@ -6,8 +6,8 @@ import os from 'os';
 
 import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
 import { getAISettings, resolveServiceAccountPath } from './settings.js';
-import { getSellMonitorPlatforms, getJobLoginPlatforms } from './stealthBrowser.js';
-import { getStatusCacheSync } from './accounts.js';
+import { getSellMonitorPlatforms, getJobLoginPlatforms, getStealthBrowserInfo } from './stealthBrowser.js';
+import { getStatusCacheSync, getVerifyTimingSummary } from './accounts.js';
 import { getRecentLogs } from '../logger.js';
 import { getGeminiTelemetry } from './gemini.js';
 import { getJobsTelemetry } from './jobs.js';
@@ -33,50 +33,103 @@ const PROCESS_START_MS = Date.now();
 
 
 /**
- * Returns the mtime (ms) of the newest main-process .js file actually running,
- * or null if scanning fails. We scan the directory that contains the running
- * module — in dev that's electron/ipc/, in production that's dist-electron/
- * (vite-plugin-electron emits hashed chunks like `settings-D7wn9ttr.js`, so
- * the old hardcoded-filename approach silently returned null in any built
- * app, producing the false "Up to date" claim that masked stale-build bugs).
+ * Returns the mtime (ms) of the newest main-process code file the running build
+ * depends on, or null if nothing could be scanned. Comparing it to
+ * PROCESS_START_MS tells us whether any code changed since the process booted —
+ * the stale-build signal we want.
  *
- * Comparing the newest mtime to PROCESS_START_MS tells us if any file has
- * been rewritten since the process booted — the signal we actually want.
+ * It scans BOTH the source tree (`electron/`) and the bundle (`dist-electron/`),
+ * under whichever of app.getAppPath()/process.cwd() they live:
+ *   • `electron/` source catches "edited a file but didn't rebuild" (dev).
+ *   • `dist-electron/` bundle is the artifact actually running — and in a
+ *     PACKAGED app the `electron/` source isn't shipped at all (only the bundle
+ *     is inside app.asar), so source-only scanning returned null → the false
+ *     "(unknown)" the report kept showing. The bundle is .cjs/.mjs, not .js, so
+ *     the old `.js`-only filter missed it even when the dir was present.
  */
 function getNewestMainProcessSourceMtime() {
-  try {
-    // app.getAppPath() = project root — always correct regardless of whether
-    // import.meta.url resolves to the source file or a vite-bundled virtual path.
-    const electronDir = path.join(app.getAppPath(), 'electron');
+  const CODE_EXT = /\.(c|m)?js$/; // .js, .cjs, .mjs
+  const roots = [];
+  try { if (app?.getAppPath) roots.push(app.getAppPath()); } catch { /* ignore */ }
+  try { roots.push(process.cwd()); } catch { /* ignore */ }
+
+  const candidates = [];
+  for (const root of roots) {
+    if (!root) continue;
+    candidates.push(path.join(root, 'electron'), path.join(root, 'dist-electron'));
+  }
+
+  let newest = 0;
+  const seen = new Set();
+  const walk = (dir) => {
+    const resolved = path.resolve(dir);
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+
+    let entries = [];
+    try { entries = fs.readdirSync(resolved, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      // Defensive: these dirs shouldn't contain node_modules, but never recurse
+      // into it (or dotfiles) if a candidate root ever broadens.
+      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+      const fullPath = path.join(resolved, entry.name);
+      if (entry.isDirectory()) { walk(fullPath); continue; }
+      if (!entry.isFile() || !CODE_EXT.test(entry.name)) continue;
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.mtimeMs > newest) newest = stat.mtimeMs;
+      } catch { /* skip */ }
+    }
+  };
+
+  for (const dir of candidates) walk(dir);
+  return newest || null;
+}
+
+/**
+ * Renderer (React/Vite) freshness. getNewestMainProcessSourceMtime above scans
+ * only electron/ + dist-electron/ — but the renderer (`src/`) is where the
+ * JobHub pipeline, the AI-scoring/test-mode gate, and most UI logic live. When
+ * the app loads the BUILT bundle (main.js does loadFile('../dist/index.html')
+ * whenever there's no Vite dev server), an edit to `src/` that was never
+ * re-bundled means the running UI is STALE even though the main process is
+ * current — the "fixed the code but it still does the old thing" trap that the
+ * main-process-only check silently passed (reporting "✅ up to date").
+ *
+ * Returns the newest mtime under `src/` (source) and under `dist/` (the built
+ * renderer bundle the app actually loads), or null for whichever can't be read.
+ */
+function getNewestRendererMtimes() {
+  const roots = [];
+  try { if (app?.getAppPath) roots.push(app.getAppPath()); } catch { /* ignore */ }
+  try { roots.push(process.cwd()); } catch { /* ignore */ }
+
+  const newestUnder = (subdir, extTest) => {
     let newest = 0;
     const seen = new Set();
-
     const walk = (dir) => {
       const resolved = path.resolve(dir);
       if (seen.has(resolved)) return;
       seen.add(resolved);
-
       let entries = [];
       try { entries = fs.readdirSync(resolved, { withFileTypes: true }); } catch { return; }
       for (const entry of entries) {
+        if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
         const fullPath = path.join(resolved, entry.name);
-        if (entry.isDirectory()) {
-          walk(fullPath);
-          continue;
-        }
-        if (!entry.isFile() || !entry.name.endsWith('.js')) continue;
-        try {
-          const stat = fs.statSync(fullPath);
-          if (stat.mtimeMs > newest) newest = stat.mtimeMs;
-        } catch { /* skip */ }
+        if (entry.isDirectory()) { walk(fullPath); continue; }
+        if (!entry.isFile() || !extTest.test(entry.name)) continue;
+        try { const stat = fs.statSync(fullPath); if (stat.mtimeMs > newest) newest = stat.mtimeMs; }
+        catch { /* skip */ }
       }
     };
-
-    walk(electronDir);
+    for (const root of roots) if (root) walk(path.join(root, subdir));
     return newest || null;
-  } catch {
-    return null;
-  }
+  };
+
+  return {
+    src: newestUnder('src', /\.(jsx?|tsx?|css|html)$/),  // renderer sources
+    bundle: newestUnder('dist', /./),                    // any file — a rebuild touches them all
+  };
 }
 
 /**
@@ -415,7 +468,13 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     const t = n?.type?.toLowerCase();
     return t === 'sellhub' || t === 'marketplacecard' || t === 'listing' || t === 'compsourcecard';
   });
-  const wantsAuthDiagnostics = /login|log in|logged|sign.?in|auth|account|indeed|glassdoor|ziprecruiter|wellfound/i.test(description || '');
+  const wantsAuthDiagnostics = /login|log in|logged|sign.?in|auth|account|indeed|glassdoor|ziprecruiter/i.test(description || '');
+  // FULL (or no code) must mean EVERYTHING — otherwise description-keyword-gated
+  // sections silently vanish on a FULL report. "window not opening" (a captcha/
+  // login window) doesn't match the auth keywords above, so without this the
+  // Auth Window Diagnostics section was dropped even under FULL.
+  const reportCode = String(payload.filterCode || '').trim().toUpperCase();
+  const isFullReport = !reportCode || reportCode.includes('FULL');
 
   const systemInfo = {
     platform: process.platform,
@@ -496,10 +555,13 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       // truncated since the raw text (e.g. an AI error or a multi-URL
       // aggregated reason) can be long. lastChecked is normalized to "Ns ago"
       // so a stale status is obvious without timezone math.
-      // jobgroup (category / salary bucket) — show kind, label, count, and
-      // expanded state so "why is this empty?" or "why won't it collapse?"
-      // reports are diagnosable at a glance.
-      if (d.kind && (d.kind === 'category' || d.kind === 'bucket')) {
+      // jobgroup — the results-tree levels (likelihood band → salary range →
+      // role; legacy: category / bucket / branch). Show kind, label, count, and
+      // expanded state so the tree's structure / ordering / auto-expand state is
+      // readable from Node Diagnostics alone (otherwise these rows are blank and
+      // you can only see the node IDs). The label also carries the band's % range
+      // and the salary range, so the whole taxonomy is visible here.
+      if (d.kind && ['likelihood', 'salary', 'role', 'category', 'bucket', 'branch'].includes(d.kind)) {
         previewParts.push(`${d.kind}: ${d.label || '?'}`);
         if (typeof d.count === 'number') previewParts.push(`count: ${d.count}`);
         previewParts.push(`expanded: ${d.expanded ? 'true' : 'false'}`);
@@ -764,11 +826,48 @@ ${rows}
     : isStale
       ? `⚠️ **STALE BUILD**: a tracked main-process source file was modified ${Math.round((newestSrcMs - PROCESS_START_MS) / 1000)}s after the process started. The running app is NOT executing the current source on disk — fully restart Electron (not just Vite) before treating this report as authoritative.`
       : '✅ Up to date — no tracked main-process source has been modified since the process started.';
+
+  // Renderer freshness — the main-process check above never covers src/, but a
+  // stale renderer (edited src/ that wasn't re-bundled into dist/) silently runs
+  // old UI logic. With a Vite dev server, HMR keeps it current; with the built
+  // bundle (loadFile dist/index.html) only a `vite build` updates it.
+  const onDevServer = !!process.env.VITE_DEV_SERVER_URL;
+  const { src: rSrcMs, bundle: rBundleMs } = getNewestRendererMtimes();
+  // A packaged app ships only the built bundle inside app.asar — `src/` isn't on
+  // disk, so a null rSrcMs there is EXPECTED (not a read failure). Label it as
+  // such only when we DID find the bundle (otherwise we truly know nothing).
+  const rSrcStr = rSrcMs
+    ? new Date(rSrcMs).toISOString()
+    : (rBundleMs ? '(not on disk — packaged build, src/ not shipped)' : '(unknown)');
+  const rBundleStr = rBundleMs ? new Date(rBundleMs).toISOString() : '(no built bundle found under dist/)';
+  const rendererStale = !!(rSrcMs && rBundleMs && rSrcMs > rBundleMs);
+  const bundleAfterStart = !!(rBundleMs && rBundleMs > PROCESS_START_MS);
+  let rendererLine;
+  if (onDevServer) {
+    rendererLine = 'ℹ️ Renderer served by the Vite dev server (HMR) — `src/` edits apply live; the dist/ mtime check does not apply.';
+  } else if (rendererStale) {
+    rendererLine = `⚠️ **STALE RENDERER**: a \`src/\` file was modified ${Math.round((rSrcMs - rBundleMs) / 1000)}s after the renderer bundle was built. The app loads \`dist/index.html\`, so the running UI does NOT include the latest src/ — run \`vite build\` and reload before trusting renderer behavior (e.g. the AI-scoring / test-mode gate).`;
+  } else if (bundleAfterStart) {
+    rendererLine = `⚠️ **RENDERER REBUILT MID-SESSION**: dist/ was rebuilt ${Math.round((rBundleMs - PROCESS_START_MS) / 1000)}s after launch but the window may still hold the pre-rebuild bundle — reload the window (or restart) to pick it up.`;
+  } else if (rBundleMs) {
+    // Bundle present, not newer than src/, and not rebuilt after launch → the
+    // window loaded the current on-disk build. src/ being absent (packaged) or
+    // older (dev, already rebuilt) both land here — both are fresh.
+    rendererLine = rSrcMs
+      ? '✅ Renderer bundle (dist/) is at least as new as src/ — running UI matches source.'
+      : '✅ Renderer bundle predates process start and no newer src/ is on disk (packaged build) — running the current bundle.';
+  } else {
+    rendererLine = '⚠️ Cannot determine renderer freshness — no dist/ bundle mtime found.';
+  }
+
   const buildFreshnessMarkdown = `
 ## Build Freshness
 - Main process started: \`${startedAt}\` (uptime ${Math.round(uptimeMs / 1000)}s)
-- Newest tracked source file mtime: \`${newestSrcStr}\`
+- Newest main-process code mtime (electron/ source + dist-electron/ bundle): \`${newestSrcStr}\`
 - ${stalenessLine}
+- Newest renderer source mtime (src/): \`${rSrcStr}\`
+- Renderer bundle built (dist/ — what loadFile actually serves): \`${rBundleStr}\`
+- ${rendererLine}
 `;
 
   // ── Persisted workspace snapshot ──────────────────────────────────────────
@@ -869,7 +968,7 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
   // Only include when this canvas actually has job nodes — don't bleed job
   // login state into a marketplace-only report.
   let jobSessionsMarkdown = '';
-  if (hasJobNodes || wantsAuthDiagnostics) try {
+  if (hasJobNodes || wantsAuthDiagnostics || isFullReport) try {
     const platforms = getJobLoginPlatforms() || [];
     const cache = getStatusCacheSync();
 
@@ -937,12 +1036,58 @@ ${rows}
 ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : ''}`;
   } catch { /* never break the report on diagnostic failure */ }
 
+  // ── Login verification timing ─────────────────────────────────────────────
+  // Answers "why is login verification slow?" directly, with explicit per-platform
+  // verify durations + wall-clock total captured by verifyAllPlatforms. Before
+  // this section the only timing signal was subtracting consecutive "Verifying X"
+  // / "Startup verify X" main-process log timestamps by hand — and the concurrent
+  // verify pool now interleaves those lines, so that method no longer works. This
+  // is the first-class replacement: included under FULL or any auth/automation report.
+  let verifyTimingMarkdown = '';
+  if (isFullReport || wantsAuthDiagnostics || hasSellNodes || hasJobNodes) try {
+    const run = getVerifyTimingSummary?.();
+    if (run && Array.isArray(run.durations) && run.durations.length > 0) {
+      const sumMs = run.durations.reduce((a, d) => a + (d.ms || 0), 0);
+      const slowest = run.durations[0]; // durations are pre-sorted slowest-first
+      const rows = run.durations.map(d => {
+        const result = d.skipped ? 'skipped (login in flight)'
+          : d.error ? `error: ${String(d.error).replace(/\|/g, '\\|').slice(0, 80)}`
+            : d.connected ? 'connected' : 'not connected';
+        return `| \`${d.platformId}\` | ${d.ms} | ${result} |`;
+      }).join('\n');
+      const savedMs = Math.max(0, sumMs - run.totalMs);
+      verifyTimingMarkdown = `
+## Login Verification Timing
+> Per-platform startup verify durations (\`verifyAllPlatforms\`). Each platform is
+> a full page navigation in the shared stealth browser, run through a bounded
+> concurrency pool (size ${run.concurrency}) — so wall time is well below the sum
+> of per-platform times. A single platform far above the others points at a slow
+> TTFB / redirect chain for that site (cookie-consent interstitials, etc.); a high
+> WALL total despite low per-platform times points at the pool size (raise
+> \`VERIFY_CONCURRENCY\` in accounts.js).
+
+- Run started: \`${new Date(run.startedAt).toISOString()}\`
+- Platforms verified: ${run.platformCount}
+- Concurrency pool: ${run.concurrency}
+- **Wall-clock total: ${run.totalMs}ms** (sum of per-platform: ${sumMs}ms — concurrency saved ~${savedMs}ms)
+- Slowest: \`${slowest.platformId}\` at ${slowest.ms}ms
+
+| Platform ID | Verify ms | Result |
+|---|---|---|
+${rows}
+`;
+    }
+  } catch { /* never break the report on diagnostic failure */ }
+
   // ── Active auth/login window snapshot ─────────────────────────────────────
   // Login bugs can happen with zero canvas nodes. This captures the visible
   // auth browser mode and current URL/title when the report is taken, which is
   // the decisive signal for Google's "browser or app may not be secure" block.
   let authWindowMarkdown = '';
-  if (wantsAuthDiagnostics) try {
+  // Captcha-resolve windows are a marketplace concern AND a job concern, and a
+  // user may describe the failure without auth vocabulary ("window not opening").
+  // Include whenever there are automation nodes, or always under FULL.
+  if (wantsAuthDiagnostics || isFullReport || hasSellNodes || hasJobNodes) try {
     const diag = getAuthWindowDiagnostics?.();
     const entries = [
       ...(Array.isArray(diag?.active) ? diag.active.map(d => ({ ...d, state: 'active' })) : []),
@@ -959,16 +1104,53 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
       const argsSection = argsRows.length > 0
         ? `\n### Chrome launch args\n${argsRows.join('\n')}\n`
         : '';
+      // Resolve outcome — the "why" behind a closed/failed captcha-resolve window,
+      // now persisted ON the window record (authWindows.js cleanup) instead of
+      // living only in the transient main-log ring buffer. This is what was missing
+      // when a SITE_CHANGED auto-close left a window stuck at result=open: the close
+      // reason had to be grepped out of Recent Logs, one long-running window away
+      // from scrolling out. `closed=site-changed-auto-close` ⇒ stale selectors (the
+      // card should offer Retry, not Solve).
+      const resolveDiagRows = entries
+        .filter(d => d.closeReason || d.extractOutcome || d.siteChangedError)
+        .map(d => {
+          const bits = [];
+          if (d.closeReason) bits.push(`closed=${d.closeReason}`);
+          if (d.extractOutcome) bits.push(`extractor=${d.extractOutcome}`);
+          if (typeof d.textLen === 'number') bits.push(`textLen=${d.textLen}`);
+          bits.push(`saw captcha=${d.sawChallenge ? 'yes' : 'no'} / consent=${d.sawConsent ? 'yes' : 'no'}`);
+          if (d.siteChangedError) bits.push(`SITE_CHANGED: ${String(d.siteChangedError).replace(/`/g, "'").replace(/\s+/g, ' ').slice(0, 200)}`);
+          return `- **${d.platformId ?? '?'} (${d.state})**: ${bits.join(' · ')}`;
+        });
+      const resolveDiagSection = resolveDiagRows.length > 0
+        ? `\n### Resolve outcome (why the window closed / failed)\n> Persisted on the window record — survives the Recent Logs ring buffer.\n${resolveDiagRows.join('\n')}\n`
+        : '';
+      // Scrape/stealth browser liveness — a captcha/login window launches a
+      // VISIBLE Chrome on the SAME userDataDir, so an alive scrape browser here
+      // is the prime suspect for a window that won't open (profile lock). A
+      // `launching`/`open` row above with this still 🟢 alive = lock conflict.
+      let stealthLine = '';
+      try {
+        const sb = getStealthBrowserInfo?.() || {};
+        const sbAge = sb.launchedAt ? `${Math.round((Date.now() - sb.launchedAt) / 1000)}s ago` : '—';
+        stealthLine = `\n- Scrape/stealth browser: ${sb.connected ? `🟢 alive (generation #${sb.generation}, launched ${sbAge}) — holds the shared userDataDir; a window stuck \`launching\` above points at a profile-lock conflict` : '⚪ not running (profile lock free)'}\n`;
+      } catch { /* ignore */ }
       authWindowMarkdown = `
 ## Auth Window Diagnostics
 > Snapshot of visible login/captcha windows. \`mode=native-chrome\` means the
 > login was launched without Puppeteer/CDP automation so Google SSO should not
-> reject it as an unsafe browser.
+> reject it as an unsafe browser. A \`captcha-resolve\` row stuck at
+> \`result=launching\` means the visible window never finished opening (hung on
+> the profile lock or a macOS permission prompt) — see Recent Logs for the
+> 30s launch-timeout error. A row stuck at \`result=open\` with NO matching
+> "Resolve outcome" line below AND a live Active IPC Task for the same node is a
+> hung resolve: the window's cleanup never resolved its promise (cross-check the
+> Active IPC Tasks section).
 
 | State | Platform | Mode | Current/Login URL | Title | Result | Updated |
 |---|---|---|---|---|---|---|
 ${rows}
-${argsSection}`;
+${stealthLine}${argsSection}${resolveDiagSection}`;
     }
   } catch { /* never break the report on diagnostic failure */ }
 
@@ -1055,8 +1237,15 @@ ${aiConfig.provider === 'gemini' ? `
   const jobsConfigMarkdown = hasJobNodes ? (() => {
     const jobsConfig = buildJobsConfigSnapshot();
     const tm = jobsConfig.testMode;
+    const aiSkipped = (tm && (tm.mode === 'medium' || tm.skipAI));
+    // FAST mode is breadth-bounded (queries × pages × jobs-per-page, API per-source)
+    // rather than just per-page — spell those bounds out so a tiny count reads as
+    // "fast cap", not a scrape miss.
+    const fastLine = (tm && tm.mode === 'fast')
+      ? `\n- Fast bounds: ${tm.queryCap === Infinity ? '∞' : tm.queryCap} queries × (${tm.jobMaxPages} pages × ${tm.jobPerPageCap} jobs) browser; ≤${tm.apiPerSourceCap === Infinity ? '∞' : tm.apiPerSourceCap}/source API`
+      : '';
     const testModeLines = tm
-      ? `\n### Job Search Test Mode\n- Mode: **${tm.mode}**${(tm.mode === 'medium' || tm.skipAI) ? ` (${tm.jobPerPageCap} jobs/page, AI skipped)` : ` (${tm.jobPerPageCap} jobs/page, full AI)`}\n- Enabled: ${tm.enabled ? '✅' : '❌'}\n- Scoped source: ${tm.sourceId ? `\`${tm.sourceId}\`` : '*(all sources)*'}\n- Per-page cap: ${tm.jobPerPageCap}, Result cap: ${tm.jobResultCap === Infinity ? 'unlimited' : tm.jobResultCap}`
+      ? `\n### Job Search Test Mode\n- Mode: **${tm.mode}**${aiSkipped ? ` (${tm.jobPerPageCap} jobs/page, AI skipped)` : ` (${tm.jobPerPageCap} jobs/page, full AI)`}\n- Enabled: ${tm.enabled ? '✅' : '❌'}\n- Scoped source: ${tm.sourceId ? `\`${tm.sourceId}\`` : '*(all sources)*'}\n- Per-page cap: ${tm.jobPerPageCap}, Result cap: ${tm.jobResultCap === Infinity ? 'unlimited' : tm.jobResultCap}${fastLine}`
       : '';
     return `
 ## Job Search API Configuration
@@ -1127,7 +1316,7 @@ ${payload.filterCode ? `\n**Filter code applied:** \`${payload.filterCode}\`${pa
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   // Static safety bound (not adaptive): keeps the assembled bug-report payload

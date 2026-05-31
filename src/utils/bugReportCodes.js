@@ -152,7 +152,7 @@ export const CODE_DEFINITIONS = {
     label: 'Job Search Pipeline',
     description: 'Job-search pipeline audit — the search→score→bucket funnel, per-source gather counts, and AI/scraper telemetry that confirm no jobs were silently dropped or not gathered. Drops the heavy node/edge/media dumps and narrows the event log to job-pipeline events (the pipeline / AI / scraper sections are built main-process-side and are always kept).',
     logFilter: line =>
-      /\bjob|career|resume|scrape|gemini|bucket|scoring|funnel|dice|linkedin|usajobs|lever|greenhouse|remoteok|weworkremotely|wellfound|glassdoor|ziprecruiter|indeed/i.test(line),
+      /\bjob|career|resume|scrape|gemini|bucket|scoring|funnel|dice|linkedin|usajobs|lever|greenhouse|remoteok|weworkremotely|glassdoor|ziprecruiter|indeed/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
@@ -160,7 +160,7 @@ export const CODE_DEFINITIONS = {
     label: 'Login/Auth Windows',
     description: 'Login/session diagnostics — auth-window launch mode, current login URL/title, session verifier traces, and account-related main-process logs. Use for Google/Indeed/marketplace login loops or “browser may not be secure” errors.',
     logFilter: line =>
-      /auth|login|log.?in|logged|sign.?in|session|account|cookie|verify|verified|not connected|connected|StealthBrowser|Accounts|google|indeed|glassdoor|ziprecruiter|wellfound|facebook|ebay|poshmark|mercari|swappa/i.test(line),
+      /auth|login|log.?in|logged|sign.?in|session|account|cookie|verify|verified|not connected|connected|StealthBrowser|Accounts|google|indeed|glassdoor|ziprecruiter|facebook|ebay|poshmark|mercari|swappa/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
@@ -206,9 +206,6 @@ If none of these codes capture the telemetry needed to debug this, don't force a
 
 Examples: "CRASH+UI+LEAN", "SAVE+ERR", "UI+QUICK"`;
 }
-
-// No-description variant, kept for any non-interactive callers.
-export const AI_PROMPT_TEMPLATE = buildAiPrompt();
 
 // ── Core Filter Logic ─────────────────────────────────────────────────────────
 
@@ -339,6 +336,3 @@ export function previewBugReportCode(logs, codeString) {
     valid: matchedCodes.length > 0 || !codeString?.trim(),
   };
 }
-
-/** All known code names for reference */
-export const ALL_CODES = Object.keys(CODE_DEFINITIONS);

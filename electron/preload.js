@@ -57,12 +57,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getLastJobAnalysisSnapshot: (args) => ipcRenderer.invoke('get-last-job-analysis-snapshot', args),
   generateCoverLetter: (args) => ipcRenderer.invoke('generate-cover-letter', args),
   generateInterviewPrep: (args) => ipcRenderer.invoke('generate-interview-prep', args),
+  parseCareerData: (args) => ipcRenderer.invoke('parse-career-data', args),
+  generateApplication: (args) => ipcRenderer.invoke('generate-application', args),
+  saveApplication: (args) => ipcRenderer.invoke('save-application', args),
   loadJobsHistory: (args) => ipcRenderer.invoke('load-jobs-history', args),
   appendJobsHistory: (args) => ipcRenderer.invoke('append-jobs-history', args),
 
   onJobSourceProgress: createListener('job-source-progress'),
   resolveJobSource: (args) => ipcRenderer.invoke('resolve-job-source', args),
   resumeJobSource:  (args) => ipcRenderer.invoke('resume-job-source', args),
+  // Crash/quit recovery: detect an incomplete prior run, or clear it. Resuming
+  // re-invokes searchJobs({ resume:true }), so no separate resume channel is needed.
+  peekJobRun:     (args) => ipcRenderer.invoke('peek-job-run', args),
+  completeJobRun: (args) => ipcRenderer.invoke('complete-job-run', args),
+  discardJobRun:  (args) => ipcRenderer.invoke('discard-job-run', args),
+  pollJobBatch:    (args) => ipcRenderer.invoke('poll-job-batch', args),
+  discardJobBatch: (args) => ipcRenderer.invoke('discard-job-batch', args),
   recordResolveMerge: (args) => ipcRenderer.invoke('record-resolve-merge', args),
   bucketJobs: (args) => ipcRenderer.invoke('bucket-jobs', args),
 
@@ -153,6 +163,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── AI Tools ────────────────────────────────────────────────────────────
   aiPolishText: (text) => ipcRenderer.invoke('ai-polish-text', text),
+  // AI provider availability/quota: live probe ("Check availability") and the
+  // last-known passive status for the Settings panel.
+  checkAIAvailability: (args) => ipcRenderer.invoke('check-ai-availability', args),
+  getAIStatus: () => ipcRenderer.invoke('get-ai-status'),
   exportBugReport:             (payload) => ipcRenderer.invoke('export-bug-report', payload),
   generateBugReportMarkdown:   (payload) => ipcRenderer.invoke('generate-bug-report-markdown', payload),
 

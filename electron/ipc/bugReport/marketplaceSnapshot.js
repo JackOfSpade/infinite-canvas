@@ -1,5 +1,6 @@
 import { getMarketplaceTelemetry } from '../marketplace.js';
-import { ago, modelTag, pipelineScope } from './helpers.js';
+import { MARKETPLACE_TEST_MODE } from '../../../src/utils/compSourceScope.js';
+import { ago, modelTag, pipelineScope, overPricedSoldFlag } from './helpers.js';
 
 // Verdict for what the top-25/15 comp cap actually dropped — does it skew the
 // price? Two facts matter. (1) Compare the TYPICAL dropped comp (its median) to
@@ -58,19 +59,34 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
 
   const lines = [];
 
+  // Surface test mode so a deliberately-narrowed run isn't misread as a bug
+  // ("why did only one comp source scrape?").
+  if (MARKETPLACE_TEST_MODE.enabled && MARKETPLACE_TEST_MODE.sourceId) {
+    lines.push(`> ⚙️ Marketplace test mode: comp scrape scoped to **${MARKETPLACE_TEST_MODE.sourceId}** only.`);
+  }
+
   if (t.analyze) {
     const a = t.analyze;
     lines.push(`### Product analysis${ago(a.ts)}`);
-    lines.push(`- ${a.photos} photo(s) → "${a.title}"${modelTag(a.model)}`);
+    lines.push(`- ${a.photos} photo(s) → "${a.title}"${modelTag(a.model, a.fallback)}`);
   }
 
   if (t.scrape) {
     const s = t.scrape;
     const errored = s.errored ?? 0;
+    const timedOut = s.timedOut ?? 0;
+    const loginRequired = s.loginRequired ?? 0;
     lines.push(`\n### Comp scrape${ago(s.ts)}`);
+    if (s.preflightBlocked) {
+      // The run never scraped — the hard login preflight blocked it. Surface this
+      // FIRST so a "0 comps" run isn't misread as empty results or a scrape bug.
+      lines.push(`- ⛔ **Login preflight BLOCKED the run** — not logged in to: ${(s.missingLogins || []).join(', ') || '(unknown)'}. Policy requires login on all in-scope marketplaces before a price check runs; nothing was scraped. Log in (Settings → Accounts) and re-run.`);
+    }
     lines.push(
       `- ${s.sources} sources → **${s.sold} sold + ${s.active} active** comps · ${s.warnings} warning(s)` +
       `${s.blocked > 0 ? `, ${s.blocked} anti-bot block(s)` : ''}` +
+      `${loginRequired > 0 ? `, ${loginRequired} not-logged-in` : ''}` +
+      `${timedOut > 0 ? `, ${timedOut} timed-out` : ''}` +
       `${errored > 0 ? `, ${errored} scrape error(s)` : ''}`,
     );
     if (s.bySource && Object.keys(s.bySource).length > 0) {
@@ -79,27 +95,100 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       // that's mostly one source's duplicates). A ⚠️<code> after a count names
       // WHY that source returned what it did — so a 0 isn't silently ambiguous.
       const sw = s.sourceWarnings || {};
-      const atCap = s.bySourceAtCap || {};
-      // `(cap)` after a count = the source returned exactly its extraction cap,
-      // so the page almost certainly held MORE listings than we gathered. The
-      // count is a floor, not the full available total.
-      lines.push(`- Per source (raw items): ${Object.entries(s.bySource).map(([id, n]) => `${id}=${n}${atCap[id] ? ' (cap)' : ''}${sw[id] ? ` ⚠️${sw[id].code}` : ''}`).join(', ')}`);
+      const yb = s.yieldBySource || {};
+      const prov = s.provenanceBySource || {};
+      // A browser-pool source (present in provenanceBySource) that returned NO
+      // yieldStats is a bare-array extractor with no per-card drift counter — a
+      // silent selector drift there can't be detected, so a healthy-looking count
+      // can hide vanished listings. Flag it (suppressed when a sourceWarning already
+      // explains the source). API sources (e.g. reverb) are never in
+      // provenanceBySource, so they're correctly excluded rather than mis-flagged.
+      const noDrift = (id) => (prov[id] && !yb[id] && !sw[id]) ? ' ⚠️no-drift-telemetry' : '';
+      // A neutral extraction-yield suffix per source: "(144 seen, 96 no-fields)"
+      // = 144 candidate cards on the page, 96 of which looked like listings but
+      // yielded no usable price/title/link. `seen` is a raw card count (it
+      // includes benign skips — eBay promo tiles, Mercari's twin anchors), so it
+      // is shown as data, not auto-flagged; `noFields` is the clean partial-drift
+      // signal that answers "did we get a price for EACH listing?" — a healthy
+      // run reads "48 seen" (noFields omitted), a drifted one "144 seen, 96 no-fields".
+      const fmtYield = (id) => {
+        const y = yb[id];
+        if (!y || typeof y.seen !== 'number') return '';
+        return ` (${y.seen} seen${y.noFields > 0 ? `, ${y.noFields} no-fields` : ''})`;
+      };
+      // Per-source raw counts are now the full rendered page (extractors no
+      // longer slice to a per-source cap), so a count reflects everything the
+      // page offered rather than a floor.
+      lines.push(`- Per source (raw items): ${Object.entries(s.bySource).map(([id, n]) => `${id}=${n}${fmtYield(id)}${noDrift(id)}${sw[id] ? ` ⚠️${sw[id].code}` : ''}`).join(', ')}`);
       // Spell out each flagged source's evidence (e.g. "extractor produced 0
       // items (expected ≥ 3)" = stale selectors / empty vs. a tiny-body block).
       for (const [id, w] of Object.entries(sw)) {
         lines.push(`  - \`${id}\` (${w.severity}): ${w.evidence}`);
       }
-      const cappedIds = Object.keys(atCap);
-      if (cappedIds.length > 0) {
-        // Answers "silently not gathered from scrape?": these per-source totals
-        // are floors. Not lost downstream (synthesis caps at 25 sold / 15 active
-        // and selects fairly across sources), but the gathered set under-counts
-        // what each page actually offered.
-        lines.push(`  - _(\`(cap)\` = hit the ${cappedIds.map(id => `${id}=${atCap[id]}`).join(', ')} extraction cap — page held more than gathered; these counts are floors. Not lost downstream: synthesis caps at 25 sold / 15 active and selects fairly across sources.)_`);
+      // Conservative partial-drift hint: a source that dropped MORE cards to
+      // missing fields than it kept almost certainly had a sub-selector move (it
+      // still returned >0 items, so it never tripped SITE_CHANGED — exactly the
+      // silent-degradation case a bare count would hide). Only fires on
+      // dropped > kept to stay quiet on benign skip noise.
+      for (const [id, y] of Object.entries(yb)) {
+        const kept = s.bySource?.[id] ?? 0;
+        const ySeen = typeof y?.seen === 'number' ? y.seen : 0;
+        if (!y || typeof y.noFields !== 'number' || y.noFields === 0) continue;
+        if (kept === 0 && ySeen > 0) {
+          // TOTAL field-drop: rows were present but EVERY candidate failed
+          // price/title/link extraction. For a JS-rendered source (e.g.
+          // PriceCharting's js-price spans) this is usually fields that never
+          // finished loading; it can also be a selector drift. The page returned
+          // rows, so it is NOT a block/login wall — distinct from a clean 0.
+          lines.push(`  - ⚠️ \`${id}\` saw ${ySeen} row(s) but extracted 0 — every candidate failed price/title/link extraction. Likely JS-rendered fields that never populated (content loads after the row skeleton), or a selector drift; the page returned rows so it is not a block. If it persists across re-runs, check the source's field selectors / readiness wait.`);
+        } else if (y.noFields > kept && kept > 0) {
+          lines.push(`  - ⚠️ \`${id}\` kept ${kept} but dropped ${y.noFields} card(s) for missing price/title/link — likely a PARTIAL selector drift (a field sub-selector moved). The source still returned data, so it did NOT trip SITE_CHANGED; check its title/price/link selectors.`);
+        }
+      }
+      // Bare-array sources (no seen/noFields denominator) — name them once so the
+      // ABSENCE of a drift signal is explicit rather than mistaken for a clean run.
+      const noTelemetry = Object.keys(s.bySource).filter(id => prov[id] && !yb[id] && !sw[id]);
+      if (noTelemetry.length > 0) {
+        lines.push(`  - ⚠️ No partial-drift telemetry from: ${noTelemetry.join(', ')} — these return a bare list with no per-card seen/no-fields counter, so a silent selector drift (dropping real listings while items stay > 0) would NOT surface here. Treat their counts as unverified for completeness; the sources above carry a seen/no-fields denominator.`);
+      }
+    }
+    if (s.provenanceBySource && Object.keys(s.provenanceBySource).length > 0) {
+      // Scrape provenance: the URL each source was read from + the sold/active
+      // category the pipeline CLAIMS for it (hard-coded on the task, never
+      // verified against the page). The tell: a source bucketed `sold` whose URL
+      // carries no sold/completed filter — cf. eBay `LH_Sold=1`, Poshmark
+      // `availability=sold_out`, Mercari `status=sold_out` — is feeding ACTIVE
+      // asking prices to the model as "what buyers actually paid" (e.g. Swappa's
+      // `/search?q=` → a `/listings/<model>` page that is live for-sale inventory,
+      // not completed sales). Shown as data, NOT auto-flagged: some sold sources
+      // legitimately lack the literal token (PriceCharting's `type=prices` IS sold
+      // data), so the URL is surfaced for a human to judge rather than mis-warned.
+      lines.push('- Scrape provenance (URL read · claimed category — a `sold` source whose URL has no sold/completed filter is serving ACTIVE prices):');
+      for (const [id, p] of Object.entries(s.provenanceBySource)) {
+        lines.push(`  - \`${id}\` claims **${p.category}** ← ${p.url}`);
+      }
+    }
+    if (s.apiQueryBySource && Object.keys(s.apiQueryBySource).length > 0) {
+      // API sources (reverb, pricecharting) aren't browser-pool tasks, so they have
+      // no scrape-provenance entry above. Their analog is the EFFECTIVE QUERY: the
+      // string actually searched. PriceCharting rewrites the product title
+      // (priceChartingQuery strips capacity/condition/"Console") before hitting a
+      // product-catalog search — so its count is shaped by that rewrite. Surfacing
+      // query + URL tells "normalizer over-stripped / wrong product" apart from
+      // "the catalog genuinely has only N matching variants".
+      lines.push('- API source query (the string actually searched — pricecharting normalizes the title; a surprising count is read against THIS, not the raw product name):');
+      for (const [id, q] of Object.entries(s.apiQueryBySource)) {
+        lines.push(`  - \`${id}\` q="${q.query}"${q.url ? ` → ${q.url}` : ''}`);
       }
     }
     if (s.blocked > 0) {
       lines.push('- _(anti-bot-blocked sources contribute 0 comps until solved via the card\'s Solve button — see the resolve stage / Recent Logs)_');
+    }
+    if (loginRequired > 0) {
+      lines.push('- _(not-logged-in source(s) returned 0 from a login wall / anonymous page — NOT a stale-selectors bug. Log in to the platform in Settings > Accounts and retry.)_');
+    }
+    if (timedOut > 0) {
+      lines.push('- _(timed-out source(s) = the page navigation never finished within the budget (usually bodyLen=0 — nothing loaded). A slow/hung site or an anti-bot tarpit, NOT a browser/profile-lock conflict. If the platform is not logged in, an anonymous request is likelier to be tarpitted — log in and retry.)_');
     }
     if (errored > 0) {
       lines.push('- _(scrape error(s) = the scrape threw before completing — e.g. a browser-launch/profile-lock conflict or network failure, NOT an anti-bot wall. A visible window opened mid-scrape can race the headless profile lock. See Recent Logs.)_');
@@ -157,6 +246,26 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       } else if (s.soldUnique != null) {
         lines.push(`- All ${s.soldFound} sold / ${s.activeFound} active comps are distinct (no duplicate inflation).`);
       }
+      // Price band of the comps actually fed to pricing — OUR independently
+      // computed min/median/max (priceStats), distinct from the model's
+      // self-reported market summary further down. Rendered EVERY run: the
+      // kept/dropped verdict block below only prints when the budget cap actually
+      // dropped comps, so an uncapped run (the common single-source scoped-test
+      // case — all found comps fed) would otherwise show NO price distribution at
+      // all. That left two things broken: the recommended price was uncheckable
+      // against the real comps (only the model's own floor was shown — the very
+      // number under suspicion), and the "verify against the kept band above"
+      // hint on a thin anchor pointed at a band that wasn't there. Stats are
+      // stamped on every synthesis, so this is a pure render fix, no new capture.
+      const band = (st) => st ? `$${st.min}–$${st.max} (median $${st.median}, n=${st.n})` : null;
+      const soldBand = band(s.soldKeptStats);
+      const activeBand = band(s.activeKeptStats);
+      if (soldBand || activeBand) {
+        lines.push(
+          `- Price band fed to pricing (our computed stats): ` +
+          [soldBand && `${soldBand} sold`, activeBand && `${activeBand} active`].filter(Boolean).join(' · '),
+        );
+      }
       // What the cap actually dropped — the evidence behind "by-design, not lost
       // data." dropBandVerdict compares the dropped slice's median to the kept
       // band to say whether the drop SKEWED the price (and which way) vs. dropped
@@ -201,7 +310,10 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
           }
         }
       }
-      lines.push(`- Result: recommended_price=${s.recommendedPrice == null ? '**null** ⚠️ (comps scraped but no price produced)' : '$' + s.recommendedPrice}, match_quality=${s.matchQuality}${modelTag(s.model)}`);
+      lines.push(`- Result: recommended_price=${s.recommendedPrice == null ? '**null** ⚠️ (comps scraped but no price produced)' : '$' + s.recommendedPrice}, match_quality=${s.matchQuality}${modelTag(s.model, s.fallback)}`);
+      // Sanity flag: recommendation above the highest ACTUAL sold comp (see helper).
+      const overPriced = overPricedSoldFlag(s.recommendedPrice, s.soldKeptStats, s.activeKeptStats);
+      if (overPriced) lines.push(`- ⚠️ ${overPriced}`);
       // The model's own anchor/adjusted/bound split — the LAST place a comp can
       // be dropped (the model weighting it out). The found→fed cap is reported
       // above; this is the fed→actually-weighted gap. classified ≪ fed is normal
@@ -259,7 +371,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
   if (t.fit) {
     const f = t.fit;
     lines.push(`\n### Platform fit${ago(f.ts)}`);
-    lines.push(`- ${f.platforms} platform(s) → ${f.good} good / ${f.unfit} unfit${modelTag(f.model)}`);
+    lines.push(`- ${f.platforms} platform(s) → ${f.good} good / ${f.unfit} unfit${modelTag(f.model, f.fallback)}`);
   }
 
   return `

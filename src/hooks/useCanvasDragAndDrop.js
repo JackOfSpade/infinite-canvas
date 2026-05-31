@@ -4,12 +4,10 @@ import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { processDroppedFiles } from '../utils/dragUtils';
 import { getNodeDims } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
+import { CODE_EXT_RE, RESUME_EXT_RE, IMAGE_EXT_RE } from '../utils/fileExtensions';
 
 // Compiled once at module load — not per drop event.
-const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)$/i;
 const URL_RE = /^(https?:\/\/[^\s]+|[a-z0-9]([a-z0-9-]*[a-z0-9])?\.([a-z]{2,}\.)*[a-z]{2,}([/?#][^\s]*)?)$/i;
-const RESUME_EXT_RE = /\.(pdf|docx|doc|txt)$/i;
-const IMAGE_EXT_RE = /\.(png|jpg|jpeg|webp|gif)$/i;
 
 export function useCanvasDragAndDrop({
   setNodes,
@@ -123,18 +121,15 @@ export function useCanvasDragAndDrop({
         return;
       }
 
-      // 2. Only Images dropped (PNG/JPG/etc) -> auto-create a SellHub (Marketplace).
-      if (imageFiles.length > 0 && resumeFiles.length === 0 && otherFiles.length === 0) {
-        takeSnapshot();
-        EventLogger.log(`drop routed type=sellhub files=${imageFiles.length}`);
-        const imagePaths = imageFiles.map(f => f.path);
-        insertNodes([NODE_FACTORIES.sellhub(position, { imagePaths })]);
-        return;
-      }
-
-      // Default: treat as document/folder drops. Images become document nodes
-      // that display the image inline. SellHub is created intentionally by
-      // dragging it from the sidebar, not auto-routed from image drops.
+      // Default: treat every remaining drop — INCLUDING images (jpg/png/heic/…) —
+      // as document/picture nodes that display the file inline. A dropped image is
+      // a STANDALONE picture; the SellHub (Marketplace) is created intentionally by
+      // dragging it from the sidebar, then dropping images onto it — never
+      // auto-spawned from a bare image drop. (Auto-spawning surprised users, fired a
+      // Gemini analysis on accidental drops, and was inconsistent: jpg/png/webp/gif
+      // matched IMAGE_EXT_RE and spawned a hub while heic/heif fell through to a
+      // picture. `imageFiles` is still computed above only to keep branch 1's
+      // pure-resume guard correct when images are mixed into a resume drop.)
       takeSnapshot();
       const dropDepth = depthRef.current;
       const newItems = await processDroppedFiles(validFiles, position);

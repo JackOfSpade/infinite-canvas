@@ -1,18 +1,21 @@
 /**
  * Shared browser overlay for job scraper sessions.
  *
- * buildOverlayScript({ withPause }) — returns the IIFE string to inject into
- *   the page via evaluateOnNewDocument + evaluate. withPause:true adds the
- *   ⏸ Pause button and CDP bridge (__icSetPaused / __icGetPaused); withPause:false
- *   gives a display-only panel (safe for scrapers where exposeFunction CDP
- *   bindings could add a Cloudflare fingerprint risk).
+ * buildOverlayScript({ withPause, cdpBridge }) — returns the IIFE string to
+ *   inject into the page via evaluateOnNewDocument + evaluate.
+ *   - withPause:true adds the ⏸ Pause button; false gives a display-only panel.
+ *   - cdpBridge:true wires the button to the Puppeteer-exposed __icSetPaused /
+ *     __icGetPaused functions. Those install a CDP Runtime.addBinding, which is
+ *     an automation fingerprint anti-bots (DataDome/Cloudflare) read — so set
+ *     cdpBridge:false to keep the button but have it only toggle the page-local
+ *     window.__icPaused, which the Node side reads by POLLING (no binding).
  *
  * updateOverlay(page, state) — updates the visible panel fields. All fields
  *   are optional; omitted fields are left unchanged.
  *   state: { srcLabel, srcName, qLabel, qText, count, status, progressText, challenge, error }
  */
 
-export function buildOverlayScript({ withPause = true } = {}) {
+export function buildOverlayScript({ withPause = true, cdpBridge = true } = {}) {
   const buttonStyles = withPause
     ? `'#__ic-panel button:hover:not(:disabled){filter:brightness(1.2)}',
     '#__ic-panel button:disabled{opacity:.4;cursor:default}',`
@@ -26,28 +29,12 @@ export function buildOverlayScript({ withPause = true } = {}) {
       'cursor:pointer;font:500 12px system-ui;transition:filter .15s">⏸ Pause</button>',`
     : '';
 
-  const pauseLogic = withPause ? `
-  window.__icPaused = false;
-  el.querySelector('#ic-pause').addEventListener('click', function(){
-    if(this.disabled) return;
-    window.__icPaused = !window.__icPaused;
-    if(window.__icSetPaused) window.__icSetPaused(window.__icPaused);
-    this.textContent = window.__icPaused ? '\\u25b6 Resume' : '\\u23f8 Pause';
-    const dot = document.getElementById('ic-dot');
-    if(dot){
-      if(window.__icPaused){
-        dot.style.background = '#eab308';
-        dot.style.animation  = 'none';
-      } else {
-        dot.style.background = '#4ade80';
-        dot.style.animation  = 'ic-blink 1.4s ease-in-out infinite';
-      }
-    }
-  });
-
-  // Restore paused state after navigation — __icGetPaused is a Puppeteer-exposed
-  // function that reads the Node.js-side paused flag, which survives page reloads.
-  // Retry up to ~500ms in case the CDP binding isn't registered yet on this document.
+  // CDP-bridge restore: only emitted when cdpBridge is on. It reads the Node-side
+  // flag back into the page after a navigation via the exposed __icGetPaused. With
+  // cdpBridge off there's no exposed function (it would be an automation
+  // fingerprint), so the Node side re-asserts paused state by pushing it in after
+  // each overlay (re)injection instead — see injectOverlay() in manualScraper.js.
+  const restoreLogic = (withPause && cdpBridge) ? `
   (function restorePause(attempts) {
     if(typeof window.__icGetPaused !== 'function') {
       if(attempts > 0) setTimeout(function(){ restorePause(attempts - 1); }, 50);
@@ -62,6 +49,26 @@ export function buildOverlayScript({ withPause = true } = {}) {
     });
   })(10);
 ` : '';
+
+  const pauseLogic = withPause ? `
+  window.__icPaused = false;
+  el.querySelector('#ic-pause').addEventListener('click', function(){
+    if(this.disabled) return;
+    window.__icPaused = !window.__icPaused;
+    ${cdpBridge ? 'if(window.__icSetPaused) window.__icSetPaused(window.__icPaused);' : '/* no CDP bridge — Node polls window.__icPaused */'}
+    this.textContent = window.__icPaused ? '\\u25b6 Resume' : '\\u23f8 Pause';
+    const dot = document.getElementById('ic-dot');
+    if(dot){
+      if(window.__icPaused){
+        dot.style.background = '#eab308';
+        dot.style.animation  = 'none';
+      } else {
+        dot.style.background = '#4ade80';
+        dot.style.animation  = 'ic-blink 1.4s ease-in-out infinite';
+      }
+    }
+  });
+${restoreLogic}` : '';
 
   return `(function(){
   if(document.getElementById('__ic-panel')) return;

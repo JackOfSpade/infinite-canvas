@@ -11,13 +11,41 @@ export const ago = (ts) => {
 
 // Renders the model that actually served an AI stage (recorded per stage via the
 // LLM layer's `meta` out-param). Flags a degraded run: a `*-lite` model = the
-// call fell through every stronger model (404/quota) to the weakest fallback —
-// so e.g. a "strong match" price is really flash-lite's verdict, not a top
-// model's. Empty when no model was recorded (older telemetry).
-export const modelTag = (model) => {
+// call fell through every stronger model to the weakest fallback — so e.g. a
+// "strong match" price is really flash-lite's verdict, not a top model's. Empty
+// when no model was recorded (older telemetry).
+//
+// `fallback` (optional, `{ attempts, reason, counts }` from gemini.js) names WHY
+// stronger models were skipped — `rate-limit`/quota (external: wait or upgrade
+// tier), `truncation` (our token cap is too low: raise it in llm.js), or `server`
+// (overload). Without it, "weak fallback" collapses three causes with opposite
+// fixes into one ambiguous flag, and the reason otherwise lives only in the
+// scrolling log buffer. A non-lite model that still fell back is noted lightly
+// (e.g. pro→flash on quota is a milder degradation, but still "not as expected").
+//
+// A MIXED chain (e.g. two models 429'd but a third truncated) is the trap: `reason`
+// is only the DOMINANT cause, so a sole "rate-limit" hides a truncation whose fix
+// (raise our cap) is the opposite of quota's (wait/upgrade). gemini.js already
+// records the full per-cause `counts`, so when more than one cause appears we
+// render the breakdown ("rate-limit×2 + truncation×1") instead of just the winner.
+export const modelTag = (model, fallback) => {
   if (!model) return '';
   const weak = /lite/.test(model);
-  return ` · model: \`${model}\`${weak ? ' ⚠️ weak fallback' : ''}`;
+  const fellBack = fallback && fallback.attempts > 0;
+  // Distinct-cause breakdown when the chain was mixed; else the single reason.
+  const causeLabel = (fb) => {
+    const c = fb && fb.counts;
+    if (c && typeof c === 'object') {
+      const parts = Object.entries(c).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+      if (parts.length > 1) return parts.map(([k, n]) => `${k}×${n}`).join(' + ');
+    }
+    return fb ? fb.reason : '';
+  };
+  const why = fellBack ? `${causeLabel(fallback)}: ${fallback.attempts} stronger model(s) failed` : '';
+  let suffix = '';
+  if (weak) suffix = ` ⚠️ weak fallback${why ? ` (${why})` : ''}`;
+  else if (fellBack) suffix = ` ↪ fell back (${why})`;
+  return ` · model: \`${model}\`${suffix}`;
 };
 
 // Produce a short but meaningful identifier for any node ID.
@@ -61,4 +89,24 @@ export const pipelineScope = (nodeId, windowId, currentNodeIds, reportWindowId) 
     foreign: false,
     note: `> Source node: \`${short}\`${deleted ? ' (hub since deleted from this canvas — telemetry retained so the run still reports)' : ''}.\n`,
   };
+};
+
+// Sanity flag for a recommended price that exceeds the highest ACTUAL sold comp.
+// Pricing above the entire sold range won't speed a sale and usually means the
+// model over-reached (common on a weak fallback). Compares against the real
+// fed-comp max (soldKeptStats), NOT the model's self-reported market summary,
+// and stays silent when an active listing legitimately sits that high (market may
+// have moved up). Returns the warning text, or null when nothing is off.
+export const overPricedSoldFlag = (recommendedPrice, soldKeptStats, activeKeptStats) => {
+  const recP = recommendedPrice;
+  const soldMax = soldKeptStats?.max;
+  const activeMax = activeKeptStats?.max;
+  if (!(typeof recP === 'number' && recP > 0)) return null;
+  if (!(typeof soldMax === 'number' && soldMax > 0)) return null;
+  if (recP <= soldMax) return null;
+  if (typeof activeMax === 'number' && activeMax >= recP) return null; // active competition justifies it
+  const over = Math.round((recP - soldMax) * 100) / 100;
+  const pct = Math.round(((recP - soldMax) / soldMax) * 1000) / 10;
+  const med = soldKeptStats?.median;
+  return `Recommended $${recP} is ABOVE the highest actual sold comp ($${soldMax}) by $${over} (${pct}%) — nothing sold that high, so for a quick sale it is likely over-priced (common when a weak fallback model anchors aggressively).${med != null ? ` Median sold was $${med}.` : ''}`;
 };

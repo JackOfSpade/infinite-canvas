@@ -1,4 +1,5 @@
 import { getNodeDims } from './constants.js';
+import { clamp } from './mathUtils.js';
 
 /**
  * Derived layout & navigation geometry — replaces the scattered hardcoded
@@ -8,8 +9,6 @@ import { getNodeDims } from './constants.js';
  *
  * Everything here is pure (no React, no DOM) so it's trivially testable.
  */
-
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // ── Radial hub layouts (JobHub / SellHub source cards) ────────────────────────
 // Both hubs fan their source cards around a circle. The radius used to be a

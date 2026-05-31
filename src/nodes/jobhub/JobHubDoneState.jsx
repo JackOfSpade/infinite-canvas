@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { JOB_SOURCE_BY_ID } from '../../utils/constants';
-import { SlidersHorizontal, X, RefreshCw, Activity, Target, MapPin, Bot } from 'lucide-react';
+import { SlidersHorizontal, X, RefreshCw, Target, MapPin, Bot } from 'lucide-react';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
 
@@ -14,8 +14,6 @@ function formatModelName(model) {
   const version = parts.slice(1).join('.');
   return `${family} ${version}`;
 }
-
-const STATUS_OPTIONS = ['New', 'Applied', 'Interview', 'Offer', 'Rejected'];
 
 export function JobHubDoneState({
   resultCount,
@@ -34,11 +32,8 @@ export function JobHubDoneState({
   setScoreThreshold,
   scoreRangeMin = 0,
   scoreRangeMax = 100,
-  statusFilters = [],
-  toggleStatusFilter,
   // Action props
   onRerun,
-  jobCards = [],
   // Search controls (passed back to the hub for next run)
   maxAgeDays = 21,
   setMaxAgeDays,
@@ -48,26 +43,17 @@ export function JobHubDoneState({
   // tweak it before re-running without going back to empty state.
   targetRole = '',
   setTargetRole,
-  // Status-monitoring (per-card AI status check across all connected JobCardNodes)
-  onCheckAllStatuses,
-  checkingAll = false,
-  // Bulk-remove cards a status check flagged as Filled/Closed.
-  onClearClosed,
   // Anti-bot signals collected during the search pipeline
   scrapeWarnings = [],
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const { addToast } = useToast();
 
-  // Cards a status sweep flagged as no longer open (Filled/Closed/expired).
-  // Kept in sync with CLOSED_MONITOR_STATUSES in JobHubNode.
-  const closedCount = jobCards.filter(c => ['sold', 'ended', 'expired'].includes(c?.monitorStatus)).length;
-
   // Slider is "active" when the user has nudged it above the dynamic minimum.
   // When min === max, the slider is a no-op and we hide it entirely.
   const sliderUsable = scoreRangeMax > scoreRangeMin;
   const sliderActive = sliderUsable && scoreThreshold > scoreRangeMin;
-  const hasActiveFilters = sliderActive || statusFilters.length > 0 || sourceFilter;
+  const hasActiveFilters = sliderActive || sourceFilter;
 
   return (
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1">
@@ -130,16 +116,6 @@ export function JobHubDoneState({
             )}
           </span>
         )}
-        {statusFilters.map(s => (
-          <span key={s} className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-white/10 text-white/50 text-[9px]">
-            {s}
-            {!locked && (
-              <button onClick={() => toggleStatusFilter?.(s)} onPointerDown={(e) => e.stopPropagation()}>
-                <X size={8} />
-              </button>
-            )}
-          </span>
-        ))}
       </div>
 
       {resumeSummary && (
@@ -158,37 +134,6 @@ export function JobHubDoneState({
             Re-run Search
           </button>
         </div>
-      )}
-
-      {/* Check All — same philosophy as the marketplace hub: ask AI to
-          re-check every connected JobCardNode's URL so the user can see at
-          a glance which postings are still open, filled, or expired. */}
-      {!locked && jobCards.length > 0 && onCheckAllStatuses && (
-        <button
-          onClick={onCheckAllStatuses}
-          disabled={checkingAll}
-          onPointerDown={(e) => e.stopPropagation()}
-          className="nodrag mt-1.5 w-full flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-blue-500/10 hover:bg-blue-500/20 text-blue-300 text-[10px] font-medium border border-blue-500/20 transition-colors disabled:opacity-50"
-          title="Ask AI to check the current status of every connected job card"
-        >
-          <Activity size={9} className={checkingAll ? 'animate-pulse' : ''} />
-          {checkingAll ? 'Checking…' : `Check All Statuses (${jobCards.length})`}
-        </button>
-      )}
-
-      {/* Clear closed — appears once a status check flags any postings as
-          Filled/Closed. Removes those cards (and any now-empty groups); they
-          stay in the jobs-history ledger so they won't re-surface on re-run. */}
-      {!locked && closedCount > 0 && onClearClosed && (
-        <button
-          onClick={onClearClosed}
-          onPointerDown={(e) => e.stopPropagation()}
-          className="nodrag mt-1.5 w-full flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-white/5 hover:bg-red-500/15 text-white/50 hover:text-red-300 text-[10px] font-medium border border-white/10 transition-colors"
-          title="Remove job cards detected as Filled or Closed. They stay in history, so they won't show up again on a re-run."
-        >
-          <X size={9} />
-          Clear closed ({closedCount})
-        </button>
       )}
 
       {/* Target role + Look back — both feed the next Re-run Search */}
@@ -281,32 +226,6 @@ export function JobHubDoneState({
               </div>
             </div>
           )}
-
-          {/* Status filter */}
-          <div className="space-y-1">
-            <div className="text-white/40 text-[10px]">Show status</div>
-            <div className="flex flex-wrap gap-1">
-              {STATUS_OPTIONS.map(s => {
-                const active = statusFilters.includes(s);
-                return (
-                  <button
-                    key={s}
-                    onClick={() => toggleStatusFilter?.(s)}
-                    className={`px-1.5 py-0.5 rounded-full text-[9px] transition-colors ${
-                      active
-                        ? 'bg-blue-500/25 text-blue-400/90 border border-blue-500/20'
-                        : 'bg-white/5 text-white/40 hover:bg-white/10'
-                    }`}
-                  >
-                    {s}
-                  </button>
-                );
-              })}
-            </div>
-            {statusFilters.length > 0 && (
-              <p className="text-white/20 text-[9px]">Showing only selected statuses</p>
-            )}
-          </div>
         </div>
       )}
     </div>

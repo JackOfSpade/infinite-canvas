@@ -18,10 +18,7 @@ const { app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execFile as execFileCb } from 'child_process';
-import { promisify } from 'util';
 import { logger } from '../logger.js';
-const execFile = promisify(execFileCb);
 
 import { getRandomUA, getSessionProfile } from './browser/antiDetectProfiles.js';
 import { saveDiceApiKey } from './settings.js';
@@ -50,59 +47,6 @@ export async function getUserDataDir() {
   return _userDataDir;
 }
 
-// ── Real Chrome Profile ───────────────────────────────────────────────────────
-// Returns the path to the user's default Chrome profile directory.
-// On macOS this is ~/Library/Application Support/Google/Chrome, which holds
-// the profile(s) the user uses day-to-day — already signed in to everything.
-// Using this instead of our isolated "browser-data" dir means the scraper
-// inherits the user's real session without any separate login flow.
-export function findRealChromeUserDataDir() {
-  const home = os.homedir();
-  if (process.platform === 'darwin') {
-    return path.join(home, 'Library', 'Application Support', 'Google', 'Chrome');
-  }
-  if (process.platform === 'win32') {
-    return path.join(
-      process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'),
-      'Google', 'Chrome', 'User Data'
-    );
-  }
-  // Linux
-  return path.join(home, '.config', 'google-chrome');
-}
-
-/**
- * Like findRealChromeUserDataDir() but async — returns the path only if the
- * directory exists and is accessible, null otherwise.
- */
-export async function getRealChromeUserDataDir() {
-  const dir = findRealChromeUserDataDir();
-  try {
-    await fs.promises.access(dir);
-    return dir;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Gracefully close the user's running Chrome so the profile lock is released
- * before Puppeteer re-opens Chrome with --remote-debugging-port.
- * Resolves once Chrome has had time to finish writing SQLite WAL files.
- */
-export async function closeSystemChrome() {
-  try {
-    if (process.platform === 'darwin') {
-      await execFile('/usr/bin/osascript', ['-e', 'tell application "Google Chrome" to quit'], { timeout: 5000 });
-    } else if (process.platform === 'win32') {
-      await execFile('taskkill', ['/F', '/IM', 'chrome.exe'], { timeout: 5000 });
-    }
-    logger.info('[StealthBrowser] System Chrome closed — waiting for profile lock to release');
-  } catch {
-    // Chrome wasn't running — nothing to do
-  }
-  await new Promise(r => setTimeout(r, 2000));
-}
 
 // ── Chrome Executable Discovery ─────────────────────────────────────────────
 // Preference order:
@@ -182,6 +126,22 @@ export async function findChromePath() {
 let browserInstance = null;
 let browserLaunchPromise = null;
 let isShuttingDown = false;
+// Monotonic generation, bumped on every successful launch (so a relaunch after
+// crash / clearBrowserSession / shutdown is a NEW generation). Lets callers tell
+// whether two operations ran on the SAME browser process — the discriminator for
+// "is a limit browser/session-based (resets on relaunch) or IP-based?".
+let browserGeneration = 0;
+let browserLaunchedAt = 0;
+
+// Identity of the current stealth-browser process. generation increments each
+// launch; launchedAt is the epoch ms of that launch (0 if never launched).
+export function getStealthBrowserInfo() {
+  return {
+    generation: browserGeneration,
+    launchedAt: browserLaunchedAt,
+    connected: !!browserInstance?.isConnected?.(),
+  };
+}
 
 export async function getStealthBrowser() {
   if (isShuttingDown) throw new Error('[StealthBrowser] Cannot get browser during shutdown');
@@ -237,7 +197,9 @@ export async function getStealthBrowser() {
         ignoreHTTPSErrors: true,
       });
 
-      logger.info('[StealthBrowser] Browser launched successfully');
+      browserGeneration += 1;
+      browserLaunchedAt = Date.now();
+      logger.info(`[StealthBrowser] Browser launched successfully (generation #${browserGeneration})`);
       return browserInstance;
     } finally {
       // Always release the mutex so the next call can retry on failure.
@@ -342,7 +304,19 @@ export async function fetchHtmlAuthed(url, { timeoutMs = 25000, signal } = {}) {
 
     const status   = response?.status() ?? 0;
     const finalUrl = page.url() || url;
-    const html     = await page.content();
+    // Bound page.content(). When an anti-bot challenge (e.g. Cloudflare) keeps the
+    // page in a reload loop, content() blocks indefinitely waiting for a stable
+    // execution context — sailing past the navigation timeout above. Without this
+    // race a wedged page hangs the caller forever; this is what stalled the startup
+    // login verify on Glassdoor (the whole "checking connections" step never
+    // returned). On timeout we fall through to the catch → { ok:false } and the
+    // finally still closes the page.
+    const html     = await Promise.race([
+      page.content(),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('page.content() timed out — page may be stuck in an anti-bot reload loop')),
+        Math.max(3000, Math.min(8000, timeoutMs - 2000)))),
+    ]);
     return { ok: true, status, finalUrl, html };
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
@@ -385,7 +359,19 @@ export async function fetchHtmlClean(url, { timeoutMs = 25000, signal } = {}) {
 
     const status   = response?.status() ?? 0;
     const finalUrl = page.url() || url;
-    const html     = await page.content();
+    // Bound page.content(). When an anti-bot challenge (e.g. Cloudflare) keeps the
+    // page in a reload loop, content() blocks indefinitely waiting for a stable
+    // execution context — sailing past the navigation timeout above. Without this
+    // race a wedged page hangs the caller forever; this is what stalled the startup
+    // login verify on Glassdoor (the whole "checking connections" step never
+    // returned). On timeout we fall through to the catch → { ok:false } and the
+    // finally still closes the page.
+    const html     = await Promise.race([
+      page.content(),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('page.content() timed out — page may be stuck in an anti-bot reload loop')),
+        Math.max(3000, Math.min(8000, timeoutMs - 2000)))),
+    ]);
     return { ok: true, status, finalUrl, html };
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
@@ -471,14 +457,18 @@ const JOB_LOGIN_PLATFORMS = {
   // connectedFinalUrlMustContain: '/member/' check was firing for valid
   // sessions. Anonymous users on /Job/index.htm are caught by body signals
   // (login CTAs that don't appear once logged in).
-  glassdoor:    { name: 'Glassdoor',    verifyUrl: 'https://www.glassdoor.com/member/home/index.htm',  bodySignals: ['sign in to glassdoor', 'create a free glassdoor account', 'join glassdoor for free', 'log in to glassdoor'] },
+  // verifyTimeoutMs: Glassdoor's member page is frequently Cloudflare-challenged for
+  // the headless verify (a successful verify lands in ~1.5–3.7s; a challenged one
+  // otherwise burns the full 25s budget before degrading to "not connected", which
+  // dominates the whole startup "checking connections" wall). A 12s cap can't cut
+  // off a real success but bounds the blocked case to ~13s.
+  glassdoor:    { name: 'Glassdoor',    verifyUrl: 'https://www.glassdoor.com/member/home/index.htm',  verifyTimeoutMs: 12000, bodySignals: ['sign in to glassdoor', 'create a free glassdoor account', 'join glassdoor for free', 'log in to glassdoor'] },
   // /jobseeker/home is the post-login landing page — authenticated sessions stay
   // there; anonymous requests redirect to /user/login (connectedFinalUrlMustContain
   // catches the redirect). Avoids /profile which Cloudflare challenges on new
   // browser sessions (HTTP 403, not a real auth failure) and caused false
   // "not logged in" verdicts on every app restart after cf_clearance expired.
   ziprecruiter: { name: 'ZipRecruiter', verifyUrl: 'https://www.ziprecruiter.com/jobseeker/home', connectedFinalUrlMustContain: 'ziprecruiter.com/jobseeker', bodySignals: ['log in to ziprecruiter', 'sign in to ziprecruiter'] },
-  wellfound:    { name: 'Wellfound',    verifyUrl: 'https://wellfound.com/settings' },
 };
 
 export function getJobLoginPlatforms() {

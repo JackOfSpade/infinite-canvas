@@ -190,7 +190,7 @@ function PlatformWatchUrlsRow({ platform, urls, connected, pending, onLogin, onC
 // LinkedIn remains available here as an optional session utility, but job search
 // no longer requires it: listings and description enrichment use public guest
 // endpoints and handle guest rate limits on the source card.
-const JOB_LOGIN_IDS = ['linkedin', 'google', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound'];
+const JOB_LOGIN_IDS = ['linkedin', 'google', 'indeed', 'glassdoor', 'ziprecruiter'];
 const JOB_LOGIN_PLATFORMS = JOB_SOURCES.filter(s => JOB_LOGIN_IDS.includes(s.id));
 
 function JobPlatformLoginsSection() {
@@ -343,6 +343,92 @@ function MarketplaceMonitorSection({ watchUrlsByPlatform, onChangeWatchUrls }) {
   );
 }
 
+/** Seconds → "Xs" / "Ym Zs". */
+function fmtSecLeft(s) {
+  if (s == null) return null;
+  return s >= 60 ? `${Math.floor(s / 60)}m${s % 60 ? ` ${s % 60}s` : ''}` : `${s}s`;
+}
+
+/**
+ * Per-provider availability card: a live "Check availability" button plus the
+ * last verdict. Claude shows REAL remaining/limit/reset pulled from the response
+ * headers; Gemini (which exposes no remaining-quota API) shows its last-call
+ * telemetry + retry hint + a dashboard link. Presentational only.
+ */
+function AIProviderStatus({ provider, status, checking, onCheck }) {
+  const probe = status?.lastProbe || null;
+  const tele = status?.telemetry || null;
+  const isClaude = provider === 'claude';
+  const rl = probe?.rateLimit || null;
+
+  let verdict = null;
+  if (probe) {
+    if (probe.ok) {
+      // Name the model that actually answered. The probe pings ONE model — for
+      // Gemini that's the high-quota workhorse (gemini-3.1-flash-lite), the tail
+      // of the fallback chain — so "Available" means "the model most likely to
+      // still have budget responded", i.e. the pipeline can complete. It does
+      // NOT verify the higher-quality models at the head of the chain, which have
+      // far smaller free-tier quotas and exhaust first.
+      verdict = { cls: 'text-emerald-400', text: probe.model ? `✅ Available — ${probe.model} responded` : '✅ Available' };
+    } else if (probe.status === 429) {
+      const hint = isClaude
+        ? (rl?.requests?.resetInSec != null ? `resets in ${fmtSecLeft(rl.requests.resetInSec)}` : '')
+        : (probe.retryAfterMs != null ? `retry in ${fmtSecLeft(Math.round(probe.retryAfterMs / 1000))}` : '');
+      verdict = { cls: 'text-amber-400', text: `⚠️ Rate-limited / quota exhausted${hint ? ` — ${hint}` : ''}` };
+    } else if (probe.status === 401 || probe.status === 403) {
+      verdict = { cls: 'text-red-400', text: '❌ Invalid or unauthorized API key' };
+    } else {
+      verdict = { cls: 'text-red-400', text: `❌ ${probe.error || `Error ${probe.status ?? ''}`}` };
+    }
+  }
+
+  const line = (label, b) => b && (
+    <div>{label}: <span className="text-white/65">{b.remaining ?? '?'}</span> / {b.limit ?? '?'} left{b.resetInSec != null ? ` · resets ${fmtSecLeft(b.resetInSec)}` : ''}</div>
+  );
+
+  return (
+    <div className="mt-1 pt-2 border-t border-white/5 space-y-1.5">
+      <div className="flex items-center justify-between">
+        <div className="text-white/50 text-[11px]">Availability</div>
+        <button
+          onClick={() => onCheck(provider)}
+          disabled={checking}
+          className="px-2 py-1 rounded-md bg-blue-500/20 hover:bg-blue-500/30 disabled:opacity-50 text-blue-300 text-[10px] font-medium border border-blue-500/30 transition-colors"
+        >
+          {checking ? 'Checking…' : 'Check availability'}
+        </button>
+      </div>
+
+      {verdict && <div className={`text-[11px] font-medium ${verdict.cls}`}>{verdict.text}</div>}
+
+      {isClaude && rl && (
+        <div className="text-white/45 text-[10px] leading-relaxed font-mono">
+          {line('requests', rl.requests)}
+          {line('tokens', rl.tokens)}
+          {line('input tok', rl.input_tokens)}
+          {line('output tok', rl.output_tokens)}
+        </div>
+      )}
+
+      {!isClaude && (
+        <div className="text-white/40 text-[10px] leading-relaxed space-y-0.5">
+          {tele?.lastSuccessfulModel && tele.lastSuccessfulModel !== '(none)' && (
+            <div>Last success: <span className="text-white/55">{tele.lastSuccessfulModel}</span></div>
+          )}
+          {tele?.lastAttemptedError && tele.lastAttemptedError !== '(none)' && (
+            <div className="text-amber-400/70 truncate" title={tele.lastAttemptedError}>Last error: {tele.lastAttemptedError.slice(0, 90)}</div>
+          )}
+          <a href="https://ai.dev/rate-limit" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">View free-tier quota dashboard ↗</a>
+          <div className="text-white/25 text-[9px]">Google exposes no "remaining quota" API — the live check reports up / rate-limited only.</div>
+        </div>
+      )}
+
+      {!verdict && <div className="text-white/30 text-[10px]">Click for a live up / rate-limited / bad-key check.</div>}
+    </div>
+  );
+}
+
 /**
  * Application settings panel.
  * Sections: AI, Marketplace Monitors, Animation Speed, View, Keyboard Shortcuts.
@@ -352,6 +438,8 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   const [aiSettings, setAiSettings] = useState(null);
   const [jobsSettings, setJobsSettings] = useState(null);
   const [watchUrlsByPlatform, setWatchUrlsByPlatform] = useState({});
+  const [aiStatus, setAiStatus] = useState({ gemini: null, claude: null });
+  const [checkingProvider, setCheckingProvider] = useState(null);
 
   useEffect(() => {
     if (!isOpen || !window.electronAPI?.getSettings) return;
@@ -364,8 +452,24 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
         if (storeData && storeData.marketplaceWatchUrls) setWatchUrlsByPlatform(storeData.marketplaceWatchUrls);
       })
       .catch(() => { /* IPC unavailable — leave loading state until next open */ });
+    // Last-known AI availability (passive — the button does a live re-check).
+    window.electronAPI.getAIStatus?.()
+      .then((res) => { if (!cancelled && res?.success) setAiStatus({ gemini: res.gemini || null, claude: res.claude || null }); })
+      .catch(() => { /* ignore — card falls back to "click to check" */ });
     return () => { cancelled = true; };
   }, [isOpen]);
+
+  const checkAvailability = useCallback(async (provider) => {
+    if (!window.electronAPI?.checkAIAvailability) return;
+    setCheckingProvider(provider);
+    try {
+      const res = await window.electronAPI.checkAIAvailability({ provider });
+      if (res?.success) {
+        setAiStatus(prev => ({ ...prev, [provider]: { ...(prev[provider] || {}), lastProbe: res } }));
+      }
+    } catch { /* ignore — leave prior status */ }
+    finally { setCheckingProvider(null); }
+  }, []);
 
   const updateAISetting = useCallback((key, value) => {
     if (!window.electronAPI?.updateSettings || !aiSettings) return;
@@ -534,6 +638,8 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                         Either an API key or a service-account file works. The file is preferred when both are set.
                       </p>
                     </div>
+
+                    <AIProviderStatus provider="gemini" status={aiStatus.gemini} checking={checkingProvider === 'gemini'} onCheck={checkAvailability} />
                   </div>
                 )}
 
@@ -556,6 +662,8 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                         className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
                       />
                     </div>
+
+                    <AIProviderStatus provider="claude" status={aiStatus.claude} checking={checkingProvider === 'claude'} onCheck={checkAvailability} />
                   </div>
                 )}
               </div>

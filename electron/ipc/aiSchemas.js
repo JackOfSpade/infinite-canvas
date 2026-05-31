@@ -177,56 +177,54 @@ export const PAGE_STATUS_MULTI_SCHEMA = {
   },
 };
 
-// ── Job bucketing: scored jobs → categories with salary buckets ────────────
-// Runs after job-scoring. Input is the array of scored jobs (each already has
-// careerDirection + salary text). The model groups by careerDirection then
-// picks salary bucket boundaries that fit the distribution within each
-// category — small categories may get 1-2 buckets; large/varied categories
-// get 3-4. Indices reference the original input ordering so the renderer can
-// map back to spawned job cards.
+// ── Job bucketing: scored jobs → the AI-created results taxonomy ────────────
+// Runs after job-scoring. The model returns the LABELS for the three-level
+// results hierarchy — nothing is hardcoded:
+//   1. likelihoodBands — interview-likelihood (matchScore) bands fitted to the
+//      run's score distribution. Definitions only: the renderer places each job
+//      into its band by the job's own score (deterministic, no dropped jobs).
+//   2. salaryRanges    — salary bands fitted to the distribution; renderer
+//      places jobs by parsed salary. Always include an "Unspecified" range.
+//   3. roles           — the creative consolidation: the model groups the jobs
+//      into clean role/job-family names (merging the scorer's per-job
+//      careerDirection guesses). This is the ONLY partition the model owns;
+//      jobs it omits are swept into "Other".
 export const JOB_BUCKETING_SCHEMA = {
   type: 'object',
-  required: ['categories'],
+  required: ['likelihoodBands', 'salaryRanges', 'roles'],
   properties: {
-    categories: {
+    likelihoodBands: {
       type: 'array',
       items: {
         type: 'object',
-        required: ['name', 'buckets'],
+        required: ['label', 'minScore', 'maxScore'],
         properties: {
-          name: { type: 'string', description: 'careerDirection value (Engineering, Leadership, etc.)' },
-          buckets: {
-            type: 'array',
-            items: {
-              type: 'object',
-              required: ['label', 'jobIndices'],
-              properties: {
-                label:     { type: 'string',  description: 'Display label, e.g. "$60-80k" or "Unspecified"' },
-                minSalary: { type: 'integer', description: 'Lower bound USD/yr; 0 if no minimum or salary unknown' },
-                maxSalary: { type: 'integer', description: 'Upper bound USD/yr; 0 if open-ended (e.g. "$200k+")' },
-                jobIndices: { type: 'array', items: { type: 'integer' }, description: '0-based indices into the input job array' },
-              },
-            },
-          },
+          label:    { type: 'string',  description: 'Human label including the % range, e.g. "Excellent fit (90–100%)"' },
+          minScore: { type: 'integer', description: '0-100 lower bound, inclusive' },
+          maxScore: { type: 'integer', description: '0-100 upper bound, inclusive' },
         },
       },
     },
-  },
-};
-
-// ── Bucketing retry: place the handful of jobs the main bucketer dropped ──────
-export const BUCKETING_PLACEMENT_SCHEMA = {
-  type: 'object',
-  required: ['placements'],
-  properties: {
-    placements: {
+    salaryRanges: {
       type: 'array',
       items: {
         type: 'object',
-        required: ['index', 'categoryName'],
+        required: ['label', 'minSalary', 'maxSalary'],
         properties: {
-          index:        { type: 'integer', description: '0-based index from the input job array' },
-          categoryName: { type: 'string',  description: 'Exact category name from the available list' },
+          label:     { type: 'string',  description: 'Display label, e.g. "$120k+", "$80-120k", "Unspecified"' },
+          minSalary: { type: 'integer', description: 'Lower bound USD/yr; 0 for the Unspecified range' },
+          maxSalary: { type: 'integer', description: 'Upper bound USD/yr; 0 if open-ended ("$200k+") or Unspecified' },
+        },
+      },
+    },
+    roles: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['name', 'jobIndices'],
+        properties: {
+          name:       { type: 'string', description: 'AI-chosen role/job-family name fitting the candidate\'s field (e.g. "Brand Marketing", "Growth"), consolidated from the scorer\'s careerDirection labels.' },
+          jobIndices: { type: 'array', items: { type: 'integer' }, description: '0-based indices into the input job array' },
         },
       },
     },
@@ -246,6 +244,19 @@ export const RESUME_PARSE_SCHEMA = {
     locations:        { type: 'array', items: { type: 'string' } },
     education:        { type: 'array', items: { type: 'string' } },
     summary:          { type: 'string', description: '2-sentence professional summary' },
+  },
+};
+
+// ── Career-file extract: one dropped file → faithful plain text ────────────
+// First pass of parse-career-data. The user can drop ANY number/type of files
+// (résumé, portfolio, project write-ups, brag doc); each is transcribed to
+// faithful text, then all are merged into one "career data" blob that drives
+// query generation, scoring, and the application generator.
+export const CAREER_FILE_EXTRACT_SCHEMA = {
+  type: 'object',
+  required: ['text'],
+  properties: {
+    text: { type: 'string', description: "A faithful, complete plain-text representation of this document's career-relevant content: roles, employers, dates, bullet points, projects, skills, education, certifications, and contact info. Preserve every fact, number, and the original structure using simple line breaks and \"- \" bullets. Do not summarize away detail and do not invent anything." },
   },
 };
 
@@ -284,6 +295,27 @@ export const INTERVIEW_PREP_SCHEMA = {
   },
 };
 
+// ── Application cover letter: structured letterhead + body ─────────────────
+// Used by generate-application. The résumé is filled as raw design-system HTML
+// by the model; the cover letter is structured so a deterministic builder
+// (resumePdf.buildCoverLetterDocument) can lay it out on-brand. Identity fields
+// (name/tagline/contact) come from the candidate's career data so the letterhead
+// matches the résumé header.
+export const APPLICATION_COVER_LETTER_SCHEMA = {
+  type: 'object',
+  required: ['name', 'salutation', 'paragraphs', 'closing'],
+  properties: {
+    name:       { type: 'string', description: "Candidate's full name, exactly as it should appear on the letterhead (from the career data)." },
+    tagline:    { type: 'string', description: 'One short role descriptor under the name, e.g. "Senior Product Marketer". Empty string if not inferable.' },
+    contact:    { type: 'array', items: { type: 'string' }, description: 'Contact-line items in order — location, email, phone, one URL. Plain strings, no labels. Omit any not present in the career data.' },
+    date:       { type: 'string', description: 'Letter date, e.g. "May 31, 2026".' },
+    recipient:  { type: 'string', description: 'Recipient block; use a literal \\n between lines, e.g. "Hiring Team\\nAcme Inc.".' },
+    salutation: { type: 'string', description: 'Greeting line, e.g. "Dear Acme Hiring Team,".' },
+    paragraphs: { type: 'array', items: { type: 'string' }, description: '3-4 body paragraphs of plain prose (no markdown). Each ties specific career-data evidence to specific job requirements and the company research.' },
+    closing:    { type: 'string', description: 'Sign-off line, e.g. "Sincerely,".' },
+  },
+};
+
 // ── Job scoring: per-job match + categorization ────────────────────────────
 // Wrapped in an object envelope because Claude's tool input_schema requires
 // type: 'object' at the top level. Consumer reads parsed.scores.
@@ -295,13 +327,12 @@ export const JOB_SCORING_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['index', 'matchScore', 'reasoning', 'careerDirection', 'strengthLabel', 'isTargetRoleMatch'],
+        required: ['index', 'matchScore', 'reasoning', 'careerDirection', 'isTargetRoleMatch'],
         properties: {
           index:           { type: 'integer', description: 'Position in input batch (0-based)' },
           matchScore:      { type: 'integer', description: '0-100 fit score' },
-          reasoning:       { type: 'string', description: '1-2 sentences explaining the fit' },
-          careerDirection: { type: 'string', enum: ['Engineering', 'Leadership', 'Product', 'DevRel', 'Consulting', 'Design', 'Data', 'Operations', 'Teaching', 'Other'] },
-          strengthLabel:   { type: 'string', enum: ['strong', 'exploring', 'stretch', 'unexpected'] },
+          reasoning:       { type: 'string', description: 'Complete, specific justification of the fit — as long as it needs to be (usually 2-4 sentences), citing concrete signals from both the JD and the candidate. No filler.' },
+          careerDirection: { type: 'string', description: 'Free-form 1-3 word job-family label that fits THIS job and candidate\'s field (e.g. "Brand Marketing", "Growth", "Backend Engineering", "Data Science"). Reuse the same label across similar jobs. Not a fixed list — the bucketer consolidates these into the final categories.' },
           isTargetRoleMatch: { type: 'boolean', description: 'True if this job fits the caller-supplied target/pivot role. False (and ignored) when no target role was supplied.' },
         },
       },

@@ -50,7 +50,7 @@ const STEPS = [
           </div>
         </div>
         <p className="text-white/40 text-xs text-center mt-1">
-          Drop a resume → AI finds matching jobs across {activeJobSourceLabel}<br/>
+          Drop your career files → AI finds matching jobs across {activeJobSourceLabel}<br/>
           Drop photos → AI creates a listing with price research
         </p>
       </div>

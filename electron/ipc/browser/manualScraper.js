@@ -42,12 +42,8 @@ const DESC_STALE_THRESHOLD   = 3;             // consecutive click/panel failure
 // full-page navigations to different search URLs is a velocity signal that
 // anti-bot systems flag — a human-scale pause between them lowers that signal.
 // All values are anchors fed through humanDelay() at the call site, so the
-// actual wait is organically spread (never a fixed cadence). DataDome-fronted
-// sources (Wellfound) get a longer anchor because they're the most sensitive.
+// actual wait is organically spread (never a fixed cadence).
 const DEFAULT_INTER_QUERY_COOLDOWN_MS = 2500;
-const INTER_QUERY_COOLDOWN_MS = {
-  wellfound: 6000,
-};
 // JOB_PER_PAGE_CAP (from resultCaps) is the unified per-page/per-query depth for all browser scrapers.
 
 
@@ -69,7 +65,6 @@ const SOURCE_LABELS = {
   google:       'Google for Jobs',
   ziprecruiter: 'ZipRecruiter',
   glassdoor:    'Glassdoor',
-  wellfound:    'Wellfound',
 };
 
 const manualScraperTelemetry = {
@@ -108,6 +103,65 @@ export function getManualScraperTelemetry() {
   };
 }
 
+// ── Anti-bot challenge diagnostics ──────────────────────────────────────────
+// Gathered when a challenge first fires so a bug report can rank the cause
+// (IP reputation vs automation fingerprint vs behavior) WITHOUT reading source
+// or relying on a pasted screenshot. All best-effort + fail-soft — diagnostics
+// must never break a scrape or delay it beyond the few seconds before we sit and
+// wait minutes for the user to solve the challenge anyway.
+
+// Static description of how the manual-scrape browser is launched. Keep in sync
+// with the puppeteer.launch() call in scrapeManualSources(). The point: a reader
+// instantly sees we're already headful with the standard evasions, so the block
+// is NOT "we forgot to run headful".
+const BROWSER_LAUNCH_PROFILE =
+  'headful system-Chrome · webdriver masked · AutomationControlled disabled · --enable-automation stripped · no CDP pause bridge';
+
+// Egress (public) IP + best-effort datacenter/residential classification. ipify
+// gives the IP (same source the LinkedIn egress trail uses); ip-api adds org +
+// a `hosting` flag so a reader can tell a datacenter/VPN exit (the dominant
+// DataDome trigger) from a residential IP. Returns nulls on any failure.
+async function lookupEgress() {
+  const out = { ip: null, isp: null, org: null, hosting: null };
+  try {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 4000);
+    const r = await fetch('https://api.ipify.org?format=json', { signal: c.signal }).finally(() => clearTimeout(t));
+    if (r.ok) { const d = await r.json(); if (typeof d?.ip === 'string') out.ip = d.ip; }
+  } catch { /* fail-soft */ }
+  if (out.ip) {
+    try {
+      const c = new AbortController();
+      const t = setTimeout(() => c.abort(), 4000);
+      const r = await fetch(`http://ip-api.com/json/${out.ip}?fields=status,isp,org,as,hosting`, { signal: c.signal }).finally(() => clearTimeout(t));
+      if (r.ok) {
+        const d = await r.json();
+        if (d?.status === 'success') {
+          out.isp = d.isp || null;
+          out.org = d.org || d.as || null;
+          // ip-api's `hosting` flag misses many VPNs (ProtonVPN returns false), so
+          // it's a positive signal only: true ⇒ datacenter, false ⇒ unknown (the
+          // isp/org is the real tell). Never infer "residential" from it.
+          out.hosting = d.hosting === true ? true : null;
+        }
+      }
+    } catch { /* fail-soft */ }
+  }
+  return out;
+}
+
+// DataDome (and most vendors) render a human-facing incident ID on the block page
+// ("ID: xxxxxxxx-…"). Extract it best-effort so a report can be cross-referenced
+// against the vendor / a support ticket.
+async function extractBlockId(page) {
+  try {
+    return await page.evaluate(() => {
+      const m = (document.body?.innerText || '').match(/\bID:\s*([0-9a-f]{6,}[0-9a-f-]*)/i);
+      return m ? m[1] : null;
+    });
+  } catch { return null; }
+}
+
 // Selector confirming real page content is present (vs bot-challenge page).
 // null = no reliable selector; skip content check, rely solely on challenge detection.
 const CONTENT_SELECTORS = {
@@ -117,7 +171,6 @@ const CONTENT_SELECTORS = {
   google:       '.EimVGf, [jscontroller="b11o3b"], #rcnt, #search, .srp',
   ziprecruiter: null,   // JSON-LD tag exists on challenge pages too; extractor validates
   glassdoor:    '[data-test="jobListing"], .JobCard_jobCardWrapper',
-  wellfound:    '[data-testid="job-listing-list"]',
 };
 
 // Selector for the "Next page" control (null = no auto-pagination for this source).
@@ -126,7 +179,6 @@ const NEXT_PAGE_SELECTORS = {
   google:       null,
   ziprecruiter: null,
   glassdoor:    'button[data-test="pagination-next"]',
-  wellfound:    null,
 };
 
 // Sources that load more jobs by scrolling to the bottom (infinite scroll).
@@ -135,10 +187,7 @@ const NEXT_PAGE_SELECTORS = {
 const SCROLL_SOURCES = new Set(['ziprecruiter', 'google']);
 
 // Sources that load more jobs via a "load more" button.
-// ⚠️ Wellfound selector — verify in browser if this stops working.
-const LOAD_MORE_SELECTORS = {
-  wellfound: '[data-test="load-more-jobs"], [data-testid="load-more-jobs"], [data-testid="load-more"]',
-};
+const LOAD_MORE_SELECTORS = {};
 
 // Per-source config for clicking cards to expand full job descriptions.
 // null = source doesn't support card-click description expansion.
@@ -210,18 +259,6 @@ const DESC_CONFIGS = {
     panelSelector: '[class*="JobDetails_jobDescription"]',
     panelMulti:    false,
     closeSelector: null,
-  },
-  wellfound: {
-    keyParam:      null,
-    keyRegex:      '/jobs/(\\d+)-',  // job ID from path: /jobs/4238742-slug
-    keyDecode:     false,
-    cardAttr:      null,
-    cardIdPrefix:  null,
-    cardHrefKey:   '/jobs/',          // find: a[href*="/jobs/{key}-"]
-    clickSelector: null,              // click the <a> job link directly (React intercepts → modal)
-    panelSelector: '#job-description',
-    panelMulti:    false,
-    closeSelector: '[data-test="closeButton"]',
   },
 };
 
@@ -428,19 +465,41 @@ async function recoverFromChallengeHomeLanding(page, overlayBase, signal, resume
 //   challenge — boolean, turns dot amber
 //   error — boolean, turns dot red and disables skip
 //
-const OVERLAY_SCRIPT = buildOverlayScript({ withPause: true });
+// Pause button ON, CDP bridge OFF. page.exposeFunction installs a CDP
+// Runtime.addBinding that anti-bots (DataDome on Wellfound) fingerprint, so the
+// button only toggles the page-local window.__icPaused; the Node side reads it by
+// POLLING (waitIfPaused) and re-asserts it after navigations (injectOverlay).
+const OVERLAY_SCRIPT = buildOverlayScript({ withPause: true, cdpBridge: false });
 
 async function injectOverlay(page) {
   await page.evaluate(OVERLAY_SCRIPT).catch(() => {});
+  // Re-assert Node-side pause state into the freshly (re)injected overlay. The
+  // page-local window.__icPaused resets to false on every navigation; with no
+  // __icGetPaused CDP bridge to pull it back, we push it from the Node side here.
+  if (manualScraperTelemetry.paused) {
+    await page.evaluate(() => {
+      window.__icPaused = true;
+      const b = document.getElementById('ic-pause');
+      if (b) b.textContent = '▶ Resume';
+      const d = document.getElementById('ic-dot');
+      if (d) { d.style.background = '#eab308'; d.style.animation = 'none'; }
+    }).catch(() => {});
+  }
 }
 
 // Blocks until the user clicks Resume or the signal is aborted.
-// Reads manualScraperTelemetry.paused (Node.js side) so state survives page navigations.
+// Source of truth is the page-local window.__icPaused (toggled by the overlay's
+// Pause button). We POLL it rather than receive a CDP callback — page.exposeFunction
+// installs a Runtime.addBinding that anti-bots fingerprint. manualScraperTelemetry
+// mirrors it so the rest of the code keeps a Node-side view.
 // Returns 'ok' | 'abort'.
-async function waitIfPaused(_page, signal) {
+async function waitIfPaused(page, signal) {
   while (true) {
     if (signal?.aborted) return 'abort';
-    if (!manualScraperTelemetry.paused) return 'ok';
+    let paused = false;
+    try { paused = await page.evaluate(() => !!window.__icPaused); } catch { /* page mid-navigation */ }
+    manualScraperTelemetry.paused = paused;
+    if (!paused) return 'ok';
     await new Promise(r => setTimeout(r, humanDelay(500)));
   }
 }
@@ -507,6 +566,10 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
           challenge: true,
         });
         logger.info(`[BrowserScraper] ${overlayBase.srcName}: bot challenge detected — waiting for user`);
+        // Gather anti-bot diagnostics once, before the (potentially minutes-long)
+        // user-solve wait. Best-effort; nulls if a lookup fails.
+        const egress = await lookupEgress();
+        const blockId = await extractBlockId(page);
         recordManualScraperTelemetry({
           phase:    'challenge-detected',
           srcName:  overlayBase.srcName,
@@ -516,6 +579,12 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
           url:      signals?.url,
           cfFrame:  signals?.hasCloudflareChallengeFrame,
           recaptcha: signals?.visibleRecaptchaFrames,
+          browserProfile: BROWSER_LAUNCH_PROFILE,
+          egressIp:       egress.ip,
+          egressIsp:      egress.isp,
+          egressOrg:      egress.org,
+          egressHosting:  egress.hosting,
+          blockId,
         });
       }
       if (!shownVerifiedOverlay && signals?.verificationCompleted) {
@@ -694,6 +763,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             const challengeDeadline = Date.now() + CHALLENGE_TIMEOUT_MS;
             let solved = false;
             while (Date.now() < challengeDeadline) {
+              // Respect cancellation/window-close promptly instead of polling for
+              // up to CHALLENGE_TIMEOUT_MS — matches the abort checks used by the
+              // other wait loops in this file.
+              if (signal?.aborted || page.isClosed()) break;
               await new Promise(r => setTimeout(r, humanDelay(1500)));
               if (await recoverFromChallengeHomeLanding(page, overlayBase, signal, viewUrl, baseCount + i + 1)) {
                 continue;
@@ -715,23 +788,33 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
 
           // Try JSON-LD JobPosting.description first (server-rendered, selector-free).
           // Fall back to __NEXT_DATA__ pageProps probe, then CSS panelSelector.
+          // Also harvest `datePosted` from the same JobPosting block — some list
+          // extractors (e.g. ZipRecruiter's ItemList) carry no date, so the
+          // per-job posting page is the only place to recover it.
           let text = '';
+          let jsonLdDate = '';
           if (cfg.jsonLdType) {
-            text = await fetchPage.evaluate((type, field) => {
+            const ld = await fetchPage.evaluate((type, field) => {
+              let desc = '';
+              let datePosted = '';
               for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
                 try {
                   const d = JSON.parse(s.textContent);
-                  if (d['@type'] === type && d[field]) {
+                  if (d['@type'] !== type) continue;
+                  if (!desc && d[field]) {
                     const tmp = document.createElement('div');
                     tmp.innerHTML = d[field];
-                    return tmp.innerText?.trim() || '';
+                    desc = tmp.innerText?.trim() || '';
                   }
+                  if (!datePosted && d.datePosted) datePosted = String(d.datePosted);
                 } catch {
                   // Ignore malformed JSON-LD blocks and keep probing fallbacks.
                 }
               }
-              return '';
-            }, cfg.jsonLdType, cfg.jsonLdField).catch(() => '');
+              return { desc, datePosted };
+            }, cfg.jsonLdType, cfg.jsonLdField).catch(() => ({ desc: '', datePosted: '' }));
+            text = ld.desc;
+            jsonLdDate = ld.datePosted;
           }
           // __NEXT_DATA__ fallback: walk a dot-separated field path into pageProps.
           if (!text && cfg.nextDataField) {
@@ -793,7 +876,12 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               logger.info(`[BrowserScraper] ${overlayBase.srcName} desc-miss diag: url="${diag.url}" title="${diag.title}" ldTypes=[${diag.ldTypes.join(',')}] nextData=${diag.hasNextData} ndKeys="${diag.ndPagePropKeys}" body="${diag.bodyHead}"`);
             }
           }
-          if (text) enhanced[i] = { ...job, snippet: text };
+          if (text) {
+            // Backfill the posted date from the posting's JSON-LD only when the
+            // list extractor didn't already capture one (don't clobber a good
+            // relative date like "3 days ago" with an ISO timestamp).
+            enhanced[i] = { ...job, snippet: text, ...(jsonLdDate && !job.posted ? { posted: jsonLdDate } : {}) };
+          }
         } catch {
           // Per-listing navigation errors are non-fatal; keep the batch moving.
         }
@@ -1169,7 +1257,7 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal) 
  * @param {AbortSignal|null}   signal
  * @returns {Promise<Array>}
  */
-export async function scrapeManualSources(tasks, onResult, signal) {
+export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = null) {
   // Clear per-run browser diagnostic buffers so the bug report only shows
   // what happened in THIS run, not leftovers from a previous one.
   manualScraperTelemetry.consoleLogs = [];
@@ -1236,12 +1324,13 @@ export async function scrapeManualSources(tasks, onResult, signal) {
     }
   });
 
-  // Expose pause state bridge — must be before evaluateOnNewDocument so
-  // the overlay script can call __icGetPaused on init. Puppeteer re-registers
-  // these CDP bindings on every new document, so they survive navigations.
+  // NO exposeFunction pause bridge. page.exposeFunction installs a CDP
+  // Runtime.addBinding, which leaves a detectable hook on the page — exactly the
+  // automation fingerprint DataDome flags ("Use of developer or inspection
+  // tools"). indeedBrowser.js avoids it for the same reason (its overlay is
+  // withPause:false). The overlay below is now display-only; pause is disabled
+  // for manual sources until it can be restored via DOM polling (no CDP binding).
   manualScraperTelemetry.paused = false;
-  await page.exposeFunction('__icSetPaused', v => { manualScraperTelemetry.paused = !!v; });
-  await page.exposeFunction('__icGetPaused', () => manualScraperTelemetry.paused);
 
   // Capture browser-side console errors/warnings for the bug report.
   // Fires for all frames (main page + iframes), so challenge-page and Turnstile
@@ -1364,9 +1453,9 @@ export async function scrapeManualSources(tasks, onResult, signal) {
         };
 
         // Human-scale cooldown between queries (not before the first) — see
-        // INTER_QUERY_COOLDOWN_MS. Honors pause/abort while waiting.
+        // DEFAULT_INTER_QUERY_COOLDOWN_MS. Honors pause/abort while waiting.
         if (qi > 0) {
-          const cooldownAnchor = INTER_QUERY_COOLDOWN_MS[sourceId] ?? DEFAULT_INTER_QUERY_COOLDOWN_MS;
+          const cooldownAnchor = DEFAULT_INTER_QUERY_COOLDOWN_MS;
           await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: 'Pacing before next query…' }).catch(() => {});
           if (await waitIfPaused(page, signal) === 'abort' || signal?.aborted) { earlyExit = true; break; }
           await new Promise(r => setTimeout(r, humanDelay(cooldownAnchor)));
@@ -1434,7 +1523,9 @@ export async function scrapeManualSources(tasks, onResult, signal) {
         }
 
         // ── Per-query extraction + pagination loop ──────────────────────────
-        let pageNum              = 1;
+        // startPageNum > 1 on a resume: task.url was built at that page, so the
+        // counter (+ the staging ledger) continue from there for URL-paginated sources.
+        let pageNum              = task.options?.startPageNum || 1;
         let siteChangedStreak    = 0;
         let siteChangedWarning   = null;
         let paginationRecoveries = 0; // times recoverFromChallengeHomeLanding fired on a paginated page
@@ -1532,6 +1623,14 @@ export async function scrapeManualSources(tasks, onResult, signal) {
           }
 
           allJobs.push(...enhanced);
+
+          // Per-page recovery flush (crash/quit checkpoint) — staged before the
+          // next page turn so a crash keeps everything gathered so far. Best-effort:
+          // never let staging I/O interfere with the scrape.
+          if (onPageJobs && enhanced.length > 0) {
+            try { await onPageJobs({ sourceId, query: task.query || '', page: pageNum, jobs: enhanced }); }
+            catch (e) { logger.warn(`[BrowserScraper] onPageJobs failed (non-fatal): ${e?.message || e}`); }
+          }
 
           if (descError) {
             if (!sourceSiteChangedWarning) sourceSiteChangedWarning = descError;

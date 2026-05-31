@@ -9,7 +9,6 @@ export const JOB_AUTH_PREFLIGHT_SOURCE_IDS = [
   'indeed',
   'glassdoor',
   'ziprecruiter',
-  'wellfound',
 ];
 
 export function getJobAuthPreflightSourceIds(scoper = getScopedJobSourceIds) {

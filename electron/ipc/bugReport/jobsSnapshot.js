@@ -6,7 +6,7 @@ import { getJobsTelemetry } from '../jobs.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings } from '../settings.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
-import { MEDIUM_TEST, FULL_TEST, JOB_RESULT_CAP, JOB_PER_PAGE_CAP } from '../resultCaps.js';
+import { MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_RESULT_CAP, JOB_PER_PAGE_CAP, JOB_MAX_PAGES, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from '../resultCaps.js';
 import { ago, modelTag, pipelineScope } from './helpers.js';
 
 export function buildJobsConfigSnapshot() {
@@ -26,12 +26,17 @@ export function buildJobsConfigSnapshot() {
     hasScrapflyKey: !!scrapflyKey,
     scrapflyKeyPrefix,
     testMode: {
-      mode: MEDIUM_TEST ? 'medium' : FULL_TEST ? 'full' : 'production',
+      mode: FAST_TEST ? 'fast' : MEDIUM_TEST ? 'medium' : FULL_TEST ? 'full' : 'production',
       enabled: JOB_SEARCH_TEST_MODE.enabled,
       sourceId: JOB_SEARCH_TEST_MODE.sourceId || null,
       skipAI: JOB_SEARCH_TEST_MODE.skipAI || false,
       jobResultCap: JOB_RESULT_CAP,
       jobPerPageCap: JOB_PER_PAGE_CAP,
+      // FAST-mode breadth knobs (Infinity in other modes) so the report shows the
+      // exact bound a fast run scraped under.
+      jobMaxPages: JOB_MAX_PAGES,
+      queryCap: JOB_TEST_QUERY_CAP,
+      apiPerSourceCap: JOB_API_PER_SOURCE_CAP,
     },
   };
 }
@@ -229,6 +234,18 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const looksLikeMoney = (s) =>
           /\$|\d+\s*k\b|per (?:hour|year|week|month)|\/h(?:r|our)|\/yr|\/year|hourly|annually|\ba year\b|\ban hour\b/i.test(s);
         const SHORT_DESC_THRESHOLD = 400; // listing snippets are typically <300 chars
+        // Per-source salary expectation — gates the "0 salaries at all" alarm so it
+        // never cries wolf on sources that structurally omit salary. Grounded in
+        // the extractors (electron/extractors/apiExtractors.js):
+        //   NEVER  — hardcode salary:'' (no comp in the feed at all): linkedin
+        //            (guest API), greenhouse, lever boards.
+        //   ALWAYS — carry comp on ~every posting (PositionRemuneration): usajobs.
+        //   else   — OPTIONAL: postings legitimately omit pay (indeed/glassdoor/
+        //            ziprecruiter/remoteok), so 0% is only suspicious on a sample
+        //            big enough that a normal batch would surface at least one.
+        const SALARY_NEVER = new Set(['linkedin', 'greenhouse', 'lever']);
+        const SALARY_ALWAYS = new Set(['usajobs']);
+        const ZERO_SALARY_MIN_SAMPLE = 20;
 
         const qualBySource = {};
         for (const j of snapJobs) {
@@ -285,6 +302,17 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
               ` — e.g. ${q.salaryGarbageEx.join(', ')} — check salary selector`,
             );
           }
+          // Zero-salary alarm — scoped to what THIS source is expected to carry.
+          // Skipped entirely for NEVER sources (0% is correct there). Hard for
+          // ALWAYS sources (0% means the parse broke). Soft for OPTIONAL sources,
+          // and only above a sample size where a healthy batch would surface ≥1.
+          if (q.salaryPresent === 0 && !SALARY_NEVER.has(src)) {
+            if (SALARY_ALWAYS.has(src)) {
+              issues.push(`🔥 salary: 0/${q.total} present — this source carries pay on ~every posting, so a clean sweep means the salary parse/selector broke`);
+            } else if (q.total >= ZERO_SALARY_MIN_SAMPLE) {
+              issues.push(`⚠ salary: 0/${q.total} present — a source that normally surfaces some pay returned NONE across the whole batch; salary selector likely regressed`);
+            }
+          }
           if (q.postedEmpty === q.total) {
             issues.push(`🔥 posted: ALL ${q.total} empty — date selector broken`);
           } else if (q.postedEmpty > 0 && q.postedEmpty / q.total >= 0.8) {
@@ -316,6 +344,19 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             const lensStr = q.descShortLens.join(', ');
             issues.push(`⚠ description short (<${SHORT_DESC_THRESHOLD} chars): ${q.descShort}/${q.total} — likely got the listing snippet instead of the full JD (sample lengths: ${lensStr})`);
           }
+          // Truncation/cap signature: non-empty descriptions clustered in a TIGHT
+          // band at a modest length — e.g. Dice's ~500-char list `summary` when
+          // detail enrichment silently falls back. Distinct from `descShort`
+          // (<400): a 500-char cap clears that threshold but still isn't a full JD.
+          // Real JDs vary widely (1k–10k), so a tight cluster across several jobs
+          // is a cap, not natural variance.
+          const lens = (bySource[src] || []).filter(l => l > 0).slice().sort((a, b) => a - b);
+          if (lens.length >= 3) {
+            const lo = lens[0], hi = lens[lens.length - 1];
+            if (hi >= 200 && hi <= 1200 && (hi - lo) <= 40) {
+              issues.push(`⚠ descriptions look capped/uniform: ${lens.length} non-empty all ~${hi} chars (${lo}–${hi}) — likely a length cap or summary-fallback, not full JDs`);
+            }
+          }
           if (issues.length > 0) {
             if (!anyQualityIssue) {
               lines.push('- ⚠️ **Field quality issues (scrape selectors may be broken):**');
@@ -326,8 +367,30 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             }
           }
         }
+        // Salary coverage — always surfaced, NOT gated on a garbage warning. The
+        // garbage check only fires on PRESENT salaries that fail looksLikeMoney,
+        // so "no warning" is vacuous when a source carries no salary at all (e.g.
+        // LinkedIn's guest API never returns salary — fetch hardcodes salary='',
+        // and enrichment extracts only the description, not baseSalary). Printing
+        // present/total makes "selector fine, source just omits salary" distinct
+        // from "we're silently dropping salaries we should have".
+        const covParts = [];
+        for (const [src, q] of Object.entries(qualBySource)) {
+          const pct = q.total ? Math.round((q.salaryPresent / q.total) * 100) : 0;
+          let note;
+          if (q.salaryPresent === 0) note = 'none carried — no salary values to validate';
+          else if (q.salaryGarbage === 0) note = 'all monetary ✅';
+          else note = `${q.salaryGarbage} non-monetary ⚠ (see field-quality issue above)`;
+          covParts.push(`\`${src}\`: ${q.salaryPresent}/${q.total} present (${pct}%) — ${note}`);
+        }
+        if (covParts.length === 1) {
+          lines.push(`- Salary coverage (saved snapshot): ${covParts[0]}`);
+        } else if (covParts.length > 1) {
+          lines.push('- Salary coverage (saved snapshot):');
+          for (const p of covParts) lines.push(`  - ${p}`);
+        }
         if (!anyQualityIssue && Object.keys(qualBySource).length > 0) {
-          lines.push('- Field quality (saved snapshot): ✅ salary, posted, url, and snippet look correct');
+          lines.push('- Field quality (saved snapshot): ✅ posted, url, and snippet look correct (salary coverage above)');
         }
       }
     } catch { /* snapshot absent or unreadable — omit silently */ }
@@ -353,6 +416,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (a.reason) lines.push(`  - Reason: ${a.reason}`);
       if (a.key) lines.push(`  - Key: ${a.key}`);
       if (a.evidence) lines.push(`  - Evidence: ${String(a.evidence).slice(0, 360)}`);
+      // Anti-bot challenge diagnostics — present when a challenge fired. These rank
+      // the cause: a datacenter/hosting egress IP points at IP reputation; the
+      // browser profile rules out "wasn't headful"; the incident ID aids vendor
+      // cross-reference. Without these, diagnosing a block needs source + a screenshot.
+      if (a.browserProfile) lines.push(`  - Browser: ${a.browserProfile}`);
+      if (a.egressIp) {
+        // isp/org is the real datacenter-vs-residential tell (a VPN like Proton
+        // shows isp "Proton AG" even though ip-api's hosting flag says false). The
+        // ⚠ flag fires only on a positive hosting hit; we never assert "residential".
+        const who = [a.egressIsp, a.egressOrg]
+          .filter(Boolean)
+          .filter((v, i, arr) => arr.indexOf(v) === i)
+          .join(' · ');
+        const hostingNote = a.egressHosting === true ? ' · **datacenter/hosting ⚠** (anti-bots flag these on sight)' : '';
+        lines.push(`  - Egress IP: ${a.egressIp}${who ? ` · ${String(who).slice(0, 90)}` : ''}${hostingNote}`);
+      }
+      if (a.blockId) lines.push(`  - Anti-bot incident ID: ${a.blockId}`);
       if (a.pageState) {
         lines.push(`  - Page state: ${JSON.stringify(a.pageState).slice(0, 360)}`);
       }
@@ -498,36 +578,170 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // shared/pre-warmed. Those three are indistinguishable without this.
   const enrichTrail = Array.isArray(t.linkedinEnrich) ? t.linkedinEnrich : [];
   if (enrichTrail.length > 0) {
-    lines.push('\n### LinkedIn enrichment — egress IP trail');
-    lines.push('> Guest description quota is per-IP. "Switch VPN → Solve" only helps if the egress IP actually changes.');
+    lines.push('\n### LinkedIn enrichment — egress IP / browser trail');
+    lines.push('> Guest quota is per-IP OR per-browser-session. "Switch VPN → Solve" only helps if it\'s per-IP — the browser# + lifetime columns separate the two.');
+    lines.push('> To MEASURE the cooldown: stay on one IP (no Re-run), Solve at progressively longer waits — the "idle" column is the gap before each pass; the first pass that returns **clean finish** (no wall) marks the cooldown.');
+    // Compact gap formatter: minutes once past 60s, else seconds.
+    const fmtGap = (ms) => ms >= 60000 ? `${Math.round(ms / 60000)}m` : `${Math.round(ms / 1000)}s`;
     let prevIp = null;
+    let prevTs = null;
     for (const e of enrichTrail) {
-      const kind = e.kind === 'solve' ? 'Solve' : 'search';
+      const kind = e.kind === 'solve' ? 'Solve' : e.kind === 'probe' ? 'probe' : 'search';
+      // Idle gap before this pass = time the limit was left to cool = this pass's
+      // START minus the previous pass's END. Using startedAt (not ts, the end)
+      // excludes a clean pass's own multi-minute enrichment from the gap.
+      const idleMs = prevTs != null ? ((e.startedAt ?? e.ts) - prevTs) : null;
+      const idleStr = idleMs != null ? ` · +${fmtGap(Math.max(0, idleMs))} idle` : '';
       let ipStr;
       if (e.ipOk === false) ipStr = '**IP lookup FAILED** (null)';
       else if (e.ip) {
         const changed = prevIp == null ? '' : (e.ip === prevIp ? ' **(unchanged ⚠)**' : ' (changed ✓)');
         ipStr = `IP ${e.ip}${changed}`;
       } else ipStr = 'IP not looked up (clean pass)';
+      // Per-pass no-desc, split soft-block (recoverable) vs genuine (permanent).
+      // Surfacing it here is what makes cross-pass transience visible — e.g. a pass
+      // reporting "40 no-desc [38 soft-block]" followed by one reporting "8 no-desc"
+      // proves the soft-blocks were rate-limit artifacts, not missing descriptions.
+      const nd = e.noDesc ?? 0;
+      const ndStr = nd > 0
+        ? `, ${nd} no-desc${e.noDescSoftBlock != null ? ` [${e.noDescSoftBlock} soft-block${e.noDescGenuine ? `, ${e.noDescGenuine} genuine` : ''}]` : ''}`
+        : '';
       let outcome;
       if (e.skippedSameIp) outcome = 'skipped — same warm IP, not re-attempted';
-      else if (e.walled) outcome = `walled, +${e.enriched ?? 0}${e.stillEmpty != null ? `, ${e.stillEmpty} still empty` : ''}${e.contextRotations != null ? `, ${e.contextRotations} rot` : ''}`;
-      else outcome = `clean finish, +${e.enriched ?? 0}${e.stillEmpty ? `, ${e.stillEmpty} still empty` : ''}`;
-      lines.push(`- ${kind}${ago(e.ts)}: ${ipStr} → ${outcome}`);
+      else if (e.walled) outcome = `walled, +${e.enriched ?? 0}${e.stillEmpty != null ? `, ${e.stillEmpty} still empty` : ''}${ndStr}${e.contextRotations != null ? `, ${e.contextRotations} rot` : ''}`;
+      // No URL wall, but soft-blocks (gutted pages) mean it was still rate-limited —
+      // don't call that a "clean finish", it overstates what happened.
+      else if ((e.noDescSoftBlock || 0) > 0) outcome = `**soft-blocked finish** (no URL wall, but gutted pages), +${e.enriched ?? 0}${e.stillEmpty ? `, ${e.stillEmpty} still empty` : ''}${ndStr}`;
+      else outcome = `**clean finish (cold)**, +${e.enriched ?? 0}${e.stillEmpty ? `, ${e.stillEmpty} still empty` : ''}${ndStr}`;
+      // Browser identity: which process this pass ran on + how much it had already
+      // enriched on that process. Same browser# with rising lifetime across passes
+      // is what lets a reader separate browser-session depletion from IP.
+      let browserStr = '';
+      if (e.browserGen != null) {
+        const ageS = e.browserAgeMs != null ? `${Math.round(e.browserAgeMs / 1000)}s old` : 'age ?';
+        browserStr = ` · browser#${e.browserGen} (${ageS}, lifetime ${e.browserLifetimeBefore ?? 0}→${e.browserLifetimeAfter ?? 0})`;
+      }
+      lines.push(`- ${kind}${ago(e.ts)}${idleStr}: ${ipStr} → ${outcome}${browserStr}`);
       if (e.ip) prevIp = e.ip;
+      prevTs = e.ts;
     }
-    // Cross-pass verdict — the actual answer to "is the IP switch working?".
+    // Cross-pass verdict — "did the IP change work, and is the limit IP- or
+    // browser-scoped?".
     const solves = enrichTrail.filter(e => e.kind === 'solve');
     const seenIps = enrichTrail.filter(e => e.ip).map(e => e.ip);
     const distinctIps = new Set(seenIps);
     const nullLookups = enrichTrail.filter(e => e.ipOk === false).length;
+    // Real enrichment passes (tied to a browser generation) — the skip pass has none.
+    const realPasses = enrichTrail.filter(e => e.browserGen != null);
+    const gens = new Set(realPasses.map(e => e.browserGen));
+    const ipChangedAcrossPasses = new Set(realPasses.filter(e => e.ip).map(e => e.ip)).size > 1;
     if (nullLookups > 0) {
       lines.push(`- ⚠️ **egress IP lookup failed on ${nullLookups} pass(es)** — api.ipify.org unreachable (a VPN may block it). The same-IP guard needs a non-null IP, so with these it silently proceeds every time and can NOT catch "you haven't switched yet."`);
     }
-    if (solves.length >= 1 && seenIps.length >= 2 && distinctIps.size === 1) {
+    // Strongest discriminator: same browser process across passes, IP changed
+    // between them, yet yield collapsed → switching the IP did NOT restore
+    // headroom, so the ceiling is browser/session-scoped, not per-IP.
+    if (realPasses.length >= 2 && gens.size === 1 && ipChangedAcrossPasses) {
+      const first = realPasses[0], last = realPasses[realPasses.length - 1];
+      if ((first.enriched ?? 0) > (last.enriched ?? 0) * 2) {
+        lines.push(`- 🔬 **Same browser process (gen #${[...gens][0]}) across all passes, yet yield collapsed ${first.enriched}→${last.enriched} while the egress IP changed** — switching the IP did NOT restore headroom on the same browser. That points to a **browser/session-scoped** limit (reset by Reset browser session / app restart), NOT per-IP. Caveat: the first pass is also the freshest browser, so the decisive test is: **Reset browser session (or restart) on the SAME IP** — if yield recovers, it's the browser, not the IP.`);
+      }
+    } else if (solves.length >= 1 && seenIps.length >= 2 && distinctIps.size === 1) {
       lines.push(`- 🔥 **IP never changed across ${seenIps.length} passes (${[...distinctIps][0]})** — the VPN switch is NOT changing the egress IP LinkedIn sees. Re-Solving on the same warm IP just re-walls; the switch isn't working.`);
     } else if (solves.length >= 2 && distinctIps.size > 1 && solves.every(e => e.walled || e.skippedSameIp)) {
-      lines.push(`- ℹ️ **${distinctIps.size} distinct IPs but every Solve still walled** — the IP IS changing, so the switch "works", but each exit IP is already rate-limited (shared/pre-warmed commercial-VPN endpoints). Switching can't reliably land a cold IP; a residential IP or waiting out the per-IP cooldown is the realistic path.`);
+      lines.push(`- ℹ️ **${distinctIps.size} distinct IPs but every Solve still walled** — could be shared/pre-warmed exit IPs (per-IP, switch can't find a cold one) OR a browser-session limit. Compare the browser# column: same browser# across all ⇒ lean browser-scoped; fresh browser# that still walls on a new IP ⇒ lean per-IP.`);
+    }
+    // Cooldown bracket: pair the idle-before-each-pass with its outcome to bound
+    // how long the limit needs to cool. A real enrichment pass (browserGen set)
+    // that came back clean after some idle ⇒ cooled by then; the longest idle
+    // that still walled is the lower bound.
+    const fmtGap2 = (ms) => ms >= 60000 ? `${Math.round(ms / 60000)}m` : `${Math.round(ms / 1000)}s`;
+    const walledIdles = [];
+    const cleanIdles = [];
+    for (let i = 1; i < enrichTrail.length; i++) {
+      const e = enrichTrail[i];
+      if (e.browserGen == null) continue; // skip the same-IP-skip pass (no run)
+      if (e.kind === 'probe') continue;   // probe confirms have 0s idle by design — don't skew the bracket
+      const idle = Math.max(0, (e.startedAt ?? e.ts) - enrichTrail[i - 1].ts);
+      // A soft-blocked pass (gutted pages, no URL wall) was STILL rate-limited —
+      // not cooled — so it bounds the cooldown from below just like a wall does.
+      // Only a pass with neither a wall nor soft-blocks proves the limit had cleared.
+      const wasRateLimited = e.walled || (e.noDescSoftBlock || 0) > 0;
+      if (wasRateLimited) walledIdles.push(idle);
+      else if (!e.skippedSameIp) cleanIdles.push(idle); // truly clean = cooled
+    }
+    if (cleanIdles.length > 0) {
+      const minClean = Math.min(...cleanIdles);
+      const walledBelow = walledIdles.filter(w => w < minClean);
+      if (walledBelow.length > 0) {
+        const loStr = fmtGap2(Math.max(...walledBelow));
+        const hiStr = fmtGap2(minClean);
+        // When both bounds round to the same label (e.g. ~61s walled vs ~62s clean
+        // both render "1m"), "between 1m and 1m" reads as a contradiction — collapse
+        // it to a single estimate instead.
+        if (loStr === hiStr) {
+          lines.push(`- 🧊 **Cooldown ≈ ${hiStr}** — around ${hiStr} idle was the boundary: a shorter wait still walled, this one came back clean (cold). Wait ≥ ${hiStr} between batches to keep enriching on the same IP/browser.`);
+        } else {
+          lines.push(`- 🧊 **Cooldown ≈ between ${loStr} and ${hiStr}** — a Solve after ${loStr} idle still walled, but after ${hiStr} idle it came back clean (cold). Wait ≥ that between batches to keep enriching on the same IP/browser.`);
+        }
+      } else {
+        lines.push(`- 🧊 **Cooldown ≤ ${fmtGap2(minClean)}** — a Solve after ${fmtGap2(minClean)} idle came back clean (cold). Try shorter waits to tighten the bound.`);
+      }
+    } else if (walledIdles.length > 0) {
+      lines.push(`- ⏳ **Cooldown > ${fmtGap2(Math.max(...walledIdles))}** (longest idle tested so far) — every Solve still walled. Wait longer between Solves (same IP, no Re-run) until one returns "clean finish".`);
+    }
+    // Automated cooldown-probe result (JOB_SEARCH_PROBE_COOLDOWN) — the crisp
+    // answer when the probe ran the wait-and-test loop unattended.
+    const cd = t.linkedinCooldown;
+    if (cd) {
+      if (cd.running) {
+        lines.push(`- ⏳ **Cooldown probe in progress** — ${cd.attempts} attempt(s) so far${cd.aborted ? ' (aborted)' : ''}.`);
+      } else if (cd.foundMs != null) {
+        lines.push(`- ✅ **Cooldown confirmed: ~${fmtGap2(cd.foundMs)}** — initial probe + confirmations all clean after ${fmtGap2(cd.foundMs)} idle on the same IP/browser (${cd.attempts} attempt(s) total). Wait ≥ that between enrichment batches to keep going without switching anything.`);
+      } else if (cd.aborted) {
+        lines.push(`- ⏹️ **Cooldown probe aborted** after ${cd.attempts} attempt(s) — no clearing wait found yet.`);
+      } else {
+        const maxMs = Array.isArray(cd.waitsMs) && cd.waitsMs.length ? Math.max(...cd.waitsMs) : 0;
+        lines.push(`- ❌ **Cooldown probe exhausted** ${cd.attempts} attempt(s) (idle waits up to ${fmtGap2(maxMs)}) without clearing — the cooldown is longer than that, or idle alone won't clear it (try a longer schedule / Reset browser session / residential IP).`);
+      }
+    }
+    // Residual verdict — the durable answer to "did we get every description?".
+    // Derived from the LAST real pass so it survives the log ring buffer rolling.
+    //
+    // The decisive split is soft-block vs genuine no-desc. A real LinkedIn job page
+    // ALWAYS carries JobPosting JSON-LD, so a no-desc with title="" + 0 JSON-LD
+    // (noDescSoftBlock) is a rate-limit artifact — recoverable on a later pass —
+    // NOT a posting that lacks a description. Only noDescGenuine is permanent.
+    // The earlier version of this verdict treated ALL no-desc as permanent and
+    // declared "complete" on any clean finish; that was wrong — soft-blocks don't
+    // trip the URL wall, so a "clean finish" can still be strangling recoverable
+    // jobs. evalErrors is NOT used (it counts failed ATTEMPTS, not empty jobs).
+    const lastReal = [...enrichTrail].reverse().find(e => e.browserGen != null);
+    if (lastReal && lastReal.stillEmpty != null) {
+      const empty = lastReal.stillEmpty;
+      if (empty === 0) {
+        lines.push('- ✅ **Residual: 0 still empty** — every job that has a description got one.');
+      } else if (lastReal.noDescSoftBlock != null) {
+        const soft = lastReal.noDescSoftBlock || 0;
+        const genuine = lastReal.noDescGenuine || 0;
+        const genuineNote = genuine > 0 ? ` (${genuine} are genuinely description-less)` : '';
+        if (lastReal.walled) {
+          lines.push(`- ⚠️ **Residual: ${empty} still empty — NOT complete.** The final pass **walled** (stopped early) so some jobs were never attempted; the last pass also saw ${soft} soft-block(s) (gutted pages under rate-limit — recoverable). Wait the cooldown and re-enrich${genuineNote}.`);
+        } else if (soft > 0) {
+          lines.push(`- ⚠️ **Residual: ${empty} still empty — likely NOT complete.** The final pass was a "clean finish" (no URL wall) but still returned **${soft} soft-block(s)** — gutted pages served under rate-limit, NOT missing descriptions, and recoverable on another pass. Enrichment stopped before these cleared; re-run or extend passes to recover them${genuineNote}.`);
+        } else {
+          lines.push(`- ✅ **Residual: ${empty} still empty — complete.** Clean finish, **0 soft-blocks** — the remainder is genuinely description-less (real pages with no JobPosting description) or a few transient load failures. Nothing recoverable by waiting; a re-run would only retry transient errors.`);
+        }
+      } else if (lastReal.noDesc != null) {
+        // Pre-split telemetry: noDesc present but not classified. Can't tell
+        // soft-block from genuine, so DON'T claim "complete" on a clean finish.
+        const noDesc = Math.min(lastReal.noDesc, empty);
+        const other = Math.max(0, empty - noDesc);
+        lines.push(`- ⚠️ **Residual: ${empty} still empty** (final pass ${lastReal.walled ? 'walled — stopped early' : 'clean finish'}): ${noDesc} no-desc${other > 0 ? ` · ${other} other` : ''}. ⚠ This build predates the soft-block split, so it's unknown how many no-desc are rate-limit soft-blocks (recoverable) vs genuinely description-less — re-run on a current build to classify.`);
+      } else {
+        // No no-desc telemetry at all — fall back to the wall flag.
+        lines.push(`- ${lastReal.walled ? '⚠️' : '✅'} **Residual: ${empty} still empty** (final pass ${lastReal.walled ? 'walled — stopped early, some jobs unreached' : 'clean finish — every job attempted'}).`);
+      }
     }
   }
 
@@ -565,6 +779,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`  - _(${sessionGathered} gathered this session; the other **${carried}** were carried over from a prior run — already on the canvas, re-scored here. Not gathered this session, so their scrape funnel isn't above — and not silently added.)_`);
     }
     lines.push(`- Batches: ${s.batches} (${s.failedBatches} failed)${modelTag(s.models?.length ? s.models.join(', ') : null)}`);
+    if (s.failureReason) {
+      // Persisted from the scoring loop so the cause survives even after the raw
+      // log line scrolls out of the main-process ring buffer.
+      lines.push(`  - ↳ batch failure reason: \`${s.failureReason}\``);
+    }
     if (s.placeholders > 0) {
       lines.push(`- ⚠️ **${s.placeholders} placeholder score(s)** — these jobs reached the scorer but came back unusable and were given a default matchScore=50. They were NOT genuinely analyzed.`);
     }
@@ -577,36 +796,64 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
 
   if (t.bucketing) {
     const b = t.bucketing;
-    lines.push(`\n### Bucketing${ago(b.ts)}`);
+    // The taxonomy = the labels for the 3-level results tree (likelihood band →
+    // salary range → role). Bands/ranges are placed deterministically by the
+    // renderer (can't drop jobs); only the ROLE partition is the AI's, so the
+    // placement check is on roles.
+    lines.push(`\n### Taxonomy (likelihood → salary → role)${ago(b.ts)}`);
     if (b.error) {
-      // The bucket call threw (e.g. Claude's "streaming required" rejection at a
-      // high max_tokens cap, an LLM truncation, or fallback-chain exhaustion).
-      // The renderer caught it and spawned a FLAT job list. Surface the error and
-      // its consequence so this is never mistaken for a clean run OR for the
-      // "never ran" null slot below — both of which hide that categorization died.
-      lines.push(`- ❌ **Bucketing FAILED** on ${b.input} scored job(s)${modelTag(b.model)} — jobs were spawned as a FLAT, uncategorized list (none dropped, but the category/salary tree is lost).`);
+      // The bucket call threw (Claude "streaming required", truncation, or
+      // fallback-chain exhaustion). The renderer flat-spawned the jobs. Surface
+      // it so this is never mistaken for a clean run OR the "never ran" null slot.
+      lines.push(`- ❌ **Taxonomy FAILED** on ${b.input} scored job(s)${modelTag(b.model)} — jobs were spawned as a FLAT, score-ordered list (none dropped, but the likelihood/salary/role tree is lost).`);
       lines.push(`  - Error: ${b.error}`);
-    } else if (b.placed != null) {
-      // Placement check: did the bucketer assign every scored job to a bucket?
+    } else {
       const clean = b.missing === 0 && b.duplicated === 0;
-      lines.push(`- Input: ${b.input} → **${b.placed} placed** across ${b.categories} categories${clean ? ' ✅ all jobs placed' : ''}${modelTag(b.model)}`);
+      lines.push(`- Input: ${b.input} → ${b.roleCount} role(s), ${Array.isArray(b.bandSummary) ? b.bandSummary.length : 0} likelihood band(s), ${Array.isArray(b.salaryRangeLabels) ? b.salaryRangeLabels.length : 0} salary range(s)${clean ? ' · ✅ every job placed in a role' : ''}${modelTag(b.model)}`);
+      const dirs = t.scoring?.directions;
+      if (typeof dirs === 'number' && dirs > 0 && b.roleCount > 0) {
+        const note = dirs > b.roleCount
+          ? ` (merged ${dirs - b.roleCount} away — ${dirs} scorer directions → ${b.roleCount} roles)`
+          : ' (no merging needed)';
+        lines.push(`  - Roles consolidated from ${dirs} distinct scorer careerDirection(s)${note}.`);
+      }
       if (b.missing > 0) {
         const idxNote = Array.isArray(b.missingIndices) && b.missingIndices.length > 0
           ? ` Missing indices (0-based): [${b.missingIndices.join(', ')}]`
           : '';
-        lines.push(`  - ⚠️ **${b.missing} scored job(s) NOT placed by the bucketer** (it broke the "every job in exactly one bucket" rule — common on the weak fallback models quota forces). The renderer's missing-sweep rescues them into an Uncategorized branch — shown, not dropped, but uncategorized.${idxNote}`);
+        lines.push(`  - ⚠️ **${b.missing} job(s) NOT placed in any role by the AI** (common on the weak fallback models quota forces). The renderer sweeps them into an "Other" role — shown, not dropped.${idxNote}`);
       }
       if (b.duplicated > 0) {
-        lines.push(`  - ⚠️ ${b.duplicated} job(s) placed in more than one bucket by the bucketer (deduped on spawn).`);
+        lines.push(`  - ⚠️ ${b.duplicated} job(s) placed in more than one role by the AI (first wins on spawn).`);
       }
-    } else {
-      lines.push(`- Input: ${b.input} → categories: ${b.categories}${modelTag(b.model)}`);
-    }
-    if (!b.error && b.categories === 0 && b.input > 0) {
-      lines.push('- ⚠️ Bucketing returned 0 categories — the renderer will have fallen back to a flat spawn (jobs still shown, but the category/salary tree is lost).');
+      // Likelihood bands (top level, ordered high→low) with deterministic counts.
+      if (Array.isArray(b.bandSummary) && b.bandSummary.length > 0) {
+        lines.push('- Likelihood bands (top level — by interview %):');
+        for (const band of b.bandSummary) {
+          lines.push(`  - **${band.label}** — ${band.count} job${band.count === 1 ? '' : 's'}`);
+        }
+      }
+      // Salary ranges (second level) — just the labels the AI chose.
+      if (Array.isArray(b.salaryRangeLabels) && b.salaryRangeLabels.length > 0) {
+        lines.push(`- Salary ranges (second level): ${b.salaryRangeLabels.map(s => `"${s}"`).join(', ')}`);
+      }
+      // Roles (third level) — the AI's creative partition; the part most worth
+      // auditing ("are these the right labels, with the right jobs?").
+      if (Array.isArray(b.roleSummary) && b.roleSummary.length > 0) {
+        lines.push('- Roles (third level — is each label a sensible home for its jobs?):');
+        for (const r of b.roleSummary) {
+          const samples = Array.isArray(r.sampleTitles) && r.sampleTitles.length
+            ? ` · e.g. ${r.sampleTitles.map(s => `"${s}"`).join(', ')}`
+            : '';
+          lines.push(`  - **${r.name}** — ${r.count} job${r.count === 1 ? '' : 's'}${samples}`);
+        }
+      }
+      if (b.roleCount === 0 && b.input > 0) {
+        lines.push('- ⚠️ Taxonomy returned 0 roles — the renderer will have fallen back to a flat spawn (jobs still shown, but the tree is lost).');
+      }
     }
   } else {
-    lines.push('\n### Bucketing\n- (no bucketing recorded this session)');
+    lines.push('\n### Taxonomy (likelihood → salary → role)\n- (no taxonomy recorded this session)');
   }
 
   return `

@@ -3,20 +3,33 @@ import { EventLogger } from '../utils/EventLogger';
 import { cancelNodeTasksRecursively } from '../utils/canvasInteractions';
 
 /**
- * Recursively collects OS file/folder paths from a node tree.
- * - document nodes: contributes their own filePath.
- * - group nodes created from a folder drag: contributes the folder path.
+ * Recursively collects OS file/folder paths from a node tree, for the "also move
+ * the linked file(s) to trash?" prompt on delete.
+ *
+ * ONLY nodes that ARE the canvas's representation of a file/folder contribute:
+ * - document nodes: their own filePath.
+ * - listing nodes: their filePath + image assets.
+ * - group nodes created from a folder drag: the folder path.
  * - organic sub-canvas groups: recurses into children.
+ *
+ * Workflow/aggregator HUBS (sellhub, jobhub) deliberately do NOT contribute.
+ * A hub merely REFERENCES external user files it was handed to work on — a
+ * SellHub's product photos, a JobHub's dropped resume — which the user owns
+ * (and, for a SellHub, are usually still represented by the source document
+ * nodes left on the canvas, so trashing them would orphan those). Deleting a
+ * hub cancels its run (see onNodesDelete); it must NOT offer to trash the
+ * user's resume/photos. This is the fix for "deleting a hub mid-run asks to
+ * keep the file on disk."
  */
 function extractPaths(nodes, pathsToDelete) {
   nodes.forEach(n => {
-    // Standard document/hub nodes with a primary file path
-    if ((n.type === 'document' || n.type === 'jobhub' || n.type === 'listing') && n.data?.filePath) {
+    // Nodes that ARE a single file's on-canvas representation.
+    if ((n.type === 'document' || n.type === 'listing') && n.data?.filePath) {
       pathsToDelete.add(n.data.filePath);
     }
-    
-    // Nodes that can hold multiple image assets (Marketplace)
-    if ((n.type === 'sellhub' || n.type === 'listing') && Array.isArray(n.data?.imagePaths)) {
+
+    // Listing nodes can hold multiple image assets.
+    if (n.type === 'listing' && Array.isArray(n.data?.imagePaths)) {
       n.data.imagePaths.forEach(p => {
         if (p) pathsToDelete.add(p);
       });

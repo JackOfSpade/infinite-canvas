@@ -1,4 +1,5 @@
 import { getScopedJobSourceIds } from './jobSourceScope.js';
+import { getScopedCompSourceIds } from './compSourceScope.js';
 
 export const DEFAULT_EDGE_OPTIONS = { type: 'smoothstep', animated: true, style: { strokeWidth: 3, opacity: 0.8 } };
 export const EDGE_STYLE = { stroke: '#a855f7', strokeWidth: 3 };
@@ -33,7 +34,6 @@ export const JOB_SOURCES = [
   { id: 'ziprecruiter',   name: 'ZipRecruiter',letter: 'ZR', color: '#50c878', domain: 'ziprecruiter.com' },
   { id: 'glassdoor',      name: 'Glassdoor',   letter: 'GD', color: '#0caa41', domain: 'glassdoor.com' },
   { id: 'dice',           name: 'Dice',        letter: 'Di', color: '#eb1c26', domain: 'dice.com' },
-  { id: 'wellfound',      name: 'Wellfound',   letter: 'WF', color: '#000000', domain: 'wellfound.com' },
   { id: 'usajobs',        name: 'USAJobs',     letter: 'US', color: '#003366', domain: 'usajobs.gov' },
 ];
 
@@ -57,12 +57,17 @@ export const PRICE_COMP_SOURCES = [
   // Niche specialist: aggregated sold-price data for video games + retro
   // consoles. Returns empty for non-game queries (auto-dismisses).
   { id: 'pricecharting', name: 'PriceCharting', letter: 'PC', color: '#1d72b8',   domain: 'pricecharting.com' },
-  // StockX dropped — PerimeterX systematically blocks bootstrap-key
-  // extraction, and the hardcoded fallback keys 403 at the Algolia edge.
-  // Result: zero usable data on every run regardless of category. The
-  // fetchStockXListings code in apiExtractors.js stays around in case we
-  // revisit with a working bypass, but it's no longer invoked anywhere.
 ];
+
+export const ALL_COMP_SOURCE_IDS = PRICE_COMP_SOURCES.map(source => source.id);
+// Comp sources after applying the marketplace test-mode scope. In production
+// (test mode off) this is the full list; with MARKETPLACE_TEST_ENABLED +
+// MARKETPLACE_TEST_SOURCE set, it narrows to the single targeted source so the
+// SellHub spawns only that comp card. Mirrors ACTIVE_JOB_SOURCES above.
+export const ACTIVE_COMP_SOURCES = (() => {
+  const scoped = new Set(getScopedCompSourceIds(ALL_COMP_SOURCE_IDS));
+  return PRICE_COMP_SOURCES.filter(source => scoped.has(source.id));
+})();
 
 export const MINIMAP_NODE_COLORS = {
   group: '#3b82f6',

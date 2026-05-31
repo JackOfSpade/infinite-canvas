@@ -301,8 +301,18 @@ async function executeScrape(url, extractorJS, options = {}) {
               if (count === lastCount) {
                 if (++stableReads >= READINESS.STABLE_READS) { settledPositively = true; break; }
               } else { stableReads = 0; lastCount = count; }
-            } else if (++zeroReads >= READINESS.MAX_ZERO_READS) {
-              break;                             // genuinely empty (or unparseable)
+            } else {
+              // count === 0. A page that HAS candidate rows but extracted nothing
+              // (yieldStats.seen > 0) is still rendering its per-card fields — e.g.
+              // PriceCharting injects the price text into <span class="js-price">
+              // AFTER the row skeleton exists, so an early read is seen>0/items=0.
+              // Keep polling to the budget deadline so those fields can populate;
+              // only a genuinely empty page (no rows seen) takes the fast zero-streak
+              // exit. Bounded by readinessDeadline below either way.
+              const seenCount = (r && r.yieldStats && typeof r.yieldStats.seen === 'number') ? r.yieldStats.seen : 0;
+              if (seenCount === 0 && ++zeroReads >= READINESS.MAX_ZERO_READS) {
+                break;                           // genuinely empty (or unparseable)
+              }
             }
           }
           if (Date.now() >= readinessDeadline) break;  // budget spent — take freshest
@@ -362,7 +372,16 @@ async function executeScrape(url, extractorJS, options = {}) {
           recordReady(sourceKey, stableElapsedMs);
         }
 
-        return { data: extractorResult, warning };
+        // Extractors may return either a bare array or { items, yieldStats }.
+        // Unwrap to keep `data` an array for every downstream consumer; surface
+        // yieldStats separately so the bug report can show the cards-seen
+        // denominator + per-card field drops behind a healthy-looking count.
+        const __wrapped = extractorResult && !Array.isArray(extractorResult) && Array.isArray(extractorResult.items);
+        return {
+          data: __wrapped ? extractorResult.items : extractorResult,
+          warning,
+          yieldStats: __wrapped ? (extractorResult.yieldStats || null) : null,
+        };
       } finally {
         if (options.signal && abortHandler) {
           options.signal.removeEventListener('abort', abortHandler);
@@ -490,6 +509,11 @@ async function executeScrapePaginated(extractorJS, options = {}) {
   let strongest = null;
   let pagesWalked = 0;
   let stopReason = 'ceiling';
+  // Accumulated extraction-yield stats ({ seen, noFields }) across pages, so a
+  // partial per-card drop is visible even when items.length stays > 0. For
+  // load-more (cumulative DOM) the extractor's counts are already running totals,
+  // so replace rather than sum; for real page navigations, sum across pages.
+  let aggYieldStats = null;
   // Tracks how many items the extractor had returned before the last "Show
   // more" click — used to slice out only the newly-loaded items so we don't
   // push the full accumulated list on every load-more iteration.
@@ -579,6 +603,17 @@ async function executeScrapePaginated(extractorJS, options = {}) {
       const allExtracted = Array.isArray(extractorResult)
         ? extractorResult
         : (Array.isArray(extractorResult?.items) ? extractorResult.items : []);
+      const pageYieldStats = (extractorResult && !Array.isArray(extractorResult) && extractorResult.yieldStats) || null;
+      if (pageYieldStats) {
+        if (!aggYieldStats) aggYieldStats = { seen: 0, noFields: 0 };
+        if (useLoadMore) {                                  // cumulative counts → take the latest
+          aggYieldStats.seen = pageYieldStats.seen || 0;
+          aggYieldStats.noFields = pageYieldStats.noFields || 0;
+        } else {                                            // per-page counts → sum
+          aggYieldStats.seen += pageYieldStats.seen || 0;
+          aggYieldStats.noFields += pageYieldStats.noFields || 0;
+        }
+      }
       // Load-more: the extractor returns all visible DOM items (old + new) — slice
       // to get only the items added by this "Show more" click.
       const pageItems = useLoadMore ? allExtracted.slice(loadMorePrevCount) : allExtracted;
@@ -654,7 +689,7 @@ async function executeScrapePaginated(extractorJS, options = {}) {
     await safeClose(page, 2000);
   }
 
-  return { data: all, warning: strongest, pagesWalked, stopReason };
+  return { data: all, warning: strongest, pagesWalked, stopReason, yieldStats: aggYieldStats };
 }
 
 // ── Process Exit Cleanup ────────────────────────────────────────────────────
@@ -755,7 +790,7 @@ export async function scrapeMultiple(tasks, onProgress = null, signal = null) {
         const wrapped = await queueScrape(task.url, task.extractorJS, { ...task.options, signal, sourceLabel: task.id });
         const data = wrapped?.data ?? null;
         const warning = wrapped?.warning ?? null;
-        const result = { id: task.id, success: true, data, warning };
+        const result = { id: task.id, success: true, data, warning, yieldStats: wrapped?.yieldStats ?? null };
         // Paginated tasks also report how far they walked and why they stopped.
         if (wrapped && wrapped.pagesWalked != null) {
           result.pagesWalked = wrapped.pagesWalked;
@@ -776,9 +811,3 @@ export async function scrapeMultiple(tasks, onProgress = null, signal = null) {
     return { id: tasks[i].id, success: false, error: r.reason?.message || 'Unknown error' };
   });
 }
-
-// ── Tier 4 Escalation Tracking ──────────────────────────────────────────────
-// Escalation now lives in rateLimiter.js (outcome-aware: block/throttle/error
-// all count, so soft blocks correctly drive escalation). Re-exported here so
-// existing importers of `getDomainHealth` from browserPool keep working.
-export { getDomainHealth } from './rateLimiter.js';

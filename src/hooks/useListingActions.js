@@ -21,8 +21,17 @@ export function useListingActions(id, data) {
   const { updateNodeData } = useReactFlow();
   const product = useMemo(() => data.product || {}, [data.product]);
 
+  // Price to display: the user's explicit price when set — including a deliberate
+  // 0 (free / parts-only items) — otherwise the recommended price. Uses an
+  // explicit "is set" test rather than `||`, so a legitimate 0 isn't treated as
+  // unset and silently replaced by recommended_price. '' / null / undefined mean
+  // "not set" and correctly fall through to the recommended price.
+  const externalPrice = (data.userPrice === 0 || data.userPrice)
+    ? data.userPrice
+    : (data.pricing?.recommended_price || '');
+
   const [editing, setEditing] = useState(null);
-  const [priceInput, setPriceInput] = useState(data.userPrice || data.pricing?.recommended_price || '');
+  const [priceInput, setPriceInput] = useState(externalPrice);
   const [justificationExpanded, setJustificationExpanded] = useState(false);
   const [selectedPlatforms, setSelectedPlatforms] = useState(data.selectedPlatforms || ['ebay', 'facebook', 'mercari']);
   const [copied, setCopied] = useState(false);
@@ -45,8 +54,8 @@ export function useListingActions(id, data) {
     setSelectedPlatforms(data.selectedPlatforms || ['ebay', 'facebook', 'mercari']);
   }
 
-  const [prevExternalPrice, setPrevExternalPrice] = useState(data.userPrice || data.pricing?.recommended_price || '');
-  const currentExternalPrice = data.userPrice || data.pricing?.recommended_price || '';
+  const [prevExternalPrice, setPrevExternalPrice] = useState(externalPrice);
+  const currentExternalPrice = externalPrice;
   if (editing !== 'price' && String(currentExternalPrice) !== String(prevExternalPrice)) {
     setPrevExternalPrice(currentExternalPrice);
     setPriceInput(currentExternalPrice);

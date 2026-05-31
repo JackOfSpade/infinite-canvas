@@ -170,68 +170,6 @@ export const GLASSDOOR_EXTRACTOR = `
   return jobs;
 })()
 `;
-// ── Wellfound (AngelList) ───────────────────────────────────────────────────
-
-export const WELLFOUND_CONFIG = {
-  waitMs: 3000,
-  timeoutMs: 40000,
-  // Jobs load client-side via GraphQL — wait for the rendered card semantic attr
-  waitFor: '[data-testid="job-listing-list"]',
-  scrollFirst: false,
-  dismissCookies: true,
-  referer: 'https://www.google.com/',
-};
-
-// Wellfound migrated to a client-side GraphQL architecture (Apollo, no SSR job data).
-// __NEXT_DATA__ only carries the logged-in user's profile, not listings.
-// Jobs are rendered client-side; structure as of 2026-05:
-//   [data-testid="job-listing-list"] — one card per job (stable semantic attr)
-//     a[href*="/jobs/"]              — relative link; prefix with wellfound.com
-//     [class*="styles_title__"]      — job title
-//     [class*="styles_location__"]   — location text
-//     [class*="styles_compensation__"] — salary + equity (strip " • X%" equity suffix)
-//     [class*="styles_tags__"]       — posted date text
-// Company name is not present in this card format (Wellfound's "Apply on Wellfound"
-// anonymous flow); left empty rather than fabricating.
-// CSS module hashes rotate on deploys — wildcard fallbacks guard against that.
-export const WELLFOUND_EXTRACTOR = `
-(function() {
-  const jobs = [];
-
-  const cards = document.querySelectorAll('[data-testid="job-listing-list"]');
-
-  cards.forEach(card => {
-    try {
-      const titleEl = card.querySelector('[class*="styles_title__"]');
-      const title = titleEl?.innerText?.trim() || '';
-      if (!title) return;
-
-      const locationEl = card.querySelector('[class*="styles_location__"]');
-      const location = locationEl?.innerText?.trim() || '';
-
-      const salaryEl = card.querySelector('[class*="styles_compensation__"]');
-      const salaryRaw = salaryEl?.innerText?.trim() || '';
-      // Strip equity suffix: "$220k – $260k • 0.0% – 0.1%" → "$220k – $260k"
-      const salary = salaryRaw.split(' • ')[0].trim();
-
-      const linkEl = card.querySelector('a[href*="/jobs/"]');
-      const href = linkEl?.getAttribute('href') || '';
-      const url = href.startsWith('http') ? href : (href ? 'https://wellfound.com' + href : '');
-
-      const tagsEl = card.querySelector('[class*="styles_tags__"]');
-      const tagsText = tagsEl?.innerText || '';
-      const postedMatch = tagsText.match(/Posted\\s+([^\\n]+)/i);
-      const posted = postedMatch ? postedMatch[1].trim() : '';
-
-      jobs.push({ title, company: '', location, salary, snippet: '', url, posted, source: 'wellfound' });
-    } catch {}
-  });
-
-  if (jobs.length === 0) throw new Error('SITE_CHANGED: wellfound extractor returned 0 — data-testid or styles_* CSS module selectors may have changed');
-  return jobs;
-})()
-`;
-
 // ── Google Jobs ──────────────────────────────────────────────────────────────
 
 export const GOOGLE_JOBS_CONFIG = {

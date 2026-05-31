@@ -9,10 +9,9 @@
  *   { title, company, location, salary, snippet, url, posted, source }
  */
 import { logger } from '../logger.js';
-import { queueScrape } from '../ipc/browserPool.js';
-import { getRandomUA, refreshDiceApiKey, getStealthBrowser } from '../ipc/stealthBrowser.js';
+import { getRandomUA, refreshDiceApiKey, getStealthBrowser, getStealthBrowserInfo } from '../ipc/stealthBrowser.js';
 import { humanDelay } from '../utils/humanDelay.js';
-import { getDiceApiKey, getJobsSettings } from '../ipc/settings.js';
+import { getDiceApiKey } from '../ipc/settings.js';
 import { htmlToText } from 'html-to-text';
 import { JSDOM } from 'jsdom';
 import { resolveBudget } from '../ipc/scrapeBudget.js';
@@ -45,36 +44,6 @@ function apiTimeout(key) {
   return resolveBudget(key, API_TIMEOUT_SEEDS[key] ?? 10000).timeoutMs;
 }
 
-function allEndpointFetchesFailedWarning(sourceName, failed, total) {
-  return {
-    code: 'api-source-unavailable',
-    severity: 'block',
-    evidence: `${sourceName} returned no usable boards (${failed}/${total} endpoint requests failed).`,
-    suggestion: `Audit the configured ${sourceName} board list or the API endpoint; the source is currently returning a clean zero because every request failed.`,
-  };
-}
-
-/**
- * Process a list of items concurrently in batches.
- * @param {Array} items - The items to process
- * @param {number} batchSize - Number of items to process concurrently
- * @param {Function} processFn - Async function to run on each item. Should return an array of results.
- * @returns {Array} - Flattened array of all successful results.
- */
-async function processInBatches(items, batchSize, processFn, signal = null) {
-  const allResults = [];
-  for (let i = 0; i < items.length; i += batchSize) {
-    if (signal?.aborted) break;
-    const batch = items.slice(i, i + batchSize);
-    const results = await Promise.allSettled(batch.map(processFn));
-    for (const r of results) {
-      if (r.status === 'fulfilled' && Array.isArray(r.value)) {
-        allResults.push(...r.value);
-      }
-    }
-  }
-  return allResults;
-}
 
 /**
  * Combines an IPC abort signal (for window closes) with a hard timeout.
@@ -272,116 +241,6 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
 }
 
 /**
- * Second-pass enrichment: fetch full job descriptions from LinkedIn public
- * job detail pages for each job in the already-deduped list.
- *
- * LinkedIn's guest search API (/jobs-guest/...) returns no description field.
- * Job detail pages (linkedin.com/jobs/view/{id}) theoretically server-render a
- * JobPosting JSON-LD schema with the full description, but LinkedIn returns
- * HTTP 999 to plain Node.js fetch() — a browser (Puppeteer) would be needed
- * to bypass this. This function is kept in place for future Puppeteer upgrade
- * and to surface the failure clearly in logs.
- *
- * Strategy: parse <script type="application/ld+json"> for a JobPosting entry
- * and strip its HTML description. Falls back to regex-extracting the
- * description container div if JSON-LD is absent or malformed.
- *
- * Batched at 5 concurrent. Logs failure reasons (status code, anti-bot warning)
- * so the ring buffer shows exactly why descriptions weren't fetched.
- *
- * @param {Array}       jobs   — deduped job objects from fetchLinkedInJobs
- * @param {AbortSignal} signal — propagated abort signal
- * @returns {Promise<Array>}   — same jobs with `description` + `snippet` enriched
- */
-export async function enrichLinkedInDescriptions(jobs, signal) {
-  if (!jobs?.length) return jobs;
-  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
-
-  const BATCH = 5;
-  const enriched = [];
-  let failNonOk = 0;
-  let failNoText = 0;
-  let failNoParse = 0;
-  let firstFailStatus = null;
-  let firstFailWarning = null;
-
-  for (let i = 0; i < jobs.length; i += BATCH) {
-    if (signal?.aborted) break;
-    const batch = jobs.slice(i, i + BATCH);
-    const results = await Promise.all(batch.map(async (job) => {
-      if (!job.url) return job;
-      try {
-        const r = await safeApiFetch(job.url, {
-          headers: {
-            'User-Agent': getRandomUA(),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.linkedin.com/jobs/search/',
-          },
-          signal: createTimeoutSignal(signal, apiTimeout('linkedin-detail')),
-        }, 'linkedin');
-        if (!r.ok) {
-          failNonOk++;
-          if (firstFailStatus === null) firstFailStatus = r.status;
-          if (firstFailWarning === null && r.warning) firstFailWarning = r.warning.code || r.warning;
-          return job;
-        }
-        if (!r.text) { failNoText++; return job; }
-
-        // Prefer JSON-LD JobPosting schema — stable across LinkedIn deploys.
-        // LinkedIn includes this for SEO/Google Jobs indexing on all public pages.
-        const ldMatches = [...r.text.matchAll(/<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)];
-        for (const match of ldMatches) {
-          try {
-            const ld = JSON.parse(match[1]);
-            // May be a single object or an array
-            const entries = Array.isArray(ld) ? ld : [ld];
-            for (const entry of entries) {
-              if (entry?.['@type'] !== 'JobPosting') continue;
-              const descHtml = entry.description || '';
-              if (!descHtml) continue;
-              const descText = descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-              if (descText) return { ...job, description: descText, snippet: descText };
-            }
-          } catch {
-            // Ignore malformed structured data and fall back to DOM extraction.
-          }
-        }
-
-        // Fallback: extract from the description container div.
-        // Class names rotate on deploys — try both known variants.
-        const domMatch = r.text.match(
-          /<div[^>]+class="[^"]*(?:description__text|show-more-less-html__markup)[^"]*"[^>]*>([\s\S]*?)<\/div>/i,
-        );
-        if (domMatch) {
-          const descText = domMatch[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-          if (descText) return { ...job, description: descText, snippet: descText };
-        }
-
-        // Page loaded but no description found — bot-wall or login redirect
-        if (r.warning) {
-          if (firstFailWarning === null) firstFailWarning = r.warning.code || r.warning;
-        }
-        failNoParse++;
-        return job;
-      } catch {
-        return job; // keep existing snippet on error — don't drop the job
-      }
-    }));
-    enriched.push(...results);
-  }
-
-  const withDesc = enriched.filter(j => j.description && j.description.length > 100).length;
-  const failDetail = [
-    failNonOk   > 0 ? `${failNonOk} non-OK (first status: ${firstFailStatus}${firstFailWarning ? `, warning: ${firstFailWarning}` : ''})` : null,
-    failNoText  > 0 ? `${failNoText} empty-body` : null,
-    failNoParse > 0 ? `${failNoParse} loaded-but-no-description${firstFailWarning && failNonOk === 0 ? ` (first warning: ${firstFailWarning})` : ''}` : null,
-  ].filter(Boolean).join(', ');
-  logger.info(`[LinkedIn] Enriched ${enriched.length} jobs — ${withDesc}/${enriched.length} have descriptions${failDetail ? ` — failures: ${failDetail}` : ''}`);
-  return enriched;
-}
-
-/**
  * Browser-based second-pass enrichment for LinkedIn job descriptions.
  *
  * LinkedIn returns HTTP 999 to plain Node.js fetch(), so plain HTTP is a dead
@@ -417,6 +276,13 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
     logger.warn(`[LinkedIn/Browser] Cannot get shared browser for enrichment: ${err.message}`);
     return { jobs, loginWall: false, loginWallUrl: null };
   }
+  // Browser-process identity for this pass. Returned to the caller so the bug
+  // report's egress-IP trail can show whether consecutive passes ran on the SAME
+  // browser instance — the discriminator for "browser/session-based limit vs
+  // per-IP": if the IP changes but the limit doesn't recover within one browser
+  // generation, it's the browser; if a relaunch (new generation) on the same IP
+  // recovers it, it's the browser too — not the IP.
+  const browserInfo = getStealthBrowserInfo();
 
   // Enrichment runs in an isolated context with NO cookies.
   // When the shared browser context is used (browser.newPage()), the new tab
@@ -457,6 +323,13 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
   let successCount = 0;
   let navErrors = 0;
   let noDesc = 0;
+  // no-desc splits two ways and the distinction decides whether the residual is
+  // permanent or recoverable: a real LinkedIn job page ALWAYS carries JobPosting
+  // JSON-LD (SEO — see the JSON-LD comment below), so pageTitle="" + 0 JSON-LD is
+  // a rate-limit soft-block serving a gutted page (recoverable on a later pass),
+  // NOT a posting that genuinely has no description. Only the latter is permanent.
+  let noDescSoftBlock = 0; // title="" && 0 JSON-LD — gutted page, retryable
+  let noDescGenuine = 0;   // had JSON-LD / a title but no description text — permanent
   let evalErrors = 0;
   let loginWallAt = null;
   // The exact URL LinkedIn redirected to when a wall was detected — returned
@@ -611,6 +484,10 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
           }
         } else {
           noDesc++;
+          // Classify: gutted soft-block page (no title, no JSON-LD) vs a real page
+          // that genuinely lacks a description. The former is recoverable.
+          if (!result.pageTitle && (result.ldCount || 0) === 0) noDescSoftBlock++;
+          else noDescGenuine++;
           consecutiveEvalErrors = 0;
           if (firstFailNote === null) {
             const ldDiag = result.ldCount != null
@@ -650,13 +527,25 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
   const failParts = [];
   if (navErrors > 0) failParts.push(`${navErrors} nav-err`);
   if (evalErrors > 0) failParts.push(`${evalErrors} eval-err`);
-  if (noDesc > 0) failParts.push(`${noDesc} no-desc`);
+  if (noDesc > 0) failParts.push(`${noDesc} no-desc [${noDescSoftBlock} soft-block, ${noDescGenuine} genuine]`);
   const failSuffix = failParts.length ? ` (${failParts.join(', ')})` : '';
   const wallSuffix = loginWallAt !== null ? ` — login wall at job ${loginWallAt + 1}, ${enriched.length - loginWallAt - 1} skipped` : '';
   const rotateSuffix = contextRotations > 0 ? ` — ${contextRotations} context rotation(s)` : '';
   const firstFailSuffix = firstFailNote !== null ? ` — first fail: ${firstFailNote}` : '';
   logger.info(`[LinkedIn/Browser] ${successCount}/${attempted} descriptions enriched${failSuffix}${rotateSuffix}${wallSuffix}${firstFailSuffix}`);
-  return { jobs: enriched, loginWall: loginWallAt !== null, loginWallUrl, successCount, attempted, contextRotations };
+  return {
+    jobs: enriched, loginWall: loginWallAt !== null, loginWallUrl, successCount, attempted, contextRotations,
+    // Failure breakdown so a caller can categorise the residual still-empty jobs.
+    // noDesc splits into soft-block (gutted page — recoverable on a later pass)
+    // vs genuine (real page, no description — permanent). The continuous loop uses
+    // noDescSoftBlock to decide whether a "clean finish" was actually rate-limited
+    // (soft-blocks don't trip the URL-based wall detector). evalErrors/navErrors
+    // are transient transport failures. Without this split a "still empty" count is
+    // ambiguous between "nothing to fetch" and "we quit while soft-blocked".
+    noDesc, noDescSoftBlock, noDescGenuine, evalErrors, navErrors,
+    browserGen: browserInfo.generation,
+    browserAgeMs: browserInfo.launchedAt ? (Date.now() - browserInfo.launchedAt) : null,
+  };
 }
 
 // ── Shared query-relevance filter (board/API sources) ────────────────────────
@@ -730,176 +619,6 @@ export function jobRelevanceMatch(roleText, query, geoTerms = EMPTY_GEO) {
   if (useTerms.length === 0) return false;
   return useTerms.some(t => text.includes(t));
 }
-
-// ── Greenhouse API ──────────────────────────────────────────────────────────
-// Public JSON endpoint: boards-api.greenhouse.io/v1/boards/{token}/jobs
-// Each company has a unique board token.
-
-/** Curated list of top tech companies using Greenhouse ATS. */
-const GREENHOUSE_BOARDS = [
-  { token: 'figma', company: 'Figma' },
-  { token: 'airbnb', company: 'Airbnb' },
-  { token: 'stripe', company: 'Stripe' },
-  { token: 'discord', company: 'Discord' },
-  { token: 'notion', company: 'Notion' },
-  { token: 'squarespace', company: 'Squarespace' },
-  { token: 'datadog', company: 'Datadog' },
-  { token: 'plaid', company: 'Plaid' },
-  { token: 'brex', company: 'Brex' },
-  { token: 'airtable', company: 'Airtable' },
-  { token: 'gitlab', company: 'GitLab' },
-  { token: 'hashicorp', company: 'HashiCorp' },
-  { token: 'duolingo', company: 'Duolingo' },
-  { token: 'cloudflare', company: 'Cloudflare' },
-  { token: 'doordash', company: 'DoorDash' },
-  { token: 'cockroachlabs', company: 'Cockroach Labs' },
-  { token: 'benchling', company: 'Benchling' },
-  { token: 'affirm', company: 'Affirm' },
-  { token: 'gusto', company: 'Gusto' },
-  { token: 'nerdwallet', company: 'NerdWallet' },
-  { token: 'reddit', company: 'Reddit' },
-  { token: 'robinhood', company: 'Robinhood' },
-  { token: 'mongodb', company: 'MongoDB' },
-  { token: 'twitch', company: 'Twitch' },
-  { token: 'palantir', company: 'Palantir' },
-  { token: 'lyft', company: 'Lyft' },
-  { token: 'okta', company: 'Okta' },
-  { token: 'asana', company: 'Asana' },
-  { token: 'webflow', company: 'Webflow' },
-  { token: 'vercel', company: 'Vercel' },
-];
-
-/**
- * Fetch jobs from Greenhouse boards matching the query.
- * Searches board titles client-side (the API doesn't support keyword search).
- */
-export async function fetchGreenhouseJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
-  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
-  // Greenhouse fans out across dozens of board tokens; collect warnings
-  // per-call and pick the strongest at the end so a wave of blocks across
-  // the whole platform shows up, not just an isolated 429 from one board.
-  const warnings = [];
-  let ghApiErrors = 0;
-  let ghEmptyBoards = 0;
-  const allJobs = await processInBatches(GREENHOUSE_BOARDS, 10, async ({ token, company }) => {
-    const r = await safeApiFetch(`https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`, {
-      headers: { 'Accept': 'application/json' },
-      signal: createTimeoutSignal(signal, apiTimeout('greenhouse-api')),
-    }, 'greenhouse');
-    if (r.warning) warnings.push(r.warning);
-    if (!r.ok) { ghApiErrors++; return []; }
-    const data = r.json;
-    const jobs = (data && data.jobs) || [];
-    if (jobs.length === 0) ghEmptyBoards++;
-    return jobs.map(job => ({ ...job, _company: company, _token: token }));
-  }, signal);
-
-  // Filter: job matches if relevant to ANY query (OR logic across all queries).
-  const qs = Array.isArray(queries) ? queries : [queries];
-  const matched = allJobs.filter(job =>
-    qs.some(q => jobRelevanceMatch(`${job.title} ${job._company}`, q, geoTerms)));
-
-  const items = matched.slice(0, JOB_RESULT_CAP).map(job => {
-    const description = stripHtml(job.content || '');
-    return {
-      title: job.title || '',
-      company: job._company || '',
-      location: job.location?.name || '',
-      salary: '',
-      description,
-      snippet: description.substring(0, 300),
-      url: `https://boards.greenhouse.io/${job._token}/jobs/${job.id}`,
-      posted: job.updated_at ? new Date(job.updated_at).toLocaleDateString() : '',
-      source: 'greenhouse',
-    };
-  });
-  const withDesc = items.filter(j => j.description).length;
-  const boardsWithJobs = new Set(allJobs.map(j => j._company)).size;
-  logger.info(`[Greenhouse API] ${allJobs.length} jobs fetched from ${boardsWithJobs}/${GREENHOUSE_BOARDS.length} boards (${ghApiErrors} API errors, ${ghEmptyBoards} empty boards) → ${matched.length} matched query → ${items.length} returned, ${withDesc}/${items.length} have descriptions`);
-  if (ghApiErrors === GREENHOUSE_BOARDS.length) {
-    warnings.push(allEndpointFetchesFailedWarning('Greenhouse API', ghApiErrors, GREENHOUSE_BOARDS.length));
-  }
-  const strongest = warnings.find(w => w.severity === 'block') || warnings[0] || null;
-  return { items, warning: strongest, gathered: matched.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
-}
-
-
-// ── Lever API ───────────────────────────────────────────────────────────────
-// Public JSON endpoint: api.lever.co/v0/postings/{company}?mode=json
-
-/**
- * Curated list of companies using Lever ATS.
- * Slugs map to: api.lever.co/v0/postings/{slug}?mode=json
- *
- * When a slug is wrong or the company moved off Lever, the API returns a
- * non-2xx response — the extractor logs "(N API errors)" per run so stale
- * entries are immediately visible. Audit by checking jobs.lever.co/{slug}.
- *
- * Last audited: 2026-05-28 — kept only slugs returning HTTP 200 from
- * api.lever.co. The previous broad list had fully stale 404 boards, causing
- * Lever to report a clean zero even though every request failed.
- */
-const LEVER_COMPANIES = [
-  { slug: 'palantir', company: 'Palantir' },
-  { slug: 'mistral', company: 'Mistral AI' },
-  { slug: 'zoox', company: 'Zoox' },
-  { slug: 'spotify', company: 'Spotify' },
-  { slug: 'plaid', company: 'Plaid' },
-  { slug: 'wealthsimple', company: 'Wealthsimple' },
-];
-
-/**
- * Fetch jobs from Lever career pages matching the query.
- */
-export async function fetchLeverJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
-  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
-  const warnings = [];
-  let leverApiErrors = 0;
-  let leverEmptyBoards = 0;
-  const allJobs = await processInBatches(LEVER_COMPANIES, 10, async ({ slug, company }) => {
-    const r = await safeApiFetch(`https://api.lever.co/v0/postings/${slug}?mode=json`, {
-      headers: { 'Accept': 'application/json' },
-      signal: createTimeoutSignal(signal, apiTimeout('lever-api')),
-    }, 'lever');
-    if (r.warning) warnings.push(r.warning);
-    if (!r.ok) { leverApiErrors++; return []; }
-    const data = r.json;
-    const jobs = Array.isArray(data) ? data : [];
-    if (jobs.length === 0) leverEmptyBoards++;
-    return jobs.map(job => ({ ...job, _company: company }));
-  }, signal);
-
-  // Filter: job matches if relevant to ANY query (OR logic across all queries).
-  const qs = Array.isArray(queries) ? queries : [queries];
-  const matched = allJobs.filter(job => {
-    const roleText = `${job.text} ${job._company} ${job.categories?.team || ''}`;
-    return qs.some(q => jobRelevanceMatch(roleText, q, geoTerms));
-  });
-
-  const items = matched.slice(0, JOB_RESULT_CAP).map(job => {
-    const description = stripHtml(job.descriptionPlain || job.description || '');
-    return {
-      title: job.text || '',
-      company: job._company || '',
-      location: job.categories?.location || '',
-      salary: '',
-      description,
-      snippet: description.substring(0, 300),
-      url: job.hostedUrl || job.applyUrl || '',
-      posted: job.createdAt ? new Date(job.createdAt).toLocaleDateString() : '',
-      source: 'lever',
-    };
-  });
-  const withDesc = items.filter(j => j.description).length;
-  const companiesWithJobs = new Set(allJobs.map(j => j._company)).size;
-  logger.info(`[Lever API] ${allJobs.length} jobs fetched from ${companiesWithJobs}/${LEVER_COMPANIES.length} companies (${leverApiErrors} API errors, ${leverEmptyBoards} empty boards) → ${matched.length} matched query → ${items.length} returned, ${withDesc}/${items.length} have descriptions`);
-  if (leverApiErrors === LEVER_COMPANIES.length) {
-    warnings.push(allEndpointFetchesFailedWarning('Lever API', leverApiErrors, LEVER_COMPANIES.length));
-  }
-  const strongest = warnings.find(w => w.severity === 'block') || warnings[0] || null;
-  return { items, warning: strongest, gathered: matched.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
-}
-
 
 // ── USAJobs API ─────────────────────────────────────────────────────────────
 // Official API: data.usajobs.gov/api/search
@@ -1022,21 +741,32 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
     return qs.some(q => jobRelevanceMatch(roleText, q, geoTerms));
   });
 
-  const items = matched.slice(0, JOB_RESULT_CAP).map(job => ({
-    title: job.position || '',
-    company: job.company || '',
-    location: job.location || 'Remote',
-    salary: job.salary || (job.salary_min ? `$${job.salary_min} - $${job.salary_max}` : ''),
-    snippet: (job.tags || []).join(', '),
+  const items = matched.slice(0, JOB_RESULT_CAP).map(job => {
     // RemoteOK's API returns description as raw HTML — strip tags to plain text.
-    description: job.description ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '',
-    // RemoteOK's `url` is sometimes already absolute ("https://remoteOK.com/…")
-    // and sometimes a relative path; only prefix the relative form, else we get
-    // a doubled "https://remoteok.comhttps://remoteOK.com/…" broken link.
-    url: job.url ? (String(job.url).startsWith('http') ? job.url : `https://remoteok.com${job.url}`) : '',
-    posted: job.date || '',
-    source: 'remoteok',
-  }));
+    const descText = job.description ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
+    const tags = (job.tags || []).join(', ');
+    return {
+      title: job.position || '',
+      company: job.company || '',
+      location: job.location || 'Remote',
+      salary: job.salary || (job.salary_min ? `$${job.salary_min} - $${job.salary_max}` : ''),
+      // Pipeline convention: the FULL JD lives in `snippet` — that's the field the
+      // scorer reads (jobs.js slimBatch + "Description: ${job.snippet}") and the
+      // bug-report field-quality check measures. RemoteOK's API hands us the full
+      // description up front, so it belongs in `snippet`; fall back to the tag
+      // list only when a posting genuinely has none. (Previously snippet=tags with
+      // the real JD stranded in `description`, which nothing downstream reads — so
+      // every remoteOK job was scored on a bare tag list, not its description.)
+      snippet: descText || tags,
+      description: descText,
+      // RemoteOK's `url` is sometimes already absolute ("https://remoteOK.com/…")
+      // and sometimes a relative path; only prefix the relative form, else we get
+      // a doubled "https://remoteok.comhttps://remoteOK.com/…" broken link.
+      url: job.url ? (String(job.url).startsWith('http') ? job.url : `https://remoteok.com${job.url}`) : '',
+      posted: job.date || '',
+      source: 'remoteok',
+    };
+  });
   const withDesc = items.filter(j => j.description).length;
   logger.info(`[RemoteOK API] ${items.length} jobs matched, ${withDesc}/${items.length} have descriptions`);
   return { items, warning: r.warning, gathered: matched.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
@@ -1118,26 +848,148 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
 
 
 // ── Reverb Internal REST API ────────────────────────────────────────────────
-// Internal endpoint: api.reverb.com/api/listings/all
-// Requires Accept-Version: 3.0 and Accept: application/hal+json headers.
-// Returns structured JSON with instrument pricing, condition, and seller data.
+// Two distinct datasets, two endpoints (both keyless; Accept-Version: 3.0 +
+// Accept: application/hal+json):
+//   • ACTIVE listings → /api/listings/all (live for-sale inventory). CRITICAL:
+//     this endpoint ONLY ever returns state=live listings — `state=ended` /
+//     `state=sold` are SILENTLY IGNORED (verified against the live API: a "sold"
+//     query returns brand-new dealer listings at full retail). It can NOT yield
+//     sold data; using it as a sold source overprices by ~2x (new vs used).
+//   • SOLD prices → the Price Guide: /api/priceguide?query= resolves the model
+//     guide(s); /api/priceguide/<id>/transactions lists individual COMPLETED
+//     sales (date, condition, price_final). This is the real "what buyers paid".
+const REVERB_HEADERS = {
+  'Accept': 'application/hal+json',
+  'Accept-Version': '3.0',
+  'Content-Type': 'application/hal+json',
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+};
+
+function reverbTokens(s) {
+  return String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
 
 /**
- * Fetch marketplace listings from Reverb's internal REST API.
- * Returns the standard comp shape for pricing comparison.
+ * Rank Reverb price-guide results by token overlap of make+model+title+finish
+ * against the query, returning the best `limit` matches. A min-hit gate drops
+ * loosely-related guides so a vague query never prices against the wrong
+ * instrument. Pure (no I/O) for testability.
+ */
+export function selectReverbPriceGuides(query, guides, limit = 2) {
+  const qt = reverbTokens(query);
+  if (qt.length === 0) return [];
+  const minHits = Math.min(2, qt.length);
+  // Model-number tokens (those containing a digit: "a3r", "ls6", "xm4"). When the
+  // query names one, the guide MUST share it — otherwise a generic brand/tech
+  // token (e.g. "yamaha", or Yamaha's "are" acoustic-resonance acronym) matches
+  // the WRONG model (a "Yamaha LS6M ARE" guide for an "A3R ARE" query).
+  const modelToks = qt.filter(t => /\d/.test(t));
+  return (Array.isArray(guides) ? guides : [])
+    .map(g => {
+      const gt = reverbTokens(`${g?.make || ''} ${g?.model || ''} ${g?.title || ''} ${g?.finish || ''}`);
+      const hits = qt.reduce((n, t) => n + (gt.includes(t) ? 1 : 0), 0);
+      return { guide: g, gt, hits };
+    })
+    .filter(s => s.hits >= minHits && (modelToks.length === 0 || modelToks.some(m => s.gt.includes(m))))
+    .sort((a, b) => b.hits - a.hits)
+    .slice(0, limit)
+    .map(s => s.guide);
+}
+
+/**
+ * Map a price guide's completed transactions to the standard sold-comp shape,
+ * using price_final (the actual sale price; falls back to price_ask). Dedups by
+ * order_id. Pure (no I/O) for testability.
+ */
+export function reverbTransactionsToComps(guide, transactions) {
+  const out = [];
+  const seen = new Set();
+  const title = guide?.title || `${guide?.make || ''} ${guide?.model || ''}`.trim();
+  const baseUrl = guide?._links?.web?.href || '';
+  for (const t of (Array.isArray(transactions) ? transactions : [])) {
+    const final = t?.price_final?.amount ?? t?.price_ask?.amount;
+    const price = final != null ? parseFloat(final) : 0;
+    if (!(price > 0)) continue;
+    const key = String(t?.order_id || `${t?.date || ''}:${price}`);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      title,
+      price,
+      priceText: t?.price_final?.display || t?.price_ask?.display || `$${price}`,
+      condition: typeof t?.condition === 'string' ? t.condition : (t?.condition?.display_name || ''),
+      soldDate: t?.date || '',
+      // Each transaction is a DISTINCT completed sale, but Reverb exposes no
+      // per-sale URL — they all share the guide page. Append the transaction key
+      // as a fragment so the pipeline's url-keyed dedup (uniqueCompCount) counts
+      // them as the distinct sales they are, instead of collapsing to 1-per-guide
+      // (which surfaced as a bogus "2 unique of 48" double-count warning).
+      url: baseUrl ? `${baseUrl}#tx-${key}` : '',
+      source: 'reverb',
+    });
+  }
+  return out;
+}
+
+/**
+ * Reverb SOLD comps via the Price Guide (real completed-sale prices). Two-step:
+ * resolve the best-matching guide(s) from /api/priceguide, then fetch each
+ * guide's /transactions — up to 2 guides so a model split by finish/year still
+ * yields a usable comp set.
+ */
+async function fetchReverbSoldComps(query, signal, safeApiFetch) {
+  const guideRes = await safeApiFetch(
+    `https://api.reverb.com/api/priceguide?query=${encodeURIComponent(query)}`,
+    { headers: REVERB_HEADERS, signal: createTimeoutSignal(signal, apiTimeout('reverb-api')) },
+    'reverb',
+  );
+  if (!guideRes.ok) {
+    if (guideRes.warning) logger.warn(`[Reverb PriceGuide] ${guideRes.warning.code}: ${guideRes.warning.evidence}`);
+    else logger.warn(`[Reverb PriceGuide] Returned ${guideRes.status}`);
+    return { items: [], warning: guideRes.warning };
+  }
+  const guides = selectReverbPriceGuides(query, guideRes.json?.price_guides || []);
+  if (guides.length === 0) {
+    logger.info(`[Reverb PriceGuide] no matching price guide for "${query}"`);
+    return { items: [], warning: null };
+  }
+
+  const items = [];
+  let warning = null;
+  const seenKeys = new Set();
+  for (const g of guides) {
+    if (signal?.aborted) break;
+    const txRes = await safeApiFetch(
+      `https://api.reverb.com/api/priceguide/${g.id}/transactions`,
+      { headers: REVERB_HEADERS, signal: createTimeoutSignal(signal, apiTimeout('reverb-api')) },
+      'reverb',
+    );
+    if (!txRes.ok) { warning = warning || txRes.warning; continue; }
+    for (const comp of reverbTransactionsToComps(g, txRes.json?.transactions || [])) {
+      const key = `${g.id}:${comp.soldDate}:${comp.price}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      items.push(comp);
+    }
+  }
+  logger.info(`[Reverb PriceGuide] "${query}" → ${guides.length} guide(s), ${items.length} sold transaction(s)`);
+  return { items, warning };
+}
+
+/**
+ * Fetch marketplace comps from Reverb. soldOnly=true uses the Price Guide
+ * (completed sales); soldOnly=false uses /api/listings/all (live ACTIVE asks).
  */
 export async function fetchReverbListings(query, soldOnly = false, signal = null) {
   const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
-  const params = new URLSearchParams({ query });
-  if (soldOnly) params.set('state', 'ended');
 
-  const r = await safeApiFetch(`https://api.reverb.com/api/listings/all?${params}`, {
-    headers: {
-      'Accept': 'application/hal+json',
-      'Accept-Version': '3.0',
-      'Content-Type': 'application/hal+json',
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    },
+  if (soldOnly) {
+    return fetchReverbSoldComps(query, signal, safeApiFetch);
+  }
+
+  // Active (live) listings — asking prices, not sold.
+  const r = await safeApiFetch(`https://api.reverb.com/api/listings/all?${new URLSearchParams({ query })}`, {
+    headers: REVERB_HEADERS,
     signal: createTimeoutSignal(signal, apiTimeout('reverb-api')),
   }, 'reverb');
 
@@ -1149,21 +1001,86 @@ export async function fetchReverbListings(query, soldOnly = false, signal = null
 
   const data = r.json;
   const listings = data?.listings || data?._embedded?.listings || [];
-
-  const items = listings.slice(0, 25).map(listing => {
+  const items = listings.map(listing => {
     const price = listing.price?.amount ? parseFloat(listing.price.amount) : 0;
     return {
       title: listing.title || listing.make_model || '',
       price,
       priceText: price > 0 ? `$${price.toFixed(2)}` : '',
       condition: listing.condition?.display_name || listing.condition?.slug || '',
-      soldDate: listing.state === 'ended' ? (listing.sold_date || 'Sold') : '',
+      soldDate: '',
       seller: listing.seller?.feedback_percentage ? `${listing.seller.feedback_percentage}%` : '',
       url: listing._links?.web?.href || listing.web_url || '',
       source: 'reverb',
     };
   });
   return { items, warning: r.warning };
+}
+
+// ── PriceCharting (direct HTTP, NOT the stealth browser) ────────────────────
+// PriceCharting's per-product price columns are SERVER-RENDERED into
+// <span class="js-price"> (verified by curl), but its CLIENT-SIDE JS BLANKS them
+// when it detects automation (navigator.webdriver / CDP) — so the Puppeteer scrape
+// always read "N rows, 0 prices" no matter how long it waited. A plain HTTP GET
+// with a browser UA runs no JS, so the server-rendered prices survive. Same
+// direct-HTTP pattern as Reverb. Niche source (video games + retro consoles):
+// returns [] for unrelated queries.
+const PRICECHARTING_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml',
+};
+
+// Parse the search-results table out of PriceCharting HTML. PURE (no I/O) for
+// testability. Each result row (`#games_table tbody tr`) carries a title link
+// (`td.title a` → name + /game/ URL) and three price columns in order:
+// loose/used | CIB | new. We take the FIRST (loose/used) as the FMV anchor — the
+// right comp for a typical used/refurbished listing. Rows without a parseable
+// price (unpriced accessories) are skipped; de-duped by URL. JSDOM does not run
+// scripts or load resources, so the anti-automation JS can't blank the prices here.
+export function parsePriceChartingHtml(html) {
+  const doc = new JSDOM(String(html || '')).window.document;
+  const parsePrice = (txt) => {
+    const m = String(txt || '').replace(/[,\s]/g, '').match(/\$?(\d+(?:\.\d{1,2})?)/);
+    return m ? parseFloat(m[1]) : 0;
+  };
+  const items = [];
+  const seen = new Set();
+  for (const row of doc.querySelectorAll('#games_table tbody tr')) {
+    const a = row.querySelector('td.title a');
+    if (!a) continue;
+    const title = (a.textContent || '').trim();
+    const href = a.getAttribute('href') || '';
+    if (!title || !href) continue;
+    const priceEl = row.querySelector('td.price .js-price') || row.querySelector('td.price');
+    const price = parsePrice(priceEl && priceEl.textContent);
+    if (!(price > 0)) continue;   // unpriced row (e.g. an accessory with no loose price)
+    const url = href.startsWith('http')
+      ? href
+      : 'https://www.pricecharting.com' + (href.startsWith('/') ? href : '/' + href);
+    if (seen.has(url)) continue;
+    seen.add(url);
+    items.push({ title, price, priceText: '$' + price.toFixed(2), url, condition: 'Loose (cart-only)', source: 'pricecharting' });
+  }
+  return items;
+}
+
+export async function fetchPriceChartingComps(query, signal = null) {
+  const q = String(query || '').trim();
+  if (!q) return { items: [], warning: null };
+  const url = `https://www.pricecharting.com/search-products?q=${encodeURIComponent(q)}&type=prices`;
+  let res;
+  try {
+    res = await fetch(url, { headers: PRICECHARTING_HEADERS, signal: createTimeoutSignal(signal, apiTimeout('pricecharting-api')) });
+  } catch (e) {
+    logger.warn(`[PriceCharting] fetch failed: ${String(e?.message || e).slice(0, 160)}`);
+    return { items: [], url, warning: { code: 'task-failed', severity: 'block', evidence: `fetch failed: ${String(e?.message || e).slice(0, 200)}` } };
+  }
+  if (!res.ok) {
+    logger.warn(`[PriceCharting] HTTP ${res.status}`);
+    return { items: [], url, warning: { code: 'task-failed', severity: 'block', evidence: `HTTP ${res.status} (server bot-gate or rate-limit)` } };
+  }
+  const items = parsePriceChartingHtml(await res.text());
+  return { items, url, warning: null };
 }
 
 // ── Dice Public API ─────────────────────────────────────────────────────────
@@ -1176,26 +1093,6 @@ export async function fetchReverbListings(query, soldOnly = false, signal = null
 
 // Dice API key is persisted in settings (getDiceApiKey) and auto-refreshed
 // by refreshDiceApiKey() when the server returns 500 — see stealthBrowser.js.
-
-// ── Indeed (Scrapfly REST API) ───────────────────────────────────────────────
-// Scrapfly is now the ONLY Indeed collection path. The old visible-browser /
-// Puppeteer flow is intentionally bypassed because Indeed's challenge stack made
-// local browser automation unreliable and expensive in user time.
-//
-// Cost strategy:
-//   1. Start with raw HTML: asp=true, US geo, no render_js, datacenter default.
-//      ASP may upgrade proxy/fingerprint only if Indeed actually requires it.
-//   2. Use a short Scrapfly cache TTL so immediate re-runs during iteration do
-//      not pay for the same query/page repeatedly.
-//   3. Set a per-request cost_budget high enough for the observed raw-HTML path.
-//      Live probe on 2026-05-25 succeeded at 80 credits for page 1; use 100 as
-//      headroom so minor Scrapfly target-cost variance does not hard-fail.
-
-const SCRAPFLY_SCRAPE_ENDPOINT = 'https://api.scrapfly.io/scrape';
-const SCRAPFLY_INDEED_MAX_PAGES = 5;
-const SCRAPFLY_INDEED_CACHE_TTL_SECONDS = 15 * 60;
-const SCRAPFLY_INDEED_COST_BUDGET = 100;
-const SCRAPFLY_PAGE_DELAY_MS = 600;
 
 function decodeScriptText(text) {
   return String(text || '')
@@ -1475,292 +1372,6 @@ export function extractIndeedJobsFromHtml(html, windowMosaicResults = null) {
   return dedupeIndeedJobs([...nextData, ...mosaic, ...dom]);
 }
 
-function buildIndeedSearchUrl(query, days, page) {
-  const params = new URLSearchParams({
-    q: query,
-    fromage: String(days),
-  });
-  if (page > 0) params.set('start', String(page * 10));
-  return `https://www.indeed.com/jobs?${params}`;
-}
-
-function buildScrapflyIndeedUrl(apiKey, targetUrl, { proxyPool = null, cacheClear = false, correlationId = null } = {}) {
-  const params = new URLSearchParams({
-    key: apiKey,
-    url: targetUrl,
-    asp: 'true',
-    country: 'us',
-    lang: 'en-US,en',
-    format: 'raw',
-    retry: 'true',
-    cache: 'true',
-    cache_ttl: String(SCRAPFLY_INDEED_CACHE_TTL_SECONDS),
-    cost_budget: String(SCRAPFLY_INDEED_COST_BUDGET),
-  });
-  if (proxyPool) params.set('proxy_pool', proxyPool);
-  if (cacheClear) params.set('cache_clear', 'true');
-  if (correlationId) params.set('correlation_id', correlationId);
-  return `${SCRAPFLY_SCRAPE_ENDPOINT}?${params}`;
-}
-
-async function readScrapflyContent(result, apiKey, signal) {
-  const content = result?.content;
-  if (!content) return '';
-  const format = String(result?.format || '').toLowerCase();
-  if (format !== 'clob' && format !== 'blob') return String(content);
-
-  const url = new URL(content);
-  url.searchParams.set('key', apiKey);
-  const response = await fetch(url, {
-    signal: createTimeoutSignal(signal, apiTimeout('scrapfly-api')),
-    headers: { Accept: 'text/html,application/xhtml+xml,text/plain,*/*' },
-  });
-  if (!response.ok) throw new Error(`Scrapfly large-object download failed: HTTP ${response.status}`);
-  return response.text();
-}
-
-function scrapflyErrorWarning(issue, totalJobs) {
-  const code = issue?.code || '';
-  const message = issue?.message || issue?.description || 'Scrapfly request failed';
-  const severity = totalJobs > 0 ? 'warn' : 'block';
-  let suggestion = 'Indeed is fetched through Scrapfly. Check the Scrapfly dashboard log for this request, then retry.';
-  let warningCode = 'scrapfly-failed';
-
-  if (/QUOTA|PAYMENT|CREDIT|BUDGET/i.test(code) || /quota|payment|credit|budget/i.test(message)) {
-    warningCode = code.includes('COST_BUDGET') ? 'scrapfly-cost-budget' : 'scrapfly-quota';
-    suggestion = code.includes('COST_BUDGET')
-      ? `Scrapfly needed more than the per-request ${SCRAPFLY_INDEED_COST_BUDGET}-credit budget for Indeed. Raise the budget in code only if that spend is acceptable.`
-      : 'Scrapfly quota or billing blocked the request. Add credits or update billing in Scrapfly, then retry.';
-  } else if (/CONCURRENT|THROTTLE|429/i.test(code) || /concurrent|throttle|too many/i.test(message)) {
-    warningCode = 'scrapfly-throttled';
-    suggestion = 'Scrapfly throttled the request. Retry later or reduce concurrent job searches.';
-  } else if (/CONFIG|401|403/i.test(code) || /api key|unauthorized|forbidden/i.test(message)) {
-    warningCode = 'scrapfly-config';
-    suggestion = 'Verify the Scrapfly API key in Settings → Job Sources.';
-  }
-
-  return {
-    code: warningCode,
-    severity,
-    evidence: `${code ? `${code}: ` : ''}${message}`.slice(0, 500),
-    suggestion,
-  };
-}
-
-async function scrapeIndeedPageWithScrapfly(apiKey, targetUrl, signal, options = {}) {
-  const scrapflyUrl = buildScrapflyIndeedUrl(apiKey, targetUrl, options);
-  const startedAt = Date.now();
-  const response = await fetch(scrapflyUrl, {
-    signal: createTimeoutSignal(signal, apiTimeout('scrapfly-api')),
-    headers: {
-      Accept: 'application/json',
-      'Accept-Encoding': 'gzip',
-    },
-  });
-
-  let payload = null;
-  let rawBody = '';
-  try {
-    rawBody = await response.text();
-    payload = rawBody ? JSON.parse(rawBody) : null;
-  } catch {
-    payload = null;
-  }
-
-  const cost = Number(response.headers.get('x-scrapfly-api-cost') || payload?.context?.cost?.total || 0) || 0;
-  const remaining = response.headers.get('x-scrapfly-remaining-api-credit') || null;
-  const logUuid = response.headers.get('x-scrapfly-log') || payload?.uuid || payload?.context?.log?.uuid || null;
-  const headerCode = response.headers.get('x-scrapfly-reject-code') || '';
-  const headerDocsUrl = response.headers.get('x-scrapfly-reject-description') || '';
-  const headerRetryable = response.headers.get('x-scrapfly-reject-retryable') === 'true';
-
-  if (!response.ok) {
-    return {
-      ok: false,
-      cost,
-      remaining,
-      logUuid,
-      retryable: headerRetryable || response.status >= 500 || response.status === 429,
-      error: {
-        http_code: response.status,
-        code: headerCode || payload?.code || payload?.error?.code || `HTTP_${response.status}`,
-        message: payload?.message || payload?.error?.message || rawBody.slice(0, 300),
-        docsUrl: headerDocsUrl || undefined,
-      },
-    };
-  }
-
-  const result = payload?.result || {};
-  const resultError = result?.error || payload?.error || null;
-  if (resultError || result?.success === false) {
-    return {
-      ok: false,
-      cost,
-      remaining,
-      logUuid,
-      retryable: !!resultError?.retryable,
-      error: resultError || {
-        http_code: result?.status_code || 422,
-        code: 'SCRAPFLY_RESULT_FAILED',
-        message: result?.reason || 'Scrapfly returned an unsuccessful scrape result',
-      },
-    };
-  }
-
-  if (result?.status_code && result.status_code >= 400) {
-    return {
-      ok: false,
-      cost,
-      remaining,
-      logUuid,
-      retryable: result.status_code >= 500 || result.status_code === 429,
-      error: {
-        http_code: result.status_code,
-        code: 'INDEED_UPSTREAM_ERROR',
-        message: `Indeed returned HTTP ${result.status_code}`,
-      },
-    };
-  }
-
-  const content = await readScrapflyContent(result, apiKey, signal);
-  return {
-    ok: true,
-    content,
-    cost,
-    remaining,
-    logUuid,
-    elapsedMs: Date.now() - startedAt,
-    cacheState: payload?.context?.cache?.state || null,
-  };
-}
-
-async function scrapeIndeedPageWithRetries(apiKey, targetUrl, signal, options) {
-  let attempt = await scrapeIndeedPageWithScrapfly(apiKey, targetUrl, signal, options);
-  if (attempt.ok) return attempt;
-
-  const code = attempt.error?.code || '';
-  if (code === 'ERR::PROXY::POOL_NOT_AVAILABLE_FOR_TARGET') {
-    attempt = await scrapeIndeedPageWithScrapfly(apiKey, targetUrl, signal, {
-      ...options,
-      proxyPool: 'public_residential_pool',
-    });
-  } else if (attempt.retryable && !signal?.aborted) {
-    await new Promise(r => setTimeout(r, 1000));
-    attempt = await scrapeIndeedPageWithScrapfly(apiKey, targetUrl, signal, {
-      ...options,
-      cacheClear: true,
-    });
-  }
-
-  return attempt;
-}
-
-/**
- * Fetch Indeed job listings via Scrapfly's ASP bypass.
- * @param {string[]} queries — array of job search queries
- * @param {AbortSignal|null} signal
- * @param {number|null} maxAgeDays
- * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
- */
-export async function fetchIndeedListings(queries, signal = null, maxAgeDays = null) {
-  const { scrapflyApiKey } = getJobsSettings();
-  const apiKey = String(scrapflyApiKey || '').trim();
-  if (!apiKey) {
-    return {
-      items: [],
-      warning: {
-        code: 'config-missing',
-        severity: 'info',
-        evidence: 'Scrapfly API key not set',
-        suggestion: 'Open Settings → Job Sources and paste a Scrapfly API key to enable Indeed.',
-      },
-      gathered: 0,
-    };
-  }
-
-  const queryList = Array.isArray(queries) ? queries.filter(Boolean) : [queries].filter(Boolean);
-  const days = maxAgeDays ? Math.max(1, Math.floor(maxAgeDays)) : 21;
-  const resultCap = Number.isFinite(JOB_RESULT_CAP) ? JOB_RESULT_CAP : Infinity;
-  const maxPages = Number.isFinite(resultCap)
-    ? Math.max(1, Math.min(SCRAPFLY_INDEED_MAX_PAGES, Math.ceil(resultCap / 10)))
-    : SCRAPFLY_INDEED_MAX_PAGES;
-  const allJobs = [];
-  const seenKeys = new Set();
-  const issues = [];
-  let totalCost = 0;
-  let lastRemaining = null;
-
-  outer:
-  for (const query of queryList) {
-    if (signal?.aborted) break;
-
-    for (let page = 0; page < maxPages; page++) {
-      if (signal?.aborted) break outer;
-      if (allJobs.length >= resultCap) break outer;
-
-      const indeedUrl = buildIndeedSearchUrl(query, days, page);
-      const correlationId = `indeed-${Date.now()}-${page}`;
-      let scrape;
-      try {
-        scrape = await scrapeIndeedPageWithRetries(apiKey, indeedUrl, signal, {
-          correlationId,
-        });
-      } catch (err) {
-        if (signal?.aborted) break outer;
-        issues.push({ code: 'SCRAPFLY_FETCH_EXCEPTION', message: err?.message || String(err) });
-        logger.warn(`[Indeed/Scrapfly] Fetch exception query="${query}" page=${page + 1}: ${err?.message || err}`);
-        break;
-      }
-
-      totalCost += scrape.cost || 0;
-      lastRemaining = scrape.remaining || lastRemaining;
-
-      if (!scrape.ok) {
-        issues.push(scrape.error);
-        logger.warn(
-          `[Indeed/Scrapfly] ${scrape.error?.code || 'error'} query="${query}" page=${page + 1}` +
-          `${scrape.logUuid ? ` log=${scrape.logUuid}` : ''}: ${scrape.error?.message || ''}`
-        );
-        break;
-      }
-
-      const pageJobs = extractIndeedJobsFromHtml(scrape.content);
-
-      logger.info(
-        `[Indeed/Scrapfly] query="${query}" page=${page + 1} jobs=${pageJobs.length}` +
-        ` cost=${scrape.cost || 0}${scrape.cacheState ? ` cache=${scrape.cacheState}` : ''}` +
-        `${scrape.logUuid ? ` log=${scrape.logUuid}` : ''}`
-      );
-
-      if (pageJobs.length === 0) break;
-
-      for (const job of pageJobs) {
-        const dk = job.jobkey || job.url || jobTitleCompanyLocationKey(job);
-        if (seenKeys.has(dk)) continue;
-        seenKeys.add(dk);
-        allJobs.push(job);
-        if (allJobs.length >= resultCap) break;
-      }
-
-      if (pageJobs.length < 10) break;
-      if (page < maxPages - 1) await new Promise(r => setTimeout(r, SCRAPFLY_PAGE_DELAY_MS));
-    }
-  }
-
-  logger.info(
-    `[Indeed/Scrapfly] Total: ${allJobs.length} unique jobs across ${queryList.length} quer(y|ies), ` +
-    `cost=${totalCost}${lastRemaining ? `, remaining=${lastRemaining}` : ''}`
-  );
-
-  const inWindow = maxAgeDays ? filterJobsByAge(allJobs, maxAgeDays) : allJobs;
-  const items = inWindow.slice(0, JOB_RESULT_CAP);
-  const warning = issues.length > 0
-    ? scrapflyErrorWarning(issues[issues.length - 1], items.length)
-    : null;
-  return { items, warning, gathered: inWindow.length };
-}
-
-
 /**
  * Fetch job listings from Dice via their public API (Tier 1).
  * @param {string} query — job search query
@@ -1879,6 +1490,18 @@ export async function fetchDiceListings(query, location = '', signal = null, max
 
   logger.info(`[Dice API] Found ${jobs.length} jobs for "${query}"`);
 
+  // Dice's `salary` field is free text — often non-monetary prose like "Depends
+  // on Experience", "Competitive", or "Compensation information provided in the
+  // description". Keep only values that actually look like money (contain a
+  // digit) and aren't one of those known non-monetary phrases, so the renderer's
+  // salary parsing/buckets don't ingest garbage. Anything dropped renders as
+  // "Unspecified", which is correct.
+  const cleanDiceSalary = (raw) => {
+    const s = String(raw || '').trim();
+    if (!s || !/\d/.test(s)) return '';
+    if (/compensation information|depends on|provided in the desc|commensurate|competitive/i.test(s)) return '';
+    return s;
+  };
   const mapped = jobs.map(job => {
     // List API returns `summary` (short blurb) but rarely `description` (full HTML).
     // Use summary as a placeholder — a second enrichment pass fetches full descriptions
@@ -1892,7 +1515,7 @@ export async function fetchDiceListings(query, location = '', signal = null, max
       title: job.title || '',
       company: job.companyName || '',
       location: job.jobLocation?.displayName || '',
-      salary: job.salary || '',
+      salary: cleanDiceSalary(job.salary),
       snippet: snippetText,
       description: descText,
       url: job.detailsPageUrl || `https://www.dice.com/job-detail/${job.guid || job.id}`,
@@ -1955,13 +1578,25 @@ export async function enrichDiceDescriptions(jobs, signal) {
 
   const BATCH = 10;
   const enriched = [];
+  // Telemetry: did the detail endpoint actually return a FULLER description than
+  // the list `summary`, or are we silently falling back to Dice's ~500-char
+  // summary? The old "N/N have descriptions" (>300 chars) log hid this — the
+  // uniform ~500-char Dice snippets seen in bug reports trace straight to here.
+  let lengthened = 0;
+  const fallbackReasons = {}; // reason -> count
+  let sampleFail = '';
+  const note = (reason, ref) => {
+    fallbackReasons[reason] = (fallbackReasons[reason] || 0) + 1;
+    if (!sampleFail) sampleFail = `${reason} @ ${ref || '?'}`;
+  };
 
   for (let i = 0; i < jobs.length; i += BATCH) {
     if (signal?.aborted) break;
     const batch = jobs.slice(i, i + BATCH);
     const results = await Promise.all(batch.map(async (job) => {
       const id = job._diceId;
-      if (!id) return job;
+      const summaryLen = (job.snippet || '').length;
+      if (!id) { note('no-id', job.url); return job; }
       try {
         const url = `https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/${id}`;
         const r = await safeApiFetch(url, {
@@ -1972,17 +1607,26 @@ export async function enrichDiceDescriptions(jobs, signal) {
           },
           signal: createTimeoutSignal(signal, 10000),
         }, 'dice');
-        if (!r.ok) return job;
+        if (!r.ok) { note(`http-${r.status}`, job.url); return job; }
         // Detail endpoint returns either a single object or { data: {...} }
         const detail = r.json?.data ?? r.json;
         const descHtml = detail?.description || '';
-        if (!descHtml) return job;
+        if (!descHtml) { note('no-desc-field', job.url); return job; }
         const descText = descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-        if (!descText) return job;
+        if (!descText) { note('empty-after-strip', job.url); return job; }
         const rest = { ...job };
         delete rest._diceId;
-        return { ...rest, description: descText, snippet: descText };
+        // Keep whichever is longer — guards against the detail endpoint returning
+        // a shorter/truncated field than the summary we already had.
+        if (descText.length > summaryLen) {
+          lengthened += 1;
+          return { ...rest, description: descText, snippet: descText };
+        }
+        note('not-longer-than-summary', job.url);
+        const best = (rest.snippet && rest.snippet.length >= descText.length) ? rest.snippet : descText;
+        return { ...rest, description: best, snippet: best };
       } catch {
+        note('fetch-error', job.url);
         return job; // keep summary on error
       }
     }));
@@ -1996,195 +1640,9 @@ export async function enrichDiceDescriptions(jobs, signal) {
     return rest;
   });
 
-  const withFullDesc = cleaned.filter(j => j.description && j.description.length > 300).length;
-  logger.info(`[Dice API] Enriched ${cleaned.length} jobs — ${withFullDesc}/${cleaned.length} have full descriptions`);
+  const reasonStr = Object.entries(fallbackReasons).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(', ');
+  const fellBack = cleaned.length - lengthened;
+  logger.info(`[Dice API] Enriched ${cleaned.length} jobs — ${lengthened} genuinely lengthened from detail endpoint${fellBack > 0 ? `; ${fellBack} kept list summary [${reasonStr}${sampleFail ? ` — e.g. ${sampleFail}` : ''}]` : ''}`);
   return cleaned;
 }
 
-
-// ── StockX Algolia API Bypass ───────────────────────────────────────────────
-// StockX outsources search to Algolia. We extract the API keys from the page
-// HTML, then query Algolia directly — bypassing StockX's PerimeterX WAF.
-// Keys rotate, so we extract them fresh each session.
-//
-// Known StockX Algolia Application ID — this is a public, client-facing value
-// embedded in StockX's frontend JS. It's tied to their Algolia account and
-// almost never changes (years). The search API key, however, may rotate.
-const HARDCODED_STOCKX_APP_ID = '2FWOTDVM2O';
-
-// Architecture: Try hardcoded App ID + cached API key first (Tier 1).
-//               If keys expired → Puppeteer stealth bootstrap to extract fresh keys.
-//               All data queries go directly to Algolia API (Tier 1).
-// Plain fetch() WILL NOT WORK for key extraction — PerimeterX serves a JS
-// challenge page that requires full browser rendering to solve.
-
-let algoliaKeys = null; // Cache keys for the session
-let lastStockXErrorTime = 0; // Cooldown for extraction failures
-
-// Extractor JS that runs inside the Puppeteer page to grab Algolia keys.
-// Searches all <script> tags and window properties for the key/appId pair.
-const STOCKX_KEY_EXTRACTOR = `
-(function() {
-  // Strategy 1: Search inline scripts for Algolia config
-  const scripts = document.querySelectorAll('script');
-  for (const script of scripts) {
-    const text = script.textContent || '';
-    const appIdMatch = text.match(/x-algolia-application-id['":\\s]+([A-Z0-9]+)/i) ||
-                       text.match(/algoliaApplicationId['":\\s]+['"]([A-Z0-9]+)['"]/i) ||
-                       text.match(/"applicationId":\\s*"([A-Z0-9]+)"/i);
-    const apiKeyMatch = text.match(/x-algolia-api-key['":\\s]+([a-f0-9]+)/i) ||
-                        text.match(/algoliaApiKey['":\\s]+['"]([a-f0-9]+)['"]/i) ||
-                        text.match(/"apiKey":\\s*"([a-f0-9]+)"/i);
-    if (appIdMatch && apiKeyMatch) {
-      return { appId: appIdMatch[1], apiKey: apiKeyMatch[1] };
-    }
-  }
-
-  // Strategy 2: Check __NEXT_DATA__ for Algolia config
-  try {
-    const ndEl = document.getElementById('__NEXT_DATA__');
-    if (ndEl) {
-      const nd = JSON.parse(ndEl.textContent);
-      const config = nd?.props?.pageProps?.algoliaConfig ||
-                     nd?.runtimeConfig?.algolia ||
-                     nd?.props?.pageProps?.searchConfig;
-      if (config?.appId && config?.apiKey) {
-        return { appId: config.appId, apiKey: config.apiKey };
-      }
-    }
-  } catch {}
-
-  // Strategy 3: Check global window properties
-  try {
-    if (window.__algoliaConfig) return window.__algoliaConfig;
-    if (window.__STOCKX_CONFIG__?.algolia) return window.__STOCKX_CONFIG__.algolia;
-  } catch {}
-
-  return null;
-})()
-`;
-
-/**
- * Fetch marketplace listings from StockX via Algolia API bypass.
- *
- * Tier escalation:
- *   1. Try cached Algolia keys (Tier 1 — pure API, zero browser)
- *   2. If keys missing/expired: extract via Puppeteer stealth (Tier 3 bootstrap, once per session)
- *   3. All data queries go to Algolia directly (Tier 1)
- */
-export async function fetchStockXListings(query, signal = null) {
-  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
-  let bootstrapWarning = null;
-  try {
-    // Phase 1: Key Extraction Bootstrap (once per session)
-    if (!algoliaKeys) {
-      if (Date.now() - lastStockXErrorTime < 300000) {
-        logger.warn('[StockX] Bootstrap cooldown active — skipping');
-        return { items: [], warning: {
-          code: 'stockx-bootstrap-cooldown',
-          severity: 'block',
-          evidence: '[stockx] Key extraction failed recently — 5 min cooldown active',
-          suggestion: 'PerimeterX likely blocked the key-extraction page. Wait 5 minutes; if it persists, the stealth browser fingerprint may need rotation.',
-        } };
-      }
-
-      logger.info('[StockX] No cached keys — extracting via stealth browser...');
-      try {
-        // queueScrape now returns { data, warning } — propagate either the
-        // extracted keys or the anti-bot warning from the page fetch.
-        const wrapped = await queueScrape(
-          `https://stockx.com/search?s=${encodeURIComponent(query)}`,
-          STOCKX_KEY_EXTRACTOR,
-          {
-            waitMs: 3000,
-            timeoutMs: 35000,
-            scrollFirst: false,
-            dismissCookies: true,
-            referer: 'https://www.google.com/',
-            signal,
-          }
-        );
-        const keys = wrapped?.data ?? null;
-        // If the bootstrap fetch tripped PerimeterX, browserPool's detector
-        // already flagged it. Save the warning so we surface it even if we
-        // fall back to the hardcoded App ID and the Algolia query "works".
-        if (wrapped?.warning) bootstrapWarning = wrapped.warning;
-
-        if (keys?.appId && keys?.apiKey) {
-          algoliaKeys = keys;
-          logger.info(`[StockX] Algolia keys extracted: appId=${keys.appId.substring(0, 4)}...`);
-        } else {
-          lastStockXErrorTime = Date.now();
-          algoliaKeys = { appId: HARDCODED_STOCKX_APP_ID, apiKey: '' };
-          logger.warn('[StockX] Bootstrap failed — using hardcoded fallback. Cooldown active.');
-        }
-      } catch (err) {
-        lastStockXErrorTime = Date.now();
-        logger.error('[StockX] Extraction error:', err.message);
-        return { items: [], warning: bootstrapWarning || {
-          code: 'stockx-bootstrap-failed',
-          severity: 'block',
-          evidence: `[stockx] key extraction threw: ${err.message}`,
-          suggestion: 'PerimeterX likely served a JS challenge that stealth couldn\'t solve. Manual session refresh or proxy may be required.',
-        } };
-      }
-    }
-
-    if (!algoliaKeys?.appId) return { items: [], warning: bootstrapWarning };
-
-    // Phase 2: Query Algolia directly
-    const r = await safeApiFetch(
-      `https://${algoliaKeys.appId}-dsn.algolia.net/1/indexes/products/query`,
-      {
-        method: 'POST',
-        headers: {
-          'X-Algolia-Application-Id': algoliaKeys.appId,
-          'X-Algolia-API-Key': algoliaKeys.apiKey,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          query,
-          hitsPerPage: 25,
-        }),
-        signal: createTimeoutSignal(signal, apiTimeout('stockx-api')),
-      },
-      'stockx-algolia'
-    );
-
-    if (!r.ok) {
-      if (r.warning) logger.warn(`[StockX Algolia] ${r.warning.code}: ${r.warning.evidence}`);
-      else logger.warn(`[StockX Algolia] Returned ${r.status}`);
-      algoliaKeys = null;
-      // Prefer the Algolia warning when present; fall back to the bootstrap
-      // warning since the user wants to see ANY signal from this pipeline.
-      return { items: [], warning: r.warning || bootstrapWarning };
-    }
-
-    const data = r.json;
-    const hits = data?.hits || [];
-
-    const items = hits.slice(0, 25).map(hit => {
-      const lastSale = hit.last_sale || hit.market?.lastSale || 0;
-      const lowestAsk = hit.lowest_ask || hit.market?.lowestAsk || 0;
-      const price = lastSale || lowestAsk;
-
-      return {
-        title: hit.name || hit.title || '',
-        price,
-        priceText: price > 0 ? `$${price}` : '',
-        lastSale: lastSale > 0 ? `$${lastSale}` : '',
-        lowestAsk: lowestAsk > 0 ? `$${lowestAsk}` : '',
-        condition: 'New / Deadstock',
-        url: hit.url ? `https://stockx.com/${hit.url}` : '',
-        source: 'stockx',
-      };
-    });
-    // Surface bootstrapWarning even on a successful Algolia query — the user
-    // should know if we fell back to hardcoded keys because StockX blocked
-    // the key page, even if the search itself worked.
-    return { items, warning: r.warning || bootstrapWarning };
-  } catch (error) {
-    logger.error('[StockX Algolia] Fetch failed:', error?.message || String(error));
-    return { items: [], warning: bootstrapWarning };
-  }
-}

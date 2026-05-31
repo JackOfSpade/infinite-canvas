@@ -15,6 +15,72 @@
  *   { title, price, priceText, url, source, soldDate?, condition?, seller? }
  */
 
+// ── SITE_CHANGED diagnostic (page-context) ──────────────────────────────────
+// Interpolated into each extractor's throw site and invoked ONLY when extraction
+// already returned 0 — so it can never affect a successful scrape. It captures
+// the cheap, decisive facts the extractor has in hand at throw time, which the
+// thrown message (and thus the bug report's stale-selectors warning) otherwise
+// discards: the page path, title, a body-size proxy, and a login-wall flag. The
+// caller passes source-specific candidate counts in `extra` (e.g.
+// "cards=48 titleSel=0").
+//
+// This is what lets a report tell apart the two causes of a 0-result scrape that
+// "selectors may have changed" alone cannot — a user pasting the page HTML was
+// the only way before:
+//   • cards=0 (+ LOGIN-WALL / tiny bodyLen) → not logged in / empty anon page,
+//     NOT a code bug — log in and retry.
+//   • cards=N>0 but our sub-selector matched 0 (e.g. titleSel=0) → a genuine
+//     redesign; the candidate count + which sub-selector broke says what to fix.
+//
+// `sampleEl` (optional) — the first matched candidate card. When given, the diag
+// appends `card0=[…]`: the distinct CSS class tokens on that card and its
+// descendants (capped). That's the NEW markup's actual class names, so a selector
+// rewrite can be derived from the bug report alone — the user never has to paste
+// page HTML even when the broken sub-selector's replacement is unknown.
+const SITE_CHANGED_DIAG = `(function(extra, sampleEl){
+  try {
+    var path = location.pathname || '';
+    var title = (document.title || '').replace(/\\s+/g, ' ').slice(0, 40);
+    var bodyLen = ((document.body && document.body.textContent) || '').length;
+    var loginWall = /login|signin|sign-in/i.test(path)
+      || !!document.querySelector('input[type=password]')
+      || /\\b(log ?in|sign ?in)\\b/i.test(document.title || '');
+    var skel = '';
+    if (sampleEl) {
+      var seen = {}, toks = [];
+      var els = [sampleEl].concat(Array.prototype.slice.call(sampleEl.querySelectorAll('*')));
+      for (var i = 0; i < els.length && toks.length < 22; i++) {
+        var cn = (typeof els[i].className === 'string' ? els[i].className : '');
+        var parts = cn.split(/\\s+/);
+        for (var j = 0; j < parts.length; j++) {
+          var t = parts[j];
+          if (t && !seen[t]) { seen[t] = 1; toks.push(t); }
+        }
+      }
+      if (toks.length) skel = ' card0=[' + toks.join(' ').slice(0, 240) + ']';
+    }
+    return ' [diag ' + (extra ? extra + ' ' : '') + 'path=' + path
+      + ' title="' + title + '" bodyLen=' + bodyLen
+      + (loginWall ? ' LOGIN-WALL/anon-page' : '') + skel + ']';
+  } catch (e) { return ' [diag-failed]'; }
+})`;
+
+// Safe price parse for the page-context display-text extractors (injected the
+// same way as SITE_CHANGED_DIAG). The naive `parseFloat(text.replace(/[^0-9.]/g,
+// ''))` is a footgun: it strips every non-digit/non-dot char and FUSES any second
+// number in the same node onto the price. A Mercari on-sale card renders the
+// current price AND the strikethrough original together ("$274.55" + "$315" →
+// "274.55315"; a whole-dollar "$110" + "$199" → a catastrophic "110199"), and an
+// eBay "$10 to $20" range → "1020". This strips commas/spaces, then captures only
+// the FIRST money token with decimals capped at 2 (`\\d{1,2}`), so the leading
+// current/low price survives and a trailing original/range/count can't corrupt it.
+// Mirrors parsePriceChartingHtml's inline parsePrice (apiExtractors.js). Returns 0 on no match.
+const MONEY_PARSE_FN = `(function(txt){
+  if (!txt) return 0;
+  var m = String(txt).replace(/[,\\s]/g, '').match(/\\$?(\\d+(?:\\.\\d{1,2})?)/);
+  return m ? (parseFloat(m[1]) || 0) : 0;
+})`;
+
 // ── Site Configurations ─────────────────────────────────────────────────────
 // `timeoutMs` is a SEED / safety ceiling, not a fixed budget: scrapeBudget
 // learns each source's typical time-to-ready and derives a tighter working
@@ -91,35 +157,41 @@ export const MERCARI_CONFIG = {
   expectedMinItems: 3,
 };
 
-// PriceCharting publishes aggregated sold-price data for video games + retro
-// consoles. No aggressive anti-bot (their business model depends on price
-// data being accessible). Results are a `.offers-table` of rows, one per
-// game+console combo, with loose / CIB / new price columns.
-export const PRICECHARTING_CONFIG = {
-  waitMs: 1500,
-  timeoutMs: 25000,
-  waitFor: '.offers-table tr, table tr, #games_table',
-  scrollFirst: false,
-  dismissCookies: false,
-};
+// NOTE: PriceCharting moved OFF the stealth browser to a direct HTTP fetch —
+// see fetchPriceChartingComps in apiExtractors.js. Its prices are server-rendered
+// but its client-side JS blanks them under automation, so the browser always read
+// 0; a plain fetch with a browser UA (no JS) gets them. No CONFIG/EXTRACTOR here.
 
-// Per-source extraction cap — the `slice(0, N)` each extractor below applies to
-// its results. Mirrored here (KEEP IN SYNC with the slices) so the scrape funnel
-// can flag a source whose returned count EQUALS its cap: that page almost
-// certainly held MORE listings than we gathered, which is otherwise invisible —
-// a raw count of "25" reads identically whether 25 or 250 were on the page.
-// This is not lost downstream (synthesis caps at 25 sold / 15 active and selects
-// fairly across sources), but it makes "silently not gathered from scrape?"
-// answerable instead of ambiguous. PriceCharting is intentionally omitted: it's
-// a niche games source where a small/zero count is expected, never a truncation.
-export const COMP_EXTRACT_CAPS = {
-  'ebay-sold': 25,
-  'ebay-active': 20,
-  'poshmark': 25,
-  'swappa': 25,
-  'mercari': 20,
-  'reverb': 25,
-};
+// PriceCharting searches a PRODUCT CATALOG, not a marketplace listing index, so a
+// seller-style title ("Sony PlayStation 5 Digital Edition 1TB Console - Certified
+// Refurbished") finds 0 exact matches and falls back to ~100 fuzzy results. Strip
+// the marketplace-listing cruft — capacity, condition/grade words, generic nouns,
+// and listing separators — so the query reduces to the canonical product name.
+// KEPT on purpose (deviates from "strip Digital Edition"): edition/variant tokens
+// (Digital/Disc/Slim/Pro/OLED/Lite) are DISTINCT catalog SKUs with materially
+// different prices — a PS5 Digital is ~$80–100 below a Disc — so dropping them
+// would silently match the wrong, pricier console. Intra-word hyphens (Spider-Man)
+// are preserved; only space-padded listing dashes are removed. Applied to the
+// PriceCharting task ONLY (full-text sources still want the full title).
+export function priceChartingQuery(query) {
+  const stripped = String(query || '')
+    .replace(/\b\d+\s?(?:gb|tb)\b/gi, ' ')                                                          // 1TB, 512 GB
+    .replace(/\bcertified\s+refurbished\b/gi, ' ')
+    .replace(/\b(?:refurbished|pre[-\s]?owned|brand[-\s]?new|like[-\s]?new|open[-\s]?box|used|sealed|loose|complete in box|cib)\b/gi, ' ')
+    .replace(/\b(?:console|system|bundle|handheld)\b/gi, ' ')
+    .replace(/\s+[-–—|]+\s+/g, ' ')                                                                 // " - " listing separators, NOT Spider-Man
+    .replace(/\s+/g, ' ')
+    .trim();
+  return stripped || String(query || '').trim();   // never reduce to empty
+}
+
+// NOTE: comp extractors return the FULL rendered page — no per-source slice.
+// The downstream relevance ranker + synthesis cap (resultCaps.compsForPricing:
+// 25 sold / 15 active, selected fairly across sources) still bound what reaches
+// the pricing LLM, so token cost is unchanged. The win is that the ranker now
+// chooses from EVERY listing on the page instead of the first N in DOM order —
+// eBay's sold results sort by recency, not relevance, so the closest-matching
+// comps frequently sit past the old 25-item cutoff.
 
 
 // ── eBay Sold Listings Extractor ────────────────────────────────────────────
@@ -136,7 +208,14 @@ export const COMP_EXTRACT_CAPS = {
 //   a.s-card__link                   — listing URL
 export const EBAY_SOLD_EXTRACTOR = `
 (function() {
+  const __diag = ${SITE_CHANGED_DIAG};
+  const __money = ${MONEY_PARSE_FN};
   const items = [];
+  // Per-card "looked like a listing but yielded no usable price/title" counter.
+  // Surfaced as yieldStats.noFields so a PARTIAL sub-selector drift (some cards
+  // silently dropped while items.length stays > 0) is visible in the bug report,
+  // not masked behind a healthy-looking raw count.
+  let __noFields = 0;
 
   const cards = document.querySelectorAll('.srp-results li.s-card');
 
@@ -144,12 +223,13 @@ export const EBAY_SOLD_EXTRACTOR = `
     try {
       const titleEl = card.querySelector('span.su-styled-text.primary');
       const title = (titleEl?.innerText || titleEl?.textContent || '').trim();
-      if (!title || title === 'Shop on eBay') return;
+      if (title === 'Shop on eBay') return;   // promo tile, not a real listing → benign
+      if (!title) { __noFields++; return; }
 
       const priceEl = card.querySelector('.s-card__price');
       const priceText = (priceEl?.innerText || priceEl?.textContent || '').trim();
-      const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
-      if (price === 0) return;
+      const price = __money(priceText);
+      if (price === 0) { __noFields++; return; }
 
       const dateEl = card.querySelector('span.su-styled-text.positive.default');
       const linkEl = card.querySelector('a.s-card__link');
@@ -167,8 +247,8 @@ export const EBAY_SOLD_EXTRACTOR = `
     } catch {}
   });
 
-  if (items.length === 0) throw new Error('SITE_CHANGED: ebay-sold su-styled-text extractor returned 0 — eBay design system may have changed');
-  return items.slice(0, 25);
+  if (items.length === 0) throw new Error('SITE_CHANGED: ebay-sold su-styled-text extractor returned 0 — eBay design system may have changed' + __diag('cards=' + cards.length + ' titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length, cards[0]));
+  return { items, yieldStats: { seen: cards.length, noFields: __noFields } };
 })()
 `;
 
@@ -176,7 +256,10 @@ export const EBAY_SOLD_EXTRACTOR = `
 // Same su-* design system migration as EBAY_SOLD — identical selectors, no soldDate.
 export const EBAY_ACTIVE_EXTRACTOR = `
 (function() {
+  const __diag = ${SITE_CHANGED_DIAG};
+  const __money = ${MONEY_PARSE_FN};
   const items = [];
+  let __noFields = 0;   // cards that looked like a listing but had no usable price/title (see ebay-sold)
 
   const cards = document.querySelectorAll('.srp-results li.s-card');
 
@@ -184,20 +267,21 @@ export const EBAY_ACTIVE_EXTRACTOR = `
     try {
       const titleEl = card.querySelector('span.su-styled-text.primary');
       const title = (titleEl?.innerText || titleEl?.textContent || '').trim();
-      if (!title || title === 'Shop on eBay') return;
+      if (title === 'Shop on eBay') return;   // promo tile, not a real listing → benign
+      if (!title) { __noFields++; return; }
 
       const priceEl = card.querySelector('.s-card__price');
       const priceText = (priceEl?.innerText || priceEl?.textContent || '').trim();
-      const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
-      if (price === 0) return;
+      const price = __money(priceText);
+      if (price === 0) { __noFields++; return; }
 
       const linkEl = card.querySelector('a.s-card__link');
       items.push({ title, price, priceText, url: linkEl?.href || '', source: 'ebay-active' });
     } catch {}
   });
 
-  if (items.length === 0) throw new Error('SITE_CHANGED: ebay-active su-styled-text extractor returned 0 — eBay design system may have changed');
-  return items.slice(0, 20);
+  if (items.length === 0) throw new Error('SITE_CHANGED: ebay-active su-styled-text extractor returned 0 — eBay design system may have changed' + __diag('cards=' + cards.length + ' titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length, cards[0]));
+  return { items, yieldStats: { seen: cards.length, noFields: __noFields } };
 })()
 `;
 
@@ -210,27 +294,42 @@ export const EBAY_ACTIVE_EXTRACTOR = `
 // Throws SITE_CHANGED if 0 sold listings are extracted.
 export const POSHMARK_SOLD_EXTRACTOR = `
 (function() {
+  const __diag = ${SITE_CHANGED_DIAG};
+  const __money = ${MONEY_PARSE_FN};
   const items = [];
+  let __noFields = 0;   // sold cards present but missing title/price/link (partial drift signal)
   const cards = document.querySelectorAll('[data-et-name="listing"]');
+  // The scrape URL is always availability=sold_out, so every result IS a sold
+  // listing. Poshmark used to stamp each card with a per-card "Sold" status word
+  // (.tile-grid-redesign__listing-status-word); when it stops rendering that
+  // (redesign — observed diag soldSel=0), REQUIRING it drops every card → 0 comps.
+  // So the sold-word check is adaptive: only when the page actually carries sold
+  // words (mixed result pages) do we use them to reject non-sold cards; if no card
+  // has one, trust the URL filter and accept all. This survives Poshmark dropping
+  // the per-card overlay without falsely accepting active listings on mixed pages.
+  const pageHasSoldWords = !!document.querySelector('.tile-grid-redesign__listing-status-word');
   for (const card of cards) {
     try {
       const statusEl = card.querySelector('.tile-grid-redesign__listing-status-word');
-      if ((statusEl?.textContent || '').trim().toLowerCase() !== 'sold') continue;
+      const statusText = (statusEl?.textContent || '').trim().toLowerCase();
+      if (statusEl && statusText !== 'sold') continue;        // explicitly NOT sold → skip
+      if (!statusEl && pageHasSoldWords) continue;            // page marks sold elsewhere but not here → not a sold result
       const titleEl = card.querySelector('.tile-grid-redesign__title');
       const priceEl = card.querySelector('.tile-grid-redesign__price-current');
       const linkEl  = card.querySelector('a[href*="/listing/"]');
       const title    = titleEl?.textContent?.trim() || '';
       const priceText = priceEl?.textContent?.trim() || '';
-      const price    = parseFloat(priceText.replace(/[^0-9.]/g, ''));
+      const price    = __money(priceText);
       const href     = linkEl?.getAttribute('href') || '';
       const url      = href ? 'https://poshmark.com' + href : '';
-      if (!title || !price || !url) continue;
+      if (!title || !price || !url) { __noFields++; continue; }
       items.push({ title, price, priceText, url, source: 'poshmark' });
     } catch {}
   }
-  if (items.length === 0) throw new Error('SITE_CHANGED: poshmark tile-grid-redesign extractor returned 0 — selectors or page structure may have changed');
+  if (items.length === 0) throw new Error('SITE_CHANGED: poshmark tile-grid-redesign extractor returned 0 — selectors or page structure may have changed' + __diag('cards=' + cards.length + ' titleSel=' + document.querySelectorAll('.tile-grid-redesign__title').length + ' priceSel=' + document.querySelectorAll('.tile-grid-redesign__price-current').length + ' linkSel=' + document.querySelectorAll('[data-et-name="listing"] a[href*="/listing/"]').length + ' soldSel=' + document.querySelectorAll('.tile-grid-redesign__listing-status-word').length, cards[0]));
   const seen = new Set();
-  return items.filter(i => { if (seen.has(i.url)) return false; seen.add(i.url); return true; }).slice(0, 25);
+  const deduped = items.filter(i => { if (seen.has(i.url)) return false; seen.add(i.url); return true; });
+  return { items: deduped, yieldStats: { seen: cards.length, noFields: __noFields } };
 })()
 `;
 
@@ -345,7 +444,7 @@ export const SWAPPA_EXTRACTOR = `
 
   // Step 1 — already on a listings page? Extract directly.
   var direct = extractOffers(document);
-  if (direct.length > 0) return direct.slice(0, 25);
+  if (direct.length > 0) return direct;
 
   // Step 2 — on /search: resolve + fetch the model's listings page (memoized).
   if (window.__swappaComps) return window.__swappaComps;
@@ -361,7 +460,7 @@ export const SWAPPA_EXTRACTOR = `
         if (!res.ok) return [];
         var html = await res.text();
         var doc = new DOMParser().parseFromString(html, 'text/html');
-        return extractOffers(doc).slice(0, 25);
+        return extractOffers(doc);
       } catch (e) { return []; }
     })().then(function(items) {
       window.__swappaComps = items;
@@ -369,6 +468,153 @@ export const SWAPPA_EXTRACTOR = `
     });
   }
   return window.__swappaCompsPromise;
+})()
+`;
+
+
+// ── Swappa SOLD Extractor (recently-completed sales) ────────────────────────
+// SWAPPA_EXTRACTOR above reads /listings/<slug> = ACTIVE for-sale inventory
+// (asking prices). Swappa's real COMPLETED-SALE data lives at the HTMX endpoint
+// `/xui/product/<slug>/sales`: a table of individual recent SOLD listings — one
+// <tr> per sale with cells [date · condition · carrier · storage] and a final
+// <a href="/listing/view/<id>" title="View Sold Listing">$price</a>. It's PUBLIC
+// (no login) but is an HTMX fragment, so the fetch must carry HX-Request. Two-step
+// like the active extractor: resolve the model slug from /search, then fetch the
+// sales fragment same-origin (carries any session cookies, same bot-check pass).
+// The resolver helpers (abs/tokens/pickListingsLink) are intentionally duplicated
+// from SWAPPA_EXTRACTOR so that working extractor is left byte-for-byte untouched.
+export const SWAPPA_SOLD_EXTRACTOR = `
+(function() {
+  var ORIGIN = location.origin || 'https://swappa.com';
+
+  function abs(href) {
+    if (!href) return '';
+    try { return new URL(href, ORIGIN).href; } catch (e) { return href.charAt(0) === '/' ? ORIGIN + href : href; }
+  }
+  function tokens(s) {
+    return String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  }
+  // Pick the bare /listings/<slug> link best matching the query (same model
+  // picker + match-quality gate as the active extractor — keeps wrong-model risk
+  // identical between the two Swappa sources).
+  function pickListingsLink(doc, query) {
+    var scope = doc.querySelector('#main_search_product_results') || doc;
+    var anchors = Array.prototype.slice.call(scope.querySelectorAll('a[href*="/listings/"]'));
+    var seen = {};
+    var cands = [];
+    anchors.forEach(function(a) {
+      var href = a.getAttribute('href') || '';
+      if (!/\\/listings\\/[a-z0-9-]+$/i.test(href)) return;
+      if (seen[href]) return; seen[href] = 1;
+      var label = (a.getAttribute('title') || a.textContent || '').trim() || href.split('/').pop().replace(/-/g, ' ');
+      cands.push({ href: href, label: label });
+    });
+    if (!cands.length) return '';
+    var qt = tokens(query);
+    var pool = {};
+    cands.forEach(function(c) { tokens(c.label + ' ' + c.href).forEach(function(t) { pool[t] = 1; }); });
+    var matchable = 0;
+    qt.forEach(function(t) { if (pool[t]) matchable++; });
+    var best = null, bestScore = -Infinity, bestHits = 0;
+    cands.forEach(function(c, idx) {
+      var ct = tokens(c.label + ' ' + c.href);
+      var hits = 0;
+      qt.forEach(function(t) { if (ct.indexOf(t) !== -1) hits++; });
+      var extra = Math.max(0, ct.length - hits);
+      var score = hits * 100 - extra - idx * 0.01;
+      if (score > bestScore) { bestScore = score; best = c; bestHits = hits; }
+    });
+    var minHits = Math.min(2, qt.length);
+    if (!best || bestHits < minHits || bestHits < matchable) return '';
+    return abs(best.href);
+  }
+
+  // 'apple-iphone-x' -> 'Apple Iphone X' — the sales fragment has no model name,
+  // only the row's spec columns, so the comp title is built from the slug + specs.
+  function modelNameFromSlug(slug) {
+    return String(slug || '').split('-').filter(Boolean).map(function(w) {
+      return w.charAt(0).toUpperCase() + w.slice(1);
+    }).join(' ');
+  }
+
+  // Parse the sales table: each row's price+link come from the
+  // a[href*="/listing/view/"] anchor; the remaining cells (date/condition/
+  // carrier/storage) are classified by pattern so column-order changes don't break it.
+  function parseSales(doc, modelName) {
+    var out = [];
+    var links = doc.querySelectorAll('a[href*="/listing/view/"]');
+    Array.prototype.forEach.call(links, function(a) {
+      try {
+        var price = parseFloat((a.textContent || '').replace(/[^0-9.]/g, '')) || 0;
+        if (price <= 0) return;
+        var row = a.closest('tr');
+        var cells = row ? Array.prototype.map.call(row.querySelectorAll('td'), function(td) { return (td.textContent || '').trim(); }) : [];
+        var storage = '', condition = '', carrier = '', soldDate = '';
+        cells.forEach(function(t) {
+          if (!storage && /\\b\\d+\\s?(gb|tb)\\b/i.test(t)) storage = t;
+          else if (!condition && /^(brand new|new|mint|good|fair|excellent|like new|used|acceptable)\\b/i.test(t)) condition = t;
+          else if (!soldDate && /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\\d{4}-\\d{2}-\\d{2})/i.test(t)) soldDate = t;
+          else if (!carrier && /(unlocked|verizon|at&?t|t-?mobile|sprint|gsm|cdma|cricket|metro|boost|us cellular|non-us)/i.test(t)) carrier = t;
+        });
+        var title = [modelName, storage, carrier].filter(Boolean).join(' ').trim() || modelName || 'Swappa sold';
+        out.push({
+          title: title,
+          price: price,
+          priceText: '$' + price,
+          condition: condition,
+          soldDate: soldDate,
+          url: abs(a.getAttribute('href')),
+          source: 'swappa-sold',
+        });
+      } catch (e) {}
+    });
+    // Dedup by listing URL — the same completed sale can surface twice on the
+    // fragment (a highlighted recent sale also appearing in the table), which
+    // would otherwise inflate the sold set (the report's "N unique of N+1" flag).
+    var seenUrls = {};
+    return out.filter(function(it) {
+      if (!it.url) return true;
+      if (seenUrls[it.url]) return false;
+      seenUrls[it.url] = 1;
+      return true;
+    });
+  }
+
+  // Step 1 — already on the sales fragment (test / direct-nav)? Parse it directly.
+  if (document.querySelector('a[href*="/listing/view/"]')) {
+    var slugNow = '';
+    try { var m = (location.pathname || '').match(/\\/(?:xui\\/product|prices|listings)\\/([a-z0-9-]+)/i); slugNow = m ? m[1] : ''; } catch (e) {}
+    var directSales = parseSales(document, modelNameFromSlug(slugNow));
+    if (directSales.length > 0) return directSales;
+  }
+
+  // Step 2 — on /search: resolve the model slug, then fetch the sales fragment.
+  if (window.__swappaSold) return window.__swappaSold;
+  if (!window.__swappaSoldPromise) {
+    var query = '';
+    try { query = new URLSearchParams(location.search).get('q') || ''; } catch (e) {}
+    if (!query) query = (document.title || '').replace(/\\s*[-|].*$/, '').trim();
+    var listingsUrl = pickListingsLink(document, query);
+    var slugMatch = String(listingsUrl).match(/\\/listings\\/([a-z0-9-]+)/i);
+    var slug = slugMatch ? slugMatch[1] : '';
+    window.__swappaSoldPromise = (async function() {
+      if (!slug) return [];
+      try {
+        var res = await fetch(ORIGIN + '/xui/product/' + slug + '/sales', {
+          credentials: 'include',
+          headers: { 'Accept': 'text/html', 'HX-Request': 'true', 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        if (!res.ok) return [];
+        var html = await res.text();
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        return parseSales(doc, modelNameFromSlug(slug));
+      } catch (e) { return []; }
+    })().then(function(items) {
+      window.__swappaSold = items;
+      return items;
+    });
+  }
+  return window.__swappaSoldPromise;
 })()
 `;
 
@@ -390,7 +636,16 @@ export const SWAPPA_EXTRACTOR = `
 // No sold date or condition visible in the search result card format.
 export const MERCARI_SOLD_EXTRACTOR = `
 (function() {
+  const __diag = ${SITE_CHANGED_DIAG};
+  const __money = ${MONEY_PARSE_FN};
   const items = [];
+  // Cards that looked like a listing (matched the /us/item/ anchor) but yielded no
+  // usable link/title/price. Count EVERY field-miss path, not just price: the title
+  // comes solely from img[alt], so a lazy-load or alt-attr drift silently empties it
+  // — counting it here (matching the renderer's advertised "price/title/link"
+  // semantics and the eBay/Poshmark convention) is what makes that partial drift
+  // visible instead of vanishing behind a healthy-looking noFields=0.
+  let __noFields = 0;
 
   const cards = document.querySelectorAll('a[href*="/us/item/"]');
 
@@ -399,13 +654,13 @@ export const MERCARI_SOLD_EXTRACTOR = `
       // Normalize URL — strip ?ref=... and other query params so the second
       // result-pass variants (?ref=search_results) dedup against the first.
       const rawUrl = card.href || '';
-      if (!rawUrl) return;
+      if (!rawUrl) { __noFields++; return; }
       const url = rawUrl.split('?')[0];
 
       // Title from image alt — the only place Mercari puts the product name in the card
       const imgEl = card.querySelector('img[alt]');
       const title = (imgEl?.alt || '').replace(/\\s*-\\s*App\\w*\\s*$/, '').trim();
-      if (!title || title.length < 3) return;
+      if (!title || title.length < 3) { __noFields++; return; }
 
       // Price: find the first <p> that contains a $ sign. Mercari cards can
       // also have a <p> with a discount percentage ("24%") or a <p> holding the
@@ -416,10 +671,10 @@ export const MERCARI_SOLD_EXTRACTOR = `
       for (const p of pEls) {
         if ((p.innerText || p.textContent || '').includes('$')) { priceEl = p; break; }
       }
-      if (!priceEl) return;
+      if (!priceEl) { __noFields++; return; }
       const priceText = (priceEl.innerText || priceEl.textContent || '').trim();
-      const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
-      if (price === 0) return;
+      const price = __money(priceText);
+      if (price === 0) { __noFields++; return; }
 
       items.push({ title, price, priceText, url, source: 'mercari' });
     } catch {}
@@ -431,68 +686,11 @@ export const MERCARI_SOLD_EXTRACTOR = `
     seen.add(item.url);
     return true;
   });
-  if (deduped.length === 0) throw new Error('SITE_CHANGED: mercari a[href*="/us/item/"] extractor returned 0 — URL pattern or card structure may have changed');
-  return deduped.slice(0, 20);
+  if (deduped.length === 0) throw new Error('SITE_CHANGED: mercari a[href*="/us/item/"] extractor returned 0 — URL pattern or card structure may have changed' + __diag('cards=' + cards.length + ' withImg=' + document.querySelectorAll('a[href*="/us/item/"] img[alt]').length, cards[0]));
+  return { items: deduped, yieldStats: { seen: cards.length, noFields: __noFields } };
 })()
 `;
 
-// ── PriceCharting Extractor ─────────────────────────────────────────────────
-// PriceCharting search returns a table of game results. Each row carries the
-// title (with platform in brackets) and loose / CIB / new prices. We pick the
-// loose price as the FMV anchor — that's what a typical reseller listing
-// matches (cart-only, no box). Falls back to whichever price cell has a
-// number when loose is missing.
-export const PRICECHARTING_EXTRACTOR = `
-(function() {
-  const items = [];
-
-  const parsePrice = (txt) => {
-    if (!txt) return 0;
-    const m = String(txt).replace(/[,\\s]/g, '').match(/\\$?(\\d+(?:\\.\\d{1,2})?)/);
-    return m ? parseFloat(m[1]) : 0;
-  };
-
-  // Strategy 1: PriceCharting renders results inside #games_table > tbody > tr
-  // (legacy id) or a generic table.offers-table. Each row has a title link
-  // and three price columns. Try both shells.
-  const rows = document.querySelectorAll('#games_table tbody tr, table.offers-table tbody tr, table tr');
-  rows.forEach(row => {
-    try {
-      const titleLink = row.querySelector('td.title a, a[href*="/game/"]');
-      if (!titleLink) return;
-      const title = (titleLink.innerText || titleLink.textContent || '').trim();
-      if (!title || title.length < 2) return;
-
-      // Price cells, in column order. PriceCharting columns are:
-      // loose | complete-in-box (CIB) | new. Some result pages drop one.
-      const priceCells = Array.from(row.querySelectorAll('td.price, td[align="right"]'))
-        .map(td => parsePrice(td.innerText || td.textContent))
-        .filter(p => p > 0);
-      if (priceCells.length === 0) return;
-      const price = priceCells[0]; // loose price first
-
-      const href = titleLink.getAttribute('href') || '';
-      const url = href.startsWith('http')
-        ? href
-        : 'https://www.pricecharting.com' + (href.startsWith('/') ? href : '/' + href);
-
-      items.push({
-        title,
-        price,
-        priceText: '$' + price.toFixed(2),
-        url,
-        condition: 'Loose (cart-only)',
-        source: 'pricecharting',
-      });
-    } catch {}
-  });
-
-  // Deduplicate by URL
-  const seen = new Set();
-  return items.filter(item => {
-    if (seen.has(item.url)) return false;
-    seen.add(item.url);
-    return true;
-  }).slice(0, 20);
-})()
-`;
+// PriceCharting comp extraction lives in apiExtractors.js (fetchPriceChartingComps /
+// parsePriceChartingHtml) — a direct HTTP fetch + server-HTML parse, NOT a browser
+// extractor. See the note where PRICECHARTING_CONFIG used to be (above) for why.

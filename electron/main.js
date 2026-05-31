@@ -3,6 +3,7 @@ const { app, BrowserWindow, Menu, protocol } = electronPkg;
 import path from 'path';
 import { registerFilesystemHandlers } from './ipc/filesystem.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
+import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
 import { registerAccountsHandlers, verifyAllPlatforms } from './ipc/accounts.js';
 import { registerMonitorHandlers, closeAllMonitors } from './ipc/browserViewMonitor.js';
@@ -560,6 +561,7 @@ if (!gotTheLock) {
 
     registerFilesystemHandlers();
     registerJobsHandlers();
+    registerJobApplicationHandlers();
     registerMarketplaceHandlers();
     registerAccountsHandlers();
     registerMonitorHandlers();

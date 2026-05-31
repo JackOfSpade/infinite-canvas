@@ -1,44 +1,74 @@
 import { structuralEdge } from '../_shared/edgeHelpers.js';
-import { EventLogger } from '../../utils/EventLogger.js';
-import { jobTitleCompanyUrlKey } from '../../utils/jobIdentity.js';
 
 /**
- * Pure helpers for turning scored jobs + a bucket tree into the React Flow
- * node/edge graph the JobHub spawns onto the canvas. Lives outside the
- * component so the algorithm can be reasoned about (and unit-tested) without
- * a ReactFlow runtime — JobHubNode.jsx just wires up the IPC plumbing and
- * passes the results to ReactFlow.
+ * Pure helpers for turning scored jobs + an AI-created taxonomy into the React
+ * Flow node/edge graph the JobHub spawns. Lives outside the component so the
+ * algorithm is unit-testable without a ReactFlow runtime — JobHubNode.jsx wires
+ * up the IPC plumbing and passes the results to ReactFlow.
  *
- * Three exports:
- *  - partitionJobsForBranches  → splits scored jobs into target / other
- *  - buildJobsForBucketing     → preps the bucketing input with the
- *                                careerDirection override that clusters
- *                                target jobs under one synthetic category
- *  - buildJobTreeNodes         → emits the {nodes, edges} graph
+ * The results hierarchy is THREE grouping levels, deepest last:
+ *   1. Likelihood band — interview-likelihood (matchScore), ordered HIGH→LOW.
+ *   2. Salary range    — ordered HIGH→LOW (Unspecified last).
+ *   3. Job role        — ordered A→Z.
+ * …then the job cards (ordered by score desc).
+ *
+ * The AI (bucketing pass) CREATES every band / range / role label — nothing is
+ * hardcoded. It returns the band + range definitions and a role partition; the
+ * renderer places each job into its band (by its own matchScore) and its salary
+ * range (by parsed salary) DETERMINISTICALLY, so a weak model can't drop or
+ * duplicate jobs across the three nested levels. Only the role grouping (the
+ * creative consolidation) comes from the AI's partition; jobs the AI leaves out
+ * fall into a swept "Other" role.
+ *
+ * Exports:
+ *  - partitionJobsForBranches → selects which scored jobs to display
+ *  - parseSalaryToNumeric     → salary text → annual USD (shared with append)
+ *  - computeLayoutPositions   → tight (x,y) for the current expand state
+ *  - buildJobTreeNodes        → emits the {nodes, edges} graph
  */
 
-// AI-judgment cutoff for "good chance of interview." Below this we treat
-// the candidate as unlikely to clear initial screen — used to decide the
-// Other Strong cutoff AND the loose-fill ladder for Target Role.
+// AI-judgment cutoff for "good chance of interview" — used by the (still
+// supported) target-role job SELECTION below.
 export const LIKELY_THRESHOLD = 65;
-// Minimum size of the Target Role branch when loose-fill kicks in: better
-// to show 5 best-shot longshots than an empty branch on a real pivot.
 const TARGET_FILL_MIN  = 5;
-// "Other Strong Matches" relaxation: when too few non-target jobs clear
-// LIKELY_THRESHOLD, lower the bar to admit up to OTHER_FILL_MIN of the best
-// (never below OTHER_FLOOR) so a niche/weak run still surfaces its top non-
-// target matches instead of an empty branch — the non-target analog of
-// TARGET_FILL_MIN. See strongMatchGate.
-const OTHER_FLOOR    = 50;
-const OTHER_FILL_MIN = 5;
+const OTHER_FLOOR      = 50;
+const OTHER_FILL_MIN   = 5;
+
+// Column x-offsets per tree level + row heights. One layout: likelihood is
+// always the first level (no target-role branch column).
+export const COL_X = { likelihood: 400, salary: 700, role: 1000, job: 1400 };
+export const ROW_H = { group: 70, job: 280 };
+
+// Vertical gap kept below an EXPANDED job card (one whose measured height exceeds
+// the fixed ROW_H.job). Collapsed/normal cards keep the original ROW_H.job
+// spacing via the Math.max in computeLayoutPositions, so the default layout is
+// unchanged — this only governs how far the next card sits below a grown one.
+const JOB_V_GAP = 40;
+
+// Leaf (role) groups paginate their cards; reveal the first N on expand.
+export const ROLE_VISIBLE_DEFAULT = 10;
+
+// Fallbacks ONLY when the AI omits bands/ranges (normal path is AI-defined).
+const DEFAULT_BANDS = [
+  { label: 'Strong match (65–100%)', minScore: 65, maxScore: 100 },
+  { label: 'Possible (40–64%)',      minScore: 40, maxScore: 64 },
+  { label: 'Long shot (0–39%)',      minScore: 0,  maxScore: 39 },
+];
+const DEFAULT_RANGES = [
+  { label: '$150k+',     minSalary: 150000, maxSalary: 0 },
+  { label: '$100–150k',  minSalary: 100000, maxSalary: 150000 },
+  { label: '$60–100k',   minSalary: 60000,  maxSalary: 100000 },
+  { label: 'Under $60k', minSalary: 1,      maxSalary: 60000 },
+  { label: 'Unspecified', minSalary: 0,     maxSalary: 0 },
+];
 
 /**
- * Cutoff score for the "Other Strong Matches" branch, derived from the run's
- * own non-target score distribution. Stays at LIKELY_THRESHOLD when there are
- * already ≥ OTHER_FILL_MIN strong non-target jobs; otherwise drops to the score
- * of the OTHER_FILL_MIN-th best (clamped to [OTHER_FLOOR, LIKELY_THRESHOLD]) so
- * a thin run still shows its best non-target matches. Computed once per run and
- * persisted on the hub (data.strongMatchGate) so later appends bucket the same way.
+ * Cutoff score for the non-target jobs shown alongside a target-role search,
+ * derived from the run's own non-target score distribution. Stays at
+ * LIKELY_THRESHOLD when there are already ≥ OTHER_FILL_MIN strong non-target
+ * jobs; otherwise drops to the OTHER_FILL_MIN-th best (clamped to
+ * [OTHER_FLOOR, LIKELY_THRESHOLD]). Persisted on the hub so later appends gate
+ * the same way.
  * @param {number[]} nonTargetScores  matchScores of the run's non-target jobs
  */
 export function strongMatchGate(nonTargetScores = []) {
@@ -48,113 +78,31 @@ export function strongMatchGate(nonTargetScores = []) {
   const nth = sortedDesc[Math.min(OTHER_FILL_MIN, sortedDesc.length) - 1];
   return Math.max(OTHER_FLOOR, Math.min(LIKELY_THRESHOLD, nth ?? LIKELY_THRESHOLD));
 }
-// Synthetic careerDirection name we override target jobs to before
-// bucketing, so the AI clusters them under one category whose buckets
-// mount directly under the Target Role branch (no Category level).
-export const TARGET_BUCKETING_CATEGORY = 'Target Role';
-
-// Tree layout — column x-offsets and row stacking heights. With branches,
-// every level shifts one column right vs. the no-target layout.
-export const COL_X_WITH_TARGET    = { branch: 400, category: 700, bucket: 1000, job: 1400 };
-export const COL_X_WITHOUT_TARGET = { category: 400, bucket: 700, job: 1100 };
-export const ROW_H = { branch: 90, category: 70, bucket: 70, job: 280 };
-
-// Per-bucket pagination — buckets reveal the first N jobs on expand; the
-// JobGroupNode component implements the Show-more interaction.
-const BUCKET_VISIBLE_DEFAULT = 10;
 
 /**
- * Compute absolute canvas positions for every visible job-tree node owned by
- * `hubId`, based on the current expanded/collapsed state in `nodes`. Called
- * after every expand, collapse, or show-more so the layout is always tight
- * rather than pre-spaced for the fully-expanded case.
- *
- * Returns a map of { [nodeId]: { x, y } }. Only nodes that are reachable from
- * the hub's root groups (categories or branches) are included — other canvas
- * nodes (source cards, other hubs) are untouched.
+ * Salary text → approximate annual USD. Takes the first number in a range and
+ * annualizes hourly/daily rates. Shared with the append path so spawned and
+ * appended cards land in the same salary range. Returns 0 when unparseable.
  */
-export function computeLayoutPositions(nodes, hubId, COL_X, hubPos) {
-  const nodeById = new Map(nodes.map(n => [n.id, n]));
-
-  // Collect every ID that appears as a child of some group node for this hub
-  const allChildIds = new Set();
-  nodes.forEach(n => {
-    if (n.data?.hubId === hubId && Array.isArray(n.data?.childIds)) {
-      n.data.childIds.forEach(cid => allChildIds.add(cid));
-    }
-  });
-
-  // Root groups: hub-owned jobgroup nodes not listed as a child of any other group
-  const rootGroups = nodes
-    .filter(n => n.data?.hubId === hubId && n.type === 'jobgroup' && !allChildIds.has(n.id))
-    .sort((a, b) => (a.position?.y ?? 0) - (b.position?.y ?? 0));
-
-  const positions = {};
-
-  function layoutNode(nodeId, startY) {
-    const node = nodeById.get(nodeId);
-    if (!node) return startY;
-
-    const kind = node.data?.kind;
-    let x;
-    if (node.type === 'jobcard') {
-      x = hubPos.x + COL_X.job;
-    } else if (kind === 'bucket') {
-      x = hubPos.x + COL_X.bucket;
-    } else if (kind === 'category') {
-      x = hubPos.x + COL_X.category;
-    } else if (kind === 'branch') {
-      x = hubPos.x + COL_X.branch;
-    } else {
-      return startY;
-    }
-
-    positions[nodeId] = { x, y: startY };
-
-    if (node.type === 'jobcard') {
-      return startY + ROW_H.job;
-    }
-
-    if (!node.data?.expanded) {
-      const h = kind === 'branch' ? ROW_H.branch : ROW_H.bucket; // bucket === category === 70
-      return startY + h;
-    }
-
-    // Expanded: lay out visible children
-    const childIds = Array.isArray(node.data?.childIds) ? node.data.childIds : [];
-    const isBucketNode = kind === 'bucket';
-    const visCount = isBucketNode
-      ? Math.min(node.data?.visibleCount ?? BUCKET_VISIBLE_DEFAULT, childIds.length)
-      : childIds.length;
-
-    let nextY = startY;
-    for (let i = 0; i < visCount; i++) {
-      nextY = layoutNode(childIds[i], nextY);
-    }
-    return nextY;
+export function parseSalaryToNumeric(salaryStr) {
+  if (!salaryStr) return 0;
+  const clean = String(salaryStr).toLowerCase().replace(/[$,]/g, '');
+  const m = clean.match(/(\d+)\s*(k)?/);
+  if (!m) return 0;
+  let val = parseFloat(m[1]);
+  if (m[2] === 'k') val *= 1000;
+  if (val < 1000) {
+    if (clean.includes('hour') || clean.includes('hr')) val = val * 40 * 52;
+    else if (clean.includes('day')) val = val * 5 * 52;
   }
-
-  let nextY = hubPos.y;
-  for (const root of rootGroups) {
-    nextY = layoutNode(root.id, nextY);
-  }
-
-  return positions;
+  return val;
 }
 
-// Stable per-job fingerprint. The search-side dedup pass already enforces
-// uniqueness on (title|company); url is defense-in-depth in case future
-// sources surface duplicate listings.
-const keyOf = jobTitleCompanyUrlKey;
-
 /**
- * Split scored jobs into:
- *  - targetList: target-role matches (≥ LIKELY) plus loose-fill up to 5
- *  - otherList:  non-target matches with score ≥ LIKELY
- *  - displayedJobs: union of the two, in target-first order
- *
- * When `hasTarget` is false the function is a passthrough — caller spawns
- * every scored job under the original flat hub structure.
+ * Select which scored jobs to display. No target role → every scored job. With
+ * a target role → the target matches (≥ LIKELY, loose-filled to ~5) plus the
+ * strongest non-target jobs above the run's relative gate. The display
+ * hierarchy is identical either way; this only decides the input set.
  */
 export function partitionJobsForBranches(scoredJobs, hasTarget) {
   if (!hasTarget) {
@@ -166,19 +114,16 @@ export function partitionJobsForBranches(scoredJobs, hasTarget) {
   if (likelyTargets.length >= TARGET_FILL_MIN) {
     targetList = likelyTargets;
   } else {
-    // Loose-fill: backfill the Target Role branch with the highest-scoring
-    // sub-threshold target jobs so the user gets ~5 best shots to chase
-    // even when the pivot is a real stretch. Badged 'stretch' so the card
-    // strength indicator distinguishes filler from genuine likely matches.
+    // Loose-fill: backfill with the highest-scoring sub-threshold target jobs so
+    // the user gets ~5 best shots even when the pivot is a stretch. The lower
+    // matchScore already signals the weaker odds — the card shows it directly.
     const needed = TARGET_FILL_MIN - likelyTargets.length;
     const fillers = targetCandidates
       .filter(j => (j.matchScore || 0) < LIKELY_THRESHOLD)
       .sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0))
-      .slice(0, needed)
-      .map(j => ({ ...j, strengthLabel: 'stretch' }));
+      .slice(0, needed);
     targetList = [...likelyTargets, ...fillers];
   }
-  // Relative cutoff from this run's non-target distribution (relaxes when thin).
   const gate = strongMatchGate(
     scoredJobs.filter(j => !j.isTargetRoleMatch).map(j => j.matchScore || 0),
   );
@@ -188,37 +133,121 @@ export function partitionJobsForBranches(scoredJobs, hasTarget) {
   return { targetList, otherList, displayedJobs: [...targetList, ...otherList], gate };
 }
 
-/**
- * Build the bucket-jobs input array. When hasTarget is true, overrides the
- * careerDirection on target jobs to TARGET_BUCKETING_CATEGORY so the
- * downstream AI bucketing produces a dedicated "Target Role" category we
- * mount under the Target Role branch.
- *
- * Pass `displayedJobs` (the filtered set) when hasTarget; pass the full
- * scored array otherwise — the function infers the right source via flag.
- */
-export function buildJobsForBucketing(displayedJobs, targetList, scoredJobs, hasTarget) {
-  if (!hasTarget) return scoredJobs;
-  const targetKeys = new Set(targetList.map(keyOf));
-  return displayedJobs.map(j => (targetKeys.has(keyOf(j))
-    ? { ...j, careerDirection: TARGET_BUCKETING_CATEGORY }
-    : j));
+// ── Deterministic placement ────────────────────────────────────────────────
+
+/** Normalize + sort AI bands high→low; guarantee coverage down to 0. */
+export function normalizeBands(bands) {
+  const src = Array.isArray(bands) && bands.length ? bands : DEFAULT_BANDS;
+  return [...src]
+    .map(b => ({ label: b.label || 'Match', minScore: Number(b.minScore) || 0, maxScore: Number(b.maxScore) || 100 }))
+    .sort((a, b) => b.minScore - a.minScore);
+}
+
+/** Split AI salary ranges into ordered (high→low) real ranges + an Unspecified. */
+export function normalizeRanges(ranges) {
+  const src = Array.isArray(ranges) && ranges.length ? ranges : DEFAULT_RANGES;
+  const mapped = src.map(r => ({
+    label: r.label || 'Unspecified',
+    minSalary: Number(r.minSalary) || 0,
+    maxSalary: Number(r.maxSalary) || 0,
+  }));
+  let unspecified = mapped.find(r => r.minSalary === 0 && r.maxSalary === 0);
+  const real = mapped.filter(r => r !== unspecified).sort((a, b) => b.minSalary - a.minSalary);
+  if (!unspecified) unspecified = { label: 'Unspecified', minSalary: 0, maxSalary: 0 };
+  return { real, unspecified };
+}
+
+/** Band a score lands in (first whose minScore it meets, in high→low order). */
+function placeBand(score, bands) {
+  const s = typeof score === 'number' ? score : 0;
+  for (const b of bands) if (s >= b.minScore) return b;
+  return bands[bands.length - 1];
+}
+
+/** Salary range a number lands in; unknown/zero salary → Unspecified. */
+function placeRange(salNum, realRanges, unspecified) {
+  if (!(salNum > 0)) return unspecified;
+  for (const r of realRanges) if (salNum >= r.minSalary) return r;
+  return unspecified;
 }
 
 /**
- * Build the ReactFlow `newNodes` / `newEdges` arrays for the entire job
- * subtree (branches → categories → buckets → cards). Pure: emits arrays,
- * does not call any ReactFlow setters.
+ * Compute absolute canvas positions for every visible job-tree node owned by
+ * `hubId`, based on the current expanded/collapsed state. Kind-agnostic: a
+ * group's x comes from COL_X[kind]; a group whose direct children are job cards
+ * paginates them via visibleCount. Returns { [nodeId]: {x, y} } for reachable
+ * visible nodes only.
+ */
+export function computeLayoutPositions(nodes, hubId, COL_X_, hubPos) {
+  const nodeById = new Map(nodes.map(n => [n.id, n]));
+
+  const allChildIds = new Set();
+  nodes.forEach(n => {
+    if (n.data?.hubId === hubId && Array.isArray(n.data?.childIds)) {
+      n.data.childIds.forEach(cid => allChildIds.add(cid));
+    }
+  });
+
+  const rootGroups = nodes
+    .filter(n => n.data?.hubId === hubId && n.type === 'jobgroup' && !allChildIds.has(n.id))
+    .sort((a, b) => (a.position?.y ?? 0) - (b.position?.y ?? 0));
+
+  const positions = {};
+
+  function layoutNode(nodeId, startY) {
+    const node = nodeById.get(nodeId);
+    if (!node) return startY;
+
+    let x;
+    if (node.type === 'jobcard') {
+      x = hubPos.x + COL_X_.job;
+    } else {
+      const kx = COL_X_[node.data?.kind];
+      if (kx == null) return startY;
+      x = hubPos.x + kx;
+    }
+    positions[nodeId] = { x, y: startY };
+
+    if (node.type === 'jobcard') {
+      // Height-aware stacking: a card taller than the fixed row (e.g. one whose
+      // justification is expanded) pushes the cards below it down; when it
+      // collapses again they slide back up. Falls back to the fixed row height
+      // until ReactFlow has measured the node. Math.max preserves the original
+      // spacing for normal/collapsed cards so the default layout is untouched.
+      const h = node.measured?.height;
+      return startY + (h ? Math.max(ROW_H.job, h + JOB_V_GAP) : ROW_H.job);
+    }
+    if (!node.data?.expanded) return startY + ROW_H.group;
+
+    const childIds = Array.isArray(node.data?.childIds) ? node.data.childIds : [];
+    const childrenAreCards = childIds.length > 0 && nodeById.get(childIds[0])?.type === 'jobcard';
+    const visCount = childrenAreCards
+      ? Math.min(node.data?.visibleCount ?? ROLE_VISIBLE_DEFAULT, childIds.length)
+      : childIds.length;
+
+    let nextY = startY;
+    for (let i = 0; i < visCount; i++) nextY = layoutNode(childIds[i], nextY);
+    return nextY;
+  }
+
+  let nextY = hubPos.y;
+  for (const root of rootGroups) nextY = layoutNode(root.id, nextY);
+  return positions;
+}
+
+
+/**
+ * Build the ReactFlow `newNodes` / `newEdges` arrays for the whole job subtree
+ * (likelihood band → salary range → role → cards). Pure: emits arrays, calls no
+ * ReactFlow setters.
+ *
+ * @param {object[]} displayedJobs  the scored jobs to show (post target-select)
+ * @param {object|null} bucketTree  { likelihoodBands, salaryRanges, roles } from
+ *                                   the AI, or null to flat-spawn on failure
  */
 export function buildJobTreeNodes({
-  scoredJobs,
-  bucketTree,
-  bucketingInput,
-  targetList,
-  otherList,
   displayedJobs,
-  hasTarget,
-  targetRole,
+  bucketTree,
   profile,
   originalPos,
   hubId,
@@ -226,300 +255,148 @@ export function buildJobTreeNodes({
 }) {
   const newNodes = [];
   const newEdges = [];
-  const structuralEdgeProps = structuralEdge('rgba(96,165,250,0.5)');
-  const COL_X = hasTarget ? COL_X_WITH_TARGET : COL_X_WITHOUT_TARGET;
+  const edgeProps = structuralEdge('rgba(96,165,250,0.5)');
+  let nextJobIdx = 0;
 
-  // bucketingInput holds the indices the AI's `jobIndices` reference. When
-  // there's no target role the AI sees the full scored array verbatim.
-  const lookupArr = hasTarget ? bucketingInput : scoredJobs;
-  const targetKeySet = hasTarget ? new Set(targetList.map(keyOf)) : new Set();
+  const pushEdge = (s, t) => newEdges.push({ id: `edge-${s}-${t}`, source: s, target: t, ...edgeProps });
 
-  const spawnedKeys = new Set();
-  let nextJobNodeIdx = 0;
-
-  // ── Small spawn helpers ──────────────────────────────────────────────
-  const pushJobNode = (job, position) => {
-    const jobId = `${baseNodeId}-job-${nextJobNodeIdx++}`;
+  const pushCard = (job) => {
+    const id = `${baseNodeId}-job-${nextJobIdx++}`;
     newNodes.push({
-      id: jobId,
+      id,
       type: 'jobcard',
-      position,
+      position: { x: originalPos.x + COL_X.job, y: originalPos.y },
       hidden: true,
       data: {
         hubId,
         title: job.title, company: job.company, location: job.location,
         salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
         reasoning: job.reasoning, careerDirection: job.careerDirection,
-        strengthLabel: job.strengthLabel, source: job.source,
-        url: job.url, posted: job.posted, resumeProfile: profile, isNew: false,
-        isTargetRoleMatch: !!job.isTargetRoleMatch,
+        source: job.source, url: job.url, posted: job.posted,
+        resumeProfile: profile, isNew: false, isTargetRoleMatch: !!job.isTargetRoleMatch,
       },
     });
-    return jobId;
+    return id;
   };
 
-  const pushBucketNode = ({ id, x, y, label, childIds, minSalary = 0, maxSalary = 0 }) => {
+  const pushGroup = (id, kind, label, childIds, count, { hidden = true, ...extra } = {}) => {
     newNodes.push({
       id,
       type: 'jobgroup',
-      position: { x: originalPos.x + x, y },
-      hidden: true,
+      position: { x: originalPos.x + COL_X[kind], y: originalPos.y },
+      hidden,
       data: {
-        kind: 'bucket', hubId, label, count: childIds.length,
-        childIds, visibleCount: Math.min(BUCKET_VISIBLE_DEFAULT, childIds.length),
-        expanded: false, minSalary, maxSalary,
+        kind, hubId, label, count, childIds, expanded: false,
+        ...(kind === 'role' ? { visibleCount: Math.min(ROLE_VISIBLE_DEFAULT, childIds.length) } : {}),
+        ...extra,
       },
     });
   };
 
-  const pushEdge = (sourceId, targetId) => {
-    newEdges.push({
-      id: `edge-${sourceId}-${targetId}`,
-      source: sourceId, target: targetId,
-      ...structuralEdgeProps,
-    });
-  };
+  const hasTaxonomy = bucketTree && Array.isArray(bucketTree.roles);
 
-  // Resolve a bucket's jobIndices into spawned job-node IDs. Skips jobs
-  // already spawned (defensive against AI returning the same index twice)
-  // and jobs that don't satisfy the optional caller-supplied filter.
-  const spawnBucketJobs = (jobIndices, bucketY, jobColX, keyFilter) => {
-    const ids = [];
-    (jobIndices || []).forEach((jobIdx, ji) => {
-      const sourceJob = lookupArr[jobIdx];
-      if (!sourceJob) return;
-      const k = keyOf(sourceJob);
-      if (spawnedKeys.has(k)) return;
-      if (keyFilter && !keyFilter(k)) return;
-      spawnedKeys.add(k);
-      // Prefer the displayed-list copy so the strengthLabel override
-      // applied during loose-fill propagates onto the spawned card.
-      const displayJob = (hasTarget ? displayedJobs : scoredJobs).find(j => keyOf(j) === k) || sourceJob;
-      const jobId = pushJobNode(displayJob, { x: originalPos.x + jobColX, y: bucketY + ji * ROW_H.job });
-      ids.push(jobId);
-    });
-    return ids;
-  };
+  if (hasTaxonomy) {
+    const bands = normalizeBands(bucketTree.likelihoodBands);
+    const { real: realRanges, unspecified } = normalizeRanges(bucketTree.salaryRanges);
 
-  // Spawn one category's buckets + jobs. Returns the category node id or
-  // null when no surviving buckets remain (so callers can omit it from
-  // their parent's childIds without dangling references).
-  const spawnCategorySubtree = (category, catY, parentId, idPrefix, ci, parentColX, bucketColX, jobColX, keyFilter) => {
-    const catId = `${idPrefix}-cat-${ci}`;
-    const catChildIds = [];
-    let catJobCount = 0;
-    let nextBucY = catY;
-
-    (category.buckets || []).forEach((bucket, bi) => {
-      const bucId = `${catId}-buc-${bi}`;
-      const bucY  = nextBucY;
-      const bucChildIds = spawnBucketJobs(bucket.jobIndices, bucY, jobColX, keyFilter);
-      bucChildIds.forEach(jobId => pushEdge(bucId, jobId));
-      if (bucChildIds.length === 0) return; // skip empty bucket entirely
-      catChildIds.push(bucId);
-      catJobCount += bucChildIds.length;
-      pushBucketNode({
-        id: bucId, x: bucketColX, y: bucY, label: bucket.label || 'Unspecified',
-        childIds: bucChildIds, minSalary: bucket.minSalary, maxSalary: bucket.maxSalary,
-      });
-      pushEdge(catId, bucId);
-      // Minimal spacing at spawn — relayout corrects positions on first expand
-      nextBucY = bucY + ROW_H.bucket;
+    // index → role name (first occurrence wins if the AI duplicated an index)
+    const roleByIdx = new Map();
+    (bucketTree.roles || []).forEach(r => {
+      (r.jobIndices || []).forEach(i => { if (!roleByIdx.has(i)) roleByIdx.set(i, r.name || 'Other'); });
     });
 
-    if (catChildIds.length === 0) return null;
-    newNodes.push({
-      id: catId,
-      type: 'jobgroup',
-      position: { x: originalPos.x + parentColX, y: catY },
-      hidden: parentId !== hubId, // hidden under a branch; visible under hub root
-      data: {
-        kind: 'category', hubId, label: category.name || 'Other',
-        count: catJobCount, childIds: catChildIds, expanded: false,
-      },
-    });
-    pushEdge(parentId, catId);
-    return { catId, nextY: nextBucY };
-  };
-
-  // Single-bucket fallback for jobs the AI failed to bucket. Used both for
-  // missing-target sweep under Target Role branch and for Uncategorized
-  // sweep under the Other Strong / hub-root level.
-  const spawnFallbackBucket = (jobs, bucId, bucY, jobColX) => {
-    const ids = jobs.map((job, ji) => {
-      spawnedKeys.add(keyOf(job));
-      const jobId = pushJobNode(job, { x: originalPos.x + jobColX, y: bucY + ji * ROW_H.job });
-      pushEdge(bucId, jobId);
-      return jobId;
-    });
-    return ids;
-  };
-
-  // ── Main spawning algorithm ──────────────────────────────────────────
-  if (bucketTree && hasTarget) {
-    // Target Role branch: skip the Category level — all target jobs cluster
-    // under the synthetic "Target Role" category whose buckets we mount
-    // directly under the branch.
-    const targetCategory = bucketTree.find(c => c.name === TARGET_BUCKETING_CATEGORY);
-    const targetBranchId = `${baseNodeId}-branch-target`;
-    const targetBranchChildIds = [];
-    const targetBranchY = originalPos.y;
-
-    let nextTargetBucY = targetBranchY;
-    (targetCategory?.buckets || []).forEach((bucket, bi) => {
-      const bucId = `${targetBranchId}-buc-${bi}`;
-      const bucY  = nextTargetBucY;
-      const bucChildIds = spawnBucketJobs(bucket.jobIndices, bucY, COL_X.job, (k) => targetKeySet.has(k));
-      bucChildIds.forEach(jobId => pushEdge(bucId, jobId));
-      if (bucChildIds.length === 0) return;
-      targetBranchChildIds.push(bucId);
-      pushBucketNode({
-        id: bucId, x: COL_X.bucket, y: bucY, label: bucket.label || 'Unspecified',
-        childIds: bucChildIds, minSalary: bucket.minSalary, maxSalary: bucket.maxSalary,
-      });
-      pushEdge(targetBranchId, bucId);
-      nextTargetBucY = bucY + ROW_H.bucket;
+    // Group every displayed job: band → range → role → jobs[]
+    const tree = new Map(); // bandLabel -> Map(rangeLabel -> Map(roleName -> jobs[]))
+    displayedJobs.forEach((job, i) => {
+      const band = placeBand(job.matchScore, bands);
+      const range = placeRange(parseSalaryToNumeric(job.salary), realRanges, unspecified);
+      const role = roleByIdx.get(i) || 'Other';
+      if (!tree.has(band.label)) tree.set(band.label, new Map());
+      const byRange = tree.get(band.label);
+      if (!byRange.has(range.label)) byRange.set(range.label, new Map());
+      const byRole = byRange.get(range.label);
+      if (!byRole.has(role)) byRole.set(role, []);
+      byRole.get(role).push(job);
     });
 
-    // Sweep any target jobs the AI missed into a synthetic "All" bucket so
-    // nothing falls off the canvas.
-    const targetMissing = targetList.filter(j => !spawnedKeys.has(keyOf(j)));
-    if (targetMissing.length > 0) {
-      EventLogger.error(`[JobHub] Target bucketing missed ${targetMissing.length} job(s) — placing in synthetic "All"`);
-      const bucId = `${targetBranchId}-buc-fallback`;
-      const bucY  = nextTargetBucY;
-      const bucChildIds = spawnFallbackBucket(targetMissing, bucId, bucY, COL_X.job);
-      targetBranchChildIds.push(bucId);
-      pushBucketNode({ id: bucId, x: COL_X.bucket, y: bucY, label: 'All', childIds: bucChildIds });
-      pushEdge(targetBranchId, bucId);
-      nextTargetBucY = bucY + ROW_H.bucket;
-    }
-
-    // Target Role branch node — always visible, even when empty, so the
-    // user knows their target was processed.
-    newNodes.push({
-      id: targetBranchId,
-      type: 'jobgroup',
-      position: { x: originalPos.x + COL_X.branch, y: targetBranchY },
-      data: {
-        kind: 'branch', hubId, label: `Target Role · ${targetRole}`,
-        count: targetList.length, childIds: targetBranchChildIds, expanded: false,
-      },
-    });
-    pushEdge(hubId, targetBranchId);
-
-    // Other Strong Matches branch — only when non-empty.
-    if (otherList.length > 0) {
-      const otherBranchId = `${baseNodeId}-branch-other`;
-      const otherBranchY  = nextTargetBucY + ROW_H.branch;
-      const otherCategories = bucketTree.filter(c => c.name !== TARGET_BUCKETING_CATEGORY);
-      const otherKeyFilter = (k) => !targetKeySet.has(k);
-      const otherBranchChildIds = [];
-
-      let nextCatY = otherBranchY;
-      otherCategories.forEach((cat, ci) => {
-        const result = spawnCategorySubtree(
-          cat, nextCatY, otherBranchId, otherBranchId, ci,
-          COL_X.category, COL_X.bucket, COL_X.job, otherKeyFilter,
-        );
-        if (result) {
-          otherBranchChildIds.push(result.catId);
-          nextCatY += ROW_H.category;
+    // Emit in canonical order: bands high→low, ranges high→low (Unspecified
+    // last), roles A→Z, cards score-desc.
+    const orderedRanges = [...realRanges, unspecified];
+    let bi = 0;
+    for (const band of bands) {
+      const byRange = tree.get(band.label);
+      if (!byRange) continue;
+      const bandId = `${baseNodeId}-L${bi++}`;
+      const bandChildIds = [];
+      let bandCount = 0;
+      let si = 0;
+      for (const range of orderedRanges) {
+        const byRole = byRange.get(range.label);
+        if (!byRole) continue;
+        const rangeId = `${bandId}-S${si++}`;
+        const rangeChildIds = [];
+        let rangeCount = 0;
+        const roleNames = [...byRole.keys()].sort((a, b) => a.localeCompare(b));
+        let ri = 0;
+        for (const roleName of roleNames) {
+          const jobs = [...byRole.get(roleName)].sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0));
+          const roleId = `${rangeId}-R${ri++}`;
+          const cardIds = jobs.map(j => { const cid = pushCard(j); pushEdge(roleId, cid); return cid; });
+          pushGroup(roleId, 'role', roleName, cardIds, cardIds.length);
+          pushEdge(rangeId, roleId);
+          rangeChildIds.push(roleId);
+          rangeCount += cardIds.length;
         }
-      });
-
-      const otherMissing = otherList.filter(j => !spawnedKeys.has(keyOf(j)));
-      if (otherMissing.length > 0) {
-        EventLogger.error(`[JobHub] Other bucketing missed ${otherMissing.length} job(s) — placing in synthetic Uncategorized`);
-        const catId = `${otherBranchId}-cat-missing`;
-        const catY  = nextCatY;
-        const bucId = `${catId}-buc-0`;
-        const bucChildIds = spawnFallbackBucket(otherMissing, bucId, catY, COL_X.job);
-        pushBucketNode({ id: bucId, x: COL_X.bucket, y: catY, label: 'All', childIds: bucChildIds });
-        pushEdge(catId, bucId);
-        newNodes.push({
-          id: catId, type: 'jobgroup',
-          position: { x: originalPos.x + COL_X.category, y: catY },
-          hidden: true,
-          data: {
-            kind: 'category', hubId, label: 'Uncategorized',
-            count: bucChildIds.length, childIds: [bucId], expanded: false,
-          },
+        pushGroup(rangeId, 'salary', range.label, rangeChildIds, rangeCount, {
+          minSalary: range.minSalary, maxSalary: range.maxSalary,
         });
-        pushEdge(otherBranchId, catId);
-        otherBranchChildIds.push(catId);
+        pushEdge(bandId, rangeId);
+        bandChildIds.push(rangeId);
+        bandCount += rangeCount;
       }
-
-      if (otherBranchChildIds.length > 0) {
-        newNodes.push({
-          id: otherBranchId, type: 'jobgroup',
-          position: { x: originalPos.x + COL_X.branch, y: otherBranchY },
-          data: {
-            kind: 'branch', hubId, label: 'Other Strong Matches',
-            count: otherList.length, childIds: otherBranchChildIds, expanded: false,
-          },
-        });
-        pushEdge(hubId, otherBranchId);
-      }
-    }
-  } else if (bucketTree) {
-    // No target role — original flat structure: categories direct under hub.
-    let nextCatY = originalPos.y;
-    bucketTree.forEach((category, ci) => {
-      const result = spawnCategorySubtree(
-        category, nextCatY, hubId, baseNodeId, ci,
-        COL_X.category, COL_X.bucket, COL_X.job, null,
-      );
-      // Minimal spacing at spawn — relayout corrects positions on expand
-      if (result) nextCatY += ROW_H.category;
-    });
-    // Uncategorized sweep for any unbucketed scored jobs.
-    const missing = scoredJobs.filter(j => !spawnedKeys.has(keyOf(j)));
-    if (missing.length > 0) {
-      EventLogger.error(`[JobHub] Bucketing missed ${missing.length} job(s) — placing in synthetic Uncategorized`);
-      const catId = `${baseNodeId}-cat-missing`;
-      const catY  = nextCatY;
-      const bucId = `${catId}-buc-0`;
-      const bucChildIds = spawnFallbackBucket(missing, bucId, catY, COL_X.job);
-      pushBucketNode({ id: bucId, x: COL_X.bucket, y: catY, label: 'All', childIds: bucChildIds });
-      pushEdge(catId, bucId);
-      newNodes.push({
-        id: catId, type: 'jobgroup',
-        position: { x: originalPos.x + COL_X.category, y: catY },
-        data: {
-          kind: 'category', hubId, label: 'Uncategorized',
-          count: bucChildIds.length, childIds: [bucId], expanded: false,
-        },
+      // Band nodes are the visible roots; everything below starts collapsed.
+      pushGroup(bandId, 'likelihood', band.label, bandChildIds, bandCount, {
+        hidden: false, minScore: band.minScore, maxScore: band.maxScore,
       });
-      pushEdge(hubId, catId);
+      pushEdge(hubId, bandId);
     }
   } else {
-    // Bucketing failed entirely — flat spawn under the hub (legacy fallback
-    // so the user still sees something after a bucket-jobs error).
-    const flatSource = hasTarget ? displayedJobs : scoredJobs;
-    flatSource.forEach((job, index) => {
-      const jobId = `${baseNodeId}-job-flat-${index}`;
-      newNodes.push({
-        id: jobId,
-        type: 'jobcard',
-        position: { x: originalPos.x + COL_X.job, y: originalPos.y + index * ROW_H.job },
-        data: {
-          hubId,
-          title: job.title, company: job.company, location: job.location,
-          salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
-          reasoning: job.reasoning, careerDirection: job.careerDirection,
-          strengthLabel: job.strengthLabel, source: job.source,
-          url: job.url, posted: job.posted, resumeProfile: profile, isNew: false,
-          isTargetRoleMatch: !!job.isTargetRoleMatch,
-        },
+    // Bucketing failed entirely — flat spawn under the hub so the user still
+    // sees their jobs (score-desc), just without the band/range/role tree.
+    [...displayedJobs]
+      .sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0))
+      .forEach((job, index) => {
+        const id = `${baseNodeId}-job-flat-${index}`;
+        newNodes.push({
+          id,
+          type: 'jobcard',
+          position: { x: originalPos.x + COL_X.job, y: originalPos.y + index * ROW_H.job },
+          data: {
+            hubId,
+            title: job.title, company: job.company, location: job.location,
+            salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
+            reasoning: job.reasoning, careerDirection: job.careerDirection,
+            source: job.source, url: job.url, posted: job.posted,
+            resumeProfile: profile, isNew: false, isTargetRoleMatch: !!job.isTargetRoleMatch,
+          },
+        });
+        pushEdge(hubId, id);
       });
-      pushEdge(hubId, jobId);
-    });
   }
 
-  // Slider iterates over spawned scores, not the full scored array.
-  const flatJobsToSpawn = hasTarget ? displayedJobs : scoredJobs;
-  const spawnedScores = flatJobsToSpawn.map(j => j.matchScore || 0);
+  // ── Lay out the collapsed tree ───────────────────────────────────────────
+  // Everything spawns COLLAPSED — the band roots are visible (hidden:false) but
+  // closed, and all ranges/roles/cards stay hidden until the user expands. One
+  // layout pass stacks the band roots (they all spawn at the same y otherwise).
+  // The flat-spawn fallback has no groups → no-op.
+  const hasGroups = newNodes.some(n => n.type === 'jobgroup');
+  if (hasGroups) {
+    const layoutPos = computeLayoutPositions(newNodes, hubId, COL_X, originalPos);
+    newNodes.forEach(n => { if (layoutPos[n.id]) n.position = layoutPos[n.id]; });
+  }
+
+  // Slider iterates over spawned scores.
+  const spawnedScores = displayedJobs.map(j => j.matchScore || 0);
   const scoreRangeMin = spawnedScores.length > 0 ? Math.min(...spawnedScores) : 0;
   const scoreRangeMax = spawnedScores.length > 0 ? Math.max(...spawnedScores) : 100;
 

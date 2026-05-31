@@ -3,6 +3,7 @@ import { useReactFlow } from '@xyflow/react';
 import { Loader2, CheckCircle2, Filter, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
+import { SourceWarningPanel } from './_shared/SourceWarningPanel';
 import { mergeSourceProgress } from '../utils/sourceProgress';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 
@@ -361,18 +362,7 @@ export function JobSourceCardNode({ id, data }) {
       </div>
       {/* Embedded warning text — selectable so the user can copy/paste the
           full evidence + suggestion back into a bug report or chat. */}
-      {warning && !dismissed && (
-        <div
-          className="px-2.5 pb-1.5 pt-1 text-[9px] leading-snug select-text cursor-text"
-          style={{ color: hasBlock ? '#fca5a5' : '#fcd34d', borderTop: `1px solid ${hasBlock ? '#ef444433' : '#f59e0b33'}` }}
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => e.stopPropagation()}
-          title="Copy this — paste back to debug"
-        >
-          {warning.evidence && <div className="font-mono break-words">{warning.evidence}</div>}
-          {warning.suggestion && <div className="mt-0.5 opacity-80 break-words">{warning.suggestion}</div>}
-        </div>
-      )}
+      {!dismissed && <SourceWarningPanel warning={warning} hasBlock={hasBlock} stopClick />}
       {/* Solve / Skip row — Solve appears when we have a failed URL to open.
           For config-missing (USAJobs no API key) the suggestion text above
           already directs the user to set the env var — no Solve button. */}

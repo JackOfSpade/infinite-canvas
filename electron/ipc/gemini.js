@@ -9,14 +9,16 @@ import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { resolveServiceAccountPath } from './settings.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
+import { IMAGE_MIME_MAP, DOCUMENT_MIME_MAP } from '../utils/mimeTypes.js';
 
 // Determinism for structured/JSON output (not a telemetry-learning candidate —
-// temperature is a quality knob, not a budget). Payload char cap is a 413
-// "Payload Too Large" guard, also intentionally fixed.
+// temperature is a quality knob, not a budget).
 const GEMINI_TEMPERATURE = 0.1;
-const MAX_PROMPT_CHARS   = 100000;
-// Static safety bound (not adaptive): Vertex inlineData tops out at 20MB and
-// base64 adds ~33%, so cap raw image/document files here to avoid a 413 / OOM.
+// NOTE: we deliberately do NOT cap prompt/context size on our end. The model's
+// own input window (~1M tokens on every model we call) is the only ceiling — an
+// over-limit prompt is rejected by the API and that error is surfaced as-is. We
+// would rather fail loudly than pre-clip or truncate context. (The file-byte cap
+// below is unrelated: a hard ~20MB API limit on inline image/document bytes.)
 const MAX_AI_FILE_BYTES  = 15 * 1024 * 1024; // 15MB
 
 const GEMINI_MODEL = 'gemini-3.5-flash';
@@ -202,6 +204,26 @@ let lastAttemptedModel = '(none)';
 let lastSuccessfulModel = '(none)';
 let lastAttemptedError = '(none)';
 
+// Per-model rate-limit cooldown: model id → epoch ms until which it's known to be
+// 429'd. Populated from each 429's "retry in Ns" hint and consulted by the fallback
+// loop so subsequent calls SKIP a model that's still cooling instead of re-hitting
+// it for a wasted round-trip every batch. Process-scoped (resets on restart), which
+// is correct — a rate-limit window is short-lived. See callGemini's loop.
+const modelCooldownUntil = new Map();
+
+/** Parse a Gemini 429 error MESSAGE (string) for its "retry in Ns / Nms" hint →
+ *  milliseconds, or null. The API phrases it as "Please retry in 53.39s." or
+ *  "...409.6ms."; the seconds-only body parser (parseGeminiRetryMs) doesn't cover
+ *  the ms form or operate on a bare message string. */
+function parseRetryMsFromError(msg) {
+  const s = String(msg || '');
+  const ms = /retry in ([\d.]+)\s*ms\b/i.exec(s);
+  if (ms) return Math.round(parseFloat(ms[1]));
+  const sec = /retry in ([\d.]+)\s*s\b/i.exec(s);
+  if (sec) return Math.round(parseFloat(sec[1]) * 1000);
+  return null;
+}
+
 /**
  * Exposes internal Gemini diagnostics to the bug reporting IPC layer.
  */
@@ -212,6 +234,65 @@ export function getGeminiTelemetry() {
     lastAttemptedError
   };
 }
+
+/** Parse a Gemini 429 body for its suggested retry delay (ms), or null. AI
+ *  Studio puts the hint in the body (a RetryInfo detail `retryDelay:"24s"`
+ *  and/or "Please retry in 24.15s"), not always the Retry-After header. */
+function parseGeminiRetryMs(res, body) {
+  const header = parseRetryAfterMs(res);
+  if (header != null) return header;
+  if (!body) return null;
+  try {
+    const details = JSON.parse(body)?.error?.details;
+    if (Array.isArray(details)) {
+      for (const d of details) {
+        if (typeof d?.retryDelay === 'string') {
+          const s = Number(d.retryDelay.replace(/s$/i, ''));
+          if (Number.isFinite(s)) return Math.round(s * 1000);
+        }
+      }
+    }
+  } catch { /* not JSON — fall through to text scan */ }
+  const m = /retry in ([\d.]+)\s*s/i.exec(body);
+  return m ? Math.round(parseFloat(m[1]) * 1000) : null;
+}
+
+function extractGeminiErr(body, status) {
+  if (!body) return `HTTP ${status}`;
+  try { const msg = JSON.parse(body)?.error?.message; if (msg) return msg; } catch { /* ignore */ }
+  return body.slice(0, 200);
+}
+
+/**
+ * Availability probe for the AI Studio key path: a 1-token generateContent ping.
+ * NEVER throws — returns {ok,status,...}. Unlike Claude, Gemini exposes NO
+ * remaining-quota on success (only a retry hint on 429), so there is no
+ * `rateLimit` block by design — we don't fabricate one.
+ */
+export async function probeGemini(apiKey, model = 'gemini-3.1-flash-lite') {
+  if (!apiKey) {
+    return { ok: false, status: null, error: 'No AI Studio API key set (a service-account / Vertex setup is not probed here).' };
+  }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: 'ping' }] }], generationConfig: { maxOutputTokens: 1 } }),
+    });
+  } catch (e) {
+    return { ok: false, status: null, error: e?.message || String(e) };
+  }
+  if (res.ok) return { ok: true, status: res.status, model };
+  let body = '';
+  try { body = await res.text(); } catch { /* ignore */ }
+  return { ok: false, status: res.status, error: extractGeminiErr(body, res.status), retryAfterMs: parseGeminiRetryMs(res, body) };
+}
+
+// Last live "Check availability" result per provider, so the Settings panel can
+// render the most recent verdict immediately on open (the button refreshes it).
+const lastProbe = { gemini: null, claude: null };
 
 /**
  * Inner executor for a single Gemini API request.
@@ -235,14 +316,27 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   // `task` is metadata for token-usage telemetry and `meta` is a by-reference
   // out-param the fallback loop writes the succeeded model into — neither is a
   // Gemini API field, so pull them out so they never leak into generationConfig
-  // (which would 400 the call).
-  const { signal, responseSchema, task, formulaSeed: _formulaSeed, meta: _meta, ...restGenConfig } = genConfig;
+  // (which would 400 the call). `grounding` is also ours — it lifts to a
+  // top-level `tools` entry (Google Search), NOT a generationConfig field.
+  const { signal, responseSchema, task, formulaSeed: _formulaSeed, meta: _meta, grounding: _grounding, ...restGenConfig } = genConfig;
   const formulaSeed = _formulaSeed ?? null;
 
   const generationConfig = {
     temperature: GEMINI_TEMPERATURE,
     responseMimeType: 'application/json',
     maxOutputTokens: 2048,   // default; callers pass task-specific caps via opts
+    // Disable model "thinking" by default. Every task on this path is
+    // schema-constrained JSON (scoring / bucketing / extraction / classification):
+    // the visible answer is a few hundred tokens, but the 2.5-flash / 3-flash
+    // models were spending 9k–12k tokens THINKING per call, which (a) blew the
+    // output cap → MAX_TOKENS truncation → forced fallback to the WEAKEST model,
+    // and (b) ran long enough to trip the 60s request timeout. Net effect: thinking
+    // was knocking out the strong models and DEGRADING quality, not improving it.
+    // thinkingBudget:0 is accepted by every model in the fallback chain (verified
+    // live against all 5 — all 200, thoughts→0, valid JSON) and is the single
+    // biggest free-tier reliability/latency win. A task that genuinely benefits
+    // from reasoning can re-enable it by passing thinkingConfig via genConfig.
+    thinkingConfig: { thinkingBudget: 0 },
     ...restGenConfig,
   };
   if (responseSchema) {
@@ -254,6 +348,14 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
     contents: [{ role: 'user', parts }],
     generationConfig,
   };
+  // Grounding: attach the Google Search tool so the model does live web
+  // research instead of answering from training knowledge alone. This is a
+  // free-text path — the caller pairs it with responseMimeType:'text/plain'
+  // (grounding is incompatible with a strict responseSchema), so we never set
+  // generationConfig.responseSchema here. Carries its own quota/billing.
+  if (_grounding) {
+    payload.tools = [{ google_search: {} }];
+  }
 
   // Scale the timeout to the payload: multimodal calls with several images
   // legitimately take longer, so a flat 60s would falsely abort a valid slow
@@ -281,7 +383,13 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
 
   const data = await response.json();
   const candidate = data?.candidates?.[0];
-  const contentText = candidate?.content?.parts?.[0]?.text;
+  // Join ALL text parts, not just [0]. Plain JSON answers arrive as a single
+  // part, but a grounded (Google Search) response can split its answer across
+  // several text parts interleaved with grounding metadata — taking only the
+  // first part would silently truncate the research text.
+  const contentText = (candidate?.content?.parts || [])
+    .map(p => p?.text || '')
+    .join('') || undefined;
   const finishReason = candidate?.finishReason;
   const usage = data?.usageMetadata;
   const cap = payload.generationConfig.maxOutputTokens;
@@ -337,30 +445,51 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   // (With a key we hit AI Studio directly — no service-account probe needed.)
   if (!apiKey) await getAuthClient();
 
-  // Hardening: Prevent "Payload Too Large" errors by capping total prompt text.
-  let totalTextLen = 0;
-  for (const part of parts) {
-    if (part.text) totalTextLen += part.text.length;
-  }
-  if (totalTextLen > MAX_PROMPT_CHARS) {
-    throw new Error(`AI prompt too large (${totalTextLen} chars). Please select fewer nodes or a smaller group.`);
-  }
-
-  // Best → worst across the text/JSON-capable Gemini models we want this app
-  // to use after July 2026. Anything Google is restricting in June 2026 or
-  // retiring by June 17, 2026 is intentionally excluded from this chain.
-  // NOTE: `*-tts` / `*-image` / `computer-use` / `robotics` variants are
-  // excluded — they don't serve plain generateContent text/JSON.
+  // Best → worst across the text/JSON-capable Gemini models, scoped to ONLY the
+  // models with real FREE-tier quota (this app runs on a free-tier key). IDs
+  // verified live against the v1beta ListModels endpoint (May 2026); `*-tts` /
+  // `*-image` / `computer-use` / `robotics` and the non-existent `gemini-3-flash`
+  // (real id is `gemini-3-flash-preview`) are excluded — they don't serve plain
+  // generateContent text/JSON.
+  //
+  // DELIBERATELY EXCLUDED: every "Pro" model (gemini-3.1-pro, gemini-3-pro,
+  // gemini-2.5-pro) — all are limit 0/0 on the free tier per the AI Studio
+  // rate-limit dashboard, i.e. they 429 on EVERY call. Listing one first (as a
+  // paid-tier hedge) only burned ~150ms per AI call on a guaranteed 429 before
+  // falling through. If a billed/Tier-1 key is ever used, re-add 'gemini-3.1-pro-
+  // preview' at the head — it's the strongest model there.
+  //
+  // Free-tier reality for the models we DO keep:
+  //   • The 4 flash / flash-lite "20 RPD" models are each a SEPARATE quota
+  //     bucket (~5–10 RPM), so chaining them multiplies usable headroom and
+  //     burst capacity — a 429 on one pool spills into the next.
+  //   • gemini-3.1-flash-lite has ~500 RPD / 15 RPM — 25× the others — so it's
+  //     the workhorse tail: last in line, it still completes a bulk run after
+  //     every smaller pool has drained.
   const GEMINI_MODEL_FALLBACKS = [
-    'gemini-3.1-pro-preview',
-    'gemini-3.5-flash',
-    'gemini-3-pro-preview',
-    'gemini-3.1-flash-lite',
+    'gemini-3.5-flash',         // ~20 RPD / 5 RPM free — best quality available on free tier
+    'gemini-3-flash-preview',   // ~20 RPD / 5 RPM free  (display name "Gemini 3 Flash")
+    'gemini-2.5-flash',         // ~20 RPD / 5 RPM free
+    'gemini-2.5-flash-lite',    // ~20 RPD / 10 RPM free
+    'gemini-3.1-flash-lite',    // ~500 RPD / 15 RPM free — workhorse, completes bulk runs
   ];
 
   const attemptedErrors = [];
 
-  for (const currentModel of GEMINI_MODEL_FALLBACKS) {
+  // Try models NOT currently in a 429 cooldown first; keep cooling ones only as a
+  // last resort (the retry-after is an estimate, and attempting beats failing if
+  // every pool happens to be cooling). On the free tier the top two flash pools
+  // exhaust within a run, so without this every scoring/bucketing batch re-hit them
+  // for two throwaway 429 round-trips before reaching gemini-2.5-flash.
+  const _now = Date.now();
+  const _ready   = GEMINI_MODEL_FALLBACKS.filter(m => (modelCooldownUntil.get(m) || 0) <= _now);
+  const _cooling = GEMINI_MODEL_FALLBACKS.filter(m => (modelCooldownUntil.get(m) || 0) >  _now);
+  const modelOrder = [..._ready, ..._cooling];
+  if (_cooling.length > 0 && _ready.length > 0) {
+    logger.info(`[Gemini] Skipping ${_cooling.length} rate-limited model(s) still cooling: ${_cooling.join(', ')}`);
+  }
+
+  for (const currentModel of modelOrder) {
     // Bail immediately if the caller cancelled (node deleted / Reset). Without
     // this, an aborted request walks the entire fallback chain — each attempt
     // throws on the already-aborted signal — and surfaces a misleading "all
@@ -379,11 +508,39 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
       const result = await callGeminiSingle(parts, apiKey, currentModel, genConfig);
 
       lastSuccessfulModel = currentModel;
+      modelCooldownUntil.delete(currentModel); // it just succeeded — clear any stale cooldown
+      // Clear the per-attempt error on success. Otherwise it stays pinned to the
+      // last failed hop — on the FREE tier the small "20 RPD" pools exhaust fast,
+      // so a healthy call that simply fell through to a later model would forever
+      // surface a scary "Last error: …429" in Settings and bug reports even though
+      // it succeeded. The expected fall-through is still captured per-stage in
+      // genConfig.meta.fallback.
+      lastAttemptedError = '(none)';
       // Report the model that actually served this call back to the caller (by
       // reference) so per-stage telemetry can record WHICH model produced each
       // result — e.g. a price synthesized by a weak flash-lite fallback after the
       // stronger models 429'd looks identical in the output otherwise.
-      if (genConfig.meta && typeof genConfig.meta === 'object') genConfig.meta.model = currentModel;
+      if (genConfig.meta && typeof genConfig.meta === 'object') {
+        genConfig.meta.model = currentModel;
+        // When stronger models were skipped to land here, record WHY — quota/
+        // rate-limit (external: wait or upgrade tier) vs token-cap truncation
+        // (our cap is too low: raise it in llm.js TASK_MAX_TOKENS) vs server
+        // (overload). The bug-report funnel otherwise only knows "weak fallback"
+        // from the model NAME; the per-attempt reason lives solely in the
+        // scrolling log buffer, and each cause needs a different fix.
+        if (attemptedErrors.length > 0) {
+          const counts = {};
+          for (const e of attemptedErrors) {
+            const m = String(e.error || '').toLowerCase();
+            const k = (m.includes('truncat') || m.includes('max_tokens') || m.includes('token output cap')) ? 'truncation'
+              : (m.includes('429') || m.includes('quota') || m.includes('rate limit')) ? 'rate-limit'
+                : /\b(404|500|502|503|504)\b/.test(m) ? 'server' : 'other';
+            counts[k] = (counts[k] || 0) + 1;
+          }
+          const reason = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+          genConfig.meta.fallback = { attempts: attemptedErrors.length, reason, counts };
+        }
+      }
       return result;
     } catch (err) {
       const errMsg = err.message || String(err);
@@ -403,6 +560,16 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
         errMsg.includes('504');
 
       if (isRateLimitOrQuota) {
+        // For a genuine rate-limit/quota 429, remember when this model is allowed
+        // again (from the API's "retry in Ns" hint) so later calls skip it until
+        // then. 404/5xx are structural/transient, not rate windows — don't cool
+        // those (they'd wrongly suppress a model that's actually available).
+        const is429 = errMsg.includes('429') || errMsg.toLowerCase().includes('quota') || errMsg.toLowerCase().includes('rate limit');
+        if (is429) {
+          const retryMs = parseRetryMsFromError(errMsg);
+          const cooldownMs = Math.min(10 * 60_000, Math.max(1000, retryMs ?? 30_000)); // clamp 1s–10min; 30s default when unparseable
+          modelCooldownUntil.set(currentModel, Date.now() + cooldownMs);
+        }
         logger.warn(`[Gemini] Falling back to the next best model...`);
         continue;
       }
@@ -480,6 +647,21 @@ export function parseGeminiJSON(raw) {
     const parsed = JSON.parse(jsonStr.trim());
     return parsed;
   } catch (error) {
+    // Strictly-additive fallback: the first-open/last-close span above can
+    // mis-bracket when the model prefixes the JSON with prose that contains a
+    // stray '{', '[', '}' or ']' (e.g. "use [ ] for arrays: {…}"), so it starts
+    // the span at the stray delimiter and JSON.parse fails. Retry with a
+    // brace-only then bracket-only span. This runs ONLY after the primary parse
+    // already threw, so it can never regress a response that parsed cleanly.
+    for (const [open, close] of [['{', '}'], ['[', ']']]) {
+      const s = raw.indexOf(open);
+      const e = raw.lastIndexOf(close);
+      if (s !== -1 && e > s) {
+        try {
+          return JSON.parse(raw.substring(s, e + 1).replace(/,\s*([}\]])/g, '$1').trim());
+        } catch { /* try the next delimiter pair, then fall through to the throw */ }
+      }
+    }
     // Log a window AROUND the failure position, not the head of the doc.
     // V8's JSON.parse error messages include "at position N" — pull that
     // out and dump ±200 chars so bug reports show the actual malformed
@@ -504,22 +686,6 @@ export function parseGeminiJSON(raw) {
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-// MIME type tables — module-level so they're not re-allocated per call.
-const IMAGE_MIME_MAP = {
-  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-  '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif',
-  '.heic': 'image/heic', '.heif': 'image/heic',
-};
-const DOCUMENT_MIME_MAP = {
-  '.pdf':  'application/pdf',
-  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  '.txt':  'text/plain',
-  '.md':   'text/plain',
-  '.json': 'text/plain',
-  '.js':   'text/plain',
-  '.py':   'text/plain',
-};
-
 /**
  * Send a text-only prompt to Gemini.
  * @param {string} prompt
@@ -530,6 +696,17 @@ const DOCUMENT_MIME_MAP = {
 export async function callGeminiText(prompt, apiKey, model, signal = null, opts = {}) {
   const raw = await callGemini([{ text: prompt }], apiKey, model, { signal, ...opts });
   return parseGeminiJSON(raw);
+}
+
+/**
+ * Free-text (non-JSON) prompt. Returns the model's raw text — NOT parsed as
+ * JSON. Forces responseMimeType:'text/plain' (overriding the JSON default) so
+ * prose / HTML / research output isn't constrained to a JSON envelope. Pass
+ * `grounding:true` in opts to enable live Google Search research.
+ * @returns {Promise<string>} — Raw text response
+ */
+export async function callGeminiTextRaw(prompt, apiKey, model, signal = null, opts = {}) {
+  return await callGemini([{ text: prompt }], apiKey, model, { signal, responseMimeType: 'text/plain', ...opts });
 }
 
 /**
@@ -625,5 +802,33 @@ export function registerGeminiHandlers() {
     const config = { responseMimeType: 'text/plain', signal, maxOutputTokens: 1024 };
     const raw = await callGemini([{ text: prompt }], settings.geminiApiKey, model, config);
     return { text: raw.trim() };
+  });
+
+  // Live "Check availability" — pings the requested provider (or the active one)
+  // and returns a structured verdict. For Claude this includes real
+  // remaining/reset numbers from the response headers; for Gemini just
+  // up/rate-limited/bad-key + a retry hint (it has no remaining-quota API).
+  handleSafe('check-ai-availability', async (event, args) => {
+    const { getAISettings } = await import('./settings.js');
+    const settings = getAISettings();
+    const provider = (args && args.provider) || settings.provider || 'gemini';
+    let result;
+    if (provider === 'claude') {
+      const { probeClaude } = await import('./claude.js');
+      result = await probeClaude(settings.anthropicApiKey);
+    } else {
+      result = await probeGemini(settings.geminiApiKey);
+    }
+    lastProbe[provider] = { ...result, at: Date.now() };
+    return { provider, ...lastProbe[provider] };
+  });
+
+  // Passive status for the initial panel render: the last probe per provider
+  // plus Gemini's always-captured call telemetry (last model / last error).
+  handleSafe('get-ai-status', async () => {
+    return {
+      gemini: { telemetry: getGeminiTelemetry(), lastProbe: lastProbe.gemini },
+      claude: { lastProbe: lastProbe.claude },
+    };
   });
 }

@@ -3,8 +3,6 @@ import {
   fetchRemoteOKJobs,
   fetchWeWorkRemotelyJobs,
   fetchDiceListings,
-  fetchGreenhouseJobs,
-  fetchLeverJobs,
 } from '../electron/extractors/apiExtractors.js';
 
 async function run() {
@@ -37,8 +35,6 @@ async function run() {
   await safeCall('RemoteOK', () => fetchRemoteOKJobs(['engineer', 'developer']));
   await safeCall('WeWorkRemotely', () => fetchWeWorkRemotelyJobs(['frontend']));
   await safeCall('Dice', () => fetchDiceListings('software engineer', '', null, 7));
-  await safeCall('Greenhouse', () => fetchGreenhouseJobs(['software engineer']));
-  await safeCall('Lever', () => fetchLeverJobs(['software engineer']));
 
   console.log(JSON.stringify(results, null, 2));
   if (Object.values(results).some(r => !r.success)) {

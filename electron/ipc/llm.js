@@ -1,7 +1,8 @@
 import { getAISettings } from './settings.js';
-import { callGeminiText, callGeminiVision, callGeminiDocument, parseGeminiJSON } from './gemini.js';
-import { callClaudeText, callClaudeVision, callClaudeDocument } from './claude.js';
+import { callGeminiText, callGeminiTextRaw, callGeminiVision, callGeminiDocument, parseGeminiJSON } from './gemini.js';
+import { callClaudeText, callClaudeVision, callClaudeDocument, createClaudeBatch, getClaudeBatch, getClaudeBatchResults, cancelClaudeBatch } from './claude.js';
 import { effectiveCap } from './tokenBudget.js';
+import { priceSynthesisMaxTokens } from './resultCaps.js';
 import { logger } from '../logger.js';
 
 /**
@@ -14,10 +15,15 @@ import { logger } from '../logger.js';
  *
  * Model choices, in short:
  *   - Sonnet 4.6: vision identification, price synthesis, resume parse,
- *     job scoring, cover letters, interview prep — anywhere quality
- *     compounds or the output is user-facing.
- *   - Haiku 4.5: page status classify, query gen, text polish — short
- *     structured outputs where Sonnet adds no value (3x cheaper).
+ *     job scoring, query generation, bucketing, cover letters, interview
+ *     prep, application generation — anywhere quality compounds or the
+ *     output is user-facing. Query gen and bucketing are on Sonnet
+ *     deliberately: query quality gates which jobs are ever DISCOVERED, and
+ *     the bucketing role-consolidation IS the user-facing results hierarchy.
+ *     Both run once per search (not per-job), so the quality win is cheap.
+ *   - Haiku 4.5: page status classify, text polish, platform-fit — short
+ *     structured outputs (enum + a sentence) where Sonnet adds no real
+ *     quality (3x cheaper, no user-visible difference).
  *   - Gemini 3.5 Flash: matches Sonnet's tasks (good enough, materially
  *     newer than the 2.5 Flash line Google is restricting on June 15, 2026).
  *   - Gemini 3.1 Flash-Lite: matches Haiku's tasks while avoiding the 2.5
@@ -32,11 +38,18 @@ const TASK_MODELS = {
   'platform-fit-assessment':   { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
   'page-status-classify':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
   'resume-parse':              { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
-  'job-query-generation':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.5-flash'      },
+  'career-file-extract':       { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
+  'job-query-generation':      { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   'job-scoring':               { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
-  'job-bucketing':             { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.5-flash'      },
+  'job-bucketing':             { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   'cover-letter-generation':   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   'interview-prep-generation': { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
+  // Application generation (résumé + cover letter from the design system).
+  // Quality compounds here — the output is a polished PDF a human sends to a
+  // recruiter — so it gets the strong model on both providers.
+  'company-research':          { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
+  'application-resume':        { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
+  'application-cover-letter':  { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   'text-polish':               { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
   // Default — used when a caller forgets to pass `task`. Logged as a warning
   // below so we notice unmapped sites; tuned to a safe-middle.
@@ -77,8 +90,9 @@ const TASK_MAX_TOKENS = {
   // Formula must
   // accommodate the fallback chain: ~200 thinking/comp + ~600 visible budget.
   // 40 items → 11000 (above the 8648 observed need + headroom); capped at 24576.
-  'price-synthesis':           ({ itemCount = 40 } = {}) =>
-    Math.min(24576, 3000 + itemCount * 200),
+  // Formula lives in resultCaps.priceSynthesisMaxTokens so the comp-count ceiling
+  // that compsForPricing() feeds is derived from the SAME shape (can't truncate).
+  'price-synthesis':           ({ itemCount } = {}) => priceSynthesisMaxTokens(itemCount),
   // Thinking-heavy fallback models consume
   // ~1460 thinking + ~50–230 visible tokens for this task — real-world p95 is
   // 1374, max 1510. The old 1024 seed forced self-calibration to catch up over
@@ -87,6 +101,12 @@ const TASK_MAX_TOKENS = {
   'platform-fit-assessment':   2048,  // per-platform fit verdict + short reason
   'page-status-classify':      512,   // 5-way enum + one sentence
   'resume-parse':              4096,  // full structured profile
+  // Career-file extract reproduces a whole document as faithful text, so it
+  // scales with the source. Sized generously: a truncated transcription
+  // silently DROPS the candidate's career history and weakens everything
+  // downstream (queries, scoring, the generated résumé). Caps are billed on
+  // actual output, so the headroom is free insurance, not a cost.
+  'career-file-extract':       16384,
   // Gemini 2.5 Flash (the active model for this task) engages thinking which
   // eats the same cap as visible output — real-world: thoughts=979, visible=31
   // at cap=1024 truncated the JSON mid-output. 4096 matches resume-parse and
@@ -97,10 +117,13 @@ const TASK_MAX_TOKENS = {
   // ~175 thinking tokens per job plus ~150 visible tokens per job (score +
   // 1-sentence rationale). 15-job batch with old formula (512 + 15*150 =
   // 2762) had thoughts=2647 alone — barely 100 visible tokens before
-  // truncation. New formula: 2500 base + 300/item gives 15→7000, 50→17500,
-  // capped at 24576 so a pathological batch can't request runaway billing.
+  // truncation. Formula: 2500 base + 420/item gives 15→8800, 50→23500, capped
+  // at 24576 so a pathological batch can't request runaway billing. The 420
+  // (was 300) reflects the richer multi-sentence `reasoning` we now ask for
+  // (truncated on the card, expandable) — output is billed on actual tokens so
+  // the headroom is free, and effectiveCap self-heals if a batch still clips.
   'job-scoring':               ({ itemCount = 10 } = {}) =>
-    Math.min(24576, 2500 + itemCount * 300),
+    Math.min(24576, 2500 + itemCount * 420),
   // Bucketing reasons over salaries per category — thinking-heavy (the model
   // weighs each job's salary against its category's distribution). The old
   // static 6144 was calibrated against an older lighter-thinking Flash model
@@ -118,6 +141,18 @@ const TASK_MAX_TOKENS = {
   // scales steeply with paste size — a ~45-job paste truncated at the old 10.5k.
   'cover-letter-generation':   2048,  // a paragraph-length letter
   'interview-prep-generation': 2048,  // bulleted prep
+  // Research: synthesized web findings covering BOTH the company (culture,
+  // products, recent news, stage) AND the specific role (responsibilities,
+  // requirements, emphasized skills) — the primary job-context source. Grounded
+  // calls also spend tokens assembling search results, so give room for a
+  // thorough two-part synthesis.
+  'company-research':          6144,
+  // Résumé generation emits a full <main class="page"> block of HTML (several
+  // roles × bullets, skills, education) — the largest free-text output here. A
+  // truncation produces malformed HTML → a broken PDF, so size well past a
+  // 2-page senior résumé. Unused cap is free (billed on actual output).
+  'application-resume':        12288,
+  'application-cover-letter':  3072,  // structured letterhead + 3-4 paragraphs
   'text-polish':               1024,  // light edit
   'default':                   2048,
 };
@@ -190,6 +225,84 @@ export async function callLLMText(prompt, opts = {}) {
   }
 }
 
+// ── Batch text/JSON (async, Claude-only) ───────────────────────────────────
+// The Batch API is ~50% cheaper but async (results within 24h). Only Claude is
+// supported (free-tier Gemini is already $0); callers must gate on provider.
+// Each item: { customId, prompt, hints }. Per-item max_tokens is resolved from
+// the task budget + hints exactly like callLLMText, so a batched call sizes its
+// output identically to a real-time one. cachedPrefix is sent as an ephemeral
+// cache block per request (the shared profile+rules), stacking the caching
+// discount on top of the batch discount.
+export async function submitLLMTextBatch(items, { task, responseSchema, cachedPrefix } = {}) {
+  const settings = getAISettings();
+  if (settings.provider !== 'claude') throw new Error('Batch scoring is only available on the Claude provider.');
+  if (!settings.anthropicApiKey) throw new Error('Batch scoring requires an Anthropic API key (set it in Settings).');
+  const model = pickModel('claude', task);
+  const requests = (items || []).map((it) => {
+    const fullLen = (it.prompt?.length || 0) + (cachedPrefix?.length || 0);
+    const { cap: maxTokens } = pickMaxTokens(task, { promptLength: fullLen, ...(it.hints || {}) });
+    return { customId: it.customId, userContent: it.prompt, model, maxTokens, responseSchema, cachedPrefix, expectJson: !responseSchema };
+  });
+  const res = await createClaudeBatch(settings.anthropicApiKey, requests);
+  return { batchId: res.id, status: res.status, count: requests.length, model };
+}
+
+export async function getLLMTextBatchStatus(batchId) {
+  const settings = getAISettings();
+  if (settings.provider !== 'claude') throw new Error('Batch scoring is only available on the Claude provider.');
+  return getClaudeBatch(settings.anthropicApiKey, batchId);
+}
+
+// Download + parse → { [customId]: parsedObject | null }. Unusable entries
+// (errored/expired request, non-JSON body) map to null so the caller's
+// reconciliation applies its placeholder fallback.
+export async function getLLMTextBatchResults(batchId) {
+  const settings = getAISettings();
+  if (settings.provider !== 'claude') throw new Error('Batch scoring is only available on the Claude provider.');
+  const raw = await getClaudeBatchResults(settings.anthropicApiKey, batchId);
+  const parsed = {};
+  for (const [customId, r] of Object.entries(raw)) {
+    if (!r.ok || !r.text) { parsed[customId] = null; continue; }
+    try { parsed[customId] = parseGeminiJSON(r.text); }
+    catch { parsed[customId] = null; }
+  }
+  return parsed;
+}
+
+export async function cancelLLMTextBatch(batchId) {
+  const settings = getAISettings();
+  if (settings.provider !== 'claude' || !settings.anthropicApiKey || !batchId) return;
+  await cancelClaudeBatch(settings.anthropicApiKey, batchId);
+}
+
+/**
+ * Free-text generation — returns the model's raw string (NOT JSON-parsed).
+ * Use for prose / HTML / research where a JSON envelope would be wrong.
+ *
+ * `grounding: true` enables live web research (Gemini Google Search tool /
+ * Claude server-side web_search). Grounded calls carry their own quota/billing
+ * separate from the normal generate tier, and cannot also enforce a JSON
+ * responseSchema — which is exactly why this path is free-text.
+ */
+export async function callLLMRaw(prompt, opts = {}) {
+  const { signal, task, hints, grounding } = normalizeOpts(opts);
+  const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
+  const settings = getAISettings();
+  const provider = settings.provider === 'claude' ? 'claude' : 'gemini';
+  const model    = pickModel(provider, task);
+  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: prompt?.length || 0, ...hints });
+  try {
+    if (provider === 'claude') {
+      const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: false, grounding, task });
+      if (meta) meta.model = model;
+      return raw;
+    }
+    return await callGeminiTextRaw(prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, grounding, task, meta });
+  } catch (err) {
+    throw enhanceLLMError(err, provider);
+  }
+}
+
 export async function callLLMVision(imagePaths, prompt, opts = {}) {
   const { signal, task, hints, responseSchema } = normalizeOpts(opts);
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
@@ -231,11 +344,11 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
 // Detect a plain AbortSignal and wrap it as `{ signal, task: undefined }`.
 // New call sites should pass `{ signal, task }`.
 function normalizeOpts(opts) {
-  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || Object.keys(opts).length === 0)) {
-    return { signal: opts.signal, task: opts.task, hints: opts.hints || {}, responseSchema: opts.responseSchema, cachedPrefix: opts.cachedPrefix };
+  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || Object.keys(opts).length === 0)) {
+    return { signal: opts.signal, task: opts.task, hints: opts.hints || {}, responseSchema: opts.responseSchema, cachedPrefix: opts.cachedPrefix, grounding: !!opts.grounding };
   }
   // Anything else (a raw AbortSignal, undefined, etc.) → treat as signal.
-  return { signal: opts, task: undefined, hints: {}, responseSchema: undefined, cachedPrefix: undefined };
+  return { signal: opts, task: undefined, hints: {}, responseSchema: undefined, cachedPrefix: undefined, grounding: false };
 }
 
 function enhanceLLMError(error, provider) {

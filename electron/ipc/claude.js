@@ -3,12 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { logger } from '../logger.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
-
-const IMAGE_MIME_MAP = {
-  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-  '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif',
-  '.heic': 'image/heic', '.heif': 'image/heic',
-};
+import { IMAGE_MIME_MAP } from '../utils/mimeTypes.js';
 
 // Hard ceiling on the Anthropic SDK's built-in retries. The SDK already does
 // exactly what we'd hand-roll for Gemini: auto-retries 408/409/429/500/503/529
@@ -22,6 +17,66 @@ const ANTHROPIC_MAX_RETRIES = 3;
 function getAnthropicClient(apiKey) {
   if (!apiKey) throw new Error("Anthropic API key is missing. Please add it in settings.");
   return new Anthropic({ apiKey, maxRetries: ANTHROPIC_MAX_RETRIES });
+}
+
+// Normalize either a Fetch Headers (from .withResponse()) or a plain header
+// object (from an SDK APIError) into a case-insensitive getter.
+function headerGetter(headers) {
+  if (!headers) return null;
+  if (typeof headers.get === 'function') return (k) => headers.get(k);
+  const lower = {};
+  for (const [k, v] of Object.entries(headers)) lower[String(k).toLowerCase()] = v;
+  return (k) => lower[String(k).toLowerCase()] ?? null;
+}
+
+/**
+ * Pull Anthropic's per-response rate-limit headers into a structured snapshot.
+ * Anthropic returns REMAINING budget on every response (and on 429 errors):
+ *   anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-{limit,remaining,reset}
+ * `reset` is an ISO-8601 instant; we precompute seconds-until-reset so the
+ * renderer needs no wall-clock math. These are real numbers from the API — the
+ * honest "how much is left" signal, not an estimate. Returns null if absent.
+ */
+function parseAnthropicRateLimit(headers) {
+  const get = headerGetter(headers);
+  if (!get) return null;
+  const toNum = (v) => (v == null || v === '' ? null : Number(v));
+  const out = {};
+  for (const prefix of ['requests', 'tokens', 'input-tokens', 'output-tokens']) {
+    const limit = toNum(get(`anthropic-ratelimit-${prefix}-limit`));
+    const remaining = toNum(get(`anthropic-ratelimit-${prefix}-remaining`));
+    const reset = get(`anthropic-ratelimit-${prefix}-reset`);
+    if (limit == null && remaining == null && reset == null) continue;
+    const resetMs = reset ? Date.parse(reset) : NaN;
+    out[prefix.replace('-', '_')] = {
+      limit, remaining, reset,
+      resetInSec: Number.isFinite(resetMs) ? Math.max(0, Math.round((resetMs - Date.now()) / 1000)) : null,
+    };
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * Lightweight availability probe: a 1-token Haiku ping that reads the live
+ * rate-limit headers Anthropic returns. NEVER throws — returns a structured
+ * {ok,status,rateLimit,error} so the Settings panel can render a verdict
+ * (the rate-limit numbers are straight from the response headers).
+ */
+export async function probeClaude(apiKey) {
+  if (!apiKey) return { ok: false, status: null, error: 'No Anthropic API key set.' };
+  try {
+    const anthropic = getAnthropicClient(apiKey);
+    const { response } = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'ping' }],
+    }).withResponse();
+    return { ok: true, status: response.status ?? 200, model: 'claude-haiku-4-5-20251001', rateLimit: parseAnthropicRateLimit(response.headers) };
+  } catch (err) {
+    // The SDK's APIError carries .status and (usually) .headers even on 429/401,
+    // so a rate-limited probe still surfaces remaining/reset.
+    return { ok: false, status: err?.status ?? null, error: err?.message || String(err), rateLimit: err?.headers ? parseAnthropicRateLimit(err.headers) : null };
+  }
 }
 
 // "2" → 2, "4.5" → 4.5, "moderate" → "moderate". Used when pulling a value out
@@ -100,7 +155,7 @@ function repairToolInput(value, schema, repaired = { count: 0 }) {
  * Saves a handful of output tokens per call and makes downstream parsing
  * more reliable (no `Sure!`-style chatter to strip).
  */
-async function createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, cachedPrefix, task }) {
+async function createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, cachedPrefix, task, grounding }) {
   // If a cachedPrefix is provided, split the user turn into a cache-marked
   // text block + the original dynamic content. Anthropic's `ephemeral` cache
   // gives subsequent calls within ~5 minutes a ~90% cost reduction on the
@@ -147,6 +202,15 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
       input_schema: responseSchema,
     }];
     params.tool_choice = { type: 'tool', name: 'submit_response' };
+  } else if (grounding) {
+    // Server-side web search: Anthropic runs the searches during this single
+    // streamed turn and returns the synthesized answer in text blocks. Free
+    // text (no JSON prefill, no schema) — the caller wants prose research.
+    // max_uses=8 lets it actually dig (company + products + culture + recent
+    // news + role context) rather than stopping at a shallow first hit; this is
+    // a deliberate, user-triggered action where research depth IS the value.
+    // Carries its own per-search billing.
+    params.tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }];
   } else if (expectJson) {
     messages.push({ role: 'assistant', content: '{' });
   }
@@ -190,6 +254,21 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
     throw new Error(`AI response was truncated — hit the ${maxTokens}-token output cap (model wrote ${usage?.output_tokens ?? 'unknown'} tokens before being cut off). Try with fewer/smaller inputs, or raise the cap for this task in llm.js TASK_MAX_TOKENS.`);
   }
 
+  // Web-search (grounding) response: the answer is spread across one or more
+  // `text` blocks, interleaved with server_tool_use / web_search_tool_result
+  // blocks. Concatenate the text blocks into the final prose; ignore the
+  // tool-result blocks (they're the raw search payloads the model already
+  // synthesized from).
+  if (grounding) {
+    const txt = response.content
+      .filter(b => b.type === 'text')
+      .map(b => b.text)
+      .join('\n')
+      .trim();
+    if (!txt) throw new Error(`Claude web-search returned no text (stop_reason=${stopReason || 'unknown'}).`);
+    return txt;
+  }
+
   // Tool-use response: pull the tool_use block's `input`, repair any nested
   // object the model mis-emitted (leaked fields / tool-call XML in a string),
   // then re-stringify so the shared parseGeminiJSON downstream can JSON.parse it
@@ -218,9 +297,9 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
   return text.trimStart().startsWith('{') ? text : '{' + text;
 }
 
-export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, expectJson = false, responseSchema = null, cachedPrefix = null, task = null } = {}) {
+export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, expectJson = false, responseSchema = null, cachedPrefix = null, task = null, grounding = false } = {}) {
   const anthropic = getAnthropicClient(apiKey);
-  return createMessage(anthropic, prompt, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, cachedPrefix, task });
+  return createMessage(anthropic, prompt, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, cachedPrefix, task, grounding });
 }
 
 export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, expectJson = false, responseSchema = null, task = null } = {}) {
@@ -309,4 +388,92 @@ export async function callClaudeDocument(filePath, prompt, model, apiKey, signal
 
   const textContent = await fs.promises.readFile(filePath, 'utf8');
   return callClaudeText(`${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n${textContent}`, model, apiKey, signal, { maxTokens, formulaSeed, expectJson, responseSchema });
+}
+
+// ── Message Batches API (async, ~50% cheaper) ──────────────────────────────
+// Standalone from createMessage so the synchronous real-time path stays exactly
+// as-is. Mirrors createMessage's request shape (cache_control prefix + tool-use
+// schema) so a batched scoring request scores identically to a live one.
+function buildBatchMessageParams(userContent, { model, maxTokens, responseSchema, cachedPrefix, expectJson }) {
+  let messageContent;
+  if (cachedPrefix) {
+    const prefixBlock = { type: 'text', text: cachedPrefix, cache_control: { type: 'ephemeral' } };
+    messageContent = typeof userContent === 'string'
+      ? [prefixBlock, { type: 'text', text: userContent }]
+      : Array.isArray(userContent) ? [prefixBlock, ...userContent] : userContent;
+  } else {
+    messageContent = userContent;
+  }
+  const messages = [{ role: 'user', content: messageContent }];
+  const params = { model, max_tokens: maxTokens, messages };
+  if (responseSchema) {
+    params.tools = [{ name: 'submit_response', description: 'Submit the structured response.', input_schema: responseSchema }];
+    params.tool_choice = { type: 'tool', name: 'submit_response' };
+  } else if (expectJson) {
+    messages.push({ role: 'assistant', content: '{' });
+  }
+  return params;
+}
+
+/**
+ * Submit a Message Batch. `requests` = [{ customId, userContent, model,
+ * maxTokens, responseSchema, cachedPrefix, expectJson }]. Returns the batch id +
+ * status; results are fetched later via getClaudeBatchResults.
+ */
+export async function createClaudeBatch(apiKey, requests) {
+  const anthropic = getAnthropicClient(apiKey);
+  const body = {
+    requests: requests.map(r => ({
+      custom_id: r.customId,
+      params: buildBatchMessageParams(r.userContent, {
+        model: r.model, maxTokens: r.maxTokens, responseSchema: r.responseSchema,
+        cachedPrefix: r.cachedPrefix, expectJson: r.expectJson,
+      }),
+    })),
+  };
+  const batch = await anthropic.messages.batches.create(body);
+  logger.info(`[Claude] Created message batch ${batch.id} (${requests.length} request(s)) — status=${batch.processing_status}`);
+  return { id: batch.id, status: batch.processing_status, counts: batch.request_counts };
+}
+
+/** Poll a batch's processing status (no result download). */
+export async function getClaudeBatch(apiKey, batchId) {
+  const anthropic = getAnthropicClient(apiKey);
+  const batch = await anthropic.messages.batches.retrieve(batchId);
+  return { id: batch.id, status: batch.processing_status, counts: batch.request_counts, endedAt: batch.ended_at };
+}
+
+/** Best-effort cancel (stops billing for not-yet-started requests). */
+export async function cancelClaudeBatch(apiKey, batchId) {
+  const anthropic = getAnthropicClient(apiKey);
+  try { await anthropic.messages.batches.cancel(batchId); }
+  catch (e) { logger.warn(`[Claude] Batch cancel failed for ${batchId}: ${e?.message || e}`); }
+}
+
+/**
+ * Download batch results → { [custom_id]: { ok, text|null, error|null } }.
+ * For tool-use responses, `text` is JSON.stringify(tool_use.input) — the same
+ * string shape callClaudeText returns, so the caller parses it identically.
+ */
+export async function getClaudeBatchResults(apiKey, batchId) {
+  const anthropic = getAnthropicClient(apiKey);
+  const out = {};
+  const results = await anthropic.messages.batches.results(batchId);
+  for await (const entry of results) {
+    const customId = entry.custom_id;
+    const result = entry.result;
+    if (result?.type !== 'succeeded') {
+      out[customId] = { ok: false, text: null, error: result?.type || 'unknown' };
+      continue;
+    }
+    const msg = result.message;
+    const toolBlock = msg?.content?.find(b => b.type === 'tool_use');
+    if (toolBlock) {
+      out[customId] = { ok: true, text: JSON.stringify(toolBlock.input), error: null };
+    } else {
+      const txt = msg?.content?.find(b => b.type === 'text')?.text;
+      out[customId] = txt ? { ok: true, text: txt, error: null } : { ok: false, text: null, error: 'empty' };
+    }
+  }
+  return out;
 }

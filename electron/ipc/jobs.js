@@ -5,20 +5,21 @@
  */
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import crypto from 'crypto';
-import { callLLMDocument, callLLMText } from './llm.js';
-import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, BUCKETING_PLACEMENT_SCHEMA, RESUME_PARSE_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA } from './aiSchemas.js';
+import { callLLMDocument, callLLMText, submitLLMTextBatch, getLLMTextBatchStatus, getLLMTextBatchResults, cancelLLMTextBatch } from './llm.js';
+import { reconcileBatchScores } from './jobBatchReconcile.js';
+import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, CAREER_FILE_EXTRACT_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA } from './aiSchemas.js';
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { clearBrowserSession } from './stealthBrowser.js';
 import { scrapeManualSources } from './browser/manualScraper.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
-import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES, MEDIUM_TEST, FULL_TEST } from './resultCaps.js';
+import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES, JOB_PER_PAGE_CAP, MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
   ZIPRECRUITER_EXTRACTOR, ZIPRECRUITER_CONFIG,
   GLASSDOOR_EXTRACTOR, GLASSDOOR_CONFIG,
-  WELLFOUND_EXTRACTOR, WELLFOUND_CONFIG,
   GOOGLE_JOBS_EXTRACTOR, GOOGLE_JOBS_CONFIG,
 } from '../extractors/jobs.js';
 import {
@@ -33,14 +34,16 @@ import {
   buildGeoTermSet,
 } from '../extractors/apiExtractors.js';
 import { fetchIndeedListingsBrowser } from '../extractors/indeedBrowser.js';
+import { withSharedProfileLock } from './sharedProfileLock.js';
+import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage as setJobRunStage, readRunState, clearRun } from './jobRunStaging.js';
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory } from './jobsHistory.js';
 import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
-import { getJobsSettings } from './settings.js';
+import { getJobsSettings, getAISettings } from './settings.js';
 import { readStatusCache } from './accounts.js';
-import { getScopedJobSourceIds } from '../../src/utils/jobSourceScope.js';
+import { getScopedJobSourceIds, JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
 import { dedupeJobsByKey, jobTitleCompanyKey } from '../../src/utils/jobIdentity.js';
 
-const { ipcMain, app } = electronPkg;
+const { ipcMain, app, shell } = electronPkg;
 const DEFAULT_MAX_AGE_DAYS = 21;
 // Sentinel score for jobs the AI couldn't score (missing from the batch result,
 // or a whole batch that failed to parse). NOT adaptive: a fixed midpoint marks
@@ -52,6 +55,9 @@ const JOB_ANALYSIS_SNAPSHOT_VERSION = 1;
 const JOB_ANALYSIS_DIR = 'job-search';
 const JOB_ANALYSIS_JSON = 'job-search-last-scrape.json';
 const JOB_ANALYSIS_PROMPT = 'job-search-scoring-AI-prompt.txt';
+// Pending Batch-API scoring run, persisted next to the canvas so a ≤24h batch
+// survives an app restart (the hub re-attaches and polls it on reopen).
+const JOB_BATCH_JSON = 'job-search-batch.json';
 
 async function assertReadableResumeFile(filePath) {
   const displayName = filePath ? path.basename(filePath) : 'Selected item';
@@ -75,8 +81,24 @@ async function assertReadableResumeFile(filePath) {
   }
   try {
     await fs.promises.access(filePath, fs.constants.R_OK);
-  } catch {
-    throw new Error(`${displayName} exists but can't be read — the file may be locked or have restrictive permissions. Try again, or drop a different resume.`);
+  } catch (err) {
+    const code = err?.code || 'EACCES';
+    // The POSIX bits can say "readable" (644) and `stat` can succeed, yet macOS
+    // still denies the actual read. Two macOS-only mechanisms do this, both keyed
+    // to the app's code signature: TCC (Desktop / Documents / Downloads are
+    // privacy-protected) and the per-file sandbox ACL `com.apple.macl`, stamped
+    // when a file is first granted to an app via drag-drop / open-dialog. This app
+    // is AD-HOC signed, so EVERY rebuild changes its identity — a resume granted to
+    // an earlier build silently loses access after a rebuild (re-dropping does NOT
+    // re-grant it; a file the app created itself, like canvas.json, is unaffected).
+    // Surface the errno + the real remedy instead of the misleading "locked" guess.
+    if (process.platform === 'darwin' && (code === 'EACCES' || code === 'EPERM')) {
+      const rel = path.relative(os.homedir(), filePath);
+      const inProtected = !rel.startsWith('..') && /^(Desktop|Documents|Downloads)[/\\]/.test(rel);
+      const where = inProtected ? ' in a macOS privacy-protected folder (Desktop/Documents/Downloads)' : '';
+      throw new Error(`macOS denied this app read access to ${displayName} (${code})${where}. The file is fine — the app lost the OS's per-file grant, typically after being rebuilt. Fix: move the file out of ~/Desktop, ~/Documents and ~/Downloads, or grant the app Full Disk Access (System Settings → Privacy & Security → Full Disk Access). Clearing the file's extended attributes — \`xattr -c "${filePath}"\` — also works.`);
+    }
+    throw new Error(`${displayName} exists but can't be read (${code}) — it may be locked or have restrictive permissions. Try again, or drop a different resume.`);
   }
   return { displayName, stats };
 }
@@ -142,6 +164,30 @@ async function saveJobAnalysisSnapshot(snapshot) {
   return { jsonPath, promptPath };
 }
 
+// ── Pending batch-scoring sidecar (next to the canvas; null if unsaved) ──────
+function jobBatchPath(canvasFilePath) {
+  if (!canvasFilePath || typeof canvasFilePath !== 'string') return null;
+  return path.join(path.dirname(canvasFilePath), JOB_BATCH_JSON);
+}
+async function writeJobBatchSidecar(canvasFilePath, data) {
+  const p = jobBatchPath(canvasFilePath);
+  if (!p) return;
+  const tmp = `${p}.__ic_${Date.now()}.tmp`;
+  await fs.promises.writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+  await fs.promises.rename(tmp, p);
+}
+async function readJobBatchSidecar(canvasFilePath) {
+  const p = jobBatchPath(canvasFilePath);
+  if (!p) return null;
+  try { return JSON.parse(await fs.promises.readFile(p, 'utf8')); }
+  catch { return null; }
+}
+async function deleteJobBatchSidecar(canvasFilePath) {
+  const p = jobBatchPath(canvasFilePath);
+  if (!p) return;
+  await fs.promises.rm(p, { force: true }).catch(() => {});
+}
+
 async function loadJobAnalysisSnapshot(canvasFilePath) {
   const { jsonPath, promptPath } = getJobAnalysisPaths(canvasFilePath);
   const raw = await fs.promises.readFile(jsonPath, 'utf8');
@@ -150,6 +196,20 @@ async function loadJobAnalysisSnapshot(canvasFilePath) {
     snapshot: parsed,
     paths: { jsonPath, promptPath },
   };
+}
+
+// Group jobs into scoring batches by ITEM COUNT only. The item cap
+// (jobScoringBatchSize) reflects a real output-token + scoring-quality
+// constraint — NOT an input limit. Each batch carries the jobs' FULL
+// descriptions (nothing truncated, no character budget); the model's own context
+// window is the only ceiling. If a batch ever genuinely exceeds it the provider
+// rejects the call and the error is surfaced — we never pre-clip context.
+function chunkScoringBatches(jobs, maxItems) {
+  const batches = [];
+  for (let i = 0; i < jobs.length; i += maxItems) {
+    batches.push(jobs.slice(i, i + maxItems));
+  }
+  return batches;
 }
 
 function buildJobAnalysisSnapshot({ jobs, profile, nodeId, targetRole, snapshotContext }) {
@@ -185,9 +245,8 @@ Return JSON of the form { "scores": [ ... one object per job in the array I send
     {
       "index": 0,
       "matchScore": 85,
-      "reasoning": "1-2 sentences explaining WHY this matches or doesn't. Read between the lines — a startup wanting a 'manager with engineering depth' is a match for an experienced engineer even without management title.",
-      "careerDirection": "Engineering | Leadership | Product | DevRel | Consulting | Design | Data | Operations | Teaching | Other",
-      "strengthLabel": "strong | exploring | stretch | unexpected",
+      "reasoning": "A complete, specific justification of WHY this matches or doesn't — as long as it genuinely needs to be (usually 2-4 sentences; longer only when the fit is nuanced). Cite concrete signals from BOTH the JD and the candidate's profile (relevant experience, gaps, seniority/comp fit, how a recruiter would react). Read between the lines — a startup wanting a 'manager with engineering depth' is a match for an experienced engineer even without management title. No filler — every sentence carries information; the card truncates this and the user expands to read it all.",
+      "careerDirection": "<a 1-3 word job-family label that fits THIS job and THIS candidate's field — invent it, don't pick from a fixed list. A marketer's jobs get labels like 'Brand Marketing' / 'Growth' / 'Comms'; an engineer's get 'Backend' / 'ML' / 'Infra'. Be specific to the candidate's actual field; never force a tech label onto a non-tech role>",
       "isTargetRoleMatch": ${role ? 'true | false (per the target role rules above)' : 'false (no target role this run)'}
     }
   ]
@@ -198,37 +257,31 @@ IMPORTANT SCORING RULES:
 - Don't just match title-to-title. A startup "manager" role that wants someone who's been in the trenches IS a match for an experienced IC.
 - Skills-only matches without title match can still score 70%+ if requirements align.
 - Score 85%+ only for genuinely strong matches; 65-84 = good chance of interview; 40-64 = stretch / longshot; <40 = unlikely.
-- "unexpected" label is for jobs from the skills-only queries that reveal surprising career paths.
-- "stretch" label is for plausible pivots where the candidate's experience only partially aligns.
-- Aim for 3-7 distinct careerDirection categories total. Merge small categories.`;
+- careerDirection: use CONSISTENT labels — reuse the exact same label for the same kind of role across jobs rather than inventing near-duplicates ("Brand" vs "Brand Marketing" vs "Marketing"). Pick one and stick to it. Aim for a small handful of distinct directions across all jobs.`;
 
-  const scoringBatchPayloads = [];
-  for (let i = 0; i < toScore.length; i += batchSize) {
-    const batch = toScore.slice(i, i + batchSize);
-    scoringBatchPayloads.push({
-      batchNumber: Math.floor(i / batchSize) + 1,
-      jobCount: batch.length,
-      jobs: slimBatch(batch),
-    });
-  }
+  // Item-count batches (see chunkScoringBatches): full JDs, no input cap. The
+  // scorer iterates these exact groupings.
+  const scoringBatches = chunkScoringBatches(toScore, batchSize);
+  const scoringBatchPayloads = scoringBatches.map((batch, i) => ({
+    batchNumber: i + 1,
+    jobCount: batch.length,
+    jobs: slimBatch(batch),
+  }));
 
   // Preview batches use ALL gathered jobs (ignoring score cap) so the prompt
   // file is populated even when scoring is skipped in test mode.
-  const previewBatchPayloads = [];
-  for (let i = 0; i < gathered.length; i += batchSize) {
-    const batch = gathered.slice(i, i + batchSize);
-    previewBatchPayloads.push({
-      batchNumber: Math.floor(i / batchSize) + 1,
-      jobCount: batch.length,
-      jobs: slimBatch(batch),
-    });
-  }
+  const previewBatchPayloads = chunkScoringBatches(gathered, batchSize).map((batch, i) => ({
+    batchNumber: i + 1,
+    jobCount: batch.length,
+    jobs: slimBatch(batch),
+  }));
 
   return {
     role,
     gathered,
     toScore,
     cappedForBudget,
+    scoringBatches,
     batchSize,
     slimBatch,
     cachedPrefix,
@@ -290,6 +343,18 @@ async function getEgressIp() {
   }
 }
 
+// Resolve after `ms`, or reject early if the abort signal fires — so a long
+// cooldown-probe wait (tens of minutes) still bails the instant the user resets
+// the run or closes the window, instead of sleeping to completion.
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('aborted'));
+    const onAbort = () => { clearTimeout(timer); reject(new Error('aborted')); };
+    const timer = setTimeout(() => { signal?.removeEventListener?.('abort', onAbort); resolve(); }, ms);
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
+}
+
 // The egress IP at which LinkedIn last hit its per-IP guest ceiling. Set when a
 // re-fetch walls; checked on the next retry — if the IP hasn't changed, the user
 // hasn't switched their VPN yet, so we prompt instead of wasting a pass on the
@@ -329,30 +394,146 @@ const jobsTelemetry = {
   // is pre-warmed → switching can't help". { ts, kind, ip, ipOk, walled,
   // skippedSameIp, enriched, stillEmpty, contextRotations }
   linkedinEnrich:   [],
+  // Result of the automated cooldown probe (JOB_SEARCH_PROBE_COOLDOWN): the first
+  // idle wait that cleared the guest wall, or exhausted. { running, attempts,
+  // foundMs, waitsMs, ts }
+  linkedinCooldown: null,
 };
 
 export function getJobsTelemetry() {
   return jobsTelemetry;
 }
 
+// Cumulative descriptions enriched on the CURRENT stealth-browser generation,
+// reset when the browser relaunches (generation changes). The whole point: if
+// the per-pass yield falls as this counter climbs WHILE the egress IP keeps
+// changing, the limit tracks the browser session/process, not the IP — i.e.
+// switching VPN can't help, only a browser relaunch (clearBrowserSession / app
+// restart) resets it. That is the device-vs-IP discriminator.
+let lkEnrichGen = null;
+let lkEnrichedThisGen = 0;
+
 // Append one LinkedIn enrichment-pass record to the capped trail (see
 // jobsTelemetry.linkedinEnrich). ipOk distinguishes "ran on IP x" from "egress
 // lookup returned null" — the latter means the same-IP VPN guard can't function.
+// browserGen ties the pass to a specific browser process; the browserLifetime*
+// fields expose the running per-generation cumulative so device-vs-IP is visible.
 function recordLinkedinEnrichPass(entry) {
-  jobsTelemetry.linkedinEnrich.push({ ts: Date.now(), ...entry });
-  // Keep the last dozen — enough to see the cross-Solve IP trend across a test
-  // session without unbounded growth.
+  const gen = entry.browserGen ?? null;
+  let before = lkEnrichedThisGen;
+  if (gen != null) {
+    // New browser process ⇒ a relaunch reset any browser/session-scoped limit.
+    if (gen !== lkEnrichGen) { lkEnrichGen = gen; lkEnrichedThisGen = 0; before = 0; }
+    lkEnrichedThisGen += (entry.enriched || 0);
+  }
+  jobsTelemetry.linkedinEnrich.push({
+    ts: Date.now(), ...entry,
+    browserLifetimeBefore: before, browserLifetimeAfter: lkEnrichedThisGen,
+  });
+  // Keep the last dozen — enough to see the cross-Solve IP/browser trend across a
+  // test session without unbounded growth.
   if (jobsTelemetry.linkedinEnrich.length > 12) jobsTelemetry.linkedinEnrich.shift();
+}
+
+// Automated cooldown probe: idle escalating waits on the SAME IP/browser,
+// probing a small job batch after each wait, stop at the first interval whose
+// wall is clear AND confirmed by 2 additional probes. Diagnostic only — gated
+// by JOB_SEARCH_PROBE_COOLDOWN. Both the initial search path (auto-trigger on
+// wall) and the resolve/Solve path call this. Returns { pool, foundMs, attempt,
+// probeTotalEnriched, aborted }. saveMidProbe(pool) is optional — the resolve
+// path uses it to persist enriched descriptions mid-probe; the search path
+// relies on the final snapshot save at the end of the search.
+async function runCooldownProbe(nodeId, waitsMs, initialPool, signal, progressFn, saveMidProbe) {
+  const PROBE_BATCH = 15;
+  logger.info(`[Jobs][${nodeId}] Cooldown probe armed: waits ${waitsMs.map(ms => Math.round(ms / 60000)).join('/')}m, batch ${PROBE_BATCH}`);
+  jobsTelemetry.linkedinCooldown = { running: true, attempts: 0, foundMs: null, waitsMs, ts: Date.now() };
+  let pool = initialPool;
+  let foundMs = null;
+  let attempt = 0;
+  let probeTotalEnriched = 0;
+  try {
+    for (const waitMs of waitsMs) {
+      attempt++;
+      const mins = Math.round(waitMs / 60000);
+      progressFn({ nodeId, sourceId: 'linkedin', status: 'searching', count: pool.length, detail: `cooldown probe ${attempt}/${waitsMs.length}: idling ${mins}m`, warning: null });
+      await abortableDelay(waitMs, signal);
+      const stillEmptyJobs = pool.filter(j => !j.snippet || j.snippet.length < 100);
+      if (stillEmptyJobs.length === 0) { foundMs = waitMs; break; }
+      const probeJobs = stillEmptyJobs.slice(0, PROBE_BATCH);
+      const probeIp = await getEgressIp();
+      progressFn({ nodeId, sourceId: 'linkedin', status: 'searching', count: pool.length, detail: `cooldown probe ${attempt}: testing after ${mins}m idle` });
+      const probeStartedAt = Date.now();
+      const pr = await enrichLinkedInDescriptionsBrowser(probeJobs, signal);
+      const byUrl = new Map((pr.jobs || []).map(j => [j.url, j]));
+      pool = pool.map(j => byUrl.get(j.url) || j);
+      probeTotalEnriched += pr.successCount || 0;
+      const stillEmptyAfter = pool.filter(j => !j.snippet || j.snippet.length < 100).length;
+      recordLinkedinEnrichPass({ kind: 'probe', ip: probeIp, ipOk: !!probeIp, walled: pr.loginWall, enriched: pr.successCount || 0, stillEmpty: stillEmptyAfter, contextRotations: pr.contextRotations || 0, browserGen: pr.browserGen ?? null, browserAgeMs: pr.browserAgeMs ?? null, startedAt: probeStartedAt });
+      jobsTelemetry.linkedinCooldown = { running: true, attempts: attempt, foundMs: null, waitsMs, ts: Date.now() };
+      if ((pr.successCount || 0) > 0 && saveMidProbe) {
+        try { await saveMidProbe(pool); } catch (e) { logger.warn(`[Jobs][${nodeId}] Cooldown probe: snapshot persist failed — ${e.message}`); }
+      }
+      logger.info(`[Jobs][${nodeId}] Cooldown probe ${attempt}: after ${mins}m idle on IP ${probeIp || '?'} → +${pr.successCount || 0}, ${pr.loginWall ? 'still WALLED' : 'CLEAR'}, ${stillEmptyAfter} still empty`);
+      if (pr.loginWall) continue;
+
+      // First clean probe. Run 2 confirmation probes at the same interval
+      // (no additional idle — just re-probe immediately) before committing
+      // to this as the cooldown. If any confirmation walls, this interval
+      // isn't stable and we advance to the next longer wait.
+      const CONFIRM_NEEDED = 2;
+      let confirmFailed = false;
+      for (let c = 1; c <= CONFIRM_NEEDED; c++) {
+        attempt++;
+        const stillEmptyNow = pool.filter(j => !j.snippet || j.snippet.length < 100);
+        if (stillEmptyNow.length === 0) break;
+        const confirmJobs = stillEmptyNow.slice(0, PROBE_BATCH);
+        const confirmIp = await getEgressIp();
+        progressFn({ nodeId, sourceId: 'linkedin', status: 'searching', count: pool.length, detail: `cooldown confirm ${c}/${CONFIRM_NEEDED} (${mins}m interval)` });
+        const confirmStartedAt = Date.now();
+        const cr = await enrichLinkedInDescriptionsBrowser(confirmJobs, signal);
+        const cByUrl = new Map((cr.jobs || []).map(j => [j.url, j]));
+        pool = pool.map(j => cByUrl.get(j.url) || j);
+        probeTotalEnriched += cr.successCount || 0;
+        const cStillEmpty = pool.filter(j => !j.snippet || j.snippet.length < 100).length;
+        recordLinkedinEnrichPass({ kind: 'probe', ip: confirmIp, ipOk: !!confirmIp, walled: cr.loginWall, enriched: cr.successCount || 0, stillEmpty: cStillEmpty, contextRotations: cr.contextRotations || 0, browserGen: cr.browserGen ?? null, browserAgeMs: cr.browserAgeMs ?? null, startedAt: confirmStartedAt });
+        if ((cr.successCount || 0) > 0 && saveMidProbe) {
+          try { await saveMidProbe(pool); } catch (e) { logger.warn(`[Jobs][${nodeId}] Cooldown confirm: snapshot persist failed — ${e.message}`); }
+        }
+        logger.info(`[Jobs][${nodeId}] Cooldown confirm ${c}/${CONFIRM_NEEDED}: IP ${confirmIp || '?'} → +${cr.successCount || 0}, ${cr.loginWall ? 'WALLED (unstable)' : 'CLEAR'}, ${cStillEmpty} still empty`);
+        if (cr.loginWall) { confirmFailed = true; break; }
+      }
+      if (!confirmFailed) { foundMs = waitMs; break; }
+      logger.info(`[Jobs][${nodeId}] Cooldown probe: ${mins}m interval not stable (confirmation walled) — advancing to next wait`);
+    }
+  } catch (e) {
+    jobsTelemetry.linkedinCooldown = { running: false, attempts: attempt, foundMs, waitsMs, ts: Date.now(), aborted: true };
+    logger.info(`[Jobs][${nodeId}] Cooldown probe aborted: ${e.message}`);
+    return { pool, foundMs, attempt, probeTotalEnriched, aborted: true };
+  }
+  jobsTelemetry.linkedinCooldown = { running: false, attempts: attempt, foundMs, waitsMs, ts: Date.now() };
+  return { pool, foundMs, attempt, probeTotalEnriched, aborted: false };
 }
 
 // All source IDs — defines the complete set for progress tracking and reporting.
 const ALL_SOURCE_IDS = [
   'google', 'indeed', 'linkedin', 'remoteok', 'weworkremotely',
-  'ziprecruiter', 'glassdoor', 'dice', 'wellfound',
+  'ziprecruiter', 'glassdoor', 'dice',
   'usajobs',
 ];
 const ACTIVE_SOURCE_IDS = getScopedJobSourceIds(ALL_SOURCE_IDS);
 const ACTIVE_SOURCE_ID_SET = new Set(ACTIVE_SOURCE_IDS);
+
+// Fixed run order for the BROWSER-based sources, which must run ONE-AT-A-TIME on
+// the shared Chrome profile (see sharedProfileLock.js). The order is intentional,
+// not configuration-derived, so it holds regardless of which subset is enabled:
+// solvable-challenge / login-gated sources first (Indeed login+Cloudflare, then
+// ZipRecruiter's Turnstile, then Cloudflare-heavy Glassdoor) so the user can clear
+// captchas early while watching; public, non-interactive Google last (it can't be
+// "solved" — it either loads or returns 0 — so it's a fast clean finish). The
+// pure-HTTP sources (linkedin/remoteok/weworkremotely/usajobs/dice) are NOT here —
+// they run fully concurrent. Indeed runs first here but lives in its own launcher
+// (fetchIndeedListingsBrowser); the rest are manual-scraper sources.
+const BROWSER_SCRAPE_ORDER = ['indeed', 'ziprecruiter', 'glassdoor', 'google'];
 
 function getQueryProgressTotal(queries) {
   return Math.max(1, Array.isArray(queries) ? queries.filter(Boolean).length : 1);
@@ -442,22 +623,19 @@ function getLocationTerms(profileLocations = [], preferredLocation = '') {
   return terms;
 }
 
-function buildJobTasks(queries, maxAgeDays, profileLocations = [], preferredLocation = '') {
+// `opts` (resume only): { onlySources: Set, startPageBySource: { [id]: 1-based page } }.
+// onlySources restricts which manual sources get tasks (skip already-'done' ones on
+// resume). startPageBySource resumes a URL-paginated source mid-pagination by building
+// its first URL at that page and stamping options.startPageNum so the manual scraper's
+// page counter + the staging ledger continue from there. Sources whose URL doesn't vary
+// by page (Glassdoor infinite-scroll, single-page Google) ignore startPage and re-scrape
+// from page 1 (the cross-source dedup absorbs the re-yielded earlier pages).
+function buildJobTasks(queries, maxAgeDays, opts = {}) {
+  const { onlySources = null, startPageBySource = null } = opts;
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
-  // Wellfound is the one browser source whose URL is a /role/{slug} SEO page, not
-  // a free-text search box. The query carries the candidate's city ("Cinematographer
-  // Denver"), and slugging the whole thing produced "/role/cinematographer-denver"
-  // — not a real role slug, so the page returned nothing and we logged a misleading
-  // "genuinely empty" 0. Same principle as the board-source geo fix: strip the
-  // candidate's own location tokens from the role identifier (location is a filter,
-  // not part of the role). The location-aware search sources (Indeed/Glassdoor/Zip/
-  // Google) keep the city below — they WANT it as a query term.
-  const geoTerms = buildGeoTermSet(getLocationTerms(profileLocations, preferredLocation));
-  const roleSlug = (q) => String(q).toLowerCase().split(/\s+/)
-    .filter(tok => tok && !geoTerms.has(tok.replace(/[^a-z0-9]/g, '')))
-    .join('-');
   // Browser pool extractors — only platforms that REQUIRE local browser rendering.
-  // Indeed, RemoteOK, and WeWorkRemotely have been moved to fetchApiSources.
+  // Indeed runs as a browser source in the search-jobs driver (not here); RemoteOK
+  // and WeWorkRemotely are pure-HTTP and live in fetchHttpSources.
   //
   // `maxPages` = the hard ceiling on how deep we page (same stealth session) for
   // each query variant. We walk the FULL ceiling page by page, stopping only on a
@@ -472,13 +650,13 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = [], preferredLoca
   // yields duplicates, which the cross-source dedup removes downstream (cheaper
   // than a seen-set stop that can false-positive under relevance sort and prune
   // real jobs from deeper pages).
+  // Declaration order here IS the run order for the manual-scraper sources
+  // (scrapeManualSources groups bySource preserving it). Per BROWSER_SCRAPE_ORDER
+  // the manual trio runs ZipRecruiter → Glassdoor → Google (Indeed runs first, but
+  // it's a separate launcher handled in the search-jobs browser driver, not here).
   const extractors = {
-    // Google Jobs: single-page scroll-loaded panel (ibp=htl;jobs). No pagination —
-    // scroll logic is handled by SCROLL_SOURCES in manualScraper.js. Does not throw
-    // SITE_CHANGED on 0 (bot detection can block the panel entirely).
-    google:          { extractor: GOOGLE_JOBS_EXTRACTOR,  config: GOOGLE_JOBS_CONFIG,  maxPages: 1,
-                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(q + ' jobs')}&ibp=htl;jobs` },
     ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, maxPages: JOB_MAX_PAGES,
+                       urlPaginated: true, // first URL can jump to an arbitrary page → supports per-page resume
                        urlFn: (q, page) => `https://www.ziprecruiter.com/jobs-search${page > 0 ? `/${page + 1}` : ''}?search=${encodeURIComponent(q)}&days=${days}` },
     // Glassdoor migrated to Next.js with infinite-scroll "Show more" pagination —
     // the old ?p=N URL param is silently ignored (every "page" returns page 1).
@@ -486,14 +664,22 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = [], preferredLoca
     glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,    config: GLASSDOOR_CONFIG,    maxPages: JOB_MAX_PAGES,
                        urlFn: (q) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}&fromAge=${days}`,
                        loadMoreSelector: '[data-test="load-more"]' },
-    wellfound:       { extractor: WELLFOUND_EXTRACTOR,    config: WELLFOUND_CONFIG,    maxPages: JOB_MAX_PAGES,
-                       urlFn: (q, page) => `https://wellfound.com/role/${roleSlug(q)}${page > 0 ? `?page=${page + 1}` : ''}` },
+    // Google Jobs: single-page scroll-loaded panel (ibp=htl;jobs). No pagination —
+    // scroll logic is handled by SCROLL_SOURCES in manualScraper.js. Does not throw
+    // SITE_CHANGED on 0 (bot detection can block the panel entirely). Last: public,
+    // non-interactive, fast.
+    google:          { extractor: GOOGLE_JOBS_EXTRACTOR,  config: GOOGLE_JOBS_CONFIG,  maxPages: 1,
+                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(q + ' jobs')}&ibp=htl;jobs` },
   };
 
   const tasks = [];
-  for (const [sourceId, { extractor, config, urlFn, maxPages = 1, loadMoreSelector = null }] of Object.entries(extractors)) {
+  for (const [sourceId, { extractor, config, urlFn, maxPages = 1, loadMoreSelector = null, urlPaginated = false }] of Object.entries(extractors)) {
     if (!ACTIVE_SOURCE_ID_SET.has(sourceId)) continue;
+    if (onlySources && !onlySources.has(sourceId)) continue; // resume: skip already-'done' sources
     const querySubset = queries;
+    // Resume: jump a URL-paginated source to its next un-scraped page (1-based →
+    // 0-based for urlFn). Non-URL-paginated sources can't jump, so they stay at 1.
+    const startPage = (urlPaginated && startPageBySource?.[sourceId] > 1) ? startPageBySource[sourceId] : 1;
 
     // One task per query. `id` stays `${sourceId}-${n}` so `res.id.replace(/-\d+$/,'')`
     // still maps a result back to its source. A multi-page source runs as a SINGLE
@@ -501,12 +687,13 @@ function buildJobTasks(queries, maxAgeDays, profileLocations = [], preferredLoca
     // source (Google) runs as a one-shot scrape.
     let idx = 0;
     for (const q of querySubset) {
-      const base = { id: `${sourceId}-${idx++}`, sourceId, url: urlFn(q, 0), extractorJS: extractor, query: q };
+      const base = { id: `${sourceId}-${idx++}`, sourceId, url: urlFn(q, startPage - 1), extractorJS: extractor, query: q };
       if (maxPages > 1) {
         base.options = {
           ...config,
           paginate: true,
           maxPages,
+          startPageNum: startPage,
           nextUrl: (page) => urlFn(q, page),
           onPageScraped: makeEmptyPageStop(),
           pageDelayMs: PAGE_DELAY_MS,
@@ -617,7 +804,7 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
   return { items, warning };
 }
 
-async function fetchApiSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], preferredLocation = '') {
+async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], preferredLocation = '', onlySources = null) {
   // Source credentials come from Settings (electron-store) with a legacy
   // process.env fallback handled inside getJobsSettings() for users still
   // on the old .env config.
@@ -636,20 +823,10 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
   // they're intentionally NOT geo-stripped.
   const geoTerms = buildGeoTermSet(getLocationTerms(profileLocations, preferredLocation));
 
+  // Pure-HTTP sources ONLY — no browser, no shared profile, so they run fully
+  // concurrent with each other AND with the serialized browser driver. Indeed is
+  // NOT here (it is browser-based and runs in the search-jobs browser driver).
   const apiTasks = [
-    { sourceId: 'indeed',        fn: (s) => fetchIndeedListingsBrowser(queries, s, days, null, (detail) => {
-      if (sender && !sender.isDestroyed()) {
-        sender.send('job-source-progress', {
-          nodeId,
-          sourceId: 'indeed',
-          status: 'searching',
-          count: 0,
-          detail,
-          completed: getCompletedQueriesFromDetail(detail, queryTotal),
-          total: queryTotal,
-        });
-      }
-    }) },
     { sourceId: 'linkedin',      fn: (s) => fetchLinkedInJobs(queries, s, days) },
     { sourceId: 'usajobs',       fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days, location), s) },
     { sourceId: 'remoteok',      fn: (s) => fetchRemoteOKJobs(queries, s, geoTerms) },
@@ -666,7 +843,7 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
       logger.info(`[Dice API] Fan-out starting: ${queries.length} queries, 350ms interval`);
       return queryFanOut(queries, (q, sig) => fetchDiceListings(q, location, sig, days), s, 4, 350);
     }},
-  ].filter(task => ACTIVE_SOURCE_ID_SET.has(task.sourceId));
+  ].filter(task => ACTIVE_SOURCE_ID_SET.has(task.sourceId) && (!onlySources || onlySources.has(task.sourceId)));
 
   // Notify frontend that API sources are starting
   for (const { sourceId } of apiTasks) {
@@ -681,12 +858,19 @@ async function fetchApiSources(queries, sender, signal = null, nodeId = null, ma
       // Each API fetcher now returns { items, warning } so blocks/throttles
       // can surface in the UI instead of silently producing an empty array.
       const result = await fn(signal);
-      const jobs = Array.isArray(result) ? result : (result?.items || []);
+      const rawJobs = Array.isArray(result) ? result : (result?.items || []);
       const warning = Array.isArray(result) ? null : (result?.warning || null);
       // Pre-cap match count: when it exceeds `jobs.length` the fetcher's
-      // JOB_RESULT_CAP slice dropped in-window jobs — surfaced in the funnel so an
-      // over-the-cap API source isn't a silent miss (mirrors the browser ceiling).
-      const gathered = Array.isArray(result) ? jobs.length : (result?.gathered ?? jobs.length);
+      // JOB_RESULT_CAP slice (or the FAST cap below) dropped in-window jobs —
+      // surfaced in the funnel so an over-the-cap API source isn't a silent miss
+      // (mirrors the browser ceiling).
+      const gathered = Array.isArray(result) ? rawJobs.length : (result?.gathered ?? rawJobs.length);
+      // FAST test mode: trim each source to a small per-source aggregate
+      // (FAST_QUERY_CAP × FAST_API_PER_QUERY ≈ 2 queries × 6). Enforced here — one
+      // slice per source — because the fetchers apply JOB_RESULT_CAP inconsistently
+      // (per-query vs whole-feed). No-op (Infinity) outside fast mode; `gathered`
+      // keeps the true pre-cap count.
+      const jobs = Number.isFinite(JOB_API_PER_SOURCE_CAP) ? rawJobs.slice(0, JOB_API_PER_SOURCE_CAP) : rawJobs;
       // Emit live completion so the source card updates as soon as this source
       // finishes — without this, all API cards stay "Searching..." until the
       // browser scraper finishes too (the final per-source loop runs post-Promise.all).
@@ -745,6 +929,51 @@ Extract everything you can find. Be thorough.`, { signal, task: 'resume-parse', 
       size: stats.size,
       mtimeMs: stats.mtimeMs,
     };
+  });
+
+  // Multi-file career data: the user can drop ANY number/type of files (résumé,
+  // portfolio, project write-ups…). Each is transcribed to faithful text (native
+  // PDF/image/doc reading), merged into one `careerData` blob, and a structured
+  // `profile` is derived from the merge — that profile drives the same query /
+  // scoring pipeline as before; `careerData` additionally feeds the application
+  // generator. Returns a combined fingerprint (hash of the per-file hashes) so
+  // the hub can skip a re-parse when the same set of files is re-dropped.
+  handleSafe('parse-career-data', async (event, { filePaths, nodeId }, signal) => {
+    const paths = Array.isArray(filePaths) ? filePaths.filter(Boolean) : [];
+    if (paths.length === 0) throw new Error('No files provided to parse.');
+    logger.info(`[Jobs][${nodeId}] Parsing ${paths.length} career file(s)`);
+
+    // Validate + per-file fingerprint; combined fingerprint = hash of the hashes.
+    const fileHashes = [];
+    for (const fp of paths) {
+      await assertReadableResumeFile(fp);
+      fileHashes.push(await computeFileSha256(fp));
+    }
+    const fingerprint = crypto.createHash('sha256').update(fileHashes.join('|')).digest('hex');
+
+    // Pass 1 — transcribe each file to faithful text.
+    const sections = [];
+    for (const fp of paths) {
+      if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+      const name = path.basename(fp);
+      const extracted = await callLLMDocument(
+        fp,
+        'Transcribe this document into a faithful, complete plain-text representation of its career-relevant content (roles, employers, dates, bullet points, projects, skills, education, certifications, contact info). Preserve every fact, number, and the original structure using simple line breaks and "- " bullets. Do not summarize away detail and do not invent anything.',
+        { signal, task: 'career-file-extract', responseSchema: CAREER_FILE_EXTRACT_SCHEMA }
+      );
+      sections.push(`===== FILE: ${name} =====\n${String(extracted.text || '').trim()}`);
+    }
+    const careerData = sections.join('\n\n').trim();
+    if (!careerData) throw new Error('Could not extract any text from the dropped files.');
+
+    // Pass 2 — derive the structured profile from the merged career data.
+    const profile = await callLLMText(
+      `Analyze this candidate's career data thoroughly and return the structured JSON profile.\n\nCAREER DATA:\n"""\n${careerData}\n"""\n\nExtract everything you can find. Be thorough.`,
+      { signal, task: 'resume-parse', responseSchema: RESUME_PARSE_SCHEMA }
+    );
+
+    logger.info(`[Jobs][${nodeId}] Career data parsed (${paths.length} file(s), ${careerData.length} chars): ${profile.titles?.join(', ')}`);
+    return { profile, careerData, fingerprint };
   });
 
   handleSafe('generate-job-queries', async (event, { profile, targetRole, preferredLocation }, signal) => {
@@ -833,13 +1062,23 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries, nodeId, maxAgeDays, canvasFilePath, profileLocations, preferredLocation }, signal) => {
+  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, profileLocations, preferredLocation, resume = false }, signal) => {
     if (ACTIVE_SOURCE_IDS.length === 0) {
       return { success: false, error: 'No active job sources configured for job search test mode.' };
     }
 
+    // FAST test mode keeps only the first N queries (no-op cap = Infinity otherwise).
+    // Applied HERE so the single slice bounds both the browser scrape tasks
+    // (buildJobTasks) and the HTTP fan-out (fetchHttpSources) from one place.
+    const queries = (FAST_TEST && Array.isArray(rawQueries))
+      ? rawQueries.slice(0, JOB_TEST_QUERY_CAP)
+      : rawQueries;
+    if (FAST_TEST && Array.isArray(rawQueries) && rawQueries.length > queries.length) {
+      logger.info(`[Jobs][${nodeId}] FAST test mode: capped ${rawQueries.length} → ${queries.length} queries`);
+    }
+
     // Gate: require verified login for all browser-scraped job platforms.
-    const BROWSER_JOB_PLATFORMS = getScopedJobSourceIds(['indeed', 'glassdoor', 'ziprecruiter', 'wellfound']);
+    const BROWSER_JOB_PLATFORMS = getScopedJobSourceIds(['indeed', 'glassdoor', 'ziprecruiter']);
     const cache = await readStatusCache();
     const notLoggedIn = BROWSER_JOB_PLATFORMS.filter(id => !cache[id]?.connected);
     if (notLoggedIn.length > 0) {
@@ -859,6 +1098,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     jobsTelemetry.sourceEvents = {};
     jobsTelemetry.sourceEventsT0 = Date.now();
     jobsTelemetry.linkedinEnrich = []; // fresh egress-IP trail per run (see definition)
+    jobsTelemetry.linkedinCooldown = null; // fresh cooldown-probe result per run
     // Record every job-source-progress we send, then send it. The trail is what
     // lets the bug report explain a "blocked source lost its resolve card" — it
     // shows whether the source ever emitted a clean 'done' (which auto-dismisses
@@ -878,7 +1118,41 @@ Be creative with suggestedRoleQueries — think about what career directions the
       event.sender.send('job-source-progress', payload);
     };
 
-    const tasks = buildJobTasks(queries, ageDays, profileLocations, preferredLocation);
+    // ── Resume mode ─────────────────────────────────────────────────────────
+    // Re-scrape ONLY the sources that didn't finish, each from its last completed
+    // page, and seed the gathered set with the staged jobs from already-'done'
+    // sources (so finished work isn't re-scraped). This replaces the old
+    // "recover staged → score directly" shortcut: resume now CONTINUES THE SCRAPE
+    // from the per-page ledger. Falls back to a normal fresh search if there's no
+    // incomplete prior run.
+    let resumeScope = null;       // Set<sourceId> to re-scrape (null = all = fresh run)
+    let resumeStartPages = null;  // { [sourceId]: 1-based next page }
+    let recoveredStaged = [];     // jobs recovered from the prior (crashed) run's staging
+    if (resume) {
+      const prior = await readRunState(canvasFilePath, Date.now());
+      if (prior?.incomplete) {
+        recoveredStaged = prior.stagedJobs.map(s => ({ ...s.job, source: s.sourceId }));
+        const priorSources = prior.manifest.sources || {};
+        resumeScope = new Set();
+        resumeStartPages = {};
+        for (const sid of ACTIVE_SOURCE_IDS) {
+          if (priorSources[sid]?.status === 'done') continue; // complete — reuse its staged jobs
+          resumeScope.add(sid);
+          // Resume from the LEAST-progressed query's next page (min lastPage + 1)
+          // so no query is skipped; the cross-source dedup absorbs any overlap.
+          const pages = Object.values(priorSources[sid]?.queries || {})
+            .map(q => q.lastPage).filter(n => typeof n === 'number' && n >= 0);
+          resumeStartPages[sid] = pages.length ? Math.min(...pages) + 1 : 1;
+        }
+        logger.info(`[Jobs][${nodeId}] Resume: re-scrape [${[...resumeScope].join(',') || 'none'}] from ${JSON.stringify(resumeStartPages)}; recovered ${recoveredStaged.length} staged job(s)`);
+      } else {
+        logger.info(`[Jobs][${nodeId}] Resume requested but no incomplete prior run — running a fresh search.`);
+      }
+    }
+
+    const tasks = buildJobTasks(queries, ageDays, resumeScope
+      ? { onlySources: resumeScope, startPageBySource: resumeStartPages }
+      : {});
 
     // Group tasks by source for per-source progress tracking
     const sourceTaskIds = {};
@@ -911,6 +1185,37 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const allJobs = [];
     const sourceResults = {};
 
+    // Resume: seed the gathered set with jobs recovered from the prior run's
+    // staging so 'done' sources aren't re-scraped and incomplete sources keep the
+    // pages already captured before the interruption (re-scraping only adds deeper pages).
+    for (const j of recoveredStaged) {
+      const sid = j.source || '?';
+      if (!sourceResults[sid]) sourceResults[sid] = { jobs: [], errors: 0, warnings: [] };
+      sourceResults[sid].jobs.push(j);
+      allJobs.push(j);
+    }
+
+    // ── Crash/quit recovery staging ───────────────────────────────────────────
+    // A FRESH run writes a new manifest + truncates staging; a RESUME keeps the
+    // existing manifest/staging and appends the newly-scraped pages. All calls
+    // no-op without a canvas path. stageOnPage flushes each page as it completes;
+    // HTTP sources are flushed per-source after they finish (below).
+    const runStartedAt = Date.now();
+    if (resumeScope) {
+      await setJobRunStage(canvasFilePath, 'searching', runStartedAt);
+    } else {
+      await startJobRun(canvasFilePath, {
+        runId: `${nodeId || 'job'}-${runStartedAt}`,
+        startedAt: runStartedAt,
+        queries,
+        maxAgeDays: ageDays,
+        nodeId,
+        sourceIds: ACTIVE_SOURCE_IDS,
+      });
+    }
+    const stageOnPage = ({ sourceId, query, page, jobs }) =>
+      recordSourcePage(canvasFilePath, { sourceId, query, page, jobs, now: Date.now() });
+
     // 1. Run browser collection (manual) and API sources concurrently.
     // pipelineAbort allows a future unrecoverable failure to abort both halves.
     // Individual API source failures (e.g. Dice 500) are source-level errors —
@@ -918,8 +1223,45 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const pipelineAbort = new AbortController();
     const combinedSignal = AbortSignal.any([pipelineAbort.signal, signal].filter(s => s instanceof AbortSignal));
 
-    const [results, apiResults] = await Promise.all([
-      scrapeManualSources(tasks, (res) => {
+    // ── Browser sources: ONE-AT-A-TIME in BROWSER_SCRAPE_ORDER ──────────────────
+    // Indeed first, then the manual trio (ZipRecruiter → Glassdoor → Google), all
+    // inside a SINGLE shared-profile lock acquisition. We must NOT nest
+    // withSharedProfileLock (neither Indeed nor scrapeManualSources self-acquires
+    // anymore) — a nested acquire would deadlock waiting on the outer hold. The
+    // pure-HTTP sources run fully concurrently via fetchHttpSources.
+    const queryTotal = getQueryProgressTotal(queries);
+    const runBrowserSourcesInOrder = async () => {
+      let indeedResult = null;
+      // Indeed runs FIRST (login + Cloudflare gate surfaced early while watched).
+      // Shaped like an API result ({ sourceId, jobs, warning, gathered }) so the
+      // existing apiResults processing below handles it unchanged.
+      if (ACTIVE_SOURCE_ID_SET.has('indeed') && (!resumeScope || resumeScope.has('indeed'))) {
+        emitProgress({ nodeId, sourceId: 'indeed', status: 'searching', count: 0, completed: 0, total: queryTotal });
+        // fetchIndeedListingsBrowser's startPage is 0-based; resumeStartPages is 1-based.
+        const indeedStartPage = resumeStartPages?.indeed > 1 ? resumeStartPages.indeed - 1 : 0;
+        try {
+          const r = await fetchIndeedListingsBrowser(queries, combinedSignal, ageDays, null, (detail) => {
+            emitProgress({ nodeId, sourceId: 'indeed', status: 'searching', count: 0, detail, completed: getCompletedQueriesFromDetail(detail, queryTotal), total: queryTotal });
+          }, indeedStartPage, stageOnPage);
+          const rawJobs = Array.isArray(r?.items) ? r.items : [];
+          const gathered = r?.gathered ?? rawJobs.length;
+          // Same FAST-mode per-source aggregate cap the HTTP path applies.
+          const jobs = Number.isFinite(JOB_API_PER_SOURCE_CAP) ? rawJobs.slice(0, JOB_API_PER_SOURCE_CAP) : rawJobs;
+          indeedResult = { sourceId: 'indeed', jobs, warning: r?.warning || null, gathered };
+        } catch (error) {
+          indeedResult = { sourceId: 'indeed', jobs: [], error: error?.message || String(error) };
+        }
+        emitProgress({
+          nodeId, sourceId: 'indeed',
+          status: (indeedResult.error || indeedResult.warning?.severity === 'block') ? 'error' : 'done',
+          count: indeedResult.jobs.length,
+          warning: indeedResult.warning || null,
+          completed: queryTotal, total: queryTotal,
+        });
+      }
+      // Manual trio (ZipRecruiter → Glassdoor → Google) — declaration order in
+      // buildJobTasks IS the run order. Same per-source progress callback as before.
+      const manualResults = await scrapeManualSources(tasks, (res) => {
         const sourceId = res.id.replace(/-\d+$/, '');
         const count = Array.isArray(res.data) ? res.data.length : 0;
         const total = sourceTaskIds[sourceId]?.length || 1;
@@ -934,9 +1276,26 @@ Be creative with suggestedRoleQueries — think about what career directions the
           warning: res.warning || null,
           url: sourceFirstUrl[sourceId] || null,
         });
-      }, combinedSignal),
-      fetchApiSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, preferredLocation),
+      }, combinedSignal, stageOnPage);
+      return { manualResults, indeedResult };
+    };
+
+    const [browserOut, httpResults] = await Promise.all([
+      withSharedProfileLock(runBrowserSourcesInOrder),
+      fetchHttpSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, preferredLocation, resumeScope),
     ]);
+    const results = browserOut.manualResults;
+    // Indeed (browser) is appended to the API-shaped results so all downstream
+    // processing (per-source funnel, gathered/warning handling) stays unchanged.
+    const apiResults = browserOut.indeedResult ? [...httpResults, browserOut.indeedResult] : [...httpResults];
+
+    // Stage pure-HTTP source results per-source (they don't paginate through the
+    // page hook); Indeed already staged per-page via stageOnPage above.
+    for (const res of httpResults) {
+      if (Array.isArray(res.jobs) && res.jobs.length > 0) {
+        await recordSourcePage(canvasFilePath, { sourceId: res.sourceId, query: '', page: 0, jobs: res.jobs, now: Date.now() });
+      }
+    }
 
     // Process Scraper Results
     for (const result of results) {
@@ -978,16 +1337,29 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Inject a block-severity warning so the card shows a Solve button — the user
     // opens the two-tab resolve window, submits a review/salary in Tab 2, then
     // Tab 1 auto-extracts the full ungated result set.
+    //
+    // CAP-AWARE: the raw count is only a gate signal when it falls SHORT of what we
+    // asked for. In FAST/MEDIUM test mode the per-page cap (JOB_PER_PAGE_CAP = 3 / 5)
+    // deliberately limits Glassdoor to ~6 jobs, so "≤10" was ALWAYS true and the gate
+    // FALSE-fired on every test run — the user then opens the Solve window, Glassdoor
+    // serves the full ungated page to the visible (non-CDP) Chrome session, and it
+    // extracts + insta-closes with nothing to solve. Require the count to be below a
+    // full capped page across the queries we ran (queries.length × JOB_PER_PAGE_CAP)
+    // so a cap-limited-but-healthy scrape isn't mislabeled. In production (cap 150)
+    // that product dwarfs the 10 threshold, so this clause is a no-op there and a
+    // genuine gate (Glassdoor truncating to ~5 despite a deep page budget) still fires.
     const gdData = sourceResults.glassdoor;
+    const gdFullPageYield = (queries.length || 1) * JOB_PER_PAGE_CAP;
     if (gdData && gdData.jobs.length > 0 && gdData.jobs.length <= 10 &&
+        gdData.jobs.length < gdFullPageYield &&
         gdData.pagesWalked <= 1 &&
         !gdData.warnings.some(w => w?.severity === 'block')) {
       gdData.warnings.push({
         code: 'glassdoor-review-gate',
         severity: 'block',
-        evidence: `Glassdoor returned only ${gdData.jobs.length} job(s) before hitting an empty page — consistent with the contribution gate.`,
+        evidence: `Glassdoor returned only ${gdData.jobs.length} job(s) (< a full ${gdFullPageYield}-job page across ${queries.length} quer${queries.length === 1 ? 'y' : 'ies'}) before hitting an empty page — consistent with the contribution gate.`,
         openSecondTab: true,
-        suggestion: 'Glassdoor is gating results behind a review. Two tabs will open — use Tab 2 to write a company review or add a salary, then switch back to Tab 1 (job results) and refresh it. The full list will be captured and the window will close automatically.',
+        suggestion: 'Glassdoor limited the automated fetch. Click Solve — a browser opens on the Glassdoor results and USUALLY loads the full list on its own, then closes; you don\'t need to do anything. ONLY if you see a "write a review / add a salary to continue" wall, use Tab 2 to satisfy it, then switch to Tab 1 and refresh.',
       });
     }
 
@@ -1072,6 +1444,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
         // doesn't share cookies anyway.
         url: sourceFirstUrl[sourceId] || null,
       });
+      // Record terminal status in the run manifest so resume knows which sources
+      // completed vs. need re-running. 'skipped' counts as done (it ran its course).
+      markSourceStatus(canvasFilePath, sourceId, status === 'error' ? 'blocked' : 'done', Date.now());
     }
 
     // Flat per-source warning list returned with the response so the JobHub
@@ -1143,54 +1518,147 @@ Be creative with suggestedRoleQueries — think about what career directions the
       // its 'done' event when the API fetch finishes (10+ min ago), then the
       // 10 s grace fires and the card disappears while the hub is still running.
       emitProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: linkedinKept.length, detail: 'enriching descriptions', completed: 0, total: 1 });
-      const { jobs: enriched, loginWall, successCount: lkSuccess = 0 } = await enrichLinkedInDescriptionsBrowser(linkedinKept, combinedSignal);
-      const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
-      kept = kept.map(j => j.source === 'linkedin' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
 
-      if (loginWall) {
-        // NOT a session/login problem: descriptions are fetched anonymously
-        // (cookieless guest JSON-LD), so this is LinkedIn's per-IP guest
-        // rate-limit. Capture the warm IP so the next retry can verify a VPN
-        // switch actually changed it before re-attempting, and tell the user to
-        // switch VPN (a fresh IP resets the per-IP quota) — logging in does nothing.
-        linkedinLastCeilingIp = await getEgressIp();
-        const stillEmpty = kept.filter(j => j.source === 'linkedin' && (!j.snippet || j.snippet.length < 100)).length;
-        const ipNote = linkedinLastCeilingIp ? ` (IP ${linkedinLastCeilingIp})` : '';
-        const rateWarning = {
-          code: 'linkedin-rate-limited',
-          severity: 'throttle', // 'throttle' keeps the Solve button visible (hidden for 'warn'/'info') and renders amber, not block-red
-          shortLabel: 'Switch VPN',
-          evidence: `LinkedIn's anonymous guest limit stopped enrichment after ${lkSuccess} description(s)${ipNote} — ${stillEmpty} job(s) still without one.`,
-          suggestion: 'This IP is rate-limited. Switch your VPN to a new location, then click Solve to fetch the next batch. (Logging in does not help — descriptions are fetched anonymously.)',
-        };
-        emitProgress({
-          nodeId,
-          sourceId: 'linkedin',
-          count: linkedinKept.length,
-          status: 'error',
-          url: 'https://www.linkedin.com/jobs',
-          warning: rateWarning,
-          completed: 1,
-          total: 1,
-        });
-        // Include in scrapeWarnings so the JobHub done-state panel surfaces it too.
-        scrapeWarnings.push({ sourceId: 'linkedin', url: null, ...rateWarning });
-        // Baseline pass for the egress-IP trail: this is the warm IP every
-        // subsequent Solve is trying to escape. ipOk:false here means the lookup
-        // itself failed — the same-IP guard then has nothing to compare against.
-        recordLinkedinEnrichPass({
-          kind: 'search', ip: linkedinLastCeilingIp, ipOk: !!linkedinLastCeilingIp,
-          walled: true, enriched: lkSuccess, stillEmpty,
-        });
+      if (JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.probeCooldown) {
+        // Continuous enrichment: loop with 1m cooldown pauses until all jobs have descriptions.
+        // Uses the measured cooldown from a prior probe run (same session) if available, else 1m default.
+        const cooldownMs = jobsTelemetry.linkedinCooldown?.foundMs ?? 60_000;
+        const cooldownMins = Math.round(cooldownMs / 60_000);
+        const MAX_PASSES = 40;
+        let lkPool = linkedinKept.slice();
+        // Consecutive zero-yield passes. A walled/soft-blocked pass that enriches
+        // NOTHING even after a cooldown wait means the limit isn't clearing — stop
+        // spinning rather than burn all MAX_PASSES on 0-yield retries.
+        let noProgressStreak = 0;
+
+        for (let pass = 0; pass < MAX_PASSES; pass++) {
+          const remaining = lkPool.filter(j => !j.snippet || j.snippet.length < 100);
+          if (remaining.length === 0) break;
+
+          if (pass > 0) {
+            emitProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: lkPool.length, detail: `enriching pass ${pass + 1}: ${remaining.length} remaining`, warning: null });
+          }
+
+          const passStartedAt = Date.now();
+          const { jobs: enriched, loginWall, successCount = 0, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0 } =
+            await enrichLinkedInDescriptionsBrowser(remaining, combinedSignal);
+
+          const byUrl = new Map(enriched.map(j => [j.url, j]));
+          lkPool = lkPool.map(j => byUrl.has(j.url) ? byUrl.get(j.url) : j);
+          const stillEmpty = lkPool.filter(j => !j.snippet || j.snippet.length < 100).length;
+
+          // The limit bites two ways: the URL-redirect wall (loginWall), and gutted
+          // soft-block pages that come back as no-desc (title="" + 0 JSON-LD). The
+          // latter does NOT trip the wall detector, but it's the same rate limit —
+          // treat it as rate-limited so the loop waits and retries instead of
+          // declaring a false "clean finish" and stranding recoverable jobs.
+          const rateLimited = loginWall || noDescSoftBlock > 0;
+          const ip = rateLimited ? await getEgressIp() : null;
+          recordLinkedinEnrichPass({
+            kind: 'search', ip, ipOk: rateLimited ? !!ip : null,
+            walled: loginWall, enriched: successCount, stillEmpty,
+            noDesc, noDescSoftBlock, noDescGenuine, evalErrors, navErrors,
+            contextRotations, browserGen, browserAgeMs, startedAt: passStartedAt,
+          });
+
+          noProgressStreak = successCount > 0 ? 0 : noProgressStreak + 1;
+
+          // Done when: nothing left; OR the residual is NOT recoverable (no wall and
+          // no soft-blocks ⇒ only genuine no-desc / permanent failures remain); OR
+          // repeated waits yield nothing (cooldown isn't clearing the limit).
+          if (stillEmpty === 0 || !rateLimited || noProgressStreak >= 3) break;
+
+          linkedinLastCeilingIp = ip;
+          const reason = loginWall ? 'walled' : `${noDescSoftBlock} soft-block(s)`;
+          logger.info(`[Jobs][${nodeId}] LinkedIn: ${reason} +${successCount}, ${stillEmpty} still empty — waiting ${cooldownMins}m`);
+          emitProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: lkPool.length, detail: `rate-limited: waiting ${cooldownMins}m (${stillEmpty} still empty)`, warning: null });
+          try {
+            await abortableDelay(cooldownMs, combinedSignal);
+          } catch {
+            break; // signal fired during wait — exit loop cleanly
+          }
+        }
+
+        const lkByUrl = new Map(lkPool.map(j => [j.url, j]));
+        kept = kept.map(j => j.source === 'linkedin' ? (lkByUrl.get(j.url) || j) : j);
+        linkedinLastCeilingIp = null;
+        emitProgress({ nodeId, sourceId: 'linkedin', count: lkPool.length, status: 'done', completed: 1, total: 1 });
+
       } else {
-        linkedinLastCeilingIp = null; // enrichment finished without the ceiling — reset
-        // Emit final done so the card transitions to its terminal state and the
-        // dismiss timer restarts (10 s grace after enrichment completes, not after
-        // the API fetch).
-        emitProgress({ nodeId, sourceId: 'linkedin', count: linkedinKept.length, status: 'done', completed: 1, total: 1 });
-        // Clean pass — no wall, so no IP-switch question. Record it (no IP
-        // lookup, to avoid paying the ipify round-trip on the happy path).
-        recordLinkedinEnrichPass({ kind: 'search', ip: null, ipOk: null, walled: false, enriched: lkSuccess });
+        // Single-pass enrichment. In probe mode: arms the cooldown probe on wall.
+        // In production: emits error and waits for the user to switch VPN and click Solve.
+        const lkPassStartedAt = Date.now();
+        const { jobs: enriched, loginWall, successCount: lkSuccess = 0, contextRotations: lkRotations = 0, browserGen: lkBrowserGen = null, browserAgeMs: lkBrowserAgeMs = null, noDesc: lkNoDesc = 0, noDescSoftBlock: lkNoDescSoft = 0, noDescGenuine: lkNoDescGenuine = 0, evalErrors: lkEvalErrors = 0, navErrors: lkNavErrors = 0 } = await enrichLinkedInDescriptionsBrowser(linkedinKept, combinedSignal);
+        const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
+        kept = kept.map(j => j.source === 'linkedin' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
+
+        if (loginWall) {
+          linkedinLastCeilingIp = await getEgressIp();
+          const stillEmpty = kept.filter(j => j.source === 'linkedin' && (!j.snippet || j.snippet.length < 100)).length;
+          const ipNote = linkedinLastCeilingIp ? ` (IP ${linkedinLastCeilingIp})` : '';
+          recordLinkedinEnrichPass({
+            kind: 'search', ip: linkedinLastCeilingIp, ipOk: !!linkedinLastCeilingIp,
+            walled: true, enriched: lkSuccess, stillEmpty, contextRotations: lkRotations,
+            noDesc: lkNoDesc, noDescSoftBlock: lkNoDescSoft, noDescGenuine: lkNoDescGenuine, evalErrors: lkEvalErrors, navErrors: lkNavErrors,
+            browserGen: lkBrowserGen, browserAgeMs: lkBrowserAgeMs, startedAt: lkPassStartedAt,
+          });
+
+          if (JOB_SEARCH_TEST_MODE.probeCooldown) {
+            // Probe mode: auto-run the cooldown measurement without a Solve click.
+            const waitsMs = JOB_SEARCH_TEST_MODE.probeCooldownWaitsMin.map(m => Math.round(m * 60_000));
+            const lkPool = kept.filter(j => j.source === 'linkedin');
+            const { pool: probedPool, foundMs, attempt } =
+              await runCooldownProbe(nodeId, waitsMs, lkPool, combinedSignal, emitProgress, null);
+            const probedByUrl = new Map(probedPool.map(j => [j.url, j]));
+            kept = kept.map(j => j.source === 'linkedin' ? (probedByUrl.get(j.url) || j) : j);
+            const probeStillEmpty = probedPool.filter(j => !j.snippet || j.snippet.length < 100).length;
+            if (foundMs != null && probeStillEmpty === 0) {
+              linkedinLastCeilingIp = null;
+              emitProgress({ nodeId, sourceId: 'linkedin', count: probedPool.length, status: 'done', completed: 1, total: 1 });
+            } else {
+              const maxMin = foundMs != null
+                ? Math.round(foundMs / 60000)
+                : Math.round(Math.max(...waitsMs) / 60000);
+              const probeWarning = foundMs != null
+                ? {
+                    code: 'linkedin-rate-limited', severity: 'throttle', shortLabel: 'Switch VPN',
+                    evidence: `Cooldown confirmed: ~${maxMin}m on this IP/browser. ${probeStillEmpty} job(s) still without description.`,
+                    suggestion: `Wait ~${maxMin}m, then click Solve to resume enrichment. (Or switch VPN for a fresh IP — either should work.)`,
+                  }
+                : {
+                    code: 'linkedin-rate-limited', severity: 'throttle', shortLabel: `Cooldown > ${maxMin}m`,
+                    evidence: `Cooldown probe exhausted (${attempt} attempt(s), up to ${maxMin}m idle). ${probeStillEmpty} still without description.`,
+                    suggestion: `The cooldown is longer than ${maxMin}m, or idle alone won't clear it. Extend JOB_SEARCH_PROBE_WAITS_MIN, Reset browser session, or try a residential IP.`,
+                  };
+              emitProgress({ nodeId, sourceId: 'linkedin', count: probedPool.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: probeWarning, completed: 1, total: 1 });
+              scrapeWarnings.push({ sourceId: 'linkedin', url: null, ...probeWarning });
+            }
+          } else {
+            // Normal: emit error, wait for user to switch VPN and click Solve.
+            const rateWarning = {
+              code: 'linkedin-rate-limited',
+              severity: 'throttle',
+              shortLabel: 'Switch VPN',
+              evidence: `LinkedIn's anonymous guest limit stopped enrichment after ${lkSuccess} description(s)${ipNote} — ${stillEmpty} job(s) still without one.`,
+              suggestion: 'This IP is rate-limited. Switch your VPN to a new location, then click Solve to fetch the next batch. (Logging in does not help — descriptions are fetched anonymously.)',
+            };
+            emitProgress({
+              nodeId,
+              sourceId: 'linkedin',
+              count: linkedinKept.length,
+              status: 'error',
+              url: 'https://www.linkedin.com/jobs',
+              warning: rateWarning,
+              completed: 1,
+              total: 1,
+            });
+            scrapeWarnings.push({ sourceId: 'linkedin', url: null, ...rateWarning });
+          }
+        } else {
+          linkedinLastCeilingIp = null;
+          emitProgress({ nodeId, sourceId: 'linkedin', count: linkedinKept.length, status: 'done', completed: 1, total: 1 });
+          recordLinkedinEnrichPass({ kind: 'search', ip: null, ipOk: null, walled: false, enriched: lkSuccess, contextRotations: lkRotations, noDesc: lkNoDesc, noDescSoftBlock: lkNoDescSoft, noDescGenuine: lkNoDescGenuine, evalErrors: lkEvalErrors, navErrors: lkNavErrors, browserGen: lkBrowserGen, browserAgeMs: lkBrowserAgeMs, startedAt: lkPassStartedAt });
+        }
       }
     }
 
@@ -1245,7 +1713,60 @@ Be creative with suggestedRoleQueries — think about what career directions the
       kept: kept.length,
       bySource,
     };
+    // Search (gather) phase done — mark the manifest so a crash during the
+    // RENDERER-driven scoring/bucketing that follows resumes from scoring (the
+    // gathered jobs are recovered from staging) rather than re-scraping.
+    await setJobRunStage(canvasFilePath, 'gathered', Date.now());
+
     return { jobs: kept, rawCount: allJobs.length, sourceResults, scrapeWarnings };
+  });
+
+  // ── Resume-from-incomplete-run IPC ──────────────────────────────────────────
+  // peek-job-run (on hub load) detects a recent, incomplete run and surfaces a
+  // "Resume / Start fresh" banner. RESUME re-invokes search-jobs with { resume:true }
+  // (see that handler): it re-scrapes ONLY the unfinished sources from their last
+  // completed page and reuses the staged jobs from finished sources — there is NO
+  // separate "score the staged jobs without re-scraping" path anymore.
+  // complete-job-run (clean finish, incl. a successful resume-on-crash) and
+  // discard-job-run ("start fresh") both move the sidecars to the OS Trash, so
+  // the cleanup is always recoverable.
+
+  handleSafe('peek-job-run', async (event, { canvasFilePath } = {}) => {
+    const state = await readRunState(canvasFilePath, Date.now());
+    if (!state) return { found: false };
+    const sources = state.manifest.sources || {};
+    const sourceSummary = Object.entries(sources).map(([id, s]) => ({ id, status: s?.status || 'pending' }));
+    return {
+      found: true,
+      resumable: state.resumable,
+      incomplete: state.incomplete,
+      stage: state.manifest.stage,
+      startedAt: state.manifest.startedAt,
+      ageMs: state.ageMs,
+      gatheredCount: state.stagedJobs.length,
+      totalSources: sourceSummary.length,
+      doneSources: sourceSummary.filter(s => s.status === 'done').length,
+      sourceSummary,
+      queries: state.manifest.inputs?.queries || [],
+      targetRole: state.manifest.inputs?.targetRole || null,
+    };
+  });
+
+  handleSafe('complete-job-run', async (event, { canvasFilePath } = {}) => {
+    // Clean finish (including a successful resume-on-crash that runs to
+    // completion): the staged jobs + run manifest have served their purpose, so
+    // move them to the OS Trash as recoverable cleanup. clearRun falls back to a
+    // hard delete if the volume has no Trash, so the run is always cleared.
+    await clearRun(canvasFilePath, { trashItem: (p) => shell.trashItem(p) });
+    return { ok: true };
+  });
+
+  handleSafe('discard-job-run', async (event, { canvasFilePath } = {}) => {
+    // "Start fresh" → recoverable: route the sidecars to the OS Trash instead of
+    // unlinking them. clearRun falls back to a hard delete if the volume has no
+    // Trash, so the run is always cleared either way.
+    await clearRun(canvasFilePath, { trashItem: (p) => shell.trashItem(p) });
+    return { ok: true };
   });
 
   handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId, preferredLocation }, signal) => {
@@ -1380,8 +1901,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // ── Score Jobs Against Resume ─────────────────────────────────────────────
-  handleSafe('score-jobs', async (event, { jobs, profile, nodeId, targetRole, snapshotContext } = {}, signal) => {
-    const { role, gathered, toScore, cappedForBudget, batchSize: BATCH_SIZE, slimBatch, cachedPrefix, snapshot } =
+  handleSafe('score-jobs', async (event, { jobs, profile, nodeId, targetRole, snapshotContext, batchScoring } = {}, signal) => {
+    const { role, gathered, toScore, cappedForBudget, scoringBatches, slimBatch, cachedPrefix, snapshot } =
       buildJobAnalysisSnapshot({ jobs, profile, nodeId, targetRole, snapshotContext });
     logger.info(`[Jobs][${nodeId}] Scoring`, gathered.length, 'jobs', role ? `(target: ${role})` : '');
     jobsTelemetry.nodeId = nodeId;
@@ -1399,6 +1920,10 @@ Be creative with suggestedRoleQueries — think about what career directions the
     let placeholderCount = 0;
     let failedBatches = 0;
     let batches = 0;
+    // First batch-failure reason (e.g. "AI prompt too large (…chars)"), persisted
+    // into telemetry so the bug report shows WHY a batch failed even after the raw
+    // log line has scrolled out of the main-process ring buffer.
+    let lastFailureReason = null;
     const scoringModels = new Set(); // distinct models that served the score batches
     try {
       const paths = await saveJobAnalysisSnapshot(snapshot);
@@ -1407,56 +1932,101 @@ Be creative with suggestedRoleQueries — think about what career directions the
       logger.warn(`[Jobs][${nodeId}] Failed to save AI prompt snapshot:`, err);
     }
 
-    for (let i = 0; i < toScore.length; i += BATCH_SIZE) {
-      // Guard: Check if window was closed between batches
-      if (signal?.aborted) break;
-
-      batches++;
-      const batch = toScore.slice(i, i + BATCH_SIZE);
-      let batchResult;
-      const batchPrompt = `JOBS TO SCORE (array, indexed):
-${JSON.stringify(slimBatch(batch))}`;
-
-      const batchMeta = {};
+    // ── Opt-in Batch-API scoring (async, ~50% cheaper) ─────────────────────
+    // Gate: hub toggle ON + Claude provider + NOT test mode (test needs instant
+    // replies) + a saved canvas (the pending batch is persisted next to it so it
+    // survives an app restart). Anything else falls through to the real-time
+    // path below unchanged — batch mode is strictly additive.
+    const canvasFilePath = snapshotContext?.canvasFilePath || null;
+    const isTestMode = MEDIUM_TEST || FULL_TEST || FAST_TEST;
+    if (batchScoring && getAISettings().provider === 'claude' && !isTestMode && canvasFilePath && toScore.length > 0) {
       try {
-        batchResult = await callLLMText(batchPrompt, {
-          signal,
-          task: 'job-scoring',
+        const items = scoringBatches.map((batch, i) => ({
+          customId: `b${i}`,
+          prompt: `JOBS TO SCORE (array, indexed):\n${JSON.stringify(slimBatch(batch))}`,
           hints: { itemCount: batch.length },
-          responseSchema: JOB_SCORING_SCHEMA,
-          cachedPrefix,
-          meta: batchMeta,
+        }));
+        const { batchId, model } = await submitLLMTextBatch(items, {
+          task: 'job-scoring', responseSchema: JOB_SCORING_SCHEMA, cachedPrefix,
         });
+        await writeJobBatchSidecar(canvasFilePath, {
+          batchId, model, createdAt: Date.now(), nodeId: nodeId || null, targetRole: role,
+          input: gathered.length, selectedForScoring: toScore.length, cappedForBudget,
+          // Full job groupings (objects) so completion reconciles + spawns with no re-search.
+          batches: scoringBatches,
+        });
+        logger.info(`[Jobs][${nodeId}] Submitted batch scoring ${batchId}: ${scoringBatches.length} batch(es), ${toScore.length} jobs — awaiting async results`);
+        jobsTelemetry.scoring = {
+          ts: Date.now(), input: gathered.length, selectedForScoring: toScore.length, cappedForBudget,
+          scored: 0, placeholders: 0, batches: scoringBatches.length, failedBatches: 0,
+          failureReason: null, unscored: toScore.length, directions: 0, models: [model], batchPending: true, batchId,
+        };
+        return { batchPending: true, batchId, batchCount: scoringBatches.length, selectedForScoring: toScore.length };
+      } catch (err) {
+        // Submission failed — fall through to real-time so the run still completes
+        // (don't strand the user on a failed batch submit).
+        logger.warn(`[Jobs][${nodeId}] Batch submit failed (${err?.message || err}) — falling back to real-time scoring`);
+      }
+    }
+
+    // Score one batch → array aligned 1:1 with `batch`, each entry the job's
+    // score object or null if it couldn't be scored. On a HARD batch failure
+    // (transient provider error, or a pathologically large single job) we SPLIT
+    // the batch and retry the halves rather than letting one bad job sink all of
+    // them into filler scores — only a single job that still fails ends up null.
+    // With the model's full input window available this split path is a
+    // rarely-needed safety net (transient errors), not the norm.
+    const scoreBatch = async (batch) => {
+      const batchMeta = {};
+      let batchResult = null;
+      try {
+        batchResult = await callLLMText(
+          `JOBS TO SCORE (array, indexed):\n${JSON.stringify(slimBatch(batch))}`,
+          { signal, task: 'job-scoring', hints: { itemCount: batch.length }, responseSchema: JOB_SCORING_SCHEMA, cachedPrefix, meta: batchMeta },
+        );
         if (batchMeta.model) scoringModels.add(batchMeta.model);
       } catch (err) {
         if (signal?.aborted) throw err;
-        logger.warn(`[Jobs] Batch scoring failed:`, err);
-        batchResult = null; // Forces string fallback below
+        if (!lastFailureReason) lastFailureReason = err?.message || String(err);
+        logger.warn(`[Jobs] Batch scoring failed (size ${batch.length}):`, err?.message || err);
+        batchResult = null;
       }
-
-      // Accept either the wrapped { scores: [...] } shape (schema-enforced)
-      // or a bare array (older response format) so the rollout is robust if a
-      // provider ever returns the legacy shape.
+      // Accept the wrapped { scores: [...] } shape (schema-enforced) or a bare
+      // array (older format) so we're robust if a provider returns the legacy shape.
       const scores = Array.isArray(batchResult?.scores)
         ? batchResult.scores
         : Array.isArray(batchResult)
           ? batchResult
           : null;
-      if (scores) {
-        batch.forEach((job, idx) => {
-          const matched = scores.find(s => s.index === idx);
-          if (!matched) placeholderCount++; // index missing from an otherwise-OK batch
-          const score = matched || { matchScore: UNSCORED_FALLBACK_SCORE, reasoning: 'Unable to score', careerDirection: 'Other', strengthLabel: 'exploring', isTargetRoleMatch: false };
-          scoredJobs.push({ ...job, ...score, isTargetRoleMatch: !!score.isTargetRoleMatch });
-        });
-      } else {
-        logger.warn(`[Jobs] batchResult missing scores array:`, batchResult);
-        failedBatches++;
-        placeholderCount += batch.length; // whole batch fell back to filler scores
-        batch.forEach((job) => {
-          scoredJobs.push({ ...job, matchScore: UNSCORED_FALLBACK_SCORE, reasoning: 'AI format error', careerDirection: 'Other', strengthLabel: 'exploring', isTargetRoleMatch: false });
-        });
+      if (scores) return batch.map((_job, idx) => scores.find(s => s.index === idx) || null);
+      if (batch.length > 1) {
+        const mid = Math.ceil(batch.length / 2);
+        const left = await scoreBatch(batch.slice(0, mid));
+        const right = await scoreBatch(batch.slice(mid));
+        return [...left, ...right];
       }
+      return [null]; // a single job that still failed is genuinely unscoreable
+    };
+
+    for (const batch of scoringBatches) {
+      // Guard: Check if window was closed between batches
+      if (signal?.aborted) break;
+
+      batches++;
+      const results = await scoreBatch(batch); // aligned 1:1 with batch
+      const allNull = results.every(r => !r);
+      if (allNull) failedBatches++; // batch produced zero usable scores even after splitting
+      batch.forEach((job, idx) => {
+        const score = results[idx];
+        if (score) {
+          scoredJobs.push({ ...job, ...score, isTargetRoleMatch: !!score.isTargetRoleMatch });
+        } else {
+          placeholderCount++;
+          // Whole batch unusable → 'AI format error'; a lone job missing from an
+          // otherwise-good batch → 'Unable to score'. Both are flagged placeholders.
+          scoredJobs.push({ ...job, matchScore: UNSCORED_FALLBACK_SCORE, reasoning: allNull ? 'AI format error' : 'Unable to score', careerDirection: 'Other', isTargetRoleMatch: false });
+        }
+      });
     }
 
     // Sort by score descending
@@ -1480,16 +2050,69 @@ ${JSON.stringify(slimBatch(batch))}`;
       placeholders: placeholderCount,
       batches,
       failedBatches,
+      failureReason: lastFailureReason, // WHY a batch failed (e.g. oversized prompt); null when none failed
+
       // >0 means the abort signal cut the batch loop short, so these SELECTED jobs
       // were never sent to the scorer (distinct from cappedForBudget, which were
       // intentionally not selected, and placeholders, which were sent but unusable).
       unscored: toScore.length - scoredJobs.length,
+      // Distinct free-form careerDirection labels the scorer emitted across all
+      // batches. The scorer invents these per-batch (no shared vocabulary), so a
+      // high count vs. the bucketer's final category count = fragmentation the
+      // global bucketing pass had to consolidate. A health signal for the
+      // AI-owned taxonomy: e.g. "16 directions → 10 categories" means weak
+      // merging (common on the quota-forced flash-lite bucketer).
+      directions: Object.keys(clusters).length,
       // Distinct model(s) that served the score batches — usually one, but the
       // fallback chain can shift mid-run if a model starts 429ing between batches.
       models: [...scoringModels],
     };
 
-    return { scoredJobs, clusters, testMode: MEDIUM_TEST || FULL_TEST };
+    return { scoredJobs, clusters, testMode: MEDIUM_TEST || FULL_TEST || FAST_TEST };
+  });
+
+  // ── Batch-scoring poll/discard (opt-in async path) ─────────────────────────
+  // Poll a pending batch-scoring run. While processing, returns its status; once
+  // ended, downloads + reconciles results into the SAME scoredJobs shape the
+  // real-time path produces, so the hub resumes the normal partition→bucket→spawn.
+  handleSafe('poll-job-batch', async (_event, { canvasFilePath } = {}) => {
+    const sidecar = await readJobBatchSidecar(canvasFilePath);
+    if (!sidecar?.batchId) return { found: false };
+    let status;
+    try {
+      status = await getLLMTextBatchStatus(sidecar.batchId);
+    } catch (err) {
+      // Transient poll failure — keep the run alive; the hub will poll again.
+      return { found: true, done: false, error: err?.message || String(err) };
+    }
+    if (status.status !== 'ended') {
+      return { found: true, done: false, status: status.status, counts: status.counts };
+    }
+    const resultsByCustomId = await getLLMTextBatchResults(sidecar.batchId);
+    const { scoredJobs, placeholderCount, failedBatches } =
+      reconcileBatchScores(sidecar.batches, resultsByCustomId, { fallbackScore: UNSCORED_FALLBACK_SCORE });
+    await deleteJobBatchSidecar(canvasFilePath);
+    const directions = new Set(scoredJobs.map(j => j.careerDirection || 'Other')).size;
+    jobsTelemetry.scoring = {
+      ts: Date.now(), input: sidecar.input, selectedForScoring: sidecar.selectedForScoring,
+      cappedForBudget: sidecar.cappedForBudget, scored: scoredJobs.length, placeholders: placeholderCount,
+      batches: Array.isArray(sidecar.batches) ? sidecar.batches.length : 0, failedBatches,
+      failureReason: null, unscored: 0, directions, models: sidecar.model ? [sidecar.model] : [], batched: true,
+    };
+    logger.info(`[Jobs] Batch ${sidecar.batchId} ended → reconciled ${scoredJobs.length} scored (${placeholderCount} placeholder, ${failedBatches} failed batch)`);
+    return {
+      found: true, done: true, scoredJobs,
+      selectedForScoring: sidecar.selectedForScoring, gatheredCount: sidecar.input,
+      targetRole: sidecar.targetRole, nodeId: sidecar.nodeId,
+    };
+  });
+
+  // Cancel + clean up a pending batch (hub reset / user abandons the run).
+  handleSafe('discard-job-batch', async (_event, { canvasFilePath } = {}) => {
+    const sidecar = await readJobBatchSidecar(canvasFilePath);
+    if (sidecar?.batchId) await cancelLLMTextBatch(sidecar.batchId).catch(() => {});
+    await deleteJobBatchSidecar(canvasFilePath);
+    return { ok: true };
   });
 
   // ── Generate Cover Letter ─────────────────────────────────────────────────
@@ -1550,57 +2173,62 @@ Rules:
     return { questions: result.questions || [] };
   });
 
-  // ── Bucket scored jobs into per-category salary ranges ────────────────────
-  // Runs after score-jobs. Takes the scored jobs (which already carry
-  // careerDirection) and asks the AI to pick salary bucket boundaries that
-  // fit each category's distribution. Returns the bucket tree the renderer
-  // uses to spawn the collapsible JobCategoryNode / JobBucketNode hierarchy.
+  // ── Bucket scored jobs into the AI-created results taxonomy ───────────────
+  // Runs after score-jobs. The results hierarchy is THREE levels — interview
+  // likelihood → salary range → job role → cards — and the AI invents every
+  // label (nothing hardcoded). The model returns: likelihoodBands + salaryRanges
+  // (definitions fitted to the run's distributions; the RENDERER places each job
+  // into its band/range deterministically by the job's own score/salary, so a
+  // weak model can't drop jobs) and roles (the one creative partition — it
+  // consolidates the scorer's per-job careerDirection guesses into clean role
+  // names; jobs it omits are swept into "Other" by the renderer).
   handleSafe('bucket-jobs', async (event, { jobs, nodeId }, signal) => {
-    logger.info(`[Jobs][${nodeId}] Bucketing ${jobs.length} jobs into category/salary tree`);
+    logger.info(`[Jobs][${nodeId}] Bucketing ${jobs.length} jobs into likelihood/salary/role taxonomy`);
     jobsTelemetry.nodeId = nodeId;
     jobsTelemetry.windowId = event.sender?.id ?? null;
-    // Strip the scored jobs down to just what bucketing needs — careerDirection,
-    // salary text, title, index. Drops the reasoning + resumeProfile + snippet
-    // payload that would otherwise bloat the prompt and burn tokens on data
-    // the bucketer doesn't need.
+    // Strip to what the taxonomy needs: the scorer's suggested careerDirection
+    // (a seed to consolidate, NOT a fixed label), the interview-likelihood
+    // score (to fit bands), salary text (to fit ranges), and title.
     const compact = jobs.map((j, i) => ({
       index: i,
-      careerDirection: j.careerDirection || 'Other',
-      title: j.title || '',
+      suggestedDirection: j.careerDirection || '',
+      matchScore: typeof j.matchScore === 'number' ? j.matchScore : 0,
       salary: j.salary || '',
+      title: j.title || '',
     }));
     const bucketMeta = {}; // populated with the model that actually served this call
     let result;
     try {
       result = await callLLMText(`
-You are a career data analyst. Group these scored jobs by careerDirection, then within each category pick salary bucket boundaries that fit the actual salary distribution.
+You are a career data analyst. Design the labels for a 3-level results tree for these scored jobs. Each job has a matchScore (0-100 = the candidate's chance of getting an interview), a salary string, and a "suggestedDirection" (the scorer's rough per-job guess at the role family).
 
 JOBS:
 ${JSON.stringify(compact, null, 2)}
 
 Return a JSON object of the shape:
 {
-  "categories": [
-    {
-      "name": "Engineering",
-      "buckets": [
-        { "label": "$60-80k",   "minSalary": 60000, "maxSalary": 80000,  "jobIndices": [0, 4, 7] },
-        { "label": "$80-120k",  "minSalary": 80000, "maxSalary": 120000, "jobIndices": [2, 9] },
-        { "label": "Unspecified", "minSalary": 0,   "maxSalary": 0,      "jobIndices": [11, 13] }
-      ]
-    }
+  "likelihoodBands": [
+    { "label": "Excellent fit (85–100%)", "minScore": 85, "maxScore": 100 },
+    { "label": "Strong (65–84%)",         "minScore": 65, "maxScore": 84 },
+    { "label": "Possible (40–64%)",        "minScore": 40, "maxScore": 64 },
+    { "label": "Long shot (0–39%)",        "minScore": 0,  "maxScore": 39 }
+  ],
+  "salaryRanges": [
+    { "label": "$120k+",      "minSalary": 120000, "maxSalary": 0 },
+    { "label": "$80-120k",    "minSalary": 80000,  "maxSalary": 120000 },
+    { "label": "Unspecified", "minSalary": 0,      "maxSalary": 0 }
+  ],
+  "roles": [
+    { "name": "Brand Marketing", "jobIndices": [0, 4, 7] },
+    { "name": "Growth",          "jobIndices": [2, 9] }
   ]
 }
 
 RULES:
-- Use the EXACT careerDirection values from the input as category names. Don't rename or merge.
-- Pick 1–4 buckets per category based on the spread of actual salaries in that category. A category with 2 jobs gets 1 bucket; a category with wide spread gets 3–4.
-- Bucket labels should be human-friendly currency ranges: "$60-80k", "$120k+", "Unspecified".
-- "$X+" (open-ended top bucket) uses minSalary=X, maxSalary=0.
-- Jobs without parseable salary go in a single "Unspecified" bucket per category (minSalary=0, maxSalary=0).
-- Every input job MUST appear in exactly one bucket — jobIndices across all buckets must be the complete 0..N-1 set with no duplicates.
-- Order buckets from lowest to highest salary; Unspecified last.
-- Order categories alphabetically.`, {
+- likelihoodBands: 3–5 bands fitted to the actual matchScore spread. They MUST be contiguous and together cover 0–100 with no gaps or overlaps; order them highest→lowest. Each label includes its % range.
+- salaryRanges: 2–5 ranges fitted to the actual salary spread, ordered highest→lowest. ALWAYS include exactly one "Unspecified" range with minSalary=0 and maxSalary=0 (for jobs with no parseable salary). "$X+" (open-ended top) uses minSalary=X, maxSalary=0. These are GLOBAL ranges (not per-band).
+- roles: CONSOLIDATE the suggestedDirections into clean, non-overlapping role names that fit the candidate's field — merge synonyms/near-duplicates into ONE role ("Brand" / "Brand Marketing" / "Marketing" → a single "Brand Marketing"); rename anything vague. Invent the names; there is no fixed list. Aim for 3–7 roles; fold tiny leftovers into the closest fit (or a single "Other").
+- Every input job index MUST appear in exactly one role's jobIndices — the union across roles must be the complete 0..${jobs.length - 1} set, no duplicates.`, {
       signal,
       task: 'job-bucketing',
       hints: { itemCount: jobs.length },
@@ -1608,22 +2236,16 @@ RULES:
       meta: bucketMeta,
       });
     } catch (err) {
-      // Bucketing threw (e.g. the Claude streaming-required rejection, an LLM
-      // truncation, or a fallback-chain exhaustion). The renderer catches this
-      // and falls back to spawning a FLAT job list — no categories. Stamp the
-      // funnel with the failure so a bug report distinguishes "bucketing threw"
-      // (jobs shown uncategorized, with a recorded reason) from "bucketing never
-      // ran this session" (the null slot). Re-throw so handleSafe still returns
-      // the error to the renderer for its flat-spawn fallback.
-      //
-      // An ABORT (user cancelled / deleted the node mid-run) is not a bucketing
-      // failure — same distinction handleSafe draws — so don't stamp a spurious
-      // "FAILED" for it; just propagate.
+      // Bucketing threw (Claude streaming-required rejection, truncation, or
+      // fallback-chain exhaustion). The renderer catches this and flat-spawns the
+      // jobs — no taxonomy. Stamp the funnel so a bug report distinguishes
+      // "bucketing threw" from "never ran" (the null slot). An ABORT isn't a
+      // failure — don't stamp a spurious FAILED; just propagate.
       if (!signal?.aborted) {
         jobsTelemetry.bucketing = {
           ts: Date.now(),
           input: jobs.length,
-          categories: 0,
+          roleCount: 0,
           placed: 0,
           missing: jobs.length,
           duplicated: 0,
@@ -1633,93 +2255,80 @@ RULES:
       }
       throw err;
     }
-    logger.info(`[Jobs][${nodeId}] Bucketed into ${result?.categories?.length || 0} categories`);
-    // Verify the bucketer placed EVERY scored job exactly once (the prompt requires
-    // jobIndices to be the complete 0..N-1 set). Weak fallback models — common now
-    // under quota pressure — can omit or duplicate indices; the renderer's
-    // missing-sweep rescues omitted jobs into Uncategorized so they aren't dropped,
-    // but the funnel must SHOW when that happened — otherwise the "all jobs
-    // accounted for" chain stops at the category count and can't confirm placement.
+
+    const bandCount = result?.likelihoodBands?.length || 0;
+    const rangeCount = result?.salaryRanges?.length || 0;
+    const roleCount = result?.roles?.length || 0;
+    logger.info(`[Jobs][${nodeId}] Taxonomy: ${bandCount} likelihood band(s), ${rangeCount} salary range(s), ${roleCount} role(s)`);
+
+    // Verify the ROLE partition (the only one the model owns) covers every job
+    // exactly once. Bands/ranges are placed deterministically by the renderer,
+    // so they can't drop jobs; only the role grouping can. Jobs the model omits
+    // are swept into "Other" by the renderer — but the funnel must SHOW it.
     const placedCounts = new Map();
-    for (const cat of result?.categories || []) {
-      for (const buc of cat?.buckets || []) {
-        for (const idx of buc?.jobIndices || []) {
-          if (Number.isInteger(idx) && idx >= 0 && idx < jobs.length) {
-            placedCounts.set(idx, (placedCounts.get(idx) || 0) + 1);
-          }
+    for (const role of result?.roles || []) {
+      for (const idx of role?.jobIndices || []) {
+        if (Number.isInteger(idx) && idx >= 0 && idx < jobs.length) {
+          placedCounts.set(idx, (placedCounts.get(idx) || 0) + 1);
         }
       }
     }
     const placed = placedCounts.size;
-    const missing = jobs.length - placed; // omitted by the bucketer → renderer sweeps into Uncategorized
+    const missing = jobs.length - placed; // omitted → renderer sweeps into "Other"
     let duplicated = 0;
     for (const n of placedCounts.values()) if (n > 1) duplicated++;
-    // Which indices were omitted — needed to debug "1 missing" without re-running.
     const missingIndices = missing > 0
       ? Array.from({ length: jobs.length }, (_, i) => i).filter(i => !placedCounts.has(i))
       : [];
     if (missing > 0 || duplicated > 0) {
-      logger.warn(`[Jobs][${nodeId}] Bucketing placement gap: ${placed}/${jobs.length} placed, ${missing} missing, ${duplicated} duplicated`);
+      logger.warn(`[Jobs][${nodeId}] Role placement gap: ${placed}/${jobs.length} placed, ${missing} missing (→ Other), ${duplicated} duplicated`);
     }
 
-    // Targeted retry for any jobs the bucketer dropped. Sends only the missing
-    // jobs with a minimal prompt — small input is reliable even on haiku.
-    // Mutates result.categories in place so the return value and telemetry both
-    // reflect the rescued state.
-    if (missing > 0 && !signal?.aborted) {
-      const missingCompact = missingIndices.map(i => compact[i]);
-      const categoryNames = (result?.categories || []).map(c => c.name).join(', ');
-      const retryMeta = {};
-      try {
-        const retryResult = await callLLMText(
-          `A job bucketer omitted ${missing} job(s). Place each in the correct category.\n\nAVAILABLE CATEGORIES: ${categoryNames}\n\nJOBS:\n${JSON.stringify(missingCompact, null, 2)}\n\nEvery job must appear in exactly one placement. Use only the available category names.`,
-          { signal, task: 'job-bucketing', responseSchema: BUCKETING_PLACEMENT_SCHEMA, meta: retryMeta },
-        );
-        for (const p of retryResult?.placements || []) {
-          if (!Number.isInteger(p?.index) || p.index < 0 || p.index >= jobs.length) continue;
-          const cat = (result.categories || []).find(c => c.name === p.categoryName) ?? result.categories?.[0];
-          if (!cat) continue;
-          let bucket = cat.buckets.find(b => b.label === 'Unspecified');
-          if (!bucket) {
-            bucket = { label: 'Unspecified', minSalary: 0, maxSalary: 0, jobIndices: [] };
-            cat.buckets.push(bucket);
-          }
-          if (!bucket.jobIndices.includes(p.index)) bucket.jobIndices.push(p.index);
-        }
-        logger.info(`[Jobs][${nodeId}] Bucketing retry rescued ${retryResult?.placements?.length || 0} missing job(s) via ${retryMeta.model || 'unknown'}`);
-      } catch {
-        // Retry failed — renderer's missing-sweep still handles it
-      }
+    // Per-level breakdown so a bug report can judge whether the AI taxonomy is
+    // sensible without reconstructing the tree from raw node diagnostics. Band
+    // counts are deterministic (placed by score, same rule as the renderer).
+    const bands = [...(result?.likelihoodBands || [])].sort((a, b) => (b.minScore || 0) - (a.minScore || 0));
+    const placeBandLabel = (score) => {
+      const s = typeof score === 'number' ? score : 0;
+      for (const b of bands) if (s >= (b.minScore || 0)) return b.label || 'Match';
+      return bands[bands.length - 1]?.label || 'Match';
+    };
+    const bandCounts = new Map();
+    if (bands.length) for (const j of jobs) {
+      const lbl = placeBandLabel(j.matchScore);
+      bandCounts.set(lbl, (bandCounts.get(lbl) || 0) + 1);
     }
-
-    // Recount after any retry so telemetry reflects the final state.
-    const finalPlacedCounts = new Map();
-    for (const cat of result?.categories || []) {
-      for (const buc of cat?.buckets || []) {
-        for (const idx of buc?.jobIndices || []) {
-          if (Number.isInteger(idx) && idx >= 0 && idx < jobs.length)
-            finalPlacedCounts.set(idx, (finalPlacedCounts.get(idx) || 0) + 1);
-        }
-      }
-    }
-    const finalPlaced = finalPlacedCounts.size;
-    const finalMissing = jobs.length - finalPlaced;
-    const finalMissingIndices = finalMissing > 0
-      ? Array.from({ length: jobs.length }, (_, i) => i).filter(i => !finalPlacedCounts.has(i))
-      : [];
+    const bandSummary = bands.map(b => ({ label: b.label, count: bandCounts.get(b.label) || 0 }));
+    const salaryRangeLabels = (result?.salaryRanges || []).map(r => r.label).filter(Boolean);
+    const roleSummary = (result?.roles || []).map((role) => {
+      const idxs = (role?.jobIndices || []).filter(i => Number.isInteger(i) && i >= 0 && i < jobs.length);
+      return {
+        name: role?.name || 'Other',
+        count: idxs.length,
+        sampleTitles: idxs.slice(0, 3).map(i => jobs[i]?.title).filter(Boolean),
+      };
+    }).sort((a, b) => b.count - a.count);
+    if (missing > 0) roleSummary.push({ name: 'Other (swept)', count: missing, sampleTitles: missingIndices.slice(0, 3).map(i => jobs[i]?.title).filter(Boolean) });
 
     jobsTelemetry.bucketing = {
       ts: Date.now(),
       input: jobs.length,
-      categories: result?.categories?.length || 0,
-      placed: finalPlaced,
-      missing: finalMissing,
+      roleCount,
+      placed,
+      missing,
       duplicated,
-      missingIndices: finalMissingIndices,
+      missingIndices,
+      bandSummary,
+      salaryRangeLabels,
+      roleSummary,
       model: bucketMeta.model || null,
       error: null,
     };
-    return { categories: result?.categories || [] };
+    return {
+      likelihoodBands: result?.likelihoodBands || [],
+      salaryRanges: result?.salaryRanges || [],
+      roles: result?.roles || [],
+    };
   });
 
   // ── Resolve a job-source block — opens the failed scrape URL in a visible,
@@ -1750,6 +2359,10 @@ RULES:
     // fills another batch as LinkedIn's guest quota cools down.
     const isLinkedInReEnrich = sourceId === 'linkedin';
     if (isLinkedInReEnrich) {
+      // Pass-start ≈ when the user clicked Solve. Stamped on the enrichment trail
+      // so the idle gap before this pass (the cooldown wait) excludes the pass's
+      // own multi-minute duration on a clean finish.
+      const passStartedAt = Date.now();
       // Resolve-attempt telemetry — the LinkedIn branch returns directly and
       // never reaches the generic resolves[] recorder below, so without this the
       // bug report's "Captcha-resolve / Solve" section is blank for LinkedIn.
@@ -1776,6 +2389,40 @@ RULES:
         if (needEnrich.length > 0) {
           logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch: ${needEnrich.length}/${allLinkedIn.length} job(s) still without descriptions`);
 
+          // ── Automated cooldown probe (JOB_SEARCH_PROBE_COOLDOWN) ──────────
+          // Diagnostic mode: idle escalating waits on the SAME IP/browser, probing
+          // a small batch after each, STOP at the first interval confirmed clean by
+          // 3 consecutive probes. The per-IP guard below is intentionally bypassed:
+          // staying on one IP is the whole point. Also triggered automatically from
+          // the initial search path — no Solve click required when enabled.
+          if (JOB_SEARCH_TEST_MODE.probeCooldown) {
+            const waitsMs = JOB_SEARCH_TEST_MODE.probeCooldownWaitsMin.map(m => Math.round(m * 60_000));
+            const saveMidProbe = async (pool) => {
+              const m = new Map(pool.map(j => [j.url, j]));
+              const mj = (snapshot.jobs || []).map(j => j.source === 'linkedin' ? (m.get(j.url) || j) : j);
+              await saveJobAnalysisSnapshot({ ...snapshot, jobs: mj, canvasFilePath });
+            };
+            const { pool: merged, foundMs, attempt, probeTotalEnriched, aborted } =
+              await runCooldownProbe(nodeId, waitsMs, allLinkedIn, signal, sendProgress, saveMidProbe);
+            if (aborted) return { resolved: true, items: merged, replaceSourceItems: true, nextBlockedUrl: null };
+            const stillEmpty = merged.filter(j => !j.snippet || j.snippet.length < 100).length;
+            recordResolve({ needEnrich: needEnrich.length, enrichSuccess: probeTotalEnriched, walled: foundMs == null, stillEmpty, cooldownProbe: true, cooldownFoundMs: foundMs });
+            if (foundMs != null) {
+              linkedinLastCeilingIp = null;
+              logger.info(`[Jobs][${nodeId}] Cooldown probe FOUND: guest wall clears after ~${Math.round(foundMs / 60000)}m idle on the same IP/browser.`);
+              sendProgress({ nodeId, sourceId: 'linkedin', count: merged.length, status: 'done' });
+              return { resolved: true, items: merged, replaceSourceItems: true, nextBlockedUrl: null };
+            }
+            const maxMin = Math.round(Math.max(...waitsMs) / 60000);
+            const exhaustedWarning = {
+              code: 'linkedin-rate-limited', severity: 'throttle', shortLabel: `Cooldown > ${maxMin}m`,
+              evidence: `Cooldown probe exhausted: still walled after idle waits up to ${maxMin}m (${attempt} attempt(s)). ${stillEmpty} still empty.`,
+              suggestion: `The cooldown is longer than ${maxMin}m, or idle alone won't clear it. Extend JOB_SEARCH_PROBE_WAITS_MIN, Reset browser session, or try a residential IP.`,
+            };
+            sendProgress({ nodeId, sourceId: 'linkedin', count: merged.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: exhaustedWarning });
+            return { resolved: true, items: merged, warning: exhaustedWarning, replaceSourceItems: true, nextBlockedUrl: null };
+          }
+
           // IP-changed guard: the guest rate-limit is per-IP, so retrying on the
           // SAME warm IP just walls instantly. If we previously hit the ceiling
           // and the egress IP hasn't changed, the user hasn't switched their VPN
@@ -1789,14 +2436,17 @@ RULES:
               suggestion: 'Switch your VPN to a new location (confirm the IP actually changes), then click Solve to continue. Logging in does not help — descriptions are fetched anonymously.',
             };
             recordResolve({ needEnrich: needEnrich.length, enrichSuccess: 0, walled: true, skippedSameIp: true, warmIp: currentIp });
-            recordLinkedinEnrichPass({ kind: 'solve', ip: currentIp, ipOk: !!currentIp, walled: false, skippedSameIp: true, enriched: 0 });
+            // walled: true — the unchanged rate-limited IP is exactly why this
+            // pass was skipped; mirrors recordResolve above (was false, which
+            // made the enrichment trail contradict itself for this event).
+            recordLinkedinEnrichPass({ kind: 'solve', ip: currentIp, ipOk: !!currentIp, walled: true, skippedSameIp: true, enriched: 0, startedAt: passStartedAt });
             logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch skipped — egress IP unchanged (${currentIp}); prompting VPN switch`);
             sendProgress({ nodeId, sourceId: 'linkedin', count: allLinkedIn.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: switchWarning });
             return { resolved: true, items: allLinkedIn, warning: switchWarning, replaceSourceItems: true, nextBlockedUrl: null };
           }
 
           sendProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: needEnrich.length, detail: 're-fetching descriptions', warning: null });
-          const { jobs: enriched, loginWall: walled, successCount = 0, contextRotations = 0 } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal);
+          const { jobs: enriched, loginWall: walled, successCount = 0, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0 } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal);
           // Merge whatever we got this pass back into the full set (keeps prior
           // descriptions for jobs enriched before the ceiling was hit).
           const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
@@ -1806,7 +2456,7 @@ RULES:
           // Egress-IP trail entry for this Solve. `walled` distinguishes the
           // re-walled outcome from a clean finish; comparing `ip` to the prior
           // pass's is what answers "did the VPN switch actually change the IP?".
-          recordLinkedinEnrichPass({ kind: 'solve', ip: currentIp, ipOk: !!currentIp, walled, enriched: successCount, stillEmpty, contextRotations });
+          recordLinkedinEnrichPass({ kind: 'solve', ip: currentIp, ipOk: !!currentIp, walled, enriched: successCount, stillEmpty, noDesc, noDescSoftBlock, noDescGenuine, evalErrors, navErrors, contextRotations, browserGen, browserAgeMs, startedAt: passStartedAt });
           logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch: +${successCount} description(s), ${stillEmpty} still empty (${contextRotations} ctx-rotation(s)${walled ? ', hit IP ceiling' : ''})`);
 
           // Persist this pass's descriptions back to the snapshot. Without this,
@@ -1871,7 +2521,6 @@ RULES:
     const SOURCE_EXTRACTORS = {
       ziprecruiter: ZIPRECRUITER_EXTRACTOR,
       glassdoor:    GLASSDOOR_EXTRACTOR,
-      wellfound:    WELLFOUND_EXTRACTOR,
     };
     const inlineExtractorJS = SOURCE_EXTRACTORS[sourceId] || null;
     const result = await openCaptchaResolveWindow(url, event.sender, signal, inlineExtractorJS, secondTabUrl || null);
@@ -1932,7 +2581,9 @@ RULES:
       return { resolved: false, items: [] };
     }
     logger.info(`[Jobs][${nodeId}] Resuming Indeed: ${remainingQueries.length} remaining queries from page ${startPage + 1}`);
-    const result = await fetchIndeedListingsBrowser(remainingQueries, signal, maxAgeDays || DEFAULT_MAX_AGE_DAYS, null, null, startPage);
+    // Same shared-profile lock — a "Continue" click could land while a full
+    // search is still scraping; serialize this Indeed browser against them.
+    const result = await withSharedProfileLock(() => fetchIndeedListingsBrowser(remainingQueries, signal, maxAgeDays || DEFAULT_MAX_AGE_DAYS, null, null, startPage));
     const extracted = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     const ageFiltered = filterJobsByAge(extracted, ageDays);

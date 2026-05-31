@@ -16,8 +16,7 @@
  * helpers never return a value *shorter* than the old fixed one for the common
  * (small) case — so this can't make saves more eager than before.
  */
-
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+import { clamp } from './mathUtils.js';
 
 export const TIMINGS = {
   // ── Debounce: input settles → commit ──────────────────────────────────────

@@ -1,97 +1,51 @@
-import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
-import { ExternalLink, FileText, ChevronDown, ChevronUp, X, Download, StickyNote, BrainCircuit, Clock, RefreshCw } from 'lucide-react';
+import { ExternalLink, X, Sparkles } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
 import { NodeHandles } from './_shared/NodeHandles';
-import { useSyncWhileFocused } from '../hooks/useSyncWhileFocused';
-import { MonitorStatusBadge } from '../components/MonitorStatusBadge';
-import { JOB_STATUS_LABELS } from '../components/monitorStatusLabels';
-import { useMonitorCheck } from '../hooks/useMonitorCheck';
 
-const MONITOR_FIELDS = { status: 'monitorStatus', message: 'monitorMessage', lastChecked: 'monitorLastChecked' };
-
-const STRENGTH_COLORS = {
-  strong: '#22c55e',
-  exploring: '#eab308',
-  stretch: '#3b82f6',
-  unexpected: '#a855f7',
-};
-
-const STRENGTH_LABELS = {
-  strong: 'Strong Match',
-  exploring: 'Worth Exploring',
-  stretch: 'Stretch',
-  unexpected: 'Unexpected Find',
-};
-
-const STATUS_OPTIONS = ['New', 'Applied', 'Interview', 'Offer', 'Rejected'];
-
-const NOTES_DEBOUNCE_MS = 600;
+// Accent color encodes the match score (interview-likelihood) band, so the
+// card's color reinforces the single metric: greener = better odds. Bands match
+// the scoring prompt (85+ strong, 65-84 good chance, 40-64 stretch, <40 unlikely).
+function scoreColor(score) {
+  if (score >= 85) return '#22c55e'; // green  — genuinely strong
+  if (score >= 65) return '#3b82f6'; // blue   — good chance of interview
+  if (score >= 40) return '#eab308'; // amber  — stretch / longshot
+  return '#6b7280';                  // gray   — unlikely
+}
 
 /**
- * JobCardNode — displays a scored job result on the canvas.
+ * JobCardNode — a transient, scored job result on the canvas.
+ *
+ * The workflow is deliberately disposable: search → decide → generate an
+ * application (or dismiss the card). There is no status / notes / monitoring CRM
+ * here. Whether a job was already *shown* is tracked in a canvas-scoped
+ * jobs-history CSV sidecar (written at discovery), so dismissing cards never
+ * re-surfaces them on the next search.
  *
  * data shape:
- *   title, company, location, salary, snippet, url, source,
- *   matchScore, reasoning, careerDirection, strengthLabel,
- *   status, coverLetter, resumeProfile, notes
+ *   title, company, location, salary, snippet, url, source, posted,
+ *   matchScore, reasoning, careerDirection, hubId
  */
 export function JobCardNode({ id, data }) {
-  const { updateNodeData, deleteElements } = useReactFlow();
+  const { deleteElements, getNode } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
-  const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
-
-  const [expanded, setExpanded] = useState(false);
-  const [generatingCL, setGeneratingCL] = useState(false);
-  const [savingCL, setSavingCL] = useState(false);
-  const [generatingPrep, setGeneratingPrep] = useState(false);
-  // Notes / cover-letter both mirror node data but pause sync while the user is typing.
-  const { value: notesValue, setValue: setNotesValue, focusProps: notesFocusProps } = useSyncWhileFocused(data.notes || '');
-  const { value: editedCL, setValue: setEditedCL, focusProps: clFocusProps } = useSyncWhileFocused(data.coverLetter || '');
   const { addToast } = useToast();
 
-  // Cache ID for closure safely
-  const idRef = useRef(id);
-  useEffect(() => {
-    idRef.current = id;
-  }, [id]);
+  const [showFullReasoning, setShowFullReasoning] = useState(false);
+  const [generatingApp, setGeneratingApp] = useState(false);
 
-  // Notes debounce ref — avoids updateGlobal on every keystroke
-  const notesTimerRef = useRef(null);
+  // Cache id for closure safety + a mounted flag so async settlements after
+  // unmount don't setState.
+  const idRef = useRef(id);
+  useEffect(() => { idRef.current = id; }, [id]);
+  const isMountedRef = useRef(true);
+  useEffect(() => () => { isMountedRef.current = false; }, []);
 
   const score = data.matchScore || 0;
-  const strength = data.strengthLabel || 'exploring';
-
-  const accentColor = STRENGTH_COLORS[strength] || '#888';
-  const status = data.status || 'New';
-  const [timeTick, setTimeTick] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (!data.appliedAt || !['Applied', 'Interview', 'Offer'].includes(status)) {
-      return undefined;
-    }
-    const timerId = window.setInterval(() => setTimeTick(Date.now()), 60 * 60 * 1000);
-    return () => window.clearInterval(timerId);
-  }, [data.appliedAt, status]);
-
-  const appliedDays = useMemo(() => {
-    if (!data.appliedAt || !['Applied', 'Interview', 'Offer'].includes(status)) return null;
-    const appliedAtMs = new Date(data.appliedAt).getTime();
-    if (Number.isNaN(appliedAtMs)) return null;
-    return Math.floor((timeTick - appliedAtMs) / 86400000);
-  }, [data.appliedAt, status, timeTick]);
-
-  const handleStatusChange = useCallback((newStatus) => {
-    const update = { status: newStatus };
-    // Record timestamp when entering key stages
-    if (newStatus === 'Applied' && !data.appliedAt) update.appliedAt = new Date().toISOString();
-    if (newStatus === 'Interview' && !data.interviewAt) update.interviewAt = new Date().toISOString();
-    // Auto-expand when entering Interview mode so prep is visible
-    if (newStatus === 'Interview') setExpanded(true);
-    updateGlobal(id, update);
-  }, [id, updateGlobal, data.appliedAt, data.interviewAt]);
+  const accentColor = scoreColor(score);
 
   const openJobUrl = useCallback(() => {
     if (data.url && window.electronAPI?.openExternal) {
@@ -99,123 +53,79 @@ export function JobCardNode({ id, data }) {
     }
   }, [data.url]);
 
-  // ── Monitoring (same philosophy as MarketplaceCardNode) ─────────────────
-  // Defaults to the original posting URL so the user gets useful "is the
-  // job still open?" checks even without pasting anything. Falls back to the
-  // user-pasted applicationUrl when they want to monitor a specific tracking
-  // URL (e.g. their Greenhouse application detail page) instead.
-  const monitorUrl = (data.applicationUrl?.trim() || data.url || '').trim();
-
-  const setApplicationUrl = useCallback((url) => {
-    updateGlobal(id, { applicationUrl: url });
-  }, [id, updateGlobal]);
-
-  const { checking: checkingStatus, check: checkStatus } = useMonitorCheck({
-    id,
-    url: monitorUrl,
-    platformId: data.source || 'job',
-    locked: !!data.locked,
-    fields: MONITOR_FIELDS,
-    updateNode: updateGlobal,
-  });
-
-  const isMountedRef = useRef(true);
-
-  React.useEffect(() => {
-    return () => {
-      isMountedRef.current = false;
-      if (notesTimerRef.current) clearTimeout(notesTimerRef.current);
-    };
-  }, []);
-
-  const handleNotesChange = useCallback((e) => {
-    const val = e.target.value;
-    setNotesValue(val);
-    if (notesTimerRef.current) clearTimeout(notesTimerRef.current);
-    notesTimerRef.current = setTimeout(() => {
-      updateGlobal(idRef.current, { notes: val });
-    }, NOTES_DEBOUNCE_MS);
-  }, [updateGlobal, setNotesValue]);
-
-  // ── Cover letter ──────────────────────────────────────────────────────────
-  const generateCoverLetter = useCallback(async () => {
-    if (!window.electronAPI?.generateCoverLetter || !data.resumeProfile) return;
-    setGeneratingCL(true);
-    const currentId = idRef.current;
+  // ── Full application (tailored résumé + cover letter PDFs) ─────────────────
+  // Reads the merged career data from the owning hub (not stored per-card, to
+  // avoid bloating the canvas file). The backend researches the company, fills
+  // the design system, renders both PDFs, then writes them straight into
+  //   <canvas dir>/Applied Jobs/<company>/<job title>/
+  // and opens that folder in Finder — no save dialog.
+  const generateApplication = useCallback(async () => {
+    if (!window.electronAPI?.generateApplication) return;
+    const careerData = getNode(data.hubId)?.data?.careerData;
+    if (!careerData) {
+      addToast({
+        title: 'No Career Data',
+        description: 'Re-run the job search by dropping your career files on the hub, then try again.',
+        type: 'error',
+      });
+      return;
+    }
+    // Applications are written relative to the saved canvas file, so it must be
+    // saved first. Fail loudly rather than dropping PDFs somewhere arbitrary.
+    const canvasFilePath = nav?.currentFile || null;
+    if (!canvasFilePath) {
+      addToast({
+        title: 'Save Your Canvas First',
+        description: 'Applications are saved next to your canvas in an "Applied Jobs" folder. Save the canvas to a file, then try again.',
+        type: 'error',
+      });
+      return;
+    }
+    setGeneratingApp(true);
     try {
-      const result = await window.electronAPI.generateCoverLetter({
-        profile: data.resumeProfile,
-        job: { title: data.title, company: data.company, snippet: data.snippet },
+      addToast({
+        title: 'Generating Application',
+        description: `Researching ${data.company} and writing your résumé + cover letter…`,
+        type: 'info',
+      });
+      const result = await window.electronAPI.generateApplication({
+        nodeId: idRef.current,
+        job: {
+          title: data.title, company: data.company, snippet: data.snippet,
+          location: data.location, salary: data.salary, url: data.url,
+        },
+        careerData,
       });
       if (!isMountedRef.current) return;
-      if (result.success) {
-        updateGlobal(currentId, { coverLetter: result.coverLetter });
-        addToast({ title: 'Cover Letter Ready', description: `Generated for ${data.company}`, type: 'success' });
-      } else {
+      if (!result.success) {
         addToast({ title: 'Generation Failed', description: result.error, type: 'error' });
+        return;
+      }
+      // Write both PDFs into ./Applied Jobs/<company>/<job>/ next to the canvas,
+      // then reveal that folder in Finder. No picker.
+      const saved = await window.electronAPI.saveApplication({
+        resumePdfPath: result.resumePdfPath,
+        coverPdfPath: result.coverPdfPath,
+        workDir: result.workDir,
+        company: result.company,
+        candidateName: result.candidateName,
+        jobTitle: data.title,
+        canvasFilePath,
+      });
+      if (!isMountedRef.current) return;
+      if (saved?.success && saved.saved) {
+        addToast({ title: 'Application Saved', description: `Résumé + cover letter saved to ${saved.dir} — opening in Finder.`, type: 'success' });
+      } else if (saved?.success === false) {
+        addToast({ title: 'Save Error', description: saved.error || 'Could not save files', type: 'error' });
       }
     } catch (e) {
       if (!isMountedRef.current) return;
-      EventLogger.error('Cover letter generation failed:', e);
+      EventLogger.error('Application generation failed:', e);
       addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
     } finally {
-      if (isMountedRef.current) setGeneratingCL(false);
+      if (isMountedRef.current) setGeneratingApp(false);
     }
-  }, [data.resumeProfile, data.title, data.company, data.snippet, updateGlobal, addToast]);
-
-  // ── Interview Prep ────────────────────────────────────────────────────────
-  const generateInterviewPrep = useCallback(async () => {
-    if (!window.electronAPI?.generateInterviewPrep || !data.resumeProfile) return;
-    setGeneratingPrep(true);
-    const currentId = idRef.current;
-    try {
-      const result = await window.electronAPI.generateInterviewPrep({
-        profile: data.resumeProfile,
-        job: { title: data.title, company: data.company, snippet: data.snippet },
-      });
-      if (!isMountedRef.current) return;
-      if (result.success) {
-        updateGlobal(currentId, { interviewPrep: result.questions });
-        addToast({ title: 'Interview Prep Ready', description: `${result.questions?.length || 0} questions for ${data.company}`, type: 'success' });
-      } else {
-        addToast({ title: 'Generation Failed', description: result.error, type: 'error' });
-      }
-    } catch (e) {
-      if (!isMountedRef.current) return;
-      EventLogger.error('Interview prep generation failed:', e);
-      addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
-    } finally {
-      if (isMountedRef.current) setGeneratingPrep(false);
-    }
-  }, [data.resumeProfile, data.title, data.company, data.snippet, updateGlobal, addToast]);
-
-  const saveCoverLetterToFile = useCallback(async () => {
-    if (!editedCL || !window.electronAPI?.saveFileDialog) return;
-    setSavingCL(true);
-    try {
-      const safe = (data.company || 'company').replace(/[^a-z0-9]/gi, '-').toLowerCase();
-      const result = await window.electronAPI.saveFileDialog({
-        defaultFilename: `cover-letter-${safe}.txt`,
-        content: editedCL,           // use locally edited text
-        filters: [{ name: 'Text Files', extensions: ['txt'] }],
-      });
-      if (!isMountedRef.current) return;
-      if (result?.saved) {
-        addToast({ title: 'Cover Letter Saved', description: result.filePath, type: 'success' });
-      } else if (result?.success === false) {
-        // atomicWriteFile failed after dialog accepted (e.g. disk full, permissions)
-        EventLogger.error('Cover letter write failed:', result.error);
-        addToast({ title: 'Save Error', description: result.error || 'Could not write file', type: 'error' });
-      }
-      // result.saved === false without success===false means user canceled — no feedback needed
-    } catch (e) {
-      if (!isMountedRef.current) return;
-      EventLogger.error('Cover letter save failed:', e);
-      addToast({ title: 'Save Error', description: e?.message || String(e), type: 'error' });
-    } finally {
-      if (isMountedRef.current) setSavingCL(false);
-    }
-  }, [editedCL, data.company, addToast]);
+  }, [data.hubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, getNode, nav, addToast]);
 
   return (
     <div
@@ -250,261 +160,53 @@ export function JobCardNode({ id, data }) {
         </div>
       </div>
 
-      {/* Strength + source badges */}
-      <div className="px-3 py-1.5 flex items-center justify-between text-[10px]">
-        <span className="px-1.5 py-0.5 rounded-full font-medium" style={{ backgroundColor: accentColor + '20', color: accentColor }}>
-          {STRENGTH_LABELS[strength]}
-        </span>
-        <div className="flex items-center gap-1.5">
-          {data.source && (
-            <span className="text-white/30 uppercase tracking-wider">{data.source}</span>
-          )}
-          <span className="text-white/20">{data.posted}</span>
-        </div>
+      {/* Source + posted + open listing */}
+      <div className="px-3 py-1.5 flex items-center gap-1.5 text-[10px]">
+        {data.source && (
+          <span className="text-white/30 uppercase tracking-wider">{data.source}</span>
+        )}
+        {data.posted && <span className="text-white/20">{data.posted}</span>}
+        {data.url && (
+          <button
+            onClick={(e) => { e.stopPropagation(); openJobUrl(); }}
+            className="ml-auto -my-1 p-1 text-white/30 hover:text-white/70 transition-colors"
+            title="Open job listing"
+          >
+            <ExternalLink size={12} />
+          </button>
+        )}
       </div>
 
-      {/* Reasoning preview */}
+      {/* AI match justification — the full text from the scorer is preserved; we
+          clamp it so every card keeps a consistent height, and let the user click
+          to expand and read it all (then click again to collapse). */}
       {data.reasoning && (
-        <div className="px-3 py-1.5 text-white/40 text-xs leading-relaxed border-t border-white/5">
+        <div
+          className={`px-3 py-1.5 text-white/45 text-xs leading-relaxed border-t border-white/5 cursor-pointer hover:text-white/60 transition-colors ${showFullReasoning ? '' : 'line-clamp-3'}`}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); setShowFullReasoning(v => !v); }}
+          title={showFullReasoning ? 'Show less' : 'Show full reasoning'}
+        >
           {data.reasoning}
         </div>
       )}
 
-      {/* Monitor status pill (only when the user has actually run a check) */}
-      {data.monitorLastChecked && (
-        <MonitorStatusBadge
-          status={data.monitorStatus || 'unknown'}
-          lastChecked={data.monitorLastChecked}
-          labels={JOB_STATUS_LABELS}
-          className="mx-3 my-1.5"
-        />
-      )}
-
-      {/* Status bar */}
-      <div className="px-3 py-1.5 flex items-center justify-between border-t border-white/5">
-        <div className="flex items-center gap-2">
-          <select
-            value={status}
-            onChange={data.locked ? undefined : (e) => handleStatusChange(e.target.value)}
-            disabled={!!data.locked}
-            className={`bg-transparent text-xs outline-none ${data.locked ? 'text-white/30 cursor-default' : 'text-white/60 cursor-pointer hover:text-white/80'}`}
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            {STATUS_OPTIONS.map(s => <option key={s} value={s} className="bg-[#1a1a1a]">{s}</option>)}
-          </select>
-          {/* Days-since badge for Applied / Interview */}
-          {appliedDays !== null && appliedDays >= 0 && (
-            <span className="flex items-center gap-0.5 text-[9px] text-white/25">
-              <Clock size={8} />
-              {appliedDays === 0 ? 'today' : `${appliedDays}d`}
-            </span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-1">
-          {monitorUrl && !data.locked && (
-            <button
-              onClick={(e) => { e.stopPropagation(); checkStatus(); }}
-              disabled={checkingStatus}
-              className="p-1 text-white/30 hover:text-blue-400 transition-colors disabled:opacity-40"
-              title={`Check whether ${data.applicationUrl ? 'your application' : 'this job posting'} is still active`}
-            >
-              <RefreshCw size={12} className={checkingStatus ? 'animate-spin' : ''} />
-            </button>
-          )}
-          {data.url && (
-            <button
-              onClick={(e) => { e.stopPropagation(); openJobUrl(); }}
-              className="p-1 text-white/30 hover:text-white/70 transition-colors"
-              title="Open job listing"
-            >
-              <ExternalLink size={12} />
-            </button>
-          )}
-          <button
-            onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
-            className="p-1 text-white/30 hover:text-white/70 transition-colors"
-            title={expanded ? 'Collapse' : 'Expand details'}
-          >
-            {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-          </button>
-        </div>
+      {/* Generate full application — always visible, tailored résumé + cover letter PDFs */}
+      <div className="px-3 py-2 border-t border-white/5" onPointerDown={(e) => e.stopPropagation()}>
+        <button
+          onClick={data.locked ? undefined : (e) => { e.stopPropagation(); generateApplication(); }}
+          disabled={generatingApp || !!data.locked}
+          className={`w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
+            data.locked
+              ? 'bg-white/5 text-white/20 cursor-default'
+              : 'bg-gradient-to-r from-emerald-500/15 to-blue-500/15 text-emerald-300 hover:from-emerald-500/25 hover:to-blue-500/25 hover:text-emerald-200 disabled:opacity-50'
+          }`}
+          title="AI researches the company, then writes a tailored résumé + cover letter and saves both as PDFs to your Applied Jobs folder"
+        >
+          <Sparkles size={13} className={generatingApp ? 'animate-pulse' : ''} />
+          {generatingApp ? 'Generating résumé + cover letter…' : 'Generate Résumé + Cover Letter'}
+        </button>
       </div>
-
-      {/* Expanded section */}
-      {expanded && (
-        <div className="px-3 py-2 border-t border-white/5 space-y-2" onPointerDown={(e) => e.stopPropagation()}>
-
-          {/* Snippet */}
-          {data.snippet && (
-            <div className="text-white/40 text-xs leading-relaxed max-h-24 overflow-y-auto custom-scrollbar">
-              {data.snippet}
-            </div>
-          )}
-
-          {/* Application URL (for AI monitoring after you apply) */}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between">
-              <div className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">
-                Application URL
-              </div>
-              {data.monitorMessage && (
-                <span className="text-white/30 text-[9px] truncate max-w-[60%]" title={data.monitorMessage}>
-                  {data.monitorMessage}
-                </span>
-              )}
-            </div>
-            <input
-              type="text"
-              value={data.applicationUrl || ''}
-              onChange={data.locked ? undefined : (e) => setApplicationUrl(e.target.value)}
-              onPointerDown={(e) => e.stopPropagation()}
-              disabled={!!data.locked}
-              placeholder="Paste your application tracking URL (optional — defaults to job listing)"
-              className="nodrag w-full bg-black/20 border border-white/5 rounded px-2 py-1 text-white/60 text-[10px] outline-none focus:border-white/15 focus:bg-black/30 disabled:opacity-60"
-            />
-          </div>
-
-
-          {/* Notes */}
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-white/30 text-[10px] font-semibold uppercase tracking-wider">
-              <StickyNote size={9} />
-              Notes
-            </div>
-            <textarea
-              value={notesValue}
-              onChange={data.locked ? undefined : handleNotesChange}
-              {...notesFocusProps}
-              readOnly={!!data.locked}
-              placeholder={data.locked ? '' : 'Interview notes, contacts, follow-ups…'}
-              rows={2}
-              className={`nodrag w-full resize-none bg-black/20 border border-white/5 rounded px-2 py-1.5 text-white/60 text-[11px] leading-relaxed outline-none placeholder:text-white/20 transition-colors ${
-                data.locked ? 'cursor-default opacity-60' : 'focus:border-white/15 focus:bg-black/30'
-              }`}
-            />
-          </div>
-
-          {/* Cover Letter */}
-          {data.coverLetter ? (
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <div className="text-white/50 text-[10px] font-semibold uppercase tracking-wider">Cover Letter</div>
-                {!data.locked && (
-                  <button
-                    onClick={generatingCL ? undefined : (e) => { e.stopPropagation(); generateCoverLetter(); }}
-                    disabled={generatingCL}
-                    className="text-[9px] text-white/25 hover:text-white/50 transition-colors disabled:opacity-30"
-                    title="Regenerate cover letter"
-                  >
-                    {generatingCL ? 'Generating…' : 'Regenerate'}
-                  </button>
-                )}
-              </div>
-              <textarea
-                value={editedCL}
-                onChange={data.locked ? undefined : (e) => setEditedCL(e.target.value)}
-                {...clFocusProps}
-                readOnly={!!data.locked}
-                rows={6}
-                className={`nodrag w-full resize-none bg-black/20 border border-white/5 rounded px-2 py-1.5 text-white/60 text-[11px] leading-relaxed outline-none font-mono ${
-                  data.locked ? 'cursor-default opacity-60' : 'focus:border-white/15 focus:bg-black/30'
-                }`}
-                placeholder="Cover letter text…"
-              />
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => navigator.clipboard.writeText(editedCL).catch(err => {
-                    EventLogger.log('clipboard copy failed: ' + (err?.message || String(err)));
-                    addToast({ title: 'Clipboard Error', description: 'Failed to copy text', type: 'error' });
-                  })}
-                  className="text-blue-400/80 text-[10px] hover:text-blue-400 transition-colors"
-                >
-                  Copy to clipboard
-                </button>
-                <span className="text-white/15">·</span>
-                <button
-                  onClick={savingCL ? undefined : saveCoverLetterToFile}
-                  disabled={savingCL}
-                  className="flex items-center gap-0.5 text-white/40 text-[10px] hover:text-white/70 transition-colors disabled:opacity-40"
-                  title="Save cover letter to file"
-                >
-                  <Download size={9} />
-                  {savingCL ? 'Saving…' : 'Save to file'}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={data.locked ? undefined : (e) => { e.stopPropagation(); generateCoverLetter(); }}
-              disabled={generatingCL || !!data.locked}
-              className={`w-full flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium transition-colors ${
-                data.locked
-                  ? 'bg-white/5 text-white/20 cursor-default'
-                  : 'bg-blue-500/10 text-blue-400/80 hover:bg-blue-500/20 hover:text-blue-400 disabled:opacity-50'
-              }`}
-            >
-              <FileText size={12} />
-              {generatingCL ? 'Generating...' : 'Generate Cover Letter'}
-            </button>
-          )}
-
-          {/* Interview Prep — shown when status is Interview, or prep exists and not yet resolved */}
-          {(status === 'Interview' || (data.interviewPrep && status !== 'Offer' && status !== 'Rejected')) && (
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1 text-purple-400/70 text-[10px] font-semibold uppercase tracking-wider">
-                  <BrainCircuit size={9} />
-                  Interview Prep
-                </div>
-                {data.interviewPrep && !data.locked && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); generateInterviewPrep(); }}
-                    disabled={generatingPrep}
-                    className="text-[9px] text-white/25 hover:text-white/50 transition-colors disabled:opacity-30"
-                    title="Regenerate prep questions"
-                  >
-                    {generatingPrep ? 'Generating…' : 'Refresh'}
-                  </button>
-                )}
-              </div>
-
-              {data.interviewPrep?.length > 0 ? (
-                <div className="space-y-1.5 max-h-64 overflow-y-auto custom-scrollbar pr-0.5">
-                  {data.interviewPrep.map((q, i) => {
-                    const typeColor = q.type === 'behavioral' ? 'text-blue-400/60' : q.type === 'technical' ? 'text-emerald-400/60' : 'text-amber-400/60';
-                    const typeBg = q.type === 'behavioral' ? 'bg-blue-500/10' : q.type === 'technical' ? 'bg-emerald-500/10' : 'bg-amber-500/10';
-                    return (
-                      <div key={i} className={`rounded p-2 ${typeBg} border border-white/5`}>
-                        <div className={`text-[9px] font-medium uppercase tracking-wider mb-0.5 ${typeColor}`}>{q.type}</div>
-                        <div className="text-white/75 text-[11px] leading-snug font-medium">{q.question}</div>
-                        {q.tip && (
-                          <div className="text-white/35 text-[10px] leading-relaxed mt-1">{q.tip}</div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <button
-                  onClick={data.locked ? undefined : (e) => { e.stopPropagation(); generateInterviewPrep(); }}
-                  disabled={generatingPrep || !!data.locked || !data.resumeProfile}
-                  className={`w-full flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium transition-colors ${
-                    data.locked || !data.resumeProfile
-                      ? 'bg-white/5 text-white/20 cursor-default'
-                      : 'bg-purple-500/10 text-purple-400/80 hover:bg-purple-500/20 hover:text-purple-400 disabled:opacity-50'
-                  }`}
-                  title={!data.resumeProfile ? 'Resume profile not available' : undefined}
-                >
-                  <BrainCircuit size={12} />
-                  {generatingPrep ? 'Generating…' : 'Generate Interview Prep'}
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
     </div>
   );
 }

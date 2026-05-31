@@ -240,7 +240,7 @@ async function getChallengeSignals(page) {
  * @param {string} [profileDir] — override for the Puppeteer userDataDir
  * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
  */
-export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0) {
+export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null) {
   const userDataDir  = profileDir || await getUserDataDir().catch(() => getProfileDir());
   const queryList    = Array.isArray(queries) ? queries.filter(Boolean) : [queries].filter(Boolean);
   const days         = maxAgeDays ? Math.max(1, Math.floor(maxAgeDays)) : 21;
@@ -645,12 +645,14 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
         if (signal?.aborted) break outer;
 
+        const pageAdded = [];
         for (let i = 0; i < pageJobs.length; i++) {
           const job = pageJobs[i];
           const dk = job.jobkey || job.url || jobTitleCompanyKey(job);
           if (seenKeys.has(dk)) continue;
           seenKeys.add(dk);
           allJobs.push(job);
+          pageAdded.push(job);
           await updateOverlay(page, {
             ...overlayBase,
             count: allJobs.length,
@@ -665,6 +667,13 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           status: `Page ${p + 1} done`,
           progressText: `${pageJobs.length}/${pageJobs.length}`,
         });
+
+        // Per-page recovery flush (crash/quit checkpoint). `p` is 0-based here;
+        // record 1-based to match the manual scraper's pageNum. Best-effort.
+        if (onPageJobs && pageAdded.length > 0) {
+          try { await onPageJobs({ sourceId: 'indeed', query: q, page: p + 1, jobs: pageAdded }); }
+          catch (e) { logger.warn(`[Indeed/Browser] onPageJobs failed (non-fatal): ${e?.message || e}`); }
+        }
 
         if (rawPageJobs.length < 10 || hasNextPage === false) break;
 

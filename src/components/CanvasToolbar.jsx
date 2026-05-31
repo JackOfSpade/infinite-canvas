@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Panel } from '@xyflow/react';
 import { Type, Trash2, Link2, PenTool, Eraser, Undo2, Redo2, Magnet, Settings, MousePointer2 } from 'lucide-react';
 
@@ -103,10 +103,6 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
   const [showColorMenu,  setShowColorMenu]  = useState(false);
   const [showEraserMenu, setShowEraserMenu] = useState(false);
 
-  // Refs used to suppress tooltips while context menus are open (no re-render needed)
-  const penSuppressRef    = useRef(false);
-  const eraserSuppressRef = useRef(false);
-
   // Notify parent whenever a tool popup opens/closes so Canvas can block drawing through it
   useEffect(() => {
     onToolMenuChange?.(showColorMenu || showEraserMenu);
@@ -117,8 +113,6 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
     const handleClick = () => {
       setShowColorMenu(false);
       setShowEraserMenu(false);
-      penSuppressRef.current    = false;
-      eraserSuppressRef.current = false;
     };
     window.addEventListener('click', handleClick);
     return () => window.removeEventListener('click', handleClick);
@@ -129,8 +123,6 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
     setShowEraserMenu(false);
     setActiveTool(activeTool === 'pen' ? null : 'pen');
     setPlacementMode(null);
-    penSuppressRef.current = false;
-    eraserSuppressRef.current = false;
   };
 
   const handleEraserClick = () => {
@@ -138,26 +130,20 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
     setShowColorMenu(false);
     setActiveTool(activeTool === 'eraser' ? null : 'eraser');
     setPlacementMode(null);
-    penSuppressRef.current = false;
-    eraserSuppressRef.current = false;
   };
 
   const handlePenContextMenu = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    penSuppressRef.current = true;
     setShowColorMenu(v => !v);
     setShowEraserMenu(false);
-    eraserSuppressRef.current = false;
   };
 
   const handleEraserContextMenu = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    eraserSuppressRef.current = true;
     setShowEraserMenu(v => !v);
     setShowColorMenu(false);
-    penSuppressRef.current = false;
   };
 
   return (

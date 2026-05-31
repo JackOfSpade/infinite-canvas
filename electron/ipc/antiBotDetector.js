@@ -68,7 +68,7 @@ const SOFT_GATE_SIGNALS = [
     code: 'glassdoor-review-gate',
     severity: 'block',
     openSecondTab: true,
-    suggestion: 'Glassdoor is gating results behind a review. Two tabs will open — use Tab 2 to write a company review or add a salary, then switch back to Tab 1 (job results) and refresh it. The full list will be captured and the window will close automatically.' },
+    suggestion: 'Glassdoor limited the automated fetch. Click Solve — a browser opens on the Glassdoor results and USUALLY loads the full list on its own, then closes; you don\'t need to do anything. ONLY if you see a "write a review / add a salary to continue" wall, use Tab 2 to satisfy it, then switch to Tab 1 and refresh.' },
 ];
 
 const KEYWORD_SIGNALS = [

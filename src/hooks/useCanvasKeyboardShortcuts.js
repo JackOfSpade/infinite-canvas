@@ -35,15 +35,9 @@ export function useCanvasKeyboardShortcuts({
         return matched;
       };
 
-      // Duplicate shortcut
-      if (isMatch(s.undo)) { // Wait, undo is Z, duplicate is D in my prev code. 
-        // Actually, the previous code had hardcoded k === 'd' for duplicate.
-        // I should probably add duplicate to DEFAULT_SHORTCUTS too.
-      }
-      
-      // Let's keep duplicate, copy, paste hardcoded for now or add them to defaults.
-      // The user issue is specifically about 's' vs Select tool.
-
+      // Duplicate / Copy / Paste are intentionally hardcoded to Ctrl/Cmd+D/C/V
+      // rather than going through the configurable `shortcuts` map — they mirror
+      // OS conventions users expect and aren't meant to be rebindable.
       if (k === 'd' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         const selectedNodes = getNodes().filter(n => n.selected);

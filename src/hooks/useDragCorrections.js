@@ -4,12 +4,12 @@ import { EventLogger } from '../utils/EventLogger';
 import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from '../utils/canvasInteractions';
 
 import { findNonOverlappingPlacement } from '../utils/layoutUtils';
+import { PRODUCT_IMAGE_EXT_RE } from '../utils/fileExtensions';
 
 // ────────────────────────────────────────────────────────────────────────────
 
 const HUB_DROP_TARGET_TYPES = new Set(['jobhub', 'sellhub']);
 const JOB_HUB_BUSY_STATES = new Set(['parsing', 'querying', 'searching', 'scoring']);
-const PRODUCT_IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|heic|heif)$/i;
 
 function filePayloadFromDraggedNodes(nodes) {
   return (nodes || [])

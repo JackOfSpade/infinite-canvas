@@ -2,7 +2,7 @@
  * Marketplace IPC handlers — photo analysis, multi-source FMV research, listing prep.
  *
  * Pricing Data Sources (7 total):
- *   Tier 1 Sold:  eBay Sold, Poshmark Sold, Swappa, StockX, Reverb
+ *   Tier 1 Sold:  eBay Sold, Poshmark Sold, Swappa, Reverb
  *   Tier 1 Active: eBay Active
  *   Tier 2 Sold:  Mercari Sold
  */
@@ -20,19 +20,20 @@ import {
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
 import { getStatusCacheSync } from './accounts.js';
 import { compsForPricing } from './resultCaps.js';
+import { isCompSourceEnabledInScope } from '../../src/utils/compSourceScope.js';
 import { logger } from '../logger.js';
 import { VISION_PRODUCT_ANALYSIS_SCHEMA, PRICE_SYNTHESIS_SCHEMA, buildPlatformFitSchema } from './aiSchemas.js';
 import {
   EBAY_SOLD_EXTRACTOR, EBAY_SOLD_CONFIG,
   EBAY_ACTIVE_EXTRACTOR, EBAY_ACTIVE_CONFIG,
   POSHMARK_SOLD_EXTRACTOR, POSHMARK_CONFIG,
-  SWAPPA_EXTRACTOR, SWAPPA_CONFIG,
+  SWAPPA_EXTRACTOR, SWAPPA_SOLD_EXTRACTOR, SWAPPA_CONFIG,
   MERCARI_SOLD_EXTRACTOR, MERCARI_CONFIG,
-  PRICECHARTING_EXTRACTOR, PRICECHARTING_CONFIG,
-  COMP_EXTRACT_CAPS,
+  priceChartingQuery,
 } from '../extractors/marketplace.js';
 import {
   fetchReverbListings,
+  fetchPriceChartingComps,
 } from '../extractors/apiExtractors.js';
 
 // ── Pipeline telemetry ───────────────────────────────────────────────────────
@@ -193,7 +194,7 @@ function priceStats(items) {
 }
 
 // ── Source → URL + Extractor mapping (browser pool sources only) ────────────
-// Reverb and StockX have been moved to fetchApiMarketplaceSources (direct HTTP).
+// Reverb has been moved to fetchApiMarketplaceSources (direct HTTP).
 //
 // Each task has a `category: 'sold' | 'active'` field so the aggregate loop can
 // classify results without a separately-maintained hardcoded ID list.
@@ -206,6 +207,8 @@ function buildCompTasks(query) {
   // SWAPPA_EXTRACTOR guarantees correctness regardless, so this only raises
   // Swappa's recall (more real comps), never its wrong-product risk.
   const swappaQuery = String(query || '').replace(/\b\d+\s?(?:gb|tb)\b/gi, ' ').replace(/\s+/g, ' ').trim() || query;
+  // Marketplace test mode (MARKETPLACE_TEST_ENABLED + MARKETPLACE_TEST_SOURCE)
+  // narrows the run to a single targeted comp source; production returns all.
   return [
     // Tier 1 — Sold comps (gold standard)
     {
@@ -221,7 +224,21 @@ function buildCompTasks(query) {
       options: POSHMARK_CONFIG,
     },
     {
-      id: 'swappa', category: 'sold',
+      // Swappa's real COMPLETED-SALE data: individual recent sold listings read
+      // from the public `/xui/product/<slug>/sales` HTMX fragment (date ·
+      // condition · carrier · storage · $price). This is the genuine "what buyers
+      // actually paid" — the prior single `swappa` source scraped the /listings
+      // page, which is ACTIVE asking prices (now split out below as category:active).
+      id: 'swappa-sold', category: 'sold',
+      url: `https://swappa.com/search?q=${encodeURIComponent(swappaQuery)}`,
+      extractorJS: SWAPPA_SOLD_EXTRACTOR,
+      options: SWAPPA_CONFIG,
+    },
+    {
+      // Swappa /listings/<slug> is the ACTIVE for-sale market (asking prices), NOT
+      // completed sales — verified live (availability=InStock). Kept as an ACTIVE
+      // comp source (id 'swappa'); the sold prices come from 'swappa-sold' above.
+      id: 'swappa', category: 'active',
       url: `https://swappa.com/search?q=${encodeURIComponent(swappaQuery)}`,
       extractorJS: SWAPPA_EXTRACTOR,
       options: SWAPPA_CONFIG,
@@ -240,16 +257,11 @@ function buildCompTasks(query) {
       extractorJS: MERCARI_SOLD_EXTRACTOR,
       options: MERCARI_CONFIG,
     },
-    // Niche: video games + retro electronics. Returns empty for unrelated
-    // queries (cheap), but for games it has clean aggregated sold-price
-    // data that eBay's noisy search results often miss.
-    {
-      id: 'pricecharting', category: 'sold',
-      url: `https://www.pricecharting.com/search-products?q=${encodeURIComponent(query)}&type=prices`,
-      extractorJS: PRICECHARTING_EXTRACTOR,
-      options: PRICECHARTING_CONFIG,
-    },
-  ];
+    // NOTE: PriceCharting (niche: video games + retro consoles) is NOT here — it
+    // moved to the direct-HTTP API path (fetchPriceChartingComps). Its prices are
+    // server-rendered but its client-side JS blanks them under automation, so the
+    // stealth browser always read 0; a plain fetch with a browser UA gets them.
+  ].filter(task => isCompSourceEnabledInScope(task.id));
 }
 
 /** Build a lookup map from task ID → category, derived once per price research call. */
@@ -257,6 +269,92 @@ function buildTaskCategoryMap(tasks) {
   const map = {};
   for (const t of tasks) map[t.id] = t.category;
   return map;
+}
+
+// A comp source draws its data from one marketplace's login; this maps the comp
+// sourceId → that platform's session-cache key (the SAME keys startup-verify /
+// verifySellMonitorLogin populate). pricecharting/reverb have no user-login gate.
+const COMP_SOURCE_LOGIN_PLATFORM = {
+  'ebay-sold':   'ebay',
+  'ebay-active': 'ebay',
+  'poshmark':    'poshmark',
+  'mercari':     'mercari',
+  'swappa':      'swappa',
+};
+
+/**
+ * The in-scope, login-capable platforms that are NOT logged in — the basis for
+ * the hard login preflight (policy: a price check requires login on ALL in-scope
+ * marketplaces before it runs). Derives the required platforms from the scoped
+ * comp tasks, dedupes, and returns the ones whose session cache says not-connected.
+ * Platforms with no login concept (pricecharting; reverb is an API key) impose no
+ * requirement, so they never appear here. Exported for testing.
+ * @returns {string[]} unique platform ids that must be logged in but aren't
+ */
+export function computeMissingLogins(tasks, sessionCache = {}) {
+  const required = [...new Set((tasks || []).map(t => COMP_SOURCE_LOGIN_PLATFORM[t.id]).filter(Boolean))];
+  return required.filter(p => !sessionCache[p]?.connected);
+}
+
+/**
+ * Classify a FAILED comp scrape into a per-source warning.
+ *
+ * The decisive split is for a 0-result SITE_CHANGED, which is AMBIGUOUS: it fires
+ * both for a genuine selector redesign AND for a scrape that hit a login wall /
+ * anonymous page (the extractor finds 0 cards and trips SITE_CHANGED even though
+ * nothing in the code is wrong). Reporting both as "stale-selectors" sends the
+ * user to fix selectors when the real fix is "log in" — exactly what this report
+ * hit on Poshmark. The login gate that was meant to prevent this
+ * (`requiresLoginPlatform`) is currently dormant — no comp source sets it — so
+ * this runtime classifier is what actually distinguishes the two, using:
+ *   • the extractor's page-level `LOGIN-WALL` diag (strong, direct evidence the
+ *     page was a sign-in wall) → promote to a `login-required` block; and
+ *   • the session cache (the platform isn't logged in) as a softer corroborator
+ *     that, short of a hard login wall, still nudges the suggestion toward login.
+ */
+export function classifyCompScrapeFailure(error, sourceId, sessionCache = {}) {
+  const msg          = String(error || '');
+  const platform     = COMP_SOURCE_LOGIN_PLATFORM[sourceId] || null;
+  const notConnected = !!(platform && sessionCache[platform] && !sessionCache[platform].connected);
+
+  if (!/SITE_CHANGED/i.test(msg)) {
+    // A navigation TIMEOUT is a different failure from a clean internal throw: the
+    // browser launched and the scrape ran for the WHOLE budget, then the page
+    // never finished loading (typically bodyLen=0 — see "Timeout state" in Recent
+    // Logs). That's a slow/hung site or an anti-bot TARPIT (holding the connection
+    // open is a known anti-bot tactic) — emphatically NOT a browser-launch /
+    // profile-lock conflict, which is what 'task-failed' implies. Conflating the
+    // two sends the reader to chase a profile-lock bug that isn't there (this
+    // report mislabeled a 45s Poshmark hang exactly that way).
+    if (/timed?\s*out|timeout/i.test(msg)) {
+      return {
+        sourceId, severity: 'block', code: 'scrape-timeout',
+        evidence: msg.slice(0, 300),
+        suggestion: `Navigation didn't finish within the timeout — usually the page never loaded at all (check "Timeout state … bodyLen=0" in Recent Logs). That's a slow/hung site or an anti-bot tarpit, NOT a browser-launch/profile-lock conflict.${notConnected ? ` ${platform} is also not logged in — an anonymous request is likelier to be tarpitted; log in and retry.` : ''}`,
+      };
+    }
+    // Genuine internal throw before completing — browser-launch/profile-lock/network.
+    return {
+      sourceId, severity: 'block', code: 'task-failed',
+      evidence: msg,
+      suggestion: 'Scrape threw before completing — a browser-launch/profile-lock conflict or network error (NOT anti-bot, NOT a navigation timeout). Check Recent Main-Process Logs in the bug report.',
+    };
+  }
+  const loginWall = /LOGIN-WALL/i.test(msg);
+  if (loginWall) {
+    return {
+      sourceId, severity: 'block', code: 'login-required',
+      evidence: `Scrape returned 0 from a login wall / anonymous page${platform ? ` — ${platform} sold listings need sign-in` : ''}. ${msg.slice(0, 280)}`,
+      suggestion: `Log in to ${platform || sourceId} in Settings > Accounts, then retry.`,
+    };
+  }
+  return {
+    sourceId, severity: 'warn', code: 'stale-selectors',
+    evidence: msg.slice(0, 700), // wide enough to keep the [diag … card0=[…]] class skeleton
+    suggestion: notConnected
+      ? `Extractor returned 0 and ${platform} is not logged in — log in and retry FIRST. If it still returns 0 after login, the site HTML changed (the diag shows candidate cards>0 with the sub-selector at 0 = a real redesign); then update electron/extractors/marketplace.js.`
+      : 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.',
+  };
 }
 
 /**
@@ -309,7 +407,7 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
         // ran). Without this, the card receives warning:null → hasWarn:false →
         // Solve button reappears even though the extractor needs a code fix.
         const cbWarning = res.warning || (!res.success && /SITE_CHANGED/i.test(res.error || '')
-          ? { code: 'stale-selectors', severity: 'warn', evidence: String(res.error || '').slice(0, 240), suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.' }
+          ? { code: 'stale-selectors', severity: 'warn', evidence: String(res.error || '').slice(0, 700), suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.' }
           : null);
         send(res.success ? 'done' : 'error', items.length, cbWarning, task.url);
       }
@@ -340,9 +438,6 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
     };
   }
 
-  // API source (reverb only — StockX was removed from comp sources because
-  // PerimeterX systematically blocks both the key bootstrap and the
-  // hardcoded fallback).
   if (sourceId === 'reverb') {
     send('searching', 0);
     try {
@@ -367,18 +462,22 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
 
 /**
  * Fetch API-based marketplace sources in parallel (no Puppeteer needed).
- * Reverb uses internal REST API, StockX uses Algolia bypass.
+ * Reverb uses an internal REST API.
  */
 async function fetchApiMarketplaceSources(query, signal = null, nodeId = null, sender = null) {
-  // StockX removed — PerimeterX systematically blocks both the stealth-
-  // browser key bootstrap and the hardcoded-key fallback, so it returned
-  // zero usable data on every run. fetchStockXListings stays exported from
-  // apiExtractors for the day someone has a working bypass.
+  // PriceCharting is a product-catalog search (not a listing index): seller-style
+  // titles miss the exact product and fall back to ~100 fuzzy results, so the
+  // query is normalized to the canonical product name (see priceChartingQuery).
+  // `effectiveQuery` is the string actually sent — surfaced in the bug report so a
+  // surprising count (e.g. 3 vs the catalog's many variants, or 0) can be told
+  // apart as "normalizer over-stripped" vs "only N products exist".
+  const pcQuery = priceChartingQuery(query);
   const apiTasks = [
-    { sourceId: 'reverb', fn: (s) => fetchReverbListings(query, true, s) },
-  ];
+    { sourceId: 'reverb', effectiveQuery: query, fn: (s) => fetchReverbListings(query, true, s) },
+    { sourceId: 'pricecharting', effectiveQuery: pcQuery, fn: (s) => fetchPriceChartingComps(pcQuery, s) },
+  ].filter(task => isCompSourceEnabledInScope(task.sourceId));
 
-  return Promise.all(apiTasks.map(async ({ sourceId, fn }) => {
+  return Promise.all(apiTasks.map(async ({ sourceId, effectiveQuery, fn }) => {
     try {
       if (signal?.aborted) throw new Error('Aborted');
       // Each API fetcher now returns { items, warning } so blocks/throttles
@@ -386,15 +485,16 @@ async function fetchApiMarketplaceSources(query, signal = null, nodeId = null, s
       const result = await fn(signal);
       const items = Array.isArray(result) ? result : (result?.items || []);
       const warning = Array.isArray(result) ? null : (result?.warning || null);
+      const url = Array.isArray(result) ? null : (result?.url || null);
       if (sender && !sender.isDestroyed()) {
         sender.send('price-source-progress', { nodeId, sourceId, status: 'done', count: items.length, warning });
       }
-      return { sourceId, items, warning };
+      return { sourceId, items, warning, effectiveQuery, url };
     } catch (error) {
       if (sender && !sender.isDestroyed()) {
         sender.send('price-source-progress', { nodeId, sourceId, status: 'error', count: 0 });
       }
-      return { sourceId, items: [], error: error?.message || String(error) };
+      return { sourceId, items: [], error: error?.message || String(error), effectiveQuery };
     }
   }));
 }
@@ -525,6 +625,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
       photos: Array.isArray(imagePaths) ? imagePaths.length : 0,
       title: result?.generated_title || '(unknown)',
       model: aiMeta.model || null,
+      fallback: aiMeta.fallback || null,
     };
     return { product: result };
   });
@@ -545,6 +646,52 @@ Be specific about what you can clearly see. If you can't identify brand or model
     // immediately so the source card shows "Log in" guidance instead of running
     // the extractor (which would return 0 and falsely trigger SITE_CHANGED).
     const sessionCache = getStatusCacheSync();
+
+    // ── Hard login preflight (policy: require login on ALL in-scope marketplaces) ──
+    // A price check does NOT run unless every in-scope comp source backed by a
+    // login-capable platform is logged in. This is the user-selected "hard-require
+    // all before running" policy — it trades partial results for never scraping a
+    // logged-out source anonymously (the cause of the Poshmark 0-results / 45s
+    // tarpit-timeouts). When any required login is missing, the whole run is
+    // blocked: every in-scope card is stamped (the missing platforms' sources as
+    // `login-required`, the rest as `preflight-blocked`) and we return WITHOUT
+    // scraping, so no tokens/time are spent.
+    const missingLogins = computeMissingLogins(allTasks, sessionCache);
+    if (missingLogins.length > 0) {
+      const sourceWarnings = {};
+      for (const t of allTasks) {
+        const platform = COMP_SOURCE_LOGIN_PLATFORM[t.id];
+        const needsThis = platform && missingLogins.includes(platform);
+        const warning = needsThis ? {
+          code: 'login-required', severity: 'block',
+          evidence: `${platform} is not logged in — price checks require login on all in-scope marketplaces (policy).`,
+          suggestion: `Log in to ${platform} in Settings > Accounts, then re-run the price check.`,
+        } : {
+          code: 'preflight-blocked', severity: 'block',
+          evidence: `Run blocked — not logged in to: ${missingLogins.join(', ')}.`,
+          suggestion: `Price checks require login on all in-scope marketplaces. Log in to ${missingLogins.join(', ')} and re-run.`,
+        };
+        sourceWarnings[t.id] = { code: warning.code, severity: warning.severity, evidence: warning.evidence };
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('price-source-progress', { nodeId, sourceId: t.id, status: 'error', count: 0, url: null, warning });
+        }
+      }
+      logger.info(`[Marketplace][${nodeId}] Price check blocked by login preflight — missing: ${missingLogins.join(', ')}`);
+      marketplaceTelemetry.scrape = {
+        ts: Date.now(),
+        sold: 0, active: 0,
+        sources: allTasks.length + ['reverb'].filter(isCompSourceEnabledInScope).length,
+        warnings: allTasks.length,
+        blocked: 0, errored: 0, timedOut: 0,
+        loginRequired: Object.values(sourceWarnings).filter(w => w.code === 'login-required').length,
+        preflightBlocked: true, missingLogins,
+        bySource: Object.fromEntries(allTasks.map(t => [t.id, 0])),
+        sourceWarnings,
+      };
+      marketplaceTelemetry.resolves = {};
+      return { comps: { sold: [], active: [] }, scrapeWarnings: [], preflightBlocked: true, missingLogins };
+    }
+
     const loginSkipped = new Set();
     for (const t of allTasks) {
       if (t.requiresLoginPlatform && !sessionCache[t.requiresLoginPlatform]?.connected) {
@@ -574,9 +721,10 @@ Be specific about what you can clearly see. If you can't identify brand or model
     const scrapeResultsPromise = scrapeMultiple(tasks, (res) => {
       if (event.sender.isDestroyed()) return;
       const items = Array.isArray(res.data) ? res.data : [];
-      const warning = res.warning || (!res.success && /SITE_CHANGED/i.test(res.error || '')
-        ? { code: 'stale-selectors', severity: 'warn', evidence: String(res.error || '').slice(0, 240), suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.' }
-        : null);
+      // Login-aware: a 0-result login wall is relabeled 'login-required' instead
+      // of 'stale-selectors' (see classifyCompScrapeFailure) so the card guides
+      // the user to log in, not to fix selectors.
+      const warning = res.warning || (!res.success ? classifyCompScrapeFailure(res.error, res.id, sessionCache) : null);
       event.sender.send('price-source-progress', {
         nodeId,
         sourceId: res.id,
@@ -587,7 +735,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
       });
     }, signal);
 
-    const apiSourceIds = ['reverb'];
+    const apiSourceIds = ['reverb', 'pricecharting'].filter(isCompSourceEnabledInScope);
     for (const sourceId of apiSourceIds) {
       if (!event.sender.isDestroyed()) {
         event.sender.send('price-source-progress', { nodeId, sourceId, status: 'searching', count: 0 });
@@ -604,22 +752,33 @@ Be specific about what you can clearly see. If you can't identify brand or model
     // contributed what (and, paired with the synthesis "unique" count, expose
     // a single source double-counting).
     const bySource = {};
+    // Extraction yield per browser-pool source ({ seen, noFields }): the
+    // cards-seen denominator + cards that looked like listings but yielded no
+    // usable price/title/link. Makes a PARTIAL per-card drift visible — a count
+    // of 48 with noFields=96 means a sub-selector drifted and silently dropped
+    // most of the page, which a bare "poshmark=48" would hide.
+    const yieldBySource = {};
+    // Scrape provenance per browser-pool source: the URL actually read + the
+    // sold/active category the pipeline CLAIMS for it. The category is hard-coded
+    // on the task, never verified against the page — so a source bucketed as
+    // "sold" whose URL carries no sold/completed filter (cf. eBay's LH_Sold=1,
+    // Mercari's status=sold_out) is silently serving ACTIVE asking prices to the
+    // pricing model as "what buyers actually paid". Without this line a bare
+    // "swappa=50 sold" gives the report no way to surface that mislabel.
+    const provenanceBySource = {};
+    for (const t of tasks) provenanceBySource[t.id] = { url: t.url, category: t.category };
+    // API sources aren't browser-pool tasks, so they have no provenanceBySource
+    // entry (correctly — they carry no per-card drift telemetry). Their hidden
+    // variable is the EFFECTIVE QUERY: reverb uses the raw title, but pricecharting
+    // rewrites it (priceChartingQuery strips capacity/condition/"Console"). Capture
+    // the query + the URL each one actually hit so a count can be explained.
+    const apiQueryBySource = {};
 
     for (const r of scrapeResults) {
       if (!r.success) {
         logger.warn(`[Marketplace] A scrape task for ${r.id} was rejected: ${r.error}`);
-        const isSiteChanged = /SITE_CHANGED/i.test(r.error || '');
-        scrapeWarnings.push(isSiteChanged ? {
-          sourceId: r.id, severity: 'warn', code: 'stale-selectors',
-          evidence: String(r.error || '').slice(0, 240),
-          suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.',
-        } : {
-          // code 'task-failed' = browser-launch/profile-lock conflict or network error,
-          // NOT anti-bot. Classified separately so it doesn't masquerade as a captcha.
-          sourceId: r.id, severity: 'block', code: 'task-failed',
-          evidence: r.error,
-          suggestion: 'Scrape threw before completing — likely a browser-launch/profile-lock conflict or network error, NOT anti-bot. Check Recent Main-Process Logs in the bug report.',
-        });
+        // Login-wall vs. stale-selectors vs. task-failed — see classifyCompScrapeFailure.
+        scrapeWarnings.push(classifyCompScrapeFailure(r.error, r.id, sessionCache));
         bySource[r.id] = 0;
         continue;
       }
@@ -627,12 +786,16 @@ Be specific about what you can clearly see. If you can't identify brand or model
       if (warning) scrapeWarnings.push({ sourceId: id, ...warning });
       const category = taskCategoryMap[id] ?? 'sold';
       bySource[id] = Array.isArray(items) ? items.length : 0;
+      if (r.yieldStats) yieldBySource[id] = r.yieldStats;
       if (Array.isArray(items)) allComps[category].push(...items);
     }
 
     for (const res of apiResults) {
       if (res.warning) scrapeWarnings.push({ sourceId: res.sourceId, ...res.warning });
       bySource[res.sourceId] = Array.isArray(res.items) ? res.items.length : 0;
+      if (typeof res.effectiveQuery === 'string') {
+        apiQueryBySource[res.sourceId] = { query: res.effectiveQuery, url: res.url || null };
+      }
       if (res.items.length > 0) allComps.sold.push(...res.items);
     }
 
@@ -646,27 +809,25 @@ Be specific about what you can clearly see. If you can't identify brand or model
         sourceWarnings[w.sourceId] = { code: w.code, severity: w.severity, evidence: w.evidence };
       }
     }
-    // Flag sources whose returned count sits at their extraction cap — a strong
-    // "the page held more than we gathered" signal (see COMP_EXTRACT_CAPS). The
-    // funnel surfaces this so a per-source count isn't mistaken for the full
-    // available total.
-    const bySourceAtCap = {};
-    for (const [id, n] of Object.entries(bySource)) {
-      const cap = COMP_EXTRACT_CAPS[id];
-      if (cap != null && n >= cap) bySourceAtCap[id] = cap;
-    }
     marketplaceTelemetry.scrape = {
       ts: Date.now(),
       sold: allComps.sold.length,
       active: allComps.active.length,
       sources: tasks.length + apiSourceIds.length,
       warnings: scrapeWarnings.length,
-      // Anti-bot blocks vs. internal scrape errors are different failures with
-      // different fixes — keep them separate instead of one "block-severity" bucket.
-      blocked: scrapeWarnings.filter(w => w?.severity === 'block' && w?.code !== 'task-failed').length,
+      // Anti-bot blocks vs. internal scrape errors vs. timeouts vs. not-logged-in
+      // are different failures with different fixes — keep them separate instead of
+      // folding every block-severity warning into one "anti-bot" bucket. login-required
+      // (sign in) and scrape-timeout (slow/hung site or tarpit) are NOT anti-bot
+      // captchas and NOT internal task failures.
+      blocked: scrapeWarnings.filter(w => w?.severity === 'block' && !['task-failed', 'scrape-timeout', 'login-required'].includes(w?.code)).length,
       errored: scrapeWarnings.filter(w => w?.code === 'task-failed').length,
+      timedOut: scrapeWarnings.filter(w => w?.code === 'scrape-timeout').length,
+      loginRequired: scrapeWarnings.filter(w => w?.code === 'login-required').length,
       bySource,
-      bySourceAtCap,
+      yieldBySource,
+      provenanceBySource,
+      apiQueryBySource,
       sourceWarnings,
     };
     // A fresh full scrape starts a new run — drop any resolves recorded for a
@@ -940,6 +1101,7 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       recommendedPrice: pricing?.recommended_price ?? null,
       matchQuality: pricing?.match_quality || '(unknown)',
       model: synthMeta.model || null,
+      fallback: synthMeta.fallback || null,
       // The model's OWN classification of the comps we fed it: anchor (weighted
       // heaviest) vs adjusted (price-corrected) vs bound (ceiling/floor only).
       // The sum is typically < fed because the model weights the rest out. This
@@ -1125,6 +1287,7 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
       good: verdicts.filter(v => v?.fit === 'good').length,
       unfit: verdicts.filter(v => v?.fit === 'unfit').length,
       model: fitMeta.model || null,
+      fallback: fitMeta.fallback || null,
     };
     return { fit: verdict || {} };
   });

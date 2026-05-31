@@ -82,7 +82,7 @@ export async function verifySellMonitorLogin(platformId) {
         // authenticated sessions. The clean path uses the same persistent
         // cookies but loads images normally so eBay/etc don't fingerprint us
         // as a bot.
-        r = await fetchHtmlClean(target, { timeoutMs: SESSION_VERIFY_TIMEOUT_MS });
+        r = await fetchHtmlClean(target, { timeoutMs: config?.verifyTimeoutMs || SESSION_VERIFY_TIMEOUT_MS });
       } catch (e) {
         const trace = { target, error: e?.message || String(e) };
         return { connected: false, reason: `Verification fetch failed: ${e?.message || String(e)}`, trace: { target, checks: [...traces, trace] } };
@@ -251,11 +251,38 @@ function buildTrustedPuppeteerLoginVerdict(platformId, result) {
 
 // ── Startup verification ──────────────────────────────────────────────────────
 // Verifies ALL known platforms on every launch. Cache starts empty, so there's
-// nothing to trust — every startup is a clean check. Runs sequentially to avoid
-// racing Chrome instances on the shared userDataDir. Pushes progress events to
+// nothing to trust — every startup is a clean check. Pushes progress events to
 // the renderer via the notify callback so hub nodes can block drops until their
 // relevant platforms are confirmed.
+//
+// Runs with a bounded-concurrency pool, NOT sequentially. The earlier sequential
+// loop existed to "avoid racing Chrome instances on the shared userDataDir" — but
+// that hazard doesn't apply here: verifySellMonitorLogin → fetchHtmlClean opens a
+// TAB in the one shared stealth browser (browser.newPage()), not a new Chrome
+// process, so there's no second process to race the profile lock. And every
+// platform is a DISTINCT domain, so concurrency never makes a single site see two
+// simultaneous hits — the per-site anti-bot concern is nil. Concurrency therefore
+// only costs local CPU/RAM/network, which the pool size below bounds. This cuts a
+// ~10-platform startup verify from ~66s (sum of per-platform nav times) to roughly
+// the slowest-few-in-a-lane wall time (~15-20s).
+const VERIFY_CONCURRENCY = 4;
+// Hard per-platform backstop for the startup verify. A normal verify is already
+// bounded by SESSION_VERIFY_TIMEOUT_MS inside fetchHtmlClean, but if anything in
+// that chain wedges below the navigation timeout (a Cloudflare reload-loop that
+// hangs page.content(), a stuck newPage, etc.) the worker would never settle and
+// Promise.all(workers) would hang forever — leaving the UI stuck on "checking
+// connections." This race guarantees every platform resolves so the pool drains.
+const VERIFY_HARD_TIMEOUT_MS = SESSION_VERIFY_TIMEOUT_MS + 10000; // 35s
 let _verifyingPlatforms = new Set();
+
+// One record per startup verify run, surfaced by the bug report so "why is login
+// verification slow?" is answerable from explicit per-platform durations instead
+// of by hand-subtracting interleaved main-process log timestamps (which the
+// concurrent pool above makes unreadable anyway).
+let _lastVerifyRun = null;
+export function getVerifyTimingSummary() {
+  return _lastVerifyRun;
+}
 
 export async function verifyAllPlatforms({ notify = () => {} } = {}) {
   const sellIds = getSellMonitorPlatforms().map(p => p.id);
@@ -264,28 +291,67 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
 
   _verifyingPlatforms = new Set(allIds);
   notify('accounts:verify-start', { platformIds: allIds });
-  logger.info(`[Accounts] Startup verify: ${allIds.length} platforms (${allIds.join(', ')})`);
+  logger.info(`[Accounts] Startup verify: ${allIds.length} platforms (${allIds.join(', ')}), concurrency ${VERIFY_CONCURRENCY}`);
 
-  for (const platformId of allIds) {
+  const runStartedAt = Date.now();
+  const durations = [];
+
+  const verifyOne = async (platformId) => {
     if (activeLoginFlows.has(platformId)) {
       logger.info(`[Accounts] Startup verify skipping ${platformId} — login flow in flight`);
       _verifyingPlatforms.delete(platformId);
       notify('accounts:verify-update', { platformId, connected: _statusCache[platformId]?.connected ?? false });
-      continue;
+      durations.push({ platformId, ms: 0, connected: _statusCache[platformId]?.connected ?? false, skipped: true });
+      return;
     }
+    const startedAt = Date.now();
     try {
-      const verdict = await verifySellMonitorLogin(platformId);
-      await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
-      logger.info(`[Accounts] Startup verify ${platformId}: ${verdict.connected ? 'connected' : 'not connected'}`);
+      // Wrap in a hard timeout so one wedged platform can't stall the whole verify
+      // (see VERIFY_HARD_TIMEOUT_MS). On timeout this rejects → the catch below
+      // records it as not-connected and the worker moves on.
+      let hardTimer;
+      const verdict = await Promise.race([
+        verifySellMonitorLogin(platformId),
+        new Promise((_, reject) => { hardTimer = setTimeout(
+          () => reject(new Error(`verify exceeded ${VERIFY_HARD_TIMEOUT_MS}ms hard timeout — a page navigation likely wedged (anti-bot reload loop)`)),
+          VERIFY_HARD_TIMEOUT_MS); }),
+      ]).finally(() => clearTimeout(hardTimer));
+      const ms = Date.now() - startedAt;
+      await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace, verifyMs: ms });
+      durations.push({ platformId, ms, connected: verdict.connected });
+      logger.info(`[Accounts] Startup verify ${platformId}: ${verdict.connected ? 'connected' : 'not connected'} (${ms}ms)`);
     } catch (e) {
-      logger.warn(`[Accounts] Startup verify ${platformId} threw:`, e?.message || String(e));
+      const ms = Date.now() - startedAt;
+      durations.push({ platformId, ms, connected: false, error: e?.message || String(e) });
+      logger.warn(`[Accounts] Startup verify ${platformId} threw (${ms}ms):`, e?.message || String(e));
     }
     _verifyingPlatforms.delete(platformId);
     notify('accounts:verify-update', { platformId, connected: _statusCache[platformId]?.connected ?? false });
-  }
+  };
+
+  // Bounded-concurrency pool: a fixed number of workers drain a shared queue.
+  // queue.shift() is atomic relative to the length check (no await between them),
+  // so no platform is processed twice and none is dropped.
+  const queue = [...allIds];
+  const workers = Array.from({ length: Math.min(VERIFY_CONCURRENCY, queue.length) }, async () => {
+    while (queue.length) {
+      await verifyOne(queue.shift());
+    }
+  });
+  await Promise.all(workers);
+
+  const finishedAt = Date.now();
+  _lastVerifyRun = {
+    startedAt: runStartedAt,
+    finishedAt,
+    totalMs: finishedAt - runStartedAt,
+    concurrency: VERIFY_CONCURRENCY,
+    platformCount: allIds.length,
+    durations: durations.sort((a, b) => b.ms - a.ms),
+  };
 
   notify('accounts:verify-done', {});
-  logger.info('[Accounts] Startup verify complete');
+  logger.info(`[Accounts] Startup verify complete (${_lastVerifyRun.totalMs}ms wall, concurrency ${VERIFY_CONCURRENCY})`);
 }
 
 // ── Single-flight login dedup ────────────────────────────────────────────────
@@ -299,74 +365,6 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
 // starting a new one. New flows only start once the prior one fully
 // settles (window closed + verify cached).
 const activeLoginFlows = new Map(); // platformId → Promise<verdict>
-
-export async function ensureJobPlatformLogin(platformId, sender = null, { force = false } = {}) {
-  const config = getJobLoginConfig(platformId);
-  if (!config) {
-    return { platform: platformId, connected: false, error: 'Unknown platform' };
-  }
-
-  if (!force) {
-    const cache = await readStatusCache();
-    if (cache[platformId]?.connected) {
-      return { platform: platformId, connected: true, loginOpened: false, reason: cache[platformId]?.lastReason || null };
-    }
-  }
-
-  const existing = activeLoginFlows.get(platformId);
-  if (existing) {
-    logger.info(`[Accounts] Runtime login for ${platformId} deduping to in-flight login`);
-    const result = await existing;
-    return { platform: platformId, connected: !!result?.connected, loginOpened: true, reason: result?.reason, error: result?.error };
-  }
-
-  const flow = (async () => {
-    try {
-      logger.info(`[Accounts] Runtime job scrape login opening for ${platformId}${force ? ' (forced)' : ''}`);
-      const result = await openLoginWindow(platformId, sender);
-      if (isTrustedNativeLoginResult(platformId, result)) {
-        // Chrome was killed after login. Wait for SQLite WAL checkpoint before
-        // the scraper opens the same user-data-dir; without this delay the
-        // scraper sees no session cookies and appears logged out.
-        await new Promise(r => setTimeout(r, 2500));
-        const verdict = buildTrustedNativeLoginVerdict(platformId, result);
-        await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
-        logger.info(`[Accounts] ${platformId} runtime native login verified (post-flush wait complete): ${verdict.reason}`);
-        return { ...(result || {}), connected: true, reason: verdict.reason, loginOpened: true };
-      }
-      if (isTrustedPuppeteerLoginResult(result)) {
-        const verdict = buildTrustedPuppeteerLoginVerdict(platformId, result);
-        await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
-        logger.info(`[Accounts] ${platformId} runtime login auto-detected: ${verdict.reason}`);
-        return { ...(result || {}), connected: true, reason: verdict.reason, loginOpened: true };
-      }
-
-      const verdict = await verifySellMonitorLogin(platformId);
-      await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
-      if (!verdict.connected) {
-        logger.info(`[Accounts] ${platformId} runtime login did not verify: ${verdict.reason}`);
-      } else {
-        logger.info(`[Accounts] ${platformId} runtime login verified: ${verdict.reason}`);
-      }
-      return { ...(result || {}), connected: verdict.connected, reason: verdict.reason, loginOpened: true };
-    } catch (error) {
-      const msg = error?.message || String(error);
-      logger.error(`[Accounts] Runtime login failed for ${platformId}:`, msg);
-      await writeStatusCache(platformId, false, {
-        lastReason: msg,
-        lastTrace: { error: msg, stack: error?.stack?.slice(0, 600), stage: 'ensureJobPlatformLogin' },
-      });
-      return { platform: platformId, connected: false, loginOpened: true, reason: msg, error: msg };
-    }
-  })();
-
-  activeLoginFlows.set(platformId, flow);
-  try {
-    return await flow;
-  } finally {
-    activeLoginFlows.delete(platformId);
-  }
-}
 
 /**
  * Register all Accounts IPC handlers.
