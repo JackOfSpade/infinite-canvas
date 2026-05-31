@@ -1,0 +1,423 @@
+@charset "utf-8";
+/* ============================================================
+   resume.css — components & page chrome
+   ----------------------------------------------------------
+   Pair with `colors_and_type.css` (tokens + element defaults).
+   This file covers everything specific to the résumé surface:
+   page chrome (screen preview + paged media), the header, section
+   heads, the meta-row utility, role / project / skills / education
+   blocks, bullets, inline separators and annotations.
+
+   Semantic markup maps 1:1 to JSON Resume v1.0.0 + the following
+   namespaced custom fields:
+     work[].highlights[i].x_scope     → .scope
+     work[].highlights[i].x_tradeoff  → .tradeoff
+     work[].x_summary                 → .role-summary
+     projects[].x_metrics             → .project-metrics
+   Full mapping table lives in STYLE.md §9.
+   ============================================================ */
+
+/* -------- viewport / page chrome (screen preview only) -------- */
+@media screen {
+  body {
+    padding: 32px 16px 64px;
+    background:
+      radial-gradient(ellipse at top,
+        #EEE9DC 0%, #E6E0CF 60%, #DCD5C2 100%);
+    min-height: 100vh;
+  }
+  .page {
+    background: var(--bg);
+    width: var(--page-w);
+    min-height: var(--page-h);
+    margin: 0 auto 24px;
+    padding: var(--margin-top) var(--margin-side) var(--margin-bot);
+    box-shadow:
+      0 1px 0 rgba(26,24,21,0.04),
+      0 24px 48px -16px rgba(26,24,21,0.18),
+      0 4px 12px -4px rgba(26,24,21,0.10);
+    box-sizing: border-box;
+  }
+}
+
+/* -------- print: CSS Paged Media --------
+   Named pages let the data-page attribute fully control paper size.
+   Chromium 85+ honours `page: <name>` on an element + matching
+   `@page <name> { size: ... }` rules — no top-level override needed.
+   The margin tokens inside .page are recomputed by the data-page
+   variant block in colors_and_type.css.
+
+   Running footer:
+   The @bottom-right margin box prints the page number on every
+   page except the first. Styling is hardcoded because CSS custom
+   properties don't reliably cascade into @page contexts across
+   engines; values mirror the mono / --ink-quiet tokens so the
+   footer stays in family. Page 1 is suppressed via `:first` —
+   a one-page resume should never show "1". */
+@page letter {
+  size: Letter;
+  margin: 0;
+  @bottom-right {
+    content: counter(page) " / " counter(pages);
+    font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 8.5pt;
+    color: #8C857A;       /* --ink-quiet */
+    margin: 0 0.78in 0.4in 0;
+    letter-spacing: -0.005em;
+  }
+}
+@page letter:first { @bottom-right { content: none; } }
+@page a4 {
+  size: A4;
+  margin: 0;
+  @bottom-right {
+    content: counter(page) " / " counter(pages);
+    font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 8.5pt;
+    color: #8C857A;
+    margin: 0 16mm 12mm 0;
+    letter-spacing: -0.005em;
+  }
+}
+@page a4:first { @bottom-right { content: none; } }
+@page {
+  /* Fallback for engines that don't support named pages — defaults
+     to Letter. Margin stays 0 here; the page padding handles it. */
+  size: Letter;
+  margin: 0;
+}
+.page              { page: letter; }
+.page[data-page="a4"],
+[data-page="a4"] .page,
+:root[data-page="a4"] .page { page: a4; }
+@media print {
+  html, body { background: var(--bg); }
+  body { padding: 0; }
+  .page {
+    width: auto;
+    min-height: auto;
+    margin: 0;
+    padding: var(--margin-top) var(--margin-side) var(--margin-bot);
+    box-shadow: none;
+    page-break-after: always;
+  }
+  .page:last-child { page-break-after: auto; }
+}
+
+/* =========================================================
+   Header — name, tagline, contact line. All body text;
+   never use document <header> for parser-critical info.
+   =========================================================*/
+.resume-header {
+  margin-bottom: var(--s-9);
+}
+.name {
+  font-family: var(--ff-display);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-display);
+  letter-spacing: var(--tr-display);
+  color: var(--accent-on);
+  margin: 0 0 var(--s-2);
+  /* Screen preview only: shrink the name on narrow viewports
+     (mobile, scaled-down windows) so it still reads gracefully
+     when the page is wider than the viewport. The clamp keys off
+     viewport width, NOT name length — a long name on a desktop
+     viewport still renders at the full token. text-wrap: balance
+     keeps any forced wrap visually centred. */
+  font-size: clamp(calc(var(--fs-display) - 4pt), 4.2vw + 6pt, var(--fs-display));
+  text-wrap: balance;
+}
+@media print {
+  /* Print uses the token directly — deterministic, fixed-paper output. */
+  .name { font-size: var(--fs-display); }
+}
+.tagline {
+  font-size: var(--fs-h3);
+  font-weight: var(--fw-regular);
+  color: var(--ink-meta);
+  margin: 0 0 var(--s-5);
+  letter-spacing: var(--tr-tight);
+}
+.contact {
+  font-size: var(--fs-small);
+  color: var(--ink-body);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--s-5);
+  row-gap: var(--s-2);
+}
+.contact a { border-bottom-color: rgba(26,24,21,0.18); }
+
+/* =========================================================
+   Section + subsection heads
+   Small uppercase mark + thin rule that fills the rest of
+   the line. Sections sit on the baseline grid via --vr-2.
+   Subsection: same shape, quieter type, italic.
+   =========================================================*/
+.section {
+  margin-top: var(--vr-2);
+}
+.section:first-of-type { margin-top: 0; }
+
+.section-head,
+.subsection-head {
+  display: flex;
+  align-items: center;          /* center the rule to the heading's optical mid */
+  gap: var(--s-5);
+  break-after: avoid;
+}
+.section-head { margin: 0 0 var(--s-6); }
+.section-head h2 {
+  font-family: var(--ff-body);
+  font-size: var(--fs-h2);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tr-h2);
+  text-transform: uppercase;
+  color: var(--ink-body);
+  margin: 0;
+  flex-shrink: 0;
+  line-height: 1;               /* tight box — lets the rule sit at cap mid */
+}
+.section-head .rule,
+.subsection-head .rule {
+  flex: 1;
+  height: var(--rule-weight);
+  background: var(--bg-rule);
+  /* No magic margin-top; align-items:center on the parent + line-height:1
+     on the heading puts the rule at its vertical centre across any font. */
+}
+
+/* Subsection head — quieter, second-tier divider for groupings
+   *inside* a section ("Open Source" under Experience, "Talks"
+   under Education). Italic sans, no uppercase, no tracked +0.14em.
+   --vr-1 above keeps it on the baseline grid one line-box below
+   the previous block. Render with:
+     <div class="subsection-head">
+       <h3>Open Source</h3><span class="rule" aria-hidden="true"></span>
+     </div>                                                       */
+.subsection-head {
+  margin: var(--vr-1) 0 var(--s-4);
+}
+.subsection-head h3 {
+  font-family: var(--ff-body);
+  font-size: var(--fs-small);
+  font-weight: var(--fw-medium);
+  font-style: italic;
+  letter-spacing: var(--tr-tight);
+  color: var(--ink-meta);
+  margin: 0;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+/* =========================================================
+   Meta-row utility
+   The "content left, right-aligned meta right" pattern
+   appears in role headers, role-meta lines, edu lines, and is
+   available for any future block that needs it. One grid, one
+   class, one place to change column widths.
+
+   Compose it onto the block element; element-specific classes
+   layer typography on top (e.g. .role-header is also a
+   .meta-row, but adds its own break-after rule).
+   =========================================================*/
+.meta-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: var(--col-gap);
+  align-items: baseline;
+}
+
+/* =========================================================
+   Inline separator (·) used between sibling inline items.
+   Two modifiers cover every usage:
+     default (.sep)    — tight, prose-adjacent runs
+     .sep.sep-loose    — mono / metric / digit-heavy runs
+   Always declared via the modifier class on the span itself;
+   no selector-per-context overrides.
+   =========================================================*/
+.sep {
+  color: var(--ink-fade);
+  user-select: none;
+  font-weight: var(--fw-regular);   /* never inherit bold from context */
+  margin: 0 var(--sep-gap-tight);
+}
+.sep.sep-loose { margin: 0 var(--sep-gap-loose); }
+/* Inside flex layouts the inline margin is harmless—flex gap wins—
+   but we collapse it explicitly so the contact line behaves cleanly
+   on viewports where the flex container's gap is 0. */
+.contact .sep { margin: 0; }
+
+/* =========================================================
+   Role — the core repeating block.
+   Two-line header: (line 1) title · company   ·   dates
+                    (line 2) scope summary     ·   location
+   Below: bullets at full content width.
+   =========================================================*/
+.role {
+  margin-bottom: var(--s-8);
+  /* Don't try to keep a 6-bullet role unsplit — just protect
+     the header and ensure no orphan first bullet. */
+}
+.role:last-child { margin-bottom: 0; }
+
+/* .role-header / .role-meta compose with .meta-row for the grid;
+   these rules only layer role-specific spacing and break behaviour. */
+.role-header {
+  break-after: avoid;
+  margin-bottom: var(--s-3);
+}
+.role-meta {
+  break-after: avoid;
+  margin-bottom: var(--s-4);
+}
+.role-title-line {
+  font-size: var(--fs-h3);
+  font-weight: var(--fw-semibold);
+  color: var(--ink-body);
+  letter-spacing: var(--tr-tight);
+}
+.role-dates {
+  font-size: var(--fs-small);
+  color: var(--ink-meta);
+  text-align: right;
+  white-space: nowrap;
+}
+.role-summary {
+  font-size: var(--fs-small);
+  color: var(--ink-meta);
+  font-style: italic;
+  letter-spacing: var(--tr-tight);
+}
+.role-location {
+  font-size: var(--fs-small);
+  color: var(--ink-meta);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* =========================================================
+   Highlights / bullets
+   Standard bullet glyph (•), tight enough to scan vertically,
+   roomy enough to wrap to 1.5–2 lines cleanly.
+   =========================================================*/
+.highlights {
+  margin: 0;
+  padding: 0;
+}
+.highlights li {
+  position: relative;
+  padding-left: 1.05em;
+  margin-bottom: var(--s-3);
+  line-height: var(--lh-body);
+  break-inside: avoid;          /* keep a bullet's lines together */
+  orphans: 2;
+  widows: 2;
+}
+.highlights li:last-child { margin-bottom: 0; }
+.highlights li::before {
+  content: "\2022";             /* U+2022 BULLET — escape avoids
+                                   charset / encoding pitfalls */
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--ink-quiet);
+  font-size: 1em;
+  line-height: var(--lh-body);
+}
+
+/* Don't orphan the first bullet from its role header. */
+.role-meta + .highlights > li:first-child,
+.role-header + .highlights > li:first-child { break-before: avoid; }
+
+/* -------- inline annotations on a bullet --------
+   Annotation labels ("—", "· trade-off:") are written in the
+   HTML as <span class="annotation-label"> rather than injected
+   via CSS `content`. That keeps presentation out of the content
+   layer: labels can be localised, omitted, restyled, or linted
+   from the markup, and copy-paste round-trips correctly (CSS
+   `content` is dropped on copy in many browsers).
+   The annotation classes only style the *text*; the label sits
+   beside the text as a sibling span. */
+.scope, .tradeoff {
+  font-size: var(--fs-caption);
+  color: var(--ink-meta);     /* same as dates / locations — staff-level
+                                 thinking should register on a skim,
+                                 not retreat into footnote grey. */
+  letter-spacing: var(--tr-tight);
+}
+.tradeoff { font-style: italic; }
+.annotation-label {
+  color: var(--ink-fade);
+  font-style: normal;         /* override italic on .tradeoff-label */
+  font-weight: var(--fw-regular);
+}
+
+/* =========================================================
+   Selected Systems / Projects
+   Compact tabular block: name · one-line description · metrics.
+   =========================================================*/
+.project  { margin-bottom: var(--s-5); break-inside: avoid; }
+.project:last-child { margin-bottom: 0; }
+
+.project-name {
+  font-weight: var(--fw-semibold);
+  color: var(--ink-body);
+}
+.project-desc {
+  color: var(--ink-body);
+}
+.project-metrics {
+  display: block;
+  margin-top: var(--s-1);
+  font-family: var(--ff-mono);
+  font-size: var(--fs-mono);
+  letter-spacing: var(--tr-mono);
+  color: var(--ink-meta);
+}
+
+/* =========================================================
+   Skills by category
+   Sans body for the keyword run — mono at 9pt has wider glyph
+   advance than body Inter, which pushes long categories
+   (Distributed Systems, Infrastructure) to extra wraps and
+   widens the perceived measure. Reserve mono for inline <code>.
+   =========================================================*/
+.skills {
+  display: grid;
+  grid-template-columns: var(--col-meta-w) 1fr;
+  column-gap: var(--col-gap);
+  row-gap: var(--s-3);
+}
+.skills dt {
+  font-size: var(--fs-small);
+  color: var(--ink-meta);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tr-tight);
+  break-after: avoid;
+}
+.skills dd {
+  margin: 0;
+  font-family: var(--ff-body);
+  font-size: var(--fs-small);
+  color: var(--ink-body);
+  line-height: var(--lh-snug);
+  text-wrap: pretty;
+}
+
+/* =========================================================
+   Education
+   Single line per entry; composes with .meta-row.
+   =========================================================*/
+.edu-line { break-inside: avoid; }
+.edu-line + .edu-line { margin-top: var(--s-3); }
+.edu-school { font-weight: var(--fw-semibold); }
+.edu-meta   { font-size: var(--fs-small); color: var(--ink-meta); white-space: nowrap; }
+
+/* =========================================================
+   Tabular numerals everywhere a date / QPS / $ appears so
+   digit columns align across bullets visually.
+   =========================================================*/
+.tnum, .role-dates, .project-metrics, .edu-meta {
+  font-variant-numeric: tabular-nums;
+}

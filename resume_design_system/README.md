@@ -1,19 +1,35 @@
 # Editorial Resume Design System
 
-A polished, opinionated visual template + documented design system for
-generating staff/principal-level engineering résumés from structured
-JSON. Aesthetic: editorial-modernist, developer-literate, quietly
-confident. Stripe Press book interiors, Pentagram partner CVs, the
-body of `staffeng.com` and `lethain.com` — that lineage.
+An agent-only design system for generating staff/principal-level
+engineering résumés from structured candidate data + a target
+company / job description. Aesthetic: editorial-modernist,
+developer-literate, quietly confident. Stripe Press book interiors,
+Pentagram partner CVs, the body of `staffeng.com` and `lethain.com`
+— that lineage.
 
 The artifact has two jobs at once: **parse cleanly** in Greenhouse /
 Ashby / Workday-class pipelines, and **signal high** in 6–10 seconds
 of human skimming. Every decision in this system is in service of one
 or both of those.
 
+> **No human interactive surface.** No editor, no drag-drop UI, no
+> CLI prompts. The agent reads the candidate's plaintext / markdown
+> data + the job description, fills the HTML template, runs the
+> PDF pipeline, and emits a single shippable PDF. End users see
+> only the final artifact.
+
+> **Mechanical decisions live in `STYLE.md`.** Token tables, type
+> scale, spacing grid, page geometry, page-break rules. **Variant
+> selection logic lives in `SKILL.md`** — the per-company decision
+> rule the agent follows. This file holds philosophy, sources,
+> content rules with examples, and caveats. If they ever disagree,
+> `STYLE.md` is the source of truth for what the system *does*;
+> `SKILL.md` is the source of truth for *how the agent uses it*;
+> this file is the source of truth for *why*.
+
 ---
 
-## Sources &amp; provenance
+## Sources & provenance
 
 This system was designed from a written brief, not from an existing
 codebase or brand. There are no Figma files, no GitHub repos, no
@@ -30,7 +46,7 @@ attached design assets. The references named in the brief are
 All three families ship locally in `fonts/`:
 
 - `SourceSerif4-{Regular,Semibold}.ttf`
-- `Inter-{Regular,Medium,SemiBold,Bold}.woff2`
+- `Inter-{Regular,Medium,SemiBold}.woff2` *(no Bold by design)*
 - `IBMPlexMono-{Regular,Medium}.ttf`
 
 Declared via `@font-face` at the top of `colors_and_type.css`. **No
@@ -44,20 +60,23 @@ is family-agnostic.
 
 ## Index of files
 
-| Path                       | What it is                                            |
-|----------------------------|-------------------------------------------------------|
-| `README.md`                | This file — context, content rules, visual rules.     |
-| `STYLE.md`                 | Every design decision, fully documented. **Read first** before editing the template. |
-| `colors_and_type.css`      | Design tokens — color, typography, spacing, page.     |
-| `resume.html`              | The template + a fully-populated sample (open this).  |
-| `SKILL.md`                 | Cross-compatible with Claude Code agent skills.       |
-| `preview/`                 | Design-system tab cards (type, color, spacing, components). |
+| Path                              | What it is                                                |
+|-----------------------------------|-----------------------------------------------------------|
+| `README.md`                       | This file — philosophy, content rules, caveats.           |
+| `STYLE.md`                        | Every design decision, fully documented. **Read first.**  |
+| `SKILL.md`                        | Agent prompt — pipeline + per-company variant selection.  |
+| `colors_and_type.css`             | Design tokens — color, typography, spacing, page geom, variants. |
+| `resume.css`                      | Components — page chrome, header, sections, roles, bullets, projects, skills, education. |
+| `resume.html`                     | The template + a fully-populated sample (open this).      |
+| `build/dual-mode-pdf.js`          | Pure module exporting `addOcgBackground(bytes) → bytes`. UMD; loads in Node or browser. |
+| `build/vendor/pdf-lib.min.js`     | Pinned pdf-lib 1.17.1. Vendored locally; no network dependency at build time. |
+| `fonts/`                          | All three families bundled as `.ttf` / `.woff2`.          |
+| `preview/`                        | Design-system reference cards (type, color, spacing, components, variants, anti-patterns). Not used at generation time. |
 
-There are no `ui_kits/`, `slides/`, or `fonts/` directories — fonts
-load from Google Fonts CDN, and this system has only one surface
-(the printable résumé). If you fork it into a renderer with offline
-font requirements, drop `.woff2` files into `fonts/` and update the
-`@import` in `colors_and_type.css` with `@font-face` rules.
+The system covers exactly one surface — the printable résumé. No
+app UIs, no marketing, no decks. Adding any of those is a *separate*
+design system; the typographic restraint here doesn't generalise
+trivially.
 
 ---
 
@@ -69,7 +88,7 @@ elide the subject ("Designed the sharding strategy…", not
 convention and parses cleanly; switching to "I" or "you" breaks
 both.
 
-### Casing &amp; punctuation
+### Casing & punctuation
 
 - Section names are conventional and Title Cased: **Experience**,
   **Selected Systems**, **Skills**, **Education**. Never
@@ -134,156 +153,106 @@ signal (scale, latency, prior approach, why it failed).
 
 ---
 
-## Visual foundations
+## Visual foundations — at a glance
 
-### Colour
+A one-paragraph orientation. Full rules in `STYLE.md`.
 
-A near-monochrome warm palette. **One** accent colour exists
-(oxblood `#7A1F2B`), used by default on the candidate's name only.
-The artifact reads as ink on warm paper. The full token table is
-in `STYLE.md`.
-
-| Token       | Hex       | Used on                              |
-|-------------|-----------|--------------------------------------|
-| `--bg`      | `#F7F4ED` | Page ground — warm off-white.        |
-| `--ink-1`   | `#1A1815` | Body text, role titles.              |
-| `--ink-2`   | `#54504A` | Dates, locations, role summary, scope &amp; trade-off annotations. |
-| `--ink-3`   | `#8C857A` | Captions; the most subdued metadata.  |
-| `--ink-4`   | `#B6AFA2` | Separators, hairline rules.          |
-| `--accent`  | `#7A1F2B` | Candidate name (only).               |
-
-The background is **never** pure white. The body text is **never**
-pure `#000`. Both choices warm the page subtly without anyone
-noticing — which is the point.
-
-### Typography
-
-A three-family system. Full scale in `STYLE.md §2`.
-
-- **Source Serif 4** — display only (candidate name).
-- **Inter** — everything else: tagline, section headers, role
-  titles, bullets, dates, locations. Local `.woff2` in `fonts/`.
-- **IBM Plex Mono** — technologies, project metrics, inline
-  code-like terms.
-
-Body sits at **10.25 pt** / 1.45 line-height / 70-75 chars per
-line. Section headers are **9 pt uppercase tracked 0.14 em** with a
-hairline rule, never bold and never coloured. The candidate name is
-**28 pt Source Serif 4 Semibold** in the accent — it is the loudest
-moment in the document and the only typographic flourish.
-
-### Spacing
-
-4 pt baseline grid. Tokens `--s-1` (2 pt) through `--s-10` (40 pt).
-Section breaks (`--s-9`, 32 pt) feel like editorial whitespace, not
-absence; role-to-role spacing inside a section (`--s-8`, 24 pt) is
-distinctly tighter so the section reads as one block.
-
-### Backgrounds, imagery, illustration
-
-**None.** No images, no illustrations, no patterns, no textures,
-no watermarks, no gradients on the page itself. The only background
-is the flat warm off-white. In screen preview the area *around* the
-page is a soft warm gradient to suggest paper sitting on a desk;
-the page itself stays flat.
-
-### Animation
-
-**None.** The artifact is a PDF. Hover states are not real here.
-On the screen preview, links carry a 0.5 pt baseline underline at
-10% ink that darkens to 32% on hover (`--ink-2`). That is the
-entire interaction vocabulary.
-
-### Hover, press, focus states
-
-- **Links:** baseline underline only; no colour change.
-- **Press:** nothing — there is no press state for a printed
-  document.
-- **Focus:** browser default outline; not customised. The artifact
-  is not interactive content.
-
-### Borders &amp; rules
-
-A single rule treatment: **0.5 pt hairline at 10% ink** (`--bg-rule`).
-Used only under section headers, where it fills the line after the
-header word. No rules between roles. No rules under the header
-block. No card borders, no boxes.
-
-### Shadows
-
-**None on the page.** A subtle outer shadow lifts the page off the
-warm-gradient screen background in preview; this is preview chrome
-and is `display:none` in `@media print`.
-
-### Corner radii
-
-**None.** Everything is square-edged. The page itself has 0 radius;
-nothing on the page is enclosed in a card, so there is nothing to
-round.
-
-### Transparency &amp; blur
-
-**Almost none.** Transparency is used only to define the rule
-colour (`rgba(26,24,21,0.10)`) and the link underline. No
-`backdrop-filter`, no frosted layers.
-
-### Layout rules
-
-- Single primary column for all text flow.
-- Right-aligned date/location "column" is a grid cell sharing a
-  baseline with the role title — not a true second column. This is
-  load-bearing for Workday-class parsers (see `STYLE.md §5.1`).
-- Page geometry is fixed: 8.5 × 11 in, 0.72 in top/bottom, 0.78 in
-  side margins. Override with the `--margin-*` variables if A4 is
-  required; pull `--page-w: 210mm; --page-h: 297mm` for A4.
-
-### Cards
-
-There are no cards. The bullets are not cards. The roles are not
-cards. The projects are not cards. Treating any block as a card
-("box with rounded corners and a shadow") is the wrong move for
-this aesthetic and would be reverted on review.
+The page reads as **ink on warm paper** — flat `#F7F4ED` ground,
+deep warm near-black body, **one** restrained accent (oxblood
+`#7A1F2B`) used only on the candidate name. Three families:
+**Source Serif 4** for the name only, **Inter** for everything
+else, **IBM Plex Mono** for inline `<code>` and the project-metrics
+line. Body at **10.25 pt** / 1.45 / ~70–75 chars per line. Section
+headers are 9 pt uppercase tracked +0.14 em with a hairline rule
+filling the line. 4 pt spacing grid. **No icons, no skill bars, no
+progress dots, no photo, no cards, no shadows on the page, no
+gradients, no rounded corners, no emoji.** The only typographic
+flourish is the candidate name. See `preview/anti-patterns.html`
+for what's explicitly out of bounds.
 
 ---
 
-## Iconography
+## Variants
 
-There is none, by design.
+Five opt-in variants, all toggled by a data attribute on
+`<main class="page">` (or on `<html>` for global scope). Full
+mechanical details in `STYLE.md §10`; the agent's per-company
+decision rule for which to apply lives in `SKILL.md — §Variant
+selection`. Variants compose freely, except the two `data-print="…"`
+values which are mutually exclusive.
 
-- No icon font (Material Icons, Heroicons, Phosphor, Lucide, etc.)
-  is imported.
-- No SVG icons ship with the system.
-- No emoji.
-- The only glyphs the design uses are: `•` for bullets, `·` for
-  inline separators, `–` for date ranges, `—` for em-dashes in
-  prose, and `→` only inside bullet text when describing a state
-  change (`380 ms → 18 ms`). Even `→` is bullet content, not
-  decoration.
+| Toggle                                 | Effect                                                      |
+|----------------------------------------|-------------------------------------------------------------|
+| `data-page="a4"`                       | Recomputes margins for A4 stock and routes the element to the `@page a4` rule via CSS named pages. |
+| `data-mono`                            | Rebinds `--accent-on` to `--ink-1`. Candidate name renders in ink. |
+| `data-density="compact"`               | Tightens body type, leading, block-spacing, and head/foot margins ~5–25% to claw back 6–9 lines per page. The single lever for "1.1 → 1.0 pages" without rewriting bullets. |
+| `data-print="ink-only"`                | Single-state white-paper PDF. Keeps the warm cream on screen, flips to pure white only when printing. Oxblood name preserved. |
+| `data-print="dual-pdf"` *(default)*    | Dual-mode PDF. After post-processing through `build/dual-mode-pdf.js`, the resulting PDF shows cream on screen and prints on white — same single file, different states. |
 
-If a future variant absolutely needs a single visual mark — a
-monogram, say — it must be rendered as text (a glyph in Source
-Serif 4), not an icon. The lineage references (Stripe Press,
-Pentagram CVs) all hold this line.
+## PDF generation — the agent pipeline
 
-**Substitution flag:** if a future client requires icon-augmented
-sections (e.g. a small mail glyph beside the email address),
-recommend **Heroicons outline** (24 px, 1.5 px stroke) over CDN as
-the closest match in stroke weight and reserve. Document the
-addition in `STYLE.md` if you ship it.
+The default in `resume.html` is `data-print="dual-pdf"`. The full
+pipeline (parse data → classify recipient → fill template → render
+PDF → post-process → emit) is documented in **`SKILL.md §The
+pipeline`** — that's the canonical reference. Pipeline contract in
+one paragraph:
+
+Render the filled HTML to PDF with headless Chrome
+(`printBackground: true`, `preferCSSPageSize: true`). If the active
+variant is `dual-pdf`, invoke `addOcgBackground(rawPdfBytes)` from
+`build/dual-mode-pdf.js` to add the view-only OCG cream layer (PDF
+spec §8.11). If the variant is `ink-only` (or any other), skip the
+post-process step — the PDF is already in final form. Emit the
+result as `<First-Last>.pdf`; the dual-mode mechanism is invisible
+to recipients by design.
+
+The build module is UMD — same file works in Node (`require`) and
+browser/Puppeteer contexts (script tag → `window.DualModePdf`).
+pdf-lib is vendored at `build/vendor/pdf-lib.min.js`; no network
+dependency at build time. Self-test: `node build/test.js` from the
+project root round-trips a synthetic PDF through the module and
+asserts on the OCG structure.
+
+The agent's per-company decision rule for which variant to apply
+lives in **`SKILL.md §Variant selection`**, including a
+prose-style inference fallback for unlisted companies and an
+explicit named-fallback for unclassifiable ones.
+
+Pages 2+ also print a mono page indicator (`2 / 3`) at the
+bottom-right via CSS `@page` margin boxes. Page 1 is suppressed so
+a one-pager never shows a counter. See `STYLE.md §10.6`.
+
+---
+
+## Iconography substitution flag
+
+The system ships **zero icons**, by design — see `STYLE.md §7`.
+If a future client absolutely requires icon-augmented sections
+(e.g. a small mail glyph beside the email address), recommend
+**Heroicons outline** (24 px, 1.5 px stroke) over CDN as the
+closest match in stroke weight and reserve. Document the addition
+in `STYLE.md` if you ship it.
 
 ---
 
 ## Caveats
 
-- The body and display fonts are loaded over Google Fonts CDN.
-  For offline PDF rendering pipelines, switch to local `@font-face`
-  with `.woff2` files in a `fonts/` directory.
+- The system covers exactly one surface — the résumé. Don't
+  generalise the typographic restraint to apps, marketing, or
+  decks; make a separate system for those.
 - The screen preview wraps the page in a warm gradient so the
   artifact reads as paper. The print stylesheet strips this. If
   you screenshot for a Figma or marketing context, screenshot at
   print scale (1:1) rather than the screen preview.
-- This system covers exactly one surface — the résumé. There are
-  no app or marketing UIs, no slide deck, no email templates.
-  Adding any of those should be done in a *separate* design
-  system; the typographic restraint here doesn't generalise
-  trivially.
+- For browsers that strip background colours when printing, the
+  `print-color-adjust: exact` declaration in `colors_and_type.css`
+  forces colour through to the PDF — critical for the oxblood
+  candidate name. If your render pipeline overrides this, the
+  accent collapses to black. Test before shipping.
+- The candidate name shrinks gracefully on narrow viewports
+  (mobile screen preview) via a `clamp()` keyed to viewport width.
+  This is **not** long-name handling — a very long name on a
+  desktop viewport still renders at 28 pt and may overflow. If
+  the name doesn't fit, edit the content (use initials, drop a
+  middle name); the CSS will not protect a 35-character name from
+  the right margin.

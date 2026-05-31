@@ -1,3 +1,4 @@
+@charset "utf-8";
 /* ============================================================
    Editorial Resume Design System — design tokens
    ----------------------------------------------------------
@@ -8,9 +9,10 @@
    Color:   Warm off-white ground · deep warm ink · one oxblood
             accent, used sparingly (default: candidate name only)
    Units:   Print-first. Sizes given in pt so they survive PDF
-            export at exact metric. Spacing scale is rem-based
-            (1rem = 11pt = body) so layout reflows cleanly when
-            base size is tweaked.
+            export at exact metric. The root `html` font-size is
+            bound to --fs-body (10.25pt) — so 1rem == 10.25pt.
+            Spacing tokens are absolute (pt), not rem-derived;
+            change --fs-body without disturbing the spacing scale.
    ============================================================ */
 
 /* All three families ship locally — no Google Fonts CDN dependency. */
@@ -69,29 +71,53 @@
   font-style: normal;
   font-display: swap;
 }
-@font-face {
-  font-family: "Inter";
-  src: url("fonts/Inter-Bold.woff2") format("woff2");
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
+/* Inter-Bold (700) is intentionally NOT loaded. The system uses
+   SemiBold (600) for every "bold" affordance — body <strong>, role
+   titles, project names, candidate name. Loading 700 invites drift
+   toward a heavier, less editorial voice. If a future variant truly
+   needs 700, add the @font-face here AND the --fw-bold token below. */
 
 :root {
-  /* ---------- Color · ground ---------- */
-  --bg:          #F7F4ED;   /* warm off-white, ~4% warm tint   */
+  /* ---------- Color · ground ----------
+     Warm off-white, ~4% warm tint. The whole "ink on warm paper"
+     reading depends on this being a coloured ground, not white.
+
+     NOTE: keep in sync with `DEFAULT_CREAM_RGB` in
+     `build/dual-mode-pdf.js`. That module paints this colour as
+     the OCG background layer in the generated PDF; if the two
+     drift, the on-screen design colour and the printed-PDF
+     background colour will mismatch. Better: pass `--bg`'s actual
+     value into `addOcgBackground({ cream: '#F7F4ED' })` at the
+     call site so the CSS token stays authoritative. */
+  --bg:          #F7F4ED;
   --bg-rule:    rgba(26, 24, 21, 0.10); /* hairline rule color */
 
-  /* ---------- Color · ink (text) ---------- */
+  /* ---------- Color · ink (text) ----------
+     Positional tokens (--ink-1..4) are the canonical declarations.
+     Semantic aliases (--ink-body, --ink-meta, --ink-quiet,
+     --ink-fade) are exposed below and are the preferred reference
+     in new code; the positional names remain in place for
+     backward compatibility and for cases where the *position* in
+     the scale is what's being expressed (e.g. selector cascades). */
   --ink-1:       #1A1815;   /* primary — body, role titles    */
   --ink-2:       #54504A;   /* secondary — dates, locations   */
-  --ink-3:       #8C857A;   /* tertiary — scope, tradeoffs    */
-  --ink-4:       #B6AFA2;   /* quaternary — disabled, page nr */
+  --ink-3:       #8C857A;   /* tertiary — bullet glyphs       */
+  --ink-4:       #B6AFA2;   /* quaternary — separators, fades */
+
+  /* Semantic aliases — prefer these in component CSS. */
+  --ink-body:    var(--ink-1);   /* body copy, role titles, names */
+  --ink-meta:    var(--ink-2);   /* dates, locations, annotations */
+  --ink-quiet:   var(--ink-3);   /* glyphs, the most subdued meta */
+  --ink-fade:    var(--ink-4);   /* separators, "trade-off:" leads */
 
   /* ---------- Color · accent ---------- */
-  /* Default usage: candidate name ONLY. Toggle with --accent-on. */
+  /* Default usage: candidate name ONLY. The single override point
+     is --accent-on. Set it to var(--ink-1) for a pure-monochrome
+     variant — either at :root, or scoped to a .page node:
+        <main class="page" style="--accent-on: var(--ink-1)">…
+     Do NOT introduce a second accent token. */
   --accent:      #7A1F2B;   /* oxblood — quiet, ink-like      */
-  --accent-on:   var(--accent);   /* set to var(--ink-1) for pure monochrome */
+  --accent-on:   var(--accent);
 
   /* ---------- Type · families ---------- */
   --ff-display:  "Source Serif 4", "Source Serif Pro", Georgia, "Times New Roman", serif;
@@ -109,7 +135,9 @@
   --fs-mono:      9pt;      /* inline technologies            */
 
   /* ---------- Type · weight ---------- */
-  /* Inter Light (300) is not bundled — start at Regular. */
+  /* Inter Light (300) and Bold (700) are not bundled — by design.
+     The system uses SemiBold (600) for every "bold" affordance to
+     keep the voice quietly confident, not loud. */
   --fw-regular:  400;
   --fw-medium:   500;
   --fw-semibold: 600;
@@ -121,11 +149,34 @@
   --lh-body:     1.45;
   --lh-loose:    1.55;
 
+  /* ---------- Vertical rhythm ----------
+     A computed token equal to one body line-box (fs-body × lh-body
+     ≈ 14.86pt). Use multiples of this for between-block spacing
+     where vertical rhythm matters (section ↔ section, header ↔ body,
+     role ↔ role). The 4pt --s-* scale below is finer-grained and
+     used for inline / intra-block spacing. The two systems coexist
+     by design: --baseline keeps the *page* on a grid; --s-* keeps
+     *elements* visually tight without forcing 4pt arithmetic onto
+     every gap. */
+  --baseline:    calc(var(--fs-body) * var(--lh-body));
+  --vr-half:     calc(var(--baseline) * 0.5);   /* ~7.4pt  */
+  --vr-1:        var(--baseline);                /* ~14.9pt */
+  --vr-1-5:      calc(var(--baseline) * 1.5);   /* ~22.3pt */
+  --vr-2:        calc(var(--baseline) * 2);     /* ~29.7pt */
+
   /* ---------- Type · tracking ---------- */
   --tr-display:  -0.012em;
   --tr-h2:        0.14em;   /* uppercase tracked              */
   --tr-mono:     -0.005em;
   --tr-tight:    -0.005em;
+
+  /* ---------- Inline separators ----------
+     The `·` separator appears in many contexts (contact line,
+     role title, edu line, metrics, skills run). Two gap sizes
+     cover every usage: tight for prose-adjacent runs, loose for
+     mono / numeric / metric lines where digits need air. */
+  --sep-gap-tight: 0.35em;
+  --sep-gap-loose: 0.5em;
 
   /* ---------- Spacing · 4pt baseline ---------- */
   --s-0:   0;
@@ -166,10 +217,34 @@ html {
   font-family: var(--ff-body);
   font-size: var(--fs-body);
   line-height: var(--lh-body);
-  font-feature-settings: "kern", "liga", "calt", "ss01", "tnum";
+  /* kern/liga/calt: universal text rendering hygiene.
+     tnum: tabular numerals so date columns and metric lines align
+     across rows — load-bearing for the right-aligned date cell.
+     No stylistic-set toggles (ss01 etc.) — they do different things
+     in Source Serif 4 vs Inter vs IBM Plex Mono and we don't want
+     family-specific behavior leaking into the global default. */
+  font-feature-settings: "kern", "liga", "calt", "tnum";
+  /* Preserve the warm ground in print. Without this, Chrome strips
+     --bg to save toner and the "ink on warm paper" reading collapses
+     to plain black-on-white. The whole aesthetic depends on this. */
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+}
+
+/* Screen-only focus ring. The artifact is a PDF first, but the
+   screen preview is interactive — the browser-default ring on a
+   warm-serif document is jarring. This one stays in family. */
+:focus { outline: none; }
+:focus-visible {
+  outline: 1.5pt solid var(--ink-3);
+  outline-offset: 2pt;
+  border-radius: 0;
+}
+@media print {
+  :focus, :focus-visible { outline: none; }
 }
 
 body { margin: 0; }
@@ -194,3 +269,181 @@ code, kbd, samp {
 }
 
 ul { margin: 0; padding: 0; list-style: none; }
+
+/* ============================================================
+   Variants
+   ----------------------------------------------------------
+   Opt-in alternate configurations. Apply by setting a data
+   attribute on the .page element (or on :root for the whole
+   document). Each variant is a closed override block — adding
+   a third should follow the same shape.
+   ============================================================ */
+
+/* ---------- A4 paper ----------
+   Letter is 8.5" wide, A4 is 8.27" wide. Keeping the same 0.78in
+   side margin would give a different measure (chars per line),
+   breaking Butterick's editorial sweet spot. Recompute the margins
+   so the content width is preserved at ~6.94in.
+
+   Apply with:  <main class="page" data-page="a4">…
+   or globally: <html data-page="a4">
+
+   The physical paper size is selected by CSS named pages declared
+   in `resume.html` (`@page a4 { size: A4 }` + `page: a4` on the
+   element). No separate top-level override is required. */
+[data-page="a4"] {
+  --page-w:      210mm;   /* 8.27in */
+  --page-h:      297mm;   /* 11.69in */
+  --margin-top:   18mm;   /* ~0.71in — preserves vertical rhythm */
+  --margin-bot:   18mm;
+  --margin-side:  16mm;   /* ~0.63in — keeps measure ≈ 70-75ch  */
+}
+
+/* ---------- Monochrome ----------
+   Pure ink, no oxblood accent. The candidate name renders in
+   --ink-1. Useful for B&W laser pipelines or when the recipient
+   org has a documented aversion to colour on résumés.
+
+   Apply with:  <main class="page" data-mono>…
+   or globally: <html data-mono>                                 */
+[data-mono] {
+  --accent-on: var(--ink-1);
+}
+
+/* ---------- Density: compact ----------
+   Tightens vertical rhythm and shrinks body type ~5% to claw back
+   roughly 6–9 lines per page. The intended use is the single
+   lever a user reaches for when content overflows by a small
+   margin — "1.1 pages, want 1.0" — without rewriting bullets.
+
+   Tokens that change:
+   - body type drops 10.25 → 9.75pt; leading 1.45 → 1.35
+   - meta sizes follow proportionally
+   - block-spacing tokens (s-6 / s-8 / s-9) drop roughly 25%
+   - page margins shrink 0.72 → 0.6in head/foot
+
+   Tokens deliberately untouched:
+   - --fs-display (the name) — shrinking the name to fit content
+     is the wrong trade
+   - --col-meta-w — date strings keep the same metrics
+   - --rule-weight, accent, families — visual identity unchanged
+
+   Apply with:  <main class="page" data-density="compact">…
+   or globally: <html data-density="compact">
+
+   Pairs cleanly with `data-page="a4"` and `data-mono`. Do not
+   nest density variants — there is one. If "compact" still
+   overflows, the content is the problem; trim a bullet.       */
+[data-density="compact"] {
+  --fs-body:      9.75pt;
+  --fs-small:     9pt;
+  --fs-caption:   8.5pt;
+  --fs-mono:      8.5pt;
+  --lh-body:      1.35;
+  --lh-snug:      1.25;
+
+  --s-6:         12pt;   /* was 16pt — section head ↔ body   */
+  --s-8:         18pt;   /* was 24pt — role ↔ role           */
+  --s-9:         24pt;   /* was 32pt — section ↔ section     */
+
+  --margin-top:  0.6in;
+  --margin-bot:  0.6in;
+}
+
+/* ---------- Print: ink-only ----------
+   Flips the warm ground to pure white **only when printing**. Screen
+   preview keeps the editorial warm cream — this is purely a paper /
+   toner concession for recipients who expect or require white stock.
+
+   Coloured text is unaffected. `print-color-adjust: exact` (set on
+   `html` above) keeps any explicitly-coloured ink rendering at its
+   true value, so the oxblood `--accent-on` on the candidate name
+   still prints in colour. Only `--bg` flips, and `--bg-rule` is
+   nudged from 10% to 16% ink so the hairline rules survive on a
+   pure-white field (the rule colour is a translucent ink overlay;
+   over warm cream the visual contrast is slightly higher than over
+   white, so we compensate).
+
+   Apply with:  <main class="page" data-print="ink-only">…
+   or globally: <html data-print="ink-only">
+
+   Pairs cleanly with `data-page="a4"`, `data-mono`, and
+   `data-density="compact"`. If you also set `data-mono`, the printed
+   page is plain ink-on-white — equivalent to a traditional B&W
+   résumé without rewriting any content.                            */
+@media print {
+  [data-print="ink-only"] {
+    --bg:        #FFFFFF;
+    --bg-rule:   rgba(26, 24, 21, 0.16);
+  }
+  /* The print-mode rule in resume.css paints html + body from
+     `var(--bg)`. Because `--bg` is a CSS custom property, it resolves
+     against the *element it's read on* — putting `data-print="ink-only"`
+     on `<main class="page">` overrides --bg on that subtree only, NOT
+     on html/body. Without the mirror below, html/body would keep the
+     warm cream and a résumé shorter than one full page would show a
+     band of cream below the white card.
+
+     `:has()` lets us flip the sheet background whenever ANY page on the
+     document opts into ink-only — so the attribute works whether it
+     lives on <html>, <body>, or an individual <main class="page">. */
+  html:has([data-print="ink-only"]),
+  html:has([data-print="ink-only"]) body,
+  html[data-print="ink-only"],
+  html[data-print="ink-only"] body { background: #FFFFFF; }
+}
+
+/* ---------- Print: dual-pdf  (default for PDF generation) ----------
+   Strips ALL background from the printed page so a headless-Chrome
+   "print to PDF" emits a file with no baked-in background fill in
+   the page content stream. The companion build module
+   (`build/dual-mode-pdf.js`) then post-processes that PDF, adding a
+   cream rectangle in a view-only OCG (Optional Content Group, PDF
+   spec §8.11). The result is a SINGLE PDF that:
+
+       • shows warm cream + oxblood name when viewed on screen
+       • prints on clean white paper, oxblood name preserved
+       • requires no settings change from the recipient
+
+   Coloured text (the oxblood candidate name, any future accent ink)
+   is unaffected in either state because it is part of the page
+   content stream, not the OCG-layered background. `print-color-adjust:
+   exact` (set on `html` above) carries it through Chrome's print
+   pipeline at its true CMYK / RGB value, so a color printer renders
+   it in oxblood and a B&W printer renders it as a dark grey — exactly
+   the same behavior as ordinary coloured text in any PDF.
+
+   --bg-rule is bumped to 16% ink (from the default 10%) for the same
+   reason as ink-only: hairline rules must remain visible when the
+   cream layer is hidden during print. On the cream view, the rule
+   appears very slightly heavier than the default 10% — an acceptable
+   trade for printability.
+
+   Apply with:  <main class="page" data-print="dual-pdf">…
+   or globally: <html data-print="dual-pdf">
+
+   This is the DEFAULT in resume.html. To opt out (e.g. you want a
+   one-state cream-baked PDF for a context where the recipient will
+   not print), remove the attribute or switch to data-print="ink-only".
+
+   Pairs cleanly with `data-page="a4"`, `data-mono`, and
+   `data-density="compact"`.                                          */
+@media print {
+  [data-print="dual-pdf"] {
+    --bg:        transparent;
+    --bg-rule:   rgba(26, 24, 21, 0.16);
+  }
+  /* Same html/body mirror trick as ink-only, but flipping to
+     transparent instead of white. With nothing drawn for the
+     background, a headless-Chrome "print to PDF" emits a page
+     content stream with no background fill — exactly what the OCG
+     post-processor needs in order to layer cream as the bottom-most
+     drawn element. */
+  html:has([data-print="dual-pdf"]),
+  html:has([data-print="dual-pdf"]) body,
+  html[data-print="dual-pdf"],
+  html[data-print="dual-pdf"] body { background: transparent; }
+}
+
+
+

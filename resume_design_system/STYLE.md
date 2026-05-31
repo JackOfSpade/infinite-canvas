@@ -41,12 +41,14 @@ ignore it: it is solving a different problem.
 | Role     | Family                | Reason                                              |
 |----------|-----------------------|-----------------------------------------------------|
 | Display  | **Source Serif 4**    | Editorial gravitas; one moment of warmth (the name).|
-| Body     | **Inter**             | Brand-supplied body family (local `.woff2`, weights 400/500/600/700). Neutral, modern, and the industry-standard digital text face — pairs cleanly with Source Serif 4 on the name. |
-| Mono     | **IBM Plex Mono**     | Technologies and inline code-like terms; reads as *terms*, not prose. |
+| Body     | **Inter**             | Brand-supplied body family (local `.woff2`, weights 400/500/600). Neutral, modern, and the industry-standard digital text face — pairs cleanly with Source Serif 4 on the name. |
+| Mono     | **IBM Plex Mono**     | Inline code-like terms (`v8::SnapshotCreator`, `mmap`); reads as *terms*, not prose. Used only for `<code>`/`<kbd>`/`<samp>` and the project-metrics line. |
 
 All three families ship locally in `fonts/`:
 - `SourceSerif4-{Regular,Semibold}.ttf`
-- `Inter-{Regular,Medium,SemiBold,Bold}.woff2`
+- `Inter-{Regular,Medium,SemiBold}.woff2` — **no Bold (700)**. The
+  system uses SemiBold (600) for every "bold" affordance to keep
+  the voice quietly confident, not loud.
 - `IBMPlexMono-{Regular,Medium}.ttf`
 
 Declared via `@font-face` at the top of `colors_and_type.css`. **The
@@ -109,11 +111,33 @@ numerals in body prose, scope the override to that span.
 |---------------|-----------|--------------------------------------------------|
 | `--bg`        | `#F7F4ED` | Warm off-white ground. ~4% warm tint, not paper. |
 | `--ink-1`     | `#1A1815` | Primary text. Deep warm near-black, never `#000`.|
-| `--ink-2`     | `#54504A` | Secondary — dates, locations, role summary, scope &amp; trade-off annotations. |
-| `--ink-3`     | `#8C857A` | Tertiary — captions and the most subdued metadata.    |
-| `--ink-4`     | `#B6AFA2` | Quaternary — separators, disabled.                |
-| `--bg-rule`   | 10% ink   | Hairline rule under section headers.             |
+| `--ink-2`     | `#54504A` | Secondary — dates, locations, role summary, **scope &amp; trade-off annotations**, project-metrics line. |
+| `--ink-3`     | `#8C857A` | Tertiary — bullet glyphs, the most subdued metadata. |
+| `--ink-4`     | `#B6AFA2` | Quaternary — separators (`·`), title-line glyphs, the `—`/`trade-off:` lead-ins. |
+| `--bg-rule`   | 10% ink   | Hairline rule under section headers, link baselines. |
 | `--accent`    | `#7A1F2B` | Oxblood. Used only on the candidate name.        |
+| `--accent-on` | (alias)   | Indirection token. Default = `--accent`. Override to `--ink-1` for the monochrome variant. |
+
+**Semantic aliases** for the ink scale are also exposed and are the
+preferred reference in new component CSS — they self-document and
+survive future renames:
+
+| Alias         | = positional | Meaning in context                       |
+|---------------|--------------|------------------------------------------|
+| `--ink-body`  | `--ink-1`    | Body copy, role titles, the name         |
+| `--ink-meta`  | `--ink-2`    | Dates, locations, annotations            |
+| `--ink-quiet` | `--ink-3`    | Bullet glyphs, subdued metadata          |
+| `--ink-fade`  | `--ink-4`    | Separators, annotation lead-in labels    |
+
+Use the positional names when the *position* in the scale is what's
+being expressed (e.g. a 50% mix between `--ink-2` and `--ink-3`).
+Use the semantic names everywhere else.
+
+**Scope &amp; trade-off annotations are deliberately at `--ink-2`,
+not `--ink-3`.** The staff-level thinking on display ("why this
+decision, what we gave up") needs to register on a skim, not
+retreat into footnote grey. The same call holds for the
+project-metrics line.
 
 ### 3.2 Accent rules
 
@@ -123,8 +147,10 @@ the name is the only piece of the document that is unambiguously a
 mark of identity — colouring it lightly says "this person" without
 shouting "look at me".
 
-To go fully monochrome, set `--accent-on: var(--ink-1)` at the
-`:root` or `.page` level.
+To go fully monochrome, add `data-mono` to the `<main class="page">`
+element (or to `<html>` for the whole document). The variant
+selector in `colors_and_type.css` rebinds `--accent-on` to
+`--ink-1`. See `preview/variant-monochrome.html`.
 
 **Do not** introduce a second accent. **Do not** apply the accent to
 section headers, role titles, or links. The artifact is meant to read
@@ -139,7 +165,11 @@ as ink on paper, not as a webpage.
 
 ---
 
-## 4. Spacing — 4pt baseline grid
+## 4. Spacing
+
+Two scales coexist, on purpose.
+
+### 4.1 4 pt scale — inline / intra-block spacing
 
 | Token | Value | Used between                                  |
 |-------|-------|-----------------------------------------------|
@@ -151,14 +181,46 @@ as ink on paper, not as a webpage.
 | `--s-6` | 16pt | section header ↔ section body                 |
 | `--s-7` | 20pt | (reserved)                                    |
 | `--s-8` | 24pt | role ↔ role within a section                  |
-| `--s-9` | 32pt | section ↔ section; header block ↔ first section |
+| `--s-9` | 32pt | (reserved — historical use; section spacing now via `--vr-2`) |
 | `--s-10`| 40pt | (reserved — large blocks)                     |
 
-The vertical rhythm uses multiples of 4pt almost everywhere. Where a
-specific text-baseline alignment beats the grid, the grid loses;
-visual rhythm is the rule, not 4pt arithmetic.
+### 4.2 Vertical-rhythm scale — baseline-keyed block spacing
 
-### 4.1 Page geometry
+`--baseline` is computed as `calc(var(--fs-body) * var(--lh-body))`
+— one line-box of body text, ~14.86 pt by default. The `--vr-*`
+tokens are multiples of `--baseline` and are used wherever vertical
+rhythm matters (section ↔ section, header block ↔ first section,
+subsection heads).
+
+| Token       | = baseline × | ~pt   | Used between                            |
+|-------------|--------------|-------|-----------------------------------------|
+| `--vr-half` | 0.5          |  7.4  | subsection-head bottom gap              |
+| `--vr-1`    | 1            | 14.9  | subsection-head top gap                 |
+| `--vr-1-5`  | 1.5          | 22.3  | (reserved)                              |
+| `--vr-2`    | 2            | 29.7  | section ↔ section                       |
+
+Why two scales: the 4 pt grid is right for inline gaps where rhythm
+is a side effect of consistency. The baseline-keyed scale is right
+for block boundaries where rhythm is the *point* — changing
+`--fs-body` (e.g. via `data-density="compact"`) recomputes every
+`--vr-*` token automatically, so the page stays on its grid.
+
+The vertical rhythm uses these multiples almost everywhere. Where a
+specific text-baseline alignment beats the grid, the grid loses;
+visual rhythm is the rule, not arithmetic.
+
+### 4.3 Inline separator gaps
+
+| Token              | Value  | Used                                           |
+|--------------------|--------|------------------------------------------------|
+| `--sep-gap-tight`  | 0.35em | Default `.sep` margin — prose-adjacent runs    |
+| `--sep-gap-loose`  | 0.5em  | `.sep.sep-loose` — mono / metric / digit runs  |
+
+Never override `.sep` margins per context. If a context needs more
+breathing room (typically because digits are involved), add the
+`sep-loose` modifier to the span. Two values cover every usage.
+
+### 4.4 Page geometry
 
 - Page: US Letter, 8.5 × 11 in.
 - Margins: 0.72 in top/bottom, 0.78 in sides.
@@ -166,7 +228,6 @@ visual rhythm is the rule, not 4pt arithmetic.
   the primary text column. **This is visual right-alignment via
   flex/grid, not a true second column** — Workday and similar parsers
   read the bullet text as a single unbroken column.
-
 ---
 
 ## 5. Layout rules
@@ -201,8 +262,14 @@ location are optional but recommended.
 
 ### 5.3 Bullet conventions
 
-- Bullet glyph is always `•` (U+2022). Acceptable alternates: `–` (en
-  dash), `*`. Never `→`, never an emoji.
+- Bullet glyph is **always `•` (U+2022)**, applied via the
+  `.highlights li::before` pseudo-element — not typed into the
+  bullet text. The CSS hardcodes this; do not override it. The
+  glyphs `·` (separator inside the contact line and metrics),
+  `–` (en dash, date ranges), `—` (em dash, prose), and `→` (state
+  change inside a bullet's prose, e.g. `380 ms → 18 ms`) are the
+  complete typographic vocabulary. **Never** an arrow as a bullet
+  marker. **Never** an emoji.
 - Aim for 3–6 bullets per role. Fewer than 3 looks thin; more than 6
   reads as a list, not a story.
 - Each bullet should ideally contain at least one specific
@@ -217,26 +284,72 @@ Two inline annotations exist:
 
 - `<span class="scope">…</span>` — secondary scope metric ("8
   engineers, 11-month project"). Renders prefixed with " — " in
-  `--ink-2`.
+  `--ink-meta`.
 - `<span class="tradeoff">…</span>` — decision / alternative /
   constraint statement. Renders prefixed with " · trade-off: " in
-  italic `--ink-2`.
+  italic `--ink-meta`.
 
-Both annotations sit at `--ink-2`, the same level as dates and
+Both annotations sit at `--ink-meta`, the same level as dates and
 locations — deliberately. The scope number and the trade-off are the
 staff-level thinking on display, so they need to register on a skim,
 not retreat into footnote grey. They remain inline (never on their
 own line) so the bullet and its reasoning stay visually coupled.
 
+**Label markup.** The prefix label is a real inline span, not
+CSS-injected content. The full markup is:
+
+```html
+<span class="scope">
+  <span class="annotation-label"> — </span>8 engineers, 11-month project…
+</span>
+<span class="tradeoff">
+  <span class="annotation-label"> · trade-off: </span>CRDT vs. Raft…
+</span>
+```
+
+This keeps the label text in the document layer where it can be
+localised, omitted, or linted, and lets copy-paste round-trip
+correctly. (CSS `content` is dropped on copy in many engines.)
+
 Use **at most one** of these per bullet. They are noise above one per
 bullet.
 
-### 5.5 AI-assisted bullets
+### 5.5 Meta-row utility
 
-The AI-assisted bullet gets `data-ai-assisted="true"` on the `<li>`
-and **no visual treatment**. The brief is explicit: treated like any
-other bullet, distinguishable only via markup, so the renderer can
-surface or hide it from the JSON.
+The "content left, right-aligned meta right" grid pattern — a single
+`grid-template-columns: 1fr auto` row — is exposed as a
+utility class, `.meta-row`. The role header, role-meta line, and
+edu line all compose with it:
+
+```html
+<div class="role-header meta-row">…</div>
+<div class="role-meta meta-row">…</div>
+<div class="edu-line meta-row">…</div>
+```
+
+Add `.meta-row` to any future block that needs the same alignment
+behaviour. Element-specific classes layer typography / spacing /
+break rules on top; the grid itself is defined once.
+
+The `.project` block intentionally does **not** use `.meta-row`:
+project metrics are a mono-set numeric run that wraps poorly inside
+a 1.45 in right column. They stack below the description instead.
+
+### 5.6 Subsection heads
+
+For groupings *inside* a section — "Open Source" under Experience,
+"Talks" under Education — use the subsection-head pattern:
+
+```html
+<div class="subsection-head">
+  <h3>Open Source</h3>
+  <span class="rule" aria-hidden="true"></span>
+</div>
+```
+
+It renders as italic 9.5 pt at `--ink-meta` with the same hairline
+rule. Quieter than `.section-head`, on purpose: it groups, it
+doesn't divide.
 
 ---
 
@@ -305,7 +418,7 @@ prefix per JSON Resume convention.
 | `basics.label`                           | `.tagline`                               |
 | `basics.location.{city,region}`          | `.contact > [itemprop=address]`          |
 | `basics.email`                           | `.contact a[itemprop=email]`             |
-| `basics.profiles[].url`                  | `.contact a[itemprop=sameAs]`            |
+| `basics.profiles[].url`                  | `.contact a[itemprop=sameAs]` (visible label = host + path, e.g. `github.com/acastellanos`; the `.network` field is metadata only and not rendered) |
 | `basics.url`                             | `.contact a[itemprop=url]`               |
 | `work[].position`                        | `.role-title-line .title`                |
 | `work[].name`                            | `.role-title-line .company`              |
@@ -315,7 +428,6 @@ prefix per JSON Resume convention.
 | `work[].highlights[i].text`              | `.highlights li` (text node)             |
 | `work[].highlights[i].x_scope`           | `.highlights li > .scope`                |
 | `work[].highlights[i].x_tradeoff`        | `.highlights li > .tradeoff`             |
-| `work[].highlights[i].x_ai_assisted`     | `.highlights li[data-ai-assisted="true"]`|
 | `projects[].name`                        | `.project-name`                          |
 | `projects[].description`                 | `.project-desc`                          |
 | `projects[].x_metrics[]`                 | `.project-metrics` (joined with ` · `)   |
@@ -330,7 +442,208 @@ Date normalisation: incoming `YYYY-MM` → rendered "Mon YYYY"; incoming
 
 ---
 
-## 10. What this template is *not*
+## 10. Variants
+
+The system ships five opt-in variants. All apply via data attribute
+on the `<main class="page">` element (or on `<html>` for global
+scope). All are defined in `colors_and_type.css` under "Variants".
+Variants compose cleanly — `data-page="a4" data-mono
+data-density="compact" data-print="dual-pdf"` is a valid combination.
+
+**The two `data-print="…"` values are mutually exclusive.** Pick one:
+`ink-only` for a single-state white-paper PDF, or `dual-pdf` for a
+two-state PDF that shows cream on screen and prints white. `dual-pdf`
+is the default in `resume.html`.
+
+### 10.1 A4 paper
+
+```html
+<html data-page="a4">
+```
+
+Or scoped to a single page element:
+
+```html
+<main class="page" data-page="a4">…
+```
+
+Recomputes `--page-w`, `--page-h`, and the margin tokens so the
+measure stays in editorial range on A4 stock (210 × 297 mm,
+~16 mm sides, ~18 mm head/foot). The physical paper size is
+selected by CSS named pages declared in `resume.html`:
+
+```css
+@page letter { size: Letter; margin: 0; }
+@page a4     { size: A4;     margin: 0; }
+.page                       { page: letter; }
+.page[data-page="a4"]       { page: a4;     }
+```
+
+Chromium 85+ honours `page: <name>` on an element + a matching
+`@page <name>` rule, so the data attribute fully controls paper
+size with no top-level override. Engines without named-page
+support fall through to the default `@page` block (Letter).
+
+### 10.2 Monochrome (no oxblood accent)
+
+```html
+<main class="page" data-mono>…
+```
+
+Rebinds `--accent-on` to `--ink-1`. The candidate name renders in
+the same deep ink as the body text. Useful for B&W laser pipelines,
+strict-formatting clients, or recipients who explicitly request no
+colour.
+
+### 10.3 Print: ink-only
+
+```html
+<main class="page" data-print="ink-only">…
+```
+
+Flips the warm ground (`--bg`) to pure white **only when printing**.
+The screen preview is unaffected — the editorial warm cream still
+shows in the browser; only the printed paper / exported PDF flips.
+
+Use this when the recipient or pipeline expects white stock
+(traditional ATS conversion to B&W, conservative legal / financial
+orgs, recruiters who explicitly request "no background colour").
+
+Coloured text is **not** affected. `print-color-adjust: exact` keeps
+any explicitly-coloured ink rendering at its true value, so the
+oxblood `--accent-on` on the candidate name still prints in colour
+on the white field. Hairline rules (`--bg-rule`) are nudged from
+10% to 16% ink in this variant so they survive on white — the rule
+is a translucent ink overlay, and over warm cream its perceived
+contrast is slightly higher than over white, so the alpha bump
+compensates without changing the rule's visual weight.
+
+Compose with `data-mono` for the full "ink on white, no accent"
+look — equivalent to a traditional B&W résumé without rewriting
+any content. Compose with `data-page="a4"` or `data-density="compact"`
+as needed.
+
+### 10.4 Print: dual-pdf (default for PDF generation)
+
+```html
+<main class="page" data-print="dual-pdf">…
+```
+
+The canonical configuration for PDF generation from this design
+system, and the default in `resume.html`. Produces a single PDF that
+shows the warm cream editorial design on screen and prints on clean
+white paper, with the oxblood candidate name preserved in both
+states. No setting change required from the recipient — the dual
+behaviour is encoded in the PDF itself, not in the viewer.
+
+**How it works.** The variant strips the print-render background
+to `transparent`, so a headless-Chrome "print to PDF" produces a
+file with no baked-in background fill in the page content stream.
+That file is then post-processed by `build/dual-mode-pdf.js` (a
+pure UMD module included with this design system) which adds a
+warm-cream rectangle inside a view-only Optional Content Group
+(PDF spec §8.11, “Optional Content”). The OCG carries the load-
+bearing flags:
+
+```
+<< /Type /OCG
+   /Name (Editorial cream background)
+   /Usage << /Print << /PrintState /OFF >>
+             /View  << /ViewState  /ON  >> >> >>
+```
+
+Compliant PDF viewers (Adobe Reader, Chrome / Edge PDFium, macOS
+Preview, Firefox PDF.js, most ATS-embedded previewers) honour these
+flags: the cream renders when viewing, the print pipeline excludes
+it. Non-compliant viewers degrade to one of the two valid states
+(either always-cream or always-white) — never to a broken state.
+The reference implementation is Adobe Reader; verify there if
+uncertain.
+
+Coloured text in the page body — the oxblood name today, any future
+accents — sits in the main content stream, not in the OCG. It
+survives in both states. Colour printers render it in oxblood; B&W
+printers render it as a dark grey, exactly like coloured text in
+any ordinary PDF.
+
+**Agent invocation.** The full pipeline (parse → classify → fill →
+render → post-process → emit) is documented in `SKILL.md §The
+pipeline`. Short form for the post-process step:
+
+```js
+const { addOcgBackground } = require('./build/dual-mode-pdf.js');
+const dual = await addOcgBackground(rawPdfBytes);
+```
+
+The module is UMD — same file works in Node (`require`) and browser
+/ Puppeteer contexts (script tag → `window.DualModePdf`). pdf-lib
+is vendored at `build/vendor/pdf-lib.min.js`; no network dependency
+at build time. Pass `{ cream: '#XXXXXX' }` if you've forked `--bg`.
+
+The transform is idempotent-guarded — calling it twice on the same
+PDF throws rather than stacking two cream layers; regenerate from
+source instead. The guard matches on the OCG's layer name
+(`"Editorial cream background"`), so input PDFs carrying unrelated
+OCGs (watermarks, accessibility layers) won't trigger false
+rejections. The module also asserts no page rotation and CropBox
+equal to MediaBox — misaligned input fails loudly instead of
+producing a visually broken PDF.
+
+**Hairline rule alpha.** `--bg-rule` is bumped to 16% ink (from the
+default 10%) for the same reason as `ink-only`: the rules must
+remain visible when the cream OCG is hidden during print. On the
+cream view, this makes the rule appear very slightly heavier than
+the default — an acceptable trade for printability across the
+dual-mode contract. Do not lower it for visual nicety; printability
+is the load-bearing constraint.
+
+**Choosing between dual-pdf and ink-only.** The agent's per-company
+decision rule lives in `SKILL.md §Variant selection`. Both are
+valid shipping configurations; `dual-pdf` is the default because it
+covers both screen and print rooms in a single artifact, but for
+big-co ATS pipelines and conservative industries `ink-only` is the
+correct call. Never run `addOcgBackground()` on an ink-only PDF —
+there's no transparent background for the cream layer to sit
+behind, and the result would be a cream rectangle covering the
+text on screen.
+
+Pairs cleanly with `data-page="a4"`, `data-mono`, and
+`data-density="compact"`. **Does not compose with `data-print="ink-only"`**
+— the two `data-print` values are mutually exclusive.
+
+### 10.5 Compact density
+
+```html
+<main class="page" data-density="compact">…
+```
+
+The single lever for "this is 1.1 pages and I want 1.0". Body type
+drops 10.25 → 9.75 pt; leading 1.45 → 1.35; block-spacing tokens
+(`--s-6` / `--s-8` / `--s-9`) drop ~25%; page head/foot margins
+shrink 0.72 → 0.6 in. Roughly 6–9 lines of body reclaim per page.
+
+Deliberately untouched: `--fs-display` (the name), `--col-meta-w`
+(date strings keep the same metrics), `--rule-weight`, accent,
+families. Visual identity unchanged — just tighter.
+
+If compact still overflows, the content is the problem; trim a
+bullet. There is no `data-density="ultra-compact"`.
+
+### 10.6 Running footer
+
+Not a variant per se, but documented here: pages 2+ render a
+mono page indicator (`2 / 3`) in `--ink-quiet` at the bottom-right
+of the page via CSS `@page` margin boxes. Page 1 is suppressed via
+`@page <named>:first` so a one-page resume never shows a counter.
+Works for both `letter` and `a4` named pages.
+
+If the rendering pipeline strips `@page` margin boxes (some legacy
+print engines), the resume still prints — just without the page
+indicator. No content depends on it.
+
+---
+
+## 11. What this template is *not*
 
 - Not a one-pager. Not a creative CV. Not a portfolio site.
 - Not driven by colour, illustration, or graphic devices.
