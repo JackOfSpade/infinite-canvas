@@ -244,6 +244,9 @@ const DESC_CONFIGS = {
     navUrlField:         'url',  // job.url is already the individual job page
     jsonLdType:          'JobPosting',
     jsonLdField:         'description',
+    // ZR pay is a client-rendered "Estimated pay" chip — not in the ItemList or
+    // JSON-LD — so read it from the live DOM by money-text pattern during enrichment.
+    salaryFromDom:       true,
     // __NEXT_DATA__ fallback — path will be confirmed/corrected from desc-miss diag log.
     nextDataField:       'props.pageProps.job.description',
   },
@@ -268,6 +271,24 @@ const DESC_CONFIGS = {
     closeSelector: null,
   },
 };
+
+// Format a schema.org JobPosting.baseSalary object into a compact display string
+// ("$80,000 - $120,000/yr", "$55/hr"). Returns '' for anything unrecognizable so a
+// malformed block never poisons the salary field. Shared by the enrichment path
+// (ZipRecruiter/Glassdoor) — backfills salary the list extractor couldn't get.
+function formatJsonLdSalary(bs) {
+  if (!bs || typeof bs !== 'object') return '';
+  const cur = String(bs.currency || bs.salaryCurrency || '').toUpperCase();
+  const sym = (cur === 'USD' || cur === 'CAD' || cur === 'AUD' || cur === '') ? '$' : `${cur} `;
+  const v = bs.value && typeof bs.value === 'object' ? bs.value : bs;
+  const unitMap = { YEAR: '/yr', HOUR: '/hr', MONTH: '/mo', WEEK: '/wk', DAY: '/day' };
+  const unit = unitMap[String(v.unitText || '').toUpperCase()] || '';
+  const num = (x) => (x == null || isNaN(Number(x))) ? null : Number(x).toLocaleString('en-US');
+  const min = num(v.minValue), max = num(v.maxValue), val = num(v.value);
+  if (min != null && max != null) return `${sym}${min} - ${sym}${max}${unit}`;
+  if (val != null) return `${sym}${val}${unit}`;
+  return '';
+}
 
 // ── Challenge detection ───────────────────────────────────────────────────────
 async function getChallengeSignals(page) {
@@ -712,6 +733,14 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     }
     const fetchPage = detailPage ?? page;
 
+    // Fire the desc/date "miss" diagnostics on the FIRST failure ANYWHERE in the
+    // batch — not just i===0. A source can enrich job 0 fine but fail later ones
+    // (e.g. Glassdoor serving fr.glassdoor.ca pages that soft-authwall the JD on a
+    // regional domain we're not logged into), and the old i===0 gate captured zero
+    // page context in exactly that case — so a "7/14 descriptions empty" report
+    // had no evidence for WHY. Latches so we log one rich sample per batch.
+    let descMissDiagDone = false;
+    let dateMissDiagDone = false;
     try {
       for (let i = 0; i < enhanced.length; i++) {
         const job = enhanced[i];
@@ -811,10 +840,12 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           // per-job posting page is the only place to recover it.
           let text = '';
           let jsonLdDate = '';
+          let jsonLdSalary = ''; // formatted pay from JobPosting.baseSalary (if present)
           if (cfg.jsonLdType) {
             const ld = await fetchPage.evaluate((type, field, datePattern) => {
               let desc = '';
               let datePosted = '';
+              let baseSalary = null; // schema.org JobPosting.baseSalary (employer-stated pay)
               // Robust JSON-LD harvest: a block may be a single object, an ARRAY of
               // objects, or wrap nodes in an `@graph`; and `@type` may be a string
               // OR an array (["JobPosting"]). The old strict `d['@type'] !== type`
@@ -849,6 +880,11 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                 if (!datePosted && (d.datePosted || d.datePublished)) {
                   datePosted = String(d.datePosted || d.datePublished);
                 }
+                // Some employer-stated postings carry structured pay here even when
+                // the list extractor had none (ZipRecruiter ItemList = name+url only).
+                if (!baseSalary && d.baseSalary && typeof d.baseSalary === 'object') {
+                  baseSalary = d.baseSalary;
+                }
               }
               // DOM fallback for the date: some detail pages carry NO structured
               // date at all — verified on ZipRecruiter's new /jobs/{co}/{slug}
@@ -868,10 +904,11 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                   if (m) { datePosted = m[0]; break; }
                 }
               }
-              return { desc, datePosted };
-            }, cfg.jsonLdType, cfg.jsonLdField, POSTED_DATE_PATTERN).catch(() => ({ desc: '', datePosted: '' }));
+              return { desc, datePosted, baseSalary };
+            }, cfg.jsonLdType, cfg.jsonLdField, POSTED_DATE_PATTERN).catch(() => ({ desc: '', datePosted: '', baseSalary: null }));
             text = ld.desc;
             jsonLdDate = ld.datePosted;
+            jsonLdSalary = formatJsonLdSalary(ld.baseSalary);
           }
           // __NEXT_DATA__ fallback: walk a dot-separated field path into pageProps.
           if (!text && cfg.nextDataField) {
@@ -908,8 +945,30 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               return '';
             }).catch(() => '');
           }
+          // DOM salary fallback (ZipRecruiter): pay is rendered CLIENT-SIDE as an
+          // "Estimated pay" chip — not in JSON-LD, not in the search ItemList — so it
+          // can only be read from the live DOM. Match by money TEXT pattern (robust
+          // to ZR's churning Tailwind classes). Bounded wait: resolves instantly once
+          // the chip hydrates (the common case, since ZR estimates ~every job); only
+          // a genuinely pay-less page pays the full timeout.
+          if (cfg.salaryFromDom && !jsonLdSalary) {
+            const MONEY_SRC = String.raw`\$\s?\d[\d.,]*\s?[KkMm]?(?:\s?(?:[-–—]|to)\s?\$?\s?\d[\d.,]*\s?[KkMm]?)?(?:\s?\/\s?(?:yr|year|hr|hour|mo|month|wk|week))?`;
+            await fetchPage.waitForFunction((src) => {
+              const re = new RegExp(src);
+              return [...document.querySelectorAll('p')].some(p => re.test(p.textContent || ''));
+            }, { timeout: 1500 }, MONEY_SRC).catch(() => {});
+            jsonLdSalary = await fetchPage.evaluate((src) => {
+              const re = new RegExp(src);
+              for (const p of document.querySelectorAll('p')) {
+                const t = (p.textContent || '').trim();
+                if (t.length <= 40 && re.test(t)) { const m = t.match(re); return (m && m[0].trim()) || ''; }
+              }
+              return '';
+            }, MONEY_SRC).catch(() => '');
+          }
           // Diagnostic: first miss per batch — log page context for next bug report.
-          if (!text && i === 0) {
+          if (!text && !descMissDiagDone) {
+            descMissDiagDone = true;
             const diag = await fetchPage.evaluate(() => {
               const ldTypes = Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
                 .map(s => { try { return JSON.parse(s.textContent)['@type']; } catch { return '?'; } });
@@ -930,21 +989,29 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               };
             }).catch(() => null);
             if (diag) {
-              logger.info(`[BrowserScraper] ${overlayBase.srcName} desc-miss diag: url="${diag.url}" title="${diag.title}" ldTypes=[${diag.ldTypes.join(',')}] nextData=${diag.hasNextData} ndKeys="${diag.ndPagePropKeys}" body="${diag.bodyHead}"`);
+              logger.info(`[BrowserScraper] ${overlayBase.srcName} desc-miss diag (job ${i + 1}/${enhanced.length}): url="${diag.url}" title="${diag.title}" ldTypes=[${diag.ldTypes.join(',')}] nextData=${diag.hasNextData} ndKeys="${diag.ndPagePropKeys}" body="${diag.bodyHead}"`);
             }
           }
-          if (text) {
-            // Backfill the posted date from the posting's JSON-LD only when the
-            // list extractor didn't already capture one (don't clobber a good
-            // relative date like "3 days ago" with an ISO timestamp).
-            enhanced[i] = { ...job, snippet: text, ...(jsonLdDate && !job.posted ? { posted: jsonLdDate } : {}) };
+          if (text || jsonLdSalary) {
+            // Backfill description, posted date, and salary — each only when the list
+            // extractor didn't already capture it (don't clobber a good relative date
+            // like "3 days ago" with an ISO timestamp, or a stated salary with an
+            // estimate). Salary alone is enough to write the job (a pay-less list row
+            // that gained an estimate still wins), so the guard is `text || salary`.
+            enhanced[i] = {
+              ...job,
+              ...(text ? { snippet: text } : {}),
+              ...(jsonLdDate && !job.posted ? { posted: jsonLdDate } : {}),
+              ...(jsonLdSalary && !job.salary ? { salary: jsonLdSalary } : {}),
+            };
           }
           // Date-miss diagnostic (once per batch): a description was recovered but
           // NO posted date — not from the list extractor, the JobPosting JSON-LD,
           // OR the visible "Posted X ago" DOM fallback. Capture the JSON-LD @types
           // + any date-like fields present so the next bug report pinpoints WHERE
           // this source's date lives (vs. a bare "posted: ALL empty" with no cause).
-          if (text && !jsonLdDate && !job.posted && i === 0) {
+          if (text && !jsonLdDate && !job.posted && !dateMissDiagDone) {
+            dateMissDiagDone = true;
             const dateDiag = await fetchPage.evaluate(() => {
               const ldTypes = [];
               const dateFields = [];

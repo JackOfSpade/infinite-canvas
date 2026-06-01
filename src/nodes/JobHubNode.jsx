@@ -195,6 +195,21 @@ export function JobHubNode({ id, data }) {
     reset: resetSourceProgress,
   } = useSourceProgress(window.electronAPI?.onJobSourceProgress, id);
 
+  // Live AI-scoring progress (real-time path). The backend emits `scoring-progress`
+  // once per scored batch; we surface a determinate "N / M" counter in the 'scoring'
+  // state. Filtered by nodeId so concurrent hubs don't cross-update each other.
+  // Cleared to null at each scoring-phase entry (see the scoreJobs call sites) so a
+  // finished run's final count never lingers; the render gate (hubState==='scoring')
+  // also hides it outside the scoring phase.
+  const [scoringProgress, setScoringProgress] = useState(null);
+  useEffect(() => {
+    if (!window.electronAPI?.onScoringProgress) return undefined;
+    return window.electronAPI.onScoringProgress((payload) => {
+      if (payload?.nodeId && payload.nodeId !== id) return;
+      setScoringProgress({ scored: payload.scored ?? 0, total: payload.total ?? 0 });
+    });
+  }, [id]);
+
   const scheduleCleanSourceCardDismiss = useCallback((reason = 'all-sources-terminal') => {
     if (sourceDismissTimerRef.current) return;
     sourceDismissTimerRef.current = setTimeout(() => {
@@ -515,6 +530,7 @@ export function JobHubNode({ id, data }) {
         }
       } else if (currentState === 'done') {
         if (freshJobs.length > 0) {
+          setScoringProgress(null); // clear prior counter; backend re-paints "0 / M"
           updateGlobal(currentId, {
             hubState: 'scoring',
             scrapeWarnings: filteredWarnings,
@@ -1004,6 +1020,7 @@ export function JobHubNode({ id, data }) {
     const currentId = id;
 
     // Step 4: Scoring
+    setScoringProgress(null); // clear any prior run's counter; backend re-paints "0 / M"
     updateGlobal(currentId, { hubState: 'scoring', jobCount: jobs.length });
     const scoreResult = await window.electronAPI.scoreJobs({
       jobs,
@@ -2248,6 +2265,7 @@ export function JobHubNode({ id, data }) {
             statusLabel={statusLabel}
             hubState={hubState}
             totalSourceJobs={totalSourceJobs}
+            scoringProgress={scoringProgress}
             resumeSummary={data.resumeSummary}
             activeSourceId={lastActiveSource}
             onReset={resetHandler}

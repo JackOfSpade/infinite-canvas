@@ -184,10 +184,19 @@ export const GOOGLE_JOBS_CONFIG = {
   waitUntil: 'domcontentloaded',
 };
 
-// Google Jobs renders cards client-side inside the ibp=htl;jobs search panel.
-// Class names like .tNxQIb / .EimVGf are obfuscated hashes that rotate on
-// deploys — always pair them with semantic fallbacks ([role="heading"] etc.).
-// data-share-url is the most stable URL anchor; cards have no <a> tags.
+// Google Jobs (served at ?q=…&udm=8; the old ibp=htl;jobs param now 302-redirects
+// there). The udm=8 RESULT LIST cards are UNCHANGED from the old panel — still
+// .EimVGf / [jscontroller="b11o3b"] containers, each with a data-share-url and a
+// .GoEOPd content group (title .tNxQIb, then company + location divs). (The
+// data-result-index / aria-label="Job details" markup only exists in the per-job
+// DETAIL view you reach by clicking a card — NOT the list we scrape; don't target
+// it here.) Class names are obfuscated hashes that rotate on deploys — pair them
+// with semantic fallbacks ([role="heading"] etc.). Verified against a live udm=8
+// list card 2026-06.
+//
+// NOTE: a thin result count (e.g. 1) is almost always bot-throttling of the stealth
+// session (datacenter/VPN egress), NOT stale selectors — confirm in a real browser
+// before "fixing" the selectors.
 //
 // Does NOT throw SITE_CHANGED on 0 — bot detection legitimately blocks the
 // jobs panel entirely; 0 means "blocked", not "broken selectors".
@@ -195,6 +204,10 @@ export const GOOGLE_JOBS_EXTRACTOR = `
 (function() {
   const jobs = [];
   const cards = document.querySelectorAll('.EimVGf, [jscontroller="b11o3b"]');
+
+  // Free-form pay chip ("$50K–70K a year", "18–22 an hour") — fallback when the
+  // semantic aria-label="Salary $X" anchor isn't on the card.
+  const payRe = /\\$?\\s?\\d[\\d.,]*\\s?[KkMm]?(?:\\s?[–-]\\s?\\$?\\s?\\d[\\d.,]*\\s?[KkMm]?)?\\s?(?:an hour|a year|a month|a week|per (?:hour|year|month)|\\/(?:yr|hr|year|hour|mo))/i;
 
   cards.forEach(card => {
     try {
@@ -204,12 +217,12 @@ export const GOOGLE_JOBS_EXTRACTOR = `
       const title = titleEl?.innerText?.trim() || '';
       if (!title || title === 'Jobs') return;
 
-      // Company + location: positional children of the content grouping div.
+      // Company + location: positional children of the content grouping div
+      // (.GoEOPd > [title, company, location]). Location line is "City, ST • via Source".
       const contentGroup = card.querySelector('.GoEOPd') || titleEl?.parentElement;
       const contentDivs = contentGroup ? Array.from(contentGroup.querySelectorAll(':scope > div')) : [];
       const company = contentDivs[1]?.innerText?.trim() || '';
-      const locationRaw = contentDivs[2]?.innerText?.trim() || '';
-      const location = locationRaw.split(' • ')[0].trim();
+      const location = (contentDivs[2]?.innerText?.trim() || '').split(/[•·]/)[0].trim();
 
       // Posted date + employment type from bare <span> elements (no class attr).
       const bareSpans = Array.from(card.querySelectorAll('span:not([class])'))
@@ -217,7 +230,19 @@ export const GOOGLE_JOBS_EXTRACTOR = `
       const posted = bareSpans.find(s => /\\d+\\s+(day|week|hour|month)/i.test(s) || s === 'Just now') || '';
       const empType = bareSpans.find(s => /full[- ]?time|part[- ]?time|contract|intern/i.test(s)) || '';
 
-      jobs.push({ title, company, location, salary: '', snippet: empType, url, posted, source: 'google' });
+      // Salary: prefer the semantic aria-label="Salary $X" anchor (keeps the currency
+      // even when the visible chip drops it); fall back to a money-text scan of the card.
+      let salary = '';
+      const salAria = card.querySelector('[aria-label^="Salary"]');
+      if (salAria) salary = (salAria.getAttribute('aria-label') || '').replace(/^Salary\\s*/i, '').trim();
+      if (!salary) {
+        for (const el of card.querySelectorAll('span, div')) {
+          const t = (el.innerText || '').trim();
+          if (t && t.length <= 40 && payRe.test(t)) { salary = t; break; }
+        }
+      }
+
+      jobs.push({ title, company, location, salary, snippet: empType, url, posted, source: 'google' });
     } catch {}
   });
 

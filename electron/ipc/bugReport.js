@@ -508,7 +508,32 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
 
   let nodeDiagMarkdown = '';
   if (nodeInternals && nodeInternals.length > 0) {
-    const rows = nodeInternals.map(n => {
+    // Cap routine result cards (plain jobcards with no anomalies) so a large
+    // results canvas doesn't blow the clipboard char budget — at ~150 chars/row,
+    // 130+ jobcards alone exceed 18KB and force the (far more valuable) main-process
+    // logs + event history to be dropped entirely. A routine jobcard's data
+    // (score, source, url) is already summarized in the Taxonomy section above, so
+    // omitting the tail beyond a sample loses no diagnostic signal. Any jobcard
+    // with an anomaly (selected/hidden/editing/resizing/error) is ALWAYS kept.
+    const ROUTINE_JOBCARD_CAP = 15;
+    const isRoutineJobcard = (n) => {
+      if (n.type !== 'jobcard' || n.selected || n.hidden) return false;
+      const cs = compStateById[n.id] || {};
+      if (cs.isEditing || cs.isResizing || cs.hasEdgeCursor) return false;
+      if (nodeDataById[n.id]?.errorMessage) return false;
+      return true;
+    };
+    let routineShown = 0;
+    let routineOmitted = 0;
+    const nodesToRender = [];
+    for (const n of nodeInternals) {
+      if (isRoutineJobcard(n)) {
+        if (routineShown >= ROUTINE_JOBCARD_CAP) { routineOmitted++; continue; }
+        routineShown++;
+      }
+      nodesToRender.push(n);
+    }
+    const rows = nodesToRender.map(n => {
       const cs = compStateById[n.id] || {};
       const flags = [
         n.hidden ? 'hidden' : null,
@@ -670,7 +695,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
 | ID | Type | Selected | Position | Font | T-Color | B-Color | width (prop) | style.width | measured.width | currentSize | state flags | data preview |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 ${rows}
-`;
+${routineOmitted > 0 ? `\n_+ ${routineOmitted} routine jobcard row(s) omitted to preserve the clipboard budget — plain score+url cards with no anomalies (selected/hidden/editing/error); their score/source/role breakdown is in the Taxonomy section above. Anomalous jobcards are always shown._\n` : ''}`;
   }
 
   // ── Media player state section ────────────────────────────────────────────

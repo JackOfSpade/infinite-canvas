@@ -758,6 +758,24 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
 // ── WeWorkRemotely RSS Feed ─────────────────────────────────────────────────
 // RSS/XML feed at weworkremotely.com — no browser, no rate limits, no WAF.
 
+// WWR's RSS carries NO structured salary field, but ~40% of postings state pay in
+// the description body. Pull the first $ amount/range that is either (a) followed by
+// an explicit pay unit (/yr, per year, annually, a year/hour) — a strong standalone
+// signal — or (b) anchored to a salary keyword within ~40 chars. Requiring comma-
+// grouped thousands ($80,000, not $80) avoids matching funding/revenue figures like
+// "$100M in bookings". Returns '' when no confident salary is present.
+function extractSalaryFromText(text) {
+  if (!text) return '';
+  const s = String(text).replace(/\s+/g, ' ');
+  const UNIT = /\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?\s?(?:\/\s?(?:yr|year|hr|hour)|per (?:year|hour|annum)|annually|a year|an hour)/i;
+  const KEYWORD = /\b(?:salary|salaries|compensation|base pay|pay range|pay rate|pay)\b[^$]{0,40}(\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?)/i;
+  const m1 = s.match(UNIT);
+  if (m1) return m1[0].trim();
+  const m2 = s.match(KEYWORD);
+  if (m2) return m2[1].trim();
+  return '';
+}
+
 /**
  * Fetch jobs from WeWorkRemotely's RSS feed (bypasses Puppeteer entirely).
  */
@@ -812,7 +830,7 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
       title: jobTitle,
       company,
       location: regionMatch?.[1]?.trim() || 'Remote',
-      salary: '',
+      salary: extractSalaryFromText(descText),
       snippet: descText,
       description: descText,
       url: linkMatch?.[1]?.trim() || '',

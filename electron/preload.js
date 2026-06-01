@@ -65,6 +65,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   appendJobsHistory: (args) => ipcRenderer.invoke('append-jobs-history', args),
 
   onJobSourceProgress: createListener('job-source-progress'),
+  // Per-batch AI-scoring progress (real-time path). Payload: { nodeId, scored, total, batch, batchTotal }.
+  onScoringProgress: createListener('scoring-progress'),
   resolveJobSource: (args) => ipcRenderer.invoke('resolve-job-source', args),
   resumeJobSource:  (args) => ipcRenderer.invoke('resume-job-source', args),
   // Crash/quit recovery: detect an incomplete prior run, or clear it. Resuming

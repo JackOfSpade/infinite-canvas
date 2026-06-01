@@ -313,18 +313,25 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // back to the listing-card excerpt. Per-query `X/Y expanded` log
         // lines otherwise need to be eyeballed to notice.
         // Fields like title/company/location are too free-form to validate here.
+        // A bare comma-grouped thousands range ("70,000 - 95,000") is a salary that
+        // merely lost its currency symbol — accept it as monetary so a source that
+        // serves numeric-only pay isn't flagged "garbage". Truly ambiguous tiny
+        // values ("40 - 50") still don't match (no thousands grouping), which is
+        // the right call — they're uninformative in a salary field.
         const looksLikeMoney = (s) =>
-          /\$|\d+\s*k\b|per (?:hour|year|week|month)|\/h(?:r|our)|\/yr|\/year|hourly|annually|\ba year\b|\ban hour\b/i.test(s);
+          /\$|\d+\s*k\b|\d{1,3}(?:,\d{3})+|per (?:hour|year|week|month)|\/h(?:r|our)|\/yr|\/year|hourly|annually|\ba year\b|\ban hour\b/i.test(s);
         const SHORT_DESC_THRESHOLD = 400; // listing snippets are typically <300 chars
         // Per-source salary expectation — gates the "0 salaries at all" alarm so it
         // never cries wolf on sources that structurally omit salary. Grounded in
-        // the extractors (electron/extractors/apiExtractors.js):
-        //   NEVER  — hardcode salary:'' (no comp in the feed at all): linkedin
-        //            (guest API), greenhouse, lever boards.
+        // the extractors (electron/extractors/apiExtractors.js + electron/extractors/jobs.js):
+        //   NEVER  — extractor has no pay path at all (hardcoded salary:''):
+        //            linkedin (guest API), greenhouse, lever boards.
         //   ALWAYS — carry comp on ~every posting (PositionRemuneration): usajobs.
-        //   else   — OPTIONAL: postings legitimately omit pay (indeed/glassdoor/
-        //            ziprecruiter/remoteok), so 0% is only suspicious on a sample
-        //            big enough that a normal batch would surface at least one.
+        //   else   — OPTIONAL: postings legitimately omit pay, so 0% is only suspicious
+        //            on a sample big enough that a normal batch would surface ≥1. This
+        //            now INCLUDES ziprecruiter (DOM "Estimated pay" chip), weworkremotely
+        //            (parsed from the RSS description), and google (aria-label salary) —
+        //            all gained best-effort extraction, so a clean 0% IS worth flagging.
         const SALARY_NEVER = new Set(['linkedin', 'greenhouse', 'lever']);
         const SALARY_ALWAYS = new Set(['usajobs']);
         const ZERO_SALARY_MIN_SAMPLE = 20;
@@ -460,7 +467,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         for (const [src, q] of Object.entries(qualBySource)) {
           const pct = q.total ? Math.round((q.salaryPresent / q.total) * 100) : 0;
           let note;
-          if (q.salaryPresent === 0) note = 'none carried — no salary values to validate';
+          if (q.salaryPresent === 0) {
+            note = SALARY_NEVER.has(src)
+              // NOT "the source has no salary" — these sites DO show pay; our
+              // extractor just doesn't capture it (ZR: ItemList JSON-LD is name+url
+              // only, enrichment pulls description not baseSalary; WWR: RSS has no
+              // salary field; Google: panel salary chip unread). A known extraction
+              // gap, not a regression — and a backlog item, not a clean ✅.
+              ? 'none carried — our extractor doesn’t capture pay for this source yet (known gap, not a regression)'
+              : 'none carried — no salary values to validate';
+          }
           else if (q.salaryGarbage === 0) note = 'all monetary ✅';
           else note = `${q.salaryGarbage} non-monetary ⚠ (see field-quality issue above)`;
           covParts.push(`\`${src}\`: ${q.salaryPresent}/${q.total} present (${pct}%) — ${note}`);

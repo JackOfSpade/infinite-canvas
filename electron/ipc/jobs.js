@@ -708,7 +708,9 @@ function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
     // SITE_CHANGED on 0 (bot detection can block the panel entirely). Last: public,
     // non-interactive, fast.
     google:          { extractor: GOOGLE_JOBS_EXTRACTOR,  config: GOOGLE_JOBS_CONFIG,  maxPages: 1,
-                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(q + ' jobs')}&ibp=htl;jobs` },
+                       // Google deprecated ibp=htl;jobs → it 302s to ?q=…&udm=8 (the new
+                       // Jobs layout). Build udm=8 directly to skip the redirect hop.
+                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(q + ' jobs')}&udm=8` },
   };
 
   const tasks = [];
@@ -2152,6 +2154,27 @@ Be creative with suggestedRoleQueries — think about what career directions the
       return [null]; // a single job that still failed is genuinely unscoreable
     };
 
+    // Live per-batch scoring progress → the hub's 'scoring' state can show a
+    // determinate "N / M scored" counter instead of an indeterminate spinner.
+    // Real-time path only (the async Batch-API path returns above — nothing to
+    // report live). Granularity is per top-level batch (~jobScoringBatchSize jobs),
+    // since a batch resolves atomically. Best-effort: a destroyed sender (window
+    // closed mid-run) is a silent no-op — progress is cosmetic, never blocks scoring.
+    const emitScoringProgress = (scored) => {
+      try {
+        if (event.sender && !event.sender.isDestroyed()) {
+          event.sender.send('scoring-progress', {
+            nodeId: nodeId || null,
+            scored,
+            total: toScore.length,
+            batch: batches,
+            batchTotal: scoringBatches.length,
+          });
+        }
+      } catch { /* sender gone — ignore */ }
+    };
+
+    emitScoringProgress(0); // paint "0 / M" immediately so the counter isn't blank
     for (const batch of scoringBatches) {
       // Guard: Check if window was closed between batches
       if (signal?.aborted) break;
@@ -2167,6 +2190,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
         // two fallback strings stay in lockstep (see jobBatchReconcile.js).
         scoredJobs.push(buildScoredJob(job, score, { fallbackScore: UNSCORED_FALLBACK_SCORE, allNull }));
       });
+      emitScoringProgress(scoredJobs.length);
     }
 
     // Sort by score descending

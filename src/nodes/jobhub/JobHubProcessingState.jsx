@@ -6,6 +6,7 @@ export function JobHubProcessingState({
   statusLabel,
   hubState,
   totalSourceJobs,
+  scoringProgress,
   resumeSummary,
   activeSourceId,
   onReset,
@@ -76,6 +77,11 @@ export function JobHubProcessingState({
       {hubState === 'searching' && totalSourceJobs > 0 && (
         <p className="text-blue-400/60 text-[10px] mt-1">
           {totalSourceJobs} jobs found so far
+        </p>
+      )}
+      {hubState === 'scoring' && scoringProgress?.total > 0 && (
+        <p className="text-blue-400/60 text-[10px] mt-1">
+          {scoringProgress.scored} / {scoringProgress.total} scored
         </p>
       )}
       {resumeSummary && (
