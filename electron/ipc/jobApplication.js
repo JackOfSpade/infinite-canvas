@@ -90,19 +90,16 @@ Prefer concrete, recent, verifiable facts with rough dates. If you cannot find r
 
 /** Fill the design system's résumé markup, tailored to the job + research. */
 async function generateResumeMain({ careerData, job, research }, signal) {
-  const prompt = `You are an elite résumé writer using the "Editorial" design system. Produce ONE \`<main class="page">…</main>\` HTML block that fills the design system's EXACT markup, tailored to the target job and company research.
+  // Static, job-independent block → CACHED PREFIX. The candidate's careerData and
+  // the design-system instructions/markup are byte-identical across every
+  // application generated this session, so résumé call 2..N read this from cache
+  // (~10% of input cost on Opus 4.8) instead of re-billing it. Only the per-job
+  // job/research live in the dynamic prompt below. Keep these two byte-stable.
+  const cachedPrefix = `You are an elite résumé writer using the "Editorial" design system. Produce ONE \`<main class="page">…</main>\` HTML block that fills the design system's EXACT markup, tailored to the TARGET JOB and company research provided at the end.
 
 CAREER DATA (the candidate — every claim must be grounded in this; see TRUTHFULNESS & FRAMING below):
 """
 ${careerData}
-"""
-
-TARGET JOB (the "Description" is what we scraped — it may be full, partial, or empty):
-${jobBlock(job)}
-
-COMPANY & ROLE CONTEXT (live web research — always covers the company, and the role too when the scraped Description was thin). Combine it with the scraped Description above for the full picture, and tailor emphasis, ordering, and keywords to it:
-"""
-${research}
 """
 
 MARKUP TO MIRROR (copy these class names and structure exactly; replace only the content):
@@ -126,20 +123,38 @@ RULES:
   • Design-conscious / startup / craft-oriented company → \`data-print="dual-pdf"\` (the design system default — warm cream on screen, background automatically removed when printed).
   • Big-company ATS / enterprise / regulated / finance back-office → \`data-print="ink-only"\` (flat white; also add \`data-mono\` for very conservative fields: defense, big-law, traditional banking IT).
   • Non-US recipient → also add \`data-page="a4"\`.`;
-  return await callLLMRaw(prompt, { signal, task: 'application-resume' });
+
+  const prompt = `TARGET JOB (the "Description" is what we scraped — it may be full, partial, or empty):
+${jobBlock(job)}
+
+COMPANY & ROLE CONTEXT (live web research — always covers the company, and the role too when the scraped Description was thin). Combine it with the scraped Description above for the full picture, and tailor emphasis, ordering, and keywords to it:
+"""
+${research}
+"""
+
+Now produce the single \`<main class="page">…</main>\` block for THIS job, grounded in the CAREER DATA and following the markup + rules above.`;
+  return await callLLMRaw(prompt, { signal, task: 'application-resume', cachedPrefix });
 }
 
 /** Structured cover letter the renderer lays out on the design-system letterhead. */
 async function generateCoverLetterFields({ careerData, job, research }, signal) {
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-  const prompt = `Write a tailored cover letter for this candidate applying to this job. Return JSON matching the provided schema.
+  // Static, job-independent block → CACHED PREFIX (careerData + writing rules are
+  // byte-identical across every application this session; only the job, research,
+  // and date vary). Keep byte-stable so cover-letter call 2..N hit the cache.
+  const cachedPrefix = `Write a tailored cover letter for a candidate applying to a job. Return JSON matching the provided schema, grounded in the CAREER DATA below and the target job + research provided at the end.
 
 CAREER DATA (use ONLY facts found here for the candidate's name, contact, and evidence):
 """
 ${careerData}
 """
 
-TARGET JOB (the "Description" is what we scraped — it may be full, partial, or empty):
+WRITING RULES:
+- 3-4 body paragraphs. Each ties SPECIFIC career-data evidence to SPECIFIC job requirements, and references a genuine detail from the research (a product, a value, or a recent development).
+- Authentic, specific, and concise — not a generic template. Ground every claim in the career data: never invent employers, titles, dates, or numbers. You MAY make fair inferences from demonstrated experience (a capability a recruiter would confidently read from real work, not a new credential) and frame the candidate's genuine accomplishments in the job's language to connect the dots for the reader.
+- Pull "name", "tagline", and "contact" (location, email, phone, one URL) from the career data; omit any contact item not present.`;
+
+  const prompt = `TARGET JOB (the "Description" is what we scraped — it may be full, partial, or empty):
 ${jobBlock(job)}
 
 COMPANY & ROLE CONTEXT (live web research — always covers the company, and the role too when the scraped Description was thin). Combine it with the scraped Description above for the full picture:
@@ -147,12 +162,9 @@ COMPANY & ROLE CONTEXT (live web research — always covers the company, and the
 ${research}
 """
 
-RULES:
-- 3-4 body paragraphs. Each ties SPECIFIC career-data evidence to SPECIFIC job requirements, and references a genuine detail from the research (a product, a value, or a recent development).
-- Authentic, specific, and concise — not a generic template. Ground every claim in the career data: never invent employers, titles, dates, or numbers. You MAY make fair inferences from demonstrated experience (a capability a recruiter would confidently read from real work, not a new credential) and frame the candidate's genuine accomplishments in the job's language to connect the dots for the reader.
-- Pull "name", "tagline", and "contact" (location, email, phone, one URL) from the career data; omit any contact item not present.
-- "date" = "${today}". "recipient" like "Hiring Team\\n${job.company || 'the company'}". "salutation" like "Dear ${job.company || 'Hiring'} Team,". "closing" like "Sincerely,".`;
-  const result = await callLLMText(prompt, { signal, task: 'application-cover-letter', responseSchema: APPLICATION_COVER_LETTER_SCHEMA });
+FILL THESE FIELDS for THIS job (per the CAREER DATA and writing rules above):
+- "date" = "${today}". "recipient" = the addressee block, one item per line separated by a literal \\n: first line the addressee, then the company, e.g. "Hiring Team\\n${job.company || 'the company'}" (optionally add a third line for the team/department if the research makes it clear). "salutation" like "Dear ${job.company || 'Hiring'} Team,". "closing" like "Sincerely,". "signatureTitle" = the TARGET role being applied to + " · candidate", i.e. "${job.title || 'the role'} · candidate".`;
+  const result = await callLLMText(prompt, { signal, task: 'application-cover-letter', responseSchema: APPLICATION_COVER_LETTER_SCHEMA, cachedPrefix });
   return result;
 }
 
@@ -173,6 +185,19 @@ async function copyUnique(src, dir, desired) {
   }
   await fs.promises.copyFile(src, target);
   return target;
+}
+
+// Last application generation — captured so the bug reporter can SEE the model's
+// actual résumé markup + cover-letter fields. That's the ONE place an application
+// rendering bug shows (a stray mid-sentence newline, a literal "\n"/"\t", broken
+// structure) — without it those are undebuggable from a report. In-memory,
+// last-one-wins, never persisted (the PDFs already are).
+let lastApplication = null;
+export function getApplicationTelemetry() {
+  return lastApplication;
+}
+function recordApplicationTelemetry(data) {
+  lastApplication = { ts: Date.now(), ...data };
 }
 
 export function registerJobApplicationHandlers() {
@@ -205,6 +230,25 @@ export function registerJobApplicationHandlers() {
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     const coverLetter = await generateCoverLetterFields({ careerData, job, research }, signal);
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+
+    // Capture the raw model output BEFORE rendering, so a render/PDF failure still
+    // leaves the LLM fields visible in a bug report (the prose is where newline /
+    // escape bugs live). Stored verbatim — the reporter stringifies for inspection.
+    recordApplicationTelemetry({
+      nodeId: nodeId || null,
+      jobTitle: job?.title || '',
+      company: job?.company || '',
+      coverLetter: {
+        salutation:     coverLetter?.salutation || '',
+        recipient:      coverLetter?.recipient || '',
+        paragraphs:     Array.isArray(coverLetter?.paragraphs) ? coverLetter.paragraphs : [],
+        closing:        coverLetter?.closing || '',
+        signatureTitle: coverLetter?.signatureTitle || '',
+        contact:        Array.isArray(coverLetter?.contact) ? coverLetter.contact : [],
+      },
+      resumeHtmlSample: String(resumeMainHtml || '').slice(0, 1500),
+      resumeHtmlLen:    String(resumeMainHtml || '').length,
+    });
 
     // 4. Render both to PDF.
     const { resumePdfPath, coverPdfPath, workDir } = await renderApplicationPdfs({

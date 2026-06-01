@@ -240,10 +240,13 @@ async function getChallengeSignals(page) {
  * @param {string} [profileDir] — override for the Puppeteer userDataDir
  * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
  */
-export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null) {
+export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '') {
   const userDataDir  = profileDir || await getUserDataDir().catch(() => getProfileDir());
   const queryList    = Array.isArray(queries) ? queries.filter(Boolean) : [queries].filter(Boolean);
   const days         = maxAgeDays ? Math.max(1, Math.floor(maxAgeDays)) : 21;
+  // Board-ready target location → Indeed's `&l=` filter. Empty → omitted
+  // (nationwide). Without this a location-free query searched the whole US.
+  const locParam     = String(location || '').trim() ? `&l=${encodeURIComponent(String(location).trim())}` : '';
   const resultCap    = Number.isFinite(JOB_RESULT_CAP) ? JOB_RESULT_CAP : Infinity;
   const maxPages     = JOB_MAX_PAGES;
 
@@ -488,7 +491,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         if (allJobs.length >= resultCap) break outer;
 
         const start = p * 10;
-        const url   = `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}&fromage=${days}${start > 0 ? `&start=${start}` : ''}`;
+        const url   = `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}${locParam}&fromage=${days}${start > 0 ? `&start=${start}` : ''}`;
 
         try {
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -541,20 +544,28 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           });
 
           const LOGIN_POLL_MS = 2000;
-          const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
-          const loginDeadline = Date.now() + LOGIN_TIMEOUT_MS;
+          const LOGIN_HEARTBEAT_MS = 30_000;
           let loggedIn = false;
+          const loginWaitStart = Date.now();
+          let loginHeartbeatAt = Date.now();
 
-          while (Date.now() < loginDeadline) {
-            if (signal?.aborted) break;
+          // Wait INDEFINITELY for the user to sign in — never skip on a timer. The
+          // escape hatches are an abort (Reset / hub close) or the user closing the
+          // window; a heartbeat keeps an unattended wait visible in the logs.
+          while (true) {
+            if (signal?.aborted || page.isClosed()) break;
             await new Promise(r => setTimeout(r, LOGIN_POLL_MS));
-            if (signal?.aborted) break;
+            if (signal?.aborted || page.isClosed()) break;
             const currentUrl = page.url();
             const isAuthPage = /secure\.indeed\.com\/(auth|login)|indeed\.com\/(auth|login|signin)/i.test(currentUrl);
             if (currentUrl.includes('indeed.com') && !isAuthPage) {
               loggedIn = true;
               logger.info(`[Indeed/Browser] Login complete — resuming q=${qi + 1} p=${p + 1}`);
               break;
+            }
+            if (Date.now() - loginHeartbeatAt >= LOGIN_HEARTBEAT_MS) {
+              loginHeartbeatAt = Date.now();
+              logger.info(`[Indeed/Browser] still waiting for Indeed sign-in (${Math.round((Date.now() - loginWaitStart) / 60000)} min elapsed)`);
             }
           }
 

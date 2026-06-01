@@ -6,6 +6,14 @@
  * relevant listing because the source uses some format we missed.
  */
 
+// Relative-date pattern for the visible "Posted X ago" label some detail pages
+// expose with NO structured date (verified on ZipRecruiter's /jobs/{co}/{slug}
+// pages: no JSON-LD / __NEXT_DATA__ / <time>). A source string so it can be both
+// injected into a browser-context evaluate (manualScraper's description harvest)
+// AND unit-tested here against parsePostedDate. Captures the clean phrase —
+// "28 days ago", "just posted", etc. — which parsePostedDate turns into an age.
+export const POSTED_DATE_PATTERN = '(\\d+\\+?\\s*(?:second|minute|hour|day|week|month|year)s?\\s*ago|just\\s*posted|posted\\s*today|just\\s*now)';
+
 // Relative-unit token → day multiplier. Each pattern is fully anchored (^…$)
 // so a token matches EXACTLY its set — there's no "starts-with-mo" overlap
 // between months ("mo") and minutes ("m"), which is the disambiguation the old

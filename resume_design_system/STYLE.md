@@ -96,10 +96,29 @@ sweet spot.
 
 ### 2.4 Numerals
 
-Tabular numerals are enabled globally via
-`font-feature-settings: "tnum"`. Date columns and metric lines align
-across roles. Do not override this anywhere; if you need proportional
-numerals in body prose, scope the override to that span.
+Numerals are **proportional (the font default), never tabular.** Do
+**not** enable `tnum` / `font-variant-numeric: tabular-nums` anywhere —
+not globally, not on the date column, not on metrics.
+
+This is a parse-safety rule, not an aesthetic one. Inter's (and Source
+Serif 4's) tabular figures are GSUB-substituted glyphs with no `cmap`
+entry. When Chrome prints to PDF and subsets the font, it builds the
+`ToUnicode` map by reverse-lookup through the `cmap`, fails to find the
+tabular digits, and assigns them **Private-Use-Area codepoints**. The
+numbers still *render* correctly, but they extract as invisible junk —
+so every `$`, `%`, QPS, and date silently disappears from the PDF text
+layer, and therefore from ATS parsing, copy-paste, and screen readers.
+For a résumé whose entire thesis is "numbers carry the signal," that is
+the single worst failure the document can have, and it is invisible on
+screen. (Verified empirically: with `tnum` on, two independent PDF text
+extractors returned **zero** digit characters from the résumé.)
+
+Digit-column alignment is recovered structurally where it matters: the
+date and metric columns are right-aligned by their grid cell
+(`--col-meta-w`), not by monospaced figures, so dropping `tnum` costs
+nothing visible. See §8 and the comments in `colors_and_type.css`
+(global `font-feature-settings`) and `resume.css` (the `.role-dates`
+rule).
 
 ---
 
@@ -395,7 +414,11 @@ it must be ink, embedded as text, and placed in body flow.
 - Render via Chrome/Chromium "Save as PDF" or `puppeteer` with
   `tagged-pdf` enabled.
 - Confirm: `Ctrl+A` → copy → paste into plain text round-trips all
-  content in reading order. Test after every major change.
+  content in reading order. Test after every major change. **Pay
+  specific attention to digits** — a font feature (`tnum`) can make
+  numbers render but not extract (see §2.4). The round-trip is only
+  "verified" if every `$`, `%`, and date survives the paste. Grep the
+  pasted text for the figures you expect; do not eyeball it.
 - The header (name / tagline / contact) lives inside `<main>`, not
   the page's chrome — parsers that drop chrome will still see contact info.
 - Semantic landmarks: `<main>`, `<header>`, `<section aria-labelledby>`,
@@ -641,9 +664,105 @@ If the rendering pipeline strips `@page` margin boxes (some legacy
 print engines), the resume still prints — just without the page
 indicator. No content depends on it.
 
+### 10.7 Page-margin model — why vertical margins live on `@page`
+
+The page margins are split across two mechanisms, deliberately:
+
+- **Top / bottom margins live on `@page`** (`margin: 0.72in 0` for
+  `letter`, `18mm 0` for `a4`). Page margins are the one thing CSS
+  paged media repeats natively on *every* page.
+- **Side margins live as `.page` padding** (`padding: 0 var(--margin-side)`),
+  so they stay token-driven — `a4` (16mm) and `data-density="compact"`
+  recompute the measure through `--margin-side` without touching the
+  vertical rhythm.
+
+**Do not move the vertical margins back into `.page` padding.** Padding
+on an element that fragments across pages is applied only at the first
+fragment (top) and the last fragment (bottom). A résumé that runs to
+two pages then renders page 2 with its content jammed against the top
+paper edge — no top margin at all. Putting the vertical margins on
+`@page` is what makes page 1 and pages 2+ identical. The `@page`
+vertical margin also gives the running-footer margin box (§10.6) a real
+band to render in.
+
+Caveat: `@page` rules can't read CSS custom properties, so the values
+are literal (`0.72in`, `18mm`). `data-density="compact"` therefore does
+*not* shrink the head/foot margin on multi-page output the way it shrinks
+side margins — a ~0.12in difference, accepted in exchange for consistent
+pagination. Side margins (the measure) still respond to every variant.
+
 ---
 
-## 11. What this template is *not*
+## 11. Cover letter
+
+The system ships a second document surface: `cover-letter.html`
+(+ `cover-letter.css`). It loads `colors_and_type.css`, then
+`resume.css` (for the shared page chrome, paged-media model, the
+letterhead component, `.meta-row`, and `.sep`), then `cover-letter.css`
+last. It is the same paper, ink, palette, and page geometry as the
+résumé — a matched pair, not a separate design.
+
+### 11.1 The one serif-body surface
+
+The résumé sets body copy in **Inter** because it is a scannable data
+grid. The cover letter is the system's only **long-form prose** surface,
+so its body is set in **Source Serif 4** at reading size (10.5pt / 1.6) —
+the "book interior" move from the same Stripe-Press / Pentagram lineage.
+Same three-family palette, same ink, a different document voice. This is
+the **single sanctioned use of the display serif at reading size**. Do
+not carry serif body back into the résumé, where Inter's even colour is
+load-bearing for the 6–10-second scan.
+
+### 11.2 Anatomy
+
+```
+Letterhead   ── identical component to the résumé header
+             (.resume-header / .name / .tagline / .contact),
+             oxblood name, contact in body text.
+─── hairline rule (.letterhead-rule) ───
+Date         ── right-aligned, --ink-meta, proportional figures.
+             Rhymes with the résumé's right-aligned date column.
+Recipient    ── <address>; org name carries the only --ink-body weight.
+Salutation   ── "Dear …,"
+Body         ── 3–4 paragraphs, Source Serif 4. Specifics over
+             adjectives, same as the bullets: a number per claim
+             where one exists. <strong> (SemiBold, never 700) on
+             only the one or two headline figures.
+Close        ── valediction + signature + role line, wrapped in
+             .letter-close.
+```
+
+### 11.3 Accent &amp; the close
+
+The oxblood accent appears **exactly once** on the page — the
+letterhead name — same restraint as the résumé. The **signature is
+ink** (Source Serif 4, SemiBold, one size down from the name): its
+distinction is carried by *type*, not colour. Repeating the accent at
+the foot would tip it from a quiet identity mark toward a brand colour,
+and "used in exactly one place" is the rule that keeps it confident
+rather than decorative. Do not colour the body, the recipient, or the
+signature.
+
+`.letter-close` carries `break-inside: avoid` so the valediction and
+signature never split across a page break — the structural cure for the
+"*Sincerely,* on page 1, name orphaned on page 2" failure. A well-formed
+one-page letter never triggers it, but the protection is load-bearing
+for any letter that runs long.
+
+### 11.4 Content rules
+
+- Length is **one page**. A cover letter that spills to two pages is
+  too long; cut a paragraph, not the margins.
+- Numbers carry the signal here exactly as in the résumé bullets. The
+  shipped Maya Chen figures are **sample data** (like the résumé's
+  Anya Castellanos numbers) — replace them with the candidate's real
+  metrics before sending.
+- No icons, no colour blocks, no second accent, no closing P.S. The
+  typographic vocabulary is the résumé's: `·`, `–`, `—`.
+
+---
+
+## 12. What this template is *not*
 
 - Not a one-pager. Not a creative CV. Not a portfolio site.
 - Not driven by colour, illustration, or graphic devices.

@@ -32,7 +32,6 @@ import {
   normalizeRanges,
   placeBand,
   placeRange,
-  LIKELY_THRESHOLD,
   COL_X,
   ROLE_VISIBLE_DEFAULT,
 } from './jobhub/buildJobTree';
@@ -46,12 +45,6 @@ import {
 const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled
   && ((!JOB_SEARCH_TEST_MODE.fast && !JOB_SEARCH_TEST_MODE.fullRun) || JOB_SEARCH_TEST_MODE.skipAI);
 // ─────────────────────────────────────────────────────────────────────────────
-
-// "Other Strong Matches" cutoff for the append path. Prefer the per-hub gate
-// persisted by the initial run (data.strongMatchGate) so appended jobs bucket
-// the same way; fall back to the absolute bar for hubs created before the gate
-// was persisted.
-const otherStrongGate = (storedGate) => storedGate ?? LIKELY_THRESHOLD;
 
 // Job freshness window (days). Default mirrors electron DEFAULT_MAX_AGE_DAYS;
 // the cap bounds the user-set slider. NOTE: auto-widening this on thin results
@@ -260,8 +253,6 @@ export function JobHubNode({ id, data }) {
     const existingNodes = getNodes();
     const existingEdges = getEdges();
 
-    const hasTarget = !!(data.targetRole || '').trim();
-    const activeTargetRole = (data.targetRole || '').trim();
     const profile = data.resumeProfile;
 
     const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
@@ -319,10 +310,8 @@ export function JobHubNode({ id, data }) {
 
     let nextJobNodeIdx = 0;
     scoredJobs.forEach((job) => {
-      // Non-target jobs below this run's strong-match bar aren't shown (matches
-      // the initial displayed-set selection).
-      if (hasTarget && !job.isTargetRoleMatch && (job.matchScore || 0) < otherStrongGate(data.strongMatchGate)) return;
-
+      // Every scored job is shown (no gate) — same as a no-target run; matches
+      // the initial displayed-set selection in partitionJobsForBranches.
       const score = job.matchScore || 0;
       const sal = parseSalaryToNumeric(job.salary);
 
@@ -382,7 +371,6 @@ export function JobHubNode({ id, data }) {
           salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
           reasoning: job.reasoning, careerDirection: job.careerDirection, source: job.source,
           url: job.url, posted: job.posted, resumeProfile: profile, isNew: true,
-          isTargetRoleMatch: !!job.isTargetRoleMatch,
         },
       });
       pushEdge(roleNode.id, jobId);
@@ -434,23 +422,14 @@ export function JobHubNode({ id, data }) {
       finalSourceCounts[job.source] = (finalSourceCounts[job.source] || 0) + 1;
     });
 
-    const hasTargetRole = !!activeTargetRole;
-    const targetCandidates = scoredJobs.filter(j => j.isTargetRoleMatch);
-    const otherCandidates = scoredJobs.filter(j => !j.isTargetRoleMatch && (j.matchScore || 0) >= otherStrongGate(data.strongMatchGate));
-
-    const targetDelta = hasTargetRole ? targetCandidates.length : 0;
-    const otherDelta = hasTargetRole ? otherCandidates.length : 0;
-
     const allAddedScores = scoredJobs.map(j => j.matchScore || 0);
     const scoreRangeMin = Math.min(data.scoreRangeMin ?? 0, ...allAddedScores);
     const scoreRangeMax = Math.max(data.scoreRangeMax ?? 100, ...allAddedScores);
 
     updateGlobal(currentId, {
       hubState: 'done',
-      resultCount: (data.resultCount || 0) + (hasTargetRole ? (targetDelta + otherDelta) : scoredJobs.length),
+      resultCount: (data.resultCount || 0) + scoredJobs.length,
       totalScoredCount: (data.totalScoredCount || 0) + scoredJobs.length,
-      targetCount: (data.targetCount || 0) + targetDelta,
-      otherCount: (data.otherCount || 0) + otherDelta,
       // Keep the "scraped → kept" funnel in sync after a background append,
       // otherwise the headline match count grows while the funnel stays stale.
       gatheredCount: (data.gatheredCount || 0) + gatheredDelta,
@@ -460,7 +439,7 @@ export function JobHubNode({ id, data }) {
       scoreRangeMax,
       scrapeWarnings: filteredWarnings,
     });
-  }, [id, data.targetRole, data.finalSourceCounts, data.resultCount, data.totalScoredCount, data.targetCount, data.otherCount, data.gatheredCount, data.scrapedCount, data.scoreRangeMin, data.scoreRangeMax, data.strongMatchGate, data.jobTaxonomy, data.resumeProfile, getNodes, getEdges, getNode, setNodes, addElementsGlobally, addNodes, addEdges, updateGlobal]);
+  }, [id, data.finalSourceCounts, data.resultCount, data.totalScoredCount, data.gatheredCount, data.scrapedCount, data.scoreRangeMin, data.scoreRangeMax, data.jobTaxonomy, data.resumeProfile, getNodes, getEdges, getNode, setNodes, addElementsGlobally, addNodes, addEdges, updateGlobal]);
 
   const triggerUSAJobsBackgroundSearch = useCallback(async () => {
     if (processingRef.current) return;
@@ -492,7 +471,9 @@ export function JobHubNode({ id, data }) {
         maxAgeDays: data.maxAgeDays || 21,
         canvasFilePath,
         nodeId: currentId,
-        preferredLocation: (data.preferredLocation || '').trim(),
+        // Prefer the query-gen-normalized location (typo-safe) over the raw input
+        // — USAJobs LocationName is an exact-ish match and won't tolerate "denvr".
+        preferredLocation: (data.canonicalLocation || data.preferredLocation || '').trim(),
       });
 
       if (cancelled()) return;
@@ -590,7 +571,7 @@ export function JobHubNode({ id, data }) {
         pendingUSAJobsRefreshRef.current = false;
       }
     }
-  }, [id, data.maxAgeDays, data.preferredLocation, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas]);
+  }, [id, data.maxAgeDays, data.preferredLocation, data.canonicalLocation, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas]);
 
   const handleJobsSettingsChange = useCallback(async () => {
     if (settingsDebounceTimerRef.current) {
@@ -696,9 +677,10 @@ export function JobHubNode({ id, data }) {
     updateGlobal(id, { maxAgeDays: n });
   }, [id, updateGlobal]);
 
-  // Optional target/pivot role. Free text — the AI uses it to prioritize
-  // matching jobs and to flag isTargetRoleMatch during scoring. Persisted so
-  // it survives saves and re-runs.
+  // Optional target/pivot role. Free text — the ONLY effect is adding
+  // target-specific queries to the generated set (see generate-job-queries);
+  // scoring, display, and categorization are identical to a no-target run.
+  // Persisted so it survives saves and re-runs.
   const targetRole = data.targetRole || '';
   const setTargetRole = useCallback((val) => {
     updateGlobal(id, { targetRole: typeof val === 'string' ? val : '' });
@@ -930,14 +912,12 @@ export function JobHubNode({ id, data }) {
   // (real-time) maps to `scrapedCount`, `scoreResult.scoredJobs` to `scoredJobs`.
   const finishScoringAndSpawn = useCallback(async ({
     scoredJobs, profile, gatheredCount, scrapedCount, scrapeWarnings = [],
-    activeTargetRole, originalPos, testMode = false, cancelled = () => false,
+    originalPos, testMode = false, cancelled = () => false,
   }) => {
     const currentId = id;
 
-    // ── Select which scored jobs to display (target-role filtering, if any) ──
-    const hasTarget = !!activeTargetRole;
-    const { targetList, otherList, displayedJobs, gate: strongMatchGate } =
-      partitionJobsForBranches(scoredJobs, hasTarget);
+    // ── Display set = every scored job (target ≡ no-target; see partition). ──
+    const { displayedJobs } = partitionJobsForBranches(scoredJobs);
 
     // Step 4.5: results taxonomy (likelihood → salary → role labels).
     let bucketTree = null;
@@ -1005,9 +985,6 @@ export function JobHubNode({ id, data }) {
       scrapedCount: scrapedCount ?? scoredJobs.length,
       gatheredCount: gatheredCount ?? scrapedCount ?? scoredJobs.length,
       testMode: !!testMode,
-      targetCount: hasTarget ? targetList.length : 0,
-      otherCount: hasTarget ? otherList.length : 0,
-      strongMatchGate,
       jobTaxonomy: bucketTree ? { likelihoodBands: bucketTree.likelihoodBands, salaryRanges: bucketTree.salaryRanges } : null,
       finalSourceCounts,
       scoreRangeMin,
@@ -1146,6 +1123,11 @@ export function JobHubNode({ id, data }) {
     processingRef.current = true;
     cancelCleanSourceCardDismiss();
     resetSourceProgress();
+    // The hub-side reset above only clears OUR aggregate hook. Source cards hold
+    // their own local count and a re-run keeps them on canvas, so broadcast a
+    // reset to make every card drop the previous run's count now (else they paint
+    // stale "{N} jobs" until each source's first fresh event arrives this run).
+    document.dispatchEvent(new CustomEvent('job-source-progress-reset', { detail: { hubId: id } }));
     const currentId = id;
     // Capture cancellation epoch at start; cancelled() returns true after
     // any reset/unmount so we can drop late settlements without mutating
@@ -1255,6 +1237,13 @@ export function JobHubNode({ id, data }) {
       } = queriesResult.queries || {};
       const allQueries = [...targetRoleQueries, ...titleQueries, ...suggestedRoleQueries];
       const queryModel = queriesResult.queryModel || null;
+      // The query-gen LLM normalizes the free-form location (typos/abbreviations)
+      // so the programmatic filters (USAJobs LocationName, Dice location, geoTerms)
+      // don't choke on "denvr". On a cache hit we reuse the persisted canonical;
+      // fall back to the raw input so this is never worse than before.
+      const canonicalLocation =
+        (canReuseQueries ? data.canonicalLocation : queriesResult.canonicalLocation)
+        || activePreferredLocation;
 
       // Step 3: Search
       resolvedDuringSearchRef.current.clear();
@@ -1264,6 +1253,7 @@ export function JobHubNode({ id, data }) {
         queries: queriesResult.queries,
         queryModel,
         queryCacheKey,
+        canonicalLocation,
         resumeFingerprint,
       });
       const searchResult = await window.electronAPI.searchJobs({
@@ -1271,7 +1261,11 @@ export function JobHubNode({ id, data }) {
         nodeId: currentId,
         maxAgeDays: data.maxAgeDays || 21,
         canvasFilePath,
-        preferredLocation: activePreferredLocation,
+        preferredLocation: canonicalLocation,
+        // The user's ORIGINAL free-form input (e.g. "denvr") — telemetry only, so
+        // the bug report can show the typo-correction (denvr → Denver, CO) it
+        // can't otherwise see (only the canonical is used for the actual search).
+        rawLocation: activePreferredLocation,
         // Candidate's own locations — the keyword-less company-board sources
         // (Greenhouse/Lever/RemoteOK/WWR) must NOT treat the city baked into a
         // job title as role relevance, or a Denver cinematographer pulls in
@@ -1356,8 +1350,6 @@ export function JobHubNode({ id, data }) {
           hubState: 'done',
           resultCount: 0,
           totalScoredCount: 0,
-          targetCount: 0,
-          otherCount: 0,
           scoreRangeMin: 0,
           scoreRangeMax: 100,
           scoreThreshold: 0,
@@ -1391,8 +1383,6 @@ export function JobHubNode({ id, data }) {
           gatheredCount: rawGatheredCount,
           testMode: true,
           totalScoredCount: 0,
-          targetCount: 0,
-          otherCount: 0,
           scoreRangeMin: 0,
           scoreRangeMax: 100,
           scoreThreshold: 0,
@@ -1444,7 +1434,7 @@ export function JobHubNode({ id, data }) {
         }
       }
     }
-  }, [id, updateGlobal, getNode, getNodes, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, ensureBlockedSourceCards, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss]);
+  }, [id, updateGlobal, getNode, getNodes, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, data.canonicalLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, ensureBlockedSourceCards, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss]);
 
   const startProcessing = useCallback((fileOrFiles) => {
     const filePaths = Array.isArray(fileOrFiles) ? fileOrFiles : (fileOrFiles ? [fileOrFiles] : []);
@@ -1479,8 +1469,8 @@ export function JobHubNode({ id, data }) {
       // now that a 0-jobs-but-blocked run pauses in 'sources-ready' with an
       // empty pendingJobs (see the block gate in runPipeline).
       updateGlobal(id, {
-        hubState: 'done', resultCount: 0, totalScoredCount: 0, targetCount: 0,
-        otherCount: 0, scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0,
+        hubState: 'done', resultCount: 0, totalScoredCount: 0,
+        scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0,
         pendingJobs: null,
         scrapeWarnings: Array.isArray(scrapeWarningsRef.current) ? scrapeWarningsRef.current : [],
       });
@@ -1571,7 +1561,7 @@ export function JobHubNode({ id, data }) {
         nodeId: currentId,
         maxAgeDays: data.maxAgeDays || 21,
         canvasFilePath: cfp,
-        preferredLocation: data.preferredLocation || '',
+        preferredLocation: data.canonicalLocation || data.preferredLocation || '',
         profileLocations: profile?.locations || [],
         resume: true,
       });
@@ -1590,7 +1580,7 @@ export function JobHubNode({ id, data }) {
       }
       if (foundJobs.length === 0) {
         updateGlobal(currentId, {
-          hubState: 'done', resultCount: 0, totalScoredCount: 0, targetCount: 0, otherCount: 0,
+          hubState: 'done', resultCount: 0, totalScoredCount: 0,
           scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0, scrapeWarnings: warnings,
         });
         window.electronAPI?.completeJobRun?.({ canvasFilePath: cfp }).catch(() => {});
@@ -1607,7 +1597,7 @@ export function JobHubNode({ id, data }) {
     } finally {
       if (isMountedRef.current) processingRef.current = false;
     }
-  }, [canvasFilePath, resumeOffer, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.preferredLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, ensureBlockedSourceCards]);
+  }, [canvasFilePath, resumeOffer, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, ensureBlockedSourceCards]);
 
   const handleDiscardResume = useCallback(async () => {
     setResumeOffer(null);
@@ -1901,6 +1891,10 @@ export function JobHubNode({ id, data }) {
     updateGlobal(id, { pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [] });
     cancelCleanSourceCardDismiss();
     resetSourceProgress();
+    // Reset the persisting source cards the instant Re-run is clicked, before the
+    // async re-parse — startProcessingWithProfile re-broadcasts at scrape start,
+    // but this clears the stale counts immediately so they don't linger.
+    document.dispatchEvent(new CustomEvent('job-source-progress-reset', { detail: { hubId: id } }));
     if (effectivePaths.length > 0) {
       // Files still accessible — re-parse for freshness then run full pipeline
       startProcessingRef.current?.(effectivePaths);
@@ -2330,8 +2324,6 @@ export function JobHubNode({ id, data }) {
               gatheredCount={data.gatheredCount}
               queryModel={data.queryModel || null}
               testMode={!!data.testMode}
-              targetCount={data.targetCount || 0}
-              otherCount={data.otherCount || 0}
               sourceFilter={sourceFilter}
               toggleSourceFilter={toggleSourceFilter}
               resumeSummary={data.resumeSummary}

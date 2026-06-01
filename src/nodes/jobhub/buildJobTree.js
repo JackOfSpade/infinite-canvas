@@ -21,18 +21,11 @@ import { structuralEdge } from '../_shared/edgeHelpers.js';
  * fall into a swept "Other" role.
  *
  * Exports:
- *  - partitionJobsForBranches → selects which scored jobs to display
+ *  - partitionJobsForBranches → display set = all scored jobs (target ≡ no-target)
  *  - parseSalaryToNumeric     → salary text → annual USD (shared with append)
  *  - computeLayoutPositions   → tight (x,y) for the current expand state
  *  - buildJobTreeNodes        → emits the {nodes, edges} graph
  */
-
-// AI-judgment cutoff for "good chance of interview" — used by the (still
-// supported) target-role job SELECTION below.
-export const LIKELY_THRESHOLD = 65;
-const TARGET_FILL_MIN  = 5;
-const OTHER_FLOOR      = 50;
-const OTHER_FILL_MIN   = 5;
 
 // Column x-offsets per tree level + row heights. One layout: likelihood is
 // always the first level (no target-role branch column).
@@ -63,23 +56,6 @@ const DEFAULT_RANGES = [
 ];
 
 /**
- * Cutoff score for the non-target jobs shown alongside a target-role search,
- * derived from the run's own non-target score distribution. Stays at
- * LIKELY_THRESHOLD when there are already ≥ OTHER_FILL_MIN strong non-target
- * jobs; otherwise drops to the OTHER_FILL_MIN-th best (clamped to
- * [OTHER_FLOOR, LIKELY_THRESHOLD]). Persisted on the hub so later appends gate
- * the same way.
- * @param {number[]} nonTargetScores  matchScores of the run's non-target jobs
- */
-export function strongMatchGate(nonTargetScores = []) {
-  const strong = nonTargetScores.filter(s => s >= LIKELY_THRESHOLD).length;
-  if (strong >= OTHER_FILL_MIN || nonTargetScores.length === 0) return LIKELY_THRESHOLD;
-  const sortedDesc = [...nonTargetScores].sort((a, b) => b - a);
-  const nth = sortedDesc[Math.min(OTHER_FILL_MIN, sortedDesc.length) - 1];
-  return Math.max(OTHER_FLOOR, Math.min(LIKELY_THRESHOLD, nth ?? LIKELY_THRESHOLD));
-}
-
-/**
  * Salary text → approximate annual USD. Takes the first number in a range and
  * annualizes hourly/daily rates. Shared with the append path so spawned and
  * appended cards land in the same salary range. Returns 0 when unparseable.
@@ -99,38 +75,13 @@ export function parseSalaryToNumeric(salaryStr) {
 }
 
 /**
- * Select which scored jobs to display. No target role → every scored job. With
- * a target role → the target matches (≥ LIKELY, loose-filled to ~5) plus the
- * strongest non-target jobs above the run's relative gate. The display
- * hierarchy is identical either way; this only decides the input set.
+ * Display set = EVERY scored job. Target and no-target runs are identical here:
+ * a target role only adds queries upstream (see generate-job-queries); it never
+ * gates, fills, sorts, or categorizes the results differently. Kept as a named
+ * function so the "all scored jobs are shown" contract has one tested home.
  */
-export function partitionJobsForBranches(scoredJobs, hasTarget) {
-  if (!hasTarget) {
-    return { targetList: [], otherList: [], displayedJobs: scoredJobs, gate: LIKELY_THRESHOLD };
-  }
-  const targetCandidates = scoredJobs.filter(j => j.isTargetRoleMatch);
-  const likelyTargets = targetCandidates.filter(j => (j.matchScore || 0) >= LIKELY_THRESHOLD);
-  let targetList;
-  if (likelyTargets.length >= TARGET_FILL_MIN) {
-    targetList = likelyTargets;
-  } else {
-    // Loose-fill: backfill with the highest-scoring sub-threshold target jobs so
-    // the user gets ~5 best shots even when the pivot is a stretch. The lower
-    // matchScore already signals the weaker odds — the card shows it directly.
-    const needed = TARGET_FILL_MIN - likelyTargets.length;
-    const fillers = targetCandidates
-      .filter(j => (j.matchScore || 0) < LIKELY_THRESHOLD)
-      .sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0))
-      .slice(0, needed);
-    targetList = [...likelyTargets, ...fillers];
-  }
-  const gate = strongMatchGate(
-    scoredJobs.filter(j => !j.isTargetRoleMatch).map(j => j.matchScore || 0),
-  );
-  const otherList = scoredJobs.filter(
-    j => !j.isTargetRoleMatch && (j.matchScore || 0) >= gate,
-  );
-  return { targetList, otherList, displayedJobs: [...targetList, ...otherList], gate };
+export function partitionJobsForBranches(scoredJobs) {
+  return { displayedJobs: scoredJobs };
 }
 
 // ── Deterministic placement ────────────────────────────────────────────────
@@ -275,7 +226,7 @@ export function buildJobTreeNodes({
         salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
         reasoning: job.reasoning, careerDirection: job.careerDirection,
         source: job.source, url: job.url, posted: job.posted,
-        resumeProfile: profile, isNew: false, isTargetRoleMatch: !!job.isTargetRoleMatch,
+        resumeProfile: profile, isNew: false,
       },
     });
     return id;
@@ -379,7 +330,7 @@ export function buildJobTreeNodes({
             salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
             reasoning: job.reasoning, careerDirection: job.careerDirection,
             source: job.source, url: job.url, posted: job.posted,
-            resumeProfile: profile, isNew: false, isTargetRoleMatch: !!job.isTargetRoleMatch,
+            resumeProfile: profile, isNew: false,
           },
         });
         pushEdge(hubId, id);

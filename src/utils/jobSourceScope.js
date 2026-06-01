@@ -61,8 +61,8 @@ export function createJobSearchTestMode(env = getRuntimeEnv()) {
     // fullRun:true  -> full   (150 jobs/page, AI per skipAI flag below)
     fullRun: parseJobSearchEnvBoolean(getEnvValue(env, 'JOB_SEARCH_TEST_FULL_RUN'), false),
     // fast: tiny end-to-end run that takes PRECEDENCE over fullRun/medium (see
-    // resultCaps.js FAST_TEST). 2 queries; browser sources do 2 pages × 3 jobs
-    // (= 12), API sources are capped to 12 per source (~2 queries × 6); AI scoring
+    // resultCaps.js FAST_TEST). 2 queries; browser sources do 2 pages × 5 jobs
+    // (= 10), API sources are capped to 10 per source (~2 queries × 5); AI scoring
     // RUNS (like full) unless skipAI. The point is a fast scrape→score smoke that
     // doesn't hammer the rate-limited free Gemini tier with 150-job pages.
     fast: parseJobSearchEnvBoolean(getEnvValue(env, 'JOB_SEARCH_TEST_FAST'), false),

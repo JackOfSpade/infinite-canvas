@@ -5,7 +5,7 @@
  *
  * The submit side groups jobs into batches and sends one request per batch with
  * `custom_id = "b{i}"`; within a request the scorer returns `{ scores: [{ index,
- * matchScore, reasoning, careerDirection, isTargetRoleMatch }, ...] }` where
+ * matchScore, reasoning, careerDirection }, ...] }` where
  * `index` is the job's position WITHIN that batch. This mirrors the real-time
  * path's per-batch index matching, including the same placeholder fallbacks, so
  * a batch run produces the identical scoredJobs shape as a live run.
@@ -66,13 +66,12 @@ export function reconcileBatchScores(scoringBatches, resultsByCustomId, { fallba
  */
 export function buildScoredJob(job, scoreOrNull, { fallbackScore, allNull }) {
   if (scoreOrNull) {
-    return { ...job, ...scoreOrNull, isTargetRoleMatch: !!scoreOrNull.isTargetRoleMatch };
+    return { ...job, ...scoreOrNull };
   }
   return {
     ...job,
     matchScore: fallbackScore,
     reasoning: allNull ? 'AI format error' : 'Unable to score',
     careerDirection: 'Other',
-    isTargetRoleMatch: false,
   };
 }

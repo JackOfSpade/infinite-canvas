@@ -155,6 +155,26 @@ export function saveDiceApiKey(key) {
   if (typeof key === 'string' && key.length > 10) tryGetStore()?.set('jobs.diceApiKey', key);
 }
 
+// Persistent cache of Glassdoor location → numeric locId (its search location
+// FILTER is keyed by locId; the locKeyword text alone is ignored). A locId is a
+// stable platform id (Denver = 1148170 forever), and resolving it requires a
+// Cloudflare-gated, in-browser autocomplete call — so caching it means that
+// lookup happens at most once per location, ever. Keyed by lowercased location.
+export function getGlassdoorLocId(locationKey) {
+  const map = tryGetStore()?.get('jobs.glassdoorLocIds') || {};
+  return map[String(locationKey || '').trim().toLowerCase()] || null;
+}
+
+export function saveGlassdoorLocId(locationKey, value) {
+  const key = String(locationKey || '').trim().toLowerCase();
+  if (!key || !value?.locId) return;
+  const store = tryGetStore();
+  if (!store) return;
+  const map = store.get('jobs.glassdoorLocIds') || {};
+  map[key] = { locId: String(value.locId), locT: value.locT || 'C' };
+  store.set('jobs.glassdoorLocIds', map);
+}
+
 /**
  * Watch URLs configured for a given platform's status check. The listing's
  * own URL is always checked separately by the caller; this returns the

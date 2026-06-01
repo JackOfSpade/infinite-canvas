@@ -11,18 +11,32 @@ import crypto from 'crypto';
 const execFileAsync = promisify(execFile);
 const SIPS = '/usr/bin/sips';
 
-export async function convertHeicIfNecessary(filePath) {
+// Formats EVERY vision provider (Claude + Gemini) accepts inline. Claude takes
+// only jpeg/png/gif/webp; Gemini also takes heic/webp — but to keep one code path
+// we normalize anything outside this set to JPEG, so both providers always get
+// bytes they can read (HEIC, TIFF, JXL, AVIF, BMP, SVG, …).
+export const VISION_SAFE_IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
+
+/**
+ * Transcode `filePath` to a JPEG temp file via sips when its extension is NOT in
+ * `safeExts`; otherwise return the original path untouched. Generalizes the old
+ * HEIC-only helper to every format macOS/ImageIO can read (HEIC/HEIF/TIFF/JXL/
+ * AVIF/BMP/SVG/…). macOS-only: throws on other platforms ONLY when a conversion
+ * is actually required (safe formats pass through everywhere).
+ */
+export async function convertToJpegIfNeeded(filePath, safeExts) {
   const ext = path.extname(filePath).toLowerCase();
-  if (ext !== '.heic' && ext !== '.heif') {
-    return filePath; // No conversion needed
+  if (safeExts.has(ext)) {
+    return filePath; // already a format the consumer accepts — no conversion needed
   }
 
-  // Only attempt on macOS
+  // Only attempt on macOS (sips). The caller's downstream readFile/AI call would
+  // otherwise surface a less clear error, so fail with an actionable message.
   if (process.platform !== 'darwin') {
-    throw new Error('HEIC conversion is only supported on macOS. Please convert to JPG manually.');
+    throw new Error(`Converting ${ext || 'this image'} is only supported on macOS (needs sips). Please convert to JPG/PNG manually.`);
   }
 
-  // randomUUID, not Date.now(): the vision pipeline runs every HEIC through
+  // randomUUID, not Date.now(): the vision pipeline runs every image through
   // here in Promise.all, so 5-7 conversions land in the same millisecond.
   // Same-ms Date.now() collisions caused two sips invocations to race on the
   // same --out path, surfacing as Error 13 "Cannot rename temporary file".
@@ -36,8 +50,18 @@ export async function convertHeicIfNecessary(filePath) {
     // sips may have produced a partial file before failing — clean it up so
     // the temp dir doesn't accumulate zero-byte junk over a long session.
     try { await fs.promises.unlink(tempFile); } catch { /* not created */ }
-    throw new Error(`Failed to convert HEIC to JPG: ${err.message}`);
+    throw new Error(`Failed to convert ${ext} to JPG: ${err.message}`);
   }
+}
+
+/**
+ * Ensure an image is in a format every vision provider accepts, transcoding
+ * anything that isn't (HEIC/HEIF/TIFF/JXL/AVIF/BMP/SVG) to JPEG. Returns the
+ * original path when already safe, else a temp JPEG the caller must clean up
+ * (track it and pass to cleanupTempFile). Replaces the old heic-only path.
+ */
+export function ensureVisionSafeImage(filePath) {
+  return convertToJpegIfNeeded(filePath, VISION_SAFE_IMAGE_EXT);
 }
 
 export async function cleanupTempFile(filePath) {

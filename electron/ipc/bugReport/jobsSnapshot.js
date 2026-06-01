@@ -3,6 +3,7 @@ const { app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 import { getJobsTelemetry } from '../jobs.js';
+import { getApplicationTelemetry } from '../jobApplication.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings } from '../settings.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
@@ -65,7 +66,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   try { browserScrape = getManualScraperTelemetry(); } catch { /* scraper may not be loaded */ }
   const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
   const hasBrowserScrape = !!browserScrape?.active || (browserScrape?.events || []).length > 0;
-  if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing && !hasBrowserScrape)) return '';
+  let appGen = null;
+  try { appGen = getApplicationTelemetry(); } catch { /* generator may not be loaded */ }
+  if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing && !hasBrowserScrape && !appGen)) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId);
   if (scope.foreign) return `\n## Job Search Pipeline\n${scope.note}`;
@@ -88,6 +91,85 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       `already-seen/history ${s.historyDropped} → **new: ${s.kept}**`,
     );
     lines.push('- _(dedup / age / history drops are by-design — not jobs we failed to analyze)_');
+    // Look-back window the run actually used + a per-platform verdict on whether
+    // it bound each source. The window is enforced two ways: a server-side date
+    // param (the source never serves out-of-window rows) AND a global client-side
+    // filterJobsByAge over the merged results — but the client filter KEEPS any
+    // job with an unparseable `posted`, so a source with neither a server param
+    // nor a parseable per-job date is only bounded by its own query limits.
+    // This block makes "did 7 days apply to ALL platforms?" answerable at a glance.
+    if (s.maxAgeDays != null) {
+      lines.push(`- **Look-back window: ${s.maxAgeDays} day(s)** — enforced server-side where the source takes a date param, and re-applied as a global client-side filter (the client filter can only bound a source that carries a parseable \`posted\` date).`);
+    }
+    if (s.ageBySource && Object.keys(s.ageBySource).length > 0) {
+      lines.push(`- Per-source age outcome (dropped → kept · oldest surviving posting):`);
+      for (const [k, a] of Object.entries(s.ageBySource)) {
+        if ((a.kept || 0) === 0 && (a.dropped || 0) === 0) continue;
+        const oldest = a.oldestKeptRaw ? `"${a.oldestKeptRaw}" (${a.oldestKeptDays}d)` : '—';
+        let flag;
+        if (a.oldestKeptDays != null && s.maxAgeDays != null && a.oldestKeptDays > s.maxAgeDays) {
+          // A survivor older than the window means the client filter and the parse
+          // disagree, or a source bypassed both — a genuine leak worth chasing.
+          flag = ` 🔥 LEAK — kept a posting older than the ${s.maxAgeDays}d window`;
+        } else if (a.kept > 0 && a.unparseableKept === a.kept) {
+          // Every survivor had an unparseable/empty date — the client-side filter
+          // was blind to this source, so its window is enforced SERVER-SIDE ONLY.
+          flag = ` ⚠️ no parseable per-job date on any survivor — window enforced by the source's date param only (client backstop blind here)`;
+        } else if (a.unparseableKept > 0) {
+          flag = ` (${a.unparseableKept} survivor(s) had no parseable date — not client-checkable)`;
+        } else {
+          flag = ' ✅';
+        }
+        // Dice's date bound is conditional + its request URL isn't logged anywhere,
+        // so annotate it inline: this is the only way to confirm the server-side
+        // `filters.postedDate` actually fired (vs. falling back to client-side).
+        const bound = (k === 'dice' && s.diceDateBound) ? ` · bound: ${s.diceDateBound}` : '';
+        lines.push(`  - \`${k}\`: ${a.dropped} dropped → ${a.kept} kept · oldest kept ${oldest}${bound}${flag}`);
+      }
+    }
+    // Target location: the typo-correction (raw → canonical), how each source
+    // applied it (real param vs keyword-only vs remote-board), and an adherence
+    // tally over the KEPT jobs — so "did 'denvr' get corrected?" and "was the
+    // location adhered to per platform / why is a Miami role here?" are answerable.
+    const loc = s.location;
+    if (loc && (loc.rawInput || loc.canonical)) {
+      if (loc.rawInput && loc.canonical && loc.rawInput.toLowerCase() !== loc.canonical.toLowerCase()) {
+        lines.push(`- **Target location: "${loc.rawInput}" → "${loc.canonical}"** ${loc.corrected ? '(typo-corrected ✅)' : ''}`);
+      } else {
+        lines.push(`- **Target location: ${loc.canonical || loc.rawInput || '(none)'}**${loc.rawInput && !loc.canonical ? ' ⚠️ raw input did not resolve to a canonical place' : ''}`);
+      }
+      if (loc.perSource && Object.keys(loc.perSource).length > 0) {
+        lines.push('- Per-source location treatment (how each platform received the target):');
+        for (const [k, treat] of Object.entries(loc.perSource)) lines.push(`  - \`${k}\`: ${treat}`);
+      }
+      const ad = loc.adherence;
+      if (ad && ad.total > 0) {
+        const pct = Math.round((ad.matched / ad.total) * 100);
+        // Attribute off-targets to the RIGHT cause. A "soft" source (keyword-only
+        // like Google, or a remote board) legitimately spills nearby/unrelated
+        // roles. A "hard" source carrying a real location= param returning an
+        // out-of-area role is either that source's own search radius (e.g. Dice
+        // +30mi → metro suburbs, which are on-target in practice) or a genuine
+        // leak — don't hand-wave it as "keyword-only".
+        let offFlag = '';
+        if (ad.offTarget > 0) {
+          const isSoft = (id) => /keyword-only|remote board/.test(loc.perSource?.[id] || '');
+          const hard = Object.keys(ad.offBySource || {}).filter(id => !isSoft(id));
+          offFlag = hard.length > 0
+            ? ` — ⚠️ ${ad.offTarget} OUT-OF-AREA, incl. from real-param source(s) [${hard.join(', ')}] — likely that source's own search radius (e.g. Dice +30mi → nearby metro suburbs) or a genuine leak; check the samples below`
+            : ` — ⚠️ ${ad.offTarget} OUT-OF-AREA (all from keyword-only / remote sources — best-effort; location-free query variants can surface these)`;
+        }
+        lines.push(`- Location adherence over ${ad.total} kept job(s): ${ad.matched} in-area (${pct}%), ${ad.remote} remote, ${ad.offTarget} off-target, ${ad.unknown} no-location${offFlag}`);
+        if (Array.isArray(ad.offSamples) && ad.offSamples.length > 0) {
+          lines.push('  - Off-target sample(s):');
+          for (const ex of ad.offSamples) lines.push(`    - ${ex}`);
+        }
+      }
+      if (Array.isArray(s.queryStrings) && s.queryStrings.length > 0) {
+        lines.push('- Query strings sent (shows which variants carried the location token):');
+        for (const q of s.queryStrings) lines.push(`  - \`${q}\``);
+      }
+    }
     // Per-source raw counts — the "was this source silently not gathered?" line.
     // A 0 WITH a warning is a real miss to chase; a clean 0 is genuinely-empty or
     // off-category (e.g. a cinematographer on USAJobs/Dice). Without this you only
@@ -854,6 +936,34 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
   } else {
     lines.push('\n### Taxonomy (likelihood → salary → role)\n- (no taxonomy recorded this session)');
+  }
+
+  // ── Application generation (last) ──────────────────────────────────────────
+  // The model's actual résumé markup + cover-letter fields — the one place an
+  // application rendering bug shows (stray mid-sentence newline, literal \n/\t,
+  // broken structure). Fields are JSON.stringify'd so whitespace/escapes are
+  // visible literally (a real newline shows as \n, a double-escaped one as \\n).
+  if (appGen) {
+    const a = appGen;
+    const cl = a.coverLetter || {};
+    const escScan = (s) => /\\[a-z]/.test(String(s ?? '')) ? ' ⚠️ literal backslash-escape present' : '';
+    lines.push(`\n### Application Generation (last)${ago(a.ts)}`);
+    lines.push(`- Job: ${a.jobTitle || '(untitled)'} @ ${a.company || '(no company)'}${a.nodeId ? ` · node ${a.nodeId}` : ''}`);
+    lines.push(`- Résumé markup: ${a.resumeHtmlLen || 0} chars${escScan(a.resumeHtmlSample)}`);
+    lines.push('- Cover-letter fields (JSON.stringify — whitespace/escapes shown literally):');
+    lines.push(`  - salutation: ${JSON.stringify(cl.salutation || '')}`);
+    lines.push(`  - recipient: ${JSON.stringify(cl.recipient || '')}`);
+    if (Array.isArray(cl.contact) && cl.contact.length) lines.push(`  - contact: ${JSON.stringify(cl.contact)}`);
+    const paras = Array.isArray(cl.paragraphs) ? cl.paragraphs : [];
+    paras.forEach((p, i) => lines.push(`  - paragraph[${i}]: ${JSON.stringify(String(p ?? ''))}`));
+    lines.push(`  - closing: ${JSON.stringify(cl.closing || '')}`);
+    if (cl.signatureTitle) lines.push(`  - signatureTitle: ${JSON.stringify(cl.signatureTitle)}`);
+    if (a.resumeHtmlSample) {
+      lines.push('- Résumé markup sample (first 1500 chars):');
+      lines.push('```html');
+      lines.push(a.resumeHtmlSample);
+      lines.push('```');
+    }
   }
 
   return `

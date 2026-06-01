@@ -124,7 +124,14 @@ export const renderSessionRows = (platforms, cache) => platforms.map(p => {
   const staleMismatch = entry?.connected && traceStatus != null && traceStatus >= 400;
   const mustContain = p.connectedFinalUrlMustContain;
   const traceFinalUrl = (entry?.lastTrace?.finalUrl || '').toLowerCase();
-  const redirectMismatch = !staleMismatch && entry?.connected && mustContain && !traceFinalUrl.includes(mustContain.toLowerCase());
+  // connectedFinalUrlMustContain is an HTTP-verify contract. A trusted puppeteer
+  // login window auto-detects the session and stamps a non-HTTP trace
+  // (status: 'auto-detected', finalUrl = the detection URL or undefined), which
+  // the HTTP redirect check would otherwise flag as a bogus "redirected to
+  // undefined". Skip the check for auto-detected traces — they were already
+  // proven logged-in by a different (DOM/cookie/auth-gated) signal.
+  const isAutoDetected = traceStatus === 'auto-detected';
+  const redirectMismatch = !staleMismatch && !isAutoDetected && entry?.connected && mustContain && !traceFinalUrl.includes(mustContain.toLowerCase());
   const connected = entry?.connected
     ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)`
       : redirectMismatch ? `⚠️ true (redirected to ${entry.lastTrace.finalUrl} — expected path containing "${mustContain}")`

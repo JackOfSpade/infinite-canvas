@@ -22,14 +22,21 @@ import {
 } from '../stealthBrowser.js';
 import { logger } from '../../logger.js';
 import { JOB_PER_PAGE_CAP } from '../resultCaps.js';
+import { POSTED_DATE_PATTERN } from '../jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from './scraperOverlay.js';
 import { humanDelay } from '../../utils/humanDelay.js';
+import { getGlassdoorLocId, saveGlassdoorLocId } from '../settings.js';
+import { pickGlassdoorLocation } from '../../../src/utils/jobLocation.js';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
 const NAV_SETTLE_MS          = 2000;          // settle after navigation before first action
 const CONTENT_POLL_MS        = 600;           // poll interval while waiting for content/challenge
 const CONTENT_TIMEOUT_MS     = 20_000;        // max wait for content before proceeding anyway
-const CHALLENGE_TIMEOUT_MS   = 5 * 60_000;   // 5 min for user to solve challenge
+// We wait INDEFINITELY for the user to solve a real (solvable) challenge — never
+// skip a source out from under someone mid-solve. The escape hatches are an abort
+// (Reset / hub close) and a hard block (nothing to solve, skipped immediately).
+// This is just the cadence for a "still waiting" heartbeat log during that wait.
+const CHALLENGE_HEARTBEAT_MS = 30_000;
 const CHALLENGE_STABLE_MS    = 1_500;         // page must be challenge-free for this long before resuming — guards against re-serves
 const DESC_CHANGE_POLL_MS    = 200;           // poll interval waiting for description panel update
 const DESC_CHANGE_TIMEOUT_MS = 3_000;         // max wait for description to change after a card click
@@ -322,9 +329,10 @@ async function getChallengeSignals(page) {
     // Hard block: verification text is present but there is NO interactive widget
     // (no Cloudflare turnstile frame, no reCAPTCHA, no hCaptcha). This is the
     // "Additional Verification Required" page — a Ray-ID block page with only a
-    // "Return home" button and nothing the user can actually solve. Waiting the
-    // full CHALLENGE_TIMEOUT_MS for a user interaction that can never happen is
-    // wasted time; callers should skip immediately when this is true.
+    // "Return home" button and nothing the user can actually solve. Since a
+    // solvable challenge is now waited on INDEFINITELY, distinguishing this is
+    // essential: callers must skip a hard block immediately so it can't hang the
+    // run forever on an interaction that can never happen.
     const isHardBlock = reason === 'verification-text' &&
                         !hasCloudflareChallengeFrame &&
                         !hasCloudflareTurnstileWidget &&
@@ -511,7 +519,8 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
   const contentSel    = CONTENT_SELECTORS[sourceId];
   const contentDL     = Date.now() + CONTENT_TIMEOUT_MS;
   let inChallenge              = false;
-  let challengeDL              = 0;
+  let challengeStartedAt       = 0; // when the current challenge wait began (for the heartbeat)
+  let lastChallengeHeartbeat   = 0;
   let cleanSince               = null; // tracks when page first went challenge-free
   let shownVerifiedOverlay     = false;
   let didHomeLandingRecover    = false; // true if recoverFromChallengeHomeLanding fired
@@ -536,8 +545,8 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
       }
       // Hard block: no interactive widget present, nothing for the user to solve.
       // "Additional Verification Required" shows only a Ray ID + "Return home" —
-      // waiting the full CHALLENGE_TIMEOUT_MS accomplishes nothing. Skip now and
-      // surface a clear, actionable error instead of a 5-min spinner.
+      // since a solvable challenge now waits indefinitely, a hard block MUST skip
+      // here or it would hang the run forever. Surface a clear, actionable error.
       if (signals?.isHardBlock) {
         const evidence = formatChallengeEvidence(signals);
         logger.warn(`[BrowserScraper] ${overlayBase.srcName}: hard block — no solvable challenge widget (${evidence})`);
@@ -559,13 +568,14 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
       }
       if (!inChallenge) {
         inChallenge = true;
-        challengeDL = Date.now() + CHALLENGE_TIMEOUT_MS;
+        challengeStartedAt = Date.now();
+        lastChallengeHeartbeat = Date.now();
         await updateOverlay(page, {
           ...overlayBase,
           status:    '⚠️ Complete the challenge above to continue',
           challenge: true,
         });
-        logger.info(`[BrowserScraper] ${overlayBase.srcName}: bot challenge detected — waiting for user`);
+        logger.info(`[BrowserScraper] ${overlayBase.srcName}: bot challenge detected — waiting for user (no timeout; Reset to cancel)`);
         // Gather anti-bot diagnostics once, before the (potentially minutes-long)
         // user-solve wait. Best-effort; nulls if a lookup fails.
         const egress = await lookupEgress();
@@ -596,9 +606,13 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
         });
         logger.info(`[BrowserScraper] ${overlayBase.srcName}: verification successful — waiting for Cloudflare redirect`);
       }
-      if (Date.now() > challengeDL) {
-        logger.warn(`[BrowserScraper] ${overlayBase.srcName}: challenge not solved within ${CHALLENGE_TIMEOUT_MS / 60000} min — skipping source`);
-        return 'skip';
+      // Wait INDEFINITELY for the user to solve — never skip a solvable challenge
+      // on a timer. The escape hatches are the abort check at the top of the loop
+      // (Reset / hub close) and the hard-block return above (nothing to solve). A
+      // periodic heartbeat keeps an unattended wait visible in the logs.
+      if (Date.now() - lastChallengeHeartbeat >= CHALLENGE_HEARTBEAT_MS) {
+        lastChallengeHeartbeat = Date.now();
+        logger.info(`[BrowserScraper] ${overlayBase.srcName}: still waiting for the user to solve the challenge (${Math.round((Date.now() - challengeStartedAt) / 60000)} min elapsed)`);
       }
       await new Promise(r => setTimeout(r, CONTENT_POLL_MS));
       continue;
@@ -759,13 +773,13 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               status:    '⚠️ Complete the verification to continue',
               challenge: true,
             });
-            logger.info(`[BrowserScraper] ${overlayBase.srcName}: human verification detected during description expansion`);
-            const challengeDeadline = Date.now() + CHALLENGE_TIMEOUT_MS;
+            logger.info(`[BrowserScraper] ${overlayBase.srcName}: human verification detected during description expansion — waiting for user (no timeout; Reset to cancel)`);
             let solved = false;
-            while (Date.now() < challengeDeadline) {
-              // Respect cancellation/window-close promptly instead of polling for
-              // up to CHALLENGE_TIMEOUT_MS — matches the abort checks used by the
-              // other wait loops in this file.
+            let descHeartbeatAt = Date.now();
+            const descChallengeStart = Date.now();
+            // Wait INDEFINITELY for the user to solve. The only exits are abort
+            // (Reset / hub close) or the user closing the window — never a timer.
+            while (true) {
               if (signal?.aborted || page.isClosed()) break;
               await new Promise(r => setTimeout(r, humanDelay(1500)));
               if (await recoverFromChallengeHomeLanding(page, overlayBase, signal, viewUrl, baseCount + i + 1)) {
@@ -773,6 +787,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               }
               const stillChallenge = await detectChallengePage(page);
               if (!stillChallenge) { solved = true; break; }
+              if (Date.now() - descHeartbeatAt >= CHALLENGE_HEARTBEAT_MS) {
+                descHeartbeatAt = Date.now();
+                logger.info(`[BrowserScraper] ${overlayBase.srcName}: still waiting for description-expansion challenge solve (${Math.round((Date.now() - descChallengeStart) / 60000)} min elapsed)`);
+              }
             }
             if (!solved) break;
             await updateOverlay(page, {
@@ -794,25 +812,64 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           let text = '';
           let jsonLdDate = '';
           if (cfg.jsonLdType) {
-            const ld = await fetchPage.evaluate((type, field) => {
+            const ld = await fetchPage.evaluate((type, field, datePattern) => {
               let desc = '';
               let datePosted = '';
+              // Robust JSON-LD harvest: a block may be a single object, an ARRAY of
+              // objects, or wrap nodes in an `@graph`; and `@type` may be a string
+              // OR an array (["JobPosting"]). The old strict `d['@type'] !== type`
+              // missed the array/@graph cases — so a JobPosting nested in an
+              // @graph (common on ZipRecruiter) was skipped, the description fell
+              // through to the panel selector, and `datePosted` was never captured.
+              // Flatten everything, then match leniently. Additive — finds MORE
+              // JobPosting nodes, never fewer, so it can't regress a working source.
+              const matchesType = (t) => Array.isArray(t) ? t.includes(type) : t === type;
+              const candidates = [];
               for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
                 try {
-                  const d = JSON.parse(s.textContent);
-                  if (d['@type'] !== type) continue;
-                  if (!desc && d[field]) {
-                    const tmp = document.createElement('div');
-                    tmp.innerHTML = d[field];
-                    desc = tmp.innerText?.trim() || '';
+                  const parsed = JSON.parse(s.textContent);
+                  for (const node of (Array.isArray(parsed) ? parsed : [parsed])) {
+                    if (!node || typeof node !== 'object') continue;
+                    candidates.push(node);
+                    if (Array.isArray(node['@graph'])) candidates.push(...node['@graph']);
                   }
-                  if (!datePosted && d.datePosted) datePosted = String(d.datePosted);
                 } catch {
                   // Ignore malformed JSON-LD blocks and keep probing fallbacks.
                 }
               }
+              for (const d of candidates) {
+                if (!d || !matchesType(d['@type'])) continue;
+                if (!desc && d[field]) {
+                  const tmp = document.createElement('div');
+                  tmp.innerHTML = d[field];
+                  desc = tmp.innerText?.trim() || '';
+                }
+                // schema.org JobPosting standardizes on `datePosted`; some feeds
+                // emit `datePublished` — accept either.
+                if (!datePosted && (d.datePosted || d.datePublished)) {
+                  datePosted = String(d.datePosted || d.datePublished);
+                }
+              }
+              // DOM fallback for the date: some detail pages carry NO structured
+              // date at all — verified on ZipRecruiter's new /jobs/{co}/{slug}
+              // pages (no JSON-LD, no __NEXT_DATA__, no <time>), where the only
+              // signal is a visible "Posted 28 days ago" label in a utility-classed
+              // <p>. Match by TEXT PATTERN (robust to ZR's churning Tailwind class
+              // names), taking the first short text leaf that reads like a relative
+              // date. Returns the clean phrase ("28 days ago") for parsePostedDate.
+              if (!datePosted) {
+                const re = new RegExp(datePattern, 'i');
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                let node;
+                while ((node = walker.nextNode())) {
+                  const txt = (node.textContent || '').trim();
+                  if (!txt || txt.length > 60) continue; // the date is a short label, not a paragraph
+                  const m = txt.match(re);
+                  if (m) { datePosted = m[0]; break; }
+                }
+              }
               return { desc, datePosted };
-            }, cfg.jsonLdType, cfg.jsonLdField).catch(() => ({ desc: '', datePosted: '' }));
+            }, cfg.jsonLdType, cfg.jsonLdField, POSTED_DATE_PATTERN).catch(() => ({ desc: '', datePosted: '' }));
             text = ld.desc;
             jsonLdDate = ld.datePosted;
           }
@@ -881,6 +938,36 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             // list extractor didn't already capture one (don't clobber a good
             // relative date like "3 days ago" with an ISO timestamp).
             enhanced[i] = { ...job, snippet: text, ...(jsonLdDate && !job.posted ? { posted: jsonLdDate } : {}) };
+          }
+          // Date-miss diagnostic (once per batch): a description was recovered but
+          // NO posted date — not from the list extractor, the JobPosting JSON-LD,
+          // OR the visible "Posted X ago" DOM fallback. Capture the JSON-LD @types
+          // + any date-like fields present so the next bug report pinpoints WHERE
+          // this source's date lives (vs. a bare "posted: ALL empty" with no cause).
+          if (text && !jsonLdDate && !job.posted && i === 0) {
+            const dateDiag = await fetchPage.evaluate(() => {
+              const ldTypes = [];
+              const dateFields = [];
+              for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+                try {
+                  const parsed = JSON.parse(s.textContent);
+                  for (const node of (Array.isArray(parsed) ? parsed : [parsed])) {
+                    const nodes = [node, ...(Array.isArray(node && node['@graph']) ? node['@graph'] : [])];
+                    for (const n of nodes) {
+                      if (!n || typeof n !== 'object') continue;
+                      ldTypes.push(Array.isArray(n['@type']) ? n['@type'].join('|') : (n['@type'] || '?'));
+                      for (const k of Object.keys(n)) {
+                        if (/date|posted|publish/i.test(k)) dateFields.push(`${k}=${String(n[k]).slice(0, 32)}`);
+                      }
+                    }
+                  }
+                } catch { /* ignore malformed JSON-LD */ }
+              }
+              return { ldTypes: ldTypes.slice(0, 12), dateFields: dateFields.slice(0, 12) };
+            }).catch(() => null);
+            if (dateDiag) {
+              logger.info(`[BrowserScraper] ${overlayBase.srcName} date-miss diag: ldTypes=[${dateDiag.ldTypes.join(',')}] dateFields=[${dateDiag.dateFields.join(', ')}]`);
+            }
           }
         } catch {
           // Per-listing navigation errors are non-fatal; keep the batch moving.
@@ -1257,6 +1344,52 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal) 
  * @param {AbortSignal|null}   signal
  * @returns {Promise<Array>}
  */
+/**
+ * Resolve a Glassdoor location string to its numeric `locId`. Glassdoor's search
+ * location FILTER is keyed by locId (the `locKeyword` text alone is silently
+ * ignored — verified empirically), and the location-autocomplete endpoint is
+ * Cloudflare-gated, so the lookup MUST run from the glassdoor.com origin inside
+ * this already-CF-cleared browser (a plain server-side fetch 403s). The result is
+ * cached persistently (a locId is a stable platform id), so this costs an extra
+ * navigation only on the first-ever use of a given location. Returns { locId,
+ * locT } or null (→ caller falls back to an unbounded, nationwide search).
+ */
+async function resolveGlassdoorLocId(page, location, signal) {
+  const key = String(location || '').trim().toLowerCase();
+  if (!key) return null;
+  const cached = getGlassdoorLocId(key);
+  if (cached) return cached;
+  if (signal?.aborted) return null;
+  // Same-origin fetch needs the page on glassdoor.com (carries cf_clearance).
+  if (!/glassdoor\.com/i.test(page.url() || '')) {
+    await page.evaluate(() => { window.location.href = 'https://www.glassdoor.com/Job/index.htm'; }).catch(() => {});
+    await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
+  }
+  if (signal?.aborted) return null;
+  const term = (location.split(',')[0] || location).trim(); // city for the typeahead
+  const res = await page.evaluate(async (t) => {
+    try {
+      const r = await fetch(`/findPopularLocationAjax.htm?term=${encodeURIComponent(t)}&maxLocationsToReturn=10`, {
+        headers: { 'Accept': 'application/json, text/plain, */*' },
+        credentials: 'include',
+      });
+      if (!r.ok) return { error: r.status };
+      const text = await r.text();
+      try { return { data: JSON.parse(text) }; } catch { return { error: 'non-json' }; }
+    } catch (e) { return { error: String((e && e.message) || e) }; }
+  }, term).catch(() => ({ error: 'evaluate-failed' }));
+  if (!res || res.error || !Array.isArray(res.data)) {
+    logger.warn(`[BrowserScraper] Glassdoor locId lookup failed for "${location}" (${res?.error ?? 'no data'})`);
+    return null;
+  }
+  const picked = pickGlassdoorLocation(res.data, location);
+  if (picked?.locId) {
+    saveGlassdoorLocId(key, picked);
+    return picked;
+  }
+  return null;
+}
+
 export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = null) {
   // Clear per-run browser diagnostic buffers so the bug report only shows
   // what happened in THIS run, not leftovers from a previous one.
@@ -1471,6 +1604,21 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           url: task.url,
         });
 
+        // Glassdoor: resolve the location text → numeric locId and append it so the
+        // search is actually geo-bounded (locKeyword text alone is ignored). Done
+        // in-browser (CF-gated endpoint) + cached; on any failure we leave the URL
+        // unbounded (nationwide) rather than block the scrape.
+        if (sourceId === 'glassdoor' && task.resolveGlassdoorLocation && !task._locResolved) {
+          task._locResolved = true;
+          const picked = await resolveGlassdoorLocId(page, task.resolveGlassdoorLocation, signal).catch(() => null);
+          if (picked?.locId && !/[?&]locId=/.test(task.url)) {
+            task.url += `&locId=${encodeURIComponent(picked.locId)}&locT=${encodeURIComponent(picked.locT || 'C')}`;
+            logger.info(`[BrowserScraper] Glassdoor "${task.resolveGlassdoorLocation}" → locId ${picked.locId}/${picked.locT}`);
+          } else {
+            logger.warn(`[BrowserScraper] Glassdoor location "${task.resolveGlassdoorLocation}" not resolved — searching nationwide (location not applied)`);
+          }
+        }
+
         // Navigate via window.location.href — avoids CDP Page.navigate fingerprint
         navStatusRef.last = null;
         await page.evaluate(u => { window.location.href = u; }, task.url).catch(() => {});
@@ -1497,13 +1645,16 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           break;
         }
         if (readyState === 'skip') {
-          logger.warn(`[BrowserScraper] ${srcName}: challenge timed out — skipping to next source`);
+          // Reached only when the session is fully blocked (the resume URL re-serves
+          // a challenge the instant we return to it — solving can't unblock it), NOT
+          // a timeout: a solvable challenge is now waited on indefinitely.
+          logger.warn(`[BrowserScraper] ${srcName}: session blocked (resume URL re-challenged) — skipping to next source`);
           if (!sourceSiteChangedWarning) {
             sourceSiteChangedWarning = {
-              code:       'challenge-timeout',
+              code:       'session-blocked',
               severity:   'block',
-              evidence:   `${srcName} stayed behind a bot challenge or login wall for ${Math.round(CHALLENGE_TIMEOUT_MS / 60000)} min, so the source was skipped.`,
-              suggestion: 'Complete the visible login/challenge window, then run the search again.',
+              evidence:   `${srcName} re-served a bot challenge the moment we returned to the results URL, so the session is blocked and the source was skipped.`,
+              suggestion: `Open ${srcName} in a normal Chrome tab, ensure you are logged in and unblocked, then run the search again.`,
             };
           }
           sourceSkipped = true;

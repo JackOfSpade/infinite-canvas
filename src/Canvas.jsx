@@ -307,6 +307,23 @@ export function Canvas() {
   useEffect(() => {
     window.electronAPI?.setWindowFile?.(currentFile || null);
   }, [currentFile]);
+
+  // ── Follow on-disk renames ───────────────────────────────────────────────
+  // If the user renames the canvas file in Finder while it's open, the main
+  // process detects it (by inode) and pushes the new path here. Adopting it
+  // keeps currentFile — and every job sidecar derived from it — pointing at the
+  // right file immediately, without waiting for the next save.
+  useEffect(() => {
+    if (!window.electronAPI?.onCanvasFileRenamed) return;
+    return window.electronAPI.onCanvasFileRenamed((newPath) => {
+      if (!newPath) return;
+      setCurrentFile(newPath);
+      updateSetting?.('lastOpenedWorkspace', newPath);
+      const name = newPath.split(/[/\\]/).pop();
+      addToast({ title: 'Canvas file renamed', description: `Now saving to “${name}”.`, type: 'info' });
+    });
+  }, [setCurrentFile, updateSetting, addToast]);
+
   // ── Document Title Manager ───────────────────────────────────────────────
   useEffect(() => {
     let title = 'Infinite Canvas';

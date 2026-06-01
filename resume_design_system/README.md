@@ -99,8 +99,10 @@ both.
 - Oxford comma. Em-dash for ranges in prose (`380 ms → 18 ms`),
   en-dash for date ranges (`Mar 2022 – Present`).
 - Numerals: digits for everything quantitative. **Always** include
-  the unit (`38 ms`, not `38`). Use `tnum` (built into the CSS) so
-  numbers align across rows.
+  the unit (`38 ms`, not `38`). Figures are proportional, not tabular —
+  tabular figures (`tnum`) break PDF text extraction, so they are
+  disabled system-wide (see STYLE.md §2.4); column alignment comes from
+  the grid, not the digits.
 - Tech terms are inline `<code>` only when the term is something
   you'd type, not when it's a product name. `kubectl apply` → code;
   Kubernetes → not code.
@@ -211,7 +213,10 @@ browser/Puppeteer contexts (script tag → `window.DualModePdf`).
 pdf-lib is vendored at `build/vendor/pdf-lib.min.js`; no network
 dependency at build time. Self-test: `node build/test.js` from the
 project root round-trips a synthetic PDF through the module and
-asserts on the OCG structure.
+asserts on the OCG structure. The same assertions run through the
+browser UMD path (`window.DualModePdf`) by opening
+`build/browser-test.html` in any browser — coverage for the
+browser/Puppeteer access path the Node test can't reach.
 
 The agent's per-company decision rule for which variant to apply
 lives in **`SKILL.md §Variant selection`**, including a

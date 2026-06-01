@@ -25,6 +25,21 @@ const MAX_AI_FILE_BYTES  = 15 * 1024 * 1024; // 15MB
 const GEMINI_MODEL = 'gemini-3.5-flash';
 const LOCATION = 'us-central1';
 
+// Best → worst across the FREE-tier text/JSON Gemini models, in cascade order
+// (callGemini falls down this list on 429/cooldown). Hoisted to module scope so
+// the token-fit preflight (checkPromptFits) can budget against the WHOLE cascade
+// — i.e. the smallest window any step might use — rather than just the entry
+// model. Today every entry is 1,048,576/65,536 so the cascade is homogeneous,
+// but taking the min keeps the preflight correct if a smaller-window model is
+// ever added. See the long rationale at the use site in callGemini.
+export const GEMINI_MODEL_FALLBACKS = [
+  'gemini-3.5-flash',         // ~20 RPD / 5 RPM free — best quality available on free tier
+  'gemini-3-flash-preview',   // ~20 RPD / 5 RPM free  (display name "Gemini 3 Flash")
+  'gemini-2.5-flash',         // ~20 RPD / 5 RPM free
+  'gemini-2.5-flash-lite',    // ~20 RPD / 10 RPM free
+  'gemini-3.1-flash-lite',    // ~500 RPD / 15 RPM free — workhorse, completes bulk runs
+];
+
 /**
  * Convert standard JSON Schema (lowercase types) to Gemini's responseSchema
  * format (uppercase types). Recursively walks objects + arrays. Drops
@@ -467,13 +482,8 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   //   • gemini-3.1-flash-lite has ~500 RPD / 15 RPM — 25× the others — so it's
   //     the workhorse tail: last in line, it still completes a bulk run after
   //     every smaller pool has drained.
-  const GEMINI_MODEL_FALLBACKS = [
-    'gemini-3.5-flash',         // ~20 RPD / 5 RPM free — best quality available on free tier
-    'gemini-3-flash-preview',   // ~20 RPD / 5 RPM free  (display name "Gemini 3 Flash")
-    'gemini-2.5-flash',         // ~20 RPD / 5 RPM free
-    'gemini-2.5-flash-lite',    // ~20 RPD / 10 RPM free
-    'gemini-3.1-flash-lite',    // ~500 RPD / 15 RPM free — workhorse, completes bulk runs
-  ];
+  // (The list itself is hoisted to module scope — GEMINI_MODEL_FALLBACKS — so the
+  // token-fit preflight can budget against the whole cascade.)
 
   const attemptedErrors = [];
 
@@ -720,6 +730,35 @@ export async function callGeminiTextRaw(prompt, apiKey, model, signal = null, op
 }
 
 /**
+ * Count the input tokens a text prompt would consume, via Gemini's FREE
+ * `:countTokens` endpoint (no charge, ~3000 RPM). Returns the integer
+ * `totalTokens`. Only the AI-Studio (API-key) path is supported — the Vertex
+ * service-account path throws so the preflight falls back to its local estimate.
+ * Counts the prompt text only (Gemini's responseSchema lives in generationConfig,
+ * not in `contents`, so it isn't billed against the input window anyway).
+ * Used by the preflight (checkPromptFits) to size/split prompts before sending.
+ */
+export async function countGeminiInputTokens(text, apiKey, model, { signal = null } = {}) {
+  if (!apiKey) throw new Error('Gemini countTokens requires an AI Studio API key');
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || GEMINI_MODEL}:countTokens?key=${apiKey}`;
+  const timeoutSignal = AbortSignal.timeout(15000);
+  const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: String(text || '') }] }] }),
+    signal: combinedSignal,
+  });
+  if (!res.ok) {
+    let body = '';
+    try { body = await res.text(); } catch { /* ignore */ }
+    throw new Error(`Gemini countTokens error ${res.status}: ${extractGeminiErr(body, res.status)}`);
+  }
+  const data = await res.json();
+  return data?.totalTokens ?? 0;
+}
+
+/**
  * Send images + text prompt to Gemini Vision.
  * @param {string[]} imagePaths — Absolute paths to image files
  * @param {string} prompt — Text prompt
@@ -728,23 +767,35 @@ export async function callGeminiTextRaw(prompt, apiKey, model, signal = null, op
  * @returns {Promise<object>} — Parsed JSON response
  */
 export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal = null, opts = {}) {
-  const imageParts = await Promise.all(imagePaths.map(async (imgPath) => {
-    const stats = await fs.promises.stat(imgPath);
-    // Vertex AI inlineData limit is 20MB. Base64 encoding adds ~33% overhead,
-    // so we cap the raw file size at 15MB to be safe and provide a clear error.
-    if (stats.size > MAX_AI_FILE_BYTES) {
-      throw new Error(`Image file too large: ${path.basename(imgPath)} (${(stats.size / 1024 / 1024).toFixed(1)}MB). Max 15MB for AI analysis.`);
-    }
+  // Normalize any non-vision-safe format to JPEG. Gemini accepts HEIC natively
+  // but NOT TIFF/JXL/AVIF/BMP/SVG — one converter keeps both providers uniform.
+  // Track temp files for cleanup in the finally (this path created none before).
+  const { ensureVisionSafeImage, cleanupTempFile } = await import('./heicUtils.js');
+  const tempFiles = [];
+  try {
+    const imageParts = await Promise.all(imagePaths.map(async (imgPath) => {
+      const safePath = await ensureVisionSafeImage(imgPath);
+      if (safePath !== imgPath) tempFiles.push(safePath);
 
-    const buffer = await fs.promises.readFile(imgPath);
-    const ext = path.extname(imgPath).toLowerCase();
-    const mimeType = IMAGE_MIME_MAP[ext] || 'image/jpeg';
-    return { inlineData: { mimeType, data: buffer.toString('base64') } };
-  }));
+      const stats = await fs.promises.stat(safePath);
+      // Vertex AI inlineData limit is 20MB. Base64 encoding adds ~33% overhead,
+      // so we cap the raw file size at 15MB to be safe and provide a clear error.
+      if (stats.size > MAX_AI_FILE_BYTES) {
+        throw new Error(`Image file too large: ${path.basename(imgPath)} (${(stats.size / 1024 / 1024).toFixed(1)}MB). Max 15MB for AI analysis.`);
+      }
 
-  const parts = [...imageParts, { text: prompt }];
-  const raw = await callGemini(parts, apiKey, model, { signal, ...opts });
-  return parseGeminiJSON(raw);
+      const buffer = await fs.promises.readFile(safePath);
+      const ext = path.extname(safePath).toLowerCase();
+      const mimeType = IMAGE_MIME_MAP[ext] || 'image/jpeg';
+      return { inlineData: { mimeType, data: buffer.toString('base64') } };
+    }));
+
+    const parts = [...imageParts, { text: prompt }];
+    const raw = await callGemini(parts, apiKey, model, { signal, ...opts });
+    return parseGeminiJSON(raw);
+  } finally {
+    if (tempFiles.length > 0) await Promise.all(tempFiles.map(f => cleanupTempFile(f)));
+  }
 }
 
 /**

@@ -59,6 +59,23 @@ export function JobSourceCardNode({ id, data }) {
     return () => cleanup?.();
   }, [data.hubId, data.sourceId]);
 
+  // Fresh-run reset. The owning hub broadcasts this the moment it (re)starts a
+  // scrape. This card holds its count in LOCAL state (seeded from
+  // persistedProgress) and a re-run deliberately KEEPS the card on canvas, so the
+  // hub's own progress-hook reset never reaches it — without this the card would
+  // paint the PREVIOUS run's "{N} jobs" all the way through the new search phase
+  // until this source's own first fresh event lands. Clearing to null makes the
+  // card derive "Searching…" immediately; the new run re-emits real progress.
+  useEffect(() => {
+    const onReset = (event) => {
+      if (event.detail?.hubId !== data.hubId) return;
+      setProgress(null);
+      setDismissed(false);
+    };
+    document.addEventListener('job-source-progress-reset', onReset);
+    return () => document.removeEventListener('job-source-progress-reset', onReset);
+  }, [data.hubId]);
+
   // Mirror progress into node data ONLY on terminal states (done / error / skipped).
   // The sanitizer keeps job-source cards only when persistedProgress carries
   // a warning or error, so writing intermediate 'searching' states is wasted
@@ -126,6 +143,7 @@ export function JobSourceCardNode({ id, data }) {
           nodeId: data.hubId,
           canvasFilePath: nav?.currentFile || null,
           maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
+          preferredLocation: getNode(data.hubId)?.data?.canonicalLocation || '',
           resumeState,
         });
       } else {
@@ -228,14 +246,27 @@ export function JobSourceCardNode({ id, data }) {
   const hubLocked = !!hubData.locked;
   const fallbackCount = hubData.finalSourceCounts?.[data.sourceId];
 
+  // A fresh run begins in 'parsing'/'querying' (the "Reading resume…" phase),
+  // BEFORE the search phase emits any per-source progress — so any `progress`
+  // still held here is necessarily from the PREVIOUS run. Treat it as stale in
+  // those phases (derive, don't setState — clearing state in an effect causes
+  // cascading renders) so the card flips straight to "Searching…" instead of
+  // lingering on the old count through the whole resume-read/query phase.
+  const preSearch = hubData.hubState === 'parsing' || hubData.hubState === 'querying';
+  const liveProgress = preSearch ? null : progress;
+
   // Pick what to display. Live progress wins; otherwise show the last-known
-  // count from the most recent completed run, otherwise neutral idle.
+  // count from the most recent completed run — but ONLY between runs. While the
+  // hub is busy (a re-run is underway) the last-run count is stale, so suppress
+  // it and show "Searching…" until this source emits fresh progress. Without the
+  // !hubBusy guard, every card flashes the previous run's counts through the
+  // whole "Reading resume…" / query phase before the search phase resets them.
   let status;
   let count;
-  if (progress) {
-    status = progress.status;
-    count  = progress.count;
-  } else if (fallbackCount != null) {
+  if (liveProgress) {
+    status = liveProgress.status;
+    count  = liveProgress.count;
+  } else if (fallbackCount != null && !hubBusy) {
     status = 'done';
     count  = fallbackCount;
   } else {
@@ -243,7 +274,7 @@ export function JobSourceCardNode({ id, data }) {
     count  = undefined;
   }
 
-  const warning = progress?.warning;
+  const warning = liveProgress?.warning;
   const isSearching = status === 'searching';
   const isDone      = status === 'done';
   const isError     = status === 'error';
@@ -253,9 +284,9 @@ export function JobSourceCardNode({ id, data }) {
   const hasInfo     = warning?.severity === 'info';
   const hasWarn     = warning?.severity === 'warn';
   const warningLabel = warning?.shortLabel || warning?.code || null;
-  const progressTotal = Number.isFinite(progress?.total) && progress.total > 0 ? progress.total : null;
-  const progressDone = progressTotal && Number.isFinite(progress?.completed)
-    ? Math.max(0, Math.min(progress.completed, progressTotal))
+  const progressTotal = Number.isFinite(liveProgress?.total) && liveProgress.total > 0 ? liveProgress.total : null;
+  const progressDone = progressTotal && Number.isFinite(liveProgress?.completed)
+    ? Math.max(0, Math.min(liveProgress.completed, progressTotal))
     : null;
   const hasMeasuredProgress = progressTotal != null && progressDone != null;
   const progressPercent = (isDone || isSkipped || isError)
@@ -276,7 +307,7 @@ export function JobSourceCardNode({ id, data }) {
       : isDone
         ? `${count ?? 0} jobs`
         : isSearching
-          ? (progress?.detail ? `Searching… ${progress.detail}` : 'Searching…')
+          ? (liveProgress?.detail ? `Searching… ${liveProgress.detail}` : 'Searching…')
           : 'Idle';
 
   // Red for hard failures/blocks, amber for throttles/skips/warn

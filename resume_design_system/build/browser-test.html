@@ -1,0 +1,162 @@
+<!doctype html>
+<!--
+  browser-test.html — browser companion to build/test.js.
+  Loads the vendored pdf-lib + dual-mode-pdf.js through their UMD
+  *browser* path (window.PDFLib → window.DualModePdf) and runs the
+  same assertion suite test.js runs under Node. Covers the
+  browser/Puppeteer access path that the Node test cannot reach.
+  Open in any browser; results print to the page and the console.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dual-mode-pdf — browser self-test</title>
+<style>
+  body { font: 13px/1.5 ui-monospace, Menlo, monospace; background:#1a1815; color:#e8e3d8; padding:24px; }
+  .pass { color:#7CCB8E; } .fail { color:#FF8A80; } .hdr { color:#B6AFA2; margin-top:14px; }
+  #summary { font-size:16px; margin-top:18px; padding:10px 14px; border-radius:6px; }
+  #summary.ok { background:#16301d; color:#7CCB8E; } #summary.bad { background:#3a1517; color:#FF8A80; }
+</style>
+<script src="vendor/pdf-lib.min.js"></script>
+<script src="dual-mode-pdf.js"></script>
+</head>
+<body>
+<div id="out"></div>
+<div id="summary">running…</div>
+<script>
+const out = document.getElementById('out');
+const sumEl = document.getElementById('summary');
+let passed = 0, failed = 0; const failures = [];
+function line(html, cls){ const d=document.createElement('div'); if(cls)d.className=cls; d.innerHTML=html; out.appendChild(d); }
+function ok(name){ line('  ✓ '+name, 'pass'); console.log('PASS: '+name); passed++; }
+function fail(name,m){ line('  ✗ '+name+' — '+m,'fail'); console.error('FAIL: '+name+' — '+m); failed++; failures.push(name); }
+function header(s){ line('\n'+s,'hdr'); }
+function assert(cond,name,msg){ cond ? ok(name) : fail(name,msg||'assertion failed'); }
+async function expectThrow(fn,name,pattern){
+  let threw=false,msg=''; try{ await fn(); }catch(e){ threw=true; msg=e.message; }
+  assert(threw && (!pattern||pattern.test(msg)), name, threw?'wrong message: '+msg:'did not throw');
+}
+
+const { PDFDocument, PDFName, PDFArray, PDFDict, PDFString, degrees } = PDFLib;
+const { addOcgBackground, DEFAULT_CREAM_RGB, DEFAULT_LAYER_NAME } = DualModePdf;
+
+async function buildBasePdf(opts){
+  opts = opts||{};
+  const pdf = await PDFDocument.create();
+  for(let i=0;i<(opts.pages||1);i++){
+    const p = pdf.addPage([612,792]);
+    p.drawText('Page '+(i+1)+' — test content',{x:72,y:720,size:14});
+    if(opts.rotate) p.setRotation(degrees(opts.rotate));
+  }
+  return await pdf.save();
+}
+async function buildPdfWithOcg(name){
+  const doc = await PDFDocument.create(); const ctx = doc.context;
+  doc.addPage([612,792]).drawText('x',{x:72,y:720,size:12});
+  const other = ctx.register(ctx.obj({ Type:'OCG', Name: PDFString.of(name) }));
+  doc.catalog.set(PDFName.of('OCProperties'), ctx.obj({ OCGs:[other], D:{Order:[other],ON:[other],OFF:[],BaseState:'ON'} }));
+  return await doc.save();
+}
+async function buildPdfWithEmptyOcProps(){
+  const doc = await PDFDocument.create(); const ctx = doc.context;
+  doc.addPage([612,792]).drawText('x',{x:72,y:720,size:12});
+  doc.catalog.set(PDFName.of('OCProperties'), ctx.obj({}));
+  return await doc.save();
+}
+async function inspectFirstOcg(bytes){
+  const pdf = await PDFDocument.load(bytes);
+  const ocProps = pdf.catalog.lookup(PDFName.of('OCProperties'));
+  const ocgs = ocProps && ocProps.lookup(PDFName.of('OCGs'));
+  const ocg = ocgs && pdf.context.lookup(ocgs.get(0));
+  const usage = ocg && ocg.lookup(PDFName.of('Usage'));
+  return { pdf, ocProps, ocgCount: ocgs?ocgs.size():0,
+    printState: usage && String(usage.lookup(PDFName.of('Print')).lookup(PDFName.of('PrintState'))),
+    viewState:  usage && String(usage.lookup(PDFName.of('View')).lookup(PDFName.of('ViewState'))) };
+}
+function everyPageHasBgBinding(pdf){
+  return pdf.getPages().every(p=>{ const res=p.node.Resources(); const props=res&&res.lookup(PDFName.of('Properties')); return !!(props&&props.lookup(PDFName.of('Bg'))); });
+}
+function latin1(bytes){ let s=''; for(let i=0;i<bytes.length;i++) s+=String.fromCharCode(bytes[i]); return s; }
+
+async function run(){
+  header('Module surface');
+  assert(typeof addOcgBackground==='function','addOcgBackground is exported as a function');
+  assert(Array.isArray(DEFAULT_CREAM_RGB)&&DEFAULT_CREAM_RGB.length===3,'DEFAULT_CREAM_RGB is exposed');
+  assert(typeof DEFAULT_LAYER_NAME==='string'&&DEFAULT_LAYER_NAME.length>0,'DEFAULT_LAYER_NAME is exposed');
+  assert(Math.abs(DEFAULT_CREAM_RGB[0]-0xF7/255)<1e-6,'DEFAULT_CREAM_RGB matches CSS --bg (#F7F4ED)');
+
+  header('Round-trip — single page');
+  const base1 = await buildBasePdf({pages:1});
+  const out1 = await addOcgBackground(base1);
+  assert(out1.length>base1.length,'output PDF is larger than input (cream layer added)');
+  const info1 = await inspectFirstOcg(out1);
+  assert(!!info1.ocProps,'/OCProperties registered on catalog');
+  assert(info1.ocgCount===1,'exactly one OCG registered');
+  assert(info1.printState==='/OFF','/Usage/Print/PrintState is /OFF (load-bearing!)');
+  assert(info1.viewState==='/ON','/Usage/View/ViewState is /ON');
+  const page0 = info1.pdf.getPages()[0];
+  const resProps = page0.node.Resources().lookup(PDFName.of('Properties'));
+  assert(!!resProps.lookup(PDFName.of('Bg')),'page 0 /Resources/Properties/Bg → OCG binding present');
+  const contents = page0.node.get(PDFName.of('Contents'));
+  assert(contents instanceof PDFArray && contents.size()===2,'page 0 /Contents is a 2-entry array (cream rect prepended + original)');
+
+  header('Round-trip — multi-page');
+  const out3 = await addOcgBackground(await buildBasePdf({pages:3}));
+  const pdf3 = await PDFDocument.load(out3);
+  assert(pdf3.getPages().length===3,'3-page input → 3-page output');
+  assert(everyPageHasBgBinding(pdf3),'every page has the OCG marked-content binding');
+
+  header('Raw byte sanity (content streams only)');
+  const raw = latin1(out1);
+  assert(raw.indexOf('/OC /Bg BDC')!==-1,'content stream contains /OC /Bg BDC marker');
+  assert(raw.indexOf('EMC')!==-1,'content stream contains EMC terminator');
+  assert(/0\.9686\s+0\.9569\s+0\.9294\s+rg/.test(raw),'content stream paints cream colour matching --bg');
+
+  header('Idempotency guard');
+  await expectThrow(()=>addOcgBackground(out1),'second call on output PDF throws',/already has an OCG/);
+
+  header('Idempotency guard is layer-name-specific');
+  const customOut = await addOcgBackground(base1,{layerName:'Other layer'});
+  await expectThrow(()=>addOcgBackground(customOut,{layerName:'Other layer'}),'guard fires when re-adding same-named layer',/already has an OCG/);
+  let passedThrough=false; try{ await addOcgBackground(customOut); passedThrough=true; }catch(e){}
+  assert(passedThrough,'PDF with unrelated OCGs (different layer name) does NOT trigger the guard');
+
+  header('Custom cream colour');
+  const pinkRaw = latin1(await addOcgBackground(base1,{cream:'#FFE4E1'}));
+  assert(/1\.0000\s+0\.8941\s+0\.8824\s+rg/.test(pinkRaw),'cream:"#FFE4E1" string param renders correct RGB');
+  const arrRaw = latin1(await addOcgBackground(base1,{cream:[0.5,0.25,0.125]}));
+  assert(/0\.5000\s+0\.2500\s+0\.1250\s+rg/.test(arrRaw),'cream:[r,g,b] array param renders correct RGB');
+  await expectThrow(()=>addOcgBackground(base1,{cream:'#GGGGGG'}),'cream:"#GGGGGG" (invalid hex) throws');
+  await expectThrow(()=>addOcgBackground(base1,{cream:[2,0,0]}),'cream:[2,0,0] (out of range) throws');
+
+  header('Page sanity assertions');
+  const rotated = await buildBasePdf({pages:1,rotate:90});
+  await expectThrow(()=>addOcgBackground(rotated),'page with /Rotate 90 is rejected',/Rotate/);
+
+  header('Input flexibility');
+  const ab = base1.buffer.slice(base1.byteOffset, base1.byteOffset+base1.byteLength);
+  const abOut = await addOcgBackground(ab);
+  assert(abOut instanceof Uint8Array && abOut.length>base1.length,'accepts ArrayBuffer input');
+
+  header('Merge into existing /OCProperties');
+  const withOcg = await buildPdfWithOcg('Watermark');
+  const merged = await addOcgBackground(withOcg);
+  const mPdf = await PDFDocument.load(merged);
+  const mOcp = mPdf.catalog.lookup(PDFName.of('OCProperties'));
+  const mOcgs = mOcp.lookup(PDFName.of('OCGs'));
+  const mNames=[]; for(let mi=0;mi<mOcgs.size();mi++) mNames.push(mPdf.context.lookup(mOcgs.get(mi)).lookup(PDFName.of('Name')).asString());
+  assert(mOcgs.size()===2 && mNames.indexOf('Watermark')!==-1 && mNames.indexOf('Editorial cream background')!==-1,'well-formed merge: both OCGs listed in /OCGs');
+  assert(mOcp.lookup(PDFName.of('D')).lookup(PDFName.of('ON')).size()===2,'well-formed merge: both OCGs listed in /D/ON');
+  const fixedUp = await addOcgBackground(await buildPdfWithEmptyOcProps());
+  const fPdf = await PDFDocument.load(fixedUp);
+  const fOcgs = fPdf.catalog.lookup(PDFName.of('OCProperties')).lookup(PDFName.of('OCGs'));
+  assert(fOcgs && typeof fOcgs.size==='function' && fOcgs.size()>=1,'malformed /OCProperties: our OCG still listed in /OCGs');
+
+  sumEl.textContent = passed+' passed, '+failed+' failed';
+  sumEl.className = failed===0 ? 'ok' : 'bad';
+  console.log('SUMMARY: '+passed+' passed, '+failed+' failed'+(failures.length?' | failures: '+failures.join(', '):''));
+}
+run().catch(e=>{ sumEl.textContent='RUNNER CRASHED: '+e.message; sumEl.className='bad'; console.error('RUNNER CRASHED', e.stack||e.message); });
+</script>
+</body>
+</html>

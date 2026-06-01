@@ -266,21 +266,44 @@ export const CAREER_FILE_EXTRACT_SCHEMA = {
 // absent target role results in an empty array.
 export const JOB_QUERY_GENERATION_SCHEMA = {
   type: 'object',
-  required: ['titleQueries', 'suggestedRoleQueries', 'skillsOnlyQueries', 'targetRoleQueries'],
+  required: ['titleQueries', 'suggestedRoleQueries', 'skillsOnlyQueries', 'targetRoleQueries', 'canonicalLocation'],
   properties: {
     titleQueries:         { type: 'array', items: { type: 'string' } },
     suggestedRoleQueries: { type: 'array', items: { type: 'string' } },
     skillsOnlyQueries:    { type: 'array', items: { type: 'string' } },
     targetRoleQueries:    { type: 'array', items: { type: 'string' } },
+    // The user's free-form preferred location, parsed + typo-corrected into a
+    // STRUCTURED object. Job boards reject free-form prose in their location
+    // field (USAJobs LocationName, Dice location, Indeed `l=`, ZipRecruiter
+    // `location=`, Glassdoor `locKeyword=`, LinkedIn `location=`), so the model
+    // MUST split the input into discrete fields plus one clean `display` string
+    // that is safe to send verbatim as a location filter. Role/keyword queries
+    // stay free-form (boards don't enforce a structure there) — only LOCATION is
+    // structured. All keys are required; an absent/unresolvable location returns
+    // the all-empty object (display: "").
+    canonicalLocation: {
+      type: 'object',
+      description: 'Preferred search location parsed into a structured, board-ready form (NOT prose). Typos corrected, abbreviations expanded.',
+      required: ['city', 'stateCode', 'region', 'country', 'isRemote', 'display'],
+      properties: {
+        city:      { type: 'string', description: 'Corrected city name ONLY (no state), e.g. "Denver" from "denvr". Empty if remote-only, a bare state/region, or unresolvable.' },
+        stateCode: { type: 'string', description: 'State/province subdivision for the city: the 2-letter code for a US state/territory (e.g. "CO"); the full province/region NAME for non-US (e.g. "Ontario"). Empty if none/unknown.' },
+        region:    { type: 'string', description: 'Broader area when no single city applies, e.g. "Midwest", "Bay Area", "Colorado". Empty when a city resolves.' },
+        country:   { type: 'string', description: 'Country name, e.g. "United States" or "Canada". Always set it when any place resolves (it decides US vs non-US formatting). Empty only if truly unknown.' },
+        isRemote:  { type: 'boolean', description: 'true if the user asked for remote / work-from-anywhere.' },
+        display:   { type: 'string', description: 'The full board-ready place string passed VERBATIM to a job board filter: "City, ST" for a US city (e.g. "Denver, CO"); "City, Province, Country" for non-US (e.g. "Whitby, Ontario, Canada"); else the region/country; "" for remote-only (do NOT put "Remote"). Strictly a place, never a sentence.' },
+      },
+    },
   },
 };
 
 // ── Application cover letter: structured letterhead + body ─────────────────
 // Used by generate-application. The résumé is filled as raw design-system HTML
-// by the model; the cover letter is structured so a deterministic builder
-// (resumePdf.buildCoverLetterDocument) can lay it out on-brand. Identity fields
+// by the model; the cover letter is structured so the builder maps the fields
+// onto the design system's NATIVE cover-letter surface (resumeHtml
+// .buildCoverLetterDocument → cover-letter.html/css). Identity fields
 // (name/tagline/contact) come from the candidate's career data so the letterhead
-// matches the résumé header.
+// matches the résumé header; signatureTitle is the target role the close signs as.
 export const APPLICATION_COVER_LETTER_SCHEMA = {
   type: 'object',
   required: ['name', 'salutation', 'paragraphs', 'closing'],
@@ -289,10 +312,11 @@ export const APPLICATION_COVER_LETTER_SCHEMA = {
     tagline:    { type: 'string', description: 'One short role descriptor under the name, e.g. "Senior Product Marketer". Empty string if not inferable.' },
     contact:    { type: 'array', items: { type: 'string' }, description: 'Contact-line items in order — location, email, phone, one URL. Plain strings, no labels. Omit any not present in the career data.' },
     date:       { type: 'string', description: 'Letter date, e.g. "May 31, 2026".' },
-    recipient:  { type: 'string', description: 'Recipient block; use a literal \\n between lines, e.g. "Hiring Team\\nAcme Inc.".' },
+    recipient:  { type: 'string', description: 'Recipient block, one item per line with a literal \\n between lines. First line is the addressee, then the company, then optionally the team/department, e.g. "Hiring Team\\nAcme Inc.\\nProduct Marketing".' },
     salutation: { type: 'string', description: 'Greeting line, e.g. "Dear Acme Hiring Team,".' },
     paragraphs: { type: 'array', items: { type: 'string' }, description: '3-4 body paragraphs of plain prose (no markdown). Each ties specific career-data evidence to specific job requirements and the company research.' },
     closing:    { type: 'string', description: 'Sign-off line, e.g. "Sincerely,".' },
+    signatureTitle: { type: 'string', description: 'Small line under the signature naming the target role, e.g. "Senior Product Marketer · candidate". Use the JOB title being applied to (not the candidate\'s current title) followed by " · candidate". Empty string if no clear role.' },
   },
 };
 
@@ -307,13 +331,12 @@ export const JOB_SCORING_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['index', 'matchScore', 'reasoning', 'careerDirection', 'isTargetRoleMatch'],
+        required: ['index', 'matchScore', 'reasoning', 'careerDirection'],
         properties: {
           index:           { type: 'integer', description: 'Position in input batch (0-based)' },
           matchScore:      { type: 'integer', description: '0-100 fit score' },
           reasoning:       { type: 'string', description: 'Complete, specific justification of the fit — as long as it needs to be (usually 2-4 sentences), citing concrete signals from both the JD and the candidate. No filler.' },
           careerDirection: { type: 'string', description: 'Free-form 1-3 word job-family label that fits THIS job and candidate\'s field (e.g. "Brand Marketing", "Growth", "Backend Engineering", "Data Science"). Reuse the same label across similar jobs. Not a fixed list — the bucketer consolidates these into the final categories.' },
-          isTargetRoleMatch: { type: 'boolean', description: 'True if this job fits the caller-supplied target/pivot role. False (and ignored) when no target role was supplied.' },
         },
       },
     },

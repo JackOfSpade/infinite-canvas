@@ -4,7 +4,7 @@ import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { processDroppedFiles } from '../utils/dragUtils';
 import { getNodeDims } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
-import { CODE_EXT_RE, RESUME_EXT_RE, IMAGE_EXT_RE } from '../utils/fileExtensions';
+import { CODE_EXT_RE } from '../utils/fileExtensions';
 
 // Compiled once at module load — not per drop event.
 const URL_RE = /^(https?:\/\/[^\s]+|[a-z0-9]([a-z0-9-]*[a-z0-9])?\.([a-z]{2,}\.)*[a-z]{2,}([/?#][^\s]*)?)$/i;
@@ -109,27 +109,14 @@ export function useCanvasDragAndDrop({
         return;
       }
 
-      const resumeFiles = validFiles.filter(f => RESUME_EXT_RE.test(f.name));
-      const imageFiles  = validFiles.filter(f => IMAGE_EXT_RE.test(f.name));
-      const otherFiles  = validFiles.filter(f => !RESUME_EXT_RE.test(f.name) && !IMAGE_EXT_RE.test(f.name));
-
-      // 1. Only Resumes dropped (Doc/PDF/TXT) -> auto-create a JobHub.
-      if (resumeFiles.length > 0 && imageFiles.length === 0 && otherFiles.length === 0) {
-        takeSnapshot();
-        EventLogger.log(`drop routed type=jobhub files=${resumeFiles.length}`);
-        insertNodes([NODE_FACTORIES.jobhub(position, { filePath: resumeFiles[0].path })]);
-        return;
-      }
-
-      // Default: treat every remaining drop — INCLUDING images (jpg/png/heic/…) —
-      // as document/picture nodes that display the file inline. A dropped image is
-      // a STANDALONE picture; the SellHub (Marketplace) is created intentionally by
-      // dragging it from the sidebar, then dropping images onto it — never
-      // auto-spawned from a bare image drop. (Auto-spawning surprised users, fired a
-      // Gemini analysis on accidental drops, and was inconsistent: jpg/png/webp/gif
-      // matched IMAGE_EXT_RE and spawned a hub while heic/heif fell through to a
-      // picture. `imageFiles` is still computed above only to keep branch 1's
-      // pure-resume guard correct when images are mixed into a resume drop.)
+      // EVERY file drop becomes a standalone document/picture node that displays
+      // the file inline. Modules are NEVER auto-spawned by a file drop — the JobHub
+      // (job search) and SellHub (marketplace) are created ONLY by dragging them
+      // from the left sidebar; the user then drops their résumé / product photos
+      // ONTO that hub (the hub has its own drop handler). Auto-spawning a JobHub
+      // from a résumé drop surprised users (a dropped .docx is just a document) and
+      // fired the pipeline on accidental drops — so a résumé/PDF/image now drops in
+      // as a plain document like any other file.
       takeSnapshot();
       const dropDepth = depthRef.current;
       const newItems = await processDroppedFiles(validFiles, position);

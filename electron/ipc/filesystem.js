@@ -113,6 +113,120 @@ function getSidecarPath(filePath) {
   return filePath.endsWith('.json') ? filePath.slice(0, -5) + '.progress.json' : filePath + '.progress.json';
 }
 
+/**
+ * Record the canvas file's identity (inode + device) on the renderer's
+ * WebContents after a load or save. A rename preserves the inode, so this is the
+ * fingerprint we use later to recognise the same file under a new name. Must be
+ * called *after* any write — atomicWriteFile renames a temp over the target, so
+ * the canvas inode changes on every save. Best-effort; ino==0 filesystems opt out.
+ */
+function rememberCanvasInode(sender, filePath) {
+  try {
+    const st = fs.statSync(filePath);
+    if (sender && !sender.isDestroyed?.() && st.ino) {
+      sender.__canvasInode = { ino: st.ino, dev: st.dev };
+      sender.__canvasPath = filePath;
+      ensureCanvasWatcher(sender, filePath);
+    }
+  } catch { /* best-effort; reconciliation simply won't trigger */ }
+}
+
+/**
+ * The path the renderer hands us for a save is whatever it last knew. If the user
+ * renamed the canvas in Finder while the app held it open, that path is stale: an
+ * atomic write would resurrect the OLD name (recreating e.g. canvas.json next to
+ * their renamed file) and silently split further edits — and every job sidecar —
+ * across two files. A rename keeps the inode, so when the known path no longer
+ * resolves to the inode we recorded, scan its directory for whoever now carries
+ * it and follow the file to its new name. Returns the original path unchanged when
+ * nothing was recorded, the file is untouched, or the inode can't be found (the
+ * file was deleted or moved out of the directory — there's nowhere to follow it).
+ */
+async function reconcileRenamedCanvas(sender, knownPath) {
+  const tracked = sender?.__canvasInode;
+  if (!tracked?.ino) return knownPath;
+  try {
+    const st = await fs.promises.stat(knownPath);
+    if (st.ino === tracked.ino && st.dev === tracked.dev) return knownPath;
+  } catch { /* knownPath is gone — fall through to the inode search */ }
+
+  const dir = path.dirname(knownPath);
+  let entries;
+  try { entries = await fs.promises.readdir(dir); } catch { return knownPath; }
+  for (const name of entries) {
+    const candidate = path.join(dir, name);
+    try {
+      const st = await fs.promises.stat(candidate);
+      if (st.ino === tracked.ino && st.dev === tracked.dev) {
+        logger.info(`[FileSystem] Canvas renamed on disk: ${knownPath} → ${candidate} (followed by inode)`);
+        return candidate;
+      }
+    } catch { /* unreadable entry — skip */ }
+  }
+  return knownPath;
+}
+
+/**
+ * Per-renderer watcher that closes the rename "sliver" save-time reconciliation
+ * leaves open: a save only fires on the next write, so a job action triggered
+ * right after a Finder rename (no intervening edit/autosave) would still use the
+ * old base name. Watching the canvas's *directory* — which survives the rename,
+ * unlike a watch on the file itself — lets us follow the rename eagerly and push
+ * the new path to the renderer, so currentFile (and every sidecar derived from
+ * it) corrects at once instead of waiting for the next save.
+ */
+const canvasWatchers = new Map(); // WebContents -> { watcher, dir, timer }
+
+function stopCanvasWatcher(sender) {
+  const entry = canvasWatchers.get(sender);
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  try { entry.watcher.close(); } catch { /* ignore */ }
+  canvasWatchers.delete(sender);
+}
+
+function ensureCanvasWatcher(sender, filePath) {
+  const dir = path.dirname(filePath);
+  const existing = canvasWatchers.get(sender);
+  if (existing && existing.dir === dir) return; // already watching the right directory
+  stopCanvasWatcher(sender);
+
+  let watcher;
+  try {
+    watcher = fs.watch(dir, () => {
+      const entry = canvasWatchers.get(sender);
+      if (!entry) return;
+      // A rename emits a burst of events; coalesce them and reconcile once.
+      clearTimeout(entry.timer);
+      entry.timer = setTimeout(() => { handleCanvasDirChange(sender).catch(() => {}); }, 250);
+    });
+  } catch (err) {
+    logger.warn(`[FileSystem] Could not watch canvas directory ${dir}:`, err);
+    return;
+  }
+  watcher.on('error', (err) => {
+    logger.warn(`[FileSystem] Canvas watcher error for ${dir}:`, err);
+    stopCanvasWatcher(sender);
+  });
+  canvasWatchers.set(sender, { watcher, dir, timer: null });
+
+  if (!sender.__canvasWatchCleanup) {
+    sender.__canvasWatchCleanup = true;
+    sender.once('destroyed', () => stopCanvasWatcher(sender));
+  }
+}
+
+async function handleCanvasDirChange(sender) {
+  if (!sender || sender.isDestroyed?.()) return;
+  const knownPath = sender.__canvasPath;
+  if (!knownPath) return;
+  const resolved = await reconcileRenamedCanvas(sender, knownPath);
+  if (resolved === knownPath) return; // unchanged, or the rename couldn't be located — nothing to do
+  rememberCanvasInode(sender, resolved); // re-fingerprint at the new name (same dir → watcher unchanged)
+  if (!sender.isDestroyed()) sender.send('canvas:file-renamed', resolved);
+  logger.info(`[FileSystem] Canvas followed on-disk rename, notified renderer → ${resolved}`);
+}
+
 function relativePortablePath(canvasPath, filePath) {
   if (!canvasPath || !filePath || typeof filePath !== 'string') return null;
   if (!path.isAbsolute(filePath)) return filePath;
@@ -300,7 +414,7 @@ export function registerFilesystemHandlers() {
     await shell.openExternal(url);
   });
 
-  handleSafe('save-workspace', async (_event, args) => {
+  handleSafe('save-workspace', async (event, args) => {
     const { data, filePath } = args;
     let targetPath = filePath;
     if (!targetPath) {
@@ -311,6 +425,11 @@ export function registerFilesystemHandlers() {
       });
       if (canceled || !dialogPath) return { canceled: true };
       targetPath = dialogPath;
+    } else {
+      // Follow a Finder rename so autosave writes to the renamed file instead of
+      // resurrecting the old name. The renderer adopts the returned filePath, so
+      // currentFile — and every job sidecar derived from it — self-corrects.
+      targetPath = await reconcileRenamedCanvas(event.sender, targetPath);
     }
 
     // The renderer-side sanitizer already preserves actionable paused state
@@ -332,14 +451,18 @@ export function registerFilesystemHandlers() {
 
     // Production Hardening: Use atomic write to prevent data corruption
     await atomicWriteFile(targetPath, JSON.stringify(data));
-    
+
+    // Re-fingerprint: the atomic rename gave the canvas a fresh inode, so record
+    // it now to recognise this exact file if it's renamed before the next save.
+    rememberCanvasInode(event.sender, targetPath);
+
     // Background cleanup of any orphaned .tmp files in this specific directory
     cleanupTempFiles(path.dirname(targetPath)).catch(err => logger.warn('Save cleanup failed:', err));
 
     return { filePath: targetPath };
   });
 
-  handleSafe('load-workspace', async (_event, opts) => {
+  handleSafe('load-workspace', async (event, opts) => {
     let targetPath = opts?.filePath;
     
     if (!targetPath) {
@@ -409,7 +532,12 @@ export function registerFilesystemHandlers() {
       
       // Cleanup any orphaned .tmp files left over from past crashes in this directory
       cleanupTempFiles(path.dirname(targetPath)).catch(err => logger.warn('Load cleanup failed:', err));
-      
+
+      // Fingerprint the file we just loaded so the next save can tell if it was
+      // renamed underneath us. Done last: the transient-progress path above may
+      // have atomically rewritten it, changing the inode.
+      rememberCanvasInode(event.sender, targetPath);
+
       return { data, filePath: targetPath };
     } catch (jsonErr) {
       logger.error(`[FileSystem] Failed to parse workspace JSON at ${targetPath}:`, jsonErr);

@@ -15,6 +15,7 @@ import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import fs from 'fs';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -44,10 +45,19 @@ const LOCAL_FILE_MIME_TYPES = {
   '.gif':  'image/gif',
   '.webp': 'image/webp',
   '.svg':  'image/svg+xml',
+  '.bmp':  'image/bmp',
+  '.avif': 'image/avif',
+  '.ico':  'image/x-icon',
   '.txt':  'text/plain; charset=utf-8',
   '.md':   'text/markdown; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
 };
+
+// Raster image formats Chromium CANNOT decode in an <img>, so the local-file
+// protocol transcodes them to JPEG via sips before serving (HEIC/HEIF lack an
+// H.265 decoder; TIFF/JXL aren't supported either). Everything Chromium handles
+// natively (jpg/png/gif/webp/bmp/avif/ico/svg) streams through untouched.
+const DISPLAY_TRANSCODE_EXT = new Set(['.heic', '.heif', '.tiff', '.tif', '.jxl']);
 
 // In the Rollup CJS bundle, __dirname and __filename are CJS globals — no
 // declaration needed. This file is always built as CJS (see vite.config.js).
@@ -470,36 +480,51 @@ if (!gotTheLock) {
         const ext = path.extname(targetPath).toLowerCase();
         const contentType = LOCAL_FILE_MIME_TYPES[ext] || 'application/octet-stream';
 
-        // ── HEIC / HEIF → JPEG transcoding via sips ───────────────────────────
-        // Chromium has no HEVC/H.265 decoder, so raw HEIC bytes render as a
-        // broken image. nativeImage.createFromPath() returns an empty image for
-        // HEIC in the Electron main process (it is renderer-side only on macOS).
-        // sips is Apple's built-in image-processing tool (ships with every Mac
-        // since 10.3) and uses the full Core Image / ImageIO stack — including
-        // HEIC support via AVFoundation. Output is JPEG for compact transfer.
-        if (ext === '.heic' || ext === '.heif') {
-          const tmpPath = path.join(os.tmpdir(), `ic_heic_${process.hrtime.bigint()}.jpg`);
+        // ── Non-native image → JPEG transcoding via sips ──────────────────────
+        // Chromium can't decode HEIC/HEIF (no H.265 decoder), TIFF, or JXL, so
+        // raw bytes render as a broken image. sips is Apple's built-in image tool
+        // (ships with every Mac since 10.3) on the full Core Image / ImageIO
+        // stack — it reads all of these and emits JPEG for compact transfer.
+        // Result is CACHED on disk keyed by source path+mtime+size: the previous
+        // no-cache path re-ran sips on every fetch (a multi-MB HEIC took ~1-2s
+        // each → visible "loading" flicker). The cache invalidates automatically
+        // when the file changes, and reuses one temp JPEG across all re-renders.
+        if (DISPLAY_TRANSCODE_EXT.has(ext)) {
+          const key = crypto.createHash('sha1')
+            .update(`${targetPath}|${stat.mtimeMs}|${stat.size}`).digest('hex');
+          const cachePath = path.join(os.tmpdir(), `ic_imgcache_${key}.jpg`);
           try {
-            await execFile('/usr/bin/sips', [
-              '-s', 'format', 'jpeg',
-              '-s', 'formatOptions', '85',
-              targetPath,
-              '--out', tmpPath,
-            ]);
-            const jpegBuf = await fs.promises.readFile(tmpPath);
+            let jpegBuf;
+            try {
+              jpegBuf = await fs.promises.readFile(cachePath); // cache hit — no sips
+            } catch {
+              // Convert to a UNIQUE temp then atomically rename into the cache
+              // slot, so two concurrent first-renders of the same image can't
+              // collide on one deterministic --out path (the Error 13 sips
+              // rename race). A lost rename race is fine — the winner's file is
+              // identical bytes; fall back to the temp if the cache read misses.
+              const tmpOut = path.join(os.tmpdir(), `ic_imgtmp_${crypto.randomUUID()}.jpg`);
+              await execFile('/usr/bin/sips', [
+                '-s', 'format', 'jpeg',
+                '-s', 'formatOptions', '85',
+                targetPath,
+                '--out', tmpOut,
+              ]);
+              await fs.promises.rename(tmpOut, cachePath).catch(() => {});
+              jpegBuf = await fs.promises.readFile(cachePath).catch(() => fs.promises.readFile(tmpOut));
+              fs.promises.unlink(tmpOut).catch(() => {});
+            }
             return new Response(jpegBuf, {
               status: 200,
               headers: {
                 'Content-Type':   'image/jpeg',
                 'Content-Length': String(jpegBuf.length),
-                'Cache-Control':  'no-cache',
+                'Cache-Control':  'no-cache', // revalidate, but served from the disk cache (no re-convert)
               },
             });
-          } catch (heicErr) {
-            console.error('[local-file] HEIC sips conversion failed:', heicErr);
-            return new Response('HEIC decode error', { status: 500 });
-          } finally {
-            fs.promises.unlink(tmpPath).catch(() => {});
+          } catch (imgErr) {
+            console.error(`[local-file] ${ext} sips transcode failed:`, imgErr);
+            return new Response('Image decode error', { status: 500 });
           }
         }
 

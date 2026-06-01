@@ -29,15 +29,13 @@ import { getNodesBounds } from '../src/utils/constants.js';
 import { mergeSourceIntoComps } from '../src/utils/compsMerge.js';
 import { mergeResolvedSourceItems } from '../src/utils/jobSourceResolveMerge.js';
 import {
-  LIKELY_THRESHOLD,
   buildJobTreeNodes,
   computeLayoutPositions,
   partitionJobsForBranches,
-  strongMatchGate,
   COL_X,
 } from '../src/nodes/jobhub/buildJobTree.js';
-import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, selectReverbPriceGuides, reverbTransactionsToComps, parsePriceChartingHtml } from '../electron/extractors/apiExtractors.js';
-import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode } from '../electron/ipc/resumeHtml.js';
+import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, selectReverbPriceGuides, reverbTransactionsToComps, parsePriceChartingHtml, dicePostedBucket, extractJobPostingDescription } from '../electron/extractors/apiExtractors.js';
+import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
 import {
   fingerprint,
   migrateGroupNodes,
@@ -61,15 +59,17 @@ import {
 } from '../src/utils/layoutGeometry.js';
 import { computeTidiedNodes, findNonOverlappingPlacement } from '../src/utils/layoutUtils.js';
 import { FILE_CATEGORIES, getFileCategoryInfo, toLocalFileUrl } from '../src/utils/fileDisplayUtils.js';
-import { parsePostedDate, filterJobsByAge } from '../electron/ipc/jobDateFilter.js';
+import { parsePostedDate, filterJobsByAge, POSTED_DATE_PATTERN } from '../electron/ipc/jobDateFilter.js';
 import { compsForPricing, priceSynthesisMaxTokens, jobScoringBatchSize, JOB_MAX_PAGES, JOB_PER_PAGE_CAP } from '../electron/ipc/resultCaps.js';
+import { modelMeta, contextWindowForModel, maxOutputForModel, estimateTokensFromChars, assessPromptFit, planSplits, LOCAL_CHARS_PER_TOKEN } from '../electron/ipc/tokenWindow.js';
 import { parseGeminiJSON } from '../electron/ipc/gemini.js';
 import { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
 import os from 'node:os';
 import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
 import { modelTag, overPricedSoldFlag } from '../electron/ipc/bugReport/helpers.js';
 import { classifyCompScrapeFailure, computeMissingLogins } from '../electron/ipc/marketplace.js';
-import { isAuthChallengeUrl } from '../electron/ipc/browser/authWindows.js';
+import { isAuthChallengeUrl, PLATFORM_AUTH_COOKIES } from '../electron/ipc/browser/authWindows.js';
+import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation } from '../src/utils/jobLocation.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
 import { createJobSearchTestMode, parseJobSearchEnvBoolean } from '../src/utils/jobSourceScope.js';
 import { createMarketplaceTestMode, parseMarketplaceEnvBoolean, getScopedCompSourceIds, isCompSourceEnabledInScope } from '../src/utils/compSourceScope.js';
@@ -109,6 +109,190 @@ function runZeroResultFixtureTest({ name, file, extractor }) {
 }
 
 const tests = [
+  {
+    name: 'tokenWindow: per-model context windows + max output (verified registry)',
+    run: () => {
+      // Verified against provider docs (May 2026): Sonnet 4.6 & Opus 4.8 are 1M
+      // natively; Haiku 4.5 is 200K; every Gemini flash is 1,048,576 / 65,536.
+      assert(contextWindowForModel('claude-sonnet-4-6') === 1000000, 'Sonnet 4.6 window should be 1M');
+      assert(contextWindowForModel('claude-opus-4-8') === 1000000, 'Opus 4.8 window should be 1M');
+      assert(contextWindowForModel('claude-haiku-4-5-20251001') === 200000, 'Haiku 4.5 window should be 200K');
+      assert(contextWindowForModel('gemini-3.5-flash') === 1048576, 'Gemini 3.5 flash window should be 1,048,576');
+      assert(maxOutputForModel('claude-opus-4-8') === 128000, 'Opus 4.8 max output should be 128K');
+      assert(maxOutputForModel('gemini-2.5-flash-lite') === 65536, 'Gemini flash-lite max output should be 65,536');
+      // Family fallbacks: unknown gemini → 1M; unknown claude → conservative 200K.
+      assert(contextWindowForModel('gemini-99-ultra-flash') === 1048576, 'unknown gemini → 1M family default');
+      assert(contextWindowForModel('claude-future-9') === 200000, 'unknown claude → conservative 200K default');
+      assert(modelMeta('gemini-2.5-flash').provider === 'gemini', 'provider tagged on meta');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'tokenWindow: local estimate over-counts (safe upper bound), assessPromptFit budget math',
+    run: () => {
+      // The local estimate must be an UPPER bound vs the realistic ~4 chars/token,
+      // so it can never wave an oversized prompt through.
+      const chars = 100000;
+      const est = estimateTokensFromChars(chars);
+      assert(est === Math.ceil(chars / LOCAL_CHARS_PER_TOKEN), 'estimate uses the conservative ratio');
+      assert(est > chars / 4, 'estimate over-counts vs the realistic ~4 chars/token');
+      // A 22K-token scoring batch (15 enriched jobs) fits BOTH a 200K and a 1M window.
+      const out = 8800; // job-scoring reserve at 15 items: min(24576, 2500+420*15)
+      assert(assessPromptFit({ contextWindow: 200000, modelMaxOutput: 64000, requestedOutput: out, promptTokens: 22000 }).fits, '22K batch fits 200K');
+      assert(assessPromptFit({ contextWindow: 1048576, modelMaxOutput: 65536, requestedOutput: out, promptTokens: 22000 }).fits, '22K batch fits 1M');
+      // A 195K-token prompt overflows 200K (no room for output+margin) but fits 1M.
+      assert(!assessPromptFit({ contextWindow: 200000, modelMaxOutput: 64000, requestedOutput: out, promptTokens: 195000 }).fits, '195K overflows 200K');
+      assert(assessPromptFit({ contextWindow: 1048576, modelMaxOutput: 65536, requestedOutput: out, promptTokens: 195000 }).fits, '195K fits 1M');
+      // requestedOutput is clamped to the model's own max output.
+      const clamped = assessPromptFit({ contextWindow: 200000, modelMaxOutput: 4096, requestedOutput: 24576, promptTokens: 0 });
+      assert(clamped.reservedOutput === 4096, 'requestedOutput clamps to modelMaxOutput');
+      return { ok: true, est, budget200k: assessPromptFit({ contextWindow: 200000, modelMaxOutput: 64000, requestedOutput: out, promptTokens: 0 }).budget };
+    },
+  },
+  {
+    name: 'tokenWindow: planSplits recursively halves only oversized groups, preserves order',
+    run: () => {
+      const items = Array.from({ length: 15 }, (_, i) => i);
+      // fits = groups of ≤4 only → every chunk ≤4, order preserved, covers all 15.
+      const chunks = planSplits(items, (g) => g.length <= 4);
+      assert(chunks.every((c) => c.length <= 4), 'all chunks within the size predicate');
+      assert(chunks.flat().join(',') === items.join(','), 'flatten preserves original order + completeness');
+      // Whole batch fits → single chunk, no splitting.
+      assert(planSplits(items, () => true).length === 1, 'no split when it already fits');
+      // Halving ISOLATES a single oversized item (size-weighted predicate).
+      const weighted = [1, 1, 1, 20, 1, 1];
+      const wchunks = planSplits(weighted, (g) => g.reduce((a, b) => a + b, 0) <= 10);
+      assert(wchunks.some((c) => c.length === 1 && c[0] === 20), 'oversized item isolated into its own chunk');
+      // A size-1 group that still does not fit is returned as-is (atomic case).
+      assert(planSplits([99], () => false).length === 1, 'unsplittable single item returned as-is');
+      return { ok: true, chunkSizes: chunks.map((c) => c.length) };
+    },
+  },
+  {
+    name: 'ZipRecruiter posted-date: DOM "Posted X ago" pattern extracts + parses (no structured date)',
+    run: () => {
+      // ZR's new /jobs/{co}/{slug} detail pages have NO JSON-LD/__NEXT_DATA__/<time>;
+      // the only date is visible text like "Posted 28 days ago". manualScraper's
+      // harvest matches POSTED_DATE_PATTERN against short DOM text leaves and feeds
+      // the captured phrase to parsePostedDate. Validate that exact chain.
+      const re = new RegExp(POSTED_DATE_PATTERN, 'i');
+      const ageOf = (d) => d ? Math.round((Date.now() - new Date(d).getTime()) / 86400000) : null;
+      const cases = [
+        ['Posted 28 days ago', '28 days ago', 28],
+        ['Posted 30+ days ago', '30+ days ago', 30],
+        ['Reposted 3 weeks ago', '3 weeks ago', 21],
+        ['Posted 5 hours ago', '5 hours ago', 0],
+      ];
+      for (const [raw, phrase, ageDays] of cases) {
+        const m = raw.match(re);
+        assert(m && m[0] === phrase, `extract "${phrase}" from "${raw}" (got ${m && m[0]})`);
+        const parsed = parsePostedDate(m[0]); // returns a Date
+        assert(parsed && ageOf(parsed) === ageDays, `parse "${phrase}" → ${ageDays}d (got ${ageOf(parsed)})`);
+      }
+      // "just posted" captures and parses to ~today.
+      assert('Just posted'.match(re)?.[0].toLowerCase() === 'just posted', 'captures "just posted"');
+      assert(parsePostedDate('just posted') !== null, '"just posted" parses to a recent date');
+      // Must NOT false-positive on prose that merely contains a number.
+      assert(!('We have 28 open roles on our careers page.'.match(re)), 'no false-positive on non-date prose');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Dice JD enrichment: extractJobPostingDescription pulls JobPosting.description from JSON-LD',
+    run: () => {
+      // Dice list summaries are ~500 chars; the full JD lives in the detail page's
+      // JSON-LD JobPosting.description. The harvester must handle plain JobPosting,
+      // @graph wrappers, and array @type — and never throw on malformed JSON-LD.
+      const mk = (ld) => `<html><head><script type="application/ld+json">${JSON.stringify(ld)}</script></head><body>x</body></html>`;
+      assert(extractJobPostingDescription(mk({ '@type': 'JobPosting', description: 'Full JD here' })) === 'Full JD here', 'plain JobPosting');
+      assert(extractJobPostingDescription(mk({ '@context': 'https://schema.org', '@graph': [{ '@type': 'Organization' }, { '@type': 'JobPosting', description: 'Graph JD' }] })) === 'Graph JD', '@graph wrapper');
+      assert(extractJobPostingDescription(mk({ '@type': ['JobPosting', 'Thing'], description: 'Array-type JD' })) === 'Array-type JD', 'array @type');
+      // Absent / no-LD / malformed → '' (caller keeps the list summary), no throw.
+      assert(extractJobPostingDescription(mk({ '@type': 'Organization', name: 'Acme' })) === '', 'no JobPosting → empty');
+      assert(extractJobPostingDescription('<html>no ld</html>') === '', 'no JSON-LD → empty');
+      assert(extractJobPostingDescription('<script type="application/ld+json">{bad json</script>') === '', 'malformed → empty (no throw)');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Dice postedDate bucket: only exact 1/3/7-day windows map to a server-side filter',
+    run: () => {
+      // Dice's `filters.postedDate` accepts ONLY ONE/THREE/SEVEN (verified against
+      // the live API; other values are silently ignored). dicePostedBucket must
+      // return a bucket ONLY for an exact 1/3/7-day window, else null so the caller
+      // keeps the wide over-pull + client-side filter (no server-side narrowing).
+      assert(dicePostedBucket(1) === 'ONE', '1 → ONE');
+      assert(dicePostedBucket(3) === 'THREE', '3 → THREE');
+      assert(dicePostedBucket(7) === 'SEVEN', '7 → SEVEN');
+      assert(dicePostedBucket(7.0) === 'SEVEN', 'float 7.0 → SEVEN');
+      // Non-bucket windows → null (client-side enforces them; never a wrong bucket).
+      for (const n of [2, 5, 6, 8, 14, 21, 30]) {
+        assert(dicePostedBucket(n) === null, `${n} → null (no exact bucket)`);
+      }
+      // Garbage / missing → null (never throw, never fabricate a bucket).
+      for (const bad of [null, undefined, 0, -1, NaN, '7']) {
+        assert(dicePostedBucket(bad) === null, `${String(bad)} → null`);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Batch chunking: window-split sub-batches reconcile by b{i} (order + per-job index preserved)',
+    run: () => {
+      // The async batch path pre-splits each over-window group then submits one
+      // `b{i}` request per fit-guaranteed sub-batch (splitBatchesToFitWindow in
+      // jobs.js mirrors planSplits). reconcileBatchScores must map every sub-batch
+      // back by local index so no job is lost or mis-scored after the split.
+      const jobs = Array.from({ length: 7 }, (_, i) => ({ id: i, title: `J${i}`, company: 'Co' }));
+      const subBatches = planSplits(jobs, (g) => g.length <= 3); // synthetic "fits ≤3" predicate
+      assert(subBatches.flat().length === 7, 'no jobs lost across the split');
+      assert(subBatches.every((b) => b.length <= 3), 'each sub-batch within the window predicate');
+      // Build results exactly as the Batch API returns them: b{i} → {scores:[{index(LOCAL)…}]}.
+      const resultsByCustomId = {};
+      subBatches.forEach((b, i) => {
+        resultsByCustomId[`b${i}`] = { scores: b.map((_job, idx) => ({ index: idx, matchScore: 50 + idx, reasoning: 'r', careerDirection: 'X' })) };
+      });
+      const { scoredJobs, placeholderCount, failedBatches } = reconcileBatchScores(subBatches, resultsByCustomId, { fallbackScore: 1 });
+      assert(scoredJobs.length === 7, 'every job reconciled after the split');
+      assert(placeholderCount === 0 && failedBatches === 0, 'clean results → no placeholders/failures');
+      assert(scoredJobs.every((j) => typeof j.title === 'string' && j.matchScore >= 50), 'each job kept its fields + a real local-index score');
+      return { ok: true, subBatchSizes: subBatches.map((b) => b.length) };
+    },
+  },
+  {
+    name: 'Application: literal \\n / \\t escapes decode in cover letter + résumé (no verbatim backslash text)',
+    run: () => {
+      // decodeTextEscapes: literal 2-char escapes → real whitespace; real content untouched.
+      assert(decodeTextEscapes('Hiring Team\\nMonster') === 'Hiring Team\nMonster', 'literal \\n decodes to newline');
+      assert(decodeTextEscapes('a\\tb') === 'a\tb', 'literal \\t decodes to tab');
+      assert(decodeTextEscapes('already\nreal') === 'already\nreal', 'real newline untouched (no-op)');
+      assert(decodeTextEscapes('plain text') === 'plain text', 'plain text untouched');
+
+      // Cover letter: a recipient with a LITERAL backslash-n splits into rows
+      // (recipient-name + recipient-line), and no verbatim "\n" leaks through.
+      const cl = buildCoverLetterDocument({
+        name: 'Maya Chen',
+        recipient: 'Hiring Team\\nMonster Brewing Company',
+        salutation: 'Dear Monster Team,',
+        paragraphs: ['I have led growth\\nin brand marketing for 6 years.', 'Second\\tindented bit.'],
+        closing: 'Sincerely,',
+      });
+      assert(!/\\n|\\t/.test(cl), 'cover letter must contain NO literal backslash-n/t');
+      assert(cl.includes('<span class="recipient-name">Hiring Team</span>'), 'recipient first line → recipient-name');
+      assert(cl.includes('<span class="recipient-line">Monster Brewing Company</span>'), 'recipient second line → recipient-line');
+      // An in-paragraph newline must COLLAPSE (flowing prose), NOT become a hard
+      // <br> — a stray model newline mid-sentence (around a title's en-dash) would
+      // otherwise render as a bad break. Both halves still present, no <br>.
+      assert(!/<br\s*\/?>/.test(cl), 'no hard <br> break inserted inside a paragraph');
+      assert(/led growth\s+in brand marketing/.test(cl), 'in-paragraph newline collapses to whitespace (prose flows)');
+
+      // Résumé: literal escapes in the raw model HTML decode to whitespace.
+      const rz = buildResumeDocument('<main class="page"><h1 class="name">Maya\\nChen</h1><p>Led\\tgrowth</p></main>');
+      assert(!/\\n|\\t/.test(rz), 'résumé must contain NO literal backslash-n/t');
+      assert(/Maya\s+Chen/.test(rz), 'résumé literal \\n became collapsing whitespace');
+      return { ok: true };
+    },
+  },
   {
     name: 'eBay sold fixture',
     run: () => runExtractorFixtureTest({
@@ -585,7 +769,7 @@ const tests = [
       ];
       const results = {
         b0: { scores: [
-          { index: 0, matchScore: 90, reasoning: 'great', careerDirection: 'X', isTargetRoleMatch: true },
+          { index: 0, matchScore: 90, reasoning: 'great', careerDirection: 'X' },
           { index: 1, matchScore: 40, reasoning: 'meh', careerDirection: 'Y' },
         ] },
         b1: null, // errored/expired batch request
@@ -601,8 +785,7 @@ const tests = [
       const eJob = scoredJobs.find(j => j.url === 'e');
       assert(eJob.matchScore === 50 && eJob.reasoning === 'Unable to score', 'Batch reconcile: missing-index job → Unable to score placeholder');
       const bJob = scoredJobs.find(j => j.url === 'b');
-      assert(bJob.isTargetRoleMatch === false, 'Batch reconcile: missing isTargetRoleMatch coerced to false');
-      assert(scoredJobs.find(j => j.url === 'a').isTargetRoleMatch === true, 'Batch reconcile: isTargetRoleMatch preserved');
+      assert(bJob.matchScore === 40 && bJob.careerDirection === 'Y', 'Batch reconcile: matched score fields spread onto the job');
       return { scored: scoredJobs.length, placeholderCount, failedBatches };
     },
   },
@@ -630,26 +813,22 @@ const tests = [
     },
   },
   {
-    name: 'Job target partitioning',
+    name: 'Job partitioning: display set = ALL scored jobs (target ≡ no-target; no gate, fill, or split)',
     run: () => {
+      // Target and no-target runs are identical post-scoring: every scored job is
+      // displayed, nothing gated/filled/hidden, no target/other partition. A target
+      // role only adds queries upstream. partitionJobsForBranches is a passthrough.
       const jobs = [
-        { title: 'A', company: 'Co', url: '1', matchScore: 90, isTargetRoleMatch: true },
-        { title: 'B', company: 'Co', url: '2', matchScore: 60, isTargetRoleMatch: true },
-        { title: 'C', company: 'Co', url: '3', matchScore: 58, isTargetRoleMatch: true },
-        { title: 'D', company: 'Co', url: '4', matchScore: 40, isTargetRoleMatch: true },
-        { title: 'E', company: 'Co', url: '5', matchScore: 30, isTargetRoleMatch: true },
-        { title: 'Other Strong', company: 'Co', url: '6', matchScore: 80, isTargetRoleMatch: false },
-        { title: 'Other Thin', company: 'Co', url: '7', matchScore: 55, isTargetRoleMatch: false },
+        { title: 'A', company: 'Co', url: '1', matchScore: 90 },
+        { title: 'B', company: 'Co', url: '2', matchScore: 30 },
+        { title: 'C', company: 'Co', url: '3', matchScore: 80 },
+        { title: 'D', company: 'Co', url: '4', matchScore: 12 },  // low score — STILL shown (no gate)
       ];
-      const gate = strongMatchGate([80, 55, 54, 53, 52]);
-      assert(gate === 52, `Job target partitioning: expected relaxed gate 52, got ${gate}`);
-      const split = partitionJobsForBranches(jobs, true);
-      assert(split.targetList.length === 5, `Job target partitioning: expected 5 target jobs after loose-fill, got ${split.targetList.length}`);
-      assert(split.targetList.filter(j => (j.matchScore || 0) < LIKELY_THRESHOLD).length === 4, 'Job target partitioning: 4 sub-threshold target jobs should be backfilled via loose-fill');
-      assert(split.otherList.length === 2, `Job target partitioning: expected relaxed other list to include 2 jobs, got ${split.otherList.length}`);
-      assert(partitionJobsForBranches(jobs, false).displayedJobs.length === jobs.length, 'Job target partitioning: no-target path should be passthrough');
-      assert(LIKELY_THRESHOLD === 65, 'Job target partitioning: unexpected likely threshold');
-      return { gate: split.gate, target: split.targetList.length, other: split.otherList.length };
+      const out = partitionJobsForBranches(jobs);
+      assert(out.displayedJobs.length === jobs.length, `must show all ${jobs.length} jobs, got ${out.displayedJobs.length}`);
+      assert(out.displayedJobs === jobs, 'displayedJobs is the scored set itself (pure passthrough)');
+      assert(out.targetList === undefined && out.otherList === undefined, 'no target/other split fields anymore');
+      return { displayed: out.displayedJobs.length };
     },
   },
   {
@@ -658,7 +837,7 @@ const tests = [
       const mk = (title, score, salary, url) => ({
         title, company: 'Acme', location: 'Remote', salary, snippet: 'x',
         matchScore: score, reasoning: 'r', careerDirection: 'x',
-        source: 'lever', url, posted: 'today', isTargetRoleMatch: false,
+        source: 'lever', url, posted: 'today',
       });
       // idx0 strong+highpay+Brand, idx1 strong+lowpay+Growth, idx2 weak+nopay+Brand
       const displayedJobs = [
@@ -723,7 +902,7 @@ const tests = [
       const mk = (title, score, url) => ({
         title, company: 'Acme', location: 'Remote', salary: '$120k', snippet: 'x',
         matchScore: score, reasoning: 'r', careerDirection: 'x',
-        source: 'lever', url, posted: 'today', isTargetRoleMatch: false,
+        source: 'lever', url, posted: 'today',
       });
       const displayedJobs = [mk('Weak', 40, 'https://jobs/lo'), mk('Strong', 95, 'https://jobs/hi')];
       const result = buildJobTreeNodes({
@@ -807,30 +986,48 @@ const tests = [
     },
   },
   {
-    name: 'Application: cover letter builder',
+    name: 'Application: cover letter builder (design-system native surface)',
     run: () => {
       const html = buildCoverLetterDocument({
         name: 'Jane Doe',
         tagline: 'Product Marketer',
         contact: ['Austin, TX', 'jane@x.com'],
         date: 'May 31, 2026',
-        recipient: 'Hiring Team\nAcme',
+        recipient: 'Hiring Team\nAcme\nProduct Marketing',
         salutation: 'Dear Acme Team,',
         paragraphs: ['I love <Acme> & your work.', 'Second para.', '   '],
         closing: 'Sincerely,',
+        signatureTitle: 'Senior Product Marketer · candidate',
       }, 'data-print="ink-only"');
+      // Uses the design system's NATIVE cover-letter surface — all three
+      // stylesheets, not a guessed inline <style>.
+      assert(!html.includes('<style'), 'cover: must not inline guessed styles');
+      assert(html.includes('href="colors_and_type.css"') && html.includes('href="resume.css"') && html.includes('href="cover-letter.css"'),
+        'cover: must link colors_and_type.css + resume.css + cover-letter.css');
+      // Native structure classes (cover-letter.html / cover-letter.css).
+      for (const cls of ['resume-header letter-letterhead', 'letterhead-rule', 'letter-meta', 'letter-date', 'letter-recipient', 'letter-body', 'salutation', 'letter-close', 'valediction', 'signature']) {
+        assert(html.includes(cls), `cover: missing native class "${cls}"`);
+      }
       assert(html.includes('Jane Doe') && html.includes('Product Marketer'), 'cover: letterhead missing');
-      assert(html.includes('data-print="ink-only"'), 'cover: variant not mirrored onto <main>');
+      assert(html.includes('data-print="ink-only"'), 'cover: variant not mirrored onto <html>');
+      // Recipient block split: first line is the bolded .recipient-name, the rest .recipient-line.
+      assert(html.includes('<span class="recipient-name">Hiring Team</span>'), 'cover: recipient-name (first line) missing');
+      assert((html.match(/<span class="recipient-line">/g) || []).length === 2, 'cover: expected 2 recipient-line rows');
+      // signatureTitle renders under the signature.
+      assert(html.includes('<p class="signature-title">Senior Product Marketer · candidate</p>'), 'cover: signature-title missing');
       // User text is HTML-escaped (no markup injection from model output).
       assert(html.includes('I love &lt;Acme&gt; &amp; your work.'), 'cover: body not HTML-escaped');
-      // Blank/whitespace-only paragraphs dropped; body uses bare <p> (heading
-      // paragraphs use <p class=…>, so this count isolates the body).
+      // Blank/whitespace paragraphs dropped; body uses bare <p> (every other
+      // paragraph is classed, so this count isolates the body).
       const bodyParas = (html.match(/<p>/g) || []).length;
       assert(bodyParas === 2, `cover: expected 2 body paragraphs, got ${bodyParas}`);
       assert(html.includes('jane@x.com') && html.includes('class="sep"'), 'cover: contact line missing separators');
-      // Sensible fallbacks when optional fields are omitted.
+      // Sensible fallbacks when optional fields are omitted: salutation/closing
+      // default; no recipient → no <address>; no signatureTitle → no signature-title.
       const bare = buildCoverLetterDocument({ name: 'X' });
       assert(bare.includes('Dear Hiring Team,') && bare.includes('Sincerely,'), 'cover: missing salutation/closing fallback');
+      assert(!bare.includes('letter-recipient') && !bare.includes('signature-title'), 'cover: optional blocks must be omitted when empty');
+      assert(bare.includes('<p class="signature"'), 'cover: signature (name) always present');
       return { ok: true };
     },
   },
@@ -1153,6 +1350,100 @@ const tests = [
     },
   },
   {
+    // The auto-close poller treats a configured PLATFORM_AUTH_COOKIES entry as a
+    // definitive logged-in signal that can fire even while the window is still on a
+    // login URL (Glassdoor suppresses its post-auth redirect → window loops on the
+    // re-rendered login form). The cookie MUST be login-only, or it would false-close
+    // the window mid-login. `at` is set only after a successful Glassdoor login;
+    // gdId/gdsid/cass/GSESSIONID appear in anonymous sessions too and must NOT be added.
+    name: 'auth-cookie contract: glassdoor uses login-only `at`, not both-state cookies',
+    run: () => {
+      const gd = PLATFORM_AUTH_COOKIES.glassdoor || [];
+      assert(gd.includes('at'), 'glassdoor auth cookie should be `at` (access token, login-only)');
+      const bothStateCookies = ['gdId', 'gdsid', 'cass', 'GSESSIONID', 'JSESSIONID', 'trs'];
+      for (const c of bothStateCookies) {
+        assert(!gd.includes(c), `glassdoor auth cookies must NOT include both-state cookie "${c}" (would false-close mid-login)`);
+      }
+      return { ok: true, glassdoor: gd };
+    },
+  },
+  {
+    // The query LLM now returns a STRUCTURED location object so a board's location
+    // FILTER never receives prose. deriveLocationParam flattens it deterministically
+    // into the "City, ST" string actually sent to USAJobs/Dice/Indeed/ZR/Glassdoor/LinkedIn.
+    name: 'deriveLocationParam: structured canonical → board-ready string (typo-corrected)',
+    run: () => {
+      // "denvr" → corrected structured object → clean "Denver, CO".
+      assert(deriveLocationParam({ city: 'Denver', stateCode: 'CO', region: '', country: 'United States', isRemote: false, display: 'Denver, CO' }) === 'Denver, CO', 'city+state → "City, ST"');
+      // city+state is built deterministically, NOT trusted from a possibly-prose display.
+      assert(deriveLocationParam({ city: 'Denver', stateCode: 'CO', display: 'around the Denver metro area' }) === 'Denver, CO', 'city+state wins over prose display');
+      assert(deriveLocationParam({ city: 'Austin', stateCode: '', region: '', display: 'Austin' }) === 'Austin', 'city-only falls through to city');
+      assert(deriveLocationParam({ city: '', stateCode: '', region: 'Bay Area', display: 'Bay Area' }) === 'Bay Area', 'region when no city');
+      // Remote → empty param (no geo filter sent → nationwide, which includes remote).
+      assert(deriveLocationParam({ city: '', stateCode: '', region: '', isRemote: true, display: 'Remote' }) === '', 'remote → empty param');
+      assert(deriveLocationParam({ city: '', stateCode: '', region: '', isRemote: false, display: 'Remote' }) === '', '"Remote" display is never sent as a geo filter');
+      // Defensive: a non-object (legacy/empty) falls back to the raw input, never throws.
+      assert(deriveLocationParam(null, 'denvr') === 'denvr', 'null struct → raw fallback');
+      assert(deriveLocationParam({}, '') === '', 'empty struct + no fallback → ""');
+      // Prose-leak guard: a model that ignores the schema and puts a sentence in
+      // `display` must NOT have it reach a board's location field — fall back to raw.
+      assert(deriveLocationParam({ city: '', stateCode: '', region: '', display: 'somewhere in the midwest, ideally' }, 'midwest') === 'midwest', 'prose display rejected → raw fallback');
+      assert(deriveLocationParam({ city: '', stateCode: '', region: '', display: 'anywhere near the coast' }, '') === '', 'prose display + no fallback → "" (never sends prose)');
+      // A genuine place-shaped display (no structured fields) is still accepted.
+      assert(deriveLocationParam({ city: '', stateCode: '', region: '', display: 'San Francisco, CA' }) === 'San Francisco, CA', 'place-shaped display accepted');
+      return { ok: true };
+    },
+  },
+  {
+    // Glassdoor's location filter is keyed by a numeric locId (locKeyword text is
+    // ignored — confirmed empirically). This is the real findPopularLocationAjax
+    // payload for "Denver": pickGlassdoorLocation must choose Denver, CO (1148170),
+    // NOT Denver City, TX / Denver, PA / etc.
+    name: 'pickGlassdoorLocation: resolves the correct homonym by state (real Glassdoor JSON)',
+    run: () => {
+      const denverResults = [
+        { compoundId: 'C1148170', id: 'C1148170', label: 'Denver, CO (US)', locationId: 1148170, locationType: 'C', longName: 'Denver, CO (US)', realId: 1148170 },
+        { compoundId: 'C1139288', id: 'C1139288', label: 'Denver City, TX (US)', locationId: 1139288, locationType: 'C', longName: 'Denver City, TX (US)', realId: 1139288 },
+        { compoundId: 'C1152344', id: 'C1152344', label: 'Denver, PA (US)', locationId: 1152344, locationType: 'C', longName: 'Denver, PA (US)', realId: 1152344 },
+        { compoundId: 'C1149511', id: 'C1149511', label: 'Denver, IA (US)', locationId: 1149511, locationType: 'C', longName: 'Denver, IA (US)', realId: 1149511 },
+      ];
+      const co = pickGlassdoorLocation(denverResults, 'Denver, CO');
+      assert(co && co.locId === '1148170' && co.locT === 'C', `Denver, CO → 1148170/C, got ${JSON.stringify(co)}`);
+      // Different state picks the right homonym, not the first result.
+      const pa = pickGlassdoorLocation(denverResults, 'Denver, PA');
+      assert(pa && pa.locId === '1152344', `Denver, PA → 1152344, got ${JSON.stringify(pa)}`);
+      // No state given → first (most prominent) result.
+      const bare = pickGlassdoorLocation(denverResults, 'Denver');
+      assert(bare && bare.locId === '1148170', `bare "Denver" → first (1148170), got ${JSON.stringify(bare)}`);
+      // Empty / malformed input → null, never throws.
+      assert(pickGlassdoorLocation([], 'Denver, CO') === null, 'empty results → null');
+      assert(pickGlassdoorLocation(null, 'Denver, CO') === null, 'null results → null');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'summarizeLocationAdherence: flags off-target survivors (the Miami-for-Denver leak)',
+    run: () => {
+      const jobs = [
+        { title: 'Brand Manager', location: 'Denver, CO', source: 'indeed' },     // in-area (city)
+        { title: 'Marketing Lead', location: 'Boulder, CO', source: 'dice' },     // in-area (same state)
+        { title: 'Sr. Brand Mgr, BK', location: 'Miami, FL', source: 'linkedin' },// OFF-TARGET
+        { title: 'Growth PM', location: 'Remote', source: 'remoteok' },           // remote bucket
+        { title: 'Mystery role', location: '', source: 'google' },                // unknown
+      ];
+      const a = summarizeLocationAdherence(jobs, 'Denver, CO');
+      assert(a.total === 5, 'counts all kept jobs');
+      assert(a.matched === 2, `2 in-area (city + same-state), got ${a.matched}`);
+      assert(a.remote === 1, '1 remote');
+      assert(a.offTarget === 1, `1 off-target (Miami), got ${a.offTarget}`);
+      assert(a.unknown === 1, '1 unknown (no location)');
+      assert(a.offSamples.length === 1 && /Miami/.test(a.offSamples[0]), 'off-target sample names the Miami role');
+      // No target location → nothing to audit.
+      assert(summarizeLocationAdherence(jobs, '') === null, 'no canonical → null');
+      return { ok: true, adherence: a };
+    },
+  },
+  {
     name: 'hard login preflight (missing logins)',
     run: () => {
       const eqSet = (a, b) => a.length === b.length && a.every(x => b.includes(x));
@@ -1404,8 +1695,8 @@ const tests = [
     name: 'buildScoredJob: matched merge vs placeholder fallbacks (shared real-time/batch shape)',
     run: () => {
       const job = { title: 'X', company: 'Y' };
-      const matched = buildScoredJob(job, { matchScore: 80, isTargetRoleMatch: 1 }, { fallbackScore: 50, allNull: false });
-      assert(matched.matchScore === 80 && matched.isTargetRoleMatch === true, 'matched: score + coerced bool');
+      const matched = buildScoredJob(job, { matchScore: 80, careerDirection: 'Eng' }, { fallbackScore: 50, allNull: false });
+      assert(matched.matchScore === 80 && matched.careerDirection === 'Eng' && matched.title === 'X', 'matched: score fields spread onto the job');
       const lone = buildScoredJob(job, null, { fallbackScore: 50, allNull: false });
       assert(lone.matchScore === 50 && lone.reasoning === 'Unable to score' && lone.careerDirection === 'Other', 'lone miss → Unable to score');
       const dead = buildScoredJob(job, null, { fallbackScore: 50, allNull: true });

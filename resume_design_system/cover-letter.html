@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en" data-print="dual-pdf">
+<head>
+<meta charset="utf-8">
+<title>Maya R. Chen · Cover Letter</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<!-- Design tokens (typography, color, spacing) -->
+<link rel="stylesheet" href="colors_and_type.css">
+<!-- Shared page chrome + letterhead component + meta-row + sep -->
+<link rel="stylesheet" href="resume.css">
+<!-- Letter-specific surface (serif body, date/recipient, close) -->
+<link rel="stylesheet" href="cover-letter.css">
+</head>
+
+<template id="__bundler_thumbnail">
+  <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+    <rect width="100" height="100" fill="#F7F4ED"></rect>
+    <text x="50" y="60" font-family="Georgia, serif" font-size="42" font-weight="600"
+          fill="#7A1F2B" text-anchor="middle">MC</text>
+  </svg>
+</template>
+
+<body>
+<!-- ============================================================
+     Cover letter — same design system as the résumé.
+     `data-print="dual-pdf"` makes the printed background
+     transparent for the OCG cream post-process; identical to the
+     résumé so a single pipeline produces a matched pair. Switch to
+     `data-print="ink-only"` for conservative / big-co ATS rooms.
+============================================================ -->
+<main class="page" role="document"
+      itemscope itemtype="https://schema.org/Person">
+
+  <!-- ===== Letterhead — identical component to the résumé header ===== -->
+  <header class="resume-header letter-letterhead">
+    <h1 class="name" itemprop="name">Maya R. Chen</h1>
+    <p class="tagline" itemprop="jobTitle">
+      Brand &amp; growth marketing · consumer engagement &amp; revenue
+    </p>
+    <p class="contact" role="group" aria-label="Contact">
+      <span itemprop="address" itemscope itemtype="https://schema.org/PostalAddress">
+        <span itemprop="addressLocality">Chicago, IL</span>
+      </span>
+      <span class="sep" aria-hidden="true">·</span>
+      <a href="mailto:maya@mayachen.co" itemprop="email">maya@mayachen.co</a>
+      <span class="sep" aria-hidden="true">·</span>
+      <a href="https://linkedin.com/in/mayarchen" itemprop="sameAs">linkedin.com/in/mayarchen</a>
+      <span class="sep" aria-hidden="true">·</span>
+      <a href="tel:+13125550148">(312) 555-0148</a>
+    </p>
+  </header>
+
+  <hr class="letterhead-rule" aria-hidden="true">
+
+  <!-- ===== Date + recipient ===== -->
+  <div class="letter-meta">
+    <p class="letter-date"><time datetime="2026-05">May 2026</time></p>
+    <address class="letter-recipient">
+      <span class="recipient-name">Hiring Team</span>
+      <span class="recipient-line">EXACT Sports</span>
+      <span class="recipient-line">Director of Marketing &amp; Growth</span>
+    </address>
+  </div>
+
+  <!-- ===== Body ===== -->
+  <div class="letter-body">
+    <p class="salutation">Dear EXACT Sports Hiring Team,</p>
+
+    <p>
+      I'm writing to apply for the Director of Marketing &amp; Growth role. EXACT
+      Sports builds tools that help athletes understand and extend their own
+      potential — behavioral assessments, sport-psychology coaching, and now
+      EXACT Rankings — and that mission maps cleanly onto what I do for a living:
+      turn consumer insight into campaigns that attract, engage, convert, and
+      keep an audience. I've spent six years building marketing engines for
+      consumer brands, and I'd like to build yours.
+    </p>
+
+    <p>
+      At Calloway &amp; Reed I led brand strategy and multichannel execution for
+      the flagship Hearthstone Kitchen line, owning a $40M annual budget. A
+      national brand refresh I directed lifted household penetration six points
+      and moved aided awareness nine points inside eight months; a seasonal
+      limited-edition campaign I built end-to-end generated
+      <strong>$4.2M in incremental revenue</strong> in its first year. The work
+      I'm proudest of started in the data — Nielsen and Circana POS, panel
+      results, campaign analytics — and ended in a brief a creative team could
+      act on. That's the same path EXACT Rankings will travel: assessment data
+      on one end, something an athlete actually does on the other.
+    </p>
+
+    <p>
+      Earlier, at Tillman &amp; Fosse, I owned the seasonal campaign calendar and
+      ran a cross-channel holiday program — direct mail, in-store, email, paid
+      social — that drove <strong>18% year-over-year revenue</strong>, plus a
+      double-points loyalty event that lifted member spend 12% on the quarter.
+      Across both roles I've run the full growth stack — lifecycle, performance,
+      email, paid social — and managed the agencies, budgets, and
+      cross-functional teams that keep it all shipping on time and on number.
+    </p>
+
+    <p>
+      What draws me to EXACT is the stage you're at: a clear mission, real
+      momentum, and room for someone to bring sharper structure and steadier
+      growth to the marketing engine. I'd relish the chance to test ideas
+      quickly, own the result, and help more athletes find their
+      &ldquo;Go&nbsp;Mental!&rdquo; edge. I'd welcome the chance to talk.
+    </p>
+  </div>
+
+  <!-- ===== Close — break-inside:avoid keeps these together ===== -->
+  <div class="letter-close">
+    <p class="valediction">Sincerely,</p>
+    <p class="signature" itemprop="name">Maya R. Chen</p>
+    <p class="signature-title">Director of Marketing &amp; Growth · candidate</p>
+  </div>
+
+</main>
+
+</body>
+</html>

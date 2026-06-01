@@ -1,8 +1,11 @@
 import { getAISettings } from './settings.js';
-import { callGeminiText, callGeminiTextRaw, callGeminiVision, callGeminiDocument, parseGeminiJSON } from './gemini.js';
-import { callClaudeText, callClaudeVision, callClaudeDocument, createClaudeBatch, getClaudeBatch, getClaudeBatchResults, cancelClaudeBatch } from './claude.js';
+import { callGeminiText, callGeminiTextRaw, callGeminiVision, callGeminiDocument, parseGeminiJSON, countGeminiInputTokens, GEMINI_MODEL_FALLBACKS } from './gemini.js';
+import { callClaudeText, callClaudeVision, callClaudeDocument, createClaudeBatch, getClaudeBatch, getClaudeBatchResults, cancelClaudeBatch, countClaudeInputTokens } from './claude.js';
+import { isWordDoc, extractWordText } from './docUtils.js';
 import { effectiveCap } from './tokenBudget.js';
+import path from 'path';
 import { priceSynthesisMaxTokens } from './resultCaps.js';
+import { modelMeta, maxOutputForModel, assessPromptFit, estimateTokensFromChars } from './tokenWindow.js';
 import { logger } from '../logger.js';
 
 /**
@@ -28,9 +31,12 @@ import { logger } from '../logger.js';
  *     newer than the 2.5 Flash line Google is restricting on June 15, 2026).
  *   - Gemini 3.1 Flash-Lite: matches Haiku's tasks while avoiding the 2.5
  *     Flash-Lite access restriction for new/inactive projects.
- *   - Opus: not used. 5x input / 1.67x output over Sonnet with no current
- *     task needing the delta. Add a row here if a future agentic flow
- *     actually justifies it.
+ *   - Opus 4.8: used ONLY for the two application-GENERATION tasks
+ *     (application-resume, application-cover-letter) — the employer-facing PDFs
+ *     where writing quality converts to interviews. At 1.67x Sonnet input/output
+ *     (Opus 4.8 $5/$25 vs Sonnet $3/$15 — far below the old Opus-4.1 5x) the
+ *     delta is worth it THERE and nowhere else; everything else stays on
+ *     Sonnet/Haiku. Don't blanket-promote — add a row only with a real reason.
  */
 const TASK_MODELS = {
   'vision-product-analysis':   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
@@ -44,10 +50,16 @@ const TASK_MODELS = {
   'job-bucketing':             { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   // Application generation (résumé + cover letter from the design system).
   // Quality compounds here — the output is a polished PDF a human sends to a
-  // recruiter — so it gets the strong model on both providers.
+  // recruiter, where writing nuance + judgment convert to interviews — so the two
+  // GENERATION tasks get Opus 4.8 on the Claude path. This is the one place the
+  // Opus delta clearly pays off (and at Opus 4.8 = 1.67x Sonnet, vs the old 5x,
+  // it's an easy trade). company-research stays on Sonnet: it's grounded
+  // summarization that FEEDS the generation, not the employer-facing artifact.
+  // (Gemini path stays Flash — Opus is Claude-only; the quality bar is about the
+  // paid Claude path, per the quality-over-cost preference.)
   'company-research':          { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
-  'application-resume':        { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
-  'application-cover-letter':  { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
+  'application-resume':        { claude: 'claude-opus-4-8',           gemini: 'gemini-3.5-flash'      },
+  'application-cover-letter':  { claude: 'claude-opus-4-8',           gemini: 'gemini-3.5-flash'      },
   'text-polish':               { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
   // Default — used when a caller forgets to pass `task`. Logged as a warning
   // below so we notice unmapped sites; tuned to a safe-middle.
@@ -159,6 +171,17 @@ function resolveTask(task) {
   return task;
 }
 
+// The set of task ids the current build actually issues (union of the model +
+// max-tokens maps, minus the 'default' fallback). The persisted token-budget
+// store accumulates a rolling sample per task and never prunes renamed/removed
+// keys, so a stale task can haunt bug reports forever — callers use this to tell
+// live tasks from persisted ghosts (e.g. an old 'parse-pasted-jobs').
+export function getKnownTaskIds() {
+  return new Set(
+    [...Object.keys(TASK_MODELS), ...Object.keys(TASK_MAX_TOKENS)].filter(k => k !== 'default')
+  );
+}
+
 function pickModel(provider, task) {
   const t = resolveTask(task);
   return TASK_MODELS[t][provider] || TASK_MODELS['default'][provider];
@@ -172,6 +195,110 @@ function pickMaxTokens(task, hints = {}) {
   // raises it toward observed p95 usage if a model has churned to use more than
   // the formula assumed (never below the seed; never above the 24576 hard cap).
   return { cap: effectiveCap(t, seed), seed };
+}
+
+// ── Context-window preflight ──────────────────────────────────────────────────
+/**
+ * Will `prompt` (+ its cached prefix and the task's reserved output) fit the
+ * context window of the model that will actually serve this task? Provider- and
+ * model-specific, and CASCADE-AWARE: for Gemini it budgets against the smallest
+ * window across the whole fallback chain (callGemini may step down on 429), so a
+ * verdict holds no matter which model ends up serving.
+ *
+ * Two tiers, to keep the common case free of network round-trips:
+ *   1. A cheap local OVER-estimate (chars ÷ 2.5). If even the over-count fits,
+ *      we're comfortably clear — return immediately, no API call.
+ *   2. Otherwise the provider's FREE token-count endpoint for an exact verdict.
+ *
+ * Never throws: any count-endpoint failure falls back to the (conservative)
+ * estimate verdict, so the preflight can't itself break a call.
+ * @returns {Promise<{fits:boolean, tokens:number, model:string, provider:string,
+ *   budget:number, reservedOutput:number, contextWindow:number, via:string}>}
+ */
+export async function checkPromptFits(prompt, opts = {}) {
+  const { signal, task, hints, responseSchema, cachedPrefix } = normalizeOpts(opts);
+  const settings = getAISettings();
+  const provider = settings.provider === 'claude' ? 'claude' : 'gemini';
+  const model = pickModel(provider, task);
+  const { cap: requestedOutput } = pickMaxTokens(task, hints);
+
+  // Budget against the model that serves — for Gemini, the smallest window the
+  // cascade could fall to (homogeneous today, but min keeps this correct if a
+  // smaller-window model is ever added to GEMINI_MODEL_FALLBACKS).
+  let contextWindow;
+  const modelMaxOutput = maxOutputForModel(model);
+  if (provider === 'gemini' && GEMINI_MODEL_FALLBACKS.length) {
+    contextWindow = Math.min(...GEMINI_MODEL_FALLBACKS.map((m) => modelMeta(m).contextWindow));
+  } else {
+    contextWindow = modelMeta(model).contextWindow;
+  }
+
+  // Tier 1 — cheap local over-estimate (no network).
+  const chars = (cachedPrefix?.length || 0) + (prompt?.length || 0)
+    + (responseSchema ? JSON.stringify(responseSchema).length : 0);
+  const estimate = estimateTokensFromChars(chars);
+  const estFit = assessPromptFit({ contextWindow, modelMaxOutput, requestedOutput, promptTokens: estimate });
+  if (estFit.fits) {
+    return { fits: true, tokens: estimate, model, provider, via: 'estimate',
+      budget: estFit.budget, reservedOutput: estFit.reservedOutput, contextWindow: estFit.contextWindow };
+  }
+
+  // Tier 2 — authoritative FREE count at the boundary.
+  try {
+    const tokens = provider === 'claude'
+      ? await countClaudeInputTokens(prompt, model, settings.anthropicApiKey, { cachedPrefix, responseSchema, signal })
+      : await countGeminiInputTokens(cachedPrefix ? `${cachedPrefix}\n\n${prompt}` : prompt, settings.geminiApiKey, model, { signal });
+    const fit = assessPromptFit({ contextWindow, modelMaxOutput, requestedOutput, promptTokens: tokens });
+    return { fits: fit.fits, tokens, model, provider, via: 'api',
+      budget: fit.budget, reservedOutput: fit.reservedOutput, contextWindow: fit.contextWindow };
+  } catch (e) {
+    logger.warn(`[LLM] token preflight count failed for task '${task || '?'}' (${e?.message || e}); using local estimate`);
+    return { fits: estFit.fits, tokens: estimate, model, provider, via: 'estimate-fallback',
+      budget: estFit.budget, reservedOutput: estFit.reservedOutput, contextWindow: estFit.contextWindow };
+  }
+}
+
+/**
+ * Enforce the preflight for a NON-chunkable call: throw a precise, actionable
+ * error when the prompt won't fit, instead of letting the provider silently
+ * truncate output or stop mid-generation. Chunkable callers (job scoring) call
+ * checkPromptFits directly and SPLIT instead of relying on this. Best-effort:
+ * checkPromptFits never throws on its own (count failures degrade to the local
+ * estimate), so this only fires on a genuine over-budget verdict.
+ */
+async function assertPromptFits(prompt, opts) {
+  const fit = await checkPromptFits(prompt, opts);
+  if (!fit.fits) {
+    throw new Error(
+      `Prompt too large for ${fit.model}: ~${fit.tokens.toLocaleString()} input tokens leave no room for ${fit.reservedOutput.toLocaleString()} reserved output within its ${fit.contextWindow.toLocaleString()}-token context window (input budget ${fit.budget.toLocaleString()}). Reduce the input for task '${opts?.task || 'unknown'}'.`,
+    );
+  }
+  return fit;
+}
+
+// Conservative per-attachment token allowance for the vision/document preflight.
+// We can cheaply count the TEXT prompt but not image/PDF tokens, so we add this
+// generous floor per attachment and fail loud only if even that blows the budget.
+// Sized above a Claude image (~1.6K) / a dense PDF page so the estimate over-counts;
+// the provider stays the final authority for borderline attachment-heavy payloads.
+const ATTACHMENT_TOKEN_ALLOWANCE = 3000;
+
+/**
+ * Preflight for an attachment (vision / document) call: precisely counts the TEXT
+ * prompt, adds a conservative allowance per attachment, and fails loud when the
+ * total leaves no room for the reserved output. Approximate BY DESIGN — exact
+ * image/PDF token counts are delegated to the provider (which rejects oversized);
+ * this catches the obvious over-window case early with an actionable message.
+ */
+async function assertAttachmentPromptFits(prompt, { task, hints, signal, attachmentCount = 1 } = {}) {
+  const fit = await checkPromptFits(prompt, { task, hints, signal });
+  const withAttachments = fit.tokens + Math.max(0, attachmentCount) * ATTACHMENT_TOKEN_ALLOWANCE;
+  if (withAttachments > fit.budget) {
+    throw new Error(
+      `Prompt + ${attachmentCount} attachment(s) too large for ${fit.model}: ~${withAttachments.toLocaleString()} input tokens exceed the ${fit.budget.toLocaleString()}-token budget (window ${fit.contextWindow.toLocaleString()} − reserved output). Reduce inputs for task '${task || 'unknown'}'.`,
+    );
+  }
+  return fit;
 }
 
 // ── Public callers ──────────────────────────────────────────────────────────
@@ -204,6 +331,12 @@ export async function callLLMText(prompt, opts = {}) {
   const model    = pickModel(settings.provider === 'claude' ? 'claude' : 'gemini', task);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
   const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: fullLen, ...hints });
+  // Context-window preflight (free token count, mostly a local estimate): fail
+  // loud BEFORE sending if the prompt + reserved output won't fit the serving
+  // model. List-payload callers (job scoring) pre-split via checkPromptFits, so
+  // they never reach this; atomic tasks (parse/research/cover-letter) that
+  // genuinely overflow get an actionable error instead of a truncated answer.
+  await assertPromptFits(prompt, { signal, task, hints, responseSchema, cachedPrefix });
   try {
     if (settings.provider === 'claude') {
       const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, cachedPrefix, task });
@@ -279,19 +412,27 @@ export async function cancelLLMTextBatch(batchId) {
  * responseSchema — which is exactly why this path is free-text.
  */
 export async function callLLMRaw(prompt, opts = {}) {
-  const { signal, task, hints, grounding } = normalizeOpts(opts);
+  const { signal, task, hints, grounding, cachedPrefix } = normalizeOpts(opts);
   const meta     = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const settings = getAISettings();
   const provider = settings.provider === 'claude' ? 'claude' : 'gemini';
   const model    = pickModel(provider, task);
-  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: prompt?.length || 0, ...hints });
+  const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
+  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: fullLen, ...hints });
+  // Same context-window preflight as callLLMText (this free-text path can carry
+  // large research/synthesis prompts). Grounding adds server-side search tokens
+  // we can't predict, but the prompt itself is what we guard here.
+  await assertPromptFits(prompt, { signal, task, hints, cachedPrefix });
   try {
     if (provider === 'claude') {
-      const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: false, grounding, task });
+      const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: false, grounding, task, cachedPrefix });
       if (meta) meta.model = model;
       return raw;
     }
-    return await callGeminiTextRaw(prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, grounding, task, meta });
+    // Gemini: prepend the cacheable prefix into the prompt (implicit prefix
+    // caching picks up the repeated content); mirrors callLLMText.
+    const merged = cachedPrefix ? `${cachedPrefix}\n\n${prompt}` : prompt;
+    return await callGeminiTextRaw(merged, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, grounding, task, meta });
   } catch (err) {
     throw enhanceLLMError(err, provider);
   }
@@ -306,6 +447,9 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   // vision-product-analysis. Caller-supplied hints win on conflict so a future
   // call site can override when it knows better than the default heuristic.
   const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { photoCount: imagePaths?.length || 0, promptLength: prompt?.length || 0, ...hints });
+  // Preflight the text prompt + a per-image allowance (image tokens themselves
+  // are the provider's authority). Fails loud before sending if clearly over.
+  await assertAttachmentPromptFits(prompt, { task, hints, signal, attachmentCount: imagePaths?.length || 0 });
   try {
     if (settings.provider === 'claude') {
       const raw = await callClaudeVision(imagePaths, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });
@@ -319,10 +463,24 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
 }
 
 export async function callLLMDocument(filePath, prompt, opts = {}) {
-  const { signal, task, hints, responseSchema } = normalizeOpts(opts);
+  const { signal, task, hints, responseSchema, cachedPrefix } = normalizeOpts(opts);
+  // Word docs (.docx / legacy .doc) can't be sent as inline data — Gemini 400s on
+  // the OOXML MIME and Claude reads the ZIP bytes as garbage. Extract the text via
+  // macOS textutil and route through the normal TEXT path, which every provider
+  // accepts (and which runs its own window preflight + caching). This also makes
+  // legacy .doc work, which both document handlers previously rejected outright.
+  if (isWordDoc(filePath)) {
+    const text = await extractWordText(filePath);
+    return callLLMText(`${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n${text}`,
+      { signal, task, hints, responseSchema, cachedPrefix });
+  }
   const settings = getAISettings();
   const model    = pickModel(settings.provider === 'claude' ? 'claude' : 'gemini', task);
   const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: prompt?.length || 0, ...hints });
+  // Preflight the text prompt + one document allowance (the file's own tokens —
+  // PDF pages, etc. — remain the provider's authority). A pathologically large
+  // career-file/résumé fails loud here instead of mid-extraction truncation.
+  await assertAttachmentPromptFits(prompt, { task, hints, signal, attachmentCount: 1 });
   try {
     if (settings.provider === 'claude') {
       const raw = await callClaudeDocument(filePath, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });

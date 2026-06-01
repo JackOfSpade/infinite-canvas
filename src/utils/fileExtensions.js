@@ -10,11 +10,16 @@
 /** Source/text files that drop in as code/text DocumentNodes. */
 export const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)$/i;
 
-/** Résumé documents accepted by the JobHub drop path. */
-export const RESUME_EXT_RE = /\.(pdf|docx|doc|txt)$/i;
+// NOTE: file drops NEVER auto-spawn a module. A résumé/PDF/image dropped on the
+// canvas becomes a plain document node; the JobHub & SellHub are spawned ONLY from
+// the left sidebar, and accept files dropped ONTO them (see fileSupportedByHub in
+// useDragCorrections.js). The old RESUME_EXT_RE / IMAGE_EXT_RE drop-routing
+// regexes were removed with that auto-spawn branch — don't reintroduce them here.
 
-/** Web/document images (no HEIC — those are handled by the selling flow). */
-export const IMAGE_EXT_RE = /\.(png|jpg|jpeg|webp|gif)$/i;
-
-/** Product photos accepted by the selling flow (includes HEIC/HEIF from iOS). */
-export const PRODUCT_IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|heic|heif)$/i;
+/**
+ * Product photos accepted by the selling flow. Matches every image format the
+ * canvas can display + AI vision can read: web-native (png/jpg/webp/gif/svg/bmp/
+ * ico/avif) plus the sips-transcoded ones (heic/heif from iOS, tiff/tif, jxl).
+ * Kept in sync with getFileCategoryInfo()'s IMAGE set and main.js display.
+ */
+export const PRODUCT_IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|svg|bmp|ico|heic|heif|tiff?|avif|jxl)$/i;

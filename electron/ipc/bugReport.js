@@ -15,6 +15,7 @@ import { getMarketplaceTelemetry } from './marketplace.js';
 import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
+import { getKnownTaskIds } from './llm.js';
 import { shortId, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
@@ -1088,12 +1089,21 @@ ${stealthLine}${argsSection}${resolveDiagSection}`;
   // which drive the self-calibrating max_tokens cap (effectiveCap). A p95 near
   // the 24576 hard cap means a task is truncating and the cap has grown to match.
   const tokenBudgets = (() => { try { return getTokenBudgetSnapshot(); } catch { return {}; } })();
+  // The persisted budget store never prunes task keys, so a renamed/removed task
+  // lingers as a "ghost" that misleadingly reports a stuck truncation forever.
+  // Split live tasks (in the current build's TASK_MODELS/TASK_MAX_TOKENS) from
+  // stale ghosts and footnote the ghosts instead of mixing them into the funnel.
+  const knownTaskIds = (() => { try { return getKnownTaskIds(); } catch { return null; } })();
+  const staleBudgetTasks = knownTaskIds
+    ? Object.keys(tokenBudgets).filter(t => !knownTaskIds.has(t)).sort()
+    : [];
   // Only surface tasks that have actually truncated — clean tasks are noise for
   // almost every bug report. A footer line summarises how many are healthy so
   // the section doesn't mislead ("only 2 tasks?" when there are really 9).
   const tokenBudgetLines = [];
   let tokenBudgetCleanCount = 0;
   for (const [task, s] of Object.entries(tokenBudgets).sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (knownTaskIds && !knownTaskIds.has(task)) continue; // stale ghost — footnoted below
     if (s.truncatedAt <= 0) { tokenBudgetCleanCount++; continue; }
     // Mirrors tokenBudget.js HEADROOM=1.2: truncation floor = truncatedAt × 1.2.
     const nextCapFloor = Math.round(s.truncatedAt * 1.2);
@@ -1109,6 +1119,7 @@ ${stealthLine}${argsSection}${resolveDiagSection}`;
     );
   }
   if (tokenBudgetCleanCount > 0) tokenBudgetLines.push(`- *(${tokenBudgetCleanCount} task(s) within budget — not shown)*`);
+  if (staleBudgetTasks.length > 0) tokenBudgetLines.push(`- *(${staleBudgetTasks.length} stale/removed task key(s) in the persisted budget store, ignored: ${staleBudgetTasks.join(', ')})*`);
   const tokenBudgetMarkdown = tokenBudgetLines.length
     ? `
 ### Learned Token Budgets

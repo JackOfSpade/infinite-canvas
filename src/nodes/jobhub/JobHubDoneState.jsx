@@ -4,7 +4,7 @@ import { SlidersHorizontal, X, RefreshCw, Target, MapPin, Bot } from 'lucide-rea
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
 
-// e.g. "claude-opus-4-7" → "Opus 4.7", "claude-haiku-4-5-20251001" → "Haiku 4.5"
+// e.g. "claude-opus-4-8" → "Opus 4.8", "claude-haiku-4-5-20251001" → "Haiku 4.5"
 function formatModelName(model) {
   if (!model || typeof model !== 'string') return null;
   const stripped = model.replace(/^claude-/, '').replace(/-\d{8,}$/, '');
@@ -21,8 +21,6 @@ export function JobHubDoneState({
   gatheredCount,
   queryModel = null,
   testMode = false,
-  targetCount = 0,
-  otherCount = 0,
   sourceFilter,
   toggleSourceFilter,
   resumeSummary,
@@ -76,14 +74,6 @@ export function JobHubDoneState({
         <p className="flex items-center gap-1 text-white/20 text-[9px] mt-0.5">
           <Bot size={8} className="shrink-0" />
           {formatModelName(queryModel)}
-        </p>
-      )}
-
-      {(targetCount > 0 || otherCount > 0) && (
-        <p className="text-white/30 text-[10px] mt-0.5">
-          {targetCount > 0 && <><span className="text-purple-300/80">{targetCount} target</span></>}
-          {targetCount > 0 && otherCount > 0 && <span className="text-white/20"> · </span>}
-          {otherCount > 0 && <><span className="text-blue-300/80">{otherCount} other</span></>}
         </p>
       )}
 

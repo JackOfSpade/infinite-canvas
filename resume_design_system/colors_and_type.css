@@ -217,13 +217,25 @@ html {
   font-family: var(--ff-body);
   font-size: var(--fs-body);
   line-height: var(--lh-body);
-  /* kern/liga/calt: universal text rendering hygiene.
-     tnum: tabular numerals so date columns and metric lines align
-     across rows — load-bearing for the right-aligned date cell.
-     No stylistic-set toggles (ss01 etc.) — they do different things
-     in Source Serif 4 vs Inter vs IBM Plex Mono and we don't want
-     family-specific behavior leaking into the global default. */
-  font-feature-settings: "kern", "liga", "calt", "tnum";
+  /* kern/liga/calt: universal text rendering hygiene — these shape
+     LETTERS only and round-trip cleanly through PDF text extraction.
+
+     tnum (tabular numerals) is deliberately NOT enabled, and must not
+     be. Inter's tabular figures are GSUB-substituted glyphs with no
+     `cmap` entry, so Chrome's print-to-PDF subsetter can't reverse-map
+     them to U+0030–0039 — it assigns Private-Use-Area codepoints
+     instead. The numbers then render correctly on screen but extract
+     as nothing: every QPS, $, %, and date silently drops out of the
+     PDF text layer, and therefore out of ATS parsing, copy-paste, and
+     screen readers. Parse-safety beats digit-column alignment
+     (STYLE.md §1); the right-aligned date cell is aligned by the grid,
+     not by monospaced figures. Do NOT add "tnum" (or "pnum"/"lnum"/
+     "onum") here — they all trip the same substitution hazard.
+
+     No stylistic-set toggles (ss01 etc.) either — they do different
+     things across the three families and would leak family-specific
+     behavior into the global default. */
+  font-feature-settings: "kern", "liga", "calt";
   /* Preserve the warm ground in print. Without this, Chrome strips
      --bg to save toner and the "ink on warm paper" reading collapses
      to plain black-on-white. The whole aesthetic depends on this. */

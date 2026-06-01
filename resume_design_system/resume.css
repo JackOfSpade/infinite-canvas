@@ -56,7 +56,12 @@
    a one-page resume should never show "1". */
 @page letter {
   size: Letter;
-  margin: 0;
+  /* Vertical margins live HERE, not as .page padding, so they repeat
+     on every printed page. Padding on a page-breaking element only
+     applies top-pad to the first fragment and bottom-pad to the last,
+     which left pages 2+ with no top margin. Side margins stay as
+     .page padding so they remain token-driven (a4 / density variants). */
+  margin: 0.72in 0;
   @bottom-right {
     content: counter(page) " / " counter(pages);
     font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
@@ -69,7 +74,7 @@
 @page letter:first { @bottom-right { content: none; } }
 @page a4 {
   size: A4;
-  margin: 0;
+  margin: 18mm 0;
   @bottom-right {
     content: counter(page) " / " counter(pages);
     font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
@@ -82,14 +87,17 @@
 @page a4:first { @bottom-right { content: none; } }
 @page {
   /* Fallback for engines that don't support named pages — defaults
-     to Letter. Margin stays 0 here; the page padding handles it. */
+     to Letter. Vertical margins repeat per page via @page; side
+     margins are handled by .page padding. */
   size: Letter;
-  margin: 0;
+  margin: 0.72in 0;
 }
 .page              { page: letter; }
+/* a4 applies whether the attribute sits on the .page element itself or
+   on any ancestor (e.g. <html data-page="a4">); the descendant selector
+   already covers the :root case, so no separate :root rule is needed. */
 .page[data-page="a4"],
-[data-page="a4"] .page,
-:root[data-page="a4"] .page { page: a4; }
+[data-page="a4"] .page { page: a4; }
 @media print {
   html, body { background: var(--bg); }
   body { padding: 0; }
@@ -97,7 +105,11 @@
     width: auto;
     min-height: auto;
     margin: 0;
-    padding: var(--margin-top) var(--margin-side) var(--margin-bot);
+    /* Side padding only — top/bottom margins are on @page so they
+       repeat on every printed page. (Bug fix: pages 2+ were losing
+       their top margin because padding on a fragmented box is applied
+       once, at the first/last fragment, not per page.) */
+    padding: 0 var(--margin-side);
     box-shadow: none;
     page-break-after: always;
   }
@@ -277,7 +289,10 @@
   color: var(--ink-body);
   letter-spacing: var(--tr-tight);
 }
-.role-dates {
+.role-dates,
+.role-location {
+  /* The date range and the location are the two right-aligned meta
+     cells of the role grid; they share one treatment. */
   font-size: var(--fs-small);
   color: var(--ink-meta);
   text-align: right;
@@ -288,12 +303,6 @@
   color: var(--ink-meta);
   font-style: italic;
   letter-spacing: var(--tr-tight);
-}
-.role-location {
-  font-size: var(--fs-small);
-  color: var(--ink-meta);
-  text-align: right;
-  white-space: nowrap;
 }
 
 /* =========================================================
@@ -415,9 +424,15 @@
 .edu-meta   { font-size: var(--fs-small); color: var(--ink-meta); white-space: nowrap; }
 
 /* =========================================================
-   Tabular numerals everywhere a date / QPS / $ appears so
-   digit columns align across bullets visually.
+   Numerals — proportional (font default), NOT tabular.
+   `tabular-nums` / "tnum" selects GSUB-only tabular figures that
+   carry no `cmap` entry, so Chrome's PDF subsetter maps them to
+   Private-Use codepoints and EVERY number drops out of the
+   extracted text layer (ATS, copy-paste, screen readers). The
+   date / metric columns are aligned by their grid cell, not by
+   monospaced digits, so nothing visual is lost. Keep this
+   `normal`; do not reintroduce tabular-nums. See STYLE.md §2.4 + §8.
    =========================================================*/
 .tnum, .role-dates, .project-metrics, .edu-meta {
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: normal;
 }

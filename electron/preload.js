@@ -36,6 +36,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setWindowFile: (filePath) => ipcRenderer.send('window:set-current-file', filePath),
 
   onFileChanged: createListener('file-changed'),
+  // Fired when the open canvas file is renamed on disk (e.g. in Finder) and the
+  // main process followed it by inode. Payload: the new absolute path.
+  onCanvasFileRenamed: createListener('canvas:file-renamed'),
   onMenuSave: createListener('menu-save'),
   onMenuExportPng: createListener('menu-export-png'),
   onQuitRequest: createListener('quit-request'),

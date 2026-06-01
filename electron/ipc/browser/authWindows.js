@@ -168,6 +168,10 @@ export const PLATFORM_LOGIN_URLS = {
 export const PLATFORM_AUTH_COOKIES = {
   facebook:    ['c_user'],          // numeric user id; absent or "0" when logged out
   linkedin:    ['li_at'],           // long-lived session token
+  glassdoor:   ['at'],              // access token (HttpOnly, ~1yr expiry); written only after a successful login.
+                                    // Confirmed by profile diff: present in a logged-in profile, absent in an anonymous
+                                    // one. gdId / gdsid / cass / GSESSIONID appear in BOTH states, so they are NOT
+                                    // login-only and would false-trip — do not add them here.
   // Others fall through to DOM signal — add here as we confirm them.
 };
 
@@ -403,7 +407,35 @@ export async function openLoginWindow(platformId, sender = null) {
           currentUrl,
           title: await page.title().catch(() => ''),
         });
-        if (LOGIN_URL_PATTERN.test(currentUrl) || isAuthChallengeUrl(currentUrl)) return; // still in the login / captcha / challenge flow — wait
+        // Cookie signal — a definitive per-platform auth cookie (PLATFORM_AUTH_COOKIES)
+        // is the most reliable logged-in indicator, and HttpOnly cookies ARE visible via
+        // CDP (c_user / li_at / glassdoor `at`, …). Computed BEFORE the login-URL guard:
+        // some SPAs suppress the post-auth redirect and re-render the login form, leaving
+        // the window stuck on a login URL even though the session cookie is already
+        // written (Glassdoor's "exiting post-authentication flow, suppressing redirect"
+        // path). The old guard returned on every such tick, so the window looped forever
+        // and never auto-closed — even though the separate post-close HTTP verify saw the
+        // cookie and marked the platform connected. Preferred for SPAs (Facebook etc.)
+        // where the account menu is lazy-rendered and "Log out" text isn't in the DOM.
+        let cookieSignal = false;
+        const expectedCookies = PLATFORM_AUTH_COOKIES[platformId];
+        if (expectedCookies?.length) {
+          try {
+            const cookies = await page.cookies();
+            cookieSignal = cookies.some(c =>
+              expectedCookies.includes(c.name) && c.value && c.value !== '0'
+            );
+          } catch { /* page may be navigating */ }
+        }
+
+        // Challenge interstitials (captcha / 2FA / checkpoint / signup) stay a HARD block
+        // even when a session cookie is present — the full-session cookie can be written
+        // before the challenge is actually cleared, so closing here would be premature.
+        if (isAuthChallengeUrl(currentUrl)) return;
+        // Still on a plain login form with no session cookie yet — keep waiting. A
+        // definitive auth cookie overrides this so suppressed-redirect SPAs (Glassdoor)
+        // can still auto-close instead of looping on the re-rendered login form.
+        if (LOGIN_URL_PATTERN.test(currentUrl) && !cookieSignal) return;
 
         if (lastNonLoginUrl !== currentUrl) {
           if (!lastNonLoginUrl) logger.info(`[StealthBrowser] ${platformId} URL transitioned past login: ${currentUrl}`);
@@ -423,21 +455,6 @@ export async function openLoginWindow(platformId, sender = null) {
           if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
           await closeLoginBrowserSafely(loginBrowser, platformId);
           return;
-        }
-
-        // Cookie signal — preferred for SPAs (Facebook etc.) where the
-        // account menu is lazy-rendered and "Log out" text isn't in the
-        // initial DOM. HttpOnly cookies ARE visible via CDP, so this works
-        // for c_user / li_at etc.
-        let cookieSignal = false;
-        const expectedCookies = PLATFORM_AUTH_COOKIES[platformId];
-        if (expectedCookies?.length) {
-          try {
-            const cookies = await page.cookies();
-            cookieSignal = cookies.some(c =>
-              expectedCookies.includes(c.name) && c.value && c.value !== '0'
-            );
-          } catch { /* page may be navigating */ }
         }
 
         // DOM signal — fallback for platforms without a known auth cookie.

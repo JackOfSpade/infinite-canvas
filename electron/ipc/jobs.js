@@ -7,7 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { callLLMDocument, callLLMText, submitLLMTextBatch, getLLMTextBatchStatus, getLLMTextBatchResults, cancelLLMTextBatch } from './llm.js';
+import { callLLMDocument, callLLMText, checkPromptFits, submitLLMTextBatch, getLLMTextBatchStatus, getLLMTextBatchResults, cancelLLMTextBatch } from './llm.js';
 import { reconcileBatchScores, buildScoredJob } from './jobBatchReconcile.js';
 import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, CAREER_FILE_EXTRACT_SCHEMA, JOB_QUERY_GENERATION_SCHEMA } from './aiSchemas.js';
 import electronPkg from 'electron';
@@ -28,6 +28,7 @@ import {
   fetchRemoteOKJobs,
   fetchWeWorkRemotelyJobs,
   fetchDiceListings,
+  dicePostedBucket,
   enrichDiceDescriptions,
   enrichLinkedInDescriptionsBrowser,
   warmDiceApiKey,
@@ -42,6 +43,7 @@ import { getJobsSettings, getAISettings } from './settings.js';
 import { readStatusCache } from './accounts.js';
 import { getScopedJobSourceIds, JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
 import { dedupeJobsByKey, jobTitleCompanyKey } from '../../src/utils/jobIdentity.js';
+import { deriveLocationParam, summarizeLocationAdherence, LOCATION_TREATMENT } from '../../src/utils/jobLocation.js';
 
 const { ipcMain, app, shell } = electronPkg;
 const DEFAULT_MAX_AGE_DAYS = 21;
@@ -212,6 +214,34 @@ function chunkScoringBatches(jobs, maxItems) {
   return batches;
 }
 
+/**
+ * Pre-split scoring batches so each fits the serving model's context window
+ * BEFORE an async Batch-API submit. The real-time path can split reactively when
+ * a call comes back truncated; the batch path CANNOT — an over-window request
+ * would silently truncate and only surface ~24h later — so a proactive preflight
+ * is essential here. Recursively halves any over-window group (mirrors planSplits
+ * / the real-time scoreBatch guard) and returns the flattened, fit-guaranteed
+ * groups in order, so `b{i}` custom_ids over the result reconcile unchanged
+ * (jobBatchReconcile.js maps b{i} → batches[i]). Best-effort: a preflight hiccup
+ * leaves a group intact (the provider still bounds it).
+ */
+async function splitBatchesToFitWindow(batches, { slimBatch, cachedPrefix, signal }) {
+  const splitOne = async (batch) => {
+    if (!Array.isArray(batch) || batch.length <= 1) return [batch];
+    const prompt = `JOBS TO SCORE (array, indexed):\n${JSON.stringify(slimBatch(batch))}`;
+    let fit = null;
+    try {
+      fit = await checkPromptFits(prompt, { signal, task: 'job-scoring', hints: { itemCount: batch.length }, responseSchema: JOB_SCORING_SCHEMA, cachedPrefix });
+    } catch { return [batch]; }
+    if (!fit || fit.fits) return [batch];
+    const mid = Math.ceil(batch.length / 2);
+    return [...await splitOne(batch.slice(0, mid)), ...await splitOne(batch.slice(mid))];
+  };
+  const out = [];
+  for (const b of batches) out.push(...await splitOne(b));
+  return out;
+}
+
 function buildJobAnalysisSnapshot({ jobs, profile, nodeId, targetRole, snapshotContext }) {
   const role = (targetRole || '').trim();
   const gathered = Array.isArray(jobs) ? jobs : [];
@@ -227,17 +257,14 @@ function buildJobAnalysisSnapshot({ jobs, profile, nodeId, targetRole, snapshotC
     snippet:  j.snippet || '',
   }));
 
-  const targetBlock = role ? `
-
-TARGET ROLE: The user wants to pivot into / land: ${role}.
-For each job, set isTargetRoleMatch=true ONLY if the job is reasonably for the target role ${role} (same role family, adjacent seniority, or a near-equivalent title). Set false for everything else, including strong fits in unrelated directions.
-Score target-role jobs by the candidate's chance of GETTING AN INTERVIEW for that role — even when their resume is a partial fit, a meaningful pivot opportunity with score 40-60 is more useful than perfect non-target matches.` : `
-
-NO TARGET ROLE was supplied. Set isTargetRoleMatch=false for every job — the field is unused this run.`;
+  // Scoring is target-AGNOSTIC: a target role only adds queries upstream (see
+  // generate-job-queries). The displayed jobs, their scoring, and the
+  // likelihood→salary→role categorization are identical to a no-target run, so
+  // the scoring prompt carries no target-role block.
   const cachedPrefix = `You are a career matching expert. Score each job against this candidate's profile.
 
 CANDIDATE PROFILE:
-${JSON.stringify(profile)}${targetBlock}
+${JSON.stringify(profile)}
 
 Return JSON of the form { "scores": [ ... one object per job in the array I send next ... ] }:
 {
@@ -246,8 +273,7 @@ Return JSON of the form { "scores": [ ... one object per job in the array I send
       "index": 0,
       "matchScore": 85,
       "reasoning": "A complete, specific justification of WHY this matches or doesn't — as long as it genuinely needs to be (usually 2-4 sentences; longer only when the fit is nuanced). Cite concrete signals from BOTH the JD and the candidate's profile (relevant experience, gaps, seniority/comp fit, how a recruiter would react). Read between the lines — a startup wanting a 'manager with engineering depth' is a match for an experienced engineer even without management title. No filler — every sentence carries information; the card truncates this and the user expands to read it all.",
-      "careerDirection": "<a 1-3 word job-family label that fits THIS job and THIS candidate's field — invent it, don't pick from a fixed list. A marketer's jobs get labels like 'Brand Marketing' / 'Growth' / 'Comms'; an engineer's get 'Backend' / 'ML' / 'Infra'. Be specific to the candidate's actual field; never force a tech label onto a non-tech role>",
-      "isTargetRoleMatch": ${role ? 'true | false (per the target role rules above)' : 'false (no target role this run)'}
+      "careerDirection": "<a 1-3 word job-family label that fits THIS job and THIS candidate's field — invent it, don't pick from a fixed list. A marketer's jobs get labels like 'Brand Marketing' / 'Growth' / 'Comms'; an engineer's get 'Backend' / 'ML' / 'Infra'. Be specific to the candidate's actual field; never force a tech label onto a non-tech role>"
     }
   ]
 }
@@ -625,6 +651,10 @@ function getLocationTerms(profileLocations = [], preferredLocation = '') {
   return terms;
 }
 
+// Location helpers (deriveLocationParam / summarizeLocationAdherence /
+// LOCATION_TREATMENT) live in src/utils/jobLocation.js — dependency-free + unit-
+// tested there; imported at the top of this file.
+
 // `opts` (resume only): { onlySources: Set, startPageBySource: { [id]: 1-based page } }.
 // onlySources restricts which manual sources get tasks (skip already-'done' ones on
 // resume). startPageBySource resumes a URL-paginated source mid-pagination by building
@@ -632,9 +662,16 @@ function getLocationTerms(profileLocations = [], preferredLocation = '') {
 // page counter + the staging ledger continue from there. Sources whose URL doesn't vary
 // by page (Glassdoor infinite-scroll, single-page Google) ignore startPage and re-scrape
 // from page 1 (the cross-source dedup absorbs the re-yielded earlier pages).
-function buildJobTasks(queries, maxAgeDays, opts = {}) {
+function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
   const { onlySources = null, startPageBySource = null } = opts;
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+  // Board-ready location filter (already flattened from the structured canonical
+  // by deriveLocationParam). Appended as each board's REAL location param so a
+  // location-free query no longer searches nationwide. Empty → omitted (nationwide,
+  // the correct default for a remote / no-location search). Google for Jobs has no
+  // clean location param, so it relies on the LLM baking the place into the query.
+  const loc = String(location || '').trim();
+  const locParam = (name) => loc ? `&${name}=${encodeURIComponent(loc)}` : '';
   // Browser pool extractors — only platforms that REQUIRE local browser rendering.
   // Indeed runs as a browser source in the search-jobs driver (not here); RemoteOK
   // and WeWorkRemotely are pure-HTTP and live in fetchHttpSources.
@@ -659,12 +696,12 @@ function buildJobTasks(queries, maxAgeDays, opts = {}) {
   const extractors = {
     ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, maxPages: JOB_MAX_PAGES,
                        urlPaginated: true, // first URL can jump to an arbitrary page → supports per-page resume
-                       urlFn: (q, page) => `https://www.ziprecruiter.com/jobs-search${page > 0 ? `/${page + 1}` : ''}?search=${encodeURIComponent(q)}&days=${days}` },
+                       urlFn: (q, page) => `https://www.ziprecruiter.com/jobs-search${page > 0 ? `/${page + 1}` : ''}?search=${encodeURIComponent(q)}${locParam('location')}&days=${days}` },
     // Glassdoor migrated to Next.js with infinite-scroll "Show more" pagination —
     // the old ?p=N URL param is silently ignored (every "page" returns page 1).
     // One URL load + JOB_MAX_PAGES-1 button clicks replaces the old N-page walk.
     glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,    config: GLASSDOOR_CONFIG,    maxPages: JOB_MAX_PAGES,
-                       urlFn: (q) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}&fromAge=${days}`,
+                       urlFn: (q) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}${locParam('locKeyword')}&fromAge=${days}`,
                        loadMoreSelector: '[data-test="load-more"]' },
     // Google Jobs: single-page scroll-loaded panel (ibp=htl;jobs). No pagination —
     // scroll logic is handled by SCROLL_SOURCES in manualScraper.js. Does not throw
@@ -690,6 +727,10 @@ function buildJobTasks(queries, maxAgeDays, opts = {}) {
     let idx = 0;
     for (const q of querySubset) {
       const base = { id: `${sourceId}-${idx++}`, sourceId, url: urlFn(q, startPage - 1), extractorJS: extractor, query: q };
+      // Glassdoor's location filter needs a numeric locId (its locKeyword text is
+      // ignored). The scraper resolves it in-browser (CF-gated) just before nav and
+      // appends &locId=&locT= to the URL — see resolveGlassdoorLocId.
+      if (sourceId === 'glassdoor' && loc) base.resolveGlassdoorLocation = loc;
       if (maxPages > 1) {
         base.options = {
           ...config,
@@ -821,21 +862,22 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
   const location = String(preferredLocation || '').trim();
   const queryTotal = getQueryProgressTotal(queries);
 
-  // Keyword-less company-board / remote-feed sources keyword-filter client-side
-  // against the query. The query carries the candidate's city ("… Denver"), and
-  // these boards bake the city into the TITLE — so the location token alone
-  // matched every co-located role (a cinematographer pulled ~10 Datadog SWE/sales
-  // jobs). Pass the candidate's own location tokens so the matcher excludes them:
-  // location is a filter, not relevance. The dedicated scrapers (LinkedIn) and
-  // server-side keyword APIs (USAJobs/Dice) take location as a real param, so
-  // they're intentionally NOT geo-stripped.
+  // Keyword-less REMOTE-FEED sources (RemoteOK / WeWorkRemotely) keyword-filter
+  // client-side against the query and have no location field at all, so the only
+  // location concern is that the candidate's own city — baked into a job TITLE by
+  // some boards ("… Denver") — must NOT count as role relevance (a Denver
+  // cinematographer once pulled ~10 Datadog SWE/sales roles on the "denver"
+  // token). Pass the candidate's own location tokens so the matcher EXCLUDES them.
+  // The keyword APIs (USAJobs LocationName, Dice location) and LinkedIn (location=)
+  // take the target location as a real param (see apiTasks below), so they get the
+  // actual geo filter and are intentionally NOT geo-stripped.
   const geoTerms = buildGeoTermSet(getLocationTerms(profileLocations, preferredLocation));
 
   // Pure-HTTP sources ONLY — no browser, no shared profile, so they run fully
   // concurrent with each other AND with the serialized browser driver. Indeed is
   // NOT here (it is browser-based and runs in the search-jobs browser driver).
   const apiTasks = [
-    { sourceId: 'linkedin',      fn: (s) => fetchLinkedInJobs(queries, s, days) },
+    { sourceId: 'linkedin',      fn: (s) => fetchLinkedInJobs(queries, s, days, location) },
     { sourceId: 'usajobs',       fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days, location), s) },
     { sourceId: 'remoteok',      fn: (s) => fetchRemoteOKJobs(queries, s, geoTerms) },
     { sourceId: 'weworkremotely',fn: (s) => fetchWeWorkRemotelyJobs(queries, s, geoTerms) },
@@ -872,7 +914,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // (mirrors the browser ceiling).
       const gathered = Array.isArray(result) ? rawJobs.length : (result?.gathered ?? rawJobs.length);
       // FAST test mode: trim each source to a small per-source aggregate
-      // (FAST_QUERY_CAP × FAST_API_PER_QUERY ≈ 2 queries × 6). Enforced here — one
+      // (FAST_QUERY_CAP × FAST_API_PER_QUERY ≈ 2 queries × 5). Enforced here — one
       // slice per source — because the fetchers apply JOB_RESULT_CAP inconsistently
       // (per-query vs whole-feed). No-op (Infinity) outside fast mode; `gathered`
       // keeps the true pre-cap count.
@@ -985,10 +1027,11 @@ Extract everything you can find. Be thorough.`, { signal, task: 'resume-parse', 
 TARGET ROLE PRIORITY: The user explicitly wants to pivot into or land the role: ${role}.
 This is the top priority — bias query construction toward this role even if their resume doesn't fully align.` : '';
     const locationBlock = location ? `
-PREFERRED SEARCH LOCATION: ${location}
-Use this as search context. It is free-form user input and may be a city, state, region, "remote", "hybrid in Chicago", "Midwest", etc. Interpret it naturally.
-Only include it in queries when it improves the search. Do NOT force it into every query.` : `
-No preferred search location was provided. Do NOT add location terms to queries by default.`;
+PREFERRED SEARCH LOCATION (free-form user input): ${location}
+Interpret it naturally — it may be a city, state, region, "remote", "hybrid in Chicago", "Midwest", or a typo ("denvr"). Two SEPARATE jobs:
+  (1) QUERY TEXT: only fold a location phrase into a query when it genuinely sharpens it. Do NOT force it into every query; skillsOnlyQueries must stay location-free. (Role/keyword text is free-form — boards don't enforce a structure there.)
+  (2) STRUCTURED "canonicalLocation": ALWAYS return the structured object (see schema). Parse + typo-correct the input into discrete fields. For a US place put the 2-letter code in stateCode ("CO"); for a NON-US place put the full province/region NAME in stateCode ("Ontario") — and ALWAYS set country. The clean "display" string is passed VERBATIM to a board's location filter: "City, ST" for US (e.g. "Denver, CO" from "denvr"), "City, Province, Country" for non-US (e.g. "Whitby, Ontario, Canada" from "whitby ontario"). Keep "display" strictly a place, never a sentence; "" for remote-only.` : `
+No preferred search location was provided. Keep QUERIES location-free (do NOT add location terms — they stay broad). BUT scope the board location FILTER to the candidate's COUNTRY, inferred from their CAREER DATA: their most recent / dominant work location, any stated location, schools attended, etc. Return canonicalLocation with ONLY "country" populated (city = stateCode = region = "", isRemote = false, display = "", country = the inferred nation, e.g. "United States" / "Canada" / "United Kingdom"). This pins the otherwise IP-dependent "nationwide" default to the right country. If the country genuinely cannot be inferred from the profile, return the all-empty object (no filter).`;
     const targetQueryInstruction = role
       ? `"targetRoleQueries": ["3-5 queries that hunt specifically for '${role}' postings. Include seniority + remoteness variants (e.g. '${role} senior', '${role} remote', '${role} junior'). If a preferred search location was provided, you may include it in 1-2 entries where it improves precision. These are the highest-priority queries."]`
       : `"targetRoleQueries": []`;
@@ -1006,12 +1049,26 @@ Return a JSON object with four arrays of search query strings:
   "titleQueries": ["2-3 queries using their exact job titles. Do not include location unless a preferred search location was explicitly provided and it clearly helps."],
   "suggestedRoleQueries": ["3-5 queries for roles they could transition into — adjacent, stretch, and pivot roles they may not have considered. Think creatively: a backend engineer could be an engineering manager, developer advocate, solutions architect, technical PM, etc. Do not include location unless a preferred search location was explicitly provided and it clearly helps."],
   "skillsOnlyQueries": ["2-3 queries using ONLY their skills and experience level, NO job title at all, e.g. 'python kubernetes 8 years team lead distributed systems'. This is intentionally broad to surface unexpected matches."],
-  ${targetQueryInstruction}
+  ${targetQueryInstruction},
+  "canonicalLocation": { "city": "Denver", "stateCode": "CO", "region": "", "country": "United States", "isRemote": false, "display": "Denver, CO" }  // STRUCTURED, per the rules above (US example; non-US uses the province NAME in stateCode + "City, Province, Country" display, e.g. "Whitby"/"Ontario"/"Canada"/"Whitby, Ontario, Canada"). If NO location was provided, populate ONLY country (inferred from career data), everything else ""
 }
 
 Be creative with suggestedRoleQueries — think about what career directions their skills unlock that they might not have considered.${role ? ` Always include the literal string ${role} in at least one targetRoleQueries entry.` : ''}`, { signal, task: 'job-query-generation', responseSchema: JOB_QUERY_GENERATION_SCHEMA, meta: queryMeta });
 
-    return { queries: result, queryModel: queryMeta.model || null };
+    // Flatten the STRUCTURED canonicalLocation into a single board-ready param
+    // string, deterministically — so a stray prose token the model might leave in
+    // `display` can never reach a job board's location field. Most-specific wins:
+    // city+stateCode → city → region → display → (remote ⇒ "") → normalized country
+    // → raw input. When NO location was set, the model populated `country` from the
+    // candidate's career data, so this resolves to that country (deterministic, vs
+    // the old IP-inferred nationwide). The country is run through normalizeCountry
+    // so the value is consistent regardless of the model's phrasing. This param is
+    // passed to EVERY source that takes a location filter: USAJobs LocationName,
+    // Dice location, Indeed l=, ZipRecruiter location=, Glassdoor locKeyword=,
+    // LinkedIn location=, and the geoTerms strip.
+    const struct = (result && typeof result.canonicalLocation === 'object' && result.canonicalLocation) || {};
+    const canonicalLocation = deriveLocationParam(struct, location);
+    return { queries: result, queryModel: queryMeta.model || null, canonicalLocation };
   });
 
   handleSafe('get-last-job-analysis-snapshot', async (event, { canvasFilePath } = {}) => {
@@ -1064,7 +1121,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, profileLocations, preferredLocation, resume = false }, signal) => {
+  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, profileLocations, preferredLocation, rawLocation, resume = false }, signal) => {
     if (ACTIVE_SOURCE_IDS.length === 0) {
       return { success: false, error: 'No active job sources configured for job search test mode.' };
     }
@@ -1088,7 +1145,11 @@ Be creative with suggestedRoleQueries — think about what career directions the
     }
 
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
-    logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across ${ACTIVE_SOURCE_IDS.length} source(s) (maxAge=${ageDays}d)`);
+    // Board-ready location filter (already flattened from the structured canonical
+    // by the renderer via deriveLocationParam). Threaded into the browser tasks
+    // (buildJobTasks) and the Indeed driver as a REAL per-board location param.
+    const location = String(preferredLocation || '').trim();
+    logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across ${ACTIVE_SOURCE_IDS.length} source(s) (maxAge=${ageDays}d, location=${location || 'none'})`);
     jobsTelemetry.nodeId = nodeId;
     jobsTelemetry.windowId = event.sender?.id ?? null;
     // Reset per-run state at search START, not at search end — a paste or captcha
@@ -1154,7 +1215,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
 
     const tasks = buildJobTasks(queries, ageDays, resumeScope
       ? { onlySources: resumeScope, startPageBySource: resumeStartPages }
-      : {});
+      : {}, location);
 
     // Group tasks by source for per-source progress tracking
     const sourceTaskIds = {};
@@ -1244,7 +1305,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
         try {
           const r = await fetchIndeedListingsBrowser(queries, combinedSignal, ageDays, null, (detail) => {
             emitProgress({ nodeId, sourceId: 'indeed', status: 'searching', count: 0, detail, completed: getCompletedQueriesFromDetail(detail, queryTotal), total: queryTotal });
-          }, indeedStartPage, stageOnPage);
+          }, indeedStartPage, stageOnPage, location);
           const rawJobs = Array.isArray(r?.items) ? r.items : [];
           const gathered = r?.gathered ?? rawJobs.length;
           // Same FAST-mode per-source aggregate cap the HTTP path applies.
@@ -1341,8 +1402,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Tab 1 auto-extracts the full ungated result set.
     //
     // CAP-AWARE: the raw count is only a gate signal when it falls SHORT of what we
-    // asked for. In FAST/MEDIUM test mode the per-page cap (JOB_PER_PAGE_CAP = 3 / 5)
-    // deliberately limits Glassdoor to ~6 jobs, so "≤10" was ALWAYS true and the gate
+    // asked for. In FAST/MEDIUM test mode the per-page cap (JOB_PER_PAGE_CAP = 5 / 5)
+    // deliberately limits Glassdoor to ~10 jobs, so "≤10" was ALWAYS true and the gate
     // FALSE-fired on every test run — the user then opens the Solve window, Glassdoor
     // serves the full ungated page to the visible (non-CDP) Chrome session, and it
     // extracts + insta-closes with nothing to solve. Require the count to be below a
@@ -1482,6 +1543,32 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // with a URL param re-apply it as a safety net.
     const ageFiltered = filterJobsByAge(deduped, ageDays);
     const ageDropped = deduped.length - ageFiltered.length;
+
+    // Per-source age accounting for the bug report. The global `ageDropped`
+    // above can't answer "did the N-day window actually bind platform X?" —
+    // and filterJobsByAge KEEPS any job whose `posted` is unparseable, so a
+    // source with no server-side date param AND no parseable per-job date is
+    // silently un-bounded by this pass (only its source-side query limits it).
+    // Record, per source: how many it contributed to the drop, how many
+    // survived, the oldest surviving posting (raw + parsed age), and how many
+    // survivors had no parseable date (the client-side filter was blind to
+    // them). The renderer turns this into a per-platform verdict; an oldest
+    // survivor older than the window is a real leak (flagged 🔥).
+    const ageBySource = {};
+    const keptRefs = new Set(ageFiltered);
+    for (const j of deduped) {
+      const sid = j.source || '?';
+      const a = ageBySource[sid] || (ageBySource[sid] = { dropped: 0, kept: 0, oldestKeptDays: null, oldestKeptRaw: null, unparseableKept: 0 });
+      if (!keptRefs.has(j)) { a.dropped++; continue; }
+      a.kept++;
+      const d = parsePostedDate(j.posted);
+      if (d) {
+        const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+        if (a.oldestKeptDays == null || days > a.oldestKeptDays) { a.oldestKeptDays = days; a.oldestKeptRaw = String(j.posted || '').trim() || null; }
+      } else {
+        a.unparseableKept++;
+      }
+    }
 
     // Drop anything we've already shown the user on a previous run.
     let kept = ageFiltered;
@@ -1705,15 +1792,42 @@ Be creative with suggestedRoleQueries — think about what career directions the
       // `count` (the JOB_RESULT_CAP slice silently dropped in-window jobs).
       if (data.gathered != null) bySource[sid].gathered = data.gathered;
     }
+    // Dice is the only source whose date bound is CONDITIONAL (server-side
+    // `filters.postedDate` only when the window matches a 1/3/7-day bucket, else
+    // client-side) AND whose request URL never reaches a log a bug report can see
+    // (browser sources log theirs; HTTP sources don't). Compute the bound from the
+    // same dicePostedBucket the extractor uses (drift-free) so "did the Dice
+    // server-side filter fire?" is answerable from the report, not inferred.
+    const diceDateBound = ACTIVE_SOURCE_ID_SET.has('dice')
+      ? (dicePostedBucket(ageDays)
+          ? `filters.postedDate=${dicePostedBucket(ageDays)} (server-side; pageSize 400)`
+          : `client-side only (${ageDays}d ∉ Dice's 1/3/7-day buckets; pageSize 1000)`)
+      : null;
+    // Location observability: the raw user input ("denvr"), the corrected param
+    // actually sent ("Denver, CO"), how each active source applied it, and an
+    // adherence tally over the KEPT jobs — so "did the typo get corrected?" and
+    // "was location adhered to per platform?" are answerable from the report.
+    const locationTelemetry = {
+      rawInput: String(rawLocation || '').trim() || null,
+      canonical: location || null,
+      corrected: !!(rawLocation && location && String(rawLocation).trim().toLowerCase() !== location.toLowerCase()),
+      perSource: Object.fromEntries(ACTIVE_SOURCE_IDS.map(id => [id, LOCATION_TREATMENT[id] || 'unknown'])),
+      adherence: summarizeLocationAdherence(kept, location),
+    };
     jobsTelemetry.search = {
       ts: Date.now(),
       queries: queries.length,
+      queryStrings: Array.isArray(queries) ? queries.slice(0, 12) : [], // exact query text sent (FAST keeps ≤2) — shows which variants carried location
       raw: allJobs.length,
       deduped: deduped.length,
+      maxAgeDays: ageDays, // the configured look-back window this run actually used
       ageDropped,
+      ageBySource, // per-source: { dropped, kept, oldestKeptDays, oldestKeptRaw, unparseableKept }
+      diceDateBound,
       historyDropped,
       kept: kept.length,
       bySource,
+      location: locationTelemetry,
     };
     // Search (gather) phase done — mark the manifest so a crash during the
     // RENDERER-driven scoring/bucketing that follows resumes from scoring (the
@@ -1943,7 +2057,15 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const isTestMode = MEDIUM_TEST || FULL_TEST || FAST_TEST;
     if (batchScoring && getAISettings().provider === 'claude' && !isTestMode && canvasFilePath && toScore.length > 0) {
       try {
-        const items = scoringBatches.map((batch, i) => ({
+        // Proactive window preflight — split any over-window group BEFORE the
+        // async submit (the batch path can't split reactively; a too-big request
+        // truncates and only surfaces ~24h later). reconcile maps b{i} → the SAME
+        // fit-guaranteed groups we store in the sidecar, so this stays in lockstep.
+        const fitBatches = await splitBatchesToFitWindow(scoringBatches, { slimBatch, cachedPrefix, signal });
+        if (fitBatches.length !== scoringBatches.length) {
+          logger.info(`[Jobs][${nodeId}] Batch preflight: split ${scoringBatches.length} → ${fitBatches.length} sub-batch(es) to fit the window`);
+        }
+        const items = fitBatches.map((batch, i) => ({
           customId: `b${i}`,
           prompt: `JOBS TO SCORE (array, indexed):\n${JSON.stringify(slimBatch(batch))}`,
           hints: { itemCount: batch.length },
@@ -1955,15 +2077,15 @@ Be creative with suggestedRoleQueries — think about what career directions the
           batchId, model, createdAt: Date.now(), nodeId: nodeId || null, targetRole: role,
           input: gathered.length, selectedForScoring: toScore.length, cappedForBudget,
           // Full job groupings (objects) so completion reconciles + spawns with no re-search.
-          batches: scoringBatches,
+          batches: fitBatches,
         });
-        logger.info(`[Jobs][${nodeId}] Submitted batch scoring ${batchId}: ${scoringBatches.length} batch(es), ${toScore.length} jobs — awaiting async results`);
+        logger.info(`[Jobs][${nodeId}] Submitted batch scoring ${batchId}: ${fitBatches.length} batch(es), ${toScore.length} jobs — awaiting async results`);
         jobsTelemetry.scoring = {
           ts: Date.now(), input: gathered.length, selectedForScoring: toScore.length, cappedForBudget,
-          scored: 0, placeholders: 0, batches: scoringBatches.length, failedBatches: 0,
+          scored: 0, placeholders: 0, batches: fitBatches.length, failedBatches: 0,
           failureReason: null, unscored: toScore.length, directions: 0, models: [model], batchPending: true, batchId,
         };
-        return { batchPending: true, batchId, batchCount: scoringBatches.length, selectedForScoring: toScore.length };
+        return { batchPending: true, batchId, batchCount: fitBatches.length, selectedForScoring: toScore.length };
       } catch (err) {
         // Submission failed — fall through to real-time so the run still completes
         // (don't strand the user on a failed batch submit).
@@ -1979,6 +2101,26 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // With the model's full input window available this split path is a
     // rarely-needed safety net (transient errors), not the norm.
     const scoreBatch = async (batch) => {
+      // PROACTIVE context-window preflight: if this batch's prompt + reserved
+      // output won't fit the serving model's window, split it in HALF and score
+      // the halves independently BEFORE spending a doomed (truncated) call. The
+      // recursion mirrors planSplits (tokenWindow.js) and bottoms out at one job.
+      // The free token count is mostly a local estimate — at the normal ~10-15
+      // jobs/batch this never trips (a batch is a tiny fraction of a 200K-1M
+      // window), so it's pure insurance + future-proofing for larger batches.
+      if (batch.length > 1) {
+        const preflightPrompt = `JOBS TO SCORE (array, indexed):\n${JSON.stringify(slimBatch(batch))}`;
+        let fit = null;
+        try {
+          fit = await checkPromptFits(preflightPrompt, { signal, task: 'job-scoring', hints: { itemCount: batch.length }, responseSchema: JOB_SCORING_SCHEMA, cachedPrefix });
+        } catch { /* best-effort: a preflight hiccup must not block scoring — the reactive split below still catches a real overflow */ }
+        if (fit && !fit.fits) {
+          logger.info(`[Jobs][${nodeId}] Window preflight: batch of ${batch.length} = ~${fit.tokens} tok + ${fit.reservedOutput} out > ${fit.budget} budget on ${fit.model} (${fit.via}) — splitting`);
+          const mid = Math.ceil(batch.length / 2);
+          const [left, right] = [await scoreBatch(batch.slice(0, mid)), await scoreBatch(batch.slice(mid))];
+          return [...left, ...right];
+        }
+      }
       const batchMeta = {};
       let batchResult = null;
       try {
@@ -2514,16 +2656,17 @@ RULES:
   // The user re-authenticates via Settings, then clicks Continue on the source
   // card. Runs only the remaining queries starting from the challenged page so
   // we don't repeat work already captured in pendingJobs.
-  handleSafe('resume-job-source', async (event, { sourceId, nodeId, canvasFilePath, maxAgeDays, resumeState } = {}, signal) => {
+  handleSafe('resume-job-source', async (event, { sourceId, nodeId, canvasFilePath, maxAgeDays, preferredLocation, resumeState } = {}, signal) => {
     if (sourceId !== 'indeed') throw new Error('resume-job-source only supports indeed');
     const { remainingQueries, startPage = 0 } = resumeState || {};
     if (!Array.isArray(remainingQueries) || remainingQueries.length === 0) {
       return { resolved: false, items: [] };
     }
-    logger.info(`[Jobs][${nodeId}] Resuming Indeed: ${remainingQueries.length} remaining queries from page ${startPage + 1}`);
+    const location = String(preferredLocation || '').trim();
+    logger.info(`[Jobs][${nodeId}] Resuming Indeed: ${remainingQueries.length} remaining queries from page ${startPage + 1} (location=${location || 'none'})`);
     // Same shared-profile lock — a "Continue" click could land while a full
     // search is still scraping; serialize this Indeed browser against them.
-    const result = await withSharedProfileLock(() => fetchIndeedListingsBrowser(remainingQueries, signal, maxAgeDays || DEFAULT_MAX_AGE_DAYS, null, null, startPage));
+    const result = await withSharedProfileLock(() => fetchIndeedListingsBrowser(remainingQueries, signal, maxAgeDays || DEFAULT_MAX_AGE_DAYS, null, null, startPage, null, location));
     const extracted = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     const ageFiltered = filterJobsByAge(extracted, ageDays);

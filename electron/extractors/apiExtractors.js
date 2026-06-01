@@ -81,7 +81,8 @@ function stripHtml(html) {
  * Multiple queries are walked sequentially with an inter-query jitter pause
  * and deduplicated by job URL so the same posting isn't returned twice.
  */
-export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = null) {
+export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = null, location = '') {
+  const locParam = String(location || '').trim();
   const queryList = Array.isArray(queries) ? queries : [queries];
   const seenUrls = new Set();
   const allJobs = [];
@@ -116,6 +117,10 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
         start: String(start),
         sortBy: 'R', // explicit relevance (= LinkedIn's default; the value its own UI sends, so anti-bot-neutral)
       });
+      // Target location → LinkedIn guest API's `location` filter. Without it a
+      // location-free query searched nationwide (how Miami corporate roles
+      // surfaced for a Denver search). Empty → omitted (nationwide).
+      if (locParam) params.set('location', locParam);
       // LinkedIn's "Time Posted" filter takes seconds (`r604800` = past week)
       if (maxAgeDays && maxAgeDays > 0) {
         params.set('f_TPR', `r${Math.floor(maxAgeDays * 86400)}`);
@@ -576,8 +581,11 @@ export function jobRelevanceMatch(roleText, query, geoTerms = EMPTY_GEO) {
   //    into the TITLE ("Account Executive - Denver", "Sales Dev Rep (Denver)"),
   //    so a "denver"/"boulder" query token matched every co-located role and
   //    flooded a cinematographer search with ~10 Datadog/Cloudflare SWE+sales
-  //    jobs. Location is a filter, never a role-relevance signal — the dedicated
-  //    scrapers (Indeed/Glassdoor/LinkedIn) already pass it as a search param.
+  //    jobs. Location is a filter, never a role-relevance signal — and the
+  //    location-capable sources (Indeed l=, Glassdoor locKeyword=, ZipRecruiter
+  //    location=, LinkedIn location=, USAJobs LocationName, Dice location) pass
+  //    the target location as a real param, so this geo-strip only guards the
+  //    keyword-less remote feeds (RemoteOK/WeWorkRemotely) that have no such field.
   // Real role tokens (camera, video, design, engineer…) survive all three.
   const norm = t => t.replace(/[^a-z0-9]/g, '');
   const meaningful = terms.filter(t => {
@@ -1348,9 +1356,22 @@ export function extractIndeedJobsFromHtml(html, windowMosaicResults = null) {
  * Fetch job listings from Dice via their public API (Tier 1).
  * @param {string} query — job search query
  * @param {string} [location] — optional location filter
- * @param {number} [maxAgeDays] — keep only postings within this window (client-side)
+ * @param {number} [maxAgeDays] — keep only postings within this window (server-side
+ *   when it matches a Dice bucket, else client-side — see dicePostedBucket)
  * @returns {Promise<Array>} — standardized job objects
  */
+// Dice exposes a SERVER-SIDE date filter (`filters.postedDate`) but only in coarse
+// 1/3/7-day buckets. Verified against the live API: the accepted enum is the
+// uppercase words ONE/THREE/SEVEN (SEVEN bounds to ≤6d, i.e. a 7-day window);
+// SEVEN_DAYS / numeric / un-prefixed values are SILENTLY IGNORED (return the
+// unfiltered feed, not a 400 — so a miss degrades to client-side filtering, never
+// a lost source). Returns the bucket string when the configured window EXACTLY
+// equals one of Dice's buckets, else null (no server-side filter possible — e.g.
+// the 21-day default). Exported for unit testing.
+export function dicePostedBucket(maxAgeDays) {
+  const n = Number.isFinite(maxAgeDays) ? Math.floor(maxAgeDays) : null;
+  return { 1: 'ONE', 3: 'THREE', 7: 'SEVEN' }[n] || null;
+}
 const DICE_MAX_RETRIES = 3;
 const DICE_RETRY_DELAYS_MS = [1000, 2000, 4000];
 
@@ -1362,25 +1383,34 @@ const DICE_RETRY_DELAYS_MS = [1000, 2000, 4000];
 let _diceKeyIsStable = false;
 
 export async function fetchDiceListings(query, location = '', signal = null, maxAgeDays = null) {
+  // When the window matches a Dice date bucket, filter SERVER-SIDE and pull a
+  // smaller page; otherwise keep the wide over-pull and filter client-side.
+  const bucket = dicePostedBucket(maxAgeDays);
   const params = new URLSearchParams({
     q: query,
     countryCode2: 'US',
     radius: '30',
     radiusUnit: 'mi',
     page: '1',
-    // Pull a WIDE relevance-ranked page, then keep only in-window jobs and take
-    // the top JOB_RESULT_CAP of those (below) — so the cap holds the most-relevant
-    // RECENT matches, not a relevance mix that's mostly age-dropped downstream.
-    // We over-pull on purpose: relevance sort interleaves stale postings, and a
-    // tight window has a small in-window fraction (probed: ~3-4% at 1 day, ~32% at
-    // 7 days), so volume is what guarantees a full cap of in-window matches. Dice
-    // has no date sort that helps and `filters.postedDate` only spans 1/3/7 days —
-    // narrower than the 21-day default — so the window is enforced client-side.
-    // pageSize is honored well past this (probed to 1000+); still one call, no paging.
+    // Why the page size differs:
+    //  • No bucket → relevance sort interleaves stale postings and the in-window
+    //    fraction is small (probed: ~3-4% at 1 day, ~32% at 7 days), so we over-pull
+    //    a WIDE relevance-ranked page and keep only the in-window slice below —
+    //    volume is what guarantees a full cap of in-window matches.
+    //  • Bucket active → `filters.postedDate` (added below) makes the response
+    //    ~100% in-window, so the relevance ranking is already over in-window jobs.
+    //    400 all-in-window rows meet/exceed what the old 1000-row mixed page yielded
+    //    in-window (1000×0.32≈320 at the widest 7-day bucket) at ~2.5x less data —
+    //    no coverage regression in any mode (FAST caps to 10 downstream regardless;
+    //    FULL keeps everything, and 400 ≥ 320). pageSize is honored past this.
     sortBy: 'relevance', // explicit (= Dice's default) so an API default change can't silently flip us off relevance
-    pageSize: '1000',
+    pageSize: bucket ? '400' : '1000',
     ...(location ? { location } : {}),
   });
+  // Coarse server-side date bound — only when the window exactly matches a bucket.
+  // The client-side filterJobsByAge below still runs (a no-op when the bucket already
+  // bounds, but it enforces the exact cutoff and stays correct for the non-bucket path).
+  if (bucket) params.append('filters.postedDate', bucket);
 
   const url = `https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search?${params}`;
   let r;
@@ -1459,7 +1489,9 @@ export async function fetchDiceListings(query, location = '', signal = null, max
   const data = r.json;
   const jobs = data?.data || [];
 
-  logger.info(`[Dice API] Found ${jobs.length} jobs for "${query}"`);
+  // Log the applied date bound so a bug report can confirm the server-side filter
+  // actually fired (HTTP-source request URLs aren't otherwise surfaced anywhere).
+  logger.info(`[Dice API] Found ${jobs.length} jobs for "${query}" (${bucket ? `filters.postedDate=${bucket}, pageSize=400` : 'no date bucket → pageSize=1000 + client-side filter'})`);
 
   // Dice's `salary` field is free text — often non-monetary prose like "Depends
   // on Experience", "Competitive", or "Compensation information provided in the
@@ -1529,17 +1561,49 @@ export async function warmDiceApiKey() {
 }
 
 /**
- * Second-pass enrichment: fetch full job descriptions from the Dice detail
- * endpoint for each job in the already-deduped list.
+ * Extract JobPosting.description from a page's JSON-LD (handles @graph wrappers
+ * and array `@type`). Node-side analogue of the browser scrapers' JSON-LD
+ * harvest. Returns '' when no JobPosting description is present, and never throws
+ * on malformed JSON-LD. Exported for unit testing.
+ * @param {string} html — raw page HTML
+ * @returns {string} — the description HTML (caller strips tags), or ''
+ */
+export function extractJobPostingDescription(html) {
+  const re = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(html || ''))) {
+    let data;
+    try { data = JSON.parse(m[1].trim()); } catch { continue; }
+    const stack = [data];
+    while (stack.length) {
+      const node = stack.shift();
+      if (!node || typeof node !== 'object') continue;
+      if (Array.isArray(node)) { stack.push(...node); continue; }
+      const type = node['@type'];
+      const isJob = type === 'JobPosting' || (Array.isArray(type) && type.includes('JobPosting'));
+      if (isJob && typeof node.description === 'string' && node.description.trim()) return node.description;
+      if (Array.isArray(node['@graph'])) stack.push(...node['@graph']);
+    }
+  }
+  return '';
+}
+
+/**
+ * Second-pass enrichment: fetch full job descriptions for each job in the
+ * already-deduped Dice list.
  *
- * The list search API only returns a short `summary`; the detail endpoint
- * returns the full HTML description. Runs after all queries are merged and
- * deduped so we only fetch for unique jobs, not per-query duplicates.
+ * The list search API only returns a ~500-char `summary`. Dice's per-job detail
+ * API route (/v1/dice/jobs/{id}) does NOT exist — it 404s with API-Gateway's
+ * "Missing Authentication Token" — so we fetch the public job-detail PAGE
+ * (www.dice.com/job-detail/{guid}, plain HTTP 200) and harvest the full JD from
+ * its JSON-LD JobPosting.description, the same structured field the browser
+ * scrapers read. Runs after all queries are merged and deduped so we only fetch
+ * for unique jobs, not per-query duplicates.
  *
- * Batched at 10 concurrent requests to avoid hammering the API.
- * Fails gracefully per job — keeps summary as fallback if detail fetch fails.
+ * Batched at 10 concurrent requests. Fails gracefully per job — keeps the list
+ * summary as fallback if the detail fetch or JSON-LD harvest fails.
  *
- * @param {Array}       jobs   — deduped job objects (each must have `_diceId`)
+ * @param {Array}       jobs   — deduped job objects (each has `url` / `_diceId`)
  * @param {AbortSignal} signal — propagated abort signal
  * @returns {Promise<Array>}   — same jobs with `description` + `snippet` enriched
  */
@@ -1564,39 +1628,38 @@ export async function enrichDiceDescriptions(jobs, signal) {
     if (signal?.aborted) break;
     const batch = jobs.slice(i, i + BATCH);
     const results = await Promise.all(batch.map(async (job) => {
-      const id = job._diceId;
       const summaryLen = (job.snippet || '').length;
-      if (!id) { note('no-id', job.url); return job; }
+      // Fetch the public job-detail PAGE and harvest JSON-LD JobPosting.description
+      // (the API has no per-job detail route — see function doc). `job.url` is the
+      // detailsPageUrl; fall back to constructing it from the guid.
+      const url = job.url || (job._diceId ? `https://www.dice.com/job-detail/${job._diceId}` : '');
+      if (!url) { note('no-url', job.url); return job; }
       try {
-        const url = `https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/${id}`;
         const r = await safeApiFetch(url, {
           headers: {
             'User-Agent': getRandomUA(),
-            'x-api-key': getDiceApiKey(),
-            'Accept': 'application/json',
+            'Accept': 'text/html,application/xhtml+xml',
           },
           signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
-        }, 'dice');
-        if (!r.ok) { note(`http-${r.status}`, job.url); return job; }
-        // Detail endpoint returns either a single object or { data: {...} }
-        const detail = r.json?.data ?? r.json;
-        const descHtml = detail?.description || '';
-        if (!descHtml) { note('no-desc-field', job.url); return job; }
+        }, 'dice-detail');
+        if (!r.ok) { note(`http-${r.status}`, url); return job; }
+        const descHtml = extractJobPostingDescription(r.text || '');
+        if (!descHtml) { note('no-jsonld-desc', url); return job; }
         const descText = descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-        if (!descText) { note('empty-after-strip', job.url); return job; }
+        if (!descText) { note('empty-after-strip', url); return job; }
         const rest = { ...job };
         delete rest._diceId;
-        // Keep whichever is longer — guards against the detail endpoint returning
-        // a shorter/truncated field than the summary we already had.
+        // Keep whichever is longer — guards against a stub JSON-LD shorter than
+        // the list summary we already had.
         if (descText.length > summaryLen) {
           lengthened += 1;
           return { ...rest, description: descText, snippet: descText };
         }
-        note('not-longer-than-summary', job.url);
+        note('not-longer-than-summary', url);
         const best = (rest.snippet && rest.snippet.length >= descText.length) ? rest.snippet : descText;
         return { ...rest, description: best, snippet: best };
       } catch {
-        note('fetch-error', job.url);
+        note('fetch-error', url);
         return job; // keep summary on error
       }
     }));

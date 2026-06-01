@@ -55,10 +55,12 @@ function loadAddOcgBackground() {
   return _addOcgBackground;
 }
 
-// The two design-system stylesheets + the fonts directory. Copied into each
-// render's temp working dir so the HTML's relative `<link>` / `url("fonts/…")`
-// references resolve without polluting the (tracked) source directory.
-const CSS_FILES = ['colors_and_type.css', 'resume.css'];
+// The design-system stylesheets + the fonts directory. Copied into each render's
+// temp working dir so the HTML's relative `<link>` / `url("fonts/…")` references
+// resolve without polluting the (tracked) source directory. cover-letter.css is
+// the letter-specific surface (serif body, date/recipient, signature close) the
+// cover-letter document links on top of colors_and_type.css + resume.css.
+const CSS_FILES = ['colors_and_type.css', 'resume.css', 'cover-letter.css'];
 const FONTS_DIR = 'fonts';
 
 /**

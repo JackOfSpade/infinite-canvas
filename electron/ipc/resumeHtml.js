@@ -19,6 +19,22 @@ export function escapeHtml(s) {
 }
 
 /**
+ * Decode ESCAPE SEQUENCES the model sometimes emits as literal two-character text
+ * — a backslash followed by n / r / t — instead of the whitespace they denote.
+ * It's nudged toward this by prompts that mention "a literal \n" (the recipient
+ * block), and a JSON round-trip can also leave a double-escaped "\\n" → literal
+ * "\n". Since escapeHtml never touches backslashes, those surface VERBATIM in the
+ * rendered PDF as "\n" / "\t". Decode the whitespace escapes to the real chars so
+ * HTML collapses/breaks them correctly. Matches ONLY the literal 2-char sequences,
+ * so it's a no-op on already-correct content (real newlines/tabs are untouched).
+ */
+export function decodeTextEscapes(s) {
+  return String(s ?? '')
+    .replace(/\\r\\n|\\n|\\r/g, '\n')
+    .replace(/\\t/g, '\t');
+}
+
+/**
  * Resolve the canonical variant attributes from the résumé model's output (it
  * sets them on its `<main class="page" …>`), so BOTH documents share one print
  * variant / paper / mono treatment.
@@ -61,6 +77,9 @@ export function buildResumeDocument(resumeMainHtml, variantAttrs) {
   if (fence) main = fence[1].trim();
   const mainMatch = /<main[\s\S]*<\/main>/i.exec(main);
   if (mainMatch) main = mainMatch[0];
+  // Decode any literal "\n"/"\t" the model left in the markup so they collapse as
+  // HTML whitespace instead of printing verbatim (real newlines are untouched).
+  main = decodeTextEscapes(main);
   const attrs = variantAttrs != null ? variantAttrs : extractVariantAttrs(resumeMainHtml);
   return `<!doctype html>
 <html lang="en" ${attrs}>
@@ -77,28 +96,54 @@ ${main}
 }
 
 /**
- * Build the cover-letter document deterministically from structured fields, so
- * the layout is always on-brand (unlike the résumé, whose rich structure the
- * model fills directly). Reuses the design tokens + `.resume-header` for the
- * letterhead, plus a small inline letter-body stylesheet. `variantAttrs` mirrors
- * the résumé's print variant.
+ * Build the cover-letter document from structured fields using the design
+ * system's NATIVE cover-letter surface (`cover-letter.html` / `cover-letter.css`):
+ * the same `.resume-header` letterhead as the résumé, a hairline rule, the
+ * date+recipient `.letter-meta` block, the Source-Serif `.letter-body`, and the
+ * `.letter-close` signature block. We own only field substitution — the
+ * typography, spacing, and the serif-body voice come straight from the design
+ * system's stylesheets (no guessed inline CSS). `variantAttrs` mirrors the
+ * résumé's print variant so the pair renders as one set.
+ *
+ * @param {object} letter
+ *   { name, tagline, contact[], date, recipient (\n-separated lines),
+ *     salutation, paragraphs[], closing, signatureTitle }
  */
 export function buildCoverLetterDocument(letter = {}, variantAttrs = '') {
-  const name     = escapeHtml(letter.name || '');
-  const tagline  = escapeHtml(letter.tagline || '');
+  // Every field is decodeTextEscapes()'d before escaping so a literal "\n"/"\t"
+  // the model emitted renders as real whitespace, not verbatim text.
+  const name     = escapeHtml(decodeTextEscapes(letter.name || ''));
+  const tagline  = escapeHtml(decodeTextEscapes(letter.tagline || ''));
   const contacts = Array.isArray(letter.contact) ? letter.contact : [];
   const contactHtml = contacts
     .filter(Boolean)
-    .map(escapeHtml)
-    .join('<span class="sep" aria-hidden="true">·</span>\n    ');
-  const date        = escapeHtml(letter.date || '');
-  const recipient   = escapeHtml(letter.recipient || '');
-  const salutation  = escapeHtml(letter.salutation || 'Dear Hiring Team,');
-  const paragraphs  = (Array.isArray(letter.paragraphs) ? letter.paragraphs : [])
+    .map(c => escapeHtml(decodeTextEscapes(c)))
+    .join('\n      <span class="sep" aria-hidden="true">·</span>\n      ');
+
+  const date       = escapeHtml(decodeTextEscapes(letter.date || ''));
+  // The design system renders the recipient as a block: the first line is the
+  // addressee (.recipient-name, set bolder), the rest are .recipient-line rows.
+  // The schema delivers the block as a single \n-separated string — decode first
+  // so a literal "\n" (real OR double-escaped) splits into rows correctly.
+  const recipientLines = decodeTextEscapes(letter.recipient || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const recipientHtml = recipientLines
+    .map((line, i) => i === 0
+      ? `<span class="recipient-name">${escapeHtml(line)}</span>`
+      : `<span class="recipient-line">${escapeHtml(line)}</span>`)
+    .join('\n      ');
+
+  const salutation = escapeHtml(decodeTextEscapes(letter.salutation || 'Dear Hiring Team,'));
+  const paragraphs = (Array.isArray(letter.paragraphs) ? letter.paragraphs : [])
     .filter(p => String(p || '').trim())
-    .map(p => `      <p>${escapeHtml(p)}</p>`)
+    // Decode escapes, then escape HTML. A newline WITHIN a paragraph is left as-is
+    // so HTML collapses it to a space — cover-letter paragraphs are flowing prose
+    // with no intended hard breaks (paragraph breaks come from the array). Do NOT
+    // convert to <br>: the model sometimes drops a stray newline mid-sentence
+    // (e.g. around a job title's en-dash), and a <br> there is a visible bad break.
+    .map(p => `    <p>${escapeHtml(decodeTextEscapes(p))}</p>`)
     .join('\n');
-  const closing     = escapeHtml(letter.closing || 'Sincerely,');
+  const closing        = escapeHtml(decodeTextEscapes(letter.closing || 'Sincerely,'));
+  const signatureTitle = escapeHtml(decodeTextEscapes(letter.signatureTitle || ''));
 
   return `<!doctype html>
 <html lang="en" ${variantAttrs}>
@@ -107,30 +152,36 @@ export function buildCoverLetterDocument(letter = {}, variantAttrs = '') {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="colors_and_type.css">
 <link rel="stylesheet" href="resume.css">
-<style>
-  .letter { font-size: var(--fs-body); color: var(--ink-body); line-height: var(--lh-body); margin-top: var(--s-9); }
-  .letter-date      { color: var(--ink-meta); font-size: var(--fs-small); margin: 0 0 var(--s-6); }
-  .letter-recipient { color: var(--ink-meta); font-size: var(--fs-small); white-space: pre-line; margin: 0 0 var(--s-6); }
-  .letter-salutation { margin: 0 0 var(--s-4); }
-  .letter p { margin: 0 0 var(--s-4); }
-  .letter-close { margin: var(--s-6) 0 var(--s-1); }
-  .letter-sign  { font-weight: var(--fw-semibold); color: var(--ink-body); }
-</style>
+<link rel="stylesheet" href="cover-letter.css">
 </head>
 <body>
-<main class="page" role="document">
-  <header class="resume-header">
-    <h1 class="name">${name}</h1>
-    ${tagline ? `<p class="tagline">${tagline}</p>` : ''}
-    ${contactHtml ? `<p class="contact" role="group" aria-label="Contact">${contactHtml}</p>` : ''}
+<main class="page" role="document" itemscope itemtype="https://schema.org/Person">
+  <header class="resume-header letter-letterhead">
+    <h1 class="name" itemprop="name">${name}</h1>
+    ${tagline ? `<p class="tagline" itemprop="jobTitle">${tagline}</p>` : ''}
+    ${contactHtml ? `<p class="contact" role="group" aria-label="Contact">
+      ${contactHtml}
+    </p>` : ''}
   </header>
-  <div class="letter">
-    ${date ? `<p class="letter-date">${date}</p>` : ''}
-    ${recipient ? `<p class="letter-recipient">${recipient}</p>` : ''}
-    <p class="letter-salutation">${salutation}</p>
+
+  <hr class="letterhead-rule" aria-hidden="true">
+
+  <div class="letter-meta">
+    ${date ? `<p class="letter-date"><time>${date}</time></p>` : ''}
+    ${recipientHtml ? `<address class="letter-recipient">
+      ${recipientHtml}
+    </address>` : ''}
+  </div>
+
+  <div class="letter-body">
+    <p class="salutation">${salutation}</p>
 ${paragraphs}
-    <p class="letter-close">${closing}</p>
-    <p class="letter-sign">${name}</p>
+  </div>
+
+  <div class="letter-close">
+    <p class="valediction">${closing}</p>
+    <p class="signature" itemprop="name">${name}</p>
+    ${signatureTitle ? `<p class="signature-title">${signatureTitle}</p>` : ''}
   </div>
 </main>
 </body>

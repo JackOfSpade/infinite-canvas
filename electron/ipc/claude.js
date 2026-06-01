@@ -254,6 +254,15 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
     throw new Error(`AI response was truncated — hit the ${maxTokens}-token output cap (model wrote ${usage?.output_tokens ?? 'unknown'} tokens before being cut off). Try with fewer/smaller inputs, or raise the cap for this task in llm.js TASK_MAX_TOKENS.`);
   }
 
+  // Backstop for the preflight (checkPromptFits): on Claude 4.5+ an oversized
+  // request isn't rejected — generation runs until it hits the window and stops
+  // with `model_context_window_exceeded`, yielding truncated/empty content. The
+  // token-count preflight should prevent this, but if a count under-estimated,
+  // fail loudly with an actionable message instead of returning a partial answer.
+  if (stopReason === 'model_context_window_exceeded') {
+    throw new Error(`AI response stopped — the prompt plus its reserved output exceeded ${model}'s context window (input ${usage?.input_tokens ?? '?'} tok + up to ${maxTokens} output). Send fewer/smaller inputs for task '${task || 'unknown'}'.`);
+  }
+
   // Web-search (grounding) response: the answer is spread across one or more
   // `text` blocks, interleaved with server_tool_use / web_search_tool_result
   // blocks. Concatenate the text blocks into the final prose; ignore the
@@ -302,6 +311,27 @@ export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens 
   return createMessage(anthropic, prompt, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, cachedPrefix, task, grounding });
 }
 
+/**
+ * Count the input tokens a text message would consume, via Anthropic's FREE
+ * `messages.count_tokens` endpoint (separate rate limits, no billing). The
+ * message shape mirrors createMessage exactly — cached-prefix block + prompt,
+ * plus the tool definition when a responseSchema is in play — so the count
+ * matches what the real call would send. Returns the integer `input_tokens`.
+ * Used by the preflight (checkPromptFits) to size/split prompts before sending.
+ */
+export async function countClaudeInputTokens(prompt, model, apiKey, { cachedPrefix = null, responseSchema = null, signal = null } = {}) {
+  const anthropic = getAnthropicClient(apiKey);
+  const content = cachedPrefix
+    ? [{ type: 'text', text: cachedPrefix }, { type: 'text', text: prompt }]
+    : prompt;
+  const params = { model, messages: [{ role: 'user', content }] };
+  if (responseSchema) {
+    params.tools = [{ name: 'submit_response', description: 'Submit the structured response.', input_schema: responseSchema }];
+  }
+  const res = await anthropic.messages.countTokens(params, { signal });
+  return res?.input_tokens ?? 0;
+}
+
 export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, expectJson = false, responseSchema = null, task = null } = {}) {
   const anthropic = getAnthropicClient(apiKey);
   const tempFiles = [];
@@ -312,11 +342,14 @@ export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal
   try {
     const contentParts = await Promise.all(imagePaths.map(async (imgPath) => {
       let finalPath = imgPath;
-      const extRaw = path.extname(imgPath).toLowerCase();
 
-      if (extRaw === '.heic' || extRaw === '.heif') {
-        const { convertHeicIfNecessary } = await import('./heicUtils.js');
-        finalPath = await convertHeicIfNecessary(imgPath);
+      // Normalize any non-vision-safe format (HEIC/HEIF/TIFF/JXL/AVIF/BMP/SVG/…)
+      // to JPEG — Claude accepts only jpeg/png/gif/webp, so a dropped TIFF or
+      // iPhone HEIC would otherwise be rejected. No-op for already-safe formats.
+      const { ensureVisionSafeImage, downscaleImageIfNeeded } = await import('./heicUtils.js');
+      const safe = await ensureVisionSafeImage(imgPath);
+      if (safe !== imgPath) {
+        finalPath = safe;
         tempFiles.push(finalPath);
       }
 
@@ -326,7 +359,6 @@ export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal
       // in one tile, ~260 tokens) — 6x cheaper per image with no impact on
       // brand/model/condition identification at this scale. Gemini sidesteps
       // this; its vision input is flat-rate per image.
-      const { downscaleImageIfNeeded } = await import('./heicUtils.js');
       const scaled = await downscaleImageIfNeeded(finalPath, { maxLongSide: 768 });
       if (scaled !== finalPath) {
         tempFiles.push(scaled);

@@ -1,0 +1,136 @@
+@charset "utf-8";
+/* ============================================================
+   cover-letter.css — the letter surface
+   ----------------------------------------------------------
+   Pairs with `colors_and_type.css` (tokens) and `resume.css`
+   (shared page chrome + paged-media model + the letterhead
+   component + .meta-row + .sep). Load all three, in that order.
+
+   DESIGN NOTE — the system's one serif-body surface.
+   The résumé sets body copy in Inter because it is a scannable
+   data grid: the reader skims for numbers and scope. A cover
+   letter is the only long-form prose surface in the system, so
+   its body is set in Source Serif 4 — the "book interior" move
+   from the same Stripe-Press / Pentagram lineage the résumé
+   draws on. Same three-family palette, same ink, same paper;
+   a different document voice. This is the single sanctioned use
+   of the display serif at reading size — do not carry it back
+   into the résumé, where Inter's even colour is load-bearing
+   for the scan.
+
+   The letterhead (name / tagline / contact) is the SAME
+   component as the résumé header, so the two documents read as
+   one set. The oxblood accent appears exactly ONCE — the
+   letterhead name — same as the résumé. The signature is ink:
+   repeating the accent at the foot would tip it from a quiet
+   identity mark toward a brand colour.
+   ============================================================ */
+
+/* -------- letterhead --------
+   Reuses .resume-header / .name / .tagline / .contact from
+   resume.css verbatim. We only tighten the trailing gap (a
+   hairline rule follows it here, where the résumé runs straight
+   into its first section). */
+.letter-letterhead { margin-bottom: var(--s-6); }
+
+.letterhead-rule {
+  border: 0;
+  height: var(--rule-weight);
+  background: var(--bg-rule);
+  margin: 0 0 var(--vr-1);
+}
+
+/* -------- date + recipient --------
+   The date is right-aligned in --ink-meta — a deliberate rhyme
+   with the résumé's right-aligned date column. The recipient
+   block sits left, the organisation name carrying the only
+   --ink-body weight in this region. */
+.letter-meta { margin-bottom: var(--vr-1); }
+
+.letter-date {
+  font-family: var(--ff-body);
+  font-size: var(--fs-small);
+  color: var(--ink-meta);
+  text-align: right;
+  white-space: nowrap;
+  /* proportional figures (font default) — NOT tabular-nums: tabular
+     figures extract as Private-Use junk from the PDF (see STYLE.md
+     §2.4). A single date has no column to align anyway. */
+  letter-spacing: var(--tr-tight);
+  margin: 0 0 var(--vr-half);
+}
+
+.letter-recipient {
+  font-style: normal;            /* it's an <address>; kill the italic */
+  font-size: var(--fs-small);
+  line-height: var(--lh-snug);
+  color: var(--ink-meta);
+}
+.letter-recipient .recipient-name {
+  display: block;
+  font-family: var(--ff-body);
+  font-size: var(--fs-body);
+  font-weight: var(--fw-semibold);
+  color: var(--ink-body);
+  letter-spacing: var(--tr-tight);
+  margin-bottom: var(--s-1);
+}
+.letter-recipient .recipient-line { display: block; }
+
+/* -------- body --------
+   Source Serif 4, reading size, generous editorial leading.
+   This is the one place body prose runs long, so the measure
+   (set by the shared --margin-side on .page) lands at ~70ch and
+   the leading opens to 1.6. */
+.letter-body {
+  font-family: var(--ff-display);
+  font-weight: var(--fw-regular);
+  font-size: 10.5pt;
+  line-height: 1.6;
+  color: var(--ink-body);
+  letter-spacing: 0;
+  text-wrap: pretty;
+}
+.letter-body p { margin: 0 0 var(--vr-1); }
+.letter-body p:last-child { margin-bottom: 0; }
+.letter-body .salutation { margin-bottom: var(--vr-1); }
+/* strong stays SemiBold (600) — the system loads no 700. Used
+   sparingly here: only the one or two headline figures. */
+.letter-body strong { font-weight: var(--fw-semibold); color: var(--ink-body); }
+
+/* -------- close --------
+   break-inside: avoid keeps the valediction and signature
+   together — the structural cure for the "Sincerely, on one
+   page / name on the next" orphan. The signature is set in the
+   display serif one size down from the letterhead name, but in
+   INK, not oxblood: the accent stays a single appearance (the
+   letterhead name), which is what keeps it reading as a quiet
+   identity mark rather than a brand colour. Type carries the
+   signature's distinction, not colour. */
+.letter-close {
+  margin-top: var(--vr-1-5);
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+.valediction {
+  font-family: var(--ff-display);
+  font-size: 10.5pt;
+  line-height: 1.6;
+  color: var(--ink-body);
+  margin: 0 0 var(--s-6);        /* room where a wet signature would sit */
+}
+.signature {
+  font-family: var(--ff-display);
+  font-weight: var(--fw-semibold);
+  font-size: 15pt;
+  line-height: 1.1;
+  letter-spacing: var(--tr-display);
+  color: var(--ink-body);        /* ink — the accent stays a single appearance (letterhead name) */
+  margin: 0 0 var(--s-1);
+}
+.signature-title {
+  font-family: var(--ff-body);
+  font-size: var(--fs-small);
+  color: var(--ink-meta);
+  letter-spacing: var(--tr-tight);
+}
