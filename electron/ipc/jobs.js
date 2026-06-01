@@ -8,8 +8,8 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { callLLMDocument, callLLMText, submitLLMTextBatch, getLLMTextBatchStatus, getLLMTextBatchResults, cancelLLMTextBatch } from './llm.js';
-import { reconcileBatchScores } from './jobBatchReconcile.js';
-import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, CAREER_FILE_EXTRACT_SCHEMA, JOB_QUERY_GENERATION_SCHEMA, INTERVIEW_PREP_SCHEMA } from './aiSchemas.js';
+import { reconcileBatchScores, buildScoredJob } from './jobBatchReconcile.js';
+import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, CAREER_FILE_EXTRACT_SCHEMA, JOB_QUERY_GENERATION_SCHEMA } from './aiSchemas.js';
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { clearBrowserSession } from './stealthBrowser.js';
@@ -449,13 +449,15 @@ async function runCooldownProbe(nodeId, waitsMs, initialPool, signal, progressFn
   jobsTelemetry.linkedinCooldown = { running: true, attempts: 0, foundMs: null, waitsMs, ts: Date.now() };
   let pool = initialPool;
   let foundMs = null;
-  let attempt = 0;
+  let attempt = 0;     // total probe CALLS (initial + confirmations) — telemetry/return
+  let waitIndex = 0;   // which configured wait we're on — the X in the "X/N" label
   let probeTotalEnriched = 0;
   try {
     for (const waitMs of waitsMs) {
       attempt++;
+      waitIndex++;
       const mins = Math.round(waitMs / 60000);
-      progressFn({ nodeId, sourceId: 'linkedin', status: 'searching', count: pool.length, detail: `cooldown probe ${attempt}/${waitsMs.length}: idling ${mins}m`, warning: null });
+      progressFn({ nodeId, sourceId: 'linkedin', status: 'searching', count: pool.length, detail: `cooldown probe ${waitIndex}/${waitsMs.length}: idling ${mins}m`, warning: null });
       await abortableDelay(waitMs, signal);
       const stillEmptyJobs = pool.filter(j => !j.snippet || j.snippet.length < 100);
       if (stillEmptyJobs.length === 0) { foundMs = waitMs; break; }
@@ -804,7 +806,13 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
   return { items, warning };
 }
 
-async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], preferredLocation = '', onlySources = null) {
+async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], preferredLocation = '', onlySources = null, emit = null) {
+  // Route progress through the caller's recorder (emitProgress) so the five
+  // pure-HTTP sources appear in jobsTelemetry.sourceEvents — without this they
+  // bypassed the trail and were invisible in bug reports (exactly the sources
+  // most prone to silent blocks: Dice 500s, LinkedIn walls). Falls back to a raw
+  // send if no recorder is passed.
+  const send = emit || ((payload) => { if (sender && !sender.isDestroyed()) sender.send('job-source-progress', payload); });
   // Source credentials come from Settings (electron-store) with a legacy
   // process.env fallback handled inside getJobsSettings() for users still
   // on the old .env config.
@@ -847,9 +855,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
 
   // Notify frontend that API sources are starting
   for (const { sourceId } of apiTasks) {
-    if (!sender.isDestroyed()) {
-      sender.send('job-source-progress', { nodeId, sourceId, status: 'searching', count: 0, completed: 0, total: queryTotal });
-    }
+    send({ nodeId, sourceId, status: 'searching', count: 0, completed: 0, total: queryTotal });
   }
 
   return Promise.all(apiTasks.map(async ({ sourceId, fn }) => {
@@ -874,22 +880,18 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // Emit live completion so the source card updates as soon as this source
       // finishes — without this, all API cards stay "Searching..." until the
       // browser scraper finishes too (the final per-source loop runs post-Promise.all).
-      if (sender && !sender.isDestroyed()) {
-        sender.send('job-source-progress', {
-          nodeId,
-          sourceId,
-          status: warning?.severity === 'block' ? 'error' : 'done',
-          count: jobs.length,
-          warning: warning || null,
-          completed: queryTotal,
-          total: queryTotal,
-        });
-      }
+      send({
+        nodeId,
+        sourceId,
+        status: warning?.severity === 'block' ? 'error' : 'done',
+        count: jobs.length,
+        warning: warning || null,
+        completed: queryTotal,
+        total: queryTotal,
+      });
       return { sourceId, jobs, warning, gathered };
     } catch (error) {
-      if (sender && !sender.isDestroyed()) {
-        sender.send('job-source-progress', { nodeId, sourceId, status: 'error', count: 0, completed: queryTotal, total: queryTotal });
-      }
+      send({ nodeId, sourceId, status: 'error', count: 0, completed: queryTotal, total: queryTotal });
       return { sourceId, jobs: [], error: error?.message || String(error) };
     }
   }));
@@ -1055,7 +1057,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
         targetRole: snapshot.targetRole,
         gatheredJobCount: snapshot.gatheredJobCount,
         selectedJobCount: snapshot.selectedJobCount,
-        promptPath: paths.mdPath,
+        promptPath: paths.promptPath,
         jsonPath: paths.jsonPath,
       },
     };
@@ -1282,7 +1284,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
 
     const [browserOut, httpResults] = await Promise.all([
       withSharedProfileLock(runBrowserSourcesInOrder),
-      fetchHttpSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, preferredLocation, resumeScope),
+      fetchHttpSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, preferredLocation, resumeScope, emitProgress),
     ]);
     const results = browserOut.manualResults;
     // Indeed (browser) is appended to the API-shaped results so all downstream
@@ -2018,14 +2020,10 @@ Be creative with suggestedRoleQueries — think about what career directions the
       if (allNull) failedBatches++; // batch produced zero usable scores even after splitting
       batch.forEach((job, idx) => {
         const score = results[idx];
-        if (score) {
-          scoredJobs.push({ ...job, ...score, isTargetRoleMatch: !!score.isTargetRoleMatch });
-        } else {
-          placeholderCount++;
-          // Whole batch unusable → 'AI format error'; a lone job missing from an
-          // otherwise-good batch → 'Unable to score'. Both are flagged placeholders.
-          scoredJobs.push({ ...job, matchScore: UNSCORED_FALLBACK_SCORE, reasoning: allNull ? 'AI format error' : 'Unable to score', careerDirection: 'Other', isTargetRoleMatch: false });
-        }
+        if (!score) placeholderCount++;
+        // Shared with the Batch-API path so the matched/placeholder shape and the
+        // two fallback strings stay in lockstep (see jobBatchReconcile.js).
+        scoredJobs.push(buildScoredJob(job, score, { fallbackScore: UNSCORED_FALLBACK_SCORE, allNull }));
       });
     }
 
@@ -2113,64 +2111,6 @@ Be creative with suggestedRoleQueries — think about what career directions the
     if (sidecar?.batchId) await cancelLLMTextBatch(sidecar.batchId).catch(() => {});
     await deleteJobBatchSidecar(canvasFilePath);
     return { ok: true };
-  });
-
-  // ── Generate Cover Letter ─────────────────────────────────────────────────
-  handleSafe('generate-cover-letter', async (event, { profile, job }, signal) => {
-    const result = await callLLMText(`
-Write a compelling cover letter for this candidate applying to this job.
-
-CANDIDATE:
-${JSON.stringify(profile, null, 2)}
-
-JOB:
-Title: ${job.title}
-Company: ${job.company}
-Description: ${job.snippet || 'Not available'}
-
-Return a JSON object:
-{
-  "coverLetter": "The full cover letter text, properly formatted with paragraphs. Professional but authentic tone. Highlight specific skills that match the job. Keep it concise — 3-4 paragraphs max."
-}
-
-Don't be generic. Reference specific skills from the resume that match specific requirements from the job.`, { signal, task: 'cover-letter-generation' });
-
-    return { coverLetter: result.coverLetter };
-  });
-
-  // ── Generate Interview Prep ───────────────────────────────────────────────
-  handleSafe('generate-interview-prep', async (event, { profile, job }, signal) => {
-    logger.info(`[Jobs] Generating interview prep for ${job.title} at ${job.company}`);
-    const result = await callLLMText(`
-You are an expert career coach preparing a candidate for a job interview.
-
-CANDIDATE PROFILE:
-${JSON.stringify(profile, null, 2)}
-
-JOB:
-Title: ${job.title}
-Company: ${job.company}
-Description: ${job.snippet || 'Not available'}
-
-Generate a focused interview prep guide. Return a JSON object:
-{
-  "questions": [
-    {
-      "type": "behavioral" | "technical" | "company",
-      "question": "The interview question they are likely to be asked",
-      "tip": "1-2 sentence coaching tip: what to emphasize from their specific background, which skills to highlight, or what angle to take. Be specific to THIS candidate's profile."
-    }
-  ]
-}
-
-Rules:
-- 3 behavioral questions (STAR-format questions about past experience)
-- 3 technical/skills questions specific to the role's requirements
-- 2 company-specific questions (about the company's mission, product, or growth stage)
-- Tips must reference the candidate's ACTUAL skills and experience, not generic advice
-- Total: exactly 8 questions`, { signal, task: 'interview-prep-generation', responseSchema: INTERVIEW_PREP_SCHEMA });
-
-    return { questions: result.questions || [] };
   });
 
   // ── Bucket scored jobs into the AI-created results taxonomy ───────────────

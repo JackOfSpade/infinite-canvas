@@ -387,7 +387,9 @@ export async function callClaudeDocument(filePath, prompt, model, apiKey, signal
   }
 
   const textContent = await fs.promises.readFile(filePath, 'utf8');
-  return callClaudeText(`${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n${textContent}`, model, apiKey, signal, { maxTokens, formulaSeed, expectJson, responseSchema });
+  // Forward `task` so recordTokenUsage captures this call's output-token sample
+  // (the image/PDF branches above already do — text files were silently dropped).
+  return callClaudeText(`${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n${textContent}`, model, apiKey, signal, { maxTokens, formulaSeed, expectJson, responseSchema, task });
 }
 
 // ── Message Batches API (async, ~50% cheaper) ──────────────────────────────

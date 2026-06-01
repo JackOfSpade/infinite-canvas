@@ -1,4 +1,4 @@
-import { getNodeDims } from './constants.js';
+import { getNodeDims, getNodesBounds } from './constants.js';
 import { gridSpacing, spiralStep } from './layoutGeometry.js';
 
 /**
@@ -108,14 +108,7 @@ function placementOverlaps(anchorX, anchorY, nodesToAbsorb, dropMinX, dropMinY, 
  * being dropped into a subcanvas.
  */
 export function findNonOverlappingPlacement(nodesToAbsorb, childNodes) {
-  let dropMinX = Infinity, dropMaxX = -Infinity, dropMinY = Infinity, dropMaxY = -Infinity;
-  nodesToAbsorb.forEach(n => {
-    const d = getNodeDims(n);
-    dropMinX = Math.min(dropMinX, n.position.x);
-    dropMaxX = Math.max(dropMaxX, n.position.x + d.w);
-    dropMinY = Math.min(dropMinY, n.position.y);
-    dropMaxY = Math.max(dropMaxY, n.position.y + d.h);
-  });
+  const { minX: dropMinX, maxX: dropMaxX, minY: dropMinY, maxY: dropMaxY } = getNodesBounds(nodesToAbsorb);
   const dropWidth  = dropMaxX - dropMinX;
   const dropHeight = dropMaxY - dropMinY;
 
@@ -123,15 +116,8 @@ export function findNonOverlappingPlacement(nodesToAbsorb, childNodes) {
   let anchorY = 0;
 
   if (childNodes.length > 0) {
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    childNodes.forEach(child => {
-      const cDims = getNodeDims(child);
-      minX = Math.min(minX, child.position.x);
-      maxX = Math.max(maxX, child.position.x + cDims.w);
-      minY = Math.min(minY, child.position.y);
-      maxY = Math.max(maxY, child.position.y + cDims.h);
-    });
-    
+    const { minX, maxX, minY, maxY } = getNodesBounds(childNodes);
+
     // Clearance + spiral step derived from node/cluster size (were flat 40 / 60).
     const padding = gridSpacing(childNodes).padding;
     const childCx = (minX + maxX) / 2;

@@ -24,8 +24,14 @@ export function parsePostedDate(raw) {
   const s = String(raw).trim();
   if (!s) return null;
 
-  const iso = Date.parse(s);
-  if (!isNaN(iso)) return new Date(iso);
+  // Skip the lenient Date.parse for a bare number ('5' → V8 reads it as a
+  // year/month, '2024' → a year). Those aren't real posted dates; let them
+  // fall through to the relative-unit matcher (which won't match) → null,
+  // rather than fabricating a date decades off.
+  if (!/^\d+$/.test(s)) {
+    const iso = Date.parse(s);
+    if (!isNaN(iso)) return new Date(iso);
+  }
 
   const lower = s.toLowerCase();
   if (lower === 'today' || lower === 'just posted' || lower === 'just now' || lower.includes('active today')) {
@@ -44,7 +50,9 @@ export function parsePostedDate(raw) {
   // Longest-first within each family (months? before mo, weeks? before w, …)
   // so the engine never grabs a short prefix when a longer unit is present —
   // correctness no longer depends on the trailing \b alone.
-  const m = lower.match(/(\d+)\s*(months?|mo|weeks?|w|days?|d|hours?|h|minutes?|mins?|m)\b/);
+  // `\+?` tolerates LinkedIn's oldest-bucket literal "30+ days ago" (treated as
+  // exactly 30 days — the conservative floor, so any maxAgeDays < 30 drops it).
+  const m = lower.match(/(\d+)\+?\s*(months?|mo|weeks?|w|days?|d|hours?|h|minutes?|mins?|m)\b/);
   if (m) {
     const n = parseInt(m[1], 10);
     const unit = m[2];

@@ -1,23 +1,31 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { SessionStatusContext } from './sessionStatusShared';
 
 export function SessionStatusProvider({ children }) {
-  const [statuses, setStatuses] = useState({});
   const [verifying, setVerifying] = useState(new Set());
+  // A verify start/update/done event can land between mount and the async
+  // getVerifyState reply (the renderer normally mounts mid-verify). Once any
+  // live event has applied, the late-resolving startup snapshot must NOT
+  // overwrite it — otherwise a platform an update already cleared would be
+  // re-added and the JobHub/SellHub progress bar would regress to "checking"
+  // until verify-done. This ref makes the snapshot a baseline, not an override.
+  const gotLiveEvent = useRef(false);
 
   useEffect(() => {
-    // Sync with whatever state the startup verify has already reached before
-    // this component mounted (handles the race where verify starts before React loads).
-    window.electronAPI.getVerifyState?.().then(({ verifying: vIds = [], statuses: s = {} }) => {
-      setStatuses(s);
+    // Seed from whatever state the startup verify reached before React mounted,
+    // but only if no live event has been applied yet (handles the verify-starts-
+    // before-React race without clobbering newer in-flight events).
+    window.electronAPI.getVerifyState?.().then(({ verifying: vIds = [] }) => {
+      if (gotLiveEvent.current) return;
       setVerifying(new Set(vIds));
     });
 
     const unsubStart = window.electronAPI.onSessionVerifyStart?.(({ platformIds }) => {
+      gotLiveEvent.current = true;
       setVerifying(new Set(platformIds));
     });
-    const unsubUpdate = window.electronAPI.onSessionVerifyUpdate?.(({ platformId, connected }) => {
-      setStatuses(prev => ({ ...prev, [platformId]: { connected } }));
+    const unsubUpdate = window.electronAPI.onSessionVerifyUpdate?.(({ platformId }) => {
+      gotLiveEvent.current = true;
       setVerifying(prev => {
         const next = new Set(prev);
         next.delete(platformId);
@@ -25,6 +33,7 @@ export function SessionStatusProvider({ children }) {
       });
     });
     const unsubDone = window.electronAPI.onSessionVerifyDone?.(() => {
+      gotLiveEvent.current = true;
       setVerifying(new Set());
     });
 
@@ -32,7 +41,7 @@ export function SessionStatusProvider({ children }) {
   }, []);
 
   return (
-    <SessionStatusContext.Provider value={{ statuses, verifying }}>
+    <SessionStatusContext.Provider value={{ verifying }}>
       {children}
     </SessionStatusContext.Provider>
   );

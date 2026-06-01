@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { EventLogger } from '../utils/EventLogger';
+import { statusCheckWrites, statusErrorWrites } from '../utils/listingStatusWrites';
 
 const DEFAULT_FIELDS = { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked', attention: 'attention' };
 
 /**
  * Per-card AI status check against the `check-listing-status` IPC. Used by
- * MarketplaceCardNode and JobCardNode — both perform exactly the same call,
- * only the field names they write back to node data differ.
+ * MarketplaceCardNode (the transient-card overhaul removed job-card monitoring,
+ * so JobCardNode no longer uses this).
  *
  * Always defers the "is there anything to check" decision to the backend.
  * Per-platform watch URLs (configured in Settings) live in the main process
@@ -54,28 +55,11 @@ export function useMonitorCheck({
         productTitle,
       });
       if (!isMountedRef.current) return;
-      const writes = { [fields.lastChecked]: new Date().toISOString() };
-      // The new backend always returns { status, message, sources } — there's
-      // no top-level `success` flag because per-URL errors are captured in
-      // `sources` and the aggregate `status` already reflects them.
-      if (res?.status) {
-        writes[fields.status]    = res.status;
-        writes[fields.message]   = res.message || '';
-        writes[fields.attention] = Array.isArray(res.attention) ? res.attention : [];
-      } else {
-        writes[fields.status]    = 'error';
-        writes[fields.message]   = res?.error || 'Status check failed';
-        writes[fields.attention] = [];
-      }
-      updateNode(id, writes);
+      updateNode(id, statusCheckWrites(res, fields));
     } catch (err) {
       EventLogger.error('[useMonitorCheck] failed:', err);
       if (!isMountedRef.current) return;
-      updateNode(id, {
-        [fields.status]:      'error',
-        [fields.message]:     err?.message || String(err),
-        [fields.lastChecked]: new Date().toISOString(),
-      });
+      updateNode(id, statusErrorWrites(err, fields));
     } finally {
       if (isMountedRef.current) setChecking(false);
     }

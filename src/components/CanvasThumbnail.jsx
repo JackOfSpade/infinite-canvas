@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { getNodeDims } from '../utils/constants';
+import { strokePoints } from '../utils/geometry';
 import { Layers } from 'lucide-react';
 
 import { ThumbnailNode } from './ThumbnailNode';
@@ -27,9 +28,7 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
     });
 
     drawings.forEach(stroke => {
-      const pts = Array.isArray(stroke) ? stroke : stroke?.points;
-      if (!Array.isArray(pts)) return;
-      pts.forEach(p => {
+      strokePoints(stroke).forEach(p => {
         minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
         maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
       });
@@ -58,9 +57,9 @@ export const CanvasThumbnail = React.memo(function CanvasThumbnail({ canvasData,
     }).filter(Boolean);
 
     const paths = drawings.map((stroke, i) => {
-      const pts = Array.isArray(stroke) ? stroke : stroke?.points;
+      const pts = strokePoints(stroke);
       const color = stroke?.color || 'white';
-      if (!Array.isArray(pts) || pts.length < 2) return null;
+      if (pts.length < 2) return null;
       return { id: i, points: pts.map(p => `${p.x},${p.y}`).join(' '), color };
     }).filter(Boolean);
 

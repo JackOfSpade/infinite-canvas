@@ -1,7 +1,8 @@
 /**
- * Status-code → human label maps for the monitor pill.
- * Both vocabularies cover the same six status codes that the AI classifier
- * emits via `check-listing-status`; only the wording differs per use case.
+ * Status-code → human label map for the marketplace monitor pill — the status
+ * codes the AI classifier emits via `check-listing-status`, mapped to wording.
+ * (A parallel job-board vocabulary once lived here, but the transient-card
+ * overhaul removed job-card monitoring, so only the marketplace map remains.)
  */
 
 export const MARKETPLACE_STATUS_LABELS = {
@@ -9,16 +10,6 @@ export const MARKETPLACE_STATUS_LABELS = {
   sold:          'Sold',
   ended:         'Ended',
   expired:       'Ended', // back-compat: nodes saved before the rename
-  'needs-login': 'Needs login',
-  error:         'Error',
-  unknown:       'Not checked',
-};
-
-export const JOB_STATUS_LABELS = {
-  live:          'Open',
-  sold:          'Filled',
-  ended:         'Closed',
-  expired:       'Closed', // back-compat: nodes saved before the rename
   'needs-login': 'Needs login',
   error:         'Error',
   unknown:       'Not checked',

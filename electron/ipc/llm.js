@@ -42,8 +42,6 @@ const TASK_MODELS = {
   'job-query-generation':      { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   'job-scoring':               { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   'job-bucketing':             { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
-  'cover-letter-generation':   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
-  'interview-prep-generation': { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   // Application generation (résumé + cover letter from the design system).
   // Quality compounds here — the output is a polished PDF a human sends to a
   // recruiter — so it gets the strong model on both providers.
@@ -137,10 +135,6 @@ const TASK_MAX_TOKENS = {
   // observed truncation point), 50→24k, capped at 24576 to bound billing.
   'job-bucketing':             ({ itemCount = 15 } = {}) =>
     Math.min(24576, 4096 + itemCount * 400),
-  // Extraction is thinking-heavy AND reproduces most of the input as JSON, so it
-  // scales steeply with paste size — a ~45-job paste truncated at the old 10.5k.
-  'cover-letter-generation':   2048,  // a paragraph-length letter
-  'interview-prep-generation': 2048,  // bulleted prep
   // Research: synthesized web findings covering BOTH the company (culture,
   // products, recent news, stage) AND the specific role (responsibilities,
   // requirements, emphasized skills) — the primary job-context source. Grounded
@@ -352,10 +346,13 @@ function normalizeOpts(opts) {
 }
 
 function enhanceLLMError(error, provider) {
-  // If the error message indicates a rate limit or exhaustion, mark it as RATE_LIMIT
-  // so the frontend can catch it and display the model selector.
+  // If the error indicates a rate limit or exhaustion, mark it as RATE_LIMIT
+  // so the frontend can catch it and display the model selector. Check the SDK's
+  // structured status (429) directly in addition to message substrings — relying
+  // on the message alone is fragile if a provider changes its error-string format.
   const msg = error.message?.toLowerCase() || '';
   if (
+    error.status === 429 ||
     msg.includes('rate limit') ||
     msg.includes('429') ||
     msg.includes('insufficient funds') ||

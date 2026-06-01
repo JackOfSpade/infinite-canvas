@@ -3,10 +3,8 @@ import { CheckCircle2, AlertCircle, Circle, LogIn } from 'lucide-react';
 import { MARKETPLACE_STATUS_LABELS } from './monitorStatusLabels';
 
 /**
- * Shared status pill for any node that polls a URL via `check-listing-status`.
- * Both MarketplaceCardNode and JobCardNode render this with their own label
- * vocabulary (sold vs filled, expired vs closed, etc.) but the same six
- * underlying status codes from the AI classifier.
+ * Status pill for MarketplaceCardNode — renders the AI classifier's
+ * `check-listing-status` verdict (six status codes) as an icon + label.
  */
 
 const META = {
@@ -23,7 +21,6 @@ const META = {
 export function MonitorStatusBadge({
   status,
   lastChecked,
-  labels = MARKETPLACE_STATUS_LABELS,
   className = '',
 }) {
   const meta = META[status] || META.unknown;
@@ -31,7 +28,7 @@ export function MonitorStatusBadge({
   const lastDisplay = lastChecked
     ? new Date(lastChecked).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
     : '';
-  const label = labels[status] || labels.unknown || status;
+  const label = MARKETPLACE_STATUS_LABELS[status] || MARKETPLACE_STATUS_LABELS.unknown || status;
 
   return (
     <div className={`flex items-center gap-1.5 px-2 py-1 rounded-md border text-[10px] ${meta.bg} ${className}`}>

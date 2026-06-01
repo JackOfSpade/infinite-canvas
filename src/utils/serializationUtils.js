@@ -60,7 +60,7 @@ export function migrateGroupNodes(nodes) {
       const { dragHandle: _dragHandle, ...restNode } = node;
       return {
         ...restNode,
-        style: { width: getNodeDims(node).w || 180, height: getNodeDims(node).h || 130 },
+        style: { width: getNodeDims(node).w, height: getNodeDims(node).h },
         data: {
           ...restData,
           canvasData: {

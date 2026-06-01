@@ -15,6 +15,7 @@ import { getDiceApiKey } from '../ipc/settings.js';
 import { htmlToText } from 'html-to-text';
 import { JSDOM } from 'jsdom';
 import { resolveBudget } from '../ipc/scrapeBudget.js';
+import { safeApiFetch } from '../ipc/antiBotDetector.js';
 import { JOB_RESULT_CAP } from '../ipc/resultCaps.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { jobTitleCompanyLocationKey } from '../../src/utils/jobIdentity.js';
@@ -27,15 +28,14 @@ import { jobTitleCompanyLocationKey } from '../../src/utils/jobIdentity.js';
 // magic literals and leaves a single hook to switch on learning later.
 const API_TIMEOUT_SEEDS = {
   'linkedin-api':   10000,
-  'linkedin-detail': 15000,
   'greenhouse-api':  8000,
   'lever-api':       8000,
   'usajobs-api':    10000,
   'remoteok-api':   10000,
   'wwr-api':        10000,
   'reverb-api':     12000,
+  'pricecharting-api': 10000,
   'dice-api':       10000,
-  'stockx-api':     10000,
   'scrapfly-api':  160000, // Scrapfly default read timeout is 155s; leave client overhead.
 };
 
@@ -50,34 +50,11 @@ function apiTimeout(key) {
  * Prevents fetch requests from hanging forever if the backend drops connection.
  */
 function createTimeoutSignal(baseSignal, timeoutMs) {
-  if (typeof AbortSignal.any === 'function' && typeof AbortSignal.timeout === 'function') {
-    return AbortSignal.any([baseSignal, AbortSignal.timeout(timeoutMs)].filter(Boolean));
-  }
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(new Error(`Timeout after ${timeoutMs}ms`)), timeoutMs);
-
-  if (baseSignal) {
-    if (baseSignal.aborted) {
-      clearTimeout(timeoutId);
-      controller.abort(baseSignal.reason);
-      return controller.signal;
-    }
-    const abortHandler = () => {
-      clearTimeout(timeoutId);
-      controller.abort(baseSignal.reason);
-    };
-    baseSignal.addEventListener('abort', abortHandler, { once: true });
-    
-    // Cleanup if timeout triggers first
-    controller.signal.addEventListener('abort', () => {
-      if (controller.signal.reason?.message?.startsWith('Timeout')) {
-        baseSignal.removeEventListener('abort', abortHandler);
-      }
-    }, { once: true });
-  }
-
-  return controller.signal;
+  // Electron's bundled Chromium/Node always provides AbortSignal.any/.timeout, so
+  // combine the IPC abort signal (window close) with a hard timeout directly.
+  // (A legacy manual-AbortController fallback used to live here but was both
+  // unreachable on supported runtimes and leaked its setTimeout on the happy path.)
+  return AbortSignal.any([baseSignal, AbortSignal.timeout(timeoutMs)].filter(Boolean));
 }
 
 /**
@@ -105,7 +82,6 @@ function stripHtml(html) {
  * and deduplicated by job URL so the same posting isn't returned twice.
  */
 export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = null) {
-  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const queryList = Array.isArray(queries) ? queries : [queries];
   const seenUrls = new Set();
   const allJobs = [];
@@ -647,7 +623,6 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
       },
     };
   }
-  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
 
   const params = new URLSearchParams({
     Keyword: query,
@@ -715,7 +690,6 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
  * Fetch jobs from RemoteOK's open JSON API (bypasses Puppeteer entirely).
  */
 export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
-  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const r = await safeApiFetch('https://remoteok.com/api', {
     headers: {
       'Accept': 'application/json',
@@ -780,7 +754,6 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
  * Fetch jobs from WeWorkRemotely's RSS feed (bypasses Puppeteer entirely).
  */
 export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
-  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const r = await safeApiFetch('https://weworkremotely.com/remote-jobs.rss', {
     headers: {
       'Accept': 'application/rss+xml, application/xml, text/xml',
@@ -981,7 +954,6 @@ async function fetchReverbSoldComps(query, signal, safeApiFetch) {
  * (completed sales); soldOnly=false uses /api/listings/all (live ACTIVE asks).
  */
 export async function fetchReverbListings(query, soldOnly = false, signal = null) {
-  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
 
   if (soldOnly) {
     return fetchReverbSoldComps(query, signal, safeApiFetch);
@@ -1390,7 +1362,6 @@ const DICE_RETRY_DELAYS_MS = [1000, 2000, 4000];
 let _diceKeyIsStable = false;
 
 export async function fetchDiceListings(query, location = '', signal = null, maxAgeDays = null) {
-  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
   const params = new URLSearchParams({
     q: query,
     countryCode2: 'US',
@@ -1574,7 +1545,6 @@ export async function warmDiceApiKey() {
  */
 export async function enrichDiceDescriptions(jobs, signal) {
   if (!jobs?.length) return jobs;
-  const { safeApiFetch } = await import('../ipc/antiBotDetector.js');
 
   const BATCH = 10;
   const enriched = [];
@@ -1605,7 +1575,7 @@ export async function enrichDiceDescriptions(jobs, signal) {
             'x-api-key': getDiceApiKey(),
             'Accept': 'application/json',
           },
-          signal: createTimeoutSignal(signal, 10000),
+          signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
         }, 'dice');
         if (!r.ok) { note(`http-${r.status}`, job.url); return job; }
         // Detail endpoint returns either a single object or { data: {...} }

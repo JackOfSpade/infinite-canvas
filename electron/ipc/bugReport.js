@@ -15,7 +15,7 @@ import { getMarketplaceTelemetry } from './marketplace.js';
 import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
-import { shortId } from './bugReport/helpers.js';
+import { shortId, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { getAuthWindowDiagnostics } from './browser/authWindows.js';
@@ -339,16 +339,14 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
         const hits = [];
         if (TRANSIENT_PROCESSING_HUB_STATES.includes(d.hubState)) hits.push(`hubState=${d.hubState}`);
         if (n.type === 'jobhub') {
+          // Data-driven over the authoritative key list: a future transient key
+          // added to JOBHUB_TRANSIENT_KEYS is flagged automatically. (A previous
+          // hardcoded if-chain would silently skip any unrecognized key, defeating
+          // this section's purpose — it would falsely read "✅ Clean".)
           for (const key of getJobHubTransientKeysForSave(d.hubState)) {
-            if (key === 'errorMessage' && d.errorMessage) hits.push(`errorMessage="${String(d.errorMessage).slice(0, 60)}"`);
-            if (key === 'isRateLimit' && d.isRateLimit) hits.push('isRateLimit=true');
-            if (key === 'scrapeWarnings' && Array.isArray(d.scrapeWarnings) && d.scrapeWarnings.length) {
-              hits.push(`scrapeWarnings=${d.scrapeWarnings.length}`);
-            }
-            if (key === 'pendingJobs' && Array.isArray(d.pendingJobs) && d.pendingJobs.length) {
-              hits.push(`pendingJobs=${d.pendingJobs.length}`);
-            }
-            if (key === 'pendingTargetRole' && d.pendingTargetRole) hits.push('pendingTargetRole=set');
+            const v = d[key];
+            if (Array.isArray(v)) { if (v.length) hits.push(`${key}=${v.length}`); }
+            else if (v) hits.push(v === true ? `${key}=true` : typeof v === 'string' ? `${key}="${v.slice(0, 60)}"` : `${key}=set`);
           }
         }
         if (n.type === 'sellhub' && d.platformFitPending) hits.push('platformFitPending=true');
@@ -888,60 +886,12 @@ ${rows}
     const platforms = getSellMonitorPlatforms() || [];
     const cache = getStatusCacheSync();
 
-    const rows = platforms.map(p => {
-      const entry = cache[p.id];
-      const traceStatus = entry?.lastTrace?.status;
-      const staleMismatch = entry?.connected && traceStatus != null && traceStatus >= 400;
-      const mustContain = p.connectedFinalUrlMustContain;
-      const traceFinalUrl = (entry?.lastTrace?.finalUrl || '').toLowerCase();
-      const redirectMismatch = !staleMismatch && entry?.connected && mustContain && !traceFinalUrl.includes(mustContain.toLowerCase());
-      const connected = entry?.connected
-        ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)`
-          : redirectMismatch ? `⚠️ true (redirected to ${entry.lastTrace.finalUrl} — expected path containing "${mustContain}")`
-            : '✅ true')
-        : entry ? '❌ false' : '— (no entry)';
-      const lastConfirmed = entry?.ts
-        ? `${new Date(entry.ts).toISOString()} (${Math.round((Date.now() - entry.ts) / 1000)}s ago)`
-        : '—';
-      const reason = entry?.lastReason ? entry.lastReason.replace(/\|/g, '\\|') : '—';
-      return `| \`${p.id}\` | ${p.name} | ${connected} | ${lastConfirmed} | ${reason} |`;
-    }).join('\n');
-
-    // Per-platform verify trace — only included when the cache has a trace
-    // (i.e. verifier has run at least once). Surfaces target URL, final URL,
-    // HTTP status, and the first chars of the response body so a "I just
-    // logged in but it says false" report immediately shows whether eBay
-    // served a soft login wall, a 4xx, or genuinely no auth-redirect.
-    const traceBlocks = platforms.map(p => {
-      const t = cache[p.id]?.lastTrace;
-      if (!t) return '';
-      const lines = [
-        `**${p.name}** (\`${p.id}\`):`,
-        `  - target: \`${t.target || '—'}\``,
-        t.finalUrl != null ? `  - finalUrl: \`${t.finalUrl}\`` : null,
-        t.status != null ? `  - HTTP status: \`${t.status}\`` : null,
-        t.htmlBytes != null ? `  - htmlBytes: \`${t.htmlBytes}\`` : null,
-        t.softWallMatch ? `  - softWallMatch: \`${t.softWallMatch}\`` : null,
-        t.error ? `  - error: \`${t.error}\`` : null,
-        t.bodyHead ? `  - bodyHead: \`${t.bodyHead.replace(/`/g, "'").slice(0, 240)}\`` : null,
-      ].filter(Boolean);
-      if (Array.isArray(t.checks) && t.checks.length > 0) {
-        lines.push('  - checks:');
-        for (const check of t.checks) {
-          const parts = [
-            check.target || '—',
-            check.status != null ? `HTTP ${check.status}` : null,
-            check.finalUrl || null,
-            check.softWallMatch ? `softWall=${check.softWallMatch}` : null,
-            check.antiBot ? `antiBot=${check.antiBot}` : null,
-            check.sessionCookieCount != null ? `cookies=${check.sessionCookieCount}` : null,
-            check.error ? `error=${check.error}` : null,
-          ].filter(Boolean);
-          lines.push(`    - ${parts.join(' | ').replace(/`/g, "'").slice(0, 320)}`);
-        }
-      }
-      return lines.join('\n');
-    }).filter(Boolean).join('\n\n');
+    // Per-platform verify trace surfaces target URL, final URL, HTTP status, and
+    // the first chars of the response body so a "I just logged in but it says
+    // false" report shows whether the platform served a soft login wall, a 4xx,
+    // or genuinely no auth-redirect. Shared with the job-platform section below.
+    const rows = renderSessionRows(platforms, cache);
+    const traceBlocks = renderSessionTraceBlocks(platforms, cache);
 
     marketplaceSessionsMarkdown = `
 ## Marketplace Sessions
@@ -972,55 +922,8 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
     const platforms = getJobLoginPlatforms() || [];
     const cache = getStatusCacheSync();
 
-    const rows = platforms.map(p => {
-      const entry = cache[p.id];
-      const traceStatus = entry?.lastTrace?.status;
-      const staleMismatch = entry?.connected && traceStatus != null && traceStatus >= 400;
-      const mustContain = p.connectedFinalUrlMustContain;
-      const traceFinalUrl = (entry?.lastTrace?.finalUrl || '').toLowerCase();
-      const redirectMismatch = !staleMismatch && entry?.connected && mustContain && !traceFinalUrl.includes(mustContain.toLowerCase());
-      const connected = entry?.connected
-        ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)`
-          : redirectMismatch ? `⚠️ true (redirected to ${entry.lastTrace.finalUrl} — expected path containing "${mustContain}")`
-            : '✅ true')
-        : entry ? '❌ false' : '— (no entry)';
-      const lastConfirmed = entry?.ts
-        ? `${new Date(entry.ts).toISOString()} (${Math.round((Date.now() - entry.ts) / 1000)}s ago)`
-        : '—';
-      const reason = entry?.lastReason ? entry.lastReason.replace(/\|/g, '\\|') : '—';
-      return `| \`${p.id}\` | ${p.name} | ${connected} | ${lastConfirmed} | ${reason} |`;
-    }).join('\n');
-
-    const traceBlocks = platforms.map(p => {
-      const t = cache[p.id]?.lastTrace;
-      if (!t) return '';
-      const lines = [
-        `**${p.name}** (\`${p.id}\`):`,
-        `  - target: \`${t.target || '—'}\``,
-        t.finalUrl != null ? `  - finalUrl: \`${t.finalUrl}\`` : null,
-        t.status != null ? `  - HTTP status: \`${t.status}\`` : null,
-        t.htmlBytes != null ? `  - htmlBytes: \`${t.htmlBytes}\`` : null,
-        t.softWallMatch ? `  - softWallMatch: \`${t.softWallMatch}\`` : null,
-        t.error ? `  - error: \`${t.error}\`` : null,
-        t.bodyHead ? `  - bodyHead: \`${t.bodyHead.replace(/`/g, "'").slice(0, 240)}\`` : null,
-      ].filter(Boolean);
-      if (Array.isArray(t.checks) && t.checks.length > 0) {
-        lines.push('  - checks:');
-        for (const check of t.checks) {
-          const parts = [
-            check.target || '—',
-            check.status != null ? `HTTP ${check.status}` : null,
-            check.finalUrl || null,
-            check.softWallMatch ? `softWall=${check.softWallMatch}` : null,
-            check.antiBot ? `antiBot=${check.antiBot}` : null,
-            check.sessionCookieCount != null ? `cookies=${check.sessionCookieCount}` : null,
-            check.error ? `error=${check.error}` : null,
-          ].filter(Boolean);
-          lines.push(`    - ${parts.join(' | ').replace(/`/g, "'").slice(0, 320)}`);
-        }
-      }
-      return lines.join('\n');
-    }).filter(Boolean).join('\n\n');
+    const rows = renderSessionRows(platforms, cache);
+    const traceBlocks = renderSessionTraceBlocks(platforms, cache);
 
     jobSessionsMarkdown = `
 ## Job Platform Sessions

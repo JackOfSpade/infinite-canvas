@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useCallback } from 'react';
 import { Panel, useReactFlow, useStore } from '@xyflow/react';
 import { getNodeDims } from '../utils/constants';
+import { strokePoints } from '../utils/geometry';
 import { ThumbnailNode } from './ThumbnailNode';
 
 const MINIMAP_W = 200;
@@ -94,9 +95,7 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
       mxY = Math.max(mxY, n.position.y + h);
     });
     (drawings || []).forEach(stroke => {
-      const pts = Array.isArray(stroke) ? stroke : stroke?.points;
-      if (!Array.isArray(pts)) return;
-      pts.forEach(p => {
+      strokePoints(stroke).forEach(p => {
         mnX = Math.min(mnX, p.x); mnY = Math.min(mnY, p.y);
         mxX = Math.max(mxX, p.x); mxY = Math.max(mxY, p.y);
       });
@@ -145,8 +144,8 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
 
           {/* ── Drawings (freehand strokes) ───────────────────────── */}
           {(drawings || []).map((stroke, i) => {
-            const pts = Array.isArray(stroke) ? stroke : stroke?.points;
-            if (!Array.isArray(pts) || pts.length < 2) return null;
+            const pts = strokePoints(stroke);
+            if (pts.length < 2) return null;
             const color = stroke?.color || 'white';
             const pts2d = pts.map(p => `${p.x},${p.y}`).join(' ');
             return (
@@ -204,9 +203,7 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
   
   if (prev.drawings && next.drawings) {
     for (let i = 0; i < prev.drawings.length; i++) {
-      const pPts = Array.isArray(prev.drawings[i]) ? prev.drawings[i] : prev.drawings[i]?.points || [];
-      const nPts = Array.isArray(next.drawings[i]) ? next.drawings[i] : next.drawings[i]?.points || [];
-      if (pPts.length !== nPts.length) return false;
+      if (strokePoints(prev.drawings[i]).length !== strokePoints(next.drawings[i]).length) return false;
     }
   }
 

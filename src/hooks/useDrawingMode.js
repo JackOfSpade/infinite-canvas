@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { generateId } from '../utils/idGenerator';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
-import { distToSegment, pixelEraseStroke, sqr } from '../utils/geometry';
+import { distToSegment, pixelEraseStroke, sqr, strokePoints } from '../utils/geometry';
 
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -49,8 +49,8 @@ export function useDrawingMode({
       }
       // Delete entire strokes that come within the eraser radius
       setDrawings(prev => prev.filter(stroke => {
-        const pts = Array.isArray(stroke) ? stroke : stroke.points;
-        if (!pts || pts.length < 2) return true;
+        const pts = strokePoints(stroke);
+        if (pts.length < 2) return true;
         for (let i = 0; i < pts.length - 1; i++) {
           if (distToSegment(C, pts[i], pts[i + 1]) <= R) return false;
         }

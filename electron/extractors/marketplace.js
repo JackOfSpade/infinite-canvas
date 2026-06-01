@@ -357,6 +357,7 @@ export const POSHMARK_SOLD_EXTRACTOR = `
 export const SWAPPA_EXTRACTOR = `
 (function() {
   var ORIGIN = location.origin || 'https://swappa.com';
+  var __money = ${MONEY_PARSE_FN};
 
   function abs(href) {
     if (!href) return '';
@@ -372,7 +373,7 @@ export const SWAPPA_EXTRACTOR = `
         var priceEl = card.querySelector('[itemprop="price"]');
         if (!priceEl) return;
         var raw = priceEl.getAttribute('content') || priceEl.textContent || '';
-        var price = parseFloat(String(raw).replace(/[^0-9.]/g, '')) || 0;
+        var price = __money(raw);
         if (price <= 0) return;
         var descEl = card.querySelector('[itemprop="description"]') || card.querySelector('[itemprop="name"]');
         var title = (descEl && (descEl.getAttribute('content') || descEl.textContent) || '').trim();
@@ -486,6 +487,7 @@ export const SWAPPA_EXTRACTOR = `
 export const SWAPPA_SOLD_EXTRACTOR = `
 (function() {
   var ORIGIN = location.origin || 'https://swappa.com';
+  var __money = ${MONEY_PARSE_FN};
 
   function abs(href) {
     if (!href) return '';
@@ -545,7 +547,7 @@ export const SWAPPA_SOLD_EXTRACTOR = `
     var links = doc.querySelectorAll('a[href*="/listing/view/"]');
     Array.prototype.forEach.call(links, function(a) {
       try {
-        var price = parseFloat((a.textContent || '').replace(/[^0-9.]/g, '')) || 0;
+        var price = __money(a.textContent || '');
         if (price <= 0) return;
         var row = a.closest('tr');
         var cells = row ? Array.prototype.map.call(row.querySelectorAll('td'), function(td) { return (td.textContent || '').trim(); }) : [];

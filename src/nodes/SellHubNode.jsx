@@ -21,6 +21,7 @@ import { useSourceProgress } from '../hooks/useSourceProgress';
 import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { PRODUCT_IMAGE_EXT_RE } from '../utils/fileExtensions';
+import { mergeSourceIntoComps } from '../utils/compsMerge';
 
 /**
  * SellHubNode — draggable canvas module for marketplace selling.
@@ -34,7 +35,6 @@ import { PRODUCT_IMAGE_EXT_RE } from '../utils/fileExtensions';
  * data.comps: { sold: [], active: [] }
  * data.errorMessage: string | null — surfaced inline via HubErrorBanner above the body
  * data.isRateLimit: boolean
- * data.userPrice: number
  */
 export function SellHubNode({ id, data }) {
 
@@ -485,14 +485,7 @@ export function SellHubNode({ id, data }) {
         setQueuedResolvesCount(0);
         EventLogger.log(`[SellHub][${id}] applying ${queued.length} queued early-resolve(s): ${queued.map(q => q.sourceId).join(', ')}`);
         for (const q of queued) {
-          const other = q.category === 'sold' ? 'active' : 'sold';
-          mergedComps = {
-            [q.category]: [
-              ...((mergedComps[q.category] || []).filter(i => i?.source !== q.sourceId)),
-              ...(q.items || []),
-            ],
-            [other]: mergedComps[other] || [],
-          };
+          mergedComps = mergeSourceIntoComps(mergedComps, { sourceId: q.sourceId, category: q.category, items: q.items });
           effectiveWarnings = effectiveWarnings.filter(w => w.sourceId !== q.sourceId);
         }
       }
@@ -719,14 +712,7 @@ export function SellHubNode({ id, data }) {
       // the extractors.
       const prevComps = pendingCompsRef.current || { sold: [], active: [] };
       const category = result.category || 'sold';
-      const otherCategory = category === 'sold' ? 'active' : 'sold';
-      const mergedComps = {
-        [category]: [
-          ...((prevComps[category] || []).filter(i => i?.source !== resolvedSourceId)),
-          ...result.items,
-        ],
-        [otherCategory]: prevComps[otherCategory] || [],
-      };
+      const mergedComps = mergeSourceIntoComps(prevComps, { sourceId: resolvedSourceId, category, items: result.items });
       const remainingWarnings = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== resolvedSourceId);
       pendingCompsRef.current = mergedComps;
       scrapeWarningsRef.current = remainingWarnings;
@@ -933,7 +919,6 @@ export function SellHubNode({ id, data }) {
       dropsBlocked={platformsVerifying}
       verifyProgress={platformsVerifying ? { done: verifyDone, total: verifyTotal } : null}
       dragHover={data.dragHover || null}
-      interactiveStates={['draft', 'priced', 'comps-ready']}
     >
         {/* ── Empty: drop zone (+ banner if a prior attempt failed) ─────── */}
         {hubState === 'empty' && (

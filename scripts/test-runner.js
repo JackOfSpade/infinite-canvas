@@ -24,7 +24,9 @@ import {
 } from '../src/utils/jobIdentity.js';
 import { mergeSourceProgress } from '../src/utils/sourceProgress.js';
 import { applyJobCardFiltersToNodes, getJobCardFilterOpacity, isJobCardVisible } from '../src/utils/jobCardFilters.js';
-import { reconcileBatchScores } from '../electron/ipc/jobBatchReconcile.js';
+import { reconcileBatchScores, buildScoredJob } from '../electron/ipc/jobBatchReconcile.js';
+import { getNodesBounds } from '../src/utils/constants.js';
+import { mergeSourceIntoComps } from '../src/utils/compsMerge.js';
 import { mergeResolvedSourceItems } from '../src/utils/jobSourceResolveMerge.js';
 import {
   LIKELY_THRESHOLD,
@@ -47,6 +49,7 @@ import {
   distToSegment,
   pixelEraseStroke,
   segmentCircleIntersections,
+  strokePoints,
 } from '../src/utils/geometry.js';
 import {
   edgeZoneForRadius,
@@ -110,7 +113,7 @@ const tests = [
     name: 'eBay sold fixture',
     run: () => runExtractorFixtureTest({
       name: 'eBay sold fixture',
-      file: 'ebay-body.html',
+      file: 'scripts/fixtures/ebay-body.html',
       extractor: EBAY_SOLD_EXTRACTOR,
       minCount: 10,
       sampleAssert: (sample) => {
@@ -123,7 +126,7 @@ const tests = [
     name: 'eBay active fixture',
     run: () => runExtractorFixtureTest({
       name: 'eBay active fixture',
-      file: 'ebay-body.html',
+      file: 'scripts/fixtures/ebay-body.html',
       extractor: EBAY_ACTIVE_EXTRACTOR,
       minCount: 10,
       sampleAssert: (sample) => {
@@ -136,7 +139,7 @@ const tests = [
     name: 'Mercari sold fixture',
     run: () => runExtractorFixtureTest({
       name: 'Mercari sold fixture',
-      file: 'mercari-body.html',
+      file: 'scripts/fixtures/mercari-body.html',
       extractor: MERCARI_SOLD_EXTRACTOR,
       minCount: 10,
       sampleAssert: (sample) => {
@@ -149,7 +152,7 @@ const tests = [
     name: 'Poshmark sold fixture',
     run: () => runExtractorFixtureTest({
       name: 'Poshmark sold fixture',
-      file: 'poshmark-body.html',
+      file: 'scripts/fixtures/poshmark-body.html',
       extractor: POSHMARK_SOLD_EXTRACTOR,
       minCount: 10,
       sampleAssert: (sample) => {
@@ -162,7 +165,7 @@ const tests = [
     name: 'Google captcha fixture',
     run: () => runZeroResultFixtureTest({
       name: 'Google captcha fixture',
-      file: 'google-jobs.html',
+      file: 'scripts/fixtures/google-jobs.html',
       extractor: GOOGLE_JOBS_EXTRACTOR,
     }),
   },
@@ -1346,6 +1349,126 @@ const tests = [
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    name: 'getNodesBounds: AABB over node dims (shared by copy/paste/extract/fit-view)',
+    run: () => {
+      const nodes = [
+        { type: 'text', position: { x: 0, y: 0 } },           // 180x36
+        { type: 'jobhub', position: { x: 500, y: 200 } },     // 280x350
+        { type: 'text', position: { x: -100, y: -50 }, width: 60, height: 20 },
+      ];
+      const b = getNodesBounds(nodes);
+      assert(b.minX === -100 && b.minY === -50, `min corner (got ${b.minX},${b.minY})`);
+      assert(b.maxX === 780 && b.maxY === 550, `max corner = jobhub br (got ${b.maxX},${b.maxY})`);
+      const empty = getNodesBounds([]);
+      assert(empty.minX === Infinity && empty.maxX === -Infinity, 'empty set → Infinity sentinels');
+      return { ok: true, b };
+    },
+  },
+  {
+    name: 'strokePoints: normalizes object/array/garbage strokes',
+    run: () => {
+      const arr = [{ x: 1, y: 2 }];
+      assert(strokePoints(arr) === arr, 'bare array passes through');
+      assert(strokePoints({ points: arr }) === arr, 'object → its points');
+      assert(Array.isArray(strokePoints(null)) && strokePoints(null).length === 0, 'null → []');
+      assert(strokePoints({ color: 'red' }).length === 0, 'object without points → []');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'mergeSourceIntoComps: replaces same-source items, carries the other bucket',
+    run: () => {
+      const prev = {
+        sold: [{ source: 'ebay-sold', price: 1 }, { source: 'mercari', price: 2 }],
+        active: [{ source: 'ebay-active', price: 3 }],
+      };
+      const merged = mergeSourceIntoComps(prev, {
+        sourceId: 'ebay-sold', category: 'sold',
+        items: [{ source: 'ebay-sold', price: 9 }],
+      });
+      // ebay-sold replaced, mercari kept, active carried through untouched
+      assert(merged.sold.length === 2, `sold count (got ${merged.sold.length})`);
+      assert(merged.sold.find(i => i.source === 'ebay-sold').price === 9, 'ebay-sold replaced with fresh item');
+      assert(merged.sold.some(i => i.source === 'mercari'), 'other-source sold item retained');
+      assert(merged.active === prev.active, 'untouched bucket carried through by reference');
+      // missing/empty inputs are safe
+      const fromNull = mergeSourceIntoComps(null, { sourceId: 's', items: [{ source: 's' }] });
+      assert(fromNull.sold.length === 1 && fromNull.active.length === 0, 'null prev → seeded comps');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'buildScoredJob: matched merge vs placeholder fallbacks (shared real-time/batch shape)',
+    run: () => {
+      const job = { title: 'X', company: 'Y' };
+      const matched = buildScoredJob(job, { matchScore: 80, isTargetRoleMatch: 1 }, { fallbackScore: 50, allNull: false });
+      assert(matched.matchScore === 80 && matched.isTargetRoleMatch === true, 'matched: score + coerced bool');
+      const lone = buildScoredJob(job, null, { fallbackScore: 50, allNull: false });
+      assert(lone.matchScore === 50 && lone.reasoning === 'Unable to score' && lone.careerDirection === 'Other', 'lone miss → Unable to score');
+      const dead = buildScoredJob(job, null, { fallbackScore: 50, allNull: true });
+      assert(dead.reasoning === 'AI format error', 'whole-batch miss → AI format error');
+      return { ok: true };
+    },
+  },
+  {
+    // Regression: a present-but-fully-unmatched scores array (empty, or all
+    // indices out of range) must report 'AI format error' + a failedBatch,
+    // identically to the real-time path (results.every(r=>!r)) — not the
+    // softer 'Unable to score'/0 the old `allNull = !scores` produced.
+    name: 'Batch reconcile: empty/out-of-range scores array == whole-batch failure (lockstep with live path)',
+    run: () => {
+      const batch = [{ id: 'a' }, { id: 'b' }];
+      const empty = reconcileBatchScores([batch], { b0: { scores: [] } }, { fallbackScore: 50 });
+      assert(empty.failedBatches === 1, `empty scores array → failedBatches=1 (got ${empty.failedBatches})`);
+      assert(empty.scoredJobs.every(j => j.reasoning === 'AI format error'), 'empty scores → AI format error');
+      const oob = reconcileBatchScores([batch], { b0: { scores: [{ index: 5, matchScore: 9 }, { index: 6, matchScore: 8 }] } }, { fallbackScore: 50 });
+      assert(oob.failedBatches === 1, `all-out-of-range indices → failedBatches=1 (got ${oob.failedBatches})`);
+      assert(oob.scoredJobs.every(j => j.reasoning === 'AI format error'), 'out-of-range → AI format error');
+      // A partially-matched batch is NOT a whole-batch failure: the unmatched job
+      // gets the lone-miss 'Unable to score', and the batch is not counted failed.
+      const partial = reconcileBatchScores([batch], { b0: { scores: [{ index: 0, matchScore: 80, careerDirection: 'Eng' }] } }, { fallbackScore: 50 });
+      assert(partial.failedBatches === 0, `partial match → failedBatches=0 (got ${partial.failedBatches})`);
+      assert(partial.scoredJobs.find(j => j.id === 'b').reasoning === 'Unable to score', 'lone miss in good batch → Unable to score');
+      return { ok: true, empty: empty.failedBatches, oob: oob.failedBatches, partial: partial.failedBatches };
+    },
+  },
+  {
+    // Regression: LinkedIn's oldest-bucket literal "30+ days ago" must parse so
+    // a tight max-age filter actually drops it (the unparsed-null path kept it).
+    name: 'parsePostedDate: "30+ days ago" parses; bare number does not fabricate a date',
+    run: () => {
+      const plus = parsePostedDate('30+ days ago');
+      assert(plus instanceof Date, '"30+ days ago" should parse to a Date');
+      const ageDays = Math.round((Date.now() - plus.getTime()) / 86400000);
+      assert(ageDays === 30, `"30+ days ago" ≈ 30 days old (got ${ageDays})`);
+      const kept = filterJobsByAge([{ posted: '30+ days ago', id: 'stale' }, { posted: '3 days ago', id: 'fresh' }], 7).map(j => j.id);
+      assert(kept.length === 1 && kept[0] === 'fresh', `7-day filter drops "30+ days ago" (kept ${JSON.stringify(kept)})`);
+      // Bare numeric strings are not dates — must NOT be parsed as a year/month.
+      assert(parsePostedDate('2024') === null, 'bare "2024" → null (not a fabricated date)');
+      assert(parsePostedDate('5') === null, 'bare "5" → null');
+      // Normal relative strings still parse.
+      assert(parsePostedDate('3 days ago') instanceof Date, '"3 days ago" still parses');
+      return { ok: true, ageDays };
+    },
+  },
+  {
+    // Regression: the prose-recovery fallback must not silently return a stray
+    // empty literal ("[ ]") scraped from prose when the real value didn't parse —
+    // that masked failures and violated the fail-loud contract.
+    name: 'parseGeminiJSON: stray empty "[ ]" in prose does not silently win → throws',
+    run: () => {
+      const raw = 'Use { } for objects and [ ] for arrays. Result: {"score": 9}';
+      let threw = false;
+      try { parseGeminiJSON(raw); } catch { threw = true; }
+      assert(threw, 'prose with a stray "[ ]" + unparseable brace span must throw, not return []');
+      // Sanity: a clean object after prose still recovers (no regression).
+      assert(parseGeminiJSON('Here is the answer: {"score": 9}').score === 9, 'object-after-prose still recovers');
+      // A genuine empty array as the whole clean response still parses to [].
+      assert(Array.isArray(parseGeminiJSON('[]')) && parseGeminiJSON('[]').length === 0, 'clean "[]" still parses to []');
+      return { ok: true };
     },
   },
 ];

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { Loader2, CheckCircle2, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
@@ -34,6 +34,12 @@ export function CompSourceCardNode({ id, data }) {
   const [resolving, setResolving] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const { deleteElements, updateNodeData, getNode } = useReactFlow();
+
+  // The card can auto-dismiss (3s after a clean 'done') while a Solve/Retry IPC
+  // is still in flight; guard the finally setState so it doesn't run after
+  // unmount. Matches the isMountedRef pattern every sibling node/hook uses.
+  const isMountedRef = useRef(true);
+  useEffect(() => () => { isMountedRef.current = false; }, []);
 
   // Hub-cascading lock: when the owning SellHub is locked, Solve/Skip
   // become no-ops. Card stays visible and informational.
@@ -108,7 +114,7 @@ export function CompSourceCardNode({ id, data }) {
         }));
       }
     } finally {
-      setResolving(false);
+      if (isMountedRef.current) setResolving(false);
     }
   };
 
@@ -192,7 +198,7 @@ export function CompSourceCardNode({ id, data }) {
                     }));
                   }
                 } finally {
-                  setRetrying(false);
+                  if (isMountedRef.current) setRetrying(false);
                 }
               }}
               onPointerDown={(e) => e.stopPropagation()}

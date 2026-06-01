@@ -7,7 +7,8 @@ import path from 'path';
 import { GoogleAuth } from 'google-auth-library';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
-import { resolveServiceAccountPath } from './settings.js';
+import { resolveServiceAccountPath, getAISettings } from './settings.js';
+import { callClaudeText, probeClaude } from './claude.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP, DOCUMENT_MIME_MAP } from '../utils/mimeTypes.js';
 
@@ -658,7 +659,16 @@ export function parseGeminiJSON(raw) {
       const e = raw.lastIndexOf(close);
       if (s !== -1 && e > s) {
         try {
-          return JSON.parse(raw.substring(s, e + 1).replace(/,\s*([}\]])/g, '$1').trim());
+          const recovered = JSON.parse(raw.substring(s, e + 1).replace(/,\s*([}\]])/g, '$1').trim());
+          // Reject a trivially-empty literal here. This loop runs ONLY after the
+          // primary parse already failed (mis-bracketed prose), so an empty {}/[]
+          // almost always came from a STRAY delimiter pair in the prose — e.g.
+          // "use [ ] for arrays: {…}", where the bracket span grabs the prose's
+          // "[ ]" and parses it to []. Returning that would silently fabricate an
+          // empty result and mask the failure; fall through to the fail-loud throw.
+          const isEmptyLiteral = recovered && typeof recovered === 'object'
+            && (Array.isArray(recovered) ? recovered.length === 0 : Object.keys(recovered).length === 0);
+          if (!isEmptyLiteral) return recovered;
         } catch { /* try the next delimiter pair, then fall through to the throw */ }
       }
     }
@@ -787,7 +797,6 @@ export function registerGeminiHandlers() {
     // Text polish always returns plain text (not JSON), so it can't share
     // callLLMText (which parses JSON). Look up the same per-task model the
     // rest of the app uses, then call Gemini directly with text/plain mime.
-    const { getAISettings } = await import('./settings.js');
     const settings = getAISettings();
     const model = settings.provider === 'gemini'
       ? 'gemini-3.1-flash-lite'   // matches TASK_MODELS['text-polish'].gemini
@@ -795,7 +804,6 @@ export function registerGeminiHandlers() {
     // If user picked Claude, polish via Claude Haiku 4.5 directly. Avoids
     // forcing them onto Gemini just for this one helper.
     if (settings.provider === 'claude') {
-      const { callClaudeText } = await import('./claude.js');
       const raw = await callClaudeText(prompt, 'claude-haiku-4-5-20251001', settings.anthropicApiKey, signal, { maxTokens: 1024, expectJson: false });
       return { text: raw.trim() };
     }
@@ -809,12 +817,10 @@ export function registerGeminiHandlers() {
   // remaining/reset numbers from the response headers; for Gemini just
   // up/rate-limited/bad-key + a retry hint (it has no remaining-quota API).
   handleSafe('check-ai-availability', async (event, args) => {
-    const { getAISettings } = await import('./settings.js');
     const settings = getAISettings();
     const provider = (args && args.provider) || settings.provider || 'gemini';
     let result;
     if (provider === 'claude') {
-      const { probeClaude } = await import('./claude.js');
       result = await probeClaude(settings.anthropicApiKey);
     } else {
       result = await probeGemini(settings.geminiApiKey);

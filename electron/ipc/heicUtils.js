@@ -1,11 +1,15 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import path from 'path';
 import os from 'os';
 import { promisify } from 'util';
 import fs from 'fs';
 import crypto from 'crypto';
 
-const execAsync = promisify(exec);
+// execFile (no shell) with an args array — never interpolate a caller-controlled
+// file path into a shell string (a filename with quotes/backticks/$() could break
+// or inject). `/usr/bin/sips` is the absolute path, matching electron/main.js.
+const execFileAsync = promisify(execFile);
+const SIPS = '/usr/bin/sips';
 
 export async function convertHeicIfNecessary(filePath) {
   const ext = path.extname(filePath).toLowerCase();
@@ -26,7 +30,7 @@ export async function convertHeicIfNecessary(filePath) {
 
   try {
     // macOS built-in sips tool
-    await execAsync(`sips -s format jpeg "${filePath}" --out "${tempFile}"`);
+    await execFileAsync(SIPS, ['-s', 'format', 'jpeg', filePath, '--out', tempFile]);
     return tempFile;
   } catch (err) {
     // sips may have produced a partial file before failing — clean it up so
@@ -38,8 +42,11 @@ export async function convertHeicIfNecessary(filePath) {
 
 export async function cleanupTempFile(filePath) {
   try {
-    // Only cleanup files we put in temp dir
-    if (filePath.includes(os.tmpdir())) {
+    // Only cleanup files we put in temp dir — anchor the check to the tmpdir
+    // prefix (a bare substring `includes` would also match an unrelated path
+    // that merely embeds the tmpdir string somewhere in the middle).
+    const resolved = path.resolve(filePath);
+    if (resolved.startsWith(path.resolve(os.tmpdir()) + path.sep)) {
       await fs.promises.unlink(filePath);
     }
   } catch {
@@ -69,7 +76,7 @@ export async function downscaleImageIfNeeded(srcPath, { maxLongSide = 768 } = {}
   try {
     // sips emits "  pixelWidth: 4032" / "  pixelHeight: 2268" — grep both
     // in one call instead of two execs.
-    const { stdout } = await execAsync(`sips --getProperty pixelWidth --getProperty pixelHeight "${srcPath}"`);
+    const { stdout } = await execFileAsync(SIPS, ['--getProperty', 'pixelWidth', '--getProperty', 'pixelHeight', srcPath]);
     width  = parseInt(stdout.match(/pixelWidth:\s*(\d+)/)?.[1] || '0', 10);
     height = parseInt(stdout.match(/pixelHeight:\s*(\d+)/)?.[1] || '0', 10);
   } catch {
@@ -86,7 +93,7 @@ export async function downscaleImageIfNeeded(srcPath, { maxLongSide = 768 } = {}
     // sips -Z preserves aspect ratio: resizes so the longest side is exactly
     // maxLongSide. Format-converts to JPEG to avoid any PNG/HEIC parsing
     // overhead downstream (Claude accepts JPEG just fine for vision).
-    await execAsync(`sips -Z ${maxLongSide} -s format jpeg "${srcPath}" --out "${tempFile}"`);
+    await execFileAsync(SIPS, ['-Z', String(maxLongSide), '-s', 'format', 'jpeg', srcPath, '--out', tempFile]);
     return tempFile;
   } catch {
     try { await fs.promises.unlink(tempFile); } catch { /* not created */ }

@@ -1,7 +1,7 @@
 import React from 'react';
 import { useViewport } from '@xyflow/react';
 
-const GAP        = 48;   // must match Canvas.jsx
+const GAP        = 48;   // visual dot/line-grid spacing (flow units). Decorative only — intentionally independent of Canvas's snapGrid (40px); they need not coincide.
 const DOT_RADIUS = 2.5;  // screen-space px (before zoom correction)
 
 /**

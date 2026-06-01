@@ -69,9 +69,8 @@ const PRESSURE_PER_THROTTLE = 0.5;
 const PRESSURE_DECAY_PER_OK = 0.5;
 const MAX_PRESSURE          = MAX_CONCURRENT_SEED - MIN_CONCURRENT; // can't shrink below the floor
 
-// ── Escalation (Tier 4) — outcome-aware rolling window ────────────────────────
-const ESCALATION_THRESHOLD = 3;  // bad outcomes (block/throttle/error) out of …
-const HISTORY_WINDOW       = 10; // … the last N attempts → recommend escalation
+// ── Outcome-aware rolling window ──────────────────────────────────────────────
+const HISTORY_WINDOW       = 10; // per-domain outcome history is capped to the last N attempts
 
 // ── State (in-memory, per session) ────────────────────────────────────────────
 const tighten     = new Map(); // canonicalDomain -> multiplier (≥1)
@@ -180,27 +179,6 @@ export function recordOutcome(domain, outcome) {
 }
 
 /**
- * Health status for a domain — used by the IPC layer to decide Tier 4 escalation.
- * Accepts either 'glassdoor' or 'glassdoor.com'.
- * @returns {{ attempts:number, failures:number, successRate:number, tighten:number, shouldEscalate:boolean }}
- */
-export function getDomainHealth(domain) {
-  const normalized = domain.includes('.') ? domain : `${domain}.com`;
-  const key = getCanonicalDomain(normalized);
-  const h = history.get(key) || [];
-  if (h.length === 0) {
-    return { attempts: 0, failures: 0, successRate: 1, tighten: 1, shouldEscalate: false };
-  }
-  const failures = h.filter(o => o !== 'ok').length;
-  return {
-    attempts: h.length,
-    failures,
-    successRate: Math.round(((h.length - failures) / h.length) * 100) / 100,
-    tighten: Math.round((tighten.get(key) || 1) * 10) / 10,
-    shouldEscalate: failures >= ESCALATION_THRESHOLD,
-  };
-}
-
 /** Diagnostic snapshot for bug reports / debugging. */
 export function getRateLimiterSnapshot() {
   const domains = {};

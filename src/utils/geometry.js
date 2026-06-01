@@ -1,5 +1,16 @@
 import { generateId } from './idGenerator.js';
 
+/**
+ * Normalize a drawing stroke to its points array. Strokes are stored as
+ * `{ points, color }` objects, but legacy data can be a bare points array —
+ * this returns the points either way (or `[]` if neither). Shared by every
+ * renderer/measurer that iterates stroke points (mini-map, thumbnail, fit-view).
+ */
+export function strokePoints(stroke) {
+  if (Array.isArray(stroke)) return stroke;
+  return Array.isArray(stroke?.points) ? stroke.points : [];
+}
+
 export function sqr(x) { return x * x; }
 
 export function dist2(v, w) { return sqr(v.x - w.x) + sqr(v.y - w.y); }
@@ -44,8 +55,8 @@ export function segmentCircleIntersections(a, b, C, R) {
  * Returns an array of sub-strokes (each is { ...stroke, points: [...] }).
  */
 export function pixelEraseStroke(stroke, C, R, halfStroke = 0) {
-  const pts = Array.isArray(stroke) ? stroke : stroke.points;
-  if (!pts || pts.length < 2) return [stroke];
+  const pts = strokePoints(stroke);
+  if (pts.length < 2) return [stroke];
 
   const result  = [];
   let current   = [];   // points accumulating outside the circle

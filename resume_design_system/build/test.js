@@ -173,7 +173,7 @@ async function run() {
   await expectThrow(function () { return addOcgBackground(customOut, { layerName: 'Other layer' }); },
     'guard fires when re-adding the same-named layer', /already has an OCG/);
   var passedThrough = false;
-  try { await addOcgBackground(customOut); passedThrough = true; } catch (e) { /* ignore */ }
+  try { await addOcgBackground(customOut); passedThrough = true; } catch { /* ignore */ }
   assert(passedThrough, 'PDF with unrelated OCGs (different layer name) does NOT trigger the guard');
 
   header('Custom cream colour');

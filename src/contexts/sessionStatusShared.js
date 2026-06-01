@@ -1,3 +1,3 @@
 import { createContext } from 'react';
 
-export const SessionStatusContext = createContext({ statuses: {}, verifying: new Set() });
+export const SessionStatusContext = createContext({ verifying: new Set() });

@@ -129,22 +129,25 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
     if (isAnimatingRef?.current) return;
     if (resizeDragActiveRef.current.has(node.id) || titleZoneDragActiveRef.current.has(node.id)) return;
 
-    const dragSet = (() => {
-      const currentNodes = getNodes ? getNodes() : [node];
-      const selected = currentNodes.filter(n => n.id === node.id || n.selected);
-      return selected.length > 0 ? selected : [node];
-    })();
-    
     if (getIntersectingNodes && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'sellhub') {
       const intersections = getIntersectingNodes(node);
       const targetGroup = intersections.find(n => n.type === 'group' && !n.data?.locked);
       const newTargetId = targetGroup ? targetGroup.id : null;
-      
+
       if (targetGroupIdRef.current !== newTargetId) {
         if (targetGroupIdRef.current) updateNodeData(targetGroupIdRef.current, { isDropTarget: false });
         if (newTargetId) updateNodeData(newTargetId, { isDropTarget: true });
         targetGroupIdRef.current = newTargetId;
       }
+
+      // Only the hub-drop path needs the selected-node set; compute it here so a
+      // drag of a group/hub (which returns above) doesn't pay getNodes()+filter
+      // over the whole canvas on every pointer-move frame.
+      const dragSet = (() => {
+        const currentNodes = getNodes ? getNodes() : [node];
+        const selected = currentNodes.filter(n => n.id === node.id || n.selected);
+        return selected.length > 0 ? selected : [node];
+      })();
 
       const targetHub = findHubDropTarget(dragSet, getIntersectingNodes);
       const newHubId = targetHub?.id || null;

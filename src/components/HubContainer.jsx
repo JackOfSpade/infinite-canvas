@@ -11,7 +11,6 @@ export function HubContainer({
   dropsBlocked = false,
   verifyProgress = null, // { done: number, total: number } — drives the progress bar while dropsBlocked
   dragHover = null, // { kind: 'accept' | 'reject', label: string } — canvas-node drag feedback
-  extras,
   children
 }) {
   const isProcessing = !['empty', 'done', 'priced', 'error'].includes(hubState);
@@ -150,7 +149,6 @@ export function HubContainer({
         )}
         {children}
       </div>
-      {extras}
     </div>
   );
 }

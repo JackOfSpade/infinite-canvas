@@ -118,10 +118,10 @@ class EventLoggerSingleton {
   }
 
   // ── Component state registry ───────────────────────────────────────────────
-  // CanvasNode instances call registerNodeState on every render so the bug
-  // report can snapshot "what was each node's React state at the moment the
-  // user clicked Generate Report" — e.g. isEditing, isResizing, edgeCursorStyle.
-  // This catches things the JSON application state (Zustand) doesn't expose.
+  // CanvasNode / SellHubNode re-register via an effect whenever the snapshotted
+  // fields change, so the bug report can capture "what was each node's React
+  // state at the moment the user clicked Generate Report" — e.g. isEditing,
+  // isResizing, edgeCursorStyle. Catches things the JSON application state doesn't expose.
 
   registerNodeState(id, state) {
     this._nodeStates.set(id, state);

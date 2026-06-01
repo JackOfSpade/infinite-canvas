@@ -1,6 +1,6 @@
 import React from 'react';
 
-export const DashboardTab = React.memo(function DashboardTab({ jobCards, appliedJobs, sellHubs, totalValue }) {
+export const DashboardTab = React.memo(function DashboardTab({ jobCardsCount, sellHubsCount, totalValue }) {
   return (
     <>
       <div className="px-4 py-3 border-b border-white/5">
@@ -11,15 +11,9 @@ export const DashboardTab = React.memo(function DashboardTab({ jobCards, applied
         {/* Jobs stats */}
         <div className="space-y-2">
           <div className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">Jobs</div>
-          <div className="grid grid-cols-2 gap-2">
-            <div className="bg-black/20 rounded-lg p-2.5 text-center">
-              <div className="text-blue-400 text-lg font-bold">{jobCards.length}</div>
-              <div className="text-white/30 text-[10px]">Matches</div>
-            </div>
-            <div className="bg-black/20 rounded-lg p-2.5 text-center">
-              <div className="text-emerald-400 text-lg font-bold">{appliedJobs.length}</div>
-              <div className="text-white/30 text-[10px]">Applied</div>
-            </div>
+          <div className="bg-black/20 rounded-lg p-2.5 text-center">
+            <div className="text-blue-400 text-lg font-bold">{jobCardsCount}</div>
+            <div className="text-white/30 text-[10px]">Matches</div>
           </div>
         </div>
 
@@ -28,7 +22,7 @@ export const DashboardTab = React.memo(function DashboardTab({ jobCards, applied
           <div className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">Marketplace</div>
           <div className="grid grid-cols-2 gap-2">
             <div className="bg-black/20 rounded-lg p-2.5 text-center">
-              <div className="text-amber-400 text-lg font-bold">{sellHubs.length}</div>
+              <div className="text-amber-400 text-lg font-bold">{sellHubsCount}</div>
               <div className="text-white/30 text-[10px]">Listings</div>
             </div>
             <div className="bg-black/20 rounded-lg p-2.5 text-center">

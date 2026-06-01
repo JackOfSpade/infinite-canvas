@@ -1,7 +1,7 @@
 import { useCallback } from 'react';
 import { addEdge, useReactFlow } from '@xyflow/react';
 import { setupDragGhost, setupCanvasDragGhost } from '../utils/dragUtils';
-import { EDGE_STYLE, getNodeDims } from '../utils/constants';
+import { EDGE_STYLE, getNodesBounds } from '../utils/constants';
 import { cloneNode, reassignCanvasDataIDs } from '../utils/nodeFactory';
 import { EventLogger } from '../utils/EventLogger';
 import { generateId } from '../utils/idGenerator';
@@ -92,14 +92,7 @@ export function useCanvasActions({
     // Find intersecting drawings perfectly bounded by the copied nodes selection box
     let drawingsToCopy = [];
     if (drawings && drawings.length > 0) {
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      nodesToCopy.forEach(n => {
-        const d = getNodeDims(n);
-        minX = Math.min(minX, n.position.x);
-        maxX = Math.max(maxX, n.position.x + d.w);
-        minY = Math.min(minY, n.position.y);
-        maxY = Math.max(maxY, n.position.y + d.h);
-      });
+      const { minX, maxX, minY, maxY } = getNodesBounds(nodesToCopy);
       drawingsToCopy = drawings.filter(d =>
         d.points.some(p => p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY)
       );
@@ -153,14 +146,7 @@ export function useCanvasActions({
     const centerY = -vpy / zoom + flowHeight / 2;
 
     // Compute bounding box of copied cluster to find its local center
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    clipboardData.nodes.forEach(n => {
-      const d = getNodeDims(n);
-      minX = Math.min(minX, n.position.x);
-      maxX = Math.max(maxX, n.position.x + d.w);
-      minY = Math.min(minY, n.position.y);
-      maxY = Math.max(maxY, n.position.y + d.h);
-    });
+    const { minX, maxX, minY, maxY } = getNodesBounds(clipboardData.nodes);
     const clusterCenterX = (minX + maxX) / 2;
     const clusterCenterY = (minY + maxY) / 2;
 

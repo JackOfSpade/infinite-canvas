@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useReactFlow } from '@xyflow/react';
-import { getNodeDims } from '../utils/constants';
+import { getNodesBounds } from '../utils/constants';
+import { strokePoints } from '../utils/geometry';
 
 export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingRef) {
   const { setViewport } = useReactFlow();
@@ -18,25 +19,15 @@ export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingR
     const currentNodes    = nodesRef.current;
     const currentDrawings = drawingsRef.current;
 
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-
-    currentNodes.forEach(n => {
-      const { w, h } = getNodeDims(n);
-      minX = Math.min(minX, n.position.x);
-      minY = Math.min(minY, n.position.y);
-      maxX = Math.max(maxX, n.position.x + w);
-      maxY = Math.max(maxY, n.position.y + h);
-    });
+    let { minX, minY, maxX, maxY } = getNodesBounds(currentNodes);
 
     currentDrawings.forEach(stroke => {
-      // Drawings are stored as { points, color } objects; handle legacy bare arrays defensively
-      const pts = Array.isArray(stroke) ? stroke : stroke.points || [];
-      pts.forEach(p => {
+      for (const p of strokePoints(stroke)) {
         minX = Math.min(minX, p.x);
         minY = Math.min(minY, p.y);
         maxX = Math.max(maxX, p.x);
         maxY = Math.max(maxY, p.y);
-      });
+      }
     });
 
     if (minX === Infinity) return;

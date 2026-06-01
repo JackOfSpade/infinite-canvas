@@ -49,6 +49,10 @@ function ShortcutRow({ id, binding, onSave, isCapturing, onStartCapture, onCance
     const handler = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      // Escape (and Tab) cancel capture rather than being bound as the shortcut.
+      // This capture-phase listener stopPropagation()s, so the panel-level Escape
+      // handler never sees the event — cancel must happen here.
+      if (e.key === 'Escape' || e.key === 'Tab') { onCancelCapture(); return; }
       // Ignore bare modifier presses
       if (['Meta', 'Control', 'Alt', 'Shift'].includes(e.key)) return;
       onSave(id, {
@@ -61,7 +65,7 @@ function ShortcutRow({ id, binding, onSave, isCapturing, onStartCapture, onCance
     };
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
-  }, [isCapturing, id, label, onSave]);
+  }, [isCapturing, id, label, onSave, onCancelCapture]);
 
   return (
     <div className="flex items-center justify-between py-1.5">

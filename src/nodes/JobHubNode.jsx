@@ -30,6 +30,8 @@ import {
   parseSalaryToNumeric,
   normalizeBands,
   normalizeRanges,
+  placeBand,
+  placeRange,
   LIKELY_THRESHOLD,
   COL_X,
   ROLE_VISIBLE_DEFAULT,
@@ -253,7 +255,7 @@ export function JobHubNode({ id, data }) {
     return all[0] || '';
   }, [data.queries]);
 
-  const appendJobsToDoneCanvas = useCallback(({ scoredJobs, filteredWarnings }) => {
+  const appendJobsToDoneCanvas = useCallback(({ scoredJobs, filteredWarnings, gatheredDelta = 0 }) => {
     const currentId = id;
     const existingNodes = getNodes();
     const existingEdges = getEdges();
@@ -283,8 +285,6 @@ export function JobHubNode({ id, data }) {
     const taxonomy = data.jobTaxonomy || {};
     const bandDefs = normalizeBands(taxonomy.likelihoodBands);
     const { real: realRanges, unspecified } = normalizeRanges(taxonomy.salaryRanges);
-    const placeBandDef = (score) => { const s = typeof score === 'number' ? score : 0; for (const b of bandDefs) if (s >= b.minScore) return b; return bandDefs[bandDefs.length - 1]; };
-    const placeRangeDef = (sal) => { if (!(sal > 0)) return unspecified; for (const r of realRanges) if (sal >= r.minSalary) return r; return unspecified; };
 
     // Applied to EXISTING nodes via setNodes after the loop; NEW nodes are
     // mutated in place (they're added fresh).
@@ -329,9 +329,12 @@ export function JobHubNode({ id, data }) {
       // 1) Likelihood band (by score) — a root group under the hub.
       const hubChildIds = getConnectedChildIds(currentId);
       const bandPool = [...existingNodes, ...newNodes].filter(n => n.type === 'jobgroup' && n.data?.kind === 'likelihood' && hubChildIds.includes(n.id));
-      const bandDef = placeBandDef(score);
-      let bandNode = bandPool.find(n => score >= (n.data?.minScore ?? 0) && score <= (n.data?.maxScore ?? 100))
-        || bandPool.find(n => norm(n.data?.label) === norm(bandDef.label));
+      const bandDef = placeBand(score, bandDefs);
+      // Match an existing band purely by the label placeBand assigns — identical
+      // to how the initial spawn buckets jobs (buildJobTreeNodes). The earlier
+      // `score <= maxScore` range probe could pick a different band than placeBand
+      // when AI bands don't perfectly tile, spawning a duplicate band node.
+      let bandNode = bandPool.find(n => norm(n.data?.label) === norm(bandDef.label));
       if (!bandNode) {
         bandNode = makeGroup('likelihood', bandDef.label, COL_X.likelihood, { minScore: bandDef.minScore, maxScore: bandDef.maxScore }, false);
         bandNode.position.y = originalPos.y + (100 - (bandDef.minScore || 0)); // order new bands by score
@@ -340,7 +343,7 @@ export function JobHubNode({ id, data }) {
       const bandExp = !!bandNode.data.expanded;
 
       // 2) Salary range (by parsed salary) under the band.
-      const rangeDef = placeRangeDef(sal);
+      const rangeDef = placeRange(sal, realRanges, unspecified);
       const bandRangeIds = getConnectedChildIds(bandNode.id);
       const rangePool = [...existingNodes, ...newNodes].filter(n => n.type === 'jobgroup' && n.data?.kind === 'salary' && bandRangeIds.includes(n.id));
       let rangeNode = rangePool.find(n => norm(n.data?.label) === norm(rangeDef.label));
@@ -448,12 +451,16 @@ export function JobHubNode({ id, data }) {
       totalScoredCount: (data.totalScoredCount || 0) + scoredJobs.length,
       targetCount: (data.targetCount || 0) + targetDelta,
       otherCount: (data.otherCount || 0) + otherDelta,
+      // Keep the "scraped → kept" funnel in sync after a background append,
+      // otherwise the headline match count grows while the funnel stays stale.
+      gatheredCount: (data.gatheredCount || 0) + gatheredDelta,
+      scrapedCount: (data.scrapedCount || 0) + scoredJobs.length,
       finalSourceCounts,
       scoreRangeMin,
       scoreRangeMax,
       scrapeWarnings: filteredWarnings,
     });
-  }, [id, data.targetRole, data.finalSourceCounts, data.resultCount, data.totalScoredCount, data.targetCount, data.otherCount, data.scoreRangeMin, data.scoreRangeMax, data.strongMatchGate, data.jobTaxonomy, data.resumeProfile, getNodes, getEdges, getNode, setNodes, addElementsGlobally, addNodes, addEdges, updateGlobal]);
+  }, [id, data.targetRole, data.finalSourceCounts, data.resultCount, data.totalScoredCount, data.targetCount, data.otherCount, data.gatheredCount, data.scrapedCount, data.scoreRangeMin, data.scoreRangeMax, data.strongMatchGate, data.jobTaxonomy, data.resumeProfile, getNodes, getEdges, getNode, setNodes, addElementsGlobally, addNodes, addEdges, updateGlobal]);
 
   const triggerUSAJobsBackgroundSearch = useCallback(async () => {
     if (processingRef.current) return;
@@ -556,6 +563,7 @@ export function JobHubNode({ id, data }) {
           appendJobsToDoneCanvas({
             scoredJobs: scoreResult.scoredJobs,
             filteredWarnings,
+            gatheredDelta: freshJobs.length,
           });
         } else {
           updateGlobal(currentId, {

@@ -59,12 +59,12 @@ const STEPS = [
   {
     id: 'ai-powered',
     title: 'AI Does the Heavy Lifting',
-    subtitle: 'Powered by Gemini',
+    subtitle: 'Powered by Claude',
     content: (
       <div className="flex flex-col items-center gap-3">
         <div className="grid grid-cols-2 gap-3 w-full max-w-xs">
           {[
-            { icon: '🔍', label: 'Multi-source search', desc: '12 job boards at once' },
+            { icon: '🔍', label: 'Multi-source search', desc: `${ACTIVE_JOB_SOURCES.length} job boards at once` },
             { icon: '🎯', label: 'Smart scoring', desc: 'AI ranks every match' },
             { icon: '💰', label: 'Price research', desc: 'eBay, Amazon, Mercari' },
             { icon: '✉️', label: 'Cover letters', desc: 'One-click generation' },

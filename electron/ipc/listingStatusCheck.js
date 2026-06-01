@@ -406,7 +406,7 @@ export async function classifyOneUrl({
   }
 
   // Strip + window. If the identifier matched, we send only the ±2k slice
-  // around it; otherwise the head of the page up to 50k chars.
+  // around it; otherwise the head of the page up to maxFullChars (8000).
   const stripped = stripHtmlForAnalysis(r.html);
   const { window: snippet, matched } = findIdentifierWindow(stripped, listingIdentifier);
   const matchHint = matched

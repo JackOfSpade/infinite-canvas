@@ -109,6 +109,25 @@ function requestSaveAndWait(win) {
 }
 
 /**
+ * Show the standard "unsaved changes" warning and map the user's choice to a
+ * verb. `verbButton` is the middle-button suffix ("Quit"/"Close"/"Proceed");
+ * `verbPhrase` is the in-sentence action ("quit" / "close this window" / …).
+ * Returns 'save' | 'proceed' | 'cancel'. Shared by the window-close handshake
+ * and the renderer-initiated 'prompt-unsaved-changes' IPC so both read identically.
+ */
+function showUnsavedChangesDialog(win, verbButton, verbPhrase) {
+  const choice = electronPkg.dialog.showMessageBoxSync(win, {
+    type: 'warning',
+    buttons: ['Save', `${verbButton} Without Saving`, 'Cancel'],
+    defaultId: 0,
+    cancelId: 2,
+    title: 'Unsaved Changes',
+    message: `You have unsaved changes. Do you want to save before you ${verbPhrase}? Your unsaved work will be lost otherwise.`,
+  });
+  return choice === 0 ? 'save' : choice === 1 ? 'proceed' : 'cancel';
+}
+
+/**
  * Perform a handshake with the renderer to check for unsaved changes.
  * Fixes a listener leak where a timeout previously left a dangling ipcMain.once listener.
  */
@@ -135,23 +154,11 @@ async function checkUnsavedChanges(win, actionType = 'close') {
   });
 
   if (rendererState.hasUnsavedChanges) {
-    const actionStr = actionType === 'quit' ? 'Quit' : 'Close';
-    const msgStr = actionType === 'quit' ? 'quit' : 'close this window';
-    
-    const choice = electronPkg.dialog.showMessageBoxSync(win, {
-      type: 'warning',
-      buttons: ['Save', `${actionStr} Without Saving`, 'Cancel'],
-      defaultId: 0,
-      cancelId: 2,
-      title: 'Unsaved Changes',
-      message: `You have unsaved changes. Do you want to save before you ${msgStr}? Your unsaved work will be lost otherwise.`
-    });
-    
-    if (choice === 0) return { action: 'save' };
-    if (choice === 1) return { action: 'proceed' };
-    return { action: 'cancel' };
+    const verbButton = actionType === 'quit' ? 'Quit' : 'Close';
+    const verbPhrase = actionType === 'quit' ? 'quit' : 'close this window';
+    return { action: showUnsavedChangesDialog(win, verbButton, verbPhrase) };
   }
-  
+
   return { action: 'proceed' };
 }
 
@@ -556,9 +563,6 @@ if (!gotTheLock) {
       }
     });
 
-    // (Legacy startup cleanup removed: cleanupTempFiles is now triggered dynamically 
-    // when saving/loading workspaces to ensure we target the correct local directories).
-
     registerFilesystemHandlers();
     registerJobsHandlers();
     registerJobApplicationHandlers();
@@ -572,18 +576,7 @@ if (!gotTheLock) {
 
     electronPkg.ipcMain.handle('prompt-unsaved-changes', async (event, actionName) => {
       const win = BrowserWindow.fromWebContents(event.sender);
-      const msgStr = actionName || 'proceed';
-      const choice = electronPkg.dialog.showMessageBoxSync(win, {
-        type: 'warning',
-        buttons: ['Save', `Proceed Without Saving`, 'Cancel'],
-        defaultId: 0,
-        cancelId: 2,
-        title: 'Unsaved Changes',
-        message: `You have unsaved changes. Do you want to save before you ${msgStr}? Your unsaved work will be lost otherwise.`
-      });
-      if (choice === 0) return 'save';
-      if (choice === 1) return 'proceed';
-      return 'cancel';
+      return showUnsavedChangesDialog(win, 'Proceed', actionName || 'proceed');
     });
 
     // The renderer reports which canvas file each window currently has open so

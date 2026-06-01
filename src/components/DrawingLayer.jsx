@@ -1,5 +1,6 @@
 import React, { useState, useImperativeHandle, useRef, forwardRef } from 'react';
 import { useStore } from '@xyflow/react';
+import { strokePoints } from '../utils/geometry';
 
 const vpTransformSelector = (s) => s.transform;
 
@@ -13,8 +14,8 @@ const ViewportG = React.memo(({ children }) => {
 });
 
 const DrawingStroke = React.memo(({ stroke }) => {
-  const points = Array.isArray(stroke) ? stroke : stroke?.points;
-  if (!Array.isArray(points) || points.length < 2) return null;
+  const points = strokePoints(stroke);
+  if (points.length < 2) return null;
   const color     = stroke?.color   || 'white';
   const thickness = stroke?.penSize ?? 3;
   return (

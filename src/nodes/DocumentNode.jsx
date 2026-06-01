@@ -268,8 +268,37 @@ const AudioPlayer = React.memo(function AudioPlayer({ mediaRef, src, themeText, 
 
 // ── Text / Markdown Preview ─────────────────────────
 
-// Configure marked for safe rendering.
-marked.setOptions({ breaks: true, gfm: true });
+// Sanitizing marked config. The preview renders user-droppable .md files via
+// dangerouslySetInnerHTML, and marked does NOT sanitize — so a file containing
+// `<img onerror=…>`, `<script>`, or a `javascript:` link could run code in the
+// renderer (which can reach the exposed electronAPI). We harden at the source:
+//  • drop raw HTML entirely (GitHub-style safe default for untrusted markdown),
+//  • neutralize link/image hrefs that aren't an allowed scheme.
+// This needs no extra dependency and keeps real markdown (tables, lists, emphasis,
+// http(s)/local-file links and images) rendering unchanged.
+const SAFE_URI_SCHEME = /^(https?:|mailto:|tel:|local-file:|#|\/|\.)/i;
+const safeHref = (href) => {
+  const h = String(href || '').trim();
+  return SAFE_URI_SCHEME.test(h) ? h : '';
+};
+marked.use({
+  breaks: true,
+  gfm: true,
+  renderer: {
+    html() { return ''; },  // never pass raw HTML through
+    link(token) {
+      const href = safeHref(token.href);
+      const text = this.parser.parseInline(token.tokens);
+      if (!href) return text;  // unsafe scheme → render the link text only
+      return `<a href="${href}"${token.title ? ` title="${token.title}"` : ''}>${text}</a>`;
+    },
+    image(token) {
+      const href = safeHref(token.href);
+      if (!href) return token.text || '';
+      return `<img src="${href}" alt="${token.text || ''}"${token.title ? ` title="${token.title}"` : ''}>`;
+    },
+  },
+});
 
 
 // Absolute-positioned save-status dot. Rendered with fixed dimensions in every state

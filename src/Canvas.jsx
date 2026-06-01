@@ -29,6 +29,7 @@ import {CustomizeDialog} from './components/CustomizeDialog';
 
 import { createTextNode } from './utils/nodeFactory';
 import { Sidebar } from './components/Sidebar';
+import { getStats } from './utils/dashboardStats';
 import { ContextMenu } from './components/ContextMenu';
 import { CanvasToolbar } from './components/CanvasToolbar';
 import { CanvasCursors } from './components/CanvasCursors';
@@ -646,9 +647,18 @@ export function Canvas() {
     };
   }, [customizeTargetIds, nodes]);
 
+  // Dashboard stats: computed once per node change here so <Sidebar> can be a
+  // plain shallow-memo on primitive counts (no per-frame rescans in a comparator).
+  const sidebarStats = useMemo(() => getStats(nodes), [nodes]);
+
   return (
     <div className="w-screen h-screen bg-neutral-950 flex" ref={reactFlowWrapper}>
-      <Sidebar nodes={nodes} onReportBugClick={handleReportBugClick} />
+      <Sidebar
+        jobCardsCount={sidebarStats.jobCardsCount}
+        sellHubsCount={sidebarStats.sellHubsCount}
+        totalValue={sidebarStats.totalValue}
+        onReportBugClick={handleReportBugClick}
+      />
 
       <div
         className="flex-1 h-full relative"

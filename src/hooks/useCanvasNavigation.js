@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
-import { getNodeDims } from '../utils/constants';
+import { getNodeDims, getNodesBounds } from '../utils/constants';
 
 import { safeClone, syncStackUpward, getCanvasData, deepUpdateNode, deepAddElements } from '../utils/navigationUtils';
 import { EventLogger } from '../utils/EventLogger';
@@ -266,14 +266,7 @@ export function useCanvasNavigation({
       const parentContainer = targetParent.nodes.find(n => n.id === targetParent.nodeId);
       
       // Compute bounding box of extracted nodes to preserve relative layout
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      nodesToExtract.forEach(n => {
-        const dims = getNodeDims(n);
-        minX = Math.min(minX, n.position.x);
-        maxX = Math.max(maxX, n.position.x + dims.w);
-        minY = Math.min(minY, n.position.y);
-        maxY = Math.max(maxY, n.position.y + dims.h);
-      });
+      const { minX, maxX, minY, maxY } = getNodesBounds(nodesToExtract);
       const clusterWidth  = Math.max(0, maxX - minX);
       const clusterHeight = Math.max(0, maxY - minY);
       

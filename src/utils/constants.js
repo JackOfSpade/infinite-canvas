@@ -23,7 +23,7 @@ export const SELL_PLATFORMS = [
 
 export const SELL_PLATFORM_BY_ID = Object.fromEntries(SELL_PLATFORMS.map(platform => [platform.id, platform]));
 
-/** Job search sources — 10 platforms.
+/** Job search sources.
  *  `color` is sampled from the live favicon so card outlines match. */
 export const JOB_SOURCES = [
   { id: 'google',         name: 'Google for Jobs', letter: 'GJ', color: '#4285f4', domain: 'google.com' },
@@ -98,4 +98,22 @@ export function getNodeDims(node) {
     w: node.width  || node.measured?.width  || node.style?.width  || NODE_DIMS[node.type]?.w || 120,
     h: node.height || node.measured?.height || node.style?.height || NODE_DIMS[node.type]?.h || 40,
   };
+}
+
+/**
+ * Axis-aligned bounding box of a node set, using each node's estimated dims.
+ * Pure. For an empty set returns Infinity/-Infinity bounds, so callers that may
+ * pass an empty array should guard (every current caller has ≥1 node).
+ * @returns {{ minX: number, minY: number, maxX: number, maxY: number }}
+ */
+export function getNodesBounds(nodes) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of nodes) {
+    const { w, h } = getNodeDims(n);
+    minX = Math.min(minX, n.position.x);
+    minY = Math.min(minY, n.position.y);
+    maxX = Math.max(maxX, n.position.x + w);
+    maxY = Math.max(maxY, n.position.y + h);
+  }
+  return { minX, minY, maxX, maxY };
 }

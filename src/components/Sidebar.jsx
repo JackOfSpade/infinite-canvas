@@ -8,30 +8,9 @@ import { DashboardTab } from './sidebar/DashboardTab';
 /**
  * Sidebar — three-tab sliding panel.
  * Jobs + Sell tabs show draggable module items (drag to canvas to create hub nodes).
- * Dashboard tab shows aggregate stats from canvas nodes.
- *
- * Props:
- *   nodes — current canvas nodes (for dashboard stats)
+ * Dashboard tab shows aggregate stats (passed in as primitives — see getStats).
  */
-// Helper to compute stats cleanly
-function getStats(nodes) {
-  let jobCardsCount = 0, sellHubsCount = 0, appliedJobsCount = 0, totalValue = 0;
-  for (let i = 0; i < nodes.length; i++) {
-    const n = nodes[i];
-    if (n.type === 'jobcard') {
-      jobCardsCount++;
-      if (n.data?.status === 'Applied') appliedJobsCount++;
-    } else if (n.type === 'sellhub') {
-      sellHubsCount++;
-      if (n.data?.hubState === 'priced') {
-        totalValue += parseFloat(n.data?.userPrice) || 0;
-      }
-    }
-  }
-  return { jobCardsCount, sellHubsCount, appliedJobsCount, totalValue };
-}
-
-export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClick }) {
+export const Sidebar = React.memo(function Sidebar({ jobCardsCount = 0, sellHubsCount = 0, totalValue = 0, onReportBugClick }) {
   const [collapsed, setCollapsed] = useState(true);
   const [activeTab, setActiveTab] = useState('jobs');
   const sidebarRef = useRef(null);
@@ -66,8 +45,6 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
     document.addEventListener('pointerdown', handleDocumentPointerDown, { capture: true });
     return () => document.removeEventListener('pointerdown', handleDocumentPointerDown, { capture: true });
   }, [collapsed]);
-
-  const { jobCardsCount, sellHubsCount, appliedJobsCount, totalValue } = React.useMemo(() => getStats(nodes), [nodes]);
 
   const tabs = [
     { id: 'sell', icon: Store, label: 'Sell' },
@@ -127,11 +104,10 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
           {activeTab === 'jobs' && <JobsTab handleModuleDragStart={handleModuleDragStart} />}
           {activeTab === 'sell' && <SellTab handleModuleDragStart={handleModuleDragStart} />}
           {activeTab === 'dashboard' && (
-            <DashboardTab 
-              jobCards={{ length: jobCardsCount }} 
-              appliedJobs={{ length: appliedJobsCount }} 
-              sellHubs={{ length: sellHubsCount }} 
-              totalValue={totalValue} 
+            <DashboardTab
+              jobCardsCount={jobCardsCount}
+              sellHubsCount={sellHubsCount}
+              totalValue={totalValue}
             />
           )}
 
@@ -139,15 +115,4 @@ export const Sidebar = React.memo(function Sidebar({ nodes = [], onReportBugClic
       </div>
     </div>
   );
-}, (prev, next) => {
-  if (prev.onReportBugClick !== next.onReportBugClick) return false;
-  if (prev.nodes === next.nodes) return true;
-  
-  const pStats = getStats(prev.nodes);
-  const nStats = getStats(next.nodes);
-  
-  return pStats.jobCardsCount === nStats.jobCardsCount &&
-         pStats.appliedJobsCount === nStats.appliedJobsCount &&
-         pStats.sellHubsCount === nStats.sellHubsCount &&
-         pStats.totalValue === nStats.totalValue;
 });

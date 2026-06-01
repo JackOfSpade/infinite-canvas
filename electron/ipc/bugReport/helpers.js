@@ -110,3 +110,61 @@ export const overPricedSoldFlag = (recommendedPrice, soldKeptStats, activeKeptSt
   const med = soldKeptStats?.median;
   return `Recommended $${recP} is ABOVE the highest actual sold comp ($${soldMax}) by $${over} (${pct}%) — nothing sold that high, so for a quick sale it is likely over-priced (common when a weak fallback model anchors aggressively).${med != null ? ` Median sold was $${med}.` : ''}`;
 };
+
+// ── Session snapshot rendering ────────────────────────────────────────────────
+// The Marketplace-Sessions and Job-Platform-Sessions report sections render the
+// SAME table + per-platform verify trace from the SAME session cache, differing
+// only in platform list and heading text. These two helpers own that rendering
+// so the two sections can't drift (a new trace field is added in one place).
+
+/** Markdown table rows for a platform list against the session cache. */
+export const renderSessionRows = (platforms, cache) => platforms.map(p => {
+  const entry = cache[p.id];
+  const traceStatus = entry?.lastTrace?.status;
+  const staleMismatch = entry?.connected && traceStatus != null && traceStatus >= 400;
+  const mustContain = p.connectedFinalUrlMustContain;
+  const traceFinalUrl = (entry?.lastTrace?.finalUrl || '').toLowerCase();
+  const redirectMismatch = !staleMismatch && entry?.connected && mustContain && !traceFinalUrl.includes(mustContain.toLowerCase());
+  const connected = entry?.connected
+    ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)`
+      : redirectMismatch ? `⚠️ true (redirected to ${entry.lastTrace.finalUrl} — expected path containing "${mustContain}")`
+        : '✅ true')
+    : entry ? '❌ false' : '— (no entry)';
+  const lastConfirmed = entry?.ts
+    ? `${new Date(entry.ts).toISOString()} (${Math.round((Date.now() - entry.ts) / 1000)}s ago)`
+    : '—';
+  const reason = entry?.lastReason ? entry.lastReason.replace(/\|/g, '\\|') : '—';
+  return `| \`${p.id}\` | ${p.name} | ${connected} | ${lastConfirmed} | ${reason} |`;
+}).join('\n');
+
+/** Per-platform verify-trace blocks (only platforms with a recorded trace). */
+export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p => {
+  const t = cache[p.id]?.lastTrace;
+  if (!t) return '';
+  const lines = [
+    `**${p.name}** (\`${p.id}\`):`,
+    `  - target: \`${t.target || '—'}\``,
+    t.finalUrl != null ? `  - finalUrl: \`${t.finalUrl}\`` : null,
+    t.status != null ? `  - HTTP status: \`${t.status}\`` : null,
+    t.htmlBytes != null ? `  - htmlBytes: \`${t.htmlBytes}\`` : null,
+    t.softWallMatch ? `  - softWallMatch: \`${t.softWallMatch}\`` : null,
+    t.error ? `  - error: \`${t.error}\`` : null,
+    t.bodyHead ? `  - bodyHead: \`${t.bodyHead.replace(/`/g, "'").slice(0, 240)}\`` : null,
+  ].filter(Boolean);
+  if (Array.isArray(t.checks) && t.checks.length > 0) {
+    lines.push('  - checks:');
+    for (const check of t.checks) {
+      const parts = [
+        check.target || '—',
+        check.status != null ? `HTTP ${check.status}` : null,
+        check.finalUrl || null,
+        check.softWallMatch ? `softWall=${check.softWallMatch}` : null,
+        check.antiBot ? `antiBot=${check.antiBot}` : null,
+        check.sessionCookieCount != null ? `cookies=${check.sessionCookieCount}` : null,
+        check.error ? `error=${check.error}` : null,
+      ].filter(Boolean);
+      lines.push(`    - ${parts.join(' | ').replace(/`/g, "'").slice(0, 320)}`);
+    }
+  }
+  return lines.join('\n');
+}).filter(Boolean).join('\n\n');

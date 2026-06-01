@@ -37,7 +37,7 @@ const OTHER_FILL_MIN   = 5;
 // Column x-offsets per tree level + row heights. One layout: likelihood is
 // always the first level (no target-role branch column).
 export const COL_X = { likelihood: 400, salary: 700, role: 1000, job: 1400 };
-export const ROW_H = { group: 70, job: 280 };
+const ROW_H = { group: 70, job: 280 }; // module-local: only used within this file
 
 // Vertical gap kept below an EXPANDED job card (one whose measured height exceeds
 // the fixed ROW_H.job). Collapsed/normal cards keep the original ROW_H.job
@@ -157,15 +157,17 @@ export function normalizeRanges(ranges) {
   return { real, unspecified };
 }
 
-/** Band a score lands in (first whose minScore it meets, in high→low order). */
-function placeBand(score, bands) {
+/** Band a score lands in (first whose minScore it meets, in high→low order).
+ *  Exported so the JobHubNode append path places appended cards on the exact
+ *  same band as the initial spawn (single source of truth — see its callsite). */
+export function placeBand(score, bands) {
   const s = typeof score === 'number' ? score : 0;
   for (const b of bands) if (s >= b.minScore) return b;
   return bands[bands.length - 1];
 }
 
 /** Salary range a number lands in; unknown/zero salary → Unspecified. */
-function placeRange(salNum, realRanges, unspecified) {
+export function placeRange(salNum, realRanges, unspecified) {
   if (!(salNum > 0)) return unspecified;
   for (const r of realRanges) if (salNum >= r.minSalary) return r;
   return unspecified;

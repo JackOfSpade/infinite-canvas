@@ -2,13 +2,16 @@ import { useCallback, useState } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
+import { statusCheckWrites, statusErrorWrites } from '../utils/listingStatusWrites';
 
 const DEFAULT_FIELDS = { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked' };
 
 /**
  * Walks every node of `cardType` connected outbound from `hubId` and runs
- * `check-listing-status` against each in sequence. Backs both the SellHub
- * "Check All" and the JobHub "Check All Statuses" buttons.
+ * `check-listing-status` against each in sequence. Backs the SellHub
+ * "Check All" button. (The hubId-tag ownership walk below also supported
+ * JobHub's "Check All Statuses", but the transient-card overhaul removed
+ * job-card monitoring; the branch is kept for potential reuse.)
  *
  * Sequential is deliberate: marketplaces and job boards both rate-limit
  * single-IP bursts hard, and the user's a single source — fanning out N
@@ -90,25 +93,11 @@ export function useCheckAllConnected({
             watchUrls,
             productTitle,
           });
-          const writes = { [fields.lastChecked]: new Date().toISOString() };
-          // New backend always returns { status, message, sources }; the
-          // legacy { success: true, status, message } shape is gone.
-          if (res?.status) {
-            writes[fields.status]  = res.status;
-            writes[fields.message] = res.message || '';
-          } else {
-            writes[fields.status]  = 'error';
-            writes[fields.message] = res?.error || 'Status check failed';
-          }
-          updateNode(card.id, writes);
+          updateNode(card.id, statusCheckWrites(res, fields));
           checked++;
         } catch (err) {
           EventLogger.error('[useCheckAllConnected] failed for', card.id, err);
-          updateNode(card.id, {
-            [fields.status]:      'error',
-            [fields.message]:     err?.message || String(err),
-            [fields.lastChecked]: new Date().toISOString(),
-          });
+          updateNode(card.id, statusErrorWrites(err, fields));
         }
       }
       addToast({

@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, X } from 'lucide-react';
+import { updateModalCount } from './modalStack';
 
 /**
  * Styled confirmation dialog — replaces the browser-native `confirm()`.
@@ -38,6 +39,14 @@ const VARIANT_STYLES = {
  */
 export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', onConfirm, onCancel, onAbort, variant = 'danger' }) {
   const style = VARIANT_STYLES[variant] || VARIANT_STYLES.danger;
+
+  // Participate in the modal stack so global shortcuts (undo/redo) are suppressed
+  // while a destructive confirm is showing — otherwise Cmd+Z on the canvas
+  // underneath could mutate state mid-confirmation. (Dialog already does this.)
+  useEffect(() => {
+    updateModalCount(1);
+    return () => updateModalCount(-1);
+  }, []);
 
   // Close on Escape — Escape always means "no further action", which matches
   // the Cancel button (not Abort — we don't want a misfired Escape to undo

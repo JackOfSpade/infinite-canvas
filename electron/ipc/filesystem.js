@@ -7,7 +7,6 @@ import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import path from 'path';
 import fs from 'fs';
-import os from 'os';
 import { randomUUID } from 'crypto';
 
 /**
@@ -20,19 +19,16 @@ const activeWatchers = new Map();
 
 /**
  * Module-level recursive directory scanner.
- * Uses lstat to detect symlinks and prevent recursion.
- * Hardened: Max 10 simultaneous directory reads to prevent EMFILE errors.
+ * Uses lstat to detect symlinks and a `visited` realpath set to prevent loops.
+ *
+ * The walk is strictly sequential — children are awaited one at a time in the
+ * for-loop below, so at most one readdir/lstat is ever in flight. A previous
+ * activeScans/MAX_SCAN_CONCURRENCY busy-wait gate was removed: with sequential
+ * recursion `activeScans` only ever equaled the current depth, so on any tree
+ * deeper than the core count every live frame held a slot while awaiting its
+ * single descendant and the gate could never drain — a hard deadlock (the only
+ * escape was closing the window). Being serial, the scan needs no EMFILE bound.
  */
-let activeScans = 0;
-// Parallel directory-scan fan-out, scaled to the machine: more cores → more
-// concurrent walks. Clamped to a sane band (a tiny box stays responsive; a big
-// one doesn't thrash the disk or libuv threadpool). ~10 on a typical laptop.
-const MAX_SCAN_CONCURRENCY = (() => {
-  let cores = 8;
-  try { cores = os.cpus()?.length || 8; } catch { /* default */ }
-  return Math.max(4, Math.min(16, cores));
-})();
-
 async function scanPath(currentPath, visited, sender = null, depth = 0) {
   // Prevent infinite recursion from symlink loops or massive trees
   if (depth > 15) return null;
@@ -40,13 +36,6 @@ async function scanPath(currentPath, visited, sender = null, depth = 0) {
   // Guard: Abort recursion if the window that requested it was closed
   if (sender && sender.isDestroyed()) return null;
 
-  // Manage concurrency
-  while (activeScans >= MAX_SCAN_CONCURRENCY) {
-    await new Promise(r => setTimeout(r, 50));
-    if (sender && sender.isDestroyed()) return null;
-  }
-
-  activeScans++;
   try {
     let realPath = currentPath;
     try { realPath = await fs.promises.realpath(currentPath); } catch { /* ignore */ }
@@ -91,8 +80,6 @@ async function scanPath(currentPath, visited, sender = null, depth = 0) {
     // Possible edge case: file deleted between readdir and lstat
     logger.warn(`[Filesystem] Skipping inaccessible path: ${currentPath}`, err?.message || String(err));
     return null;
-  } finally {
-    activeScans--;
   }
 }
 
@@ -538,7 +525,8 @@ export function registerFilesystemHandlers() {
  */
 const cleanedDirs = new Set();
 
-export async function cleanupTempFiles(targetDir) {
+// Module-private: invoked only from save-workspace / load-workspace below.
+async function cleanupTempFiles(targetDir) {
   const dir = targetDir || process.cwd();
   
   // Logical proof: .tmp files are only orphaned if the ENTIRE process crashes. 

@@ -55,8 +55,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scoreJobs: (args) => ipcRenderer.invoke('score-jobs', args),
   saveJobAnalysisSnapshot: (args) => ipcRenderer.invoke('save-job-analysis-snapshot', args),
   getLastJobAnalysisSnapshot: (args) => ipcRenderer.invoke('get-last-job-analysis-snapshot', args),
-  generateCoverLetter: (args) => ipcRenderer.invoke('generate-cover-letter', args),
-  generateInterviewPrep: (args) => ipcRenderer.invoke('generate-interview-prep', args),
   parseCareerData: (args) => ipcRenderer.invoke('parse-career-data', args),
   generateApplication: (args) => ipcRenderer.invoke('generate-application', args),
   saveApplication: (args) => ipcRenderer.invoke('save-application', args),

@@ -275,26 +275,6 @@ export const JOB_QUERY_GENERATION_SCHEMA = {
   },
 };
 
-// ── Interview prep: profile + job → question bundle ────────────────────────
-export const INTERVIEW_PREP_SCHEMA = {
-  type: 'object',
-  required: ['questions'],
-  properties: {
-    questions: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['type', 'question', 'tip'],
-        properties: {
-          type:     { type: 'string', enum: ['behavioral', 'technical', 'company'] },
-          question: { type: 'string' },
-          tip:      { type: 'string', description: 'Coaching tip referencing the candidate’s actual background' },
-        },
-      },
-    },
-  },
-};
-
 // ── Application cover letter: structured letterhead + body ─────────────────
 // Used by generate-application. The résumé is filled as raw design-system HTML
 // by the model; the cover letter is structured so a deterministic builder

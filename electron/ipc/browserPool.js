@@ -29,6 +29,7 @@ import {
   recordOutcome,
   nextWakeMs,
 } from './rateLimiter.js';
+import { detectAntiBotSignal } from './antiBotDetector.js';
 
 // Queue dispatch cadence. These are housekeeping intervals, not rate limits —
 // the rate limiter (cooldowns) governs actual request pacing. The idle poller
@@ -335,7 +336,6 @@ async function executeScrape(url, extractorJS, options = {}) {
         // render a visible signal instead of silently accepting a blocked page.
         let warning = null;
         try {
-          const { detectAntiBotSignal } = await import('./antiBotDetector.js');
           const html       = await page.content().catch(() => '');
           const finalUrl   = page.url() || url;
           const status     = pageResponse?.status?.() ?? 0;
@@ -497,7 +497,6 @@ async function executeScrapePaginated(extractorJS, options = {}) {
   if (typeof nextUrl !== 'function') throw new Error('executeScrapePaginated requires options.nextUrl');
   const domain = extractDomain(nextUrl(0));
   const sourceKey = options.sourceLabel || domain;
-  const { detectAntiBotSignal } = await import('./antiBotDetector.js');
   const countItems = (r) => Array.isArray(r)
     ? r.length
     : (r && typeof r === 'object' && Array.isArray(r.items) ? r.items.length : (r ? -1 : 0));

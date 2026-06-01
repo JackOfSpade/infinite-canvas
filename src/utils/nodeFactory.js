@@ -4,6 +4,7 @@
  */
 
 import { generateId } from './idGenerator.js';
+import { safeClone } from './navigationUtils.js';
 
 /**
  * Read the user's last-applied text/link customization from settings so that
@@ -96,12 +97,7 @@ const ACTIVE_HUB_STATES = new Set(['parsing', 'querying', 'searching', 'scoring'
  * @returns {object} A new node object safe to push into the nodes array
  */
 export function cloneNode(original, dx = 40, dy = 40) {
-  let src;
-  try {
-    src = structuredClone(original);
-  } catch {
-    src = JSON.parse(JSON.stringify(original));
-  }
+  const src = safeClone(original);
 
   const clone = {
     ...src,

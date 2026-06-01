@@ -280,6 +280,7 @@ const COMP_SOURCE_LOGIN_PLATFORM = {
   'poshmark':    'poshmark',
   'mercari':     'mercari',
   'swappa':      'swappa',
+  'swappa-sold': 'swappa',  // shares Swappa's login with its active sibling; without this a swappa-sold-only scope bypasses the hard preflight and mislabels failures
 };
 
 /**
@@ -380,23 +381,6 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
 
   // Browser-pool source (ebay-sold, poshmark, swappa, ebay-active, mercari).
   if (task) {
-    // Short-circuit for platforms that require authentication: the extractor
-    // legitimately returns 0 when not logged in (not a code bug), so SITE_CHANGED
-    // would be a false alarm. Skip immediately with a login-required warning
-    // so the source card shows "Log in" guidance instead of "update the scraper."
-    if (task.requiresLoginPlatform) {
-      const session = getStatusCacheSync()[task.requiresLoginPlatform];
-      if (!session?.connected) {
-        const loginWarning = {
-          code: 'login-required', severity: 'block',
-          evidence: `${task.requiresLoginPlatform} is not logged in — sold listings are not available without authentication.`,
-          suggestion: `Log in to ${task.requiresLoginPlatform} in Settings > Accounts to enable this source.`,
-        };
-        send('error', 0, loginWarning, null);
-        return { sourceId, items: [], warning: loginWarning, category: taskCategoryMap[sourceId] || 'sold' };
-      }
-    }
-
     send('searching', 0);
     const results = await scrapeMultiple([task], (res) => {
       if (sender && !sender.isDestroyed()) {
@@ -515,9 +499,10 @@ async function fetchApiMarketplaceSources(query, signal = null, nodeId = null, s
  * through the stealth browser so the persistent userDataDir's cookies — set
  * by a prior `openLoginWindow` — keep us logged in.
  *
- * Returns { status, message, sources } where status is the strongest signal
- * across all URLs (sold > expired > needs-login > live > unknown), message is
- * a human sentence quoting that evidence, and sources is the per-URL trace.
+ * Returns { status, message, sources, attention } where status is the strongest
+ * signal across all URLs (sold > expired > needs-login > live > unknown), message
+ * is a human sentence quoting that evidence, sources is the per-URL trace, and
+ * attention is the list of URLs the renderer should surface for follow-up.
  */
 async function checkListingStatusMultiSource({
   listingUrl,
@@ -680,7 +665,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
       marketplaceTelemetry.scrape = {
         ts: Date.now(),
         sold: 0, active: 0,
-        sources: allTasks.length + ['reverb'].filter(isCompSourceEnabledInScope).length,
+        sources: allTasks.length + ['reverb', 'pricecharting'].filter(isCompSourceEnabledInScope).length,
         warnings: allTasks.length,
         blocked: 0, errored: 0, timedOut: 0,
         loginRequired: Object.values(sourceWarnings).filter(w => w.code === 'login-required').length,
@@ -692,28 +677,12 @@ Be specific about what you can clearly see. If you can't identify brand or model
       return { comps: { sold: [], active: [] }, scrapeWarnings: [], preflightBlocked: true, missingLogins };
     }
 
-    const loginSkipped = new Set();
-    for (const t of allTasks) {
-      if (t.requiresLoginPlatform && !sessionCache[t.requiresLoginPlatform]?.connected) {
-        loginSkipped.add(t.id);
-      }
-    }
-    const tasks = allTasks.filter(t => !loginSkipped.has(t.id));
-
-    for (const t of allTasks) {
+    // The hard login preflight above (computeMissingLogins) is the single
+    // logged-out gate; every task that reaches here is in scope and runs.
+    const tasks = allTasks;
+    for (const t of tasks) {
       if (!event.sender.isDestroyed()) {
-        if (loginSkipped.has(t.id)) {
-          event.sender.send('price-source-progress', {
-            nodeId, sourceId: t.id, status: 'error', count: 0, url: null,
-            warning: {
-              code: 'login-required', severity: 'block',
-              evidence: `${t.requiresLoginPlatform} is not logged in — sold listings are not available without authentication.`,
-              suggestion: `Log in to ${t.requiresLoginPlatform} in Settings > Accounts to enable this source.`,
-            },
-          });
-        } else {
-          event.sender.send('price-source-progress', { nodeId, sourceId: t.id, status: 'searching', count: 0 });
-        }
+        event.sender.send('price-source-progress', { nodeId, sourceId: t.id, status: 'searching', count: 0 });
       }
     }
 

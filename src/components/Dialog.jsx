@@ -1,14 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-
-let activeModalCount = 0;
-
-function updateModalCount(delta) {
-  activeModalCount = Math.max(0, activeModalCount + delta);
-  window.dispatchEvent(new CustomEvent('modal-stack-changed', {
-    detail: { count: activeModalCount }
-  }));
-}
+import { updateModalCount } from './modalStack';
 
 /**
  * Reusable floating dialog.
