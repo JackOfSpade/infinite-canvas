@@ -7,7 +7,7 @@ export function SessionStatusProvider({ children }) {
   // getVerifyState reply (the renderer normally mounts mid-verify). Once any
   // live event has applied, the late-resolving startup snapshot must NOT
   // overwrite it — otherwise a platform an update already cleared would be
-  // re-added and the JobHub/SellHub progress bar would regress to "checking"
+  // re-added and the Job Search Module/SellHub progress bar would regress to "checking"
   // until verify-done. This ref makes the snapshot a baseline, not an override.
   const gotLiveEvent = useRef(false);
 

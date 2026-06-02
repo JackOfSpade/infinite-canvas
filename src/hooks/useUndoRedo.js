@@ -216,7 +216,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undo, redo, sc, modalCount]);
 
-  // Listen for global snapshot requests (e.g. from JobHub when spawning results)
+  // Listen for global snapshot requests (e.g. from Job Search Module when spawning results)
   useEffect(() => {
     const handleSnapshot = () => takeSnapshot();
     document.addEventListener('canvas-take-snapshot', handleSnapshot);

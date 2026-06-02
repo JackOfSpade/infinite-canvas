@@ -14,7 +14,7 @@ import { cancelNodeTasksRecursively } from '../utils/canvasInteractions';
  *
  * Workflow/aggregator HUBS (sellhub, jobhub) deliberately do NOT contribute.
  * A hub merely REFERENCES external user files it was handed to work on — a
- * SellHub's product photos, a JobHub's dropped resume — which the user owns
+ * SellHub's product photos, a Job Search Module's dropped resume — which the user owns
  * (and, for a SellHub, are usually still represented by the source document
  * nodes left on the canvas, so trashing them would orphan those). Deleting a
  * hub cancels its run (see onNodesDelete); it must NOT offer to trash the

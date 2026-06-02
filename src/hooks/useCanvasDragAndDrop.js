@@ -110,10 +110,10 @@ export function useCanvasDragAndDrop({
       }
 
       // EVERY file drop becomes a standalone document/picture node that displays
-      // the file inline. Modules are NEVER auto-spawned by a file drop — the JobHub
+      // the file inline. Modules are NEVER auto-spawned by a file drop — the Job Search Module
       // (job search) and SellHub (marketplace) are created ONLY by dragging them
       // from the left sidebar; the user then drops their résumé / product photos
-      // ONTO that hub (the hub has its own drop handler). Auto-spawning a JobHub
+      // ONTO that hub (the hub has its own drop handler). Auto-spawning a Job Search Module
       // from a résumé drop surprised users (a dropped .docx is just a document) and
       // fired the pipeline on accidental drops — so a résumé/PDF/image now drops in
       // as a plain document like any other file.

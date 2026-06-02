@@ -15,7 +15,7 @@ const SUBLINE_THEMES = {
 
 /**
  * Spinner + cancel-button shell shared by the SellHub analyzing/researching
- * states and JobHub processing state. Cancel button reveals on hover.
+ * states and Job Search Module processing state. Cancel button reveals on hover.
  */
 export function HubBusyState({ label, subline, theme = 'amber', onReset }) {
   return (

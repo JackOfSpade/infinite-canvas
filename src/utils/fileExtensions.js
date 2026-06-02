@@ -11,7 +11,7 @@
 export const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|swift|kt|md|txt|sh|yaml|yml|toml|ini|env|log)$/i;
 
 // NOTE: file drops NEVER auto-spawn a module. A résumé/PDF/image dropped on the
-// canvas becomes a plain document node; the JobHub & SellHub are spawned ONLY from
+// canvas becomes a plain document node; the Job Search Module & SellHub are spawned ONLY from
 // the left sidebar, and accept files dropped ONTO them (see fileSupportedByHub in
 // useDragCorrections.js). The old RESUME_EXT_RE / IMAGE_EXT_RE drop-routing
 // regexes were removed with that auto-spawn branch — don't reintroduce them here.

@@ -1,9 +1,10 @@
 import { structuralEdge } from '../_shared/edgeHelpers.js';
+import { isJobCardVisible } from '../../utils/jobCardFilters.js';
 
 /**
  * Pure helpers for turning scored jobs + an AI-created taxonomy into the React
- * Flow node/edge graph the JobHub spawns. Lives outside the component so the
- * algorithm is unit-testable without a ReactFlow runtime — JobHubNode.jsx wires
+ * Flow node/edge graph the Job Search Module spawns. Lives outside the component so the
+ * algorithm is unit-testable without a ReactFlow runtime — JobSearchNode.jsx wires
  * up the IPC plumbing and passes the results to ReactFlow.
  *
  * The results hierarchy is THREE grouping levels, deepest last:
@@ -109,7 +110,7 @@ export function normalizeRanges(ranges) {
 }
 
 /** Band a score lands in (first whose minScore it meets, in high→low order).
- *  Exported so the JobHubNode append path places appended cards on the exact
+ *  Exported so the JobSearchNode append path places appended cards on the exact
  *  same band as the initial spawn (single source of truth — see its callsite). */
 export function placeBand(score, bands) {
   const s = typeof score === 'number' ? score : 0;
@@ -142,7 +143,7 @@ export function computeLayoutPositions(nodes, hubId, COL_X_, hubPos) {
   });
 
   const rootGroups = nodes
-    .filter(n => n.data?.hubId === hubId && n.type === 'jobgroup' && !allChildIds.has(n.id))
+    .filter(n => n.data?.hubId === hubId && n.type === 'jobgroup' && !allChildIds.has(n.id) && !n.hidden)
     .sort((a, b) => (a.position?.y ?? 0) - (b.position?.y ?? 0));
 
   const positions = {};
@@ -150,6 +151,10 @@ export function computeLayoutPositions(nodes, hubId, COL_X_, hubPos) {
   function layoutNode(nodeId, startY) {
     const node = nodeById.get(nodeId);
     if (!node) return startY;
+    // Hidden nodes (collapsed OR filtered out) take no layout space, so the tree
+    // tightens around whatever is removed. Visibility is owned by `hidden`
+    // (see computeJobTreeView); this function just lays out what's visible.
+    if (node.hidden) return startY;
 
     let x;
     if (node.type === 'jobcard') {
@@ -186,6 +191,91 @@ export function computeLayoutPositions(nodes, hubId, COL_X_, hubPos) {
   let nextY = hubPos.y;
   for (const root of rootGroups) nextY = layoutNode(root.id, nextY);
   return positions;
+}
+
+/**
+ * Recompute the job tree's visibility for `hubId` from the single source of truth:
+ * (current expand/collapse state) × (active card filter). Sets `hidden` on every
+ * card/group so a filter ACTUALLY REMOVES non-matching cards and any branch with
+ * no matching descendant (not just dims them), then relays out so the tree tightens.
+ * Clearing the filter restores the normal collapsed view (everything matches).
+ *
+ * This is the one place that derives `hidden` — collapse/expand just flips a
+ * group's `data.expanded` and calls this, so reveal always respects the filter.
+ *
+ * `filter` = { scoreThreshold?, sourceFilter? } (same shape as jobCardFilters).
+ * Pure: returns a new nodes array (or the same ref when nothing changed).
+ */
+export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  const byId = new Map(list.map(n => [n.id, n]));
+  const cardMatch = (d) => isJobCardVisible(d || {}, filter);
+
+  // # of matching descendant cards per group (memoized) — a group with 0 is an
+  // empty branch under the current filter and gets removed entirely.
+  const matchCount = new Map();
+  const countMatches = (id) => {
+    if (matchCount.has(id)) return matchCount.get(id);
+    matchCount.set(id, 0); // guard against cycles
+    let c = 0;
+    for (const cid of byId.get(id)?.data?.childIds || []) {
+      const child = byId.get(cid);
+      if (!child) continue;
+      c += child.type === 'jobcard' ? (cardMatch(child.data) ? 1 : 0) : countMatches(cid);
+    }
+    matchCount.set(id, c);
+    return c;
+  };
+
+  // Band roots = this hub's jobgroups not referenced as anyone's child.
+  const allChildIds = new Set();
+  list.forEach(n => { if (n.data?.hubId === hubId && Array.isArray(n.data?.childIds)) n.data.childIds.forEach(c => allChildIds.add(c)); });
+  const rootGroups = list.filter(n => n.data?.hubId === hubId && n.type === 'jobgroup' && !allChildIds.has(n.id));
+
+  // Walk open paths; collect what should be VISIBLE (matching cards + non-empty
+  // branches on an expanded path). Role leaves reveal the same childIds[0..N]
+  // window the layout paginates, minus non-matching — kept in lockstep with
+  // computeLayoutPositions' visibleCount slice.
+  const visible = new Set();
+  const walk = (id) => {
+    const node = byId.get(id);
+    if (!node) return;
+    if (node.type === 'jobcard') { if (cardMatch(node.data)) visible.add(id); return; }
+    if (countMatches(id) === 0) return;          // empty branch → removed
+    visible.add(id);
+    if (!node.data?.expanded) return;
+    const childIds = Array.isArray(node.data?.childIds) ? node.data.childIds : [];
+    const childrenAreCards = childIds.length > 0 && byId.get(childIds[0])?.type === 'jobcard';
+    if (childrenAreCards) {
+      childIds.slice(0, node.data?.visibleCount ?? ROLE_VISIBLE_DEFAULT)
+        .forEach(cid => { if (cardMatch(byId.get(cid)?.data)) visible.add(cid); });
+    } else {
+      childIds.forEach(walk);
+    }
+  };
+  rootGroups.forEach(r => walk(r.id));
+
+  // Apply hidden (+ clear any leftover opacity dim from the old filter approach).
+  let changed = false;
+  const withHidden = list.map(n => {
+    if ((n.type !== 'jobcard' && n.type !== 'jobgroup') || n.data?.hubId !== hubId) return n;
+    const hide = !visible.has(n.id);
+    const dim = n.type === 'jobcard' && n.style?.opacity !== undefined && n.style.opacity !== 1;
+    if (!!n.hidden === hide && !dim) return n;
+    changed = true;
+    const next = { ...n, hidden: hide };
+    if (dim) { const { opacity: _opacity, ...rest } = n.style; next.style = rest; }
+    return next;
+  });
+  if (!changed) return nodes;
+
+  const hubPos = byId.get(hubId)?.position || { x: 0, y: 0 };
+  const positions = computeLayoutPositions(withHidden, hubId, COL_X_, hubPos);
+  return withHidden.map(n => {
+    const p = positions[n.id];
+    if (p && (p.x !== n.position.x || p.y !== n.position.y)) return { ...n, position: p };
+    return n;
+  });
 }
 
 
@@ -226,7 +316,11 @@ export function buildJobTreeNodes({
         salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
         reasoning: job.reasoning, careerDirection: job.careerDirection,
         source: job.source, url: job.url, posted: job.posted, language: job.language,
-        resumeProfile: profile, isNew: false,
+        // Per-job résumé wins when present (Job Board merges cards from several
+        // search modules, each scored against its own résumé) so the card's
+        // "Generate Résumé" uses the right origin; falls back to the single
+        // `profile` for the normal single-hub path (where jobs carry none).
+        resumeProfile: job.resumeProfile || profile, isNew: false,
       },
     });
     return id;
@@ -330,7 +424,7 @@ export function buildJobTreeNodes({
             salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
             reasoning: job.reasoning, careerDirection: job.careerDirection,
             source: job.source, url: job.url, posted: job.posted, language: job.language,
-            resumeProfile: profile, isNew: false,
+            resumeProfile: job.resumeProfile || profile, isNew: false,
           },
         });
         pushEdge(hubId, id);

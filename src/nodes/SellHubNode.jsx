@@ -261,7 +261,7 @@ export function SellHubNode({ id, data }) {
   // ── Comp-source cards (ephemeral, one per PRICE_COMP_SOURCE) ──────────────
   // Per-source progress shown as real canvas nodes connected by edges —
   // same UX pattern as MarketplaceCardNode in the priced state and
-  // JobSourceCardNode under JobHubNode. Each card subscribes to its own
+  // JobSourceCardNode under JobSearchNode. Each card subscribes to its own
   // progress events. They're ephemeral because comp sources aren't user-
   // facing platforms — they're internal data sources for the price model.
 
@@ -281,7 +281,7 @@ export function SellHubNode({ id, data }) {
   // cards AND the marketplacecard platform cards spawned after pricing (the
   // eBay/Swappa/… listing cards). cleanupCompSourceCards above is reused for
   // pre-run/cancel cleanup, which must leave the spawned platform cards alone, so
-  // the unmount cascade needs its own wider sweep. Mirrors JobHub's cleanupAllJobChildren.
+  // the unmount cascade needs its own wider sweep. Mirrors Job Search Module's cleanupAllJobChildren.
   const cleanupAllHubChildren = useCallback(() => {
     deleteChildrenByHubId({
       getNodes, getEdges, deleteElements, hubId: id,

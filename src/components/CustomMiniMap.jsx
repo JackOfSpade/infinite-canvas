@@ -85,9 +85,16 @@ const ReactiveMiniMapSVG = React.memo(({ cMinX, cMinY, cMaxX, cMaxY, isAnimating
 });
 
 export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, drawings, isAnimating }) {
+  // Only map what's actually on the canvas. Collapsed job-tree cards/groups are
+  // flagged `hidden: true` (and NOT repositioned — computeLayoutPositions only
+  // moves visible nodes), so without this filter the minimap keeps drawing them
+  // at their last expanded spots and never reflects a collapse. React Flow's main
+  // canvas hides them natively; the minimap must mirror that.
+  const visibleNodes = useMemo(() => nodes.filter(n => !n.hidden), [nodes]);
+
   const { cMinX, cMinY, cMaxX, cMaxY } = useMemo(() => {
     let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
-    nodes.forEach(n => {
+    visibleNodes.forEach(n => {
       const { w, h } = getNodeDims(n);
       mnX = Math.min(mnX, n.position.x);
       mnY = Math.min(mnY, n.position.y);
@@ -102,13 +109,13 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
     });
     if (!isFinite(mnX)) return { cMinX: -200, cMinY: -200, cMaxX: 200, cMaxY: 200, isEmpty: true };
     return { cMinX: mnX - CONTENT_PAD, cMinY: mnY - CONTENT_PAD, cMaxX: mxX + CONTENT_PAD, cMaxY: mxY + CONTENT_PAD, isEmpty: false };
-  }, [nodes, drawings]);
+  }, [visibleNodes, drawings]);
 
   const nodeById = useMemo(() => {
     const m = new Map();
-    nodes.forEach(n => m.set(n.id, n));
+    visibleNodes.forEach(n => m.set(n.id, n));
     return m;
-  }, [nodes]);
+  }, [visibleNodes]);
 
   const renderedContent = useMemo(() => (
     <>
@@ -158,17 +165,17 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
           })}
 
           {/* ── Nodes ────────────────────────────────────────────────── */}
-          {nodes.map(n => {
+          {visibleNodes.map(n => {
             const { w, h } = getNodeDims(n);
             return (
-              <ThumbnailNode 
-                key={n.id} 
-                r={{ x: n.position.x, y: n.position.y, w, h, type: n.type, data: n.data }} 
+              <ThumbnailNode
+                key={n.id}
+                r={{ x: n.position.x, y: n.position.y, w, h, type: n.type, data: n.data }}
               />
             );
           })}
     </>
-  ), [edges, nodeById, drawings, nodes]);
+  ), [edges, nodeById, drawings, visibleNodes]);
 
   return (
     <Panel position="bottom-right" style={{ margin: 8, zIndex: 200 }}>
@@ -212,6 +219,7 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
     const p = prev.nodes[i];
     const n = next.nodes[i];
     if (p.id !== n.id) return false;
+    if (!!p.hidden !== !!n.hidden) return false; // collapse/expand toggles visibility — must re-render
     if (p.data !== n.data) return false; // Text, label, or color changed
     if (p.measured?.width !== n.measured?.width || p.measured?.height !== n.measured?.height) return false;
     if (p.style?.width !== n.style?.width || p.style?.height !== n.style?.height) return false;

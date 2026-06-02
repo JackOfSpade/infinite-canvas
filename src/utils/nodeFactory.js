@@ -54,7 +54,10 @@ function createGroupNode(position) {
   };
 }
 
-function createJobHubNode(position, extra = {}) {
+// Job Search Module. NOTE: the persisted node-type key stays `'jobhub'` (the
+// legacy name) so saved canvases keep loading — same backward-compat pattern as
+// `group` → CanvasNode. Only the component/UI naming changed to "Job Search".
+function createJobSearchNode(position, extra = {}) {
   return {
     id: generateId(), type: 'jobhub', position,
     data: { hubState: 'empty', ...extra },
@@ -68,12 +71,22 @@ function createSellHubNode(position, extra = {}) {
   };
 }
 
+// Job Board: aggregates results from connected Job Search Modules. No file drop
+// and no résumé — its inputs arrive purely through edge connections.
+function createJobBoardNode(position, extra = {}) {
+  return {
+    id: generateId(), type: 'jobboard', position,
+    data: { hubState: 'empty', ...extra },
+  };
+}
+
 /** Centralized factory lookup — avoids duplicated maps across hooks. */
 export const NODE_FACTORIES = {
   text: createTextNode,
   link: createLinkNode,
   group: createGroupNode,
-  jobhub: createJobHubNode,
+  jobhub: createJobSearchNode,
+  jobboard: createJobBoardNode,
   sellhub: createSellHubNode,
 };
 

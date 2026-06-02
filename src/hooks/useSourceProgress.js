@@ -6,7 +6,7 @@ import { mergeSourceProgress } from '../utils/sourceProgress';
  * backend and shape them into a `{ [sourceId]: { status, count, warning } }`
  * map that hub UIs render against.
  *
- * Both JobHub (job boards) and SellHub (comp sources) emit the same
+ * Both Job Search Module (job boards) and SellHub (comp sources) emit the same
  * payload shape: `{ nodeId, sourceId, status, count, warning }`. The
  * `warning` field is sticky — completion events sometimes omit it even when
  * an earlier scrape-progress event carried one, so we preserve the last

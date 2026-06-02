@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
+import { sanitizeNodesForSave, sanitizeEdgesForSave, CURRENT_SCHEMA_VERSION } from '../utils/serializationUtils';
 import { EventLogger } from '../utils/EventLogger';
 import { TIMINGS, autosaveDebounceMs } from '../utils/timings';
 
@@ -80,7 +80,7 @@ export function useCanvasInitialization({
       // normal cascade path — accumulate forever otherwise and bloat the file).
       const sanitizedNodes = sanitizeNodesForSave(rawData.nodes);
       const sanitizedEdges = sanitizeEdgesForSave(rawData.edges, sanitizedNodes);
-      const data = { ...rawData, nodes: sanitizedNodes, edges: sanitizedEdges };
+      const data = { ...rawData, nodes: sanitizedNodes, edges: sanitizedEdges, schemaVersion: CURRENT_SCHEMA_VERSION };
 
       window.electronAPI.saveWorkspace({ data, filePath: currentFile }).then(res => {
         if (!isMountedRef.current) return;

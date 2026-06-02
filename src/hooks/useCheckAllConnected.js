@@ -10,7 +10,7 @@ const DEFAULT_FIELDS = { status: 'status', message: 'statusMessage', lastChecked
  * Walks every node of `cardType` connected outbound from `hubId` and runs
  * `check-listing-status` against each in sequence. Backs the SellHub
  * "Check All" button. (The hubId-tag ownership walk below also supported
- * JobHub's "Check All Statuses", but the transient-card overhaul removed
+ * Job Search Module's "Check All Statuses", but the transient-card overhaul removed
  * job-card monitoring; the branch is kept for potential reuse.)
  *
  * Sequential is deliberate: marketplaces and job boards both rate-limit
@@ -46,11 +46,11 @@ export function useCheckAllConnected({
 
   const getConnectedCards = useCallback(() => {
     // Two ownership signals — accept either:
-    //   - `data.hubId === hubId` tag (used by JobHub: jobcards live under a
+    //   - `data.hubId === hubId` tag (used by Job Search Module: jobcards live under a
     //     category/bucket tree, so their edges don't terminate at the hub).
     //   - Direct outgoing edge from the hub (used by SellHub: marketplacecards
     //     are spawned as direct children with a single hub→card edge).
-    // Without the hubId branch, JobHub's "Check All" walks zero cards because
+    // Without the hubId branch, Job Search Module's "Check All" walks zero cards because
     // hub→category→bucket→jobcard edges don't have source===hubId.
     const outgoing = getEdges().filter(e => e.source === hubId);
     const edgeIds = new Set(outgoing.map(e => e.target));

@@ -83,7 +83,7 @@ export const CODE_DEFINITIONS = {
     label: 'Undo / Redo',
     description: 'Undo and redo operation events',
     // Word-bounded to avoid false positives on unrelated "history"/"snapshot"
-    // log lines (e.g. JobHub's "History append failed").
+    // log lines (e.g. Job Search Module's "History append failed").
     logFilter: line =>
       /\bundo\b|\bredo\b/i.test(line),
   },
@@ -93,6 +93,13 @@ export const CODE_DEFINITIONS = {
     description: 'Nested canvas dive-in and dive-out events',
     logFilter: line =>
       /dive|navigation|breadcrumb|nested|canvas level/i.test(line),
+  },
+
+  TREE: {
+    label: 'Results Tree & Minimap',
+    description: 'Job/results cascade expand/collapse/show-more events (and minimap). Use for "minimap or canvas not reflecting collapsed/expanded cards" or node visibility/culling bugs — these interactions go through setNodes, so they would NOT appear in the log without this category.',
+    logFilter: line =>
+      /\[JobTree\]|minimap/i.test(line),
   },
 
   // ── Exclusion Modifiers ───────────────────────────────────────────────────

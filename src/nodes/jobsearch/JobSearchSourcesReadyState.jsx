@@ -2,7 +2,7 @@ import React from 'react';
 import { ShieldAlert, FastForward } from 'lucide-react';
 
 /**
- * JobHubSourcesReadyState — paused-pipeline UI rendered when the hub's
+ * JobSearchSourcesReadyState — paused-pipeline UI rendered when the hub's
  * `hubState === 'sources-ready'`. The pipeline reached this after finding
  * one or more block-severity scrape warnings (captcha, login wall, etc.)
  * and is now waiting for the user to either:
@@ -14,7 +14,7 @@ import { ShieldAlert, FastForward } from 'lucide-react';
  * Mirrors the SellHub 'comps-ready' decision UX so the spend on AI scoring
  * tokens is gated behind explicit user consent when sources were blocked.
  */
-export function JobHubSourcesReadyState({
+export function JobSearchSourcesReadyState({
   blockedCount,
   jobsAvailable,
   resumeSummary,

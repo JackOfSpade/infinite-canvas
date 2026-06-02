@@ -1,6 +1,5 @@
-import React, { useState } from 'react';
-import { JOB_SOURCE_BY_ID } from '../../utils/constants';
-import { SlidersHorizontal, X, RefreshCw, Target, MapPin, Bot } from 'lucide-react';
+import React from 'react';
+import { RefreshCw, Target, MapPin, Bot, LayoutGrid } from 'lucide-react';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
 
@@ -15,21 +14,14 @@ function formatModelName(model) {
   return `${family} ${version}`;
 }
 
-export function JobHubDoneState({
+export function JobSearchDoneState({
   resultCount,
   scrapedCount,
   gatheredCount,
   queryModel = null,
   testMode = false,
-  sourceFilter,
-  toggleSourceFilter,
   resumeSummary,
   locked = false,
-  // Filter props
-  scoreThreshold = 0,
-  setScoreThreshold,
-  scoreRangeMin = 0,
-  scoreRangeMax = 100,
   // Action props
   onRerun,
   // Search controls (passed back to the hub for next run)
@@ -44,21 +36,15 @@ export function JobHubDoneState({
   // Anti-bot signals collected during the search pipeline
   scrapeWarnings = [],
 }) {
-  const [filtersOpen, setFiltersOpen] = useState(false);
   const { addToast } = useToast();
-
-  // Slider is "active" when the user has nudged it above the dynamic minimum.
-  // When min === max, the slider is a no-op and we hide it entirely.
-  const sliderUsable = scoreRangeMax > scoreRangeMin;
-  const sliderActive = sliderUsable && scoreThreshold > scoreRangeMin;
-  const hasActiveFilters = sliderActive || sourceFilter;
+  const count = testMode ? (scrapedCount ?? 0) : (resultCount || 0);
 
   return (
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1">
 
       {/* Result count */}
-      <div className="text-emerald-400 text-2xl font-bold">{testMode ? (scrapedCount ?? 0) : (resultCount || 0)}</div>
-      <p className="text-white/40 text-xs">{testMode ? 'jobs collected' : 'jobs matched'}</p>
+      <div className="text-emerald-400 text-2xl font-bold">{count}</div>
+      <p className="text-white/40 text-xs">{testMode ? 'jobs collected' : 'jobs scored'}</p>
 
       {/* Scraped → kept funnel */}
       {(gatheredCount > 0 || scrapedCount > 0) && (
@@ -77,36 +63,22 @@ export function JobHubDoneState({
         </p>
       )}
 
+      {/* The results cascade now lives on the Job Board Module — point the user there. */}
+      {count > 0 && (
+        <div className="flex items-start gap-1.5 mt-2 px-2 py-1.5 rounded-md bg-indigo-500/10 border border-indigo-500/15 w-full">
+          <LayoutGrid size={11} className="text-indigo-300/70 shrink-0 mt-0.5" />
+          <p className="text-indigo-200/70 text-[10px] leading-snug">
+            Connect a <span className="font-medium">Job Board Module</span> to view & merge these results.
+          </p>
+        </div>
+      )}
+
       {/* Anti-bot / throttle warnings collected during the search pipeline. */}
       {scrapeWarnings.length > 0 && (
         <div className="w-full mt-2">
           <ScrapeWarningsPanel warnings={scrapeWarnings} addToast={addToast} />
         </div>
       )}
-
-      {/* Active filter summary pills */}
-      <div className="flex flex-wrap justify-center gap-1 mt-1 min-h-[18px]">
-        {sourceFilter && (
-          <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-400/80 text-[9px]">
-            {JOB_SOURCE_BY_ID[sourceFilter]?.name || sourceFilter}
-            {!locked && (
-              <button onClick={() => toggleSourceFilter(sourceFilter)} onPointerDown={(e) => e.stopPropagation()}>
-                <X size={8} />
-              </button>
-            )}
-          </span>
-        )}
-        {sliderActive && (
-          <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-white/10 text-white/50 text-[9px]">
-            ≥{scoreThreshold}%
-            {!locked && (
-              <button onClick={() => setScoreThreshold?.(scoreRangeMin)} onPointerDown={(e) => e.stopPropagation()}>
-                <X size={8} />
-              </button>
-            )}
-          </span>
-        )}
-      </div>
 
       {resumeSummary && (
         <p className="text-white/20 text-[10px] text-center mt-1">{resumeSummary}</p>
@@ -118,7 +90,7 @@ export function JobHubDoneState({
             onClick={onRerun}
             onPointerDown={(e) => e.stopPropagation()}
             className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-blue-500/15 text-blue-400/80 hover:bg-blue-500/25 text-[10px] transition-colors border border-blue-500/15"
-            title="Clear old cards and re-run the search with the same resume"
+            title="Clear old results and re-run the search with the same resume"
           >
             <RefreshCw size={9} />
             Re-run Search
@@ -166,56 +138,6 @@ export function JobHubDoneState({
             />
             <span>days</span>
           </div>
-        </div>
-      )}
-
-      {/* Filter toggle button */}
-      {!locked && (
-        <button
-          onClick={() => setFiltersOpen(o => !o)}
-          onPointerDown={(e) => e.stopPropagation()}
-          className={`nodrag mt-2 flex items-center gap-1 px-2 py-1 rounded-full text-[10px] transition-colors ${
-            hasActiveFilters
-              ? 'bg-blue-500/20 text-blue-400/90 border border-blue-500/20'
-              : 'bg-white/5 text-white/35 hover:bg-white/10 hover:text-white/60'
-          }`}
-        >
-          <SlidersHorizontal size={9} />
-          {hasActiveFilters ? 'Filters active' : 'Filter cards'}
-        </button>
-      )}
-
-      {/* Filter panel */}
-      {filtersOpen && !locked && (
-        <div className="nodrag w-full mt-2 space-y-3 px-1" onPointerDown={(e) => e.stopPropagation()}>
-
-          {/* Score threshold — dynamic range based on actually-spawned scores.
-              Bottom = "show everything"; top = "show only the highest match".
-              Hidden when min===max (single-job lists, or all jobs scored
-              identically — a no-op slider would just be noise). */}
-          {sliderUsable && (
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-[10px]">
-                <span className="text-white/40">Min score</span>
-                <span className="text-white/60 font-medium">
-                  {sliderActive ? `≥${scoreThreshold}%` : 'All'}
-                </span>
-              </div>
-              <input
-                type="range"
-                min={scoreRangeMin}
-                max={scoreRangeMax}
-                step={1}
-                value={scoreThreshold}
-                onChange={(e) => setScoreThreshold?.(Number(e.target.value))}
-                className="w-full h-1 accent-blue-400 cursor-pointer"
-              />
-              <div className="flex justify-between text-[8px] text-white/20">
-                <span>{scoreRangeMin}%</span>
-                <span>{scoreRangeMax}%</span>
-              </div>
-            </div>
-          )}
         </div>
       )}
     </div>

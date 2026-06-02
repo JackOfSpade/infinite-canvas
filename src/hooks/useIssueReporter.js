@@ -35,9 +35,15 @@ export function useIssueReporter({
       // For group nodes (CanvasNode), capture all three size fields separately.
       const nodeInternals = nodes.map(n => {
         return {
-          id: n.id, 
+          id: n.id,
           type: n.type,
           selected: !!n.selected,
+          // Visibility: collapsed job-tree cards/groups carry hidden:true. The
+          // bug report's Node Diagnostics flags this and treats hidden cards as
+          // anomalies that are always shown (never omitted) — it expects this
+          // field. Without it, visibility/minimap/culling bugs are invisible in
+          // the report even at FULL.
+          hidden:         !!n.hidden,
           position:       n.position,
           fontSize:       n.data?.fontSize,
           fontFamily:     n.data?.fontFamily,
@@ -161,6 +167,19 @@ export function useIssueReporter({
         EventLogger.error(`Bug report filter: unknown code(s): ${unknownCodes.join(', ')}`);
       }
 
+      // Strip heavy per-node payloads before the report crosses IPC. A done Job
+      // Search Module stores its full scored-jobs array in data.scoredJobs (each
+      // job carries a description + résumé) — 150+ of those would blow the report
+      // size budget and crowd out the logs. Replace the array with a count; the
+      // Node Diagnostics section surfaces `scoredJobs: N` from it.
+      const reportNodes = nodes.map(n => {
+        if (n.data && Array.isArray(n.data.scoredJobs)) {
+          const { scoredJobs, ...restData } = n.data;
+          return { ...n, data: { ...restData, scoredJobsCount: scoredJobs.length } };
+        }
+        return n;
+      });
+
       // Build the full payload, then drop sections excluded by the filter code.
       const fullPayload = {
         description,
@@ -171,7 +190,7 @@ export function useIssueReporter({
           eventsTotal: rawLogs.length,
           omittedSections: Array.from(sectionExclusions),
         } : null,
-        nodes,
+        nodes: reportNodes,
         edges,
         drawings,
         mediaState,

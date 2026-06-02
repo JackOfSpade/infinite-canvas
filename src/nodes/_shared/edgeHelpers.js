@@ -1,7 +1,7 @@
 /**
  * Edge helpers shared by hubs that radially spawn child cards.
  *
- * Both SellHub (comp source cards) and JobHub (job source cards) need:
+ * Both SellHub (comp source cards) and Job Search Module (job source cards) need:
  *   - To route hub→card edges to the hub's nearest side (not always right).
  *   - The same "structural" edge config so users can't accidentally detach
  *     spawn-tracking edges.

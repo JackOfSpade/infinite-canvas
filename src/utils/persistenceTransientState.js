@@ -7,7 +7,7 @@ export const TRANSIENT_PROCESSING_HUB_STATES = [
   'researching',
 ];
 
-const JOBHUB_TRANSIENT_KEYS = [
+const JOBSEARCH_TRANSIENT_KEYS = [
   'scrapeWarnings',
   'pendingJobs',
   'pendingTargetRole',
@@ -15,7 +15,7 @@ const JOBHUB_TRANSIENT_KEYS = [
   'isRateLimit',
 ];
 
-const JOBHUB_SOURCES_READY_TRANSIENT_KEYS = [
+const JOBSEARCH_SOURCES_READY_TRANSIENT_KEYS = [
   'errorMessage',
   'isRateLimit',
 ];
@@ -24,8 +24,8 @@ export const SELLHUB_TRANSIENT_KEYS = [
   'platformFitPending',
 ];
 
-export function getJobHubTransientKeysForSave(hubState) {
+export function getJobSearchTransientKeysForSave(hubState) {
   return hubState === 'sources-ready'
-    ? JOBHUB_SOURCES_READY_TRANSIENT_KEYS
-    : JOBHUB_TRANSIENT_KEYS;
+    ? JOBSEARCH_SOURCES_READY_TRANSIENT_KEYS
+    : JOBSEARCH_TRANSIENT_KEYS;
 }

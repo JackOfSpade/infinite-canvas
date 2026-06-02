@@ -21,7 +21,7 @@ import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { getAuthWindowDiagnostics } from './browser/authWindows.js';
 import {
-  getJobHubTransientKeysForSave,
+  getJobSearchTransientKeysForSave,
   TRANSIENT_PROCESSING_HUB_STATES,
 } from '../../src/utils/persistenceTransientState.js';
 
@@ -90,7 +90,7 @@ function getNewestMainProcessSourceMtime() {
 /**
  * Renderer (React/Vite) freshness. getNewestMainProcessSourceMtime above scans
  * only electron/ + dist-electron/ — but the renderer (`src/`) is where the
- * JobHub pipeline, the AI-scoring/test-mode gate, and most UI logic live. When
+ * Job Search Module pipeline, the AI-scoring/test-mode gate, and most UI logic live. When
  * the app loads the BUILT bundle (main.js does loadFile('../dist/index.html')
  * whenever there's no Vite dev server), an edit to `src/` that was never
  * re-bundled means the running UI is STALE even though the main process is
@@ -341,10 +341,10 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
         if (TRANSIENT_PROCESSING_HUB_STATES.includes(d.hubState)) hits.push(`hubState=${d.hubState}`);
         if (n.type === 'jobhub') {
           // Data-driven over the authoritative key list: a future transient key
-          // added to JOBHUB_TRANSIENT_KEYS is flagged automatically. (A previous
+          // added to JOBSEARCH_TRANSIENT_KEYS is flagged automatically. (A previous
           // hardcoded if-chain would silently skip any unrecognized key, defeating
           // this section's purpose — it would falsely read "✅ Clean".)
-          for (const key of getJobHubTransientKeysForSave(d.hubState)) {
+          for (const key of getJobSearchTransientKeysForSave(d.hubState)) {
             const v = d[key];
             if (Array.isArray(v)) { if (v.length) hits.push(`${key}=${v.length}`); }
             else if (v) hits.push(v === true ? `${key}=true` : typeof v === 'string' ? `${key}="${v.slice(0, 60)}"` : `${key}=set`);
@@ -550,6 +550,19 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       if (d.hubState) previewParts.push(`hubState: ${d.hubState}`);
       if (typeof d.scrapedCount === 'number') previewParts.push(`scraped: ${d.scrapedCount}`);
       if (typeof d.resultCount === 'number' && d.hubState === 'done') previewParts.push(`results: ${d.resultCount}`);
+      // A Job Search Module stores its results in data.scoredJobs (renderer
+      // strips the heavy array to a count). `∅ none stored` on a done hub with
+      // results>0 means a legacy pre-split canvas that hasn't been migrated — a
+      // Job Board would read zero from it. Only meaningful for `jobhub`: a
+      // `jobboard` legitimately never stores scoredJobs (it reads them from
+      // connected hubs at Combine and spawns the cascade), so its results count
+      // (shown above) is the signal there — flagging ∅ on a board is noise.
+      if (n.type === 'jobhub') {
+        const sc = typeof d.scoredJobsCount === 'number'
+          ? d.scoredJobsCount
+          : (Array.isArray(d.scoredJobs) ? d.scoredJobs.length : null);
+        previewParts.push(`scoredJobs: ${sc == null ? '∅ none stored' : sc}`);
+      }
       if (d.errorMessage) previewParts.push(`err: ${String(d.errorMessage).slice(0, 60)}`);
       if (d.isRateLimit) previewParts.push(`rateLimit: true`);
       // Warnings: show total + block-severity + DISTINCT source breakdown. The
@@ -594,7 +607,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       // Transient source-progress cards (job + marketplace). Surface the source
       // and its persisted progress status. Only flag a card as lingering once
       // every sibling source card for the same hub is already in a clean
-      // terminal state; until then, JobHub intentionally keeps clean cards
+      // terminal state; until then, Job Search Module intentionally keeps clean cards
       // visible so the source-count set stays intact while other sources are
       // still searching or blocked.
       if (d.sourceId && d.persistedProgress) {

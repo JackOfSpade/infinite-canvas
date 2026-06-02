@@ -41,8 +41,6 @@ export function DraggableModuleCard({
         )}
       </div>
 
-      <div className="flex-1" />
-      
       {footerText && (
         <div className="px-4 py-3 border-t border-white/5">
           <p className="text-white/15 text-[10px] text-center">{footerText}</p>

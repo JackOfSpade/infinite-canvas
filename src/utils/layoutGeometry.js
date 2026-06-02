@@ -10,7 +10,7 @@ import { clamp } from './mathUtils.js';
  * Everything here is pure (no React, no DOM) so it's trivially testable.
  */
 
-// ── Radial hub layouts (JobHub / SellHub source cards) ────────────────────────
+// ── Radial hub layouts (Job Search Module / SellHub source cards) ────────────────────────
 // Both hubs fan their source cards around a circle. The radius used to be a
 // hand-tuned constant per hub (320 / 260), which OVERLAPS once there are enough
 // cards to wrap the circumference. Derive it instead from two constraints:

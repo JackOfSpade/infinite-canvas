@@ -11,7 +11,7 @@ import {
 } from '../electron/extractors/marketplace.js';
 import { GOOGLE_JOBS_EXTRACTOR } from '../electron/extractors/jobs.js';
 import {
-  getJobHubTransientKeysForSave,
+  getJobSearchTransientKeysForSave,
   SELLHUB_TRANSIENT_KEYS,
   TRANSIENT_PROCESSING_HUB_STATES,
 } from '../src/utils/persistenceTransientState.js';
@@ -31,14 +31,19 @@ import { mergeResolvedSourceItems } from '../src/utils/jobSourceResolveMerge.js'
 import {
   buildJobTreeNodes,
   computeLayoutPositions,
+  computeJobTreeView,
   partitionJobsForBranches,
   COL_X,
-} from '../src/nodes/jobhub/buildJobTree.js';
+} from '../src/nodes/jobsearch/buildJobTree.js';
+import { unionScoredJobs } from '../src/nodes/jobboard/mergeJobs.js';
 import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, selectReverbPriceGuides, reverbTransactionsToComps, parsePriceChartingHtml, dicePostedBucket, extractJobPostingDescription } from '../electron/extractors/apiExtractors.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
 import {
   fingerprint,
   migrateGroupNodes,
+  migrateLegacyJobHubResults,
+  runNodeMigrations,
+  CURRENT_SCHEMA_VERSION,
   sanitizeEdgesForSave,
   sanitizeNodesForSave,
 } from '../src/utils/serializationUtils.js';
@@ -386,8 +391,8 @@ const tests = [
   {
     name: 'Transient jobhub save rules',
     run: () => {
-      const normal = getJobHubTransientKeysForSave('searching');
-      const sourcesReady = getJobHubTransientKeysForSave('sources-ready');
+      const normal = getJobSearchTransientKeysForSave('searching');
+      const sourcesReady = getJobSearchTransientKeysForSave('sources-ready');
       assert(normal.includes('scrapeWarnings'), 'Transient jobhub save rules: default state should strip scrapeWarnings');
       assert(normal.includes('pendingTargetRole'), 'Transient jobhub save rules: default state should strip pendingTargetRole');
       assert(!sourcesReady.includes('scrapeWarnings'), 'Transient jobhub save rules: sources-ready should preserve scrapeWarnings');
@@ -459,6 +464,69 @@ const tests = [
       const fpB = fingerprint({ nodes: migrated, edges: [], drawings: [{ points: [{ x: 0, y: 0 }, { x: 7, y: 7 }, { x: 10, y: 10 }] }] });
       assert(fpA !== fpB, 'Serialization migration and fingerprints: middle drawing point should affect fingerprint');
       return { migratedNodes: migrated[0].data.canvasData.nodes.length };
+    },
+  },
+  {
+    name: 'Legacy Job Search Module migration: relocate cascade → scoredJobs, drop orphans',
+    run: () => {
+      const legacy = [
+        { id: 'doc', type: 'document', position: { x: 0, y: 0 }, data: { filePath: 'r.docx' } },
+        { id: 'hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'done', resultCount: 3, resumeProfile: { id: 'P' } } },
+        { id: 'L0', type: 'jobgroup', position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'likelihood', label: 'Strong', childIds: ['c1'] } },
+        { id: 'c1', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'hub', title: 'Mid', company: 'A', url: 'u1', matchScore: 60, resumeProfile: { id: 'P' } } },
+        { id: 'c2', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'hub', title: 'Top', company: 'B', url: 'u2', matchScore: 90 } },
+        { id: 'c3', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'hub', title: 'Low', company: 'C', url: 'u3', matchScore: 30 } },
+      ];
+      const out = migrateLegacyJobHubResults(legacy);
+      const hub = out.find(n => n.id === 'hub');
+      const cascadeLeft = out.filter(n => n.type === 'jobcard' || n.type === 'jobgroup');
+      assert(cascadeLeft.length === 0, `migration: orphaned cascade should be removed (left ${cascadeLeft.length})`);
+      assert(Array.isArray(hub.data.scoredJobs) && hub.data.scoredJobs.length === 3, 'migration: hub should hold reconstructed scoredJobs');
+      assert(hub.data.scoredJobs[0].matchScore === 90 && hub.data.scoredJobs[2].matchScore === 30, 'migration: scoredJobs sorted score-desc');
+      assert(hub.data.scoredJobs[0].resumeProfile == null && hub.data.scoredJobs.find(j => j.url === 'u1').resumeProfile?.id === 'P', 'migration: per-card resumeProfile preserved');
+      assert(out.find(n => n.id === 'doc'), 'migration: unrelated nodes untouched');
+
+      // Idempotent / new-model untouched: a hub with scoredJobs and no cascade is the same reference.
+      const newModel = [{ id: 'h2', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'done', scoredJobs: [{ title: 'x', matchScore: 1 }] } }];
+      assert(migrateLegacyJobHubResults(newModel) === newModel, 'migration: new-model canvas returned unchanged (same ref)');
+      assert(migrateLegacyJobHubResults(out) === out, 'migration: idempotent — re-running on migrated output is a no-op');
+      return { scored: hub.data.scoredJobs.length };
+    },
+  },
+  {
+    name: 'runNodeMigrations: versioned, recurses into nested canvases, idempotent',
+    run: () => {
+      const legacyHub = (p) => ([
+        { id: `${p}hub`, type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'done', resultCount: 2 } },
+        { id: `${p}c1`, type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: `${p}hub`, title: 'A', url: `${p}u1`, matchScore: 70 } },
+        { id: `${p}c2`, type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: `${p}hub`, title: 'B', url: `${p}u2`, matchScore: 30 } },
+      ]);
+      const nodes = [
+        ...legacyHub('top-'),
+        // new-format group whose nested canvas holds its OWN legacy hub + cascade
+        { id: 'grp', type: 'group', position: { x: 0, y: 0 }, data: { canvasData: { nodes: legacyHub('inner-'), edges: [], drawings: [] } } },
+      ];
+
+      // v0 file → run all migrations; top-level AND nested hubs heal.
+      const out = runNodeMigrations(nodes, 0);
+      assert(out !== nodes, 'runNodeMigrations: migrated → new ref');
+      const topHub = out.find(n => n.id === 'top-hub');
+      assert(topHub.data.scoredJobs?.length === 2, 'runNodeMigrations: top-level hub → scoredJobs');
+      assert(!out.some(n => n.type === 'jobcard'), 'runNodeMigrations: top-level cascade removed');
+      const grp = out.find(n => n.id === 'grp');
+      const innerHub = grp.data.canvasData.nodes.find(n => n.id === 'inner-hub');
+      assert(innerHub.data.scoredJobs?.length === 2, 'runNodeMigrations: NESTED hub migrated (recursion into canvasData)');
+      assert(!grp.data.canvasData.nodes.some(n => n.type === 'jobcard'), 'runNodeMigrations: nested cascade removed');
+
+      // Current-version file → no migration eligible → SAME ref (clean files are free).
+      assert(runNodeMigrations(out, CURRENT_SCHEMA_VERSION) === out, 'runNodeMigrations: current-version file is a same-ref no-op');
+
+      // Idempotent by value: re-running from 0 over migrated output doesn't
+      // duplicate scoredJobs or resurrect a cascade.
+      const out2 = runNodeMigrations(out, 0);
+      assert(out2.find(n => n.id === 'top-hub').data.scoredJobs.length === 2, 'runNodeMigrations: idempotent — scoredJobs not duplicated');
+      assert(!out2.some(n => n.type === 'jobcard'), 'runNodeMigrations: idempotent — no cascade resurrected');
+      return { current: CURRENT_SCHEMA_VERSION };
     },
   },
   {
@@ -934,6 +1002,85 @@ const tests = [
       assert(cards.every(c => c.hidden === true), 'collapsed: all cards should be hidden');
       // Bands still ordered best-first and stacked (layout pass runs regardless).
       assert(strong.position.y < possible.position.y, 'collapsed: Strong band should still sit above Possible');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Job Board: unionScoredJobs dedups by identity, keeps higher score',
+    run: () => {
+      const a = [
+        { title: 'Eng', company: 'Acme', url: 'https://j/1', matchScore: 60, resumeProfile: { id: 'A' } },
+        { title: 'PM', company: 'Beta', url: 'https://j/2', matchScore: 80, resumeProfile: { id: 'A' } },
+      ];
+      const b = [
+        { title: 'Eng', company: 'Acme', url: 'https://j/1', matchScore: 90, resumeProfile: { id: 'B' } }, // dup of a[0], higher
+        { title: 'Designer', company: 'Gamma', url: '', matchScore: 50, resumeProfile: { id: 'B' } },
+        { title: 'designer', company: 'gamma', url: '', matchScore: 70, resumeProfile: { id: 'B' } }, // dup by title|company (no url)
+      ];
+      const out = unionScoredJobs([a, b]);
+      assert(out.length === 3, `union: expected 3 unique, got ${out.length}`);
+      const eng = out.find(j => j.url === 'https://j/1');
+      assert(eng.matchScore === 90, `union: higher score should win (got ${eng.matchScore})`);
+      assert(eng.resumeProfile?.id === 'B', 'union: winning copy carries its own resumeProfile');
+      // First-seen order preserved: Eng (a[0]), PM, Designer.
+      assert(out[0].url === 'https://j/1' && out[1].url === 'https://j/2', 'union: first-seen order preserved');
+      const designer = out.find(j => j.company.toLowerCase() === 'gamma');
+      assert(designer.matchScore === 70, 'union: title|company dedup keeps higher score when url missing');
+      return { unique: out.length };
+    },
+  },
+  {
+    name: 'Job Board: unionScoredJobs tolerates empty / non-array inputs',
+    run: () => {
+      assert(unionScoredJobs([]).length === 0, 'union: empty → empty');
+      assert(unionScoredJobs(null).length === 0, 'union: null → empty');
+      const out = unionScoredJobs([null, undefined, [{ title: 'x', company: 'y', url: 'u', matchScore: 1 }]]);
+      assert(out.length === 1, 'union: skips non-array entries');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'computeJobTreeView: filter removes non-matching cards + empty branches (not dim)',
+    run: () => {
+      // Two bands: A (Excellent, scores 90/88) and B (Long shot, score 20).
+      const tree = () => ([
+        { id: 'hub', type: 'jobboard', position: { x: 0, y: 0 }, data: {} },
+        { id: 'A',   type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'likelihood', label: 'Excellent', childIds: ['A-S'], expanded: false } },
+        { id: 'A-S', type: 'jobgroup', hidden: true,  position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'salary', label: '$100k+', childIds: ['A-R'], expanded: false } },
+        { id: 'A-R', type: 'jobgroup', hidden: true,  position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'role', label: 'Eng', childIds: ['a1', 'a2'], expanded: false, visibleCount: 10 } },
+        { id: 'a1',  type: 'jobcard',  hidden: true,  position: { x: 0, y: 0 }, data: { hubId: 'hub', matchScore: 90, source: 'lever' } },
+        { id: 'a2',  type: 'jobcard',  hidden: true,  position: { x: 0, y: 0 }, data: { hubId: 'hub', matchScore: 88, source: 'dice' } },
+        { id: 'B',   type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'likelihood', label: 'Long shot', childIds: ['B-S'], expanded: false } },
+        { id: 'B-S', type: 'jobgroup', hidden: true,  position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'salary', label: 'Under', childIds: ['B-R'], expanded: false } },
+        { id: 'B-R', type: 'jobgroup', hidden: true,  position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'role', label: 'Eng', childIds: ['b1'], expanded: false, visibleCount: 10 } },
+        { id: 'b1',  type: 'jobcard',  hidden: true,  position: { x: 0, y: 0 }, data: { hubId: 'hub', matchScore: 20, source: 'indeed' } },
+      ]);
+      const hiddenOf = (out, id) => !!out.find(n => n.id === id)?.hidden;
+
+      // No filter on the spawned/collapsed tree → no change (same ref).
+      const base = tree();
+      assert(computeJobTreeView(base, 'hub', {}) === base, 'no-filter on collapsed tree is a same-ref no-op');
+
+      // Filter ≥85 (collapsed): empty band B removed; matching band A stays visible.
+      const f85 = computeJobTreeView(tree(), 'hub', { scoreThreshold: 85 });
+      assert(hiddenOf(f85, 'A') === false, 'filter: band with matches stays visible');
+      assert(hiddenOf(f85, 'B') === true, 'filter: empty band REMOVED (hidden), not dimmed');
+
+      // Expand A fully under ≥89 → only a1 (90) shows; a2 (88) removed; branch stays.
+      const expanded = tree().map(n =>
+        ['A', 'A-S', 'A-R'].includes(n.id) ? { ...n, data: { ...n.data, expanded: true } } : n);
+      const f89 = computeJobTreeView(expanded, 'hub', { scoreThreshold: 89 });
+      assert(hiddenOf(f89, 'a1') === false, 'filter+expand: matching card visible');
+      assert(hiddenOf(f89, 'a2') === true, 'filter+expand: non-matching card REMOVED');
+      assert(hiddenOf(f89, 'A-R') === false && hiddenOf(f89, 'B') === true, 'filter+expand: branch with a match kept, empty band gone');
+
+      // Filter above every score → whole tree removed.
+      const f99 = computeJobTreeView(tree(), 'hub', { scoreThreshold: 99 });
+      assert(['A', 'A-S', 'A-R', 'a1', 'a2', 'B', 'b1'].every(id => hiddenOf(f99, id)), 'filter above max removes everything');
+
+      // Source filter: only dice → a2 stays, a1 (lever) + b1 (indeed) removed.
+      const expandedSrc = computeJobTreeView(expanded, 'hub', { sourceFilter: 'dice' });
+      assert(hiddenOf(expandedSrc, 'a2') === false && hiddenOf(expandedSrc, 'a1') === true, 'source filter keeps only matching source');
       return { ok: true };
     },
   },
@@ -1869,6 +2016,17 @@ const tests = [
       assert(b.maxX === 780 && b.maxY === 550, `max corner = jobhub br (got ${b.maxX},${b.maxY})`);
       const empty = getNodesBounds([]);
       assert(empty.minX === Infinity && empty.maxX === -Infinity, 'empty set → Infinity sentinels');
+
+      // Zoom-to-fit must fit only VISIBLE nodes: a hidden node at a stale far
+      // position (collapsed job card) shouldn't stretch the box. The fit-view
+      // hook filters `!n.hidden` before calling this; verify that excludes it.
+      const withHidden = [
+        ...nodes,
+        { type: 'jobcard', position: { x: 5000, y: 5000 }, hidden: true }, // stale, far away
+      ];
+      const visibleOnly = getNodesBounds(withHidden.filter(n => !n.hidden));
+      assert(visibleOnly.maxX === 780 && visibleOnly.maxY === 550, `visible-only bounds ignore hidden outlier (got ${visibleOnly.maxX},${visibleOnly.maxY})`);
+      assert(getNodesBounds(withHidden).maxX === 5180, 'sanity: unfiltered DOES include the hidden outlier');
       return { ok: true, b };
     },
   },

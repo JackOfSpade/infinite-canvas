@@ -1550,7 +1550,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       markSourceStatus(canvasFilePath, sourceId, status === 'error' ? 'blocked' : 'done', Date.now());
     }
 
-    // Flat per-source warning list returned with the response so the JobHub
+    // Flat per-source warning list returned with the response so the Job Search Module
     // done state can render a copy-able "Scrape Warnings" panel. Carry each
     // source's scrape `url` so the block gate can re-seed a Solve target if the
     // blocked source's card was lost during the run (see ensureBlockedSourceCards).

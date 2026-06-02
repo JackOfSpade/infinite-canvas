@@ -2,7 +2,7 @@ import React from 'react';
 import { Loader2, XCircle, Terminal } from 'lucide-react';
 import { JOB_SOURCE_BY_ID } from '../../utils/constants';
 
-export function JobHubProcessingState({
+export function JobSearchProcessingState({
   statusLabel,
   hubState,
   totalSourceJobs,

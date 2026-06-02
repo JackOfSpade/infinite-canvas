@@ -129,7 +129,7 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
     if (isAnimatingRef?.current) return;
     if (resizeDragActiveRef.current.has(node.id) || titleZoneDragActiveRef.current.has(node.id)) return;
 
-    if (getIntersectingNodes && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'sellhub') {
+    if (getIntersectingNodes && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'jobboard' && node.type !== 'sellhub') {
       const intersections = getIntersectingNodes(node);
       const targetGroup = intersections.find(n => n.type === 'group' && !n.data?.locked);
       const newTargetId = targetGroup ? targetGroup.id : null;
@@ -275,7 +275,7 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
 
     // Check if the node was dropped inside a group (nested canvas)
     // Only standard nodes (no groups) are absorbed, to prevent deep recursion complexities.
-    if (!wasResizeDrag && !wasTitleZoneDrag && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'sellhub') {
+    if (!wasResizeDrag && !wasTitleZoneDrag && node.type !== 'group' && node.type !== 'jobhub' && node.type !== 'jobboard' && node.type !== 'sellhub') {
       if (getIntersectingNodes && getNode) {
         const intersections = getIntersectingNodes(node);
         const targetGroup = intersections.find(n => n.type === 'group' && !n.data?.locked);

@@ -18,7 +18,8 @@ import { ResizeCorrection } from './utils/canvasInteractions';
 import { LinkNode } from './nodes/LinkNode';
 import { ListingNode } from './nodes/ListingNode';
 import { JobCardNode } from './nodes/JobCardNode';
-import { JobHubNode } from './nodes/JobHubNode';
+import { JobSearchNode } from './nodes/JobSearchNode';
+import { JobBoardNode } from './nodes/JobBoardNode';
 import {SellHubNode} from './nodes/SellHubNode';
 import { MarketplaceCardNode } from './nodes/MarketplaceCardNode';
 import { CompSourceCardNode } from './nodes/CompSourceCardNode';
@@ -76,7 +77,8 @@ const nodeTypes = {
   link: LinkNode,
   listing: ListingNode,
   jobcard: JobCardNode,
-  jobhub: JobHubNode,
+  jobhub: JobSearchNode, // 'jobhub' is the legacy persisted type key for the Job Search Module (kept for saved-canvas compat, like 'group')
+  jobboard: JobBoardNode,
   sellhub: SellHubNode,
   marketplacecard: MarketplaceCardNode,
   compsourcecard: CompSourceCardNode,
@@ -269,7 +271,7 @@ export function Canvas() {
     saveStateRef,
   });
 
-  // Exposes currentFile to descendants (e.g. JobHubNode) alongside the
+  // Exposes currentFile to descendants (e.g. JobSearchNode) alongside the
   // navigation helpers via the same context, avoiding a second provider.
   const navContextValue = React.useMemo(
     () => ({ ...navigation, currentFile }),

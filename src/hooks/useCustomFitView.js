@@ -19,7 +19,14 @@ export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingR
     const currentNodes    = nodesRef.current;
     const currentDrawings = drawingsRef.current;
 
-    let { minX, minY, maxX, maxY } = getNodesBounds(currentNodes);
+    // Fit to what's actually VISIBLE. Collapsed job-tree cards/groups are
+    // `hidden` and keep their last (often expanded) positions — including them
+    // would stretch the fit to empty space around invisible nodes, so the button
+    // wouldn't re-calibrate as the tree collapses/expands. (RF's built-in fitView
+    // already excludes hidden; this custom one must too.)
+    const visibleNodes = currentNodes.filter(n => !n.hidden);
+
+    let { minX, minY, maxX, maxY } = getNodesBounds(visibleNodes);
 
     currentDrawings.forEach(stroke => {
       for (const p of strokePoints(stroke)) {

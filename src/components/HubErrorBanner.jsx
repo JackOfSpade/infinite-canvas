@@ -2,7 +2,7 @@ import React from 'react';
 import { AlertTriangle, X, RefreshCw } from 'lucide-react';
 
 /**
- * Inline error banner shown above the body of any hub node (SellHub, JobHub,
+ * Inline error banner shown above the body of any hub node (SellHub, Job Search Module,
  * etc.). Replaces the dedicated 'error' hubState — the user wanted failures
  * to keep their place in the flow (still see/edit prior results, drop new
  * inputs) rather than be wiped to a "Try Again" wall.

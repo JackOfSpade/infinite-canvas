@@ -1,7 +1,7 @@
 import { useCallback, useState, useRef, useEffect, useEffectEvent } from 'react';
 import { toPng } from 'html-to-image';
 import { EventLogger } from '../utils/EventLogger';
-import { migrateGroupNodes, sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
+import { runNodeMigrations, CURRENT_SCHEMA_VERSION, sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
 import { TIMINGS } from '../utils/timings';
 
 
@@ -90,7 +90,7 @@ export function useCanvasPersistence({
       // ephemeral filter just above, or via a delete that bypassed the
       // normal cascade-cleanup path). Recursive across group sub-canvases.
       const sanitizedEdges = sanitizeEdgesForSave(rawData.edges, sanitizedNodes);
-      const data = { ...rawData, nodes: sanitizedNodes, edges: sanitizedEdges };
+      const data = { ...rawData, nodes: sanitizedNodes, edges: sanitizedEdges, schemaVersion: CURRENT_SCHEMA_VERSION };
       // Read currentFile via ref to avoid this callback being recreated on every file-path change
       const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFileRef.current });
       if (res?.success && res.filePath) {
@@ -191,18 +191,28 @@ export function useCanvasPersistence({
       if (res?.success && res.data) {
         // Reset navigation stack to root — prevents stale breadcrumbs/stack corruption
         resetStack?.();
-        // Migrate old group nodes on load
-        const migratedNodes = migrateGroupNodes(res.data.nodes || []);
+        // Run versioned node migrations: every migration newer than the file's
+        // schemaVersion (absent ⇒ 0) heals old/changed component shapes to the
+        // current format — group→canvasData, legacy Job Search cascade→scoredJobs,
+        // etc. Idempotent + same-ref when nothing changed, so current files are
+        // free. The on-disk file is untouched until the next save, so a bad
+        // migration is recoverable by not saving.
+        const fileVersion = res.data.schemaVersion ?? 0;
+        const inputNodes = res.data.nodes || [];
+        const relocatedNodes = runNodeMigrations(inputNodes, fileVersion);
+        if (relocatedNodes !== inputNodes) {
+          EventLogger.log(`[Migration] Healed canvas from schemaVersion ${fileVersion} → ${CURRENT_SCHEMA_VERSION}`);
+        }
         // Sanitize transient hub state on load, not just on save. A workspace
         // saved before the save-time strip existed (or by any path that
         // bypassed it) can carry a stale data.errorMessage / pending-pipeline
-        // buffer / mid-run hubState on a jobhub/sellhub. Without stripping here
+        // buffer / mid-run hubState on a jobsearch/sellhub. Without stripping here
         // the "report an issue" banner from a forgotten failed run reappears on
         // every auto-load and never clears — a freshly-loaded canvas is marked
         // clean (hasUnsavedChanges=false below), so no auto-save ever fires to
         // re-sanitize it. Running the same sanitizer used on save makes load
         // idempotent for clean files and self-healing for stale ones.
-        const sanitizedNodes = sanitizeNodesForSave(migratedNodes);
+        const sanitizedNodes = sanitizeNodesForSave(relocatedNodes);
         // Strip orphan edges on load too — files saved before the save-time
         // orphan filter existed can carry hundreds of orphans (refs to
         // long-deleted hub trees) that render as ghost connections in the

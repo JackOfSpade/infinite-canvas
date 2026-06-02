@@ -4,7 +4,7 @@ import { ShieldAlert, ChevronDown, ChevronUp, Copy } from 'lucide-react';
 /**
  * Collapsible panel for per-source anti-bot / throttle warnings produced
  * during a multi-source scrape. Used by both SellHubPricedState and
- * JobHubDoneState — the ephemeral comp/job source cards show warnings
+ * JobSearchDoneState — the ephemeral comp/job source cards show warnings
  * inline, but their data needs to survive after the cards are reaped,
  * which is what this panel does.
  *

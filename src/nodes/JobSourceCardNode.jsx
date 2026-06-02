@@ -9,14 +9,14 @@ import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 
 /**
  * JobSourceCardNode — persistent canvas node representing one job source
- * (LinkedIn, Indeed, Greenhouse, etc.) that a JobHubNode searches against.
+ * (LinkedIn, Indeed, Greenhouse, etc.) that a JobSearchNode searches against.
  *
  * Replaces the orbital ring of source icons. Each card is a real ReactFlow
  * node connected to its hub by a native edge, leaving room for per-platform
  * features to grow on each card later (login state, custom filters, etc.).
  *
  * Lifecycle:
- *   - Spawned by the owning JobHubNode the first time its pipeline runs.
+ *   - Spawned by the owning JobSearchNode the first time its pipeline runs.
  *   - Reused across re-runs — the hub looks up existing cards by hubId+sourceId
  *     before deciding what to spawn.
  *   - Subscribes to `job-source-progress` events filtered by its sourceId.
@@ -28,12 +28,12 @@ import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
  * data shape:
  *   {
  *     sourceId, name, letter, color,  // JOB_SOURCES entry
- *     hubId,                          // owning JobHubNode id (multi-hub safety)
+ *     hubId,                          // owning JobSearchNode id (multi-hub safety)
  *   }
  */
 export function JobSourceCardNode({ id, data }) {
   const { getNode, deleteElements, updateNodeData } = useReactFlow();
-  // Same nav context the owning JobHub reads currentFile from — needed so a
+  // Same nav context the owning Job Search Module reads currentFile from — needed so a
   // captcha-resolve can history-dedup against this project's jobs-history CSV
   // (mirrors the headless search path), instead of re-surfacing already-seen
   // jobs every time the user re-solves a source.
@@ -96,7 +96,7 @@ export function JobSourceCardNode({ id, data }) {
     });
   }, [progress, id, updateNodeData]);
 
-  // The owning JobHub coordinates clean-card dismissal after ALL source cards
+  // The owning Job Search Module coordinates clean-card dismissal after ALL source cards
   // have reported terminal progress. That keeps the source counts visible as a
   // set, while blocked/errored/manual-action cards still remain actionable.
   useEffect(() => {
@@ -240,7 +240,7 @@ export function JobSourceCardNode({ id, data }) {
   const hubData = hub?.data || {};
   const isFiltered = hubData.sourceFilter === data.sourceId;
   const hubBusy = ['parsing', 'querying', 'searching', 'scoring'].includes(hubData.hubState);
-  // Hub-cascading lock: when the owning JobHub is locked, the source card's
+  // Hub-cascading lock: when the owning Job Search Module is locked, the source card's
   // interactive controls (filter toggle, Solve, Skip) become no-ops. The
   // card itself stays visible and informational.
   const hubLocked = !!hubData.locked;

@@ -2,10 +2,8 @@ import React from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { ChevronRight, ChevronDown, Plus } from 'lucide-react';
 import { NodeHandles } from './_shared/NodeHandles';
-import {
-  computeLayoutPositions,
-  COL_X,
-} from './jobhub/buildJobTree';
+import { EventLogger } from '../utils/EventLogger';
+import { computeJobTreeView } from './jobsearch/buildJobTree';
 
 /**
  * JobGroupNode — collapsible header that owns a slice of the job-tree.
@@ -36,14 +34,14 @@ import {
  *   }
  */
 export function JobGroupNode({ id, data }) {
-  const { setNodes, getNode, getNodes } = useReactFlow();
+  const { setNodes, getNode } = useReactFlow();
 
   const expanded = !!data.expanded;
   const kind = data.kind || 'role';
   const isLikelihood = kind === 'likelihood';
   const isSalary     = kind === 'salary';
   const isLeaf       = kind === 'role'; // leaf group: paginates its job cards
-  // Hub-cascading lock: when the owning JobHub is locked, expand/collapse
+  // Hub-cascading lock: when the owning Job Search Module is locked, expand/collapse
   // becomes a no-op so the canvas state can't be mutated.
   const hubLocked = !!getNode(data.hubId)?.data?.locked;
 
@@ -59,97 +57,77 @@ export function JobGroupNode({ id, data }) {
     : childIds.length;
   const hasMore = isLeaf && visibleCount < childIds.length;
 
+  // The owning hub/board's active card filter — reveal must respect it, so an
+  // expand under a filter only shows matching cards / non-empty branches.
+  const hubFilter = () => {
+    const d = getNode(data.hubId)?.data || {};
+    return { scoreThreshold: d.scoreThreshold ?? 0, sourceFilter: d.sourceFilter ?? null };
+  };
+
   const toggle = (e) => {
     e.stopPropagation();
     if (hubLocked) return;
     if (childIds.length === 0) return;
 
-    const hubPos = getNode(data.hubId)?.position || { x: 0, y: 0 };
+    const willExpand = !expanded;
+    const filter = hubFilter();
 
-    if (expanded) {
-      // Collapsing: hide every descendant under this node, not just direct
-      // children. A previously-expanded bucket under a category leaves its
-      // jobs visible otherwise. Walk the tree by following childIds on any
-      // visited JobGroupNode.
-      const allNodes = getNodes();
-      const byId = new Map(allNodes.map(n => [n.id, n]));
-      const toHide = new Set();
-      const queue = [...childIds];
-      while (queue.length > 0) {
-        const cid = queue.shift();
-        if (toHide.has(cid)) continue;
-        toHide.add(cid);
-        const child = byId.get(cid);
-        const grand = child?.data?.childIds;
-        if (Array.isArray(grand)) queue.push(...grand);
+    setNodes(nodes => {
+      const byId = new Map(nodes.map(n => [n.id, n]));
+      // On collapse, reset the whole subtree's expanded/visibleCount so a later
+      // re-expand starts fresh (computeJobTreeView then derives `hidden`).
+      const resetIds = new Set();
+      if (!willExpand) {
+        const queue = [...childIds];
+        while (queue.length > 0) {
+          const cid = queue.shift();
+          if (resetIds.has(cid)) continue;
+          resetIds.add(cid);
+          const grand = byId.get(cid)?.data?.childIds;
+          if (Array.isArray(grand)) queue.push(...grand);
+        }
       }
-      setNodes(nodes => {
-        const after = nodes.map(n => {
-          if (n.id === id) {
-            return {
-              ...n,
-              data: {
-                ...n.data,
-                expanded: false,
-                ...(isLeaf ? { visibleCount: Math.min(10, childIds.length) } : {}),
-              },
-            };
-          }
-          if (toHide.has(n.id)) {
-            const isGroup = n.type === 'jobgroup';
-            if (isGroup) {
-              return {
-                ...n,
-                hidden: true,
-                data: {
-                  ...n.data,
-                  expanded: false,
-                  ...(n.data?.kind === 'role'
-                    ? { visibleCount: Math.min(10, (n.data?.childIds || []).length) }
-                    : {}),
-                },
-              };
-            }
-            return { ...n, hidden: true };
-          }
-          return n;
-        });
-        const positions = computeLayoutPositions(after, data.hubId, COL_X, hubPos);
-        return after.map(n => positions[n.id] ? { ...n, position: positions[n.id] } : n);
+      const updated = nodes.map(n => {
+        if (n.id === id) {
+          return {
+            ...n,
+            data: {
+              ...n.data,
+              expanded: willExpand,
+              ...(isLeaf && !willExpand ? { visibleCount: Math.min(10, childIds.length) } : {}),
+            },
+          };
+        }
+        if (resetIds.has(n.id) && n.type === 'jobgroup' && (n.data?.expanded || n.data?.visibleCount)) {
+          return {
+            ...n,
+            data: {
+              ...n.data,
+              expanded: false,
+              ...(n.data?.kind === 'role' ? { visibleCount: Math.min(10, (n.data?.childIds || []).length) } : {}),
+            },
+          };
+        }
+        return n;
       });
-    } else {
-      // Expanding. Role leaves reveal up to `visibleCount` cards (paginated);
-      // likelihood/salary groups reveal all direct children at once.
-      const revealSet = isLeaf
-        ? new Set(childIds.slice(0, visibleCount))
-        : new Set(childIds);
-      setNodes(nodes => {
-        const after = nodes.map(n => {
-          if (n.id === id) return { ...n, data: { ...n.data, expanded: true } };
-          if (revealSet.has(n.id)) return { ...n, hidden: false };
-          return n;
-        });
-        const positions = computeLayoutPositions(after, data.hubId, COL_X, hubPos);
-        return after.map(n => positions[n.id] ? { ...n, position: positions[n.id] } : n);
-      });
-    }
+      return computeJobTreeView(updated, data.hubId, filter);
+    });
+    EventLogger.log(`[JobTree] ${willExpand ? 'expanded' : 'collapsed'} ${kind} "${data.label}" id=${id}`);
   };
 
   const showMore = (e) => {
     e.stopPropagation();
     if (!isLeaf || !hasMore || hubLocked) return;
     const nextCount = Math.min(visibleCount + 10, childIds.length);
-    const toReveal = new Set(childIds.slice(visibleCount, nextCount));
-    const hubPos = getNode(data.hubId)?.position || { x: 0, y: 0 };
-    setNodes(nodes => {
-      const after = nodes.map(n => {
-        if (n.id === id) return { ...n, data: { ...n.data, visibleCount: nextCount } };
-        if (toReveal.has(n.id)) return { ...n, hidden: false };
-        return n;
-      });
-      const positions = computeLayoutPositions(after, data.hubId, COL_X, hubPos);
-      return after.map(n => positions[n.id] ? { ...n, position: positions[n.id] } : n);
-    });
+    const filter = hubFilter();
+    setNodes(nodes =>
+      computeJobTreeView(
+        nodes.map(n => (n.id === id ? { ...n, data: { ...n.data, visibleCount: nextCount } } : n)),
+        data.hubId,
+        filter,
+      ),
+    );
+    EventLogger.log(`[JobTree] show more in role "${data.label}" id=${id} (now ${nextCount}/${childIds.length})`);
   };
 
   return (
