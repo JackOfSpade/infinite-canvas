@@ -216,6 +216,12 @@ function buildTrustedNativeLoginVerdict(platformId, result) {
     trace: {
       target: result.currentUrl,
       nativeChrome: true,
+      // Lift finalUrl + status to the top level so the bug-report session table
+      // (renderSessionRows reads lastTrace.status / .finalUrl) sees the
+      // auto-detected marker and suppresses the bogus "redirected to undefined"
+      // mismatch — mirrors the HTTP-verify trace shape (see verifySession).
+      finalUrl: result.currentUrl,
+      status: 'auto-detected',
       checks: [{
         target: 'native-chrome-login-window',
         finalUrl: result.currentUrl,
@@ -240,6 +246,10 @@ function buildTrustedPuppeteerLoginVerdict(platformId, result) {
     reason: `Auto-detected logged-in state for ${platformId} at ${result.loginUrl} (DOM/cookie/auth-gated signal) — HTTP re-verify skipped.`,
     trace: {
       target: result.loginUrl,
+      // Top-level finalUrl + status so the bug-report session table sees the
+      // auto-detected marker (see buildTrustedNativeLoginVerdict for why).
+      finalUrl: result.loginUrl,
+      status: 'auto-detected',
       checks: [{
         target: 'puppeteer-login-window',
         finalUrl: result.loginUrl,

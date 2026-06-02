@@ -337,9 +337,25 @@ async function getChallengeSignals(page) {
     const hasDataDomeFrame  = !!document.querySelector('iframe[src*="captcha-delivery.com"], iframe[title*="DataDome"]');
     const hasDataDomeScript = !!document.querySelector('script[src*="captcha-delivery.com"]');
 
+    // Google's "unusual traffic" interstitial (google.com/sorry/index) — a reCAPTCHA
+    // "I'm not a robot" wall served when Google flags the session/IP. The reCAPTCHA
+    // iframe alone isn't a reliable signal (it can lag), so also key off the /sorry
+    // URL and the Google-specific body string (low false-positive). This makes the
+    // scrape treat it as a SOLVABLE challenge and wait for the user — like every
+    // other platform — instead of silently extracting 0 jobs and moving on.
+    // Both signals live on the TOP document (the reCAPTCHA checkbox + its "I'm not a
+    // robot" label are inside a cross-origin iframe we can't read, so don't rely on
+    // them). The /sorry URL and the Google-specific banner are unambiguous and won't
+    // false-positive on a normal results page — important, since a false positive
+    // here would make the scrape wait forever for a solve that isn't needed.
+    const isGoogleSorryPage =
+      /\/sorry\/(index|captcha)/.test(window.location.href) ||
+      bodyText.includes('unusual traffic from your computer network');
+
     let reason = 'none';
     if (hasChallengeShell || hasPerimeterXBlock) reason = 'challenge-shell';
     else if (title.startsWith('just a moment')) reason = 'just-a-moment-title';
+    else if (isGoogleSorryPage) reason = 'google-sorry-recaptcha';
     else if (hasVerificationText) reason = 'verification-text';
     else if (hasDataDomeFrame || hasDataDomeScript) reason = 'datadome-captcha';
     else if (visibleRecaptchaFrames > 0 && !hasNormalContent) reason = 'visible-recaptcha-without-content';
@@ -347,14 +363,13 @@ async function getChallengeSignals(page) {
     else if (hasCloudflareChallengeFrame || hasCloudflareTurnstileWidget) reason = 'cloudflare-challenge-frame';
     else if (hasIndeedCloudflareMarker && !hasNormalContent) reason = 'indeed-cloudflare-static-without-content';
 
-    // Hard block: verification text is present but there is NO interactive widget
-    // (no Cloudflare turnstile frame, no reCAPTCHA, no hCaptcha). This is the
-    // "Additional Verification Required" page — a Ray-ID block page with only a
-    // "Return home" button and nothing the user can actually solve. Since a
-    // solvable challenge is now waited on INDEFINITELY, distinguishing this is
-    // essential: callers must skip a hard block immediately so it can't hang the
-    // run forever on an interaction that can never happen.
-    const isHardBlock = reason === 'verification-text' &&
+    // Hard block: a verification wall is present but there is NO interactive widget
+    // to solve (no Cloudflare turnstile, no reCAPTCHA, no hCaptcha). Covers both the
+    // CF "Additional Verification Required" Ray-ID page AND a Google /sorry page that
+    // serves no reCAPTCHA (a pure rate-limit block). Since a solvable challenge is
+    // now waited on INDEFINITELY, distinguishing this is essential: callers must skip
+    // a hard block immediately so it can't hang the run on an interaction that can't happen.
+    const isHardBlock = (reason === 'verification-text' || reason === 'google-sorry-recaptcha') &&
                         !hasCloudflareChallengeFrame &&
                         !hasCloudflareTurnstileWidget &&
                         visibleRecaptchaFrames === 0 &&
@@ -1457,6 +1472,147 @@ async function resolveGlassdoorLocId(page, location, signal) {
   return null;
 }
 
+// Stealth navigator/screen masking applied on every document of a page (main
+// frame + iframes + post-navigation). Mirrors createStealthPage() in
+// stealthBrowser.js — keeps the fingerprint coherent across the session.
+async function applyStealthMask(page) {
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver',           { get: () => false });
+    Object.defineProperty(navigator, 'platform',            { get: () => 'MacIntel' });
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+    Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8 });
+    Object.defineProperty(navigator, 'maxTouchPoints',      { get: () => 0 });
+    if (navigator.connection) {
+      Object.defineProperty(navigator.connection, 'rtt',           { get: () => 50 });
+      Object.defineProperty(navigator.connection, 'downlink',      { get: () => 10 });
+      Object.defineProperty(navigator.connection, 'effectiveType', { get: () => '4g' });
+    }
+  });
+}
+
+/**
+ * Launch a fresh Chrome dedicated to ONE platform scrape: its own process, a
+ * stealth-masked page, and all the console/network/overlay instrumentation the
+ * scrape loop relies on. Each browser-based source gets a brand-new browser
+ * (closed via teardown() before the next launches) so no single long-lived session
+ * carries accumulated automation/anti-bot signal across platforms — e.g. Google,
+ * scraped last, no longer inherits the "warmth" of indeed→ziprecruiter→glassdoor.
+ * The persistent userDataDir is shared, so logins persist; only the process resets.
+ *
+ * `onCrash` fires only if the browser disconnects UNEXPECTEDLY (a real crash) — our
+ * own teardown() suppresses it so closing between platforms doesn't abort the run.
+ *
+ * @returns {{ browser:object, page:object, navStatusRef:{last:number|null}, isClosed:()=>boolean, teardown:()=>Promise<void> }}
+ */
+async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandboxArgs, onCrash }) {
+  const browser = await puppeteer.launch({
+    headless: false,
+    executablePath,
+    userDataDir,
+    // Strip --enable-automation (Puppeteer default) and disable the blink
+    // AutomationControlled feature flag — the two most-checked automation signals.
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: [
+      ...sandboxArgs,
+      '--disable-blink-features=AutomationControlled',
+      '--disable-infobars',
+      '--window-size=1280,900',
+      '--lang=en-US,en',
+    ],
+    defaultViewport: null,
+    ignoreHTTPSErrors: true,
+  });
+
+  const page = await browser.newPage();
+  await applyStealthMask(page);
+
+  // Capture browser-side console errors/warnings for the bug report. Fires for all
+  // frames (challenge-page + Turnstile frames included). error/warning only.
+  page.on('console', msg => {
+    const type = msg.type();
+    if (type !== 'error' && type !== 'warning') return;
+    const loc = msg.location();
+    manualScraperTelemetry.consoleLogs.push({
+      ts: Date.now(),
+      type,
+      text: msg.text().slice(0, 300),
+      url: (loc?.url || '').slice(0, 120),
+      line: loc?.lineNumber ?? null,
+    });
+    if (manualScraperTelemetry.consoleLogs.length > 60) manualScraperTelemetry.consoleLogs.shift();
+  });
+
+  // Capture hard network failures (DNS, TCP, TLS, COEP, etc.)
+  page.on('requestfailed', req => {
+    const url = req.url();
+    if (/t\.indeed\.com\/signals|googletagmanager|\.analytics\.|sift\.com|intercom\.io|clarity\.ms|bat\.bing|munchkin\.marketo|cdn\.branch\.io|cloudflareinsights\.com\/cdn-cgi\/rum/.test(url)) return;
+    manualScraperTelemetry.networkErrors.push({
+      ts: Date.now(),
+      method: req.method(),
+      url: url.slice(0, 200),
+      status: null,
+      errorText: req.failure()?.errorText || 'unknown',
+    });
+    if (manualScraperTelemetry.networkErrors.length > 30) manualScraperTelemetry.networkErrors.shift();
+  });
+
+  // Tracks the status code of the most recent main-frame document response — lets
+  // the SITE_CHANGED branch tell "200 but selectors stale" from "403 block page".
+  const navStatusRef = { last: null };
+  page.on('response', res => {
+    const status = res.status();
+    try {
+      if (res.request().resourceType() === 'document' && res.frame() === page.mainFrame()) {
+        navStatusRef.last = status;
+      }
+    } catch { /* frame may be detached on rapid navigations — skip */ }
+    if (status < 400) return;
+    const url = res.url();
+    if (/t\.indeed\.com\/signals|googletagmanager|\.analytics\.|sift\.com|intercom\.io|clarity\.ms|bat\.bing|munchkin\.marketo|cdn\.branch\.io/.test(url)) return;
+    manualScraperTelemetry.networkErrors.push({
+      ts: Date.now(),
+      method: res.request().method(),
+      url: url.slice(0, 200),
+      status,
+      errorText: null,
+    });
+    if (manualScraperTelemetry.networkErrors.length > 30) manualScraperTelemetry.networkErrors.shift();
+  });
+
+  // Inject overlay on every new document so it survives navigations
+  await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
+
+  let closed = false;
+  let intentional = false;
+  browser.on('disconnected', () => { closed = true; if (!intentional) onCrash?.(); });
+
+  // Re-inject overlay after any navigation that kills it (CF blocks, redirects).
+  // OVERLAY_SCRIPT is a no-op when the panel is already present; skips challenge pages.
+  const overlayKeepAlive = setInterval(() => {
+    if (closed) return;
+    page.evaluate(() => {
+      if (typeof window.INDEED_CLOUDFLARE_STATIC_PAGE !== 'undefined') return true;
+      return !!document.getElementById('__ic-panel');
+    }).then(exists => { if (!exists) page.evaluate(OVERLAY_SCRIPT).catch(() => {}); })
+      .catch(() => {});
+  }, 1500);
+
+  return {
+    browser,
+    page,
+    navStatusRef,
+    isClosed: () => closed,
+    teardown: async () => {
+      intentional = true; // suppress onCrash for our own close
+      clearInterval(overlayKeepAlive);
+      if (!closed) await browser.close().catch(() => {});
+      closed = true;
+      // Let Chrome release the shared-profile SingletonLock before the next launch.
+      await new Promise(r => setTimeout(r, 600));
+    },
+  };
+}
+
 export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = null) {
   // Clear per-run browser diagnostic buffers so the bug report only shows
   // what happened in THIS run, not leftovers from a previous one.
@@ -1479,142 +1635,26 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
 
   await closeStealthBrowser();
 
-  // ── Browser launch ────────────────────────────────────────────────────────
-  let browser;
+  // ── Per-platform fresh browser ──────────────────────────────────────────────
+  // Each browser-based source gets its OWN Chrome process, launched at the top of
+  // its iteration and fully closed before the next (launchScrapePlatformBrowser +
+  // teardownCurrent). No single long-lived session carries accumulated automation /
+  // anti-bot signal across platforms — e.g. Google, scraped last, no longer inherits
+  // the "warmth" of indeed→ziprecruiter→glassdoor. The persistent userDataDir is
+  // shared, so logins persist; only the process/session resets.
   const userDataDir    = await getUserDataDir();
   const executablePath = process.env.CHROME_PATH || await findChromePath();
   const sandboxArgs    = process.platform === 'darwin'
     ? []
     : ['--no-sandbox', '--disable-setuid-sandbox'];
 
-  browser = await puppeteer.launch({
-    headless: false,
-    executablePath,
-    userDataDir,
-    // Strip --enable-automation (Puppeteer default) and disable the blink
-    // AutomationControlled feature flag — these two are the most-checked
-    // automation signals and what ZipRecruiter's fingerprint JS reads.
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      ...sandboxArgs,
-      '--disable-blink-features=AutomationControlled',
-      '--disable-infobars',
-      '--window-size=1280,900',
-      '--lang=en-US,en',
-    ],
-    defaultViewport: null,
-    ignoreHTTPSErrors: true,
-  });
-
-  const page = await browser.newPage();
-
-  // Mask automation-specific navigator/screen properties on every document
-  // (including iframes and post-navigation pages). Mirrors createStealthPage()
-  // in stealthBrowser.js — keeps the fingerprint coherent across the session.
-  await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'webdriver',           { get: () => false });
-    Object.defineProperty(navigator, 'platform',            { get: () => 'MacIntel' });
-    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-    Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8 });
-    Object.defineProperty(navigator, 'maxTouchPoints',      { get: () => 0 });
-    if (navigator.connection) {
-      Object.defineProperty(navigator.connection, 'rtt',           { get: () => 50 });
-      Object.defineProperty(navigator.connection, 'downlink',      { get: () => 10 });
-      Object.defineProperty(navigator.connection, 'effectiveType', { get: () => '4g' });
-    }
-  });
-
-  // NO exposeFunction pause bridge. page.exposeFunction installs a CDP
-  // Runtime.addBinding, which leaves a detectable hook on the page — exactly the
-  // automation fingerprint DataDome flags ("Use of developer or inspection
-  // tools"). indeedBrowser.js avoids it for the same reason (its overlay is
-  // withPause:false). The overlay below is now display-only; pause is disabled
-  // for manual sources until it can be restored via DOM polling (no CDP binding).
   manualScraperTelemetry.paused = false;
 
-  // Capture browser-side console errors/warnings for the bug report.
-  // Fires for all frames (main page + iframes), so challenge-page and Turnstile
-  // frame errors are included. Only error/warning to keep the ring buffer from
-  // filling with routine log/info noise.
-  page.on('console', msg => {
-    const type = msg.type();
-    if (type !== 'error' && type !== 'warning') return;
-    const loc = msg.location();
-    const entry = {
-      ts: Date.now(),
-      type,
-      text: msg.text().slice(0, 300),
-      url: (loc?.url || '').slice(0, 120),
-      line: loc?.lineNumber ?? null,
-    };
-    manualScraperTelemetry.consoleLogs.push(entry);
-    if (manualScraperTelemetry.consoleLogs.length > 60) manualScraperTelemetry.consoleLogs.shift();
-  });
-
-  // Capture hard network failures (DNS, TCP, TLS, COEP, etc.)
-  page.on('requestfailed', req => {
-    const url = req.url();
-    if (/t\.indeed\.com\/signals|googletagmanager|\.analytics\.|sift\.com|intercom\.io|clarity\.ms|bat\.bing|munchkin\.marketo|cdn\.branch\.io|cloudflareinsights\.com\/cdn-cgi\/rum/.test(url)) return;
-    manualScraperTelemetry.networkErrors.push({
-      ts: Date.now(),
-      method: req.method(),
-      url: url.slice(0, 200),
-      status: null,
-      errorText: req.failure()?.errorText || 'unknown',
-    });
-    if (manualScraperTelemetry.networkErrors.length > 30) manualScraperTelemetry.networkErrors.shift();
-  });
-
-  // Tracks the status code of the most recent main-frame document response.
-  // Used to distinguish "anti-bot blocked the page load" from "selectors stale"
-  // when the extractor returns 0 results — a 4xx/5xx main-frame response means
-  // the body we're extracting against was a block/error page, not stale markup.
-  // Reset at each per-query navigation.
-  const navStatusRef = { last: null };
-
-  // Capture HTTP 4xx/5xx responses. Skip analytics/tracking that fail routinely
-  // and add no debug value (t.indeed.com/signals, GTM, Sift, Intercom, etc.).
-  page.on('response', res => {
-    const status = res.status();
-    // Main-frame document status is captured regardless of code so the SITE_CHANGED
-    // branch can tell apart "200 but selectors don't match" from "403 block page".
-    try {
-      if (res.request().resourceType() === 'document' && res.frame() === page.mainFrame()) {
-        navStatusRef.last = status;
-      }
-    } catch { /* frame may be detached on rapid navigations — skip */ }
-    if (status < 400) return;
-    const url = res.url();
-    if (/t\.indeed\.com\/signals|googletagmanager|\.analytics\.|sift\.com|intercom\.io|clarity\.ms|bat\.bing|munchkin\.marketo|cdn\.branch\.io/.test(url)) return;
-    manualScraperTelemetry.networkErrors.push({
-      ts: Date.now(),
-      method: res.request().method(),
-      url: url.slice(0, 200),
-      status,
-      errorText: null,
-    });
-    if (manualScraperTelemetry.networkErrors.length > 30) manualScraperTelemetry.networkErrors.shift();
-  });
-
-  // Inject overlay on every new document so it survives navigations
-  await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
-
-  let earlyExit    = false;
-  let browserClosed = false;
-  browser.on('disconnected', () => { browserClosed = true; earlyExit = true; });
-
-  // Re-inject overlay after any page navigation that kills it (Cloudflare blocks,
-  // redirects, etc.). OVERLAY_SCRIPT is a no-op when the panel is already present.
-  // Skip challenge pages — injecting there causes DOM errors that interfere with
-  // the Cloudflare widget (INDEED_CLOUDFLARE_STATIC_PAGE is set by the challenge page).
-  const overlayKeepAlive = setInterval(() => {
-    if (browserClosed) return;
-    page.evaluate(() => {
-      if (typeof window.INDEED_CLOUDFLARE_STATIC_PAGE !== 'undefined') return true;
-      return !!document.getElementById('__ic-panel');
-    }).then(exists => { if (!exists) page.evaluate(OVERLAY_SCRIPT).catch(() => {}); })
-      .catch(() => {});
-  }, 1500);
+  let earlyExit = false;
+  let platform  = null; // current per-platform browser bundle (see teardownCurrent)
+  const teardownCurrent = async () => {
+    if (platform) { await platform.teardown(); platform = null; }
+  };
 
   const sourceList = [...bySource.entries()];
 
@@ -1630,7 +1670,14 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       let sourcePagesWalked        = 0;
       let sourceSkipped            = false; // set true when challenge times out — skips remaining queries for this source
 
-      logger.info(`[BrowserScraper] Starting ${si + 1}/${sourceList.length}: ${srcName} (${sourceTasks.length} queries)`);
+      // Fresh, fully-isolated Chrome for THIS platform (torn down before the next).
+      platform = await launchScrapePlatformBrowser({
+        userDataDir, executablePath, sandboxArgs,
+        onCrash: () => { earlyExit = true; },
+      });
+      const { browser, page, navStatusRef } = platform;
+
+      logger.info(`[BrowserScraper] Starting ${si + 1}/${sourceList.length}: ${srcName} (${sourceTasks.length} queries) — fresh isolated browser launched`);
       recordManualScraperTelemetry({
         phase: 'source-start',
         sourceId,
@@ -1661,20 +1708,13 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           await new Promise(r => setTimeout(r, humanDelay(cooldownAnchor)));
         }
 
-        logger.info(`[BrowserScraper] ${srcName} query ${qi + 1}/${sourceTasks.length}: ${task.url}`);
-        recordManualScraperTelemetry({
-          phase: 'query-start',
-          sourceId,
-          srcName,
-          queryIndex: qi + 1,
-          queryTotal: sourceTasks.length,
-          url: task.url,
-        });
-
         // Glassdoor: resolve the location text → numeric locId and append it so the
         // search is actually geo-bounded (locKeyword text alone is ignored). Done
         // in-browser (CF-gated endpoint) + cached; on any failure we leave the URL
-        // unbounded (nationwide) rather than block the scrape.
+        // unbounded (nationwide) rather than block the scrape. MUST run before the
+        // query-start log + telemetry below so the recorded URL reflects the
+        // geo-bounded URL we actually navigate to — otherwise the bug report shows a
+        // locKeyword-only URL and Glassdoor looks unscoped when it isn't.
         if (sourceId === 'glassdoor' && task.resolveGlassdoorLocation && !task._locResolved) {
           task._locResolved = true;
           const picked = await resolveGlassdoorLocId(page, task.resolveGlassdoorLocation, signal).catch(() => null);
@@ -1685,6 +1725,16 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             logger.warn(`[BrowserScraper] Glassdoor location "${task.resolveGlassdoorLocation}" not resolved — searching nationwide (location not applied)`);
           }
         }
+
+        logger.info(`[BrowserScraper] ${srcName} query ${qi + 1}/${sourceTasks.length}: ${task.url}`);
+        recordManualScraperTelemetry({
+          phase: 'query-start',
+          sourceId,
+          srcName,
+          queryIndex: qi + 1,
+          queryTotal: sourceTasks.length,
+          url: task.url,
+        });
 
         // Navigate via window.location.href — avoids CDP Page.navigate fingerprint
         navStatusRef.last = null;
@@ -1924,12 +1974,13 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       onResult?.(result);
 
       logger.info(`[BrowserScraper] ${srcName} done: ${allJobs.length} jobs`);
+
+      // Close this platform's browser completely before the next launches, so each
+      // platform starts from a fresh process with no carried-over session signal.
+      await teardownCurrent();
     }
   } finally {
-    clearInterval(overlayKeepAlive);
-    if (!browserClosed) {
-      await browser.close().catch(() => {});
-    }
+    await teardownCurrent();
     clearManualScraperTelemetry(signal?.aborted ? 'aborted' : 'finished');
   }
 

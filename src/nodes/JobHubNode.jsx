@@ -385,7 +385,7 @@ export function JobHubNode({ id, data }) {
           hubId: currentId, title: job.title, company: job.company, location: job.location,
           salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
           reasoning: job.reasoning, careerDirection: job.careerDirection, source: job.source,
-          url: job.url, posted: job.posted, resumeProfile: profile, isNew: true,
+          url: job.url, posted: job.posted, language: job.language, resumeProfile: profile, isNew: true,
         },
       });
       pushEdge(roleNode.id, jobId);
@@ -697,13 +697,32 @@ export function JobHubNode({ id, data }) {
   // target-specific queries to the generated set (see generate-job-queries);
   // scoring, display, and categorization are identical to a no-target run.
   // Persisted so it survives saves and re-runs.
-  const targetRole = data.targetRole || '';
+  // Role / location are edited through LOCAL draft state, not bound straight to
+  // data.* . React Flow feeds node data via an external store (useSyncExternalStore);
+  // re-renders from an external store bypass React's controlled-input caret
+  // restoration, so a value={data.targetRole} input jumps the caret to the end on
+  // every mid-text edit (backspace/insert). Mirroring locally keeps the value update
+  // inside React's own event flow (caret preserved); onChange writes through to the
+  // store, and the render-time reconcile picks up EXTERNAL store changes (canvas load
+  // / reset) — React's "adjust state when a prop changes" pattern (no effect, so it
+  // doesn't trip react-hooks/set-state-in-effect).
+  const storeRole = data.targetRole || '';
+  const storeLocation = data.preferredLocation || '';
+  const [targetRole, setRoleDraft] = useState(storeRole);
+  const [lastStoreRole, setLastStoreRole] = useState(storeRole);
+  if (storeRole !== lastStoreRole) { setLastStoreRole(storeRole); setRoleDraft(storeRole); }
+  const [preferredLocation, setLocationDraft] = useState(storeLocation);
+  const [lastStoreLocation, setLastStoreLocation] = useState(storeLocation);
+  if (storeLocation !== lastStoreLocation) { setLastStoreLocation(storeLocation); setLocationDraft(storeLocation); }
   const setTargetRole = useCallback((val) => {
-    updateGlobal(id, { targetRole: typeof val === 'string' ? val : '' });
+    const v = typeof val === 'string' ? val : '';
+    setRoleDraft(v);                                  // synchronous local update → caret preserved
+    updateGlobal(id, { targetRole: v });              // write through to the persisted store
   }, [id, updateGlobal]);
-  const preferredLocation = data.preferredLocation || '';
   const setPreferredLocation = useCallback((val) => {
-    updateGlobal(id, { preferredLocation: typeof val === 'string' ? val : '' });
+    const v = typeof val === 'string' ? val : '';
+    setLocationDraft(v);
+    updateGlobal(id, { preferredLocation: v });
   }, [id, updateGlobal]);
   // Opt-in "economy" scoring via the provider Batch API: ~50% cheaper but async
   // (results within 24h, not instant). Chosen before the run; only takes effect

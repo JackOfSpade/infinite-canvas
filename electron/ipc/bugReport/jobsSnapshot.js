@@ -153,13 +153,26 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // leak — don't hand-wave it as "keyword-only".
         let offFlag = '';
         if (ad.offTarget > 0) {
-          const isSoft = (id) => /keyword-only|remote board/.test(loc.perSource?.[id] || '');
-          const hard = Object.keys(ad.offBySource || {}).filter(id => !isSoft(id));
-          offFlag = hard.length > 0
-            ? ` — ⚠️ ${ad.offTarget} OUT-OF-AREA, incl. from real-param source(s) [${hard.join(', ')}] — likely that source's own search radius (e.g. Dice +30mi → nearby metro suburbs) or a genuine leak; check the samples below`
-            : ` — ⚠️ ${ad.offTarget} OUT-OF-AREA (all from keyword-only / remote sources — best-effort; location-free query variants can surface these)`;
+          if (ad.country) {
+            // Country-level target: an off-target is genuinely OUTSIDE the
+            // country (a cross-border leak, e.g. a US role on a "Canada" search)
+            // — not a within-country radius spill, so don't hand-wave it as one.
+            offFlag = ` — ⚠️ ${ad.offTarget} OUTSIDE ${ad.country} (cross-border leak — genuinely out of the target country; check the samples below)`;
+          } else {
+            const isSoft = (id) => /keyword-only|remote board/.test(loc.perSource?.[id] || '');
+            const hard = Object.keys(ad.offBySource || {}).filter(id => !isSoft(id));
+            offFlag = hard.length > 0
+              ? ` — ⚠️ ${ad.offTarget} OUT-OF-AREA, incl. from real-param source(s) [${hard.join(', ')}] — likely that source's own search radius (e.g. Dice +30mi → nearby metro suburbs) or a genuine leak; check the samples below`
+              : ` — ⚠️ ${ad.offTarget} OUT-OF-AREA (all from keyword-only / remote sources — best-effort; location-free query variants can surface these)`;
+          }
         }
-        lines.push(`- Location adherence over ${ad.total} kept job(s): ${ad.matched} in-area (${pct}%), ${ad.remote} remote, ${ad.offTarget} off-target, ${ad.unknown} no-location${offFlag}`);
+        // For a country target, "in-area" only means inside that country — say so,
+        // so the reader doesn't read 50% as a city-level miss (it isn't).
+        const scopeNote = ad.country ? ` (in-area = anywhere in ${ad.country})` : '';
+        lines.push(`- Location adherence over ${ad.total} kept job(s)${scopeNote}: ${ad.matched} in-area (${pct}%), ${ad.remote} remote, ${ad.offTarget} off-target, ${ad.unknown} no-location${offFlag}`);
+        if (ad.country) {
+          lines.push(`  - ℹ️ Country-level target — "in-area" just means inside ${ad.country}. Search a city/province (e.g. "Toronto, Ontario") to tighten results and get city-level adherence.`);
+        }
         if (Array.isArray(ad.offSamples) && ad.offSamples.length > 0) {
           lines.push('  - Off-target sample(s):');
           for (const ex of ad.offSamples) lines.push(`    - ${ex}`);
@@ -170,6 +183,21 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         for (const q of s.queryStrings) lines.push(`  - \`${q}\``);
       }
     }
+    // Listing language: how many kept jobs came through in a non-English language
+    // (e.g. fr.glassdoor.ca / Québec / EU postings). They're kept & scored as-is —
+    // this is observability, not a filter — so a foreign listing that scored low
+    // is explained by its language, not a scoring bug.
+    const langs = s.languages;
+    if (langs && langs.total > 0) {
+      if (langs.nonEnglish > 0) {
+        const parts = Object.entries(langs.byLang).map(([l, n]) => `${l}=${n}`).join(', ');
+        lines.push(`- Listing language: ${langs.nonEnglish}/${langs.total} non-English (${parts}) — kept & scored as-is (the AI reads them; applying is the user's call)`);
+        for (const l of Object.keys(langs.samples || {})) lines.push(`  - ${l}: ${langs.samples[l]}`);
+      } else {
+        lines.push(`- Listing language: all ${langs.total} kept job(s) English`);
+      }
+    }
+
     // Per-source raw counts — the "was this source silently not gathered?" line.
     // A 0 WITH a warning is a real miss to chase; a clean 0 is genuinely-empty or
     // off-category (e.g. a cinematographer on USAJobs/Dice). Without this you only
@@ -335,6 +363,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const SALARY_NEVER = new Set(['linkedin', 'greenhouse', 'lever']);
         const SALARY_ALWAYS = new Set(['usajobs']);
         const ZERO_SALARY_MIN_SAMPLE = 20;
+        // Mojibake / encoding corruption: C1 control chars (U+0080–U+009F) never
+        // appear in legitimate text — they're the continuation bytes of a UTF-8
+        // sequence mis-decoded as Latin-1 (e.g. "'" = E2 80 99 → "â"+U+0080+U+0099,
+        // or a 𝗯𝗼𝗹𝗱-Unicode title). Distinct from LEGIT accents (é, à, ç =
+        // U+00E0–U+00FF), so a real French/Portuguese JD is NOT flagged. This
+        // corruption flows into scoring AND the generated résumé, so surface it.
+        const MOJIBAKE_RE = /[\u0080-\u009f]/;
 
         const qualBySource = {};
         for (const j of snapJobs) {
@@ -347,8 +382,18 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             companyEmpty: 0,
             titleEmpty: 0,
             descEmpty: 0, descShort: 0, descShortLens: [],
+            mojibake: 0, mojibakeEx: [],
           });
           q.total++;
+          // Encoding corruption (C1 controls) in any user-facing field.
+          const blob = `${j.title || ''} ${j.company || ''} ${j.snippet || ''}`;
+          if (MOJIBAKE_RE.test(blob)) {
+            q.mojibake++;
+            if (q.mojibakeEx.length < 1) {
+              const i = blob.search(MOJIBAKE_RE);
+              q.mojibakeEx.push(blob.slice(Math.max(0, i - 18), i + 18).replace(/[\u0080-\u009f]/g, '\uFFFD').replace(/\s+/g, ' '));
+            }
+          }
           const sal = (j.salary || '').trim();
           if (sal) {
             q.salaryPresent++;
@@ -432,6 +477,15 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           if (q.descShort > 0) {
             const lensStr = q.descShortLens.join(', ');
             issues.push(`⚠ description short (<${SHORT_DESC_THRESHOLD} chars): ${q.descShort}/${q.total} — likely got the listing snippet instead of the full JD (sample lengths: ${lensStr})`);
+          }
+          // Encoding corruption — UTF-8 read as Latin-1 ("'"→"â€™", em-dash→"â€"",
+          // 𝗯𝗼𝗹𝗱-Unicode). Corrupts the text fed to scoring AND the generated
+          // résumé, and (before the gate fix) tricked language detection. NOT legit
+          // accents (é/à/ç) — only C1 control bytes that never occur in real text.
+          if (q.mojibake > 0) {
+            const pct = Math.round((q.mojibake / q.total) * 100);
+            const ex = q.mojibakeEx[0] ? ` — e.g. "…${q.mojibakeEx[0]}…"` : '';
+            issues.push(`⚠ mojibake / encoding corruption: ${q.mojibake}/${q.total} (${pct}%) descriptions contain UTF-8-as-Latin-1 artifacts — corrupts scoring + generated résumé text${ex}`);
           }
           // Truncation/cap signature: non-empty descriptions clustered in a TIGHT
           // band at a modest length — e.g. Dice's ~500-char list `summary` when

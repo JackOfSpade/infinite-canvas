@@ -225,7 +225,7 @@ export function buildJobTreeNodes({
         title: job.title, company: job.company, location: job.location,
         salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
         reasoning: job.reasoning, careerDirection: job.careerDirection,
-        source: job.source, url: job.url, posted: job.posted,
+        source: job.source, url: job.url, posted: job.posted, language: job.language,
         resumeProfile: profile, isNew: false,
       },
     });
@@ -329,7 +329,7 @@ export function buildJobTreeNodes({
             title: job.title, company: job.company, location: job.location,
             salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
             reasoning: job.reasoning, careerDirection: job.careerDirection,
-            source: job.source, url: job.url, posted: job.posted,
+            source: job.source, url: job.url, posted: job.posted, language: job.language,
             resumeProfile: profile, isNew: false,
           },
         });

@@ -44,6 +44,16 @@ export function normalizeCountry(raw) {
   return COUNTRY_ALIASES[key] || s;
 }
 
+// Recognize a target that is JUST a country (e.g. "Canada", "United States").
+// Unlike normalizeCountry (which passes unrecognized input through), this returns
+// null for anything not a known country — so a single-word CITY ("Berlin") is not
+// mistaken for a country. Used by the adherence auditor to switch into
+// country-membership mode instead of city/subdivision matching.
+function detectCountryTarget(seg) {
+  const key = String(seg || '').toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
+  return COUNTRY_ALIASES[key] || null;
+}
+
 /**
  * Flatten the structured canonicalLocation into one board-ready location-filter
  * string — deterministically, so a stray prose token the model might leave in
@@ -119,6 +129,14 @@ export const LOCATION_TREATMENT = {
   weworkremotely: 'remote board — location N/A (candidate-city tokens geo-stripped from relevance)',
 };
 
+// Remote-only job boards: every listing is remote regardless of the city/region in
+// its location field (that's the company HQ or a region hint, not a work-site
+// requirement). Location adherence buckets these as `remote`, never off-target.
+// Derived from LOCATION_TREATMENT so a new remote board added above is honored here.
+export const REMOTE_BOARD_SOURCES = new Set(
+  Object.entries(LOCATION_TREATMENT).filter(([, t]) => /remote board/i.test(t)).map(([id]) => id)
+);
+
 /**
  * Pick the right Glassdoor location from its autocomplete results
  * (findPopularLocationAjax.htm). Glassdoor's location FILTER is keyed by a numeric
@@ -168,21 +186,73 @@ const US_STATES = {
   dc: 'district of columbia',
 };
 
+// Canadian provinces/territories — same code↔name shape as US_STATES, so a search
+// for "Whitby, Ontario" counts a same-province job that lists only the code
+// ("Toronto, ON") as in-area instead of off-target.
+const CA_PROVINCES = {
+  ab: 'alberta', bc: 'british columbia', mb: 'manitoba', nb: 'new brunswick',
+  nl: 'newfoundland and labrador', ns: 'nova scotia', nt: 'northwest territories',
+  nu: 'nunavut', on: 'ontario', pe: 'prince edward island', qc: 'quebec',
+  sk: 'saskatchewan', yt: 'yukon',
+};
+
+// Combined subdivision lookup (US states + Canadian provinces); codes don't collide.
+const SUBDIVISIONS = { ...US_STATES, ...CA_PROVINCES };
+
 // Build a regex that matches the target state by EITHER its 2-letter code or its
 // full name. `stateToken` arrives alpha-only (spaces already stripped: "new york"
 // → "newyork"), so resolve it to a code first, then match the spaced full name.
 // Unknown tokens (non-US / unrecognized) fall back to matching the token as-is.
 function buildStateRegex(stateToken) {
   if (!stateToken) return null;
-  let code = US_STATES[stateToken] ? stateToken : null;
+  let code = SUBDIVISIONS[stateToken] ? stateToken : null;
   if (!code) {
-    for (const [c, name] of Object.entries(US_STATES)) {
+    for (const [c, name] of Object.entries(SUBDIVISIONS)) {
       if (name.replace(/\s/g, '') === stateToken) { code = c; break; }
     }
   }
-  const alts = code ? [code, US_STATES[code]] : [stateToken];
+  const alts = code ? [code, SUBDIVISIONS[code]] : [stateToken];
   const pattern = alts.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
   return new RegExp(`\\b(?:${pattern})\\b`);
+}
+
+// If a target SEGMENT is a US state or Canadian province — by 2-letter code
+// ("QC") or full name ("Quebec") — return its canonical 2-letter code, else null.
+// Lets the adherence auditor recognize a PROVINCE search ("Quebec, Canada") and
+// match same-province jobs ("Montreal, QC") instead of treating "Quebec" as a city.
+function subdivisionCode(seg) {
+  const alpha = String(seg || '').toLowerCase().replace(/[^a-z]/g, '');
+  if (!alpha) return null;
+  if (SUBDIVISIONS[alpha]) return alpha;
+  for (const [code, name] of Object.entries(SUBDIVISIONS)) {
+    if (name.replace(/\s/g, '') === alpha) return code;
+  }
+  return null;
+}
+
+// Subdivisions we can enumerate per country, for country-level adherence (below).
+const COUNTRY_SUBDIVISIONS = {
+  'Canada': CA_PROVINCES,
+  'United States': US_STATES,
+};
+
+// Build a regex that matches a job IN the target COUNTRY — i.e. anywhere within
+// it. Matches the country name itself plus, where we can enumerate them, every
+// subdivision by 2-letter code (word-bounded) or full name. For a country whose
+// subdivisions we don't list (UK, Australia, …) it falls back to the country
+// name only — which still works because non-US listings get the country appended
+// ("Amsterdam, Netherlands"). Lets "Toronto, ON" count as in-area for "Canada".
+function buildCountryRegex(country) {
+  const c = String(country || '').trim();
+  if (!c) return null;
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const parts = [esc(c.toLowerCase())];
+  const subs = COUNTRY_SUBDIVISIONS[c];
+  if (subs) {
+    for (const code of Object.keys(subs)) parts.push(`\\b${esc(code)}\\b`);
+    for (const name of Object.values(subs)) parts.push(esc(name));
+  }
+  return new RegExp(`(?:${parts.join('|')})`, 'i');
 }
 
 /**
@@ -197,21 +267,55 @@ function buildStateRegex(stateToken) {
 export function summarizeLocationAdherence(jobs, canonical) {
   const loc = String(canonical || '').trim();
   if (!loc) return null;
-  const cityToken  = loc.split(',')[0].trim().toLowerCase();
-  const stateToken = (loc.split(',')[1] || '').trim().toLowerCase().replace(/[^a-z]/g, '');
-  const stateRe = buildStateRegex(stateToken);
-  const counts = { target: loc, total: 0, matched: 0, remote: 0, offTarget: 0, unknown: 0, offSamples: [], offBySource: {} };
+  const segments = loc.split(',').map(s => s.trim()).filter(Boolean);
+
+  // Country = any segment that's a recognized country name ("Canada", "United States").
+  let countryTarget = null;
+  for (const s of segments) { const c = detectCountryTarget(s); if (c) { countryTarget = c; break; } }
+
+  // Subdivision (US state / CA province): prefer a NON-FIRST segment ("Denver, CO"
+  // / "Washington, DC" → use the 2nd, so a city that happens to share a state's
+  // name stays a city). Fall back to the FIRST segment only when it IS a state/
+  // province name AND the rest of the target is just the country — i.e. "Quebec,
+  // Canada" / "Ontario, Canada" mean the PROVINCE, not a city. Without this a
+  // province search treats "Quebec" as a city substring and mis-flags
+  // "Montreal, QC" as off-target.
+  let subCode = null;
+  for (let i = 1; i < segments.length; i++) { const c = subdivisionCode(segments[i]); if (c) { subCode = c; break; } }
+  let cityToken = (segments[0] || '').toLowerCase();
+  if (!subCode) {
+    const firstAsSub = subdivisionCode(segments[0]);
+    const restIsCountryOnly = segments.slice(1).every(s => detectCountryTarget(s));
+    if (firstAsSub && restIsCountryOnly) { subCode = firstAsSub; cityToken = ''; }
+  }
+
+  // Country-MEMBERSHIP mode only when the WHOLE target is a lone country (no city/
+  // subdivision): "Canada" alone counts any province in-area, but "Quebec, Canada"
+  // must pin to Quebec — not all of Canada. Otherwise the city/subdivision path
+  // would mis-flag every Canadian city as off-target on a "Canada" search.
+  const countryOnly = !!countryTarget && !subCode && segments.length === 1;
+  const countryRe = countryOnly ? buildCountryRegex(countryTarget) : null;
+  const stateRe = subCode ? buildStateRegex(subCode) : null;
+  const counts = { target: loc, country: countryOnly ? countryTarget : null, total: 0, matched: 0, remote: 0, offTarget: 0, unknown: 0, offSamples: [], offBySource: {} };
   for (const j of (Array.isArray(jobs) ? jobs : [])) {
     counts.total++;
+    const src = j?.source || '?';
+    // Remote-only board ⇒ remote regardless of the city/region shown (location N/A).
+    if (REMOTE_BOARD_SOURCES.has(src)) { counts.remote++; continue; }
     const jl = String(j?.location || '').trim().toLowerCase();
     if (!jl) { counts.unknown++; continue; }
     if (/\b(remote|anywhere|work from home|wfh|distributed)\b/.test(jl)) { counts.remote++; continue; }
-    const cityHit  = cityToken.length >= 3 && jl.includes(cityToken);
-    const stateHit = stateRe && stateRe.test(jl);
-    if (cityHit || stateHit) counts.matched++;
+    let hit;
+    if (countryRe) {
+      hit = countryRe.test(jl);
+    } else {
+      const cityHit  = cityToken.length >= 3 && jl.includes(cityToken);
+      const stateHit = stateRe && stateRe.test(jl);
+      hit = cityHit || stateHit;
+    }
+    if (hit) counts.matched++;
     else {
       counts.offTarget++;
-      const src = j?.source || '?';
       counts.offBySource[src] = (counts.offBySource[src] || 0) + 1;
       if (counts.offSamples.length < 6) counts.offSamples.push(`${String(j?.title || '?').slice(0, 48)} — ${String(j?.location || '').slice(0, 40)} [${src}]`);
     }

@@ -1330,6 +1330,17 @@ function extractDomJobs(html) {
       const card = node.matches?.('a[data-jk]')
         ? (node.closest('.job_seen_beacon, [data-testid="job-card-container"], li, article') || node)
         : node;
+      // Skip Indeed recommendation panels ("Similar to jobs you explored", "Jobs for
+      // you", …) that render alongside the real results. They're off-search cards —
+      // sponsored, frequently the wrong location/role (one leaked into a Denver search
+      // as a Temple TX nursing job). Primary signal: the `recommendation-section` class
+      // on the card outline; secondary (survives a class rename): the panel's section
+      // header text. These cards do NOT come through the mosaic/NEXT_DATA paths (those
+      // read only the main jobcards provider), so this DOM filter is the lone gate.
+      if (card.closest?.('.recommendation-section')) return;
+      const sectionHeaderText = card.closest?.('li')?.parentElement
+        ?.querySelector?.('.jobSection-header-text')?.textContent || '';
+      if (/you explored|jobs for you|similar to jobs|recommended/i.test(sectionHeaderText)) return;
       const titleEl = card.matches?.('a') ? card : card.querySelector(
         '[data-testid="jobTitle"] a, [data-testid="job-title"], .jobTitle a, h2 a, h3 a, a[data-jk]'
       );

@@ -4,6 +4,7 @@ import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { ExternalLink, X, Sparkles } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
+import { languageLabel } from '../utils/jobLanguageLabels';
 import { NodeHandles } from './_shared/NodeHandles';
 
 // Accent color encodes the match score (interview-likelihood) band, so the
@@ -27,7 +28,8 @@ function scoreColor(score) {
  *
  * data shape:
  *   title, company, location, salary, snippet, url, source, posted,
- *   matchScore, reasoning, careerDirection, hubId
+ *   matchScore, reasoning, careerDirection, hubId,
+ *   language (optional 2-letter code, set only when non-English → shows a chip)
  */
 export function JobCardNode({ id, data }) {
   const { deleteElements, getNode } = useReactFlow();
@@ -164,6 +166,14 @@ export function JobCardNode({ id, data }) {
       <div className="px-3 py-1.5 flex items-center gap-1.5 text-[10px]">
         {data.source && (
           <span className="text-white/30 uppercase tracking-wider">{data.source}</span>
+        )}
+        {data.language && data.language !== 'en' && (
+          <span
+            className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300/90 uppercase tracking-wider"
+            title={`Listing is in ${languageLabel(data.language)} — kept & scored as-is; applying is your call`}
+          >
+            {data.language}
+          </span>
         )}
         {data.posted && <span className="text-white/20">{data.posted}</span>}
         {data.url && (

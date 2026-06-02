@@ -44,6 +44,8 @@ import { readStatusCache } from './accounts.js';
 import { getScopedJobSourceIds, JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
 import { dedupeJobsByKey, jobTitleCompanyKey } from '../../src/utils/jobIdentity.js';
 import { deriveLocationParam, summarizeLocationAdherence, LOCATION_TREATMENT } from '../../src/utils/jobLocation.js';
+import { tagJobLanguages, summarizeJobLanguages } from '../../src/utils/jobLanguage.js';
+import { repairJobsMojibake } from '../../src/utils/textEncoding.js';
 
 const { ipcMain, app, shell } = electronPkg;
 const DEFAULT_MAX_AGE_DAYS = 21;
@@ -1762,6 +1764,20 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const postedMs = (j) => { const d = parsePostedDate(j?.posted); return d ? d.getTime() : -Infinity; };
     kept.sort((a, b) => postedMs(b) - postedMs(a));
 
+    // Repair mojibake (UTF-8 mis-decoded as Latin-1) BEFORE anything reads the
+    // text — some sources (RemoteOK's API) serve already-corrupted descriptions
+    // ("we’d" → "weâ\x80\x99d"). Done here, on the final kept set, so the cleaned
+    // text flows into language detection, scoring, the saved snapshot, the cards,
+    // and the generated résumé alike. No-op on clean text and real accents.
+    repairJobsMojibake(kept);
+
+    // Tag non-English listings (e.g. fr.glassdoor.ca / Québec / EU postings). Runs
+    // here — after enrichment, on the final kept set — so the language sniff sees
+    // full descriptions and the tag rides through scoring → staging → card. We do
+    // NOT drop or down-score these: the AI reads any language and the user may
+    // speak it, so applying is their call. English jobs are left untagged.
+    tagJobLanguages(kept);
+
     logger.info(
       `[Jobs] ${kept.length} new jobs (raw=${allJobs.length}, dedup=${deduped.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped})`
     );
@@ -1816,6 +1832,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
       perSource: Object.fromEntries(ACTIVE_SOURCE_IDS.map(id => [id, LOCATION_TREATMENT[id] || 'unknown'])),
       adherence: summarizeLocationAdherence(kept, location),
     };
+    // Listing-language tally over the kept jobs — answers "did any non-English
+    // postings come through, and from where?" (kept & scored as-is; see tagJobLanguages).
+    const languageTelemetry = summarizeJobLanguages(kept);
     jobsTelemetry.search = {
       ts: Date.now(),
       queries: queries.length,
@@ -1830,6 +1849,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       kept: kept.length,
       bySource,
       location: locationTelemetry,
+      languages: languageTelemetry,
     };
     // Search (gather) phase done — mark the manifest so a crash during the
     // RENDERER-driven scoring/bucketing that follows resumes from scoring (the

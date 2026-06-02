@@ -70,6 +70,8 @@ import { modelTag, overPricedSoldFlag } from '../electron/ipc/bugReport/helpers.
 import { classifyCompScrapeFailure, computeMissingLogins } from '../electron/ipc/marketplace.js';
 import { isAuthChallengeUrl, PLATFORM_AUTH_COOKIES } from '../electron/ipc/browser/authWindows.js';
 import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation } from '../src/utils/jobLocation.js';
+import { detectLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
+import { repairMojibake, hasMojibake, repairJobsMojibake } from '../src/utils/textEncoding.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
 import { createJobSearchTestMode, parseJobSearchEnvBoolean } from '../src/utils/jobSourceScope.js';
 import { createMarketplaceTestMode, parseMarketplaceEnvBoolean, getScopedCompSourceIds, isCompSourceEnabledInScope } from '../src/utils/compSourceScope.js';
@@ -1441,6 +1443,186 @@ const tests = [
       // No target location → nothing to audit.
       assert(summarizeLocationAdherence(jobs, '') === null, 'no canonical → null');
       return { ok: true, adherence: a };
+    },
+  },
+  {
+    name: 'summarizeLocationAdherence: remote-board listings count as remote (not off-target) even with a city',
+    run: () => {
+      const jobs = [
+        { title: 'Estimator II', location: 'Pune Division', source: 'remoteok' },          // remote board + city → remote
+        { title: 'Social Media Mod', location: 'Philippines', source: 'weworkremotely' },   // remote board + region → remote
+        { title: 'Data Eng', location: 'Raleigh, NC', source: 'glassdoor' },               // hard-param source → off-target leak
+      ];
+      const a = summarizeLocationAdherence(jobs, 'Durham, Ontario, Canada');
+      assert(a.remote === 2, `remote-board listings bucket as remote, got ${a.remote}`);
+      assert(a.offTarget === 1, `only the glassdoor leak is off-target, got ${a.offTarget}`);
+      assert(!a.offBySource.remoteok && !a.offBySource.weworkremotely, 'no remote board attributed to off-target');
+      return { ok: true, adherence: a };
+    },
+  },
+  {
+    name: 'summarizeLocationAdherence: same Canadian province (code-only job) counts as in-area',
+    run: () => {
+      const jobs = [
+        { title: 'Data Engineer', location: 'Whitby, ON', source: 'ziprecruiter' },     // exact city
+        { title: 'Sr Data Engineer', location: 'Toronto, ON', source: 'ziprecruiter' }, // same province, code only
+        { title: 'DBA', location: 'Ottawa, Ontario', source: 'glassdoor' },             // same province, spelled out
+        { title: 'Analyst', location: 'Vancouver, BC', source: 'ziprecruiter' },        // different province → off-target
+      ];
+      const a = summarizeLocationAdherence(jobs, 'Whitby, Ontario, Canada');
+      assert(a.matched === 3, `Whitby + both Ontario jobs are in-area, got ${a.matched}`);
+      assert(a.offTarget === 1 && /Vancouver/.test(a.offSamples[0] || ''), `only BC is off-target, got ${a.offTarget}`);
+      return { ok: true, adherence: a };
+    },
+  },
+  {
+    name: 'summarizeLocationAdherence: country target "Canada" → any province is in-area, only cross-border is off',
+    run: () => {
+      const jobs = [
+        { title: 'Data Engineer', location: 'Toronto, ON', source: 'ziprecruiter' },      // ON code → in Canada
+        { title: 'DBA', location: 'Montreal, QC', source: 'ziprecruiter' },               // QC code → in Canada
+        { title: 'Architect', location: 'Halifax, Nova Scotia', source: 'glassdoor' },    // full name → in Canada
+        { title: 'Analyst', location: 'Vancouver, BC', source: 'indeed' },                // BC code → in Canada
+        { title: 'Sales Mgr', location: 'Houston, TX', source: 'indeed' },                // US → cross-border leak
+      ];
+      const a = summarizeLocationAdherence(jobs, 'Canada');
+      assert(a.country === 'Canada', `country target detected, got ${a.country}`);
+      assert(a.matched === 4, `all 4 Canadian jobs in-area, got ${a.matched}`);
+      assert(a.offTarget === 1 && /Houston/.test(a.offSamples[0] || ''), `only Houston TX is off, got ${a.offTarget}`);
+      return { ok: true, adherence: a };
+    },
+  },
+  {
+    name: 'summarizeLocationAdherence: a single-word CITY is not mistaken for a country',
+    run: () => {
+      // "Toronto" alone (no province/country) must stay a city match, not flip
+      // into country mode — detectCountryTarget only fires on known country names.
+      const jobs = [
+        { title: 'Eng', location: 'Toronto, ON', source: 'ziprecruiter' },
+        { title: 'Eng', location: 'Calgary, AB', source: 'ziprecruiter' }, // diff city, no country target → off
+      ];
+      const a = summarizeLocationAdherence(jobs, 'Toronto');
+      assert(a.country === null, `"Toronto" is not a country, got ${a.country}`);
+      assert(a.matched === 1 && a.offTarget === 1, `city match only: 1 in / 1 off, got ${a.matched}/${a.offTarget}`);
+      return { ok: true, adherence: a };
+    },
+  },
+  {
+    name: 'summarizeLocationAdherence: province target "Quebec, Canada" matches same-province jobs (not treated as a city)',
+    run: () => {
+      const jobs = [
+        { title: 'Data Eng', location: 'Montreal, QC', source: 'ziprecruiter' },       // QC code → in-province
+        { title: 'DBA', location: 'Quebec City, Quebec', source: 'glassdoor' },        // province name → in
+        { title: 'Analyst', location: 'Laval, QC', source: 'indeed' },                 // QC code → in
+        { title: 'SDE', location: 'Boston, MA', source: 'indeed' },                    // US → off (real leak)
+      ];
+      const a = summarizeLocationAdherence(jobs, 'Quebec, Canada');
+      assert(a.country === null, `province search is not a bare-country target, got ${a.country}`);
+      assert(a.matched === 3, `all 3 Quebec jobs in-area, got ${a.matched}`);
+      assert(a.offTarget === 1 && /Boston/.test(a.offSamples[0] || ''), `only Boston off, got ${a.offTarget}`);
+      return { ok: true, adherence: a };
+    },
+  },
+  {
+    name: 'summarizeLocationAdherence: "Washington, DC" stays a city (Seattle, WA is NOT in-area)',
+    run: () => {
+      // Regression guard: the first segment "Washington" is a state NAME, but the
+      // 2nd segment "DC" is the real subdivision — so it must stay a city search,
+      // not flip to "Washington state" and count Seattle as in-area.
+      const jobs = [
+        { title: 'PM', location: 'Washington, DC', source: 'indeed' },   // in
+        { title: 'Eng', location: 'Seattle, WA', source: 'indeed' },     // WA state → off
+      ];
+      const a = summarizeLocationAdherence(jobs, 'Washington, DC');
+      assert(a.matched === 1 && a.offTarget === 1 && /Seattle/.test(a.offSamples[0] || ''),
+        `DC city match only: Seattle off, got ${a.matched}/${a.offTarget}`);
+      return { ok: true, adherence: a };
+    },
+  },
+  {
+    name: 'detectLanguage: Portuguese JD body (English title) → pt; near-tie garbage stays en',
+    run: () => {
+      // Real shape from a WeWorkRemotely listing: English title, Portuguese body.
+      const ptBody = 'Data Quality Analyst I. Headquarters: BR. Conheça a nossa banda! Somos uma empresa inovadora e buscamos um analista de qualidade de dados para a nossa equipe, com experiência em SQL e responsabilidades de governança.';
+      assert(detectLanguage(ptBody) === 'pt', `Portuguese body → pt, got ${detectLanguage(ptBody)}`);
+      // English JD with a lone accented loanword must NOT be tagged.
+      const enBody = 'Estimator II. About Us: Honeywell helps organizations solve the world\'s most complex challenges in automation and energy. You will prepare cost estimates, bids, and proposals. 5 years experience required.';
+      assert(detectLanguage(enBody) === 'en', `English body → en, got ${detectLanguage(enBody)}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'repairMojibake: reverses UTF-8-as-Latin-1, leaves clean text + real accents alone',
+    run: () => {
+      const e2 = String.fromCharCode(0xe2);
+      const moji = 'we' + e2 + String.fromCharCode(0x80, 0x99) + 'd love' + e2 + String.fromCharCode(0x80, 0x94) + 'apply';
+      assert(hasMojibake(moji), 'C1 controls detected');
+      assert(repairMojibake(moji) === 'we’d love—apply', `repaired → ${JSON.stringify(repairMojibake(moji))}`);
+      // Real accents (no C1 controls) must pass through untouched.
+      const fr = 'à Montréal — développeur d’expérience';
+      assert(!hasMojibake(fr) && repairMojibake(fr) === fr, 'clean French unchanged');
+      assert(repairMojibake('Senior Data Engineer') === 'Senior Data Engineer', 'plain English unchanged');
+      // Field-level repair over a job array.
+      const jobs = [{ title: 'Data Entry', snippet: 'we' + e2 + String.fromCharCode(0x80, 0x99) + 'd hire you' }];
+      repairJobsMojibake(jobs);
+      assert(jobs[0].snippet === 'we’d hire you' && !hasMojibake(jobs[0].snippet), `job repaired → ${jobs[0].snippet}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'repairMojibake: segmented — fixes mojibake AROUND a genuine high-Unicode char',
+    run: () => {
+      const e2 = String.fromCharCode(0xe2);
+      // Mojibake apostrophe + a genuine emoji (>0xFF) + more mojibake. The old
+      // whole-string guard bailed on the emoji and left it all corrupted; the
+      // segmented repair fixes the ≤0xFF runs and passes the emoji through.
+      const mixed = 'we' + e2 + String.fromCharCode(0x80, 0x99) + 'd hire 🚀 you' + e2 + String.fromCharCode(0x80, 0x99) + 'll love it';
+      const out = repairMojibake(mixed);
+      assert(out === 'we’d hire 🚀 you’ll love it', `segmented repair → ${JSON.stringify(out)}`);
+      assert(!hasMojibake(out), 'no C1 controls remain');
+      assert(out.includes('🚀'), 'emoji preserved');
+      return { ok: true, out };
+    },
+  },
+  {
+    name: 'detectLanguage: English JD stays English (no false-positive chip)',
+    run: () => {
+      const en = 'Senior Data Engineer. We are looking for an engineer to join our team. You will work on data pipelines and build scalable systems. Requirements: 5 years of experience with SQL and Python.';
+      assert(detectLanguage(en) === 'en', `English JD should be en, got ${detectLanguage(en)}`);
+      // A single accented loanword in an otherwise-English title must NOT flip it.
+      assert(detectLanguage('Café Operations Manager') === 'en', 'one accent (café) is not a language signal');
+      assert(detectLanguage('') === 'en' && detectLanguage(null) === 'en', 'empty/null default to en');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'detectLanguage: French / Spanish / German JDs are detected',
+    run: () => {
+      const fr = "Développeur Full Stack. Nous recherchons un développeur pour rejoindre notre équipe. Vous travaillerez sur des applications web et serez responsable du développement. Profil: 5 ans d'expérience avec le poste, les compétences et une bonne maîtrise du travail en équipe.";
+      const es = 'Ingeniero de Software. Buscamos un ingeniero para unirse a nuestro equipo. Trabajarás con nuestra empresa en el desarrollo de aplicaciones. Requisitos: experiencia con los conocimientos y responsabilidades del puesto.';
+      const de = 'Softwareentwickler. Wir suchen einen Mitarbeiter für unser Unternehmen. Sie werden mit dem Team an der Arbeit und den Aufgaben arbeiten. Erfahrung und Kenntnisse für die Stelle sind erforderlich.';
+      assert(detectLanguage(fr) === 'fr', `French JD → fr, got ${detectLanguage(fr)}`);
+      assert(detectLanguage(es) === 'es', `Spanish JD → es, got ${detectLanguage(es)}`);
+      assert(detectLanguage(de) === 'de', `German JD → de, got ${detectLanguage(de)}`);
+      // Title-only French (the authwalled fr.glassdoor.ca case) leans on diacritics.
+      assert(detectLanguage('Développeur Logiciel Sénior') === 'fr', 'title-only French via diacritic fallback');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'tagJobLanguages + summarizeJobLanguages: tags non-English, leaves English untouched',
+    run: () => {
+      const jobs = [
+        { title: 'Data Engineer', snippet: 'We are looking for an engineer to join our team and build pipelines with SQL and Python.', source: 'ziprecruiter', location: 'Toronto, ON' },
+        { title: 'Développeur', snippet: "Nous recherchons un développeur pour rejoindre notre équipe et travailler sur des applications avec une bonne expérience du poste.", source: 'glassdoor', location: 'Montréal, QC' },
+      ];
+      tagJobLanguages(jobs);
+      assert(jobs[0].language === undefined, `English job stays untagged, got ${jobs[0].language}`);
+      assert(jobs[1].language === 'fr', `French job tagged fr, got ${jobs[1].language}`);
+      const sum = summarizeJobLanguages(jobs);
+      assert(sum.total === 2 && sum.nonEnglish === 1 && sum.byLang.fr === 1, `summary: 2 total, 1 fr → ${JSON.stringify(sum)}`);
+      assert(/Montréal/.test(sum.samples.fr || ''), `fr sample names the listing → ${sum.samples.fr}`);
+      return { ok: true, summary: sum };
     },
   },
   {
