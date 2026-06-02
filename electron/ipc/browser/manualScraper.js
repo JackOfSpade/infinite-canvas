@@ -27,6 +27,7 @@ import { buildOverlayScript, updateOverlay } from './scraperOverlay.js';
 import { humanDelay } from '../../utils/humanDelay.js';
 import { getGlassdoorLocId, saveGlassdoorLocId } from '../settings.js';
 import { pickGlassdoorLocation } from '../../../src/utils/jobLocation.js';
+import { markManualSolveRequired } from '../scrapeVerification.js';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
 const NAV_SETTLE_MS          = 2000;          // settle after navigation before first action
@@ -606,6 +607,10 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
         inChallenge = true;
         challengeStartedAt = Date.now();
         lastChallengeHeartbeat = Date.now();
+        // This source made the user manually solve something this run — feeds the
+        // "manual-verification-first" scrape ordering (scrapeVerification.js). The
+        // orchestrator records the outcome per source; we only flag it here.
+        markManualSolveRequired(sourceId);
         await updateOverlay(page, {
           ...overlayBase,
           status:    '⚠️ Complete the challenge above to continue',
@@ -1613,11 +1618,23 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
   };
 }
 
-export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = null) {
-  // Clear per-run browser diagnostic buffers so the bug report only shows
-  // what happened in THIS run, not leftovers from a previous one.
+// Clears the per-run browser diagnostic buffers (console/network) so a bug report
+// shows only THIS run. Exposed so the orchestrator can reset ONCE when it calls
+// scrapeManualSources per-source (data-driven order) — otherwise each per-source
+// call would wipe the earlier sources' diagnostics.
+export function resetManualScraperDiagnostics() {
   manualScraperTelemetry.consoleLogs = [];
   manualScraperTelemetry.networkErrors = [];
+}
+
+// `opts`: { resetDiagnostics=true, sourceIndexBase=0, sourceTotal=null } — for
+// per-source dispatch the orchestrator passes resetDiagnostics:false (it cleared
+// once up front) and the real index/total so the "Starting X/Y" log stays correct.
+export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = null, opts = {}) {
+  const { resetDiagnostics = true, sourceIndexBase = 0, sourceTotal = null } = opts;
+  // Clear per-run browser diagnostic buffers so the bug report only shows
+  // what happened in THIS run, not leftovers from a previous one.
+  if (resetDiagnostics) resetManualScraperDiagnostics();
 
   if (!Array.isArray(tasks) || tasks.length === 0) {
     clearManualScraperTelemetry('idle');
@@ -1677,13 +1694,15 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       });
       const { browser, page, navStatusRef } = platform;
 
-      logger.info(`[BrowserScraper] Starting ${si + 1}/${sourceList.length}: ${srcName} (${sourceTasks.length} queries) — fresh isolated browser launched`);
+      const displayIndex = sourceIndexBase + si + 1;
+      const displayTotal = sourceTotal || sourceList.length;
+      logger.info(`[BrowserScraper] Starting ${displayIndex}/${displayTotal}: ${srcName} (${sourceTasks.length} queries) — fresh isolated browser launched`);
       recordManualScraperTelemetry({
         phase: 'source-start',
         sourceId,
         srcName,
-        sourceIndex: si + 1,
-        sourceTotal: sourceList.length,
+        sourceIndex: displayIndex,
+        sourceTotal: displayTotal,
         queryTotal: sourceTasks.length,
       });
 

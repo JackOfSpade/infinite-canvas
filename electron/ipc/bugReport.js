@@ -1136,7 +1136,7 @@ ${stealthLine}${argsSection}${resolveDiagSection}`;
     const stuckAtHardCap = s.truncatedAt >= TOKEN_HARD_CAP;
     const healNote = stuckAtHardCap
       ? `⛔ AT hard cap (${TOKEN_HARD_CAP}) — self-calibration cannot self-heal; formula or hard cap must be raised`
-      : `next cap ≥${nextCapFloor} — until self-healed this task fell back to a weaker model`;
+      : `next cap ≥${nextCapFloor} — cap since raised, self-heals`;
     const detail = seedNote ? `${seedNote}, ${healNote}` : healNote;
     tokenBudgetLines.push(
       `- \`${task}\`: p95 ${s.p95} / max ${s.max} tok over ${s.samples} call(s)` +
@@ -1148,8 +1148,13 @@ ${stealthLine}${argsSection}${resolveDiagSection}`;
   const tokenBudgetMarkdown = tokenBudgetLines.length
     ? `
 ### Learned Token Budgets
-> Only tasks that have truncated are shown — ⚠️ means a call hit its cap and fell
-> back to a weaker model; the cap has since been raised. ⛔ AT hard cap = stuck.
+> Only tasks that have truncated are shown — ⚠️ means a call once hit its output
+> cap and was cut off. These records are CUMULATIVE across all runs (and both
+> providers), not just this one; the cap auto-raises so it self-heals. What the
+> truncation CAUSED depends on the provider for that call: on the Gemini path the
+> cascade steps down to a weaker fallback model; on the paid Claude path there is
+> NO model fallback — the caller retries smaller on the SAME model (job-scoring
+> splits the batch), worst case placeholder-scoring one job. ⛔ AT hard cap = stuck.
 ${tokenBudgetLines.join('\n')}`
     : '';
 

@@ -72,6 +72,7 @@ import { isAuthChallengeUrl, PLATFORM_AUTH_COOKIES } from '../electron/ipc/brows
 import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation } from '../src/utils/jobLocation.js';
 import { detectLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
 import { repairMojibake, hasMojibake, repairJobsMojibake } from '../src/utils/textEncoding.js';
+import { foldVerificationSample, orderByVerification, verificationScore } from '../src/utils/scrapeOrder.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
 import { createJobSearchTestMode, parseJobSearchEnvBoolean } from '../src/utils/jobSourceScope.js';
 import { createMarketplaceTestMode, parseMarketplaceEnvBoolean, getScopedCompSourceIds, isCompSourceEnabledInScope } from '../src/utils/compSourceScope.js';
@@ -1567,6 +1568,37 @@ const tests = [
       repairJobsMojibake(jobs);
       assert(jobs[0].snippet === 'we’d hire you' && !hasMojibake(jobs[0].snippet), `job repaired → ${jobs[0].snippet}`);
       return { ok: true };
+    },
+  },
+  {
+    name: 'scrapeOrder: EMA fold + manual-verification-first ordering',
+    run: () => {
+      // EMA fold: first sample seeds, then moves toward new samples.
+      let s = foldVerificationSample(null, true);
+      assert(s.ema === 1 && s.samples === 1, `seed → ema 1, got ${JSON.stringify(s)}`);
+      s = foldVerificationSample(s, false);
+      assert(Math.abs(s.ema - 0.7) < 1e-9 && s.samples === 2, `1→0 @α.3 → 0.7, got ${s.ema}`);
+      // Below MIN_SAMPLES → neutral score 0 (don't reorder off one noisy run).
+      assert(verificationScore({ ema: 0.9, samples: 1 }) === 0, 'one sample is not trusted');
+      assert(verificationScore({ ema: 0.9, samples: 2 }) === 0.9, 'two samples trusted');
+
+      const def = ['indeed', 'ziprecruiter', 'glassdoor', 'google'];
+      // No data → default order unchanged (first run).
+      assert(orderByVerification(def, {}).join() === def.join(), 'no data → default order');
+      // Google + Glassdoor make the user solve often; Indeed/ZR clean → they lead.
+      const stats = {
+        google:    { ema: 0.8, samples: 4 },
+        glassdoor: { ema: 0.5, samples: 4 },
+        indeed:    { ema: 0.0, samples: 4 },
+        ziprecruiter: { ema: 0.0, samples: 4 },
+      };
+      assert(orderByVerification(def, stats).join() === ['google', 'glassdoor', 'indeed', 'ziprecruiter'].join(),
+        `manual-prone first, ties keep default: ${orderByVerification(def, stats).join()}`);
+      // Indeed mid-ranked lands in the MIDDLE (true unified order, not pinned first/last).
+      const stats2 = { google: { ema: 0.9, samples: 3 }, indeed: { ema: 0.6, samples: 3 }, glassdoor: { ema: 0.2, samples: 3 } };
+      assert(orderByVerification(def, stats2).join() === ['google', 'indeed', 'glassdoor', 'ziprecruiter'].join(),
+        `Indeed sits mid-order by data: ${orderByVerification(def, stats2).join()}`);
+      return { ok: true, ordered: orderByVerification(def, stats) };
     },
   },
   {

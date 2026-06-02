@@ -198,6 +198,20 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       }
     }
 
+    // Browser-scrape order this run + the per-source manual-solve history that
+    // produced it. Sources that recently made the user solve a captcha/login run
+    // first (so they're cleared while watched); clean/auto-handling sources sink.
+    // Answers "why did Google scrape before Indeed?" — score = recent manual-solve
+    // rate (EMA); needs ≥2 runs of data before it reorders off the default.
+    if (Array.isArray(s.browserOrder) && s.browserOrder.length) {
+      const v = s.verification || {};
+      const annotated = s.browserOrder.map((id) => {
+        const st = v[id];
+        return st && st.samples >= 2 ? `${id}(${Math.round((st.score || 0) * 100)}% manual)` : id;
+      });
+      lines.push(`- Browser scrape order (manual-verification-first): ${annotated.join(' → ')}`);
+    }
+
     // Per-source raw counts — the "was this source silently not gathered?" line.
     // A 0 WITH a warning is a real miss to chase; a clean 0 is genuinely-empty or
     // off-category (e.g. a cinematographer on USAJobs/Dice). Without this you only

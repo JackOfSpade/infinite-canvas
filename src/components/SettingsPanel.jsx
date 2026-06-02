@@ -363,33 +363,35 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
   const probe = status?.lastProbe || null;
   const tele = status?.telemetry || null;
   const isClaude = provider === 'claude';
-  const rl = probe?.rateLimit || null;
-
-  let verdict = null;
-  if (probe) {
-    if (probe.ok) {
-      // Name the model that actually answered. The probe pings ONE model — for
-      // Gemini that's the high-quota workhorse (gemini-3.1-flash-lite), the tail
-      // of the fallback chain — so "Available" means "the model most likely to
-      // still have budget responded", i.e. the pipeline can complete. It does
-      // NOT verify the higher-quality models at the head of the chain, which have
-      // far smaller free-tier quotas and exhaust first.
-      verdict = { cls: 'text-emerald-400', text: probe.model ? `✅ Available — ${probe.model} responded` : '✅ Available' };
-    } else if (probe.status === 429) {
-      const hint = isClaude
-        ? (rl?.requests?.resetInSec != null ? `resets in ${fmtSecLeft(rl.requests.resetInSec)}` : '')
-        : (probe.retryAfterMs != null ? `retry in ${fmtSecLeft(Math.round(probe.retryAfterMs / 1000))}` : '');
-      verdict = { cls: 'text-amber-400', text: `⚠️ Rate-limited / quota exhausted${hint ? ` — ${hint}` : ''}` };
-    } else if (probe.status === 401 || probe.status === 403) {
-      verdict = { cls: 'text-red-400', text: '❌ Invalid or unauthorized API key' };
-    } else {
-      verdict = { cls: 'text-red-400', text: `❌ ${probe.error || `Error ${probe.status ?? ''}`}` };
-    }
-  }
 
   const line = (label, b) => b && (
     <div>{label}: <span className="text-white/65">{b.remaining ?? '?'}</span> / {b.limit ?? '?'} left{b.resetInSec != null ? ` · resets ${fmtSecLeft(b.resetInSec)}` : ''}</div>
   );
+
+  // Verdict for a SINGLE probe result (Claude per-model, or the one Gemini probe).
+  // The model name is rendered separately, so the text here omits it.
+  const verdictFor = (p) => {
+    if (!p) return null;
+    if (p.ok) return { cls: 'text-emerald-400', text: '✅ Available' };
+    const prl = p.rateLimit || null;
+    if (p.status === 429) {
+      const hint = isClaude
+        ? (prl?.requests?.resetInSec != null ? `resets in ${fmtSecLeft(prl.requests.resetInSec)}` : '')
+        : (p.retryAfterMs != null ? `retry in ${fmtSecLeft(Math.round(p.retryAfterMs / 1000))}` : '');
+      return { cls: 'text-amber-400', text: `⚠️ Rate-limited / quota exhausted${hint ? ` — ${hint}` : ''}` };
+    }
+    if (p.status === 401 || p.status === 403) return { cls: 'text-red-400', text: '❌ Invalid or unauthorized API key' };
+    return { cls: 'text-red-400', text: `❌ ${p.error || `Error ${p.status ?? ''}`}` };
+  };
+
+  // Gemini probes ONE model (the high-quota fallback tail), so it names the model
+  // that answered. Claude probes EVERY model in use and renders one row each — so
+  // the per-model rate limits reflect what a real run actually consumes.
+  const geminiVerdict = (!isClaude && probe) ? (() => {
+    const v = verdictFor(probe);
+    if (v && probe.ok && probe.model) v.text = `✅ Available — ${probe.model} responded`;
+    return v;
+  })() : null;
 
   return (
     <div className="mt-1 pt-2 border-t border-white/5 space-y-1.5">
@@ -404,16 +406,36 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
         </button>
       </div>
 
-      {verdict && <div className={`text-[11px] font-medium ${verdict.cls}`}>{verdict.text}</div>}
-
-      {isClaude && rl && (
-        <div className="text-white/45 text-[10px] leading-relaxed font-mono">
-          {line('requests', rl.requests)}
-          {line('tokens', rl.tokens)}
-          {line('input tok', rl.input_tokens)}
-          {line('output tok', rl.output_tokens)}
+      {/* Claude: one row per model the app actually uses (Anthropic limits are
+          per-model — Sonnet drives job runs, Opus drives application generation,
+          Haiku the light tasks). */}
+      {isClaude && probe?.models && (
+        <div className="space-y-2">
+          <div className="text-white/40 text-[10px]">Per model in use (Anthropic rate limits are per-model):</div>
+          {probe.models.map((m, i) => {
+            const v = verdictFor(m);
+            const mrl = m.rateLimit || null;
+            return (
+              <div key={m.model || i} className="space-y-0.5">
+                <div className="text-[11px] font-medium leading-snug">
+                  <span className="text-white/70 font-mono">{m.model || '(unknown model)'}</span>
+                  {v && <> — <span className={v.cls}>{v.text}</span></>}
+                </div>
+                {mrl && (
+                  <div className="text-white/45 text-[10px] leading-relaxed font-mono pl-3">
+                    {line('requests', mrl.requests)}
+                    {line('tokens', mrl.tokens)}
+                    {line('input tok', mrl.input_tokens)}
+                    {line('output tok', mrl.output_tokens)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
+
+      {!isClaude && geminiVerdict && <div className={`text-[11px] font-medium ${geminiVerdict.cls}`}>{geminiVerdict.text}</div>}
 
       {!isClaude && (
         <div className="text-white/40 text-[10px] leading-relaxed space-y-0.5">
@@ -428,7 +450,7 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
         </div>
       )}
 
-      {!verdict && <div className="text-white/30 text-[10px]">Click for a live up / rate-limited / bad-key check.</div>}
+      {!probe && <div className="text-white/30 text-[10px]">Click for a live up / rate-limited / bad-key check.</div>}
     </div>
   );
 }

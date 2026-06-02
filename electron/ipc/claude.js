@@ -56,26 +56,40 @@ function parseAnthropicRateLimit(headers) {
   return Object.keys(out).length ? out : null;
 }
 
+// Distinct Claude models the app actually uses across tasks — KEEP IN SYNC with
+// TASK_MODELS in llm.js (declared here, not imported, to avoid a circular import:
+// llm.js imports gemini.js which owns the availability handler). Ordered
+// workhorse → app-gen → light. The availability probe checks EACH, because
+// Anthropic rate limits are PER-MODEL: Haiku having headroom says nothing about
+// whether a Sonnet scoring run or an Opus application-generation will hit limits.
+export const CLAUDE_MODELS_IN_USE = [
+  'claude-sonnet-4-6',          // job scoring/bucketing, resume-parse, query-gen, vision, price-synthesis, company-research
+  'claude-opus-4-8',            // application résumé + cover-letter generation
+  'claude-haiku-4-5-20251001',  // platform-fit, page-status, text-polish
+];
+
 /**
- * Lightweight availability probe: a 1-token Haiku ping that reads the live
- * rate-limit headers Anthropic returns. NEVER throws — returns a structured
- * {ok,status,rateLimit,error} so the Settings panel can render a verdict
+ * Lightweight availability probe: a 1-token ping to ONE model that reads the
+ * live rate-limit headers Anthropic returns. Defaults to the Sonnet workhorse;
+ * the availability handler calls it once per CLAUDE_MODELS_IN_USE entry so each
+ * model's per-model limits are surfaced. NEVER throws — returns a structured
+ * {ok,status,model,rateLimit,error} so the Settings panel can render a verdict
  * (the rate-limit numbers are straight from the response headers).
  */
-export async function probeClaude(apiKey) {
-  if (!apiKey) return { ok: false, status: null, error: 'No Anthropic API key set.' };
+export async function probeClaude(apiKey, model = 'claude-sonnet-4-6') {
+  if (!apiKey) return { ok: false, status: null, model, error: 'No Anthropic API key set.' };
   try {
     const anthropic = getAnthropicClient(apiKey);
     const { response } = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model,
       max_tokens: 1,
       messages: [{ role: 'user', content: 'ping' }],
     }).withResponse();
-    return { ok: true, status: response.status ?? 200, model: 'claude-haiku-4-5-20251001', rateLimit: parseAnthropicRateLimit(response.headers) };
+    return { ok: true, status: response.status ?? 200, model, rateLimit: parseAnthropicRateLimit(response.headers) };
   } catch (err) {
     // The SDK's APIError carries .status and (usually) .headers even on 429/401,
     // so a rate-limited probe still surfaces remaining/reset.
-    return { ok: false, status: err?.status ?? null, error: err?.message || String(err), rateLimit: err?.headers ? parseAnthropicRateLimit(err.headers) : null };
+    return { ok: false, status: err?.status ?? null, model, error: err?.message || String(err), rateLimit: err?.headers ? parseAnthropicRateLimit(err.headers) : null };
   }
 }
 

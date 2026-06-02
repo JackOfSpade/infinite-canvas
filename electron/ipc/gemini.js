@@ -8,7 +8,7 @@ import { GoogleAuth } from 'google-auth-library';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { resolveServiceAccountPath, getAISettings } from './settings.js';
-import { callClaudeText, probeClaude } from './claude.js';
+import { callClaudeText, probeClaude, CLAUDE_MODELS_IN_USE } from './claude.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP, DOCUMENT_MIME_MAP } from '../utils/mimeTypes.js';
 
@@ -864,15 +864,26 @@ export function registerGeminiHandlers() {
   });
 
   // Live "Check availability" — pings the requested provider (or the active one)
-  // and returns a structured verdict. For Claude this includes real
-  // remaining/reset numbers from the response headers; for Gemini just
-  // up/rate-limited/bad-key + a retry hint (it has no remaining-quota API).
+  // and returns a structured verdict. For Claude this probes EVERY model the app
+  // uses (CLAUDE_MODELS_IN_USE) — Anthropic limits are per-model, so checking one
+  // model (esp. the lightest) misrepresents whether a real run will hit limits —
+  // and returns per-model {ok,status,rateLimit} from the response headers. For
+  // Gemini it's a single up/rate-limited/bad-key probe + retry hint (no
+  // remaining-quota API exists).
   handleSafe('check-ai-availability', async (event, args) => {
     const settings = getAISettings();
     const provider = (args && args.provider) || settings.provider || 'gemini';
     let result;
     if (provider === 'claude') {
-      result = await probeClaude(settings.anthropicApiKey);
+      if (!settings.anthropicApiKey) {
+        result = { ok: false, models: [{ ok: false, status: null, model: null, error: 'No Anthropic API key set.' }] };
+      } else {
+        // Probe all models in parallel — each is a 1-token ping (~free).
+        const models = await Promise.all(
+          CLAUDE_MODELS_IN_USE.map((m) => probeClaude(settings.anthropicApiKey, m)),
+        );
+        result = { ok: models.length > 0 && models.every((m) => m.ok), models };
+      }
     } else {
       result = await probeGemini(settings.geminiApiKey);
     }

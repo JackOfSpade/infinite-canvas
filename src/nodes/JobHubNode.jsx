@@ -46,6 +46,16 @@ const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled
   && ((!JOB_SEARCH_TEST_MODE.fast && !JOB_SEARCH_TEST_MODE.fullRun) || JOB_SEARCH_TEST_MODE.skipAI);
 // ─────────────────────────────────────────────────────────────────────────────
 
+// A scrape warning "gates" the pipeline — pauses it in 'sources-ready' until the
+// user Solves or Skips — when it's a hard block/paste (captcha, login wall) OR a
+// LinkedIn guest rate-limit. The rate-limit is technically a 'throttle', but a
+// Solve (switch VPN → re-enrich the missing descriptions) recovers real data, so
+// we hold scoring rather than burn AI tokens on description-less LinkedIn jobs;
+// the user can still Skip to score with what we have. Everything else (info,
+// transient throttles on other sources) flows straight through to scoring.
+const isGatingWarning = (w) =>
+  w?.severity === 'block' || w?.severity === 'paste' || w?.code === 'linkedin-rate-limited';
+
 // Job freshness window (days). Default mirrors electron DEFAULT_MAX_AGE_DAYS;
 // the cap bounds the user-set slider. NOTE: auto-widening this on thin results
 // would need a search refetch (filterJobsByAge runs post-fetch, so date-param
@@ -522,7 +532,7 @@ export function JobHubNode({ id, data }) {
           scrapeWarnings: filteredWarnings,
         });
 
-        const remainingBlocks = filteredWarnings.filter(w => w?.severity === 'block' || w?.severity === 'paste');
+        const remainingBlocks = filteredWarnings.filter(isGatingWarning);
         if (remainingBlocks.length === 0 && mergedPending.length > 0) {
           EventLogger.log(`[JobHub][${id}] Auto-resuming scoring from sources-ready state.`);
           processingRef.current = false;
@@ -860,7 +870,7 @@ export function JobHubNode({ id, data }) {
   // the reason + Solve target must come from persisted state). A blocked source
   // that still HAS its card already carries the live warning — leave it.
   const ensureBlockedSourceCards = useCallback((blockingWarnings) => {
-    const blocks = (blockingWarnings || []).filter(w => (w?.severity === 'block' || w?.severity === 'paste') && w.sourceId);
+    const blocks = (blockingWarnings || []).filter(w => isGatingWarning(w) && w.sourceId);
     if (blocks.length === 0) return;
     const allowedSourceIds = new Set(ACTIVE_JOB_SOURCES);
     const existingSourceIds = new Set(
@@ -1333,7 +1343,7 @@ export function JobHubNode({ id, data }) {
       const effectiveWarnings = alreadyResolved.size > 0
         ? searchWarnings.filter(w => !alreadyResolved.has(w?.sourceId))
         : searchWarnings;
-      const blockingWarnings = effectiveWarnings.filter(w => w?.severity === 'block' || w?.severity === 'paste');
+      const blockingWarnings = effectiveWarnings.filter(isGatingWarning);
 
       // Merge backend's foundJobs with any jobs already resolved via paste during
       // the search — they're in pendingJobsRef but absent from the backend result.
@@ -1348,10 +1358,10 @@ export function JobHubNode({ id, data }) {
       }
 
       // ── Block gate ──────────────────────────────────────────────────
-      // If any source hit a block-severity warning (captcha, login wall),
-      // pause in 'sources-ready' so the user can Solve / Skip each blocked
-      // source before we spend AI tokens, then auto-resume when the last
-      // warning clears (or "Score current results" with partial data).
+      // If any source hit a gating warning (captcha, login wall, or a LinkedIn
+      // guest rate-limit — see isGatingWarning), pause in 'sources-ready' so the
+      // user can Solve / Skip each one before we spend AI tokens, then auto-resume
+      // when the last warning clears (or "Score current results" with partial data).
       //
       // This MUST come before the zero-jobs terminal branch below: a run can
       // legitimately return 0 jobs *because* the only productive source was
@@ -1361,8 +1371,8 @@ export function JobHubNode({ id, data }) {
       // Solve — the resolve merged them into pendingJobs, but auto-resume only
       // fires from 'sources-ready', so they were never scored.
       //
-      // info-severity warnings (USAJobs config-missing) and throttles don't
-      // gate — they're informational and shouldn't require a manual click.
+      // info-severity warnings (USAJobs config-missing) and non-LinkedIn throttles
+      // don't gate — they're informational and shouldn't require a manual click.
       if (blockingWarnings.length > 0 && !SKIP_AI_FOR_TESTING) {
         updateGlobal(currentId, {
           hubState: 'sources-ready',
@@ -1375,6 +1385,24 @@ export function JobHubNode({ id, data }) {
         // can be lost during the long run, which stranded the user with "1 source
         // blocked but nothing to resolve."
         ensureBlockedSourceCards(blockingWarnings);
+        // A LinkedIn "Solve" from this paused state re-enriches descriptions by
+        // reading the saved analysis snapshot — normally written by score-jobs,
+        // which hasn't run yet. Persist it now so the re-enrich has jobs to work
+        // with (without it the resolve returns resolved:false and the card just
+        // stays actionable — still safe, but Solve would no-op).
+        if (blockingWarnings.some(w => w?.code === 'linkedin-rate-limited')) {
+          window.electronAPI?.saveJobAnalysisSnapshot?.({
+            jobs: foundJobs,
+            profile,
+            nodeId: currentId,
+            targetRole: activeTargetRole,
+            snapshotContext: {
+              sourceHubId: currentId,
+              canvasFilePath,
+              resumeSummary: buildResumeSummary(profile),
+            },
+          }).catch(() => {});
+        }
         return;
       }
 
@@ -1604,7 +1632,7 @@ export function JobHubNode({ id, data }) {
       if (cancelled()) return;
       const foundJobs = (searchResult?.success && Array.isArray(searchResult.jobs)) ? searchResult.jobs : [];
       const warnings = Array.isArray(searchResult?.scrapeWarnings) ? searchResult.scrapeWarnings : [];
-      const blockingWarnings = warnings.filter(w => w?.severity === 'block' || w?.severity === 'paste');
+      const blockingWarnings = warnings.filter(isGatingWarning);
       // Same post-search branches as runPipeline: block-gate pause, empty terminal, score.
       if (blockingWarnings.length > 0 && !SKIP_AI_FOR_TESTING) {
         updateGlobal(currentId, {
@@ -1612,6 +1640,13 @@ export function JobHubNode({ id, data }) {
           jobCount: foundJobs.length, scrapeWarnings: warnings,
         });
         ensureBlockedSourceCards(blockingWarnings);
+        // See runPipeline: persist the snapshot so a LinkedIn Solve here can re-enrich.
+        if (blockingWarnings.some(w => w?.code === 'linkedin-rate-limited')) {
+          window.electronAPI?.saveJobAnalysisSnapshot?.({
+            jobs: foundJobs, profile, nodeId: currentId, targetRole: activeTargetRole,
+            snapshotContext: { sourceHubId: currentId, canvasFilePath: cfp, resumeSummary: buildResumeSummary(profile) },
+          }).catch(() => {});
+        }
         return;
       }
       if (foundJobs.length === 0) {
@@ -1652,12 +1687,12 @@ export function JobHubNode({ id, data }) {
       const remaining = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== skippedSourceId);
       scrapeWarningsRef.current = remaining;
       updateGlobal(id, { scrapeWarnings: remaining });
-      // The gate that paused the pipeline was block-severity only (captcha,
-      // login walls). info-severity warnings (e.g. USAJobs config-missing,
-      // shown so the user knows why that source returned 0 but not requiring
-      // action) and throttles should NOT keep the resume from firing — the
-      // user already addressed every actionable block by this point.
-      const remainingBlocks = remaining.filter(w => w?.severity === 'block' || w?.severity === 'paste');
+      // Resume once no GATING warning remains (captcha/login walls + the LinkedIn
+      // rate-limit; see isGatingWarning). info-severity warnings (e.g. USAJobs
+      // config-missing, shown so the user knows why that source returned 0 but
+      // not requiring action) and non-LinkedIn throttles should NOT keep the
+      // resume from firing — the user already addressed every actionable block.
+      const remainingBlocks = remaining.filter(isGatingWarning);
       if (
         remainingBlocks.length === 0 &&
         hubStateRef.current === 'sources-ready' &&
@@ -1717,8 +1752,8 @@ export function JobHubNode({ id, data }) {
       }
       scrapeWarningsRef.current = remaining;
       updateGlobal(id, { pendingJobs: mergedPending, jobCount: mergedPending.length, scrapeWarnings: remaining });
-      // Auto-resume on no remaining BLOCK or PASTE warnings (info / throttle stays).
-      const remainingBlocks = remaining.filter(w => w?.severity === 'block' || w?.severity === 'paste');
+      // Auto-resume on no remaining GATING warnings (info / non-LinkedIn throttle stays).
+      const remainingBlocks = remaining.filter(isGatingWarning);
       // Report the actual merge outcome back to the main process so the bug
       // report can show "net pendingJobs change" rather than just the IPC-side
       // "kept" count. The IPC side doesn't know the renderer dropped same-source
@@ -1752,9 +1787,9 @@ export function JobHubNode({ id, data }) {
   // non-blocking warning so the done-state "N throttled" panel reflects the
   // in-flight retry immediately instead of sitting stale through a multi-minute
   // re-fetch — onResolved re-adds it if the attempt comes back still-warned.
-  // Block/paste warnings are intentionally left untouched: they gate the paused
-  // 'sources-ready' state, and dropping one here could mis-fire auto-resume
-  // before the block is actually cleared.
+  // Gating warnings (block/paste AND the LinkedIn rate-limit) are intentionally
+  // left untouched: they gate the paused 'sources-ready' state, and dropping one
+  // here could mis-fire auto-resume before the block is actually cleared.
   useEffect(() => {
     const onRetryStart = (e) => {
       if (e.detail?.hubId !== id) return;
@@ -1762,7 +1797,7 @@ export function JobHubNode({ id, data }) {
       if (!sid) return;
       const current = scrapeWarningsRef.current || [];
       const w = current.find(x => x.sourceId === sid);
-      if (!w || w.severity === 'block' || w.severity === 'paste') return;
+      if (!w || isGatingWarning(w)) return;
       const remaining = current.filter(x => x.sourceId !== sid);
       scrapeWarningsRef.current = remaining;
       updateGlobal(id, { scrapeWarnings: remaining });
@@ -2337,7 +2372,7 @@ export function JobHubNode({ id, data }) {
               // source — so counting warnings made it say "2 sources blocked"
               // with only one Indeed card visible. Skip/resolve already filters
               // warnings by sourceId, so distinct-source count is the truth.
-              blockedCount={new Set((data.scrapeWarnings || []).filter(w => w?.severity === 'block' || w?.severity === 'paste').map(w => w.sourceId)).size}
+              blockedCount={new Set((data.scrapeWarnings || []).filter(isGatingWarning).map(w => w.sourceId)).size}
               jobsAvailable={Array.isArray(data.pendingJobs) ? data.pendingJobs.length : (data.jobCount || 0)}
               resumeSummary={data.resumeSummary}
               locked={!!data.locked}

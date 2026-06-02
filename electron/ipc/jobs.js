@@ -13,7 +13,8 @@ import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, CAREER_F
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { clearBrowserSession } from './stealthBrowser.js';
-import { scrapeManualSources } from './browser/manualScraper.js';
+import { scrapeManualSources, resetManualScraperDiagnostics } from './browser/manualScraper.js';
+import { orderBrowserSources, resetManualSolveTracking, recordVerificationOutcome, wasManualSolveRequired, getVerificationSnapshot } from './scrapeVerification.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
 import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES, JOB_PER_PAGE_CAP, MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from './resultCaps.js';
 import { logger } from '../logger.js';
@@ -1297,53 +1298,86 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // anymore) — a nested acquire would deadlock waiting on the outer hold. The
     // pure-HTTP sources run fully concurrently via fetchHttpSources.
     const queryTotal = getQueryProgressTotal(queries);
+
+    // Data-driven scrape order: sources that recently forced the user to manually
+    // solve a challenge (captcha / login wall) run FIRST, so the user clears them
+    // up front and can walk away while the rest finish unattended. No source is
+    // pinned — Indeed auto-handles its CF (never waits for the user) so it sinks
+    // unless its history says otherwise; Google/Glassdoor, which DO wait via
+    // waitForReady, rise. First run / clean history = the default order.
+    const activeBrowserSources = BROWSER_SCRAPE_ORDER.filter(
+      sid => ACTIVE_SOURCE_ID_SET.has(sid) && (!resumeScope || resumeScope.has(sid)),
+    );
+    const browserOrder = orderBrowserSources(activeBrowserSources);
+    if (browserOrder.length) {
+      logger.info(`[Jobs] Browser scrape order (manual-verification-first): ${browserOrder.join(' → ')}`);
+    }
+
+    // Indeed runs via its OWN driver (separate from the manual trio's
+    // scrapeManualSources), so the loop dispatches per source. Indeed launches +
+    // closes its own Chrome on the shared userDataDir, exactly like each trio
+    // source, so interleaving is safe (all sequential inside the one profile lock).
+    const runIndeed = async () => {
+      emitProgress({ nodeId, sourceId: 'indeed', status: 'searching', count: 0, completed: 0, total: queryTotal });
+      const indeedStartPage = resumeStartPages?.indeed > 1 ? resumeStartPages.indeed - 1 : 0;
+      let indeedResult;
+      try {
+        const r = await fetchIndeedListingsBrowser(queries, combinedSignal, ageDays, null, (detail) => {
+          emitProgress({ nodeId, sourceId: 'indeed', status: 'searching', count: 0, detail, completed: getCompletedQueriesFromDetail(detail, queryTotal), total: queryTotal });
+        }, indeedStartPage, stageOnPage, location);
+        const rawJobs = Array.isArray(r?.items) ? r.items : [];
+        const gathered = r?.gathered ?? rawJobs.length;
+        const jobs = Number.isFinite(JOB_API_PER_SOURCE_CAP) ? rawJobs.slice(0, JOB_API_PER_SOURCE_CAP) : rawJobs;
+        indeedResult = { sourceId: 'indeed', jobs, warning: r?.warning || null, gathered };
+      } catch (error) {
+        indeedResult = { sourceId: 'indeed', jobs: [], error: error?.message || String(error) };
+      }
+      emitProgress({
+        nodeId, sourceId: 'indeed',
+        status: (indeedResult.error || indeedResult.warning?.severity === 'block') ? 'error' : 'done',
+        count: indeedResult.jobs.length,
+        warning: indeedResult.warning || null,
+        completed: queryTotal, total: queryTotal,
+      });
+      return indeedResult;
+    };
+
+    const onManualResult = (res) => {
+      const sourceId = res.id.replace(/-\d+$/, '');
+      const count = Array.isArray(res.data) ? res.data.length : 0;
+      const total = sourceTaskIds[sourceId]?.length || 1;
+      const blocked = res.warning?.severity === 'block';
+      emitProgress({
+        nodeId, sourceId,
+        status: blocked ? 'error' : 'done',
+        count, completed: total, total,
+        warning: res.warning || null,
+        url: sourceFirstUrl[sourceId] || null,
+      });
+    };
+
     const runBrowserSourcesInOrder = async () => {
       let indeedResult = null;
-      // Indeed runs FIRST (login + Cloudflare gate surfaced early while watched).
-      // Shaped like an API result ({ sourceId, jobs, warning, gathered }) so the
-      // existing apiResults processing below handles it unchanged.
-      if (ACTIVE_SOURCE_ID_SET.has('indeed') && (!resumeScope || resumeScope.has('indeed'))) {
-        emitProgress({ nodeId, sourceId: 'indeed', status: 'searching', count: 0, completed: 0, total: queryTotal });
-        // fetchIndeedListingsBrowser's startPage is 0-based; resumeStartPages is 1-based.
-        const indeedStartPage = resumeStartPages?.indeed > 1 ? resumeStartPages.indeed - 1 : 0;
-        try {
-          const r = await fetchIndeedListingsBrowser(queries, combinedSignal, ageDays, null, (detail) => {
-            emitProgress({ nodeId, sourceId: 'indeed', status: 'searching', count: 0, detail, completed: getCompletedQueriesFromDetail(detail, queryTotal), total: queryTotal });
-          }, indeedStartPage, stageOnPage, location);
-          const rawJobs = Array.isArray(r?.items) ? r.items : [];
-          const gathered = r?.gathered ?? rawJobs.length;
-          // Same FAST-mode per-source aggregate cap the HTTP path applies.
-          const jobs = Number.isFinite(JOB_API_PER_SOURCE_CAP) ? rawJobs.slice(0, JOB_API_PER_SOURCE_CAP) : rawJobs;
-          indeedResult = { sourceId: 'indeed', jobs, warning: r?.warning || null, gathered };
-        } catch (error) {
-          indeedResult = { sourceId: 'indeed', jobs: [], error: error?.message || String(error) };
+      const manualResults = [];
+      resetManualSolveTracking();          // fresh per-run manual-solve flags
+      resetManualScraperDiagnostics();     // clear console/network ONCE for the whole phase
+      for (let i = 0; i < browserOrder.length; i++) {
+        if (combinedSignal.aborted) break;
+        const sid = browserOrder[i];
+        if (sid === 'indeed') {
+          indeedResult = await runIndeed();
+        } else {
+          const sourceTasks = tasks.filter(t => t.sourceId === sid);
+          if (!sourceTasks.length) continue;
+          const r = await scrapeManualSources(sourceTasks, onManualResult, combinedSignal, stageOnPage, {
+            resetDiagnostics: false, sourceIndexBase: i, sourceTotal: browserOrder.length,
+          });
+          manualResults.push(...r);
         }
-        emitProgress({
-          nodeId, sourceId: 'indeed',
-          status: (indeedResult.error || indeedResult.warning?.severity === 'block') ? 'error' : 'done',
-          count: indeedResult.jobs.length,
-          warning: indeedResult.warning || null,
-          completed: queryTotal, total: queryTotal,
-        });
+        // Record this source's outcome for the NEXT run's order: did it make the
+        // user manually solve something? (Drivers flag via markManualSolveRequired.)
+        recordVerificationOutcome(sid, wasManualSolveRequired(sid));
       }
-      // Manual trio (ZipRecruiter → Glassdoor → Google) — declaration order in
-      // buildJobTasks IS the run order. Same per-source progress callback as before.
-      const manualResults = await scrapeManualSources(tasks, (res) => {
-        const sourceId = res.id.replace(/-\d+$/, '');
-        const count = Array.isArray(res.data) ? res.data.length : 0;
-        const total = sourceTaskIds[sourceId]?.length || 1;
-        const blocked = res.warning?.severity === 'block';
-        emitProgress({
-          nodeId,
-          sourceId,
-          status: blocked ? 'error' : 'done',
-          count,
-          completed: total,
-          total,
-          warning: res.warning || null,
-          url: sourceFirstUrl[sourceId] || null,
-        });
-      }, combinedSignal, stageOnPage);
       return { manualResults, indeedResult };
     };
 
@@ -1685,18 +1719,27 @@ Be creative with suggestedRoleQueries — think about what career directions the
         const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
         kept = kept.map(j => j.source === 'linkedin' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
 
-        if (loginWall) {
+        const lkStillEmpty = kept.filter(j => j.source === 'linkedin' && (!j.snippet || j.snippet.length < 100)).length;
+        // The guest limit bites two ways: the hard URL-redirect wall (loginWall)
+        // and gutted soft-block pages (noDescSoftBlock) that come back empty
+        // without tripping the wall detector. Both are the same per-IP rate limit,
+        // recoverable on a fresh IP — so either one, with descriptions STILL
+        // missing, gates the pipeline (the user switches VPN + Solve, pass after
+        // pass, until every description is grabbed or they Skip) rather than
+        // scoring empties. (Mirrors the test-mode continuous loop above; a
+        // soft-block-only pass used to fall through to a clean 'done' and score
+        // the gutted residual.)
+        if ((loginWall || lkNoDescSoft > 0) && lkStillEmpty > 0) {
           linkedinLastCeilingIp = await getEgressIp();
-          const stillEmpty = kept.filter(j => j.source === 'linkedin' && (!j.snippet || j.snippet.length < 100)).length;
           const ipNote = linkedinLastCeilingIp ? ` (IP ${linkedinLastCeilingIp})` : '';
           recordLinkedinEnrichPass({
             kind: 'search', ip: linkedinLastCeilingIp, ipOk: !!linkedinLastCeilingIp,
-            walled: true, enriched: lkSuccess, stillEmpty, contextRotations: lkRotations,
+            walled: loginWall, enriched: lkSuccess, stillEmpty: lkStillEmpty, contextRotations: lkRotations,
             noDesc: lkNoDesc, noDescSoftBlock: lkNoDescSoft, noDescGenuine: lkNoDescGenuine, evalErrors: lkEvalErrors, navErrors: lkNavErrors,
             browserGen: lkBrowserGen, browserAgeMs: lkBrowserAgeMs, startedAt: lkPassStartedAt,
           });
 
-          if (JOB_SEARCH_TEST_MODE.probeCooldown) {
+          if (loginWall && JOB_SEARCH_TEST_MODE.probeCooldown) {
             // Probe mode: auto-run the cooldown measurement without a Solve click.
             const waitsMs = JOB_SEARCH_TEST_MODE.probeCooldownWaitsMin.map(m => Math.round(m * 60_000));
             const lkPool = kept.filter(j => j.source === 'linkedin');
@@ -1728,11 +1771,14 @@ Be creative with suggestedRoleQueries — think about what career directions the
             }
           } else {
             // Normal: emit error, wait for user to switch VPN and click Solve.
+            const reason = loginWall
+              ? "LinkedIn's anonymous guest limit stopped enrichment"
+              : `LinkedIn served ${lkNoDescSoft} gutted (soft-blocked) page(s)`;
             const rateWarning = {
               code: 'linkedin-rate-limited',
               severity: 'throttle',
               shortLabel: 'Switch VPN',
-              evidence: `LinkedIn's anonymous guest limit stopped enrichment after ${lkSuccess} description(s)${ipNote} — ${stillEmpty} job(s) still without one.`,
+              evidence: `${reason} after ${lkSuccess} description(s)${ipNote} — ${lkStillEmpty} job(s) still without one.`,
               suggestion: 'This IP is rate-limited. Switch your VPN to a new location, then click Solve to fetch the next batch. (Logging in does not help — descriptions are fetched anonymously.)',
             };
             emitProgress({
@@ -1745,7 +1791,13 @@ Be creative with suggestedRoleQueries — think about what career directions the
               completed: 1,
               total: 1,
             });
-            scrapeWarnings.push({ sourceId: 'linkedin', url: null, ...rateWarning });
+            // Carry the Solve target on the persisted warning too (not just the
+            // live progress event): the rate-limit now gates the pipeline in
+            // 'sources-ready', and if the LinkedIn card was lost during the long
+            // run, ensureBlockedSourceCards re-spawns it from this warning — it
+            // needs the url to render the Solve button (else the user is stuck
+            // with only Skip).
+            scrapeWarnings.push({ sourceId: 'linkedin', url: 'https://www.linkedin.com/jobs', ...rateWarning });
           }
         } else {
           linkedinLastCeilingIp = null;
@@ -1850,6 +1902,10 @@ Be creative with suggestedRoleQueries — think about what career directions the
       bySource,
       location: locationTelemetry,
       languages: languageTelemetry,
+      // Data-driven browser-scrape order this run + the per-source manual-solve
+      // history that produced it — so "why did Google scrape first?" is answerable.
+      browserOrder,
+      verification: getVerificationSnapshot(),
     };
     // Search (gather) phase done — mark the manifest so a crash during the
     // RENDERER-driven scoring/bucketing that follows resumes from scoring (the
@@ -2602,18 +2658,27 @@ RULES:
             }
           }
 
-          if (walled && stillEmpty > 0) {
-            // Got a batch but hit LinkedIn's per-IP guest ceiling again. Remember
-            // THIS IP as warm so the next retry's guard can require a VPN switch.
-            // severity 'throttle' (not 'warn') keeps the action button visible (the
-            // card hides it for 'warn'/'info') and renders amber rather than
-            // block-red. Return resolved:true (so the descriptions we DID get merge
-            // in) AND the warning (so the renderer keeps it, not a clean done).
+          if ((walled || noDescSoftBlock > 0) && stillEmpty > 0) {
+            // Got a batch but hit LinkedIn's per-IP guest ceiling again — either a
+            // hard URL wall (walled) or gutted soft-block pages (noDescSoftBlock)
+            // that come back empty without tripping the wall detector. Both are the
+            // SAME per-IP rate limit and recoverable on a fresh IP, so keep the
+            // warning + Solve button: the pipeline stays gated and the user is
+            // re-prompted to switch VPN and Solve again, pass after pass, until
+            // every description is grabbed (or they Skip). A clean done here (the
+            // old `walled`-only check) stranded the soft-blocked residual — it
+            // auto-resumed scoring with jobs still empty. Remember THIS IP as warm
+            // so the next retry's guard can require a real VPN switch. severity
+            // 'throttle' (not 'warn') keeps the action button visible (the card
+            // hides it for 'warn'/'info') and renders amber rather than block-red.
             linkedinLastCeilingIp = currentIp || linkedinLastCeilingIp;
             const ipNote = currentIp ? ` (IP ${currentIp})` : '';
+            const reason = walled
+              ? "LinkedIn's anonymous guest limit stopped"
+              : `LinkedIn served ${noDescSoftBlock} gutted (soft-blocked) page(s)`;
             const rateWarning = {
               code: 'linkedin-rate-limited', severity: 'throttle', shortLabel: 'Switch VPN',
-              evidence: `LinkedIn's anonymous guest limit stopped after +${successCount} this pass${ipNote} — ${stillEmpty} job(s) still without a description.`,
+              evidence: `${reason} after +${successCount} this pass${ipNote} — ${stillEmpty} job(s) still without a description.`,
               suggestion: 'This IP is now rate-limited. Switch your VPN to a new location, then click Solve to fetch the next batch. Logging in does not help — descriptions are fetched anonymously.',
             };
             sendProgress({ nodeId, sourceId: 'linkedin', count: items.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: rateWarning });
