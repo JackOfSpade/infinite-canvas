@@ -23,8 +23,11 @@ import {
   uniqueJobsNotIn,
 } from '../src/utils/jobIdentity.js';
 import { mergeSourceProgress } from '../src/utils/sourceProgress.js';
-import { applyJobCardFiltersToNodes, getJobCardFilterOpacity, isJobCardVisible } from '../src/utils/jobCardFilters.js';
+import { isJobCardVisible } from '../src/utils/jobCardFilters.js';
 import { reconcileBatchScores, buildScoredJob } from '../electron/ipc/jobBatchReconcile.js';
+import { buildCachedUserContent, buildAnthropicMessageParams } from '../electron/ipc/anthropicRequest.js';
+import { getStats } from '../src/utils/dashboardStats.js';
+import { resolveNodePresence } from '../src/utils/nodePresence.js';
 import { getNodesBounds } from '../src/utils/constants.js';
 import { mergeSourceIntoComps } from '../src/utils/compsMerge.js';
 import { mergeResolvedSourceItems } from '../src/utils/jobSourceResolveMerge.js';
@@ -35,7 +38,7 @@ import {
   partitionJobsForBranches,
   COL_X,
 } from '../src/nodes/jobsearch/buildJobTree.js';
-import { unionScoredJobs } from '../src/nodes/jobboard/mergeJobs.js';
+import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason } from '../src/nodes/jobboard/mergeJobs.js';
 import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, selectReverbPriceGuides, reverbTransactionsToComps, parsePriceChartingHtml, dicePostedBucket, extractJobPostingDescription } from '../electron/extractors/apiExtractors.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
 import {
@@ -80,7 +83,7 @@ import { repairMojibake, hasMojibake, repairJobsMojibake } from '../src/utils/te
 import { foldVerificationSample, orderByVerification, verificationScore } from '../src/utils/scrapeOrder.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
 import { createJobSearchTestMode, parseJobSearchEnvBoolean } from '../src/utils/jobSourceScope.js';
-import { createMarketplaceTestMode, parseMarketplaceEnvBoolean, getScopedCompSourceIds, isCompSourceEnabledInScope } from '../src/utils/compSourceScope.js';
+import { createMarketplaceTestMode, parseMarketplaceEnvBoolean, getScopedCompSourceIds, isCompSourceEnabledInScope, normalizeCompWarnings } from '../src/utils/compSourceScope.js';
 import { getJobAuthPreflightSourceIds, JOB_AUTH_PREFLIGHT_SOURCE_IDS } from '../src/utils/jobAuthPreflight.js';
 
 function assert(condition, message) {
@@ -652,6 +655,28 @@ const tests = [
     },
   },
   {
+    name: 'resultCaps: jobScoringBatchSize scales with the serving model',
+    run: () => {
+      const claude = jobScoringBatchSize('claude-sonnet-4-6');
+      const gemini = jobScoringBatchSize('gemini-3.5-flash');
+      const missing = jobScoringBatchSize();
+      assert(gemini === 15, `gemini Flash stays at the calibrated 15 (got ${gemini})`);
+      assert(missing === 15, `missing model → conservative default 15 (got ${missing})`);
+      assert(claude === 30, `Claude (stronger, leaner output) scores more per call (got ${claude})`);
+      assert(claude > gemini, 'a stronger model gets a larger batch than thinking-heavy Flash');
+      // Bounds hold for every known scoring-capable model id, and the size never
+      // exceeds what the output-token cap can honor (so a batch can't truncate).
+      const PER_JOB_FLOOR = 200, CAP = 24576, BASE = 2500, SAFETY = 0.8;
+      const outBudgetMax = Math.floor((CAP * SAFETY - BASE) / PER_JOB_FLOOR);
+      for (const m of ['claude-opus-4-8', 'claude-haiku-4-5-20251001', 'gemini-2.5-flash-lite', 'gemini-3.1-flash-lite']) {
+        const n = jobScoringBatchSize(m);
+        assert(n >= 5 && n <= 30, `${m} batch ${n} within [5,30]`);
+        assert(n <= outBudgetMax, `${m} batch ${n} fits the output-token budget (≤${outBudgetMax})`);
+      }
+      return { claude, gemini, missing };
+    },
+  },
+  {
     name: 'Job board relevance filtering',
     run: () => {
       const geoTerms = buildGeoTermSet(['Denver, CO', 'hybrid in Chicago']);
@@ -813,21 +838,104 @@ const tests = [
       assert(!isJobCardVisible(job, { scoreThreshold: 80 }), 'Job card filters: score below threshold should be hidden');
       assert(isJobCardVisible({ ...job, status: undefined }, { statusFilters: ['New'] }), 'Job card filters: missing status should default to New');
       assert(!isJobCardVisible(job, { statusFilters: ['Filled'] }), 'Job card filters: non-matching status should be hidden');
-      assert(getJobCardFilterOpacity(job, { sourceFilter: 'linkedin' }) === 0.15, 'Job card filters: hidden opacity should match UI contract');
-      const otherHubCard = { id: 'other', type: 'jobcard', style: {}, data: { ...job, hubId: 'hub-b', source: 'linkedin' } };
-      const alreadyHidden = { id: 'hidden', type: 'jobcard', style: { opacity: 0.15 }, data: { ...job, hubId: 'hub-a', source: 'linkedin' } };
+      return { ok: true };
+    },
+  },
+  {
+    name: 'anthropicRequest: buildCachedUserContent splits the cached prefix into an ephemeral block',
+    run: () => {
+      const arr = [{ type: 'image' }];
+      assert(buildCachedUserContent('hi', null) === 'hi', 'no prefix → string passthrough');
+      assert(buildCachedUserContent(arr, null) === arr, 'no prefix → array passthrough (same ref)');
+      const s = buildCachedUserContent('JOBS', 'PROFILE');
+      assert(Array.isArray(s) && s.length === 2, 'string + prefix → 2 blocks');
+      assert(s[0].type === 'text' && s[0].text === 'PROFILE' && s[0].cache_control?.type === 'ephemeral', 'prefix block is ephemeral-cached');
+      assert(s[1].type === 'text' && s[1].text === 'JOBS', 'second block is the dynamic content');
+      const a = buildCachedUserContent([{ type: 'image' }, { type: 'text', text: 'p' }], 'PFX');
+      assert(a.length === 3 && a[0].cache_control?.type === 'ephemeral' && a[1].type === 'image', 'array + prefix → prefix prepended to media blocks');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'anthropicRequest: buildAnthropicMessageParams builds the identical live/batch request shape',
+    run: () => {
+      const base = { model: 'claude-sonnet-4-6', maxTokens: 8000, cachedPrefix: 'PROFILE' };
+      const schema = { type: 'object', properties: {} };
+      // responseSchema → forced submit_response tool, no JSON prefill.
+      const p1 = buildAnthropicMessageParams('JOBS', { ...base, responseSchema: schema });
+      assert(p1.model === 'claude-sonnet-4-6' && p1.max_tokens === 8000, 'carries model + max_tokens');
+      assert(p1.tools?.[0]?.name === 'submit_response' && p1.tools[0].input_schema === schema, 'responseSchema → submit_response tool');
+      assert(p1.tool_choice?.type === 'tool' && p1.tool_choice?.name === 'submit_response', 'responseSchema → forced tool_choice');
+      assert(p1.messages.length === 1, 'tool-use mode adds no assistant prefill');
+      assert(p1.messages[0].content[0].cache_control?.type === 'ephemeral', 'cached prefix carried into params');
+      // expectJson (no schema) → assistant "{" prefill, no tools.
+      const p2 = buildAnthropicMessageParams('X', { model: 'm', maxTokens: 100, expectJson: true });
+      assert(!p2.tools && p2.messages.length === 2 && p2.messages[1].role === 'assistant' && p2.messages[1].content === '{', 'expectJson → "{" prefill');
+      // plain → single user turn, no envelope.
+      const p3 = buildAnthropicMessageParams('X', { model: 'm', maxTokens: 100 });
+      assert(!p3.tools && !p3.tool_choice && p3.messages.length === 1, 'plain → single user message, no envelope');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'compSourceScope: normalizeCompWarnings re-tags cardless sub-source warnings to the family card',
+    run: () => {
+      const cards = ['ebay-sold', 'ebay-active', 'swappa', 'reverb'];
+      // swappa-sold has no card → re-tag to the 'swappa' family card so the card's
+      // Skip/Solve (which clears by exact sourceId) can resolve it.
+      const out1 = normalizeCompWarnings([{ sourceId: 'swappa-sold', code: 'zero-extracted', severity: 'block' }], cards);
+      assert(out1.length === 1 && out1[0].sourceId === 'swappa', `swappa-sold → swappa (got ${out1[0]?.sourceId})`);
+      assert(out1[0].code === 'zero-extracted' && out1[0].severity === 'block', 'warning fields preserved on re-tag');
+      // A real card warning is kept untouched (same ref).
+      const w = { sourceId: 'ebay-sold', code: 'x' };
+      const out2 = normalizeCompWarnings([w], cards);
+      assert(out2.length === 1 && out2[0] === w, 'real card warning kept as-is (same ref)');
+      // ebay-sold and ebay-active are SEPARATE cards → both kept (no family collapse).
+      assert(normalizeCompWarnings([{ sourceId: 'ebay-sold' }, { sourceId: 'ebay-active' }], cards).length === 2, 'distinct cards both kept');
+      // swappa + swappa-sold both blocked → collapse to ONE swappa entry.
+      const out4 = normalizeCompWarnings([{ sourceId: 'swappa', code: 'a' }, { sourceId: 'swappa-sold', code: 'b' }], cards);
+      assert(out4.length === 1 && out4[0].sourceId === 'swappa', 'swappa family collapses to one entry');
+      // A true orphan (no family card present) is DROPPED so it can never gate forever.
+      assert(normalizeCompWarnings([{ sourceId: 'mercari-sold' }], cards).length === 0, 'orphan with no family card is dropped');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'nodePresence: resolveNodePresence prefers stamped filterStats over a dropped nodes section',
+    run: () => {
+      // No filter, nodes intact → scan nodes.
+      const scanned = resolveNodePresence({ nodes: [{ type: 'sellhub' }, { type: 'text' }] });
+      assert(scanned.hasSellNodes === true && scanned.hasJobNodes === false, 'scans nodes when no flags present');
+      // The bug: a filter code (MARKET/JOBS) drops the nodes section; the stamped
+      // flags must still drive the module-section gates.
+      const stamped = resolveNodePresence({ filterStats: { hasSellNodes: true, hasJobNodes: false } });
+      assert(stamped.hasSellNodes === true && stamped.hasJobNodes === false, 'uses stamped flags when nodes absent');
+      const jobs = resolveNodePresence({ nodes: [{ type: 'jobhub' }, { type: 'jobboard' }] });
+      assert(jobs.hasJobNodes === true && jobs.hasSellNodes === false, 'jobhub/jobboard count as job nodes');
+      // ?? not || — a genuine false from a node-less canvas is respected.
+      const empty = resolveNodePresence({ filterStats: { hasJobNodes: false, hasSellNodes: false }, nodes: [] });
+      assert(empty.hasJobNodes === false && empty.hasSellNodes === false, 'genuine false flag respected');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'dashboardStats: getStats sums SellHub recommended_price (not the absent userPrice)',
+    run: () => {
       const nodes = [
-        { id: 'visible', type: 'jobcard', style: {}, data: { ...job, hubId: 'hub-a' } },
-        { id: 'to-hide', type: 'jobcard', style: {}, data: { ...job, hubId: 'hub-a', source: 'linkedin' } },
-        otherHubCard,
-        alreadyHidden,
+        { type: 'jobcard', data: {} },
+        { type: 'jobcard', data: {} },
+        { type: 'sellhub', data: { hubState: 'priced', pricing: { recommended_price: 250 } } },
+        { type: 'sellhub', data: { hubState: 'priced', pricing: { recommended_price: '99.5' } } },
+        { type: 'sellhub', data: { hubState: 'priced', pricing: { recommended_price: null } } }, // no-comps → 0
+        { type: 'sellhub', data: { hubState: 'draft', pricing: { recommended_price: 999 } } },    // not priced → excluded
+        { type: 'sellhub', data: { hubState: 'priced', userPrice: 500 } },                        // legacy/wrong field → 0
       ];
-      const filteredNodes = applyJobCardFiltersToNodes(nodes, 'hub-a', { sourceFilter: 'indeed' });
-      assert(filteredNodes[0] === nodes[0], 'Job card filters: already-visible cards should preserve node identity');
-      assert(filteredNodes[1].style.opacity === 0.15, 'Job card filters: hidden same-hub cards should get hidden opacity');
-      assert(filteredNodes[2] === otherHubCard, 'Job card filters: cards from other hubs should not be mutated');
-      assert(filteredNodes[3] === alreadyHidden, 'Job card filters: unchanged opacity should preserve node identity');
-      return { visible: getJobCardFilterOpacity(job, { sourceFilter: 'indeed' }), nodes: filteredNodes.length };
+      const { jobCardsCount, sellHubsCount, totalValue } = getStats(nodes);
+      assert(jobCardsCount === 2, `getStats: jobCardsCount should be 2, got ${jobCardsCount}`);
+      assert(sellHubsCount === 5, `getStats: sellHubsCount should be 5, got ${sellHubsCount}`);
+      // Old (buggy) code read userPrice → would total 500; correct sums priced recommended_price.
+      assert(totalValue === 349.5, `getStats: totalValue should be 250 + 99.5 = 349.5, got ${totalValue}`);
+      return { totalValue };
     },
   },
   {
@@ -1030,12 +1138,88 @@ const tests = [
     },
   },
   {
+    name: 'Job Board: unionScoredJobs reports merge stats via out-param',
+    run: () => {
+      const a = [
+        { title: 'Eng', company: 'Acme', url: 'https://j/1', matchScore: 60 },
+        { title: 'PM', company: 'Beta', url: 'https://j/2', matchScore: 80 },
+      ];
+      const b = [
+        { title: 'Eng', company: 'Acme', url: 'https://j/1', matchScore: 90 }, // dup, higher → upgrade
+        { title: 'PM', company: 'Beta', url: 'https://j/2', matchScore: 50 },  // dup, lower → no upgrade
+        { title: 'New', company: 'Gamma', url: 'https://j/3', matchScore: 70 },
+      ];
+      const stats = {};
+      const out = unionScoredJobs([a, b], stats);
+      assert(out.length === 3, `stats: expected 3 unique, got ${out.length}`);
+      assert(stats.totalIncoming === 5, `stats: totalIncoming should be 5 (got ${stats.totalIncoming})`);
+      assert(stats.unique === 3, `stats: unique should be 3 (got ${stats.unique})`);
+      assert(stats.duplicatesRemoved === 2, `stats: duplicatesRemoved should be 2 (got ${stats.duplicatesRemoved})`);
+      assert(stats.collisions === 2, `stats: collisions should be 2 (got ${stats.collisions})`);
+      assert(stats.collisionUpgrades === 1, `stats: only the higher-score collision upgrades (got ${stats.collisionUpgrades})`);
+      // Stats path must not alter the returned union vs. the no-stats call.
+      assert(unionScoredJobs([a, b]).length === out.length, 'stats: out-param does not change the result');
+      return stats;
+    },
+  },
+  {
     name: 'Job Board: unionScoredJobs tolerates empty / non-array inputs',
     run: () => {
       assert(unionScoredJobs([]).length === 0, 'union: empty → empty');
       assert(unionScoredJobs(null).length === 0, 'union: null → empty');
       const out = unionScoredJobs([null, undefined, [{ title: 'x', company: 'y', url: 'u', matchScore: 1 }]]);
       assert(out.length === 1, 'union: skips non-array entries');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Job Board: moduleFingerprint changes on count OR score change, stable otherwise',
+    run: () => {
+      const a = [{ matchScore: 90 }, { matchScore: 80 }];
+      assert(moduleFingerprint(a) === moduleFingerprint([{ matchScore: 80 }, { matchScore: 90 }]),
+        'fingerprint: order-insensitive (sum-based), same set → same fp');
+      assert(moduleFingerprint(a) !== moduleFingerprint([{ matchScore: 90 }]),
+        'fingerprint: fewer jobs → different fp');
+      assert(moduleFingerprint(a) !== moduleFingerprint([{ matchScore: 90 }, { matchScore: 81 }]),
+        'fingerprint: re-scored (same count, different score) → different fp');
+      assert(moduleFingerprint(null) === '0.0', 'fingerprint: nullish → "0.0"');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Job Board: combineSignature is order-independent over modules',
+    run: () => {
+      const m1 = { id: 'A', fingerprint: '5.10' };
+      const m2 = { id: 'B', fingerprint: '3.7' };
+      assert(combineSignature([m1, m2]) === combineSignature([m2, m1]),
+        'signature: connection order does not matter');
+      assert(combineSignature([m1]) !== combineSignature([m1, m2]),
+        'signature: dropping a module changes it');
+      assert(combineSignature([m1, m2]) !== combineSignature([m1, { id: 'B', fingerprint: '4.8' }]),
+        'signature: a module whose data changed changes it');
+      assert(combineSignature([]) === '', 'signature: empty → ""');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Job Board: staleReason diffs last-combine signature vs. live modules',
+    run: () => {
+      const prev = combineSignature([{ id: 'A', fingerprint: '5.10' }, { id: 'B', fingerprint: '3.7' }]);
+      // B disconnected:
+      assert(staleReason(prev, [{ id: 'A', fingerprint: '5.10' }]) === '1 disconnected',
+        'reason: a removed connection');
+      // B re-ran (data changed):
+      assert(staleReason(prev, [{ id: 'A', fingerprint: '5.10' }, { id: 'B', fingerprint: '4.9' }]) === '1 updated',
+        'reason: a connection whose data changed');
+      // C newly added:
+      assert(staleReason(prev, [{ id: 'A', fingerprint: '5.10' }, { id: 'B', fingerprint: '3.7' }, { id: 'C', fingerprint: '2.2' }]) === '1 added',
+        'reason: a new connection');
+      // Identical → no drift (caller wouldn't show it, but the function stays honest):
+      assert(staleReason(prev, [{ id: 'A', fingerprint: '5.10' }, { id: 'B', fingerprint: '3.7' }]) === 'connections changed',
+        'reason: no diff → generic fallback');
+      // Combined change:
+      assert(staleReason(prev, [{ id: 'B', fingerprint: '9.9' }, { id: 'C', fingerprint: '1.1' }]) === '1 disconnected · 1 added · 1 updated',
+        'reason: disconnected + added + updated together');
       return { ok: true };
     },
   },
@@ -1081,6 +1265,32 @@ const tests = [
       // Source filter: only dice → a2 stays, a1 (lever) + b1 (indeed) removed.
       const expandedSrc = computeJobTreeView(expanded, 'hub', { sourceFilter: 'dice' });
       assert(hiddenOf(expandedSrc, 'a2') === false && hiddenOf(expandedSrc, 'a1') === true, 'source filter keeps only matching source');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'computeJobTreeView: flat-spawn fallback (no jobgroups) — cards survive filter/restore',
+    run: () => {
+      // Bucketing failed → flat spawn: jobcards wired straight to the hub, NO groups.
+      // Regression: previously computeJobTreeView only seeded `visible` by walking
+      // jobgroups, so a flat board had an empty visible set and ALL cards were hidden
+      // on any filter/restore (blank board with a non-zero header count).
+      const tree = () => ([
+        { id: 'hub', type: 'jobboard', position: { x: 0, y: 0 }, data: {} },
+        { id: 'c1', type: 'jobcard', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', matchScore: 90, source: 'lever' } },
+        { id: 'c2', type: 'jobcard', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', matchScore: 60, source: 'dice' } },
+      ]);
+      const hiddenOf = (out, id) => !!out.find(n => n.id === id)?.hidden;
+      const f0 = computeJobTreeView(tree(), 'hub', {});
+      assert(hiddenOf(f0, 'c1') === false && hiddenOf(f0, 'c2') === false, 'flat: no-filter keeps all cards visible');
+      const fLow = computeJobTreeView(tree(), 'hub', { scoreThreshold: 50 });
+      assert(hiddenOf(fLow, 'c1') === false && hiddenOf(fLow, 'c2') === false, 'flat: threshold below all keeps both');
+      const fMid = computeJobTreeView(tree(), 'hub', { scoreThreshold: 80 });
+      assert(hiddenOf(fMid, 'c1') === false && hiddenOf(fMid, 'c2') === true, 'flat: threshold removes only sub-threshold card');
+      const fHigh = computeJobTreeView(tree(), 'hub', { scoreThreshold: 95 });
+      assert(hiddenOf(fHigh, 'c1') === true && hiddenOf(fHigh, 'c2') === true, 'flat: threshold above all hides both');
+      const fSrc = computeJobTreeView(tree(), 'hub', { sourceFilter: 'dice' });
+      assert(hiddenOf(fSrc, 'c2') === false && hiddenOf(fSrc, 'c1') === true, 'flat: source filter keeps only matching source');
       return { ok: true };
     },
   },
@@ -1470,6 +1680,17 @@ const tests = [
       // The real sold figures ($575–620) are ~half the live-retail price (~$1180)
       // the broken /listings path returned — the whole point of this fix.
       assert(Math.max(...comps.map(c => c.price)) <= 620, 'sold comps should reflect used-market price, not new retail');
+      // Outer-dedup contract (fetchReverbSoldComps now keys on comp.url): two
+      // DISTINCT sales sharing date AND price must get distinct urls (via order_id)
+      // so both survive — the old date+price key collapsed them at modal prices.
+      const sameDayPrice = reverbTransactionsToComps(picked[0], [
+        { date: '2025-06-01', condition: 'Good', order_id: 111, price_final: { amount: '500.00', display: '$500' } },
+        { date: '2025-06-01', condition: 'Good', order_id: 222, price_final: { amount: '500.00', display: '$500' } },
+      ]);
+      assert(sameDayPrice.length === 2, `distinct same-day same-price sales should both map, got ${sameDayPrice.length}`);
+      assert(sameDayPrice[0].url !== sameDayPrice[1].url, 'distinct order_ids → distinct urls (so the url-keyed outer dedup keeps both)');
+      const oldKey = (c) => `${picked[0].id}:${c.soldDate}:${c.price}`;
+      assert(oldKey(sameDayPrice[0]) === oldKey(sameDayPrice[1]), 'regression witness: the OLD date+price key would have collapsed these two distinct sales');
       return { ok: true, picked: picked[0].id, comps: comps.length, prices: comps.map(c => c.price) };
     },
   },

@@ -675,7 +675,10 @@ export function JobSearchNode({ id, data }) {
         { id: w.sourceId, name: w.sourceId, letter: (w.sourceId[0] || '?').toUpperCase(), color: '#ef4444', domain: '' },
       persistedProgress: {
         status:  'error',
-        warning: { code: w.code, severity: w.severity, evidence: w.evidence, suggestion: w.suggestion },
+        // Spread the FULL warning so the re-spawned card keeps resumeState (Indeed
+        // 'Continue' resumes instead of full re-scrape), openSecondTab (Glassdoor
+        // 2-tab solve), and shortLabel (friendly chip) — not just the 4 base fields.
+        warning: { ...w },
         url:     w.url || null,
         count:   0,
       },
@@ -813,12 +816,22 @@ export function JobSearchNode({ id, data }) {
     if (batchCompletingRef.current) return;
     if (!canvasFilePath || !window.electronAPI?.pollJobBatch) return;
     let res;
-    try { res = await window.electronAPI.pollJobBatch({ canvasFilePath }); }
+    try { res = await window.electronAPI.pollJobBatch({ canvasFilePath, nodeId: id }); }
     catch (e) { EventLogger.log(`[JobSearch][${id}] batch poll failed: ${e?.message || e}`); return; }
     if (!res?.found) {
-      updateGlobal(id, { pendingBatch: null }); // sidecar gone (done/discarded elsewhere)
+      // This hub's batch entry is gone (completed/discarded). If we're still parked
+      // in 'scoring-batch' it vanished without delivering — flip to a recoverable
+      // terminal rather than spin forever (the poll effect tears down on null).
+      const live = getNode(id)?.data?.hubState;
+      updateGlobal(id, live === 'scoring-batch'
+        ? { pendingBatch: null, hubState: 'done', resultCount: 0, totalScoredCount: 0, scoreThreshold: 0 }
+        : { pendingBatch: null });
       return;
     }
+    // Defense-in-depth: never apply a batch that belongs to a different hub. The
+    // per-nodeId sidecar keying already scopes the read; this also guards a legacy
+    // single-entry sidecar whose nodeId isn't this hub.
+    if (res.nodeId && res.nodeId !== id) return;
     if (res.done && Array.isArray(res.scoredJobs)) {
       if (batchCompletingRef.current) return;
       batchCompletingRef.current = true;
@@ -851,9 +864,72 @@ export function JobSearchNode({ id, data }) {
   // empty state (the gathered jobs aren't held in the renderer, so this is a
   // start-over, not a switch-to-real-time).
   const cancelBatchScoring = useCallback(async () => {
-    try { await window.electronAPI?.discardJobBatch?.({ canvasFilePath }); } catch { /* best-effort */ }
+    try { await window.electronAPI?.discardJobBatch?.({ canvasFilePath, nodeId: id }); } catch { /* best-effort */ }
     updateGlobal(id, { hubState: 'empty', pendingBatch: null, resumeProfile: null, careerData: null, filePath: null });
   }, [canvasFilePath, id, updateGlobal]);
+
+  /**
+   * Shared post-search disposition for the search + resume paths: pause in
+   * 'sources-ready' when a gating warning blocks (so the user Solves/Skips before
+   * we spend AI tokens), OR terminate 'done' when nothing was found. Returns
+   * false in both of those terminal/paused cases, true when the caller should
+   * proceed to score. The block-gate MUST precede the empty terminal: a run can
+   * return 0 jobs *because* the only productive source was blocked, and those
+   * jobs only get scored via the 'sources-ready' auto-resume after Solve.
+   *
+   * Each caller passes its OWN inputs so the deliberate per-path differences are
+   * preserved: `warnings` (runPipeline passes already-resolved-filtered
+   * effectiveWarnings; resume passes raw), and `canvasFilePath` (runPipeline's
+   * live closure vs. resume's await-stable snapshot). The test-mode collect and
+   * the score handoff (with each path's own gatheredCount) stay with the caller.
+   */
+  const handlePostSearchResult = useCallback(({
+    currentId, foundJobs, warnings, blockingWarnings, profile, activeTargetRole, canvasFilePath: cfp,
+  }) => {
+    if (blockingWarnings.length > 0 && !SKIP_AI_FOR_TESTING) {
+      updateGlobal(currentId, {
+        hubState: 'sources-ready',
+        pendingJobs: foundJobs,
+        pendingTargetRole: activeTargetRole,
+        jobCount: foundJobs.length,
+        scrapeWarnings: warnings,
+      });
+      // Guarantee a Solve/Skip card for every blocked source — a card can be lost
+      // during the long run, stranding the user with "blocked but nothing to resolve".
+      ensureBlockedSourceCards(blockingWarnings);
+      // A LinkedIn "Solve" re-enriches from the saved analysis snapshot (normally
+      // written by score-jobs, which hasn't run yet) — persist it now so Solve has
+      // jobs to work with instead of no-opping.
+      if (blockingWarnings.some(w => w?.code === 'linkedin-rate-limited')) {
+        window.electronAPI?.saveJobAnalysisSnapshot?.({
+          jobs: foundJobs,
+          profile,
+          nodeId: currentId,
+          targetRole: activeTargetRole,
+          snapshotContext: { sourceHubId: currentId, canvasFilePath: cfp, resumeSummary: buildResumeSummary(profile) },
+        }).catch(() => {});
+      }
+      return false;
+    }
+
+    if (foundJobs.length === 0) {
+      // Genuinely empty — no blocked sources left to recover. Terminal 'done'.
+      // Reset slider range + counts so the done-state UI doesn't show stale values.
+      updateGlobal(currentId, {
+        hubState: 'done',
+        resultCount: 0,
+        totalScoredCount: 0,
+        scoreRangeMin: 0,
+        scoreRangeMax: 100,
+        scoreThreshold: 0,
+        scrapeWarnings: warnings,
+      });
+      window.electronAPI?.completeJobRun?.({ canvasFilePath: cfp }).catch(() => {});
+      return false;
+    }
+
+    return true;
+  }, [updateGlobal, ensureBlockedSourceCards]);
 
   /**
    * Drives the full pipeline. Pass `filePath` for a fresh resume parse, or
@@ -1059,71 +1135,14 @@ export function JobSearchNode({ id, data }) {
         }
       }
 
-      // ── Block gate ──────────────────────────────────────────────────
-      // If any source hit a gating warning (captcha, login wall, or a LinkedIn
-      // guest rate-limit — see isGatingWarning), pause in 'sources-ready' so the
-      // user can Solve / Skip each one before we spend AI tokens, then auto-resume
-      // when the last warning clears (or "Score current results" with partial data).
-      //
-      // This MUST come before the zero-jobs terminal branch below: a run can
-      // legitimately return 0 jobs *because* the only productive source was
-      // blocked (e.g. Indeed served a captcha while every other source was
-      // history-deduped). Going straight to 'done' there showed "0 jobs
-      // matched" prematurely AND stranded the jobs the user later unlocked via
-      // Solve — the resolve merged them into pendingJobs, but auto-resume only
-      // fires from 'sources-ready', so they were never scored.
-      //
-      // info-severity warnings (USAJobs config-missing) and non-LinkedIn throttles
-      // don't gate — they're informational and shouldn't require a manual click.
-      if (blockingWarnings.length > 0 && !SKIP_AI_FOR_TESTING) {
-        updateGlobal(currentId, {
-          hubState: 'sources-ready',
-          pendingJobs: foundJobs,
-          pendingTargetRole: activeTargetRole,
-          jobCount: foundJobs.length,
-          scrapeWarnings: effectiveWarnings,
-        });
-        // Guarantee a Solve/Skip card exists for every blocked source — a card
-        // can be lost during the long run, which stranded the user with "1 source
-        // blocked but nothing to resolve."
-        ensureBlockedSourceCards(blockingWarnings);
-        // A LinkedIn "Solve" from this paused state re-enriches descriptions by
-        // reading the saved analysis snapshot — normally written by score-jobs,
-        // which hasn't run yet. Persist it now so the re-enrich has jobs to work
-        // with (without it the resolve returns resolved:false and the card just
-        // stays actionable — still safe, but Solve would no-op).
-        if (blockingWarnings.some(w => w?.code === 'linkedin-rate-limited')) {
-          window.electronAPI?.saveJobAnalysisSnapshot?.({
-            jobs: foundJobs,
-            profile,
-            nodeId: currentId,
-            targetRole: activeTargetRole,
-            snapshotContext: {
-              sourceHubId: currentId,
-              canvasFilePath,
-              resumeSummary: buildResumeSummary(profile),
-            },
-          }).catch(() => {});
-        }
-        return;
-      }
-
-      if (foundJobs.length === 0) {
-        // Genuinely empty — no blocked sources left to recover. Terminal 'done'.
-        // Reset the slider range + branch counts so the done-state UI doesn't
-        // show stale values from a previous successful run.
-        updateGlobal(currentId, {
-          hubState: 'done',
-          resultCount: 0,
-          totalScoredCount: 0,
-          scoreRangeMin: 0,
-          scoreRangeMax: 100,
-          scoreThreshold: 0,
-          scrapeWarnings: effectiveWarnings,
-        });
-        window.electronAPI?.completeJobRun?.({ canvasFilePath }).catch(() => {});
-        return;
-      }
+      // Disposition the search result: pause in 'sources-ready' on a gating
+      // warning, or terminate 'done' when empty (block-gate MUST precede empty —
+      // see handlePostSearchResult). Only proceed to score when neither fires.
+      const shouldScore = handlePostSearchResult({
+        currentId, foundJobs, warnings: effectiveWarnings, blockingWarnings,
+        profile, activeTargetRole, canvasFilePath,
+      });
+      if (!shouldScore) return;
 
       if (SKIP_AI_FOR_TESTING) {
         try {
@@ -1201,7 +1220,7 @@ export function JobSearchNode({ id, data }) {
         }
       }
     }
-  }, [id, updateGlobal, getNode, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, data.canonicalLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, ensureBlockedSourceCards, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss]);
+  }, [id, updateGlobal, getNode, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, data.canonicalLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss]);
 
   const startProcessing = useCallback((fileOrFiles) => {
     const filePaths = Array.isArray(fileOrFiles) ? fileOrFiles : (fileOrFiles ? [fileOrFiles] : []);
@@ -1336,30 +1355,12 @@ export function JobSearchNode({ id, data }) {
       const foundJobs = (searchResult?.success && Array.isArray(searchResult.jobs)) ? searchResult.jobs : [];
       const warnings = Array.isArray(searchResult?.scrapeWarnings) ? searchResult.scrapeWarnings : [];
       const blockingWarnings = warnings.filter(isGatingWarning);
-      // Same post-search branches as runPipeline: block-gate pause, empty terminal, score.
-      if (blockingWarnings.length > 0 && !SKIP_AI_FOR_TESTING) {
-        updateGlobal(currentId, {
-          hubState: 'sources-ready', pendingJobs: foundJobs, pendingTargetRole: activeTargetRole,
-          jobCount: foundJobs.length, scrapeWarnings: warnings,
-        });
-        ensureBlockedSourceCards(blockingWarnings);
-        // See runPipeline: persist the snapshot so a LinkedIn Solve here can re-enrich.
-        if (blockingWarnings.some(w => w?.code === 'linkedin-rate-limited')) {
-          window.electronAPI?.saveJobAnalysisSnapshot?.({
-            jobs: foundJobs, profile, nodeId: currentId, targetRole: activeTargetRole,
-            snapshotContext: { sourceHubId: currentId, canvasFilePath: cfp, resumeSummary: buildResumeSummary(profile) },
-          }).catch(() => {});
-        }
-        return;
-      }
-      if (foundJobs.length === 0) {
-        updateGlobal(currentId, {
-          hubState: 'done', resultCount: 0, totalScoredCount: 0,
-          scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0, scrapeWarnings: warnings,
-        });
-        window.electronAPI?.completeJobRun?.({ canvasFilePath: cfp }).catch(() => {});
-        return;
-      }
+      // Same post-search disposition as runPipeline (block-gate pause / empty terminal).
+      const shouldScore = handlePostSearchResult({
+        currentId, foundJobs, warnings, blockingWarnings,
+        profile, activeTargetRole, canvasFilePath: cfp,
+      });
+      if (!shouldScore) return;
       await runScoringAndSpawn({
         profile, jobs: foundJobs, gatheredCount: searchResult.rawCount ?? foundJobs.length,
         scrapeWarnings: warnings, activeTargetRole, originalPos, cancelled,
@@ -1371,7 +1372,7 @@ export function JobSearchNode({ id, data }) {
     } finally {
       if (isMountedRef.current) processingRef.current = false;
     }
-  }, [canvasFilePath, resumeOffer, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, ensureBlockedSourceCards]);
+  }, [canvasFilePath, resumeOffer, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult]);
 
   const handleDiscardResume = useCallback(async () => {
     setResumeOffer(null);
@@ -1629,8 +1630,15 @@ export function JobSearchNode({ id, data }) {
     // resume again or click Try Again on the error state.
     lastDroppedPathsRef.current = null;
     // Cancel + clean up any pending async batch scoring (best-effort).
-    if (data.pendingBatch?.batchId) window.electronAPI?.discardJobBatch?.({ canvasFilePath }).catch(() => {});
-    updateGlobal(id, { hubState: 'empty', filePath: null, errorMessage: null, isRateLimit: false, testModeNote: null, pendingBatch: null });
+    if (data.pendingBatch?.batchId) window.electronAPI?.discardJobBatch?.({ canvasFilePath, nodeId: id }).catch(() => {});
+    // Drop stale results too: an 'empty' hub must not keep scoredJobs from a prior
+    // run — otherwise a connected Job Board could still read them (defense-in-depth
+    // with the board's hubState!=='done' gate). Résumé/careerData are kept (the
+    // hub is locked to its initial résumé — see project memory).
+    updateGlobal(id, {
+      hubState: 'empty', filePath: null, errorMessage: null, isRateLimit: false, testModeNote: null, pendingBatch: null,
+      scoredJobs: null, resultCount: 0, totalScoredCount: 0, scoreThreshold: 0,
+    });
     cancelCleanSourceCardDismiss();
     resetSourceProgress();
     cleanupAllJobChildren();

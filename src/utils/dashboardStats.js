@@ -13,7 +13,11 @@ export function getStats(nodes) {
     } else if (n.type === 'sellhub') {
       sellHubsCount++;
       if (n.data?.hubState === 'priced') {
-        totalValue += parseFloat(n.data?.userPrice) || 0;
+        // A SellHub stores its price at data.pricing.recommended_price (set in
+        // SellHubNode on synthesis); `userPrice` is a ListingNode field a sellhub
+        // never has — reading it made this stat permanently $0. recommended_price
+        // is null for the "no comps found" case, which correctly contributes 0.
+        totalValue += parseFloat(n.data?.pricing?.recommended_price) || 0;
       }
     }
   }

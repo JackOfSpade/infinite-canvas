@@ -237,14 +237,6 @@ export function runNodeMigrations(nodes, fromVersion = 0) {
 }
 
 /**
- * Strip transient visual properties from nodes before saving.
- * Prevents runtime-only state (e.g. source-filter dim opacity) from
- * being persisted to disk and corrupting the loaded workspace.
- *
- * This is recursive: group (CanvasNode) nodes can contain arbitrary
- * nested canvases, so we must sanitize down every level.
- */
-/**
  * Drop edges whose source or target node no longer exists in the live set.
  * Orphan edges accumulate when a node is force-deleted from outside the
  * regular delete path (or before the cascade-cleanup utility existed), then
@@ -274,6 +266,14 @@ export function sanitizeEdgesForSave(edges, sanitizedNodes) {
   return edges.filter(e => liveIds.has(e?.source) && liveIds.has(e?.target));
 }
 
+/**
+ * Strip transient visual properties from nodes before saving.
+ * Prevents runtime-only state (e.g. source-filter dim opacity) from
+ * being persisted to disk and corrupting the loaded workspace.
+ *
+ * This is recursive: group (CanvasNode) nodes can contain arbitrary
+ * nested canvases, so we must sanitize down every level.
+ */
 export function sanitizeNodesForSave(nodes) {
   if (!Array.isArray(nodes)) return nodes;
   // Drop ephemeral nodes (e.g. comp-source cards spawned during price research)

@@ -83,7 +83,8 @@ export function useCanvasNavigation({
 
     // After fade-out completes, dynamically read the LATEST state to swap data.
     // This prevents background tasks (file watchers, IPC) from hitting a race condition
-    // and overwriting their changes during the 300ms fade duration.
+    // and overwriting their changes during the fade-out half (halfDuration =
+    // animationDuration / 2, i.e. 100/200/300ms by the user's animation setting).
     const t1 = setTimeout(() => {
       navTimersRef.current = navTimersRef.current.filter(id => id !== t1);
       

@@ -5,6 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 import { GoogleAuth } from 'google-auth-library';
+import Store from 'electron-store';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { resolveServiceAccountPath, getAISettings } from './settings.js';
@@ -39,6 +40,57 @@ export const GEMINI_MODEL_FALLBACKS = [
   'gemini-2.5-flash-lite',    // ~20 RPD / 10 RPM free
   'gemini-3.1-flash-lite',    // ~500 RPD / 15 RPM free — workhorse, completes bulk runs
 ];
+
+const GEMINI_LIMITS = {
+  'gemini-3.5-flash': { rpd: 20, rpm: 5 },
+  'gemini-3-flash-preview': { rpd: 20, rpm: 5 },
+  'gemini-2.5-flash': { rpd: 20, rpm: 5 },
+  'gemini-2.5-flash-lite': { rpd: 20, rpm: 10 },
+  'gemini-3.1-flash-lite': { rpd: 500, rpm: 15 },
+};
+
+let _usageStore = null;
+function getUsageStore() {
+  return _usageStore ??= new Store({ name: 'gemini-usage-tracking' });
+}
+
+function recordGeminiRequest(model) {
+  try {
+    const store = getUsageStore();
+    const key = `requests.${model}`;
+    const now = Date.now();
+    const history = store.get(key) || [];
+    history.push(now);
+    // Keep only timestamps within the last 24 hours to prevent memory/file growth
+    const cutoff = now - 24 * 60 * 60 * 1000;
+    const filtered = history.filter(t => t > cutoff);
+    store.set(key, filtered);
+  } catch (e) {
+    logger.error('[Gemini Tracking] Failed to record request:', e);
+  }
+}
+
+export function getGeminiUsageLeft(model) {
+  try {
+    const store = getUsageStore();
+    const history = store.get(`requests.${model}`) || [];
+    const now = Date.now();
+    
+    const lastMinute = history.filter(t => t > now - 60 * 1000).length;
+    const lastDay = history.filter(t => t > now - 24 * 60 * 60 * 1000).length;
+
+    const limits = GEMINI_LIMITS[model] || { rpd: 20, rpm: 5 };
+    return {
+      rpdLeft: Math.max(0, limits.rpd - lastDay),
+      rpmLeft: Math.max(0, limits.rpm - lastMinute),
+      rpdLimit: limits.rpd,
+      rpmLimit: limits.rpm,
+    };
+  } catch (e) {
+    logger.error('[Gemini Tracking] Failed to read usage:', e);
+    return null;
+  }
+}
 
 /**
  * Convert standard JSON Schema (lowercase types) to Gemini's responseSchema
@@ -300,10 +352,23 @@ export async function probeGemini(apiKey, model = 'gemini-3.1-flash-lite') {
   } catch (e) {
     return { ok: false, status: null, error: e?.message || String(e) };
   }
-  if (res.ok) return { ok: true, status: res.status, model };
+  
+  const usage = getGeminiUsageLeft(model);
+  const rateLimit = usage ? {
+    requests: {
+      remaining: usage.rpdLeft,
+      limit: usage.rpdLimit,
+    },
+    rpm: {
+      remaining: usage.rpmLeft,
+      limit: usage.rpmLimit,
+    }
+  } : null;
+
+  if (res.ok) return { ok: true, status: res.status, model, rateLimit };
   let body = '';
   try { body = await res.text(); } catch { /* ignore */ }
-  return { ok: false, status: res.status, error: extractGeminiErr(body, res.status), retryAfterMs: parseGeminiRetryMs(res, body) };
+  return { ok: false, status: res.status, error: extractGeminiErr(body, res.status), retryAfterMs: parseGeminiRetryMs(res, body), rateLimit };
 }
 
 // Last live "Check availability" result per provider, so the Settings panel can
@@ -381,6 +446,10 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const endpointName = apiKey ? 'Gemini API (AI Studio)' : 'Vertex AI';
+
+  if (apiKey) {
+    recordGeminiRequest(model || 'gemini-3.5-flash');
+  }
 
   const response = await fetchWithRetry(endpoint, {
     method: 'POST',
@@ -815,12 +884,8 @@ export async function callGeminiDocument(filePath, prompt, apiKey, model, signal
     if (IMAGE_MIME_MAP[ext]) {
       return callGeminiVision([filePath], prompt, apiKey, model, signal, opts);
     }
-    // Legacy .doc files are a binary format that Vertex AI can't ingest as inline
-    // data. Reading the bytes as utf8 (the previous fallback) silently produced
-    // garbage; surface a clear actionable error instead.
-    if (ext === '.doc') {
-      throw new Error('Legacy .doc resumes are not supported. Save as PDF or DOCX and try again.');
-    }
+    // Word docs (.doc/.docx) never reach here — callLLMDocument (llm.js) intercepts
+    // them upstream, extracts text via textutil, and routes through callLLMText.
     // Fallback to text/plain for other document types so Gemini tries to read them as raw text
     return callGemini([{ text: `${prompt}\n\n[Attached File: ${path.basename(filePath)}]\n` + await fs.promises.readFile(filePath, 'utf8') }], apiKey, model, { signal, ...opts });
   }
@@ -885,7 +950,14 @@ export function registerGeminiHandlers() {
         result = { ok: models.length > 0 && models.every((m) => m.ok), models };
       }
     } else {
-      result = await probeGemini(settings.geminiApiKey);
+      if (!settings.geminiApiKey) {
+        result = { ok: false, models: [{ ok: false, status: null, model: null, error: 'No Gemini API key set.' }] };
+      } else {
+        const models = await Promise.all(
+          GEMINI_MODEL_FALLBACKS.map((m) => probeGemini(settings.geminiApiKey, m)),
+        );
+        result = { ok: models.length > 0 && models.every((m) => m.ok), models };
+      }
     }
     lastProbe[provider] = { ...result, at: Date.now() };
     return { provider, ...lastProbe[provider] };

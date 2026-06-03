@@ -2,6 +2,7 @@ import { useCallback, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { applyBugReportCode } from '../utils/bugReportCodes';
+import { isJobNodeType, isSellNodeType } from '../utils/nodePresence';
 
 export function useIssueReporter({
   nodes,
@@ -189,6 +190,11 @@ export function useIssueReporter({
           eventsShown: filteredLogs.length,
           eventsTotal: rawLogs.length,
           omittedSections: Array.from(sectionExclusions),
+          // Stamp node-presence NOW (from the intact `nodes`) so module sections
+          // survive a filter code that drops the `nodes` section — otherwise a
+          // JOBS/MARKET report loses the very diagnostics it was meant to surface.
+          hasJobNodes: nodes.some(n => isJobNodeType(n?.type)),
+          hasSellNodes: nodes.some(n => isSellNodeType(n?.type)),
         } : null,
         nodes: reportNodes,
         edges,

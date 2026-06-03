@@ -9,7 +9,7 @@ import { useUnmountEffect } from '../hooks/useUnmountEffect';
 import { EventLogger } from '../utils/EventLogger';
 import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
-import { unionScoredJobs } from './jobboard/mergeJobs';
+import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason } from './jobboard/mergeJobs';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 
 // Human label for a connected Job Search Module, from its search params.
@@ -52,7 +52,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       ids.forEach((nid) => {
         const n = s.nodeLookup.get(nid);
         if (n && n.type === 'jobhub') {
-          parts.push(`${nid}:${n.data?.scoredJobs?.length || 0}:${n.data?.hubState || ''}`);
+          // Fingerprint (not just length) so re-running a module — same count,
+          // different jobs/scores — registers as changed data, not a no-op.
+          parts.push(`${nid}:${moduleFingerprint(n.data?.scoredJobs)}:${n.data?.hubState || ''}`);
         }
       });
       parts.sort();
@@ -73,14 +75,36 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         id: n.id,
         label: moduleLabel(n.data),
         count: Array.isArray(n.data?.scoredJobs) ? n.data.scoredJobs.length : 0,
+        fingerprint: moduleFingerprint(n.data?.scoredJobs),
         hubState: n.data?.hubState || 'empty',
       }));
     // connectedSig is the real reactive trigger; getEdges/getNodes are stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectedSig, id]);
 
-  const readyModules = connectedModules.filter((m) => m.count > 0);
+  // Only hubs that are actually DONE (not searching/sources-ready/empty) feed a
+  // combine — gating on count alone let a hub that kept stale scoredJobs from a
+  // prior run (e.g. after Reset) contribute outdated jobs. hubState also flows
+  // into liveSignature, so a hub leaving 'done' now correctly marks the board stale.
+  const readyModules = connectedModules.filter((m) => m.count > 0 && m.hubState === 'done');
   const totalIncoming = readyModules.reduce((sum, m) => sum + m.count, 0);
+
+  // Signature of the modules that WOULD feed a combine right now (id + data
+  // fingerprint). Compared against the signature captured at the last Combine to
+  // tell whether the cached board is still valid. connectedModules is memoized,
+  // so this only recomputes when a connection or a module's data changes.
+  const liveSignature = useMemo(
+    () => combineSignature(readyModules),
+    // readyModules is derived from connectedModules each render; the VALUE is stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [connectedModules]
+  );
+  const stale = hubState === 'done' && !!data.stale;
+  const staleReasonText = useMemo(
+    () => (stale ? staleReason(data.combineSignature, readyModules) : ''),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [stale, data.combineSignature, connectedModules]
+  );
 
   // ── Cascade filters (score slider + per-source), scoped to THIS board's cards.
   // computeJobTreeView REMOVES non-matching cards and any branch with no matching
@@ -106,11 +130,57 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
   // Re-apply filters on mount — card opacities are stripped from save files.
   useEffect(() => {
+    if (data.stale) return; // stale → cascade is hidden; don't reveal it here
     const min = data.scoreRangeMin ?? 0;
     const hasFilter = data.sourceFilter || (data.scoreThreshold ?? min) > min;
     if (!hasFilter) return;
     applyCardFilters({});
-  }, [applyCardFilters, data.scoreThreshold, data.scoreRangeMin, data.sourceFilter]);
+  }, [applyCardFilters, data.scoreThreshold, data.scoreRangeMin, data.sourceFilter, data.stale]);
+
+  // Hide every spawned card/group (results "disappear") without touching their
+  // expand/collapse state, so the exact view can be restored later.
+  const hideBoardChildren = useCallback(() => {
+    setNodes((nodes) => {
+      let changed = false;
+      const next = nodes.map((n) => {
+        if ((n.type === 'jobcard' || n.type === 'jobgroup') && n.data?.hubId === id && !n.hidden) {
+          changed = true;
+          return { ...n, hidden: true };
+        }
+        return n;
+      });
+      return changed ? next : nodes;
+    });
+  }, [id, setNodes]);
+
+  // Re-reveal the cascade exactly as it was: computeJobTreeView derives `hidden`
+  // from each group's preserved `data.expanded` × the active filter, so the prior
+  // expand/collapse + filter view comes back intact.
+  const showBoardChildren = useCallback(() => {
+    setNodes((nodes) => computeJobTreeView(nodes, id, {
+      sourceFilter: data.sourceFilter || null,
+      scoreThreshold: data.scoreThreshold ?? 0,
+    }));
+  }, [id, setNodes, data.sourceFilter, data.scoreThreshold]);
+
+  // Detect connection/data drift vs. the last Combine. A deleted connection (or a
+  // re-run, or a newly added module) makes the cached board stale → hide results +
+  // prompt re-combine. Restoring the exact connections+data (e.g. re-adding the
+  // same edge with unchanged jobs) clears staleness → results reappear, no
+  // re-combine or LLM call needed. Old boards (no stored signature) adopt the
+  // current connections as their baseline instead of falsely going stale.
+  useEffect(() => {
+    if (hubState !== 'done' || data.locked) return; // locked = frozen snapshot
+    if (data.combineSignature == null) {
+      updateGlobal(id, { combineSignature: liveSignature, stale: false });
+      return;
+    }
+    const nextStale = liveSignature !== data.combineSignature;
+    if (nextStale === !!data.stale) return;
+    updateGlobal(id, { stale: nextStale });
+    if (nextStale) hideBoardChildren();
+    else showBoardChildren();
+  }, [hubState, data.locked, liveSignature, data.combineSignature, data.stale, id, updateGlobal, hideBoardChildren, showBoardChildren]);
 
   // Cascade-delete the board's spawned cards/groups (re-combine, clear, unmount).
   const clearBoardChildren = useCallback(() => {
@@ -126,7 +196,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       hubState: 'empty',
       resultCount: 0, moduleCount: 0,
       scoreThreshold: 0, scoreRangeMin: 0, scoreRangeMax: 100,
-      sourceFilter: null, jobTaxonomy: null, finalSourceCounts: {},
+      sourceFilter: null, jobTaxonomy: null, finalSourceCounts: {}, mergeStats: null,
+      combineSignature: null, stale: false,
     });
   }, [id, clearBoardChildren, updateGlobal]);
 
@@ -138,6 +209,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     }
     setCombining(true);
     try {
+      // Capture the input signature NOW so a connection change mid-combine is
+      // correctly detected as stale afterwards (matches the live-signature math).
+      const sigAtCombine = combineSignature(readyModules);
       // Gather each ready module's scored jobs, tagging each with its module's
       // résumé so a merged card's "Generate Résumé" uses the right origin.
       const byId = new Map(getNodes().map((n) => [n.id, n]));
@@ -147,7 +221,15 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         return (Array.isArray(n?.data?.scoredJobs) ? n.data.scoredJobs : [])
           .map((j) => ({ ...j, resumeProfile: j.resumeProfile || profile }));
       });
-      const union = unionScoredJobs(jobArrays);
+      const mergeStats = {};
+      const union = unionScoredJobs(jobArrays, mergeStats);
+      const perModule = readyModules.map((m) => ({ label: m.label, count: m.count }));
+      EventLogger.log(
+        `[JobBoard] Combined ${readyModules.length} module(s): ` +
+        `${perModule.map((p) => p.count).join('+')}=${mergeStats.totalIncoming} → ` +
+        `${mergeStats.unique} unique (${mergeStats.duplicatesRemoved} dup removed, ` +
+        `${mergeStats.collisionUpgrades} score-upgrade(s))`
+      );
       if (union.length === 0) {
         addToast({ title: 'No jobs to combine', description: 'The connected modules have no scored jobs.', type: 'error' });
         return;
@@ -204,6 +286,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         sourceFilter: null,
         jobTaxonomy: bucketTree ? { likelihoodBands: bucketTree.likelihoodBands, salaryRanges: bucketTree.salaryRanges } : null,
         finalSourceCounts,
+        // Merge provenance for the bug report — the dedup is otherwise invisible.
+        mergeStats: { ...mergeStats, modules: readyModules.length, perModule },
+        // Baseline for staleness detection (connection/data drift vs. this combine).
+        combineSignature: sigAtCombine, stale: false,
       });
     } catch (err) {
       EventLogger.error('[JobBoard] Combine failed:', err);
@@ -271,6 +357,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         <JobBoardDoneState
           resultCount={data.resultCount}
           moduleCount={data.moduleCount}
+          totalIncoming={data.mergeStats?.totalIncoming || 0}
+          duplicatesRemoved={data.mergeStats?.duplicatesRemoved || 0}
+          stale={stale}
+          staleReason={staleReasonText}
           locked={!!data.locked}
           scoreThreshold={data.scoreThreshold ?? (data.scoreRangeMin ?? 0)}
           setScoreThreshold={setScoreThreshold}

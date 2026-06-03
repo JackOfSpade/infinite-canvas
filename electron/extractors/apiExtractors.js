@@ -240,6 +240,44 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
  *   loginWall  — true if enrichment was stopped by a LinkedIn auth redirect
  *   loginWallUrl — the redirect URL that triggered the wall (for error surfacing)
  */
+/**
+ * Is the current egress (the system network / VPN) actually online? Node fetch
+ * rides the same uplink as the stealth browser, so this reflects what the browser
+ * can reach. Returns true if ANY HTTP response comes back (DNS+TCP+TLS worked) —
+ * status is irrelevant; we only care that the pipe is alive — and false on
+ * timeout / network error. Tries a couple of fast, neutral endpoints (first win)
+ * and bails instantly if the caller aborts (reset / window close).
+ *
+ * Why this exists: when a VPN switch lands on a dead server (no internet), every
+ * guest job navigation silently times out (15s each) and the pass grinds through
+ * hundreds of jobs with NO log output — indistinguishable from a hang. One probe
+ * tells a dead uplink apart from a LinkedIn rate-limit wall (where requests DO
+ * succeed and LinkedIn serves an authwall), so we can stop and ask the user to
+ * switch to a working VPN server instead of stalling.
+ */
+export async function probeInternet(signal, timeoutMs = 5000) {
+  if (signal?.aborted) return true; // caller bailing — don't misreport as offline
+  const urls = ['https://www.google.com/generate_204', 'https://api.ipify.org'];
+  for (const url of urls) {
+    let timer = null;
+    const ctrl = new AbortController();
+    const onAbort = () => ctrl.abort();
+    try {
+      timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      signal?.addEventListener?.('abort', onAbort, { once: true });
+      await fetch(url, { signal: ctrl.signal });
+      return true; // a response of any status means the uplink is alive
+    } catch {
+      if (signal?.aborted) return true; // aborted, not offline
+      // try the next endpoint
+    } finally {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener?.('abort', onAbort);
+    }
+  }
+  return false;
+}
+
 export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
   if (!jobs?.length) return { jobs, loginWall: false, loginWallUrl: null };
 
@@ -248,6 +286,16 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
   const noUrlCount = jobs.filter(j => !j.url).length;
   if (noUrlCount > 0) {
     logger.warn(`[LinkedIn/Browser] ${noUrlCount}/${jobs.length} jobs have no URL — will be skipped in enrichment`);
+  }
+
+  // Fast-fail if the egress IP has no internet at all (e.g. a VPN switch that
+  // landed on a dead server). Without this, every navigation below times out
+  // silently and the pass looks hung; instead we return noInternet so the caller
+  // can ask the user to switch to a working VPN server. The mid-run detector in
+  // the loop catches an uplink that dies partway through.
+  if (!(await probeInternet(signal))) {
+    logger.warn('[LinkedIn/Browser] Connectivity probe failed before enrichment — egress IP appears offline. Skipping; user should switch VPN to a working server.');
+    return { jobs, loginWall: false, loginWallUrl: null, noInternet: true, successCount: 0, attempted: 0, contextRotations: 0 };
   }
 
   let browser;
@@ -312,6 +360,14 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
   let noDescSoftBlock = 0; // title="" && 0 JSON-LD — gutted page, retryable
   let noDescGenuine = 0;   // had JSON-LD / a title but no description text — permanent
   let evalErrors = 0;
+  // Dead-egress detection. A run of network-level nav failures (15s timeouts /
+  // net::ERR_*) means the VPN IP went offline mid-pass — NOT a LinkedIn wall. We
+  // probe to confirm, then stop with noInternet so we don't silently grind every
+  // remaining job through a 15s timeout (which reads as a hang).
+  let noInternet = false;
+  let stoppedNoInternetAt = null;
+  let consecutiveNavErrors = 0;
+  const NO_INTERNET_NAV_ERRORS = 2; // consecutive network failures → probe & confirm
   let loginWallAt = null;
   // The exact URL LinkedIn redirected to when a wall was detected — returned
   // to the caller so it can surface a user-actionable error on the source card.
@@ -363,6 +419,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
         await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
         const finalUrl = page.url();
+        consecutiveNavErrors = 0; // a navigation completed → the uplink is alive
 
         // HTTP-redirect login wall: LinkedIn changed the URL to an auth page.
         if (LOGIN_WALL_RE.test(finalUrl)) {
@@ -484,6 +541,26 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
         if (firstFailNote === null) {
           firstFailNote = `nav-error · ${String(err.message || err).slice(0, 100)} · ${job.url.slice(0, 80)}`;
         }
+        // Dead-egress detection: a navigation timeout / net::ERR_* is a
+        // transport failure (the page never loaded), unlike an authwall (which
+        // loads fine and redirects). A run of them means the VPN IP has no
+        // internet — confirm with a probe, then STOP rather than silently
+        // timing out every remaining job (15s each ≈ tens of minutes of false
+        // "hang"). Genuinely-flaky single pages don't trip it (streak resets on
+        // any successful nav, and the probe must also fail).
+        const msg = String(err?.message || err);
+        const networkLevel = err?.name === 'TimeoutError' || /Navigation timeout|net::ERR_/i.test(msg);
+        if (networkLevel) {
+          consecutiveNavErrors++;
+          if (consecutiveNavErrors >= NO_INTERNET_NAV_ERRORS && !(await probeInternet(signal))) {
+            noInternet = true;
+            stoppedNoInternetAt = i;
+            logger.warn(`[LinkedIn/Browser] No internet on current egress IP — ${consecutiveNavErrors} consecutive network failure(s) and a connectivity probe failed. Stopping (${enriched.length - i - 1} job(s) unattempted); user should switch VPN to a working server.`);
+            break;
+          }
+        } else {
+          consecutiveNavErrors = 0;
+        }
       }
 
       // Reaching here means the navigation completed WITHOUT triggering a wall
@@ -504,18 +581,21 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
     await isolatedCtx?.close().catch(() => {});
   }
 
-  const attempted = loginWallAt !== null ? loginWallAt : enriched.length;
+  const attempted = loginWallAt !== null
+    ? loginWallAt
+    : (stoppedNoInternetAt !== null ? stoppedNoInternetAt : enriched.length);
   const failParts = [];
   if (navErrors > 0) failParts.push(`${navErrors} nav-err`);
   if (evalErrors > 0) failParts.push(`${evalErrors} eval-err`);
   if (noDesc > 0) failParts.push(`${noDesc} no-desc [${noDescSoftBlock} soft-block, ${noDescGenuine} genuine]`);
   const failSuffix = failParts.length ? ` (${failParts.join(', ')})` : '';
   const wallSuffix = loginWallAt !== null ? ` — login wall at job ${loginWallAt + 1}, ${enriched.length - loginWallAt - 1} skipped` : '';
+  const offlineSuffix = noInternet ? ` — STOPPED: egress offline at job ${(stoppedNoInternetAt ?? 0) + 1}, ${enriched.length - (stoppedNoInternetAt ?? enriched.length) - 1} unattempted` : '';
   const rotateSuffix = contextRotations > 0 ? ` — ${contextRotations} context rotation(s)` : '';
   const firstFailSuffix = firstFailNote !== null ? ` — first fail: ${firstFailNote}` : '';
-  logger.info(`[LinkedIn/Browser] ${successCount}/${attempted} descriptions enriched${failSuffix}${rotateSuffix}${wallSuffix}${firstFailSuffix}`);
+  logger.info(`[LinkedIn/Browser] ${successCount}/${attempted} descriptions enriched${failSuffix}${rotateSuffix}${wallSuffix}${offlineSuffix}${firstFailSuffix}`);
   return {
-    jobs: enriched, loginWall: loginWallAt !== null, loginWallUrl, successCount, attempted, contextRotations,
+    jobs: enriched, loginWall: loginWallAt !== null, loginWallUrl, successCount, attempted, contextRotations, noInternet,
     // Failure breakdown so a caller can categorise the residual still-empty jobs.
     // noDesc splits into soft-block (gutted page — recoverable on a later pass)
     // vs genuine (real page, no description — permanent). The continuous loop uses
@@ -965,7 +1045,11 @@ async function fetchReverbSoldComps(query, signal, safeApiFetch) {
     );
     if (!txRes.ok) { warning = warning || txRes.warning; continue; }
     for (const comp of reverbTransactionsToComps(g, txRes.json?.transactions || [])) {
-      const key = `${g.id}:${comp.soldDate}:${comp.price}`;
+      // Per-transaction url (embeds the guide href + #tx-<order_id>) is globally
+      // unique per distinct sale; key on it so genuinely distinct same-day/
+      // same-price sales (common at the modal price points) aren't collapsed.
+      // Fall back to date+price only when a guide lacks a web href.
+      const key = comp.url || `${g.id}:${comp.soldDate}:${comp.price}`;
       if (seenKeys.has(key)) continue;
       seenKeys.add(key);
       items.push(comp);

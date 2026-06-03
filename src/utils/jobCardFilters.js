@@ -13,24 +13,3 @@ export function isJobCardVisible(jobData = {}, {
 
   return sourceOk && scoreOk && statusOk;
 }
-
-export function getJobCardFilterOpacity(jobData, filters) {
-  return isJobCardVisible(jobData, filters) ? 1 : 0.15;
-}
-
-export function applyJobCardFiltersToNodes(nodes, hubId, filters) {
-  return (Array.isArray(nodes) ? nodes : []).map(node => {
-    if (node?.type !== 'jobcard' || node.data?.hubId !== hubId) return node;
-
-    const opacity = getJobCardFilterOpacity(node.data, filters);
-    if ((node.style?.opacity ?? 1) === opacity) return node;
-
-    return {
-      ...node,
-      style: {
-        ...node.style,
-        opacity,
-      },
-    };
-  });
-}

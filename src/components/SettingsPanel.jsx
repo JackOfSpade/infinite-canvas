@@ -406,12 +406,12 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
         </button>
       </div>
 
-      {/* Claude: one row per model the app actually uses (Anthropic limits are
-          per-model — Sonnet drives job runs, Opus drives application generation,
-          Haiku the light tasks). */}
-      {isClaude && probe?.models && (
+      {/* Models list */}
+      {probe?.models && (
         <div className="space-y-2">
-          <div className="text-white/40 text-[10px]">Per model in use (Anthropic rate limits are per-model):</div>
+          <div className="text-white/40 text-[10px]">
+            {isClaude ? 'Per model in use (Anthropic rate limits are per-model):' : 'Per model in use (Gemini fallback chain, local estimated usage):'}
+          </div>
           {probe.models.map((m, i) => {
             const v = verdictFor(m);
             const mrl = m.rateLimit || null;
@@ -423,10 +423,19 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
                 </div>
                 {mrl && (
                   <div className="text-white/45 text-[10px] leading-relaxed font-mono pl-3">
-                    {line('requests', mrl.requests)}
-                    {line('tokens', mrl.tokens)}
-                    {line('input tok', mrl.input_tokens)}
-                    {line('output tok', mrl.output_tokens)}
+                    {isClaude ? (
+                      <>
+                        {line('requests', mrl.requests)}
+                        {line('tokens', mrl.tokens)}
+                        {line('input tok', mrl.input_tokens)}
+                        {line('output tok', mrl.output_tokens)}
+                      </>
+                    ) : (
+                      <>
+                        {line('requests/day', mrl.requests)}
+                        {line('requests/min', mrl.rpm)}
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -499,18 +508,25 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
 
   const updateAISetting = useCallback((key, value) => {
     if (!window.electronAPI?.updateSettings || !aiSettings) return;
-    const next = { ...aiSettings, [key]: value };
-    setAiSettings(next);
-    // IPC outside the setState updater so it fires exactly once — strict /
-    // concurrent mode may invoke updaters twice, which would double-write.
-    window.electronAPI.updateSettings({ ai: next });
+    setAiSettings(prev => ({ ...prev, [key]: value }));
+    // Send ONLY the changed key — the backend shallow-merges per section, so a
+    // single-key payload preserves sibling keys (incl. any the main process
+    // wrote at runtime after this panel's snapshot was taken). Echoing back the
+    // whole stale section would clobber those concurrent writes. IPC is outside
+    // the setState updater so it fires exactly once (strict/concurrent mode may
+    // invoke updaters twice, which would double-write).
+    window.electronAPI.updateSettings({ ai: { [key]: value } });
   }, [aiSettings]);
 
   const updateJobsSetting = useCallback((key, value) => {
     if (!window.electronAPI?.updateSettings || !jobsSettings) return;
-    const next = { ...jobsSettings, [key]: value };
-    setJobsSettings(next);
-    window.electronAPI.updateSettings({ jobs: next });
+    setJobsSettings(prev => ({ ...prev, [key]: value }));
+    // Send ONLY the changed key (see updateAISetting): the panel's `jobsSettings`
+    // snapshot is taken once on open and never re-synced, so it can hold a stale
+    // diceApiKey / glassdoorLocIds that the main process refreshed at runtime
+    // (saveDiceApiKey on a Dice 500, saveGlassdoorLocId on a location resolve).
+    // Posting the full snapshot would revert those; a single-key payload doesn't.
+    window.electronAPI.updateSettings({ jobs: { [key]: value } });
   }, [jobsSettings]);
 
   const updateMarketplaceWatchUrls = useCallback((platformId, urls) => {

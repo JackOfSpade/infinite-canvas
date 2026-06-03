@@ -23,7 +23,7 @@ import { isJobCardVisible } from '../../utils/jobCardFilters.js';
  *
  * Exports:
  *  - partitionJobsForBranches → display set = all scored jobs (target ≡ no-target)
- *  - parseSalaryToNumeric     → salary text → annual USD (shared with append)
+ *  - parseSalaryToNumeric     → salary text → annual USD
  *  - computeLayoutPositions   → tight (x,y) for the current expand state
  *  - buildJobTreeNodes        → emits the {nodes, edges} graph
  */
@@ -58,8 +58,9 @@ const DEFAULT_RANGES = [
 
 /**
  * Salary text → approximate annual USD. Takes the first number in a range and
- * annualizes hourly/daily rates. Shared with the append path so spawned and
- * appended cards land in the same salary range. Returns 0 when unparseable.
+ * annualizes hourly/daily rates. Used by buildJobTreeNodes (and the re-layout in
+ * computeJobTreeView) so every card lands in a consistent salary range. Returns
+ * 0 when unparseable.
  */
 export function parseSalaryToNumeric(salaryStr) {
   if (!salaryStr) return 0;
@@ -110,8 +111,8 @@ export function normalizeRanges(ranges) {
 }
 
 /** Band a score lands in (first whose minScore it meets, in high→low order).
- *  Exported so the JobSearchNode append path places appended cards on the exact
- *  same band as the initial spawn (single source of truth — see its callsite). */
+ *  Single source of truth for band placement, used by buildJobTreeNodes (the
+ *  Job Board's Combine spawn) so every card is placed deterministically. */
 export function placeBand(score, bands) {
   const s = typeof score === 'number' ? score : 0;
   for (const b of bands) if (s >= b.minScore) return b;
@@ -254,6 +255,18 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X) {
     }
   };
   rootGroups.forEach(r => walk(r.id));
+
+  // Flat-spawn fallback (bucketing failed → no jobgroups): those jobcards are
+  // wired directly to the hub with no group tree, so the walk above never reaches
+  // them and they'd ALL be forced hidden (a blank board on filter/restore). Treat
+  // each hub-owned jobcard that isn't any group's child as top-level and reveal it
+  // iff it matches the filter — mirroring walk's jobcard branch. No-op on the
+  // grouped path (those cards ARE in allChildIds, so the guard skips them).
+  list.forEach(n => {
+    if (n.type === 'jobcard' && n.data?.hubId === hubId && !allChildIds.has(n.id) && cardMatch(n.data)) {
+      visible.add(n.id);
+    }
+  });
 
   // Apply hidden (+ clear any leftover opacity dim from the old filter approach).
   let changed = false;

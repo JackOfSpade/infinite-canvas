@@ -18,29 +18,10 @@
 // (VITE_MARKETPLACE_TEST_ENABLED / VITE_MARKETPLACE_TEST_SOURCE), since Vite
 // only exposes VITE_-prefixed vars to the client bundle.
 
-const TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
-const FALSE_VALUES = new Set(['0', 'false', 'no', 'off']);
+import { getRuntimeEnv, getEnvValue, parseScopeEnvBoolean } from './sourceScopeShared.js';
 
-function getRuntimeEnv() {
-  return {
-    ...(globalThis.process?.env || {}),
-    ...(import.meta.env || {}),
-  };
-}
-
-function getEnvValue(env, key) {
-  return env[key] ?? env[`VITE_${key}`];
-}
-
-export function parseMarketplaceEnvBoolean(value, fallback = false) {
-  if (value == null || value === '') return fallback;
-  if (typeof value === 'boolean') return value;
-
-  const normalized = String(value).trim().toLowerCase();
-  if (TRUE_VALUES.has(normalized)) return true;
-  if (FALSE_VALUES.has(normalized)) return false;
-  return fallback;
-}
+// Public name kept for existing importers/tests; the logic is the shared parser.
+export const parseMarketplaceEnvBoolean = parseScopeEnvBoolean;
 
 export function createMarketplaceTestMode(env = getRuntimeEnv()) {
   const enabled = parseMarketplaceEnvBoolean(getEnvValue(env, 'MARKETPLACE_TEST_ENABLED'), false);
@@ -72,4 +53,39 @@ export function getScopedCompSourceIds(allSourceIds = []) {
 export function isCompSourceEnabledInScope(sourceId) {
   if (!MARKETPLACE_TEST_MODE.enabled || !MARKETPLACE_TEST_MODE.sourceId) return true;
   return matchesCompScope(sourceId, MARKETPLACE_TEST_MODE.sourceId);
+}
+
+/**
+ * Normalize scrape warnings to card-representable source ids so the SellHub
+ * comps-ready gate can never be stranded by a warning whose sourceId has no
+ * spawned card. The backend emits per-sub-source warnings (e.g. 'swappa-sold')
+ * but the canvas shows ONE family card ('swappa'); since Skip/Solve clear by
+ * EXACT sourceId, a 'swappa-sold' warning could never be cleared, freezing the
+ * hub in 'comps-ready' (a common outcome — Swappa's sold scrape is anti-bot
+ * prone). Each warning: kept as-is if its sourceId IS a card; else re-tagged to
+ * the family card that owns it (so that card's Skip/Solve clears it); else
+ * dropped (no card can ever resolve it, so it must not gate). De-duped by final
+ * sourceId so one family card never carries two lingering entries.
+ *
+ * @param {object[]} warnings  raw scrapeWarnings from the backend
+ * @param {string[]} cardIds   ids of the comp-source cards actually on the canvas
+ * @returns {object[]}
+ */
+export function normalizeCompWarnings(warnings, cardIds = []) {
+  const cards = new Set(Array.isArray(cardIds) ? cardIds : []);
+  const out = [];
+  const seen = new Set();
+  for (const w of (Array.isArray(warnings) ? warnings : [])) {
+    if (!w || typeof w !== 'object') continue;
+    let sid = w.sourceId;
+    if (!cards.has(sid)) {
+      const family = [...cards].find(cid => matchesCompScope(sid, cid)); // 'swappa-sold' → 'swappa'
+      if (!family) continue; // orphan — nothing on the canvas can resolve it
+      sid = family;
+    }
+    if (seen.has(sid)) continue; // family already represented
+    seen.add(sid);
+    out.push(sid === w.sourceId ? w : { ...w, sourceId: sid });
+  }
+  return out;
 }

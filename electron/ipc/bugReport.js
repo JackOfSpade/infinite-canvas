@@ -17,6 +17,7 @@ import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { getKnownTaskIds } from './llm.js';
 import { shortId, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
+import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { getAuthWindowDiagnostics } from './browser/authWindows.js';
@@ -461,12 +462,10 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
 
   // Canvas-content guards — gate module-specific sections on whether this canvas
   // actually has nodes of that type, so sell-side sections don't bleed into a
-  // job-only canvas and vice versa.
-  const hasJobNodes = (nodes || []).some(n => n?.type?.toLowerCase().startsWith('job'));
-  const hasSellNodes = (nodes || []).some(n => {
-    const t = n?.type?.toLowerCase();
-    return t === 'sellhub' || t === 'marketplacecard' || t === 'listing' || t === 'compsourcecard';
-  });
+  // job-only canvas and vice versa. Prefer the flags the renderer stamped into
+  // filterStats (computed before a filter code could drop the `nodes` section);
+  // fall back to scanning nodes when present (no-filter reports).
+  const { hasJobNodes, hasSellNodes } = resolveNodePresence(payload);
   const wantsAuthDiagnostics = /login|log in|logged|sign.?in|auth|account|indeed|glassdoor|ziprecruiter/i.test(description || '');
   // FULL (or no code) must mean EVERYTHING — otherwise description-keyword-gated
   // sections silently vanish on a FULL report. "window not opening" (a captcha/
@@ -508,28 +507,32 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
 
   let nodeDiagMarkdown = '';
   if (nodeInternals && nodeInternals.length > 0) {
-    // Cap routine result cards (plain jobcards with no anomalies) so a large
-    // results canvas doesn't blow the clipboard char budget — at ~150 chars/row,
-    // 130+ jobcards alone exceed 18KB and force the (far more valuable) main-process
-    // logs + event history to be dropped entirely. A routine jobcard's data
-    // (score, source, url) is already summarized in the Taxonomy section above, so
-    // omitting the tail beyond a sample loses no diagnostic signal. Any jobcard
-    // with an anomaly (selected/hidden/editing/resizing/error) is ALWAYS kept.
+    // Cap the routine nodes a hub spawns into its results cascade (jobcard +
+    // jobgroup) so a large board doesn't blow the clipboard char budget — at
+    // ~150-200 chars/row, a 739-card cascade is >150KB and forces the far more
+    // valuable main-process logs + pipeline funnel + event history (which render
+    // AFTER this table) to be dropped entirely. Crucially, a cascade spawns
+    // COLLAPSED, so every card/group is `hidden` by default — that is the normal
+    // tree state, NOT an anomaly, so `hidden` must NOT exempt a node from the cap
+    // (the old predicate did, which is why all 739 rendered). The score/url and
+    // band/salary/role breakdown are summarized in the Job Search Pipeline /
+    // Taxonomy sections; only a genuine anomaly (selected/editing/resizing/
+    // edge-cursor/error) forces a row to always show.
     const ROUTINE_JOBCARD_CAP = 15;
-    const isRoutineJobcard = (n) => {
-      if (n.type !== 'jobcard' || n.selected || n.hidden) return false;
+    const ROUTINE_JOBGROUP_CAP = 25; // keep enough to convey the taxonomy shape
+    const hasAnomaly = (n) => {
       const cs = compStateById[n.id] || {};
-      if (cs.isEditing || cs.isResizing || cs.hasEdgeCursor) return false;
-      if (nodeDataById[n.id]?.errorMessage) return false;
-      return true;
+      return !!(n.selected || cs.isEditing || cs.isResizing || cs.hasEdgeCursor || nodeDataById[n.id]?.errorMessage);
     };
-    let routineShown = 0;
-    let routineOmitted = 0;
+    let cardShown = 0, cardOmitted = 0, groupShown = 0, groupOmitted = 0;
     const nodesToRender = [];
     for (const n of nodeInternals) {
-      if (isRoutineJobcard(n)) {
-        if (routineShown >= ROUTINE_JOBCARD_CAP) { routineOmitted++; continue; }
-        routineShown++;
+      if (n.type === 'jobcard' && !hasAnomaly(n)) {
+        if (cardShown >= ROUTINE_JOBCARD_CAP) { cardOmitted++; continue; }
+        cardShown++;
+      } else if (n.type === 'jobgroup' && !hasAnomaly(n)) {
+        if (groupShown >= ROUTINE_JOBGROUP_CAP) { groupOmitted++; continue; }
+        groupShown++;
       }
       nodesToRender.push(n);
     }
@@ -562,6 +565,20 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
           ? d.scoredJobsCount
           : (Array.isArray(d.scoredJobs) ? d.scoredJobs.length : null);
         previewParts.push(`scoredJobs: ${sc == null ? '∅ none stored' : sc}`);
+      }
+      // A Job Board's defining op is the merge+dedup of its connected modules,
+      // which runs renderer-side and is otherwise invisible (only the post-dedup
+      // count reaches main via bucketJobs). `mergeStats` makes "merged the wrong
+      // count / kept the wrong copy" diagnosable: per-module inputs → unique.
+      if (n.type === 'jobboard' && d.mergeStats && typeof d.mergeStats === 'object') {
+        const ms = d.mergeStats;
+        const breakdown = Array.isArray(ms.perModule) && ms.perModule.length
+          ? `${ms.perModule.map(p => p.count).join('+')}=${ms.totalIncoming}`
+          : `${ms.totalIncoming ?? '?'}`;
+        previewParts.push(
+          `merge: ${ms.modules ?? '?'} mod · ${breakdown} → ${ms.unique ?? '?'} unique ` +
+          `(${ms.duplicatesRemoved ?? '?'} dup, ${ms.collisionUpgrades ?? 0} score-upgrade)`
+        );
       }
       if (d.errorMessage) previewParts.push(`err: ${String(d.errorMessage).slice(0, 60)}`);
       if (d.isRateLimit) previewParts.push(`rateLimit: true`);
@@ -708,7 +725,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
 | ID | Type | Selected | Position | Font | T-Color | B-Color | width (prop) | style.width | measured.width | currentSize | state flags | data preview |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 ${rows}
-${routineOmitted > 0 ? `\n_+ ${routineOmitted} routine jobcard row(s) omitted to preserve the clipboard budget — plain score+url cards with no anomalies (selected/hidden/editing/error); their score/source/role breakdown is in the Taxonomy section above. Anomalous jobcards are always shown._\n` : ''}`;
+${(cardOmitted > 0 || groupOmitted > 0) ? `\n_+ ${[cardOmitted > 0 ? `${cardOmitted} routine jobcard` : null, groupOmitted > 0 ? `${groupOmitted} routine jobgroup` : null].filter(Boolean).join(' and ')} row(s) omitted to preserve the clipboard budget — collapsed-cascade nodes (hidden by default) with no anomaly. The hubs, board (merge stats), and a sample are shown; the full score/taxonomy breakdown is in the Job Search Pipeline section. Anomalous nodes (selected/editing/resizing/error) are always shown._\n` : ''}`;
   }
 
   // ── Media player state section ────────────────────────────────────────────
@@ -826,17 +843,44 @@ ${rows}
     const localTasks = tasks.filter(t => !knownForeignNodeIds.has(t.nodeId));
     const foreignCount = tasks.length - localTasks.length;
     if (localTasks.length > 0) {
+      // Staleness = time since the most recent main-process log line that names
+      // this node. A task registered long ago whose node hasn't logged in a
+      // while is the fingerprint of a hang (e.g. a navigation on a dead VPN IP
+      // that never times out) — the thing a bare count can't tell you.
+      const allLogs = getRecentLogs() || [];
+      const HUNG_HINT_MS = 180_000; // 3 min of no node-tagged activity = suspect
+      const fmtAge = (ms) => (ms == null ? '—' : `${Math.round(ms / 1000)}s`);
+      const lastLogAgeForNode = (nodeId) => {
+        let latest = 0;
+        for (const l of allLogs) {
+          if (l.ts > latest && typeof l.message === 'string' && l.message.includes(nodeId)) latest = l.ts;
+        }
+        return latest ? Date.now() - latest : null;
+      };
       const rows = localTasks
-        .map(t => `| \`${shortId(t.nodeId)}\` | ${t.taskCount} |`)
+        .map(t => {
+          const lastMs = lastLogAgeForNode(t.nodeId);
+          // Suspect a hang when the node has been silent past the hint window
+          // (or never logged) while a task is still registered and aging.
+          const suspect = (lastMs == null ? t.oldestAgeMs : lastMs) > HUNG_HINT_MS;
+          const lastCell = lastMs == null ? 'no node-tagged log' : `${fmtAge(lastMs)} ago`;
+          const flag = suspect ? ' ⚠️ possibly hung' : '';
+          const chans = t.channels?.length ? t.channels.join(', ') : '—';
+          return `| \`${shortId(t.nodeId)}\` | ${t.taskCount} | ${fmtAge(t.oldestAgeMs)} | ${lastCell}${flag} | ${chans} |`;
+        })
         .join('\n');
       activeTasksMarkdown = `
 ## Active IPC Tasks
 > Nodes with backend AbortControllers still registered at report time.
 > A node showing tasks here while its UI looks idle means a cancel/abort
-> request never reached the backend.${foreignCount > 0 ? ` (${foreignCount} task(s) from other canvas windows omitted.)` : ''}
+> request never reached the backend. **Oldest task age** = how long the
+> longest-running task has been registered; **Last node log** = time since the
+> newest main-process log line naming this node. A large age + stale last-log
+> (⚠️ possibly hung, >3m of silence) is the signature of a stuck task — e.g. a
+> request hanging on a network call that never returns.${foreignCount > 0 ? ` (${foreignCount} task(s) from other canvas windows omitted.)` : ''}
 
-| Node ID | Active task count |
-|---|---|
+| Node ID | Tasks | Oldest task age | Last node log | Channel(s) |
+|---|---|---|---|---|
 ${rows}
 `;
     } else {

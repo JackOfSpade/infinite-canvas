@@ -21,7 +21,7 @@ import {
   closeStealthBrowser, getUserDataDir, findChromePath,
 } from '../stealthBrowser.js';
 import { logger } from '../../logger.js';
-import { JOB_PER_PAGE_CAP } from '../resultCaps.js';
+import { JOB_PER_PAGE_CAP, JOB_MAX_PAGES } from '../resultCaps.js';
 import { POSTED_DATE_PATTERN } from '../jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from './scraperOverlay.js';
 import { humanDelay } from '../../utils/humanDelay.js';
@@ -270,6 +270,16 @@ const DESC_CONFIGS = {
     panelSelector: '[class*="JobDetails_jobDescription"]',
     panelMulti:    false,
     closeSelector: null,
+    // Glassdoor embeds REGIONAL-domain hrefs in its search cards (e.g.
+    // fr.glassdoor.ca for an Ontario search). We log in + earn cf_clearance on
+    // www.glassdoor.com only, so navigating to the regional host serves an
+    // anti-bot "Security" wall (French "Aidez-nous à protéger Glassdoor…", no
+    // JSON-LD, no __NEXT_DATA__) and the JD comes back empty — confirmed via the
+    // desc-miss diag (url=fr.glassdoor.ca → title "Security | Glassdoor"). The
+    // job-listing path is global, so pin enrichment navigation to the session
+    // domain. Only the nav URL is rewritten; job.url (the user-facing apply link)
+    // keeps its regional host so the human still lands on their locale.
+    pinHost: 'www.glassdoor.com',
   },
 };
 
@@ -778,6 +788,21 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           viewUrl = cfg.navUrlTemplate.replace('{key}', key);
         }
         if (!viewUrl) continue;
+
+        // Pin enrichment to the session domain when configured (Glassdoor serves
+        // regional-domain job hrefs that wall us — see DESC_CONFIGS.glassdoor.pinHost).
+        // Rewrites any sibling host sharing pinHost's second-level label
+        // (fr.glassdoor.ca / www.glassdoor.com → pinHost). Host-only: path + query
+        // preserved; an unrelated host (no shared SLD) is left untouched.
+        if (cfg.pinHost) {
+          const sld = cfg.pinHost.split('.').at(-2); // 'www.glassdoor.com' → 'glassdoor'
+          if (sld) {
+            viewUrl = viewUrl.replace(
+              new RegExp(`^(https?://)[^/]*\\b${sld}\\.[^/]+`, 'i'),
+              `$1${cfg.pinHost}`,
+            );
+          }
+        }
 
         const navPause = await waitIfPaused(page, signal);
         if (navPause === 'abort') break;
@@ -1692,7 +1717,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         userDataDir, executablePath, sandboxArgs,
         onCrash: () => { earlyExit = true; },
       });
-      const { browser, page, navStatusRef } = platform;
+      const { page, navStatusRef } = platform;
 
       const displayIndex = sourceIndexBase + si + 1;
       const displayTotal = sourceTotal || sourceList.length;
@@ -1820,6 +1845,14 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         while (!earlyExit && !sourceSkipped && !signal?.aborted) {
           const pauseResult = await waitIfPaused(page, signal);
           if (pauseResult === 'abort' || signal?.aborted) { earlyExit = true; break; }
+
+          // Hard page ceiling. The per-query walk otherwise only stops on an empty
+          // extraction or a failed clickNextPage — so a source whose "next" re-serves
+          // content or a stale pager could loop unbounded. JOB_MAX_PAGES bounds it.
+          if (pageNum > JOB_MAX_PAGES) {
+            logger.info(`[BrowserScraper] ${srcName} q${qi + 1} hit JOB_MAX_PAGES (${JOB_MAX_PAGES}) — stopping pagination`);
+            break;
+          }
 
           await updateOverlay(page, {
             ...overlayBase,

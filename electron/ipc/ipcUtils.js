@@ -6,18 +6,23 @@ const { ipcMain } = electronPkg;
 import { logger } from '../logger.js';
 
 // ── Node Task Registry ──────────────────────────────────────────────────────
-const nodeTasks = new Map(); // nodeId -> Set<AbortController>
+// nodeId -> Map<AbortController, { registeredAt, channel }>. We track WHEN each
+// task was registered and which channel it came from so the bug report can show
+// a task's age + which IPC it is — a long-lived task with no recent log activity
+// is the signature of a hang (e.g. a navigation on a dead VPN IP that never
+// times out), which a bare count can't reveal.
+const nodeTasks = new Map();
 
 /**
  * Register an AbortController for a specific node.
  * Allows cancelling background tasks (e.g. search, analysis) when the node is deleted.
  */
-function registerNodeTask(nodeId, ac) {
+function registerNodeTask(nodeId, ac, channel) {
   if (!nodeId) return;
   if (!nodeTasks.has(nodeId)) {
-    nodeTasks.set(nodeId, new Set());
+    nodeTasks.set(nodeId, new Map());
   }
-  nodeTasks.get(nodeId).add(ac);
+  nodeTasks.get(nodeId).set(ac, { registeredAt: Date.now(), channel: channel || null });
   logger.info(`[IPC] Registered task for node ${nodeId}`);
 }
 
@@ -39,7 +44,7 @@ export function abortNodeTasks(nodeId) {
   const set = nodeTasks.get(nodeId);
   if (set) {
     logger.info(`[IPC] Aborting ${set.size} tasks for node ${nodeId}`);
-    for (const ac of set) {
+    for (const ac of set.keys()) {
       ac.abort(new Error('Node deleted'));
     }
     nodeTasks.delete(nodeId);
@@ -54,8 +59,20 @@ export function abortNodeTasks(nodeId) {
  */
 export function snapshotActiveNodeTasks() {
   const out = [];
+  const now = Date.now();
   for (const [nodeId, set] of nodeTasks.entries()) {
-    out.push({ nodeId, taskCount: set.size });
+    let oldestRegisteredAt = now;
+    const channels = new Set();
+    for (const meta of set.values()) {
+      if (meta.registeredAt < oldestRegisteredAt) oldestRegisteredAt = meta.registeredAt;
+      if (meta.channel) channels.add(meta.channel);
+    }
+    out.push({
+      nodeId,
+      taskCount: set.size,
+      oldestAgeMs: now - oldestRegisteredAt,
+      channels: [...channels],
+    });
   }
   return out;
 }
@@ -106,7 +123,7 @@ export function handleSafe(channel, handler, timeoutMs = 0) {
     const nodeId = args?.nodeId;
     
     if (nodeId) {
-      registerNodeTask(nodeId, ac);
+      registerNodeTask(nodeId, ac, channel);
     }
 
     try {

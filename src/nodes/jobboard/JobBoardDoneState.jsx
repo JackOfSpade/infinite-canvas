@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { JOB_SOURCE_BY_ID } from '../../utils/constants';
-import { SlidersHorizontal, X, RefreshCw, Trash2, Layers } from 'lucide-react';
+import { SlidersHorizontal, X, RefreshCw, Trash2, Layers, AlertTriangle } from 'lucide-react';
 
 /**
  * Done-state UI for the Job Board Module — the display half that used to live on
@@ -12,6 +12,10 @@ import { SlidersHorizontal, X, RefreshCw, Trash2, Layers } from 'lucide-react';
 export function JobBoardDoneState({
   resultCount = 0,
   moduleCount = 0,
+  totalIncoming = 0,
+  duplicatesRemoved = 0,
+  stale = false,
+  staleReason = '',
   locked = false,
   // Score filter
   scoreThreshold = 0,
@@ -37,20 +41,45 @@ export function JobBoardDoneState({
   return (
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1">
 
-      {/* Combined result count */}
-      <div className="text-emerald-400 text-2xl font-bold">{resultCount || 0}</div>
-      <p className="text-white/40 text-xs">jobs combined</p>
+      {stale ? (
+        <>
+          {/* Connections changed since the last combine — results are hidden. */}
+          <div className="text-white/25 text-2xl font-bold line-through">{resultCount || 0}</div>
+          <p className="flex items-center gap-1 text-amber-400/90 text-[11px] font-semibold mt-0.5">
+            <AlertTriangle size={11} className="shrink-0" />
+            Connections changed
+          </p>
+          <p className="text-white/40 text-[10px] text-center leading-snug px-1 mt-0.5">
+            {staleReason ? `${staleReason} — ` : ''}re-combine to update the board
+          </p>
+        </>
+      ) : (
+        <>
+          {/* Unique jobs kept after dedup (NOT the raw total — that's below). */}
+          <div className="text-emerald-400 text-2xl font-bold">{resultCount || 0}</div>
+          <p className="text-white/40 text-xs">unique jobs</p>
 
-      {moduleCount > 0 && (
-        <p className="flex items-center gap-1 text-white/25 text-[10px] mt-0.5">
-          <Layers size={9} className="shrink-0" />
-          from {moduleCount} search {moduleCount === 1 ? 'module' : 'modules'}
-        </p>
+          {moduleCount > 0 && (
+            <p className="flex items-center gap-1 text-white/25 text-[10px] mt-0.5">
+              <Layers size={9} className="shrink-0" />
+              from {moduleCount} search {moduleCount === 1 ? 'module' : 'modules'}
+            </p>
+          )}
+
+          {/* Dedup provenance — total pulled in vs. unique kept (the big number). */}
+          {totalIncoming > 0 && (
+            <p className="text-white/25 text-[10px]">
+              {totalIncoming} collected · {duplicatesRemoved > 0
+                ? `${duplicatesRemoved} duplicate${duplicatesRemoved === 1 ? '' : 's'} removed`
+                : 'no duplicates'}
+            </p>
+          )}
+        </>
       )}
 
-      {/* Active filter summary pills */}
+      {/* Active filter summary pills (irrelevant while stale — cards are hidden) */}
       <div className="flex flex-wrap justify-center gap-1 mt-1 min-h-[18px]">
-        {sourceFilter && (
+        {!stale && sourceFilter && (
           <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-400/80 text-[9px]">
             {JOB_SOURCE_BY_ID[sourceFilter]?.name || sourceFilter}
             {!locked && (
@@ -60,7 +89,7 @@ export function JobBoardDoneState({
             )}
           </span>
         )}
-        {sliderActive && (
+        {!stale && sliderActive && (
           <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-white/10 text-white/50 text-[9px]">
             ≥{scoreThreshold}%
             {!locked && (
@@ -78,7 +107,11 @@ export function JobBoardDoneState({
             onClick={onRecombine}
             onPointerDown={(e) => e.stopPropagation()}
             disabled={combining}
-            className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-indigo-500/15 text-indigo-300/90 hover:bg-indigo-500/25 disabled:opacity-50 text-[10px] transition-colors border border-indigo-500/15"
+            className={`nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full disabled:opacity-50 text-[10px] transition-colors border ${
+              stale
+                ? 'bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 border-amber-500/30'
+                : 'bg-indigo-500/15 text-indigo-300/90 hover:bg-indigo-500/25 border-indigo-500/15'
+            }`}
             title="Re-pull all connected Job Search modules and rebuild the combined board"
           >
             <RefreshCw size={9} className={combining ? 'animate-spin' : ''} />
@@ -97,7 +130,7 @@ export function JobBoardDoneState({
       )}
 
       {/* Filter toggle */}
-      {!locked && (sliderUsable || sources.length > 1) && (
+      {!locked && !stale && (sliderUsable || sources.length > 1) && (
         <button
           onClick={() => setFiltersOpen(o => !o)}
           onPointerDown={(e) => e.stopPropagation()}
@@ -113,7 +146,7 @@ export function JobBoardDoneState({
       )}
 
       {/* Filter panel */}
-      {filtersOpen && !locked && (
+      {filtersOpen && !locked && !stale && (
         <div className="nodrag w-full mt-2 space-y-3 px-1" onPointerDown={(e) => e.stopPropagation()}>
 
           {sliderUsable && (

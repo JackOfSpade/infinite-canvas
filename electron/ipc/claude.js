@@ -4,6 +4,7 @@ import path from 'path';
 import { logger } from '../logger.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP } from '../utils/mimeTypes.js';
+import { buildCachedUserContent, buildAnthropicMessageParams } from './anthropicRequest.js';
 
 // Hard ceiling on the Anthropic SDK's built-in retries. The SDK already does
 // exactly what we'd hand-roll for Gemini: auto-retries 408/409/429/500/503/529
@@ -170,53 +171,17 @@ function repairToolInput(value, schema, repaired = { count: 0 }) {
  * more reliable (no `Sure!`-style chatter to strip).
  */
 async function createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, cachedPrefix, task, grounding }) {
-  // If a cachedPrefix is provided, split the user turn into a cache-marked
-  // text block + the original dynamic content. Anthropic's `ephemeral` cache
-  // gives subsequent calls within ~5 minutes a ~90% cost reduction on the
-  // prefix. Below the provider's minimum cacheable size (~1024 tokens for
-  // Sonnet) the cache_control marker is a no-op — no error, just falls
-  // through to normal pricing — so we can apply it unconditionally.
-  let messageContent;
-  if (cachedPrefix) {
-    const prefixBlock = {
-      type: 'text',
-      text: cachedPrefix,
-      cache_control: { type: 'ephemeral' },
-    };
-    if (typeof userContent === 'string') {
-      messageContent = [prefixBlock, { type: 'text', text: userContent }];
-    } else if (Array.isArray(userContent)) {
-      // Vision/document path: prepend the cacheable text in front of the
-      // (image/PDF + text) blocks. Caching media is also supported but we
-      // don't have a use case for it here.
-      messageContent = [prefixBlock, ...userContent];
-    } else {
-      messageContent = userContent;
-    }
-  } else {
-    messageContent = userContent;
-  }
-
-  const messages = [{ role: 'user', content: messageContent }];
-  // Tool-use mode: when a responseSchema is provided, force Claude to call a
-  // dummy tool whose input_schema is the desired output shape. This gives valid
-  // JSON and the right top-level keys, but Anthropic does NOT strictly validate
-  // the model's input against the schema — for a nested object the model can
-  // still fumble the nesting (see repairToolInput below). JSON-prefill ('{') is
-  // incompatible with tool_choice so skip it.
-  const params = {
-    model,
-    max_tokens: maxTokens,
-    messages,
-  };
-  if (responseSchema) {
-    params.tools = [{
-      name: 'submit_response',
-      description: 'Submit the structured response.',
-      input_schema: responseSchema,
-    }];
-    params.tool_choice = { type: 'tool', name: 'submit_response' };
-  } else if (grounding) {
+  // Build the shared Anthropic request shape — cache_control prefix block +
+  // tool-use schema (forces the submit_response tool) or JSON-prefill ('{').
+  // Extracted to anthropicRequest.js so the async Message Batches path and the
+  // free token-count preflight build the IDENTICAL request (see its doc).
+  // `expectJson && !grounding` so a grounding call (layered on below) keeps
+  // priority over the JSON-prefill — preserving the original branch precedence
+  // responseSchema > grounding > expectJson.
+  const params = buildAnthropicMessageParams(userContent, {
+    model, maxTokens, responseSchema, cachedPrefix, expectJson: expectJson && !grounding,
+  });
+  if (grounding && !responseSchema) {
     // Server-side web search: Anthropic runs the searches during this single
     // streamed turn and returns the synthesized answer in text blocks. Free
     // text (no JSON prefill, no schema) — the caller wants prose research.
@@ -225,8 +190,6 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
     // a deliberate, user-triggered action where research depth IS the value.
     // Carries its own per-search billing.
     params.tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }];
-  } else if (expectJson) {
-    messages.push({ role: 'assistant', content: '{' });
   }
   // Stream rather than the one-shot `.create()`. With our high per-task caps
   // (job-bucketing provisions up to ~24576 output tokens) a single non-streaming
@@ -335,10 +298,11 @@ export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens 
  */
 export async function countClaudeInputTokens(prompt, model, apiKey, { cachedPrefix = null, responseSchema = null, signal = null } = {}) {
   const anthropic = getAnthropicClient(apiKey);
-  const content = cachedPrefix
-    ? [{ type: 'text', text: cachedPrefix }, { type: 'text', text: prompt }]
-    : prompt;
-  const params = { model, messages: [{ role: 'user', content }] };
+  // Same content + tool envelope the real call sends (shared builder) so the
+  // count is exact. count_tokens ignores max_tokens/tool_choice and the
+  // cache_control marker doesn't change the token count, so we pass only the
+  // pieces the endpoint accepts.
+  const params = { model, messages: [{ role: 'user', content: buildCachedUserContent(prompt, cachedPrefix) }] };
   if (responseSchema) {
     params.tools = [{ name: 'submit_response', description: 'Submit the structured response.', input_schema: responseSchema }];
   }
@@ -410,9 +374,8 @@ export async function callClaudeDocument(filePath, prompt, model, apiKey, signal
     return callClaudeVision([filePath], prompt, model, apiKey, signal, { maxTokens, formulaSeed, expectJson, responseSchema, task });
   }
 
-  if (ext === '.doc') {
-    throw new Error('Legacy .doc files are not supported. Save as PDF or DOCX and try again.');
-  }
+  // Word docs (.doc/.docx) never reach here — callLLMDocument (llm.js) intercepts
+  // them upstream, extracts text via textutil, and routes through callLLMText.
 
   // Claude API requires standard pdf extraction. For text formats, we read as utf8.
   if (ext === '.pdf') {
@@ -439,29 +402,11 @@ export async function callClaudeDocument(filePath, prompt, model, apiKey, signal
 }
 
 // ── Message Batches API (async, ~50% cheaper) ──────────────────────────────
-// Standalone from createMessage so the synchronous real-time path stays exactly
-// as-is. Mirrors createMessage's request shape (cache_control prefix + tool-use
-// schema) so a batched scoring request scores identically to a live one.
-function buildBatchMessageParams(userContent, { model, maxTokens, responseSchema, cachedPrefix, expectJson }) {
-  let messageContent;
-  if (cachedPrefix) {
-    const prefixBlock = { type: 'text', text: cachedPrefix, cache_control: { type: 'ephemeral' } };
-    messageContent = typeof userContent === 'string'
-      ? [prefixBlock, { type: 'text', text: userContent }]
-      : Array.isArray(userContent) ? [prefixBlock, ...userContent] : userContent;
-  } else {
-    messageContent = userContent;
-  }
-  const messages = [{ role: 'user', content: messageContent }];
-  const params = { model, max_tokens: maxTokens, messages };
-  if (responseSchema) {
-    params.tools = [{ name: 'submit_response', description: 'Submit the structured response.', input_schema: responseSchema }];
-    params.tool_choice = { type: 'tool', name: 'submit_response' };
-  } else if (expectJson) {
-    messages.push({ role: 'assistant', content: '{' });
-  }
-  return params;
-}
+// The batch request shape comes from the SAME buildAnthropicMessageParams the
+// synchronous path uses (see anthropicRequest.js), so a batched scoring request
+// is structurally guaranteed to score identically to a live one — no
+// hand-mirrored copy to drift. Grounding/streaming is live-only and not used
+// for batched scoring, so the shared builder covers the batch path exactly.
 
 /**
  * Submit a Message Batch. `requests` = [{ customId, userContent, model,
@@ -473,7 +418,7 @@ export async function createClaudeBatch(apiKey, requests) {
   const body = {
     requests: requests.map(r => ({
       custom_id: r.customId,
-      params: buildBatchMessageParams(r.userContent, {
+      params: buildAnthropicMessageParams(r.userContent, {
         model: r.model, maxTokens: r.maxTokens, responseSchema: r.responseSchema,
         cachedPrefix: r.cachedPrefix, expectJson: r.expectJson,
       }),

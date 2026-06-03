@@ -327,9 +327,21 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
           VERIFY_HARD_TIMEOUT_MS); }),
       ]).finally(() => clearTimeout(hardTimer));
       const ms = Date.now() - startedAt;
-      await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace, verifyMs: ms });
-      durations.push({ platformId, ms, connected: verdict.connected });
-      logger.info(`[Accounts] Startup verify ${platformId}: ${verdict.connected ? 'connected' : 'not connected'} (${ms}ms)`);
+      // Don't cache a not-connected verdict that's really a browser TEARDOWN: if the
+      // user opens a login/captcha window mid-verify, closeStealthBrowser() kills
+      // this verify tab and verifySellMonitorLogin returns connected:false with a
+      // "target/session closed" reason. Caching that flashes a false "not connected";
+      // skip the write so the prior status stands and the next verify re-checks.
+      const closedRe = /target closed|session closed|connection closed|browser (?:has )?disconnected|protocol error/i;
+      const browserKilled = !verdict.connected &&
+        (closedRe.test(verdict.reason || '') || closedRe.test(verdict.trace?.error || ''));
+      if (browserKilled) {
+        logger.warn(`[Accounts] Startup verify ${platformId} interrupted by browser teardown — keeping prior status, not caching spurious not-connected`);
+      } else {
+        await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace, verifyMs: ms });
+      }
+      durations.push({ platformId, ms, connected: browserKilled ? (_statusCache[platformId]?.connected ?? false) : verdict.connected });
+      logger.info(`[Accounts] Startup verify ${platformId}: ${browserKilled ? 'interrupted (kept prior status)' : (verdict.connected ? 'connected' : 'not connected')} (${ms}ms)`);
     } catch (e) {
       const ms = Date.now() - startedAt;
       durations.push({ platformId, ms, connected: false, error: e?.message || String(e) });

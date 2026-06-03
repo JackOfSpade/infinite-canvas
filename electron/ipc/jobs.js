@@ -7,7 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { callLLMDocument, callLLMText, checkPromptFits, submitLLMTextBatch, getLLMTextBatchStatus, getLLMTextBatchResults, cancelLLMTextBatch } from './llm.js';
+import { callLLMDocument, callLLMText, checkPromptFits, submitLLMTextBatch, getLLMTextBatchStatus, getLLMTextBatchResults, cancelLLMTextBatch, modelForTask } from './llm.js';
 import { reconcileBatchScores, buildScoredJob } from './jobBatchReconcile.js';
 import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, CAREER_FILE_EXTRACT_SCHEMA, JOB_QUERY_GENERATION_SCHEMA } from './aiSchemas.js';
 import electronPkg from 'electron';
@@ -174,23 +174,45 @@ function jobBatchPath(canvasFilePath) {
   if (!canvasFilePath || typeof canvasFilePath !== 'string') return null;
   return path.join(path.dirname(canvasFilePath), JOB_BATCH_JSON);
 }
-async function writeJobBatchSidecar(canvasFilePath, data) {
+// The sidecar is a MAP keyed by nodeId — { [nodeId]: entry } — so two Job Search
+// Modules batch-scoring on the SAME canvas don't overwrite each other's batch
+// (which cross-attributed scored jobs to the wrong hub and stranded the other).
+// Tolerates the legacy single-entry shape ({ batchId, ... }) from before this keying.
+async function readJobBatchMap(canvasFilePath) {
+  const p = jobBatchPath(canvasFilePath);
+  if (!p) return {};
+  try {
+    const obj = JSON.parse(await fs.promises.readFile(p, 'utf8'));
+    if (!obj || typeof obj !== 'object') return {};
+    // Legacy single-entry sidecar → present it as a one-key map.
+    if (typeof obj.batchId === 'string') return { [obj.nodeId || '__legacy__']: obj };
+    return obj;
+  } catch { return {}; }
+}
+async function writeJobBatchSidecar(canvasFilePath, nodeId, entry) {
   const p = jobBatchPath(canvasFilePath);
   if (!p) return;
+  const map = await readJobBatchMap(canvasFilePath);
+  map[nodeId || '__default__'] = { ...entry, nodeId: nodeId || null };
   const tmp = `${p}.__ic_${Date.now()}.tmp`;
-  await fs.promises.writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+  await fs.promises.writeFile(tmp, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
   await fs.promises.rename(tmp, p);
 }
-async function readJobBatchSidecar(canvasFilePath) {
-  const p = jobBatchPath(canvasFilePath);
-  if (!p) return null;
-  try { return JSON.parse(await fs.promises.readFile(p, 'utf8')); }
-  catch { return null; }
+async function readJobBatchSidecar(canvasFilePath, nodeId) {
+  const map = await readJobBatchMap(canvasFilePath);
+  return map[nodeId || '__default__'] || map.__legacy__ || null;
 }
-async function deleteJobBatchSidecar(canvasFilePath) {
+async function deleteJobBatchSidecar(canvasFilePath, nodeId) {
   const p = jobBatchPath(canvasFilePath);
   if (!p) return;
-  await fs.promises.rm(p, { force: true }).catch(() => {});
+  const map = await readJobBatchMap(canvasFilePath);
+  delete map[nodeId || '__default__'];
+  delete map.__legacy__; // clear any legacy straggler on a keyed delete
+  const remaining = Object.keys(map);
+  if (remaining.length === 0) { await fs.promises.rm(p, { force: true }).catch(() => {}); return; }
+  const tmp = `${p}.__ic_${Date.now()}.tmp`;
+  await fs.promises.writeFile(tmp, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
+  await fs.promises.rename(tmp, p);
 }
 
 async function loadJobAnalysisSnapshot(canvasFilePath) {
@@ -204,10 +226,11 @@ async function loadJobAnalysisSnapshot(canvasFilePath) {
 }
 
 // Group jobs into scoring batches by ITEM COUNT only. The item cap
-// (jobScoringBatchSize) reflects a real output-token + scoring-quality
+// (jobScoringBatchSize, model-aware) reflects a real output-token + scoring-quality
 // constraint — NOT an input limit. Each batch carries the jobs' FULL
 // descriptions (nothing truncated, no character budget); the model's own context
-// window is the only ceiling. If a batch ever genuinely exceeds it the provider
+// window is the only input ceiling, and the free-count preflight verifies each
+// real batch against it. If a batch ever genuinely exceeds it the provider
 // rejects the call and the error is surfaced — we never pre-clip context.
 function chunkScoringBatches(jobs, maxItems) {
   const batches = [];
@@ -250,7 +273,10 @@ function buildJobAnalysisSnapshot({ jobs, profile, nodeId, targetRole, snapshotC
   const gathered = Array.isArray(jobs) ? jobs : [];
   const toScore = selectTopAcrossSources(gathered, JOB_SCORE_CAP);
   const cappedForBudget = gathered.length - toScore.length;
-  const batchSize = jobScoringBatchSize();
+  // Size batches to the model that will serve scoring (Claude scores more/call
+  // than thinking-heavy Gemini Flash). The free-count preflight below still
+  // verifies each real batch fits the window and halves it if not.
+  const batchSize = jobScoringBatchSize(modelForTask('job-scoring'));
   const slimBatch = (batch) => batch.map((j, idx) => ({
     index: idx,
     title:    j.title || '',
@@ -1229,10 +1255,12 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // (mirrors marketplace's CompSourceCardNode `progress.url` flow).
     const sourceFirstUrl = {};
     const sourceBlockedUrls = {}; // sourceId → [url, ...] in task order
+    const taskUrlById = {};       // task id → its scrape URL (for sequential solve)
     for (const t of tasks) {
       if (!sourceTaskIds[t.sourceId]) sourceTaskIds[t.sourceId] = [];
       sourceTaskIds[t.sourceId].push(t.id);
       if (!sourceFirstUrl[t.sourceId]) sourceFirstUrl[t.sourceId] = t.url;
+      taskUrlById[t.id] = t.url;
     }
 
     // Notify frontend that sources are starting. Include `url` from the
@@ -1347,6 +1375,17 @@ Be creative with suggestedRoleQueries — think about what career directions the
       const count = Array.isArray(res.data) ? res.data.length : 0;
       const total = sourceTaskIds[sourceId]?.length || 1;
       const blocked = res.warning?.severity === 'block';
+      if (blocked) {
+        // Record THIS query's blocked URL (in task order) so a source blocked on
+        // multiple query variants can be Solved sequentially — the resolve handler
+        // pops each and returns the next. Without this the map stayed empty and
+        // only the FIRST blocked query was ever recoverable (sans a full re-run).
+        const u = taskUrlById[res.id];
+        if (u) {
+          const list = sourceBlockedUrls[sourceId] || (sourceBlockedUrls[sourceId] = []);
+          if (!list.includes(u)) list.push(u);
+        }
+      }
       emitProgress({
         nodeId, sourceId,
         status: blocked ? 'error' : 'done',
@@ -1715,7 +1754,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
         // Single-pass enrichment. In probe mode: arms the cooldown probe on wall.
         // In production: emits error and waits for the user to switch VPN and click Solve.
         const lkPassStartedAt = Date.now();
-        const { jobs: enriched, loginWall, successCount: lkSuccess = 0, contextRotations: lkRotations = 0, browserGen: lkBrowserGen = null, browserAgeMs: lkBrowserAgeMs = null, noDesc: lkNoDesc = 0, noDescSoftBlock: lkNoDescSoft = 0, noDescGenuine: lkNoDescGenuine = 0, evalErrors: lkEvalErrors = 0, navErrors: lkNavErrors = 0 } = await enrichLinkedInDescriptionsBrowser(linkedinKept, combinedSignal);
+        const { jobs: enriched, loginWall, successCount: lkSuccess = 0, contextRotations: lkRotations = 0, browserGen: lkBrowserGen = null, browserAgeMs: lkBrowserAgeMs = null, noDesc: lkNoDesc = 0, noDescSoftBlock: lkNoDescSoft = 0, noDescGenuine: lkNoDescGenuine = 0, evalErrors: lkEvalErrors = 0, navErrors: lkNavErrors = 0, noInternet: lkNoInternet = false } = await enrichLinkedInDescriptionsBrowser(linkedinKept, combinedSignal);
         const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
         kept = kept.map(j => j.source === 'linkedin' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
 
@@ -1729,7 +1768,29 @@ Be creative with suggestedRoleQueries — think about what career directions the
         // scoring empties. (Mirrors the test-mode continuous loop above; a
         // soft-block-only pass used to fall through to a clean 'done' and score
         // the gutted residual.)
-        if ((loginWall || lkNoDescSoft > 0) && lkStillEmpty > 0) {
+        if (lkNoInternet) {
+          // Dead VPN egress during the initial search — descriptions failed at the
+          // network layer (not a wall). Gate the pipeline with a "switch to a
+          // working VPN server" prompt instead of scoring empty jobs. Reuses the
+          // gating code so the Solve button + sources-ready pause behave the same;
+          // NOT a rate-limit ceiling (the probe re-detects regardless of IP).
+          linkedinLastCeilingIp = null;
+          const offlineIp = await getEgressIp();
+          const offlineIpNote = offlineIp ? ` (IP ${offlineIp})` : '';
+          recordLinkedinEnrichPass({
+            kind: 'search', ip: offlineIp, ipOk: !!offlineIp, walled: false, noInternet: true,
+            enriched: lkSuccess, stillEmpty: lkStillEmpty, contextRotations: lkRotations,
+            noDesc: lkNoDesc, noDescSoftBlock: lkNoDescSoft, noDescGenuine: lkNoDescGenuine, evalErrors: lkEvalErrors, navErrors: lkNavErrors,
+            browserGen: lkBrowserGen, browserAgeMs: lkBrowserAgeMs, startedAt: lkPassStartedAt,
+          });
+          const offlineWarning = {
+            code: 'linkedin-rate-limited', severity: 'throttle', shortLabel: 'No internet',
+            evidence: `This VPN IP has no working internet${offlineIpNote} — LinkedIn description fetches failed at the network layer${lkSuccess > 0 ? ` after +${lkSuccess}` : ''}. ${lkStillEmpty} job(s) still without one.`,
+            suggestion: 'The VPN server you are on has no connection. Switch to a DIFFERENT VPN location (confirm a web page loads), then click Solve to continue. Logging in does not help — descriptions are fetched anonymously.',
+          };
+          emitProgress({ nodeId, sourceId: 'linkedin', count: linkedinKept.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: offlineWarning, completed: 1, total: 1 });
+          scrapeWarnings.push({ sourceId: 'linkedin', url: 'https://www.linkedin.com/jobs', ...offlineWarning });
+        } else if ((loginWall || lkNoDescSoft > 0) && lkStillEmpty > 0) {
           linkedinLastCeilingIp = await getEgressIp();
           const ipNote = linkedinLastCeilingIp ? ` (IP ${linkedinLastCeilingIp})` : '';
           recordLinkedinEnrichPass({
@@ -2151,8 +2212,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
         const { batchId, model } = await submitLLMTextBatch(items, {
           task: 'job-scoring', responseSchema: JOB_SCORING_SCHEMA, cachedPrefix,
         });
-        await writeJobBatchSidecar(canvasFilePath, {
-          batchId, model, createdAt: Date.now(), nodeId: nodeId || null, targetRole: role,
+        await writeJobBatchSidecar(canvasFilePath, nodeId, {
+          batchId, model, createdAt: Date.now(), targetRole: role,
           input: gathered.length, selectedForScoring: toScore.length, cappedForBudget,
           // Full job groupings (objects) so completion reconciles + spawns with no re-search.
           batches: fitBatches,
@@ -2315,8 +2376,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
   // Poll a pending batch-scoring run. While processing, returns its status; once
   // ended, downloads + reconciles results into the SAME scoredJobs shape the
   // real-time path produces, so the hub resumes the normal partition→bucket→spawn.
-  handleSafe('poll-job-batch', async (_event, { canvasFilePath } = {}) => {
-    const sidecar = await readJobBatchSidecar(canvasFilePath);
+  handleSafe('poll-job-batch', async (_event, { canvasFilePath, nodeId } = {}) => {
+    const sidecar = await readJobBatchSidecar(canvasFilePath, nodeId);
     if (!sidecar?.batchId) return { found: false };
     let status;
     try {
@@ -2331,7 +2392,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const resultsByCustomId = await getLLMTextBatchResults(sidecar.batchId);
     const { scoredJobs, placeholderCount, failedBatches } =
       reconcileBatchScores(sidecar.batches, resultsByCustomId, { fallbackScore: UNSCORED_FALLBACK_SCORE });
-    await deleteJobBatchSidecar(canvasFilePath);
+    await deleteJobBatchSidecar(canvasFilePath, nodeId);
     const directions = new Set(scoredJobs.map(j => j.careerDirection || 'Other')).size;
     jobsTelemetry.scoring = {
       ts: Date.now(), input: sidecar.input, selectedForScoring: sidecar.selectedForScoring,
@@ -2348,10 +2409,10 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // Cancel + clean up a pending batch (hub reset / user abandons the run).
-  handleSafe('discard-job-batch', async (_event, { canvasFilePath } = {}) => {
-    const sidecar = await readJobBatchSidecar(canvasFilePath);
+  handleSafe('discard-job-batch', async (_event, { canvasFilePath, nodeId } = {}) => {
+    const sidecar = await readJobBatchSidecar(canvasFilePath, nodeId);
     if (sidecar?.batchId) await cancelLLMTextBatch(sidecar.batchId).catch(() => {});
-    await deleteJobBatchSidecar(canvasFilePath);
+    await deleteJobBatchSidecar(canvasFilePath, nodeId);
     return { ok: true };
   });
 
@@ -2628,7 +2689,7 @@ RULES:
           }
 
           sendProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: needEnrich.length, detail: 're-fetching descriptions', warning: null });
-          const { jobs: enriched, loginWall: walled, successCount = 0, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0 } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal);
+          const { jobs: enriched, loginWall: walled, successCount = 0, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, noInternet = false } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal);
           // Merge whatever we got this pass back into the full set (keeps prior
           // descriptions for jobs enriched before the ceiling was hit).
           const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
@@ -2638,7 +2699,7 @@ RULES:
           // Egress-IP trail entry for this Solve. `walled` distinguishes the
           // re-walled outcome from a clean finish; comparing `ip` to the prior
           // pass's is what answers "did the VPN switch actually change the IP?".
-          recordLinkedinEnrichPass({ kind: 'solve', ip: currentIp, ipOk: !!currentIp, walled, enriched: successCount, stillEmpty, noDesc, noDescSoftBlock, noDescGenuine, evalErrors, navErrors, contextRotations, browserGen, browserAgeMs, startedAt: passStartedAt });
+          recordLinkedinEnrichPass({ kind: 'solve', ip: currentIp, ipOk: !!currentIp, walled, noInternet, enriched: successCount, stillEmpty, noDesc, noDescSoftBlock, noDescGenuine, evalErrors, navErrors, contextRotations, browserGen, browserAgeMs, startedAt: passStartedAt });
           logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch: +${successCount} description(s), ${stillEmpty} still empty (${contextRotations} ctx-rotation(s)${walled ? ', hit IP ceiling' : ''})`);
 
           // Persist this pass's descriptions back to the snapshot. Without this,
@@ -2658,6 +2719,23 @@ RULES:
             }
           }
 
+          if (noInternet) {
+            // The VPN IP went offline mid-pass — every fetch failed at the network
+            // layer (not a LinkedIn wall). Same remediation as a rate-limit (switch
+            // VPN + Solve) but a DIFFERENT cause, so the message says the server is
+            // dead, not throttled. Reuse the gating code so the Solve button +
+            // pipeline pause behave identically with no renderer change. We don't
+            // mark this IP as a rate-limit "ceiling": getEgressIp may itself fail on
+            // the next try, and the probe re-detects regardless.
+            const ipNote = currentIp ? ` (IP ${currentIp})` : '';
+            const offlineWarning = {
+              code: 'linkedin-rate-limited', severity: 'throttle', shortLabel: 'No internet',
+              evidence: `This VPN IP has no working internet${ipNote} — description fetches failed at the network layer${successCount > 0 ? ` after +${successCount} this pass` : ''}. ${stillEmpty} job(s) still without a description.`,
+              suggestion: 'The VPN server you switched to has no connection. Switch to a DIFFERENT VPN location (confirm a web page loads), then click Solve to continue. Logging in does not help — descriptions are fetched anonymously.',
+            };
+            sendProgress({ nodeId, sourceId: 'linkedin', count: items.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: offlineWarning });
+            return { resolved: true, items, warning: offlineWarning, replaceSourceItems: true, nextBlockedUrl: null };
+          }
           if ((walled || noDescSoftBlock > 0) && stillEmpty > 0) {
             // Got a batch but hit LinkedIn's per-IP guest ceiling again — either a
             // hard URL wall (walled) or gutted soft-block pages (noDescSoftBlock)

@@ -415,6 +415,12 @@ export function Canvas() {
   });
 
   const handlePaneDoubleClick = useCallback((e) => {
+    // onDoubleClick is NOT pane-scoped in @xyflow/react v12 — it lands on the outer
+    // rf__wrapper (an ancestor of every node), so a node/document/group double-click
+    // bubbles here and would spawn a stray empty text node (baked into a group's
+    // saved canvas). Only act on a direct hit to the empty pane (mirrors the
+    // handlePaneMouseDown deselect guard).
+    if (!e.target?.classList?.contains('react-flow__pane')) return;
     if (activeTool || placementMode || navigation.isAnimating) return;
     takeSnapshot();
     const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });

@@ -550,18 +550,23 @@ async function checkListingStatusMultiSource({
   // false "needs-login" for a logged-in user. classifyMultipleUrls fetches all
   // N URLs in parallel, then makes ONE consolidated LLM call so the instruction
   // block + listing identity preamble is paid once instead of N times.
+  // fetchHtmlAuthed takes an options object ({ signal }); the classify engine
+  // invokes fetchers positionally as (url, signal). Adapt the shape here so the
+  // AbortSignal actually reaches the page — passing it positionally silently
+  // dropped it, leaving a cancelled check's puppeteer page navigating for ~25s.
+  const authedFetcher = (u, sig) => fetchHtmlAuthed(u, { signal: sig });
   const escalatingListingFetcher = async (u, sig) => {
     const r = await plainFetcher(u, sig);
     if (!r.ok) return r; // network error — let the classifier surface it
     const fin = String(r.finalUrl || u).toLowerCase();
     const walled = r.status === 401 || r.status === 403 ||
       /\/(login|signin|sign-in|account\/login)/i.test(fin);
-    return walled ? fetchHtmlAuthed(u, sig) : r;
+    return walled ? authedFetcher(u, sig) : r;
   };
   const urlSpecs = all.map(({ url, source }) => ({
     url,
     urlLabel: source === 'listing' ? 'listing' : source === 'card-watch' ? 'card watch' : 'platform watch',
-    fetcher:  source === 'listing' ? escalatingListingFetcher : fetchHtmlAuthed,
+    fetcher:  source === 'listing' ? escalatingListingFetcher : authedFetcher,
   }));
 
   const perUrl = await classifyMultipleUrls({

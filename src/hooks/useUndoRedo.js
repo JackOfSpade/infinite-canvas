@@ -137,9 +137,13 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     const currentState = deepCloneState();
     let previous;
 
-    // Use the cached fingerprint of the current state (set by the last takeSnapshot call)
-    // to avoid a redundant JSON.stringify on every undo action.
-    if (fingerprint(past[past.length - 1]) === lastFingerprintRef.current) {
+    // Is the top snapshot the current state (settled, post-debounce) or a pre-edit
+    // snapshot (canvas dirty, edit not yet auto-snapshotted)? Compare against the
+    // ACTUAL current fingerprint — the cached last-snapshot one goes stale the
+    // instant an edit lands before the debounce fires, which made the first
+    // post-edit undo no-op and rapid undos overshoot by a step.
+    const currentFp = fingerprint(currentState);
+    if (fingerprint(past[past.length - 1]) === currentFp) {
       if (past.length < 2) return;
       previous        = past[past.length - 2];
       pastRef.current = past.slice(0, -2);

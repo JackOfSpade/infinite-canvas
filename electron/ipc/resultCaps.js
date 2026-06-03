@@ -1,4 +1,5 @@
 import { JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
+import { modelMeta } from './tokenWindow.js';
 
 /**
  * Result-count caps — how many results reach the LLM, and the per-source
@@ -143,16 +144,51 @@ export function compsForPricing(soldAvailable = 0, activeAvailable = 0) {
   return { sold, active };
 }
 
-const DEFAULT_SCORING_BATCH = 15; // calibrated batch size (telemetry — see llm.js job-scoring)
-const MIN_SCORING_BATCH     = 5;
+const MIN_SCORING_BATCH = 5;
+
+// Per-job OUTPUT token cost by provider family — the budget backstop behind the
+// batch size (it must never let a batch request more output than the cap allows).
+// Gemini Flash engages heavy thinking on this task (~325 tok/job observed; we
+// reuse the calibrated JOB_TOKENS_PER_JOB budget coefficient). Claude emits only
+// the visible score+reasoning (~180/job, no separate thinking budget), so more
+// fit the same output cap. In practice the per-provider quality ceiling below is
+// what binds — both lanes' output-budget max comfortably exceeds it.
+const JOB_OUT_TOKENS_PER_JOB = { claude: 200, gemini: JOB_TOKENS_PER_JOB, default: JOB_TOKENS_PER_JOB };
+
+// Per-provider scoring-batch CEILING. This is a SCORING-QUALITY bound, not a
+// token one: an LLM ranking too many jobs in one shot compresses scores and
+// rushes the reasoning, and a bigger batch has a larger truncation/retry blast
+// radius. Gemini stays at the telemetry-calibrated 15; the stronger paid Claude
+// path scores more per call (≈2× fewer round-trips on a 500-job run) while
+// staying well under the output cap. Tunable.
+const SCORING_BATCH_CEILING = { claude: 30, gemini: 15, default: 15 };
 
 /**
- * Jobs to score per LLM call. Capped at the calibrated default, but shrinks
- * automatically if JOB_TOKENS_PER_JOB is raised to reflect a more thinking-heavy
- * model — so a batch can never request a per-call output budget over the hard
- * cap. (At today's coefficients the budget allows ~57, so the default governs.)
+ * Jobs to score per LLM call, sized to the model that will actually serve scoring
+ * (pass llm.js `modelForTask('job-scoring')`). Two binding limits:
+ *   1. OUTPUT budget — each job costs ~JOB_OUT_TOKENS_PER_JOB output tokens and
+ *      the whole batch must fit the billing-safe output cap (so a call can never
+ *      request a budget the model won't honor → no silent truncation).
+ *   2. A per-provider scoring-QUALITY ceiling.
+ * The model's INPUT window is deliberately NOT the driver — it dwarfs even ~50
+ * full JDs — but it isn't ignored: the free token-count preflight (scoreBatch /
+ * splitBatchesToFitWindow in jobs.js) verifies every REAL batch fits the serving
+ * model's window and halves it if a pathological JD set doesn't. So this returns
+ * a TARGET; input-safety is guaranteed downstream by the count API.
+ *
+ * @param {string} [model] resolved scoring model id; unknown/missing → safe default
  */
-export function jobScoringBatchSize() {
-  const maxByBudget = Math.floor((TOKEN_HARD_CAP * BUDGET_SAFETY - JOB_BASE_TOKENS) / JOB_TOKENS_PER_JOB);
-  return clamp(Math.min(DEFAULT_SCORING_BATCH, maxByBudget), MIN_SCORING_BATCH, DEFAULT_SCORING_BATCH);
+export function jobScoringBatchSize(model) {
+  const meta = modelMeta(model);
+  // A missing model id → conservative 'default' lane (the small 15 ceiling); a
+  // real id trusts its resolved provider. (modelMeta defaults unknowns to claude,
+  // so only an absent arg is treated as "don't know".)
+  const lane = model ? meta.provider : 'default';
+  const perJob  = JOB_OUT_TOKENS_PER_JOB[lane] ?? JOB_OUT_TOKENS_PER_JOB.default;
+  const ceiling = SCORING_BATCH_CEILING[lane]  ?? SCORING_BATCH_CEILING.default;
+  // Cap output at min(model max, billing hard cap) so big-output models can't
+  // request runaway billing; the per-provider ceiling is what binds in practice.
+  const outputCap = Math.min(meta.maxOutput || TOKEN_HARD_CAP, TOKEN_HARD_CAP);
+  const byOutput  = Math.floor((outputCap * BUDGET_SAFETY - JOB_BASE_TOKENS) / perJob);
+  return clamp(Math.min(byOutput, ceiling), MIN_SCORING_BATCH, ceiling);
 }

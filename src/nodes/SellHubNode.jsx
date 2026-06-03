@@ -5,6 +5,7 @@ import { usePlatformsVerifyingProgress } from '../contexts/useSessionStatus';
 import { HubContainer } from '../components/HubContainer';
 import { Camera } from 'lucide-react';
 import { ACTIVE_COMP_SOURCES, SELL_PLATFORMS } from '../utils/constants';
+import { normalizeCompWarnings } from '../utils/compSourceScope';
 import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
 import { useListingActions } from '../hooks/useListingActions';
 import { useToast } from '../components/ToastProvider';
@@ -465,7 +466,14 @@ export function SellHubNode({ id, data }) {
       }
 
       const comps = scrapeResult.comps || { sold: [], active: [] };
-      const scrapeWarnings = Array.isArray(scrapeResult.scrapeWarnings) ? scrapeResult.scrapeWarnings : [];
+      // Re-tag/drop warnings whose sourceId has no spawned card (e.g. backend-only
+      // 'swappa-sold' → the 'swappa' family card) BEFORE they reach the gate, so a
+      // blocked sub-source can actually be Skipped/Solved instead of stranding the
+      // hub in 'comps-ready'. Card ids = the cards actually spawned (ACTIVE_COMP_SOURCES).
+      const scrapeWarnings = normalizeCompWarnings(
+        Array.isArray(scrapeResult.scrapeWarnings) ? scrapeResult.scrapeWarnings : [],
+        ACTIVE_COMP_SOURCES.map(s => s.id),
+      );
 
       // Branch: any blocked source → pause and ask the user. AI synthesis is
       // skipped here so we don't spend tokens on partial data without consent.

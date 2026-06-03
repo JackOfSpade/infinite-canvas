@@ -117,13 +117,12 @@ const TASK_MAX_TOKENS = {
   // downstream (queries, scoring, the generated résumé). Caps are billed on
   // actual output, so the headroom is free insurance, not a cost.
   'career-file-extract':       16384,
-  // Gemini 2.5 Flash (the active model for this task) engages thinking which
-  // eats the same cap as visible output — real-world: thoughts=979, visible=31
-  // at cap=1024 truncated the JSON mid-output. 4096 matches resume-parse and
-  // gives ~3000 headroom over typical use (3 short query arrays ≈ 500 tokens
-  // visible + ~1000 thinking).
+  // The active Flash-tier Gemini engages thinking which eats the same cap as
+  // visible output — real-world: thoughts=979, visible=31 at cap=1024 truncated
+  // the JSON mid-output. 4096 matches resume-parse and gives ~3000 headroom over
+  // typical use (3 short query arrays ≈ 500 tokens visible + ~1000 thinking).
   'job-query-generation':      4096,  // 3 query arrays — small JSON, thinking-heavy
-  // Job scoring on Gemini 2.5 Flash with thinking: real-world telemetry shows
+  // Job scoring on the active Flash-tier Gemini with thinking: real-world telemetry shows
   // ~175 thinking tokens per job plus ~150 visible tokens per job (score +
   // 1-sentence rationale). 15-job batch with old formula (512 + 15*150 =
   // 2762) had thoughts=2647 alone — barely 100 visible tokens before
@@ -185,6 +184,18 @@ export function getKnownTaskIds() {
 function pickModel(provider, task) {
   const t = resolveTask(task);
   return TASK_MODELS[t][provider] || TASK_MODELS['default'][provider];
+}
+
+/**
+ * The model id that will actually serve `task` for the active provider — the same
+ * choice checkPromptFits / callLLMText make, exposed so a caller can size work to
+ * that model BEFORE the call (e.g. jobScoringBatchSize). Returns the PRIMARY
+ * model; a Gemini cascade may step down to a same-family fallback, but those
+ * share the window/output the sizing depends on.
+ */
+export function modelForTask(task) {
+  const provider = getAISettings().provider === 'claude' ? 'claude' : 'gemini';
+  return pickModel(provider, task);
 }
 
 function pickMaxTokens(task, hints = {}) {

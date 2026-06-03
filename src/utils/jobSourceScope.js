@@ -15,29 +15,10 @@
 //
 // Renderer builds may use the matching VITE_ prefix for the same keys.
 
-const TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
-const FALSE_VALUES = new Set(['0', 'false', 'no', 'off']);
+import { getRuntimeEnv, getEnvValue, parseScopeEnvBoolean } from './sourceScopeShared.js';
 
-function getRuntimeEnv() {
-  return {
-    ...(globalThis.process?.env || {}),
-    ...(import.meta.env || {}),
-  };
-}
-
-function getEnvValue(env, key) {
-  return env[key] ?? env[`VITE_${key}`];
-}
-
-export function parseJobSearchEnvBoolean(value, fallback = false) {
-  if (value == null || value === '') return fallback;
-  if (typeof value === 'boolean') return value;
-
-  const normalized = String(value).trim().toLowerCase();
-  if (TRUE_VALUES.has(normalized)) return true;
-  if (FALSE_VALUES.has(normalized)) return false;
-  return fallback;
-}
+// Public name kept for existing importers/tests; the logic is the shared parser.
+export const parseJobSearchEnvBoolean = parseScopeEnvBoolean;
 
 // Parse a comma-separated minutes list ("1,2,4,8,16,32") into a positive-number
 // array; falls back to the default when empty/garbage.

@@ -774,6 +774,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : '';
       let outcome;
       if (e.skippedSameIp) outcome = 'skipped — same warm IP, not re-attempted';
+      // Dead egress (VPN landed on a server with no internet) — distinct from a
+      // rate-limit wall: every fetch failed at the transport layer. The remedy is
+      // a DIFFERENT (working) VPN server, not waiting out a cooldown.
+      else if (e.noInternet) outcome = `🔌 **no internet on this IP** (egress offline) — +${e.enriched ?? 0}${e.stillEmpty != null ? `, ${e.stillEmpty} still empty` : ''}${ndStr} · switch to a WORKING VPN server, then Solve`;
       else if (e.walled) outcome = `walled, +${e.enriched ?? 0}${e.stillEmpty != null ? `, ${e.stillEmpty} still empty` : ''}${ndStr}${e.contextRotations != null ? `, ${e.contextRotations} rot` : ''}`;
       // No URL wall, but soft-blocks (gutted pages) mean it was still rate-limited —
       // don't call that a "clean finish", it overstates what happened.
@@ -828,6 +832,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const e = enrichTrail[i];
       if (e.browserGen == null) continue; // skip the same-IP-skip pass (no run)
       if (e.kind === 'probe') continue;   // probe confirms have 0s idle by design — don't skew the bracket
+      if (e.noInternet) continue;         // offline egress is neither cooled nor walled — not a cooldown signal
       const idle = Math.max(0, (e.startedAt ?? e.ts) - enrichTrail[i - 1].ts);
       // A soft-blocked pass (gutted pages, no URL wall) was STILL rate-limited —
       // not cooled — so it bounds the cooldown from below just like a wall does.
