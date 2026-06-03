@@ -48,21 +48,20 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
     return () => updateModalCount(-1);
   }, []);
 
-  // Close on Escape — Escape always means "no further action", which matches
-  // the Cancel button (not Abort — we don't want a misfired Escape to undo
-  // user state changes that pre-dated this dialog).
+  // Close on Escape — Escape always means "no further action", which cancels
+  // the dialog (triggers onAbort to undo if available, else falls back to onCancel).
   useEffect(() => {
     const handleKey = (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+      if (e.key === 'Escape') { e.preventDefault(); (onAbort || onCancel)(); }
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [onCancel]);
+  }, [onCancel, onAbort]);
 
   return createPortal(
     <div
       className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onClick={onCancel}
+      onClick={onAbort || onCancel}
     >
       <div
         className="w-[360px] bg-neutral-900/95 border border-white/10 rounded-2xl shadow-2xl overflow-hidden onboarding-panel relative"

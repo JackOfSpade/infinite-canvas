@@ -373,11 +373,13 @@ export function Canvas() {
   }, [confirmDialogData]);
 
   const handleConfirmDialogConfirm = useCallback(() => {
+    EventLogger.log('ConfirmDialog CONFIRMED');
     confirmDialogDataRef.current?.onConfirm();
     setConfirmDialogData(null);
   }, [setConfirmDialogData]);
 
   const handleConfirmDialogCancel = useCallback(() => {
+    EventLogger.log('ConfirmDialog CANCELLED');
     setConfirmDialogData(null);
   }, [setConfirmDialogData]);
 
@@ -385,6 +387,7 @@ export function Canvas() {
   // on" callback. Used by the delete-from-disk dialog to roll back the canvas
   // deletion that triggered it. No-op if the caller didn't provide one.
   const handleConfirmDialogAbort = useCallback(() => {
+    EventLogger.log('ConfirmDialog ABORTED/UNDONE');
     confirmDialogDataRef.current?.onAbort?.();
     setConfirmDialogData(null);
   }, [setConfirmDialogData]);

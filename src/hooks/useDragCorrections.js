@@ -5,11 +5,11 @@ import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } 
 
 import { findNonOverlappingPlacement } from '../utils/layoutUtils';
 import { PRODUCT_IMAGE_EXT_RE } from '../utils/fileExtensions';
+import { canHubAcceptInitialDrop, getHubDropRejectLabel } from '../utils/hubDropEligibility';
 
 // ────────────────────────────────────────────────────────────────────────────
 
 const HUB_DROP_TARGET_TYPES = new Set(['jobhub', 'sellhub']);
-const JOB_HUB_BUSY_STATES = new Set(['parsing', 'querying', 'searching', 'scoring']);
 
 function filePayloadFromDraggedNodes(nodes) {
   return (nodes || [])
@@ -29,21 +29,13 @@ function fileSupportedByHub(hubType, file) {
 }
 
 function hubCanAcceptDrop(targetHub) {
-  if (!targetHub || targetHub.data?.locked) return false;
-  if (targetHub.type === 'jobhub') {
-    return !JOB_HUB_BUSY_STATES.has(targetHub.data?.hubState || 'empty');
-  }
-  if (targetHub.type === 'sellhub') return true;
-  return false;
+  return canHubAcceptInitialDrop(targetHub);
 }
 
 function buildHubHoverState(targetHub, dragSet) {
   if (!targetHub) return null;
   if (targetHub.data?.locked) {
     return { kind: 'reject', label: 'Locked' };
-  }
-  if (targetHub.type === 'jobhub' && JOB_HUB_BUSY_STATES.has(targetHub.data?.hubState || 'empty')) {
-    return { kind: 'reject', label: 'Busy' };
   }
 
   const filePayload = filePayloadFromDraggedNodes(dragSet);
@@ -57,6 +49,11 @@ function buildHubHoverState(targetHub, dragSet) {
       kind: 'reject',
       label: targetHub.type === 'jobhub' ? 'Unsupported resume file' : 'Images only',
     };
+  }
+
+  const lockLabel = getHubDropRejectLabel(targetHub);
+  if (lockLabel) {
+    return { kind: 'reject', label: lockLabel };
   }
 
   return {
@@ -250,10 +247,12 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
         }
 
         const acceptedFiles = filePayload.filter(file => fileSupportedByHub(targetHub.type, file));
-        if (acceptedFiles.length === 0 || !hubCanAcceptDrop(targetHub)) {
+        const canAcceptHubDrop = hubCanAcceptDrop(targetHub);
+        if (acceptedFiles.length === 0 || !canAcceptHubDrop) {
           restoreDragStartPositions(draggedIds);
-          if (!hubCanAcceptDrop(targetHub)) {
-            EventLogger.log(`Rejected document node drop for busy ${targetHub.type}; restored drag position`);
+          if (!canAcceptHubDrop) {
+            const reason = getHubDropRejectLabel(targetHub) || 'Not accepting drops';
+            EventLogger.log(`Rejected document node drop for ${reason.toLowerCase()} ${targetHub.type}; restored drag position`);
             return;
           }
           EventLogger.log(`Rejected ${filePayload.length} document node(s) for ${targetHub.type}; restored drag position`);

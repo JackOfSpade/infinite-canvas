@@ -26,6 +26,13 @@ import { mergeSourceProgress } from '../src/utils/sourceProgress.js';
 import { isJobCardVisible } from '../src/utils/jobCardFilters.js';
 import { reconcileBatchScores, buildScoredJob } from '../electron/ipc/jobBatchReconcile.js';
 import { buildCachedUserContent, buildAnthropicMessageParams } from '../electron/ipc/anthropicRequest.js';
+import {
+  isProfileLockCollision,
+  recordLaunchCollision,
+  getLaunchCollisions,
+  _resetLaunchCollisions,
+} from '../electron/ipc/browserLaunchTelemetry.js';
+import { detectAntiBotSignal, matchesNoResultsSentinel } from '../electron/ipc/antiBotDetector.js';
 import { getStats } from '../src/utils/dashboardStats.js';
 import { resolveNodePresence } from '../src/utils/nodePresence.js';
 import { getNodesBounds } from '../src/utils/constants.js';
@@ -81,6 +88,7 @@ import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation 
 import { detectLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
 import { repairMojibake, hasMojibake, repairJobsMojibake } from '../src/utils/textEncoding.js';
 import { foldVerificationSample, orderByVerification, verificationScore } from '../src/utils/scrapeOrder.js';
+import { canHubAcceptInitialDrop, getHubDropRejectLabel } from '../src/utils/hubDropEligibility.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
 import { createJobSearchTestMode, parseJobSearchEnvBoolean } from '../src/utils/jobSourceScope.js';
 import { createMarketplaceTestMode, parseMarketplaceEnvBoolean, getScopedCompSourceIds, isCompSourceEnabledInScope, normalizeCompWarnings } from '../src/utils/compSourceScope.js';
@@ -567,6 +575,21 @@ const tests = [
       assert(reassigned.data.canvasData.edges[0].source === childId && reassigned.data.canvasData.edges[0].target === childId, 'Node factory clone safety: nested edge endpoints should be remapped consistently');
       assert(reassigned.data.canvasData.drawings[0].id !== 'draw-a', 'Node factory clone safety: drawing ids should be reassigned');
       return { cloneIdChanged: clone.id !== source.id, childId };
+    },
+  },
+  {
+    name: 'Hub drop eligibility locks after initial input',
+    run: () => {
+      assert(canHubAcceptInitialDrop({ type: 'sellhub', data: { hubState: 'empty' } }), 'Hub drop eligibility: empty sellhub accepts initial photos');
+      assert(!canHubAcceptInitialDrop({ type: 'sellhub', data: { hubState: 'empty', imagePaths: ['/tmp/a.jpg'] } }), 'Hub drop eligibility: sellhub with photos rejects later drops');
+      assert(!canHubAcceptInitialDrop({ type: 'sellhub', data: { hubState: 'priced', product: { title: 'x' } } }), 'Hub drop eligibility: priced sellhub rejects later drops');
+      assert(getHubDropRejectLabel({ type: 'sellhub', data: { hubState: 'analyzing' } }) === 'Busy', 'Hub drop eligibility: active sellhub reports busy');
+
+      assert(canHubAcceptInitialDrop({ type: 'jobhub', data: { hubState: 'empty' } }), 'Hub drop eligibility: empty jobhub accepts initial career files');
+      assert(!canHubAcceptInitialDrop({ type: 'jobhub', data: { hubState: 'empty', inputLocked: true } }), 'Hub drop eligibility: jobhub preflight lock rejects a second drop');
+      assert(!canHubAcceptInitialDrop({ type: 'jobhub', data: { hubState: 'done', resumeProfile: { skills: [] } } }), 'Hub drop eligibility: completed jobhub rejects later drops');
+      assert(getHubDropRejectLabel({ type: 'jobhub', data: { hubState: 'searching' } }) === 'Busy', 'Hub drop eligibility: active jobhub reports busy');
+      return { checked: 8 };
     },
   },
   {
@@ -2352,6 +2375,109 @@ const tests = [
       assert(parseGeminiJSON('Here is the answer: {"score": 9}').score === 9, 'object-after-prose still recovers');
       // A genuine empty array as the whole clean response still parses to [].
       assert(Array.isArray(parseGeminiJSON('[]')) && parseGeminiJSON('[]').length === 0, 'clean "[]" still parses to []');
+      return { ok: true };
+    },
+  },
+  {
+    // A page where the SITE ITSELF says "0 results" is genuinely empty, NOT a
+    // block. matchesNoResultsSentinel must fire on real empty-states and stay
+    // SILENT on populated pages (a false match would suppress a real warning).
+    name: 'matchesNoResultsSentinel: fires on real empty-states, silent on populated/incidental pages',
+    run: () => {
+      // The actual Swappa empty page from the bug report.
+      const swappaEmpty = '<h1>Search</h1><p>Showing <b>0</b> results for <b>Yamaha A3R ARE acoustic electric guitar</b></p><div class="well"><h2>No products match this criteria...</h2></div>';
+      assert(matchesNoResultsSentinel(swappaEmpty), 'Swappa "No products match this criteria" / "Showing 0 results" → empty');
+      // innerText form (no tags) — what the captcha-resolve probe sees.
+      assert(matchesNoResultsSentinel('Search Showing 0 results for Yamaha A3R ARE acoustic electric guitar'), 'innerText "Showing 0 results" → empty');
+      assert(matchesNoResultsSentinel('We couldn\'t find any listings matching your search.'), '"couldn\'t find any" → empty');
+      assert(matchesNoResultsSentinel('0 results found'), '"0 results found" → empty');
+      assert(matchesNoResultsSentinel('No listings found for this search'), '"no listings found" → empty');
+      assert(matchesNoResultsSentinel('Your search did not match any documents.'), '"your search did not match any" → empty');
+      // ADVERSARIAL NEGATIVES — must NOT match (these would hide a real warning):
+      assert(!matchesNoResultsSentinel('Showing 24 results for iPhone 14 Pro Max'), 'populated "Showing 24 results" → NOT empty');
+      assert(!matchesNoResultsSentinel('<div>Cart: no items in your cart yet</div>'), 'incidental "no items in your cart" (no qualifier) → NOT empty');
+      // A Swappa model-PICKER page (tiles, no empty-state copy) → must NOT match,
+      // so it still falls through to the zero-extracted heuristic.
+      assert(!matchesNoResultsSentinel('Select your model: iPhone 14 Series, iPhone 15 Series, MacBooks'), 'picker page (no empty-state copy) → NOT empty');
+      assert(!matchesNoResultsSentinel(''), 'empty string → NOT a match (no throw)');
+      return { ok: true };
+    },
+  },
+  {
+    // End-to-end through detectAntiBotSignal: the site's own "0 results" page must
+    // return null (no warning), while a drifted/picker page with 0 items still
+    // flags zero-extracted, and a real block that ALSO contains "no results" copy
+    // still loses to the Layer-3 block verdict (block wins).
+    name: 'detectAntiBotSignal: explicit 0-results → null; drift/picker still zero-extracted; block still wins',
+    run: () => {
+      const bigBody = (core) => core + ' '.repeat(60000); // > suspiciousBelow, not tiny
+      // 1) Swappa legitimate empty → null (was zero-extracted/throttle).
+      const empty = detectAntiBotSignal({
+        html: bigBody('Showing 0 results for Yamaha A3R ARE acoustic electric guitar. No products match this criteria...'),
+        itemsExtracted: 0, expectedMinItems: 3, sourceLabel: 'swappa',
+        finalUrl: 'https://swappa.com/search?q=Yamaha%20A3R%20ARE',
+      });
+      assert(empty === null, `Swappa 0-results page → null (got ${JSON.stringify(empty)})`);
+      // 2) Drift/picker: big body, 0 items, NO empty-state copy → still zero-extracted.
+      const drift = detectAntiBotSignal({
+        html: bigBody('Select your model below to see prices: iPhone 14 Series, MacBooks, PlayStation 5'),
+        itemsExtracted: 0, expectedMinItems: 3, sourceLabel: 'swappa',
+        finalUrl: 'https://swappa.com/search?q=whatever',
+      });
+      assert(drift?.code === 'zero-extracted', `picker/drift page (no empty-state) → zero-extracted (got ${JSON.stringify(drift)})`);
+      // Reporting enhancement: the evidence must carry a page-text snippet so a
+      // future report is self-diagnosing (picker vs drift) without pasting HTML.
+      assert(/page text:/.test(drift.evidence) && /Select your model/.test(drift.evidence), `zero-extracted evidence includes a page-text snippet (got: ${drift.evidence})`);
+      // 3) A real block page that ALSO contains "no results" must still be a block
+      //    (Layer 3 keyword sniff runs first).
+      const blocked = detectAntiBotSignal({
+        html: 'Pardon Our Interruption... we noticed unusual traffic. No results found.',
+        itemsExtracted: 0, expectedMinItems: 3, sourceLabel: 'ebay',
+      });
+      assert(blocked && blocked.code !== 'zero-extracted' && blocked.severity, `block page with "no results" copy still flags a block (got ${JSON.stringify(blocked)})`);
+      // 4) Populated page (items >= threshold) never reaches the gate → null.
+      const ok = detectAntiBotSignal({ html: bigBody('Showing 24 results'), itemsExtracted: 24, expectedMinItems: 3, sourceLabel: 'swappa' });
+      assert(ok === null, `populated page → null (got ${JSON.stringify(ok)})`);
+      return { ok: true };
+    },
+  },
+  {
+    // The shared Chrome profile is OS-locked to one process. Two launch failures
+    // mean "another Chrome holds it" and are safe to wait-and-retry; everything
+    // else (missing binary, permission denial, crash) must NOT be retried.
+    name: 'isProfileLockCollision: classifies the two shared-profile lock errors, not unrelated failures',
+    run: () => {
+      assert(isProfileLockCollision(new Error('The browser is already running for /Users/x/browser-data. Use a different `userDataDir` or stop the running browser first.')), 'headless "already running" → collision');
+      assert(isProfileLockCollision('Failed to launch the browser process:  Code: 0  stderr:  Opening in existing browser session.'), 'visible "Opening in existing browser session" → collision');
+      assert(!isProfileLockCollision(new Error('Failed to launch the browser process: spawn ENOENT')), 'missing Chrome → NOT a collision (must surface)');
+      assert(!isProfileLockCollision(new Error('Navigation timeout of 30000 ms exceeded')), 'nav timeout → NOT a collision');
+      assert(!isProfileLockCollision(null) && !isProfileLockCollision(undefined), 'nullish → NOT a collision (no throw)');
+      return { ok: true };
+    },
+  },
+  {
+    // Persisted collision tally must survive the log ring buffer (the whole point):
+    // count totals, track auto-recovery, ring-cap the event list, and snapshot-copy.
+    name: 'browserLaunchTelemetry: records totals/recovery, caps the ring, returns a copy',
+    run: () => {
+      _resetLaunchCollisions();
+      assert(getLaunchCollisions().total === 0, 'starts empty');
+      recordLaunchCollision({ context: 'headless-scrape', attempts: 2, recovered: true, error: 'already running for x', ts: 1000 });
+      recordLaunchCollision({ context: 'captcha-resolve-window', url: 'https://www.ebay.com/sch', attempts: 6, recovered: false, error: 'Opening in existing browser session', ts: 2000 });
+      let snap = getLaunchCollisions();
+      assert(snap.total === 2 && snap.recovered === 1, `total=2 recovered=1 (got ${snap.total}/${snap.recovered})`);
+      assert(snap.events[snap.events.length - 1].context === 'captcha-resolve-window', 'last event is the most recent');
+      assert(snap.events[1].error.length <= 200, 'error string is bounded');
+      // Mutating the returned snapshot must not corrupt internal state.
+      snap.events.push({ junk: true });
+      assert(getLaunchCollisions().events.length === 2, 'getLaunchCollisions returns a copy, not the live array');
+      // Ring cap at 12: push 15 more, expect exactly 12 retained, newest last.
+      for (let i = 0; i < 15; i++) recordLaunchCollision({ context: `c${i}`, ts: 3000 + i });
+      snap = getLaunchCollisions();
+      assert(snap.events.length === 12, `ring caps at 12 (got ${snap.events.length})`);
+      assert(snap.events[snap.events.length - 1].context === 'c14', 'newest event retained');
+      assert(snap.total === 17, `total keeps counting past the ring cap (got ${snap.total})`);
+      _resetLaunchCollisions();
       return { ok: true };
     },
   },

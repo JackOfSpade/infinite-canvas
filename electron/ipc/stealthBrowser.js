@@ -22,6 +22,7 @@ import { logger } from '../logger.js';
 
 import { getRandomUA, getSessionProfile } from './browser/antiDetectProfiles.js';
 import { saveDiceApiKey } from './settings.js';
+import { isProfileLockCollision, recordLaunchCollision } from './browserLaunchTelemetry.js';
 
 // Apply stealth evasions
 puppeteer.use(StealthPlugin());
@@ -143,6 +144,49 @@ export function getStealthBrowserInfo() {
   };
 }
 
+// Retry a puppeteer.launch() that fails with a shared-profile lock collision.
+// The ONE shared userDataDir is OS-locked to a single Chrome process; a VISIBLE
+// captcha-resolve window (held open for its grace/solve period) or a sibling
+// scrape can still own it for a few seconds when the next launch fires. The OS
+// releases the lock only after the holding Chrome fully exits, which lags a
+// window/scrape close. Rather than bubble up the cryptic "browser is already
+// running" / "Opening in existing browser session" error (the user saw this as a
+// source falsely "task-failed", needing a manual re-Solve), we wait through that
+// lag and retry. A NON-collision launch error throws on the first attempt — we
+// never mask a real failure (missing Chrome, permission denial, crash). Every
+// collision is recorded in browserLaunchTelemetry so the bug report can surface
+// it long after the log ring buffer scrolls away. See sharedProfileLock.js for
+// the complementary serialization of the job-scrape launchers.
+const PROFILE_LOCK_RETRY_DELAYS = [700, 1200, 2000, 3000, 4500]; // ms; ~11.4s total
+
+export async function launchWithProfileLockRetry(launchOpts, context, url = null) {
+  let lastErr;
+  for (let attempt = 0; attempt <= PROFILE_LOCK_RETRY_DELAYS.length; attempt++) {
+    try {
+      const browser = await puppeteer.launch(launchOpts);
+      if (attempt > 0) {
+        recordLaunchCollision({ context, url, attempts: attempt + 1, recovered: true, error: lastErr, ts: Date.now() });
+        logger.info(`[StealthBrowser] ${context} launch recovered after ${attempt} retry(ies) — shared profile freed`);
+      }
+      return browser;
+    } catch (err) {
+      lastErr = err;
+      if (!isProfileLockCollision(err)) throw err;
+      if (attempt < PROFILE_LOCK_RETRY_DELAYS.length) {
+        const delay = PROFILE_LOCK_RETRY_DELAYS[attempt];
+        logger.warn(`[StealthBrowser] ${context} launch hit the shared-profile lock (another Chrome window/scrape holds it) — retrying in ${delay}ms (attempt ${attempt + 1}/${PROFILE_LOCK_RETRY_DELAYS.length + 1})`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      // Retries exhausted: record + throw a message that names the real cause
+      // (the bare puppeteer "Code: 0" is undebuggable).
+      recordLaunchCollision({ context, url, attempts: attempt + 1, recovered: false, error: err, ts: Date.now() });
+      throw new Error(`Chrome launch blocked by the shared browser profile lock after ${attempt + 1} attempts — another window or scrape is holding it. Close any open captcha/login window and retry. (${err?.message || String(err)})`);
+    }
+  }
+  throw lastErr; // unreachable — loop either returns or throws
+}
+
 export async function getStealthBrowser() {
   if (isShuttingDown) throw new Error('[StealthBrowser] Cannot get browser during shutdown');
   if (browserInstance?.isConnected?.()) return browserInstance;
@@ -171,7 +215,7 @@ export async function getStealthBrowser() {
     );
 
     try {
-      browserInstance = await puppeteer.launch({
+      browserInstance = await launchWithProfileLockRetry({
         headless: 'new',
         executablePath,
         userDataDir: await getUserDataDir(),
@@ -195,7 +239,7 @@ export async function getStealthBrowser() {
           deviceScaleFactor: 1,
         },
         ignoreHTTPSErrors: true,
-      });
+      }, 'headless-scrape');
 
       browserGeneration += 1;
       browserLaunchedAt = Date.now();

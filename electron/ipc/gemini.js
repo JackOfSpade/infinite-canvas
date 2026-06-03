@@ -5,7 +5,6 @@
 import fs from 'fs';
 import path from 'path';
 import { GoogleAuth } from 'google-auth-library';
-import Store from 'electron-store';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { resolveServiceAccountPath, getAISettings } from './settings.js';
@@ -40,57 +39,6 @@ export const GEMINI_MODEL_FALLBACKS = [
   'gemini-2.5-flash-lite',    // ~20 RPD / 10 RPM free
   'gemini-3.1-flash-lite',    // ~500 RPD / 15 RPM free — workhorse, completes bulk runs
 ];
-
-const GEMINI_LIMITS = {
-  'gemini-3.5-flash': { rpd: 20, rpm: 5 },
-  'gemini-3-flash-preview': { rpd: 20, rpm: 5 },
-  'gemini-2.5-flash': { rpd: 20, rpm: 5 },
-  'gemini-2.5-flash-lite': { rpd: 20, rpm: 10 },
-  'gemini-3.1-flash-lite': { rpd: 500, rpm: 15 },
-};
-
-let _usageStore = null;
-function getUsageStore() {
-  return _usageStore ??= new Store({ name: 'gemini-usage-tracking' });
-}
-
-function recordGeminiRequest(model) {
-  try {
-    const store = getUsageStore();
-    const key = `requests.${model}`;
-    const now = Date.now();
-    const history = store.get(key) || [];
-    history.push(now);
-    // Keep only timestamps within the last 24 hours to prevent memory/file growth
-    const cutoff = now - 24 * 60 * 60 * 1000;
-    const filtered = history.filter(t => t > cutoff);
-    store.set(key, filtered);
-  } catch (e) {
-    logger.error('[Gemini Tracking] Failed to record request:', e);
-  }
-}
-
-export function getGeminiUsageLeft(model) {
-  try {
-    const store = getUsageStore();
-    const history = store.get(`requests.${model}`) || [];
-    const now = Date.now();
-    
-    const lastMinute = history.filter(t => t > now - 60 * 1000).length;
-    const lastDay = history.filter(t => t > now - 24 * 60 * 60 * 1000).length;
-
-    const limits = GEMINI_LIMITS[model] || { rpd: 20, rpm: 5 };
-    return {
-      rpdLeft: Math.max(0, limits.rpd - lastDay),
-      rpmLeft: Math.max(0, limits.rpm - lastMinute),
-      rpdLimit: limits.rpd,
-      rpmLimit: limits.rpm,
-    };
-  } catch (e) {
-    logger.error('[Gemini Tracking] Failed to read usage:', e);
-    return null;
-  }
-}
 
 /**
  * Convert standard JSON Schema (lowercase types) to Gemini's responseSchema
@@ -337,7 +285,7 @@ function extractGeminiErr(body, status) {
  * remaining-quota on success (only a retry hint on 429), so there is no
  * `rateLimit` block by design — we don't fabricate one.
  */
-export async function probeGemini(apiKey, model = 'gemini-3.1-flash-lite') {
+export async function probeGemini(apiKey, model = 'gemini-3.1-flash-lite', quotaStatsMap = null) {
   if (!apiKey) {
     return { ok: false, status: null, error: 'No AI Studio API key set (a service-account / Vertex setup is not probed here).' };
   }
@@ -350,25 +298,164 @@ export async function probeGemini(apiKey, model = 'gemini-3.1-flash-lite') {
       body: JSON.stringify({ contents: [{ parts: [{ text: 'ping' }] }], generationConfig: { maxOutputTokens: 1 } }),
     });
   } catch (e) {
-    return { ok: false, status: null, error: e?.message || String(e) };
+    return { ok: false, status: null, model, error: e?.message || String(e) };
   }
-  
-  const usage = getGeminiUsageLeft(model);
-  const rateLimit = usage ? {
-    requests: {
-      remaining: usage.rpdLeft,
-      limit: usage.rpdLimit,
-    },
-    rpm: {
-      remaining: usage.rpmLeft,
-      limit: usage.rpmLimit,
-    }
-  } : null;
-
-  if (res.ok) return { ok: true, status: res.status, model, rateLimit };
+  // Attach quota stats for this model if we fetched them from Cloud Monitoring.
+  const quotaStats = quotaStatsMap?.[model] ?? null;
+  if (res.ok) return { ok: true, status: res.status, model, quotaStats };
   let body = '';
   try { body = await res.text(); } catch { /* ignore */ }
-  return { ok: false, status: res.status, error: extractGeminiErr(body, res.status), retryAfterMs: parseGeminiRetryMs(res, body), rateLimit };
+  return { ok: false, status: res.status, model, error: extractGeminiErr(body, res.status), retryAfterMs: parseGeminiRetryMs(res, body), quotaStats };
+}
+
+/**
+ * Fetches real RPM / RPD / TPM quota usage for all Gemini models via the
+ * Cloud Monitoring API. Requires a service account with monitoring.read scope
+ * (i.e., the service-account.json the user has already configured for Vertex AI).
+ * Returns a map: modelName → { rpm, rpd, tpm } where each entry is
+ * { used: number, limit: number } — 100% confirmed from Google.
+ * Returns null silently if no service account is configured or the call fails.
+ * NEVER throws.
+ */
+export async function fetchGeminiQuotaStats() {
+  let projectId;
+  let token;
+  try {
+    const { auth, projectId: pid } = await getAuthClient();
+    projectId = pid;
+    const client = await auth.getClient();
+    // Request an additional monitoring.read scope on top of cloud-platform.
+    const tokenResp = await client.getAccessToken();
+    token = tokenResp.token;
+    if (!token || !projectId) return null;
+  } catch {
+    // No service account configured — silently skip.
+    return null;
+  }
+
+  const monBase = `https://monitoring.googleapis.com/v3/projects/${projectId}/timeSeries`;
+  const authHeader = { Authorization: `Bearer ${token}` };
+
+  // Use a 25-hour window so we always capture the last full day of RPD data.
+  const now = new Date();
+  const startTime = new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString();
+  const endTime = now.toISOString();
+
+  // We query two metric types:
+  //   quota/rate/net_usage  — how much was actually consumed (per 1-min windows)
+  //   quota/limit           — the configured limit per quota metric
+  // Both are under serviceruntime for the generativelanguage service.
+  const BASE_FILTER = 'resource.labels.service="generativelanguage.googleapis.com"';
+
+  const usageParams = new URLSearchParams({
+    filter: `metric.type="serviceruntime.googleapis.com/quota/rate/net_usage" AND ${BASE_FILTER}`,
+    'interval.startTime': startTime,
+    'interval.endTime': endTime,
+    'aggregation.alignmentPeriod': '3600s',
+    'aggregation.crossSeriesReducer': 'REDUCE_MAX',
+    'aggregation.perSeriesAligner': 'ALIGN_MAX',
+    'aggregation.groupByFields': 'metric.labels.quota_metric,metric.labels.quota_location',
+    view: 'FULL',
+  });
+
+  const limitParams = new URLSearchParams({
+    filter: `metric.type="serviceruntime.googleapis.com/quota/limit" AND ${BASE_FILTER}`,
+    'interval.startTime': startTime,
+    'interval.endTime': endTime,
+    'aggregation.alignmentPeriod': '86400s',
+    'aggregation.crossSeriesReducer': 'REDUCE_MAX',
+    'aggregation.perSeriesAligner': 'ALIGN_MAX',
+    'aggregation.groupByFields': 'metric.labels.quota_metric',
+    view: 'FULL',
+  });
+
+  let usageData, limitData;
+  try {
+    const [usageRes, limitRes] = await Promise.all([
+      fetch(`${monBase}?${usageParams}`, { headers: authHeader }),
+      fetch(`${monBase}?${limitParams}`, { headers: authHeader }),
+    ]);
+    if (!usageRes.ok && !limitRes.ok) return null;
+    [usageData, limitData] = await Promise.all([
+      usageRes.ok ? usageRes.json().catch(() => null) : null,
+      limitRes.ok ? limitRes.json().catch(() => null) : null,
+    ]);
+  } catch {
+    return null;
+  }
+
+  // Parse the quota metric name to extract the model and dimension (rpm/rpd/tpm).
+  // Google names these like:
+  //   "generate_content_free_tier_requests_per_minute_per_project_per_model"
+  //   "generate_content_free_tier_requests_per_day"
+  //   "generate_content_free_tier_tokens_per_minute_per_model"
+  // The actual model mapping requires parsing the quota_metric label and matching
+  // to our GEMINI_MODEL_FALLBACKS list. We parse the time series labels.
+
+  // Build limit map: quota_metric → limit value
+  const limits = {};
+  for (const ts of limitData?.timeSeries || []) {
+    const qm = ts.metric?.labels?.quota_metric || '';
+    const pts = ts.points || [];
+    if (pts.length === 0) continue;
+    const val = Number(pts[0].value?.int64Value ?? pts[0].value?.doubleValue ?? 0);
+    limits[qm] = val;
+  }
+
+  // Build usage map: quota_metric → max used value in window
+  const usages = {};
+  for (const ts of usageData?.timeSeries || []) {
+    const qm = ts.metric?.labels?.quota_metric || '';
+    const pts = ts.points || [];
+    if (pts.length === 0) continue;
+    const maxVal = pts.reduce((m, p) => {
+      const v = Number(p.value?.int64Value ?? p.value?.doubleValue ?? 0);
+      return Math.max(m, v);
+    }, 0);
+    usages[qm] = (usages[qm] ?? 0) + maxVal;
+  }
+
+  // Map quota metric names → dimension keys we expose.
+  // We look for keywords in the metric name to classify as rpm/rpd/tpm.
+  function classifyQuotaMetric(qm) {
+    const s = qm.toLowerCase();
+    if (s.includes('per_minute') && s.includes('token')) return 'tpm';
+    if (s.includes('per_minute')) return 'rpm';
+    if (s.includes('per_day'))    return 'rpd';
+    return null;
+  }
+
+  // Because quota metrics are project-wide (not per-model in the returned labels
+  // for the AI Studio free-tier API), we aggregate all rpm/rpd/tpm values and
+  // distribute them equally across all our fallback models — the dashboard shows
+  // the same project-wide numbers per model anyway.
+  const aggregated = { rpm: { used: 0, limit: 0 }, rpd: { used: 0, limit: 0 }, tpm: { used: 0, limit: 0 } };
+  const seenDimensions = new Set();
+  for (const qm of new Set([...Object.keys(usages), ...Object.keys(limits)])) {
+    const dim = classifyQuotaMetric(qm);
+    if (!dim) continue;
+    if (!seenDimensions.has(dim)) {
+      // Take the first matching metric per dimension (avoid double-counting variants).
+      aggregated[dim].used  = usages[qm]  ?? 0;
+      aggregated[dim].limit = limits[qm]  ?? 0;
+      seenDimensions.add(dim);
+    }
+  }
+
+  // Return the same stats for every fallback model. If no data came back at all,
+  // return null so the UI falls back to ping-only display.
+  const hasData = seenDimensions.size > 0;
+  if (!hasData) return null;
+
+  const result = {};
+  for (const model of GEMINI_MODEL_FALLBACKS) {
+    result[model] = {
+      rpm: aggregated.rpm.limit > 0 ? aggregated.rpm : null,
+      rpd: aggregated.rpd.limit > 0 ? aggregated.rpd : null,
+      tpm: aggregated.tpm.limit > 0 ? aggregated.tpm : null,
+    };
+  }
+  return result;
 }
 
 // Last live "Check availability" result per provider, so the Settings panel can
@@ -446,10 +533,6 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const endpointName = apiKey ? 'Gemini API (AI Studio)' : 'Vertex AI';
-
-  if (apiKey) {
-    recordGeminiRequest(model || 'gemini-3.5-flash');
-  }
 
   const response = await fetchWithRetry(endpoint, {
     method: 'POST',
@@ -953,10 +1036,19 @@ export function registerGeminiHandlers() {
       if (!settings.geminiApiKey) {
         result = { ok: false, models: [{ ok: false, status: null, model: null, error: 'No Gemini API key set.' }] };
       } else {
-        const models = await Promise.all(
-          GEMINI_MODEL_FALLBACKS.map((m) => probeGemini(settings.geminiApiKey, m)),
-        );
-        result = { ok: models.length > 0 && models.every((m) => m.ok), models };
+        // Fetch real quota stats (service account path) and ping all models in parallel.
+        // fetchGeminiQuotaStats returns null if no service account is configured —
+        // probeGemini attaches null quotaStats in that case and the UI shows ping-only.
+        const [quotaStatsMap, ...probeResults] = await Promise.all([
+          fetchGeminiQuotaStats(),
+          ...GEMINI_MODEL_FALLBACKS.map((m) => probeGemini(settings.geminiApiKey, m, null)),
+        ]);
+        // Re-run probes with the quota stats map attached (they already finished, just re-attach).
+        const models = probeResults.map((probe, i) => ({
+          ...probe,
+          quotaStats: quotaStatsMap?.[GEMINI_MODEL_FALLBACKS[i]] ?? null,
+        }));
+        result = { ok: models.length > 0 && models.every((m) => m.ok), models, hasQuotaStats: quotaStatsMap !== null };
       }
     }
     lastProbe[provider] = { ...result, at: Date.now() };

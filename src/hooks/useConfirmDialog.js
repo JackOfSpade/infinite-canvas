@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react';
+import { EventLogger } from '../utils/EventLogger';
 
 const IS_MAC = (() => {
   const p = navigator.userAgentData?.platform ?? navigator.platform ?? '';
@@ -9,10 +10,12 @@ export function useConfirmDialog() {
   const [confirmDialogData, setConfirmDialogData] = useState(null);
 
   const requestConfirm = useCallback((data) => {
+    EventLogger.log(`ConfirmDialog requested: title="${data.title}"`);
     setConfirmDialogData(data);
   }, []);
 
   const requestClearConfirm = useCallback((onConfirm) => {
+    EventLogger.log(`ConfirmDialog requested: title="Clear Canvas"`);
     setConfirmDialogData({
       title: "Clear Canvas",
       message: `This will remove all nodes, edges, and drawings. This action can be undone with ${IS_MAC ? '⌘' : 'Ctrl+'}Z.`,

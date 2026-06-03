@@ -23,6 +23,7 @@ import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { PRODUCT_IMAGE_EXT_RE } from '../utils/fileExtensions';
 import { mergeSourceIntoComps } from '../utils/compsMerge';
+import { getHubDropLockReason } from '../utils/hubDropEligibility';
 
 /**
  * SellHubNode — draggable canvas module for marketplace selling.
@@ -48,6 +49,7 @@ export function SellHubNode({ id, data }) {
   const { addToast } = useToast();
   const processingRef = useRef(false);
   const processingPriceRef = useRef(false);
+  const initialDropAcceptedRef = useRef(false);
   const isMountedRef = useRef(true);
   // Cancellation epoch — see hooks/useEpochCancellation.js. In-flight async
   // workflows (startAnalysis / handleConfirmDraft / synthesizeAndPrice)
@@ -155,7 +157,15 @@ export function SellHubNode({ id, data }) {
   const [queuedResolvesCount, setQueuedResolvesCount] = useState(0);
 
   const hubState = data.hubState || 'empty';
+  const dropLockReason = getHubDropLockReason({ type: 'sellhub', data });
+  const inputDropsBlocked = !!dropLockReason;
   const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(['ebay', 'poshmark', 'mercari', 'swappa', 'facebook']);
+
+  useEffect(() => {
+    if (data.inputLocked || data.product || data.imagePaths?.length > 0) {
+      initialDropAcceptedRef.current = true;
+    }
+  }, [data.inputLocked, data.product, data.imagePaths]);
 
   // Per-source comp progress populated from backend `price-source-progress`
   // events. Reset before each fresh run so stale counts don't bleed in.
@@ -185,7 +195,7 @@ export function SellHubNode({ id, data }) {
     // settlement. Also clear any leftover errorMessage so a successful run
     // doesn't leave a stale banner around after the next render.
     const cancelled = epoch.start();
-    updateGlobal(currentId, { hubState: 'analyzing', imagePaths: validPaths, errorMessage: null, isRateLimit: false });
+    updateGlobal(currentId, { hubState: 'analyzing', imagePaths: validPaths, inputLocked: true, errorMessage: null, isRateLimit: false });
 
     try {
       const result = await window.electronAPI.analyzePhotos({ imagePaths: validPaths, nodeId: currentId });
@@ -765,40 +775,27 @@ export function SellHubNode({ id, data }) {
       return;
     }
 
-    EventLogger.log(`[SellHub][${id}] Drop accepted: ${validPaths.length}/${attemptedCount} images`);
-
-    // In any state where the user has work in flight or completed, append
-    // photos rather than restarting analysis. Includes 'comps-ready' so a
-    // drop during the resolve/skip pause doesn't wipe pendingComps + warned
-    // comp cards by kicking off a fresh analysis.
-    if (
-      hubState === 'draft' ||
-      hubState === 'priced' ||
-      hubState === 'analyzing' ||
-      hubState === 'researching' ||
-      hubState === 'comps-ready'
-    ) {
-      const existing = data.imagePaths || [];
-      const merged = [...new Set([...existing, ...validPaths])]; // deduplicate
-      updateGlobal(id, { imagePaths: merged });
+    if (initialDropAcceptedRef.current || dropLockReason || processingRef.current || processingPriceRef.current) {
+      EventLogger.log(`[SellHub][${id}] Drop rejected: hub already started`);
       addToast({
-        title: `${validPaths.length} Photo${validPaths.length > 1 ? 's' : ''} Added`,
-        description: `${merged.length} total photo${merged.length > 1 ? 's' : ''} — listing preserved`,
-        type: 'success'
+        title: 'Photos are locked',
+        description: 'This marketplace module is tied to its original photos. Create a new marketplace module to use different photos.',
+        type: 'info',
       });
       return;
     }
 
-    // Empty / error state: start fresh analysis
+    initialDropAcceptedRef.current = true;
+    EventLogger.log(`[SellHub][${id}] Drop accepted: ${validPaths.length}/${attemptedCount} images`);
+
     startAnalysisRef.current?.(validPaths);
-  }, [addToast, data.imagePaths, hubState, id, updateGlobal]);
+  }, [addToast, dropLockReason, id]);
 
   const handleDrop = useCallback((e) => {
-    if (data.locked) return; // Locked nodes don't accept new drops
-    if (platformsVerifying) return;
-
     e.preventDefault();
     e.stopPropagation();
+    if (data.locked) return; // Locked nodes don't accept new drops
+    if (platformsVerifying || inputDropsBlocked) return;
 
     const files = Array.from(e.dataTransfer?.files || []);
     // Log EVERY drop attempt up front (extensions + total count) so bug reports
@@ -812,13 +809,13 @@ export function SellHubNode({ id, data }) {
       .map(f => f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : ''))
       .filter(Boolean);
     acceptImagePaths(imagePaths, files.length);
-  }, [acceptImagePaths, data.locked, id, platformsVerifying]);
+  }, [acceptImagePaths, data.locked, id, inputDropsBlocked, platformsVerifying]);
 
   useEffect(() => {
     const handler = (e) => {
       if (e.detail?.hubId !== id) return;
       if (data.locked) return;
-      if (platformsVerifying) return;
+      if (platformsVerifying || inputDropsBlocked) return;
       const files = e.detail?.files || [];
       const imagePaths = files
         .filter(f => PRODUCT_IMAGE_EXT_RE.test(f.filename || f.filePath || ''))
@@ -829,7 +826,7 @@ export function SellHubNode({ id, data }) {
     };
     document.addEventListener('canvas-file-nodes-dropped-on-hub', handler);
     return () => document.removeEventListener('canvas-file-nodes-dropped-on-hub', handler);
-  }, [acceptImagePaths, data.locked, id, platformsVerifying]);
+  }, [acceptImagePaths, data.locked, id, inputDropsBlocked, platformsVerifying]);
 
   const resetHandler = useCallback((e) => {
     e?.stopPropagation();
@@ -924,7 +921,7 @@ export function SellHubNode({ id, data }) {
       height={undefined}
       minHeight={nodeHeight}
       onDrop={handleDrop}
-      dropsBlocked={platformsVerifying}
+      dropsBlocked={platformsVerifying || inputDropsBlocked}
       verifyProgress={platformsVerifying ? { done: verifyDone, total: verifyTotal } : null}
       dragHover={data.dragHover || null}
     >
@@ -938,6 +935,11 @@ export function SellHubNode({ id, data }) {
                 <>
                   <p className="text-white/40 text-sm font-medium">Checking connections…</p>
                   <p className="text-white/20 text-[10px] mt-1">Verifying marketplace logins</p>
+                </>
+              ) : inputDropsBlocked ? (
+                <>
+                  <p className="text-white/40 text-sm font-medium">Photos locked</p>
+                  <p className="text-white/25 text-[10px] mt-1 text-center">Create a new marketplace module for different photos</p>
                 </>
               ) : (
                 <>

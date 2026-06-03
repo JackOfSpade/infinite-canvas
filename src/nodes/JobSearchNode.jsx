@@ -12,6 +12,7 @@ import { mergeResolvedSourceItems } from '../utils/jobSourceResolveMerge';
 import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
 import { EventLogger } from '../utils/EventLogger';
 import { useToast } from '../components/ToastProvider';
+import { getHubDropLockReason } from '../utils/hubDropEligibility';
 
 import { JobSearchProcessingState } from './jobsearch/JobSearchProcessingState';
 import { JobSearchDoneState } from './jobsearch/JobSearchDoneState';
@@ -124,6 +125,7 @@ export function JobSearchNode({ id, data }) {
   const addElementsGlobally = nav?.addElementsGlobally;
   const canvasFilePath = nav?.currentFile || null;
   const processingRef = useRef(false);
+  const initialDropAcceptedRef = useRef(false);
   const pendingUSAJobsRefreshRef = useRef(false);
   const scrapeWarningsRef = useRef(data.scrapeWarnings);
   const hubStateRef = useRef(data.hubState);
@@ -160,7 +162,15 @@ export function JobSearchNode({ id, data }) {
   const lastDroppedPathsRef = useRef(null);
 
   const hubState = data.hubState || 'empty';
+  const dropLockReason = getHubDropLockReason({ type: 'jobhub', data });
+  const inputDropsBlocked = !!dropLockReason;
   const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(['indeed', 'glassdoor', 'ziprecruiter']);
+
+  useEffect(() => {
+    if (data.inputLocked || data.careerData || data.resumeProfile || data.filePath) {
+      initialDropAcceptedRef.current = true;
+    }
+  }, [data.inputLocked, data.careerData, data.resumeProfile, data.filePath]);
 
   // Chrome manual-launch overlay — shown when the app couldn't auto-launch
   // Chrome with the debug port and the user needs to do it via Terminal.
@@ -1541,9 +1551,9 @@ export function JobSearchNode({ id, data }) {
   const acceptCareerFiles = useCallback((paths, names = []) => {
     // Each hub is permanently bound to its INITIAL career-data upload. Once that
     // exists, further drops are refused — re-running a search reuses the same
-    // résumé, and searching with different career data means a NEW hub. (A failed
-    // first parse leaves neither field set, so retry drops are still allowed.)
-    if (data.careerData || data.resumeProfile) {
+    // résumé, and searching with different career data means a NEW hub.
+    if (initialDropAcceptedRef.current || dropLockReason || processingRef.current) {
+      EventLogger.log(`[JobSearch][${id}] Drop rejected: hub already started`);
       addToast({
         title: 'Career data is locked',
         description: 'This job search is tied to your original career files. Create a new job search to use different ones.',
@@ -1569,18 +1579,19 @@ export function JobSearchNode({ id, data }) {
       });
       return;
     }
+    initialDropAcceptedRef.current = true;
     lastDroppedPathsRef.current = valid;
     EventLogger.log(`[JobSearch][${id}] Drop accepted: ${valid.length} file(s)`);
+    updateGlobal(id, { inputLocked: true });
     startProcessingRef.current?.(valid);
-  }, [addToast, id, data.careerData, data.resumeProfile]);
+  }, [addToast, dropLockReason, id, updateGlobal]);
 
   const handleDrop = useCallback((e) => {
-    if (data.locked) return;
-    if (platformsVerifying) return;
-    if (PROCESSING_STATES.includes(hubState)) return;
-
     e.preventDefault();
     e.stopPropagation();
+    if (data.locked) return;
+    if (platformsVerifying || inputDropsBlocked) return;
+    if (PROCESSING_STATES.includes(hubState)) return;
 
     const files = Array.from(e.dataTransfer?.files || []);
     const exts = files.map(f => (f.name.match(/\.[a-z0-9]+$/i)?.[0] || '?').toLowerCase());
@@ -1590,13 +1601,13 @@ export function JobSearchNode({ id, data }) {
     const paths = files.map(f => f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : ''));
     const names = files.map(f => f.name);
     acceptCareerFiles(paths, names);
-  }, [acceptCareerFiles, data.locked, hubState, id, platformsVerifying]);
+  }, [acceptCareerFiles, data.locked, hubState, id, inputDropsBlocked, platformsVerifying]);
 
   useEffect(() => {
     const handler = (e) => {
       if (e.detail?.hubId !== id) return;
       if (data.locked) return;
-      if (platformsVerifying) return;
+      if (platformsVerifying || inputDropsBlocked) return;
       if (PROCESSING_STATES.includes(hubStateRef.current)) return;
       const droppedFiles = (e.detail?.files || []).filter(f => f?.filePath);
       if (droppedFiles.length === 0) return;
@@ -1605,7 +1616,7 @@ export function JobSearchNode({ id, data }) {
     };
     document.addEventListener('canvas-file-nodes-dropped-on-hub', handler);
     return () => document.removeEventListener('canvas-file-nodes-dropped-on-hub', handler);
-  }, [acceptCareerFiles, data.locked, id, platformsVerifying]);
+  }, [acceptCareerFiles, data.locked, id, inputDropsBlocked, platformsVerifying]);
 
   const resetHandler = useCallback((e) => {
     e?.stopPropagation();
@@ -1947,7 +1958,7 @@ export function JobSearchNode({ id, data }) {
       height={undefined}
       minHeight={hubState === 'empty' ? 140 : 100}
       onDrop={handleDrop}
-      dropsBlocked={platformsVerifying}
+      dropsBlocked={platformsVerifying || inputDropsBlocked}
       verifyProgress={platformsVerifying ? { done: verifyDone, total: verifyTotal } : null}
       dragHover={data.dragHover || null}
     >
@@ -1959,6 +1970,11 @@ export function JobSearchNode({ id, data }) {
               <Briefcase size={28} className="text-blue-400/40 mb-3" />
               {platformsVerifying ? (
                 <p className="text-white/40 text-sm font-medium">Checking connections…</p>
+              ) : inputDropsBlocked ? (
+                <>
+                  <p className="text-white/40 text-sm font-medium">Career files locked</p>
+                  <p className="text-white/25 text-[10px] mt-1 text-center">Create a new job search module for different files</p>
+                </>
               ) : (
                 <>
                   <p className="text-white/40 text-sm font-medium">Drop your career files</p>

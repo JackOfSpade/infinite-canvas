@@ -356,13 +356,15 @@ function fmtSecLeft(s) {
 /**
  * Per-provider availability card: a live "Check availability" button plus the
  * last verdict. Claude shows REAL remaining/limit/reset pulled from the response
- * headers; Gemini (which exposes no remaining-quota API) shows its last-call
- * telemetry + retry hint + a dashboard link. Presentational only.
+ * headers; Gemini shows real RPM/RPD/TPM from Cloud Monitoring when a service
+ * account is configured, or ping-only when using only an API key.
+ * Presentational only.
  */
 function AIProviderStatus({ provider, status, checking, onCheck }) {
   const probe = status?.lastProbe || null;
   const tele = status?.telemetry || null;
   const isClaude = provider === 'claude';
+  const hasQuotaStats = !isClaude && (probe?.hasQuotaStats === true);
 
   const line = (label, b) => b && (
     <div>{label}: <span className="text-white/65">{b.remaining ?? '?'}</span> / {b.limit ?? '?'} left{b.resetInSec != null ? ` · resets ${fmtSecLeft(b.resetInSec)}` : ''}</div>
@@ -387,11 +389,29 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
   // Gemini probes ONE model (the high-quota fallback tail), so it names the model
   // that answered. Claude probes EVERY model in use and renders one row each — so
   // the per-model rate limits reflect what a real run actually consumes.
-  const geminiVerdict = (!isClaude && probe) ? (() => {
+  const geminiVerdict = (!isClaude && probe && !probe.models) ? (() => {
     const v = verdictFor(probe);
     if (v && probe.ok && probe.model) v.text = `✅ Available — ${probe.model} responded`;
     return v;
   })() : null;
+
+  /** Render a single quota stat cell: "6 / 5" with amber when over limit. */
+  const QuotaCell = ({ used, limit }) => {
+    if (used == null || limit == null) return <span className="text-white/30">—</span>;
+    const over = limit > 0 && used >= limit;
+    return (
+      <span className={over ? 'text-amber-400 font-semibold' : 'text-white/60'}>
+        {used.toLocaleString()} / {limit.toLocaleString()}
+        {over && <span className="ml-0.5">⚠️</span>}
+      </span>
+    );
+  };
+
+  /** Format large token numbers as e.g. "87.4K" */
+  function fmtK(n) {
+    if (n == null) return null;
+    return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+  }
 
   return (
     <div className="mt-1 pt-2 border-t border-white/5 space-y-1.5">
@@ -410,31 +430,49 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
       {probe?.models && (
         <div className="space-y-2">
           <div className="text-white/40 text-[10px]">
-            {isClaude ? 'Per model in use (Anthropic rate limits are per-model):' : 'Per model in use (Gemini fallback chain, local estimated usage):'}
+            {isClaude
+              ? 'Per model in use (Anthropic rate limits are per-model):'
+              : hasQuotaStats
+                ? 'Per model in use (live usage from Cloud Monitoring API — peak last 25h):'
+                : 'Per model in use (Gemini fallback chain):'
+            }
           </div>
           {probe.models.map((m, i) => {
             const v = verdictFor(m);
             const mrl = m.rateLimit || null;
+            const qs = m.quotaStats || null;
             return (
               <div key={m.model || i} className="space-y-0.5">
                 <div className="text-[11px] font-medium leading-snug">
                   <span className="text-white/70 font-mono">{m.model || '(unknown model)'}</span>
                   {v && <> — <span className={v.cls}>{v.text}</span></>}
                 </div>
-                {mrl && (
+                {/* Claude per-model rate limit rows */}
+                {mrl && isClaude && (
                   <div className="text-white/45 text-[10px] leading-relaxed font-mono pl-3">
-                    {isClaude ? (
-                      <>
-                        {line('requests', mrl.requests)}
-                        {line('tokens', mrl.tokens)}
-                        {line('input tok', mrl.input_tokens)}
-                        {line('output tok', mrl.output_tokens)}
-                      </>
-                    ) : (
-                      <>
-                        {line('requests/day', mrl.requests)}
-                        {line('requests/min', mrl.rpm)}
-                      </>
+                    {line('requests', mrl.requests)}
+                    {line('tokens', mrl.tokens)}
+                    {line('input tok', mrl.input_tokens)}
+                    {line('output tok', mrl.output_tokens)}
+                  </div>
+                )}
+                {/* Gemini Cloud Monitoring quota stats */}
+                {qs && !isClaude && (
+                  <div className="text-[10px] leading-relaxed font-mono pl-3 flex flex-wrap gap-x-3 gap-y-0.5">
+                    {qs.rpm && (
+                      <span className="text-white/40">
+                        RPM: <QuotaCell used={qs.rpm.used} limit={qs.rpm.limit} />
+                      </span>
+                    )}
+                    {qs.rpd && (
+                      <span className="text-white/40">
+                        RPD: <QuotaCell used={qs.rpd.used} limit={qs.rpd.limit} />
+                      </span>
+                    )}
+                    {qs.tpm && (
+                      <span className="text-white/40">
+                        TPM: <QuotaCell used={fmtK(qs.tpm.used)} limit={fmtK(qs.tpm.limit)} />
+                      </span>
                     )}
                   </div>
                 )}
@@ -455,7 +493,10 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
             <div className="text-amber-400/70 truncate" title={tele.lastAttemptedError}>Last error: {tele.lastAttemptedError.slice(0, 90)}</div>
           )}
           <a href="https://ai.dev/rate-limit" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">View free-tier quota dashboard ↗</a>
-          <div className="text-white/25 text-[9px]">Google exposes no "remaining quota" API — the live check reports up / rate-limited only.</div>
+          {hasQuotaStats
+            ? <div className="text-emerald-500/50 text-[9px]">✓ Usage data sourced from Cloud Monitoring API — 100% confirmed from Google.</div>
+            : <div className="text-white/25 text-[9px]">No service account configured — live check reports up / rate-limited only. Add a service-account.json to see real RPM/RPD/TPM.</div>
+          }
         </div>
       )}
 

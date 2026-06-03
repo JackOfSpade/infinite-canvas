@@ -139,6 +139,66 @@ const URL_SIGNALS = [
     suggestion: 'Final URL is a challenge / block path. The originating request was rejected before content was served.' },
 ];
 
+// ── Explicit "zero results" sentinels ─────────────────────────────────────────
+// Phrases a site renders in its OWN empty-state when a search legitimately
+// matched nothing — e.g. Swappa sells only electronics, so a guitar query returns
+// "No products match this criteria" / "Showing 0 results". That is NOT a block,
+// NOT stale selectors, and NOT a wrong-URL picker — it is the site's authoritative
+// "0 results" answer. Detecting it lets the volume-sanity layer return null
+// instead of a spurious 'zero-extracted' throttle, which otherwise surfaces a
+// Solve card, a rate-limiter penalty, and a 30s captcha-resolve grace window for a
+// page that simply has nothing to show. Every pattern pairs a result-NOUN with an
+// empty QUALIFIER (or a literal 0 count), so it cannot match a populated results
+// page. The generic ones reuse the battle-tested empty-state copy already shipped
+// in electron/extractors/jobs.js. Exported for reuse by the captcha-resolve window
+// (authWindows.js), which concludes immediately on a definitive empty page rather
+// than holding the full human-scale grace.
+const NO_RESULTS_SENTINELS = [
+  // Swappa: "<h2>No products match this criteria ...</h2>"
+  /no products? match(?:es)? this (?:criteria|search)/i,
+  // "Showing 0 results" / "Showing <b>0</b> results" — entity/tag-tolerant 0.
+  /showing\s*(?:<[^>]+>\s*)*0(?:\s*<\/[^>]+>)*\s*(?:results?|listings?|items?|products?)/i,
+  // "0 results found" / "0 listings match".
+  /\b0 (?:results?|listings?|jobs?|items?|products?) (?:found|match)/i,
+  // Generic "no <thing> found/matched/available" within a single text run.
+  /\bno (?:results?|listings?|items?|products?|jobs?|matches)\b[^<]{0,40}\b(?:found|match|matched|available)\b/i,
+  // "we couldn't find any …" / "did not find any …".
+  /\b(?:we )?(?:could ?n.?t|did(?: not|n.?t)) find any\b/i,
+  // "Your search did not match any …".
+  /your search (?:did not|did ?n.?t) match any/i,
+];
+
+/**
+ * True if `text` contains a site's own definitive "zero results" empty-state copy.
+ * Used by the volume-sanity gate below AND by the captcha-resolve window to tell a
+ * genuinely-empty page apart from a soft block.
+ * @param {string} text  HTML body OR innerText (patterns are tag-tolerant)
+ * @returns {boolean}
+ */
+export function matchesNoResultsSentinel(text) {
+  if (!text) return false;
+  const body = String(text).slice(0, SOFT_GATE_SCAN_CHARS);
+  return NO_RESULTS_SENTINELS.some((re) => re.test(body));
+}
+
+// Strip tags + collapse whitespace into a short readable snippet of a page's
+// visible text. Appended to volume-sanity evidence so a bug report can tell WHY a
+// page came back empty — the site's own "0 results" copy, a model-picker's tiles
+// ("Select your model…"), or real listings the extractor missed (= drift) —
+// WITHOUT the user having to paste the page HTML (the gap that made the "stuck on
+// Swappa" report un-diagnosable from the report alone).
+export function htmlTextSnippet(html, maxChars = 220) {
+  if (!html) return '';
+  return String(html)
+    .slice(0, SOFT_GATE_SCAN_CHARS)
+    .replace(/<(script|style|noscript)[\s\S]*?<\/\1>/gi, ' ') // drop non-visible blocks
+    .replace(/<[^>]+>/g, ' ')                                 // strip tags
+    .replace(/&(?:[a-z]+|#\d+|#x[0-9a-f]+);/gi, ' ')          // crude entity strip
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxChars);
+}
+
 /**
  * @param {object} ctx
  * @param {number} [ctx.status]              HTTP status (0 if unknown)
@@ -241,6 +301,22 @@ export function detectAntiBotSignal(ctx = {}) {
     }
   }
 
+  // Layer 3.5 — explicit empty state. A page where the SITE ITSELF declares zero
+  // matches (its own empty-state copy, e.g. Swappa "No products match this
+  // criteria" / "Showing 0 results") must NOT fire a throttle: no Solve card, no
+  // rate-limiter penalty, no captcha-resolve grace window. Guarded by the SAME
+  // low-count condition Layer 4 uses, so it can only ever short-circuit the empty
+  // path — a real block that co-occurs with results has items above the threshold
+  // and never reaches here, and Layer 3 (block keywords) has already returned for a
+  // challenge served instead of content, so a block page that also says "no
+  // results" still loses to the block verdict. A drifted listings page (results
+  // present, extractor got 0) shows the listings, NOT this copy, so drift is still
+  // caught.
+  if (itemsExtracted != null && expectedMinItems > 0 && itemsExtracted < expectedMinItems
+      && matchesNoResultsSentinel(html)) {
+    return null; // the site's own "0 results" — genuinely empty, not suspicious
+  }
+
   // Layer 4 — volume sanity. Triggered only when caller passes a threshold;
   // a generic zero-results on a long-tail query is not suspicious by itself.
   if (itemsExtracted != null && expectedMinItems > 0 && itemsExtracted < expectedMinItems) {
@@ -260,20 +336,26 @@ export function detectAntiBotSignal(ctx = {}) {
     // listings page). Without finalUrl in the evidence, "0 items" can't tell
     // those apart, and a bug report shows a confusing "good on the site, 0 here."
     const where = finalUrl ? ` [finalUrl=${finalUrl}]` : '';
+    // A snippet of the page's visible text disambiguates the three reasons a page
+    // comes back with 0 items (genuine empty / model-picker / real drift) so the
+    // bug report is self-diagnosing. Genuine "0 results" pages are already caught
+    // by Layer 3.5 above, so the snippet here mostly clarifies picker-vs-drift.
+    const snippet = htmlTextSnippet(html);
+    const snippetEvidence = snippet ? ` · page text: "${snippet}"` : '';
     if (htmlLen < suspiciousBelow) {
       const vs = expectedBodySize > 0 ? ` (typical ~${Math.round(expectedBodySize)})` : '';
       return {
         code: 'suspicious-empty',
         severity: 'throttle',
-        evidence: `${label}returned ${itemsExtracted} items with only ${htmlLen} chars of body${vs}${where}`,
+        evidence: `${label}returned ${itemsExtracted} items with only ${htmlLen} chars of body${vs}${where}${snippetEvidence}`,
         suggestion: 'Response was suspiciously small AND empty of items. Most likely a soft block; retry with a fresh profile.',
       };
     }
     return {
       code: 'zero-extracted',
       severity: 'throttle',
-      evidence: `${label}extractor produced ${itemsExtracted} items (expected ≥ ${expectedMinItems}) from ${htmlLen} chars of body${where}`,
-      suggestion: 'Extractor produced fewer items than expected. The body is NOT tiny, so this is not a hard block — check finalUrl: if it is not the expected results page, the scraper landed on a picker/disambiguation/login/interstitial page (wrong URL), not stale selectors. If it IS the right page, the layout changed.',
+      evidence: `${label}extractor produced ${itemsExtracted} items (expected ≥ ${expectedMinItems}) from ${htmlLen} chars of body${where}${snippetEvidence}`,
+      suggestion: 'Extractor produced fewer items than expected. The body is NOT tiny, so this is not a hard block — check finalUrl + the page-text snippet: if it shows model tiles/disambiguation the scraper landed on a picker page (wrong URL); if it shows real listings the selectors drifted; if it states "0 results" it is genuinely empty (should have been caught upstream).',
     };
   }
 

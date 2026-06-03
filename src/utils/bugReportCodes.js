@@ -53,9 +53,9 @@ export const CODE_DEFINITIONS = {
 
   UI: {
     label: 'UI Interactions',
-    description: 'Node add, remove, move, resize, and edge events',
+    description: 'Confirm dialogs, node add, remove, move, resize, and edge events',
     logFilter: line =>
-      /node added|node removed|node moved|node resized|edge added|edge removed|node removal BLOCKED/i.test(line),
+      /node added|node removed|node moved|node resized|edge added|edge removed|node removal BLOCKED|ConfirmDialog/i.test(line),
   },
 
   PASTE: {

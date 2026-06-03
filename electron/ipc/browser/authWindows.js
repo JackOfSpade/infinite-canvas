@@ -1,7 +1,7 @@
 import { logger } from '../../logger.js';
-import puppeteer from 'puppeteer-extra';
-import { getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath } from '../stealthBrowser.js';
+import { getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath, launchWithProfileLockRetry } from '../stealthBrowser.js';
 import { READINESS } from '../scrapeBudget.js';
+import { matchesNoResultsSentinel } from '../antiBotDetector.js';
 import { execFile as execFileCb, spawn } from 'child_process';
 import fs from 'fs';
 import { promisify } from 'util';
@@ -295,7 +295,7 @@ export async function openLoginWindow(platformId, sender = null) {
   // puppeteer and return a blank page. --disable-blink-features=AutomationControlled
   // already removes navigator.webdriver; stripping --enable-automation makes the
   // login window indistinguishable from a regular Chrome session.
-  const loginBrowser = await puppeteer.launch({
+  const loginBrowser = await launchWithProfileLockRetry({
     headless: false,
     executablePath,
     userDataDir: await getUserDataDir(),
@@ -310,7 +310,7 @@ export async function openLoginWindow(platformId, sender = null) {
     ],
     defaultViewport: null,
     ignoreHTTPSErrors: true,
-  });
+  }, 'login-window', url);
 
   const pages = await loginBrowser.pages();
   const page = pages[0] || await loginBrowser.newPage();
@@ -711,7 +711,13 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
  */
 async function launchVisibleWindow(label, url, launchOpts) {
   const LAUNCH_TIMEOUT_MS = 30000;
-  const launchP = puppeteer.launch(launchOpts);
+  // launchWithProfileLockRetry transparently rides out a shared-profile lock
+  // collision (e.g. another captcha-resolve window still owns the userDataDir
+  // for its grace/solve window) by waiting + retrying, instead of failing with
+  // the cryptic "Opening in existing browser session" that forced the user to
+  // click Solve a second time. Its ~11s retry budget fits inside LAUNCH_TIMEOUT_MS.
+  const context = label === 'Captcha-resolve window' ? 'captcha-resolve-window' : 'visible-window';
+  const launchP = launchWithProfileLockRetry(launchOpts, context, url);
   let timer = null;
   let timedOut = false;
   // If the launch resolves AFTER we've given up, close the orphan so a slow
@@ -996,8 +1002,12 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
               consentVisible = true; break;
             }
           }
-          const textLength = (document.body?.innerText || '').length;
-          return { hits, textLength, consentVisible };
+          const innerText = document.body?.innerText || '';
+          // bodyText (bounded) lets the poll loop test a definitive "0 results"
+          // empty-state sentinel — a genuinely-empty page (e.g. Swappa for a
+          // non-electronics query) has nothing for the user to clear, so we
+          // conclude immediately instead of holding the full empty grace.
+          return { hits, textLength: innerText.length, consentVisible, bodyText: innerText.slice(0, 20000) };
         }, CHALLENGE_SELECTORS, CONSENT_SELECTOR_STRING).catch(() => null);
 
         if (!probe) return;
@@ -1122,6 +1132,20 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
               // post-dismiss rendering is measured fresh.
               emptySince = null;
               antiBotClearedAt = null;
+            } else if (matchesNoResultsSentinel(probe.bodyText)) {
+              // 0 items, no challenge, no consent wall, AND the page shows the
+              // site's OWN definitive "0 results" empty-state (e.g. Swappa "No
+              // products match this criteria" — Swappa sells only electronics, so
+              // a guitar query is genuinely empty). There is nothing for the user
+              // to clear, so conclude immediately rather than holding the full 30s
+              // human-scale grace (the "stuck on Swappa" report). The anti-bot
+              // detector now suppresses the Solve button for this case upstream, so
+              // this window normally won't even open — this is defense-in-depth for
+              // any resolve window that lands on a genuinely-empty page.
+              extractOutcome = 'matched 0 (no-results sentinel)';
+              logger.info(`[StealthBrowser] ${currentHost} shows a definitive "0 results" empty-state — concluding empty immediately (no captcha/consent, no grace wait)`);
+              await finishCleared(items, 'empty-noresults'); // items === []
+              return;
             } else {
               // 0 items and no overlay we recognize — but the user may still be
               // clearing one we don't (Swappa's cookie panel slipped past the

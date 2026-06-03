@@ -7,6 +7,7 @@ import os from 'os';
 import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
 import { getAISettings, resolveServiceAccountPath } from './settings.js';
 import { getSellMonitorPlatforms, getJobLoginPlatforms, getStealthBrowserInfo } from './stealthBrowser.js';
+import { getLaunchCollisions } from './browserLaunchTelemetry.js';
 import { getStatusCacheSync, getVerifyTimingSummary } from './accounts.js';
 import { getRecentLogs } from '../logger.js';
 import { getGeminiTelemetry } from './gemini.js';
@@ -1121,6 +1122,28 @@ ${rows}
         const sbAge = sb.launchedAt ? `${Math.round((Date.now() - sb.launchedAt) / 1000)}s ago` : '—';
         stealthLine = `\n- Scrape/stealth browser: ${sb.connected ? `🟢 alive (generation #${sb.generation}, launched ${sbAge}) — holds the shared userDataDir; a window stuck \`launching\` above points at a profile-lock conflict` : '⚪ not running (profile lock free)'}\n`;
       } catch { /* ignore */ }
+      // Shared-profile launch collisions — PERSISTED across the log ring buffer.
+      // A collision = a Chrome launch that failed because another window/scrape
+      // already held the shared userDataDir lock (captcha-resolve window racing a
+      // headless rescrape, or two overlapping windows). These otherwise live only
+      // in Recent Logs, which scrolls away in a long run. `recovered` ones retried
+      // automatically (no user action); un-recovered ones surfaced an error and
+      // likely forced a manual re-Solve / re-click.
+      let launchCollisionLine = '';
+      try {
+        const lc = getLaunchCollisions?.() || { total: 0, recovered: 0, events: [] };
+        if (lc.total > 0) {
+          const last = lc.events[lc.events.length - 1];
+          let lastBit = '';
+          if (last) {
+            let host = '';
+            try { host = last.url ? ` ${new URL(last.url).host}` : ''; } catch { /* non-URL */ }
+            const ago = last.ts ? `, ${Math.round((Date.now() - last.ts) / 1000)}s ago` : '';
+            lastBit = ` Last: \`${last.context}\`${host} — ${last.recovered ? `auto-recovered after ${last.attempts} attempt(s)` : `NOT recovered (${last.attempts} attempt(s))`}${ago}.`;
+          }
+          launchCollisionLine = `\n- ⚠️ Shared-profile launch collisions: **${lc.total}** total, ${lc.recovered} auto-recovered. A Chrome launch hit the userDataDir lock held by another window/scrape (captcha-resolve window racing a headless rescrape, or overlapping windows).${lastBit} Recovered ones retried silently; un-recovered ones forced a manual re-Solve/re-click.\n`;
+        }
+      } catch { /* ignore */ }
       authWindowMarkdown = `
 ## Auth Window Diagnostics
 > Snapshot of visible login/captcha windows. \`mode=native-chrome\` means the
@@ -1136,7 +1159,7 @@ ${rows}
 | State | Platform | Mode | Current/Login URL | Title | Result | Updated |
 |---|---|---|---|---|---|---|
 ${rows}
-${stealthLine}${argsSection}${resolveDiagSection}`;
+${stealthLine}${launchCollisionLine}${argsSection}${resolveDiagSection}`;
     }
   } catch { /* never break the report on diagnostic failure */ }
 
