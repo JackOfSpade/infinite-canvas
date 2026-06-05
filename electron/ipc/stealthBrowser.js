@@ -766,11 +766,59 @@ async function _browserRefreshDiceApiKey() {
 //   completed login but don't have a seller subscription. The verify URL
 //   is a universal account/profile page that any logged-in user can reach.
 const SELL_MONITOR_PLATFORMS = {
-  ebay:      { name: 'eBay',       sellerUrl: 'https://www.ebay.com/sh/lst/active',                 verifyUrl: 'https://www.ebay.com/mye/myebay/summary' },
-  poshmark:  { name: 'Poshmark',   sellerUrl: 'https://poshmark.com/closet',                         verifyUrl: 'https://poshmark.com/feed' },
-  mercari:   { name: 'Mercari',    sellerUrl: 'https://www.mercari.com/mypage/listings/',            verifyUrl: 'https://www.mercari.com/mypage/' },
-  swappa:    { name: 'Swappa',     sellerUrl: 'https://swappa.com/user/listings',                    verifyUrl: 'https://swappa.com/my/swappa' },
-  facebook:  { name: 'Facebook',   sellerUrl: 'https://www.facebook.com/marketplace/you/selling',    verifyUrl: 'https://www.facebook.com/me' },
+  ebay:      {
+    name: 'eBay',
+    sellerUrl: 'https://www.ebay.com/sh/lst/active',
+    verifyUrl: 'https://www.ebay.com/mye/myebay/summary',
+    connectedFinalUrlMustContain: 'ebay.com/mye/myebay/summary',
+  },
+  poshmark:  {
+    name: 'Poshmark',
+    sellerUrl: 'https://poshmark.com/closet',
+    verifyUrl: 'https://poshmark.com/feed',
+    connectedFinalUrlMustContain: 'poshmark.com/feed',
+    bodySignals: [
+      'log in to poshmark',
+      'login - poshmark',
+      'sign up to buy and sell',
+    ],
+    bodyScanChars: 1200,
+  },
+  mercari:   {
+    name: 'Mercari',
+    sellerUrl: 'https://www.mercari.com/mypage/listings/',
+    verifyUrl: 'https://www.mercari.com/mypage/listings/',
+    connectedFinalUrlMustContain: 'mercari.com/mypage',
+    bodySignals: [
+      'log in to mercari',
+      'sign up for mercari',
+      'email address password log in',
+    ],
+    bodyScanChars: 2000,
+  },
+  swappa:    {
+    name: 'Swappa',
+    sellerUrl: 'https://swappa.com/user/listings',
+    verifyUrl: 'https://swappa.com/my/swappa',
+    connectedFinalUrlMustContain: 'swappa.com/my/swappa',
+    bodySignals: [
+      'log in to swappa',
+      'login to swappa',
+      'sign in to swappa',
+    ],
+    bodyScanChars: 1200,
+  },
+  facebook:  {
+    name: 'Facebook',
+    sellerUrl: 'https://www.facebook.com/marketplace/you/selling',
+    verifyUrl: 'https://www.facebook.com/me',
+    bodySignals: [
+      'log into facebook',
+      'email or mobile number password',
+      'forgot password? create new account',
+    ],
+    bodyScanChars: 1200,
+  },
 };
 
 /**

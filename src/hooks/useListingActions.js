@@ -68,6 +68,10 @@ export function useListingActions(id, data) {
     setEditing(null);
   }, [id, product, updateNodeData]);
 
+  const handlePricingNotesChange = useCallback((value) => {
+    updateNodeData(id, { pricingNotes: String(value || '').slice(0, 2000) });
+  }, [id, updateNodeData]);
+
   // ── Price input ────────────────────────────────────────────────────────────
 
   const handlePriceChange = useCallback((value) => {
@@ -188,6 +192,7 @@ export function useListingActions(id, data) {
         color: product.color,
         title: product.generated_title,
       },
+      pricingNotes: data.pricingNotes || '',
       comps,
     });
     if (!result.success) {
@@ -199,7 +204,7 @@ export function useListingActions(id, data) {
       setPriceInput(result.pricing.recommended_price);
     }
     return result;
-  }, [buildSearchQuery, product.condition, product.model, product.color, product.generated_title, id]);
+  }, [buildSearchQuery, product.condition, product.model, product.color, product.generated_title, data.pricingNotes, id]);
 
   // ── Justification toggle ───────────────────────────────────────────────────
 
@@ -220,6 +225,7 @@ export function useListingActions(id, data) {
 
     // Handlers
     handleFieldEdit,
+    handlePricingNotesChange,
     handlePriceChange,
     handleQuickPrice,
     handleCopyListing,

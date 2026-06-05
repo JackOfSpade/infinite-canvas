@@ -9,17 +9,14 @@ const DEFAULT_FIELDS = { status: 'status', message: 'statusMessage', lastChecked
  * MarketplaceCardNode (the transient-card overhaul removed job-card monitoring,
  * so JobCardNode no longer uses this).
  *
- * Always defers the "is there anything to check" decision to the backend.
- * Per-platform watch URLs (configured in Settings) live in the main process
- * and are merged into the URL list there, so a renderer-side short-circuit
- * on empty `url`/`watchUrls` would false-positive when only per-platform
- * URLs are configured. The backend returns a structured 'error' status with
- * "No URLs to check..." when truly nothing is available, which the hook
- * writes through to node data the same as any other error.
+ * A listing URL is required. Watch URLs are supplemental context for that
+ * listing, not an identity source for a blank card. Per-platform watch URLs
+ * (configured in Settings) live in the main process and are merged into the
+ * URL list there after the backend validates the listing URL.
  *
  * @param {object} opts
  * @param {string} opts.id — node id (target of updateNode)
- * @param {string} opts.url — listing URL (may be empty if watchUrls or per-platform URLs cover it)
+ * @param {string} opts.url — listing URL
  * @param {string} opts.platformId — provider tag (drives per-platform watch URL lookup + auth routing)
  * @param {string[]} [opts.watchUrls] — extra URLs to scan (notification feed, dashboard) for this listing
  * @param {string} [opts.productTitle] — fallback identifier when the URL has no recognizable item id

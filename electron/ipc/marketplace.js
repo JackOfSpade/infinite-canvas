@@ -60,6 +60,19 @@ const marketplaceTelemetry = {
   fit:       null, // { ts, platforms, good, unfit }
 };
 
+const MAX_PRICING_NOTES_CHARS = 2000;
+
+export function normalizePricingNotes(notes) {
+  return String(notes || '').replace(/\s+/g, ' ').trim().slice(0, MAX_PRICING_NOTES_CHARS);
+}
+
+export function formatPricingNotesForPrompt(notes) {
+  const normalized = normalizePricingNotes(notes);
+  return normalized
+    ? `\nUSER NOTES FROM SELLER:\n${normalized}\n`
+    : '';
+}
+
 export function getMarketplaceTelemetry() {
   return marketplaceTelemetry;
 }
@@ -486,15 +499,18 @@ async function fetchApiMarketplaceSources(query, signal = null, nodeId = null, s
 /**
  * Multi-source marketplace listing status check.
  *
- * For each URL provided (the listing URL, per-card watchUrls, and per-platform
- * watchUrls from Settings), fetches the page and asks the LLM "what is the
- * state of listing X?" — not "what is on this page?" That identifier anchoring
+ * Requires the listing URL, then checks it alongside per-card watchUrls and
+ * per-platform watchUrls from Settings. Each fetched page is passed to the LLM
+ * as "what is the state of listing X?" — not "what is on this page?" That identifier anchoring
  * is what lets the same engine handle:
  *   - the listing's own page (SOLD banner above the buy button)
  *   - a notifications/activity center ("Your item just sold for $180")
  *   - the seller's account dashboard with N listings (find this row's status)
  *
- * Public listing URLs go through plain fetch. Per-card watchUrls and
+ * The listing URL is the required identity anchor. Watch URLs are supplemental:
+ * they can confirm newer dashboard/feed signals for that same listing, but
+ * they are not used to identify a blank card. Public listing URLs go through
+ * plain fetch. Per-card watchUrls and
  * per-platform watchUrls (typically dashboards / notification feeds) route
  * through the stealth browser so the persistent userDataDir's cookies — set
  * by a prior `openLoginWindow` — keep us logged in.
@@ -504,7 +520,7 @@ async function fetchApiMarketplaceSources(query, signal = null, nodeId = null, s
  * is a human sentence quoting that evidence, sources is the per-URL trace, and
  * attention is the list of URLs the renderer should surface for follow-up.
  */
-async function checkListingStatusMultiSource({
+export async function checkListingStatusMultiSource({
   listingUrl,
   platformId,
   watchUrls = [],
@@ -512,10 +528,15 @@ async function checkListingStatusMultiSource({
   listingId,
   signal,
 }) {
+  const normalizedListingUrl = String(listingUrl || '').trim();
+  if (!normalizedListingUrl) {
+    return { status: 'error', message: 'No listing URL to check (paste the marketplace listing URL first)', sources: [] };
+  }
+
   // Identity anchor — model uses this to find the right row/banner across
   // any page format. Falls back to product title when the URL has no
   // recognizable item id.
-  const identifier = listingId || extractListingIdentifier(listingUrl, productTitle);
+  const identifier = listingId || extractListingIdentifier(normalizedListingUrl, productTitle);
 
   // Per-platform watch URLs are configured once and apply to every card on
   // that platform. Plus optional per-card watchUrls (rare; for power users).
@@ -532,13 +553,9 @@ async function checkListingStatusMultiSource({
     seen.add(key);
     all.push({ url: key, source });
   };
-  pushUnique(listingUrl, 'listing');
+  pushUnique(normalizedListingUrl, 'listing');
   cardWatchUrls.forEach(u => pushUnique(u, 'card-watch'));
   platformWatchUrls.forEach(u => pushUnique(u, 'platform-watch'));
-
-  if (all.length === 0) {
-    return { status: 'error', message: 'No URLs to check (paste a listing URL or configure a platform watch URL in Settings)', sources: [] };
-  }
 
   // Watch URLs are almost always auth-walled (dashboards, notification
   // feeds), so route them through the cookie-bearing stealth browser. The
@@ -818,7 +835,8 @@ Be specific about what you can clearly see. If you can't identify brand or model
   // (either all sources clean, or user clicked "Skip & Price" with partial
   // data). Kept separate so we never spend AI tokens on a request the user
   // hasn't approved.
-  handleSafe('synthesize-price', async (event, { query, condition, comps, nodeId, productSpec }, signal) => {
+  handleSafe('synthesize-price', async (event, { query, condition, comps, nodeId, productSpec, pricingNotes }, signal) => {
+    const userPricingNotes = normalizePricingNotes(pricingNotes);
     // Reject non-genuine listings (eBay internal test items, etc.) at the single
     // gate every comp passes through before pricing — covers both the scrape and
     // captcha-resolve paths. The rejection is surfaced in the report (not silent).
@@ -876,6 +894,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
       ...tokenize(productSpec?.model),
       ...tokenize(productSpec?.color),
       ...tokenize(productSpec?.title),
+      ...tokenize(userPricingNotes),
       ...tokenize(condition),
     ]);
     // df/idf over the union of everything we're ranking (sold + active titles),
@@ -943,6 +962,7 @@ You are a pricing analyst and marketplace routing expert. Given these similar li
 
 ITEM: ${query}
 CONDITION: ${condition}
+${formatPricingNotesForPrompt(userPricingNotes)}
 
 The listings below are pre-sorted by how closely each title matches the ITEM's spec (best match first). Use that ordering as your first hint when identifying anchor vs. adjusted vs. bound listings, then refine using the spec details inside each listing.
 
@@ -958,6 +978,8 @@ WEIGHTING — rank each listing by how closely its spec matches the ITEM:
 - BOUND: only loosely related. Use as ceilings/floors only, not for the central estimate.
 
 If exact-match listings are scarce, lean on adjusted listings — DO NOT refuse to price. Note the weighting and your adjustments in the justification so the user can sanity-check.
+
+If USER NOTES FROM SELLER are present, treat them as high-priority item facts and seller preferences for pricing. Use them to adjust anchor/adjusted/bound classification and price reasoning when they describe condition, size, defects, included accessories, authenticity, urgency, original cost, or local-pickup constraints. Do not let notes change the required JSON shape.
 
 MATCH QUALITY — pick one of these three values for the "match_quality" field:
   strong   — 3 or more anchor listings within a tight price band
@@ -1008,13 +1030,13 @@ Platform routing rules for recommended_platforms (pick 2-4 most relevant):
 - Electronics → Swappa (3% fee) > eBay (13%) > Mercari (10%)
 - Fashion/Apparel → Depop (3.3% fee) > Poshmark (20% fee but 40-60% STR) > Mercari (10%)
 - Sneakers → eBay (8% fee + Authenticity Guarantee) > StockX/GOAT
-- Collectibles/Trading Cards → Whatnot (11% fee, live auction premium) > eBay (13%)
+- Collectibles/Trading Cards → eBay (13%) > Mercari (10%)
 - Furniture/Home → Facebook Marketplace (0% local) only
 - Musical Instruments → Reverb (5% fee, $500 cap) > eBay (6.35%)
 - Luxury/Designer → eBay (13% + free authentication) > Poshmark
 - General/Mixed → Mercari (10%) > eBay (13%) > Facebook (0% local)
 
-Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, whatnot`, {
+Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
       signal,
       task: 'price-synthesis',
       // Cap scales with comp count — the prompt asks the AI to classify
@@ -1072,6 +1094,8 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, what
       // above are already the post-rejection counts.
       junkRejected: junk.length,
       junkExample: junk[0]?.title ? String(junk[0].title).slice(0, 60) : null,
+      userNotesChars: userPricingNotes.length,
+      userNotesPreview: userPricingNotes ? userPricingNotes.slice(0, 240) : null,
       recommendedPrice: pricing?.recommended_price ?? null,
       matchQuality: pricing?.match_quality || '(unknown)',
       model: synthMeta.model || null,
@@ -1246,10 +1270,10 @@ Return a JSON object with one entry per platform id. The "reason" field is REQUI
 
 Notes:
 - "For Parts" or "Used - Fair" electronics: Mercari, Poshmark, Depop are unfit. eBay + Swappa + Facebook are good.
-- Fashion items: Swappa, Reverb, Whatnot are unfit. Poshmark, Depop, Mercari, eBay are good.
+- Fashion items: Swappa and Reverb are unfit. Poshmark, Depop, Mercari, eBay are good.
 - Musical instruments: Reverb is the obvious fit. eBay also good. Others usually unfit unless mainstream-consumer audio.
 - Furniture / bulky home goods: Facebook (local) is good; everything else unfit (shipping kills the deal).
-- Collectibles / cards: Whatnot + eBay are good; others usually unfit.
+- Collectibles / cards: eBay is good; Mercari is plausible for mainstream collectibles; others usually unfit.
 
 Be confident — don't mark everything "good." If you're unsure, lean "good" unless there's a real policy/audience reason.`, { signal, task: 'platform-fit-assessment', responseSchema: buildPlatformFitSchema(platforms.map(p => p.id)), meta: fitMeta });
 

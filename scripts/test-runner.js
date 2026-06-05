@@ -35,7 +35,7 @@ import {
 import { detectAntiBotSignal, matchesNoResultsSentinel } from '../electron/ipc/antiBotDetector.js';
 import { getStats } from '../src/utils/dashboardStats.js';
 import { resolveNodePresence } from '../src/utils/nodePresence.js';
-import { getNodesBounds } from '../src/utils/constants.js';
+import { getNodesBounds, SELL_PLATFORMS } from '../src/utils/constants.js';
 import { mergeSourceIntoComps } from '../src/utils/compsMerge.js';
 import { mergeResolvedSourceItems } from '../src/utils/jobSourceResolveMerge.js';
 import {
@@ -79,20 +79,26 @@ import { compsForPricing, priceSynthesisMaxTokens, jobScoringBatchSize, JOB_MAX_
 import { modelMeta, contextWindowForModel, maxOutputForModel, estimateTokensFromChars, assessPromptFit, planSplits, LOCAL_CHARS_PER_TOKEN } from '../electron/ipc/tokenWindow.js';
 import { parseGeminiJSON } from '../electron/ipc/gemini.js';
 import { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
+import { getSoftLoginWallMatch } from '../electron/ipc/accounts.js';
+import { getSellMonitorConfig } from '../electron/ipc/stealthBrowser.js';
 import os from 'node:os';
 import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
 import { modelTag, overPricedSoldFlag } from '../electron/ipc/bugReport/helpers.js';
-import { classifyCompScrapeFailure, computeMissingLogins } from '../electron/ipc/marketplace.js';
-import { isAuthChallengeUrl, PLATFORM_AUTH_COOKIES } from '../electron/ipc/browser/authWindows.js';
+import { checkListingStatusMultiSource, classifyCompScrapeFailure, computeMissingLogins, formatPricingNotesForPrompt, normalizePricingNotes } from '../electron/ipc/marketplace.js';
+import { aggregateStrongest } from '../electron/ipc/listingStatusCheck.js';
+import { isAuthChallengeUrl, PLATFORM_AUTH_COOKIES, PLATFORM_LOGIN_URLS } from '../electron/ipc/browser/authWindows.js';
+import { PRICE_SYNTHESIS_SCHEMA } from '../electron/ipc/aiSchemas.js';
 import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation } from '../src/utils/jobLocation.js';
 import { detectLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
 import { repairMojibake, hasMojibake, repairJobsMojibake } from '../src/utils/textEncoding.js';
 import { foldVerificationSample, orderByVerification, verificationScore } from '../src/utils/scrapeOrder.js';
-import { canHubAcceptInitialDrop, getHubDropRejectLabel } from '../src/utils/hubDropEligibility.js';
+import { canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, getHubDropRejectLabel, getHubFileDropMode } from '../src/utils/hubDropEligibility.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
 import { createJobSearchTestMode, parseJobSearchEnvBoolean } from '../src/utils/jobSourceScope.js';
 import { createMarketplaceTestMode, parseMarketplaceEnvBoolean, getScopedCompSourceIds, isCompSourceEnabledInScope, normalizeCompWarnings } from '../src/utils/compSourceScope.js';
 import { getJobAuthPreflightSourceIds, JOB_AUTH_PREFLIGHT_SOURCE_IDS } from '../src/utils/jobAuthPreflight.js';
+import { getMarketplaceStatusLabel } from '../src/components/monitorStatusLabels.js';
+import { appendPhotoFiles, appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../src/utils/photoPathList.js';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -583,13 +589,20 @@ const tests = [
       assert(canHubAcceptInitialDrop({ type: 'sellhub', data: { hubState: 'empty' } }), 'Hub drop eligibility: empty sellhub accepts initial photos');
       assert(!canHubAcceptInitialDrop({ type: 'sellhub', data: { hubState: 'empty', imagePaths: ['/tmp/a.jpg'] } }), 'Hub drop eligibility: sellhub with photos rejects later drops');
       assert(!canHubAcceptInitialDrop({ type: 'sellhub', data: { hubState: 'priced', product: { title: 'x' } } }), 'Hub drop eligibility: priced sellhub rejects later drops');
+      assert(canSellHubAcceptDisplayPhotoDrop({ type: 'sellhub', data: { hubState: 'priced', product: { title: 'x' } } }), 'Hub drop eligibility: priced sellhub accepts display-photo drops');
+      assert(!canSellHubAcceptDisplayPhotoDrop({ type: 'sellhub', data: { hubState: 'priced', locked: true } }), 'Hub drop eligibility: locked priced sellhub rejects display-photo drops');
+      assert(getHubFileDropMode({ type: 'sellhub', data: { hubState: 'empty' } }) === 'initial-input', 'Hub drop eligibility: empty sellhub routes file drops as initial input');
+      assert(getHubFileDropMode({ type: 'sellhub', data: { hubState: 'priced', product: { title: 'x' } } }) === 'display-photos', 'Hub drop eligibility: priced sellhub routes file drops as display photos');
+      assert(getHubFileDropMode({ type: 'sellhub', data: { hubState: 'priced', locked: true } }) === null, 'Hub drop eligibility: locked priced sellhub does not route file drops');
       assert(getHubDropRejectLabel({ type: 'sellhub', data: { hubState: 'analyzing' } }) === 'Busy', 'Hub drop eligibility: active sellhub reports busy');
 
       assert(canHubAcceptInitialDrop({ type: 'jobhub', data: { hubState: 'empty' } }), 'Hub drop eligibility: empty jobhub accepts initial career files');
       assert(!canHubAcceptInitialDrop({ type: 'jobhub', data: { hubState: 'empty', inputLocked: true } }), 'Hub drop eligibility: jobhub preflight lock rejects a second drop');
       assert(!canHubAcceptInitialDrop({ type: 'jobhub', data: { hubState: 'done', resumeProfile: { skills: [] } } }), 'Hub drop eligibility: completed jobhub rejects later drops');
+      assert(getHubFileDropMode({ type: 'jobhub', data: { hubState: 'empty' } }) === 'initial-input', 'Hub drop eligibility: empty jobhub routes file drops as initial input');
+      assert(getHubFileDropMode({ type: 'jobhub', data: { hubState: 'done', resumeProfile: { skills: [] } } }) === null, 'Hub drop eligibility: completed jobhub does not route file drops');
       assert(getHubDropRejectLabel({ type: 'jobhub', data: { hubState: 'searching' } }) === 'Busy', 'Hub drop eligibility: active jobhub reports busy');
-      return { checked: 8 };
+      return { checked: 15 };
     },
   },
   {
@@ -646,6 +659,20 @@ const tests = [
       assert(getFileCategoryInfo('report.pdf').label === 'PDF Document', 'File display helpers: PDF label mismatch');
       assert(getFileCategoryInfo('unknown').badge === 'FILE', 'File display helpers: extensionless badge mismatch');
       return { image: getFileCategoryInfo('photo.HEIC').label };
+    },
+  },
+  {
+    name: 'SellHub display photo path edits',
+    run: () => {
+      const original = ['/tmp/a.jpg', '  /tmp/b.jpg  ', '/tmp/a.jpg', '', null];
+      assert(JSON.stringify(normalizePhotoPathList(original)) === JSON.stringify(['/tmp/a.jpg', '/tmp/b.jpg']), 'photo paths should normalize, trim, and dedupe');
+      assert(JSON.stringify(removePhotoPathAt(original, 0)) === JSON.stringify(['/tmp/b.jpg']), 'remove should use visible normalized index');
+      assert(JSON.stringify(removePhotoPathAt(original, 99)) === JSON.stringify(['/tmp/a.jpg', '/tmp/b.jpg']), 'out-of-range remove should be a no-op');
+      assert(JSON.stringify(appendPhotoPaths(original, ['/tmp/c.jpg', '/tmp/b.jpg'])) === JSON.stringify(['/tmp/a.jpg', '/tmp/b.jpg', '/tmp/c.jpg']), 'append should add replacements without duplicates');
+      const displayDrop = appendPhotoFiles(['/tmp/a.jpg'], [{ filePath: '/tmp/a.jpg' }, { filePath: '/tmp/c.jpg' }, { path: '/tmp/d.jpg' }]);
+      assert(JSON.stringify(displayDrop.imagePaths) === JSON.stringify(['/tmp/a.jpg', '/tmp/c.jpg', '/tmp/d.jpg']), 'display photo file append should accept canvas-node filePath and file path payloads');
+      assert(displayDrop.accepted === 3 && displayDrop.added === 2, `display photo file append should report accepted/added counts -> ${JSON.stringify(displayDrop)}`);
+      return { ok: true };
     },
   },
   {
@@ -2066,6 +2093,101 @@ const tests = [
       assert(eqSet(full, ['ebay', 'poshmark']), `full run missing → ebay,poshmark (deduped, mercari ok, pricecharting no-login) → ${full}`);
       // A no-login-platform source (pricecharting) never imposes a requirement.
       assert(computeMissingLogins([{ id: 'pricecharting' }], {}).length === 0, 'pricecharting → no login requirement');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'settings auth verifier: soft login walls for marketplace platforms',
+    run: () => {
+      const facebookLoggedOut = 'Facebook Explore the things you love . Log into Facebook Email or mobile number Password Log in Forgot password? Create new account';
+      assert(getSoftLoginWallMatch(facebookLoggedOut, getSellMonitorConfig('facebook')) === 'log into facebook',
+        'facebook login page body must not cache connected:true');
+
+      const poshmarkLoggedOut = 'Poshmark Login - Poshmark Log in to Poshmark Email Username Password';
+      assert(getSoftLoginWallMatch(poshmarkLoggedOut, getSellMonitorConfig('poshmark')) === 'log in to poshmark',
+        'poshmark login body must be detected');
+
+      const mercariLoggedOut = 'Mercari Log in to Mercari Email address Password Log in Forgot password Sign up for Mercari';
+      assert(getSoftLoginWallMatch(mercariLoggedOut, getSellMonitorConfig('mercari')) === 'log in to mercari',
+        'mercari login body must be detected');
+
+      const swappaLoggedOut = 'Swappa Log in to Swappa Email Password Sign in to Swappa';
+      assert(getSoftLoginWallMatch(swappaLoggedOut, getSellMonitorConfig('swappa')) === 'log in to swappa',
+        'swappa login body must be detected');
+
+      const swappaLoggedIn = 'My Swappa - Swappa Find a good deal Search Swappa Loading search results Apple iPhone iPad';
+      assert(getSoftLoginWallMatch(swappaLoggedIn, getSellMonitorConfig('swappa')) === null,
+        'logged-in swappa trace should not false-positive as logged out');
+
+      for (const id of ['ebay', 'poshmark', 'mercari', 'swappa']) {
+        assert(!!getSellMonitorConfig(id)?.connectedFinalUrlMustContain, `${id} should have a final URL guard`);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'marketplace status badge label: unchecked vs checked unknown',
+    run: () => {
+      assert(getMarketplaceStatusLabel('unknown', null) === 'Not checked', 'unknown without timestamp means not checked');
+      assert(getMarketplaceStatusLabel('unknown', '2026-06-03T19:39:47.686Z') === 'Unknown', 'unknown with timestamp means checked but inconclusive');
+      assert(getMarketplaceStatusLabel('needs-login', '2026-06-03T19:39:47.686Z') === 'Needs login', 'needs-login label remains explicit');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'pricing notes: normalize and format for price synthesis prompt',
+    run: () => {
+      const notes = '  8x10 rug\n\nsmall coffee stain, pet home.  ';
+      const normalized = normalizePricingNotes(notes);
+      const promptBlock = formatPricingNotesForPrompt(notes);
+      assert(normalized === '8x10 rug small coffee stain, pet home.', `pricing notes normalize whitespace → ${normalized}`);
+      assert(promptBlock.includes('USER NOTES FROM SELLER') && promptBlock.includes(normalized), `pricing notes prompt block includes notes → ${promptBlock}`);
+      assert(formatPricingNotesForPrompt('   ') === '', 'blank pricing notes do not add a prompt section');
+      const long = normalizePricingNotes('x'.repeat(2100));
+      assert(long.length === 2000, `pricing notes cap at 2000 chars, got ${long.length}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'listing status: aggregate never returns a blank diagnostic',
+    run: () => {
+      const fallback = aggregateStrongest([
+        { url: 'https://www.ebay.com/itm/236855303972', urlLabel: 'listing', status: 'unknown', message: '' },
+      ]);
+      assert(fallback.status === 'unknown', `fallback status remains unknown, got ${fallback.status}`);
+      assert(/No clear status signal/i.test(fallback.message), `blank unknown gets fallback message -> ${fallback.message}`);
+
+      const preferred = aggregateStrongest([
+        { url: 'https://www.ebay.com/itm/236855303972', urlLabel: 'listing', status: 'unknown', message: '   ' },
+        { url: 'https://www.ebay.com/sh/lst/active', urlLabel: 'platform watch', status: 'unknown', message: '[platform watch] Identifier was not present on this page.' },
+      ]);
+      assert(preferred.message.includes('Identifier was not present'), `same-rank result with message is preferred -> ${preferred.message}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'listing status: listing URL is required before watch URLs are scanned',
+    run: async () => {
+      const result = await checkListingStatusMultiSource({
+        listingUrl: '',
+        platformId: 'ebay',
+        watchUrls: ['https://www.ebay.com/sh/lst/active'],
+        productTitle: 'Apple iPhone 14 Pro',
+      });
+      assert(result.status === 'error', `blank listing URL should fail before scraping, got ${result.status}`);
+      assert(/No listing URL/i.test(result.message), `message should ask for listing URL -> ${result.message}`);
+      assert(Array.isArray(result.sources) && result.sources.length === 0, 'blank listing URL should not scan watch URLs');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'marketplace platform support excludes Whatnot',
+    run: () => {
+      const sellIds = SELL_PLATFORMS.map(p => p.id);
+      const schemaIds = PRICE_SYNTHESIS_SCHEMA.properties.recommended_platforms.items.properties.id.enum;
+      assert(!sellIds.includes('whatnot'), `SELL_PLATFORMS should not include whatnot -> ${sellIds}`);
+      assert(!schemaIds.includes('whatnot'), `recommended_platforms schema should not include whatnot -> ${schemaIds}`);
+      assert(!Object.prototype.hasOwnProperty.call(PLATFORM_LOGIN_URLS, 'whatnot'), 'auth login registry should not include whatnot');
       return { ok: true };
     },
   },

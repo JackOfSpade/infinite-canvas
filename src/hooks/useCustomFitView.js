@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { getNodesBounds } from '../utils/constants';
 import { strokePoints } from '../utils/geometry';
+import { EventLogger } from '../utils/EventLogger';
 
 export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingRef) {
   const { setViewport } = useReactFlow();
@@ -14,8 +15,10 @@ export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingR
   useEffect(() => { nodesRef.current = nodes; },    [nodes]);
   useEffect(() => { drawingsRef.current = drawings; }, [drawings]);
 
-  const customFitView = useCallback(() => {
+  const customFitView = useCallback((options = {}) => {
     if (isAnimatingRef?.current) return;
+    const duration = Number.isFinite(options?.duration) ? Math.max(0, options.duration) : 800;
+    const reason = options?.reason || 'manual';
     const currentNodes    = nodesRef.current;
     const currentDrawings = drawingsRef.current;
 
@@ -54,11 +57,13 @@ export function useCustomFitView(reactFlowWrapper, nodes, drawings, isAnimatingR
     const cx = (minX + maxX) / 2;
     const cy = (minY + maxY) / 2;
 
+    EventLogger.log(`fit-view reason=${reason} nodes=${visibleNodes.length} drawings=${currentDrawings.length} duration=${duration}ms zoom=${zoom.toFixed(3)}`);
+
     setViewport({
       x: containerWidth  / 2 - cx * zoom,
       y: containerHeight / 2 - cy * zoom,
       zoom
-    }, { duration: 800 });
+    }, { duration });
   }, [setViewport, reactFlowWrapper, isAnimatingRef]); // nodes/drawings read via refs — stable callback
 
   return customFitView;

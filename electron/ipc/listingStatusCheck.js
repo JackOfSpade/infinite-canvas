@@ -157,6 +157,48 @@ function normalizeStatus(raw) {
   return STATUS_ALIASES[s] || s;
 }
 
+function cleanMessage(raw) {
+  return String(raw || '').replace(/\s+/g, ' ').trim();
+}
+
+function sourceDescription(url, urlLabel) {
+  if (urlLabel) return `the ${urlLabel} page`;
+  return hostOf(url) || 'the page';
+}
+
+function fallbackStatusMessage({ status, listingIdentifier, matched, url, urlLabel } = {}) {
+  const source = sourceDescription(url, urlLabel);
+  const id = listingIdentifier ? `identifier '${listingIdentifier}'` : 'the listing identifier';
+  switch (status) {
+    case 'unknown':
+      if (matched === true) {
+        return `Found ${id} on ${source}, but no clear live/sold/ended signal was present.`;
+      }
+      if (matched === false) {
+        return `No clear status signal found; ${id} was not found on ${source}.`;
+      }
+      return `No clear status signal found for this listing on ${source}.`;
+    case 'live':
+      return `Status classified as live on ${source}, but no evidence sentence was returned.`;
+    case 'sold':
+      return `Status classified as sold on ${source}, but no evidence sentence was returned.`;
+    case 'ended':
+      return `Status classified as ended on ${source}, but no evidence sentence was returned.`;
+    case 'needs-login':
+      return `Page appears login-gated on ${source}, but no evidence sentence was returned.`;
+    case 'error':
+      return `Status check failed on ${source} without additional details.`;
+    default:
+      return `Status check returned no details for ${source}.`;
+  }
+}
+
+function formatClassificationMessage({ url, urlLabel, status, rawMessage, listingIdentifier, matched }) {
+  const source = urlLabel || hostOf(url);
+  const message = cleanMessage(rawMessage) || fallbackStatusMessage({ status, listingIdentifier, matched, url, urlLabel });
+  return source ? `[${source}] ${message}` : message;
+}
+
 // Open-ended channel for "things a seller would want to know that don't
 // change the state." Engagement signals, platform actions, deadlines, etc.
 // AI picks `category` from this fixed list so the card UI can pick an icon.
@@ -288,10 +330,14 @@ export function aggregateStrongest(perUrlResults) {
   let best = null;
   for (const r of perUrlResults) {
     const rank = STATUS_RANK[r.status] ?? -1;
-    if (!best || rank > STATUS_RANK[best.status]) best = r;
+    const bestRank = STATUS_RANK[best?.status] ?? -1;
+    if (!best || rank > bestRank || (rank === bestRank && !cleanMessage(best.message) && cleanMessage(r.message))) {
+      best = r;
+    }
   }
   const messageParts = [];
-  if (best?.message) messageParts.push(best.message);
+  const bestMessage = cleanMessage(best?.message) || fallbackStatusMessage(best);
+  if (bestMessage) messageParts.push(bestMessage);
   const otherSignals = perUrlResults
     .filter(r => r !== best && r.status !== 'unknown' && r.status !== 'error')
     .map(r => `${r.status} on ${r.urlLabel || r.url}`);
@@ -486,7 +532,14 @@ Be conservative: prefer "unknown" over a guess for state. Do NOT classify based 
   return {
     url, urlLabel,
     status,
-    message: parsed?.message ? `[${urlLabel || hostOf(url)}] ${parsed.message}` : '',
+    message: formatClassificationMessage({
+      url,
+      urlLabel,
+      status,
+      rawMessage: parsed?.message,
+      listingIdentifier,
+      matched,
+    }),
     attention,
   };
 }
@@ -669,7 +722,14 @@ Be conservative: prefer "unknown" over a guess for state. Do NOT classify based 
       url: p.spec.url,
       urlLabel: p.spec.urlLabel,
       status,
-      message: verdict?.message ? `[${p.spec.urlLabel || hostOf(p.spec.url)}] ${verdict.message}` : '',
+      message: formatClassificationMessage({
+        url: p.spec.url,
+        urlLabel: p.spec.urlLabel,
+        status,
+        rawMessage: verdict?.message,
+        listingIdentifier,
+        matched: p.matched,
+      }),
       attention: sanitizeAttention(verdict?.attention),
     });
   }

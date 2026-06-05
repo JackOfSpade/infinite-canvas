@@ -24,6 +24,7 @@ import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { PRODUCT_IMAGE_EXT_RE } from '../utils/fileExtensions';
 import { mergeSourceIntoComps } from '../utils/compsMerge';
 import { getHubDropLockReason } from '../utils/hubDropEligibility';
+import { appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../utils/photoPathList';
 
 /**
  * SellHubNode — draggable canvas module for marketplace selling.
@@ -64,7 +65,7 @@ export function SellHubNode({ id, data }) {
   const startAnalysisRef = useRef(null);
   const {
     product, editing, setEditing, justificationExpanded,
-    handleFieldEdit, toggleJustification,
+    handleFieldEdit, handlePricingNotesChange, toggleJustification,
     scrapePriceComps, rescrapeSource, synthesizePrice,
   } = useListingActions(id, data);
 
@@ -77,7 +78,8 @@ export function SellHubNode({ id, data }) {
     cardType: 'marketplacecard',
     getUrl: (d) => d?.listingUrl,
     getPlatformId: (d) => d?.platformId,
-    updateNode: updateNodeData,
+    fields: { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked', attention: 'attention' },
+    updateNode: updateGlobal,
     itemLabel: 'marketplace',
   });
 
@@ -159,7 +161,9 @@ export function SellHubNode({ id, data }) {
   const hubState = data.hubState || 'empty';
   const dropLockReason = getHubDropLockReason({ type: 'sellhub', data });
   const inputDropsBlocked = !!dropLockReason;
+  const displayPhotoDropMode = hubState === 'priced' && !data.locked;
   const { verifying: platformsVerifying, done: verifyDone, total: verifyTotal } = usePlatformsVerifyingProgress(['ebay', 'poshmark', 'mercari', 'swappa', 'facebook']);
+  const hubDropsBlocked = platformsVerifying || (inputDropsBlocked && !displayPhotoDropMode);
 
   useEffect(() => {
     if (data.inputLocked || data.product || data.imagePaths?.length > 0) {
@@ -779,7 +783,9 @@ export function SellHubNode({ id, data }) {
       EventLogger.log(`[SellHub][${id}] Drop rejected: hub already started`);
       addToast({
         title: 'Photos are locked',
-        description: 'This marketplace module is tied to its original photos. Create a new marketplace module to use different photos.',
+        description: hubState === 'priced'
+          ? 'Use the photo strip add button to update display-only photos. Product analysis and pricing will stay unchanged.'
+          : 'This marketplace module is tied to its analyzed photos. Create a new marketplace module to analyze different photos.',
         type: 'info',
       });
       return;
@@ -789,13 +795,38 @@ export function SellHubNode({ id, data }) {
     EventLogger.log(`[SellHub][${id}] Drop accepted: ${validPaths.length}/${attemptedCount} images`);
 
     startAnalysisRef.current?.(validPaths);
-  }, [addToast, dropLockReason, id]);
+  }, [addToast, dropLockReason, hubState, id]);
+
+  const handleRemoveDisplayPhoto = useCallback((index) => {
+    if (data.locked) return;
+    const before = data.imagePaths || [];
+    const next = removePhotoPathAt(before, index);
+    if (next.length === before.length) return;
+    EventLogger.log(`[SellHub][${id}] Display photo removed at index ${index}; analysis/pricing retained`);
+    updateGlobal(id, { imagePaths: next });
+  }, [data.imagePaths, data.locked, id, updateGlobal]);
+
+  const handleAddDisplayPhotos = useCallback((paths) => {
+    if (data.locked) return;
+    const before = data.imagePaths || [];
+    const normalizedBefore = normalizePhotoPathList(before);
+    const next = appendPhotoPaths(before, paths);
+    const added = next.length - normalizedBefore.length;
+    if (added <= 0) return;
+    EventLogger.log(`[SellHub][${id}] Added ${added} display photo(s); analysis/pricing retained`);
+    updateGlobal(id, { imagePaths: next });
+    addToast({
+      title: 'Display photos updated',
+      description: 'These photos are for reference only; product analysis and pricing were not rerun.',
+      type: 'success',
+    });
+  }, [addToast, data.imagePaths, data.locked, id, updateGlobal]);
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
     e.stopPropagation();
     if (data.locked) return; // Locked nodes don't accept new drops
-    if (platformsVerifying || inputDropsBlocked) return;
+    if (platformsVerifying) return;
 
     const files = Array.from(e.dataTransfer?.files || []);
     // Log EVERY drop attempt up front (extensions + total count) so bug reports
@@ -808,25 +839,35 @@ export function SellHubNode({ id, data }) {
       .filter(f => PRODUCT_IMAGE_EXT_RE.test(f.name))
       .map(f => f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : ''))
       .filter(Boolean);
+    if (displayPhotoDropMode) {
+      handleAddDisplayPhotos(imagePaths);
+      return;
+    }
+    if (inputDropsBlocked) return;
     acceptImagePaths(imagePaths, files.length);
-  }, [acceptImagePaths, data.locked, id, inputDropsBlocked, platformsVerifying]);
+  }, [acceptImagePaths, data.locked, displayPhotoDropMode, handleAddDisplayPhotos, id, inputDropsBlocked, platformsVerifying]);
 
   useEffect(() => {
     const handler = (e) => {
       if (e.detail?.hubId !== id) return;
       if (data.locked) return;
-      if (platformsVerifying || inputDropsBlocked) return;
+      if (platformsVerifying) return;
       const files = e.detail?.files || [];
       const imagePaths = files
         .filter(f => PRODUCT_IMAGE_EXT_RE.test(f.filename || f.filePath || ''))
         .map(f => f.filePath)
         .filter(Boolean);
-      EventLogger.log(`[SellHub][${id}] Document-node drop received: ${files.length} file(s)`);
+      EventLogger.log(`[SellHub][${id}] Document-node drop received: ${files.length} file(s), acceptedImages=${imagePaths.length}, mode=${e.detail?.mode || 'initial-input'}, hubState=${hubState}`);
+      if (e.detail?.mode === 'display-photos' || hubState === 'priced') {
+        handleAddDisplayPhotos(imagePaths);
+        return;
+      }
+      if (inputDropsBlocked) return;
       acceptImagePaths(imagePaths, files.length);
     };
     document.addEventListener('canvas-file-nodes-dropped-on-hub', handler);
     return () => document.removeEventListener('canvas-file-nodes-dropped-on-hub', handler);
-  }, [acceptImagePaths, data.locked, id, inputDropsBlocked, platformsVerifying]);
+  }, [acceptImagePaths, data.locked, handleAddDisplayPhotos, hubState, id, inputDropsBlocked, platformsVerifying]);
 
   const resetHandler = useCallback((e) => {
     e?.stopPropagation();
@@ -921,7 +962,7 @@ export function SellHubNode({ id, data }) {
       height={undefined}
       minHeight={nodeHeight}
       onDrop={handleDrop}
-      dropsBlocked={platformsVerifying || inputDropsBlocked}
+      dropsBlocked={hubDropsBlocked}
       verifyProgress={platformsVerifying ? { done: verifyDone, total: verifyTotal } : null}
       dragHover={data.dragHover || null}
     >
@@ -971,6 +1012,8 @@ export function SellHubNode({ id, data }) {
               setEditing={setEditing}
               handleFieldEdit={handleFieldEdit}
               handleConfirmDraft={handleConfirmDraft}
+              pricingNotes={data.pricingNotes || ''}
+              onPricingNotesChange={handlePricingNotesChange}
               locked={!!data.locked}
               imagePaths={data.imagePaths || []}
             />
@@ -1009,6 +1052,9 @@ export function SellHubNode({ id, data }) {
             toggleJustification={toggleJustification}
             locked={!!data.locked}
             imagePaths={data.imagePaths || []}
+            editablePhotos={!data.locked}
+            onRemovePhoto={handleRemoveDisplayPhoto}
+            onAddPhotos={handleAddDisplayPhotos}
             onReresearch={handleConfirmDraft}
             spawnedMarketplaceIds={spawnedMarketplaceIds}
             onSpawnMarketplaceCard={handleSpawnMarketplaceCard}

@@ -31,6 +31,7 @@ export function useCanvasPersistence({
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [currentFile, setCurrentFile] = useState(null);
   const [saveState, setSaveState] = useState('idle');
+  const [loadState, setLoadState] = useState({ active: false, progress: 0, label: '' });
   const isMountedRef = useRef(true);
 
   useEffect(() => {
@@ -40,6 +41,7 @@ export function useCanvasPersistence({
   const isExportingRef = useRef(false);
   const saveStateTimerRef = useRef(null);
   const loadTimerRef = useRef(null);
+  const loadHideTimerRef = useRef(null);
 
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
@@ -157,6 +159,7 @@ export function useCanvasPersistence({
       window.removeEventListener('beforeunload', handleBeforeUnload);
       if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
       if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+      if (loadHideTimerRef.current) clearTimeout(loadHideTimerRef.current);
     };
   }, []); // Stable: reads live value via ref / useEffectEvent — no need to re-register on change
 
@@ -186,8 +189,30 @@ export function useCanvasPersistence({
     }
 
     try {
+      const startedAt = performance.now();
+      const setLoading = (progress, label) => {
+        if (!isMountedRef.current) return;
+        setLoadState({ active: true, progress, label });
+      };
+      const finishLoading = (delayMs = 120) => {
+        if (loadHideTimerRef.current) clearTimeout(loadHideTimerRef.current);
+        loadHideTimerRef.current = setTimeout(() => {
+          loadHideTimerRef.current = null;
+          if (!isMountedRef.current) return;
+          setLoadState({ active: false, progress: 0, label: '' });
+        }, delayMs);
+      };
+
+      if (loadHideTimerRef.current) {
+        clearTimeout(loadHideTimerRef.current);
+        loadHideTimerRef.current = null;
+      }
+      setLoading(0.08, 'Opening workspace...');
+      EventLogger.log(`canvas load start silent=${isSilent} target=${targetFilePath || 'last-opened'}`);
+
       const loadOpts = typeof targetFilePath === 'string' ? { filePath: targetFilePath } : undefined;
       const res = await window.electronAPI.loadWorkspace(loadOpts);
+      setLoading(0.35, 'Reading workspace...');
       if (res?.success && res.data) {
         // Reset navigation stack to root — prevents stale breadcrumbs/stack corruption
         resetStack?.();
@@ -203,6 +228,7 @@ export function useCanvasPersistence({
         if (relocatedNodes !== inputNodes) {
           EventLogger.log(`[Migration] Healed canvas from schemaVersion ${fileVersion} → ${CURRENT_SCHEMA_VERSION}`);
         }
+        setLoading(0.58, 'Preparing canvas...');
         // Sanitize transient hub state on load, not just on save. A workspace
         // saved before the save-time strip existed (or by any path that
         // bypassed it) can carry a stale data.errorMessage / pending-pipeline
@@ -227,6 +253,7 @@ export function useCanvasPersistence({
         setDrawings(res.data.drawings || []);
         setCurrentFile(res.filePath);
         updateSetting?.('lastOpenedWorkspace', res.filePath);
+        setLoading(0.78, 'Rendering canvas...');
         // Clear undo history — a freshly-loaded workspace should start with a blank slate
         clearHistory?.();
         // Defer: the useCanvasInitialization effect will fire setHasUnsavedChanges(true)
@@ -237,14 +264,28 @@ export function useCanvasPersistence({
           loadTimerRef.current = null;
           if (!isMountedRef.current) return;
           setHasUnsavedChanges(false);
-          customFitView();
+          const fitDuration = isSilent ? 0 : 800;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              if (!isMountedRef.current) return;
+              setLoading(0.92, fitDuration > 0 ? 'Fitting workspace...' : 'Framing workspace...');
+              customFitView({ duration: fitDuration, reason: isSilent ? 'initial-load' : 'manual-load' });
+              setLoading(1, 'Ready');
+              EventLogger.log(`canvas load ready nodes=${sanitizedNodes.length} edges=${cleanEdges.length} fitDuration=${fitDuration}ms elapsed=${Math.round(performance.now() - startedAt)}ms`);
+              finishLoading(fitDuration > 0 ? Math.min(fitDuration, 500) : 120);
+            });
+          });
         }, 50);
         if (!isSilent) addToast({ title: 'Workspace Loaded', description: 'Your canvas has been loaded successfully.', type: 'success' });
       } else if (!res?.canceled) {
+        setLoadState({ active: false, progress: 0, label: '' });
         if (!isSilent) addToast({ title: 'Load Failed', description: 'Failed to load canvas or invalid file format.', type: 'error' });
+      } else {
+        setLoadState({ active: false, progress: 0, label: '' });
       }
     } catch (err) {
       EventLogger.error('Failed to load canvas:', err);
+      setLoadState({ active: false, progress: 0, label: '' });
       if (!isSilent) addToast({ title: 'Load Error', description: err?.message || String(err) || 'An error occurred while loading.', type: 'error' });
       // Clear auto-load config if it fails completely (deleted or broken) so we don't boot loop into it
       if (isSilent) updateSetting?.('lastOpenedWorkspace', null);
@@ -285,5 +326,6 @@ export function useCanvasPersistence({
     currentFile,
     setCurrentFile,
     saveStateRef, // Exposed so useCanvasInitialization can gate auto-saves on in-progress saves
+    loadState,
   };
 }

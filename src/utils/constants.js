@@ -18,7 +18,6 @@ export const SELL_PLATFORMS = [
   // Category specialists
   { id: 'swappa',    name: 'Swappa',     letter: 'Sw', color: '#27ae60', domain: 'swappa.com',    postUrl: 'https://swappa.com/sell' },
   { id: 'reverb',    name: 'Reverb',     letter: 'Rv', color: '#f04d23', domain: 'reverb.com',    postUrl: 'https://reverb.com/my/selling/listings/new' },
-  { id: 'whatnot',   name: 'Whatnot',    letter: 'Wn', color: '#fff200', domain: 'whatnot.com',   postUrl: 'https://www.whatnot.com/sell' },
 ];
 
 export const SELL_PLATFORM_BY_ID = Object.fromEntries(SELL_PLATFORMS.map(platform => [platform.id, platform]));

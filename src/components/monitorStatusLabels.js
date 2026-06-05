@@ -12,5 +12,10 @@ export const MARKETPLACE_STATUS_LABELS = {
   expired:       'Ended', // back-compat: nodes saved before the rename
   'needs-login': 'Needs login',
   error:         'Error',
-  unknown:       'Not checked',
+  unknown:       'Unknown',
 };
+
+export function getMarketplaceStatusLabel(status, lastChecked) {
+  if (status === 'unknown' && !lastChecked) return 'Not checked';
+  return MARKETPLACE_STATUS_LABELS[status] || MARKETPLACE_STATUS_LABELS.unknown || status;
+}

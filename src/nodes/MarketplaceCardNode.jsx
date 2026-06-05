@@ -47,8 +47,8 @@ export function MarketplaceCardNode({ id, data }) {
 
   // Uses the default field names (status / statusMessage / lastChecked).
   // Per-platform watch URLs (configured in Settings) are merged in by the
-  // backend, so the hook always issues the request — backend reports
-  // "No URLs to check..." inline when nothing's configured.
+  // backend, but a listing URL is still required so those pages can be anchored
+  // to a specific marketplace listing.
   const { checking, check: checkStatus } = useMonitorCheck({
     id,
     url,
@@ -183,13 +183,9 @@ export function MarketplaceCardNode({ id, data }) {
           </button>
           <button
             onClick={checkStatus}
-            // Check is meaningful as long as we have something to scan — either a
-            // listing URL OR at least one watch URL (per-card or per-platform).
-            // The per-platform list isn't visible here, so we conservatively
-            // require either a listing URL or a per-card watch URL to enable
-            // the button — power users who rely only on platform-wide URLs can
-            // use the hub's "Check All Statuses" instead.
-            disabled={checking || data.locked || (!data.listingUrl?.trim() && watchUrls.length === 0)}
+            // Watch URLs are supplemental context; the listing URL anchors the
+            // check to the specific item this card represents.
+            disabled={checking || data.locked || !data.listingUrl?.trim()}
             onPointerDown={(e) => e.stopPropagation()}
             className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-md bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 text-[10px] font-medium transition-colors border border-blue-500/20 disabled:opacity-40 disabled:cursor-default"
             title="Ask AI to fetch the listing and report its current status"

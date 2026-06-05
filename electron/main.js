@@ -1,5 +1,5 @@
 import electronPkg from 'electron';
-const { app, BrowserWindow, Menu, protocol } = electronPkg;
+const { app, BrowserWindow, Menu, protocol, nativeImage } = electronPkg;
 import path from 'path';
 import { registerFilesystemHandlers } from './ipc/filesystem.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
@@ -58,6 +58,119 @@ const LOCAL_FILE_MIME_TYPES = {
 // H.265 decoder; TIFF/JXL aren't supported either). Everything Chromium handles
 // natively (jpg/png/gif/webp/bmp/avif/ico/svg) streams through untouched.
 const DISPLAY_TRANSCODE_EXT = new Set(['.heic', '.heif', '.tiff', '.tif', '.jxl']);
+const MARKETPLACE_PREVIEW_EXT = new Set([
+  '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.avif', '.ico',
+  '.heic', '.heif', '.tiff', '.tif', '.jxl',
+]);
+const MARKETPLACE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
+const MARKETPLACE_PREVIEW_DEFAULT_DIMENSION = 1600;
+const MARKETPLACE_PREVIEW_QUALITY_STEPS = [82, 72, 60, 48, 36, 24];
+const MARKETPLACE_PREVIEW_CACHE_MAX_BYTES = 80 * 1024 * 1024;
+const marketplacePreviewCache = new Map();
+let marketplacePreviewCacheBytes = 0;
+
+function clampNumber(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function resizeNativeImageToFit(image, maxDimension) {
+  const size = image.getSize();
+  const width = Number(size?.width) || 0;
+  const height = Number(size?.height) || 0;
+  if (width <= 0 || height <= 0) return image;
+
+  const scale = Math.min(1, maxDimension / Math.max(width, height));
+  if (scale >= 1) return image;
+
+  return image.resize({
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+    quality: 'best',
+  });
+}
+
+function encodeNativeImageUnderLimit(image, { maxBytes, maxDimension }) {
+  let dimension = maxDimension;
+  while (dimension >= 128) {
+    const resized = resizeNativeImageToFit(image, dimension);
+    if (!resized || resized.isEmpty()) return null;
+
+    for (const quality of MARKETPLACE_PREVIEW_QUALITY_STEPS) {
+      const buffer = resized.toJPEG(quality);
+      if (buffer.length <= maxBytes) return buffer;
+    }
+
+    dimension = Math.floor(dimension * 0.65);
+  }
+  return null;
+}
+
+async function createSipsPreviewBuffer(filePath, { maxBytes, maxDimension }) {
+  let dimension = maxDimension;
+  while (dimension >= 128) {
+    for (const quality of MARKETPLACE_PREVIEW_QUALITY_STEPS) {
+      const tmpOut = path.join(os.tmpdir(), `ic_marketplace_preview_${crypto.randomUUID()}.jpg`);
+      try {
+        await execFile('/usr/bin/sips', [
+          '-Z', String(dimension),
+          '-s', 'format', 'jpeg',
+          '-s', 'formatOptions', String(quality),
+          filePath,
+          '--out', tmpOut,
+        ]);
+        const buffer = await fs.promises.readFile(tmpOut);
+        if (buffer.length <= maxBytes) return buffer;
+      } catch {
+        return null;
+      } finally {
+        fs.promises.unlink(tmpOut).catch(() => {});
+      }
+    }
+    dimension = Math.floor(dimension * 0.65);
+  }
+  return null;
+}
+
+async function createMarketplacePreviewBuffer(filePath, { maxBytes, maxDimension }) {
+  const sourceImage = nativeImage.createFromPath(filePath);
+  if (sourceImage && !sourceImage.isEmpty()) {
+    const directBuffer = encodeNativeImageUnderLimit(sourceImage, { maxBytes, maxDimension });
+    if (directBuffer) return directBuffer;
+  }
+
+  const sipsBuffer = await createSipsPreviewBuffer(filePath, { maxBytes, maxDimension });
+  if (sipsBuffer) return sipsBuffer;
+
+  const thumbnail = await nativeImage.createThumbnailFromPath(filePath, {
+    width: maxDimension,
+    height: maxDimension,
+  });
+  if (!thumbnail || thumbnail.isEmpty()) return null;
+  return encodeNativeImageUnderLimit(thumbnail, { maxBytes, maxDimension });
+}
+
+function getMarketplacePreviewCache(key) {
+  const hit = marketplacePreviewCache.get(key);
+  if (!hit) return null;
+  marketplacePreviewCache.delete(key);
+  marketplacePreviewCache.set(key, hit);
+  return hit.buffer;
+}
+
+function setMarketplacePreviewCache(key, buffer) {
+  marketplacePreviewCache.set(key, { buffer, bytes: buffer.length });
+  marketplacePreviewCacheBytes += buffer.length;
+
+  while (marketplacePreviewCacheBytes > MARKETPLACE_PREVIEW_CACHE_MAX_BYTES) {
+    const oldestKey = marketplacePreviewCache.keys().next().value;
+    if (!oldestKey) break;
+    const oldest = marketplacePreviewCache.get(oldestKey);
+    marketplacePreviewCache.delete(oldestKey);
+    marketplacePreviewCacheBytes -= oldest?.bytes || 0;
+  }
+}
 
 // In the Rollup CJS bundle, __dirname and __filename are CJS globals — no
 // declaration needed. This file is always built as CJS (see vite.config.js).
@@ -429,6 +542,8 @@ if (!gotTheLock) {
 
   app.whenReady().then(() => {
     protocol.handle('local-file', async (request) => {
+      let requestParams = new URLSearchParams();
+      try { requestParams = new URL(request.url).searchParams; } catch { /* ignore */ }
       let url = request.url.replace(/^local-file:\/\//, '');
       url = url.split('?')[0].split('#')[0]; // Strip query and hash
       try {
@@ -479,6 +594,51 @@ if (!gotTheLock) {
 
         const ext = path.extname(targetPath).toLowerCase();
         const contentType = LOCAL_FILE_MIME_TYPES[ext] || 'application/octet-stream';
+        const previewMode = requestParams.get('preview');
+        if (previewMode === 'marketplace' && MARKETPLACE_PREVIEW_EXT.has(ext)) {
+          const maxBytes = clampNumber(
+            requestParams.get('maxBytes'),
+            MARKETPLACE_PREVIEW_MAX_BYTES,
+            64 * 1024,
+            MARKETPLACE_PREVIEW_MAX_BYTES,
+          );
+          const maxDimension = clampNumber(
+            requestParams.get('maxDimension'),
+            MARKETPLACE_PREVIEW_DEFAULT_DIMENSION,
+            128,
+            4096,
+          );
+          const cacheKey = `${targetPath}|${stat.mtimeMs}|${stat.size}|${maxBytes}|${maxDimension}`;
+          const cachedPreview = getMarketplacePreviewCache(cacheKey);
+          if (cachedPreview) {
+            return new Response(cachedPreview, {
+              status: 200,
+              headers: {
+                'Content-Type': 'image/jpeg',
+                'Content-Length': String(cachedPreview.length),
+                'Cache-Control': 'no-cache',
+              },
+            });
+          }
+          const previewBuffer = await createMarketplacePreviewBuffer(targetPath, {
+            maxBytes,
+            maxDimension,
+          });
+          if (previewBuffer) {
+            setMarketplacePreviewCache(cacheKey, previewBuffer);
+            return new Response(previewBuffer, {
+              status: 200,
+              headers: {
+                'Content-Type': 'image/jpeg',
+                'Content-Length': String(previewBuffer.length),
+                'Cache-Control': 'no-cache',
+              },
+            });
+          }
+          if (stat.size > maxBytes) {
+            return new Response('Preview unavailable', { status: 415 });
+          }
+        }
 
         // ── Non-native image → JPEG transcoding via sips ──────────────────────
         // Chromium can't decode HEIC/HEIF (no H.265 decoder), TIFF, or JXL, so
@@ -615,16 +775,18 @@ if (!gotTheLock) {
     setupApplicationMenu();
     createWindow({ mode: 'auto' });
 
-    // Verify all platforms immediately. Cache starts empty each launch so there's
-    // nothing to trust. Progress events are broadcast to every canvas window so
-    // hub nodes can block drops until their platforms are confirmed.
-    verifyAllPlatforms({
-      notify: (event, data) => {
-        for (const win of canvasWindows) {
-          if (!win.isDestroyed()) win.webContents.send(event, data);
-        }
-      },
-    }).catch(() => {});
+    // Let the renderer mount and auto-load the workspace before launching the
+    // Chrome-based marketplace/account verifier windows. The verifier still runs
+    // every launch; it just stops competing with first paint and image decode.
+    setTimeout(() => {
+      verifyAllPlatforms({
+        notify: (event, data) => {
+          for (const win of canvasWindows) {
+            if (!win.isDestroyed()) win.webContents.send(event, data);
+          }
+        },
+      }).catch(() => {});
+    }, 2500);
 
     app.on('activate', () => {
       // macOS: re-opening from the dock with no windows restores the last

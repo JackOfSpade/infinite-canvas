@@ -149,7 +149,6 @@ export const PLATFORM_LOGIN_URLS = {
   depop:         'https://www.depop.com/login/',
   swappa:        'https://swappa.com/login',
   reverb:        'https://reverb.com/login',
-  whatnot:       'https://www.whatnot.com/login',
   // Marketplace — pricing data only
   stockx:        'https://stockx.com/login',
 };
@@ -206,7 +205,6 @@ export const PLATFORM_COOKIE_DOMAINS = {
   depop:         ['.depop.com'],
   swappa:        ['.swappa.com'],
   reverb:        ['.reverb.com'],
-  whatnot:       ['.whatnot.com'],
   stockx:        ['.stockx.com'],
 };
 

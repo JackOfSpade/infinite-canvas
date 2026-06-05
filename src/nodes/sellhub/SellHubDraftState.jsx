@@ -1,6 +1,7 @@
 import React from 'react';
 import { EditableField } from '../../components/EditableField';
 import { PhotoStrip } from '../../components/PhotoStrip';
+import { useSyncWhileFocused } from '../../hooks/useSyncWhileFocused';
 
 // Mirrors the enum the AI is prompted to pick from in marketplace.js so the
 // dropdown options match what's already living in `product.condition`.
@@ -19,9 +20,23 @@ export function SellHubDraftState({
   setEditing,
   handleFieldEdit,
   handleConfirmDraft,
+  pricingNotes = '',
+  onPricingNotesChange,
   locked = false,
   imagePaths = [],
 }) {
+  const {
+    value: draftPricingNotes,
+    setValue: setDraftPricingNotes,
+    focusProps: pricingNotesFocusProps,
+  } = useSyncWhileFocused(pricingNotes);
+
+  const handlePricingNotesInput = (e) => {
+    const nextValue = e.target.value;
+    setDraftPricingNotes(nextValue);
+    onPricingNotesChange?.(nextValue);
+  };
+
   return (
     <div className="p-3 space-y-2">
       <div className="text-amber-400/60 text-[10px] font-semibold uppercase tracking-wider">📝 Draft</div>
@@ -78,6 +93,23 @@ export function SellHubDraftState({
             <option key={c} value={c}>{c}</option>
           ))}
         </select>
+      </div>
+
+      <div className="space-y-1">
+        <label className="block text-white/30 text-[10px]">Pricing notes</label>
+        <textarea
+          value={draftPricingNotes}
+          onChange={handlePricingNotesInput}
+          onPointerDown={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          onFocus={pricingNotesFocusProps.onFocus}
+          onBlur={pricingNotesFocusProps.onBlur}
+          disabled={locked}
+          maxLength={2000}
+          rows={3}
+          placeholder="Size, flaws, included accessories, urgency, original cost..."
+          className="nodrag nowheel w-full resize-none rounded-md bg-black/30 border border-white/10 px-2 py-1.5 text-white/80 placeholder:text-white/25 text-[10px] leading-snug outline-none focus:border-blue-400/50 disabled:opacity-50 disabled:cursor-default"
+        />
       </div>
 
       <button

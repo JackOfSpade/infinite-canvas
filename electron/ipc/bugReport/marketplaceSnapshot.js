@@ -229,6 +229,9 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       lines.push('- ⚠️ 0 comps available → no price synthesized (all sources empty or blocked).');
     } else {
       const capped = s.soldFound > s.soldUsed || s.activeFound > s.activeUsed;
+      if (s.userNotesChars > 0) {
+        lines.push(`- Seller pricing notes sent to the model (${s.userNotesChars} chars): "${String(s.userNotesPreview || '').replace(/"/g, '\\"')}${s.userNotesChars > 240 ? '...' : ''}"`);
+      }
       lines.push(
         `- Comps fed to the model: ${s.soldUsed}/${s.soldFound} sold + ${s.activeUsed}/${s.activeFound} active` +
         (capped ? ' _(capped at the top 25 sold / 15 active by title-match — by-design, not lost data)_' : ''),

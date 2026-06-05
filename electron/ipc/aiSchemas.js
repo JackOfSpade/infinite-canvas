@@ -79,7 +79,7 @@ export const PRICE_SYNTHESIS_SCHEMA = {
         type: 'object',
         required: ['id', 'name', 'reason', 'estimated_fee_pct', 'net_payout'],
         properties: {
-          id:                { type: 'string', enum: ['ebay', 'facebook', 'mercari', 'poshmark', 'depop', 'swappa', 'reverb', 'whatnot'] },
+          id:                { type: 'string', enum: ['ebay', 'facebook', 'mercari', 'poshmark', 'depop', 'swappa', 'reverb'] },
           name:              { type: 'string' },
           reason:            { type: 'string', description: 'Why optimal for this item (1 sentence)' },
           estimated_fee_pct: { type: 'number', description: 'Total fee % including processing' },
@@ -342,4 +342,3 @@ export const JOB_SCORING_SCHEMA = {
     },
   },
 };
-

@@ -5,7 +5,8 @@ import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } 
 
 import { findNonOverlappingPlacement } from '../utils/layoutUtils';
 import { PRODUCT_IMAGE_EXT_RE } from '../utils/fileExtensions';
-import { canHubAcceptInitialDrop, getHubDropRejectLabel } from '../utils/hubDropEligibility';
+import { canSellHubAcceptDisplayPhotoDrop, getHubDropRejectLabel, getHubFileDropMode } from '../utils/hubDropEligibility';
+import { appendPhotoFiles } from '../utils/photoPathList';
 
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -28,10 +29,6 @@ function fileSupportedByHub(hubType, file) {
   return false;
 }
 
-function hubCanAcceptDrop(targetHub) {
-  return canHubAcceptInitialDrop(targetHub);
-}
-
 function buildHubHoverState(targetHub, dragSet) {
   if (!targetHub) return null;
   if (targetHub.data?.locked) {
@@ -49,6 +46,10 @@ function buildHubHoverState(targetHub, dragSet) {
       kind: 'reject',
       label: targetHub.type === 'jobhub' ? 'Unsupported resume file' : 'Images only',
     };
+  }
+
+  if (canSellHubAcceptDisplayPhotoDrop(targetHub)) {
+    return { kind: 'accept', label: 'Add display photos' };
   }
 
   const lockLabel = getHubDropRejectLabel(targetHub);
@@ -247,10 +248,10 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
         }
 
         const acceptedFiles = filePayload.filter(file => fileSupportedByHub(targetHub.type, file));
-        const canAcceptHubDrop = hubCanAcceptDrop(targetHub);
-        if (acceptedFiles.length === 0 || !canAcceptHubDrop) {
+        const dropMode = getHubFileDropMode(targetHub);
+        if (acceptedFiles.length === 0 || !dropMode) {
           restoreDragStartPositions(draggedIds);
-          if (!canAcceptHubDrop) {
+          if (!dropMode) {
             const reason = getHubDropRejectLabel(targetHub) || 'Not accepting drops';
             EventLogger.log(`Rejected document node drop for ${reason.toLowerCase()} ${targetHub.type}; restored drag position`);
             return;
@@ -259,15 +260,30 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
           return;
         }
 
+        if (dropMode === 'display-photos') {
+          const { imagePaths, added } = appendPhotoFiles(targetHub.data?.imagePaths || [], acceptedFiles);
+          if (added > 0) {
+            setNodes(nds => nds.map(n =>
+              n.id === targetHub.id
+                ? { ...n, data: { ...(n.data || {}), imagePaths } }
+                : n
+            ));
+          }
+          restoreDragStartPositions(draggedIds);
+          EventLogger.log(`Dropped ${acceptedFiles.length}/${filePayload.length} document node(s) onto ${targetHub.type} ${targetHub.id} mode=${dropMode} applied=${added}`);
+          return;
+        }
+
         document.dispatchEvent(new CustomEvent('canvas-file-nodes-dropped-on-hub', {
           detail: {
             hubId: targetHub.id,
             hubType: targetHub.type,
             files: acceptedFiles,
+            mode: dropMode,
           },
         }));
         restoreDragStartPositions(draggedIds);
-        EventLogger.log(`Dropped ${acceptedFiles.length}/${filePayload.length} document node(s) onto ${targetHub.type} ${targetHub.id}`);
+        EventLogger.log(`Dropped ${acceptedFiles.length}/${filePayload.length} document node(s) onto ${targetHub.type} ${targetHub.id} mode=${dropMode}`);
         return;
       }
     }

@@ -13,6 +13,15 @@ export function toLocalFileUrl(filePath) {
   return `local-file://${filePath.replace(/%/g, '%25').replace(/ /g, '%20').replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
 }
 
+export function toLocalFilePreviewUrl(filePath, { maxBytes = 10 * 1024 * 1024, maxDimension = 1600 } = {}) {
+  const params = new URLSearchParams({
+    preview: 'marketplace',
+    maxBytes: String(maxBytes),
+    maxDimension: String(maxDimension),
+  });
+  return `${toLocalFileUrl(filePath)}?${params.toString()}`;
+}
+
 export const FILE_CATEGORIES = {
   IMAGE: 'image',
   CODE: 'code',

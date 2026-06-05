@@ -52,6 +52,19 @@ export function canHubAcceptInitialDrop(hub) {
   return getHubDropLockReason(hub) === null;
 }
 
+export function canSellHubAcceptDisplayPhotoDrop(hub) {
+  if (!hub || hub.type !== 'sellhub') return false;
+  const data = hub.data || {};
+  if (data.locked) return false;
+  return (data.hubState || 'empty') === 'priced';
+}
+
+export function getHubFileDropMode(hub) {
+  if (canSellHubAcceptDisplayPhotoDrop(hub)) return 'display-photos';
+  if (canHubAcceptInitialDrop(hub)) return 'initial-input';
+  return null;
+}
+
 export function getHubDropRejectLabel(hub) {
   switch (getHubDropLockReason(hub)) {
     case 'locked':

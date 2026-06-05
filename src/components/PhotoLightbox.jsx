@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { X, ChevronLeft, ChevronRight } from 'lucide-react';
-import { toLocalFileUrl } from '../utils/fileDisplayUtils';
+import { toLocalFilePreviewUrl } from '../utils/fileDisplayUtils';
 
 /**
  * Full-viewport image viewer rendered via a portal so it escapes ReactFlow's
@@ -99,11 +99,12 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
           <div className="text-white/40 text-xs animate-pulse">Loading…</div>
         )}
         <img
-          src={toLocalFileUrl(currentPath)}
+          src={toLocalFilePreviewUrl(currentPath, { maxDimension: 2400 })}
           alt={`Photo ${index + 1} of ${total}`}
           className={`max-w-[90vw] max-h-[90vh] object-contain rounded ${loading ? 'hidden' : ''}`}
           onLoad={() => setLoading(false)}
           onError={() => setLoading(false)}
+          decoding="async"
           draggable={false}
         />
       </div>

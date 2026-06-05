@@ -102,6 +102,9 @@ export function SellHubPricedState({
   toggleJustification,
   locked = false,
   imagePaths = [],
+  editablePhotos = false,
+  onRemovePhoto,
+  onAddPhotos,
   onReresearch,
   // Phase-2 redesign: marketplace cards replace the platform-toggles UX.
   spawnedMarketplaceIds = [], // ids already represented by a connected MarketplaceCardNode
@@ -127,7 +130,13 @@ export function SellHubPricedState({
     <div className="p-3 space-y-2">
       <div className="text-emerald-400/60 text-[10px] font-semibold uppercase tracking-wider">💰 Ready to List</div>
 
-      <PhotoStrip imagePaths={imagePaths} size="sm" />
+      <PhotoStrip
+        imagePaths={imagePaths}
+        size="sm"
+        editable={editablePhotos}
+        onRemoveImage={onRemovePhoto}
+        onAddImages={onAddPhotos}
+      />
 
       <ExpandableTitle title={product.generated_title || 'Item'} addToast={addToast} />
 

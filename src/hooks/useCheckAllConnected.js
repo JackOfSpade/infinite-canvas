@@ -73,14 +73,12 @@ export function useCheckAllConnected({
         const platformId = getPlatformId(card.data);
         const watchUrls  = getWatchUrls(card.data);
         const productTitle = getProductTitle(card.data);
-        // Per-platform watch URLs live server-side; the backend merges them in,
-        // so a card with no listing URL but with a configured platform watch
-        // URL still gets a meaningful check. Only flag "no URL" when the card
-        // has nothing AND no per-card watch URLs.
-        if (!url && watchUrls.length === 0) {
+        // Watch URLs are supplemental context; the listing URL anchors the
+        // check to the specific item this card represents.
+        if (!url) {
           updateNode(card.id, {
             [fields.status]:      'error',
-            [fields.message]:     'No URL to check (paste a listing URL or configure a platform watch URL in Settings)',
+            [fields.message]:     'No listing URL to check (paste the marketplace listing URL first)',
             [fields.lastChecked]: new Date().toISOString(),
           });
           continue;

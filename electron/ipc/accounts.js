@@ -22,6 +22,16 @@ import { detectAntiBotSignal } from './antiBotDetector.js';
 // Timeout for a session-verify page fetch. Not a freshness/density signal —
 // it's an auth-check network bound (fixed).
 const SESSION_VERIFY_TIMEOUT_MS = 25000;
+const DEFAULT_SOFT_WALL_SIGNALS = [
+  'sign in to your account',
+  'sign in to ebay',
+  'sign in to continue',
+  'please sign in',
+  'log in to your account',
+  'log in to continue',
+  'enter your email or username',
+  'enter your password',
+];
 
 // ── Session status in-memory cache ───────────────────────────────────────────
 // Pure in-memory: starts empty each launch, populated by verifyAllPlatforms on
@@ -145,26 +155,7 @@ export async function verifySellMonitorLogin(platformId) {
         }
       }
 
-      // Body-content sniff — catches "soft" login walls where the response is
-      // 200 OK with the original URL but the body is actually a sign-in form
-      // (eBay does this when anti-bot kicks in). Looks for high-signal phrases
-      // in a configurable visible-text prefix, scoped to avoid false positives
-      // from a stray "Sign in" link in nav chrome unless the platform opts in.
-      const scanChars = config?.bodyScanChars || 300;
-      const head = visibleText.slice(0, scanChars).toLowerCase();
-      const softWallSignals = [
-        'sign in to your account',
-        'sign in to ebay',
-        'sign in to continue',
-        'please sign in',
-        'log in to your account',
-        'log in to continue',
-        'enter your email or username',
-        'enter your password',
-        // Platform-specific signals merged from platform config
-        ...(config?.bodySignals || []),
-      ];
-      const matched = softWallSignals.find(s => head.includes(s));
+      const matched = getSoftLoginWallMatch(visibleText, config);
       if (matched) {
         trace.softWallMatch = matched;
         return { connected: false, reason: `Page body looks logged out at ${target} ("${matched}") despite URL ${r.finalUrl}.`, trace: { target, checks: traces } };
@@ -196,6 +187,20 @@ function stripTags(html) {
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+export function getSoftLoginWallMatch(visibleText, config = {}) {
+  // Body-content sniff — catches "soft" login walls where the response is
+  // 200 OK with the original URL but the body is actually a sign-in form.
+  // Looks for high-signal phrases in a configurable visible-text prefix,
+  // scoped to avoid false positives from nav chrome unless the platform opts in.
+  const scanChars = config?.bodyScanChars || 300;
+  const head = String(visibleText || '').slice(0, scanChars).toLowerCase();
+  const softWallSignals = [
+    ...DEFAULT_SOFT_WALL_SIGNALS,
+    ...(config?.bodySignals || []),
+  ].map(s => String(s || '').toLowerCase());
+  return softWallSignals.find(s => s && head.includes(s)) || null;
 }
 
 export async function writeStatusCache(platformId, connected, extras = {}) {

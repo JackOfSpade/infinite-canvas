@@ -1,6 +1,6 @@
 import React from 'react';
 import { CheckCircle2, AlertCircle, Circle, LogIn } from 'lucide-react';
-import { MARKETPLACE_STATUS_LABELS } from './monitorStatusLabels';
+import { getMarketplaceStatusLabel } from './monitorStatusLabels';
 
 /**
  * Status pill for MarketplaceCardNode — renders the AI classifier's
@@ -28,7 +28,7 @@ export function MonitorStatusBadge({
   const lastDisplay = lastChecked
     ? new Date(lastChecked).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
     : '';
-  const label = MARKETPLACE_STATUS_LABELS[status] || MARKETPLACE_STATUS_LABELS.unknown || status;
+  const label = getMarketplaceStatusLabel(status, lastChecked);
 
   return (
     <div className={`flex items-center gap-1.5 px-2 py-1 rounded-md border text-[10px] ${meta.bg} ${className}`}>

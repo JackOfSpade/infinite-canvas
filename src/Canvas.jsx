@@ -254,7 +254,7 @@ export function Canvas() {
   const {
     saveCanvas, loadCanvas, exportCanvasToPNG,
     hasUnsavedChanges, setHasUnsavedChanges, currentFile, setCurrentFile,
-    saveStateRef,
+    saveStateRef, loadState,
   } = useCanvasPersistence({
     nodes, edges, drawings, setNodes, setEdges, setDrawings, customFitView, addToast,
     flushStack: navigation.flushStack,
@@ -697,6 +697,28 @@ export function Canvas() {
         onPointerLeave={onCanvasPointerLeave}
       >
         <SearchBar />
+
+        {loadState.active && (
+          <div className="absolute inset-0 z-[500] flex items-center justify-center bg-neutral-950/80 backdrop-blur-sm">
+            <div className="w-[min(360px,80vw)] rounded-lg border border-white/10 bg-neutral-900/95 p-4 shadow-2xl">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="text-xs font-semibold text-white/85">Loading workspace</div>
+                <div className="font-mono text-[10px] text-white/45">
+                  {Math.round(Math.max(0, Math.min(1, loadState.progress || 0)) * 100)}%
+                </div>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+                <div
+                  className="h-full rounded-full bg-emerald-400 transition-[width] duration-200 ease-out"
+                  style={{ width: `${Math.round(Math.max(0, Math.min(1, loadState.progress || 0)) * 100)}%` }}
+                />
+              </div>
+              <div className="mt-2 text-[10px] text-white/45">
+                {loadState.label || 'Preparing canvas...'}
+              </div>
+            </div>
+          </div>
+        )}
 
         <CanvasCursors
           ref={cursorsRef}
