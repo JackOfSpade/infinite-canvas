@@ -4,7 +4,7 @@ import { EventLogger } from '../utils/EventLogger';
 import { ResizeCorrection, ResizeActive, TitleZoneCorrection, TitleZoneActive } from '../utils/canvasInteractions';
 
 import { findNonOverlappingPlacement } from '../utils/layoutUtils';
-import { PRODUCT_IMAGE_EXT_RE } from '../utils/fileExtensions';
+import { isProductImageFile } from '../utils/fileDropUtils';
 import { canSellHubAcceptDisplayPhotoDrop, getHubDropRejectLabel, getHubFileDropMode } from '../utils/hubDropEligibility';
 import { appendPhotoFiles } from '../utils/photoPathList';
 
@@ -25,7 +25,7 @@ function filePayloadFromDraggedNodes(nodes) {
 function fileSupportedByHub(hubType, file) {
   const name = file?.filename || file?.filePath || '';
   if (hubType === 'jobhub') return !/\.app$/i.test(name);
-  if (hubType === 'sellhub') return PRODUCT_IMAGE_EXT_RE.test(name);
+  if (hubType === 'sellhub') return isProductImageFile(file);
   return false;
 }
 

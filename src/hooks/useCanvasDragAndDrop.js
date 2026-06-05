@@ -5,6 +5,7 @@ import { processDroppedFiles } from '../utils/dragUtils';
 import { getNodeDims } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
 import { CODE_EXT_RE } from '../utils/fileExtensions';
+import { filesToDropPayloads } from '../utils/fileDropUtils';
 
 // Compiled once at module load — not per drop event.
 const URL_RE = /^(https?:\/\/[^\s]+|[a-z0-9]([a-z0-9-]*[a-z0-9])?\.([a-z]{2,}\.)*[a-z]{2,}([/?#][^\s]*)?)$/i;
@@ -94,18 +95,13 @@ export function useCanvasDragAndDrop({
     }
 
     if (event.dataTransfer.files?.length > 0) {
-      const files = Array.from(event.dataTransfer.files).map(f => ({
-        name: f.name,
-        type: f.type,
-        size: f.size,
-        path: f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : '')
-      }));
+      const droppedFiles = Array.from(event.dataTransfer.files);
+      const files = filesToDropPayloads(droppedFiles);
 
       // Only process items with valid system paths
-      const validFiles = files.filter(f => f.path);
-      if (validFiles.length === 0) {
+      if (files.length === 0) {
         EventLogger.log('Drop ignored: no valid paths on files. files=' +
-          JSON.stringify(files.map(f => ({ name: f.name, type: f.type, size: f.size, path: f.path }))));
+          JSON.stringify(droppedFiles.map(f => ({ name: f.name, type: f.type, size: f.size }))));
         return;
       }
 
@@ -119,15 +115,15 @@ export function useCanvasDragAndDrop({
       // as a plain document like any other file.
       takeSnapshot();
       const dropDepth = depthRef.current;
-      const newItems = await processDroppedFiles(validFiles, position);
+      const newItems = await processDroppedFiles(files, position);
       if (!isMountedRef.current) return;
       if (depthRef.current !== dropDepth) return; // Canvas changed during processing
 
       if (newItems.length > 0) {
-        EventLogger.log(`drop routed type=document files=${validFiles.length}`);
+        EventLogger.log(`drop routed type=document files=${files.length}`);
         insertNodes(newItems);
       } else {
-        EventLogger.log('Drop ignored: processDroppedFiles returned 0 items. count=' + validFiles.length);
+        EventLogger.log('Drop ignored: processDroppedFiles returned 0 items. count=' + files.length);
       }
       return;
     }

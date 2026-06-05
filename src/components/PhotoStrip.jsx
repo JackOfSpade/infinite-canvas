@@ -1,8 +1,8 @@
 import React, { useState, useCallback, useRef } from 'react';
 import { Camera, ImageOff, Maximize2, Trash2, Upload } from 'lucide-react';
 import { toLocalFilePreviewUrl } from '../utils/fileDisplayUtils';
+import { filesToProductImagePaths } from '../utils/fileDropUtils';
 import { PhotoLightbox } from './PhotoLightbox';
-import { PRODUCT_IMAGE_EXT_RE } from '../utils/fileExtensions';
 
 /**
  * Horizontal photo thumbnail strip used by SellHub draft/priced states.
@@ -61,11 +61,7 @@ export function PhotoStrip({
   }, [onRemoveImage]);
 
   const getImagePathsFromFiles = useCallback((files) => {
-    const paths = files
-      .filter(f => PRODUCT_IMAGE_EXT_RE.test(f.name || ''))
-      .map(f => f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : ''))
-      .filter(Boolean);
-    return paths;
+    return filesToProductImagePaths(files);
   }, []);
 
   const handleDragEnter = useCallback((e) => {

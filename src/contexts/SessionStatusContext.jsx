@@ -12,19 +12,22 @@ export function SessionStatusProvider({ children }) {
   const gotLiveEvent = useRef(false);
 
   useEffect(() => {
+    const api = globalThis.window?.electronAPI;
+    if (!api) return undefined;
+
     // Seed from whatever state the startup verify reached before React mounted,
     // but only if no live event has been applied yet (handles the verify-starts-
     // before-React race without clobbering newer in-flight events).
-    window.electronAPI.getVerifyState?.().then(({ verifying: vIds = [] }) => {
+    api.getVerifyState?.()?.then(({ verifying: vIds = [] }) => {
       if (gotLiveEvent.current) return;
       setVerifying(new Set(vIds));
-    });
+    }).catch(() => {});
 
-    const unsubStart = window.electronAPI.onSessionVerifyStart?.(({ platformIds }) => {
+    const unsubStart = api.onSessionVerifyStart?.(({ platformIds }) => {
       gotLiveEvent.current = true;
       setVerifying(new Set(platformIds));
     });
-    const unsubUpdate = window.electronAPI.onSessionVerifyUpdate?.(({ platformId }) => {
+    const unsubUpdate = api.onSessionVerifyUpdate?.(({ platformId }) => {
       gotLiveEvent.current = true;
       setVerifying(prev => {
         const next = new Set(prev);
@@ -32,7 +35,7 @@ export function SessionStatusProvider({ children }) {
         return next;
       });
     });
-    const unsubDone = window.electronAPI.onSessionVerifyDone?.(() => {
+    const unsubDone = api.onSessionVerifyDone?.(() => {
       gotLiveEvent.current = true;
       setVerifying(new Set());
     });

@@ -13,6 +13,7 @@ import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
 import { EventLogger } from '../utils/EventLogger';
 import { useToast } from '../components/ToastProvider';
 import { getHubDropLockReason } from '../utils/hubDropEligibility';
+import { filesToDropPayloads, summarizeFileExtensions } from '../utils/fileDropUtils';
 
 import { JobSearchProcessingState } from './jobsearch/JobSearchProcessingState';
 import { JobSearchDoneState } from './jobsearch/JobSearchDoneState';
@@ -1594,13 +1595,12 @@ export function JobSearchNode({ id, data }) {
     if (PROCESSING_STATES.includes(hubState)) return;
 
     const files = Array.from(e.dataTransfer?.files || []);
-    const exts = files.map(f => (f.name.match(/\.[a-z0-9]+$/i)?.[0] || '?').toLowerCase());
+    const exts = summarizeFileExtensions(files);
     EventLogger.log(`[JobSearch][${id}] Drop attempt: ${files.length} file(s) ext=[${exts.join(', ') || 'none'}]`);
     if (files.length === 0) return;
 
-    const paths = files.map(f => f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : ''));
-    const names = files.map(f => f.name);
-    acceptCareerFiles(paths, names);
+    const payloads = filesToDropPayloads(files);
+    acceptCareerFiles(payloads.map(file => file.path), payloads.map(file => file.name));
   }, [acceptCareerFiles, data.locked, hubState, id, inputDropsBlocked, platformsVerifying]);
 
   useEffect(() => {

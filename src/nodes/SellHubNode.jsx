@@ -21,7 +21,7 @@ import { useEpochCancellation, isNodeDeletedAbort } from '../hooks/useEpochCance
 import { useSourceProgress } from '../hooks/useSourceProgress';
 import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
-import { PRODUCT_IMAGE_EXT_RE } from '../utils/fileExtensions';
+import { filesToProductImagePaths, summarizeFileExtensions } from '../utils/fileDropUtils';
 import { mergeSourceIntoComps } from '../utils/compsMerge';
 import { getHubDropLockReason } from '../utils/hubDropEligibility';
 import { appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../utils/photoPathList';
@@ -832,13 +832,10 @@ export function SellHubNode({ id, data }) {
     // Log EVERY drop attempt up front (extensions + total count) so bug reports
     // can distinguish "drop never fired" from "drop fired but every file was
     // rejected by the regex" — the previous code only logged on success.
-    const exts = files.map(f => (f.name.match(/\.[a-z0-9]+$/i)?.[0] || '?').toLowerCase());
+    const exts = summarizeFileExtensions(files);
     EventLogger.log(`[SellHub][${id}] Drop attempt: ${files.length} file(s) ext=[${exts.join(', ') || 'none'}]`);
 
-    const imagePaths = files
-      .filter(f => PRODUCT_IMAGE_EXT_RE.test(f.name))
-      .map(f => f.path || (window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(f) : ''))
-      .filter(Boolean);
+    const imagePaths = filesToProductImagePaths(files);
     if (displayPhotoDropMode) {
       handleAddDisplayPhotos(imagePaths);
       return;
@@ -853,10 +850,7 @@ export function SellHubNode({ id, data }) {
       if (data.locked) return;
       if (platformsVerifying) return;
       const files = e.detail?.files || [];
-      const imagePaths = files
-        .filter(f => PRODUCT_IMAGE_EXT_RE.test(f.filename || f.filePath || ''))
-        .map(f => f.filePath)
-        .filter(Boolean);
+      const imagePaths = filesToProductImagePaths(files);
       EventLogger.log(`[SellHub][${id}] Document-node drop received: ${files.length} file(s), acceptedImages=${imagePaths.length}, mode=${e.detail?.mode || 'initial-input'}, hubState=${hubState}`);
       if (e.detail?.mode === 'display-photos' || hubState === 'priced') {
         handleAddDisplayPhotos(imagePaths);

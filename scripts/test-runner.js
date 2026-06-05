@@ -99,6 +99,7 @@ import { createMarketplaceTestMode, parseMarketplaceEnvBoolean, getScopedCompSou
 import { getJobAuthPreflightSourceIds, JOB_AUTH_PREFLIGHT_SOURCE_IDS } from '../src/utils/jobAuthPreflight.js';
 import { getMarketplaceStatusLabel } from '../src/components/monitorStatusLabels.js';
 import { appendPhotoFiles, appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../src/utils/photoPathList.js';
+import { filesToDropPayloads, filesToProductImagePaths, getLocalFilePath, summarizeFileExtensions } from '../src/utils/fileDropUtils.js';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -672,6 +673,30 @@ const tests = [
       const displayDrop = appendPhotoFiles(['/tmp/a.jpg'], [{ filePath: '/tmp/a.jpg' }, { filePath: '/tmp/c.jpg' }, { path: '/tmp/d.jpg' }]);
       assert(JSON.stringify(displayDrop.imagePaths) === JSON.stringify(['/tmp/a.jpg', '/tmp/c.jpg', '/tmp/d.jpg']), 'display photo file append should accept canvas-node filePath and file path payloads');
       assert(displayDrop.accepted === 3 && displayDrop.added === 2, `display photo file append should report accepted/added counts -> ${JSON.stringify(displayDrop)}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'File drop helpers preserve payload pairing and centralize image filtering',
+    run: () => {
+      const resolver = (file) => file.systemPath || '';
+      const files = [
+        { name: 'resume.pdf', type: 'application/pdf', size: 123, systemPath: '/tmp/resume.pdf' },
+        { filename: 'front.HEIC', filePath: ' /tmp/front.HEIC ' },
+        { name: 'notes.txt', systemPath: '/tmp/notes.txt' },
+        { name: 'missing.jpg', systemPath: '' },
+        { filename: 'nested.JPG', filePath: '/tmp/nested.JPG' },
+      ];
+      assert(getLocalFilePath(files[0], resolver) === '/tmp/resume.pdf', 'resolver fallback should return trimmed system paths');
+      const payloads = filesToDropPayloads(files, resolver);
+      assert(JSON.stringify(payloads.map(f => [f.name, f.path])) === JSON.stringify([
+        ['resume.pdf', '/tmp/resume.pdf'],
+        ['front.HEIC', '/tmp/front.HEIC'],
+        ['notes.txt', '/tmp/notes.txt'],
+        ['nested.JPG', '/tmp/nested.JPG'],
+      ]), 'drop payloads should keep names paired with filtered valid paths');
+      assert(JSON.stringify(summarizeFileExtensions(files)) === JSON.stringify(['.pdf', '.heic', '.txt', '.jpg', '.jpg']), 'extension summaries should support name/filename payloads');
+      assert(JSON.stringify(filesToProductImagePaths(files, resolver)) === JSON.stringify(['/tmp/front.HEIC', '/tmp/nested.JPG']), 'product-image paths should filter and normalize accepted image drops');
       return { ok: true };
     },
   },
