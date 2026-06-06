@@ -43,7 +43,8 @@ export function CompSourceCardNode({ id, data }) {
 
   // Hub-cascading lock: when the owning SellHub is locked, Solve/Skip
   // become no-ops. Card stays visible and informational.
-  const hubLocked = !!getNode(data.hubId)?.data?.locked;
+  const hubData = getNode(data.hubId)?.data || {};
+  const hubLocked = !!hubData.locked || hubData.hubState === 'queued';
 
   useEffect(() => {
     if (!window.electronAPI?.onPriceSourceProgress) return;

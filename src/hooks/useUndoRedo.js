@@ -3,6 +3,8 @@ import { DEFAULT_SHORTCUTS } from './useSettings';
 import { EventLogger } from '../utils/EventLogger';
 import { fingerprint } from '../utils/serializationUtils';
 import { TIMINGS, maxUndoHistory } from '../utils/timings';
+import { mergeNonRestorableNodeDataFromLive } from '../utils/undoNonRestorableState';
+import { isTextEditingTarget, shouldUseNativeTextUndo } from '../utils/nativeTextUndo';
 
 // Resolved once at module load — each snapshot is a full canvas clone, so this
 // scales down on low-memory devices (see maxUndoHistory).
@@ -156,10 +158,11 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
 
     EventLogger.log('undo');
     isRestoringRef.current = true;
-    setNodes(previous.nodes);
+    const restoredNodes = mergeNonRestorableNodeDataFromLive(previous.nodes, currentState.nodes);
+    setNodes(restoredNodes);
     setEdges(previous.edges);
     setDrawings(previous.drawings);
-    lastFingerprintRef.current = fingerprint(previous);
+    lastFingerprintRef.current = fingerprint({ ...previous, nodes: restoredNodes });
     syncHistoryLen();
     setIsStateDirty(false);
     requestAnimationFrame(() => { isRestoringRef.current = false; });
@@ -170,16 +173,18 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     const future = futureRef.current;
     if (future.length === 0) return;
 
+    const currentState = deepCloneState();
     const next        = future[future.length - 1];
     futureRef.current = future.slice(0, -1);
-    pastRef.current   = [...pastRef.current, deepCloneState()];
+    pastRef.current   = [...pastRef.current, currentState];
+    const restoredNodes = mergeNonRestorableNodeDataFromLive(next.nodes, currentState.nodes);
 
     EventLogger.log('redo');
     isRestoringRef.current = true;
-    setNodes(next.nodes);
+    setNodes(restoredNodes);
     setEdges(next.edges);
     setDrawings(next.drawings);
-    lastFingerprintRef.current = fingerprint(next);
+    lastFingerprintRef.current = fingerprint({ ...next, nodes: restoredNodes });
     syncHistoryLen();
     setIsStateDirty(false);
     requestAnimationFrame(() => { isRestoringRef.current = false; });
@@ -200,8 +205,9 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
 
       const isMod = e.ctrlKey || e.metaKey;
       if (!isMod) return;
-      const tag = e.target.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) {
+      if (isTextEditingTarget(e.target)) {
+        if (shouldUseNativeTextUndo(e.target)) return;
+        const tag = e.target.tagName;
         // If it's an empty contentEditable, allow the workspace undo (to undo node creation)
         if (e.target.innerText && e.target.innerText.trim().length > 0) return;
         if (tag === 'INPUT' && e.target.value.trim().length > 0) return;

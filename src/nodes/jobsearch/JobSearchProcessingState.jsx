@@ -11,6 +11,7 @@ export function JobSearchProcessingState({
   activeSourceId,
   onReset,
   chromeLaunchInfo,
+  queuedRun,
 }) {
   const handleCopy = () => {
     if (chromeLaunchInfo?.terminalCommand) {
@@ -74,6 +75,11 @@ export function JobSearchProcessingState({
       <p className="text-white/60 text-xs font-medium">
         {hubState === 'searching' && activeSourceId ? `Scanning ${JOB_SOURCE_BY_ID[activeSourceId]?.name || activeSourceId}...` : statusLabel}
       </p>
+      {hubState === 'queued' && (
+        <p className="text-blue-400/60 text-[10px] mt-1">
+          {(queuedRun?.label || 'Job search')} · Position {queuedRun?.position || 1}
+        </p>
+      )}
       {hubState === 'searching' && totalSourceJobs > 0 && (
         <p className="text-blue-400/60 text-[10px] mt-1">
           {totalSourceJobs} jobs found so far

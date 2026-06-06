@@ -625,6 +625,7 @@ export function registerAccountsHandlers() {
       platform: platformId,
       connected: !!cached?.connected,
       lastConfirmedAt: cached?.ts || null,
+      lastReason: cached?.lastReason || null,
       name: config.name,
       sellerUrl: config.sellerUrl,
     };
@@ -647,6 +648,7 @@ export function registerAccountsHandlers() {
       platform: platformId,
       connected: !!cached?.connected,
       lastConfirmedAt: cached?.ts || null,
+      lastReason: cached?.lastReason || null,
       name: config.name,
     };
   });

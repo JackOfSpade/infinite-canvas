@@ -91,7 +91,7 @@ export const NODE_FACTORIES = {
 };
 
 // Hub states that indicate an active background job — clones should not inherit these.
-const ACTIVE_HUB_STATES = new Set(['parsing', 'querying', 'searching', 'scoring', 'analyzing']);
+const ACTIVE_HUB_STATES = new Set(['queued', 'parsing', 'querying', 'searching', 'scoring', 'analyzing']);
 
 /**
  * Create a clean, safe clone of an existing node for duplication.
@@ -139,6 +139,7 @@ export function cloneNode(original, dx = 40, dy = 40) {
     } else if (clone.data.hubState === 'researching') {
       clone.data.hubState = 'draft';
     }
+    delete clone.data.queuedModuleRun;
   }
 
   return clone;

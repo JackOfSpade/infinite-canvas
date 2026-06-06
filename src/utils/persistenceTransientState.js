@@ -1,4 +1,5 @@
 export const TRANSIENT_PROCESSING_HUB_STATES = [
+  'queued',
   'parsing',
   'querying',
   'searching',
@@ -8,6 +9,7 @@ export const TRANSIENT_PROCESSING_HUB_STATES = [
 ];
 
 const JOBSEARCH_TRANSIENT_KEYS = [
+  'queuedModuleRun',
   'scrapeWarnings',
   'pendingJobs',
   'pendingTargetRole',
@@ -21,6 +23,7 @@ const JOBSEARCH_SOURCES_READY_TRANSIENT_KEYS = [
 ];
 
 export const SELLHUB_TRANSIENT_KEYS = [
+  'queuedModuleRun',
   'platformFitPending',
 ];
 

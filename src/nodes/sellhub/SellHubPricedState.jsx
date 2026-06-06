@@ -97,6 +97,9 @@ export function SellHubPricedState({
   product,
   pricing,
   comps,
+  // Per-item breakdown for multi-item ("bundle") listings (null for single item).
+  itemPricings = null,
+  bundleTotal = null,
   scrapeWarnings = [],
   justificationExpanded,
   toggleJustification,
@@ -170,6 +173,33 @@ export function SellHubPricedState({
             compBreakdown={pricing.comp_breakdown}
           />
         </>
+      )}
+
+      {/* Bundle breakdown — one row per item priced + a suggested total. Only
+          shown when this listing packages multiple items; the tiers above
+          reflect the primary item. */}
+      {Array.isArray(itemPricings) && itemPricings.length > 1 && (
+        <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] px-2 py-1.5 space-y-1">
+          <div className="text-emerald-300/70 text-[9px] font-semibold uppercase tracking-wider">
+            Bundle breakdown ({itemPricings.length} items)
+          </div>
+          <ul className="space-y-0.5">
+            {itemPricings.map((it, i) => (
+              <li key={it.key || i} className="flex items-center justify-between gap-2 text-[10px]">
+                <span className="text-white/60 truncate" title={it.label || it.query}>
+                  {i === 0 ? '★ ' : ''}{it.label || it.query || `Item ${i + 1}`}
+                </span>
+                <span className="text-white/80 font-medium shrink-0">
+                  {it.pricing?.recommended_price != null ? `$${it.pricing.recommended_price}` : '—'}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <div className="flex items-center justify-between gap-2 pt-1 border-t border-white/10 text-[11px]">
+            <span className="text-emerald-300/80 font-semibold">Suggested bundle total</span>
+            <span className="text-emerald-300 font-bold shrink-0">{bundleTotal != null ? `$${bundleTotal}` : '—'}</span>
+          </div>
+        </div>
       )}
 
       {/* Price justification */}

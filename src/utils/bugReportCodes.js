@@ -179,6 +179,13 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  STATUS: {
+    label: 'Listing Status Checks',
+    description: 'Listing status-check audit — per-card "Check" / "Check All" runs: the per-URL verdict trace, whether the identity anchor matched each page, and sold/ended/needs-login/unknown outcomes. Use for "Check All said X but the listing is Y", "my deletion was not detected", or "card stuck on unknown" reports. The per-URL trace + listing-URL shape live in Node Diagnostics (`listing:` and `checkTrace[…]`); this also narrows the event log to status-check lines.',
+    logFilter: line =>
+      /status check|check.?all|checking .* status|Result: (live|sold|ended|unknown|needs.?login|error)|ListingStatusCheck|needs.?login|lastCheckTrace/i.test(line),
+  },
+
   // ── Presets ───────────────────────────────────────────────────────────────
 
   FULL: {

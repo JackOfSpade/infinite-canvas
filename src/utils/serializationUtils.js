@@ -4,6 +4,7 @@ import {
   SELLHUB_TRANSIENT_KEYS,
   TRANSIENT_PROCESSING_HUB_STATES,
 } from './persistenceTransientState.js';
+import { stripNonRestorableNodeDataForUndo } from './undoNonRestorableState.js';
 
 /** Stable, pure snapshot fingerprint — no hook needed. */
 export function fingerprint(snap) {
@@ -27,7 +28,8 @@ export function fingerprint(snap) {
           dc: canvasData.drawings?.length || 0
         };
       }
-      return { id: x.id, x: x.position?.x, y: x.position?.y, t: x.type, d: data, s: x.style, sm: summary };
+      const undoData = stripNonRestorableNodeDataForUndo({ ...x, data });
+      return { id: x.id, x: x.position?.x, y: x.position?.y, t: x.type, d: undoData, s: x.style, sm: summary };
     }),
     e: e.map(x => ({ id: x.id, s: x.source, t: x.target })),
     dl: d.map(x => {

@@ -20,7 +20,8 @@
  * Multi-URL aggregation → strongest signal wins.
  */
 import { callLLMText } from './llm.js';
-import { verifySellMonitorLogin, writeStatusCache } from './accounts.js';
+import { getSoftLoginWallMatch, verifySellMonitorLogin, writeStatusCache } from './accounts.js';
+import { getSellMonitorConfig } from './stealthBrowser.js';
 import { logger } from '../logger.js';
 import { PAGE_STATUS_SINGLE_SCHEMA, PAGE_STATUS_MULTI_SCHEMA } from './aiSchemas.js';
 
@@ -159,6 +160,120 @@ function normalizeStatus(raw) {
 
 function cleanMessage(raw) {
   return String(raw || '').replace(/\s+/g, ' ').trim();
+}
+
+function isFacebookShareUrl(url) {
+  try {
+    const u = new URL(url);
+    return /(^|\.)facebook\.com$/i.test(u.hostname) && /^\/share\/[^/]+\/?$/i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isFacebookMarketplaceItemUrl(url) {
+  try {
+    const u = new URL(url);
+    return /(^|\.)facebook\.com$/i.test(u.hostname) && /^\/marketplace\/item\/[^/]+\/?$/i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function getAuthWallSignal({ status, finalUrl, url, html, platformId }) {
+  const finalLower = String(finalUrl || url).toLowerCase();
+  if (status === 401 || status === 403 || /\/(login|signin|sign-in|account\/login)/i.test(finalLower)) {
+    return 'transport';
+  }
+  const config = getSellMonitorConfig(platformId);
+  if (!config || !html) return null;
+  const softWall = getSoftLoginWallMatch(stripHtmlForAnalysis(html), config);
+  return softWall ? `body: ${softWall}` : null;
+}
+
+/**
+ * A listing's own page returning a hard client error means the item is no
+ * longer retrievable — sold, deleted, or removed → `ended`.
+ *
+ * 404/410 are unambiguous "gone" for ANY page (a dashboard or the listing
+ * itself). 400 is broadened to the LISTING url for most canonical listing URLs:
+ * some platforms return HTTP 400 "This content isn't available right now" for a
+ * removed item. Facebook is an exception: both `/share/<hash>` and canonical
+ * `/marketplace/item/<id>` URLs can 400 in automation while the seller's authed
+ * view still shows an active/in-review listing. Treat those 400s as ambiguous
+ * so watch/dashboard evidence can win the aggregate.
+ *
+ * Returns a pre-LLM result when the transport status is decisive/ambiguous, or
+ * null when the status should proceed to content analysis.
+ */
+export function goneListingResult({ status, url, urlLabel }) {
+  const isListing = urlLabel === 'listing';
+  // Facebook listing URLs are not stable status evidence at HTTP 400: a listing
+  // under seller review can 400 to public/automation fetches while still being
+  // editable and visible in seller dashboards. Treat that shape as ambiguous so
+  // authenticated listing/dashboard evidence can decide the final state.
+  if (isListing && status === 400 && (isFacebookShareUrl(url) || isFacebookMarketplaceItemUrl(url))) {
+    return {
+      url,
+      urlLabel,
+      status: 'unknown',
+      message: 'Facebook listing URL returned HTTP 400. Facebook can do this for active or in-review seller listings; use authenticated listing/dashboard evidence instead of treating it as ended.',
+    };
+  }
+  const gone = status === 404 || status === 410 || (isListing && status === 400);
+  if (!gone) return null;
+  const message = status === 404 || status === 410
+    ? `Listing not found (HTTP ${status}).`
+    : `Listing page is no longer available (HTTP ${status}) — the item was removed, deleted, or sold.`;
+  return { url, urlLabel, status: 'ended', message };
+}
+
+export function deterministicListingStatusFromText({ text, platformId, url, urlLabel, matched } = {}) {
+  const lower = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!lower || platformId !== 'facebook' || urlLabel !== 'listing') return null;
+
+  const terminalText = /\b(this listing (?:has )?(?:ended|expired)|no longer available|removed by facebook|marked as sold|sold on)\b/.test(lower);
+  const isUnderReview =
+    /\bthis listing is (?:in review|being reviewed)\b/.test(lower) ||
+    /\blisting is (?:currently )?being reviewed\b/.test(lower) ||
+    /\ball listings go through a standard review\b/.test(lower);
+  if (isUnderReview && !terminalText) {
+    return {
+      url,
+      urlLabel,
+      status: 'live',
+      message: '[listing] Facebook says this listing is in review. Review means it is awaiting visibility approval, not ended.',
+      attention: [{
+        urgency: 'low',
+        category: 'policy',
+        headline: 'Listing currently being reviewed',
+        evidence: 'This listing is in review.',
+      }],
+      matched: typeof matched === 'boolean' ? matched : null,
+    };
+  }
+
+  const isOwnerActivePage =
+    /\bmark as sold\b/.test(lower) &&
+    /\bmark as pending\b/.test(lower) &&
+    /\bboost listing\b/.test(lower);
+  if (!isOwnerActivePage) return null;
+
+  const withoutActionLabels = lower
+    .replace(/\bmark as sold\b/g, ' ')
+    .replace(/\bmark as pending\b/g, ' ');
+  if (/\b(this listing (?:has )?(?:ended|expired)|no longer available|removed by facebook|marked as sold|sold on)\b/.test(withoutActionLabels)) {
+    return null;
+  }
+
+  return {
+    url,
+    urlLabel,
+    status: 'live',
+    message: '[listing] Facebook seller controls are visible: Mark as sold, Mark as pending, and Boost listing. Those are owner actions for an active listing, not a sold/ended banner.',
+    attention: [],
+    matched: typeof matched === 'boolean' ? matched : null,
+  };
 }
 
 function sourceDescription(url, urlLabel) {
@@ -344,10 +459,26 @@ export function aggregateStrongest(perUrlResults) {
   if (otherSignals.length > 0) {
     messageParts.push(`(also: ${otherSignals.join(', ')})`);
   }
-  // Concatenate attention items from every source then fuzzy-dedup so the
-  // card doesn't show four near-identical "1 offer received" lines when
-  // four watch URLs all surfaced the same signal.
-  const allAttention = perUrlResults.flatMap(r => Array.isArray(r.attention) ? r.attention : []);
+  // Concatenate attention items from the sources that actually located THIS
+  // listing, then fuzzy-dedup so the card doesn't show four near-identical
+  // "1 offer received" lines when four watch URLs all surfaced the same signal.
+  //
+  // A watch/dashboard page lists many listings; attention it emits is only
+  // about ours when ours was found there — otherwise it bleeds in a sibling
+  // listing's offer or an account-level notice (e.g. a deleted listing reading
+  // `ended` while a dashboard still showed an unrelated "high urgency" item).
+  // A source is trusted for attention when: it's the listing's own page
+  // (inherently about this listing — `matched` can be false there if the page
+  // doesn't echo the id literally), OR the identifier matched on that page, OR
+  // that page reached a definite per-listing verdict (live/sold/ended/needs-
+  // login — the model located the listing by id or title to conclude that).
+  const allAttention = perUrlResults.flatMap(r => {
+    if (!Array.isArray(r.attention) || r.attention.length === 0) return [];
+    const aboutThisListing = r.urlLabel === 'listing'
+      || r.matched === true
+      || (r.status && r.status !== 'unknown' && r.status !== 'error');
+    return aboutThisListing ? r.attention : [];
+  });
   const attention = dedupeAttention(allAttention);
   return {
     status: best?.status || 'unknown',
@@ -431,17 +562,21 @@ export async function classifyOneUrl({
 
   // Cheap pre-classification on transport signals — skip the LLM call when
   // the answer is obvious from HTTP status alone.
-  const finalLower = String(r.finalUrl || url).toLowerCase();
-  if (r.status === 401 || r.status === 403 || /\/(login|signin|sign-in|account\/login)/i.test(finalLower)) {
+  const authWallSignal = getAuthWallSignal({ status: r.status, finalUrl: r.finalUrl, url, html: r.html, platformId });
+  // Transport-level auth (401/403 / login redirect) is a real wall → disambiguate.
+  if (authWallSignal === 'transport') {
     const verdict = await disambiguateAuthFailure({ platformId, status: r.status, finalUrl: r.finalUrl, url, urlLabel });
     return { url, urlLabel, ...verdict };
   }
-  if (r.status === 404 || r.status === 410) {
-    return {
-      url, urlLabel,
-      status: 'ended',
-      message: `Listing not found (HTTP ${r.status}).`,
-    };
+  // A hard client error on the listing's own page = the item is gone. Checked
+  // BEFORE the soft body-wall so a deleted-listing 400 isn't swallowed as a
+  // login wall by chrome that happens to carry a "Log in" link.
+  const goneResult = goneListingResult({ status: r.status, url, urlLabel });
+  if (goneResult) return goneResult;
+  // Soft body-level login wall (a 200 page whose body is a sign-in prompt).
+  if (authWallSignal) {
+    const verdict = await disambiguateAuthFailure({ platformId, status: r.status, finalUrl: r.finalUrl, url, urlLabel });
+    return { url, urlLabel, ...verdict };
   }
   if (!r.html || r.html.length < MIN_CONTENT_CHARS) {
     return {
@@ -455,6 +590,14 @@ export async function classifyOneUrl({
   // around it; otherwise the head of the page up to maxFullChars (8000).
   const stripped = stripHtmlForAnalysis(r.html);
   const { window: snippet, matched } = findIdentifierWindow(stripped, listingIdentifier);
+  const deterministicStatus = deterministicListingStatusFromText({
+    text: stripped,
+    platformId,
+    url,
+    urlLabel,
+    matched,
+  });
+  if (deterministicStatus) return deterministicStatus;
   const matchHint = matched
     ? `The text below is the ±2000-char window around the first occurrence of identifier '${listingIdentifier}'.`
     : `Identifier '${listingIdentifier || '(none)'}' was NOT found in this page; the text below is the page head. If the listing isn't present here, return status 'unknown' with reason 'not present on this page'.`;
@@ -502,6 +645,8 @@ Return ONLY a JSON object:
 
 State rules:
 - "live"        — listing is currently up for sale (buy button visible, status Active in a table, etc.)
+- Seller owner-page actions such as "Mark as sold", "Mark as pending", "Boost listing", or "Edit" are LIVE evidence; they are actions the seller can take, not evidence that the item is already sold, pending, or ended.
+- Facebook review banners such as "This listing is in review" or "This listing is being reviewed" are LIVE/non-terminal evidence; include a low-urgency attention item, but do not classify them as ended.
 - "sold"        — the listing sold (SOLD banner, notification of sale, row in sold-listings table)
 - "ended"       — listing is no longer for sale and didn't sell (expired, canceled, removed, withdrawn, suspended for policy — *why* goes in attention, not state)
 - "needs-login" — the page itself is gated behind a login form or a "sign in to view" wall
@@ -541,6 +686,10 @@ Be conservative: prefer "unknown" over a guess for state. Do NOT classify based 
       matched,
     }),
     attention,
+    // Whether the identity anchor was located in this page — the decisive
+    // diagnostic for "why did the dashboard read unknown?" (a /share/<hash>
+    // listing URL yields an anchor that never appears on the seller dashboard).
+    matched,
   };
 }
 
@@ -609,19 +758,32 @@ export async function classifyMultipleUrls({
     if (!r.ok) {
       return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, status: 'error', message: `Fetch failed: ${r.error}` } };
     }
-    const finalLower = String(r.finalUrl || s.url).toLowerCase();
-    if (r.status === 401 || r.status === 403 || /\/(login|signin|sign-in|account\/login)/i.test(finalLower)) {
+    const authWallSignal = getAuthWallSignal({ status: r.status, finalUrl: r.finalUrl, url: s.url, html: r.html, platformId });
+    if (authWallSignal === 'transport') {
       const verdict = await disambiguateAuthFailure({ platformId, status: r.status, finalUrl: r.finalUrl, url: s.url, urlLabel: s.urlLabel });
       return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, ...verdict } };
     }
-    if (r.status === 404 || r.status === 410) {
-      return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, status: 'ended', message: `Listing not found (HTTP ${r.status}).` } };
+    // Hard client error on the listing's own page = gone (see goneListingResult);
+    // ranked above the soft body-wall so a deleted-listing 400 isn't read as login.
+    const goneResult = goneListingResult({ status: r.status, url: s.url, urlLabel: s.urlLabel });
+    if (goneResult) return { spec: s, terminal: goneResult };
+    if (authWallSignal) {
+      const verdict = await disambiguateAuthFailure({ platformId, status: r.status, finalUrl: r.finalUrl, url: s.url, urlLabel: s.urlLabel });
+      return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, ...verdict } };
     }
     if (!r.html || r.html.length < MIN_CONTENT_CHARS) {
       return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, status: 'unknown', message: `Empty or near-empty response (${r.html?.length || 0} bytes).` } };
     }
     const stripped = stripHtmlForAnalysis(r.html);
     const { window: snippet, matched } = findIdentifierWindow(stripped, listingIdentifier);
+    const deterministicStatus = deterministicListingStatusFromText({
+      text: stripped,
+      platformId,
+      url: s.url,
+      urlLabel: s.urlLabel,
+      matched,
+    });
+    if (deterministicStatus) return { spec: s, terminal: deterministicStatus };
     return { spec: s, status: r.status, finalUrl: r.finalUrl, snippet, matched };
   }));
 
@@ -685,6 +847,8 @@ Return ONLY a JSON object:
 
 State rules per page:
 - "live"        — listing currently up for sale on that page (buy button, status Active in a table row matching the identifier, etc.)
+- Seller owner-page actions such as "Mark as sold", "Mark as pending", "Boost listing", or "Edit" are LIVE evidence; they are actions the seller can take, not evidence that the item is already sold, pending, or ended.
+- Facebook review banners such as "This listing is in review" or "This listing is being reviewed" are LIVE/non-terminal evidence; include a low-urgency attention item, but do not classify them as ended.
 - "sold"        — page evidence of sale for this specific listing (SOLD banner, "sold for $X" notification, row in sold-listings)
 - "ended"       — listing is no longer for sale and didn't sell (expired, canceled, removed, withdrawn, suspended for policy — *why* belongs in attention)
 - "needs-login" — page body is gated behind a login form (separate from the 4xx auth wall we already handle)
@@ -731,6 +895,7 @@ Be conservative: prefer "unknown" over a guess for state. Do NOT classify based 
         matched: p.matched,
       }),
       attention: sanitizeAttention(verdict?.attention),
+      matched: p.matched,
     });
   }
   return results;

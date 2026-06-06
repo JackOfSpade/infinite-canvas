@@ -35,7 +35,7 @@ import {
 import { detectAntiBotSignal, matchesNoResultsSentinel } from '../electron/ipc/antiBotDetector.js';
 import { getStats } from '../src/utils/dashboardStats.js';
 import { resolveNodePresence } from '../src/utils/nodePresence.js';
-import { getNodesBounds, SELL_PLATFORMS } from '../src/utils/constants.js';
+import { CANVAS_ZOOM_LIMITS, getNodesBounds, SELL_PLATFORMS } from '../src/utils/constants.js';
 import { mergeSourceIntoComps } from '../src/utils/compsMerge.js';
 import { mergeResolvedSourceItems } from '../src/utils/jobSourceResolveMerge.js';
 import {
@@ -57,6 +57,7 @@ import {
   sanitizeEdgesForSave,
   sanitizeNodesForSave,
 } from '../src/utils/serializationUtils.js';
+import { mergeNonRestorableNodeDataFromLive } from '../src/utils/undoNonRestorableState.js';
 import { cloneNode, reassignCanvasDataIDs } from '../src/utils/nodeFactory.js';
 import {
   distToSegment,
@@ -71,6 +72,7 @@ import {
   panDuration,
   radialRadius,
   spiralStep,
+  viewportForZoomAtScreenPoint,
 } from '../src/utils/layoutGeometry.js';
 import { computeTidiedNodes, findNonOverlappingPlacement } from '../src/utils/layoutUtils.js';
 import { FILE_CATEGORIES, getFileCategoryInfo, toLocalFileUrl } from '../src/utils/fileDisplayUtils.js';
@@ -79,20 +81,29 @@ import { compsForPricing, priceSynthesisMaxTokens, jobScoringBatchSize, JOB_MAX_
 import { modelMeta, contextWindowForModel, maxOutputForModel, estimateTokensFromChars, assessPromptFit, planSplits, LOCAL_CHARS_PER_TOKEN } from '../electron/ipc/tokenWindow.js';
 import { parseGeminiJSON } from '../electron/ipc/gemini.js';
 import { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
-import { getSoftLoginWallMatch } from '../electron/ipc/accounts.js';
+import { withStatusCheckLock, getStatusCheckQueueDepth } from '../electron/ipc/statusCheckLock.js';
+import { createAggregatingProgress } from '../electron/ipc/compProgressAggregator.js';
+import { buildResearchItems, computeBundleTotal } from '../src/utils/bundlePricing.js';
+import {
+  clearMissingPreviewRelinkCache,
+  findExactFilenameBelow,
+  resolveMissingPreviewPath,
+} from '../electron/ipc/missingPreviewRelink.js';
+import { getBrowserPoolQueueState, pauseBrowserPool, queueScrape } from '../electron/ipc/browserPool.js';
+import { getSoftLoginWallMatch, getStatusCacheSync, writeStatusCache } from '../electron/ipc/accounts.js';
 import { getSellMonitorConfig } from '../electron/ipc/stealthBrowser.js';
 import os from 'node:os';
 import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
 import { modelTag, overPricedSoldFlag } from '../electron/ipc/bugReport/helpers.js';
 import { checkListingStatusMultiSource, classifyCompScrapeFailure, computeMissingLogins, formatPricingNotesForPrompt, normalizePricingNotes } from '../electron/ipc/marketplace.js';
-import { aggregateStrongest } from '../electron/ipc/listingStatusCheck.js';
+import { aggregateStrongest, classifyOneUrl, deterministicListingStatusFromText, goneListingResult } from '../electron/ipc/listingStatusCheck.js';
 import { isAuthChallengeUrl, PLATFORM_AUTH_COOKIES, PLATFORM_LOGIN_URLS } from '../electron/ipc/browser/authWindows.js';
 import { PRICE_SYNTHESIS_SCHEMA } from '../electron/ipc/aiSchemas.js';
 import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation } from '../src/utils/jobLocation.js';
 import { detectLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
 import { repairMojibake, hasMojibake, repairJobsMojibake } from '../src/utils/textEncoding.js';
 import { foldVerificationSample, orderByVerification, verificationScore } from '../src/utils/scrapeOrder.js';
-import { canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, getHubDropRejectLabel, getHubFileDropMode } from '../src/utils/hubDropEligibility.js';
+import { canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, getHubDropRejectLabel, getHubFileDropMode } from '../src/utils/hubDropEligibility.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
 import { createJobSearchTestMode, parseJobSearchEnvBoolean } from '../src/utils/jobSourceScope.js';
 import { createMarketplaceTestMode, parseMarketplaceEnvBoolean, getScopedCompSourceIds, isCompSourceEnabledInScope, normalizeCompWarnings } from '../src/utils/compSourceScope.js';
@@ -100,6 +111,9 @@ import { getJobAuthPreflightSourceIds, JOB_AUTH_PREFLIGHT_SOURCE_IDS } from '../
 import { getMarketplaceStatusLabel } from '../src/components/monitorStatusLabels.js';
 import { appendPhotoFiles, appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../src/utils/photoPathList.js';
 import { filesToDropPayloads, filesToProductImagePaths, getLocalFilePath, summarizeFileExtensions } from '../src/utils/fileDropUtils.js';
+import { cachedAuthNeedsLoginResult, statusErrorWrites, statusCheckWrites } from '../src/utils/listingStatusWrites.js';
+import { shouldUseNativeTextUndo } from '../src/utils/nativeTextUndo.js';
+import { createModuleRunQueue } from '../src/utils/moduleRunQueue.js';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -411,6 +425,7 @@ const tests = [
     run: () => {
       const normal = getJobSearchTransientKeysForSave('searching');
       const sourcesReady = getJobSearchTransientKeysForSave('sources-ready');
+      assert(normal.includes('queuedModuleRun'), 'Transient jobhub save rules: default state should strip queuedModuleRun');
       assert(normal.includes('scrapeWarnings'), 'Transient jobhub save rules: default state should strip scrapeWarnings');
       assert(normal.includes('pendingTargetRole'), 'Transient jobhub save rules: default state should strip pendingTargetRole');
       assert(!sourcesReady.includes('scrapeWarnings'), 'Transient jobhub save rules: sources-ready should preserve scrapeWarnings');
@@ -421,9 +436,11 @@ const tests = [
   {
     name: 'Transient state constants',
     run: () => {
+      assert(TRANSIENT_PROCESSING_HUB_STATES.includes('queued'), 'Transient state constants: missing queued');
       assert(TRANSIENT_PROCESSING_HUB_STATES.includes('searching'), 'Transient state constants: missing searching');
       assert(TRANSIENT_PROCESSING_HUB_STATES.includes('researching'), 'Transient state constants: missing researching');
       assert(SELLHUB_TRANSIENT_KEYS.includes('platformFitPending'), 'Transient state constants: missing platformFitPending');
+      assert(SELLHUB_TRANSIENT_KEYS.includes('queuedModuleRun'), 'Transient state constants: missing queuedModuleRun');
       return {
         transientStates: TRANSIENT_PROCESSING_HUB_STATES.length,
         sellhubKeys: SELLHUB_TRANSIENT_KEYS.length,
@@ -434,7 +451,7 @@ const tests = [
     name: 'Serialization sanitizes transient state',
     run: () => {
       const nodes = [
-        { id: 'hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'searching', pendingJobs: [1], scrapeWarnings: [2], errorMessage: 'old' } },
+        { id: 'hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'queued', queuedModuleRun: { position: 1 }, pendingJobs: [1], scrapeWarnings: [2], errorMessage: 'old' } },
         { id: 'job', type: 'jobcard', position: { x: 1, y: 1 }, style: { opacity: 0.3, width: 180 }, data: { title: 'A', isDropTarget: true } },
         { id: 'clean-source', type: 'jobsourcecard', position: { x: 2, y: 2 }, data: { persistedProgress: { status: 'done' } } },
         { id: 'blocked-source', type: 'jobsourcecard', position: { x: 3, y: 3 }, data: { persistedProgress: { status: 'error', warning: { code: 'captcha' } } } },
@@ -446,7 +463,7 @@ const tests = [
       const hub = sanitized.find(n => n.id === 'hub');
       const job = sanitized.find(n => n.id === 'job');
       assert(hub.data.hubState === 'empty', 'Serialization sanitizes transient state: active jobhub should reset to empty');
-      assert(!('pendingJobs' in hub.data) && !('scrapeWarnings' in hub.data), 'Serialization sanitizes transient state: jobhub transient buffers should be stripped');
+      assert(!('pendingJobs' in hub.data) && !('scrapeWarnings' in hub.data) && !('queuedModuleRun' in hub.data), 'Serialization sanitizes transient state: jobhub transient buffers should be stripped');
       assert(!('isDropTarget' in job.data) && job.style.opacity === undefined && job.style.width === 180, 'Serialization sanitizes transient state: node transient UI state should be stripped');
       assert(!sanitized.some(n => n.id === 'clean-source'), 'Serialization sanitizes transient state: clean source card should be dropped');
       assert(sanitized.some(n => n.id === 'blocked-source'), 'Serialization sanitizes transient state: blocked source card should persist');
@@ -482,6 +499,109 @@ const tests = [
       const fpB = fingerprint({ nodes: migrated, edges: [], drawings: [{ points: [{ x: 0, y: 0 }, { x: 7, y: 7 }, { x: 10, y: 10 }] }] });
       assert(fpA !== fpB, 'Serialization migration and fingerprints: middle drawing point should affect fingerprint');
       return { migratedNodes: migrated[0].data.canvasData.nodes.length };
+    },
+  },
+  {
+    name: 'Module run queue serializes Marketplace and Job Search modules FIFO',
+    run: async () => {
+      const starts = [];
+      const positionEvents = [];
+      const queue = createModuleRunQueue();
+
+      const a = await queue.acquireModuleRun({
+        nodeId: 'market-1',
+        kind: 'marketplace',
+        label: 'A',
+        onStart: () => starts.push('A'),
+      });
+      const bPromise = queue.acquireModuleRun({
+        nodeId: 'job-1',
+        kind: 'jobsearch',
+        label: 'B',
+        onQueued: ({ position }) => positionEvents.push(`Bq${position}`),
+        onQueueUpdate: ({ position }) => positionEvents.push(`Bu${position}`),
+        onStart: () => starts.push('B'),
+      });
+      const cPromise = queue.acquireModuleRun({
+        nodeId: 'market-2',
+        kind: 'marketplace',
+        label: 'C',
+        onQueued: ({ position }) => positionEvents.push(`Cq${position}`),
+        onStart: () => starts.push('C'),
+      });
+      const dPromise = queue.acquireModuleRun({
+        nodeId: 'job-2',
+        kind: 'jobsearch',
+        label: 'D',
+        onQueued: ({ position }) => positionEvents.push(`Dq${position}`),
+        onQueueUpdate: ({ position }) => positionEvents.push(`Du${position}`),
+        onStart: () => starts.push('D'),
+      });
+
+      assert(queue.getSnapshot().active.nodeId === 'market-1', 'first module starts immediately');
+      assert(queue.getSnapshot().queued.length === 3, `three later modules wait (got ${queue.getSnapshot().queued.length})`);
+      assert(positionEvents.includes('Bq1') && positionEvents.includes('Cq2') && positionEvents.includes('Dq3'), `initial queue positions recorded (${positionEvents.join(',')})`);
+
+      const cancelled = queue.cancelQueuedRunsForNode('market-2');
+      const cResult = await cPromise.catch(err => err?.message || String(err));
+      assert(cancelled === 1 && cResult === 'Node deleted', `cancel removes one waiting module (${cancelled}, ${cResult})`);
+      assert(queue.getSnapshot().queued.map(e => e.nodeId).join(',') === 'job-1,job-2', 'cancel preserves remaining FIFO order');
+      assert(positionEvents.includes('Du2'), `remaining queue positions update after cancel (${positionEvents.join(',')})`);
+
+      a.release();
+      const b = await bPromise;
+      assert(starts.join(',') === 'A,B', `B starts after A releases (${starts.join(',')})`);
+      b.release();
+      const d = await dPromise;
+      assert(starts.join(',') === 'A,B,D', `D starts after B releases (${starts.join(',')})`);
+      d.release();
+      assert(queue.getSnapshot().active === null && queue.getSnapshot().queued.length === 0, 'queue drains after all releases');
+      return { starts, queued: positionEvents.length };
+    },
+  },
+  {
+    name: 'Undo fingerprints ignore marketplace status checks',
+    run: () => {
+      const base = {
+        id: 'm1',
+        type: 'marketplacecard',
+        position: { x: 0, y: 0 },
+        data: {
+          listingUrl: 'https://market.test/listing/1',
+          status: 'unknown',
+          statusMessage: '',
+          lastChecked: '2026-01-01T00:00:00.000Z',
+          attention: [],
+          lastCheckTrace: { checked: 1 },
+        },
+      };
+      const checked = {
+        ...base,
+        data: {
+          ...base.data,
+          status: 'live',
+          statusMessage: 'Still live',
+          lastChecked: '2026-01-02T00:00:00.000Z',
+          attention: [{ urgency: 'low', category: 'watcher', headline: 'Watcher', evidence: '1 watcher' }],
+          lastCheckTrace: { checked: 2 },
+        },
+      };
+      assert(
+        fingerprint({ nodes: [base], edges: [], drawings: [] }) === fingerprint({ nodes: [checked], edges: [], drawings: [] }),
+        'Undo fingerprints ignore marketplace status checks: status-only changes should not dirty undo history'
+      );
+
+      const edited = { ...checked, data: { ...checked.data, listingUrl: 'https://market.test/listing/2' } };
+      assert(
+        fingerprint({ nodes: [base], edges: [], drawings: [] }) !== fingerprint({ nodes: [edited], edges: [], drawings: [] }),
+        'Undo fingerprints ignore marketplace status checks: listing URL edits should remain undoable'
+      );
+
+      const restored = mergeNonRestorableNodeDataFromLive([base], [edited]);
+      assert(restored[0].data.listingUrl === base.data.listingUrl, 'Undo restore should still restore undoable listing URL data');
+      assert(restored[0].data.status === 'live' && restored[0].data.lastChecked === checked.data.lastChecked, 'Undo restore should preserve live status fields');
+      assert(restored[0].data.lastCheckTrace.checked === 2, 'Undo restore should preserve live status trace');
+      return { ok: true };
     },
   },
   {
@@ -556,13 +676,13 @@ const tests = [
         position: { x: 10, y: 20 },
         draggable: false,
         deletable: false,
-        data: { locked: true, hubState: 'searching', isNew: true },
+        data: { locked: true, hubState: 'queued', queuedModuleRun: { position: 2 }, isNew: true },
       };
       const clone = cloneNode(source, 5, 6);
       assert(clone.id !== source.id, 'Node factory clone safety: clone should get a new id');
       assert(clone.position.x === 15 && clone.position.y === 26, 'Node factory clone safety: clone should be offset');
       assert(clone.data.locked === false && clone.draggable === undefined && clone.deletable === undefined, 'Node factory clone safety: clone should unlock');
-      assert(clone.data.hubState === 'empty' && clone.data.isNew === false, 'Node factory clone safety: active state/new flag should be sanitized');
+      assert(clone.data.hubState === 'empty' && clone.data.isNew === false && !clone.data.queuedModuleRun, 'Node factory clone safety: active state/new flag should be sanitized');
 
       const group = {
         id: 'group-a',
@@ -589,6 +709,10 @@ const tests = [
     run: () => {
       assert(canHubAcceptInitialDrop({ type: 'sellhub', data: { hubState: 'empty' } }), 'Hub drop eligibility: empty sellhub accepts initial photos');
       assert(!canHubAcceptInitialDrop({ type: 'sellhub', data: { hubState: 'empty', imagePaths: ['/tmp/a.jpg'] } }), 'Hub drop eligibility: sellhub with photos rejects later drops');
+      const failedInitialPhotos = { type: 'sellhub', data: { hubState: 'empty', imagePaths: ['/tmp/too-large.jpg'], inputLocked: true, errorMessage: 'Image file too large after resizing' } };
+      assert(canSellHubReplaceFailedInitialPhotos(failedInitialPhotos), 'Hub drop eligibility: failed initial sellhub photo analysis can be replaced');
+      assert(canHubAcceptInitialDrop(failedInitialPhotos), 'Hub drop eligibility: failed initial sellhub photo analysis accepts replacement drop');
+      assert(getHubFileDropMode(failedInitialPhotos) === 'initial-input', 'Hub drop eligibility: failed initial sellhub photo analysis routes replacement as initial input');
       assert(!canHubAcceptInitialDrop({ type: 'sellhub', data: { hubState: 'priced', product: { title: 'x' } } }), 'Hub drop eligibility: priced sellhub rejects later drops');
       assert(canSellHubAcceptDisplayPhotoDrop({ type: 'sellhub', data: { hubState: 'priced', product: { title: 'x' } } }), 'Hub drop eligibility: priced sellhub accepts display-photo drops');
       assert(!canSellHubAcceptDisplayPhotoDrop({ type: 'sellhub', data: { hubState: 'priced', locked: true } }), 'Hub drop eligibility: locked priced sellhub rejects display-photo drops');
@@ -603,7 +727,19 @@ const tests = [
       assert(getHubFileDropMode({ type: 'jobhub', data: { hubState: 'empty' } }) === 'initial-input', 'Hub drop eligibility: empty jobhub routes file drops as initial input');
       assert(getHubFileDropMode({ type: 'jobhub', data: { hubState: 'done', resumeProfile: { skills: [] } } }) === null, 'Hub drop eligibility: completed jobhub does not route file drops');
       assert(getHubDropRejectLabel({ type: 'jobhub', data: { hubState: 'searching' } }) === 'Busy', 'Hub drop eligibility: active jobhub reports busy');
-      return { checked: 15 };
+      return { checked: 18 };
+    },
+  },
+  {
+    name: 'Native text undo guard: opt-in module fields keep Ctrl/Cmd-Z even when empty',
+    run: () => {
+      const dom = new JSDOM('<div><input id="plain" value=""><input id="marked" data-native-undo="true" value=""><div data-native-undo="true"><textarea id="nested"></textarea></div><input id="checkbox" type="checkbox" data-native-undo="true"></div>');
+      const doc = dom.window.document;
+      assert(!shouldUseNativeTextUndo(doc.getElementById('plain')), 'plain empty input should still allow workspace undo');
+      assert(shouldUseNativeTextUndo(doc.getElementById('marked')), 'marked empty input should keep native undo');
+      assert(shouldUseNativeTextUndo(doc.getElementById('nested')), 'textarea under marked ancestor should keep native undo');
+      assert(!shouldUseNativeTextUndo(doc.getElementById('checkbox')), 'checkbox is not a text undo target');
+      return { ok: true };
     },
   },
   {
@@ -622,8 +758,11 @@ const tests = [
     name: 'Layout geometry helpers',
     run: () => {
       assert(radialRadius({ count: 12, cardW: 140, cardH: 50, hubW: 260, hubH: 140 }) >= 223, 'Layout geometry helpers: radial radius should clear hub/cards');
+      assert(CANVAS_ZOOM_LIMITS.min === 0.01 && CANVAS_ZOOM_LIMITS.max === 9.99, 'Canvas zoom limits should mirror Resolve-style 1%-999% viewer scale');
       assert(fitViewDuration(0) === 450 && fitViewDuration(100) === 900, 'Layout geometry helpers: fit duration clamp mismatch');
       assert(panDuration(0) === 260 && panDuration(5000) === 900, 'Layout geometry helpers: pan duration clamp mismatch');
+      const vp = viewportForZoomAtScreenPoint({ x: -100, y: -50, zoom: 1 }, { x: 400, y: 300 }, 2);
+      assert(vp.x === -600 && vp.y === -400 && vp.zoom === 2, 'Layout geometry helpers: center-anchored zoom viewport mismatch');
       assert(edgeZoneForRadius(10) === 8 && edgeZoneForRadius(1000) === 28, 'Layout geometry helpers: edge zone clamp mismatch');
       const spacing = gridSpacing([{ type: 'text' }, { type: 'listing' }]);
       assert(spacing.gutter >= 32 && spacing.gutter <= 80, 'Layout geometry helpers: grid spacing out of bounds');
@@ -660,6 +799,39 @@ const tests = [
       assert(getFileCategoryInfo('report.pdf').label === 'PDF Document', 'File display helpers: PDF label mismatch');
       assert(getFileCategoryInfo('unknown').badge === 'FILE', 'File display helpers: extensionless badge mismatch');
       return { image: getFileCategoryInfo('photo.HEIC').label };
+    },
+  },
+  {
+    name: 'Missing preview relink uses exact nearest filename and refuses ambiguity',
+    run: () => {
+      const root = path.join(os.tmpdir(), `ic-preview-relink-${process.pid}-${Date.now()}`);
+      const original = path.join(root, 'photo.jpg');
+      const moved = path.join(root, 'products', 'archived', 'photo.jpg');
+      const ambiguousRoot = path.join(root, 'ambiguous');
+      try {
+        fs.mkdirSync(path.dirname(moved), { recursive: true });
+        fs.writeFileSync(moved, 'image');
+        fs.mkdirSync(path.join(ambiguousRoot, 'a'), { recursive: true });
+        fs.mkdirSync(path.join(ambiguousRoot, 'b'), { recursive: true });
+        fs.writeFileSync(path.join(ambiguousRoot, 'a', 'duplicate.jpg'), 'a');
+        fs.writeFileSync(path.join(ambiguousRoot, 'b', 'duplicate.jpg'), 'b');
+
+        clearMissingPreviewRelinkCache();
+        const found = resolveMissingPreviewPath(original);
+        assert(found.status === 'found' && found.path === moved, `missing preview should relink to exact descendant filename -> ${JSON.stringify(found)}`);
+        const cached = resolveMissingPreviewPath(original);
+        assert(cached.cached === true && cached.path === moved, 'repeated preview requests should reuse the bounded relink cache');
+
+        const wrongCase = findExactFilenameBelow(root, 'Photo.jpg');
+        assert(wrongCase.status === 'not-found', 'missing preview relink should require an exact case-sensitive filename');
+
+        const ambiguous = findExactFilenameBelow(ambiguousRoot, 'duplicate.jpg');
+        assert(ambiguous.status === 'ambiguous' && ambiguous.path === null && ambiguous.matches.length === 2, 'same-depth duplicate filenames should be left unresolved');
+        return { found: path.relative(root, found.path), ambiguous: ambiguous.matches.length };
+      } finally {
+        clearMissingPreviewRelinkCache();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
     },
   },
   {
@@ -2168,8 +2340,8 @@ const tests = [
       assert(normalized === '8x10 rug small coffee stain, pet home.', `pricing notes normalize whitespace → ${normalized}`);
       assert(promptBlock.includes('USER NOTES FROM SELLER') && promptBlock.includes(normalized), `pricing notes prompt block includes notes → ${promptBlock}`);
       assert(formatPricingNotesForPrompt('   ') === '', 'blank pricing notes do not add a prompt section');
-      const long = normalizePricingNotes('x'.repeat(2100));
-      assert(long.length === 2000, `pricing notes cap at 2000 chars, got ${long.length}`);
+      const long = normalizePricingNotes('x'.repeat(10_000));
+      assert(long.length === 10_000, `pricing notes should remain uncapped, got ${long.length}`);
       return { ok: true };
     },
   },
@@ -2191,6 +2363,38 @@ const tests = [
     },
   },
   {
+    name: 'listing status: attention is scoped to sources that located this listing (no dashboard bleed)',
+    run: () => {
+      const high = (h) => ({ urgency: 'high', category: 'offer', headline: h, evidence: h });
+      // A deleted listing: its own page 4xx'd to `ended` (no attention); five
+      // dashboards were no-match for it but each emitted a sibling listing's
+      // high-urgency offer. None of that bleed should reach the card.
+      const deleted = aggregateStrongest([
+        { url: 'https://www.facebook.com/share/1FpnZtE25M/', urlLabel: 'listing', status: 'ended', message: 'gone (HTTP 400)' },
+        ...Array.from({ length: 5 }, (_, i) => ({
+          url: `https://fb.com/dash${i}`, urlLabel: 'platform watch', status: 'unknown', matched: false,
+          message: 'not present', attention: [high(`sibling offer ${i}`)],
+        })),
+      ]);
+      assert(deleted.status === 'ended', `ended wins, got ${deleted.status}`);
+      assert(deleted.attention.length === 0, `no-match dashboard attention is dropped, got ${deleted.attention.length}`);
+
+      // Legit attention is kept: the listing's own page, a matched watch page, and
+      // a watch page that reached a definite verdict all count; only the no-match
+      // unknown dashboard is dropped.
+      const live = aggregateStrongest([
+        { url: 'https://ebay.com/itm/1', urlLabel: 'listing', status: 'live', matched: true, message: 'live', attention: [high('own-page watcher spike')] },
+        { url: 'https://ebay.com/active', urlLabel: 'platform watch', status: 'live', matched: true, message: 'active row', attention: [high('matched dashboard offer')] },
+        { url: 'https://ebay.com/other', urlLabel: 'platform watch', status: 'unknown', matched: false, message: 'not present', attention: [high('bleed offer')] },
+      ]);
+      const heads = live.attention.map(a => a.headline);
+      assert(heads.includes('own-page watcher spike'), 'listing own-page attention kept');
+      assert(heads.includes('matched dashboard offer'), 'matched dashboard attention kept');
+      assert(!heads.includes('bleed offer'), 'no-match unknown dashboard attention dropped');
+      return { ok: true };
+    },
+  },
+  {
     name: 'listing status: listing URL is required before watch URLs are scanned',
     run: async () => {
       const result = await checkListingStatusMultiSource({
@@ -2202,6 +2406,242 @@ const tests = [
       assert(result.status === 'error', `blank listing URL should fail before scraping, got ${result.status}`);
       assert(/No listing URL/i.test(result.message), `message should ask for listing URL -> ${result.message}`);
       assert(Array.isArray(result.sources) && result.sources.length === 0, 'blank listing URL should not scan watch URLs');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'listing status: expired marketplace session returns needs-login before scraping',
+    run: async () => {
+      let verifiedPlatform = null;
+      let wroteStatus = null;
+      const result = await checkListingStatusMultiSource({
+        listingUrl: 'https://www.facebook.com/marketplace/item/123456789',
+        platformId: 'facebook',
+        productTitle: 'Apple iPhone XS',
+        sessionVerifier: async (platformId) => {
+          verifiedPlatform = platformId;
+          return { connected: false, reason: 'Redirected to https://www.facebook.com/login', trace: { finalUrl: 'https://www.facebook.com/login' } };
+        },
+        writeSessionStatus: async (platformId, connected, extras) => {
+          wroteStatus = { platformId, connected, extras };
+        },
+      });
+      assert(verifiedPlatform === 'facebook', `session verifier should run for facebook, got ${verifiedPlatform}`);
+      assert(wroteStatus?.platformId === 'facebook' && wroteStatus.connected === false, 'expired session should be written to cache');
+      assert(result.status === 'needs-login', `expired session should return needs-login, got ${result.status}`);
+      assert(/log in to Facebook/i.test(result.message), `message should tell user to log in -> ${result.message}`);
+      assert(result.sources?.[0]?.urlLabel === 'session', 'needs-login result should include a session source trace');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'listing status: cached disconnected marketplace session blocks before scraping',
+    run: async () => {
+      const cache = getStatusCacheSync();
+      const hadPrior = Object.prototype.hasOwnProperty.call(cache, 'mercari');
+      const prior = cache.mercari;
+      await writeStatusCache('mercari', false, { lastReason: 'Verification fetch error: page.content() timed out' });
+      try {
+        let verifierCalled = false;
+        const result = await checkListingStatusMultiSource({
+          listingUrl: 'https://www.mercari.com/us/item/m44325565616/',
+          platformId: 'mercari',
+          productTitle: 'Calibrite ColorChecker Passport Video 2',
+          sessionVerifier: async () => {
+            verifierCalled = true;
+            return { connected: true, reason: 'should not run' };
+          },
+        });
+        assert(!verifierCalled, 'cached disconnected session should block before verifier/scrape');
+        assert(result.status === 'needs-login', `cached disconnected session should return needs-login, got ${result.status}`);
+        assert(/Mercari session needs login/i.test(result.message), `needs-login message should name Mercari -> ${result.message}`);
+        assert(/page\.content\(\) timed out/i.test(result.message), `needs-login message should include cached verifier reason -> ${result.message}`);
+        assert(result.sources?.[0]?.urlLabel === 'session', 'cached auth gate should include a session source trace');
+      } finally {
+        if (hadPrior) cache.mercari = prior;
+        else delete cache.mercari;
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'listing status: hard client errors distinguish canonical listings from Facebook share links',
+    run: () => {
+      // 400 on most canonical listing pages is gone. Facebook listing URLs are
+      // weaker evidence: seller-owned/in-review items can 400 to automation
+      // while authenticated listing/dashboard evidence still shows them active.
+      const canonicalDeleted = goneListingResult({ status: 400, url: 'https://www.ebay.com/itm/123456789/', urlLabel: 'listing' });
+      assert(canonicalDeleted?.status === 'ended', `400 on non-Facebook canonical listing → ended, got ${canonicalDeleted?.status}`);
+      assert(/removed, deleted, or sold/i.test(canonicalDeleted.message), `ended message explains removal -> ${canonicalDeleted?.message}`);
+      const facebookCanonicalAmbiguous = goneListingResult({ status: 400, url: 'https://www.facebook.com/marketplace/item/123456789/', urlLabel: 'listing' });
+      assert(facebookCanonicalAmbiguous?.status === 'unknown', `400 on Facebook canonical listing should be unknown, got ${facebookCanonicalAmbiguous?.status}`);
+      assert(/active or in-review/i.test(facebookCanonicalAmbiguous.message), `Facebook canonical 400 message should explain ambiguity -> ${facebookCanonicalAmbiguous.message}`);
+      const shareAmbiguous = goneListingResult({ status: 400, url: 'https://www.facebook.com/share/1FpnZtE25M/', urlLabel: 'listing' });
+      assert(shareAmbiguous?.status === 'unknown', `400 on Facebook share URL should be unknown, got ${shareAmbiguous?.status}`);
+      assert(/Facebook listing URL returned HTTP 400/i.test(shareAmbiguous.message), `share 400 message should explain ambiguity -> ${shareAmbiguous.message}`);
+      // 400 on a watch/dashboard URL is NOT a removal signal (could be a transient
+      // dashboard hiccup) → no terminal verdict.
+      assert(goneListingResult({ status: 400, url: 'https://www.facebook.com/marketplace/you/selling', urlLabel: 'platform watch' }) === null, '400 on a watch URL is not ended');
+      // 404/410 stay "gone" for any page; non-gone statuses return null.
+      assert(goneListingResult({ status: 404, url: 'x', urlLabel: 'platform watch' })?.status === 'ended', '404 on any page → ended');
+      assert(goneListingResult({ status: 410, url: 'x', urlLabel: 'listing' })?.status === 'ended', '410 → ended');
+      assert(goneListingResult({ status: 200, url: 'x', urlLabel: 'listing' }) === null, '200 is not gone');
+      assert(goneListingResult({ status: 403, url: 'x', urlLabel: 'listing' }) === null, '403 (auth) is handled elsewhere, not ended');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'listing status: classifyOneUrl maps a non-Facebook 400 canonical listing page to ended before the LLM',
+    run: async () => {
+      const fetcher = async () => ({
+        ok: true,
+        status: 400,
+        finalUrl: 'https://www.ebay.com/itm/123456789/',
+        html: '<html><body>Something went wrong. This content is not available right now.</body></html>'.padEnd(400, ' '),
+      });
+      const res = await classifyOneUrl({
+        url: 'https://www.ebay.com/itm/123456789/',
+        listingIdentifier: '123456789',
+        productTitle: 'Apple iPhone XS',
+        platformId: undefined, // no monitor config → no soft-wall interception, no LLM reached
+        urlLabel: 'listing',
+        fetcher,
+      });
+      assert(res.status === 'ended', `400 listing page should classify ended without the LLM, got ${res.status}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'listing status: Facebook canonical 400 is ambiguous so live watch evidence can win',
+    run: async () => {
+      const fetcher = async () => ({
+        ok: true,
+        status: 400,
+        finalUrl: 'https://www.facebook.com/marketplace/item/27086638057612157/',
+        html: '<html><body>Something went wrong. This content is not available right now.</body></html>'.padEnd(400, ' '),
+      });
+      const listing = await classifyOneUrl({
+        url: 'https://www.facebook.com/marketplace/item/27086638057612157/',
+        listingIdentifier: '27086638057612157',
+        productTitle: 'Lenovo ThinkPad T540p',
+        platformId: 'facebook',
+        urlLabel: 'listing',
+        fetcher,
+      });
+      assert(listing.status === 'unknown', `Facebook canonical 400 should be unknown, got ${listing.status}`);
+
+      const aggregate = aggregateStrongest([
+        listing,
+        {
+          url: 'https://www.facebook.com/marketplace/you/selling',
+          urlLabel: 'platform watch',
+          status: 'live',
+          matched: false,
+          message: '[platform watch] Seller dashboard shows the listing as active/in review.',
+        },
+      ]);
+      assert(aggregate.status === 'live', `live watch evidence should beat ambiguous Facebook 400, got ${aggregate.status}`);
+      assert(/active\/in review/i.test(aggregate.message), `aggregate should use the live watch message -> ${aggregate.message}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'listing status: Facebook owner controls classify as live without treating action labels as sold',
+    run: async () => {
+      const reviewText = 'This listing is in review All listings go through a standard review before they become visible to others. Lenovo ThinkPad T540p $145 Delete Listing';
+      const review = deterministicListingStatusFromText({
+        text: reviewText,
+        platformId: 'facebook',
+        url: 'https://www.facebook.com/marketplace/item/27086638057612157/',
+        urlLabel: 'listing',
+        matched: false,
+      });
+      assert(review?.status === 'live', `Facebook review banner should classify as live/non-terminal, got ${review?.status}`);
+      assert(review.attention?.[0]?.headline === 'Listing currently being reviewed', 'Facebook review banner should create an info attention item');
+
+      const text = 'Calibrite ColorChecker Passport Video 2 (CCPPV2) $75 Mark as sold Mark as pending Boost listing Edit Share Details Seller information';
+      const deterministic = deterministicListingStatusFromText({
+        text,
+        platformId: 'facebook',
+        url: 'https://www.facebook.com/marketplace/item/763727366765755/',
+        urlLabel: 'listing',
+        matched: false,
+      });
+      assert(deterministic?.status === 'live', `Facebook owner controls should classify live, got ${deterministic?.status}`);
+      assert(deterministic.matched === false, 'deterministic result should preserve the identifier match diagnostic');
+      assert(deterministicListingStatusFromText({ text, platformId: 'facebook', urlLabel: 'platform watch' }) === null, 'owner-control shortcut should not run on dashboard/watch pages');
+
+      const fetcher = async () => ({
+        ok: true,
+        status: 200,
+        finalUrl: 'https://www.facebook.com/marketplace/item/763727366765755/',
+        html: `<html><body>${text}</body></html>`.padEnd(400, ' '),
+      });
+      const res = await classifyOneUrl({
+        url: 'https://www.facebook.com/marketplace/item/763727366765755/',
+        listingIdentifier: '763727366765755',
+        productTitle: 'Calibrite ColorChecker Passport Video 2 (CCPPV2)',
+        platformId: 'facebook',
+        urlLabel: 'listing',
+        fetcher,
+      });
+      assert(res.status === 'live', `Facebook owner controls should return live before the LLM, got ${res.status}`);
+      assert(/owner actions for an active listing/i.test(res.message), `live message should explain action labels -> ${res.message}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'listing status: statusCheckWrites persists a compact per-URL check trace',
+    run: () => {
+      const res = {
+        status: 'unknown',
+        message: '[listing] 400 …',
+        attention: [],
+        listingIdentifier: '1FpnZtE25M',
+        sources: [
+          { url: 'https://www.facebook.com/share/1FpnZtE25M/', urlLabel: 'listing', status: 'unknown', matched: false },
+          { url: 'https://www.facebook.com/marketplace/you/selling', urlLabel: 'platform watch', status: 'unknown', matched: false },
+        ],
+      };
+      const fields = { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked', trace: 'lastCheckTrace' };
+      const writes = statusCheckWrites(res, fields);
+      assert(writes.lastCheckTrace?.identifier === '1FpnZtE25M', 'trace keeps the identity anchor');
+      assert(writes.lastCheckTrace?.sources?.length === 2, 'trace keeps per-URL rows');
+      assert(writes.lastCheckTrace.sources[0].label === 'listing' && writes.lastCheckTrace.sources[0].status === 'unknown', 'trace row carries label + status');
+      assert(writes.lastCheckTrace.sources[1].matched === false, 'trace row carries the identity-anchor match flag');
+      // Back-compat: a caller without a trace field never gets one written.
+      const noTrace = statusCheckWrites(res, { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked' });
+      assert(!('lastCheckTrace' in noTrace), 'trace omitted when fields.trace is absent');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'listing status writes: cached auth gate writes needs-login card state',
+    run: () => {
+      const res = cachedAuthNeedsLoginResult({
+        platformId: 'mercari',
+        name: 'Mercari',
+        reason: 'Verification fetch error: page.content() timed out',
+      });
+      const writes = statusCheckWrites(res, { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked', trace: 'lastCheckTrace' });
+      assert(writes.status === 'needs-login', `cached auth writes needs-login, got ${writes.status}`);
+      assert(/Mercari session needs login/i.test(writes.statusMessage), `cached auth message names Mercari -> ${writes.statusMessage}`);
+      assert(writes.lastCheckTrace?.sources?.[0]?.label === 'session', 'cached auth writes session trace');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'listing status writes: thrown errors clear stale attention',
+    run: () => {
+      const writes = statusErrorWrites(new Error('Browser closed'), {
+        status: 'status',
+        message: 'statusMessage',
+        lastChecked: 'lastChecked',
+        attention: 'attention',
+      });
+      assert(writes.status === 'error', `thrown error should write error status, got ${writes.status}`);
+      assert(Array.isArray(writes.attention) && writes.attention.length === 0, 'thrown error should clear stale attention panels');
+      assert(!!writes.lastChecked, 'thrown error should stamp lastChecked');
       return { ok: true };
     },
   },
@@ -2320,6 +2760,148 @@ const tests = [
       const recovered = await withSharedProfileLock(async () => 'recovered');
       assert(errMsg === 'boom' && recovered === 'recovered', 'queue survives a rejected critical section');
       return { ok: true, order: order.join(',') };
+    },
+  },
+  {
+    name: 'status-check lock serializes checks across hubs/cards (FIFO, depth, rejection-safe)',
+    run: async () => {
+      // Two status checks (e.g. two "Check All"s) must NOT overlap — the second
+      // can't start until the first settles, so the single-IP burst stays at one
+      // check's worth.
+      const order = [];
+      let releaseA;
+      const aGate = new Promise(r => { releaseA = r; });
+      const before = getStatusCheckQueueDepth();
+      const p1 = withStatusCheckLock(async () => { order.push('A-start'); await aGate; order.push('A-end'); return 'a'; });
+      const p2 = withStatusCheckLock(async () => { order.push('B-start'); return 'b'; });
+      // Both enqueued, neither settled → depth reflects two in flight ahead of any new caller.
+      assert(getStatusCheckQueueDepth() === before + 2, `depth should count both pending checks — got ${getStatusCheckQueueDepth()}`);
+      await new Promise(r => setTimeout(r, 0));
+      assert(order.join(',') === 'A-start', `B must not start until A settles — got [${order.join(',')}]`);
+      releaseA();
+      const [r1, r2] = await Promise.all([p1, p2]);
+      assert(r1 === 'a' && r2 === 'b', 'each caller observes its own fn result');
+      assert(order.join(',') === 'A-start,A-end,B-start', `B runs strictly after A — got [${order.join(',')}]`);
+      assert(getStatusCheckQueueDepth() === before, `depth returns to baseline once settled — got ${getStatusCheckQueueDepth()}`);
+      // A rejection must NOT wedge the queue.
+      const errMsg = await withStatusCheckLock(async () => { throw new Error('boom'); }).catch(e => e.message);
+      const recovered = await withStatusCheckLock(async () => 'recovered');
+      assert(errMsg === 'boom' && recovered === 'recovered', 'queue survives a rejected critical section');
+      return { ok: true, order: order.join(',') };
+    },
+  },
+  {
+    name: 'comp progress aggregator: a source releases its terminal only after the LAST item (bundle)',
+    run: () => {
+      const events = [];
+      const factory = createAggregatingProgress({ totalItems: 2, send: (p) => events.push(p) });
+      // Item 0
+      const e0 = factory(0);
+      e0('ebay-sold', { status: 'searching', count: 0 }); // seeds the spinner
+      e0('ebay-sold', { status: 'done', count: 10 });      // NOT the last item → interim
+      // Item 1 (last)
+      const e1 = factory(1);
+      e1('ebay-sold', { status: 'searching', count: 0 });  // swallowed (only item 0 seeds)
+      e1('ebay-sold', { status: 'done', count: 5 });        // last → real terminal, summed
+      assert(events.length === 3, `expected seed+interim+done = 3 events — got ${events.length}`);
+      assert(events[0].status === 'searching' && events[0].count === 0, `first event seeds the spinner — got ${JSON.stringify(events[0])}`);
+      assert(events[1].status === 'searching' && events[1].count === 10 && events[1].total === 2,
+        `item-0 terminal becomes an interim 'searching' with cumulative count — got ${JSON.stringify(events[1])}`);
+      assert(events[2].status === 'done' && events[2].count === 15,
+        `last item releases 'done' with the count summed across items — got ${JSON.stringify(events[2])}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'comp progress aggregator: block in any item → terminal error; single item passes straight through',
+    run: () => {
+      // Bundle: blocked in item 0, fine in item 1 → final terminal is error (sticky warning).
+      const ev = [];
+      const f = createAggregatingProgress({ totalItems: 2, send: (p) => ev.push(p) });
+      const a = f(0);
+      a('mercari', { status: 'searching', count: 0 });
+      a('mercari', { status: 'error', count: 0, warning: { code: 'anti-bot', severity: 'block' } });
+      const b = f(1);
+      b('mercari', { status: 'done', count: 7 });
+      const fin = ev[ev.length - 1];
+      assert(fin.status === 'error', `blocked-in-any-item → terminal error — got ${fin.status}`);
+      assert(fin.warning?.code === 'anti-bot', `sticky warning carried to the terminal — got ${JSON.stringify(fin.warning)}`);
+
+      // Single item (totalItems=1): the terminal passes straight through unchanged.
+      const ev2 = [];
+      const f2 = createAggregatingProgress({ totalItems: 1, send: (p) => ev2.push(p) });
+      const s = f2(0);
+      s('ebay-sold', { status: 'searching', count: 0 });
+      s('ebay-sold', { status: 'done', count: 12, url: 'u' });
+      assert(ev2[1].status === 'done' && ev2[1].count === 12 && ev2[1].url === 'u',
+        `single-item terminal is unchanged — got ${JSON.stringify(ev2[1])}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'bundlePricing: buildResearchItems orders primary-first + drops blanks; computeBundleTotal sums non-null',
+    run: () => {
+      const product = { search_query: 'Apple iPhone XS 256GB', generated_title: 'iPhone XS', condition: 'Used - Good' };
+      const extras = [
+        { id: 'a', query: '  Otterbox case  ', condition: 'New' },
+        { id: 'b', query: '', condition: 'Used - Fair' }, // blank → dropped
+        { id: 'c', query: 'screen protector' },            // no condition → inherits primary
+      ];
+      const items = buildResearchItems(product, extras);
+      assert(items.length === 3, `1 primary + 2 non-blank extras — got ${items.length}`);
+      assert(items[0].key === 'primary' && items[0].query === 'Apple iPhone XS 256GB',
+        `primary first, query from search_query — got ${JSON.stringify(items[0])}`);
+      assert(items[1].query === 'Otterbox case' && items[1].condition === 'New',
+        `extra trims query + keeps its own condition — got ${JSON.stringify(items[1])}`);
+      assert(items[2].condition === 'Used - Good', `extra without condition inherits the primary's — got ${items[2].condition}`);
+
+      assert(computeBundleTotal([
+        { pricing: { recommended_price: 300 } },
+        { pricing: { recommended_price: 25 } },
+        { pricing: { recommended_price: null } }, // skipped
+      ]) === 325, 'bundle total sums non-null recommended prices');
+      assert(computeBundleTotal([{ pricing: { recommended_price: null } }]) === null, 'all-null bundle total → null (so UI can hide it)');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'browser pool: captcha resolve pause holds queued scrapes until released',
+    run: async () => {
+      const release = pauseBrowserPool('test-captcha-resolve');
+      const controller = new AbortController();
+      const queued = queueScrape(
+        'https://example.com/browser-pool-pause-test',
+        '() => []',
+        { signal: controller.signal, sourceLabel: 'browser-pool-pause-test', timeoutMs: 1000 },
+      ).then(
+        () => 'resolved',
+        (err) => err?.message || String(err),
+      );
+
+      let released = false;
+      try {
+        await new Promise(r => setTimeout(r, 0));
+        let state = getBrowserPoolQueueState();
+        assert(state.paused, 'queue is paused while captcha resolve owns the shared profile');
+        assert(state.pauseDepth >= 1, `pause depth recorded (got ${state.pauseDepth})`);
+        assert(state.pauseReasons.includes('test-captcha-resolve'), `pause reason recorded (${state.pauseReasons.join(',')})`);
+        assert(state.queued >= 1, `scrape stays queued while paused (queued=${state.queued})`);
+        assert(state.active === 0, `paused scrape must not become active (active=${state.active})`);
+
+        controller.abort();
+        const result = await queued;
+        assert(result === 'Aborted', `queued scrape aborts cleanly while paused (got ${result})`);
+
+        release();
+        released = true;
+        state = getBrowserPoolQueueState();
+        assert(!state.paused, 'queue resumes after the captcha resolve pause is released');
+        return { ok: true };
+      } finally {
+        controller.abort();
+        await queued.catch(() => {});
+        if (!released) release();
+      }
     },
   },
   {

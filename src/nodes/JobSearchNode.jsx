@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useCallback, useContext, useState } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
+import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { usePlatformsVerifyingProgress } from '../contexts/useSessionStatus';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase, Clock } from 'lucide-react';
@@ -58,11 +59,12 @@ const STATE_LABELS = {
   querying: 'Planning search strategy...',
   searching: 'Searching for jobs...',
   scoring: 'AI scoring matches...',
+  queued: 'Waiting to run...',
   'sources-ready': null,
   done: null,
 };
 
-const PROCESSING_STATES = ['parsing', 'querying', 'searching', 'scoring'];
+const PROCESSING_STATES = ['queued', 'parsing', 'querying', 'searching', 'scoring'];
 const SOURCE_CARD_DISMISS_GRACE_MS = 10_000;
 const TERMINAL_SOURCE_STATUSES = new Set(['done', 'error', 'skipped']);
 
@@ -125,6 +127,7 @@ export function JobSearchNode({ id, data }) {
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const addElementsGlobally = nav?.addElementsGlobally;
   const canvasFilePath = nav?.currentFile || null;
+  const moduleRunQueue = useModuleRunQueue();
   const processingRef = useRef(false);
   const initialDropAcceptedRef = useRef(false);
   const pendingUSAJobsRefreshRef = useRef(false);
@@ -552,6 +555,9 @@ export function JobSearchNode({ id, data }) {
   }, [id, getNodes, getEdges, deleteElements]);
 
   useUnmountEffect(cleanupAllJobChildren);
+  useUnmountEffect(() => {
+    moduleRunQueue.cancelQueuedRunsForNode(id);
+  });
 
   // ── Job-source platform cards (persistent, one per ACTIVE_JOB_SOURCE) ─────
   // Replaces the orbital ring with real canvas nodes connected by edges. Cards
@@ -956,29 +962,53 @@ export function JobSearchNode({ id, data }) {
       : (filePath ? [filePath] : []);
     if (paths.length === 0 && !providedProfile) return;
     processingRef.current = true;
-    cancelCleanSourceCardDismiss();
-    resetSourceProgress();
-    // The hub-side reset above only clears OUR aggregate hook. Source cards hold
-    // their own local count and a re-run keeps them on canvas, so broadcast a
-    // reset to make every card drop the previous run's count now (else they paint
-    // stale "{N} jobs" until each source's first fresh event arrives this run).
-    document.dispatchEvent(new CustomEvent('job-source-progress-reset', { detail: { hubId: id } }));
     const currentId = id;
     // Capture cancellation epoch at start; cancelled() returns true after
     // any reset/unmount so we can drop late settlements without mutating
     // freshly-reverted state.
     const cancelled = epoch.start();
-
-    // Spawn (or reuse) one platform card per active job source. Cards subscribe
-    // to per-source progress events themselves, so the hub doesn't need to push
-    // anything to them — they update independently.
-    ensureSourceCards();
-
-    // Snapshot the node position so we can spawn siblings near it even if
-    // the user navigates away and unmounts this layer of the canvas.
-    const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
+    let lease = null;
 
     try {
+      lease = await moduleRunQueue.acquireModuleRun({
+        nodeId: currentId,
+        kind: 'jobsearch',
+        label: 'Job search',
+        onQueued: ({ position }) => {
+          updateGlobal(currentId, {
+            hubState: 'queued',
+            queuedModuleRun: { label: 'Job search', position },
+            errorMessage: null,
+            isRateLimit: false,
+            testModeNote: null,
+          });
+        },
+        onQueueUpdate: ({ position }) => {
+          updateGlobal(currentId, { queuedModuleRun: { label: 'Job search', position } });
+        },
+        onStart: () => {
+          if (cancelled()) throw new Error('Node deleted');
+          updateGlobal(currentId, { queuedModuleRun: null });
+        },
+      });
+
+      cancelCleanSourceCardDismiss();
+      resetSourceProgress();
+      // The hub-side reset above only clears OUR aggregate hook. Source cards hold
+      // their own local count and a re-run keeps them on canvas, so broadcast a
+      // reset to make every card drop the previous run's count now (else they paint
+      // stale "{N} jobs" until each source's first fresh event arrives this run).
+      document.dispatchEvent(new CustomEvent('job-source-progress-reset', { detail: { hubId: id } }));
+
+      // Spawn (or reuse) one platform card per active job source. Cards subscribe
+      // to per-source progress events themselves, so the hub doesn't need to push
+      // anything to them — they update independently.
+      ensureSourceCards();
+
+      // Snapshot the node position so we can spawn siblings near it even if
+      // the user navigates away and unmounts this layer of the canvas.
+      const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
+
       updateGlobal(currentId, { errorMessage: null, isRateLimit: false, testModeNote: null });
       let profile = providedProfile;
       let resumeFingerprint = data.resumeFingerprint || '';
@@ -1219,6 +1249,7 @@ export function JobSearchNode({ id, data }) {
         isRateLimit: !!error?.isRateLimit,
       });
     } finally {
+      lease?.release();
       if (isMountedRef.current) {
         processingRef.current = false;
         if (pendingUSAJobsRefreshRef.current) {
@@ -1231,7 +1262,7 @@ export function JobSearchNode({ id, data }) {
         }
       }
     }
-  }, [id, updateGlobal, getNode, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, data.canonicalLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss]);
+  }, [id, updateGlobal, getNode, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, data.canonicalLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue]);
 
   const startProcessing = useCallback((fileOrFiles) => {
     const filePaths = Array.isArray(fileOrFiles) ? fileOrFiles : (fileOrFiles ? [fileOrFiles] : []);
@@ -1277,8 +1308,29 @@ export function JobSearchNode({ id, data }) {
     processingRef.current = true;
     const currentId = id;
     const cancelled = epoch.start();
-    const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
+    let lease = null;
     try {
+      lease = await moduleRunQueue.acquireModuleRun({
+        nodeId: currentId,
+        kind: 'jobsearch',
+        label: 'Job scoring',
+        onQueued: ({ position }) => {
+          updateGlobal(currentId, {
+            hubState: 'queued',
+            queuedModuleRun: { label: 'Scoring job results', position },
+            errorMessage: null,
+            isRateLimit: false,
+          });
+        },
+        onQueueUpdate: ({ position }) => {
+          updateGlobal(currentId, { queuedModuleRun: { label: 'Scoring job results', position } });
+        },
+        onStart: () => {
+          if (cancelled()) throw new Error('Node deleted');
+          updateGlobal(currentId, { queuedModuleRun: null });
+        },
+      });
+      const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
       await runScoringAndSpawn({
         profile,
         jobs: pending,
@@ -1296,6 +1348,7 @@ export function JobSearchNode({ id, data }) {
         isRateLimit: !!error?.isRateLimit,
       });
     } finally {
+      lease?.release();
       if (isMountedRef.current) {
         processingRef.current = false;
         if (pendingUSAJobsRefreshRef.current) {
@@ -1308,7 +1361,7 @@ export function JobSearchNode({ id, data }) {
         }
       }
     }
-  }, [id, data.resumeProfile, data.pendingTargetRole, data.targetRole, epoch, getNode, runScoringAndSpawn, updateGlobal, triggerUSAJobsBackgroundSearch]);
+  }, [id, data.resumeProfile, data.pendingTargetRole, data.targetRole, epoch, getNode, runScoringAndSpawn, updateGlobal, triggerUSAJobsBackgroundSearch, moduleRunQueue]);
 
   useEffect(() => {
     resumeScoringRef.current = resumeScoring;
@@ -1347,9 +1400,31 @@ export function JobSearchNode({ id, data }) {
     processingRef.current = true;
     const currentId = id;
     const cancelled = epoch.start();
-    const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
     const activeTargetRole = data.targetRole || '';
+    let lease = null;
     try {
+      lease = await moduleRunQueue.acquireModuleRun({
+        nodeId: currentId,
+        kind: 'jobsearch',
+        label: 'Resume job search',
+        onQueued: ({ position }) => {
+          updateGlobal(currentId, {
+            hubState: 'queued',
+            queuedModuleRun: { label: 'Resuming job search', position },
+            errorMessage: null,
+            isRateLimit: false,
+          });
+        },
+        onQueueUpdate: ({ position }) => {
+          updateGlobal(currentId, { queuedModuleRun: { label: 'Resuming job search', position } });
+        },
+        onStart: () => {
+          if (cancelled()) throw new Error('Node deleted');
+          updateGlobal(currentId, { queuedModuleRun: null });
+        },
+      });
+
+      const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
       updateGlobal(currentId, { hubState: 'searching' });
       // resume:true → search-jobs re-scrapes only the unfinished sources from their
       // last completed page and reuses staged jobs from finished sources.
@@ -1381,9 +1456,10 @@ export function JobSearchNode({ id, data }) {
       EventLogger.error('[JobSearch] Resume run failed:', error);
       updateGlobal(currentId, { hubState: 'empty', errorMessage: error?.message || String(error), isRateLimit: !!error?.isRateLimit });
     } finally {
+      lease?.release();
       if (isMountedRef.current) processingRef.current = false;
     }
-  }, [canvasFilePath, resumeOffer, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult]);
+  }, [canvasFilePath, resumeOffer, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue]);
 
   const handleDiscardResume = useCallback(async () => {
     setResumeOffer(null);
@@ -1628,6 +1704,7 @@ export function JobSearchNode({ id, data }) {
     // this point sees a mismatch and bails (doesn't overwrite the freshly-
     // reverted state or spawn orphan nodes).
     epoch.bump();
+    moduleRunQueue.cancelQueuedRunsForNode(id);
 
     // Actually abort the backend — without this the AbortControllers registered
     // against this nodeId keep running and finish a few seconds later, often
@@ -1647,14 +1724,14 @@ export function JobSearchNode({ id, data }) {
     // with the board's hubState!=='done' gate). Résumé/careerData are kept (the
     // hub is locked to its initial résumé — see project memory).
     updateGlobal(id, {
-      hubState: 'empty', filePath: null, errorMessage: null, isRateLimit: false, testModeNote: null, pendingBatch: null,
+      hubState: 'empty', queuedModuleRun: null, filePath: null, errorMessage: null, isRateLimit: false, testModeNote: null, pendingBatch: null,
       scoredJobs: null, resultCount: 0, totalScoredCount: 0, scoreThreshold: 0,
     });
     cancelCleanSourceCardDismiss();
     resetSourceProgress();
     cleanupAllJobChildren();
     processingRef.current = false;
-  }, [data.locked, id, updateGlobal, epoch, resetSourceProgress, cleanupAllJobChildren, cancelCleanSourceCardDismiss, data.pendingBatch, canvasFilePath]);
+  }, [data.locked, id, updateGlobal, epoch, resetSourceProgress, cleanupAllJobChildren, cancelCleanSourceCardDismiss, data.pendingBatch, canvasFilePath, moduleRunQueue]);
 
   const handleRerun = useCallback(() => {
     if (data.locked || processingRef.current) return;
@@ -1987,6 +2064,7 @@ export function JobSearchNode({ id, data }) {
               >
                 <input
                   type="text"
+                  data-native-undo="true"
                   value={targetRole}
                   onChange={(e) => setTargetRole(e.target.value)}
                   placeholder="Target role (optional) — e.g. Product Manager"
@@ -1994,6 +2072,7 @@ export function JobSearchNode({ id, data }) {
                 />
                 <input
                   type="text"
+                  data-native-undo="true"
                   value={preferredLocation}
                   onChange={(e) => setPreferredLocation(e.target.value)}
                   placeholder="Preferred location (optional) — e.g. Chicago, hybrid, remote"
@@ -2003,6 +2082,7 @@ export function JobSearchNode({ id, data }) {
                   <span>Look back</span>
                   <input
                     type="number"
+                    data-native-undo="true"
                     min={1}
                     max={180}
                     value={maxAgeDays}
@@ -2049,6 +2129,7 @@ export function JobSearchNode({ id, data }) {
             activeSourceId={lastActiveSource}
             onReset={resetHandler}
             chromeLaunchInfo={chromeLaunchInfo}
+            queuedRun={data.queuedModuleRun || null}
           />
         )}
 

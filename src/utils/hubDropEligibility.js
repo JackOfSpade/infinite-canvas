@@ -33,6 +33,17 @@ export function hubHasAcceptedInitialDrop(hub) {
   return false;
 }
 
+export function canSellHubReplaceFailedInitialPhotos(hub) {
+  if (!hub || hub.type !== 'sellhub') return false;
+  const data = hub.data || {};
+  return !!(
+    !data.locked &&
+    (data.hubState || 'empty') === 'empty' &&
+    data.errorMessage &&
+    !data.product
+  );
+}
+
 export function getHubDropLockReason(hub) {
   if (!hub) return 'missing';
   if (hub.type !== 'jobhub' && hub.type !== 'sellhub') return 'unsupported';
@@ -42,6 +53,7 @@ export function getHubDropLockReason(hub) {
 
   const hubState = data.hubState || 'empty';
   if (ACTIVE_INPUT_STATES.has(hubState)) return 'busy';
+  if (canSellHubReplaceFailedInitialPhotos(hub)) return null;
   if (hubHasAcceptedInitialDrop(hub)) return 'started';
   if (hubState !== 'empty') return 'started';
 

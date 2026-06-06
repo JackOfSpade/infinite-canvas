@@ -83,7 +83,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       lines.push(`- ⛔ **Login preflight BLOCKED the run** — not logged in to: ${(s.missingLogins || []).join(', ') || '(unknown)'}. Policy requires login on all in-scope marketplaces before a price check runs; nothing was scraped. Log in (Settings → Accounts) and re-run.`);
     }
     lines.push(
-      `- ${s.sources} sources → **${s.sold} sold + ${s.active} active** comps · ${s.warnings} warning(s)` +
+      `- ${s.sources} sources${s.items > 1 ? ` × **${s.items} items** (bundle)` : ''} → **${s.sold} sold + ${s.active} active** comps${s.items > 1 ? ' _(summed across items)_' : ''} · ${s.warnings} warning(s)` +
       `${s.blocked > 0 ? `, ${s.blocked} anti-bot block(s)` : ''}` +
       `${loginRequired > 0 ? `, ${loginRequired} not-logged-in` : ''}` +
       `${timedOut > 0 ? `, ${timedOut} timed-out` : ''}` +

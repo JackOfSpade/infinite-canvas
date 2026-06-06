@@ -33,6 +33,7 @@ export function EditableField({ value, placeholder, isEditing, onStartEdit, onSa
         <textarea
           autoFocus
           rows={4}
+          data-native-undo="true"
           className="nodrag w-full bg-black/30 border border-white/10 rounded px-2 py-1 text-white/80 text-[10px] leading-relaxed outline-none resize-y"
           defaultValue={value || ''}
           onBlur={handleBlur}
@@ -49,6 +50,7 @@ export function EditableField({ value, placeholder, isEditing, onStartEdit, onSa
     return (
       <input
         autoFocus
+        data-native-undo="true"
         className={inputClass}
         defaultValue={value || ''}
         onBlur={handleBlur}

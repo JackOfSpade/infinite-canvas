@@ -45,6 +45,8 @@ const queue = [];
 const activeTasks = new Map(); // cacheKey -> Promise (deduplicates both queued and running tasks)
 const pageHandles = new Map(); // uuid -> { page, startTime }
 let isShuttingDown = false;
+let queuePauseDepth = 0;
+const queuePauseReasons = new Map(); // reason -> count
 
 // ── Utility Functions ───────────────────────────────────────────────────────
 
@@ -81,9 +83,52 @@ function canProcessTask(task) {
 
 let queuePoller = null;
 
+function isQueuePaused() {
+  return queuePauseDepth > 0;
+}
+
+function addPauseReason(reason) {
+  const key = reason || 'manual';
+  queuePauseReasons.set(key, (queuePauseReasons.get(key) || 0) + 1);
+  return key;
+}
+
+function removePauseReason(reason) {
+  const key = reason || 'manual';
+  const count = queuePauseReasons.get(key) || 0;
+  if (count <= 1) queuePauseReasons.delete(key);
+  else queuePauseReasons.set(key, count - 1);
+}
+
+export function pauseBrowserPool(reason = 'manual') {
+  const key = addPauseReason(reason);
+  queuePauseDepth++;
+  logger.info(`[BrowserPool] Queue paused (${key}); depth=${queuePauseDepth}`);
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    queuePauseDepth = Math.max(0, queuePauseDepth - 1);
+    removePauseReason(key);
+    logger.info(`[BrowserPool] Queue resumed (${key}); depth=${queuePauseDepth}`);
+    if (!isQueuePaused()) processQueue();
+  };
+}
+
+export function getBrowserPoolQueueState() {
+  return {
+    active: activeCount,
+    queued: queue.length,
+    paused: isQueuePaused(),
+    pauseDepth: queuePauseDepth,
+    pauseReasons: Array.from(queuePauseReasons.keys()),
+  };
+}
+
 /** Backstop wake: re-check the queue when the soonest domain cooldown expires. */
 function scheduleQueueWake() {
-  if (queuePoller || queue.length === 0 || isShuttingDown) return;
+  if (queuePoller || queue.length === 0 || isShuttingDown || isQueuePaused()) return;
   const wait = Math.max(POLLER_MIN_MS, Math.min(nextWakeMs() ?? POLLER_MAX_MS, POLLER_MAX_MS));
   queuePoller = setTimeout(() => {
     queuePoller = null;
@@ -92,6 +137,7 @@ function scheduleQueueWake() {
 }
 
 function processQueue() {
+  if (isQueuePaused()) return;
   // Effective concurrency shrinks under cross-domain block pressure.
   while (activeCount < effectiveConcurrency() && queue.length > 0) {
     // Find the first task whose domain isn't cooling down / at capacity

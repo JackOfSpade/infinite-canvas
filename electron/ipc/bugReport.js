@@ -13,6 +13,7 @@ import { getRecentLogs } from '../logger.js';
 import { getGeminiTelemetry } from './gemini.js';
 import { getJobsTelemetry } from './jobs.js';
 import { getMarketplaceTelemetry } from './marketplace.js';
+import { getStatusCheckQueueDepth } from './statusCheckLock.js';
 import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
@@ -654,8 +655,14 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       if (d.status) previewParts.push(`status: ${d.status}`);
       if (d.statusMessage) previewParts.push(`statusMsg: ${String(d.statusMessage).slice(0, 100)}`);
       if (d.listingUrl) {
-        try { previewParts.push(`listingHost: ${new URL(d.listingUrl).host}`); }
-        catch { previewParts.push(`listingUrl: ${String(d.listingUrl).slice(0, 40)}`); }
+        try {
+          const u = new URL(d.listingUrl);
+          // host + path so the listing's SHAPE is visible: a /share/<hash> URL
+          // yields an identity anchor that never appears on the seller dashboard
+          // (the reason a share-linked card can read "unknown"), vs a
+          // /marketplace/item/<id> URL whose id the dashboard can locate.
+          previewParts.push(`listing: ${(u.host + u.pathname).slice(0, 64)}`);
+        } catch { previewParts.push(`listingUrl: ${String(d.listingUrl).slice(0, 50)}`); }
       }
       if (d.lastChecked) {
         const ageS = Math.round((Date.now() - new Date(d.lastChecked).getTime()) / 1000);
@@ -664,6 +671,28 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       if (Array.isArray(d.attention) && d.attention.length > 0) {
         const high = d.attention.filter(a => a?.urgency === 'high').length;
         previewParts.push(`attention: ${d.attention.length} (${high} high)`);
+      }
+      // Per-URL status-check trace (persisted by statusCheckWrites). The single
+      // most useful evidence for "did Check All work?": each URL's verdict and
+      // whether the identity anchor matched there. A deleted listing reads
+      // `listing=ended` (its page 4xx'd); a share-linked card reads
+      // `platform watch=unknown·no-match` (anchor absent from the dashboard).
+      if (d.lastCheckTrace && Array.isArray(d.lastCheckTrace.sources) && d.lastCheckTrace.sources.length > 0) {
+        const t = d.lastCheckTrace;
+        const formatted = t.sources.map(s => {
+          const m = s.matched === true ? '·matched' : s.matched === false ? '·no-match' : '';
+          return `${s.label || '?'}=${s.status || '?'}${m}`;
+        });
+        // Collapse consecutive identical entries (e.g. a card with 5 platform-
+        // watch URLs that all no-match) → `platform watch=unknown·no-match ×5`.
+        const collapsed = [];
+        for (const f of formatted) {
+          const last = collapsed[collapsed.length - 1];
+          if (last && last.text === f) last.count++;
+          else collapsed.push({ text: f, count: 1 });
+        }
+        const srcStr = collapsed.map(c => c.count > 1 ? `${c.text} ×${c.count}` : c.text).join(', ');
+        previewParts.push(`checkTrace[id=${t.identifier || '—'}]: ${srcStr}`);
       }
       if (Array.isArray(d.watchUrls) && d.watchUrls.length > 0) {
         previewParts.push(`watchUrls: ${d.watchUrls.length}`);
@@ -843,6 +872,14 @@ ${rows}
     ].filter(Boolean));
     const localTasks = tasks.filter(t => !knownForeignNodeIds.has(t.nodeId));
     const foreignCount = tasks.length - localTasks.length;
+    // Listing status checks serialize through a global FIFO lock (statusCheckLock)
+    // — they do NOT register an AbortController task, so they're invisible above.
+    // Surface the queue depth so "two Check-Alls feel stuck behind each other"
+    // is diagnosable: depth N = 1 running + (N-1) waiting their turn.
+    const statusQueueDepth = getStatusCheckQueueDepth();
+    const statusQueueLine = statusQueueDepth > 0
+      ? `\n- 🔄 **Listing status checks in flight: ${statusQueueDepth}** — 1 running, ${statusQueueDepth - 1} queued behind the FIFO lock (per-card "Check" + "Check All" serialize globally to avoid doubling the single-IP burst; see statusCheckLock.js). A nonzero depth while the UI looks frozen = checks awaiting their turn, NOT hung.`
+      : '\n- Listing status-check queue: idle (no Check / Check All running).';
     if (localTasks.length > 0) {
       // Staleness = time since the most recent main-process log line that names
       // this node. A task registered long ago whose node hasn't logged in a
@@ -883,11 +920,12 @@ ${rows}
 | Node ID | Tasks | Oldest task age | Last node log | Channel(s) |
 |---|---|---|---|---|
 ${rows}
+${statusQueueLine}
 `;
     } else {
       activeTasksMarkdown = `
 ## Active IPC Tasks
-- ✅ None registered${foreignCount > 0 ? ` (${foreignCount} task(s) running in other canvas windows — expected, not shown here)` : ''}.
+- ✅ None registered${foreignCount > 0 ? ` (${foreignCount} task(s) running in other canvas windows — expected, not shown here)` : ''}.${statusQueueLine}
 `;
     }
   } catch { /* never break the report on diagnostic failure */ }

@@ -3,6 +3,10 @@ import { getScopedCompSourceIds } from './compSourceScope.js';
 
 export const DEFAULT_EDGE_OPTIONS = { type: 'smoothstep', animated: true, style: { strokeWidth: 3, opacity: 0.8 } };
 export const EDGE_STYLE = { stroke: '#a855f7', strokeWidth: 3 };
+export const CANVAS_ZOOM_LIMITS = {
+  min: 0.01, // 1%
+  max: 9.99, // 999%
+};
 
 /** Selling platforms — single source of truth for ListingNode and SellHubNode.
  *  `color` is sampled from the live favicon (src/assets/favicons/<domain>.png)

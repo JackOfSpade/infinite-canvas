@@ -105,6 +105,7 @@ export function JobSearchDoneState({
             <Target size={10} className="text-purple-300/70 shrink-0" />
             <input
               type="text"
+              data-native-undo="true"
               value={targetRole}
               onChange={(e) => setTargetRole?.(e.target.value)}
               placeholder="Target role (optional)"
@@ -116,6 +117,7 @@ export function JobSearchDoneState({
             <MapPin size={10} className="text-blue-300/70 shrink-0" />
             <input
               type="text"
+              data-native-undo="true"
               value={preferredLocation}
               onChange={(e) => setPreferredLocation?.(e.target.value)}
               placeholder="Preferred location (optional)"
@@ -130,6 +132,7 @@ export function JobSearchDoneState({
             <span>Look back</span>
             <input
               type="number"
+              data-native-undo="true"
               min={1}
               max={180}
               value={maxAgeDays}

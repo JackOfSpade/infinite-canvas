@@ -50,6 +50,21 @@ export function panDuration(travelPx = 0) {
   return clamp(Math.round(260 + (travelPx || 0) * 0.35), 260, 900);
 }
 
+export function viewportForZoomAtScreenPoint(viewport, screenPoint, nextZoom) {
+  if (!viewport || !screenPoint || !Number.isFinite(nextZoom) || nextZoom <= 0 || viewport.zoom <= 0) {
+    return viewport;
+  }
+
+  const flowX = (screenPoint.x - viewport.x) / viewport.zoom;
+  const flowY = (screenPoint.y - viewport.y) / viewport.zoom;
+
+  return {
+    x: screenPoint.x - flowX * nextZoom,
+    y: screenPoint.y - flowY * nextZoom,
+    zoom: nextZoom,
+  };
+}
+
 // ── Auto-layout (tidy grid + drop placement) spacing ──────────────────────────
 // Spacings used to be flat 40px (grid gutter / collision padding), a 100px
 // row-detection threshold, and a 60px spiral step — all independent of node

@@ -8,8 +8,8 @@ import { X, ShieldAlert } from 'lucide-react';
  * AI synthesis auto-fires the moment the last warned card is resolved or
  * skipped.
  */
-export function SellHubCompsReadyDecision({ scrapeWarnings, pendingComps, onCancel }) {
-  const total = (pendingComps.sold?.length || 0) + (pendingComps.active?.length || 0);
+export function SellHubCompsReadyDecision({ scrapeWarnings, compsTotal = 0, onCancel }) {
+  const total = compsTotal;
   const blocked = scrapeWarnings.length;
   return (
     <div className="p-3 space-y-2" onPointerDown={(e) => e.stopPropagation()}>

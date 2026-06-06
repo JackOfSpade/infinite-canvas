@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { EventLogger } from '../utils/EventLogger';
 import { statusCheckWrites, statusErrorWrites } from '../utils/listingStatusWrites';
+import { useToast } from '../components/ToastProvider';
 
-const DEFAULT_FIELDS = { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked', attention: 'attention' };
+const DEFAULT_FIELDS = { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked', attention: 'attention', trace: 'lastCheckTrace' };
 
 /**
  * Per-card AI status check against the `check-listing-status` IPC. Used by
@@ -36,6 +37,7 @@ export function useMonitorCheck({
   updateNode,
 }) {
   const [checking, setChecking] = useState(false);
+  const { addToast } = useToast();
   const isMountedRef = useRef(true);
   useEffect(() => () => { isMountedRef.current = false; }, []);
 
@@ -53,14 +55,33 @@ export function useMonitorCheck({
       });
       if (!isMountedRef.current) return;
       updateNode(id, statusCheckWrites(res, fields));
+      if (res?.status === 'needs-login') {
+        addToast({
+          title: `${platformId || 'Marketplace'} login needed`,
+          description: res.message || 'Refresh the marketplace login in Settings, then run Check again.',
+          type: 'error',
+          duration: 7000,
+        });
+      } else if (!res?.status || res?.status === 'error') {
+        addToast({
+          title: 'Status check failed',
+          description: res?.message || res?.error || 'The listing status check did not complete.',
+          type: 'error',
+        });
+      }
     } catch (err) {
       EventLogger.error('[useMonitorCheck] failed:', err);
       if (!isMountedRef.current) return;
       updateNode(id, statusErrorWrites(err, fields));
+      addToast({
+        title: 'Status check failed',
+        description: err?.message || String(err),
+        type: 'error',
+      });
     } finally {
       if (isMountedRef.current) setChecking(false);
     }
-  }, [checking, locked, url, platformId, watchUrls, productTitle, id, fields, updateNode]);
+  }, [checking, locked, url, platformId, watchUrls, productTitle, id, fields, updateNode, addToast]);
 
   return { checking, check };
 }

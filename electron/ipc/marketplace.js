@@ -9,7 +9,7 @@
 import { callLLMVision, callLLMText } from './llm.js';
 import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
-import { fetchHtmlAuthed } from './stealthBrowser.js';
+import { fetchHtmlAuthed, getSellMonitorConfig } from './stealthBrowser.js';
 import { getMarketplaceWatchUrls } from './settings.js';
 import {
   classifyMultipleUrls,
@@ -18,7 +18,9 @@ import {
   plainFetcher,
 } from './listingStatusCheck.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
-import { getStatusCacheSync } from './accounts.js';
+import { withStatusCheckLock, getStatusCheckQueueDepth } from './statusCheckLock.js';
+import { createAggregatingProgress } from './compProgressAggregator.js';
+import { getStatusCacheSync, verifySellMonitorLogin, writeStatusCache } from './accounts.js';
 import { compsForPricing } from './resultCaps.js';
 import { isCompSourceEnabledInScope } from '../../src/utils/compSourceScope.js';
 import { logger } from '../logger.js';
@@ -60,10 +62,8 @@ const marketplaceTelemetry = {
   fit:       null, // { ts, platforms, good, unfit }
 };
 
-const MAX_PRICING_NOTES_CHARS = 2000;
-
 export function normalizePricingNotes(notes) {
-  return String(notes || '').replace(/\s+/g, ' ').trim().slice(0, MAX_PRICING_NOTES_CHARS);
+  return String(notes || '').replace(/\s+/g, ' ').trim();
 }
 
 export function formatPricingNotesForPrompt(notes) {
@@ -461,7 +461,7 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
  * Fetch API-based marketplace sources in parallel (no Puppeteer needed).
  * Reverb uses an internal REST API.
  */
-async function fetchApiMarketplaceSources(query, signal = null, nodeId = null, sender = null) {
+async function fetchApiMarketplaceSources(query, signal = null, emit = null) {
   // PriceCharting is a product-catalog search (not a listing index): seller-style
   // titles miss the exact product and fall back to ~100 fuzzy results, so the
   // query is normalized to the canonical product name (see priceChartingQuery).
@@ -483,17 +483,82 @@ async function fetchApiMarketplaceSources(query, signal = null, nodeId = null, s
       const items = Array.isArray(result) ? result : (result?.items || []);
       const warning = Array.isArray(result) ? null : (result?.warning || null);
       const url = Array.isArray(result) ? null : (result?.url || null);
-      if (sender && !sender.isDestroyed()) {
-        sender.send('price-source-progress', { nodeId, sourceId, status: 'done', count: items.length, warning });
-      }
+      emit?.(sourceId, { status: 'done', count: items.length, warning });
       return { sourceId, items, warning, effectiveQuery, url };
     } catch (error) {
-      if (sender && !sender.isDestroyed()) {
-        sender.send('price-source-progress', { nodeId, sourceId, status: 'error', count: 0 });
-      }
+      emit?.(sourceId, { status: 'error', count: 0 });
       return { sourceId, items: [], error: error?.message || String(error), effectiveQuery };
     }
   }));
+}
+
+/**
+ * Run ONE full comp scrape for a single query: every browser-pool source +
+ * the API sources, assembled into { sold, active } comps plus the per-source
+ * telemetry the bug report reads. Progress is reported through
+ * `emit(sourceId, payload)` so the caller can ship it straight to IPC (single
+ * item) or aggregate it across items (a multi-item "bundle" run). The login
+ * preflight is the CALLER's job — it's per-platform, not per-query, so a
+ * multi-item run only does it once.
+ */
+async function scrapeCompsForQuery(query, { emit, signal, sessionCache }) {
+  const tasks = buildCompTasks(query);
+  for (const t of tasks) emit(t.id, { status: 'searching', count: 0 });
+
+  const sourceUrlById = Object.fromEntries(tasks.map(t => [t.id, t.url]));
+  const scrapeResultsPromise = scrapeMultiple(tasks, (res) => {
+    const items = Array.isArray(res.data) ? res.data : [];
+    // Login-aware: a 0-result login wall is relabeled 'login-required' rather
+    // than 'stale-selectors' so the card guides the user to log in.
+    const warning = res.warning || (!res.success ? classifyCompScrapeFailure(res.error, res.id, sessionCache) : null);
+    emit(res.id, {
+      status: res.success ? 'done' : 'error',
+      count: items.length,
+      warning,
+      url: sourceUrlById[res.id] || null,
+    });
+  }, signal);
+
+  const apiSourceIds = ['reverb', 'pricecharting'].filter(isCompSourceEnabledInScope);
+  for (const sourceId of apiSourceIds) emit(sourceId, { status: 'searching', count: 0 });
+  const apiResultsPromise = fetchApiMarketplaceSources(query, signal, emit);
+
+  const [scrapeResults, apiResults] = await Promise.all([scrapeResultsPromise, apiResultsPromise]);
+
+  const taskCategoryMap = buildTaskCategoryMap(tasks);
+  const comps = { sold: [], active: [] };
+  const scrapeWarnings = [];
+  const bySource = {};            // raw item count per source (drives funnel)
+  const yieldBySource = {};       // {seen,noFields} per browser-pool source (partial-drift telemetry)
+  const provenanceBySource = {};  // url + claimed sold/active category per source
+  for (const t of tasks) provenanceBySource[t.id] = { url: t.url, category: t.category };
+  const apiQueryBySource = {};    // effective (possibly-rewritten) query per API source
+
+  for (const r of scrapeResults) {
+    if (!r.success) {
+      logger.warn(`[Marketplace] A scrape task for ${r.id} was rejected: ${r.error}`);
+      scrapeWarnings.push(classifyCompScrapeFailure(r.error, r.id, sessionCache));
+      bySource[r.id] = 0;
+      continue;
+    }
+    const { id, data: items, warning } = r;
+    if (warning) scrapeWarnings.push({ sourceId: id, ...warning });
+    const category = taskCategoryMap[id] ?? 'sold';
+    bySource[id] = Array.isArray(items) ? items.length : 0;
+    if (r.yieldStats) yieldBySource[id] = r.yieldStats;
+    if (Array.isArray(items)) comps[category].push(...items);
+  }
+
+  for (const res of apiResults) {
+    if (res.warning) scrapeWarnings.push({ sourceId: res.sourceId, ...res.warning });
+    bySource[res.sourceId] = Array.isArray(res.items) ? res.items.length : 0;
+    if (typeof res.effectiveQuery === 'string') {
+      apiQueryBySource[res.sourceId] = { query: res.effectiveQuery, url: res.url || null };
+    }
+    if (res.items.length > 0) comps.sold.push(...res.items);
+  }
+
+  return { comps, scrapeWarnings, bySource, yieldBySource, provenanceBySource, apiQueryBySource, sourceCount: tasks.length + apiSourceIds.length };
 }
 
 /**
@@ -527,10 +592,48 @@ export async function checkListingStatusMultiSource({
   productTitle,
   listingId,
   signal,
+  sessionVerifier = verifySellMonitorLogin,
+  writeSessionStatus = writeStatusCache,
 }) {
   const normalizedListingUrl = String(listingUrl || '').trim();
   if (!normalizedListingUrl) {
     return { status: 'error', message: 'No listing URL to check (paste the marketplace listing URL first)', sources: [] };
+  }
+
+  const monitorConfig = getSellMonitorConfig(platformId);
+  const needsLoginResult = (reasonOverride = null) => {
+    const platformName = monitorConfig?.name || platformId;
+    const reason = reasonOverride ? ` ${reasonOverride}` : '';
+    const message = `${platformName} session needs login.${reason} Open Settings > Accounts and log in to ${platformName}, then run Check again.`;
+    return {
+      status: 'needs-login',
+      message,
+      attention: [],
+      sources: [{
+        url: monitorConfig?.verifyUrl || monitorConfig?.sellerUrl || normalizedListingUrl,
+        urlLabel: 'session',
+        status: 'needs-login',
+        message,
+      }],
+    };
+  };
+
+  // Status checks read seller dashboards / notification feeds, not just public
+  // listing pages. A stale cookie should therefore become an explicit card state
+  // before the page classifier runs; otherwise a login wall can look like a vague
+  // "unknown" page and leave old Live/attention state visible.
+  const cachedSession = monitorConfig ? getStatusCacheSync()[platformId] : null;
+  if (cachedSession && cachedSession.connected === false) {
+    return needsLoginResult(cachedSession.lastReason);
+  }
+  if (monitorConfig && sessionVerifier) {
+    const verdict = await sessionVerifier(platformId);
+    if (!verdict?.connected) {
+      try {
+        await writeSessionStatus?.(platformId, false, { lastReason: verdict?.reason, lastTrace: verdict?.trace });
+      } catch { /* cache write failures are non-fatal for the card verdict */ }
+      return needsLoginResult(verdict?.reason);
+    }
   }
 
   // Identity anchor — model uses this to find the right row/banner across
@@ -572,13 +675,27 @@ export async function checkListingStatusMultiSource({
   // AbortSignal actually reaches the page — passing it positionally silently
   // dropped it, leaving a cancelled check's puppeteer page navigating for ~25s.
   const authedFetcher = (u, sig) => fetchHtmlAuthed(u, { signal: sig });
+  const isFacebookItemUrl = (u) => {
+    try {
+      const parsed = new URL(u);
+      return platformId === 'facebook' &&
+        /(^|\.)facebook\.com$/i.test(parsed.hostname) &&
+        /^\/marketplace\/item\/[^/]+\/?$/i.test(parsed.pathname);
+    } catch {
+      return false;
+    }
+  };
   const escalatingListingFetcher = async (u, sig) => {
     const r = await plainFetcher(u, sig);
     if (!r.ok) return r; // network error — let the classifier surface it
     const fin = String(r.finalUrl || u).toLowerCase();
     const walled = r.status === 401 || r.status === 403 ||
       /\/(login|signin|sign-in|account\/login)/i.test(fin);
-    return walled ? authedFetcher(u, sig) : r;
+    // Facebook can return HTTP 400 to unauthenticated/automation fetches for a
+    // seller-owned item that is still active but under review. Retry with the
+    // logged-in browser before the classifier sees that 400 as transport data.
+    const facebookSellerOnlyItem = r.status === 400 && isFacebookItemUrl(u);
+    return (walled || facebookSellerOnlyItem) ? authedFetcher(u, sig) : r;
   };
   const urlSpecs = all.map(({ url, source }) => ({
     url,
@@ -594,7 +711,11 @@ export async function checkListingStatusMultiSource({
     signal,
   });
 
-  return aggregateStrongest(perUrl);
+  // Surface the identity anchor alongside the aggregate so the card (and the
+  // bug report's status-check trace) can show WHICH needle was searched — a
+  // /share/<hash> listing URL yields an anchor that never appears on the seller
+  // dashboard, which is why a share-linked card reads "unknown".
+  return { ...aggregateStrongest(perUrl), listingIdentifier: identifier };
 }
 
 /**
@@ -642,12 +763,22 @@ Be specific about what you can clearly see. If you can't identify brand or model
   // some sources errored — gives the user a chance to solve captchas / dismiss
   // failures before the model spends tokens on partial data. The renderer
   // calls `synthesize-price` afterward with the comps it decides to use.
-  handleSafe('scrape-price-comps', async (event, { query, nodeId }, signal) => {
-    logger.info(`[Marketplace][${nodeId}] Scraping comps for:`, query);
+  handleSafe('scrape-price-comps', async (event, args = {}, signal) => {
+    const { nodeId } = args;
+    // Multi-item ("bundle") support: a single listing can package several
+    // independent products (kayak + paddle). Each item runs its own complete
+    // pass through the pricing sources. Fall back to a single legacy `query`
+    // so older callers / saved flows keep working.
+    const items = (Array.isArray(args.items) && args.items.length > 0)
+      ? args.items
+      : [{ query: args.query, condition: args.condition }];
     marketplaceTelemetry.nodeId = nodeId;
     marketplaceTelemetry.windowId = event.sender?.id ?? null;
+    logger.info(`[Marketplace][${nodeId}] Scraping comps for ${items.length} item(s):`, items.map(i => i.query).join(' | '));
 
-    const allTasks = buildCompTasks(query);
+    // The comp-source LIST is query-independent, so build once from item 0 for
+    // the login preflight (the per-source cards are spawned by the renderer).
+    const allTasks = buildCompTasks(items[0].query);
 
     // Pre-check login-required sources: skip scraping and emit login-required
     // immediately so the source card shows "Log in" guidance instead of running
@@ -696,104 +827,59 @@ Be specific about what you can clearly see. If you can't identify brand or model
         sourceWarnings,
       };
       marketplaceTelemetry.resolves = {};
-      return { comps: { sold: [], active: [] }, scrapeWarnings: [], preflightBlocked: true, missingLogins };
+      return { items: [], comps: { sold: [], active: [] }, scrapeWarnings: [], preflightBlocked: true, missingLogins };
     }
 
-    // The hard login preflight above (computeMissingLogins) is the single
-    // logged-out gate; every task that reaches here is in scope and runs.
-    const tasks = allTasks;
-    for (const t of tasks) {
-      if (!event.sender.isDestroyed()) {
-        event.sender.send('price-source-progress', { nodeId, sourceId: t.id, status: 'searching', count: 0 });
-      }
-    }
+    // Every source that reaches here is in scope. Run each item's full scrape
+    // SEQUENTIALLY (safer for single-IP rate limits than fanning out N items at
+    // once), routing per-source progress through an aggregator so a source card
+    // only reports its terminal (done/error) — and thus only disappears — after
+    // the LAST item finishes it. Single-item runs pass terminals straight
+    // through, so the existing one-item flow is unchanged.
+    const send = (payload) => {
+      if (!event.sender.isDestroyed()) event.sender.send('price-source-progress', { nodeId, ...payload });
+    };
+    const progressFactory = createAggregatingProgress({ totalItems: items.length, send });
 
-    const sourceUrlById = Object.fromEntries(tasks.map(t => [t.id, t.url]));
-    const scrapeResultsPromise = scrapeMultiple(tasks, (res) => {
-      if (event.sender.isDestroyed()) return;
-      const items = Array.isArray(res.data) ? res.data : [];
-      // Login-aware: a 0-result login wall is relabeled 'login-required' instead
-      // of 'stale-selectors' (see classifyCompScrapeFailure) so the card guides
-      // the user to log in, not to fix selectors.
-      const warning = res.warning || (!res.success ? classifyCompScrapeFailure(res.error, res.id, sessionCache) : null);
-      event.sender.send('price-source-progress', {
-        nodeId,
-        sourceId: res.id,
-        status: res.success ? 'done' : 'error',
-        count: items.length,
-        warning,
-        url: sourceUrlById[res.id] || null,
+    const perItem = [];
+    // Telemetry accumulators across items (the bug report reads these).
+    const bySource = {};            // summed raw item count per source
+    const yieldBySource = {};       // {seen,noFields} per browser-pool source
+    const provenanceBySource = {};  // url + claimed category per source
+    const apiQueryBySource = {};    // effective query per API source
+    let sourceCount = 0;
+    for (let k = 0; k < items.length; k++) {
+      if (signal.aborted) throw new Error('Window closed');
+      const emit = progressFactory(k);
+      const res = await scrapeCompsForQuery(items[k].query, { emit, signal, sessionCache });
+      perItem.push({
+        query: items[k].query,
+        condition: items[k].condition || null,
+        comps: res.comps,
+        scrapeWarnings: res.scrapeWarnings,
       });
-    }, signal);
-
-    const apiSourceIds = ['reverb', 'pricecharting'].filter(isCompSourceEnabledInScope);
-    for (const sourceId of apiSourceIds) {
-      if (!event.sender.isDestroyed()) {
-        event.sender.send('price-source-progress', { nodeId, sourceId, status: 'searching', count: 0 });
-      }
+      for (const [sid, n] of Object.entries(res.bySource)) bySource[sid] = (bySource[sid] || 0) + n;
+      Object.assign(yieldBySource, res.yieldBySource);
+      Object.assign(provenanceBySource, res.provenanceBySource);
+      Object.assign(apiQueryBySource, res.apiQueryBySource);
+      sourceCount = res.sourceCount;
     }
-    const apiResultsPromise = fetchApiMarketplaceSources(query, signal, nodeId, event.sender);
 
-    const [scrapeResults, apiResults] = await Promise.all([scrapeResultsPromise, apiResultsPromise]);
-
-    const taskCategoryMap = buildTaskCategoryMap(tasks);
-    const allComps = { sold: [], active: [] };
+    // Union the per-item warnings by sourceId — a source blocked in ANY item
+    // surfaces ONE blocked card (Solve/Skip then apply across all items).
     const scrapeWarnings = [];
-    // Raw item count per source so the bug report can show which source
-    // contributed what (and, paired with the synthesis "unique" count, expose
-    // a single source double-counting).
-    const bySource = {};
-    // Extraction yield per browser-pool source ({ seen, noFields }): the
-    // cards-seen denominator + cards that looked like listings but yielded no
-    // usable price/title/link. Makes a PARTIAL per-card drift visible — a count
-    // of 48 with noFields=96 means a sub-selector drifted and silently dropped
-    // most of the page, which a bare "poshmark=48" would hide.
-    const yieldBySource = {};
-    // Scrape provenance per browser-pool source: the URL actually read + the
-    // sold/active category the pipeline CLAIMS for it. The category is hard-coded
-    // on the task, never verified against the page — so a source bucketed as
-    // "sold" whose URL carries no sold/completed filter (cf. eBay's LH_Sold=1,
-    // Mercari's status=sold_out) is silently serving ACTIVE asking prices to the
-    // pricing model as "what buyers actually paid". Without this line a bare
-    // "swappa=50 sold" gives the report no way to surface that mislabel.
-    const provenanceBySource = {};
-    for (const t of tasks) provenanceBySource[t.id] = { url: t.url, category: t.category };
-    // API sources aren't browser-pool tasks, so they have no provenanceBySource
-    // entry (correctly — they carry no per-card drift telemetry). Their hidden
-    // variable is the EFFECTIVE QUERY: reverb uses the raw title, but pricecharting
-    // rewrites it (priceChartingQuery strips capacity/condition/"Console"). Capture
-    // the query + the URL each one actually hit so a count can be explained.
-    const apiQueryBySource = {};
-
-    for (const r of scrapeResults) {
-      if (!r.success) {
-        logger.warn(`[Marketplace] A scrape task for ${r.id} was rejected: ${r.error}`);
-        // Login-wall vs. stale-selectors vs. task-failed — see classifyCompScrapeFailure.
-        scrapeWarnings.push(classifyCompScrapeFailure(r.error, r.id, sessionCache));
-        bySource[r.id] = 0;
-        continue;
+    const seenWarn = new Set();
+    for (const it of perItem) {
+      for (const w of it.scrapeWarnings) {
+        if (w?.sourceId && !seenWarn.has(w.sourceId)) { seenWarn.add(w.sourceId); scrapeWarnings.push(w); }
       }
-      const { id, data: items, warning } = r;
-      if (warning) scrapeWarnings.push({ sourceId: id, ...warning });
-      const category = taskCategoryMap[id] ?? 'sold';
-      bySource[id] = Array.isArray(items) ? items.length : 0;
-      if (r.yieldStats) yieldBySource[id] = r.yieldStats;
-      if (Array.isArray(items)) allComps[category].push(...items);
     }
 
-    for (const res of apiResults) {
-      if (res.warning) scrapeWarnings.push({ sourceId: res.sourceId, ...res.warning });
-      bySource[res.sourceId] = Array.isArray(res.items) ? res.items.length : 0;
-      if (typeof res.effectiveQuery === 'string') {
-        apiQueryBySource[res.sourceId] = { query: res.effectiveQuery, url: res.url || null };
-      }
-      if (res.items.length > 0) allComps.sold.push(...res.items);
-    }
+    const totalSold = perItem.reduce((n, it) => n + (it.comps.sold?.length || 0), 0);
+    const totalActive = perItem.reduce((n, it) => n + (it.comps.active?.length || 0), 0);
+    logger.info(`[Marketplace][${nodeId}] Bundle scrape done: ${items.length} item(s), ${totalSold} sold, ${totalActive} active, ${scrapeWarnings.length} warning(s)`);
 
-    logger.info(`[Marketplace][${nodeId}] Scrape done: ${allComps.sold.length} sold, ${allComps.active.length} active, ${scrapeWarnings.length} warning(s)`);
-    // Per-source warning reason so the funnel can explain a count (esp. a 0):
-    // "swappa=0 ⚠️zero-extracted" tells stale-selectors/empty apart from a block,
-    // turning a silently-empty source into a diagnosable one.
+    // Per-source warning reason so the funnel can explain a count (esp. a 0).
     const sourceWarnings = {};
     for (const w of scrapeWarnings) {
       if (w?.sourceId && !sourceWarnings[w.sourceId]) {
@@ -802,15 +888,13 @@ Be specific about what you can clearly see. If you can't identify brand or model
     }
     marketplaceTelemetry.scrape = {
       ts: Date.now(),
-      sold: allComps.sold.length,
-      active: allComps.active.length,
-      sources: tasks.length + apiSourceIds.length,
+      sold: totalSold,
+      active: totalActive,
+      sources: sourceCount,
+      items: items.length,
       warnings: scrapeWarnings.length,
       // Anti-bot blocks vs. internal scrape errors vs. timeouts vs. not-logged-in
-      // are different failures with different fixes — keep them separate instead of
-      // folding every block-severity warning into one "anti-bot" bucket. login-required
-      // (sign in) and scrape-timeout (slow/hung site or tarpit) are NOT anti-bot
-      // captchas and NOT internal task failures.
+      // are different failures with different fixes — keep them separate.
       blocked: scrapeWarnings.filter(w => w?.severity === 'block' && !['task-failed', 'scrape-timeout', 'login-required'].includes(w?.code)).length,
       errored: scrapeWarnings.filter(w => w?.code === 'task-failed').length,
       timedOut: scrapeWarnings.filter(w => w?.code === 'scrape-timeout').length,
@@ -827,7 +911,9 @@ Be specific about what you can clearly see. If you can't identify brand or model
 
     if (signal.aborted) throw new Error('Window closed');
 
-    return { comps: allComps, scrapeWarnings };
+    // `comps` = the PRIMARY item (back-compat for any single-comps reader);
+    // `items` is the per-item breakdown the renderer prices individually.
+    return { items: perItem, comps: perItem[0].comps, scrapeWarnings };
   });
 
   // ── Synthesize Price (AI step, takes pre-scraped comps) ───────────────────
@@ -1124,7 +1210,21 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
   // instead of throwing away the prior scrape's ~70 successful comps and
   // re-paying for a full multi-source run. The renderer merges the returned
   // items into pendingComps and drops the source from scrapeWarnings.
-  handleSafe('rescrape-source', async (event, { sourceId, query, nodeId }, signal) => {
+  handleSafe('rescrape-source', async (event, { sourceId, query, items, nodeId }, signal) => {
+    // Multi-item bundle: re-scrape this source once per item's query so a Solve
+    // recovers comps for EVERY item, not just the primary. Returns per-item
+    // results the renderer merges into each item's comps.
+    if (Array.isArray(items) && items.length > 0) {
+      logger.info(`[Marketplace][${nodeId}] Rescraping source ${sourceId} across ${items.length} item(s)`);
+      const perItem = [];
+      for (const it of items) {
+        if (signal.aborted) throw new Error('Window closed');
+        const r = await scrapeOneSource(sourceId, it.query, event.sender, signal, nodeId);
+        perItem.push({ key: it.key ?? null, query: it.query, items: r.items, warning: r.warning, category: r.category });
+      }
+      return { sourceId, perItem, category: perItem[0]?.category || 'sold' };
+    }
+
     logger.info(`[Marketplace][${nodeId}] Rescraping single source: ${sourceId}`);
     const result = await scrapeOneSource(sourceId, query, event.sender, signal, nodeId);
     logger.info(`[Marketplace][${nodeId}] Rescrape ${sourceId} → ${result.items.length} item(s), warning=${result.warning?.code || 'none'}`);
@@ -1297,17 +1397,28 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
   // to re-fetch them.
   handleSafe('check-listing-status', async (_event, args = {}, signal) => {
     const { url, platformId, nodeId, watchUrls, productTitle, listingId } = args;
-    const urlCount = 1 + (Array.isArray(watchUrls) ? watchUrls.length : 0) + getMarketplaceWatchUrls(platformId).length;
-    logger.info(`[Marketplace][${nodeId}] Checking ${platformId} status across ${urlCount} URL(s); listing=${url}`);
-    const result = await checkListingStatusMultiSource({
-      listingUrl: url,
-      platformId,
-      watchUrls,
-      productTitle,
-      listingId,
-      signal,
+    // Serialize across every hub/card: two concurrent checks would double the
+    // single-IP burst and trip false needs-login/captcha (see statusCheckLock).
+    // A "Check All" loop is already sequential; this also covers two Check-Alls
+    // or a per-card Check firing during one. The "Checking…" log lives INSIDE
+    // the lock so the bug-report timeline reflects real start order, not enqueue.
+    const ahead = getStatusCheckQueueDepth();
+    if (ahead > 0) {
+      logger.info(`[Marketplace][${nodeId}] Status check queued behind ${ahead} in-flight check(s)`);
+    }
+    return withStatusCheckLock(async () => {
+      const urlCount = 1 + (Array.isArray(watchUrls) ? watchUrls.length : 0) + getMarketplaceWatchUrls(platformId).length;
+      logger.info(`[Marketplace][${nodeId}] Checking ${platformId} status across ${urlCount} URL(s); listing=${url}`);
+      const result = await checkListingStatusMultiSource({
+        listingUrl: url,
+        platformId,
+        watchUrls,
+        productTitle,
+        listingId,
+        signal,
+      });
+      logger.info(`[Marketplace][${nodeId}] Result: ${result.status} — ${result.message}`);
+      return result;
     });
-    logger.info(`[Marketplace][${nodeId}] Result: ${result.status} — ${result.message}`);
-    return result;
   });
 }

@@ -8,6 +8,7 @@ import { logger } from '../logger.js';
 import path from 'path';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
+import { resolveMissingPreviewPath } from './missingPreviewRelink.js';
 
 /**
  * Global registry of active file watchers.
@@ -249,6 +250,31 @@ function resolvePortablePath(canvasPath, filePath, relativePath) {
   return filePath;
 }
 
+function resolvePortableImagePath(canvasPath, filePath, relativePath) {
+  const resolved = resolvePortablePath(canvasPath, filePath, relativePath);
+  if (!resolved || fs.existsSync(resolved)) return resolved;
+
+  const baseDir = path.dirname(canvasPath);
+  const relativeCandidate = typeof relativePath === 'string'
+    ? path.resolve(baseDir, relativePath)
+    : null;
+  const relink = resolveMissingPreviewPath(resolved, [
+    relativeCandidate ? path.dirname(relativeCandidate) : null,
+    baseDir,
+  ]);
+
+  if (relink.status === 'found') {
+    if (!relink.cached) {
+      logger.info(`[FileSystem] Relinked missing preview image by exact filename: ${resolved} → ${relink.path} (scanned ${relink.entriesScanned} entries)`);
+    }
+    return relink.path;
+  }
+  if (!relink.cached && (relink.status === 'ambiguous' || relink.status === 'limit')) {
+    logger.warn(`[FileSystem] Could not relink missing preview image (${relink.status}): ${resolved} (scanned ${relink.entriesScanned} entries)`);
+  }
+  return resolved;
+}
+
 function traverseCanvasNodes(nodes, fn) {
   if (!Array.isArray(nodes)) return;
   for (const node of nodes) {
@@ -289,7 +315,7 @@ function resolvePortableFilePaths(data, canvasPath) {
     }
 
     if (Array.isArray(d.imagePaths)) {
-      d.imagePaths = d.imagePaths.map((p, i) => resolvePortablePath(canvasPath, p, d.relativeImagePaths?.[i]));
+      d.imagePaths = d.imagePaths.map((p, i) => resolvePortableImagePath(canvasPath, p, d.relativeImagePaths?.[i]));
       const rels = d.imagePaths.map(p => relativePortablePath(canvasPath, p));
       if (rels.some(Boolean)) d.relativeImagePaths = rels;
     }

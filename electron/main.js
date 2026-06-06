@@ -2,6 +2,8 @@ import electronPkg from 'electron';
 const { app, BrowserWindow, Menu, protocol, nativeImage } = electronPkg;
 import path from 'path';
 import { registerFilesystemHandlers } from './ipc/filesystem.js';
+import { resolveMissingPreviewPath } from './ipc/missingPreviewRelink.js';
+import { logger } from './logger.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
@@ -554,9 +556,27 @@ if (!gotTheLock) {
         // 3. Resolve real path to prevent symlink-based blocklist bypasses.
         const absolutePath = path.resolve(decodedPath);
         const normalizedPath = path.normalize(absolutePath);
+        const previewMode = requestParams.get('preview');
+        const requestedExt = path.extname(normalizedPath).toLowerCase();
         
         let targetPath = normalizedPath;
         try { targetPath = fs.realpathSync(normalizedPath); } catch { /* ignore */ }
+
+        if (
+          previewMode === 'marketplace'
+          && MARKETPLACE_PREVIEW_EXT.has(requestedExt)
+          && !fs.existsSync(targetPath)
+        ) {
+          const relink = resolveMissingPreviewPath(normalizedPath);
+          if (relink.status === 'found') {
+            targetPath = relink.path;
+            if (!relink.cached) {
+              logger.info(`[local-file] Relinked missing preview image by exact filename: ${normalizedPath} → ${targetPath} (scanned ${relink.entriesScanned} entries)`);
+            }
+          } else if (!relink.cached && (relink.status === 'ambiguous' || relink.status === 'limit')) {
+            logger.warn(`[local-file] Could not relink missing preview image (${relink.status}): ${normalizedPath} (scanned ${relink.entriesScanned} entries)`);
+          }
+        }
         
         // Convert to Unix-style separators for consistent verification across platforms
         const verificationPath = targetPath.split(path.sep).join('/').toLowerCase();
@@ -594,7 +614,6 @@ if (!gotTheLock) {
 
         const ext = path.extname(targetPath).toLowerCase();
         const contentType = LOCAL_FILE_MIME_TYPES[ext] || 'application/octet-stream';
-        const previewMode = requestParams.get('preview');
         if (previewMode === 'marketplace' && MARKETPLACE_PREVIEW_EXT.has(ext)) {
           const maxBytes = clampNumber(
             requestParams.get('maxBytes'),

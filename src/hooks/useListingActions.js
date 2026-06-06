@@ -69,7 +69,7 @@ export function useListingActions(id, data) {
   }, [id, product, updateNodeData]);
 
   const handlePricingNotesChange = useCallback((value) => {
-    updateNodeData(id, { pricingNotes: String(value || '').slice(0, 2000) });
+    updateNodeData(id, { pricingNotes: String(value || '') });
   }, [id, updateNodeData]);
 
   // ── Price input ────────────────────────────────────────────────────────────
@@ -151,24 +151,34 @@ export function useListingActions(id, data) {
   // Split into two stages so the caller can pause between scrape and synthesis
   // when sources errored — see SellHubNode.handleConfirmDraft for the
   // resolve-or-skip decision flow that lives between them.
-  const scrapePriceComps = useCallback(async () => {
+  // Accepts an optional list of research items (multi-item "bundle" listings —
+  // e.g. kayak + paddle). Each item carries its own { query, condition } and
+  // gets a complete pricing pass server-side. With no argument, falls back to a
+  // single item built from the primary product (the common single-item case).
+  const scrapePriceComps = useCallback(async (researchItems) => {
     if (!window.electronAPI?.scrapePriceComps) throw new Error('scrapePriceComps API unavailable');
-    const query = buildSearchQuery();
-    const result = await window.electronAPI.scrapePriceComps({ query, nodeId: id });
+    const items = (Array.isArray(researchItems) && researchItems.length > 0)
+      ? researchItems
+      : [{ query: buildSearchQuery(), condition: product.condition || 'Used - Good' }];
+    const result = await window.electronAPI.scrapePriceComps({ items, nodeId: id });
     if (!result.success) {
       const err = new Error(result.error);
       if (result.isRateLimit) err.isRateLimit = true;
       throw err;
     }
     return result;
-  }, [buildSearchQuery, id]);
+  }, [buildSearchQuery, product.condition, id]);
 
   // Rescrape a single comp source — used after captcha-resolve to refetch
-  // just the unblocked source instead of re-running the whole pipeline.
-  const rescrapeSource = useCallback(async (sourceId) => {
+  // just the unblocked source instead of re-running the whole pipeline. Pass
+  // `researchItems` to refetch that source for every item of a bundle (returns
+  // a per-item result); omit it for the single-item path.
+  const rescrapeSource = useCallback(async (sourceId, researchItems) => {
     if (!window.electronAPI?.rescrapeSource) throw new Error('rescrapeSource API unavailable');
-    const query = buildSearchQuery();
-    const result = await window.electronAPI.rescrapeSource({ sourceId, query, nodeId: id });
+    const payload = (Array.isArray(researchItems) && researchItems.length > 0)
+      ? { sourceId, items: researchItems, nodeId: id }
+      : { sourceId, query: buildSearchQuery(), nodeId: id };
+    const result = await window.electronAPI.rescrapeSource(payload);
     if (!result.success) {
       const err = new Error(result.error);
       if (result.isRateLimit) err.isRateLimit = true;
@@ -177,17 +187,20 @@ export function useListingActions(id, data) {
     return result;
   }, [buildSearchQuery, id]);
 
-  const synthesizePrice = useCallback(async (comps) => {
+  // `overrides` lets the caller price an extra bundle item with ITS OWN query /
+  // condition / spec instead of the primary product's (defaults derive from the
+  // primary, so single-item callers pass just `comps`).
+  const synthesizePrice = useCallback(async (comps, overrides = {}) => {
     if (!window.electronAPI?.synthesizePrice) throw new Error('synthesizePrice API unavailable');
-    const query = buildSearchQuery();
+    const query = overrides.query || buildSearchQuery();
     const result = await window.electronAPI.synthesizePrice({
       query,
       nodeId: id,
-      condition: product.condition || 'Used - Good',
+      condition: overrides.condition || product.condition || 'Used - Good',
       // Full spec (not just the broad search query) so the backend can rank comps
       // by what actually distinguishes this item — color/model/title carry the
       // discriminating signal the deliberately-broad query strips out.
-      productSpec: {
+      productSpec: overrides.productSpec || {
         model: product.model,
         color: product.color,
         title: product.generated_title,

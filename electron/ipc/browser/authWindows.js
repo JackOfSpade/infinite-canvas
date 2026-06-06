@@ -1,5 +1,6 @@
 import { logger } from '../../logger.js';
 import { getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath, launchWithProfileLockRetry } from '../stealthBrowser.js';
+import { pauseBrowserPool } from '../browserPool.js';
 import { READINESS } from '../scrapeBudget.js';
 import { matchesNoResultsSentinel } from '../antiBotDetector.js';
 import { execFile as execFileCb, spawn } from 'child_process';
@@ -769,12 +770,13 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
   // visible browser launch on a dir the headless scraper still holds. Bracketed
   // with logs so a hang HERE (waiting on the scrape browser to exit) is
   // distinguishable in the bug report from a hang in the launch below.
-  logger.info('[StealthBrowser] Captcha window: closing stealth browser to release the profile lock…');
-  await closeStealthBrowser();
-  logger.info('[StealthBrowser] Captcha window: stealth browser closed — launching visible window');
-
+  const releaseBrowserPoolPause = pauseBrowserPool(`captcha-resolve:${diagKey}`);
   let captchaBrowser;
   try {
+    logger.info('[StealthBrowser] Captcha window: closing stealth browser to release the profile lock…');
+    await closeStealthBrowser();
+    logger.info('[StealthBrowser] Captcha window: stealth browser closed — launching visible window');
+
     captchaBrowser = await launchVisibleWindow('Captcha-resolve window', url, {
       headless: false,
       executablePath,
@@ -792,78 +794,88 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       ignoreHTTPSErrors: true,
     });
   } catch (err) {
+    releaseBrowserPoolPause();
     finishAuthWindowDiagnostic(diagKey, { result: 'launch-error', error: err?.message || String(err) });
     throw err;
   }
   updateAuthWindowDiagnostic(diagKey, { result: 'open' });
 
-  const pages = await captchaBrowser.pages();
-  const page = pages[0] || await captchaBrowser.newPage();
-  // Capture the original host so a user wandering off to another site doesn't
-  // false-positive the "challenge gone" check on an unrelated page.
-  const originalHost = (() => { try { return new URL(url).host; } catch { return null; } })();
-  // 'load' closes the goto promise on DOM + critical-resource readiness,
-  // skipping the 1-3s 'networkidle2' wait for analytics/tracking pixels.
-  // Safe because the probe below gates extract on textLength > BODY_TEXT_GATE,
-  // which is its own "page has real content" check.
-  // Same window.location.href pattern as openLoginWindow — avoids the CDP
-  // Page.navigate fingerprint that Cloudflare silently hangs. The evaluate()
-  // resolves immediately after the assignment; the probe poll handles about:blank
-  // gracefully by skipping it until the navigation completes.
-  await page.evaluate((targetUrl) => {
-    window.location.href = targetUrl;
-  }, url).catch((err) => {
-    logger.warn(`[StealthBrowser] Captcha window navigate ${url} failed: ${err?.message || String(err)}`);
-  });
+  let page;
+  let originalHost;
+  try {
+    const pages = await captchaBrowser.pages();
+    page = pages[0] || await captchaBrowser.newPage();
+    // Capture the original host so a user wandering off to another site doesn't
+    // false-positive the "challenge gone" check on an unrelated page.
+    originalHost = (() => { try { return new URL(url).host; } catch { return null; } })();
+    // 'load' closes the goto promise on DOM + critical-resource readiness,
+    // skipping the 1-3s 'networkidle2' wait for analytics/tracking pixels.
+    // Safe because the probe below gates extract on textLength > BODY_TEXT_GATE,
+    // which is its own "page has real content" check.
+    // Same window.location.href pattern as openLoginWindow — avoids the CDP
+    // Page.navigate fingerprint that Cloudflare silently hangs. The evaluate()
+    // resolves immediately after the assignment; the probe poll handles about:blank
+    // gracefully by skipping it until the navigation completes.
+    await page.evaluate((targetUrl) => {
+      window.location.href = targetUrl;
+    }, url).catch((err) => {
+      logger.warn(`[StealthBrowser] Captcha window navigate ${url} failed: ${err?.message || String(err)}`);
+    });
 
-  // When the caller needs the user to act on a separate page (e.g. Glassdoor
-  // review gate: Tab 1 stays on job results for polling; Tab 2 is where the
-  // user writes their review). Tab 2 is opened last so it gets focus, keeping
-  // Tab 1 untouched and ready for the extractor poll.
-  //
-  // Both tabs get a color-coded sticky banner injected via evaluateOnNewDocument
-  // (persists across SPA navigations within the tab) + an immediate evaluate call
-  // (catches the already-loaded initial page). The banners orient the user so they
-  // don't accidentally write the review on the polling tab.
-  if (secondTabUrl) {
-    // Helper: inject once on every new document load in a tab.
-    // evaluateOnNewDocument args are serialized, so text/bg must be primitives.
-    const injectBanner = async (p, text, bg) => {
-      await p.evaluateOnNewDocument((t, b) => {
-        const inject = () => {
+    // When the caller needs the user to act on a separate page (e.g. Glassdoor
+    // review gate: Tab 1 stays on job results for polling; Tab 2 is where the
+    // user writes their review). Tab 2 is opened last so it gets focus, keeping
+    // Tab 1 untouched and ready for the extractor poll.
+    //
+    // Both tabs get a color-coded sticky banner injected via evaluateOnNewDocument
+    // (persists across SPA navigations within the tab) + an immediate evaluate call
+    // (catches the already-loaded initial page). The banners orient the user so they
+    // don't accidentally write the review on the polling tab.
+    if (secondTabUrl) {
+      // Helper: inject once on every new document load in a tab.
+      // evaluateOnNewDocument args are serialized, so text/bg must be primitives.
+      const injectBanner = async (p, text, bg) => {
+        await p.evaluateOnNewDocument((t, b) => {
+          const inject = () => {
+            if (document.getElementById('__ic-tab-banner__')) return;
+            const el = document.createElement('div');
+            el.id = '__ic-tab-banner__';
+            el.style.cssText = `position:fixed;top:0;left:0;right:0;z-index:2147483647;background:${b};color:#fff;padding:9px 16px;font:500 13px/1.4 system-ui,sans-serif;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.35);pointer-events:none`;
+            el.textContent = t;
+            if (document.body) document.body.prepend(el);
+          };
+          if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', inject);
+          else inject();
+        }, text, bg).catch(() => {});
+        // Also inject immediately into the already-loaded page.
+        await p.evaluate((t, b) => {
           if (document.getElementById('__ic-tab-banner__')) return;
           const el = document.createElement('div');
           el.id = '__ic-tab-banner__';
           el.style.cssText = `position:fixed;top:0;left:0;right:0;z-index:2147483647;background:${b};color:#fff;padding:9px 16px;font:500 13px/1.4 system-ui,sans-serif;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.35);pointer-events:none`;
           el.textContent = t;
           if (document.body) document.body.prepend(el);
-        };
-        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', inject);
-        else inject();
-      }, text, bg).catch(() => {});
-      // Also inject immediately into the already-loaded page.
-      await p.evaluate((t, b) => {
-        if (document.getElementById('__ic-tab-banner__')) return;
-        const el = document.createElement('div');
-        el.id = '__ic-tab-banner__';
-        el.style.cssText = `position:fixed;top:0;left:0;right:0;z-index:2147483647;background:${b};color:#fff;padding:9px 16px;font:500 13px/1.4 system-ui,sans-serif;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.35);pointer-events:none`;
-        el.textContent = t;
-        if (document.body) document.body.prepend(el);
-      }, text, bg).catch(() => {});
-    };
+        }, text, bg).catch(() => {});
+      };
 
-    await injectBanner(
-      page,
-      '🔄  Tab 1 · Job Results — refresh this page after completing your task on Tab 2',
-      '#16a34a',
-    );
-    const tab2 = await captchaBrowser.newPage();
-    await injectBanner(
-      tab2,
-      '✏️  Tab 2 · Complete your review or salary entry here — then switch to Tab 1 and refresh it',
-      '#2563eb',
-    );
-    await tab2.evaluate((u) => { window.location.href = u; }, secondTabUrl).catch(() => {});
+      await injectBanner(
+        page,
+        '🔄  Tab 1 · Job Results — refresh this page after completing your task on Tab 2',
+        '#16a34a',
+      );
+      const tab2 = await captchaBrowser.newPage();
+      await injectBanner(
+        tab2,
+        '✏️  Tab 2 · Complete your review or salary entry here — then switch to Tab 1 and refresh it',
+        '#2563eb',
+      );
+      await tab2.evaluate((u) => { window.location.href = u; }, secondTabUrl).catch(() => {});
+    }
+  } catch (err) {
+    releaseBrowserPoolPause();
+    finishAuthWindowDiagnostic(diagKey, { result: 'setup-error', error: err?.message || String(err) });
+    try { await captchaBrowser?.close(); } catch { /* ignored */ }
+    throw err;
   }
 
   return new Promise((resolve) => {
@@ -1262,6 +1274,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       if (signal) signal.removeEventListener?.('abort', onAbort);
       if (sender) sender.removeListener('destroyed', cleanup);
       try { await captchaBrowser.close(); } catch { /* ignored */ }
+      releaseBrowserPoolPause();
       // `items` is the inline-extracted comp data captured from the visible
       // session before close — when present, caller skips the headless rescrape
       // (which would re-trigger the same bot wall).

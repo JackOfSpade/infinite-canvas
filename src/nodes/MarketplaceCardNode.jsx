@@ -116,9 +116,9 @@ export function MarketplaceCardNode({ id, data }) {
       <div className="p-3 space-y-2">
         <MonitorStatusBadge status={data.status || 'unknown'} lastChecked={data.lastChecked} />
 
-        {/* Show the prose status message only on error/unknown — for live/sold/ended
-            the badge plus the Attention items already cover everything in the message. */}
-        {data.statusMessage && (data.status === 'error' || data.status === 'unknown') && (
+        {/* Show the prose status message only when it explains a problem. For
+            live/sold/ended, the badge plus attention panels carry the signal. */}
+        {data.statusMessage && (data.status === 'error' || data.status === 'unknown' || data.status === 'needs-login') && (
           <div className="text-white/40 text-[9px] leading-snug px-1 break-words">
             {data.statusMessage}
           </div>
@@ -133,6 +133,7 @@ export function MarketplaceCardNode({ id, data }) {
           </label>
           <input
             type="text"
+            data-native-undo="true"
             value={data.listingUrl || ''}
             onChange={(e) => setUrl(e.target.value)}
             onPointerDown={(e) => e.stopPropagation()}
@@ -158,6 +159,7 @@ export function MarketplaceCardNode({ id, data }) {
           {watchOpen && (
             <textarea
               rows={2}
+              data-native-undo="true"
               value={watchDraft}
               onChange={(e) => setWatchDraft(e.target.value)}
               onFocus={watchFocusProps.onFocus}

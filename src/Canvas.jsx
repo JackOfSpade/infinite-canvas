@@ -48,7 +48,7 @@ import { IssueReporterDialog } from './components/IssueReporterDialog';
 import { EventLogger } from './utils/EventLogger';
 
 import { CanvasNavigationContext } from './contexts/CanvasNavigationContext';
-import { DEFAULT_EDGE_OPTIONS } from './utils/constants';
+import { CANVAS_ZOOM_LIMITS, DEFAULT_EDGE_OPTIONS } from './utils/constants';
 
 import { useUndoRedo } from './hooks/useUndoRedo';
 import { useCustomFitView } from './hooks/useCustomFitView';
@@ -69,6 +69,13 @@ import { useCanvasKeyboardShortcuts } from './hooks/useCanvasKeyboardShortcuts';
 import { useCanvasOSDeletion } from './hooks/useCanvasOSDeletion';
 import { useConfirmDialog } from './hooks/useConfirmDialog';
 import { ArrowUpLeft } from 'lucide-react';
+import { viewportForZoomAtScreenPoint } from './utils/layoutGeometry';
+
+const wheelZoomDelta = (event) => {
+  const platform = window.navigator?.platform || '';
+  const factor = event.ctrlKey && /Mac/.test(platform) ? 10 : 1;
+  return -event.deltaY * (event.deltaMode === 1 ? 0.05 : event.deltaMode ? 1 : 0.002) * factor;
+};
 
 const nodeTypes = {
   document: DocumentNode,
@@ -123,7 +130,16 @@ export function Canvas() {
   const snapshotTakenForDeleteRef = useRef(false);
   const takeSnapshotRef = useRef(null);
 
-  const { screenToFlowPosition, getIntersectingNodes, getNode, getNodes, getEdges, updateNodeData } = useReactFlow();
+  const {
+    screenToFlowPosition,
+    getIntersectingNodes,
+    getNode,
+    getNodes,
+    getEdges,
+    updateNodeData,
+    getViewport,
+    setViewport,
+  } = useReactFlow();
 
   const snapshotOnDelete = useCallback((changes) => {
     if (changes.some(c => c.type === 'remove') && !snapshotTakenForDeleteRef.current) {
@@ -484,6 +500,33 @@ export function Canvas() {
   const isSelectTool  = activeTool === 'select';
   const interactiveDisabled = isDrawingTool || !!placementMode || navigation.isAnimating;
 
+  const handleWheelZoom = useCallback((e) => {
+    if (interactiveDisabled || e.target?.closest?.('.nowheel')) return;
+
+    const delta = wheelZoomDelta(e);
+    if (!Number.isFinite(delta) || delta === 0) return;
+
+    const bounds = e.currentTarget.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    const viewport = getViewport();
+    const nextZoom = Math.min(
+      CANVAS_ZOOM_LIMITS.max,
+      Math.max(CANVAS_ZOOM_LIMITS.min, viewport.zoom * Math.pow(2, delta))
+    );
+
+    if (nextZoom === viewport.zoom) return;
+
+    setViewport(viewportForZoomAtScreenPoint(
+      viewport,
+      { x: bounds.width / 2, y: bounds.height / 2 },
+      nextZoom
+    ));
+  }, [getViewport, interactiveDisabled, setViewport]);
+
   // Deselect nodes whenever the user starts an interaction on empty canvas.
   // ReactFlow's built-in onPaneClick already deselects on a plain click, but a
   // click-and-drag (pan) doesn't fire onClick, so the prior selection visually
@@ -766,8 +809,11 @@ export function Canvas() {
             connectionLineType={ConnectionLineType.SmoothStep}
             nodesDraggable={!interactiveDisabled}
             elementsSelectable={!interactiveDisabled}
-            zoomOnScroll={!interactiveDisabled}
+            zoomOnScroll={false}
             zoomOnPinch={!interactiveDisabled}
+            onWheelCapture={handleWheelZoom}
+            minZoom={CANVAS_ZOOM_LIMITS.min}
+            maxZoom={CANVAS_ZOOM_LIMITS.max}
             panOnScroll={false}
             autoPanOnNodeFocus={false}
             zoomOnDoubleClick={false}

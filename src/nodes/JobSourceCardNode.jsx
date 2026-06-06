@@ -239,7 +239,7 @@ export function JobSourceCardNode({ id, data }) {
   const hub = getNode(data.hubId);
   const hubData = hub?.data || {};
   const isFiltered = hubData.sourceFilter === data.sourceId;
-  const hubBusy = ['parsing', 'querying', 'searching', 'scoring'].includes(hubData.hubState);
+  const hubBusy = ['queued', 'parsing', 'querying', 'searching', 'scoring'].includes(hubData.hubState);
   // Hub-cascading lock: when the owning Job Search Module is locked, the source card's
   // interactive controls (filter toggle, Solve, Skip) become no-ops. The
   // card itself stays visible and informational.

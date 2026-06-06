@@ -922,22 +922,31 @@ export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal
   // Normalize any non-vision-safe format to JPEG. Gemini accepts HEIC natively
   // but NOT TIFF/JXL/AVIF/BMP/SVG — one converter keeps both providers uniform.
   // Track temp files for cleanup in the finally (this path created none before).
-  const { ensureVisionSafeImage, cleanupTempFile } = await import('./heicUtils.js');
+  const { ensureVisionSafeImage, downscaleImageIfNeeded, cleanupTempFile } = await import('./heicUtils.js');
   const tempFiles = [];
   try {
     const imageParts = await Promise.all(imagePaths.map(async (imgPath) => {
-      const safePath = await ensureVisionSafeImage(imgPath);
-      if (safePath !== imgPath) tempFiles.push(safePath);
+      let finalPath = await ensureVisionSafeImage(imgPath);
+      if (finalPath !== imgPath) tempFiles.push(finalPath);
 
-      const stats = await fs.promises.stat(safePath);
+      // Gemini vision is flat-rate per image, but inlineData still has a hard
+      // byte ceiling. Downscale phone-camera originals before the size check so
+      // a 20-30MB JPEG can still be analyzed instead of forcing manual export.
+      const scaledPath = await downscaleImageIfNeeded(finalPath, { maxLongSide: 1600 });
+      if (scaledPath !== finalPath) {
+        tempFiles.push(scaledPath);
+        finalPath = scaledPath;
+      }
+
+      const stats = await fs.promises.stat(finalPath);
       // Vertex AI inlineData limit is 20MB. Base64 encoding adds ~33% overhead,
       // so we cap the raw file size at 15MB to be safe and provide a clear error.
       if (stats.size > MAX_AI_FILE_BYTES) {
-        throw new Error(`Image file too large: ${path.basename(imgPath)} (${(stats.size / 1024 / 1024).toFixed(1)}MB). Max 15MB for AI analysis.`);
+        throw new Error(`Image file too large after resizing: ${path.basename(imgPath)} (${(stats.size / 1024 / 1024).toFixed(1)}MB). Max 15MB for AI analysis.`);
       }
 
-      const buffer = await fs.promises.readFile(safePath);
-      const ext = path.extname(safePath).toLowerCase();
+      const buffer = await fs.promises.readFile(finalPath);
+      const ext = path.extname(finalPath).toLowerCase();
       const mimeType = IMAGE_MIME_MAP[ext] || 'image/jpeg';
       return { inlineData: { mimeType, data: buffer.toString('base64') } };
     }));
