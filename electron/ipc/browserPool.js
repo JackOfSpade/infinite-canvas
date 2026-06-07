@@ -377,6 +377,13 @@ async function executeScrape(url, extractorJS, options = {}) {
           }
         }
 
+        // Unwrap the extractor's optional { items, yieldStats } envelope up front
+        // so the anti-bot detector can consult the cards-seen denominator AND the
+        // site's own result-count header (yieldStats.claimedTotal): a sub-floor
+        // count on a page the extractor read cleanly is a thin query, not a block.
+        const __wrapped = extractorResult && !Array.isArray(extractorResult) && Array.isArray(extractorResult.items);
+        const yieldStats = __wrapped ? (extractorResult.yieldStats || null) : null;
+
         // Run anti-bot detection on what we observed. Both the raw extractor
         // result and the warning (if any) flow back to the caller so the UI can
         // render a visible signal instead of silently accepting a blocked page.
@@ -385,11 +392,9 @@ async function executeScrape(url, extractorJS, options = {}) {
           const html       = await page.content().catch(() => '');
           const finalUrl   = page.url() || url;
           const status     = pageResponse?.status?.() ?? 0;
-          const itemCount  = Array.isArray(extractorResult)
-            ? extractorResult.length
-            : (extractorResult && typeof extractorResult === 'object'
-                ? (Array.isArray(extractorResult.items) ? extractorResult.items.length : null)
-                : null);
+          const itemCount  = __wrapped
+            ? extractorResult.items.length
+            : (Array.isArray(extractorResult) ? extractorResult.length : null);
           warning = detectAntiBotSignal({
             status,
             finalUrl,
@@ -398,6 +403,7 @@ async function executeScrape(url, extractorJS, options = {}) {
             expectedMinItems: options.expectedMinItems || 0,
             expectedBodySize: getBodyBaseline(sourceKey),  // learned typical good-body size
             sourceLabel: options.sourceLabel || domain,
+            yieldStats,
           });
           if (warning) {
             logger.warn(`[BrowserPool] Anti-bot signal on ${url}: ${warning.code} — ${warning.evidence}`);
@@ -418,15 +424,13 @@ async function executeScrape(url, extractorJS, options = {}) {
           recordReady(sourceKey, stableElapsedMs);
         }
 
-        // Extractors may return either a bare array or { items, yieldStats }.
-        // Unwrap to keep `data` an array for every downstream consumer; surface
-        // yieldStats separately so the bug report can show the cards-seen
-        // denominator + per-card field drops behind a healthy-looking count.
-        const __wrapped = extractorResult && !Array.isArray(extractorResult) && Array.isArray(extractorResult.items);
+        // `data` stays a bare array for every downstream consumer; yieldStats was
+        // unwrapped above (the cards-seen denominator + per-card field drops behind
+        // a healthy-looking count, plus the site's claimed result total).
         return {
           data: __wrapped ? extractorResult.items : extractorResult,
           warning,
-          yieldStats: __wrapped ? (extractorResult.yieldStats || null) : null,
+          yieldStats,
         };
       } finally {
         if (options.signal && abortHandler) {
@@ -679,6 +683,8 @@ async function executeScrapePaginated(extractorJS, options = {}) {
             expectedMinItems,
             expectedBodySize: getBodyBaseline(sourceKey),
             sourceLabel: sourceKey,
+            // Per-page (not aggregated) stats so seen/itemsExtracted share a basis.
+            yieldStats: pageYieldStats,
           });
           if (warning) logger.warn(`[BrowserPool] Anti-bot signal on ${url} (p${p}): ${warning.code} — ${warning.evidence}`);
           else if (allExtracted.length > 0 && html) recordBodySize(sourceKey, String(html).length);

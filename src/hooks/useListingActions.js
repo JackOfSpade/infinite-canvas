@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { TIMINGS } from '../utils/timings';
+import { buildItemQuery } from '../utils/bundlePricing';
 
 /**
  * useListingActions — shared logic for ListingNode and SellHubNode.
@@ -140,13 +141,13 @@ export function useListingActions(id, data) {
   // do relevance ranking on token overlap — and a noisy query like
   // "FOR PARTS: Apple iPhone XS Silver 512GB" biases toward a narrow slice
   // instead of the broader pool we want for anchor/adjusted/bound weighting.
-  // Falls back to the old brand+model+title concat for workspaces saved
-  // before the search_query field existed.
-  const buildSearchQuery = useCallback(() => {
-    const ai = product.search_query?.trim();
-    if (ai) return ai;
-    return `${product.brand || ''} ${product.model || ''} ${product.generated_title || ''}`.trim();
-  }, [product]);
+  // Falls back to the brand+model+title concat (with "Unknown"/blank tokens
+  // stripped) for workspaces saved before the search_query field existed.
+  // Delegates to the SAME buildItemQuery used by the bundle scrape (see
+  // buildResearchItems) so the primary item is SYNTHESIZED with the exact query
+  // it was SCRAPED with — otherwise the prompt's `ITEM:` line could disagree with
+  // what produced the comps (e.g. "Brand Unknown Title" vs "Brand Title").
+  const buildSearchQuery = useCallback(() => buildItemQuery(product), [product]);
 
   // Split into two stages so the caller can pause between scrape and synthesis
   // when sources errored — see SellHubNode.handleConfirmDraft for the
@@ -196,6 +197,8 @@ export function useListingActions(id, data) {
     const result = await window.electronAPI.synthesizePrice({
       query,
       nodeId: id,
+      itemKey: overrides.itemKey || 'primary',
+      itemLabel: overrides.itemLabel || product.generated_title || query,
       condition: overrides.condition || product.condition || 'Used - Good',
       // Full spec (not just the broad search query) so the backend can rank comps
       // by what actually distinguishes this item — color/model/title carry the
@@ -205,7 +208,10 @@ export function useListingActions(id, data) {
         color: product.color,
         title: product.generated_title,
       },
-      pricingNotes: data.pricingNotes || '',
+      // Per-item notes for multi-item bundles: each extra item carries its own
+      // pricing notes. Falls back to the hub-level notes for the primary item
+      // (and any caller that doesn't pass an override).
+      pricingNotes: overrides.pricingNotes !== undefined ? overrides.pricingNotes : (data.pricingNotes || ''),
       comps,
     });
     if (!result.success) {
@@ -218,6 +224,22 @@ export function useListingActions(id, data) {
     }
     return result;
   }, [buildSearchQuery, product.condition, product.model, product.color, product.generated_title, data.pricingNotes, id]);
+
+  // Multi-item bundle: ask the AI for ONE combined asking price across the
+  // independently-priced items (synergy-aware, not just the arithmetic sum).
+  // Returns whole-listing quick/best/max prices plus a bundle-only
+  // justification, or null when the backend declined (fewer than 2 priced
+  // items) — the caller falls back to the item sums in that case.
+  const synthesizeBundlePrice = useCallback(async (items, sumOfPrices) => {
+    if (!window.electronAPI?.synthesizeBundlePrice) throw new Error('synthesizeBundlePrice API unavailable');
+    const result = await window.electronAPI.synthesizeBundlePrice({ items, sumOfPrices, nodeId: id });
+    if (!result.success) {
+      const err = new Error(result.error);
+      if (result.isRateLimit) err.isRateLimit = true;
+      throw err;
+    }
+    return result.bundlePricing || null;
+  }, [id]);
 
   // ── Justification toggle ───────────────────────────────────────────────────
 
@@ -247,6 +269,7 @@ export function useListingActions(id, data) {
     scrapePriceComps,
     rescrapeSource,
     synthesizePrice,
+    synthesizeBundlePrice,
     syncPriceFromBackend,
   };
 }

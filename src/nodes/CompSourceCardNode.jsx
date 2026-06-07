@@ -111,6 +111,12 @@ export function CompSourceCardNode({ id, data }) {
             sourceId: data.sourceId,
             items: result.items || null,
             category: result.category || null,
+            warning: result.warning || null,
+            // The visible window auto-resolved without ever seeing a challenge
+            // widget → there is no wall to clear, so a low/empty result is the
+            // page's real answer. Lets the hub clear the gate instead of re-arming
+            // an unclearable Solve (the eBay "1 result" loop) on the single-item path.
+            noChallengeConfirmed: result.diag?.sawChallenge === false,
           },
         }));
       }
@@ -178,10 +184,11 @@ export function CompSourceCardNode({ id, data }) {
       {/* Decision row — action depends on what went wrong:
           stale-selectors (code fix needed) → Retry re-runs the extractor after rebuild.
           bot block → Solve opens the URL in a cookie-shared browser.
+          sources without a browser URL → Retry directly.
           Skip always available so the hub can proceed without this source. */}
       {(warning || isError) && (
         <div className="flex border-t border-white/10">
-          {hasWarn ? (
+          {(hasWarn || !progress?.url) ? (
             <button
               onClick={async (e) => {
                 e.stopPropagation();
@@ -195,7 +202,13 @@ export function CompSourceCardNode({ id, data }) {
                   const result = await window.electronAPI.rescrapeSource({ sourceId: data.sourceId, query, nodeId: data.hubId });
                   if (result?.items?.length > 0) {
                     document.dispatchEvent(new CustomEvent('comp-captcha-resolved', {
-                      detail: { hubId: data.hubId, sourceId: data.sourceId, items: result.items, category: result.category || 'sold' },
+                      detail: {
+                        hubId: data.hubId,
+                        sourceId: data.sourceId,
+                        items: result.items,
+                        category: result.category || 'sold',
+                        warning: result.warning || null,
+                      },
                     }));
                   }
                 } finally {
@@ -205,7 +218,11 @@ export function CompSourceCardNode({ id, data }) {
               onPointerDown={(e) => e.stopPropagation()}
               disabled={retrying || hubLocked}
               className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
-              title={hubLocked ? 'Hub is locked' : 'Re-run the extractor — update the scraper code and rebuild first'}
+              title={hubLocked
+                ? 'Hub is locked'
+                : hasWarn
+                  ? 'Re-run the extractor — update the scraper code and rebuild first'
+                  : 'Retry this source'}
             >
               <ExternalLink size={9} />
               {retrying ? 'Retrying…' : 'Retry'}

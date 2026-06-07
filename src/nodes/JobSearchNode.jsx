@@ -638,7 +638,7 @@ export function JobSearchNode({ id, data }) {
     pruneDisabledSourceCards();
   }, [pruneDisabledSourceCards]);
 
-  const ensureSourceCards = useCallback(() => {
+  const ensureSourceCards = useCallback(({ frameSourceCards = true } = {}) => {
     const existingCards = getNodes().filter(n => n.type === 'jobsourcecard' && n.data?.hubId === id);
     const allowedSourceIds = new Set(ACTIVE_JOB_SOURCES);
     const staleCards = existingCards.filter(n => !allowedSourceIds.has(n.data?.sourceId));
@@ -662,9 +662,11 @@ export function JobSearchNode({ id, data }) {
 
     // requestAnimationFrame gives ReactFlow one tick to register the new nodes;
     // a synchronous fitView would frame only the hub.
-    requestAnimationFrame(() => {
-      fitView({ duration: fitViewDuration(total), padding: 0.2 });
-    });
+    if (frameSourceCards) {
+      requestAnimationFrame(() => {
+        fitView({ duration: fitViewDuration(total), padding: 0.2 });
+      });
+    }
   }, [id, getNodes, deleteElements, spawnSourceCardsAround, fitView]);
 
   // Guarantee every blocked source has a visible, actionable card when we pause
@@ -953,7 +955,12 @@ export function JobSearchNode({ id, data }) {
    * `profile` to skip parsing and re-run from query construction onward.
    * `filePath` takes precedence when both are provided.
    */
-  const runPipeline = useCallback(async ({ filePath, filePaths, profile: providedProfile } = {}) => {
+  const runPipeline = useCallback(async ({
+    filePath,
+    filePaths,
+    profile: providedProfile,
+    frameSourceCards = true,
+  } = {}) => {
     if (!window.electronAPI || processingRef.current) return;
     // Career data can come from one OR many dropped files; normalize to a list.
     // A single `filePath` (canvas-created hub) still works as a one-element list.
@@ -1000,11 +1007,6 @@ export function JobSearchNode({ id, data }) {
       // stale "{N} jobs" until each source's first fresh event arrives this run).
       document.dispatchEvent(new CustomEvent('job-source-progress-reset', { detail: { hubId: id } }));
 
-      // Spawn (or reuse) one platform card per active job source. Cards subscribe
-      // to per-source progress events themselves, so the hub doesn't need to push
-      // anything to them — they update independently.
-      ensureSourceCards();
-
       // Snapshot the node position so we can spawn siblings near it even if
       // the user navigates away and unmounts this layer of the canvas.
       const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
@@ -1030,6 +1032,11 @@ export function JobSearchNode({ id, data }) {
           { isLoginGate: true, notLoggedIn }
         );
       }
+
+      // Spawn (or reuse) one platform card per active job source only after the
+      // login gate passes. ensureSourceCards intentionally frames all source
+      // cards, which must not replace the user's zoom/pan for a login request.
+      ensureSourceCards({ frameSourceCards });
 
       // Step 1: Parse career data (only when fresh files were dropped). Any
       // number/type of files are transcribed + merged into one `careerData`
@@ -1264,11 +1271,14 @@ export function JobSearchNode({ id, data }) {
     }
   }, [id, updateGlobal, getNode, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, data.canonicalLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue]);
 
-  const startProcessing = useCallback((fileOrFiles) => {
+  const startProcessing = useCallback((fileOrFiles, { frameSourceCards = true } = {}) => {
     const filePaths = Array.isArray(fileOrFiles) ? fileOrFiles : (fileOrFiles ? [fileOrFiles] : []);
-    return runPipeline({ filePaths });
+    return runPipeline({ filePaths, frameSourceCards });
   }, [runPipeline]);
-  const startProcessingWithProfile = useCallback((profile) => runPipeline({ profile }), [runPipeline]);
+  const startProcessingWithProfile = useCallback(
+    (profile, { frameSourceCards = true } = {}) => runPipeline({ profile, frameSourceCards }),
+    [runPipeline],
+  );
 
   /**
    * Resume the pipeline from the paused 'sources-ready' state. Picks up the
@@ -1733,7 +1743,7 @@ export function JobSearchNode({ id, data }) {
     processingRef.current = false;
   }, [data.locked, id, updateGlobal, epoch, resetSourceProgress, cleanupAllJobChildren, cancelCleanSourceCardDismiss, data.pendingBatch, canvasFilePath, moduleRunQueue]);
 
-  const handleRerun = useCallback(() => {
+  const handleRerun = useCallback(({ frameSourceCards = true } = {}) => {
     if (data.locked || processingRef.current) return;
     const droppedPaths = lastDroppedPathsRef.current;
     const effectivePaths = (Array.isArray(droppedPaths) && droppedPaths.length)
@@ -1767,11 +1777,11 @@ export function JobSearchNode({ id, data }) {
     document.dispatchEvent(new CustomEvent('job-source-progress-reset', { detail: { hubId: id } }));
     if (effectivePaths.length > 0) {
       // Files still accessible — re-parse for freshness then run full pipeline
-      startProcessingRef.current?.(effectivePaths);
+      startProcessingRef.current?.(effectivePaths, { frameSourceCards });
     } else {
       // Files gone but profile is persisted — run from query step onward
       addToast({ title: 'Re-running Search', description: 'Using stored career profile — original files not needed.', type: 'info' });
-      startProcessingWithProfile(data.resumeProfile);
+      startProcessingWithProfile(data.resumeProfile, { frameSourceCards });
     }
   }, [data.locked, data.filePath, data.resumeProfile, id, getNodes, getEdges, deleteElements, addToast, startProcessingWithProfile, resetSourceProgress, updateGlobal, cancelCleanSourceCardDismiss]);
 
@@ -1941,7 +1951,7 @@ export function JobSearchNode({ id, data }) {
     if (data.locked) return;
     EventLogger.log(`[JobSearch][${id}] User clicked Try Again on error banner`);
     updateGlobal(id, { errorMessage: null, isRateLimit: false, testModeNote: null });
-    handleRerun();
+    handleRerun({ frameSourceCards: false });
   }, [data.locked, id, updateGlobal, handleRerun]);
 
   const savedAnalysisWarning = getSavedAnalysisWarning(savedAnalysisMeta, id, canvasFilePath);

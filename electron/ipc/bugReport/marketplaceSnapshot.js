@@ -2,7 +2,7 @@ import { getMarketplaceTelemetry } from '../marketplace.js';
 import { MARKETPLACE_TEST_MODE } from '../../../src/utils/compSourceScope.js';
 import { ago, modelTag, pipelineScope, overPricedSoldFlag } from './helpers.js';
 
-// Verdict for what the top-25/15 comp cap actually dropped — does it skew the
+// Verdict for what the token-budget comp ceiling actually dropped — does it skew the
 // price? Two facts matter. (1) Compare the TYPICAL dropped comp (its median) to
 // the typical kept one, not a lone outlier — the old dropped.max ≥ kept.median
 // test fired on essentially every run. (2) Crucially, the cap selects by
@@ -20,11 +20,11 @@ import { ago, modelTag, pipelineScope, overPricedSoldFlag } from './helpers.js';
 const dropBandVerdict = (kept, dropped, keptScore, droppedScore) => {
   if (!kept || !dropped) return '';
   if (dropped.median < kept.min) {
-    return ' Dropped sit below the kept band (low-relevance noise — cap working as intended).';
+    return ' Dropped sit below the kept band (low-relevance noise — selection working as intended).';
   }
   const rel = kept.median > 0 ? (dropped.median - kept.median) / kept.median : 0;
   if (Math.abs(rel) <= 0.15) {
-    return ` ✅ dropped median $${dropped.median} ≈ kept median $${kept.median} — the cap dropped a representative sample, so the price is not skewed by it (the 25/15 cap is a by-design cost bound, not lost signal).`;
+    return ` ✅ dropped median $${dropped.median} ≈ kept median $${kept.median} — selection dropped a representative sample, so the price is not skewed by it.`;
   }
   const pct = Math.round(Math.abs(rel) * 100);
   const dir = rel > 0 ? 'ABOVE' : 'BELOW';
@@ -34,9 +34,9 @@ const dropBandVerdict = (kept, dropped, keptScore, droppedScore) => {
   // Dropped comps clearly less relevant than kept → the cap correctly kept the
   // closest matches; the price gap is the ranking working, not a bias.
   if (haveScores && droppedScore < keptScore * 0.85) {
-    return ` dropped median $${dropped.median} is ${pct}% ${dir} kept median $${kept.median}, but the dropped comps are less relevant${scoreNote} — the cap kept the closest-matching listings and shed lower-relevance ${rel > 0 ? 'pricier' : 'cheaper'} ones, so the gap is the ranking working as intended, not a price bias.`;
+    return ` dropped median $${dropped.median} is ${pct}% ${dir} kept median $${kept.median}, but the dropped comps are less relevant${scoreNote} — selection kept the closest-matching listings and shed lower-relevance ${rel > 0 ? 'pricier' : 'cheaper'} ones, so the gap is the ranking working as intended, not a price bias.`;
   }
-  return ` ⚠️ dropped median $${dropped.median} is ${pct}% ${dir} kept median $${kept.median} at comparable relevance${scoreNote} — the cap shed comps as on-spec as those it kept, so the price may be biased ${bias} (raise the cap or improve the comp ranking).`;
+  return ` ⚠️ dropped median $${dropped.median} is ${pct}% ${dir} kept median $${kept.median} at comparable relevance${scoreNote} — selection shed comps as on-spec as those it kept, so the price may be biased ${bias} (raise the token budget or improve the comp ranking).`;
 };
 
 /**
@@ -45,14 +45,21 @@ const dropBandVerdict = (kept, dropped, keptScore, droppedScore) => {
  * synthesis → platform fit). Same rationale — the SellHub's in-memory tallies
  * vanish when the hub is deleted, and the raw funnel otherwise lives only in
  * the scrolling log buffer. The decisive line for "did we use all the comps we
- * found?" is synthesis's used-vs-found gap (the top-25/15 slice is by-design;
+ * found?" is synthesis's used-vs-found gap (the token-budget ceiling is by-design;
  * a recommended_price of null means comps were scraped but no price came out).
  */
 export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId) {
   let t;
   try { t = getMarketplaceTelemetry(); } catch { return ''; }
   const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
-  if (!t || (!t.analyze && !t.scrape && !hasResolves && !t.synthesis && !t.fit)) return '';
+  const synthesisEntries = Array.isArray(t?.syntheses) && t.syntheses.length > 0
+    ? t.syntheses
+    : (t?.synthesis ? [t.synthesis] : []);
+  const pricingStartedAt = synthesisEntries
+    .map(s => s?.startedAt)
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b)[0] || null;
+  if (!t || (!t.analyze && !t.scrape && !hasResolves && synthesisEntries.length === 0 && !t.bundle && !t.fit)) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId);
   if (scope.foreign) return `\n## Marketplace Pipeline\n${scope.note}`;
@@ -89,6 +96,15 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       `${timedOut > 0 ? `, ${timedOut} timed-out` : ''}` +
       `${errored > 0 ? `, ${errored} scrape error(s)` : ''}`,
     );
+    if (Array.isArray(s.itemDetails) && s.itemDetails.length > 1) {
+      lines.push('- Per-item scrape results:');
+      for (const item of s.itemDetails) {
+        const warnings = Array.isArray(item.warnings) && item.warnings.length
+          ? ` · warnings: ${item.warnings.map(w => `${w.sourceId}:${w.code}`).join(', ')}`
+          : '';
+        lines.push(`  - Item ${item.index + 1} q="${item.query}" → ${item.sold} sold + ${item.active} active${warnings}`);
+      }
+    }
     if (s.bySource && Object.keys(s.bySource).length > 0) {
       // Per-source raw counts — pair with the synthesis "unique" line below to
       // spot a single source double-counting (e.g. a healthy-looking total
@@ -114,7 +130,11 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       const fmtYield = (id) => {
         const y = yb[id];
         if (!y || typeof y.seen !== 'number') return '';
-        return ` (${y.seen} seen${y.noFields > 0 ? `, ${y.noFields} no-fields` : ''})`;
+        // `site claims N` is the source's OWN result-count header (eBay "1 result").
+        // It's the decisive genuine-thin-query vs. selector-drift tell: "1 seen, site
+        // claims 1" = a real 1-result page (no block); "1 seen, site claims 50" = drift.
+        const claimed = Number.isFinite(Number(y.claimedTotal)) ? `, site claims ${y.claimedTotal}` : '';
+        return ` (${y.seen} seen${y.noFields > 0 ? `, ${y.noFields} no-fields` : ''}${claimed})`;
       };
       // Per-source raw counts are now the full rendered page (extractors no
       // longer slice to a per-source cap), so a count reflects everything the
@@ -163,7 +183,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       // not completed sales). Shown as data, NOT auto-flagged: some sold sources
       // legitimately lack the literal token (PriceCharting's `type=prices` IS sold
       // data), so the URL is surfaced for a human to judge rather than mis-warned.
-      lines.push('- Scrape provenance (URL read · claimed category — a `sold` source whose URL has no sold/completed filter is serving ACTIVE prices):');
+      lines.push(`- ${s.items > 1 ? 'Last-item scrape provenance' : 'Scrape provenance'} (URL read · claimed category — a \`sold\` source whose URL has no sold/completed filter is serving ACTIVE prices):`);
       for (const [id, p] of Object.entries(s.provenanceBySource)) {
         lines.push(`  - \`${id}\` claims **${p.category}** ← ${p.url}`);
       }
@@ -176,7 +196,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       // product-catalog search — so its count is shaped by that rewrite. Surfacing
       // query + URL tells "normalizer over-stripped / wrong product" apart from
       // "the catalog genuinely has only N matching variants".
-      lines.push('- API source query (the string actually searched — pricecharting normalizes the title; a surprising count is read against THIS, not the raw product name):');
+      lines.push(`- ${s.items > 1 ? 'Last-item API source query' : 'API source query'} (the string actually searched — pricecharting normalizes the title; a surprising count is read against THIS, not the raw product name):`);
       for (const [id, q] of Object.entries(s.apiQueryBySource)) {
         lines.push(`  - \`${id}\` q="${q.query}"${q.url ? ` → ${q.url}` : ''}`);
       }
@@ -201,21 +221,30 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
     const entries = Object.entries(t.resolves).sort((a, b) => (b[1]?.ts || 0) - (a[1]?.ts || 0));
     lines.push('\n### Captcha-resolve / Solve');
     for (const [sourceId, r] of entries) {
-      // `via` distinguishes how the items reached the pricing set: 'inline' =
-      // pulled directly from the visible captcha-resolve session; 'rescrape' =
-      // inline came back empty and a headless rescrape recovered them. Reporting
-      // the rescrape count (not the inline 0) is what keeps a successful recovery
-      // from looking like a failure.
-      const line = r.via === 'rescrape'
-        ? `- \`${sourceId}\`${ago(r.ts)}: rescraped ${r.extracted} ${r.category} comp(s) into the pricing set (inline extract failed; recovered via headless rescrape)`
-        : `- \`${sourceId}\`${ago(r.ts)}: inline-extracted ${r.extracted} ${r.category} comp(s) merged into the pricing set`;
-      lines.push(line + (r.extracted === 0 ? ' ⚠️ recovered 0 — source contributed nothing to pricing' : ''));
+      // The backend knows what it returned to the renderer, but only the renderer
+      // knows whether it merged before pricing. Compare against pricing start so
+      // a late retry is never falsely reported as influencing the final price.
+      const late = pricingStartedAt != null && r.ts >= pricingStartedAt;
+      const method = r.via === 'bundle-rescrape'
+        ? `bundle-rescrape returned ${r.extracted} ${r.category} comp(s) across ${r.itemCounts?.length || '?'} item query(s)`
+        : r.via === 'rescrape'
+          ? `headless rescrape returned ${r.extracted} ${r.category} comp(s) to the renderer`
+          : `visible-session inline extract returned ${r.extracted} ${r.category} comp(s) to the renderer`;
+      const warning = r.warningCount > 0 ? ` · ${r.warningCount} retry warning(s) remained` : '';
+      const advisory = r.advisoryCount > 0 ? ` · ${r.advisoryCount} usable low-yield advisory(s) accepted` : '';
+      lines.push(
+        `- \`${sourceId}\`${ago(r.ts)}: ${method}${warning}${advisory}` +
+        (r.extracted === 0 ? ' ⚠️ recovered 0' : '') +
+        (late ? ' ⚠️ arrived after AI pricing began, so it was not part of the finalized priced comp snapshot' : ''),
+      );
     }
   }
 
-  if (t.synthesis) {
-    const s = t.synthesis;
-    lines.push(`\n### Price synthesis${ago(s.ts)}`);
+  for (const s of synthesisEntries) {
+    const itemTag = synthesisEntries.length > 1
+      ? ` — ${s.itemLabel || s.query || s.itemKey || 'item'}`
+      : '';
+    lines.push(`\n### Price synthesis${itemTag}${ago(s.ts)}`);
     if (s.junkRejected > 0) {
       // Non-genuine listings dropped before pricing — reported so the rejection
       // is transparent (and so a spike signals a new junk pattern to filter).
@@ -224,6 +253,9 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       // internal test listings. Keep the description in sync with the filter so
       // the example never contradicts the explanation.
       lines.push(`- 🧹 Rejected ${s.junkRejected} non-genuine listing(s) before pricing${s.junkExample ? ` (e.g. "${s.junkExample}")` : ''} — accessories for the item (cases/chargers/etc.) and eBay internal test listings, not real comps.`);
+    }
+    if (s.offTargetRejected > 0) {
+      lines.push(`- Rejected ${s.offTargetRejected} grossly off-target listing(s) before pricing because even the source's best result barely matched the item${s.offTargetRejectedSources?.length ? `: ${s.offTargetRejectedSources.join(', ')}` : ''}.`);
     }
     if (s.soldFound + s.activeFound === 0) {
       lines.push('- ⚠️ 0 comps available → no price synthesized (all sources empty or blocked).');
@@ -234,7 +266,11 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       }
       lines.push(
         `- Comps fed to the model: ${s.soldUsed}/${s.soldFound} sold + ${s.activeUsed}/${s.activeFound} active` +
-        (capped ? ' _(capped at the top 25 sold / 15 active by title-match — by-design, not lost data)_' : ''),
+        (s.budgetLimited
+          ? ' _(grossly off-target sources rejected first, then proportionally limited by the synthesis token budget — by-design, not lost data)_'
+          : s.offTargetRejected > 0
+            ? ' _(difference is the grossly off-target source rejection above, not a token-budget drop)_'
+            : ''),
       );
       // Found vs. unique — a gap means an extractor emitted the same listing
       // multiple times, so the "found"/"used" totals overstate the real signal
@@ -371,6 +407,24 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
     }
   }
 
+  // Multi-item bundle combine — the AI's synergy-aware combined price vs the
+  // arithmetic sum. Only present on bundle runs (2+ priced items). A "bundle
+  // priced wrong" report needs the sum, the AI price, and the synergy verdict to
+  // tell a synergy call gone wrong from a per-item pricing problem upstream.
+  if (t.bundle) {
+    const b = t.bundle;
+    lines.push(`\n### Bundle pricing${ago(b.ts)}`);
+    const delta = (b.bundlePrice != null && b.sum != null) ? b.bundlePrice - b.sum : null;
+    const deltaTxt = delta == null ? ''
+      : delta === 0 ? ' (= sum)'
+      : ` (${delta > 0 ? '+' : ''}${delta} vs $${b.sum} sum${b.sum ? `, ${(delta / b.sum * 100).toFixed(0)}%` : ''})`;
+    lines.push(
+      `- ${b.items} priced item(s)${b.unpriced > 0 ? ` (+${b.unpriced} unpriced, excluded)` : ''} → ` +
+      `bundle quick/best/max **$${b.quickPrice ?? '?'} / $${b.bundlePrice ?? '?'} / $${b.maxPrice ?? '?'}**` +
+      `${deltaTxt}, synergy=${b.synergy || '?'}${modelTag(b.model, b.fallback)}`,
+    );
+  }
+
   if (t.fit) {
     const f = t.fit;
     lines.push(`\n### Platform fit${ago(f.ts)}`);
@@ -383,7 +437,7 @@ ${scope.note}> Last sell-side run's funnel (photo analysis → comp scrape → p
 > platform fit), captured in the main process so it survives SellHub deletion
 > and log-buffer scroll — the sell-side analog of the Job Search Pipeline. The
 > "found → fed to the model" gap in synthesis answers "did we use all the comps
-> we found?": the top-25/15 cap is by-design; blocked sources, a null price, and
+> we found?": the synthesis token-budget ceiling is by-design; blocked sources, a null price, and
 > a found≫unique gap (an extractor double-counting) are not. Per-source raw
 > counts + the unique line localize a silent inflation; anti-bot blocks and
 > internal scrape errors are reported separately (a browser-launch/profile-lock

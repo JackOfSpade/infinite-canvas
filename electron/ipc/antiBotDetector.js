@@ -30,6 +30,10 @@ const SOFT_GATE_SCAN_CHARS = 100000; // soft-gate keyword sniff — contribution
                                      // and are buried past large <head> sections (Glassdoor: "To restore your access"
                                      // appears at ~50-100KB into 775KB HTML, past the old 5000-char window)
 const API_SCAN_CHARS       = 2000;   // raw API body keyword sniff
+const SNIPPET_STRIP_MAX_CHARS = 3000000; // htmlTextSnippet: bound the <style>/<script> strip input.
+                                     // Must exceed a full page (eBay SRPs are ~1.8MB with a >100KB
+                                     // inline <style> in <head>) so the strip sees each block's close
+                                     // tag; only guards against a pathologically huge body.
 
 // Suspicious-empty ("soft block returns a stripped 200") thresholds. The body
 // size is judged against the source's LEARNED typical good-response size when
@@ -189,8 +193,15 @@ export function matchesNoResultsSentinel(text) {
 // Swappa" report un-diagnosable from the report alone).
 export function htmlTextSnippet(html, maxChars = 220) {
   if (!html) return '';
+  // Strip non-visible blocks (script/style/noscript) BEFORE bounding the window.
+  // eBay-class pages carry a >100KB inline <style> in <head>; slicing to a small
+  // window first would cut off its closing </style>, the non-greedy strip would
+  // never match the orphaned open tag, and raw CSS would leak into the snippet —
+  // defeating the field meant to tell genuine-empty / model-picker / selector-
+  // drift apart. The strip input is bounded so a huge body can't stall this
+  // (error-path-only) diagnostic; it just needs to exceed one full page.
   return String(html)
-    .slice(0, SOFT_GATE_SCAN_CHARS)
+    .slice(0, SNIPPET_STRIP_MAX_CHARS)
     .replace(/<(script|style|noscript)[\s\S]*?<\/\1>/gi, ' ') // drop non-visible blocks
     .replace(/<[^>]+>/g, ' ')                                 // strip tags
     .replace(/&(?:[a-z]+|#\d+|#x[0-9a-f]+);/gi, ' ')          // crude entity strip
@@ -208,10 +219,11 @@ export function htmlTextSnippet(html, maxChars = 220) {
  * @param {number} [ctx.expectedMinItems]    Floor below which "zero or near-zero" is suspicious (default 0 — set to e.g. 5 for established platforms)
  * @param {number} [ctx.expectedBodySize]    This source's LEARNED typical good-response body size (chars); 0/absent → use the absolute floor
  * @param {string} [ctx.sourceLabel]         For the evidence string ("eBay Sold", "LinkedIn", etc.)
+ * @param {object} [ctx.yieldStats]          Extractor health: { seen, noFields, claimedTotal? } — lets a sub-floor count be recognized as a genuinely-thin query (not a block) rather than firing a false zero-extracted + unclearable Solve
  * @returns {null | {code, severity, evidence, suggestion}}
  */
 export function detectAntiBotSignal(ctx = {}) {
-  const { status = 0, finalUrl = '', html = '', itemsExtracted = null, expectedMinItems = 0, expectedBodySize = 0, sourceLabel = '' } = ctx;
+  const { status = 0, finalUrl = '', html = '', itemsExtracted = null, expectedMinItems = 0, expectedBodySize = 0, sourceLabel = '', yieldStats = null } = ctx;
   const label = sourceLabel ? `[${sourceLabel}] ` : '';
 
   // Layer 1 — HTTP status
@@ -315,6 +327,37 @@ export function detectAntiBotSignal(ctx = {}) {
   if (itemsExtracted != null && expectedMinItems > 0 && itemsExtracted < expectedMinItems
       && matchesNoResultsSentinel(html)) {
     return null; // the site's own "0 results" — genuinely empty, not suspicious
+  }
+
+  // Layer 3.6 — extractor-health / site-declared-count gate. A sub-floor item
+  // count is only a block/drift tell if the SCRAPE FAILED. Two independent proofs
+  // that it instead SUCCEEDED on a genuinely-thin query — where a Solve card would
+  // be unclearable because there is no wall to clear — short-circuit to null:
+  //   (a) the site's OWN result-count header (eBay's "1 result"): we extracted
+  //       everything it claims (itemsExtracted >= claimedTotal), or it claims fewer
+  //       than the floor. Immune to selector drift — a drifted page reads "50
+  //       results" while we got 1, so neither test passes and it still warns below.
+  //   (b) no count header: the extractor saw exactly as many cards as it returned
+  //       and none were malformed (seen === itemsExtracted, noFields === 0) — the
+  //       page genuinely had that few listings, not silently-dropped ones.
+  if (itemsExtracted != null && expectedMinItems > 0 && itemsExtracted < expectedMinItems && yieldStats) {
+    const claimed = Number(yieldStats.claimedTotal);
+    if (Number.isFinite(claimed) && claimed >= 0) {
+      // (a) The site declares its own total — authoritative, and takes EXCLUSIVE
+      // precedence: suppress only if we extracted everything it claims, or it
+      // genuinely has fewer than the floor. A drifted page (claims 50, we got 1)
+      // fails both and still warns below — we do NOT fall through to the seen
+      // heuristic, which a drift-induced low `seen` would otherwise fool.
+      if (itemsExtracted >= claimed || claimed < expectedMinItems) return null;
+    } else {
+      // (b) No count header: fall back to extractor health. seen === extracted
+      // with no malformed cards = the page genuinely had that few listings.
+      const { seen, noFields } = yieldStats;
+      if (Number.isInteger(seen) && Number.isInteger(noFields)
+          && noFields === 0 && seen === itemsExtracted && seen > 0) {
+        return null;
+      }
+    }
   }
 
   // Layer 4 — volume sanity. Triggered only when caller passes a threshold;

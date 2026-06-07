@@ -1,3 +1,5 @@
+import { selectBundleHeadline } from './bundlePricing.js';
+
 /**
  * Derive the Sidebar Dashboard-tab aggregate stats from the canvas nodes.
  * Computed once per nodes change by the owner (Canvas) and passed to <Sidebar>
@@ -13,11 +15,10 @@ export function getStats(nodes) {
     } else if (n.type === 'sellhub') {
       sellHubsCount++;
       if (n.data?.hubState === 'priced') {
-        // A SellHub stores its price at data.pricing.recommended_price (set in
-        // SellHubNode on synthesis); `userPrice` is a ListingNode field a sellhub
-        // never has — reading it made this stat permanently $0. recommended_price
-        // is null for the "no comps found" case, which correctly contributes 0.
-        totalValue += parseFloat(n.data?.pricing?.recommended_price) || 0;
+        // Bundles contribute their combined listing price, not just the primary
+        // item's recommendation. Single-item hubs fall back to recommended_price.
+        const bundleHeadline = selectBundleHeadline(n.data?.bundlePricing, n.data?.bundleTotal).headline;
+        totalValue += parseFloat(bundleHeadline ?? n.data?.pricing?.recommended_price) || 0;
       }
     }
   }

@@ -23,8 +23,10 @@ import { createAggregatingProgress } from './compProgressAggregator.js';
 import { getStatusCacheSync, verifySellMonitorLogin, writeStatusCache } from './accounts.js';
 import { compsForPricing } from './resultCaps.js';
 import { isCompSourceEnabledInScope } from '../../src/utils/compSourceScope.js';
+import { COMP_SOURCE_LOGIN_PLATFORM, getRequiredCompLoginPlatformIds } from '../../src/utils/marketplaceLoginPreflight.js';
+import { retryWarningRequiringAction } from '../../src/utils/compsMerge.js';
 import { logger } from '../logger.js';
-import { VISION_PRODUCT_ANALYSIS_SCHEMA, PRICE_SYNTHESIS_SCHEMA, buildPlatformFitSchema } from './aiSchemas.js';
+import { VISION_PRODUCT_ANALYSIS_SCHEMA, PRICE_SYNTHESIS_SCHEMA, BUNDLE_PRICE_SCHEMA, buildPlatformFitSchema } from './aiSchemas.js';
 import {
   EBAY_SOLD_EXTRACTOR, EBAY_SOLD_CONFIG,
   EBAY_ACTIVE_EXTRACTOR, EBAY_ACTIVE_CONFIG,
@@ -59,6 +61,8 @@ const marketplaceTelemetry = {
                    // resolve; re-resolving a source replaces its entry. Reset
                    // when a fresh scrape stamps so resolves are scoped to it.
   synthesis: null, // { ts, soldFound, activeFound, soldUsed, activeUsed, recommendedPrice, matchQuality }
+  syntheses: [],   // One entry per independently-priced bundle item; synthesis = latest for back-compat.
+  bundle:    null, // { ts, items, sum, quickPrice, bundlePrice, maxPrice, synergy, model } — multi-item combine
   fit:       null, // { ts, platforms, good, unfit }
 };
 
@@ -75,6 +79,16 @@ export function formatPricingNotesForPrompt(notes) {
 
 export function getMarketplaceTelemetry() {
   return marketplaceTelemetry;
+}
+
+function recordSynthesisTelemetry(entry) {
+  marketplaceTelemetry.synthesis = entry;
+  const entries = Array.isArray(marketplaceTelemetry.syntheses) ? marketplaceTelemetry.syntheses : [];
+  const key = entry?.itemKey || entry?.query || 'primary';
+  const index = entries.findIndex(s => (s?.itemKey || s?.query || 'primary') === key);
+  marketplaceTelemetry.syntheses = index >= 0
+    ? entries.map((s, i) => (i === index ? entry : s))
+    : [...entries, entry];
 }
 
 /**
@@ -147,13 +161,52 @@ function selectAcrossSources(items, n, scoreFn) {
   return picked;
 }
 
+/**
+ * Remove an entire source only when even its BEST result is far below the best
+ * result available from another source. Round-robin selection is valuable for
+ * preventing source monopolies, but without this gate it also guarantees slots
+ * to a wrong-product source (the report caught PriceCharting at match 0.85 vs
+ * 5.84 overall). A conservative 25% floor preserves variant-title sources while
+ * rejecting sources whose strongest result is still only a generic token match.
+ */
+export function filterGrosslyOffTargetSources(items, scoreFn, ratio = 0.25) {
+  const list = Array.isArray(items) ? items : [];
+  const groups = new Map();
+  for (const item of list) {
+    const source = item?.source || 'unknown';
+    if (!groups.has(source)) groups.set(source, []);
+    groups.get(source).push(item);
+  }
+  if (groups.size <= 1) return { kept: list, rejected: [], sources: [] };
+
+  const bestBySource = new Map();
+  for (const [source, group] of groups) {
+    bestBySource.set(source, Math.max(...group.map(item => Number(scoreFn(item)) || 0)));
+  }
+  const strongest = Math.max(...bestBySource.values());
+  if (!(strongest > 0)) return { kept: list, rejected: [], sources: [] };
+
+  const rejectedSources = [...bestBySource.entries()]
+    .filter(([, best]) => best < strongest * ratio)
+    .map(([source]) => source);
+  if (rejectedSources.length === 0 || rejectedSources.length === groups.size) {
+    return { kept: list, rejected: [], sources: [] };
+  }
+  const rejectedSet = new Set(rejectedSources);
+  return {
+    kept: list.filter(item => !rejectedSet.has(item?.source || 'unknown')),
+    rejected: list.filter(item => rejectedSet.has(item?.source || 'unknown')),
+    sources: rejectedSources,
+  };
+}
+
 // Accessories FOR an item, not the item itself — cases, covers, chargers, etc.
 // These are the biggest comp pollutant: a marketplace like Poshmark (which bans
 // phone sales) returns a "sold iPhone XS" page that is almost entirely $5–$75
 // phone CASES. Their titles carry the full product name ("Apple iPhone XS
 // Silicone Case") with no negative signal, so the title-match ranking can't tell
-// them from a real phone — they tie, burn cap slots, and push genuine comps out
-// of the top-25. Site-agnostic (keys on the title, applies to every source).
+// them from a real phone — they tie, burn token-budget slots, and push genuine
+// comps out. Site-agnostic (keys on the title, applies to every source).
 const ACCESSORY_RE = /\b(cases?|covers?|chargers?|cables?|screen\s+protectors?|tempered\s+glass|glass\s+protectors?|skins?|bumpers?|holsters?|wallets?|lanyards?|straps?|docks?|adapters?|mounts?|popsockets?)\b/i;
 // Strong "this is the actual device, not an accessory" signals — storage size,
 // unlock status, carrier. A listing with an accessory word AND one of these
@@ -284,18 +337,6 @@ function buildTaskCategoryMap(tasks) {
   return map;
 }
 
-// A comp source draws its data from one marketplace's login; this maps the comp
-// sourceId → that platform's session-cache key (the SAME keys startup-verify /
-// verifySellMonitorLogin populate). pricecharting/reverb have no user-login gate.
-const COMP_SOURCE_LOGIN_PLATFORM = {
-  'ebay-sold':   'ebay',
-  'ebay-active': 'ebay',
-  'poshmark':    'poshmark',
-  'mercari':     'mercari',
-  'swappa':      'swappa',
-  'swappa-sold': 'swappa',  // shares Swappa's login with its active sibling; without this a swappa-sold-only scope bypasses the hard preflight and mislabels failures
-};
-
 /**
  * The in-scope, login-capable platforms that are NOT logged in — the basis for
  * the hard login preflight (policy: a price check requires login on ALL in-scope
@@ -306,7 +347,7 @@ const COMP_SOURCE_LOGIN_PLATFORM = {
  * @returns {string[]} unique platform ids that must be logged in but aren't
  */
 export function computeMissingLogins(tasks, sessionCache = {}) {
-  const required = [...new Set((tasks || []).map(t => COMP_SOURCE_LOGIN_PLATFORM[t.id]).filter(Boolean))];
+  const required = getRequiredCompLoginPlatformIds(tasks);
   return required.filter(p => !sessionCache[p]?.connected);
 }
 
@@ -727,6 +768,12 @@ export function registerMarketplaceHandlers() {
     logger.info(`[Marketplace][${nodeId}] Analyzing`, imagePaths.length, 'photos');
     marketplaceTelemetry.nodeId = nodeId;
     marketplaceTelemetry.windowId = event.sender?.id ?? null;
+    marketplaceTelemetry.scrape = null;
+    marketplaceTelemetry.resolves = {};
+    marketplaceTelemetry.synthesis = null;
+    marketplaceTelemetry.syntheses = [];
+    marketplaceTelemetry.bundle = null;
+    marketplaceTelemetry.fit = null;
 
     const aiMeta = {}; // populated with the model that actually served this call
     const result = await callLLMVision(imagePaths, `
@@ -774,6 +821,14 @@ Be specific about what you can clearly see. If you can't identify brand or model
       : [{ query: args.query, condition: args.condition }];
     marketplaceTelemetry.nodeId = nodeId;
     marketplaceTelemetry.windowId = event.sender?.id ?? null;
+    // A full scrape starts a new pricing run. Clear every downstream stage now
+    // so a report captured mid-run cannot mix this scrape with the previous
+    // run's resolve/synthesis/bundle/fit results.
+    marketplaceTelemetry.resolves = {};
+    marketplaceTelemetry.synthesis = null;
+    marketplaceTelemetry.syntheses = [];
+    marketplaceTelemetry.bundle = null;
+    marketplaceTelemetry.fit = null;
     logger.info(`[Marketplace][${nodeId}] Scraping comps for ${items.length} item(s):`, items.map(i => i.query).join(' | '));
 
     // The comp-source LIST is query-independent, so build once from item 0 for
@@ -857,6 +912,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
         condition: items[k].condition || null,
         comps: res.comps,
         scrapeWarnings: res.scrapeWarnings,
+        bySource: res.bySource,
       });
       for (const [sid, n] of Object.entries(res.bySource)) bySource[sid] = (bySource[sid] || 0) + n;
       Object.assign(yieldBySource, res.yieldBySource);
@@ -904,10 +960,16 @@ Be specific about what you can clearly see. If you can't identify brand or model
       provenanceBySource,
       apiQueryBySource,
       sourceWarnings,
+      itemDetails: perItem.map((it, index) => ({
+        index,
+        query: it.query,
+        condition: it.condition,
+        sold: it.comps.sold?.length || 0,
+        active: it.comps.active?.length || 0,
+        warnings: it.scrapeWarnings.map(w => ({ sourceId: w.sourceId, code: w.code, severity: w.severity })),
+        bySource: it.bySource,
+      })),
     };
-    // A fresh full scrape starts a new run — drop any resolves recorded for a
-    // previous product/run so the report's funnel only shows this run's.
-    marketplaceTelemetry.resolves = {};
 
     if (signal.aborted) throw new Error('Window closed');
 
@@ -921,7 +983,8 @@ Be specific about what you can clearly see. If you can't identify brand or model
   // (either all sources clean, or user clicked "Skip & Price" with partial
   // data). Kept separate so we never spend AI tokens on a request the user
   // hasn't approved.
-  handleSafe('synthesize-price', async (event, { query, condition, comps, nodeId, productSpec, pricingNotes }, signal) => {
+  handleSafe('synthesize-price', async (event, { query, condition, comps, nodeId, itemKey, itemLabel, productSpec, pricingNotes }, signal) => {
+    const synthesisStartedAt = Date.now();
     const userPricingNotes = normalizePricingNotes(pricingNotes);
     // Reject non-genuine listings (eBay internal test items, etc.) at the single
     // gate every comp passes through before pricing — covers both the scrape and
@@ -939,11 +1002,12 @@ Be specific about what you can clearly see. If you can't identify brand or model
     marketplaceTelemetry.windowId = event.sender?.id ?? null;
 
     if (total === 0) {
-      marketplaceTelemetry.synthesis = {
-        ts: Date.now(), soldFound: 0, activeFound: 0, soldUsed: 0, activeUsed: 0,
+      recordSynthesisTelemetry({
+        ts: Date.now(), startedAt: synthesisStartedAt, itemKey, itemLabel, query,
+        soldFound: 0, activeFound: 0, soldUsed: 0, activeUsed: 0,
         junkRejected: junk.length, junkExample: junk[0]?.title ? String(junk[0].title).slice(0, 60) : null,
         recommendedPrice: null, matchQuality: 'none',
-      };
+      });
       return {
         pricing: {
           recommended_price: null,
@@ -980,9 +1044,12 @@ Be specific about what you can clearly see. If you can't identify brand or model
       ...tokenize(productSpec?.model),
       ...tokenize(productSpec?.color),
       ...tokenize(productSpec?.title),
-      ...tokenize(userPricingNotes),
       ...tokenize(condition),
     ]);
+    // Seller notes still go to the pricing model as high-priority context, but
+    // they do NOT rank comp titles. Notes are often pasted retail-page text; now
+    // that they are uncapped, tokenizing them here would let delivery/policy
+    // boilerplate decide which listings survive the comp budget.
     // df/idf over the union of everything we're ranking (sold + active titles),
     // tokenized once per comp and cached by object identity (scoreFn is hot).
     const rankPool = [...sold, ...active];
@@ -1004,13 +1071,26 @@ Be specific about what you can clearly see. If you can't identify brand or model
     const byMatchDesc = (a, b) => scoreByTitleMatch(b) - scoreByTitleMatch(a);
     // How many comps actually reach the model: scaled to what's available and
     // bounded by the price-synthesis token budget (see resultCaps).
-    const { sold: soldN, active: activeN } = compsForPricing(sold.length, active.length);
+    // Source balancing happens only after a conservative source-level relevance
+    // gate. Otherwise round-robin guarantees slots to a source whose BEST result
+    // is still a wrong product.
+    const soldRelevance = filterGrosslyOffTargetSources(sold, scoreByTitleMatch);
+    const activeRelevance = filterGrosslyOffTargetSources(active, scoreByTitleMatch);
+    if (soldRelevance.rejected.length + activeRelevance.rejected.length > 0) {
+      logger.info(
+        `[Marketplace][${nodeId}] Rejected ${soldRelevance.rejected.length + activeRelevance.rejected.length} grossly off-target comp(s) from source(s): ` +
+        [...new Set([...soldRelevance.sources, ...activeRelevance.sources])].join(', '),
+      );
+    }
+    const rankableSold = soldRelevance.kept;
+    const rankableActive = activeRelevance.kept;
+    const { sold: soldN, active: activeN } = compsForPricing(rankableSold.length, rankableActive.length);
     // Pick FAIRLY across sources (round-robin), then present best-match-first so
     // the prompt's "pre-sorted by keyword match" hint still holds. The plain
     // top-N slice was order-dependent and let one source monopolize the cap when
     // title-match couldn't discriminate (see selectAcrossSources).
-    const soldComps   = selectAcrossSources(sold, soldN, scoreByTitleMatch).sort(byMatchDesc);
-    const activeComps = selectAcrossSources(active, activeN, scoreByTitleMatch).sort(byMatchDesc);
+    const soldComps   = selectAcrossSources(rankableSold, soldN, scoreByTitleMatch).sort(byMatchDesc);
+    const activeComps = selectAcrossSources(rankableActive, activeN, scoreByTitleMatch).sort(byMatchDesc);
     // Dropped = everything not picked (for the report's kept-vs-dropped lines).
     const soldKeptSet   = new Set(soldComps);
     const activeKeptSet = new Set(activeComps);
@@ -1078,7 +1158,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No comments, no traili
   "recommended_price": 0,
   "quick_sell_price": 0,
   "max_profit_price": 0,
-  "justification": "3-5 sentences: state which listings anchored the price, what adjustments you applied for non-exact ones (direction + rough size), and any caveats. Cite specific titles or numbers where it helps.",
+  "justification": "3-5 sentences displayed directly under this item's individual valuation: state which listings anchored the price, what adjustments you applied for non-exact ones (direction + rough size), and any caveats. Discuss only this item; do not discuss a bundle. Cite specific titles or numbers where it helps.",
   "match_quality": "strong",
   "comp_breakdown": {
     "anchor_count": 0,
@@ -1142,8 +1222,12 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
     // "used vs. found" gap is the sell-side analog of the jobs funnel's expected
     // drops (by-design, not lost data). recommended_price=null is the "scraped
     // comps but produced no price" signal.
-    marketplaceTelemetry.synthesis = {
+    recordSynthesisTelemetry({
       ts: Date.now(),
+      startedAt: synthesisStartedAt,
+      itemKey,
+      itemLabel,
+      query,
       soldFound: sold.length,
       activeFound: active.length,
       // Distinct listings among what was found — a found≫unique gap means an
@@ -1152,6 +1236,9 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
       activeUnique: uniqueCompCount(active),
       soldUsed: soldComps.length,
       activeUsed: activeComps.length,
+      soldRankable: rankableSold.length,
+      activeRankable: rankableActive.length,
+      budgetLimited: rankableSold.length > soldComps.length || rankableActive.length > activeComps.length,
       // Price distribution of what the cap KEPT vs. DROPPED, so "prices dropped
       // from analysis?" is answerable from the report: the renderer compares the
       // dropped median to the kept band to tell a representative drop (price
@@ -1175,6 +1262,8 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
       // Per-source median match score among kept comps — a source far below the
       // overall kept score returned wrong-product results that polluted pricing.
       soldKeptScoreBySource: scoreBySource(soldComps),
+      offTargetRejected: soldRelevance.rejected.length + activeRelevance.rejected.length,
+      offTargetRejectedSources: [...new Set([...soldRelevance.sources, ...activeRelevance.sources])],
       // Non-genuine listings (eBay test items, …) removed before pricing — surfaced
       // so the rejection is transparent, not a silent drop. soldFound/activeFound
       // above are already the post-rejection counts.
@@ -1200,9 +1289,115 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
       // parts. Without this, the report shows "15 active fed" with no signal
       // that the model internally rejected them all.
       marketSummary: pricing?.market_summary || null,
-    };
+    });
 
     return { pricing };
+  });
+
+  // ── Combine independently-priced items into ONE bundle asking price ────────
+  // A SellHub listing can package several independent items (kayak + paddle);
+  // each is priced on its own from real comps (synthesize-price, above), then
+  // this call decides the single combined asking price. It is deliberately NOT
+  // the arithmetic sum: complementary items can be worth more together (a
+  // watering system + a jug to hold the water), and a forced bundle can warrant a
+  // small discount. The model returns a synergy verdict + reasoning so the user
+  // can see WHY the bundle price differs from the sum. Text-only (no photos): the
+  // items were already identified/priced; this step reasons over those results.
+  handleSafe('synthesize-bundle-price', async (event, { items, sumOfPrices, nodeId } = {}, signal) => {
+    marketplaceTelemetry.nodeId = nodeId;
+    marketplaceTelemetry.windowId = event.sender?.id ?? null;
+    const list = Array.isArray(items) ? items : [];
+    // Bundling is only meaningful with 2+ items, and we can only reason about
+    // synergy for the ones that actually got a price. Fewer than 2 priced → let
+    // the caller fall back to the arithmetic sum.
+    const priced = list.filter(it => it && it.recommended_price != null && Number.isFinite(Number(it.recommended_price)));
+    if (priced.length < 2) {
+      return { bundlePricing: null };
+    }
+    const sum = Number.isFinite(Number(sumOfPrices))
+      ? Number(sumOfPrices)
+      : priced.reduce((n, it) => n + Number(it.recommended_price), 0);
+    logger.info(`[Marketplace][${nodeId}] Synthesizing bundle price for ${priced.length} item(s) (sum $${sum})`);
+
+    // Only the priced items inform the combined price; an unpriced item ("set
+    // your own price") has no market anchor to reason from, so feeding it would
+    // just invite the model to invent a value.
+    const itemsForPrompt = priced.map((it, i) => ({
+      item: i + 1,
+      label: it.label,
+      condition: it.condition,
+      individual_price: Number(it.recommended_price),
+      individual_quick_sell_price: it.quick_sell_price != null && Number.isFinite(Number(it.quick_sell_price))
+        ? Number(it.quick_sell_price)
+        : undefined,
+      individual_max_profit_price: it.max_profit_price != null && Number.isFinite(Number(it.max_profit_price))
+        ? Number(it.max_profit_price)
+        : undefined,
+      match_quality: it.match_quality || undefined,
+      seller_notes: (it.notes || '').trim() || undefined,
+      individual_reasoning: (it.reasoning || '').trim() || undefined,
+    }));
+
+    const bundleMeta = {};
+    const result = await callLLMText(`
+You are a pricing analyst. A seller is listing MULTIPLE independent items together in ONE listing. Each item has ALREADY been priced individually from real market evidence. Your job is to produce the complete final pricing result for the WHOLE bundle.
+
+Selling items together can change their total value versus selling them separately:
+- PREMIUM: the items complement each other and are more useful as a set, so a buyer will pay more for the convenience of getting them together (e.g. a watering system + a jug to hold the water; a camera body + a matching lens; a kayak + its paddle). The bundle can ask MORE than the sum.
+- DISCOUNT: bundling forces the buyer to take items they may not all want, OR the seller accepts a small markdown to move everything in one faster transaction. The bundle may ask LESS than the sum.
+- NEUTRAL: the items are unrelated and bundling adds nothing — the bundle ≈ the sum.
+
+Decide which applies and roughly by how much, using the items' nature and any seller notes. Be disciplined: synergy adjustments are usually MODEST (typically within ±15% of the sum). Only exceed that when the set is genuinely worth much more (or much less) together than apart, and say why.
+
+Return THREE prices for the whole bundle:
+- quick_sell_price: a bundle price likely to sell in 1-3 days
+- bundle_price: the best bundle asking price for a sale within 1-2 weeks
+- max_profit_price: the highest reasonable bundle price with 3-4 weeks of patience
+- Always keep quick_sell_price <= bundle_price <= max_profit_price.
+
+The justification is displayed directly under the FINAL BUNDLE price. Keep it
+strictly bundle-level:
+- Explain why the final bundle price is above, below, or equal to the sum of the individual prices.
+- Explain how the items' relationship, conditions, and seller notes affect that bundle adjustment.
+- Briefly explain the tradeoff represented by the quick and max bundle prices.
+- Do NOT repeat or rewrite each item's individual pricing justification; those are displayed separately under each item.
+- Do not use the word "comps"; say "similar listings" or "sold listings."
+
+SUM OF INDIVIDUAL PRICES: $${sum}
+
+ITEMS (each already priced individually):
+${JSON.stringify(itemsForPrompt, null, 2)}
+
+Return ONLY a single JSON object with EXACTLY this shape. No prose outside the JSON.
+
+{
+  "quick_sell_price": 0,
+  "bundle_price": 0,
+  "max_profit_price": 0,
+  "synergy": "premium",
+  "justification": "2-4 sentences explaining only the final bundle adjustment and the quick/best/max bundle tradeoff. Plain English."
+}`, {
+      signal,
+      task: 'bundle-price-synthesis',
+      hints: { itemCount: priced.length },
+      responseSchema: BUNDLE_PRICE_SCHEMA,
+      meta: bundleMeta,
+    });
+
+    marketplaceTelemetry.bundle = {
+      ts: Date.now(),
+      items: priced.length,
+      unpriced: list.length - priced.length,
+      sum,
+      quickPrice: result?.quick_sell_price ?? null,
+      bundlePrice: result?.bundle_price ?? null,
+      maxPrice: result?.max_profit_price ?? null,
+      synergy: result?.synergy || null,
+      model: bundleMeta.model || null,
+      fallback: bundleMeta.fallback || null,
+    };
+    logger.info(`[Marketplace][${nodeId}] Bundle price: $${result?.bundle_price} (${result?.synergy}, sum $${sum})`);
+    return { bundlePricing: result };
   });
 
   // ── Rescrape a single comp source ─────────────────────────────────────────
@@ -1220,30 +1415,78 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
       for (const it of items) {
         if (signal.aborted) throw new Error('Window closed');
         const r = await scrapeOneSource(sourceId, it.query, event.sender, signal, nodeId);
-        perItem.push({ key: it.key ?? null, query: it.query, items: r.items, warning: r.warning, category: r.category });
+        const warning = retryWarningRequiringAction(r.warning, r.items);
+        perItem.push({
+          key: it.key ?? null,
+          query: it.query,
+          items: r.items,
+          warning,
+          category: r.category,
+        });
       }
+      const extracted = perItem.reduce((n, it) => n + (Array.isArray(it.items) ? it.items.length : 0), 0);
+      const warningCount = perItem.filter(it => it.warning).length;
+      marketplaceTelemetry.resolves[sourceId] = {
+        ts: Date.now(),
+        extracted,
+        category: perItem[0]?.category || 'sold',
+        via: 'bundle-rescrape',
+        warningCount,
+        itemCounts: perItem.map(it => ({
+          query: it.query,
+          count: it.items?.length || 0,
+          warning: it.warning?.code || null,
+        })),
+      };
+      // scrapeOneSource emits progress per query. Re-assert one aggregate
+      // terminal event after the bundle retry so the card cannot disappear just
+      // because the LAST query succeeded while an earlier bundle item failed.
+      const finalWarning = perItem.find(it => it.warning)?.warning || null;
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('price-source-progress', {
+          nodeId,
+          sourceId,
+          status: finalWarning ? 'error' : 'done',
+          count: extracted,
+          warning: finalWarning,
+        });
+      }
+      logger.info(`[Marketplace][${nodeId}] Rescrape ${sourceId} across bundle → ${extracted} item(s), ${warningCount}/${perItem.length} query warning(s) remain`);
       return { sourceId, perItem, category: perItem[0]?.category || 'sold' };
     }
 
     logger.info(`[Marketplace][${nodeId}] Rescraping single source: ${sourceId}`);
     const result = await scrapeOneSource(sourceId, query, event.sender, signal, nodeId);
-    logger.info(`[Marketplace][${nodeId}] Rescrape ${sourceId} → ${result.items.length} item(s), warning=${result.warning?.code || 'none'}`);
-    // When this rescrape follows a captcha-resolve whose inline extract came back
-    // empty (the common case: inline fails with "Execution context destroyed",
-    // the renderer falls back here), update that resolve's tally so the report
-    // reflects the items the rescrape actually recovered — otherwise the resolve
-    // line keeps the inline 0 and a successful recovery looks like a failure.
-    // Guarded on an existing entry so a standalone rescrape never invents one.
-    const prior = marketplaceTelemetry.resolves[sourceId];
-    if (prior) {
-      marketplaceTelemetry.resolves[sourceId] = {
-        ts: Date.now(),
-        extracted: Array.isArray(result?.items) ? result.items.length : 0,
-        category: result.category || prior.category,
-        via: 'rescrape',
-      };
+    const warning = retryWarningRequiringAction(result.warning, result.items);
+    const normalizedResult = {
+      ...result,
+      warning,
+    };
+    // Re-assert the NORMALIZED retry verdict after scrapeOneSource's raw
+    // progress event. In particular, a raw clean 0-item result becomes the
+    // synthetic retry-empty block here; without this correction the card would
+    // see "done / no warning", auto-dismiss, and strand a still-blocked source.
+    if (!event.sender.isDestroyed()) {
+      event.sender.send('price-source-progress', {
+        nodeId,
+        sourceId,
+        status: warning ? 'error' : 'done',
+        count: result.items.length,
+        warning,
+      });
     }
-    return result;
+    logger.info(`[Marketplace][${nodeId}] Rescrape ${sourceId} → ${result.items.length} item(s), warning=${warning?.code || 'none'}`);
+    // This records what reached the renderer, not whether it was merged into the
+    // final priced snapshot. The bug report compares this timestamp with pricing
+    // start so a late retry cannot be mislabeled as having influenced the price.
+    marketplaceTelemetry.resolves[sourceId] = {
+      ts: Date.now(),
+      extracted: Array.isArray(result?.items) ? result.items.length : 0,
+      category: result.category || 'sold',
+      via: 'rescrape',
+      warningCount: warning ? 1 : 0,
+    };
+    return normalizedResult;
   });
 
   // ── Resolve captcha / anti-bot challenge that blocked a comp scrape ───────
@@ -1296,14 +1539,26 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
     // the hub merged the inline-extracted items into pendingComps — leaving
     // the user thinking nothing happened. The card's existing 3s auto-dismiss
     // timer then removes it from the canvas naturally.
+    // If the visible window auto-resolved (reached a definitive conclusion) and
+    // NEVER saw a challenge widget, there is no wall to clear — a sub-floor or
+    // empty result is the page's real answer, not a block. Accept it instead of
+    // re-arming an unclearable Solve (the eBay "1 result" loop). diag.sawChallenge
+    // is recorded by the inline extractor in openCaptchaResolveWindow.
+    const noChallengeConfirmed = result.resolved === true && result.diag?.sawChallenge === false;
+    let inlineWarning = null;
+    if (result.resolved && Array.isArray(result.items)) {
+      inlineWarning = retryWarningRequiringAction(null, result.items, { noChallengeConfirmed });
+    }
     if (result.resolved && Array.isArray(result.items) && !event.sender.isDestroyed()) {
       event.sender.send('price-source-progress', {
         nodeId,
         sourceId,
-        status: 'done',
+        status: inlineWarning ? 'error' : 'done',
         count: result.items.length,
-        warning: null,
-        url: null,
+        warning: inlineWarning,
+        // Keep the retry target while blocked so the user can Solve again as
+        // many times as needed. Clear it only after a clean, non-empty result.
+        url: inlineWarning ? url : null,
       });
     }
     // Keyed by sourceId so a multi-source recovery keeps every resolve;
@@ -1319,7 +1574,7 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
       category,
       via: 'inline',
     };
-    return { ...result, category };
+    return { ...result, category, warning: inlineWarning };
   });
 
   // ── Assess platform fit (which marketplaces suit this specific item) ──────

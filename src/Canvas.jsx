@@ -527,6 +527,13 @@ export function Canvas() {
     ));
   }, [getViewport, interactiveDisabled, setViewport]);
 
+  const handleViewportMoveEnd = useCallback((event, viewport) => {
+    if (!viewport) return;
+    EventLogger.log(
+      `viewport changed source=${event ? 'interaction' : 'programmatic'} zoom=${viewport.zoom.toFixed(4)} x=${viewport.x.toFixed(2)} y=${viewport.y.toFixed(2)}`
+    );
+  }, []);
+
   // Deselect nodes whenever the user starts an interaction on empty canvas.
   // ReactFlow's built-in onPaneClick already deselects on a plain click, but a
   // click-and-drag (pan) doesn't fire onClick, so the prior selection visually
@@ -812,6 +819,7 @@ export function Canvas() {
             zoomOnScroll={false}
             zoomOnPinch={!interactiveDisabled}
             onWheelCapture={handleWheelZoom}
+            onMoveEnd={handleViewportMoveEnd}
             minZoom={CANVAS_ZOOM_LIMITS.min}
             maxZoom={CANVAS_ZOOM_LIMITS.max}
             panOnScroll={false}

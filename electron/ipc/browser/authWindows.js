@@ -33,6 +33,12 @@ export function isAuthChallengeUrl(url) {
   return AUTH_CHALLENGE_URL_PATTERN.test(String(url || ''));
 }
 
+export function unwrapInlineExtractorItems(result) {
+  if (Array.isArray(result)) return result;
+  if (result && typeof result === 'object' && Array.isArray(result.items)) return result.items;
+  return null;
+}
+
 // Google rejects sign-in attempts from CDP-controlled Chrome. Indeed commonly
 // delegates auth to Google SSO, so use a plain Chrome process for that flow.
 const NATIVE_LOGIN_PLATFORMS = new Set(['indeed']);
@@ -172,6 +178,7 @@ export const PLATFORM_AUTH_COOKIES = {
                                     // Confirmed by profile diff: present in a logged-in profile, absent in an anonymous
                                     // one. gdId / gdsid / cass / GSESSIONID appear in BOTH states, so they are NOT
                                     // login-only and would false-trip — do not add them here.
+  reverb:      ['user_credentials'], // persistent signed credentials; `has_logged_in` is only historical and survives logout.
   // Others fall through to DOM signal — add here as we confirm them.
 };
 
@@ -1046,6 +1053,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
         // Declare the challenge cleared, stash any extracted items, and close
         // (the window's `disconnected` → cleanup resolves with { resolved, items }).
         const finishCleared = async (items, reason) => {
+          if (resolved || isTerminated) return;
           if (items) {
             extractedItems = items;
             logger.info(`[StealthBrowser] Inline extract on ${currentHost} → ${items.length} item(s) (skipping headless rescrape)`);
@@ -1076,8 +1084,11 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
             let items = null;
             try {
               const result = await page.evaluate(inlineExtractorJS);
-              if (Array.isArray(result)) items = result;
-              else { extractOutcome = 'non-array'; logger.warn(`[StealthBrowser] Inline extract returned non-array (${typeof result}); falling back to rescrape`); }
+              items = unwrapInlineExtractorItems(result);
+              if (!items) {
+                extractOutcome = 'non-array';
+                logger.warn(`[StealthBrowser] Inline extract returned non-array (${typeof result}); falling back to rescrape`);
+              }
             } catch (e) {
               extractOutcome = 'threw';
               const isSC = /SITE_CHANGED/i.test(e?.message || '');

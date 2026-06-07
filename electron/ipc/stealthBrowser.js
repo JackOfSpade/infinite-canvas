@@ -819,6 +819,17 @@ const SELL_MONITOR_PLATFORMS = {
     ],
     bodyScanChars: 1200,
   },
+  reverb:    {
+    name: 'Reverb',
+    sellerUrl: 'https://reverb.com/my/selling/listings',
+    verifyUrl: 'https://reverb.com/my/selling/listings',
+    connectedFinalUrlMustContain: 'reverb.com/my/selling/listings',
+    bodySignals: [
+      'log in to reverb',
+      'sign in to reverb',
+    ],
+    bodyScanChars: 1200,
+  },
 };
 
 /**

@@ -88,11 +88,25 @@ export const CODE_DEFINITIONS = {
       /\bundo\b|\bredo\b/i.test(line),
   },
 
+  TEXT: {
+    label: 'Text Editing',
+    description: 'Text-field focus, selection, middle-edit, and native undo/redo diagnostics',
+    logFilter: line =>
+      /\[TextEdit\]/i.test(line),
+  },
+
   NAV: {
     label: 'Canvas Navigation',
     description: 'Nested canvas dive-in and dive-out events',
     logFilter: line =>
       /dive|navigation|breadcrumb|nested|canvas level/i.test(line),
+  },
+
+  VIEWPORT: {
+    label: 'Canvas Viewport',
+    description: 'Canvas zoom/pan changes and fit-view actions, including whether a viewport change was interactive or programmatic',
+    logFilter: line =>
+      /viewport changed|fit-view|zoom|pan|WASD navigation/i.test(line),
   },
 
   TREE: {

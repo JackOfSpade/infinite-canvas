@@ -46,7 +46,7 @@ export const PRICE_SYNTHESIS_SCHEMA = {
     recommended_price: { type: 'number', description: 'Best single price (1-2 week sale)' },
     quick_sell_price:  { type: 'number', description: 'Price likely to sell in 1-3 days' },
     max_profit_price:  { type: 'number', description: 'Highest reasonable price (3-4 week patience)' },
-    justification:     { type: 'string', description: '3-5 sentences with reasoning + adjustments + caveats' },
+    justification:     { type: 'string', description: 'Item-only reasoning shown under this individual valuation: market evidence, adjustments, and caveats' },
     match_quality: {
       type: 'string',
       enum: ['strong', 'moderate', 'weak'],
@@ -87,6 +87,29 @@ export const PRICE_SYNTHESIS_SCHEMA = {
         },
       },
     },
+  },
+};
+
+// ── Bundle pricing: combine independently-priced items into one asking price ──
+// A SellHub listing can package several independent items (kayak + paddle); each
+// is priced on its own from real comps, then THIS call decides the single
+// combined asking price. The point is that it is NOT just the arithmetic sum:
+// items that complement each other can be worth more together (a watering system
+// + a jug to hold the water), and a forced bundle can warrant a small discount —
+// so the model returns a synergy classification + reasoning alongside the price.
+export const BUNDLE_PRICE_SCHEMA = {
+  type: 'object',
+  required: ['quick_sell_price', 'bundle_price', 'max_profit_price', 'synergy', 'justification'],
+  properties: {
+    quick_sell_price: { type: 'number', description: 'Whole-bundle price likely to sell in 1-3 days' },
+    bundle_price: { type: 'number', description: 'Recommended single asking price for the whole bundle' },
+    max_profit_price: { type: 'number', description: 'Highest reasonable whole-bundle price with 3-4 weeks of patience' },
+    synergy: {
+      type: 'string',
+      enum: ['premium', 'discount', 'neutral'],
+      description: 'premium = worth more together than the sum; discount = worth less; neutral ≈ the sum',
+    },
+    justification: { type: 'string', description: 'Bundle-only explanation of the adjustment versus separate value and the quick/best/max tradeoff' },
   },
 };
 

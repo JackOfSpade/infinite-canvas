@@ -722,12 +722,11 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
           }).join(','));
         }
       }
-      // SellHub may have early captcha-resolves queued waiting for scrape
-      // completion. Surfacing the count turns "I solved all the cards but
-      // it still says N left" reports into a one-glance diagnosis ("queued:
-      // 1" with hubState=comps-ready means a queued merge didn't drain).
+      // SellHub may have captcha-resolves queued or actively being applied.
+      // Surfacing the count and phase turns "I solved all the cards but it
+      // still says N left" reports into a one-glance diagnosis.
       if (cs.queuedResolvesCount > 0) {
-        previewParts.push(`queued: ${cs.queuedResolvesCount}`);
+        previewParts.push(`resolve work: ${cs.queuedResolvesCount}${cs.isApplyingResolves ? ' (applying)' : ' (queued)'}`);
       }
       const dataPreview = previewParts.join(', ');
 

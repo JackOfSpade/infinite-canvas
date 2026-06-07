@@ -56,16 +56,14 @@ export function isCompSourceEnabledInScope(sourceId) {
 }
 
 /**
- * Normalize scrape warnings to card-representable source ids so the SellHub
- * comps-ready gate can never be stranded by a warning whose sourceId has no
- * spawned card. The backend emits per-sub-source warnings (e.g. 'swappa-sold')
- * but the canvas shows ONE family card ('swappa'); since Skip/Solve clear by
- * EXACT sourceId, a 'swappa-sold' warning could never be cleared, freezing the
- * hub in 'comps-ready' (a common outcome — Swappa's sold scrape is anti-bot
- * prone). Each warning: kept as-is if its sourceId IS a card; else re-tagged to
- * the family card that owns it (so that card's Skip/Solve clears it); else
- * dropped (no card can ever resolve it, so it must not gate). De-duped by final
- * sourceId so one family card never carries two lingering entries.
+ * Normalize scrape warnings without ever dropping or folding one source into
+ * another. Every backend source has its own canvas card; preserving the exact
+ * sourceId guarantees a source can only clear after its own successful retry or
+ * an explicit Skip click. Unexpected/orphan warnings stay in the gate instead
+ * of silently becoming partial-data pricing.
+ *
+ * Duplicate warnings for the SAME source are collapsed because one source-card
+ * retry re-runs that source across every bundle item.
  *
  * @param {object[]} warnings  raw scrapeWarnings from the backend
  * @param {string[]} cardIds   ids of the comp-source cards actually on the canvas
@@ -73,19 +71,15 @@ export function isCompSourceEnabledInScope(sourceId) {
  */
 export function normalizeCompWarnings(warnings, cardIds = []) {
   const cards = new Set(Array.isArray(cardIds) ? cardIds : []);
-  const out = [];
+  const represented = [];
+  const unexpected = [];
   const seen = new Set();
   for (const w of (Array.isArray(warnings) ? warnings : [])) {
     if (!w || typeof w !== 'object') continue;
-    let sid = w.sourceId;
-    if (!cards.has(sid)) {
-      const family = [...cards].find(cid => matchesCompScope(sid, cid)); // 'swappa-sold' → 'swappa'
-      if (!family) continue; // orphan — nothing on the canvas can resolve it
-      sid = family;
-    }
-    if (seen.has(sid)) continue; // family already represented
+    const sid = w.sourceId;
+    if (!sid || seen.has(sid)) continue;
     seen.add(sid);
-    out.push(sid === w.sourceId ? w : { ...w, sourceId: sid });
+    (cards.has(sid) ? represented : unexpected).push(w);
   }
-  return out;
+  return [...represented, ...unexpected];
 }

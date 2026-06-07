@@ -7,7 +7,7 @@ import { HubContainer } from '../components/HubContainer';
 import { Camera } from 'lucide-react';
 import { ACTIVE_COMP_SOURCES, SELL_PLATFORMS } from '../utils/constants';
 import { normalizeCompWarnings } from '../utils/compSourceScope';
-import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
+import { radialRadius } from '../utils/layoutGeometry';
 import { useListingActions } from '../hooks/useListingActions';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
@@ -23,11 +23,13 @@ import { useSourceProgress } from '../hooks/useSourceProgress';
 import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { filesToProductImagePaths, summarizeFileExtensions } from '../utils/fileDropUtils';
-import { mergeSourceIntoComps } from '../utils/compsMerge';
-import { buildResearchItems, computeBundleTotal } from '../utils/bundlePricing';
+import { mergeSourceIntoComps, retryWarningRequiringAction, updateResolvedSourceWarning } from '../utils/compsMerge';
+import { buildResearchItems, computeBundleTotal, selectBundleHeadline } from '../utils/bundlePricing';
 import { generateId } from '../utils/idGenerator';
 import { canSellHubReplaceFailedInitialPhotos, getHubDropLockReason } from '../utils/hubDropEligibility';
 import { appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../utils/photoPathList';
+import { enqueueUniqueSourceResolve } from '../utils/sourceResolveQueue';
+import { getRequiredCompLoginPlatformIds } from '../utils/marketplaceLoginPreflight';
 
 /**
  * SellHubNode — draggable canvas module for marketplace selling.
@@ -50,7 +52,7 @@ export function SellHubNode({ id, data }) {
 
   // id is stable for this component's lifetime — ReactFlow never reuses
   // instances with different ids, so we can safely close over it in callbacks.
-  const { updateNodeData, getNode, getNodes, getEdges, addNodes, addEdges, deleteElements, fitView } = useReactFlow();
+  const { updateNodeData, getNode, getNodes, getEdges, addNodes, addEdges, deleteElements } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const addElementsGlobally = nav?.addElementsGlobally;
@@ -58,6 +60,10 @@ export function SellHubNode({ id, data }) {
   const { addToast } = useToast();
   const processingRef = useRef(false);
   const processingPriceRef = useRef(false);
+  const scrapeInFlightRef = useRef(false);
+  const resolveDrainInFlightRef = useRef(false);
+  const pendingMergesRef = useRef([]);
+  const activeResolveSourceIdsRef = useRef(new Set());
   const initialDropAcceptedRef = useRef(false);
   const isMountedRef = useRef(true);
   // Cancellation epoch — see hooks/useEpochCancellation.js. In-flight async
@@ -74,7 +80,7 @@ export function SellHubNode({ id, data }) {
   const {
     product, editing, setEditing, justificationExpanded,
     handleFieldEdit, handlePricingNotesChange, toggleJustification,
-    scrapePriceComps, rescrapeSource, synthesizePrice,
+    scrapePriceComps, rescrapeSource, synthesizePrice, synthesizeBundlePrice,
   } = useListingActions(id, data);
 
   // ── Phase-2 marketplace cards ──────────────────────────────────────────
@@ -118,6 +124,7 @@ export function SellHubNode({ id, data }) {
     let index = 0;
     while (usedSlots.has(index)) index++;
     const cardId = `mkt-${id}-${platformId}-${Date.now()}`;
+    const bundleHeadline = selectBundleHeadline(data.bundlePricing, data.bundleTotal).headline;
     const newNode = {
       id: cardId,
       type: 'marketplacecard',
@@ -128,7 +135,7 @@ export function SellHubNode({ id, data }) {
         listingUrl: '',
         status: 'unknown',
         productSnapshot: product?.generated_title
-          ? { title: product.generated_title, price: data.pricing?.recommended_price || null }
+          ? { title: product.generated_title, price: bundleHeadline ?? data.pricing?.recommended_price ?? null }
           : null,
       },
     };
@@ -154,19 +161,46 @@ export function SellHubNode({ id, data }) {
       addEdges([newEdge]);
     }
   }, [
-    data.locked, spawnedMarketplaceIds, id, getNode, getNodes, product, data.pricing?.recommended_price,
+    data.locked, data.bundlePricing, data.bundleTotal, spawnedMarketplaceIds, id, getNode, getNodes, product, data.pricing?.recommended_price,
     addElementsGlobally, addNodes, addEdges,
   ]);
 
 
-  // Surfaced via EventLogger.registerNodeState so the bug-report node-
-  // diagnostics row shows "queued: N" when early captcha-resolves are
-  // sitting waiting for scrape completion. Previously this state was
-  // invisible, which made "I solved all the cards but it still said 1
-  // left" reports hard to diagnose.
+  // Surfaced via EventLogger.registerNodeState so bug reports show whether
+  // captcha-resolve work is queued or actively being applied. Previously this
+  // state was invisible, which made "I solved all the cards but it still said
+  // 1 left" reports hard to diagnose.
   const [queuedResolvesCount, setQueuedResolvesCount] = useState(0);
+  const [isApplyingResolves, setIsApplyingResolves] = useState(false);
+
+  const syncResolveWorkCount = useCallback(() => {
+    setQueuedResolvesCount(pendingMergesRef.current.length + activeResolveSourceIdsRef.current.size);
+  }, []);
+
+  const queueSourceResolve = useCallback((entry) => {
+    const result = enqueueUniqueSourceResolve(
+      pendingMergesRef.current,
+      entry,
+      activeResolveSourceIdsRef.current,
+    );
+    pendingMergesRef.current = result.queue;
+    syncResolveWorkCount();
+    return result.status;
+  }, [syncResolveWorkCount]);
 
   const hubState = data.hubState || 'empty';
+  // Refs bridge persisted node data / hub state into async event handlers so
+  // back-to-back resolve or skip events see the latest synchronous transition
+  // before React has flushed updateGlobal.
+  const scrapeWarningsRef = useRef(data.scrapeWarnings);
+  const pendingItemsRef   = useRef(data.pendingItems);
+  const hubStateRef       = useRef(hubState);
+  const researchItemsRef  = useRef(null);
+  useEffect(() => { scrapeWarningsRef.current = data.scrapeWarnings; }, [data.scrapeWarnings]);
+  useEffect(() => { pendingItemsRef.current   = data.pendingItems;   }, [data.pendingItems]);
+  useEffect(() => { hubStateRef.current       = hubState;            }, [hubState]);
+  useEffect(() => { researchItemsRef.current  = buildResearchItems(data.product, data.extraItems, data.pricingNotes); }, [data.product, data.extraItems, data.pricingNotes]);
+
   const canReplaceFailedInitialPhotos = canSellHubReplaceFailedInitialPhotos({ type: 'sellhub', data });
   const dropLockReason = getHubDropLockReason({ type: 'sellhub', data });
   const inputDropsBlocked = !!dropLockReason;
@@ -195,9 +229,9 @@ export function SellHubNode({ id, data }) {
   // "old comps circle is still showing" can be diagnosed from the report alone
   // (otherwise compProgress is only visible to the user's eyes).
   useEffect(() => {
-    EventLogger.registerNodeState(id, { hubState, compProgress, queuedResolvesCount });
+    EventLogger.registerNodeState(id, { hubState, compProgress, queuedResolvesCount, isApplyingResolves });
     return () => EventLogger.unregisterNodeState(id);
-  }, [id, hubState, compProgress, queuedResolvesCount]);
+  }, [id, hubState, compProgress, queuedResolvesCount, isApplyingResolves]);
 
 
   const startAnalysis = useCallback(async (imagePaths) => {
@@ -434,6 +468,17 @@ export function SellHubNode({ id, data }) {
   const synthesizeAndPrice = useCallback(async (items, scrapeWarnings, cancelled) => {
     const currentId = id;
     try {
+      // The comp snapshot is final once AI pricing starts. Remove every source
+      // card so a stale Solve/Retry action cannot misleadingly appear to affect
+      // the price after the only early-resolve drain point has passed.
+      scrapeInFlightRef.current = false;
+      resolveDrainInFlightRef.current = false;
+      pendingMergesRef.current.splice(0);
+      activeResolveSourceIdsRef.current.clear();
+      setIsApplyingResolves(false);
+      setQueuedResolvesCount(0);
+      cleanupCompSourceCards();
+
       // Price each item independently (its own comps / query / condition), then
       // sum into a suggested bundle total. Item 0 is always the primary
       // (AI-analyzed) product, so it uses the product-derived defaults.
@@ -445,14 +490,24 @@ export function SellHubNode({ id, data }) {
         // "no listings"); stamp a canned empty result instead.
         if (compCount === 0) {
           itemPricings.push({
-            key: it.key, label: it.label, query: it.query, condition: it.condition, comps,
+            key: it.key, label: it.label, query: it.query, condition: it.condition, pricingNotes: it.pricingNotes || '', comps,
             pricing: { recommended_price: null, justification: 'No similar listings found — set your own price.', market_summary: { sold_count: 0, active_count: 0 }, recommended_platforms: [] },
           });
           continue;
         }
+        // Primary keeps its product-derived defaults (its notes come from
+        // data.pricingNotes inside the hook). Each EXTRA passes its OWN query,
+        // condition, and pricing notes so it's priced as an independent item.
         const overrides = it.key === 'primary'
-          ? {}
-          : { query: it.query, condition: it.condition, productSpec: { title: it.label || it.query } };
+          ? { itemKey: it.key, itemLabel: it.label || it.query }
+          : {
+              itemKey: it.key,
+              itemLabel: it.label || it.query,
+              query: it.query,
+              condition: it.condition,
+              productSpec: { title: it.label || it.query },
+              pricingNotes: it.pricingNotes || '',
+            };
         const synthResult = await synthesizePrice(comps, overrides);
         if (cancelled()) return;
         itemPricings.push({
@@ -460,13 +515,44 @@ export function SellHubNode({ id, data }) {
           label: it.label,
           query: it.query,
           condition: it.condition,
+          pricingNotes: it.pricingNotes || '',
           pricing: synthResult.pricing,
           comps,
         });
       }
       const primary = itemPricings[0];
       const isBundle = itemPricings.length > 1;
+      // Arithmetic sum of the per-item prices — kept as the reference figure AND
+      // the fallback if the AI combine call is unavailable or fails.
       const bundleTotal = isBundle ? computeBundleTotal(itemPricings) : null;
+      // AI combine: ask for ONE bundle asking price that accounts for synergy
+      // (complementary items worth more together; a forced bundle worth a touch
+      // less) — NOT just the sum. Non-fatal: on any failure we keep bundleTotal
+      // as the headline so a synergy hiccup never blocks pricing.
+      let bundlePricing = null;
+      if (isBundle) {
+        const anyPriced = itemPricings.some(it => it.pricing?.recommended_price != null);
+        if (anyPriced && window.electronAPI?.synthesizeBundlePrice) {
+          try {
+            bundlePricing = await synthesizeBundlePrice(
+              itemPricings.map(it => ({
+                label: it.label || it.query,
+                condition: it.condition,
+                recommended_price: it.pricing?.recommended_price ?? null,
+                quick_sell_price: it.pricing?.quick_sell_price ?? null,
+                max_profit_price: it.pricing?.max_profit_price ?? null,
+                match_quality: it.pricing?.match_quality ?? null,
+                reasoning: it.pricing?.justification ?? null,
+                notes: it.pricingNotes || '',
+              })),
+              bundleTotal,
+            );
+            if (cancelled()) return;
+          } catch (err) {
+            EventLogger.error('[SellHub] Bundle price synthesis failed (using item sum):', err);
+          }
+        }
+      }
       // Platform fit is assessed in a SECOND background AI call after pricing.
       // If we render the marketplace list before it lands, every platform shows
       // as "good" and then unfit ones collapse behind the toggle a few seconds
@@ -483,6 +569,8 @@ export function SellHubNode({ id, data }) {
         // priced state renders exactly as before.
         itemPricings: isBundle ? itemPricings : null,
         bundleTotal,
+        // AI synergy-aware combined price (null → UI falls back to bundleTotal).
+        bundlePricing: isBundle ? bundlePricing : null,
         scrapeWarnings: Array.isArray(scrapeWarnings) ? scrapeWarnings : [],
         platformFit: null,
         platformFitPending: willAssessFit,
@@ -511,11 +599,13 @@ export function SellHubNode({ id, data }) {
       }
       const rec = primary.pricing?.recommended_price;
       const warnCount = Array.isArray(scrapeWarnings) ? scrapeWarnings.length : 0;
+      // Headline bundle figure = AI combined price when we got one, else the sum.
+      const bundleHeadline = bundlePricing?.bundle_price ?? bundleTotal;
       addToast({
         title: 'Pricing Engine',
         description: isBundle
-          ? (bundleTotal != null
-              ? `Bundle of ${itemPricings.length}: suggested total $${bundleTotal}${warnCount > 0 ? ` (${warnCount} blocked source(s))` : ''}`
+          ? (bundleHeadline != null
+              ? `Bundle of ${itemPricings.length}: suggested $${bundleHeadline}${bundlePricing?.synergy && bundlePricing.synergy !== 'neutral' ? ` (${bundlePricing.synergy} vs $${bundleTotal} apart)` : ''}${warnCount > 0 ? ` — ${warnCount} blocked source(s)` : ''}`
               : `Priced ${itemPricings.length} items — set your own total.`)
           : (rec != null
               ? `Recommended price: $${rec}${warnCount > 0 ? ` (synthesized without ${warnCount} blocked source(s))` : ''}`
@@ -532,7 +622,7 @@ export function SellHubNode({ id, data }) {
       });
       addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
     }
-  }, [id, updateGlobal, synthesizePrice, addToast, data.product]);
+  }, [id, updateGlobal, synthesizePrice, synthesizeBundlePrice, addToast, data.product, cleanupCompSourceCards]);
 
   const queueSynthesizeAndPrice = useCallback(async (items, scrapeWarnings, cancelled) => {
     let lease = null;
@@ -568,36 +658,109 @@ export function SellHubNode({ id, data }) {
   // fingerprinting sites like Mercari with a headless rescrape). BUNDLE →
   // rescrape that source for EVERY item, since the inline extract only covers
   // the one query whose captcha window was solved. Returns the updated items
-  // array (does not mutate).
-  const mergeResolvedSource = useCallback(async (items, researchItems, { sourceId, inlineItems, category }, cancelled) => {
+  // plus any warning that still remains after the retry. A bundle source is only
+  // resolved when it succeeded for EVERY item.
+  const mergeResolvedSource = useCallback(async (items, researchItems, {
+    sourceId,
+    inlineItems,
+    category,
+    warning: resolvedWarning,
+    noChallengeConfirmed = false,
+  }, cancelled) => {
     if (items.length <= 1) {
       let useItems = Array.isArray(inlineItems) ? inlineItems : null;
       let cat = category;
+      let rawWarning = resolvedWarning || null;
+      // noChallengeConfirmed only holds for the INLINE result (the visible Solve
+      // window). A headless rescrape is a fresh fetch with no such proof, so a
+      // fallback rescrape must re-arm the normal gate.
+      let usedInline = !!useItems;
       if (!useItems) {
         const r = await rescrapeSource(sourceId);
         useItems = r.items || [];
         cat = r.category || cat;
+        rawWarning = r.warning;
       }
-      if (cancelled()) return items;
+      const retryWarning = retryWarningRequiringAction(rawWarning, useItems, { noChallengeConfirmed: noChallengeConfirmed && usedInline });
+      if (cancelled()) return { items, warning: retryWarning };
       const base = items[0] || { comps: { sold: [], active: [] } };
-      return [{ ...base, comps: mergeSourceIntoComps(base.comps || { sold: [], active: [] }, { sourceId, category: cat || 'sold', items: useItems }) }];
+      return {
+        items: [{ ...base, comps: mergeSourceIntoComps(base.comps || { sold: [], active: [] }, { sourceId, category: cat || 'sold', items: useItems }) }],
+        warning: retryWarning ? { ...retryWarning, sourceId } : null,
+      };
     }
     const res = await rescrapeSource(sourceId, researchItems.map(ri => ({ key: ri.key, query: ri.query })));
-    if (cancelled()) return items;
+    if (cancelled()) return { items, warning: null };
     const perItem = Array.isArray(res.perItem) ? res.perItem : [];
-    return items.map((it, k) => {
+    const mergedItems = items.map((it, k) => {
       const pi = perItem[k];
       if (!pi || !Array.isArray(pi.items)) return it;
       return { ...it, comps: mergeSourceIntoComps(it.comps || { sold: [], active: [] }, { sourceId, category: pi.category || category || 'sold', items: pi.items }) };
     });
+    const failedWarnings = perItem
+      .map(pi => retryWarningRequiringAction(pi?.warning, pi?.items))
+      .filter(Boolean);
+    const missing = Math.max(0, items.length - perItem.length);
+    const failedCount = failedWarnings.length + missing;
+    const firstWarning = failedWarnings[0] || (missing > 0 ? {
+      code: 'task-failed',
+      severity: 'block',
+      evidence: 'Retry returned no result for one or more bundle items.',
+      suggestion: 'This source remains blocked. Retry again, or explicitly click Skip to continue without it.',
+    } : null);
+    const warning = firstWarning ? {
+      ...firstWarning,
+      sourceId,
+      evidence: `${failedCount}/${items.length} bundle item retry attempt(s) still failed. ${firstWarning.evidence || ''}`.trim(),
+    } : null;
+    return { items: mergedItems, warning };
   }, [rescrapeSource]);
+
+  const drainQueuedResolves = useCallback(async (items, researchItems, warnings, cancelled) => {
+    let mergedItems = items;
+    let effectiveWarnings = warnings;
+    if (pendingMergesRef.current.length === 0) {
+      return { items: mergedItems, warnings: effectiveWarnings };
+    }
+
+    resolveDrainInFlightRef.current = true;
+    setIsApplyingResolves(true);
+    syncResolveWorkCount();
+    try {
+      // New Solve results can arrive while a bundle source is being retried.
+      // Keep draining until the unique-source queue is empty so none are lost.
+      while (pendingMergesRef.current.length > 0) {
+        // Consume one entry at a time. Sources still waiting remain visible in
+        // the unique-source queue, so another Solve result replaces that entry
+        // instead of accidentally scheduling a duplicate retry.
+        const q = pendingMergesRef.current.shift();
+        activeResolveSourceIdsRef.current.add(q.sourceId);
+        syncResolveWorkCount();
+        EventLogger.log(`[SellHub][${id}] applying queued source resolve: ${q.sourceId}`);
+        try {
+          const mergeResult = await mergeResolvedSource(mergedItems, researchItems, q, cancelled);
+          mergedItems = mergeResult.items;
+          if (cancelled()) return { items: mergedItems, warnings: effectiveWarnings, cancelled: true };
+          effectiveWarnings = updateResolvedSourceWarning(effectiveWarnings, q.sourceId, mergeResult.warning);
+        } finally {
+          activeResolveSourceIdsRef.current.delete(q.sourceId);
+          syncResolveWorkCount();
+        }
+      }
+      return { items: mergedItems, warnings: effectiveWarnings };
+    } finally {
+      resolveDrainInFlightRef.current = false;
+      setIsApplyingResolves(false);
+      syncResolveWorkCount();
+    }
+  }, [id, mergeResolvedSource, syncResolveWorkCount]);
 
   // ── Additional items packaged into this one listing (bundle research) ─────
   // The primary item comes from the AI photo analysis (data.product); these are
   // user-typed extras (kayak + paddle), each priced on its own complete pass.
   const extraItems = useMemo(() => (Array.isArray(data.extraItems) ? data.extraItems : []), [data.extraItems]);
   const handleAddExtraItem = useCallback(() => {
-    updateGlobal(id, { extraItems: [...(data.extraItems || []), { id: generateId(), query: '', condition: data.product?.condition || 'Used - Good' }] });
+    updateGlobal(id, { extraItems: [...(data.extraItems || []), { id: generateId(), generated_title: '', brand: '', model: '', condition: data.product?.condition || 'Used - Good', pricingNotes: '' }] });
   }, [id, data.extraItems, data.product, updateGlobal]);
   const handleEditExtraItem = useCallback((itemId, patch) => {
     updateGlobal(id, { extraItems: (data.extraItems || []).map(it => (it.id === itemId ? { ...it, ...patch } : it)) });
@@ -614,6 +777,35 @@ export function SellHubNode({ id, data }) {
     let lease = null;
 
     try {
+      // Check the same cached marketplace sessions as the backend first so a
+      // login-blocked request does not start work that the backend will reject.
+      const requiredLoginIds = getRequiredCompLoginPlatformIds(ACTIVE_COMP_SOURCES);
+      const missingLogins = (await Promise.all(
+        requiredLoginIds.map(async (platformId) => {
+          const res = await window.electronAPI?.checkSellMonitorAuth?.({ platformId });
+          return res?.connected ? null : platformId;
+        }),
+      )).filter(Boolean);
+      if (cancelled()) return;
+      if (missingLogins.length > 0) {
+        hubStateRef.current = 'draft';
+        updateGlobal(currentId, {
+          hubState: 'draft',
+          errorMessage: `Price check needs login on: ${missingLogins.join(', ')}. Log in (Settings → Accounts) and re-run.`,
+          isRateLimit: false,
+          pendingItems: null,
+          scrapeWarnings: [],
+          platformFit: null,
+          platformFitPending: false,
+        });
+        addToast({
+          title: 'Log in to run a price check',
+          description: `Not logged in: ${missingLogins.join(', ')}. Your canvas view was left unchanged.`,
+          type: 'warning',
+        });
+        return;
+      }
+
       lease = await moduleRunQueue.acquireModuleRun({
         nodeId: currentId,
         kind: 'marketplace',
@@ -631,6 +823,15 @@ export function SellHubNode({ id, data }) {
         },
         onStart: () => {
           if (cancelled()) throw new Error('Node deleted');
+          hubStateRef.current = 'researching';
+          scrapeInFlightRef.current = true;
+          resolveDrainInFlightRef.current = false;
+          pendingMergesRef.current.splice(0);
+          activeResolveSourceIdsRef.current.clear();
+          pendingItemsRef.current = null;
+          scrapeWarningsRef.current = [];
+          setIsApplyingResolves(false);
+          syncResolveWorkCount();
           resetCompProgress();
           spawnCompSourceCards();
           updateGlobal(currentId, {
@@ -642,16 +843,14 @@ export function SellHubNode({ id, data }) {
             platformFit: null,
             platformFitPending: false,
           });
-          requestAnimationFrame(() => {
-            fitView({ duration: fitViewDuration(ACTIVE_COMP_SOURCES.length), padding: 0.2 });
-          });
         },
       });
 
       // Primary item (from the AI photo analysis) + any user-added extras —
       // each gets its OWN complete pass through the comp sources server-side.
-      const researchItems = buildResearchItems(data.product, data.extraItems);
+      const researchItems = buildResearchItems(data.product, data.extraItems, data.pricingNotes);
       const scrapeResult = await scrapePriceComps(researchItems);
+      scrapeInFlightRef.current = false;
       if (cancelled()) return;
 
       // Hard login preflight (policy): the backend blocked the run because one or
@@ -660,6 +859,7 @@ export function SellHubNode({ id, data }) {
       // to 'draft' so logging in (Settings > Accounts) and re-confirming re-runs.
       if (scrapeResult.preflightBlocked) {
         const missing = Array.isArray(scrapeResult.missingLogins) ? scrapeResult.missingLogins : [];
+        hubStateRef.current = 'draft';
         updateGlobal(currentId, {
           hubState: 'draft',
           errorMessage: `Price check needs login on: ${missing.join(', ')}. Log in (Settings → Accounts) and re-run.`,
@@ -679,15 +879,14 @@ export function SellHubNode({ id, data }) {
       // belongs to which item.
       const scrapedItems = Array.isArray(scrapeResult.items) ? scrapeResult.items : [];
       let pendingItems = researchItems.map((ri, k) => ({
-        key: ri.key, label: ri.label, query: ri.query, condition: ri.condition,
+        key: ri.key, label: ri.label, query: ri.query, condition: ri.condition, pricingNotes: ri.pricingNotes,
         comps: scrapedItems[k]?.comps || { sold: [], active: [] },
       }));
 
-      // Re-tag/drop warnings whose sourceId has no spawned card (e.g. backend-only
-      // 'swappa-sold' → the 'swappa' family card) BEFORE they reach the gate, so a
-      // blocked sub-source can actually be Skipped/Solved instead of stranding the
-      // hub in 'comps-ready'. Warnings are the union across items (a source blocked
-      // in ANY item → one card).
+      // Preserve one warning per exact source. Every backend comp source has its
+      // own card, so no source can be folded into another or silently dropped.
+      // Warnings are the union across items (a source blocked in ANY item → one
+      // card that retries that source across the whole bundle).
       let effectiveWarnings = normalizeCompWarnings(
         Array.isArray(scrapeResult.scrapeWarnings) ? scrapeResult.scrapeWarnings : [],
         ACTIVE_COMP_SOURCES.map(s => s.id),
@@ -697,20 +896,19 @@ export function SellHubNode({ id, data }) {
       // Each clears its source from the warnings + merges recovered comps into
       // every item.
       if (pendingMergesRef.current.length > 0) {
-        const queued = pendingMergesRef.current.splice(0);
-        setQueuedResolvesCount(0);
-        EventLogger.log(`[SellHub][${id}] applying ${queued.length} queued early-resolve(s): ${queued.map(q => q.sourceId).join(', ')}`);
-        for (const q of queued) {
-          pendingItems = await mergeResolvedSource(pendingItems, researchItems, q, cancelled);
-          if (cancelled()) return;
-          effectiveWarnings = effectiveWarnings.filter(w => w.sourceId !== q.sourceId);
-        }
+        const drained = await drainQueuedResolves(pendingItems, researchItems, effectiveWarnings, cancelled);
+        if (drained.cancelled || cancelled()) return;
+        pendingItems = drained.items;
+        effectiveWarnings = drained.warnings;
       }
 
       // Branch: any blocked source → pause and ask the user (Solve/Skip on the
       // cards). AI synthesis is skipped here so we don't spend tokens on partial
       // data without consent.
       if (effectiveWarnings.length > 0) {
+        hubStateRef.current = 'comps-ready';
+        pendingItemsRef.current = pendingItems;
+        scrapeWarningsRef.current = effectiveWarnings;
         updateGlobal(currentId, {
           hubState: 'comps-ready',
           pendingItems,
@@ -731,6 +929,7 @@ export function SellHubNode({ id, data }) {
     } catch (err) {
       if (cancelled() || isNodeDeletedAbort(err)) return;
       EventLogger.error('[SellHub] Price scrape failed:', err);
+      hubStateRef.current = 'draft';
       updateGlobal(currentId, {
         hubState: 'draft',
         errorMessage: err?.message || String(err),
@@ -738,15 +937,13 @@ export function SellHubNode({ id, data }) {
       });
       addToast({ title: 'Scrape Error', description: err?.message || String(err), type: 'error' });
     } finally {
+      scrapeInFlightRef.current = false;
       lease?.release();
       processingPriceRef.current = false;
-      // No cleanup pass here — clean-success cards self-dismiss on their
-      // own 3s timer (so the user actually sees the "25 found" result),
-      // and warned/errored cards stick around until the user acts on them.
-      // Defensive cleanup at start-of-next-run (spawnCompSourceCards) still
-      // ensures no carry-over.
+      // Source cards are removed when synthesis begins; warned cards remain only
+      // while the hub is paused in comps-ready awaiting Resolve/Skip.
     }
-  }, [id, updateGlobal, scrapePriceComps, synthesizeAndPrice, addToast, data.product, data.extraItems, mergeResolvedSource, spawnCompSourceCards, fitView, epoch, resetCompProgress, moduleRunQueue]);
+  }, [id, updateGlobal, scrapePriceComps, synthesizeAndPrice, addToast, data.product, data.extraItems, data.pricingNotes, drainQueuedResolves, spawnCompSourceCards, epoch, resetCompProgress, syncResolveWorkCount, moduleRunQueue]);
 
   // Per-source skip — fired by a comp card's Skip button. Drops the source
   // from data.scrapeWarnings, deletes the card, then if the warnings list
@@ -757,21 +954,6 @@ export function SellHubNode({ id, data }) {
   // resolved-or-skipped. Filtered by hubId so a multi-hub canvas doesn't
   // cross-trigger.
   //
-  // Refs bridge data.scrapeWarnings / data.pendingComps / hubState so two
-  // skip events firing within a single React batch both read the LATEST
-  // warnings list (the first event's updateGlobal hasn't flushed when the
-  // second runs). Without the refs, the second event would re-add the
-  // first event's already-dismissed warning.
-  const scrapeWarningsRef = useRef(data.scrapeWarnings);
-  const pendingItemsRef   = useRef(data.pendingItems);
-  const hubStateRef       = useRef(hubState);
-  // Current research-item list (primary + extras) for the async resolve handler,
-  // which needs each item's query to rescrape a blocked source across all items.
-  const researchItemsRef  = useRef(null);
-  useEffect(() => { scrapeWarningsRef.current = data.scrapeWarnings; }, [data.scrapeWarnings]);
-  useEffect(() => { pendingItemsRef.current   = data.pendingItems;   }, [data.pendingItems]);
-  useEffect(() => { hubStateRef.current       = hubState;            }, [hubState]);
-  useEffect(() => { researchItemsRef.current  = buildResearchItems(data.product, data.extraItems); }, [data.product, data.extraItems]);
   useEffect(() => {
     const onSkip = (e) => {
       if (e.detail?.hubId !== id) return;
@@ -824,7 +1006,6 @@ export function SellHubNode({ id, data }) {
   // stuck in comps-ready with "1 left" even though the user solved
   // everything visible. Drained in handleConfirmDraft after the scrape
   // settles and pendingComps is initialized.
-  const pendingMergesRef = useRef([]);
   useEffect(() => {
     const onResolved = async (e) => {
       if (e.detail?.hubId !== id) return;
@@ -840,17 +1021,31 @@ export function SellHubNode({ id, data }) {
       // rescrapes per item (see mergeResolvedSource).
       const inlineItems = (!isBundle && Array.isArray(e.detail?.items)) ? e.detail.items : null;
       const category = e.detail?.category || 'sold';
+      const resolvedWarning = e.detail?.warning || null;
+      // Solve proved there was no challenge → a low/empty inline result is real,
+      // not a block. Carried into mergeResolvedSource so the single-item gate
+      // clears instead of re-deriving an unclearable 'retry-empty'.
+      const noChallengeConfirmed = e.detail?.noChallengeConfirmed === true;
 
       // hubState guard:
-      //  - 'researching': scrape still running → queue for the drain in
-      //    handleConfirmDraft (otherwise scrape completion would overwrite
-      //    pendingItems with the original warning-included data).
+      //  - 'researching' + scrape/resolve drain in flight: queue once per source
+      //    so scrape completion cannot overwrite the result and a duplicate Solve
+      //    click cannot launch the same long bundle rescrape twice.
+      //  - 'researching' with neither active: AI pricing already started → discard.
       //  - 'comps-ready': normal path, merge below.
       //  - anything else: user moved on (Cancel/Refresh) → discard.
       if (hubStateRef.current === 'researching') {
-        EventLogger.log(`[SellHub][${id}] queueing early resolve for ${resolvedSourceId} — applied after scrape completes`);
-        pendingMergesRef.current.push({ sourceId: resolvedSourceId, inlineItems, category });
-        setQueuedResolvesCount(pendingMergesRef.current.length);
+        if (scrapeInFlightRef.current || resolveDrainInFlightRef.current) {
+          const status = queueSourceResolve({ sourceId: resolvedSourceId, inlineItems, category, warning: resolvedWarning, noChallengeConfirmed });
+          const stage = resolveDrainInFlightRef.current ? 'active resolve drain' : 'scrape completion';
+          EventLogger.log(
+            status === 'active'
+              ? `[SellHub][${id}] coalesced ${resolvedSourceId} resolve — that source retry is already active`
+              : `[SellHub][${id}] ${status === 'replaced' ? 'updated queued' : 'queued'} ${resolvedSourceId} resolve for ${stage}`,
+          );
+        } else {
+          EventLogger.log(`[SellHub][${id}] discarding late ${resolvedSourceId} resolve — pricing already started from the finalized comp snapshot`);
+        }
         return;
       }
       if (hubStateRef.current !== 'comps-ready') {
@@ -858,10 +1053,22 @@ export function SellHubNode({ id, data }) {
         return;
       }
 
+      const queueStatus = queueSourceResolve({ sourceId: resolvedSourceId, inlineItems, category, warning: resolvedWarning, noChallengeConfirmed });
+      if (resolveDrainInFlightRef.current) {
+        EventLogger.log(
+          queueStatus === 'active'
+            ? `[SellHub][${id}] coalesced ${resolvedSourceId} resolve — that source retry is already active`
+            : `[SellHub][${id}] ${queueStatus === 'replaced' ? 'updated queued' : 'queued'} ${resolvedSourceId} resolve for active resolve drain`,
+        );
+        return;
+      }
+
+      hubStateRef.current = 'researching';
+      updateGlobal(id, { hubState: 'researching' });
       addToast({
         title: 'Captcha cleared',
         description: isBundle
-          ? `Refetching ${resolvedSourceId} for ${researchItems.length} items — other sources keep their results.`
+          ? `Refetching resolved sources for ${researchItems.length} items — other source results are preserved.`
           : (inlineItems
               ? `${resolvedSourceId} pulled ${inlineItems.length} item(s) inline — other sources keep their results.`
               : `Refetching ${resolvedSourceId} (cookies are fresh) — other sources keep their results.`),
@@ -869,28 +1076,42 @@ export function SellHubNode({ id, data }) {
       });
 
       const cancelled = epoch.start();
-      let mergedItems;
+      let drained;
       try {
-        mergedItems = await mergeResolvedSource(
-          pendingItemsRef.current || [], researchItems,
-          { sourceId: resolvedSourceId, inlineItems, category }, cancelled,
+        drained = await drainQueuedResolves(
+          pendingItemsRef.current || [],
+          researchItems,
+          scrapeWarningsRef.current || [],
+          cancelled,
         );
       } catch (err) {
         if (isNodeDeletedAbort(err)) return;
         EventLogger.error(`[SellHub][${id}] resolve/rescrape ${resolvedSourceId} failed:`, err);
+        hubStateRef.current = 'comps-ready';
+        updateGlobal(id, { hubState: 'comps-ready' });
         addToast({ title: 'Rescrape failed', description: err?.message || String(err), type: 'error' });
         return;
       }
-      if (cancelled()) return;
+      if (drained.cancelled || cancelled()) return;
 
-      const remainingWarnings = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== resolvedSourceId);
+      const mergedItems = drained.items;
+      const remainingWarnings = drained.warnings;
       pendingItemsRef.current = mergedItems;
       scrapeWarningsRef.current = remainingWarnings;
-      updateGlobal(id, { pendingItems: mergedItems, scrapeWarnings: remainingWarnings });
-      EventLogger.log(`[SellHub][${id}] merged ${resolvedSourceId} into pending items; ${remainingWarnings.length} blocked source(s) remaining`);
+      if (remainingWarnings.length > 0) {
+        hubStateRef.current = 'comps-ready';
+        updateGlobal(id, { hubState: 'comps-ready', pendingItems: mergedItems, scrapeWarnings: remainingWarnings });
+        EventLogger.log(`[SellHub][${id}] resolved-source drain complete; ${remainingWarnings.length} blocked source(s) remaining`);
+        addToast({
+          title: 'Sources still blocked',
+          description: `${remainingWarnings.length} source(s) remain blocked. Retry as many times as needed, or explicitly click Skip.`,
+          type: 'warning',
+        });
+        return;
+      }
 
       // Last blocker cleared AND still paused → auto-fire synthesis.
-      if (remainingWarnings.length === 0 && hubStateRef.current === 'comps-ready') {
+      if (remainingWarnings.length === 0) {
         if (processingPriceRef.current) return;
         processingPriceRef.current = true;
         try {
@@ -903,7 +1124,7 @@ export function SellHubNode({ id, data }) {
     };
     document.addEventListener('comp-captcha-resolved', onResolved);
     return () => document.removeEventListener('comp-captcha-resolved', onResolved);
-  }, [id, addToast, updateGlobal, epoch, queueSynthesizeAndPrice, mergeResolvedSource]);
+  }, [id, addToast, updateGlobal, epoch, queueSynthesizeAndPrice, drainQueuedResolves, queueSourceResolve]);
 
   const acceptImagePaths = useCallback((paths, attemptedCount = paths?.length || 0) => {
     const validPaths = [...new Set((paths || []).filter(p => typeof p === 'string' && p.trim()))];
@@ -1043,6 +1264,7 @@ export function SellHubNode({ id, data }) {
       errorMessage: null,
       isRateLimit: false,
       pendingItems: null,
+      bundlePricing: null,
     };
     if (revertTo === 'empty') updates.imagePaths = null;
     updateGlobal(id, updates);
@@ -1051,7 +1273,11 @@ export function SellHubNode({ id, data }) {
     // Drop queued early-resolves — they belong to the cancelled run and
     // would otherwise leak into the next scrape's drain pass.
     pendingMergesRef.current.splice(0);
+    activeResolveSourceIdsRef.current.clear();
     setQueuedResolvesCount(0);
+    scrapeInFlightRef.current = false;
+    resolveDrainInFlightRef.current = false;
+    setIsApplyingResolves(false);
     processingRef.current = false;
     processingPriceRef.current = false;
   }, [data.locked, data.product, hubState, id, updateGlobal, cleanupCompSourceCards, epoch, resetCompProgress, moduleRunQueue]);
@@ -1080,7 +1306,7 @@ export function SellHubNode({ id, data }) {
   }, [data.product, hubState, id, updateGlobal]);
 
   // "Try again" routes to whichever pipeline matches what just failed:
-  //  - product present → re-run price research (handleConfirmDraft)
+  //  - product present → re-run price research without changing zoom/pan
   //  - product missing but imagePaths present → re-run analysis
   const handleRetryFailed = useCallback(() => {
     if (data.locked) return;
@@ -1169,6 +1395,7 @@ export function SellHubNode({ id, data }) {
           <>
             {banner}
             <SellHubDraftState
+              hubId={id}
               product={product}
               editing={editing}
               setEditing={setEditing}
@@ -1190,8 +1417,10 @@ export function SellHubNode({ id, data }) {
         {hubState === 'researching' && (
           <HubBusyState
             theme="amber"
-            label="Researching market prices..."
-            subline={totalComps > 0 ? `${totalComps} similar listing${totalComps === 1 ? '' : 's'} found` : null}
+            label={isApplyingResolves ? 'Applying resolved sources...' : 'Researching market prices...'}
+            subline={isApplyingResolves
+              ? `${Math.max(1, queuedResolvesCount)} source retr${Math.max(1, queuedResolvesCount) === 1 ? 'y' : 'ies'} in progress`
+              : (totalComps > 0 ? `${totalComps} similar listing${totalComps === 1 ? '' : 's'} found` : null)}
             onReset={resetHandler}
           />
         )}
@@ -1212,9 +1441,9 @@ export function SellHubNode({ id, data }) {
           <SellHubPricedState
             product={product}
             pricing={data.pricing}
-            comps={data.comps}
             itemPricings={data.itemPricings || null}
             bundleTotal={data.bundleTotal ?? null}
+            bundlePricing={data.bundlePricing || null}
             scrapeWarnings={data.scrapeWarnings || []}
             justificationExpanded={justificationExpanded}
             toggleJustification={toggleJustification}

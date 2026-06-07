@@ -84,6 +84,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scrapePriceComps: (args) => ipcRenderer.invoke('scrape-price-comps', args),
   rescrapeSource: (args) => ipcRenderer.invoke('rescrape-source', args),
   synthesizePrice: (args) => ipcRenderer.invoke('synthesize-price', args),
+  synthesizeBundlePrice: (args) => ipcRenderer.invoke('synthesize-bundle-price', args),
   assessPlatformFit: (args) => ipcRenderer.invoke('assess-platform-fit', args),
   resolveCaptcha: (args) => ipcRenderer.invoke('resolve-captcha', args),
   checkListingStatus: (args) => ipcRenderer.invoke('check-listing-status', args),

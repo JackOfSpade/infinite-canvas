@@ -41,6 +41,10 @@ import { logger } from '../logger.js';
 const TASK_MODELS = {
   'vision-product-analysis':   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   'price-synthesis':           { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
+  // Bundle pricing is a pricing JUDGMENT (synergy reasoning across items), so it
+  // gets the same Sonnet tier as price-synthesis — not the cheaper Haiku used for
+  // mechanical classification (per the quality-over-cost preference on pricing).
+  'bundle-price-synthesis':    { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   'platform-fit-assessment':   { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
   'page-status-classify':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
   'resume-parse':              { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
@@ -109,6 +113,10 @@ const TASK_MAX_TOKENS = {
   // truncation cycles. 2048 is above the observed max so the cap is adequate
   // even on a fresh install with no learned state.
   'platform-fit-assessment':   2048,  // per-platform fit verdict + short reason
+  // Bundle reasoning considers every item even though its visible explanation
+  // stays bundle-only. Scale beyond the two-item baseline for thinking headroom.
+  'bundle-price-synthesis':    ({ itemCount = 2 } = {}) =>
+    Math.min(8192, 2048 + Math.max(0, itemCount - 2) * 350),
   'page-status-classify':      512,   // 5-way enum + one sentence
   'resume-parse':              4096,  // full structured profile
   // Career-file extract reproduces a whole document as faithful text, so it

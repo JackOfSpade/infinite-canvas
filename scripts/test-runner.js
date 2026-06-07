@@ -35,8 +35,8 @@ import {
 import { detectAntiBotSignal, matchesNoResultsSentinel } from '../electron/ipc/antiBotDetector.js';
 import { getStats } from '../src/utils/dashboardStats.js';
 import { resolveNodePresence } from '../src/utils/nodePresence.js';
-import { CANVAS_ZOOM_LIMITS, getNodesBounds, SELL_PLATFORMS } from '../src/utils/constants.js';
-import { mergeSourceIntoComps } from '../src/utils/compsMerge.js';
+import { ALL_COMP_SOURCE_IDS, CANVAS_ZOOM_LIMITS, getNodesBounds, SELL_PLATFORMS } from '../src/utils/constants.js';
+import { mergeSourceIntoComps, retryWarningRequiringAction, updateResolvedSourceWarning } from '../src/utils/compsMerge.js';
 import { mergeResolvedSourceItems } from '../src/utils/jobSourceResolveMerge.js';
 import {
   buildJobTreeNodes,
@@ -83,7 +83,7 @@ import { parseGeminiJSON } from '../electron/ipc/gemini.js';
 import { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
 import { withStatusCheckLock, getStatusCheckQueueDepth } from '../electron/ipc/statusCheckLock.js';
 import { createAggregatingProgress } from '../electron/ipc/compProgressAggregator.js';
-import { buildResearchItems, computeBundleTotal } from '../src/utils/bundlePricing.js';
+import { buildResearchItems, computeBundleTotal, selectBundleHeadline, selectListingPriceTiers, buildItemQuery } from '../src/utils/bundlePricing.js';
 import {
   clearMissingPreviewRelinkCache,
   findExactFilenameBelow,
@@ -95,9 +95,10 @@ import { getSellMonitorConfig } from '../electron/ipc/stealthBrowser.js';
 import os from 'node:os';
 import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
 import { modelTag, overPricedSoldFlag } from '../electron/ipc/bugReport/helpers.js';
-import { checkListingStatusMultiSource, classifyCompScrapeFailure, computeMissingLogins, formatPricingNotesForPrompt, normalizePricingNotes } from '../electron/ipc/marketplace.js';
+import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
+import { checkListingStatusMultiSource, classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
 import { aggregateStrongest, classifyOneUrl, deterministicListingStatusFromText, goneListingResult } from '../electron/ipc/listingStatusCheck.js';
-import { isAuthChallengeUrl, PLATFORM_AUTH_COOKIES, PLATFORM_LOGIN_URLS } from '../electron/ipc/browser/authWindows.js';
+import { isAuthChallengeUrl, PLATFORM_AUTH_COOKIES, PLATFORM_LOGIN_URLS, unwrapInlineExtractorItems } from '../electron/ipc/browser/authWindows.js';
 import { PRICE_SYNTHESIS_SCHEMA } from '../electron/ipc/aiSchemas.js';
 import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation } from '../src/utils/jobLocation.js';
 import { detectLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
@@ -113,6 +114,9 @@ import { appendPhotoFiles, appendPhotoPaths, normalizePhotoPathList, removePhoto
 import { filesToDropPayloads, filesToProductImagePaths, getLocalFilePath, summarizeFileExtensions } from '../src/utils/fileDropUtils.js';
 import { cachedAuthNeedsLoginResult, statusErrorWrites, statusCheckWrites } from '../src/utils/listingStatusWrites.js';
 import { shouldUseNativeTextUndo } from '../src/utils/nativeTextUndo.js';
+import { syncUncontrolledTextValue } from '../src/utils/uncontrolledTextValue.js';
+import { enqueueUniqueSourceResolve } from '../src/utils/sourceResolveQueue.js';
+import { getRequiredCompLoginPlatformIds } from '../src/utils/marketplaceLoginPreflight.js';
 import { createModuleRunQueue } from '../src/utils/moduleRunQueue.js';
 
 function assert(condition, message) {
@@ -345,6 +349,23 @@ const tests = [
         assert(sample.title && sample.price > 0 && sample.soldDate, 'eBay sold fixture: incomplete sample payload');
       },
     }),
+  },
+  {
+    // The eBay count-heading parse (yieldStats.claimedTotal) against REAL markup:
+    // the fixture reads "4,100+ results", so the parser must strip the comma and
+    // the "+" → 4100. This is the signal the detector uses to tell a genuine
+    // 1-result page from selector drift; a markup change that breaks it would
+    // silently re-enable the false zero-extracted Solve loop, so lock it down.
+    name: 'eBay extractor: claimedTotal parses the site result-count header',
+    run: () => {
+      const html = fs.readFileSync(path.resolve('scripts/fixtures/ebay-body.html'), 'utf8');
+      const dom = new JSDOM(html, { url: 'https://example.com', runScripts: 'outside-only' });
+      const raw = dom.window.eval(EBAY_SOLD_EXTRACTOR);
+      assert(raw && raw.yieldStats, 'eBay extractor must return a yieldStats envelope');
+      assert(raw.yieldStats.claimedTotal === 4100, `claimedTotal should parse "4,100+ results" → 4100 (got ${raw.yieldStats.claimedTotal})`);
+      assert(Number.isInteger(raw.yieldStats.seen) && raw.yieldStats.seen >= 10, 'seen denominator present');
+      return { ok: true, claimedTotal: raw.yieldStats.claimedTotal };
+    },
   },
   {
     name: 'eBay active fixture',
@@ -743,6 +764,44 @@ const tests = [
     },
   },
   {
+    name: 'Uncontrolled text sync: focused middle edits keep value and selection; unfocused external changes apply',
+    run: () => {
+      const dom = new JSDOM('<textarea id="notes"></textarea>');
+      const notes = dom.window.document.getElementById('notes');
+      notes.value = 'alpha beta';
+      notes.setSelectionRange(5, 5);
+
+      const focusedSync = syncUncontrolledTextValue(notes, 'stale parent value', true);
+      assert(!focusedSync, 'focused notes should reject external synchronization');
+      assert(notes.value === 'alpha beta', 'focused notes should preserve the live DOM edit');
+      assert(notes.selectionStart === 5 && notes.selectionEnd === 5, 'focused notes should preserve the middle-edit caret');
+
+      const unfocusedSync = syncUncontrolledTextValue(notes, 'workspace undo value', false);
+      assert(unfocusedSync && notes.value === 'workspace undo value', 'unfocused notes should accept external undo/redo state');
+      assert(!syncUncontrolledTextValue(notes, 'workspace undo value', false), 'equal external text should not rewrite the DOM');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Source resolve queue: duplicate pending/active sources coalesce',
+    run: () => {
+      const ebay1 = { sourceId: 'ebay-sold', items: [1] };
+      const ebay2 = { sourceId: 'ebay-sold', items: [2] };
+      const swappa = { sourceId: 'swappa', items: [] };
+
+      const first = enqueueUniqueSourceResolve([], ebay1);
+      assert(first.status === 'added' && first.queue.length === 1, 'first source resolve should enqueue');
+      const replaced = enqueueUniqueSourceResolve(first.queue, ebay2);
+      assert(replaced.status === 'replaced' && replaced.queue.length === 1 && replaced.queue[0] === ebay2,
+        'duplicate pending source should replace in place, not add a second rescrape');
+      const second = enqueueUniqueSourceResolve(replaced.queue, swappa);
+      assert(second.status === 'added' && second.queue.length === 2, 'different source should enqueue independently');
+      const active = enqueueUniqueSourceResolve(second.queue, ebay1, new Set(['ebay-sold']));
+      assert(active.status === 'active' && active.queue === second.queue, 'already-active source should not queue another retry');
+      return { ok: true };
+    },
+  },
+  {
     name: 'Geometry eraser math',
     run: () => {
       assert(distToSegment({ x: 5, y: 5 }, { x: 0, y: 0 }, { x: 10, y: 0 }) === 5, 'Geometry eraser math: point-to-segment distance mismatch');
@@ -1029,6 +1088,10 @@ const tests = [
       assert(full.filteredLogs === logs && full.matchedCodes.includes('FULL'), 'Bug report code filtering: FULL should keep original logs');
       const filtered = applyBugReportCode(logs, {}, 'ERR+QUICK');
       assert(filtered.filteredLogs.length <= logs.length && filtered.matchedCodes.includes('ERR'), 'Bug report code filtering: ERR+QUICK should match ERR');
+      const text = applyBugReportCode([...logs, '[TextEdit] input field=hub:primary type=historyUndo len=4 selection=2-2'], {}, 'TEXT');
+      assert(text.filteredLogs.some(line => line.includes('[TextEdit]')) && text.matchedCodes.includes('TEXT'), 'Bug report code filtering: TEXT should retain text-edit diagnostics');
+      const viewport = applyBugReportCode([...logs, 'viewport changed source=programmatic zoom=0.2818 x=-181.31 y=237.18'], {}, 'VIEWPORT');
+      assert(viewport.filteredLogs.some(line => line.includes('viewport changed')) && viewport.matchedCodes.includes('VIEWPORT'), 'Bug report code filtering: VIEWPORT should retain zoom/pan diagnostics');
       const preview = previewBugReportCode(logs, 'ERR+NOPE');
       assert(preview.unknownCodes.includes('NOPE') && preview.valid, 'Bug report code filtering: preview should report unknown codes while keeping valid matches');
       return { filtered: filtered.filteredLogs.length, unknown: preview.unknownCodes };
@@ -1125,25 +1188,27 @@ const tests = [
     },
   },
   {
-    name: 'compSourceScope: normalizeCompWarnings re-tags cardless sub-source warnings to the family card',
+    name: 'compSourceScope: normalizeCompWarnings preserves every exact blocked source',
     run: () => {
-      const cards = ['ebay-sold', 'ebay-active', 'swappa', 'reverb'];
-      // swappa-sold has no card → re-tag to the 'swappa' family card so the card's
-      // Skip/Solve (which clears by exact sourceId) can resolve it.
+      assert(ALL_COMP_SOURCE_IDS.includes('swappa-sold') && ALL_COMP_SOURCE_IDS.includes('swappa'),
+        'Swappa sold and active must have separate source cards/retry actions');
+      const cards = ['ebay-sold', 'ebay-active', 'swappa-sold', 'swappa', 'reverb'];
       const out1 = normalizeCompWarnings([{ sourceId: 'swappa-sold', code: 'zero-extracted', severity: 'block' }], cards);
-      assert(out1.length === 1 && out1[0].sourceId === 'swappa', `swappa-sold → swappa (got ${out1[0]?.sourceId})`);
-      assert(out1[0].code === 'zero-extracted' && out1[0].severity === 'block', 'warning fields preserved on re-tag');
+      assert(out1.length === 1 && out1[0].sourceId === 'swappa-sold', `swappa-sold stays exact (got ${out1[0]?.sourceId})`);
+      assert(out1[0].code === 'zero-extracted' && out1[0].severity === 'block', 'warning fields preserved');
       // A real card warning is kept untouched (same ref).
       const w = { sourceId: 'ebay-sold', code: 'x' };
       const out2 = normalizeCompWarnings([w], cards);
       assert(out2.length === 1 && out2[0] === w, 'real card warning kept as-is (same ref)');
-      // ebay-sold and ebay-active are SEPARATE cards → both kept (no family collapse).
-      assert(normalizeCompWarnings([{ sourceId: 'ebay-sold' }, { sourceId: 'ebay-active' }], cards).length === 2, 'distinct cards both kept');
-      // swappa + swappa-sold both blocked → collapse to ONE swappa entry.
+      // Sold and active variants are separate sources and both remain blocked.
       const out4 = normalizeCompWarnings([{ sourceId: 'swappa', code: 'a' }, { sourceId: 'swappa-sold', code: 'b' }], cards);
-      assert(out4.length === 1 && out4[0].sourceId === 'swappa', 'swappa family collapses to one entry');
-      // A true orphan (no family card present) is DROPPED so it can never gate forever.
-      assert(normalizeCompWarnings([{ sourceId: 'mercari-sold' }], cards).length === 0, 'orphan with no family card is dropped');
+      assert(out4.length === 2, 'distinct sold/active source warnings must never collapse');
+      // Unexpected sources remain blocked rather than silently pricing without them.
+      const orphan = normalizeCompWarnings([{ sourceId: 'unexpected-source', code: 'x' }], cards);
+      assert(orphan.length === 1 && orphan[0].sourceId === 'unexpected-source', 'unexpected source warning is preserved');
+      // Multiple item-query warnings for one exact source share one source retry.
+      assert(normalizeCompWarnings([{ sourceId: 'ebay-sold', code: 'a' }, { sourceId: 'ebay-sold', code: 'b' }], cards).length === 1,
+        'duplicate warnings for one exact source collapse to one retry action');
       return { ok: true };
     },
   },
@@ -1166,7 +1231,7 @@ const tests = [
     },
   },
   {
-    name: 'dashboardStats: getStats sums SellHub recommended_price (not the absent userPrice)',
+    name: 'dashboardStats: getStats uses combined bundle price and single-item recommended_price',
     run: () => {
       const nodes = [
         { type: 'jobcard', data: {} },
@@ -1176,12 +1241,12 @@ const tests = [
         { type: 'sellhub', data: { hubState: 'priced', pricing: { recommended_price: null } } }, // no-comps → 0
         { type: 'sellhub', data: { hubState: 'draft', pricing: { recommended_price: 999 } } },    // not priced → excluded
         { type: 'sellhub', data: { hubState: 'priced', userPrice: 500 } },                        // legacy/wrong field → 0
+        { type: 'sellhub', data: { hubState: 'priced', pricing: { recommended_price: 20 }, bundleTotal: 42, bundlePricing: { bundle_price: 40 } } },
       ];
       const { jobCardsCount, sellHubsCount, totalValue } = getStats(nodes);
       assert(jobCardsCount === 2, `getStats: jobCardsCount should be 2, got ${jobCardsCount}`);
-      assert(sellHubsCount === 5, `getStats: sellHubsCount should be 5, got ${sellHubsCount}`);
-      // Old (buggy) code read userPrice → would total 500; correct sums priced recommended_price.
-      assert(totalValue === 349.5, `getStats: totalValue should be 250 + 99.5 = 349.5, got ${totalValue}`);
+      assert(sellHubsCount === 6, `getStats: sellHubsCount should be 6, got ${sellHubsCount}`);
+      assert(totalValue === 389.5, `getStats: totalValue should include the $40 combined bundle price, got ${totalValue}`);
       return { totalValue };
     },
   },
@@ -1968,6 +2033,17 @@ const tests = [
     },
   },
   {
+    name: 'captcha inline extractor: accepts bare arrays and wrapped { items, yieldStats } results',
+    run: () => {
+      const bare = [{ title: 'A' }];
+      const wrapped = { items: [{ title: 'B' }], yieldStats: { seen: 2, noFields: 1 } };
+      assert(unwrapInlineExtractorItems(bare) === bare, 'bare extractor array passes through');
+      assert(unwrapInlineExtractorItems(wrapped) === wrapped.items, 'wrapped extractor items are accepted by visible Solve flow');
+      assert(unwrapInlineExtractorItems({ items: 'bad' }) === null, 'invalid wrapped extractor result is rejected');
+      return { ok: true };
+    },
+  },
+  {
     // The auto-close poller treats a configured PLATFORM_AUTH_COOKIES entry as a
     // definitive logged-in signal that can fire even while the window is still on a
     // login URL (Glassdoor suppresses its post-auth redirect → window loops on the
@@ -1983,6 +2059,17 @@ const tests = [
         assert(!gd.includes(c), `glassdoor auth cookies must NOT include both-state cookie "${c}" (would false-close mid-login)`);
       }
       return { ok: true, glassdoor: gd };
+    },
+  },
+  {
+    name: 'auth-cookie contract: Reverb detects completed login without post-login navigation',
+    run: () => {
+      const reverb = PLATFORM_AUTH_COOKIES.reverb || [];
+      assert(reverb.includes('user_credentials'), 'Reverb should auto-detect its signed credentials cookie');
+      assert(!reverb.includes('has_logged_in'), 'Reverb historical login marker must not count as an active session');
+      const config = getSellMonitorConfig('reverb');
+      assert(config?.verifyUrl === 'https://reverb.com/my/selling/listings', 'Reverb should participate in verified selling-session checks');
+      return { ok: true, reverb, verifyUrl: config.verifyUrl };
     },
   },
   {
@@ -2294,6 +2381,23 @@ const tests = [
     },
   },
   {
+    name: 'marketplace renderer login preflight: required platforms derive from active comp sources',
+    run: () => {
+      const required = getRequiredCompLoginPlatformIds([
+        { id: 'ebay-sold' },
+        { id: 'ebay-active' },
+        { id: 'poshmark' },
+        { id: 'pricecharting' },
+        { id: 'reverb' },
+      ]);
+      assert(required.join(',') === 'ebay,poshmark',
+        `renderer preflight should dedupe login-backed sources and ignore no-login sources → ${required}`);
+      assert(getRequiredCompLoginPlatformIds(['swappa', 'swappa-sold', 'mercari']).join(',') === 'swappa,mercari',
+        'renderer preflight should accept source IDs and dedupe shared platform sessions');
+      return { required };
+    },
+  },
+  {
     name: 'settings auth verifier: soft login walls for marketplace platforms',
     run: () => {
       const facebookLoggedOut = 'Facebook Explore the things you love . Log into Facebook Email or mobile number Password Log in Forgot password? Create new account';
@@ -2342,6 +2446,78 @@ const tests = [
       assert(formatPricingNotesForPrompt('   ') === '', 'blank pricing notes do not add a prompt section');
       const long = normalizePricingNotes('x'.repeat(10_000));
       assert(long.length === 10_000, `pricing notes should remain uncapped, got ${long.length}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'price comp relevance: grossly off-target sources do not get forced round-robin slots',
+    run: () => {
+      const comps = [
+        { source: 'ebay-sold', score: 10 },
+        { source: 'ebay-sold', score: 8 },
+        { source: 'mercari', score: 4 },
+        { source: 'pricecharting', score: 1 },
+        { source: 'pricecharting', score: 0.5 },
+      ];
+      const filtered = filterGrosslyOffTargetSources(comps, item => item.score);
+      assert(filtered.sources.length === 1 && filtered.sources[0] === 'pricecharting',
+        `only grossly off-target source rejected → ${JSON.stringify(filtered.sources)}`);
+      assert(filtered.kept.length === 3 && filtered.rejected.length === 2, 'all good-source comps kept; wrong-source comps rejected');
+      const oneSource = filterGrosslyOffTargetSources([{ source: 'only', score: 0 }], item => item.score);
+      assert(oneSource.kept.length === 1 && oneSource.rejected.length === 0, 'never reject the only available source');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'marketplace pipeline report: bundle items and late retries are explicit',
+    run: () => {
+      const telemetry = getMarketplaceTelemetry();
+      const saved = { ...telemetry };
+      const now = Date.now();
+      Object.assign(telemetry, {
+        nodeId: 'bundle-hub',
+        windowId: 7,
+        analyze: null,
+        scrape: {
+          ts: now - 500,
+          sources: 8, items: 2, sold: 30, active: 10, warnings: 1,
+          blocked: 0, errored: 0, timedOut: 1, loginRequired: 0,
+          bySource: {}, sourceWarnings: {},
+          itemDetails: [
+            { index: 0, query: 'watering timer', sold: 20, active: 5, warnings: [] },
+            { index: 1, query: 'glass jug', sold: 10, active: 5, warnings: [{ sourceId: 'ebay-sold', code: 'scrape-timeout' }] },
+          ],
+        },
+        resolves: {
+          'ebay-sold': {
+            ts: now - 50,
+            extracted: 61,
+            category: 'sold',
+            via: 'bundle-rescrape',
+            warningCount: 1,
+            itemCounts: [{ count: 60 }, { count: 1, warning: 'zero-extracted' }],
+          },
+        },
+        synthesis: null,
+        syntheses: [
+          { ts: now - 200, startedAt: now - 400, itemKey: 'primary', itemLabel: 'Watering Timer', soldFound: 0, activeFound: 0, soldUsed: 0, activeUsed: 0, recommendedPrice: null, matchQuality: 'none' },
+          { ts: now - 100, startedAt: now - 190, itemKey: 'jug', itemLabel: 'Glass Jug', soldFound: 0, activeFound: 0, soldUsed: 0, activeUsed: 0, recommendedPrice: null, matchQuality: 'none' },
+        ],
+        bundle: null,
+        fit: null,
+      });
+      try {
+        const report = buildMarketplacePipelineSnapshot(new Set(['bundle-hub']), 7);
+        assert(report.includes('Item 1 q="watering timer"') && report.includes('Item 2 q="glass jug"'),
+          'bundle report names each item scrape');
+        assert(report.includes('Price synthesis — Watering Timer') && report.includes('Price synthesis — Glass Jug'),
+          'bundle report renders each item synthesis');
+        assert(report.includes('arrived after AI pricing began'), 'late retry is explicitly marked as excluded from finalized pricing');
+        assert(report.includes('1 retry warning(s) remained'),
+          'retry warnings remain visible instead of being auto-accepted');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
       return { ok: true };
     },
   },
@@ -2839,21 +3015,33 @@ const tests = [
     },
   },
   {
-    name: 'bundlePricing: buildResearchItems orders primary-first + drops blanks; computeBundleTotal sums non-null',
+    name: 'bundlePricing: buildResearchItems (full item shape) orders primary-first + drops empty + threads per-item notes; buildItemQuery strips Unknown; computeBundleTotal sums non-null',
     run: () => {
+      // buildItemQuery: explicit search_query/query win; else brand+model+title
+      // with "Unknown"/blank tokens stripped (so a query never says "Unknown").
+      assert(buildItemQuery({ search_query: 'iPhone XS 256GB', brand: 'X' }) === 'iPhone XS 256GB', 'search_query wins');
+      assert(buildItemQuery({ brand: 'Diafield', model: 'Unknown', generated_title: 'Glass Jug' }) === 'Diafield Glass Jug',
+        `"Unknown" model dropped — got "${buildItemQuery({ brand: 'Diafield', model: 'Unknown', generated_title: 'Glass Jug' })}"`);
+      assert(buildItemQuery({ brand: '', model: '', generated_title: '' }) === '', 'empty item → empty query');
+
       const product = { search_query: 'Apple iPhone XS 256GB', generated_title: 'iPhone XS', condition: 'Used - Good' };
       const extras = [
-        { id: 'a', query: '  Otterbox case  ', condition: 'New' },
-        { id: 'b', query: '', condition: 'Used - Fair' }, // blank → dropped
-        { id: 'c', query: 'screen protector' },            // no condition → inherits primary
+        // Full item shape now (title/brand/model/condition/notes), like the primary.
+        { id: 'a', generated_title: 'Otterbox Defender case', brand: 'Otterbox', model: 'Unknown', condition: 'New', pricingNotes: 'sealed in box' },
+        { id: 'b', generated_title: '', brand: '', model: '' },         // nothing to search → dropped
+        { id: 'c', generated_title: 'screen protector' },               // no condition → inherits primary
       ];
-      const items = buildResearchItems(product, extras);
-      assert(items.length === 3, `1 primary + 2 non-blank extras — got ${items.length}`);
+      const items = buildResearchItems(product, extras, 'cracked back glass');
+      assert(items.length === 3, `1 primary + 2 searchable extras — got ${items.length}`);
       assert(items[0].key === 'primary' && items[0].query === 'Apple iPhone XS 256GB',
         `primary first, query from search_query — got ${JSON.stringify(items[0])}`);
-      assert(items[1].query === 'Otterbox case' && items[1].condition === 'New',
-        `extra trims query + keeps its own condition — got ${JSON.stringify(items[1])}`);
+      assert(items[0].pricingNotes === 'cracked back glass', `primary carries the hub-level notes — got ${JSON.stringify(items[0].pricingNotes)}`);
+      assert(items[1].query === 'Otterbox Otterbox Defender case' && items[1].condition === 'New',
+        `extra query from brand+title (Unknown model dropped) + keeps its own condition — got ${JSON.stringify(items[1])}`);
+      assert(items[1].label === 'Otterbox Defender case', `extra label = its title — got ${JSON.stringify(items[1].label)}`);
+      assert(items[1].pricingNotes === 'sealed in box', `extra carries its OWN notes (not the primary's) — got ${JSON.stringify(items[1].pricingNotes)}`);
       assert(items[2].condition === 'Used - Good', `extra without condition inherits the primary's — got ${items[2].condition}`);
+      assert(items[2].pricingNotes === '', `extra without notes → empty string, not the primary's — got ${JSON.stringify(items[2].pricingNotes)}`);
 
       assert(computeBundleTotal([
         { pricing: { recommended_price: 300 } },
@@ -2861,6 +3049,65 @@ const tests = [
         { pricing: { recommended_price: null } }, // skipped
       ]) === 325, 'bundle total sums non-null recommended prices');
       assert(computeBundleTotal([{ pricing: { recommended_price: null } }]) === null, 'all-null bundle total → null (so UI can hide it)');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'bundlePricing: selectBundleHeadline prefers the AI synergy price, falls back to the sum, flags the reference line',
+    run: () => {
+      // AI moved the price above the sum (synergy premium) → headline = AI price,
+      // show the "sum if sold separately" reference line.
+      const premium = selectBundleHeadline({ bundle_price: 360, synergy: 'premium' }, 325);
+      assert(premium.headline === 360 && premium.aiPrice === 360, `AI price is the headline — got ${JSON.stringify(premium)}`);
+      assert(premium.showSumRef === true, 'AI price ≠ sum → show the sum reference line');
+      assert(premium.synergy === 'premium', `synergy passed through — got ${premium.synergy}`);
+
+      // No AI result → fall back to the arithmetic sum, no reference line.
+      const fallback = selectBundleHeadline(null, 325);
+      assert(fallback.headline === 325 && fallback.aiPrice === null, `null bundlePricing → sum headline — got ${JSON.stringify(fallback)}`);
+      assert(fallback.showSumRef === false, 'no AI price → no separate reference line');
+
+      // AI agreed with the sum exactly → headline = AI price but NO redundant ref line.
+      const equal = selectBundleHeadline({ bundle_price: 325, synergy: 'neutral' }, 325);
+      assert(equal.headline === 325 && equal.showSumRef === false, `AI == sum → single line — got ${JSON.stringify(equal)}`);
+
+      // Both missing → null headline (UI shows "—").
+      assert(selectBundleHeadline(null, null).headline === null, 'no data → null headline');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'bundlePricing: result tiers are whole-bundle quick/best/max, with old-result fallback',
+    run: () => {
+      const itemPricings = [
+        { pricing: { quick_sell_price: 18, recommended_price: 22, max_profit_price: 28 } },
+        { pricing: { quick_sell_price: 15, recommended_price: 19, max_profit_price: 24 } },
+      ];
+
+      const explicit = selectListingPriceTiers({
+        pricing: itemPricings[0].pricing,
+        itemPricings,
+        bundleTotal: 41,
+        bundlePricing: { quick_sell_price: 38, bundle_price: 45, max_profit_price: 55 },
+      });
+      assert(explicit.isBundle === true, '2+ item prices produce bundle-level result tiers');
+      assert(explicit.quick === 38 && explicit.best === 45 && explicit.max === 55,
+        `explicit AI bundle tiers win over the primary item — got ${JSON.stringify(explicit)}`);
+
+      // Old saved bundle results only have bundle_price. Scale the sums of the
+      // individual quick/max tiers by the same 45/41 bundle adjustment.
+      const legacy = selectListingPriceTiers({
+        pricing: itemPricings[0].pricing,
+        itemPricings,
+        bundleTotal: 41,
+        bundlePricing: { bundle_price: 45 },
+      });
+      assert(legacy.quick === 36 && legacy.best === 45 && legacy.max === 57,
+        `legacy bundle result derives whole-listing tiers — got ${JSON.stringify(legacy)}`);
+
+      const single = selectListingPriceTiers({ pricing: itemPricings[0].pricing });
+      assert(single.isBundle === false && single.quick === 18 && single.best === 22 && single.max === 28,
+        `single listing keeps its own tiers — got ${JSON.stringify(single)}`);
       return { ok: true };
     },
   },
@@ -3015,7 +3262,7 @@ const tests = [
     },
   },
   {
-    name: 'mergeSourceIntoComps: replaces same-source items, carries the other bucket',
+    name: 'marketplace retry merge: only clean non-empty retries clear a blocked source',
     run: () => {
       const prev = {
         sold: [{ source: 'ebay-sold', price: 1 }, { source: 'mercari', price: 2 }],
@@ -3033,6 +3280,33 @@ const tests = [
       // missing/empty inputs are safe
       const fromNull = mergeSourceIntoComps(null, { sourceId: 's', items: [{ source: 's' }] });
       assert(fromNull.sold.length === 1 && fromNull.active.length === 0, 'null prev → seeded comps');
+      const warnings = [{ sourceId: 'ebay-sold', code: 'scrape-timeout' }, { sourceId: 'poshmark', code: 'stale-selectors' }];
+      const stillBlocked = updateResolvedSourceWarning(warnings, 'ebay-sold', { code: 'task-failed', severity: 'block' });
+      assert(stillBlocked.length === 2 && stillBlocked.some(w => w.sourceId === 'ebay-sold' && w.code === 'task-failed'),
+        'partial retry replaces the source warning instead of clearing it');
+      const clean = updateResolvedSourceWarning(stillBlocked, 'ebay-sold', null);
+      assert(clean.length === 1 && clean[0].sourceId === 'poshmark', 'clean retry clears only that source warning');
+      const lowYield = { code: 'zero-extracted', severity: 'throttle' };
+      assert(retryWarningRequiringAction(lowYield, [{ source: 'ebay-sold' }]) === lowYield,
+        'partial data with any warning remains blocked until clean retry or explicit Skip');
+      assert(retryWarningRequiringAction(null, [{ source: 'ebay-sold' }]) === null,
+        'clean non-empty retry clears the blocked source');
+      assert(retryWarningRequiringAction(lowYield, []) === lowYield,
+        'zero-item low-yield retry should remain actionable');
+      const silentEmpty = retryWarningRequiringAction(null, []);
+      assert(silentEmpty?.severity === 'block' && silentEmpty?.code === 'retry-empty',
+        'zero-item retry without a source warning must remain blocked until explicit Skip');
+      const hardBlock = { code: 'captcha', severity: 'block' };
+      assert(retryWarningRequiringAction(hardBlock, [{ source: 'ebay-sold' }]) === hardBlock,
+        'hard blocks remain actionable even if partial items were recovered');
+      // noChallengeConfirmed: a Solve that proved there was no challenge clears the
+      // gate regardless of count — breaks the eBay "1 result" unclearable loop.
+      assert(retryWarningRequiringAction(null, [], { noChallengeConfirmed: true }) === null,
+        'no-challenge-confirmed empty retry clears the gate (no unclearable Solve loop)');
+      assert(retryWarningRequiringAction(lowYield, [], { noChallengeConfirmed: true }) === null,
+        'no-challenge-confirmed accepts the page even with a residual low-yield warning');
+      assert(retryWarningRequiringAction(lowYield, []) === lowYield,
+        'WITHOUT the no-challenge proof, an empty low-yield retry still stays blocked');
       return { ok: true };
     },
   },
@@ -3167,6 +3441,38 @@ const tests = [
       // 4) Populated page (items >= threshold) never reaches the gate → null.
       const ok = detectAntiBotSignal({ html: bigBody('Showing 24 results'), itemsExtracted: 24, expectedMinItems: 3, sourceLabel: 'swappa' });
       assert(ok === null, `populated page → null (got ${JSON.stringify(ok)})`);
+      return { ok: true };
+    },
+  },
+  {
+    // Layer 3.6: a sub-floor item count must NOT be a block when the scrape
+    // SUCCEEDED on a genuinely-thin query — proven either by the site's own
+    // result-count header (eBay "1 result") or by extractor health (seen ===
+    // extracted, noFields === 0). This is what kills the eBay "1 result"
+    // false zero-extracted + unclearable Solve loop. Drift must still flag.
+    name: 'detectAntiBotSignal: claimedTotal / seen-noFields gate distinguishes thin-query from drift',
+    run: () => {
+      const bigBody = (core) => core + ' '.repeat(60000);
+      const base = { html: bigBody('1 result for FastRack Glass Jug'), expectedMinItems: 3, sourceLabel: 'ebay-sold', finalUrl: 'https://www.ebay.com/sch/i.html?_nkw=x&LH_Sold=1' };
+      // (a) eBay says "1 result" and we got 1 → genuine thin query → null.
+      assert(detectAntiBotSignal({ ...base, itemsExtracted: 1, yieldStats: { seen: 1, noFields: 0, claimedTotal: 1 } }) === null,
+        'site claims 1 + extracted 1 → suppressed (no false zero-extracted)');
+      // (a') Selector/pagination drift: site claims 50, we extracted 1 → STILL flags.
+      const drift = detectAntiBotSignal({ ...base, itemsExtracted: 1, yieldStats: { seen: 1, noFields: 0, claimedTotal: 50 } });
+      assert(drift?.code === 'zero-extracted', `claims 50 but extracted 1 → still zero-extracted drift (got ${JSON.stringify(drift)})`);
+      // (a'') claimedTotal takes EXCLUSIVE precedence — the consistent-looking
+      // seen===extracted must NOT rescue a drift the count header contradicts.
+      assert(detectAntiBotSignal({ ...base, itemsExtracted: 2, expectedMinItems: 5, yieldStats: { seen: 2, noFields: 0, claimedTotal: 40 } })?.code === 'zero-extracted',
+        'claimed-count contradicting seen still flags (no seen-heuristic rescue)');
+      // (b) No count header, extractor healthy (seen === extracted, noFields 0) → null.
+      assert(detectAntiBotSignal({ ...base, sourceLabel: 'mercari', itemsExtracted: 2, yieldStats: { seen: 2, noFields: 0 } }) === null,
+        'no count header + healthy extractor (seen===extracted) → suppressed');
+      // (b') No count header but cards were DROPPED (seen > extracted) → drift flags.
+      assert(detectAntiBotSignal({ ...base, sourceLabel: 'mercari', itemsExtracted: 1, yieldStats: { seen: 9, noFields: 8 } })?.code === 'zero-extracted',
+        'dropped cards (seen >> extracted, noFields>0) → still zero-extracted');
+      // (c) No yieldStats at all → unchanged legacy behavior (still flags).
+      assert(detectAntiBotSignal({ ...base, itemsExtracted: 1 })?.code === 'zero-extracted',
+        'no yieldStats → legacy zero-extracted preserved');
       return { ok: true };
     },
   },

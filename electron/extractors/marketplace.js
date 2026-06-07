@@ -248,7 +248,18 @@ export const EBAY_SOLD_EXTRACTOR = `
   });
 
   if (items.length === 0) throw new Error('SITE_CHANGED: ebay-sold su-styled-text extractor returned 0 — eBay design system may have changed' + __diag('cards=' + cards.length + ' titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length, cards[0]));
-  return { items, yieldStats: { seen: cards.length, noFields: __noFields } };
+  // eBay's own "N result(s) for <query>" header. The anti-bot detector uses this
+  // to tell a genuinely-thin query (eBay says "1 result", we got 1) apart from
+  // selector drift (eBay says "50 results", we got 1) — so a 1-result page never
+  // raises a false zero-extracted block + unclearable Solve. Leading int only
+  // (the query itself can contain digits, e.g. "(1 gallon)"), so anchor on " result".
+  var __claimedTotal = null;
+  try {
+    var __ch = document.querySelector('.srp-controls__count-heading');
+    var __m = __ch && (__ch.textContent || '').match(/([\\d,]+)\\s*\\+?\\s*results?\\b/i);
+    if (__m) { var __n = parseInt(__m[1].replace(/,/g, ''), 10); if (isFinite(__n)) __claimedTotal = __n; }
+  } catch (e) {}
+  return { items, yieldStats: { seen: cards.length, noFields: __noFields, claimedTotal: __claimedTotal } };
 })()
 `;
 
@@ -281,7 +292,14 @@ export const EBAY_ACTIVE_EXTRACTOR = `
   });
 
   if (items.length === 0) throw new Error('SITE_CHANGED: ebay-active su-styled-text extractor returned 0 — eBay design system may have changed' + __diag('cards=' + cards.length + ' titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length, cards[0]));
-  return { items, yieldStats: { seen: cards.length, noFields: __noFields } };
+  // eBay's own "N result(s) for <query>" header — see EBAY_SOLD_EXTRACTOR.
+  var __claimedTotal = null;
+  try {
+    var __ch = document.querySelector('.srp-controls__count-heading');
+    var __m = __ch && (__ch.textContent || '').match(/([\\d,]+)\\s*\\+?\\s*results?\\b/i);
+    if (__m) { var __n = parseInt(__m[1].replace(/,/g, ''), 10); if (isFinite(__n)) __claimedTotal = __n; }
+  } catch (e) {}
+  return { items, yieldStats: { seen: cards.length, noFields: __noFields, claimedTotal: __claimedTotal } };
 })()
 `;
 

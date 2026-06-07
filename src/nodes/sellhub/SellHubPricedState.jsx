@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
-import { PriceJustification } from '../../components/PriceJustification';
 import { PhotoStrip } from '../../components/PhotoStrip';
-import { Check, Copy, RefreshCw, ChevronDown, ChevronRight, Plus, Activity, Sparkles } from 'lucide-react';
+import { Check, Copy, RefreshCw, ChevronDown, ChevronRight, Plus, Activity, Sparkles, TrendingUp, TrendingDown, Minus, ChevronUp } from 'lucide-react';
 import { TIMINGS } from '../../utils/timings';
 import { SELL_PLATFORMS } from '../../utils/constants';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
+import { selectListingPriceTiers } from '../../utils/bundlePricing';
 
 /**
  * Title that toggles between one-line truncate and full wrapped text on click,
@@ -52,42 +52,44 @@ function ExpandableTitle({ title, addToast }) {
   );
 }
 
-/**
- * Tiny inline badge showing how confident the AI is in its recommendation
- * + how many comps fed each weighting bucket. Reads two optional fields
- * from the synthesis response — older `pricing` blobs without them just
- * render nothing.
- *
- * Strong  = anchored on a tight cluster of exact-match listings.
- * Moderate = mostly adjusted (similar-but-not-exact) listings, OR few anchors with wide spread.
- * Weak    = mostly bound (loosely related) listings — best-guess.
- */
-function PriceConfidence({ matchQuality, compBreakdown }) {
-  if (!matchQuality && !compBreakdown) return null;
-  const quality = matchQuality || 'moderate';
-  const palette = {
-    strong:   { bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', dot: 'bg-emerald-400',  text: 'text-emerald-300/80', label: 'Strong match' },
-    moderate: { bg: 'bg-amber-500/10',   border: 'border-amber-500/30',   dot: 'bg-amber-400',    text: 'text-amber-300/80',   label: 'Moderate match' },
-    weak:     { bg: 'bg-red-500/10',     border: 'border-red-500/30',     dot: 'bg-red-400',      text: 'text-red-300/80',     label: 'Weak match' },
-  }[quality] || null;
-  if (!palette) return null;
-  const { anchor_count = 0, adjusted_count = 0, bound_count = 0 } = compBreakdown || {};
-  const breakdownTxt = [
-    anchor_count   > 0 && `${anchor_count} exact`,
-    adjusted_count > 0 && `${adjusted_count} adjusted`,
-    bound_count    > 0 && `${bound_count} loose`,
-  ].filter(Boolean).join(' · ');
+function formatPrice(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  const price = Number(value);
+  if (!Number.isFinite(price)) return '—';
+  return `$${Number.isInteger(price) ? price : price.toFixed(2)}`;
+}
+
+function buildFinalExplanation({ pricing, itemPricings, bundlePricing, bundleTotal, best }) {
+  const isBundle = Array.isArray(itemPricings) && itemPricings.length > 1;
+  if (!isBundle) return pricing?.justification || '';
+  return bundlePricing?.justification
+    || (best != null && bundleTotal != null
+      ? `The combined listing price is ${formatPrice(best)} versus ${formatPrice(bundleTotal)} if the items were sold separately.`
+      : '');
+}
+
+function ReasonDisclosure({ expanded, onToggle, children, className = '' }) {
+  if (!children) return null;
   return (
-    <div
-      className={`flex items-center justify-between gap-2 px-2 py-1 rounded ${palette.bg} border ${palette.border}`}
-      title="AI confidence in the recommended price based on how closely listings matched the item spec"
-    >
-      <div className="flex items-center gap-1.5">
-        <span className={`w-1.5 h-1.5 rounded-full ${palette.dot}`} />
-        <span className={`text-[10px] font-medium ${palette.text}`}>{palette.label}</span>
-      </div>
-      {breakdownTxt && (
-        <span className="text-white/40 text-[9px] font-mono">{breakdownTxt}</span>
+    <div className={className}>
+      <button
+        onClick={(e) => { e.stopPropagation(); onToggle(); }}
+        onPointerDown={(e) => e.stopPropagation()}
+        className="nodrag flex w-full items-center justify-between py-1 text-[9px] text-white/35 transition-colors hover:text-white/65"
+      >
+        <span className="flex items-center gap-1">
+          <Sparkles size={8} className="text-emerald-300/50" />
+          Why this price?
+        </span>
+        {expanded ? <ChevronUp size={9} /> : <ChevronDown size={9} />}
+      </button>
+      {expanded && (
+        <p
+          className="nodrag pb-1 text-[9px] leading-relaxed text-white/50 whitespace-pre-wrap select-text"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {children}
+        </p>
       )}
     </div>
   );
@@ -96,10 +98,13 @@ function PriceConfidence({ matchQuality, compBreakdown }) {
 export function SellHubPricedState({
   product,
   pricing,
-  comps,
   // Per-item breakdown for multi-item ("bundle") listings (null for single item).
   itemPricings = null,
   bundleTotal = null,
+  // AI whole-listing result { quick_sell_price, bundle_price,
+  // max_profit_price, synergy, justification }.
+  // Null → fall back to the arithmetic sum (bundleTotal) as the headline.
+  bundlePricing = null,
   scrapeWarnings = [],
   justificationExpanded,
   toggleJustification,
@@ -127,7 +132,32 @@ export function SellHubPricedState({
   platformFitPending = false,
 }) {
   const [showUnfit, setShowUnfit] = useState(false);
+  const [expandedItemReasons, setExpandedItemReasons] = useState({});
   const { addToast } = useToast();
+  const tiers = selectListingPriceTiers({ pricing, itemPricings, bundlePricing, bundleTotal });
+  const resultItems = tiers.isBundle
+    ? itemPricings
+    : [{ key: 'primary', label: product.generated_title || 'Item', pricing }];
+  const bundleDelta = tiers.isBundle && tiers.best != null && bundleTotal != null
+    ? tiers.best - bundleTotal
+    : null;
+  const bundleSignal = bundleDelta > 0
+    ? { Icon: TrendingUp, label: `${formatPrice(Math.abs(bundleDelta))} bundle premium`, cls: 'text-emerald-300 bg-emerald-500/10 border-emerald-500/20' }
+    : bundleDelta < 0
+      ? { Icon: TrendingDown, label: `${formatPrice(Math.abs(bundleDelta))} bundle discount`, cls: 'text-amber-300 bg-amber-500/10 border-amber-500/20' }
+      : bundleDelta === 0
+        ? { Icon: Minus, label: 'Matches separate value', cls: 'text-white/45 bg-white/5 border-white/10' }
+        : null;
+  const finalExplanation = buildFinalExplanation({
+    pricing,
+    itemPricings,
+    bundlePricing,
+    bundleTotal,
+    best: tiers.best,
+  });
+  const toggleItemReason = (key) => {
+    setExpandedItemReasons(prev => ({ ...prev, [key]: !prev[key] }));
+  };
 
   return (
     <div className="p-3 space-y-2">
@@ -150,65 +180,89 @@ export function SellHubPricedState({
           you can copy/paste the whole block back to debug or optimize. */}
       <ScrapeWarningsPanel warnings={scrapeWarnings} addToast={addToast} />
 
-      {/* Price tiers — read-only reference. The user picks one in their
-          head and types it directly into the marketplace's form. */}
-      {pricing?.recommended_price != null && (
-        <>
-          <div className="grid grid-cols-3 gap-1.5 text-[11px]">
-            <div className="rounded px-1.5 py-1 bg-amber-500/10 border border-amber-500/20 text-center">
-              <div className="text-amber-400/70 text-[9px] uppercase tracking-wider">Quick</div>
-              <div className="text-amber-300 font-semibold">${pricing.quick_sell_price ?? '—'}</div>
+      {/* One listing-level result. For bundles, every headline tier belongs to
+          the entire bundle; individual prices only explain how it was built. */}
+      <div className="overflow-hidden rounded-xl border border-emerald-500/25 bg-gradient-to-b from-emerald-500/[0.10] to-white/[0.02]">
+        <div className="px-3 pt-2.5 pb-2 space-y-2">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-emerald-300/60 text-[9px] font-semibold uppercase tracking-[0.16em]">
+                {tiers.isBundle ? `Bundle recommendation · ${resultItems.length} items` : 'Listing recommendation'}
+              </div>
+              <div className="mt-0.5 flex items-baseline gap-1.5">
+                <span className="text-emerald-300 text-2xl font-bold leading-none">{formatPrice(tiers.best)}</span>
+                <span className="text-white/30 text-[9px] uppercase tracking-wider">Best</span>
+              </div>
             </div>
-            <div className="rounded px-1.5 py-1 bg-emerald-500/10 border border-emerald-500/20 text-center">
-              <div className="text-emerald-400/70 text-[9px] uppercase tracking-wider">Best</div>
-              <div className="text-emerald-300 font-semibold">${pricing.recommended_price}</div>
-            </div>
-            <div className="rounded px-1.5 py-1 bg-purple-500/10 border border-purple-500/20 text-center">
-              <div className="text-purple-300/70 text-[9px] uppercase tracking-wider">Max</div>
-              <div className="text-purple-200 font-semibold">${pricing.max_profit_price ?? '—'}</div>
-            </div>
+            {bundleSignal && (
+              <div className={`flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[8px] font-medium ${bundleSignal.cls}`}>
+                <bundleSignal.Icon size={8} />
+                {bundleSignal.label}
+              </div>
+            )}
           </div>
-          <PriceConfidence
-            matchQuality={pricing.match_quality}
-            compBreakdown={pricing.comp_breakdown}
-          />
-        </>
-      )}
 
-      {/* Bundle breakdown — one row per item priced + a suggested total. Only
-          shown when this listing packages multiple items; the tiers above
-          reflect the primary item. */}
-      {Array.isArray(itemPricings) && itemPricings.length > 1 && (
-        <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] px-2 py-1.5 space-y-1">
-          <div className="text-emerald-300/70 text-[9px] font-semibold uppercase tracking-wider">
-            Bundle breakdown ({itemPricings.length} items)
-          </div>
-          <ul className="space-y-0.5">
-            {itemPricings.map((it, i) => (
-              <li key={it.key || i} className="flex items-center justify-between gap-2 text-[10px]">
-                <span className="text-white/60 truncate" title={it.label || it.query}>
-                  {i === 0 ? '★ ' : ''}{it.label || it.query || `Item ${i + 1}`}
-                </span>
-                <span className="text-white/80 font-medium shrink-0">
-                  {it.pricing?.recommended_price != null ? `$${it.pricing.recommended_price}` : '—'}
-                </span>
-              </li>
+          <div className="grid grid-cols-3 gap-1.5">
+            {[
+              { label: 'Quick', subline: '1–3 days', price: tiers.quick, cls: 'border-amber-500/20 bg-amber-500/[0.08] text-amber-300' },
+              { label: 'Best', subline: '1–2 weeks', price: tiers.best, cls: 'border-emerald-500/30 bg-emerald-500/[0.12] text-emerald-300' },
+              { label: 'Max', subline: '3–4 weeks', price: tiers.max, cls: 'border-purple-500/20 bg-purple-500/[0.08] text-purple-200' },
+            ].map(tier => (
+              <div key={tier.label} className={`rounded-lg border px-1.5 py-1.5 text-center ${tier.cls}`}>
+                <div className="text-[8px] font-semibold uppercase tracking-wider opacity-70">{tier.label}</div>
+                <div className="text-[12px] font-bold">{formatPrice(tier.price)}</div>
+                <div className="text-white/25 text-[7px]">{tier.subline}</div>
+              </div>
             ))}
-          </ul>
-          <div className="flex items-center justify-between gap-2 pt-1 border-t border-white/10 text-[11px]">
-            <span className="text-emerald-300/80 font-semibold">Suggested bundle total</span>
-            <span className="text-emerald-300 font-bold shrink-0">{bundleTotal != null ? `$${bundleTotal}` : '—'}</span>
           </div>
-        </div>
-      )}
 
-      {/* Price justification */}
-      <PriceJustification
-        pricing={pricing}
-        comps={comps}
-        expanded={justificationExpanded}
-        onToggle={toggleJustification}
-      />
+          {finalExplanation && (
+            <ReasonDisclosure
+              expanded={justificationExpanded}
+              onToggle={toggleJustification}
+              className="border-t border-white/[0.07] pt-1"
+            >
+              {finalExplanation}
+            </ReasonDisclosure>
+          )}
+        </div>
+
+        <div className="border-t border-white/[0.07] bg-black/10 px-3 py-2 space-y-1.5">
+          <div className="flex items-center justify-between text-[8px] font-semibold uppercase tracking-[0.14em]">
+            <span className="text-white/30">{tiers.isBundle ? 'Individual market values' : 'Item value'}</span>
+            <span className="text-white/20">Best price</span>
+          </div>
+          <ul className="space-y-1">
+            {resultItems.map((it, i) => {
+              const itemKey = String(it.key || i);
+              return (
+                <li key={itemKey} className="rounded-md border border-white/[0.05] bg-white/[0.015] px-2 py-1">
+                  <div className="flex items-center justify-between gap-2 text-[10px]">
+                    <span className="min-w-0 truncate text-white/60" title={it.label || it.query}>
+                      {it.label || it.query || `Item ${i + 1}`}
+                    </span>
+                    <span className="shrink-0 font-medium text-white/80">{formatPrice(it.pricing?.recommended_price)}</span>
+                  </div>
+                  {tiers.isBundle && (
+                    <ReasonDisclosure
+                      expanded={!!expandedItemReasons[itemKey]}
+                      onToggle={() => toggleItemReason(itemKey)}
+                    >
+                      {it.pricing?.justification}
+                    </ReasonDisclosure>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+          {tiers.isBundle && bundleTotal != null && (
+            <div className="flex items-center justify-between gap-2 border-t border-white/[0.07] pt-1.5 text-[9px]">
+              <span className="text-white/35">Value if sold separately</span>
+              <span className="shrink-0 text-white/50">{formatPrice(bundleTotal)}</span>
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Marketplace cards — spawn one per platform you list on.
           Each card persists on the canvas, holds its own listing URL, and can
