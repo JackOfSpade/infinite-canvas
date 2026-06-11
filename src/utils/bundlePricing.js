@@ -66,11 +66,6 @@ export function buildItemQuery(item = {}) {
   return tokens.filter(Boolean).join(' ').trim();
 }
 
-/** Back-compat alias — the primary item is just an item. */
-export function buildPrimaryQuery(product = {}) {
-  return buildItemQuery(product);
-}
-
 /**
  * Ordered list of items to research — the primary (from the AI analysis) first,
  * then each user-added extra. Extras with a blank query are dropped (an empty

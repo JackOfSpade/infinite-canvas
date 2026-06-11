@@ -9,6 +9,17 @@ export const ago = (ts) => {
   return Number.isFinite(s) ? ` (${s}s ago)` : '';
 };
 
+// Human age ("32s ago" / "5m ago" / "2h14m ago" / "never") for a timestamp —
+// shared by the marketplace module/status rollups' check-recency columns.
+export function formatAge(ts) {
+  if (!ts) return 'never';
+  const s = Math.round((Date.now() - ts) / 1000);
+  if (s < 60) return `${s}s ago`;
+  const h = Math.floor(s / 3600);
+  const mn = Math.floor((s % 3600) / 60);
+  return h ? `${h}h${mn}m ago` : `${mn}m ago`;
+}
+
 // Renders the model that actually served an AI stage (recorded per stage via the
 // LLM layer's `meta` out-param). Flags a degraded run: a `*-lite` model = the
 // call fell through every stronger model to the weakest fallback — so e.g. a

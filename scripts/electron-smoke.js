@@ -39,6 +39,18 @@ async function nodeCount(page, type) {
   return page.locator(`.react-flow__node${suffix}`).count();
 }
 
+// Poll a locator count until the predicate holds — asserting the instant an
+// input event returns races React's commit, which is the e2e's main flake source.
+async function waitForCount(locator, predicate, label, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const n = await locator.count();
+    if (predicate(n)) return n;
+    if (Date.now() > deadline) assert.fail(`${label} (count=${n})`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 async function clickPane(page, x, y) {
   await page.locator('.react-flow__pane').click({ position: { x, y } });
 }
@@ -132,16 +144,24 @@ try {
   assert.equal(await nodeCount(page, 'text'), 3, 'copy/paste shortcuts should clone selected node');
 
   step('exercise text node context actions');
-  await openNodeMenu(page, firstTextNode);
+  // The three text nodes share identical text, and react-flow re-orders node DOM
+  // on selection — a bare .first() can resolve to a DIFFERENT node between
+  // actions. Pin one node by its data-id so every context action and assertion
+  // targets the same node, and poll for the style commit instead of asserting
+  // the instant the click returns.
+  const stickyId = await firstTextNode.getAttribute('data-id');
+  const stickyNode = page.locator(`.react-flow__node[data-id="${stickyId}"]`);
+  await openNodeMenu(page, stickyNode);
   await page.locator('.context-menu-enter').getByText('Make Sticky Note', { exact: true }).click();
-  assert.notEqual(
-    await firstTextNode.locator(':scope > div').first().evaluate((node) => getComputedStyle(node).backgroundColor),
-    'rgba(0, 0, 0, 0)',
-    'sticky-note action should apply a background',
-  );
-  await openNodeMenu(page, firstTextNode);
+  await page.waitForFunction((id) => {
+    const el = document.querySelector(`.react-flow__node[data-id="${id}"] > div`);
+    return el && getComputedStyle(el).backgroundColor !== 'rgba(0, 0, 0, 0)';
+  }, stickyId).catch(() => {
+    throw new assert.AssertionError({ message: 'sticky-note action should apply a background' });
+  });
+  await openNodeMenu(page, stickyNode);
   await page.locator('.context-menu-enter').getByText('Lock Node', { exact: true }).click();
-  await openNodeMenu(page, firstTextNode);
+  await openNodeMenu(page, stickyNode);
   assert.ok(
     await page.locator('.context-menu-enter').getByText('Delete', { exact: true }).isDisabled(),
     'locked nodes should disable deletion',
@@ -180,6 +200,10 @@ try {
   await page.locator('.react-flow__node-group').dblclick();
   const backToParent = page.locator('button[title="Back to parent canvas"]');
   await backToParent.waitFor();
+  // The back button mounts at the dive animation's midpoint state swap, while
+  // the fade-in is still running — and pane double-click is guarded by
+  // navigation.isAnimating. Wait for the transition overlay to unmount.
+  await page.locator('.canvas-transition-overlay').waitFor({ state: 'detached' });
   await page.locator('.react-flow__pane').dblclick({ position: { x: 500, y: 260 } });
   assert.equal(await nodeCount(page, 'text'), 1, 'double-click should create text inside nested canvas');
   const nestedTextEditor = page.locator('.react-flow__node-text [contenteditable="true"]');
@@ -187,6 +211,7 @@ try {
   await nestedTextEditor.press('Escape');
   await backToParent.click();
   await backToParent.waitFor({ state: 'hidden' });
+  await page.locator('.canvas-transition-overlay').waitFor({ state: 'detached' });
   assert.equal(await nodeCount(page, 'group'), 1, 'returning to parent should preserve nested canvas');
 
   // Tool state, option menus, settings, and sidebar panels.
@@ -202,11 +227,11 @@ try {
   await page.mouse.down();
   await page.mouse.move(paneBox.x + 500, paneBox.y + 550, { steps: 5 });
   await page.mouse.up();
-  assert.ok(await drawingPolylines.count() > drawingCountBefore, 'pen drag should create a drawing');
+  await waitForCount(drawingPolylines, (n) => n > drawingCountBefore, 'pen drag should create a drawing');
   await clickToolbar(page, 'Undo');
-  assert.equal(await drawingPolylines.count(), drawingCountBefore, 'undo should remove the drawing');
+  await waitForCount(drawingPolylines, (n) => n === drawingCountBefore, 'undo should remove the drawing');
   await clickToolbar(page, 'Redo');
-  assert.ok(await drawingPolylines.count() > drawingCountBefore, 'redo should restore the drawing');
+  await waitForCount(drawingPolylines, (n) => n > drawingCountBefore, 'redo should restore the drawing');
   await page.getByText('Pen Tool', { exact: true }).evaluate((node) => {
     node.closest('.relative')?.querySelector('button')?.dispatchEvent(
       new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }),
@@ -237,13 +262,32 @@ try {
   );
   assert.equal(await nodeCount(page, 'jobhub'), 1, 'dragging Job Search module should create a hub');
 
-  await page.locator('button[title="Sell"]').click();
-  await expectVisible(page, 'Marketplace Module');
-  await page.getByText('Marketplace Module', { exact: true }).locator('..').dragTo(
+  await page.getByText('Job Board Module', { exact: true }).locator('..').dragTo(
     page.locator('.react-flow__pane'),
-    { targetPosition: { x: 800, y: 420 } },
+    { targetPosition: { x: 120, y: 150 } },
+  );
+  assert.equal(await nodeCount(page, 'jobboard'), 1, 'dragging Job Board module should create a board');
+
+  await page.locator('button[title="Sell"]').click();
+  await expectVisible(page, 'Price Check Module');
+  // (380, 600) is clear of the jobhub just dropped at (700, 300) — hubs are
+  // 280×350, so the old (800, 420) target landed ON the jobhub and the module
+  // drop was (correctly) rejected rather than spawning a sellhub. The bottom-
+  // right corner is out too: the minimap panel obscures it from hit-testing.
+  await page.getByText('Price Check Module', { exact: true }).locator('..').dragTo(
+    page.locator('.react-flow__pane'),
+    { targetPosition: { x: 380, y: 600 } },
   );
   assert.equal(await nodeCount(page, 'sellhub'), 1, 'dragging Marketplace module should create a hub');
+
+  await page.getByText('Marketplace Status Module', { exact: true }).locator('..').dragTo(
+    page.locator('.react-flow__pane'),
+    { targetPosition: { x: 850, y: 80 } },
+  );
+  assert.equal(
+    await nodeCount(page, 'marketplacestatus'), 1,
+    'dragging Marketplace Status module should create a monitor',
+  );
 
   await page.locator('button[title="Stats"]').click();
   await expectVisible(page, 'Dashboard');

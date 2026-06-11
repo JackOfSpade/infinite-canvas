@@ -138,11 +138,17 @@ export function useDrawingMode({
     }
     if (activeTool === 'pen' && currentStrokeRef.current?.length > 1) {
       takeSnapshot();
-      setDrawings(prev => [...prev, { 
+      // Capture the points BEFORE dispatching: the updater runs whenever React
+      // processes the queue, which can be AFTER the ref is nulled below (React's
+      // eager-state fast path usually runs it synchronously, but any pending
+      // update on the fiber — e.g. right after a nested-canvas navigation —
+      // defers it to render time and the stroke would commit as points:null).
+      const points = currentStrokeRef.current;
+      setDrawings(prev => [...prev, {
         id: generateId(),
-        points: currentStrokeRef.current, 
-        color: activeColor, 
-        penSize 
+        points,
+        color: activeColor,
+        penSize
       }]);
     }
     currentStrokeRef.current = null;

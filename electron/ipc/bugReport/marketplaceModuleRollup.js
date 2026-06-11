@@ -22,14 +22,7 @@
  * Pure (no electron / IO imports) so it's unit-testable in the plain-node runner.
  * Returns '' when the canvas has no marketplacestatus node with results.
  */
-function formatAge(ts) {
-  if (!ts) return 'never';
-  const s = Math.round((Date.now() - ts) / 1000);
-  if (s < 60) return `${s}s ago`;
-  const h = Math.floor(s / 3600);
-  const mn = Math.floor((s % 3600) / 60);
-  return h ? `${h}h${mn}m ago` : `${mn}m ago`;
-}
+import { formatAge } from './helpers.js';
 
 export function buildMarketplaceModuleRollup(nodes) {
   // Collect every marketplacestatus node's platformStatus, recursing into

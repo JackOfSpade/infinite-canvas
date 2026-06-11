@@ -11,7 +11,7 @@ export const JobsTab = React.memo(function JobsTab({ handleModuleDragStart }) {
         icon={<Briefcase size={22} className="text-blue-400/50" />}
         moduleName="Job Search Module"
         instructions="Drag to canvas, then drop career files"
-        subInstructions="Or drop your career files directly on the canvas — a hub will be created automatically"
+        subInstructions="Files dropped straight on the canvas just become document nodes — drop them onto the module after placing it"
         hoverBorderClass="hover:border-blue-500/30"
         hoverBgClass="hover:bg-blue-500/5"
         handleModuleDragStart={handleModuleDragStart}

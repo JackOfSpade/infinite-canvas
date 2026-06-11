@@ -10,17 +10,10 @@
  * Own electron-store file ('scrape-verification'), mirroring scrapeBudget.js. The
  * ordering/EMA math lives in src/utils/scrapeOrder.js (pure + unit-tested).
  */
-import Store from 'electron-store';
 import { foldVerificationSample, orderByVerification, verificationScore } from '../../src/utils/scrapeOrder.js';
+import { lazyStore } from '../utils/lazyStore.js';
 
-// Lazy-init — new Store() needs app.whenReady() (see scrapeBudget.js).
-let _store = null;
-function getStore() { return _store ??= new Store({ name: 'scrape-verification' }); }
-function tryGetStore() { try { return getStore(); } catch { return null; } }
-const store = {
-  get: (...args) => tryGetStore()?.get(...args),
-  set: (...args) => tryGetStore()?.set(...args),
-};
+const store = lazyStore('scrape-verification');
 
 function allStats() { return store.get('verification') || {}; }
 

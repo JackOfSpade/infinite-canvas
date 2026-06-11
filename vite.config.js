@@ -57,6 +57,10 @@ export default defineConfig({
                 // jsdom uses __dirname-relative readFileSync for browser/default-stylesheet.css;
                 // bundling it corrupts that path to dist-electron/ instead of node_modules/jsdom/.
                 'jsdom',
+                // pdf-lib's tslib helpers break under CJS bundling ("Cannot
+                // destructure '__extends'" at main.cjs load) — resolve it from
+                // node_modules at runtime like the other externals.
+                'pdf-lib',
               ],
             }
           },

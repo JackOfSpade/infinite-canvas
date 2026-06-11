@@ -11,7 +11,7 @@ export const SellTab = React.memo(function SellTab({ handleModuleDragStart }) {
         icon={<Camera size={22} className="text-emerald-400/50" />}
         moduleName="Price Check Module"
         instructions="Drag to canvas, then drop photos"
-        subInstructions="Or drop product photos directly on the canvas"
+        subInstructions="Photos dropped straight on the canvas just become picture nodes — drop them onto the module after placing it"
         footerText="AI generates listing + researches price"
         hoverBorderClass="hover:border-emerald-500/30"
         hoverBgClass="hover:bg-emerald-500/5"

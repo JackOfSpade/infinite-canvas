@@ -10,6 +10,7 @@ export default defineConfig([
     'electron/extractors/_archive',
     'release',                            // electron-builder output (gitignored) — never lint built app copies
     'resume_design_system/build/vendor',  // third-party (pdf-lib.min.js)
+    'resume_design_system/_ds_bundle.js', // generated dual-mode bundle (see its @ds-bundle header) — not app-consumed, never hand-edited
   ]),
   {
     files: ['**/*.{js,jsx}'],

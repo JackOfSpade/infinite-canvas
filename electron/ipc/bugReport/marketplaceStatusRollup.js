@@ -16,15 +16,9 @@
  * Pure (no electron / IO imports) so it's unit-testable in the plain-node runner.
  * Returns '' when the canvas has no marketplace cards.
  */
-const STATES = ['live', 'sold', 'ended', 'needs-login', 'unknown', 'error'];
+import { formatAge } from './helpers.js';
 
-function formatAge(ts) {
-  if (!ts) return 'never';
-  const s = Math.round((Date.now() - ts) / 1000);
-  const h = Math.floor(s / 3600);
-  const mn = Math.floor((s % 3600) / 60);
-  return h ? `${h}h${mn}m ago` : `${mn}m ago`;
-}
+const STATES = ['live', 'sold', 'ended', 'needs-login', 'unknown', 'error'];
 
 export function buildMarketplaceStatusRollup(nodes) {
   const cards = [];

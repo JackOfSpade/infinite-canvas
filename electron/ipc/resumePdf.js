@@ -22,7 +22,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
-import { createRequire } from 'module';
+import * as PDFLib from 'pdf-lib';
 import electronPkg from 'electron';
 import puppeteer from 'puppeteer-core';
 import { findChromePath } from './stealthBrowser.js';
@@ -36,19 +36,24 @@ const { app } = electronPkg;
 // default drifts. Keep in sync with `--bg` in colors_and_type.css.
 const CREAM = '#F7F4ED';
 
-// Lazily load the design system's OCG post-processor. It's a CJS/UMD module that
-// require()s its vendored pdf-lib relative to itself, so it MUST be loaded via a
-// CommonJS require (not import()) — under a "type":"module" tree, import() would
-// mis-parse it as ESM and `module.exports`/`require` would be undefined.
+// Lazily load the design system's OCG post-processor (a UMD file that does
+// `require('pdf-lib')` in its Node branch). Don't require() the file directly:
+// in dev the repo root's "type":"module" makes Node parse the .js as ESM (the
+// UMD wrapper then mis-detects browser mode and crashes), and in a packaged app
+// the extraResources copy can't resolve `pdf-lib` from inside the asar. Instead
+// evaluate the source with an injected CJS scope and hand it OUR bundled pdf-lib.
 let _addOcgBackground = null;
 function loadAddOcgBackground() {
   if (_addOcgBackground) return _addOcgBackground;
-  // __filename is a CJS global in the Rollup electron bundle (see main.js); the
-  // process.cwd() fallback only matters outside the bundle (never in prod).
-  const base = (typeof __filename !== 'undefined') ? __filename : path.join(process.cwd(), 'index.cjs');
-  const requireCjs = createRequire(base);
-  const mod = requireCjs(path.join(getDesignSystemDir(), 'build', 'dual-mode-pdf.js'));
-  _addOcgBackground = mod.addOcgBackground || (mod.default && mod.default.addOcgBackground);
+  const srcPath = path.join(getDesignSystemDir(), 'build', 'dual-mode-pdf.js');
+  const src = fs.readFileSync(srcPath, 'utf8');
+  const mod = { exports: {} };
+  new Function('module', 'exports', 'require', src)(mod, mod.exports, (id) => {
+    if (id === 'pdf-lib') return PDFLib;
+    throw new Error(`dual-mode-pdf.js required unexpected module "${id}"`);
+  });
+  _addOcgBackground = mod.exports.addOcgBackground
+    || (mod.exports.default && mod.exports.default.addOcgBackground);
   if (typeof _addOcgBackground !== 'function') {
     throw new Error('dual-mode-pdf.js did not export addOcgBackground');
   }

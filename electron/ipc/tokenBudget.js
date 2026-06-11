@@ -24,23 +24,9 @@
  * pulls p95 up and the budget self-heals on the next call; once roomy, samples
  * fall back to actual usage and it settles at actual_p95 × HEADROOM.
  */
-import Store from 'electron-store';
+import { lazyStore } from '../utils/lazyStore.js';
 
-// Lazy-initialized — new Store() calls app.getPath('userData') which requires
-// app.whenReady(). Module-level init runs before that, causing the v11 error.
-let _store = null;
-function getStore() { return _store ??= new Store({ name: 'token-budgets' }); }
-function tryGetStore() {
-  try {
-    return getStore();
-  } catch {
-    return null;
-  }
-}
-const store = {
-  get: (...args) => tryGetStore()?.get(...args),
-  set: (...args) => tryGetStore()?.set(...args),
-};
+const store = lazyStore('token-budgets');
 
 const WINDOW       = 30;     // rolling samples kept per task
 const MIN_SAMPLES  = 8;      // trust the learned cap only after this many
