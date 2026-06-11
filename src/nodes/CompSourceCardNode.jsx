@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { Loader2, CheckCircle2, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
 import { SourceWarningPanel } from './_shared/SourceWarningPanel';
 import { mergeSourceProgress } from '../utils/sourceProgress';
+import { useIsMountedRef } from '../hooks/useIsMountedRef';
 
 /**
  * CompSourceCardNode — ephemeral card spawned by SellHubNode during price
@@ -17,7 +18,9 @@ import { mergeSourceProgress } from '../utils/sourceProgress';
  *   - Spawned with `data.hubId` pointing at the SellHub that owns this run.
  *   - Subscribes to `price-source-progress` events filtered by its sourceId
  *     so each card manages its own status/count independently.
- *   - Cleaned up by the hub when research completes (priced/error/cancel).
+ *   - Clean cards dismiss together ~10s after every card is terminal, via the
+ *     hub's `comp-source-dismiss-clean` event; blocked ones stay until acted on.
+ *   - Also reaped by the hub when research completes (priced/error/cancel).
  *
  * data shape:
  *   {
@@ -32,14 +35,16 @@ export function CompSourceCardNode({ id, data }) {
   // (none will arrive — the scrape isn't running on reload).
   const [progress, setProgress] = useState(data.persistedProgress || null);
   const [resolving, setResolving] = useState(false);
+  // How many sell-side browser ops are ahead of this card's Solve while it waits
+  // for the shared-browser lock (marketplaceBrowserLock). 0 = not waiting.
+  const [queuedAhead, setQueuedAhead] = useState(0);
   const [retrying, setRetrying] = useState(false);
   const { deleteElements, updateNodeData, getNode } = useReactFlow();
 
-  // The card can auto-dismiss (3s after a clean 'done') while a Solve/Retry IPC
+  // The card can be dismissed by the hub's grace timer while a Solve/Retry IPC
   // is still in flight; guard the finally setState so it doesn't run after
-  // unmount. Matches the isMountedRef pattern every sibling node/hook uses.
-  const isMountedRef = useRef(true);
-  useEffect(() => () => { isMountedRef.current = false; }, []);
+  // unmount.
+  const isMountedRef = useIsMountedRef();
 
   // Hub-cascading lock: when the owning SellHub is locked, Solve/Skip
   // become no-ops. Card stays visible and informational.
@@ -60,6 +65,24 @@ export function CompSourceCardNode({ id, data }) {
     return () => cleanup?.();
   }, [data.hubId, data.sourceId]);
 
+  // While this card's Solve is queued behind another sell-side browser op the
+  // backend emits queuedBehind>0 (then 0 once it acquires the shared browser).
+  // Reflect it on the button so a queued resolve reads "Queued…" instead of a
+  // misleading "Window open…" while no window has actually opened yet.
+  useEffect(() => {
+    if (!window.electronAPI?.onPriceQueueStatus) return;
+    const cleanup = window.electronAPI.onPriceQueueStatus((payload) => {
+      if (payload?.nodeId && payload.nodeId !== data.hubId) return;
+      // Only MY own resolve's queue position — a per-node event is broadcast to
+      // every card, so without the sourceId filter a sibling card queuing behind
+      // me would corrupt my "Window open…" into "Queued…". The hub scrape's
+      // emit carries no sourceId and is correctly ignored here (hub-level only).
+      if (payload?.sourceId !== data.sourceId) return;
+      setQueuedAhead(payload?.queuedBehind || 0);
+    });
+    return () => cleanup?.();
+  }, [data.hubId, data.sourceId]);
+
   // Mirror progress into node data ONLY on terminal states (done / error).
   // The sanitizer keeps comp-source cards only when persistedProgress carries
   // a warning or error, so writing intermediate 'searching' states is wasted
@@ -71,18 +94,23 @@ export function CompSourceCardNode({ id, data }) {
     updateNodeData(id, { persistedProgress: progress });
   }, [progress, id, updateNodeData]);
 
-  // Auto-dismiss clean-success cards a few seconds after they report done so
-  // the canvas isn't littered with green checkmarks while the user is
-  // deciding what to do about the blocked ones. Errored/warned cards stick
-  // around indefinitely so the user can act on them.
+  // The owning SellHub coordinates clean-card dismissal: all comp-source cards
+  // stay visible as a set during the price check, then the clean ones dismiss
+  // TOGETHER ~10s after EVERY card has reached a terminal state (the hub fires
+  // `comp-source-dismiss-clean`). Purely visual — synthesis already ran — so the
+  // user gets a steady "all sources done" FYI instead of cards popping away one
+  // by one. Errored/warned cards ignore the event and stay actionable. Mirrors
+  // JobSourceCardNode + Job Search Module's job-source-dismiss-clean.
   useEffect(() => {
-    const isCleanDone = progress?.status === 'done' && !progress.warning;
-    if (!isCleanDone) return;
-    const timeout = setTimeout(() => {
+    const onDismiss = (event) => {
+      if (event.detail?.hubId !== data.hubId) return;
+      const isCleanTerminal = progress?.status === 'done' && !progress.warning;
+      if (!isCleanTerminal) return;
       deleteElements({ nodes: [{ id }] });
-    }, 3000);
-    return () => clearTimeout(timeout);
-  }, [progress?.status, progress?.warning, id, deleteElements]);
+    };
+    document.addEventListener('comp-source-dismiss-clean', onDismiss);
+    return () => document.removeEventListener('comp-source-dismiss-clean', onDismiss);
+  }, [data.hubId, progress?.status, progress?.warning, id, deleteElements]);
 
   // Open the original scrape URL in a visible browser sharing our scrape
   // userDataDir. The window auto-closes when the challenge is gone (cookies
@@ -92,6 +120,7 @@ export function CompSourceCardNode({ id, data }) {
   // to fire immediately while it's still valid.
   const handleResolveCaptcha = async () => {
     if (resolving || hubLocked || !progress?.url || !window.electronAPI?.resolveCaptcha) return;
+    setQueuedAhead(0);
     setResolving(true);
     try {
       const result = await window.electronAPI.resolveCaptcha({
@@ -121,7 +150,7 @@ export function CompSourceCardNode({ id, data }) {
         }));
       }
     } finally {
-      if (isMountedRef.current) setResolving(false);
+      if (isMountedRef.current) { setResolving(false); setQueuedAhead(0); }
     }
   };
 
@@ -236,7 +265,7 @@ export function CompSourceCardNode({ id, data }) {
               title={hubLocked ? 'Hub is locked' : 'Open the failed page so you can solve the captcha — cookies will carry over to the next refresh'}
             >
               <ExternalLink size={9} />
-              {resolving ? 'Window open…' : 'Solve'}
+              {resolving ? (queuedAhead > 0 ? `Queued behind ${queuedAhead}…` : 'Window open…') : 'Solve'}
             </button>
           )}
           <button

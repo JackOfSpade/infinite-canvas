@@ -15,11 +15,10 @@
  * doesn't, the field won't make it into the output.
  */
 
-// Marketplace condition tiers — used by the photo-analysis prompt's
-// condition dropdown AND the price-synthesis adjustment logic.
-const CONDITION_VALUES = [
-  'New', 'Like New', 'Used - Excellent', 'Used - Good', 'Used - Fair', 'For Parts',
-];
+// Marketplace condition tiers — the single source of truth (labels + the
+// human/AI-facing definitions) lives in src/utils/productConditions.js, shared
+// with the renderer dropdown and the photo-analysis / price-synthesis prompts.
+import { CONDITION_VALUES } from '../../src/utils/productConditions.js';
 
 // ── Vision: photo → product identification ──────────────────────────────────
 export const VISION_PRODUCT_ANALYSIS_SCHEMA = {
@@ -34,7 +33,7 @@ export const VISION_PRODUCT_ANALYSIS_SCHEMA = {
     notable_features:  { type: 'string', description: 'Accessories, damage, special features' },
     generated_title:   { type: 'string', description: 'Optimized selling title (~80 chars)' },
     generated_description: { type: 'string', description: 'Buyer-friendly description, 3-4 sentences' },
-    search_query:      { type: 'string', description: 'Marketplace-search-friendly query — brand + model + 1-2 price-driving specs, no condition keywords' },
+    search_query:      { type: 'string', description: 'Marketplace-search query for the SINGLE primary product — brand + model + 1-2 price-driving specs; no condition keywords, no bundle/lot/second-product terms' },
   },
 };
 
@@ -92,24 +91,50 @@ export const PRICE_SYNTHESIS_SCHEMA = {
 
 // ── Bundle pricing: combine independently-priced items into one asking price ──
 // A SellHub listing can package several independent items (kayak + paddle); each
-// is priced on its own from real comps, then THIS call decides the single
-// combined asking price. The point is that it is NOT just the arithmetic sum:
-// items that complement each other can be worth more together (a watering system
-// + a jug to hold the water), and a forced bundle can warrant a small discount —
-// so the model returns a synergy classification + reasoning alongside the price.
+// is priced on its own from real comps, then THIS call returns attributable
+// pricing factors. Code sums those factors and derives every dollar value,
+// relationship badge, and explanation from them.
 export const BUNDLE_PRICE_SCHEMA = {
   type: 'object',
-  required: ['quick_sell_price', 'bundle_price', 'max_profit_price', 'synergy', 'justification'],
+  required: ['bundle_factors', 'quick_sell_factors', 'max_profit_factors'],
   properties: {
-    quick_sell_price: { type: 'number', description: 'Whole-bundle price likely to sell in 1-3 days' },
-    bundle_price: { type: 'number', description: 'Recommended single asking price for the whole bundle' },
-    max_profit_price: { type: 'number', description: 'Highest reasonable whole-bundle price with 3-4 weeks of patience' },
-    synergy: {
-      type: 'string',
-      enum: ['premium', 'discount', 'neutral'],
-      description: 'premium = worth more together than the sum; discount = worth less; neutral ≈ the sum',
+    bundle_factors: {
+      type: 'array',
+      description: 'Attributable factors that change the bundle value versus the sum. Empty means neutral.',
+      items: {
+        type: 'object',
+        required: ['direction', 'percent', 'reason'],
+        properties: {
+          direction: { type: 'string', enum: ['premium', 'discount'], description: 'Whether this factor adds to or subtracts from separate value' },
+          percent: { type: 'number', description: 'Non-negative magnitude from 0 to 50' },
+          reason: { type: 'string', description: 'Specific reason this factor applies to these items; do not state dollar prices' },
+        },
+      },
     },
-    justification: { type: 'string', description: 'Bundle-only explanation of the adjustment versus separate value and the quick/best/max tradeoff' },
+    quick_sell_factors: {
+      type: 'array',
+      description: 'Attributable reductions from Best for a likely sale in 1-3 days. Empty means no reduction.',
+      items: {
+        type: 'object',
+        required: ['percent', 'reason'],
+        properties: {
+          percent: { type: 'number', description: 'Non-negative reduction from 0 to 75' },
+          reason: { type: 'string', description: 'Specific liquidity reason for this reduction; do not state dollar prices' },
+        },
+      },
+    },
+    max_profit_factors: {
+      type: 'array',
+      description: 'Attributable increases from Best for a patient 3-4 week sale. Empty means no increase.',
+      items: {
+        type: 'object',
+        required: ['percent', 'reason'],
+        properties: {
+          percent: { type: 'number', description: 'Non-negative increase from 0 to 100' },
+          reason: { type: 'string', description: 'Specific reason the market may support this increase; do not state dollar prices' },
+        },
+      },
+    },
   },
 };
 
@@ -194,6 +219,34 @@ export const PAGE_STATUS_MULTI_SCHEMA = {
               },
             },
           },
+        },
+      },
+    },
+  },
+};
+
+// ── Marketplace hub scan (Marketplace Status Module) ───────────────────────
+// NOT listing-specific. Fed the seller's aggregate hub page(s) for ONE platform
+// (dashboard / notifications / activity center) and asked to surface anything
+// actionable + useful FYI across ALL their listings at once. No per-listing
+// state — the platform-level read status (ok / needs-login / error) is derived
+// from transport, not the model; the model only produces the attention list.
+export const MARKETPLACE_HUB_SCAN_SCHEMA = {
+  type: 'object',
+  required: ['attention'],
+  properties: {
+    summary: { type: 'string', description: 'One short line summarizing the hub state, e.g. "2 offers, 1 buyer message, no policy issues"' },
+    attention: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['urgency', 'category', 'headline', 'evidence'],
+        properties: {
+          urgency:  { type: 'string', enum: ['high', 'low'] },
+          category: { type: 'string', enum: ['engagement', 'offer', 'question', 'policy', 'payout', 'pricing', 'time-sensitive', 'other'] },
+          headline: { type: 'string' },
+          evidence: { type: 'string' },
+          sourceUrl: { type: 'string', description: 'The exact url of the HUB PAGE this item was found on, copied verbatim from that page\'s header above — lets the seller jump straight to it.' },
         },
       },
     },

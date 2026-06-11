@@ -23,6 +23,7 @@ import { HubErrorBanner } from '../components/HubErrorBanner';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
 import { useEpochCancellation, isNodeDeletedAbort } from '../hooks/useEpochCancellation';
 import { useSourceProgress } from '../hooks/useSourceProgress';
+import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 
@@ -139,7 +140,7 @@ export function JobSearchNode({ id, data }) {
   // re-blocking them when the search result comes back with stale warnings.
   const resolvedDuringSearchRef = useRef(new Set());
   const resumeScoringRef = useRef(null);
-  const isMountedRef = useRef(true);
+  const isMountedRef = useIsMountedRef();
   const settingsDebounceTimerRef = useRef(null);
   const sourceDismissTimerRef = useRef(null);
   const epoch = useEpochCancellation();
@@ -148,7 +149,6 @@ export function JobSearchNode({ id, data }) {
   const [savedAnalysisLoading, setSavedAnalysisLoading] = useState(false);
   useEffect(() => {
     return () => {
-      isMountedRef.current = false;
       if (settingsDebounceTimerRef.current) {
         clearTimeout(settingsDebounceTimerRef.current);
       }
@@ -437,7 +437,7 @@ export function JobSearchNode({ id, data }) {
         pendingUSAJobsRefreshRef.current = false;
       }
     }
-  }, [id, data.maxAgeDays, data.preferredLocation, data.canonicalLocation, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas]);
+  }, [id, data.maxAgeDays, data.preferredLocation, data.canonicalLocation, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas, isMountedRef]);
 
   const handleJobsSettingsChange = useCallback(async () => {
     if (settingsDebounceTimerRef.current) {
@@ -1269,7 +1269,7 @@ export function JobSearchNode({ id, data }) {
         }
       }
     }
-  }, [id, updateGlobal, getNode, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, data.canonicalLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue]);
+  }, [id, updateGlobal, getNode, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, data.canonicalLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue, isMountedRef]);
 
   const startProcessing = useCallback((fileOrFiles, { frameSourceCards = true } = {}) => {
     const filePaths = Array.isArray(fileOrFiles) ? fileOrFiles : (fileOrFiles ? [fileOrFiles] : []);
@@ -1371,7 +1371,7 @@ export function JobSearchNode({ id, data }) {
         }
       }
     }
-  }, [id, data.resumeProfile, data.pendingTargetRole, data.targetRole, epoch, getNode, runScoringAndSpawn, updateGlobal, triggerUSAJobsBackgroundSearch, moduleRunQueue]);
+  }, [id, data.resumeProfile, data.pendingTargetRole, data.targetRole, epoch, getNode, runScoringAndSpawn, updateGlobal, triggerUSAJobsBackgroundSearch, moduleRunQueue, isMountedRef]);
 
   useEffect(() => {
     resumeScoringRef.current = resumeScoring;
@@ -1469,7 +1469,7 @@ export function JobSearchNode({ id, data }) {
       lease?.release();
       if (isMountedRef.current) processingRef.current = false;
     }
-  }, [canvasFilePath, resumeOffer, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue]);
+  }, [canvasFilePath, resumeOffer, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef]);
 
   const handleDiscardResume = useCallback(async () => {
     setResumeOffer(null);
@@ -1932,7 +1932,7 @@ export function JobSearchNode({ id, data }) {
     } finally {
       if (isMountedRef.current) setSavedAnalysisLoading(false);
     }
-  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.locked, deleteElements, epoch, getEdges, getNode, getNodes, hubState, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal]);
+  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.locked, deleteElements, epoch, getEdges, getNode, getNodes, hubState, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef]);
 
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[JobSearch][${id}] User clicked Dismiss Error`);

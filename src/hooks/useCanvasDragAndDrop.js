@@ -6,6 +6,7 @@ import { getNodeDims } from '../utils/constants';
 import { EventLogger } from '../utils/EventLogger';
 import { CODE_EXT_RE } from '../utils/fileExtensions';
 import { filesToDropPayloads } from '../utils/fileDropUtils';
+import { useIsMountedRef } from './useIsMountedRef';
 
 // Compiled once at module load — not per drop event.
 const URL_RE = /^(https?:\/\/[^\s]+|[a-z0-9]([a-z0-9-]*[a-z0-9])?\.([a-z]{2,}\.)*[a-z]{2,}([/?#][^\s]*)?)$/i;
@@ -21,10 +22,7 @@ export function useCanvasDragAndDrop({
   useEffect(() => {
     depthRef.current = depth;
   }, [depth]);
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    return () => { isMountedRef.current = false; };
-  }, []);
+  const isMountedRef = useIsMountedRef();
   const { screenToFlowPosition, getIntersectingNodes, updateNodeData, getNode } = useReactFlow();
   const hoveredGroupIdRef = useRef(null);
 
@@ -147,7 +145,7 @@ export function useCanvasDragAndDrop({
         insertNodes([newNode]);
       }
     }
-  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode, handleDragLeave, getNode, addElementsGlobally]);
+  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode, handleDragLeave, getNode, addElementsGlobally, isMountedRef]);
 
   return { handleDrop, handleDragOver, handleDragLeave };
 }

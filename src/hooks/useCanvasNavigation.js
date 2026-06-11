@@ -30,6 +30,7 @@ export function useCanvasNavigation({
   const drawingsRef = useRef(drawings);
   const stackRef = useRef(stack);
   const isNavigatingRef = useRef(false);
+  const stateSwapRef = useRef(false);
   const navTimersRef = useRef([]); // All pending navigation setTimeout IDs
   const navFramesRef = useRef([]); // All pending requestAnimationFrame IDs
   useEffect(() => {
@@ -106,6 +107,7 @@ export function useCanvasNavigation({
         viewport: reactFlow.getViewport(),
       };
 
+      stateSwapRef.current = true;
       setStack(s => [...s, parentState]);
       setNodes(canvasData.nodes || []);
       setEdges(canvasData.edges || []);
@@ -176,6 +178,7 @@ export function useCanvasNavigation({
       );
 
       const targetViewport = currentStack[targetIndex].viewport;
+      stateSwapRef.current = true;
       setStack(s => s.slice(0, targetIndex));
       setNodes(cn);
       setEdges(ce);
@@ -385,5 +388,6 @@ export function useCanvasNavigation({
     depth,
     isAnimating,
     animPhase,
+    stateSwapRef,
   };
 }

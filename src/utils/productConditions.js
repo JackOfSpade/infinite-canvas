@@ -1,0 +1,102 @@
+/**
+ * Single source of truth for the marketplace condition tiers.
+ *
+ * Shared by the renderer (the SellHub draft dropdown + tooltips) and the main
+ * process (the photo-analysis & price-synthesis AI prompts, and the response
+ * schema in aiSchemas.js). `electron/` already imports from `src/utils/`, so one
+ * definition here keeps the human and the pricing AI agreeing on what each tier
+ * means — previously the AI received only the bare label (e.g. "Used - Good")
+ * and had to guess what it encompassed.
+ *
+ * WHY THESE SIX, AND WHY NOT RENAME THEM:
+ * There is no single cross-platform condition standard — every marketplace
+ * invented its own scale. These six are deliberately the de-facto resale middle
+ * ground: they mirror Depop's grades almost exactly and map cleanly onto every
+ * connected platform (eBay folds the middle three into one "Used"; Mercari uses
+ * New/Like New/Good/Fair/Poor; Swappa New/Mint/Good/Fair; Reverb Brand New/Mint/
+ * Excellent/Very Good/Good/Fair/Poor/Non-Functioning). The `value` strings are
+ * persisted on saved canvases and fed to the AI verbatim — do NOT rename them
+ * without a node migration (see the migration framework).
+ *
+ * `platforms` records each tier's nearest native equivalent on the platforms we
+ * route to, so the AI (and the user) can reason about how our grade translates
+ * when listing. Sources: each platform's own seller/condition help pages.
+ */
+export const PRODUCT_CONDITIONS = [
+  {
+    value: 'New',
+    summary: 'Brand-new and unused, in original packaging.',
+    includes: 'Never used or owned; original box, tags, and seals intact; all original accessories present; unactivated/unregistered.',
+    excludes: 'Open-box, display or demo units, "tried once," refurbished, or anything used after unsealing.',
+    platforms: 'eBay New · Facebook New · Mercari New · Depop Brand new · Swappa New · Reverb Brand New · Poshmark NWT',
+  },
+  {
+    value: 'Like New',
+    summary: 'No visible signs of use — but, unlike "New," it MAY have been opened or used lightly. What disqualifies it is wear, not use.',
+    includes: 'Open-box / display units (opened but never used) AND items used a few times that left no marks; no scratches, scuffs, or blemishes anywhere; works flawlessly; original packaging/accessories ideally still included. Most platforms file this under "Used."',
+    excludes: 'A still-sealed, never-opened item (that is "New"); and any visible wear at all, even a single faint scratch (that is "Used - Excellent").',
+    platforms: 'eBay Open box · Facebook Used – Like New · Mercari Like New · Depop Used – like new · Swappa Mint · Reverb Mint',
+  },
+  {
+    value: 'Used - Excellent',
+    summary: 'Used and very well cared for; only the faintest wear, visible on close inspection.',
+    includes: 'Light use with great care; at most micro-scratches or hairline marks you have to look for; 100% functional; nothing missing.',
+    excludes: 'Noticeable scratches, dents, screen blemishes, or any functional issue (those are "Used - Good" or lower).',
+    platforms: 'eBay Used · Facebook Used – Like New/Good · Mercari Good · Depop Used – excellent · Swappa Good · Reverb Excellent',
+  },
+  {
+    value: 'Used - Good',
+    summary: 'Honest everyday-used condition — visible light wear, fully functional. The default for most used items.',
+    includes: 'Normal signs of use: light scratches, minor scuffs, small dings; works exactly as intended; all core parts present.',
+    excludes: 'Cracks, dents that affect use, missing core components, or any functional defect.',
+    platforms: 'eBay Used · Facebook Used – Good · Mercari Good · Depop Used – good · Swappa Good · Reverb Very Good/Good',
+  },
+  {
+    value: 'Used - Fair',
+    summary: 'Heavy cosmetic wear or minor quirks, but still works for its main purpose.',
+    includes: 'Significant wear — deep scratches, dents, scuffing, faded finish, a cracked-but-working screen; minor quirks that don\'t stop core use; everything essential still functions.',
+    excludes: 'Items that won\'t power on, are missing core functionality, or are sold for repair (those are "For Parts").',
+    platforms: 'eBay Used · Facebook Used – Fair · Mercari Fair · Depop Used – fair · Swappa Fair (must still be 100% functional) · Reverb Fair',
+  },
+  {
+    value: 'For Parts',
+    summary: 'Does not fully work — sold for components or repair.',
+    includes: 'Won\'t power on, a major defect, missing essential components, water damage, or a cracked non-working screen; the buyer expects it NOT to work as intended.',
+    excludes: 'Anything that powers on and performs its main function (that is "Used - Fair").',
+    platforms: 'eBay For parts or not working · Mercari Poor · Reverb Poor/Non-Functioning · (not allowed on Swappa; no Facebook/Depop equivalent — disclose clearly or skip those)',
+  },
+];
+
+/** Ordered tier labels — for the dropdown options and the schema enum. */
+export const CONDITION_VALUES = PRODUCT_CONDITIONS.map((c) => c.value);
+
+/** Sensible fallback when an item has no recognized condition yet. */
+export const DEFAULT_CONDITION = 'Used - Good';
+
+const CONDITION_BY_VALUE = new Map(PRODUCT_CONDITIONS.map((c) => [c.value, c]));
+
+/** Look up a tier's full definition, or null if the value isn't one of ours. */
+export function getConditionDef(value) {
+  return CONDITION_BY_VALUE.get(value) || null;
+}
+
+/**
+ * The full tier guide, for the photo-analysis prompt where the AI must PICK the
+ * right condition from photos. Lists every tier with what it includes/excludes.
+ */
+export function formatConditionGuideForPrompt() {
+  return PRODUCT_CONDITIONS
+    .map((c) => `- "${c.value}": ${c.summary} INCLUDES: ${c.includes} DOES NOT INCLUDE: ${c.excludes}`)
+    .join('\n');
+}
+
+/**
+ * One already-chosen tier's definition, for the price-synthesis prompt — so the
+ * model anchors its comp adjustments to the same meaning the seller intended,
+ * and knows the equivalent grade on each platform it scraped.
+ */
+export function formatConditionForPricingPrompt(value) {
+  const c = CONDITION_BY_VALUE.get(value);
+  if (!c) return value ? `${value} (no standard definition on file — interpret literally)` : 'Unknown';
+  return `${c.value} — ${c.summary}\n  Includes: ${c.includes}\n  Does not include: ${c.excludes}\n  Equivalent tiers on other platforms: ${c.platforms}`;
+}

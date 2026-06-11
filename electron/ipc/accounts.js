@@ -94,12 +94,18 @@ export async function verifySellMonitorLogin(platformId) {
         // as a bot.
         r = await fetchHtmlClean(target, { timeoutMs: config?.verifyTimeoutMs || SESSION_VERIFY_TIMEOUT_MS });
       } catch (e) {
+        // We never got a readable page (the fetch threw — e.g. a `page.content()
+        // timed out` anti-bot reload loop). That is NOT proof of logout, so mark
+        // the verdict `inconclusive`: callers must keep the prior session status
+        // and not flip the pill / card to "needs login" off a transient failure.
         const trace = { target, error: e?.message || String(e) };
-        return { connected: false, reason: `Verification fetch failed: ${e?.message || String(e)}`, trace: { target, checks: [...traces, trace] } };
+        return { connected: false, inconclusive: true, reason: `Verification fetch failed: ${e?.message || String(e)}`, trace: { target, checks: [...traces, trace] } };
       }
       if (!r.ok) {
+        // Fetcher returned an error shape rather than a page — same transient,
+        // inconclusive class as the thrown case above (see comment there).
         const trace = { target, error: r.error };
-        return { connected: false, reason: `Verification fetch error: ${r.error}`, trace: { target, checks: [...traces, trace] } };
+        return { connected: false, inconclusive: true, reason: `Verification fetch error: ${r.error}`, trace: { target, checks: [...traces, trace] } };
       }
 
       const visibleText = stripTags(r.html || '');
@@ -172,6 +178,7 @@ export async function verifySellMonitorLogin(platformId) {
     logger.error(`[Accounts] verifySellMonitorLogin unexpected error for ${platformId}:`, e);
     return {
       connected: false,
+      inconclusive: true, // an unforeseen throw is not evidence of logout — keep prior status
       reason: `Unexpected verifier error: ${e?.message || String(e)}`,
       trace: { error: e?.message || String(e), stack: e?.stack?.slice(0, 600) },
     };
@@ -340,13 +347,20 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
       const closedRe = /target closed|session closed|connection closed|browser (?:has )?disconnected|protocol error/i;
       const browserKilled = !verdict.connected &&
         (closedRe.test(verdict.reason || '') || closedRe.test(verdict.trace?.error || ''));
-      if (browserKilled) {
-        logger.warn(`[Accounts] Startup verify ${platformId} interrupted by browser teardown — keeping prior status, not caching spurious not-connected`);
+      // An inconclusive verdict (the verify fetch timed out / errored before we
+      // could read the page — e.g. an anti-bot reload loop) is, like a browser
+      // teardown, NOT proof of logout. Keep the prior cached status instead of
+      // caching a spurious not-connected that flips the pill to "Log in" and the
+      // listing cards to needs-login.
+      const keepPrior = browserKilled || (!verdict.connected && verdict.inconclusive);
+      if (keepPrior) {
+        const cause = browserKilled ? 'interrupted by browser teardown' : 'verify inconclusive (transient fetch failure)';
+        logger.warn(`[Accounts] Startup verify ${platformId} ${cause} — keeping prior status, not caching spurious not-connected`);
       } else {
         await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace, verifyMs: ms });
       }
-      durations.push({ platformId, ms, connected: browserKilled ? (_statusCache[platformId]?.connected ?? false) : verdict.connected });
-      logger.info(`[Accounts] Startup verify ${platformId}: ${browserKilled ? 'interrupted (kept prior status)' : (verdict.connected ? 'connected' : 'not connected')} (${ms}ms)`);
+      durations.push({ platformId, ms, connected: keepPrior ? (_statusCache[platformId]?.connected ?? false) : verdict.connected });
+      logger.info(`[Accounts] Startup verify ${platformId}: ${keepPrior ? 'kept prior status' : (verdict.connected ? 'connected' : 'not connected')} (${ms}ms)`);
     } catch (e) {
       const ms = Date.now() - startedAt;
       durations.push({ platformId, ms, connected: false, error: e?.message || String(e) });
@@ -511,6 +525,16 @@ export function registerAccountsHandlers() {
         }
 
         const verdict = await verifySellMonitorLogin(platformId);
+        // An inconclusive verify (timed out / errored before reading the page)
+        // right after the window closed is NOT proof the login failed — caching
+        // not-connected here would bounce a just-logged-in user straight back to
+        // "Log in". Keep the prior cached status instead (same rule as startup
+        // verify) rather than overwriting a good session with a transient false.
+        if (!verdict.connected && verdict.inconclusive) {
+          const prior = _statusCache[platformId]?.connected ?? false;
+          logger.warn(`[Accounts] ${platformId} post-login verify inconclusive (${verdict.reason}) — keeping prior status (${prior ? 'connected' : 'not connected'})`);
+          return { ...(result || {}), connected: prior, reason: verdict.reason, inconclusive: true };
+        }
         await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
         if (!verdict.connected) {
           logger.info(`[Accounts] ${platformId} login window closed without successful login: ${verdict.reason}`);

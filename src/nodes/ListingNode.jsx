@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useEffect, useContext, useRef } from 'react';
+import React, { useCallback, useState, useEffect, useContext } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { PriceJustification } from '../components/PriceJustification';
@@ -10,6 +10,7 @@ import { NodeHandles } from './_shared/NodeHandles';
 import { SELL_PLATFORM_BY_ID } from '../utils/constants';
 import { useListingActions } from '../hooks/useListingActions';
 import { EventLogger } from '../utils/EventLogger';
+import { useIsMountedRef } from '../hooks/useIsMountedRef';
 
 const STATUS_STYLES = {
   draft: { border: 'border-dashed border-white/20', badge: 'bg-white/10 text-white/50', label: '📝 DRAFT' },
@@ -62,11 +63,7 @@ export function ListingNode({ id, data }) {
 
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
-  const isMountedRef = useRef(true);
-
-  useEffect(() => {
-    return () => { isMountedRef.current = false; };
-  }, []);
+  const isMountedRef = useIsMountedRef();
 
   // Listen for granular pricing progress (Scanning eBay, etc.)
   useEffect(() => {
@@ -123,7 +120,7 @@ export function ListingNode({ id, data }) {
       EventLogger.error(`[ListingNode][${id}] Price research failed:`, err);
       updateGlobal(id, { status: 'draft' });
     }
-  }, [id, updateGlobal, scrapePriceComps, synthesizePrice]);
+  }, [id, updateGlobal, scrapePriceComps, synthesizePrice, isMountedRef]);
 
   const handleListOnPlatforms = useCallback(async (e) => {
     e.stopPropagation();
@@ -143,7 +140,7 @@ export function ListingNode({ id, data }) {
       const platform = SELL_PLATFORM_BY_ID[platformId];
       if (platform?.postUrl) window.electronAPI?.openExternal?.(platform.postUrl);
     }
-  }, [selectedPlatforms]);
+  }, [selectedPlatforms, isMountedRef]);
 
 
 

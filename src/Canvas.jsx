@@ -22,6 +22,7 @@ import { JobSearchNode } from './nodes/JobSearchNode';
 import { JobBoardNode } from './nodes/JobBoardNode';
 import {SellHubNode} from './nodes/SellHubNode';
 import { MarketplaceCardNode } from './nodes/MarketplaceCardNode';
+import { MarketplaceStatusNode } from './nodes/MarketplaceStatusNode';
 import { CompSourceCardNode } from './nodes/CompSourceCardNode';
 import { JobSourceCardNode } from './nodes/JobSourceCardNode';
 import { JobGroupNode } from './nodes/JobGroupNode';
@@ -88,6 +89,7 @@ const nodeTypes = {
   jobboard: JobBoardNode,
   sellhub: SellHubNode,
   marketplacecard: MarketplaceCardNode,
+  marketplacestatus: MarketplaceStatusNode,
   compsourcecard: CompSourceCardNode,
   jobsourcecard: JobSourceCardNode,
   jobgroup: JobGroupNode,
@@ -284,6 +286,7 @@ export function Canvas() {
     nodes, edges, drawings, currentFile, setCurrentFile, hasUnsavedChanges, setHasUnsavedChanges,
     flushStack: navigation.flushStack,
     isAnimatingRef: isNavigationAnimatingRef,
+    navigationStateSwapRef: navigation.stateSwapRef,
     saveStateRef,
   });
 

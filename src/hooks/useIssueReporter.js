@@ -1,8 +1,9 @@
-import { useCallback, useRef, useEffect } from 'react';
+import { useCallback } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { applyBugReportCode } from '../utils/bugReportCodes';
 import { isJobNodeType, isSellNodeType } from '../utils/nodePresence';
+import { useIsMountedRef } from './useIsMountedRef';
 
 export function useIssueReporter({
   nodes,
@@ -19,10 +20,7 @@ export function useIssueReporter({
   addToast,
 }) {
   const { getViewport } = useReactFlow();
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    return () => { isMountedRef.current = false; };
-  }, []);
+  const isMountedRef = useIsMountedRef();
 
   const handleIssueSubmit = useCallback(async (description, filterCode, mode = 'file') => {
     if (!window.electronAPI) {
@@ -270,7 +268,7 @@ export function useIssueReporter({
     }
   }, [
     nodes, edges, drawings, activeTool, placementMode, eraserType, settings, currentFile,
-    hasUnsavedChanges, navigationDepth, snapToGrid, addToast, getViewport
+    hasUnsavedChanges, navigationDepth, snapToGrid, addToast, getViewport, isMountedRef
   ]);
 
   return { handleIssueSubmit };

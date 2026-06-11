@@ -35,7 +35,8 @@ import {
 import { detectAntiBotSignal, matchesNoResultsSentinel } from '../electron/ipc/antiBotDetector.js';
 import { getStats } from '../src/utils/dashboardStats.js';
 import { resolveNodePresence } from '../src/utils/nodePresence.js';
-import { ALL_COMP_SOURCE_IDS, CANVAS_ZOOM_LIMITS, getNodesBounds, SELL_PLATFORMS } from '../src/utils/constants.js';
+import { ALL_COMP_SOURCE_IDS, CANVAS_ZOOM_LIMITS, getNodeDims, getNodesBounds, SELL_PLATFORMS } from '../src/utils/constants.js';
+import { listingUrlMatchesPlatform, isFacebookShareUrl } from '../src/utils/platformUrlMatch.js';
 import { mergeSourceIntoComps, retryWarningRequiringAction, updateResolvedSourceWarning } from '../src/utils/compsMerge.js';
 import { mergeResolvedSourceItems } from '../src/utils/jobSourceResolveMerge.js';
 import {
@@ -46,7 +47,8 @@ import {
   COL_X,
 } from '../src/nodes/jobsearch/buildJobTree.js';
 import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason } from '../src/nodes/jobboard/mergeJobs.js';
-import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, selectReverbPriceGuides, reverbTransactionsToComps, parsePriceChartingHtml, dicePostedBucket, extractJobPostingDescription } from '../electron/extractors/apiExtractors.js';
+import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, selectReverbPriceGuides, reverbTransactionsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription } from '../electron/extractors/apiExtractors.js';
+import { isPriceChartingApplicable } from '../src/utils/compSourceScope.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
 import {
   fingerprint,
@@ -82,8 +84,9 @@ import { modelMeta, contextWindowForModel, maxOutputForModel, estimateTokensFrom
 import { parseGeminiJSON } from '../electron/ipc/gemini.js';
 import { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
 import { withStatusCheckLock, getStatusCheckQueueDepth } from '../electron/ipc/statusCheckLock.js';
+import { withMarketplaceBrowserLock, getMarketplaceBrowserQueueDepth } from '../electron/ipc/marketplaceBrowserLock.js';
 import { createAggregatingProgress } from '../electron/ipc/compProgressAggregator.js';
-import { buildResearchItems, computeBundleTotal, selectBundleHeadline, selectListingPriceTiers, buildItemQuery } from '../src/utils/bundlePricing.js';
+import { buildFinalListingTitle, buildRefreshResearchItems, buildResearchItems, computeBundleTotal, selectBundleHeadline, selectListingPriceTiers, buildItemQuery, bundleSynergyForPrices, deriveBundlePricingResult, normalizeBundlePricingResult } from '../src/utils/bundlePricing.js';
 import {
   clearMissingPreviewRelinkCache,
   findExactFilenameBelow,
@@ -97,7 +100,7 @@ import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs,
 import { modelTag, overPricedSoldFlag } from '../electron/ipc/bugReport/helpers.js';
 import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
 import { checkListingStatusMultiSource, classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
-import { aggregateStrongest, classifyOneUrl, deterministicListingStatusFromText, goneListingResult } from '../electron/ipc/listingStatusCheck.js';
+import { aggregateStrongest, classifyOneUrl, deterministicListingStatusFromText, goneListingResult, resolveAttentionSourceUrls, annotateReadState, summarizeReadState, stripHtmlForAnalysis, stripReadStateTokens, READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN } from '../electron/ipc/listingStatusCheck.js';
 import { isAuthChallengeUrl, PLATFORM_AUTH_COOKIES, PLATFORM_LOGIN_URLS, unwrapInlineExtractorItems } from '../electron/ipc/browser/authWindows.js';
 import { PRICE_SYNTHESIS_SCHEMA } from '../electron/ipc/aiSchemas.js';
 import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation } from '../src/utils/jobLocation.js';
@@ -113,11 +116,17 @@ import { getMarketplaceStatusLabel } from '../src/components/monitorStatusLabels
 import { appendPhotoFiles, appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../src/utils/photoPathList.js';
 import { filesToDropPayloads, filesToProductImagePaths, getLocalFilePath, summarizeFileExtensions } from '../src/utils/fileDropUtils.js';
 import { cachedAuthNeedsLoginResult, statusErrorWrites, statusCheckWrites } from '../src/utils/listingStatusWrites.js';
+import { buildMarketplaceStatusRollup } from '../electron/ipc/bugReport/marketplaceStatusRollup.js';
+import { buildMarketplaceModuleRollup } from '../electron/ipc/bugReport/marketplaceModuleRollup.js';
 import { shouldUseNativeTextUndo } from '../src/utils/nativeTextUndo.js';
+import { matchesRedoShortcut } from '../src/utils/keyboardShortcuts.js';
 import { syncUncontrolledTextValue } from '../src/utils/uncontrolledTextValue.js';
 import { enqueueUniqueSourceResolve } from '../src/utils/sourceResolveQueue.js';
 import { getRequiredCompLoginPlatformIds } from '../src/utils/marketplaceLoginPreflight.js';
 import { createModuleRunQueue } from '../src/utils/moduleRunQueue.js';
+import { deleteChildrenByHubId } from '../src/nodes/_shared/hubChildCleanup.js';
+import { getConnectedHubCards } from '../src/utils/connectedHubCards.js';
+import { enqueueStatusCheckAction, getStatusCheckActionQueueDepth } from '../src/utils/statusCheckActionQueue.js';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -153,6 +162,157 @@ function runZeroResultFixtureTest({ name, file, extractor }) {
 }
 
 const tests = [
+  {
+    name: 'listingUrlMatchesPlatform: blocks cross-platform URLs, stays conservative on the unknowable',
+    run: () => {
+      // Clear match — incl. protocol-less (how listing URLs are stored) and www/subdomain.
+      assert(listingUrlMatchesPlatform('https://www.ebay.com/itm/123', 'ebay').ok, 'ebay itm URL matches ebay');
+      assert(listingUrlMatchesPlatform('www.ebay.com/itm/123', 'ebay').ok, 'protocol-less ebay URL matches');
+      assert(listingUrlMatchesPlatform('https://m.facebook.com/marketplace/item/1', 'facebook').ok, 'facebook subdomain matches');
+      assert(listingUrlMatchesPlatform('https://www.facebook.com/share/abc/', 'facebook').ok, 'facebook share URL matches');
+      // Clear mismatch — the bug the guard exists for (ebay link on a facebook card).
+      const m = listingUrlMatchesPlatform('https://www.ebay.com/itm/123', 'facebook');
+      assert(!m.ok, 'ebay URL on facebook card is a mismatch');
+      assert(m.expectedDomain === 'facebook.com' && m.actualHost === 'ebay.com', 'mismatch reports both hosts');
+      assert(!listingUrlMatchesPlatform('https://reverb.com/item/1', 'mercari').ok, 'reverb URL on mercari card is a mismatch');
+      // Conservative: never block when we can't be sure it's wrong.
+      assert(listingUrlMatchesPlatform('', 'ebay').ok, 'blank URL does not block');
+      assert(listingUrlMatchesPlatform('not a url', 'ebay').ok, 'unparseable URL does not block');
+      assert(listingUrlMatchesPlatform('https://www.ebay.com/itm/1', 'ebay-sold').ok, 'unknown platform id does not block');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'resolveAttentionSourceUrls: binds each item to a real hub page, never a wrong one',
+    run: () => {
+      const offers = 'https://www.ebay.com/sh/ord/?filter=offers';
+      const messages = 'https://www.ebay.com/mesgreq';
+      // Valid model hint against a multi-page scan → kept verbatim.
+      const a = resolveAttentionSourceUrls(
+        [{ headline: 'Offer on AirPods', sourceUrl: offers }, { headline: 'Buyer question', sourceUrl: messages }],
+        [offers, messages],
+      );
+      assert(a[0].sourceUrl === offers && a[1].sourceUrl === messages, 'valid hints kept verbatim');
+      // Single hub page → source is unambiguous; bad/missing hint is corrected to it.
+      const b = resolveAttentionSourceUrls(
+        [{ headline: 'x', sourceUrl: 'https://evil.example/phish' }, { headline: 'y' }],
+        [offers],
+      );
+      assert(b[0].sourceUrl === offers && b[1].sourceUrl === offers, 'single page resolves regardless of hint');
+      // Multiple pages + unresolvable hint → no button rather than a wrong page.
+      const c = resolveAttentionSourceUrls(
+        [{ headline: 'z', sourceUrl: 'https://made.up/page' }],
+        [offers, messages],
+      );
+      assert(!('sourceUrl' in c[0]), 'ambiguous multi-page hint drops sourceUrl (no misleading button)');
+      // No hub pages → nothing to link.
+      assert(!('sourceUrl' in resolveAttentionSourceUrls([{ headline: 'q', sourceUrl: offers }], [])[0]), 'no hub urls → no sourceUrl');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'annotateReadState: read/unread CSS markers survive stripping next to the message text',
+    run: () => {
+      // Verbatim read conversation card from the eBay messages inbox (the bug:
+      // an already-read message was flagged as action-needed because read-state
+      // lives only in `card__content-read` / `status-dot--hidden`, which the
+      // text strip erased).
+      const readCard = `<button id="msg-0-btn" data-testid="conversation-item__from-member"><span class="status-dot status-dot--hidden"></span><div class="card__content card__content__resized card__content-read"><p class="card__username sender"><span class="ux-textspans">lentn_978928864</span></p><div class="card__latest-message"><span class="ux-textspans">Thanks. If change price let me know that. Thanks</span></div><div class="card__datetime"><small>7h</small></div></div></button>`;
+      const stripped = stripHtmlForAnalysis(annotateReadState(readCard));
+      // The READ token must land BEFORE the message body so the model binds them.
+      assert(stripped.includes(READ_STATE_READ_TOKEN), 'read card gains a READ token');
+      assert(!stripped.includes(READ_STATE_UNREAD_TOKEN), 'read card has no UNREAD token');
+      assert(
+        stripped.indexOf(READ_STATE_READ_TOKEN) < stripped.indexOf('Thanks. If change price'),
+        'READ token precedes the message text it annotates',
+      );
+
+      // An unopened card → UNREAD token, no READ token.
+      const unreadCard = `<button data-testid="conversation-item__from-member"><span class="status-dot"></span><div class="card__content card__content-unread"><div class="card__latest-message">Is this still available?</div></div></button>`;
+      const strippedUnread = stripHtmlForAnalysis(annotateReadState(unreadCard));
+      assert(strippedUnread.includes(READ_STATE_UNREAD_TOKEN), 'unread card gains an UNREAD token');
+      assert(!strippedUnread.includes(READ_STATE_READ_TOKEN), 'unread card has no READ token');
+
+      // Pages with no read-state classes are untouched (no spurious markers).
+      const plain = `<div class="dashboard"><p>2 active listings, no offers.</p></div>`;
+      const strippedPlain = stripHtmlForAnalysis(annotateReadState(plain));
+      assert(!strippedPlain.includes(READ_STATE_READ_TOKEN) && !strippedPlain.includes(READ_STATE_UNREAD_TOKEN), 'plain page gets no markers');
+      assert(annotateReadState('') === '' && annotateReadState(null) === null, 'empty input is passed through');
+
+      // Belt-and-suspenders: if the model leaks a sentinel into evidence, it is
+      // scrubbed so it never reaches the UI card or the bug report.
+      const leaked = stripReadStateTokens(`${READ_STATE_READ_TOKEN} Thanks. If change price ${READ_STATE_UNREAD_TOKEN} let me know`);
+      assert(!leaked.includes(READ_STATE_READ_TOKEN) && !leaked.includes(READ_STATE_UNREAD_TOKEN), 'sentinels scrubbed from leaked evidence');
+      assert(leaked.trim() === 'Thanks. If change price let me know', 'scrub collapses the gap it leaves behind');
+      // A token jammed between two words must not merge them.
+      assert(stripReadStateTokens(`Thanks${READ_STATE_READ_TOKEN}more`).trim() === 'Thanks more', 'token replaced by a space, not nothing');
+      // No-op fast path: a token-free string (the shared per-listing path) is
+      // returned byte-for-byte, preserving any internal whitespace.
+      assert(stripReadStateTokens('a  b\nc') === 'a  b\nc', 'token-free input is untouched (no whitespace collapse)');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'buildMarketplaceModuleRollup: surfaces flagged-item evidence + read/unread signal',
+    run: () => {
+      const nodes = [{
+        id: 'mod-1',
+        type: 'marketplacestatus',
+        data: { platformStatus: {
+          ebay: {
+            status: 'ok',
+            // Summary carries a literal pipe (a quoted buyer offer "$50 | OBO")
+            // that must be escaped so it doesn't break the markdown table row.
+            summary: 'Buyer offered $50 | OBO on the microphone',
+            attention: [{ urgency: 'high', category: 'question', headline: 'Buyer message about price', evidence: 'Thanks. If change price let me know that. Thanks' }],
+            sources: [{ status: 'ok' }],
+            readState: { read: 4, unread: 1 },
+            lastChecked: new Date().toISOString(),
+          },
+        } },
+      }];
+      const md = buildMarketplaceModuleRollup(nodes);
+      assert(md.includes('Flagged items'), 'renders a flagged-items detail section');
+      assert(md.includes('Thanks. If change price'), 'includes the verbatim evidence the model quoted');
+      assert(md.includes('Buyer message about price'), 'includes the item headline');
+      assert(/\b4r\/1u\b/.test(md), 'read/unread column shows 4r/1u');
+      assert(md.includes('read-state'), 'notes that read-state was detected');
+      assert(md.includes('$50 \\| OBO'), 'literal pipe in summary is escaped so the table row keeps its 7 cells');
+      // No marketplacestatus node → empty (unchanged behavior).
+      assert(buildMarketplaceModuleRollup([{ id: 'x', type: 'sellhub', data: {} }]) === '', 'no module node → empty string');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'summarizeReadState: counts conversations once each, keyed off the content class',
+    run: () => {
+      const html = `<div class="card__content card__content-read"></div><div class="card__content card__content-read"></div><div class="card__content card__content-unread"></div><span class="status-dot status-dot--hidden"></span>`;
+      const s = summarizeReadState(html);
+      // status-dot--hidden must NOT inflate the read count (it would double-count
+      // a read card, which already carries card__content-read).
+      assert(s.read === 2, `2 read conversations counted (got ${s.read})`);
+      assert(s.unread === 1, `1 unread conversation counted (got ${s.unread})`);
+      const empty = summarizeReadState('');
+      assert(empty.read === 0 && empty.unread === 0, 'empty html → zero counts');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'isFacebookShareUrl: flags /share/<hash> links, not canonical item URLs',
+    run: () => {
+      // The weak-anchor shape this nudge exists for — incl. protocol-less + subdomain.
+      assert(isFacebookShareUrl('https://www.facebook.com/share/1FnDGdqNK1/'), 'share link flagged');
+      assert(isFacebookShareUrl('www.facebook.com/share/1FnDGdqNK1/'), 'protocol-less share link flagged');
+      assert(isFacebookShareUrl('https://m.facebook.com/share/abc'), 'subdomain share link flagged (no trailing slash)');
+      // Canonical listing URLs and everything else must NOT be flagged.
+      assert(!isFacebookShareUrl('https://www.facebook.com/marketplace/item/27086638057612157'), 'canonical item URL not flagged');
+      assert(!isFacebookShareUrl('https://www.ebay.com/itm/123'), 'non-facebook URL not flagged');
+      assert(!isFacebookShareUrl('https://www.facebook.com/share/'), 'empty share hash not flagged');
+      assert(!isFacebookShareUrl(''), 'blank not flagged');
+      assert(!isFacebookShareUrl('not a url'), 'unparseable not flagged');
+      return { ok: true };
+    },
+  },
   {
     name: 'tokenWindow: per-model context windows + max output (verified registry)',
     run: () => {
@@ -581,6 +741,54 @@ const tests = [
     },
   },
   {
+    name: 'SellHub price refresh cleanup preserves attached marketplace listing cards',
+    run: () => {
+      const nodes = [
+        { id: 'sellhub-1', type: 'sellhub', data: {} },
+        { id: 'comp-1', type: 'compsourcecard', data: { hubId: 'sellhub-1' } },
+        { id: 'ebay-1', type: 'marketplacecard', data: { hubId: 'sellhub-1', platformId: 'ebay' } },
+        { id: 'facebook-1', type: 'marketplacecard', data: { hubId: 'sellhub-1', platformId: 'facebook' } },
+        { id: 'other-card', type: 'marketplacecard', data: { hubId: 'sellhub-2', platformId: 'ebay' } },
+      ];
+      const edges = [
+        { id: 'edge-comp', source: 'sellhub-1', target: 'comp-1' },
+        { id: 'edge-ebay', source: 'sellhub-1', target: 'ebay-1' },
+        { id: 'edge-facebook', source: 'sellhub-1', target: 'facebook-1' },
+        { id: 'edge-other', source: 'sellhub-2', target: 'other-card' },
+        { id: 'edge-cross-hub', source: 'sellhub-1', target: 'other-card' },
+      ];
+      let deletion = null;
+
+      deleteChildrenByHubId({
+        getNodes: () => nodes,
+        getEdges: () => edges,
+        deleteElements: (payload) => { deletion = payload; },
+        hubId: 'sellhub-1',
+        childTypes: ['compsourcecard'],
+      });
+
+      assert(deletion?.nodes?.map(n => n.id).join(',') === 'comp-1', 'refresh cleanup should delete only the ephemeral comp-source card');
+      assert(deletion?.edges?.map(e => e.id).join(',') === 'edge-comp', 'refresh cleanup should delete only the comp-source edge');
+      assert(!deletion.nodes.some(n => n.id === 'ebay-1' || n.id === 'facebook-1'), 'attached marketplace listing cards must survive refresh');
+      assert(!deletion.edges.some(e => e.id === 'edge-ebay' || e.id === 'edge-facebook'), 'marketplace listing-card edges must remain attached');
+
+      const deletedNodeIds = new Set(deletion.nodes.map(node => node.id));
+      const deletedEdgeIds = new Set(deletion.edges.map(edge => edge.id));
+      const remainingNodes = nodes.filter(node => !deletedNodeIds.has(node.id));
+      const remainingEdges = edges.filter(edge => !deletedEdgeIds.has(edge.id));
+      const checkAllCardIds = getConnectedHubCards({
+        nodes: remainingNodes,
+        edges: remainingEdges,
+        hubId: 'sellhub-1',
+        cardType: 'marketplacecard',
+      }).map(card => card.id);
+
+      assert(checkAllCardIds.join(',') === 'ebay-1,facebook-1',
+        `Check All after refresh must target the same attached marketplace cards only — got ${checkAllCardIds.join(',')}`);
+      return { preservedCards: checkAllCardIds };
+    },
+  },
+  {
     name: 'Undo fingerprints ignore marketplace status checks',
     run: () => {
       const base = {
@@ -760,6 +968,32 @@ const tests = [
       assert(shouldUseNativeTextUndo(doc.getElementById('marked')), 'marked empty input should keep native undo');
       assert(shouldUseNativeTextUndo(doc.getElementById('nested')), 'textarea under marked ancestor should keep native undo');
       assert(!shouldUseNativeTextUndo(doc.getElementById('checkbox')), 'checkbox is not a text undo target');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Redo shortcuts: Ctrl/Cmd+Y and Ctrl/Cmd+Shift+Z are unconditional aliases',
+    run: () => {
+      const keyEvent = (key, overrides = {}) => ({
+        key,
+        ctrlKey: false,
+        metaKey: false,
+        shiftKey: false,
+        altKey: false,
+        ...overrides,
+      });
+      const custom = {
+        undo: { meta: true, shift: false, alt: false, key: 'y' },
+        redo: { meta: true, shift: false, alt: false, key: 'r' },
+        redoAlt: { meta: true, shift: true, alt: false, key: 'r' },
+      };
+
+      assert(matchesRedoShortcut(keyEvent('y', { ctrlKey: true }), custom), 'Ctrl+Y should redo even after shortcuts are customized or conflict');
+      assert(matchesRedoShortcut(keyEvent('z', { ctrlKey: true, shiftKey: true }), custom), 'Ctrl+Shift+Z should redo even after shortcuts are customized');
+      assert(matchesRedoShortcut(keyEvent('Y', { metaKey: true }), custom), 'Cmd+Y should redo');
+      assert(matchesRedoShortcut(keyEvent('Z', { metaKey: true, shiftKey: true }), custom), 'Cmd+Shift+Z should redo');
+      assert(matchesRedoShortcut(keyEvent('r', { ctrlKey: true }), custom), 'custom redo bindings should remain supported');
+      assert(!matchesRedoShortcut(keyEvent('z', { ctrlKey: true }), custom), 'Ctrl+Z must remain undo, not redo');
       return { ok: true };
     },
   },
@@ -1786,29 +2020,44 @@ const tests = [
       // The gap this guards: a sub-selector (e.g. price) drifts for SOME cards,
       // so items.length stays > 0 (no SITE_CHANGED throw) but a chunk of the
       // page is silently dropped. yieldStats.{seen,noFields} makes that visible.
-      const listing = (slug, withPrice) =>
-        `<div data-et-name="listing"><a href="/listing/${slug}">` +
-        `<div class="tile-grid-redesign__title">iPhone XS</div>` +
-        (withPrice ? `<span class="tile-grid-redesign__price-current">$200</span>` : '') +
-        `</a></div>`;
-      // 2 complete cards + 1 with title+link but NO price → kept=2, noFields=1, seen=3.
+      const listing = (slug, opts = {}) => {
+        const { title = true, price = true, link = true } = opts;
+        const inner =
+          (title ? `<div class="tile-grid-redesign__title">iPhone XS</div>` : '') +
+          (price ? `<span class="tile-grid-redesign__price-current">$200</span>` : '');
+        return link
+          ? `<div data-et-name="listing"><a href="/listing/${slug}">${inner}</a></div>`
+          : `<div data-et-name="listing">${inner}</div>`;
+      };
+      // 2 complete cards + one missing EACH of price / title / link → kept=2,
+      // noFields=3, with the per-field attribution pinning WHICH selector dropped
+      // each (noPrice/noTitle/noLink). That breakdown is what lets a bug report tell
+      // a single drifted sub-selector apart from whole-card skeleton (all 3 spread).
       const html = '<html><head><title>Search</title></head><body>' +
-        listing('a', true) + listing('b', true) + listing('c', false) + '</body></html>';
+        listing('a') + listing('b') +
+        listing('c', { price: false }) +
+        listing('d', { title: false }) +
+        listing('e', { link: false }) + '</body></html>';
       const dom = new JSDOM(html, { url: 'https://poshmark.com/search?query=x&availability=sold_out', runScripts: 'outside-only' });
       const out = dom.window.eval(POSHMARK_SOLD_EXTRACTOR);
       assert(out && Array.isArray(out.items), 'poshmark extractor should return { items }');
       assert(out.items.length === 2, `expected 2 kept items, got ${out.items.length}`);
-      assert(out.yieldStats && out.yieldStats.seen === 3, `expected seen=3 (cards on page), got ${out.yieldStats?.seen}`);
-      assert(out.yieldStats.noFields === 1, `expected noFields=1 (the price-less card), got ${out.yieldStats?.noFields}`);
+      assert(out.yieldStats && out.yieldStats.seen === 5, `expected seen=5 (cards on page), got ${out.yieldStats?.seen}`);
+      assert(out.yieldStats.noFields === 3, `expected noFields=3, got ${out.yieldStats?.noFields}`);
+      assert(out.yieldStats.noPrice === 1, `expected noPrice=1 (the price-less card), got ${out.yieldStats?.noPrice}`);
+      assert(out.yieldStats.noTitle === 1, `expected noTitle=1 (the title-less card), got ${out.yieldStats?.noTitle}`);
+      assert(out.yieldStats.noLink === 1, `expected noLink=1 (the link-less card), got ${out.yieldStats?.noLink}`);
 
-      // A fully healthy page reports noFields=0 (denominator == kept) so the
-      // report stays quiet — only real drift produces a non-zero noFields.
+      // A fully healthy page reports noFields=0 AND every per-field counter 0 (so the
+      // report stays quiet) — only real drift produces a non-zero counter.
       const cleanDom = new JSDOM(
-        '<html><head><title>Search</title></head><body>' + listing('x', true) + listing('y', true) + '</body></html>',
+        '<html><head><title>Search</title></head><body>' + listing('x') + listing('y') + '</body></html>',
         { url: 'https://poshmark.com/search?query=x&availability=sold_out', runScripts: 'outside-only' });
       const clean = cleanDom.window.eval(POSHMARK_SOLD_EXTRACTOR);
       assert(clean.items.length === 2 && clean.yieldStats.seen === 2 && clean.yieldStats.noFields === 0,
         `clean page should read seen=2 noFields=0, got seen=${clean.yieldStats?.seen} noFields=${clean.yieldStats?.noFields}`);
+      assert(clean.yieldStats.noPrice === 0 && clean.yieldStats.noTitle === 0 && clean.yieldStats.noLink === 0,
+        `clean page should read all per-field counters 0, got ${JSON.stringify(clean.yieldStats)}`);
       return { ok: true, drift: out.yieldStats, clean: clean.yieldStats };
     },
   },
@@ -1921,6 +2170,61 @@ const tests = [
       assert(parsePriceChartingHtml('<html><body><table id="games_table"><tbody></tbody></table></body></html>').length === 0, 'empty table → 0 comps');
       assert(parsePriceChartingHtml('').length === 0, 'empty string → 0 comps');
       return { ok: true, prices: comps.map(c => c.price) };
+    },
+  },
+  {
+    name: 'filterPriceChartingByRelevance drops fuzzy whole-catalog junk, keeps genuine matches',
+    run: () => {
+      // The reported bug: PriceCharting fuzzy-matches a vacuum-formula query to
+      // dozens of unrelated games/comics/cards on single shared tokens. Each junk
+      // row shares ONE query token; a real match shares most. The filter keeps
+      // only rows clearing a token-overlap bar.
+      const vacuumQuery = 'BISSELL Multi-Surface Pet Formula Febreze Freshness Crosswave 80 oz';
+      const junk = [
+        { title: 'Formula One 99', price: 12, source: 'pricecharting' },          // shares "formula"
+        { title: 'Azur Lane: Crosswave', price: 24, source: 'pricecharting' },     // shares "crosswave"
+        { title: 'Wizard of Oz', price: 8, source: 'pricecharting' },              // shares "oz" → stopword, 0 hits
+        { title: 'Obnoxious Pet', price: 5, source: 'pricecharting' },             // shares "pet"
+        { title: 'Multi-Form Token', price: 3, source: 'pricecharting' },          // shares "multi"
+      ];
+      const keptJunk = filterPriceChartingByRelevance(junk, vacuumQuery);
+      assert(keptJunk.length === 0, `vacuum query must drop all fuzzy junk, kept ${keptJunk.length}: ${keptJunk.map(c => c.title).join(', ')}`);
+
+      // A genuine multi-token game match shares most of the query's tokens → kept;
+      // a different product sharing only one token → dropped.
+      const gameQuery = 'Sony PlayStation 5 Digital Edition';
+      const gameRows = [
+        { title: 'Playstation 5 Slim Digital Edition', price: 366, source: 'pricecharting' },  // 3 of 4 tokens → keep
+        { title: 'Playstation 4 Pro 1TB Console', price: 144, source: 'pricecharting' },        // 1 token → drop
+      ];
+      const keptGame = filterPriceChartingByRelevance(gameRows, gameQuery);
+      assert(keptGame.length === 1 && keptGame[0].title === 'Playstation 5 Slim Digital Edition',
+        `genuine match kept, wrong-product dropped → ${JSON.stringify(keptGame.map(c => c.title))}`);
+
+      // 1-token query keeps any title containing that token (broad-by-design).
+      assert(filterPriceChartingByRelevance([{ title: 'Tetris' }, { title: 'Halo' }], 'Tetris').length === 1, 'single-token query → exact-token match only');
+      // Empty/blank query → don't over-filter (nothing to score on).
+      assert(filterPriceChartingByRelevance([{ title: 'Anything' }], '   ').length === 1, 'blank query → unfiltered');
+      assert(filterPriceChartingByRelevance([], gameQuery).length === 0, 'empty list → empty');
+      return { ok: true, keptGame: keptGame.map(c => c.title) };
+    },
+  },
+  {
+    name: 'isPriceChartingApplicable gates by product category',
+    run: () => {
+      // In-catalog categories → run PriceCharting.
+      assert(isPriceChartingApplicable('Video Games > Nintendo Switch > Games') === true, 'video games → applicable');
+      assert(isPriceChartingApplicable('Toys & Hobbies > Trading Card Games > Pokémon') === true, 'TCG/Pokémon → applicable');
+      assert(isPriceChartingApplicable('Collectibles > Comics') === true, 'comics → applicable');
+      assert(isPriceChartingApplicable('Electronics > Video Game Consoles') === true, 'consoles → applicable');
+      // Off-catalog household goods → skip (the reported vacuum case).
+      assert(isPriceChartingApplicable('Home & Garden > Vacuums > Wet/Dry') === false, 'vacuum → not applicable');
+      assert(isPriceChartingApplicable('Appliances > Floor Care') === false, 'appliance → not applicable');
+      assert(isPriceChartingApplicable('Electronics > Headphones > Over-Ear') === false, 'headphones → not applicable');
+      // Unknown/blank → don't suppress (back-compat; relevance filter still guards).
+      assert(isPriceChartingApplicable('') === true, 'blank category → applicable (don\'t suppress)');
+      assert(isPriceChartingApplicable(undefined) === true, 'undefined category → applicable');
+      return { ok: true };
     },
   },
   {
@@ -2420,6 +2724,14 @@ const tests = [
       assert(getSoftLoginWallMatch(swappaLoggedIn, getSellMonitorConfig('swappa')) === null,
         'logged-in swappa trace should not false-positive as logged out');
 
+      const missingMonitorConfigs = SELL_PLATFORMS
+        .map(platform => platform.id)
+        .filter(platformId => !getSellMonitorConfig(platformId));
+      assert(missingMonitorConfigs.length === 0,
+        `every Settings marketplace login must have a sell-monitor auth config; missing ${missingMonitorConfigs.join(', ')}`);
+      assert(getSellMonitorConfig('depop')?.verifyUrl === 'https://www.depop.com/products/create/',
+        'Depop must use its auth-gated create-listing page so cached login survives Settings reopen');
+
       for (const id of ['ebay', 'poshmark', 'mercari', 'swappa']) {
         assert(!!getSellMonitorConfig(id)?.connectedFinalUrlMustContain, `${id} should have a final URL guard`);
       }
@@ -2484,8 +2796,8 @@ const tests = [
           blocked: 0, errored: 0, timedOut: 1, loginRequired: 0,
           bySource: {}, sourceWarnings: {},
           itemDetails: [
-            { index: 0, query: 'watering timer', sold: 20, active: 5, warnings: [] },
-            { index: 1, query: 'glass jug', sold: 10, active: 5, warnings: [{ sourceId: 'ebay-sold', code: 'scrape-timeout' }] },
+            { index: 0, query: 'watering timer', label: 'Watering Timer', sold: 20, active: 5, warnings: [] },
+            { index: 1, query: 'glass jug', label: 'Glass Jug', sold: 10, active: 5, warnings: [{ sourceId: 'ebay-sold', code: 'scrape-timeout' }] },
           ],
         },
         resolves: {
@@ -2503,18 +2815,123 @@ const tests = [
           { ts: now - 200, startedAt: now - 400, itemKey: 'primary', itemLabel: 'Watering Timer', soldFound: 0, activeFound: 0, soldUsed: 0, activeUsed: 0, recommendedPrice: null, matchQuality: 'none' },
           { ts: now - 100, startedAt: now - 190, itemKey: 'jug', itemLabel: 'Glass Jug', soldFound: 0, activeFound: 0, soldUsed: 0, activeUsed: 0, recommendedPrice: null, matchQuality: 'none' },
         ],
-        bundle: null,
+        bundle: {
+          ts: now - 80,
+          items: 2,
+          unpriced: 0,
+          sum: 40,
+          quickPrice: 38,
+          bundlePrice: 42,
+          maxPrice: 46,
+          synergy: 'premium',
+          adjustmentPercent: 5,
+          quickReductionPercent: 10,
+          maxIncreasePercent: 10,
+          bundleFactors: [{ direction: 'premium', percent: 8, reason: 'Complete ready-to-use system' }, { direction: 'discount', percent: 3, reason: 'Buyer must take both items' }],
+          quickFactors: [{ percent: 10, reason: 'Focused buyer pool' }],
+          maxFactors: [{ percent: 10, reason: 'Patient seller can wait for the right buyer' }],
+          factorCapsApplied: null,
+          rejectedFactors: null,
+        },
         fit: null,
       });
       try {
         const report = buildMarketplacePipelineSnapshot(new Set(['bundle-hub']), 7);
-        assert(report.includes('Item 1 q="watering timer"') && report.includes('Item 2 q="glass jug"'),
-          'bundle report names each item scrape');
+        assert(report.includes('Item 1 — "Watering Timer" · q="watering timer"') && report.includes('Item 2 — "Glass Jug" · q="glass jug"'),
+          'bundle report names each item scrape with its title');
+        assert(!report.includes('query term(s) absent from the title'),
+          'no drift flag when each query matches its item title');
         assert(report.includes('Price synthesis — Watering Timer') && report.includes('Price synthesis — Glass Jug'),
           'bundle report renders each item synthesis');
         assert(report.includes('arrived after AI pricing began'), 'late retry is explicitly marked as excluded from finalized pricing');
         assert(report.includes('1 retry warning(s) remained'),
           'retry warnings remain visible instead of being auto-accepted');
+        assert(report.includes('Bundle factors: +8% Complete ready-to-use system; -3% Buyer must take both items')
+            && report.includes('factor net=+5% vs sum'),
+          'FULL marketplace report preserves attributable bundle factors and their derived net');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'marketplace pipeline report: query↔title drift flag fires when an item is priced against a different product',
+    run: () => {
+      const telemetry = getMarketplaceTelemetry();
+      const saved = { ...telemetry };
+      const now = Date.now();
+      Object.assign(telemetry, {
+        nodeId: 'drift-hub', windowId: 3, analyze: null,
+        scrape: {
+          ts: now - 100, sources: 8, items: 3, sold: 6, active: 2, warnings: 0,
+          blocked: 0, errored: 0, timedOut: 0, loginRequired: 0, bySource: {}, sourceWarnings: {},
+          itemDetails: [
+            // The bug signature: the title is just the insert, but the query is a
+            // bundle-wide string that drags in a second product (Exotac titanLIGHT).
+            { index: 0, query: 'Zippo butane insert Exotac titanLIGHT lighter bundle', label: 'Zippo 65827 Butane Lighter Insert', sold: 3, active: 1, warnings: [] },
+            { index: 1, query: 'Zippo Butane Fuel 115ml', label: 'Zippo Butane Fuel, 115ml', sold: 2, active: 1, warnings: [] },
+            // NOT drift: a terse title + a legitimately broader query that only
+            // adds the brand + a spec token (256gb). Just one foreign WORD
+            // ("apple"); the alphanumeric spec is excluded → below the 2-word
+            // floor, so a normal item isn't mis-flagged.
+            { index: 2, query: 'Apple iPhone XS 256GB', label: 'iPhone XS', sold: 1, active: 0, warnings: [] },
+          ],
+        },
+        resolves: {}, synthesis: null, syntheses: [], bundle: null, fit: null,
+      });
+      try {
+        const report = buildMarketplacePipelineSnapshot(new Set(['drift-hub']), 3);
+        const item1Line = report.split('\n').find(l => l.includes('Item 1')) || '';
+        assert(/query term\(s\) absent from the title \([^)]*exotac[^)]*\)/i.test(item1Line),
+          `drifted item 1 is flagged with the offending tokens — got: ${item1Line}`);
+        const item2Line = report.split('\n').find(l => l.includes('Item 2')) || '';
+        assert(!/query term\(s\) absent from the title/.test(item2Line),
+          `the clean item 2 (query ⊆ title) is NOT flagged — got: ${item2Line}`);
+        const item3Line = report.split('\n').find(l => l.includes('Item 3')) || '';
+        assert(!/query term\(s\) absent from the title/.test(item3Line),
+          `terse title + broader query with a spec token is NOT mis-flagged — got: ${item3Line}`);
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'marketplace pipeline report: browser-contention flag explains task-failed from a concurrent captcha-resolve',
+    run: () => {
+      const telemetry = getMarketplaceTelemetry();
+      const saved = { ...telemetry };
+      const now = Date.now();
+      const baseScrape = {
+        ts: now - 100, sources: 8, items: 1, sold: 50, active: 0, warnings: 2,
+        blocked: 0, errored: 2, timedOut: 0, loginRequired: 0,
+        bySource: {}, sourceWarnings: {},
+      };
+      // With contention: a job-side captcha-resolve closed the shared browser
+      // mid-scrape and detached ebay-sold + poshmark → their task-failed results
+      // are internal contention, not anti-bot. The report must SAY so rather than
+      // leave the reader to correlate timestamps by hand (the FULL-report gap this
+      // whole change closes).
+      Object.assign(telemetry, {
+        nodeId: 'contention-hub', windowId: 4, analyze: null,
+        scrape: { ...baseScrape, browserContention: { handoffAt: now - 120, detachedSources: ['ebay-sold', 'poshmark'] } },
+        resolves: {}, synthesis: null, syntheses: [], bundle: null, fit: null,
+      });
+      try {
+        const report = buildMarketplacePipelineSnapshot(new Set(['contention-hub']), 4);
+        // Match the distinctive bolded flag (the scrape-error footnote also
+        // mentions "Browser contention" in prose, so a loose match would alias).
+        const flagLine = report.split('\n').find(l => l.includes('**Browser contention**')) || '';
+        assert(flagLine, 'contention run renders the bolded Browser contention flag line');
+        assert(/ebay-sold, poshmark/.test(flagLine), 'contention line names the detached sources');
+        assert(/INTERNAL contention/.test(flagLine) && /NOT anti-bot/i.test(flagLine),
+          'contention line states the failures are internal, not anti-bot');
+        // Control: no browserContention → no flag line (don't cry wolf on a
+        // genuine block).
+        telemetry.scrape = { ...baseScrape, browserContention: null };
+        const clean = buildMarketplacePipelineSnapshot(new Set(['contention-hub']), 4);
+        assert(!clean.includes('**Browser contention**'), 'no flag line when browserContention is null');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -2654,7 +3071,11 @@ const tests = [
       assert(/active or in-review/i.test(facebookCanonicalAmbiguous.message), `Facebook canonical 400 message should explain ambiguity -> ${facebookCanonicalAmbiguous.message}`);
       const shareAmbiguous = goneListingResult({ status: 400, url: 'https://www.facebook.com/share/1FpnZtE25M/', urlLabel: 'listing' });
       assert(shareAmbiguous?.status === 'unknown', `400 on Facebook share URL should be unknown, got ${shareAmbiguous?.status}`);
-      assert(/Facebook listing URL returned HTTP 400/i.test(shareAmbiguous.message), `share 400 message should explain ambiguity -> ${shareAmbiguous.message}`);
+      // The share message is SPECIALIZED (distinct from the canonical-item one):
+      // it names the share-link cause and the actionable fix (paste /marketplace/item/).
+      assert(/share link/i.test(shareAmbiguous.message), `share 400 message should name the share-link cause -> ${shareAmbiguous.message}`);
+      assert(/marketplace\/item/i.test(shareAmbiguous.message), `share 400 message should point at the canonical URL -> ${shareAmbiguous.message}`);
+      assert(shareAmbiguous.message !== facebookCanonicalAmbiguous.message, 'share message must differ from the canonical-item message');
       // 400 on a watch/dashboard URL is NOT a removal signal (could be a transient
       // dashboard hiccup) → no terminal verdict.
       assert(goneListingResult({ status: 400, url: 'https://www.facebook.com/marketplace/you/selling', urlLabel: 'platform watch' }) === null, '400 on a watch URL is not ended');
@@ -2785,9 +3206,59 @@ const tests = [
       assert(writes.lastCheckTrace?.sources?.length === 2, 'trace keeps per-URL rows');
       assert(writes.lastCheckTrace.sources[0].label === 'listing' && writes.lastCheckTrace.sources[0].status === 'unknown', 'trace row carries label + status');
       assert(writes.lastCheckTrace.sources[1].matched === false, 'trace row carries the identity-anchor match flag');
+      assert(!('reason' in writes.lastCheckTrace.sources[0]), 'non-error rows carry no reason (would bloat the trace + break ×N collapse)');
+      // An `error` row captures a bounded reason (the WHY behind a bare
+      // `listing=error`), with the `[label]` prefix stripped and capped at 80 chars.
+      const errRes = {
+        status: 'live', message: '[platform watch] live', attention: [], listingIdentifier: '236855247964',
+        sources: [
+          { url: 'https://www.ebay.com/itm/236855247964', urlLabel: 'listing', status: 'error', matched: null, message: '[listing] Fetch failed: net::ERR_CONNECTION_RESET navigating the eBay item page after anti-bot rate-limit' },
+          { url: 'https://www.ebay.com/sh/lst/active', urlLabel: 'platform watch', status: 'live', matched: true, message: '[platform watch] live in Active table' },
+        ],
+      };
+      const errWrites = statusCheckWrites(errRes, fields);
+      const errRow = errWrites.lastCheckTrace.sources[0];
+      assert(errRow.reason && errRow.reason.startsWith('Fetch failed:'), `error row captures the reason with [label] stripped -> ${errRow.reason}`);
+      assert(errRow.reason.length <= 80, `error reason is capped at 80 chars -> ${errRow.reason.length}`);
+      assert(!('reason' in errWrites.lastCheckTrace.sources[1]), 'the live watch row that saved the card carries no reason');
       // Back-compat: a caller without a trace field never gets one written.
       const noTrace = statusCheckWrites(res, { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked' });
       assert(!('lastCheckTrace' in noTrace), 'trace omitted when fields.trace is absent');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'marketplace status roll-up: flags listing-err→watch rescues + needs-login; empty canvas → no section',
+    run: () => {
+      const card = (platformId, status, listingStatus, lastChecked) => ({
+        type: 'marketplacecard',
+        data: {
+          platformId, status, lastChecked,
+          lastCheckTrace: { sources: [
+            { label: 'listing', status: listingStatus },
+            { label: 'platform watch', status: status === 'live' ? 'live' : 'unknown' },
+          ] },
+        },
+      });
+      const now = Date.now();
+      const nodes = [
+        card('ebay', 'live', 'error', new Date(now - 1000).toISOString()),   // rescued
+        card('ebay', 'live', 'error', new Date(now - 2000).toISOString()),   // rescued
+        card('ebay', 'live', 'live', new Date(now - 3000).toISOString()),    // clean direct check
+        card('mercari', 'needs-login', 'needs-login', new Date(now - 4000).toISOString()),
+        card('facebook', 'unknown', 'unknown', new Date(now - 5000).toISOString()),
+      ];
+      const md = buildMarketplaceStatusRollup(nodes);
+      assert(/## Marketplace Status Roll-up/.test(md), 'renders the roll-up section');
+      assert(/5 listing card\(s\) across 3 platform\(s\)/.test(md), `counts cards + platforms -> ${md.split('\n').find(l => l.includes('listing card'))}`);
+      assert(/2 card\(s\) had the \*\*listing-page check error, rescued by a platform-watch\*\* \(ebay ×2\)/.test(md), 'flags the eBay listing-err→watch rescues');
+      assert(/1 needs-login \(mercari ×1\)/.test(md), 'flags the needs-login card');
+      assert(/\| ebay \| 3 \| 3 \| 0 \| 0 \| 0 \| 0 \| 0 \| 2 \|/.test(md), `per-platform table: ebay 3 cards, 3 live, 2 rescued -> ${md.split('\n').find(l => l.startsWith('| ebay'))}`);
+      // A canvas with no marketplace cards emits nothing (no empty section).
+      assert(buildMarketplaceStatusRollup([{ type: 'jobcard', data: {} }]) === '', 'no marketplace cards → empty string');
+      // A fully-clean run says so.
+      const clean = buildMarketplaceStatusRollup([card('ebay', 'live', 'live', new Date().toISOString())]);
+      assert(/✅ No errored, rescued, or needs-login cards/.test(clean), 'clean run gets the all-clear line');
       return { ok: true };
     },
   },
@@ -2963,6 +3434,116 @@ const tests = [
       const errMsg = await withStatusCheckLock(async () => { throw new Error('boom'); }).catch(e => e.message);
       const recovered = await withStatusCheckLock(async () => 'recovered');
       assert(errMsg === 'boom' && recovered === 'recovered', 'queue survives a rejected critical section');
+
+      // Abort-at-turn-start: a queued check whose window/card was deleted before
+      // its turn should bail without running and without wedging the queue.
+      let ranAborted = false;
+      const abErr = await withStatusCheckLock(() => { ranAborted = true; return 'should-not-run'; }, { aborted: true }).catch(e => e.name);
+      assert(ranAborted === false, 'an already-aborted queued status check must not run its fn');
+      assert(abErr === 'AbortError', `aborted status check rejects with AbortError — got ${abErr}`);
+      const afterAbort = await withStatusCheckLock(async () => 'after-abort');
+      assert(afterAbort === 'after-abort', 'an aborted status check does not wedge the queue for the next caller');
+      return { ok: true, order: order.join(',') };
+    },
+  },
+  {
+    name: 'status-check action queue serializes Check All + Check buttons and dedupes rapid same-button clicks',
+    run: async () => {
+      const order = [];
+      let releaseA;
+      const aGate = new Promise(r => { releaseA = r; });
+      const before = getStatusCheckActionQueueDepth();
+
+      const a = enqueueStatusCheckAction('check-all:marketplacecard:hub-a', async () => {
+        order.push('A-card-1');
+        await aGate;
+        order.push('A-card-2');
+        return 'a';
+      });
+      const duplicateA = enqueueStatusCheckAction('check-all:marketplacecard:hub-a', async () => {
+        order.push('A-duplicate');
+      });
+      const c = enqueueStatusCheckAction('card:marketplace-card-c', async () => {
+        order.push('C-single-check');
+        return 'c';
+      });
+      const duplicateC = enqueueStatusCheckAction('card:marketplace-card-c', async () => {
+        order.push('C-duplicate');
+      });
+      const b = enqueueStatusCheckAction('check-all:marketplacecard:hub-b', async () => {
+        order.push('B-card-1');
+        order.push('B-card-2');
+        return 'b';
+      });
+      const d = enqueueStatusCheckAction('card:marketplace-card-d', async () => {
+        order.push('D-single-check');
+        return 'd';
+      });
+
+      assert(a.enqueued && !duplicateA.enqueued && c.enqueued && !duplicateC.enqueued && b.enqueued && d.enqueued,
+        'rapid duplicate Check All / Check clicks are deduped while different actions queue');
+      assert(c.queuedBehind === 1, `single Check queues behind the complete Check All batch — got ${c.queuedBehind}`);
+      assert(b.queuedBehind === 2 && d.queuedBehind === 3,
+        `alternating Check All / Check actions retain FIFO positions — got ${b.queuedBehind}, ${d.queuedBehind}`);
+      assert(getStatusCheckActionQueueDepth() === before + 4, 'queue depth counts unique actions only');
+      await new Promise(r => setTimeout(r, 0));
+      assert(order.join(',') === 'A-card-1', `single Check must not interleave with Check All — got [${order.join(',')}]`);
+
+      releaseA();
+      const [aResult, cResult, bResult, dResult] = await Promise.all([a.promise, c.promise, b.promise, d.promise]);
+      assert(aResult === 'a' && cResult === 'c' && bResult === 'b' && dResult === 'd', 'each action observes its own result');
+      assert(order.join(',') === 'A-card-1,A-card-2,C-single-check,B-card-1,B-card-2,D-single-check',
+        `alternating Check All / Check actions run FIFO without interleaving — got [${order.join(',')}]`);
+      assert(!order.includes('A-duplicate') && !order.includes('C-duplicate'), 'duplicate action bodies never run');
+      assert(getStatusCheckActionQueueDepth() === before, 'action queue depth returns to baseline');
+
+      const failed = enqueueStatusCheckAction('check-all:marketplacecard:hub-fail', async () => { throw new Error('boom'); });
+      const recovered = enqueueStatusCheckAction('card:marketplace-card-after-fail', async () => 'recovered');
+      const error = await failed.promise.catch(err => err.message);
+      assert(error === 'boom' && await recovered.promise === 'recovered', 'failed action does not wedge later buttons');
+      assert(getStatusCheckActionQueueDepth() === before, 'action queue drains after rejection path');
+      return { ok: true, order: order.join(',') };
+    },
+  },
+  {
+    name: 'marketplace browser lock serializes sell-side ops (FIFO, depth, rejection-safe, abort-at-turn-start)',
+    run: async () => {
+      // A price-check scrape and a captcha-resolve both drive the ONE shared
+      // stealth browser; they must not overlap or the resolve's browser-close
+      // detaches the scrape's in-flight pages ("Navigating frame was detached").
+      // Same FIFO contract as the status-check lock, PLUS: a queued op whose
+      // signal is already aborted must bail WITHOUT running fn (a cancelled price
+      // check behind a long captcha-resolve shouldn't waste a scrape) and must
+      // not wedge the queue for the next caller.
+      const order = [];
+      let releaseA;
+      const aGate = new Promise(r => { releaseA = r; });
+      const before = getMarketplaceBrowserQueueDepth();
+      const p1 = withMarketplaceBrowserLock(async () => { order.push('A-start'); await aGate; order.push('A-end'); return 'a'; });
+      const p2 = withMarketplaceBrowserLock(async () => { order.push('B-start'); return 'b'; });
+      assert(getMarketplaceBrowserQueueDepth() === before + 2, `depth counts both pending ops — got ${getMarketplaceBrowserQueueDepth()}`);
+      await new Promise(r => setTimeout(r, 0));
+      assert(order.join(',') === 'A-start', `B must not start until A settles — got [${order.join(',')}]`);
+      releaseA();
+      const [r1, r2] = await Promise.all([p1, p2]);
+      assert(r1 === 'a' && r2 === 'b', 'each caller observes its own fn result');
+      assert(order.join(',') === 'A-start,A-end,B-start', `B runs strictly after A — got [${order.join(',')}]`);
+      assert(getMarketplaceBrowserQueueDepth() === before, `depth returns to baseline once settled — got ${getMarketplaceBrowserQueueDepth()}`);
+
+      // A rejection must NOT wedge the queue.
+      const errMsg = await withMarketplaceBrowserLock(async () => { throw new Error('boom'); }).catch(e => e.message);
+      const recovered = await withMarketplaceBrowserLock(async () => 'recovered');
+      assert(errMsg === 'boom' && recovered === 'recovered', 'queue survives a rejected critical section');
+
+      // Abort-at-turn-start: an op whose signal is already aborted when it reaches
+      // the head bails (AbortError) WITHOUT running fn; the next op still runs.
+      let ranAborted = false;
+      const abErr = await withMarketplaceBrowserLock(() => { ranAborted = true; return 'should-not-run'; }, { aborted: true }).catch(e => e.name);
+      assert(ranAborted === false, 'an already-aborted queued op must not run its fn');
+      assert(abErr === 'AbortError', `aborted op rejects with AbortError — got ${abErr}`);
+      const afterAbort = await withMarketplaceBrowserLock(async () => 'after-abort');
+      assert(afterAbort === 'after-abort', 'an aborted op does not wedge the queue for the next caller');
+      assert(getMarketplaceBrowserQueueDepth() === before, `depth back to baseline after abort path — got ${getMarketplaceBrowserQueueDepth()}`);
       return { ok: true, order: order.join(',') };
     },
   },
@@ -3015,7 +3596,7 @@ const tests = [
     },
   },
   {
-    name: 'bundlePricing: buildResearchItems (full item shape) orders primary-first + drops empty + threads per-item notes; buildItemQuery strips Unknown; computeBundleTotal sums non-null',
+    name: 'bundlePricing: buildResearchItems (full item shape) orders primary-first + drops empty + threads per-item notes; buildItemQuery strips Unknown + dedups brand/model already in title; computeBundleTotal sums usable prices',
     run: () => {
       // buildItemQuery: explicit search_query/query win; else brand+model+title
       // with "Unknown"/blank tokens stripped (so a query never says "Unknown").
@@ -3023,6 +3604,19 @@ const tests = [
       assert(buildItemQuery({ brand: 'Diafield', model: 'Unknown', generated_title: 'Glass Jug' }) === 'Diafield Glass Jug',
         `"Unknown" model dropped — got "${buildItemQuery({ brand: 'Diafield', model: 'Unknown', generated_title: 'Glass Jug' })}"`);
       assert(buildItemQuery({ brand: '', model: '', generated_title: '' }) === '', 'empty item → empty query');
+      // Dedup: a brand/model the title already leads with isn't repeated (the
+      // "Zippo Zippo Butane Fuel" bug). Title-only when it fully covers them.
+      assert(buildItemQuery({ brand: 'Zippo', model: '', generated_title: 'Zippo Butane Fuel, 115ml' }) === 'Zippo Butane Fuel, 115ml',
+        `brand already in title not doubled — got "${buildItemQuery({ brand: 'Zippo', model: '', generated_title: 'Zippo Butane Fuel, 115ml' })}"`);
+      assert(buildItemQuery({ brand: 'Zippo', model: '65827', generated_title: 'Zippo 65827 Butane Lighter Insert' }) === 'Zippo 65827 Butane Lighter Insert',
+        'brand+model already in title → title only (no "Zippo 65827 Zippo 65827 …")');
+      // Brand/model NOT in the title are still prepended (a complete query).
+      assert(buildItemQuery({ brand: 'Sony', model: 'WH-1000XM4', generated_title: 'Noise Cancelling Headphones' }) === 'Sony WH-1000XM4 Noise Cancelling Headphones',
+        'brand+model absent from title are prepended');
+      // Word boundary: a brand that only appears as a substring ("Pro" inside
+      // "Professional") is NOT treated as already-present.
+      assert(buildItemQuery({ brand: 'Pro', model: '', generated_title: 'Professional Mixer' }) === 'Pro Professional Mixer',
+        'substring-only brand still prepended (word-boundary dedup)');
 
       const product = { search_query: 'Apple iPhone XS 256GB', generated_title: 'iPhone XS', condition: 'Used - Good' };
       const extras = [
@@ -3036,19 +3630,55 @@ const tests = [
       assert(items[0].key === 'primary' && items[0].query === 'Apple iPhone XS 256GB',
         `primary first, query from search_query — got ${JSON.stringify(items[0])}`);
       assert(items[0].pricingNotes === 'cracked back glass', `primary carries the hub-level notes — got ${JSON.stringify(items[0].pricingNotes)}`);
-      assert(items[1].query === 'Otterbox Otterbox Defender case' && items[1].condition === 'New',
-        `extra query from brand+title (Unknown model dropped) + keeps its own condition — got ${JSON.stringify(items[1])}`);
+      assert(items[1].query === 'Otterbox Defender case' && items[1].condition === 'New',
+        `extra query dedups the brand the title already leads with (Unknown model dropped) + keeps its own condition — got ${JSON.stringify(items[1])}`);
       assert(items[1].label === 'Otterbox Defender case', `extra label = its title — got ${JSON.stringify(items[1].label)}`);
       assert(items[1].pricingNotes === 'sealed in box', `extra carries its OWN notes (not the primary's) — got ${JSON.stringify(items[1].pricingNotes)}`);
       assert(items[2].condition === 'Used - Good', `extra without condition inherits the primary's — got ${items[2].condition}`);
       assert(items[2].pricingNotes === '', `extra without notes → empty string, not the primary's — got ${JSON.stringify(items[2].pricingNotes)}`);
 
+      const recoveredRefreshItems = buildRefreshResearchItems(product, [], [
+        { key: 'primary', label: 'iPhone XS', query: 'Apple iPhone XS 256GB', condition: 'Used - Good' },
+        { key: 'legacy-case', label: 'Otterbox Defender case', query: 'Otterbox Defender case', condition: 'New', pricingNotes: 'sealed' },
+      ], 'cracked back glass');
+      assert(recoveredRefreshItems.length === 2 && recoveredRefreshItems[1].query === 'Otterbox Defender case',
+        `Refresh Prices recovers legacy saved bundle items when extraItems are missing — got ${JSON.stringify(recoveredRefreshItems)}`);
+      const explicitRefreshItems = buildRefreshResearchItems(product, extras, [
+        { key: 'primary', query: 'stale primary' },
+        { key: 'stale-extra', query: 'stale extra' },
+      ], 'cracked back glass');
+      assert(explicitRefreshItems[1].key === 'a' && explicitRefreshItems[1].query === 'Otterbox Defender case',
+        'Refresh Prices prefers current editable extraItems over stale saved itemPricings');
+
+      assert(buildFinalListingTitle(product, null) === 'iPhone XS',
+        'single-item final title remains the primary item name');
+      assert(buildFinalListingTitle(product, [
+        { key: 'primary', label: 'iPhone XS', query: 'Apple iPhone XS 256GB' },
+        { key: 'case', label: 'Otterbox Defender case', query: 'Otterbox Defender case' },
+        { key: 'protector', label: 'screen protector', query: 'screen protector' },
+      ]) === 'iPhone XS + Otterbox Defender case + screen protector',
+      'bundle final title joins every individual item name in order');
+      assert(buildFinalListingTitle(product, [
+        { key: 'primary', label: 'iPhone XS' },
+        { key: 'legacy', query: 'legacy charger' },
+        { key: 'blank' },
+      ]) === 'iPhone XS + legacy charger + Item 3',
+      'bundle final title still represents legacy items whose saved labels are missing');
+
       assert(computeBundleTotal([
         { pricing: { recommended_price: 300 } },
         { pricing: { recommended_price: 25 } },
         { pricing: { recommended_price: null } }, // skipped
-      ]) === 325, 'bundle total sums non-null recommended prices');
+        { pricing: { recommended_price: 0 } },    // unusable price, skipped
+        { pricing: { recommended_price: -10 } },  // invalid price, skipped
+        { pricing: { recommended_price: 0.001 } }, // displays as $0.00, skipped
+      ]) === 325, 'bundle total sums positive recommended prices');
+      assert(computeBundleTotal([
+        { pricing: { recommended_price: 10.005 } },
+        { pricing: { recommended_price: 10.005 } },
+      ]) === 20.02, 'bundle total sums the same cent-rounded item prices shown to the user');
       assert(computeBundleTotal([{ pricing: { recommended_price: null } }]) === null, 'all-null bundle total → null (so UI can hide it)');
+      assert(computeBundleTotal([{ pricing: { recommended_price: 0.001 } }]) === null, 'sub-cent-only bundle total → null instead of visible $0');
       return { ok: true };
     },
   },
@@ -3073,6 +3703,166 @@ const tests = [
 
       // Both missing → null headline (UI shows "—").
       assert(selectBundleHeadline(null, null).headline === null, 'no data → null headline');
+      assert(selectBundleHeadline({ bundle_price: -10 }, 325).headline === 325,
+        'invalid non-positive bundle price falls back to the separate-item sum');
+      assert(selectBundleHeadline({ bundle_price: -10, synergy: 'discount' }, 325).synergy === null,
+        'invalid bundle result cannot leak a stale synergy label onto the fallback sum');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'bundlePricing: numeric relationship corrects contradictory synergy labels and explanations',
+    run: () => {
+      assert(bundleSynergyForPrices(49, 51.48) === 'discount', 'price below separate sum must be a discount');
+      assert(bundleSynergyForPrices(54, 51.48) === 'premium', 'price above separate sum must be a premium');
+      assert(bundleSynergyForPrices(51.48, 51.48) === 'neutral', 'price equal to separate sum must be neutral');
+
+      const contradictory = {
+        quick_sell_price: 44,
+        bundle_price: 49,
+        max_profit_price: 54,
+        synergy: 'premium',
+        justification: 'This bundle commands a premium over the individual sum.',
+      };
+      const corrected = normalizeBundlePricingResult(contradictory, 51.48, 3);
+      assert(corrected.synergy === 'discount', `contradictory premium corrected to discount — got ${corrected.synergy}`);
+      assert(corrected.justification.includes('$2.48') && corrected.justification.includes('below the $51.48'),
+        `corrected explanation states the actual delta — got ${corrected.justification}`);
+      assert(!corrected.justification.toLowerCase().includes('premium'),
+        `contradictory premium prose is discarded — got ${corrected.justification}`);
+      assert(corrected.justification.includes('$44') && corrected.justification.includes('$54'),
+        'corrected explanation retains the quick/max tradeoff');
+
+      const consistent = { ...contradictory, synergy: 'discount', justification: 'Purpose-built set offered below separate value.' };
+      assert(normalizeBundlePricingResult(consistent, 51.48, 3) === consistent,
+        'consistent model response is preserved unchanged');
+
+      const correctLabelBadProse = { ...contradictory, synergy: 'discount' };
+      const correctedProse = normalizeBundlePricingResult(correctLabelBadProse, 51.48, 3);
+      assert(correctedProse.synergy === 'discount' && !correctedProse.justification.toLowerCase().includes('premium'),
+        'contradictory explanation is corrected even when the categorical label was already right');
+
+      const factorDerived = deriveBundlePricingResult({
+        bundle_factors: [
+          { direction: 'premium', percent: 8, reason: 'Convenience supports a modest premium.' },
+          { direction: 'discount', percent: 13, reason: 'The forced bundle warrants a discount.' },
+        ],
+        quick_sell_factors: [],
+        max_profit_factors: [],
+      }, 100, 2);
+      assert(normalizeBundlePricingResult(factorDerived, 100, 2) === factorDerived,
+        'legacy prose correction preserves valid mixed factor explanations');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'bundlePricing: attributable AI factors deterministically derive synchronized bundle prices and explanation',
+    run: () => {
+      const result = deriveBundlePricingResult({
+        bundle_factors: [
+          { direction: 'premium', percent: 8, reason: 'The items form a complete ready-to-use system.' },
+          { direction: 'discount', percent: 13, reason: 'A buyer must take all three items in one purchase.' },
+        ],
+        quick_sell_factors: [{ percent: 10, reason: 'The complete set has a focused buyer pool.' }],
+        max_profit_factors: [{ percent: 10, reason: 'A patient seller can wait for a buyer seeking the complete set.' }],
+      }, 51.48, 3);
+
+      assert(result.bundle_price === 49 && result.quick_sell_price === 44 && result.max_profit_price === 54,
+        `structured factors derive expected whole-dollar tiers — got ${JSON.stringify(result)}`);
+      assert(result.synergy === 'discount' && result.bundle_adjustment_percent === -5,
+        `relationship and signed adjustment derive by summing factors — got ${JSON.stringify(result)}`);
+      assert(result.justification.includes('$2.48') && result.justification.includes('below the $51.48'),
+        `exact arithmetic explanation derives from the resulting price — got ${result.justification}`);
+      assert(result.justification.includes('+8%: The items form a complete ready-to-use system.')
+          && result.justification.includes('-13%: A buyer must take all three items in one purchase.')
+          && result.justification.includes('Net bundle adjustment: -5%'),
+        `every bundle factor and the resulting net are explicit — got ${result.justification}`);
+
+      const neutral = deriveBundlePricingResult({
+        bundle_factors: [
+          { direction: 'premium', percent: 8, reason: 'The items are convenient together.' },
+          { direction: 'discount', percent: 8, reason: 'A buyer must take the full set.' },
+        ],
+        quick_sell_factors: [],
+        max_profit_factors: [],
+      }, 51.48, 2);
+      assert(neutral.bundle_price === 51.48 && neutral.synergy === 'neutral' && neutral.bundle_adjustment_percent === 0,
+        `offsetting factors derive a neutral result and preserve the sum — got ${JSON.stringify(neutral)}`);
+
+      const malformed = deriveBundlePricingResult({
+        bundle_factors: [],
+        quick_sell_factors: [{ percent: 500, reason: 'Extremely narrow buyer pool.' }],
+        max_profit_factors: [{ percent: 500, reason: 'A patient seller may test demand.' }],
+      }, 8, 2);
+      assert(malformed.bundle_price === 8 && malformed.synergy === 'neutral',
+        `empty bundle factors preserve a neutral Best price — got ${JSON.stringify(malformed)}`);
+      assert(malformed.quick_sell_price === 2 && malformed.max_profit_price === 16,
+        `malformed tier percentages are bounded and low-value prices retain cents/scale — got ${JSON.stringify(malformed)}`);
+      assert(malformed.factor_caps_applied?.quick && malformed.factor_caps_applied?.max,
+        `applied factor caps are explicit — got ${JSON.stringify(malformed.factor_caps_applied)}`);
+
+      const tinyLowValueAdjustment = deriveBundlePricingResult({
+        bundle_factors: [{ direction: 'premium', percent: 0.01, reason: 'The paired items add slight convenience.' }],
+        quick_sell_factors: [],
+        max_profit_factors: [],
+      }, 8, 2);
+      assert(tinyLowValueAdjustment.bundle_price === 8.01,
+        `tiny low-value adjustments move one cent instead of a whole dollar — got ${JSON.stringify(tinyLowValueAdjustment)}`);
+
+      const tinyNormalValueAdjustment = deriveBundlePricingResult({
+        bundle_factors: [{ direction: 'premium', percent: 0.01, reason: 'The paired items add slight convenience.' }],
+        quick_sell_factors: [{ percent: 0.01, reason: 'A slight reduction improves liquidity.' }],
+        max_profit_factors: [{ percent: 0.01, reason: 'A slight increase tests patient demand.' }],
+      }, 10, 2);
+      assert(tinyNormalValueAdjustment.bundle_price === 10.01
+          && tinyNormalValueAdjustment.quick_sell_price === 10
+          && tinyNormalValueAdjustment.max_profit_price === 10.02,
+      `tiny factors move each tier by cents instead of becoming whole-dollar jumps or no-ops — got ${JSON.stringify(tinyNormalValueAdjustment)}`);
+
+      const invalidOnlyFactor = deriveBundlePricingResult({
+        bundle_factors: [{ direction: 'premium', percent: 20, reason: 'The bundle deserves a discount because buyers must take everything.' }],
+        quick_sell_factors: [],
+        max_profit_factors: [],
+      }, 100, 2);
+      assert(invalidOnlyFactor === null,
+        'a response containing only contradictory factors is rejected instead of silently becoming neutral');
+      const partiallyInvalidFactors = deriveBundlePricingResult({
+        bundle_factors: [
+          { direction: 'premium', percent: 20, reason: 'The items form a complete useful set.' },
+          { direction: 'discount', percent: 30, reason: 'This bundle commands a premium.' },
+        ],
+        quick_sell_factors: [],
+        max_profit_factors: [],
+      }, 100, 2);
+      assert(partiallyInvalidFactors === null,
+        'a partially invalid factor list is rejected instead of pricing from a biased valid subset');
+      const tooManyFactors = deriveBundlePricingResult({
+        bundle_factors: Array.from({ length: 9 }, (_, index) => ({
+          direction: index === 8 ? 'discount' : 'premium',
+          percent: index === 8 ? 40 : 5,
+          reason: index === 8 ? 'The buyer must take all items.' : `Convenience factor ${index + 1}.`,
+        })),
+        quick_sell_factors: [],
+        max_profit_factors: [],
+      }, 100, 2);
+      assert(tooManyFactors === null,
+        'an over-limit factor list is rejected instead of dropping factors that may reverse the net');
+      assert(deriveBundlePricingResult({
+        bundle_factors: [{ direction: 'discount', percent: 1, reason: 'Buyer must take both items.' }],
+        quick_sell_factors: [],
+        max_profit_factors: [],
+      }, 0.01, 2) === null,
+      'a factor response that would round the positive bundle price to zero is rejected');
+      assert(deriveBundlePricingResult({
+        bundle_factors: [],
+        quick_sell_factors: [{ percent: 75, reason: 'Extremely limited liquidity.' }],
+        max_profit_factors: [],
+      }, 0.01, 2) === null,
+      'a tier factor response that would round Quick to zero is rejected');
+      assert(deriveBundlePricingResult({ bundle_factors: [] }, 100, 2) === null,
+        'structurally incomplete factor response is rejected instead of silently becoming neutral');
+      assert(deriveBundlePricingResult({ bundle_factors: [], quick_sell_factors: [], max_profit_factors: [] }, 0, 2) === null,
+        'non-positive separate value cannot produce a fabricated bundle factor price');
       return { ok: true };
     },
   },
@@ -3105,9 +3895,23 @@ const tests = [
       assert(legacy.quick === 36 && legacy.best === 45 && legacy.max === 57,
         `legacy bundle result derives whole-listing tiers — got ${JSON.stringify(legacy)}`);
 
+      const malformedLegacy = selectListingPriceTiers({
+        pricing: itemPricings[0].pricing,
+        itemPricings,
+        bundleTotal: 41,
+        bundlePricing: { quick_sell_price: 1, bundle_price: -10, max_profit_price: 2 },
+      });
+      assert(malformedLegacy.quick === 33 && malformedLegacy.best === 41 && malformedLegacy.max === 52,
+        `invalid legacy Best rejects its stale explicit tiers and falls back consistently — got ${JSON.stringify(malformedLegacy)}`);
+
       const single = selectListingPriceTiers({ pricing: itemPricings[0].pricing });
       assert(single.isBundle === false && single.quick === 18 && single.best === 22 && single.max === 28,
         `single listing keeps its own tiers — got ${JSON.stringify(single)}`);
+      const invalidSingle = selectListingPriceTiers({
+        pricing: { quick_sell_price: -1, recommended_price: 0.001, max_profit_price: 0 },
+      });
+      assert(invalidSingle.quick === null && invalidSingle.best === null && invalidSingle.max === null,
+        `single listing rejects prices that cannot display as positive currency — got ${JSON.stringify(invalidSingle)}`);
       return { ok: true };
     },
   },
@@ -3251,6 +4055,25 @@ const tests = [
     },
   },
   {
+    name: 'getNodeDims: normalizes CSS pixel dimensions and rejects non-absolute values',
+    run: () => {
+      const cssPixels = getNodeDims({
+        type: 'group',
+        style: { width: '240px', height: '180' },
+      });
+      assert(cssPixels.w === 240 && cssPixels.h === 180, `pixel strings normalize to numbers (${JSON.stringify(cssPixels)})`);
+
+      const nonAbsolute = getNodeDims({
+        type: 'text',
+        width: Number.NaN,
+        measured: { width: 0, height: -1 },
+        style: { width: '100%', height: 'auto' },
+      });
+      assert(nonAbsolute.w === 180 && nonAbsolute.h === 36, `invalid dimensions fall back by type (${JSON.stringify(nonAbsolute)})`);
+      return { ok: true };
+    },
+  },
+  {
     name: 'strokePoints: normalizes object/array/garbage strokes',
     run: () => {
       const arr = [{ x: 1, y: 2 }];
@@ -3305,8 +4128,16 @@ const tests = [
         'no-challenge-confirmed empty retry clears the gate (no unclearable Solve loop)');
       assert(retryWarningRequiringAction(lowYield, [], { noChallengeConfirmed: true }) === null,
         'no-challenge-confirmed accepts the page even with a residual low-yield warning');
+      // A BLOCK-severity timeout (e.g. swappa-sold's readiness-loop timeout on a
+      // genuine 0-results page) ALSO clears under noChallengeConfirmed — this is
+      // what lets a multi-item bundle whose source is truly empty finish instead
+      // of stranding in error/retry-empty (the "swappa/ebay unable to finish" bug).
+      assert(retryWarningRequiringAction(hardBlock, [], { noChallengeConfirmed: true }) === null,
+        'no-challenge-confirmed clears even a block-severity empty (bundle truly-empty source can finish)');
       assert(retryWarningRequiringAction(lowYield, []) === lowYield,
         'WITHOUT the no-challenge proof, an empty low-yield retry still stays blocked');
+      assert(retryWarningRequiringAction(hardBlock, []) === hardBlock,
+        'WITHOUT the no-challenge proof, a block-severity empty retry still stays blocked');
       return { ok: true };
     },
   },
@@ -3396,8 +4227,15 @@ const tests = [
       assert(matchesNoResultsSentinel('0 results found'), '"0 results found" → empty');
       assert(matchesNoResultsSentinel('No listings found for this search'), '"no listings found" → empty');
       assert(matchesNoResultsSentinel('Your search did not match any documents.'), '"your search did not match any" → empty');
+      // eBay's genuine-empty SRP — the exact markup + innerText from the bug report.
+      // Previously missed: "0 results for" (no trailing found/match) and "No exact
+      // matches found" (word between no+matches) → Solve window held the full 30s.
+      const ebayEmptyHtml = '<h1 class="srp-controls__count-heading"><span class="BOLD">0</span> results for <span class="BOLD">iygiuygf</span></h1><div class="srp-save-null-search__title"><h3 class="srp-save-null-search__heading">No exact matches found</h3></div>';
+      assert(matchesNoResultsSentinel(ebayEmptyHtml), 'eBay "No exact matches found" null-search (HTML) → empty');
+      assert(matchesNoResultsSentinel('0 results for iygiuygf No exact matches found Save this search'), 'eBay empty innerText ("0 results for" + "No exact matches found") → empty');
       // ADVERSARIAL NEGATIVES — must NOT match (these would hide a real warning):
       assert(!matchesNoResultsSentinel('Showing 24 results for iPhone 14 Pro Max'), 'populated "Showing 24 results" → NOT empty');
+      assert(!matchesNoResultsSentinel('28,000+ results for iphone 13'), 'populated eBay "28,000+ results for" → NOT empty');
       assert(!matchesNoResultsSentinel('<div>Cart: no items in your cart yet</div>'), 'incidental "no items in your cart" (no qualifier) → NOT empty');
       // A Swappa model-PICKER page (tiles, no empty-state copy) → must NOT match,
       // so it still falls through to the zero-extracted heuristic.
@@ -3473,6 +4311,40 @@ const tests = [
       // (c) No yieldStats at all → unchanged legacy behavior (still flags).
       assert(detectAntiBotSignal({ ...base, itemsExtracted: 1 })?.code === 'zero-extracted',
         'no yieldStats → legacy zero-extracted preserved');
+      return { ok: true };
+    },
+  },
+  {
+    // Regression for "Cloudflare block mislabeled as stale-selectors": when the
+    // extractor throws SITE_CHANGED (0 cards), browserPool now DEFERS the throw and
+    // asks detectAntiBotSignal to look at the same page with itemsExtracted=null,
+    // then reroutes ONLY on a `block` verdict. This pins the two inputs that branch
+    // drives, exactly as seen in the UPWOIGH report:
+    //   • Mercari rescrape = Cloudflare "Just a moment…" (~4.5KB) → block
+    //     (cloudflare-challenge) → card shows Solve, domain backs off as a block.
+    //   • eBay = full ~1MB SRP, correct title, su-styled-text matched 0 → NOT a
+    //     block → browserPool re-throws SITE_CHANGED → stays stale-selectors (Retry).
+    name: 'detectAntiBotSignal: 0-card SITE_CHANGED page — Cloudflare → block, real drift → not-a-block',
+    run: () => {
+      // itemsExtracted=null is the exact value browserPool passes after a deferred
+      // SITE_CHANGED throw (extractorResult stays null), so contentServed=false and
+      // the Layer-3 keyword sniff runs — the whole point of deferring the throw.
+      const cf = detectAntiBotSignal({
+        html: '<html><head><title>Just a moment...</title></head><body>Just a moment... Checking your browser before accessing mercari.com. cf-browser-verification</body></html>',
+        itemsExtracted: null, expectedMinItems: 0, sourceLabel: 'mercari',
+        finalUrl: 'https://www.mercari.com/search/?keyword=x&status=sold_out',
+      });
+      assert(cf?.severity === 'block', `Cloudflare "Just a moment…" + 0-card throw → block (got ${JSON.stringify(cf)})`);
+      assert(cf?.code === 'cloudflare-challenge', `→ cloudflare-challenge specifically (got ${cf?.code})`);
+      // Full eBay SRP, 0 cards, NO challenge markers anywhere → must NOT be a block,
+      // so the reroute's `warning?.severity === 'block'` is false and the original
+      // SITE_CHANGED re-raises (genuine selector drift stays stale-selectors/Retry).
+      const drift = detectAntiBotSignal({
+        html: '<html><head><title>Upwoigh Water Container for sale | eBay</title></head><body>' + 'Shop by category. Save this search. Results matching fewer words. '.repeat(8000) + '</body></html>',
+        itemsExtracted: null, expectedMinItems: 0, sourceLabel: 'ebay-sold',
+        finalUrl: 'https://www.ebay.com/sch/i.html?_nkw=x&LH_Complete=1&LH_Sold=1',
+      });
+      assert(!drift || drift.severity !== 'block', `full eBay SRP with 0 cards must NOT be a block → re-throws as stale-selectors (got ${JSON.stringify(drift)})`);
       return { ok: true };
     },
   },

@@ -1,0 +1,27 @@
+<!doctype html>
+<!-- @dsCard group="Components" name="Component · Skills List" subtitle="Category label + dot-separated keywords — sans body; mono is reserved for inline code" viewport="700x280" -->
+<html lang="en"><head><meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<link rel="stylesheet" href="_card.css">
+<style>
+  /* Mirrors .skills in resume.css — keyword runs are the BODY family
+     (Inter), not mono: mono at 9pt has wider glyph advance and pushes
+     long categories to extra wraps. Mono is reserved for inline <code>
+     and the project-metrics line. */
+  dl.skills { display: grid; grid-template-columns: var(--col-meta-w) 1fr; column-gap: var(--col-gap); row-gap: var(--s-3); margin: 0; }
+  dl.skills dt { font-size: var(--fs-small); color: var(--ink-meta); font-weight: var(--fw-medium); letter-spacing: var(--tr-tight); }
+  dl.skills dd { margin: 0; font-family: var(--ff-body); font-size: var(--fs-small); color: var(--ink-body); line-height: var(--lh-snug); }
+  dl.skills dd .sep { color: var(--ink-fade); margin: 0 var(--sep-gap-tight); }
+</style>
+</head><body>
+<dl class="skills">
+  <dt>Languages</dt>
+  <dd>Go<span class="sep">·</span>Rust<span class="sep">·</span>Python<span class="sep">·</span>TypeScript<span class="sep">·</span>SQL</dd>
+  <dt>Distributed&nbsp;Systems</dt>
+  <dd>Raft<span class="sep">·</span>Paxos<span class="sep">·</span>CRDTs<span class="sep">·</span>consistent hashing<span class="sep">·</span>gossip</dd>
+  <dt>Data</dt>
+  <dd>Postgres<span class="sep">·</span>ClickHouse<span class="sep">·</span>FoundationDB<span class="sep">·</span>Kafka</dd>
+  <dt>Observability</dt>
+  <dd>OpenTelemetry<span class="sep">·</span>Prometheus<span class="sep">·</span>Honeycomb</dd>
+</dl>
+</body></html>

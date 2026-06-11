@@ -13,7 +13,7 @@
        fs.writeFileSync('resume.pdf', out);
 
      Browser (also Puppeteer / Playwright contexts):
-       <script src="build/vendor/pdf-lib.min.js"></script>
+       <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
        <script src="build/dual-mode-pdf.js"></script>
        <script>
          const out = await DualModePdf.addOcgBackground(bytes);
@@ -39,8 +39,8 @@
 
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    // Node — pdf-lib resolved from local vendor dir.
-    module.exports = factory(require('./vendor/pdf-lib.min.js'));
+    // Node — pdf-lib resolved from the npm package (`npm i pdf-lib@1.17.1`).
+    module.exports = factory(require('pdf-lib'));
   } else {
     // Browser / Puppeteer — pdf-lib must be loaded first as a
     // global. Export onto the host object as `DualModePdf`.
@@ -51,8 +51,8 @@
 
   if (!PDFLib) {
     throw new Error(
-      'dual-mode-pdf: PDFLib not found. Load build/vendor/pdf-lib.min.js ' +
-      'before this module, or require pdf-lib in Node.'
+      'dual-mode-pdf: PDFLib not found. Load pdf-lib 1.17.1 from CDN ' +
+      'before this module, or `require("pdf-lib")` in Node.'
     );
   }
 

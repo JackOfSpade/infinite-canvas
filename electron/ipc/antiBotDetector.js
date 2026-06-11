@@ -170,6 +170,13 @@ const NO_RESULTS_SENTINELS = [
   /\b(?:we )?(?:could ?n.?t|did(?: not|n.?t)) find any\b/i,
   // "Your search did not match any …".
   /your search (?:did not|did ?n.?t) match any/i,
+  // eBay's empty SRP: count heading "<b>0</b> results for <query>" + the dedicated
+  // null-search block "No exact matches found". Neither matched the generic patterns
+  // above — "0 results for" lacks a trailing found/match, and "no exact matches" puts
+  // a word between "no" and "matches". On innerText (the Solve-window path) both read
+  // contiguously; in raw HTML the null-search heading text is the reliable catch.
+  /\b0 results? for\b/i,
+  /\bno exact match(?:es)? found\b/i,
 ];
 
 /**

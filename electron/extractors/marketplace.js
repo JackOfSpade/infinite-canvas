@@ -214,8 +214,10 @@ export const EBAY_SOLD_EXTRACTOR = `
   // Per-card "looked like a listing but yielded no usable price/title" counter.
   // Surfaced as yieldStats.noFields so a PARTIAL sub-selector drift (some cards
   // silently dropped while items.length stays > 0) is visible in the bug report,
-  // not masked behind a healthy-looking raw count.
-  let __noFields = 0;
+  // not masked behind a healthy-looking raw count. noTitle/noPrice attribute each
+  // miss to the FIRST absent field so a partial drift is field-localized in the report
+  // (a drop concentrated in one field = that sub-selector moved).
+  let __noFields = 0, __noTitle = 0, __noPrice = 0;
 
   const cards = document.querySelectorAll('.srp-results li.s-card');
 
@@ -224,12 +226,12 @@ export const EBAY_SOLD_EXTRACTOR = `
       const titleEl = card.querySelector('span.su-styled-text.primary');
       const title = (titleEl?.innerText || titleEl?.textContent || '').trim();
       if (title === 'Shop on eBay') return;   // promo tile, not a real listing → benign
-      if (!title) { __noFields++; return; }
+      if (!title) { __noFields++; __noTitle++; return; }
 
       const priceEl = card.querySelector('.s-card__price');
       const priceText = (priceEl?.innerText || priceEl?.textContent || '').trim();
       const price = __money(priceText);
-      if (price === 0) { __noFields++; return; }
+      if (price === 0) { __noFields++; __noPrice++; return; }
 
       const dateEl = card.querySelector('span.su-styled-text.positive.default');
       const linkEl = card.querySelector('a.s-card__link');
@@ -247,19 +249,33 @@ export const EBAY_SOLD_EXTRACTOR = `
     } catch {}
   });
 
-  if (items.length === 0) throw new Error('SITE_CHANGED: ebay-sold su-styled-text extractor returned 0 — eBay design system may have changed' + __diag('cards=' + cards.length + ' titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length, cards[0]));
   // eBay's own "N result(s) for <query>" header. The anti-bot detector uses this
   // to tell a genuinely-thin query (eBay says "1 result", we got 1) apart from
   // selector drift (eBay says "50 results", we got 1) — so a 1-result page never
   // raises a false zero-extracted block + unclearable Solve. Leading int only
   // (the query itself can contain digits, e.g. "(1 gallon)"), so anchor on " result".
+  // Read BEFORE the empty-guard so a genuine 0-results page is told apart from drift.
   var __claimedTotal = null;
   try {
     var __ch = document.querySelector('.srp-controls__count-heading');
     var __m = __ch && (__ch.textContent || '').match(/([\\d,]+)\\s*\\+?\\s*results?\\b/i);
     if (__m) { var __n = parseInt(__m[1].replace(/,/g, ''), 10); if (isFinite(__n)) __claimedTotal = __n; }
   } catch (e) {}
-  return { items, yieldStats: { seen: cards.length, noFields: __noFields, claimedTotal: __claimedTotal } };
+  if (items.length === 0) {
+    // eBay itself reports 0 results (rare/obscure query, no exact matches) → a
+    // GENUINE empty, not a site change. Two independent signals, either decisive:
+    //   • count heading reads 0 ("<b>0</b> results for X"), OR
+    //   • eBay rendered its dedicated null-search block (.srp-save-null-search →
+    //     "No exact matches found") — robust when the count-heading regex misses.
+    // Return [] so the source records "0 comps" instead of a false stale-selectors
+    // error + unclearable Retry. Only when eBay claims results exist (or NEITHER
+    // signal is present) does 0 extracted = real drift.
+    if (__claimedTotal === 0 || document.querySelector('.srp-save-null-search')) {
+      return { items: [], yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: 0 } };
+    }
+    throw new Error('SITE_CHANGED: ebay-sold su-styled-text extractor returned 0 — eBay design system may have changed' + __diag('cards=' + cards.length + ' titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length, cards[0]));
+  }
+  return { items, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: __claimedTotal } };
 })()
 `;
 
@@ -270,7 +286,7 @@ export const EBAY_ACTIVE_EXTRACTOR = `
   const __diag = ${SITE_CHANGED_DIAG};
   const __money = ${MONEY_PARSE_FN};
   const items = [];
-  let __noFields = 0;   // cards that looked like a listing but had no usable price/title (see ebay-sold)
+  let __noFields = 0, __noTitle = 0, __noPrice = 0;   // field-miss total + per-field attribution (see ebay-sold)
 
   const cards = document.querySelectorAll('.srp-results li.s-card');
 
@@ -279,27 +295,35 @@ export const EBAY_ACTIVE_EXTRACTOR = `
       const titleEl = card.querySelector('span.su-styled-text.primary');
       const title = (titleEl?.innerText || titleEl?.textContent || '').trim();
       if (title === 'Shop on eBay') return;   // promo tile, not a real listing → benign
-      if (!title) { __noFields++; return; }
+      if (!title) { __noFields++; __noTitle++; return; }
 
       const priceEl = card.querySelector('.s-card__price');
       const priceText = (priceEl?.innerText || priceEl?.textContent || '').trim();
       const price = __money(priceText);
-      if (price === 0) { __noFields++; return; }
+      if (price === 0) { __noFields++; __noPrice++; return; }
 
       const linkEl = card.querySelector('a.s-card__link');
       items.push({ title, price, priceText, url: linkEl?.href || '', source: 'ebay-active' });
     } catch {}
   });
 
-  if (items.length === 0) throw new Error('SITE_CHANGED: ebay-active su-styled-text extractor returned 0 — eBay design system may have changed' + __diag('cards=' + cards.length + ' titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length, cards[0]));
-  // eBay's own "N result(s) for <query>" header — see EBAY_SOLD_EXTRACTOR.
+  // eBay's own "N result(s) for <query>" header — see EBAY_SOLD_EXTRACTOR. Read
+  // BEFORE the empty-guard so a genuine 0-results page is told apart from drift.
   var __claimedTotal = null;
   try {
     var __ch = document.querySelector('.srp-controls__count-heading');
     var __m = __ch && (__ch.textContent || '').match(/([\\d,]+)\\s*\\+?\\s*results?\\b/i);
     if (__m) { var __n = parseInt(__m[1].replace(/,/g, ''), 10); if (isFinite(__n)) __claimedTotal = __n; }
   } catch (e) {}
-  return { items, yieldStats: { seen: cards.length, noFields: __noFields, claimedTotal: __claimedTotal } };
+  if (items.length === 0) {
+    // eBay reports 0 results — count heading 0 OR the null-search block — → genuine
+    // empty, not a site change (see ebay-sold).
+    if (__claimedTotal === 0 || document.querySelector('.srp-save-null-search')) {
+      return { items: [], yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: 0 } };
+    }
+    throw new Error('SITE_CHANGED: ebay-active su-styled-text extractor returned 0 — eBay design system may have changed' + __diag('cards=' + cards.length + ' titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length, cards[0]));
+  }
+  return { items, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: __claimedTotal } };
 })()
 `;
 
@@ -315,7 +339,7 @@ export const POSHMARK_SOLD_EXTRACTOR = `
   const __diag = ${SITE_CHANGED_DIAG};
   const __money = ${MONEY_PARSE_FN};
   const items = [];
-  let __noFields = 0;   // sold cards present but missing title/price/link (partial drift signal)
+  let __noFields = 0, __noTitle = 0, __noPrice = 0, __noLink = 0;   // field-miss total + per-field attribution (partial drift signal)
   const cards = document.querySelectorAll('[data-et-name="listing"]');
   // The scrape URL is always availability=sold_out, so every result IS a sold
   // listing. Poshmark used to stamp each card with a per-card "Sold" status word
@@ -340,14 +364,18 @@ export const POSHMARK_SOLD_EXTRACTOR = `
       const price    = __money(priceText);
       const href     = linkEl?.getAttribute('href') || '';
       const url      = href ? 'https://poshmark.com' + href : '';
-      if (!title || !price || !url) { __noFields++; continue; }
+      if (!title || !price || !url) {
+        __noFields++;
+        if (!title) __noTitle++; else if (!price) __noPrice++; else __noLink++;
+        continue;
+      }
       items.push({ title, price, priceText, url, source: 'poshmark' });
     } catch {}
   }
   if (items.length === 0) throw new Error('SITE_CHANGED: poshmark tile-grid-redesign extractor returned 0 — selectors or page structure may have changed' + __diag('cards=' + cards.length + ' titleSel=' + document.querySelectorAll('.tile-grid-redesign__title').length + ' priceSel=' + document.querySelectorAll('.tile-grid-redesign__price-current').length + ' linkSel=' + document.querySelectorAll('[data-et-name="listing"] a[href*="/listing/"]').length + ' soldSel=' + document.querySelectorAll('.tile-grid-redesign__listing-status-word').length, cards[0]));
   const seen = new Set();
   const deduped = items.filter(i => { if (seen.has(i.url)) return false; seen.add(i.url); return true; });
-  return { items: deduped, yieldStats: { seen: cards.length, noFields: __noFields } };
+  return { items: deduped, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, noLink: __noLink } };
 })()
 `;
 
@@ -665,7 +693,7 @@ export const MERCARI_SOLD_EXTRACTOR = `
   // — counting it here (matching the renderer's advertised "price/title/link"
   // semantics and the eBay/Poshmark convention) is what makes that partial drift
   // visible instead of vanishing behind a healthy-looking noFields=0.
-  let __noFields = 0;
+  let __noFields = 0, __noTitle = 0, __noPrice = 0, __noLink = 0;
 
   const cards = document.querySelectorAll('a[href*="/us/item/"]');
 
@@ -674,13 +702,13 @@ export const MERCARI_SOLD_EXTRACTOR = `
       // Normalize URL — strip ?ref=... and other query params so the second
       // result-pass variants (?ref=search_results) dedup against the first.
       const rawUrl = card.href || '';
-      if (!rawUrl) { __noFields++; return; }
+      if (!rawUrl) { __noFields++; __noLink++; return; }
       const url = rawUrl.split('?')[0];
 
       // Title from image alt — the only place Mercari puts the product name in the card
       const imgEl = card.querySelector('img[alt]');
       const title = (imgEl?.alt || '').replace(/\\s*-\\s*App\\w*\\s*$/, '').trim();
-      if (!title || title.length < 3) { __noFields++; return; }
+      if (!title || title.length < 3) { __noFields++; __noTitle++; return; }
 
       // Price: find the first <p> that contains a $ sign. Mercari cards can
       // also have a <p> with a discount percentage ("24%") or a <p> holding the
@@ -691,10 +719,10 @@ export const MERCARI_SOLD_EXTRACTOR = `
       for (const p of pEls) {
         if ((p.innerText || p.textContent || '').includes('$')) { priceEl = p; break; }
       }
-      if (!priceEl) { __noFields++; return; }
+      if (!priceEl) { __noFields++; __noPrice++; return; }
       const priceText = (priceEl.innerText || priceEl.textContent || '').trim();
       const price = __money(priceText);
-      if (price === 0) { __noFields++; return; }
+      if (price === 0) { __noFields++; __noPrice++; return; }
 
       items.push({ title, price, priceText, url, source: 'mercari' });
     } catch {}
@@ -707,7 +735,7 @@ export const MERCARI_SOLD_EXTRACTOR = `
     return true;
   });
   if (deduped.length === 0) throw new Error('SITE_CHANGED: mercari a[href*="/us/item/"] extractor returned 0 — URL pattern or card structure may have changed' + __diag('cards=' + cards.length + ' withImg=' + document.querySelectorAll('a[href*="/us/item/"] img[alt]').length, cards[0]));
-  return { items: deduped, yieldStats: { seen: cards.length, noFields: __noFields } };
+  return { items: deduped, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, noLink: __noLink } };
 })()
 `;
 

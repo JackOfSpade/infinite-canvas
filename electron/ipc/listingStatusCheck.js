@@ -23,7 +23,8 @@ import { callLLMText } from './llm.js';
 import { getSoftLoginWallMatch, verifySellMonitorLogin, writeStatusCache } from './accounts.js';
 import { getSellMonitorConfig } from './stealthBrowser.js';
 import { logger } from '../logger.js';
-import { PAGE_STATUS_SINGLE_SCHEMA, PAGE_STATUS_MULTI_SCHEMA } from './aiSchemas.js';
+import { PAGE_STATUS_SINGLE_SCHEMA, PAGE_STATUS_MULTI_SCHEMA, MARKETPLACE_HUB_SCAN_SCHEMA } from './aiSchemas.js';
+import { isFacebookShareUrl } from '../../src/utils/platformUrlMatch.js';
 
 // Structural thresholds (absolute by design — not page-baseline candidates):
 //   - MIN_CONTENT_CHARS: below this, a fetched page is treated as empty/blocked
@@ -90,6 +91,19 @@ async function disambiguateAuthFailure({ platformId, status, finalUrl, url, urlL
   } catch (e) {
     logger.warn(`[ListingStatusCheck] verifier threw for ${platformId} (assuming auth wall):`, e?.message || String(e));
     return needsLogin();
+  }
+
+  // The verifier itself couldn't read its page (fetch timed out / errored — e.g.
+  // an anti-bot reload loop). That is not evidence of logout, so we must NOT flip
+  // to needs-login or poison the session cache. Return 'unknown' (ranks below a
+  // real signal, so an authenticated watch URL still wins the aggregate) and say
+  // it was a transient verify failure, not a logout.
+  if (verdict?.inconclusive) {
+    return {
+      status: 'unknown',
+      message: `Listing page returned HTTP ${status}, and the ${platformId} session check was inconclusive (${verdict.reason || 'verify fetch failed'}) — a transient anti-bot/network error, not a confirmed logout. Retry; an authenticated watch URL's status (if configured) is used instead.`,
+      warning: `[${urlLabel || hostOf(url)}] session verify inconclusive (transient) — treating as unknown, not a logout.`,
+    };
   }
 
   if (verdict?.connected) {
@@ -162,14 +176,9 @@ function cleanMessage(raw) {
   return String(raw || '').replace(/\s+/g, ' ').trim();
 }
 
-function isFacebookShareUrl(url) {
-  try {
-    const u = new URL(url);
-    return /(^|\.)facebook\.com$/i.test(u.hostname) && /^\/share\/[^/]+\/?$/i.test(u.pathname);
-  } catch {
-    return false;
-  }
-}
+// `isFacebookShareUrl` is imported from src/utils/platformUrlMatch.js so the
+// card UI nudge and this engine's diagnosis stay in lockstep on what a share
+// link looks like.
 
 function isFacebookMarketplaceItemUrl(url) {
   try {
@@ -212,7 +221,19 @@ export function goneListingResult({ status, url, urlLabel }) {
   // under seller review can 400 to public/automation fetches while still being
   // editable and visible in seller dashboards. Treat that shape as ambiguous so
   // authenticated listing/dashboard evidence can decide the final state.
-  if (isListing && status === 400 && (isFacebookShareUrl(url) || isFacebookMarketplaceItemUrl(url))) {
+  if (isListing && status === 400 && isFacebookShareUrl(url)) {
+    // A /share/<hash> link is the worst-case anchor: it 400s to automation AND
+    // its hash never appears on the seller dashboard, so no watch page can
+    // confirm it either. Tell the user the actual fix rather than the generic
+    // in-review note — paste the canonical /marketplace/item/<id> URL.
+    return {
+      url,
+      urlLabel,
+      status: 'unknown',
+      message: "This is a Facebook share link (/share/…), which returns HTTP 400 to automated checks and whose code never appears on your seller dashboard — so the status can't be confirmed (the listing may well still be live). Open the listing and paste its canonical facebook.com/marketplace/item/<id> URL for a reliable check.",
+    };
+  }
+  if (isListing && status === 400 && isFacebookMarketplaceItemUrl(url)) {
     return {
       url,
       urlLabel,
@@ -369,6 +390,69 @@ export function extractListingIdentifier(listingUrl, productTitle) {
  * approach instead of a DOM parse — good enough since the LLM is what does
  * the actual reading. Token-density goes up ~5x vs. raw HTML.
  */
+// Read/unread state on a marketplace messages/notifications hub lives ONLY in
+// CSS class names — never in the visible text. eBay's messages inbox marks an
+// already-opened conversation with `card__content-read` on its content block
+// and `status-dot--hidden` on its "new" dot; an unopened one carries
+// `card__content-unread`. stripHtmlForAnalysis collapses every tag (and thus
+// every class) to a space, so the model sees identical text for a read and an
+// unread message — and flags already-handled messages as ACTION NEEDED.
+//
+// annotateReadState runs on the RAW html BEFORE stripping and injects an inline
+// sentinel right AFTER the marker element's opening tag, so the sentinel lands
+// at the very start of that element's text and survives stripping + windowing.
+// The tokens are system annotations, not page copy — the hub-scan prompt is told
+// not to quote them as evidence, and sanitizeAttention scrubs them defensively.
+//
+// DIRECTIONAL INVARIANT (do not invert): the READ classes do the real work. The
+// presence of a ⟦READ⟧ token is what DEMOTES a message; absence means "unknown
+// read-state", which (correctly) leaves it eligible for action-needed. So class
+// drift fails toward OVER-flagging (an already-handled message resurfaces), never
+// toward hiding a genuinely new one. Never rewrite this so that "unmarked" becomes
+// the demotion trigger — that would flip drift to dangerous false suppression.
+export const READ_STATE_READ_TOKEN   = '⟦READ⟧';
+export const READ_STATE_UNREAD_TOKEN = '⟦UNREAD⟧';
+
+// [openingTagRegex, token]. Each regex matches an opening tag whose class
+// attribute carries a read-state signal; the token is appended after that tag.
+const READ_STATE_RULES = [
+  // eBay messages inbox — read conversation's content block + its hidden dot.
+  // `card__content-read` is the LOAD-BEARING read signal: it sits on the content
+  // block (always plain-text-bearing), so its token survives stripping. The
+  // `status-dot--hidden` rule is a corroborating fallback only — if that dot is
+  // ever an <svg> (or nested in <svg>/<nav>/<header>/<footer>/<aside>, all
+  // removed-WITH-contents by stripHtmlForAnalysis), its token is wiped. That is
+  // harmless while the content-block rule still fires.
+  [/(<[a-z][a-z0-9-]*\b[^>]*\bcard__content-read\b[^>]*>)/gi,   READ_STATE_READ_TOKEN],
+  [/(<[a-z][a-z0-9-]*\b[^>]*\bstatus-dot--hidden\b[^>]*>)/gi,   READ_STATE_READ_TOKEN],
+  // eBay messages inbox — explicit unopened conversation card (best-effort
+  // positive signal; the system does not depend on it — see note above).
+  [/(<[a-z][a-z0-9-]*\b[^>]*\bcard__content-unread\b[^>]*>)/gi, READ_STATE_UNREAD_TOKEN],
+];
+
+// NOTE: not idempotent — each call appends a token per match. Call exactly once
+// per page (the sole production call site is in scanSellerHubPages); never wrap
+// an already-annotated string.
+export function annotateReadState(html) {
+  if (!html) return html;
+  let s = String(html);
+  for (const [re, token] of READ_STATE_RULES) s = s.replace(re, `$1 ${token} `);
+  return s;
+}
+
+// Conversation-level read/unread counts for diagnostics (one per card, keyed off
+// the content class so the hidden-dot annotation does not double-count). Surfaced
+// in the bug report so a future "read message still flagged" report proves whether
+// the model actually received the read-state signal.
+export function summarizeReadState(html) {
+  if (!html) return { read: 0, unread: 0 };
+  const s = String(html);
+  return {
+    read:   (s.match(/\bcard__content-read\b/gi)   || []).length,
+    unread: (s.match(/\bcard__content-unread\b/gi) || []).length,
+  };
+}
+
 export function stripHtmlForAnalysis(html) {
   if (!html) return '';
   let s = String(html);
@@ -506,10 +590,14 @@ function dedupeAttention(items) {
     const urgency = VALID_URGENCIES.has(raw.urgency) ? raw.urgency : 'low';
     const category = VALID_ATTENTION_CATEGORIES.has(raw.category) ? raw.category : 'other';
     const evidence = String(raw.evidence || '').trim();
+    // Preserve sourceUrl when present so dedupe stays shape-compatible with
+    // sanitizeAttention (today only the hub path sets it, and that path doesn't
+    // dedupe — but don't make this a silent field-drop if that ever changes).
+    const sourceUrl = String(raw.sourceUrl || '').trim();
     const key = headline.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     const prior = seen.get(key);
     if (!prior || (urgency === 'high' && prior.urgency !== 'high')) {
-      seen.set(key, { urgency, category, headline, evidence });
+      seen.set(key, { urgency, category, headline, evidence, ...(sourceUrl ? { sourceUrl } : {}) });
     }
   }
   // High urgency items render first; within a tier, insertion order.
@@ -704,16 +792,66 @@ function sanitizeAttention(raw) {
   const out = [];
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue;
-    const headline = String(item.headline || '').trim();
+    const headline = stripReadStateTokens(String(item.headline || '')).trim();
     if (!headline) continue;
+    // `sourceUrl` is only emitted by the hub scan (which validates it against the
+    // pages it actually fetched — see resolveAttentionSourceUrls). Pass it through
+    // verbatim here; omit the key entirely when absent so other callers' shape is
+    // unchanged.
+    const sourceUrl = String(item.sourceUrl || '').trim();
     out.push({
       urgency:  VALID_URGENCIES.has(item.urgency) ? item.urgency : 'low',
       category: VALID_ATTENTION_CATEGORIES.has(item.category) ? item.category : 'other',
       headline,
-      evidence: String(item.evidence || '').trim(),
+      evidence: stripReadStateTokens(String(item.evidence || '')).trim(),
+      ...(sourceUrl ? { sourceUrl } : {}),
     });
   }
   return out;
+}
+
+// Belt-and-suspenders: the hub-scan prompt tells the model not to quote the
+// ⟦READ⟧/⟦UNREAD⟧ sentinels (they sit right next to the quotable message text
+// after stripping), but a non-compliant model could leak one into headline/
+// evidence — which would clutter the UI card and the bug report's verbatim
+// evidence. Scrub them here so the guarantee doesn't depend on model compliance.
+export function stripReadStateTokens(s) {
+  const str = String(s ?? '');
+  // No-op fast path — keeps the shared per-listing classifier output byte-for-byte
+  // unchanged (those items never carry a sentinel; only the hub scan annotates).
+  if (!str.includes(READ_STATE_READ_TOKEN) && !str.includes(READ_STATE_UNREAD_TOKEN)) return str;
+  // Replace each token with a SPACE (not '') so a token jammed between two words
+  // can't merge them, then collapse the gaps it leaves. Caller trims.
+  return str
+    .split(READ_STATE_READ_TOKEN).join(' ')
+    .split(READ_STATE_UNREAD_TOKEN).join(' ')
+    .replace(/\s+/g, ' ');
+}
+
+/**
+ * Bind each hub-scan attention item to the page it was derived from, so the UI
+ * can offer a "jump straight there" button. The model is asked to copy the HUB
+ * PAGE url into `sourceUrl`, but we never trust that blindly:
+ *
+ *   - If the model's `sourceUrl` exactly matches one of the pages we fetched,
+ *     keep it.
+ *   - Otherwise, if only ONE hub page was scanned, the source is unambiguous —
+ *     use it (the model's hint was redundant anyway).
+ *   - Otherwise we genuinely don't know which of several pages it came from →
+ *     drop `sourceUrl` (no button) rather than point the seller at a wrong page.
+ *
+ * Pure + exported for unit testing; `hubUrls` is the list of urls actually fetched.
+ */
+export function resolveAttentionSourceUrls(attention, hubUrls) {
+  const urls = (Array.isArray(hubUrls) ? hubUrls : []).filter(Boolean);
+  const known = new Set(urls);
+  const soleUrl = urls.length === 1 ? urls[0] : null;
+  return (Array.isArray(attention) ? attention : []).map((item) => {
+    const claimed = String(item?.sourceUrl || '').trim();
+    const resolved = known.has(claimed) ? claimed : soleUrl;
+    const { sourceUrl: _drop, ...rest } = item || {};
+    return resolved ? { ...rest, sourceUrl: resolved } : rest;
+  });
 }
 
 /**
@@ -899,6 +1037,161 @@ Be conservative: prefer "unknown" over a guess for state. Do NOT classify based 
     });
   }
   return results;
+}
+
+// Head slice for a hub page — there is no single-listing identifier to window
+// around (the whole point of the hub is that it aggregates every listing), so
+// we feed the model the page head after stripping nav/script chrome.
+const HUB_HEAD_CHARS = 8000;
+
+/**
+ * Marketplace Status Module scanner — NOT listing-specific.
+ *
+ * Fetches a single platform's aggregate hub page(s) (the per-platform watch URLs
+ * the user configured in Settings: seller dashboard, notifications feed, activity
+ * center, messages inbox) and asks the model to surface anything across ALL of
+ * the seller's listings that needs action or is useful to know — instead of
+ * tracking one listing's live/sold/ended state.
+ *
+ * Reuses the same transport shortcuts as classifyMultipleUrls (auth wall →
+ * needs-login, fetch error → error, empty → unknown) so a logged-out platform
+ * reports cleanly without an LLM call. All readable pages go into ONE
+ * consolidated `marketplace-hub-scan` call.
+ *
+ * @returns {{ status:'ok'|'needs-login'|'error'|'unknown', message:string,
+ *   summary:string, attention:object[], sources:object[] }}
+ */
+export async function scanSellerHubPages({ urlSpecs, platformId, signal }) {
+  if (!urlSpecs || urlSpecs.length === 0) {
+    return { status: 'unknown', message: 'No watch URLs configured for this platform.', summary: '', attention: [], sources: [] };
+  }
+
+  // Fetch + strip every hub URL in parallel; resolve transport-level outcomes
+  // (auth wall, fetch error, empty) up front so they never cost an LLM call.
+  const prepared = await Promise.all(urlSpecs.map(async (s) => {
+    const r = await s.fetcher(s.url, signal);
+    if (!r.ok) {
+      return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, status: 'error', message: `Fetch failed: ${r.error}` } };
+    }
+    const authWallSignal = getAuthWallSignal({ status: r.status, finalUrl: r.finalUrl, url: s.url, html: r.html, platformId });
+    if (authWallSignal) {
+      const verdict = await disambiguateAuthFailure({ platformId, status: r.status, finalUrl: r.finalUrl, url: s.url, urlLabel: s.urlLabel });
+      return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, ...verdict } };
+    }
+    if (!r.html || r.html.length < MIN_CONTENT_CHARS) {
+      return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, status: 'unknown', message: `Empty or near-empty response (${r.html?.length || 0} bytes).` } };
+    }
+    // Preserve message read/unread state (CSS-class-only) BEFORE stripping wipes
+    // it, so the model can tell an already-read message from a new one.
+    const snippet = stripHtmlForAnalysis(annotateReadState(r.html)).slice(0, HUB_HEAD_CHARS);
+    return { spec: s, status: r.status, finalUrl: r.finalUrl, snippet, readState: summarizeReadState(r.html) };
+  }));
+
+  const sources = [];
+  const llmInputs = [];
+  for (const p of prepared) {
+    if (p.terminal) sources.push(p.terminal);
+    else llmInputs.push(p);
+  }
+
+  // Aggregate read/unread conversation counts across the hub pages we read, for
+  // the bug report (proves the model received read-state signal). Zero of both
+  // means no message hub among the watch URLs, or the markers fell outside the
+  // window — both worth knowing when a "read message flagged" report comes in.
+  const readState = llmInputs.reduce((acc, p) => ({
+    read:   acc.read   + (p.readState?.read   || 0),
+    unread: acc.unread + (p.readState?.unread || 0),
+  }), { read: 0, unread: 0 });
+
+  let attention = [];
+  let summary = '';
+
+  if (llmInputs.length > 0) {
+    const platformName = getSellMonitorConfig(platformId)?.name || platformId || 'this marketplace';
+    const sections = llmInputs.map((p, i) =>
+      `--- HUB PAGE ${i + 1} (label: ${p.spec.urlLabel || 'hub'}, url: ${p.spec.url}, http: ${p.status}) ---\n${p.snippet}`
+    ).join('\n\n');
+
+    const prompt = `You are reviewing a seller's ${platformName} account on their behalf. The page(s) below are the seller's AGGREGATE HUB — a seller dashboard, notifications feed, activity center, or messages inbox that summarizes ALL of their listings at once. You are NOT tracking one specific listing; scan the whole hub for what the seller would care about across their entire account.
+
+${sections}
+
+READ-STATE MARKERS: a conversation or message preceded by the token ${READ_STATE_READ_TOKEN} has ALREADY BEEN OPENED by the seller; one preceded by ${READ_STATE_UNREAD_TOKEN} (or with no marker) has not been confirmed read. These tokens are system annotations of the page's read/unread CSS state — they are NOT part of the page text, so never quote them in "evidence".
+
+Surface two kinds of items:
+
+1. ACTION NEEDED (urgency "high") — anything that needs the seller to act:
+   - a buyer offer or counter-offer (especially if it's expiring)
+   - an UNREAD buyer message or question awaiting a reply
+   - an order to ship or a shipping deadline
+   - a dispute, case, return request, or claim to respond to
+   - a policy strike, listing removal, account warning, or a hold on funds
+   - a payout that needs action or verification
+
+2. USEFUL INFO (urgency "low") — FYI that doesn't need action:
+   - a recent sale ("sold for $X")
+   - new watchers, a new-offers count, a price/relist suggestion
+   - a payout posted, a listing auto-renewed, a promotion eligibility
+
+Return ONLY a JSON object:
+{
+  "summary": "one short line, e.g. '2 offers, 1 unread message, no policy issues'",
+  "attention": [
+    {
+      "urgency": "high" | "low",
+      "category": "engagement" | "offer" | "question" | "policy" | "payout" | "pricing" | "time-sensitive" | "other",
+      "headline": "short sentence the seller reads at a glance, e.g. 'Buyer offered $65 on the AirPods (expires 8h)'",
+      "evidence": "verbatim quote or close paraphrase from the page so the seller can verify",
+      "sourceUrl": "the exact url of the HUB PAGE this item came from — copy it verbatim from that page's header line above"
+    }
+    // zero or more; return an empty array if the hub is quiet
+  ]
+}
+
+Rules:
+- Be selective and specific — only what a busy seller would actually act on or want to know. Skip static chrome (menu labels, a generic "0 notifications", boilerplate help text).
+- A message/conversation marked ${READ_STATE_READ_TOKEN} has already been opened by the seller — do NOT raise it as ACTION NEEDED. Treat it as already-handled: omit it, or — if its latest message is from the BUYER and is an explicit question/request the seller has not yet answered — include it ONLY as a low-urgency FYI (never high). Only ${READ_STATE_UNREAD_TOKEN} / unmarked-but-clearly-new messages awaiting a reply are ACTION NEEDED.
+- Every item must be grounded in the page text above — quote it in "evidence". Do NOT invent items.
+- "sourceUrl" must be one of the HUB PAGE urls listed above, copied character-for-character — it's the page the seller will be taken to. Do not shorten, guess, or combine urls.
+- If nothing notable is present, return an empty attention array.`;
+
+    try {
+      const parsed = await callLLMText(prompt, {
+        signal,
+        task: 'marketplace-hub-scan',
+        hints: { urlCount: llmInputs.length },
+        responseSchema: MARKETPLACE_HUB_SCAN_SCHEMA,
+      });
+      // Bind each item to the hub page it was read from (validated against the
+      // pages we actually fetched) so the card can offer a jump-to-page button.
+      attention = resolveAttentionSourceUrls(sanitizeAttention(parsed?.attention), llmInputs.map((p) => p.spec.url));
+      summary = cleanMessage(parsed?.summary);
+      for (const p of llmInputs) sources.push({ url: p.spec.url, urlLabel: p.spec.urlLabel, status: 'ok' });
+    } catch (err) {
+      for (const p of llmInputs) {
+        sources.push({ url: p.spec.url, urlLabel: p.spec.urlLabel, status: 'error', message: `AI scan failed: ${err?.message || String(err)}` });
+      }
+    }
+  }
+
+  // Platform-level read status: 'ok' if we read any hub page; else surface the
+  // strongest blocking reason (a dead session → needs-login; all errors →
+  // error; otherwise unknown for anti-bot / login-gated-but-alive pages).
+  const statuses = sources.map(s => s.status);
+  let status;
+  if (statuses.includes('ok')) status = 'ok';
+  else if (statuses.includes('needs-login')) status = 'needs-login';
+  else if (statuses.length > 0 && statuses.every(s => s === 'error')) status = 'error';
+  else status = 'unknown';
+
+  const message = summary || (
+    status === 'ok'          ? (attention.length ? `${attention.length} item${attention.length === 1 ? '' : 's'} flagged.` : 'No action items found.')
+    : status === 'needs-login' ? `${getSellMonitorConfig(platformId)?.name || platformId} session needs login. Open Settings → Marketplace Login.`
+    : status === 'error'       ? (sources.find(s => s.message)?.message || 'Hub scan failed.')
+    : 'Could not read this platform’s hub pages.'
+  );
+
+  return { status, message, summary, attention, sources, readState };
 }
 
 function hostOf(url) {

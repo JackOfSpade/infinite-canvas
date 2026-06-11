@@ -39,6 +39,37 @@ const dropBandVerdict = (kept, dropped, keptScore, droppedScore) => {
   return ` ⚠️ dropped median $${dropped.median} is ${pct}% ${dir} kept median $${kept.median} at comparable relevance${scoreNote} — selection shed comps as on-spec as those it kept, so the price may be biased ${bias} (raise the token budget or improve the comp ranking).`;
 };
 
+const bundleFactorSummary = factors => (Array.isArray(factors) && factors.length > 0
+  ? factors.map(f => `${f.direction === 'discount' ? '-' : '+'}${f.percent}% ${f.reason}`).join('; ')
+  : 'none');
+
+const tierFactorSummary = (factors, sign) => (Array.isArray(factors) && factors.length > 0
+  ? factors.map(f => `${sign}${f.percent}% ${f.reason}`).join('; ')
+  : 'none');
+
+// Pure-alphabetic query words (≥4 letters, NO digits) that DON'T appear in the
+// item's own title — the signature of a scrape/price query that drifted from
+// what the seller sees. The classic case: a bundle-spanning AI `search_query`
+// survives a title edit, so item "Zippo Insert" is actually priced against
+// "...Exotac titanLIGHT lighter bundle". A second product is always named in
+// words (exotac/titanlight/bundle); deliberately EXCLUDE alphanumeric spec
+// tokens (256gb, 115ml, wh1000xm4) so a terse title ("iPhone XS") + a normal
+// broader query ("Apple iPhone XS 256GB") isn't mis-flagged. 2+ such words ⇒ the
+// price model was likely told about a different/second product than the title
+// shows. Returns [] (no flag) below that threshold or when no title is known.
+const queryTitleDrift = (query, title) => {
+  const hay = String(title || '').toLowerCase();
+  if (!hay) return [];
+  const seen = new Set();
+  const drift = [];
+  for (const tok of String(query || '').toLowerCase().split(/[^a-z0-9]+/)) {
+    if (tok.length < 4 || !/^[a-z]+$/.test(tok) || seen.has(tok)) continue;
+    seen.add(tok);
+    if (!hay.includes(tok)) drift.push(tok);
+  }
+  return drift.length >= 2 ? drift.slice(0, 4) : [];
+};
+
 /**
  * Sell-side analog of buildJobsPipelineSnapshot: renders the last marketplace
  * pipeline funnel (photo analysis → comp scrape → captcha-resolve → price
@@ -96,13 +127,43 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       `${timedOut > 0 ? `, ${timedOut} timed-out` : ''}` +
       `${errored > 0 ? `, ${errored} scrape error(s)` : ''}`,
     );
+    if (s.browserContention) {
+      // A captcha-resolve closed the shared browser DURING this scrape and
+      // detached our in-flight pages. The `task-failed` sources here are
+      // INTERNAL contention, not anti-bot — they'd have succeeded run alone.
+      // Sell-side price checks serialize (marketplaceBrowserLock), so a residual
+      // hit means a JOB-side captcha-resolve overlapped this run.
+      const bc = s.browserContention;
+      const det = Array.isArray(bc.detachedSources) ? bc.detachedSources : [];
+      lines.push(`- ⚠️ **Browser contention** — a captcha-resolve window closed the shared stealth browser mid-scrape, detaching ${det.length} in-flight source(s)${det.length ? ` (${det.join(', ')})` : ''}. Their \`task-failed\` results are INTERNAL contention, NOT anti-bot — they would have succeeded had this run been alone. Sell-side price checks now serialize via marketplaceBrowserLock; a hit here means a JOB-side captcha-resolve overlapped (these are NOT gated by that lock).`);
+    }
     if (Array.isArray(s.itemDetails) && s.itemDetails.length > 1) {
-      lines.push('- Per-item scrape results:');
+      lines.push('- Per-item scrape results _(q = the query scraped AND fed to the price model as the ITEM):_');
       for (const item of s.itemDetails) {
         const warnings = Array.isArray(item.warnings) && item.warnings.length
           ? ` · warnings: ${item.warnings.map(w => `${w.sourceId}:${w.code}`).join(', ')}`
           : '';
-        lines.push(`  - Item ${item.index + 1} q="${item.query}" → ${item.sold} sold + ${item.active} active${warnings}`);
+        const labelPart = item.label ? ` — "${item.label}"` : '';
+        // Flag a query that names product terms the item's own title doesn't —
+        // the title and the priced query may describe different products (e.g. a
+        // stale bundle-wide search_query). See queryTitleDrift.
+        const drift = queryTitleDrift(item.query, item.label);
+        const driftFlag = drift.length
+          ? ` ⚠️ query term(s) absent from the title (${drift.join(', ')}) — title vs priced query may describe different products`
+          : '';
+        lines.push(`  - Item ${item.index + 1}${labelPart} · q="${item.query}" → ${item.sold} sold + ${item.active} active${warnings}${driftFlag}`);
+      }
+    } else if (Array.isArray(s.itemDetails) && s.itemDetails.length === 1) {
+      // Single-item run: the per-item block above (which carries the drift flag)
+      // only prints for bundles, so a title↔query divergence on a lone item would
+      // otherwise go unflagged — the reader would have to cross-reference the
+      // Product analysis title against the per-source `q=` provenance by eye. Run
+      // the SAME detector on the primary and surface it as a standalone warning
+      // (only when drift is found, so clean single-item runs stay quiet).
+      const only = s.itemDetails[0];
+      const drift = queryTitleDrift(only.query, only.label);
+      if (drift.length) {
+        lines.push(`- ⚠️ Title vs priced query may describe different products: the scraped query names term(s) absent from the title "${only.label}" (${drift.join(', ')}). Priced q="${only.query}". Usually a self-inconsistent photo analysis (generated_title vs search_query) or a stale search_query — off-target comps downstream are expected when this fires.`);
       }
     }
     if (s.bySource && Object.keys(s.bySource).length > 0) {
@@ -127,6 +188,20 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       // is shown as data, not auto-flagged; `noFields` is the clean partial-drift
       // signal that answers "did we get a price for EACH listing?" — a healthy
       // run reads "48 seen" (noFields omitted), a drifted one "144 seen, 96 no-fields".
+      // Per-field attribution of the no-fields drop: "96 no-fields [94 no-price, 2
+      // no-title]". A drop concentrated in ONE field is a sub-selector move for that
+      // field (e.g. a sold listing's price element renamed); a drop spread across
+      // fields points at un-hydrated/skeleton cards (the whole card body is empty).
+      // Extractors that pre-date the sub-counters omit them, so this stays silent
+      // rather than printing a misleading "0 no-price".
+      const fieldBreakdown = (y) => {
+        if (!y) return '';
+        const parts = [];
+        if (y.noTitle > 0) parts.push(`${y.noTitle} no-title`);
+        if (y.noPrice > 0) parts.push(`${y.noPrice} no-price`);
+        if (y.noLink > 0) parts.push(`${y.noLink} no-link`);
+        return parts.length ? ` [${parts.join(', ')}]` : '';
+      };
       const fmtYield = (id) => {
         const y = yb[id];
         if (!y || typeof y.seen !== 'number') return '';
@@ -134,7 +209,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
         // It's the decisive genuine-thin-query vs. selector-drift tell: "1 seen, site
         // claims 1" = a real 1-result page (no block); "1 seen, site claims 50" = drift.
         const claimed = Number.isFinite(Number(y.claimedTotal)) ? `, site claims ${y.claimedTotal}` : '';
-        return ` (${y.seen} seen${y.noFields > 0 ? `, ${y.noFields} no-fields` : ''}${claimed})`;
+        return ` (${y.seen} seen${y.noFields > 0 ? `, ${y.noFields} no-fields${fieldBreakdown(y)}` : ''}${claimed})`;
       };
       // Per-source raw counts are now the full rendered page (extractors no
       // longer slice to a per-source cap), so a count reflects everything the
@@ -144,6 +219,24 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       // items (expected ≥ 3)" = stale selectors / empty vs. a tiny-body block).
       for (const [id, w] of Object.entries(sw)) {
         lines.push(`  - \`${id}\` (${w.severity}): ${w.evidence}`);
+      }
+      // Sample of the actual extracted comp TITLES per source (last bundle item).
+      // Counts alone can't reveal an OFF-TARGET match — a source can report a
+      // healthy number while every row is the wrong product (PriceCharting's
+      // fuzzy whole-catalog hits like "Azur Lane: Crosswave"/"Wizard of Oz" for a
+      // vacuum; Poshmark accessories; Swappa wrong-model). The titles make it
+      // self-evident WITHOUT re-running the scrape, and survive a mid-scrape
+      // export (before the synthesis-stage relevance gate populates).
+      const samples = s.samplesBySource || {};
+      const sampleIds = Object.keys(samples).filter(id => Array.isArray(samples[id]) && samples[id].length > 0);
+      if (sampleIds.length > 0) {
+        lines.push('- Sample of extracted comps per source _(top few titles actually returned — spot off-target matches a count can\'t reveal):_');
+        for (const id of sampleIds) {
+          const shown = samples[id]
+            .map(c => `"${c.title}"${c.price != null ? ` $${c.price}` : ''}`)
+            .join(' · ');
+          lines.push(`  - \`${id}\`: ${shown}`);
+        }
       }
       // Conservative partial-drift hint: a source that dropped MORE cards to
       // missing fields than it kept almost certainly had a sub-selector move (it
@@ -160,9 +253,9 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
           // PriceCharting's js-price spans) this is usually fields that never
           // finished loading; it can also be a selector drift. The page returned
           // rows, so it is NOT a block/login wall — distinct from a clean 0.
-          lines.push(`  - ⚠️ \`${id}\` saw ${ySeen} row(s) but extracted 0 — every candidate failed price/title/link extraction. Likely JS-rendered fields that never populated (content loads after the row skeleton), or a selector drift; the page returned rows so it is not a block. If it persists across re-runs, check the source's field selectors / readiness wait.`);
+          lines.push(`  - ⚠️ \`${id}\` saw ${ySeen} row(s) but extracted 0 — every candidate failed price/title/link extraction${fieldBreakdown(y)}. Likely JS-rendered fields that never populated (content loads after the row skeleton), or a selector drift; the page returned rows so it is not a block. If it persists across re-runs, check the source's field selectors / readiness wait.`);
         } else if (y.noFields > kept && kept > 0) {
-          lines.push(`  - ⚠️ \`${id}\` kept ${kept} but dropped ${y.noFields} card(s) for missing price/title/link — likely a PARTIAL selector drift (a field sub-selector moved). The source still returned data, so it did NOT trip SITE_CHANGED; check its title/price/link selectors.`);
+          lines.push(`  - ⚠️ \`${id}\` kept ${kept} but dropped ${y.noFields} card(s)${fieldBreakdown(y)} for missing price/title/link — likely a PARTIAL selector drift (the indicated field's sub-selector moved). The source still returned data, so it did NOT trip SITE_CHANGED; check that field's selector.`);
         }
       }
       // Bare-array sources (no seen/noFields denominator) — name them once so the
@@ -211,7 +304,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
       lines.push('- _(timed-out source(s) = the page navigation never finished within the budget (usually bodyLen=0 — nothing loaded). A slow/hung site or an anti-bot tarpit, NOT a browser/profile-lock conflict. If the platform is not logged in, an anonymous request is likelier to be tarpitted — log in and retry.)_');
     }
     if (errored > 0) {
-      lines.push('- _(scrape error(s) = the scrape threw before completing — e.g. a browser-launch/profile-lock conflict or network failure, NOT an anti-bot wall. A visible window opened mid-scrape can race the headless profile lock. See Recent Logs.)_');
+      lines.push('- _(scrape error(s) = the scrape threw before completing — e.g. a browser-launch/profile-lock conflict or network failure, NOT an anti-bot wall. Sell-side price checks + captcha-resolves now serialize on the shared browser (marketplaceBrowserLock), so a visible window racing the headless profile lock should be a JOB-side captcha-resolve — see the Browser contention line above + Recent Logs.)_');
     }
   }
 
@@ -407,10 +500,9 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
     }
   }
 
-  // Multi-item bundle combine — the AI's synergy-aware combined price vs the
-  // arithmetic sum. Only present on bundle runs (2+ priced items). A "bundle
-  // priced wrong" report needs the sum, the AI price, and the synergy verdict to
-  // tell a synergy call gone wrong from a per-item pricing problem upstream.
+  // Multi-item bundle combine — attributable AI factors plus the prices/code
+  // derived from them. A "bundle priced wrong" report needs both to distinguish
+  // a bad factor judgment from an aggregation/arithmetic bug.
   if (t.bundle) {
     const b = t.bundle;
     lines.push(`\n### Bundle pricing${ago(b.ts)}`);
@@ -421,8 +513,20 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
     lines.push(
       `- ${b.items} priced item(s)${b.unpriced > 0 ? ` (+${b.unpriced} unpriced, excluded)` : ''} → ` +
       `bundle quick/best/max **$${b.quickPrice ?? '?'} / $${b.bundlePrice ?? '?'} / $${b.maxPrice ?? '?'}**` +
-      `${deltaTxt}, synergy=${b.synergy || '?'}${modelTag(b.model, b.fallback)}`,
+      `${deltaTxt}, synergy=${b.synergy || '?'}` +
+      `${b.adjustmentPercent != null ? `, factor net=${b.adjustmentPercent > 0 ? '+' : ''}${b.adjustmentPercent}% vs sum` : ''}` +
+      `${b.quickReductionPercent != null && b.maxIncreasePercent != null ? `, tier factor totals=-${b.quickReductionPercent}%/+${b.maxIncreasePercent}% vs best` : ''}` +
+      `${modelTag(b.model, b.fallback)}`,
     );
+    lines.push(`- Bundle factors: ${bundleFactorSummary(b.bundleFactors)}`);
+    lines.push(`- Quick-sale factors: ${tierFactorSummary(b.quickFactors, '-')}`);
+    lines.push(`- Max-profit factors: ${tierFactorSummary(b.maxFactors, '+')}`);
+    if (b.factorCapsApplied) {
+      lines.push(`- ⚠️ Factor caps applied: ${Object.entries(b.factorCapsApplied).filter(([, applied]) => applied).map(([tier]) => tier).join(', ')}`);
+    }
+    if (b.rejectedFactors) {
+      lines.push(`- ⚠️ Invalid/contradictory factors rejected: ${Object.entries(b.rejectedFactors).filter(([, count]) => count > 0).map(([tier, count]) => `${tier}=${count}`).join(', ')}`);
+    }
   }
 
   if (t.fit) {

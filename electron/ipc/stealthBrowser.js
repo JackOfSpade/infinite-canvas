@@ -784,6 +784,17 @@ const SELL_MONITOR_PLATFORMS = {
     ],
     bodyScanChars: 1200,
   },
+  depop:     {
+    name: 'Depop',
+    sellerUrl: 'https://www.depop.com/products/create/',
+    verifyUrl: 'https://www.depop.com/products/create/',
+    connectedFinalUrlMustContain: 'depop.com/products/create',
+    bodySignals: [
+      'sign up or log in',
+      'log in to depop',
+    ],
+    bodyScanChars: 1200,
+  },
   mercari:   {
     name: 'Mercari',
     sellerUrl: 'https://www.mercari.com/mypage/listings/',

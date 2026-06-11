@@ -19,6 +19,28 @@ const AUTH_HEARTBEAT_LOG_MS     = 10_000;        // "still waiting" diagnostic h
 const NATIVE_LOGIN_COOKIE_FLUSH_MS = 2_500;      // let OAuth/session cookies reach disk before verify
 const execFile = promisify(execFileCb);
 
+// ── Shared-browser handoff watermark ───────────────────────────────────────────
+// A visible captcha-resolve window takes over the shared Chrome profile, which
+// requires first CLOSING the headless stealth browser (one userDataDir = one
+// browser). That close detaches any scrape pages in flight on the stealth
+// browser. The sell-side price-check pipeline can't observe that close directly,
+// so we stamp a watermark here; the marketplace scrape compares it before/after
+// its run to tell whether a handoff (e.g. a JOB-side captcha-resolve, which the
+// sell-side browser lock does NOT gate) detached its pages mid-scrape — turning
+// an otherwise-cryptic "Navigating frame was detached" into an explained
+// "browser contention" line in the bug report.
+let _lastCaptchaHandoffAt = 0;
+
+/**
+ * Epoch-ms of the last time a captcha-resolve window closed the shared stealth
+ * browser to take the profile (0 if none this session). Read it to detect a
+ * browser-close that landed during another operation's scrape window.
+ * @returns {number}
+ */
+export function getLastCaptchaHandoffAt() {
+  return _lastCaptchaHandoffAt;
+}
+
 // Human-verification / challenge / signup interstitials are NOT a logged-in state —
 // the user is still mid-flow. These slip past LOGIN_URL_PATTERN in the auto-close
 // poll (eBay's captcha splash is /splashui/captcha, and the /signin in its `ru=`
@@ -781,6 +803,9 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
   let captchaBrowser;
   try {
     logger.info('[StealthBrowser] Captcha window: closing stealth browser to release the profile lock…');
+    // Stamp the handoff BEFORE the close so a concurrent scrape that loses its
+    // pages to this close can attribute the detach (see getLastCaptchaHandoffAt).
+    _lastCaptchaHandoffAt = Date.now();
     await closeStealthBrowser();
     logger.info('[StealthBrowser] Captcha window: stealth browser closed — launching visible window');
 

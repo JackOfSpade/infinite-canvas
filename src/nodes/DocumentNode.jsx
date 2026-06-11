@@ -7,6 +7,7 @@ import { EventLogger } from '../utils/EventLogger';
 import { TIMINGS, docSaveDebounceMs } from '../utils/timings';
 import { NodeHandles } from './_shared/NodeHandles';
 import { LockBadge } from './_shared/LockBadge';
+import { useIsMountedRef } from '../hooks/useIsMountedRef';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -397,8 +398,7 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
   }, [setFontSize]);
 
   const saveTimerRef = useRef(null);
-  const isMountedRef = useRef(true);
-  useEffect(() => () => { isMountedRef.current = false; }, []);
+  const isMountedRef = useIsMountedRef();
 
   useEffect(() => {
     const gen = Date.now();
@@ -457,7 +457,7 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
         setSaveStatus('error');
       }
     }, docSaveDebounceMs(content.length));  // longer idle window for longer docs
-  }, [filePath, diskState.gen]);
+  }, [filePath, diskState.gen, isMountedRef]);
 
   const handleChange = useCallback((e) => {
     const val = e.target.value;

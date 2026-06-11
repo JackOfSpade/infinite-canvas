@@ -47,6 +47,10 @@ const TASK_MODELS = {
   'bundle-price-synthesis':    { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   'platform-fit-assessment':   { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
   'page-status-classify':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
+  // Marketplace Status Module hub scan — mechanical extraction of action items
+  // from a seller dashboard / notification feed, same tier as page-status-classify
+  // (scanning, not pricing judgment, so Haiku per the quality-over-cost split).
+  'marketplace-hub-scan':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
   'resume-parse':              { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   'career-file-extract':       { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
   'job-query-generation':      { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash'      },
@@ -118,6 +122,11 @@ const TASK_MAX_TOKENS = {
   'bundle-price-synthesis':    ({ itemCount = 2 } = {}) =>
     Math.min(8192, 2048 + Math.max(0, itemCount - 2) * 350),
   'page-status-classify':      512,   // 5-way enum + one sentence
+  // Hub scan returns an attention list across a whole dashboard/feed — busier
+  // than a single listing's check. Scale modestly with the number of hub pages
+  // scanned (one consolidated call covers all of a platform's watch URLs).
+  'marketplace-hub-scan':      ({ urlCount = 1 } = {}) =>
+    Math.min(4096, 1536 + Math.max(0, urlCount - 1) * 512),
   'resume-parse':              4096,  // full structured profile
   // Career-file extract reproduces a whole document as faithful text, so it
   // scales with the source. Sized generously: a truncated transcription

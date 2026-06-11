@@ -41,20 +41,23 @@ ignore it: it is solving a different problem.
 | Role     | Family                | Reason                                              |
 |----------|-----------------------|-----------------------------------------------------|
 | Display  | **Source Serif 4**    | Editorial gravitas; one moment of warmth (the name).|
-| Body     | **Inter**             | Brand-supplied body family (local `.woff2`, weights 400/500/600). Neutral, modern, and the industry-standard digital text face — pairs cleanly with Source Serif 4 on the name. |
+| Body     | **Inter**             | Brand-supplied body family (Google Fonts CDN, weights 400/500/600). Neutral, modern, and the industry-standard digital text face — pairs cleanly with Source Serif 4 on the name. |
 | Mono     | **IBM Plex Mono**     | Inline code-like terms (`v8::SnapshotCreator`, `mmap`); reads as *terms*, not prose. Used only for `<code>`/`<kbd>`/`<samp>` and the project-metrics line. |
 
-All three families ship locally in `fonts/`:
-- `SourceSerif4-{Regular,Semibold}.ttf`
-- `Inter-{Regular,Medium,SemiBold}.woff2` — **no Bold (700)**. The
+All three families load from the **Google Fonts CDN** (CSS2 API),
+pinned to the exact weights the system uses:
+
+- `Source Serif 4` — 400, 600
+- `Inter` — 400, 500, 600 — **no Bold (700)**. The
   system uses SemiBold (600) for every "bold" affordance to keep
   the voice quietly confident, not loud.
-- `IBMPlexMono-{Regular,Medium}.ttf`
+- `IBM Plex Mono` — 400, 500
 
-Declared via `@font-face` at the top of `colors_and_type.css`. **The
-system has zero network dependencies at render time** — copy the
-folder to any container or serverless environment and it renders
-identically. All three families embed in PDFs produced by
+Loaded via a single `@import` at the top of `colors_and_type.css`.
+**Typography now has a render-time network dependency on the Google
+Fonts CDN** — ensure the CDN is reachable from the render environment
+(headless Chrome / serverless), or re-vendor the families locally if
+you need an air-gapped build. All three families embed in PDFs produced by
 Chrome/Chromium's print engine; the candidate-text-extraction
 round-trip (Ctrl+A → paste-into-text) has been verified.
 
@@ -600,8 +603,10 @@ const dual = await addOcgBackground(rawPdfBytes);
 
 The module is UMD — same file works in Node (`require`) and browser
 / Puppeteer contexts (script tag → `window.DualModePdf`). pdf-lib
-is vendored at `build/vendor/pdf-lib.min.js`; no network dependency
-at build time. Pass `{ cream: '#XXXXXX' }` if you've forked `--bg`.
+1.17.1 is loaded from CDN in the browser
+(`https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js`)
+and from the `pdf-lib` npm package in Node. Pass `{ cream: '#XXXXXX' }`
+if you've forked `--bg`.
 
 The transform is idempotent-guarded — calling it twice on the same
 PDF throws rather than stacking two cream layers; regenerate from

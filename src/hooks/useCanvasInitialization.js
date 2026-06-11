@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { sanitizeNodesForSave, sanitizeEdgesForSave, CURRENT_SCHEMA_VERSION } from '../utils/serializationUtils';
 import { EventLogger } from '../utils/EventLogger';
 import { TIMINGS, autosaveDebounceMs } from '../utils/timings';
+import { useIsMountedRef } from './useIsMountedRef';
 
 export function useCanvasInitialization({
   nodes,
@@ -13,12 +14,10 @@ export function useCanvasInitialization({
   setHasUnsavedChanges,
   flushStack,
   isAnimatingRef,
+  navigationStateSwapRef,
   saveStateRef, // Ref to the active save state — prevents auto-save running concurrently with manual saves
 }) {
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    return () => { isMountedRef.current = false; };
-  }, []);
+  const isMountedRef = useIsMountedRef();
 
   // Keep latest state in a ref so the auto-save timer reads current data
   // without the effect being torn down on every state change.
@@ -41,9 +40,16 @@ export function useCanvasInitialization({
   // NOTE: setHasUnsavedChanges is a stable React state setter — omitting it from
   // the dep array is intentional; its identity never changes across renders.
   useEffect(() => {
+    // Diving into/out of a nested canvas swaps the active React Flow arrays but
+    // does not change workspace content. Consume that one-shot marker so a pure
+    // view transition cannot dirty an untouched saved workspace.
+    if (navigationStateSwapRef?.current) {
+      navigationStateSwapRef.current = false;
+      return;
+    }
     if (nodes.length === 0 && edges.length === 0 && drawings.length === 0) return;
     setHasUnsavedChanges(true);
-  }, [nodes, edges, drawings, setHasUnsavedChanges]);
+  }, [nodes, edges, drawings, setHasUnsavedChanges, navigationStateSwapRef]);
 
   // Auto-save: debounced timer (≥2s, longer for big workspaces — see
   // autosaveDebounceMs) that restarts whenever content or the file path changes.
@@ -95,6 +101,5 @@ export function useCanvasInitialization({
     // Debounce scales with workspace size (bigger = costlier to serialize/write).
     timer = setTimeout(attemptSave, autosaveDebounceMs(nodes.length));
     return () => clearTimeout(timer);
-  }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, saveStateRef]);
+  }, [nodes, edges, drawings, currentFile, setCurrentFile, setHasUnsavedChanges, isAnimatingRef, saveStateRef, isMountedRef]);
 }
-

@@ -1,0 +1,15 @@
+@charset "utf-8";
+/* ============================================================
+   Editorial Resume Design System — global CSS entry point
+   ------------------------------------------------------------
+   Consumers link THIS one file. It re-exports the design-token
+   closure (colour, typography, spacing, page geometry, all
+   variants) and the three locally-bundled @font-face families
+   (Source Serif 4 · Inter · IBM Plex Mono).
+
+   Component / surface stylesheets are loaded per-document, not
+   globally, to preserve the system's original behaviour:
+     - resume.css        (résumé page chrome + components)
+     - cover-letter.css  (letter surface; load after resume.css)
+   ============================================================ */
+@import "colors_and_type.css";

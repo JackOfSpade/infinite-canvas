@@ -2,10 +2,9 @@
 /* ============================================================
    Editorial Resume Design System — design tokens
    ----------------------------------------------------------
-   Type:    Source Serif 4 (display, local ttf)  ·  Inter (body,
-            local woff2)  ·  IBM Plex Mono (technologies, local ttf)
-            All three families are bundled locally — zero network
-            dependencies at render time.
+   Type:    Source Serif 4 (display)  ·  Inter (body)  ·  IBM Plex
+            Mono (technologies). All three load from the Google Fonts
+            CDN (CSS2 API) — see the @import below.
    Color:   Warm off-white ground · deep warm ink · one oxblood
             accent, used sparingly (default: candidate name only)
    Units:   Print-first. Sizes given in pt so they survive PDF
@@ -15,67 +14,19 @@
             change --fs-body without disturbing the spacing scale.
    ============================================================ */
 
-/* All three families ship locally — no Google Fonts CDN dependency. */
+/* All three families load from the Google Fonts CDN (CSS2 API).
+   Weights are pinned to exactly what the system uses:
+     Source Serif 4 — 400, 600
+     Inter          — 400, 500, 600   (NO 700 by design — see note below)
+     IBM Plex Mono  — 400, 500
+   Swap families by editing this @import AND the --ff-* tokens below. */
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap");
 
-/* ---------- Source Serif 4 (local) ---------- */
-@font-face {
-  font-family: "Source Serif 4";
-  src: url("fonts/SourceSerif4-Regular.ttf") format("truetype");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Source Serif 4";
-  src: url("fonts/SourceSerif4-Semibold.ttf") format("truetype");
-  font-weight: 600;
-  font-style: normal;
-  font-display: swap;
-}
-
-/* ---------- IBM Plex Mono (local) ---------- */
-@font-face {
-  font-family: "IBM Plex Mono";
-  src: url("fonts/IBMPlexMono-Regular.ttf") format("truetype");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "IBM Plex Mono";
-  src: url("fonts/IBMPlexMono-Medium.ttf") format("truetype");
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-
-/* ---------- Inter (local) ---------- */
-@font-face {
-  font-family: "Inter";
-  src: url("fonts/Inter-Regular.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Inter";
-  src: url("fonts/Inter-Medium.woff2") format("woff2");
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Inter";
-  src: url("fonts/Inter-SemiBold.woff2") format("woff2");
-  font-weight: 600;
-  font-style: normal;
-  font-display: swap;
-}
-/* Inter-Bold (700) is intentionally NOT loaded. The system uses
+/* Inter Bold (700) is intentionally NOT requested. The system uses
    SemiBold (600) for every "bold" affordance — body <strong>, role
-   titles, project names, candidate name. Loading 700 invites drift
+   titles, project names, candidate name. Pulling 700 invites drift
    toward a heavier, less editorial voice. If a future variant truly
-   needs 700, add the @font-face here AND the --fw-bold token below. */
+   needs 700, add it to the @import above AND the --fw-bold token below. */
 
 :root {
   /* ---------- Color · ground ----------
@@ -120,34 +71,34 @@
   --accent-on:   var(--accent);
 
   /* ---------- Type · families ---------- */
-  --ff-display:  "Source Serif 4", "Source Serif Pro", Georgia, "Times New Roman", serif;
-  --ff-body:     "Inter", -apple-system, "Helvetica Neue", Arial, sans-serif;
-  --ff-mono:     "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+  --ff-display:  "Source Serif 4", "Source Serif Pro", Georgia, "Times New Roman", serif; /* @kind font */
+  --ff-body:     "Inter", -apple-system, "Helvetica Neue", Arial, sans-serif; /* @kind font */
+  --ff-mono:     "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace; /* @kind font */
 
   /* ---------- Type · scale (pt for print fidelity) ---------- */
-  --fs-display:  28pt;      /* candidate name                 */
-  --fs-h1:       18pt;      /* document title (rarely used)   */
-  --fs-h2:        9pt;      /* section header (uppercase)     */
-  --fs-h3:       11pt;      /* role title / company           */
-  --fs-body:     10.25pt;   /* bullets, paragraphs            */
-  --fs-small:     9.5pt;    /* meta (dates, location)         */
-  --fs-caption:   8.75pt;   /* scope chip, tradeoff note      */
-  --fs-mono:      9pt;      /* inline technologies            */
+  --fs-display:  28pt;      /* @kind font */  /* candidate name */
+  --fs-h1:       18pt;      /* @kind font */  /* document title (rarely used) */
+  --fs-h2:        9pt;      /* @kind font */  /* section header (uppercase) */
+  --fs-h3:       11pt;      /* @kind font */  /* role title / company */
+  --fs-body:     10.25pt;   /* @kind font */  /* bullets, paragraphs */
+  --fs-small:     9.5pt;    /* @kind font */  /* meta (dates, location) */
+  --fs-caption:   8.75pt;   /* @kind font */  /* scope chip, tradeoff note */
+  --fs-mono:      9pt;      /* @kind font */  /* inline technologies */
 
   /* ---------- Type · weight ---------- */
   /* Inter Light (300) and Bold (700) are not bundled — by design.
      The system uses SemiBold (600) for every "bold" affordance to
      keep the voice quietly confident, not loud. */
-  --fw-regular:  400;
-  --fw-medium:   500;
-  --fw-semibold: 600;
+  --fw-regular:  400; /* @kind font */
+  --fw-medium:   500; /* @kind font */
+  --fw-semibold: 600; /* @kind font */
 
   /* ---------- Type · leading ---------- */
-  --lh-display:  1.05;
-  --lh-tight:    1.20;
-  --lh-snug:     1.35;
-  --lh-body:     1.45;
-  --lh-loose:    1.55;
+  --lh-display:  1.05; /* @kind font */
+  --lh-tight:    1.20; /* @kind font */
+  --lh-snug:     1.35; /* @kind font */
+  --lh-body:     1.45; /* @kind font */
+  --lh-loose:    1.55; /* @kind font */
 
   /* ---------- Vertical rhythm ----------
      A computed token equal to one body line-box (fs-body × lh-body
@@ -158,51 +109,51 @@
      by design: --baseline keeps the *page* on a grid; --s-* keeps
      *elements* visually tight without forcing 4pt arithmetic onto
      every gap. */
-  --baseline:    calc(var(--fs-body) * var(--lh-body));
-  --vr-half:     calc(var(--baseline) * 0.5);   /* ~7.4pt  */
-  --vr-1:        var(--baseline);                /* ~14.9pt */
-  --vr-1-5:      calc(var(--baseline) * 1.5);   /* ~22.3pt */
-  --vr-2:        calc(var(--baseline) * 2);     /* ~29.7pt */
+  --baseline:    calc(var(--fs-body) * var(--lh-body)); /* @kind spacing */
+  --vr-half:     calc(var(--baseline) * 0.5);   /* @kind spacing */  /* ~7.4pt  */
+  --vr-1:        var(--baseline);                /* @kind spacing */  /* ~14.9pt */
+  --vr-1-5:      calc(var(--baseline) * 1.5);   /* @kind spacing */  /* ~22.3pt */
+  --vr-2:        calc(var(--baseline) * 2);     /* @kind spacing */  /* ~29.7pt */
 
   /* ---------- Type · tracking ---------- */
-  --tr-display:  -0.012em;
-  --tr-h2:        0.14em;   /* uppercase tracked              */
-  --tr-mono:     -0.005em;
-  --tr-tight:    -0.005em;
+  --tr-display:  -0.012em; /* @kind font */
+  --tr-h2:        0.14em;   /* @kind font */  /* uppercase tracked */
+  --tr-mono:     -0.005em; /* @kind font */
+  --tr-tight:    -0.005em; /* @kind font */
 
   /* ---------- Inline separators ----------
      The `·` separator appears in many contexts (contact line,
      role title, edu line, metrics, skills run). Two gap sizes
      cover every usage: tight for prose-adjacent runs, loose for
      mono / numeric / metric lines where digits need air. */
-  --sep-gap-tight: 0.35em;
-  --sep-gap-loose: 0.5em;
+  --sep-gap-tight: 0.35em; /* @kind spacing */
+  --sep-gap-loose: 0.5em; /* @kind spacing */
 
   /* ---------- Spacing · 4pt baseline ---------- */
-  --s-0:   0;
-  --s-1:   2pt;
-  --s-2:   4pt;
-  --s-3:   6pt;
-  --s-4:   8pt;
-  --s-5:  12pt;
-  --s-6:  16pt;
-  --s-7:  20pt;
-  --s-8:  24pt;
-  --s-9:  32pt;
-  --s-10: 40pt;
+  --s-0:   0; /* @kind spacing */
+  --s-1:   2pt; /* @kind spacing */
+  --s-2:   4pt; /* @kind spacing */
+  --s-3:   6pt; /* @kind spacing */
+  --s-4:   8pt; /* @kind spacing */
+  --s-5:  12pt; /* @kind spacing */
+  --s-6:  16pt; /* @kind spacing */
+  --s-7:  20pt; /* @kind spacing */
+  --s-8:  24pt; /* @kind spacing */
+  --s-9:  32pt; /* @kind spacing */
+  --s-10: 40pt; /* @kind spacing */
 
   /* ---------- Page geometry (Letter) ---------- */
-  --page-w:        8.5in;
-  --page-h:       11.0in;
-  --margin-top:    0.72in;
-  --margin-bot:    0.72in;
-  --margin-side:   0.78in;
-  --rule-weight:   0.5pt;
+  --page-w:        8.5in;  /* @kind spacing */
+  --page-h:       11.0in;  /* @kind spacing */
+  --margin-top:    0.72in; /* @kind spacing */
+  --margin-bot:    0.72in; /* @kind spacing */
+  --margin-side:   0.78in; /* @kind spacing */
+  --rule-weight:   0.5pt;  /* @kind spacing */
 
   /* ---------- Layout columns (single primary column) ---------- */
-  --col-meta-w:   1.45in;   /* right-aligned date/location column
+  --col-meta-w:   1.45in;   /* @kind spacing */  /* right-aligned date/location column
                                — visual alignment, NOT a 2-col flow */
-  --col-gap:      0.32in;
+  --col-gap:      0.32in;   /* @kind spacing */
 }
 
 /* ============================================================
@@ -304,11 +255,11 @@ ul { margin: 0; padding: 0; list-style: none; }
    in `resume.html` (`@page a4 { size: A4 }` + `page: a4` on the
    element). No separate top-level override is required. */
 [data-page="a4"] {
-  --page-w:      210mm;   /* 8.27in */
-  --page-h:      297mm;   /* 11.69in */
-  --margin-top:   18mm;   /* ~0.71in — preserves vertical rhythm */
-  --margin-bot:   18mm;
-  --margin-side:  16mm;   /* ~0.63in — keeps measure ≈ 70-75ch  */
+  --page-w:      210mm;   /* @kind spacing */  /* 8.27in */
+  --page-h:      297mm;   /* @kind spacing */  /* 11.69in */
+  --margin-top:   18mm;   /* @kind spacing */  /* ~0.71in — preserves vertical rhythm */
+  --margin-bot:   18mm;   /* @kind spacing */
+  --margin-side:  16mm;   /* @kind spacing */  /* ~0.63in — keeps measure ≈ 70-75ch  */
 }
 
 /* ---------- Monochrome ----------
@@ -347,19 +298,19 @@ ul { margin: 0; padding: 0; list-style: none; }
    nest density variants — there is one. If "compact" still
    overflows, the content is the problem; trim a bullet.       */
 [data-density="compact"] {
-  --fs-body:      9.75pt;
-  --fs-small:     9pt;
-  --fs-caption:   8.5pt;
-  --fs-mono:      8.5pt;
-  --lh-body:      1.35;
-  --lh-snug:      1.25;
+  --fs-body:      9.75pt;  /* @kind font */
+  --fs-small:     9pt;     /* @kind font */
+  --fs-caption:   8.5pt;   /* @kind font */
+  --fs-mono:      8.5pt;   /* @kind font */
+  --lh-body:      1.35;    /* @kind font */
+  --lh-snug:      1.25;    /* @kind font */
 
-  --s-6:         12pt;   /* was 16pt — section head ↔ body   */
-  --s-8:         18pt;   /* was 24pt — role ↔ role           */
-  --s-9:         24pt;   /* was 32pt — section ↔ section     */
+  --s-6:         12pt;   /* @kind spacing */  /* was 16pt — section head ↔ body   */
+  --s-8:         18pt;   /* @kind spacing */  /* was 24pt — role ↔ role           */
+  --s-9:         24pt;   /* @kind spacing */  /* was 32pt — section ↔ section     */
 
-  --margin-top:  0.6in;
-  --margin-bot:  0.6in;
+  --margin-top:  0.6in;  /* @kind spacing */
+  --margin-bot:  0.6in;  /* @kind spacing */
 }
 
 /* ---------- Print: ink-only ----------

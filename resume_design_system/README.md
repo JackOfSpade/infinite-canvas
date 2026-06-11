@@ -43,16 +43,19 @@ attached design assets. The references named in the brief are
   reference only)
 - Matthew Butterick, *Practical Typography* (practicaltypography.com)
 
-All three families ship locally in `fonts/`:
+All three families load from the **Google Fonts CDN** (CSS2 API),
+pinned to the exact weights the system uses:
 
-- `SourceSerif4-{Regular,Semibold}.ttf`
-- `Inter-{Regular,Medium,SemiBold}.woff2` *(no Bold by design)*
-- `IBMPlexMono-{Regular,Medium}.ttf`
+- `Source Serif 4` — 400, 600
+- `Inter` — 400, 500, 600 *(no Bold by design)*
+- `IBM Plex Mono` — 400, 500
 
-Declared via `@font-face` at the top of `colors_and_type.css`. **No
-Google Fonts CDN, no other network dependencies at render time** —
-this folder is self-contained. All three embed cleanly in
-Chrome-rendered PDFs and match the documented aesthetic. Swap families
+Loaded via a single `@import` at the top of `colors_and_type.css`. **No
+longer self-contained** — typography has a render-time dependency on the
+Google Fonts CDN; ensure it's reachable from the render environment, or
+re-vendor the families locally for an air-gapped build. All three embed
+cleanly in Chrome-rendered PDFs and match the documented aesthetic. Swap
+families
 by editing the `--ff-*` variables in `colors_and_type.css`; the system
 is family-agnostic.
 
@@ -69,8 +72,8 @@ is family-agnostic.
 | `resume.css`                      | Components — page chrome, header, sections, roles, bullets, projects, skills, education. |
 | `resume.html`                     | The template + a fully-populated sample (open this).      |
 | `build/dual-mode-pdf.js`          | Pure module exporting `addOcgBackground(bytes) → bytes`. UMD; loads in Node or browser. |
-| `build/vendor/pdf-lib.min.js`     | Pinned pdf-lib 1.17.1. Vendored locally; no network dependency at build time. |
-| `fonts/`                          | All three families bundled as `.ttf` / `.woff2`.          |
+| `build/vendor/`                   | *(removed — pdf-lib is now loaded from CDN in the browser and the `pdf-lib` npm package in Node).* |
+| `fonts/` (removed)                | Families now load from the Google Fonts CDN — no longer bundled. |
 | `preview/`                        | Design-system reference cards (type, color, spacing, components, variants, anti-patterns). Not used at generation time. |
 
 The system covers exactly one surface — the printable résumé. No
@@ -210,8 +213,10 @@ to recipients by design.
 
 The build module is UMD — same file works in Node (`require`) and
 browser/Puppeteer contexts (script tag → `window.DualModePdf`).
-pdf-lib is vendored at `build/vendor/pdf-lib.min.js`; no network
-dependency at build time. Self-test: `node build/test.js` from the
+pdf-lib 1.17.1 is loaded from CDN in the browser
+(`https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js`)
+and from the `pdf-lib` npm package in Node (`npm i pdf-lib@1.17.1`).
+Self-test: `node build/test.js` from the
 project root round-trips a synthetic PDF through the module and
 asserts on the OCG structure. The same assertions run through the
 browser UMD path (`window.DualModePdf`) by opening

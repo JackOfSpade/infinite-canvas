@@ -97,10 +97,27 @@ export const NODE_DIMS = {
 };
 
 /** Extracts or estimates width/height of a node */
+function resolveNodeDimension(...values) {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return value;
+    }
+    if (
+      typeof value === 'string'
+      && /^\s*(?:\d+\.?\d*|\.\d+)(?:px)?\s*$/i.test(value)
+    ) {
+      const parsed = Number.parseFloat(value);
+      if (parsed > 0) return parsed;
+    }
+  }
+  return 0;
+}
+
 export function getNodeDims(node) {
+  const fallback = NODE_DIMS[node?.type];
   return {
-    w: node.width  || node.measured?.width  || node.style?.width  || NODE_DIMS[node.type]?.w || 120,
-    h: node.height || node.measured?.height || node.style?.height || NODE_DIMS[node.type]?.h || 40,
+    w: resolveNodeDimension(node?.width, node?.measured?.width, node?.style?.width, fallback?.w, 120),
+    h: resolveNodeDimension(node?.height, node?.measured?.height, node?.style?.height, fallback?.h, 40),
   };
 }
 

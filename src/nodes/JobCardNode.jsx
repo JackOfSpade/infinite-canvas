@@ -6,6 +6,7 @@ import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
 import { languageLabel } from '../utils/jobLanguageLabels';
 import { NodeHandles } from './_shared/NodeHandles';
+import { useIsMountedRef } from '../hooks/useIsMountedRef';
 
 // Accent color encodes the match score (interview-likelihood) band, so the
 // card's color reinforces the single metric: greener = better odds. Bands match
@@ -43,8 +44,7 @@ export function JobCardNode({ id, data }) {
   // unmount don't setState.
   const idRef = useRef(id);
   useEffect(() => { idRef.current = id; }, [id]);
-  const isMountedRef = useRef(true);
-  useEffect(() => () => { isMountedRef.current = false; }, []);
+  const isMountedRef = useIsMountedRef();
 
   const score = data.matchScore || 0;
   const accentColor = scoreColor(score);
@@ -127,7 +127,7 @@ export function JobCardNode({ id, data }) {
     } finally {
       if (isMountedRef.current) setGeneratingApp(false);
     }
-  }, [data.hubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, getNode, nav, addToast]);
+  }, [data.hubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, getNode, nav, addToast, isMountedRef]);
 
   return (
     <div

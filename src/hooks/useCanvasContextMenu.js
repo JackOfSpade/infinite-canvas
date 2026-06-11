@@ -1,9 +1,10 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { useToast } from '../components/ToastProvider';
 import { computeTidiedNodes } from '../utils/layoutUtils';
+import { useIsMountedRef } from './useIsMountedRef';
 
 // Helper to determine if an action applies to a single clicked node or the entire selected group
 const getTargetNodeIds = (reactFlow, menuNodeId) => {
@@ -28,15 +29,18 @@ export function useCanvasContextMenu({
 }) {
   const [menu, setMenu] = useState(null);
   const reactFlow = useReactFlow();
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    return () => { isMountedRef.current = false; };
-  }, []);
+  const isMountedRef = useIsMountedRef();
   const { deleteElements } = reactFlow;
   const { addToast } = useToast();
 
   const onPaneContextMenuBase = useCallback((e) => {
     if (placementMode) return;
+    // React Flow's zoom-pane fires onPaneContextMenu for any right-click that did
+    // not pass through a `nopan` element. Draggable nodes carry `nopan`, but LOCKED
+    // nodes (draggable:false) do not — so a right-click on a locked node also bubbles
+    // here and would clobber the node menu that onNodeContextMenuBase opens. Bail when
+    // the click landed on a node so the node menu (incl. Unlock Node) is preserved.
+    if (e.target?.closest?.('.react-flow__node')) return;
     e.preventDefault();
     setMenu({ x: e.clientX, y: e.clientY, type: 'pane' });
   }, [placementMode]);
@@ -180,7 +184,7 @@ export function useCanvasContextMenu({
       EventLogger.error('[ContextMenu] AI polish crashed:', err);
       if (!isMountedRef.current) return;
     }
-  }, [menu, setNodes, takeSnapshot, addToast, updateGlobal, isAnimatingRef]);
+  }, [menu, setNodes, takeSnapshot, addToast, updateGlobal, isAnimatingRef, isMountedRef]);
 
   const toggleStickyNote = useCallback(() => {
     if (isAnimatingRef?.current) return;

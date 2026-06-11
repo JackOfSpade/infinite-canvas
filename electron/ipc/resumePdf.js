@@ -55,13 +55,14 @@ function loadAddOcgBackground() {
   return _addOcgBackground;
 }
 
-// The design-system stylesheets + the fonts directory. Copied into each render's
-// temp working dir so the HTML's relative `<link>` / `url("fonts/…")` references
-// resolve without polluting the (tracked) source directory. cover-letter.css is
-// the letter-specific surface (serif body, date/recipient, signature close) the
-// cover-letter document links on top of colors_and_type.css + resume.css.
+// The design-system stylesheets. Copied into each render's temp working dir so
+// the HTML's relative `<link>` references resolve without polluting the (tracked)
+// source directory. Fonts are loaded from the Google Fonts CDN via the @import
+// at the top of colors_and_type.css — no local fonts/ directory is needed.
+// cover-letter.css is the letter-specific surface (serif body, date/recipient,
+// signature close) the cover-letter document links on top of colors_and_type.css
+// + resume.css.
 const CSS_FILES = ['colors_and_type.css', 'resume.css', 'cover-letter.css'];
-const FONTS_DIR = 'fonts';
 
 /**
  * Resolve `resume_design_system/`. In dev this is the repo root; in a packaged
@@ -96,7 +97,6 @@ async function prepareAssetsDir() {
   await Promise.all(CSS_FILES.map(f =>
     fs.promises.copyFile(path.join(designDir, f), path.join(workDir, f))
   ));
-  await fs.promises.cp(path.join(designDir, FONTS_DIR), path.join(workDir, FONTS_DIR), { recursive: true });
   return workDir;
 }
 

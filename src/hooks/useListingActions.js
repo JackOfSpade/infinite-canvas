@@ -3,6 +3,8 @@ import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { TIMINGS } from '../utils/timings';
 import { buildItemQuery } from '../utils/bundlePricing';
+import { useIsMountedRef } from './useIsMountedRef';
+import { useToast } from '../components/ToastProvider';
 
 /**
  * useListingActions — shared logic for ListingNode and SellHubNode.
@@ -20,6 +22,7 @@ import { buildItemQuery } from '../utils/bundlePricing';
  */
 export function useListingActions(id, data) {
   const { updateNodeData } = useReactFlow();
+  const { addToast } = useToast();
   const product = useMemo(() => data.product || {}, [data.product]);
 
   // Price to display: the user's explicit price when set — including a deliberate
@@ -65,9 +68,28 @@ export function useListingActions(id, data) {
   // ── Field editing ──────────────────────────────────────────────────────────
 
   const handleFieldEdit = useCallback((field, value) => {
-    updateNodeData(id, { product: { ...product, [field]: value } });
+    // Title is REQUIRED — a listing must have one. Reject an empty/whitespace
+    // title edit, keeping the previous title rather than blanking it. Brand and
+    // model have no such rule: clearing either is allowed and persists as ''
+    // (buildItemQuery strips blank/"Unknown" tokens), so an empty edit there is
+    // kept empty, NOT reverted to the pre-edit value.
+    if (field === 'generated_title' && !String(value ?? '').trim()) {
+      addToast({ title: 'Title required', description: "A listing title can't be empty — keeping the previous title.", type: 'error' });
+      setEditing(null);
+      return;
+    }
+    // Title / brand / model define what the item IS. Editing any of them makes
+    // the AI's original `search_query` stale — it may describe a broader or
+    // bundle-spanning product than the user now sees. Clear it so the scrape +
+    // price query re-derive from the visible fields (buildItemQuery). "What you
+    // priced = what you saw."
+    const patch = { [field]: value };
+    if (field === 'generated_title' || field === 'brand' || field === 'model') {
+      patch.search_query = '';
+    }
+    updateNodeData(id, { product: { ...product, ...patch } });
     setEditing(null);
-  }, [id, product, updateNodeData]);
+  }, [id, product, updateNodeData, addToast]);
 
   const handlePricingNotesChange = useCallback((value) => {
     updateNodeData(id, { pricingNotes: String(value || '') });
@@ -130,10 +152,7 @@ export function useListingActions(id, data) {
 
   // ── Price research ─────────────────────────────────────────────────────────
 
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    return () => { isMountedRef.current = false; };
-  }, []);
+  const isMountedRef = useIsMountedRef();
 
   // Build a neutral search-friendly query string. Prefer the AI-generated
   // `search_query` field (brand + model + price-driving specs only, no
@@ -161,24 +180,28 @@ export function useListingActions(id, data) {
     const items = (Array.isArray(researchItems) && researchItems.length > 0)
       ? researchItems
       : [{ query: buildSearchQuery(), condition: product.condition || 'Used - Good' }];
-    const result = await window.electronAPI.scrapePriceComps({ items, nodeId: id });
+    // Hub-level product category gates niche comp sources server-side (e.g.
+    // PriceCharting only runs for video-game/collectible categories — it fuzzily
+    // "matches" any query otherwise). Blank/Unknown is fine; the backend treats
+    // an unknown category as "don't suppress".
+    const result = await window.electronAPI.scrapePriceComps({ items, nodeId: id, category: product.category });
     if (!result.success) {
       const err = new Error(result.error);
       if (result.isRateLimit) err.isRateLimit = true;
       throw err;
     }
     return result;
-  }, [buildSearchQuery, product.condition, id]);
+  }, [buildSearchQuery, product.condition, product.category, id]);
 
   // Rescrape a single comp source — used after captcha-resolve to refetch
   // just the unblocked source instead of re-running the whole pipeline. Pass
   // `researchItems` to refetch that source for every item of a bundle (returns
   // a per-item result); omit it for the single-item path.
-  const rescrapeSource = useCallback(async (sourceId, researchItems) => {
+  const rescrapeSource = useCallback(async (sourceId, researchItems, noChallengeConfirmed = false) => {
     if (!window.electronAPI?.rescrapeSource) throw new Error('rescrapeSource API unavailable');
     const payload = (Array.isArray(researchItems) && researchItems.length > 0)
-      ? { sourceId, items: researchItems, nodeId: id }
-      : { sourceId, query: buildSearchQuery(), nodeId: id };
+      ? { sourceId, items: researchItems, nodeId: id, noChallengeConfirmed }
+      : { sourceId, query: buildSearchQuery(), nodeId: id, noChallengeConfirmed };
     const result = await window.electronAPI.rescrapeSource(payload);
     if (!result.success) {
       const err = new Error(result.error);
@@ -223,13 +246,12 @@ export function useListingActions(id, data) {
       setPriceInput(result.pricing.recommended_price);
     }
     return result;
-  }, [buildSearchQuery, product.condition, product.model, product.color, product.generated_title, data.pricingNotes, id]);
+  }, [buildSearchQuery, product.condition, product.model, product.color, product.generated_title, data.pricingNotes, id, isMountedRef]);
 
-  // Multi-item bundle: ask the AI for ONE combined asking price across the
-  // independently-priced items (synergy-aware, not just the arithmetic sum).
-  // Returns whole-listing quick/best/max prices plus a bundle-only
-  // justification, or null when the backend declined (fewer than 2 priced
-  // items) — the caller falls back to the item sums in that case.
+  // Multi-item bundle: ask the AI for attributable bundle/tier pricing factors
+  // across independently-priced items. The backend deterministically derives
+  // whole-listing quick/best/max prices and explanation from those factors.
+  // Returns null when fewer than 2 items were priced.
   const synthesizeBundlePrice = useCallback(async (items, sumOfPrices) => {
     if (!window.electronAPI?.synthesizeBundlePrice) throw new Error('synthesizeBundlePrice API unavailable');
     const result = await window.electronAPI.synthesizeBundlePrice({ items, sumOfPrices, nodeId: id });

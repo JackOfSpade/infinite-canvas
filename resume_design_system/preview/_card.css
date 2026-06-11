@@ -1,0 +1,55 @@
+/* Shared chrome for preview/*.html cards.
+   Keeps each card self-contained but visually consistent
+   with the actual design system. */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--ink-1);
+  font-family: var(--ff-body);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+body {
+  padding: 24px 28px;
+  min-height: calc(100vh - 0px);
+  box-sizing: border-box;
+}
+
+.card-label {
+  font-family: var(--ff-body);
+  font-size: 8.5pt;
+  font-weight: var(--fw-medium);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 0 0 14px;
+}
+
+.row { display: flex; align-items: baseline; gap: 24px; flex-wrap: wrap; }
+.col { display: flex; flex-direction: column; gap: 4px; }
+
+.meta {
+  font-family: var(--ff-mono);
+  font-size: 8.5pt;
+  letter-spacing: -0.005em;
+  color: var(--ink-3);
+}
+
+.swatch {
+  display: flex;
+  align-items: stretch;
+  border: 0.5pt solid rgba(26,24,21,0.10);
+  border-radius: 0;     /* the design has no radii — neither do its cards */
+}
+.swatch .chip { width: 56px; }
+.swatch .lbl  {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 9pt;
+}
+.swatch .lbl .name { color: var(--ink-1); font-weight: var(--fw-medium); }
+.swatch .lbl .hex  { color: var(--ink-3); font-family: var(--ff-mono); font-size: 8.5pt; letter-spacing: -0.005em; }

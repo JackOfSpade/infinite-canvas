@@ -19,6 +19,7 @@ import { safeApiFetch } from '../ipc/antiBotDetector.js';
 import { JOB_RESULT_CAP } from '../ipc/resultCaps.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { jobTitleCompanyLocationKey } from '../../src/utils/jobIdentity.js';
+import { isPriceChartingApplicable } from '../../src/utils/compSourceScope.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
 // shared scrapeBudget store so they live in one place and share the budget
@@ -1105,8 +1106,18 @@ export async function fetchReverbListings(query, soldOnly = false, signal = null
 // when it detects automation (navigator.webdriver / CDP) — so the Puppeteer scrape
 // always read "N rows, 0 prices" no matter how long it waited. A plain HTTP GET
 // with a browser UA runs no JS, so the server-rendered prices survive. Same
-// direct-HTTP pattern as Reverb. Niche source (video games + retro consoles):
-// returns [] for unrelated queries.
+// direct-HTTP pattern as Reverb.
+//
+// CAUTION — PriceCharting's /search-products is a FUZZY, WHOLE-CATALOG keyword
+// match that does NOT return [] for off-catalog queries (an earlier comment here
+// wrongly claimed it did). A non-game query fuzzily matches dozens of unrelated
+// catalog entries on stray single tokens — a "BISSELL … Crosswave 80 oz" vacuum
+// query returns "Azur Lane: Crosswave", "Formula One 99", "Wizard of Oz", … (137
+// "matches"). Two guards keep that noise out of the comp pool: (1) the caller
+// SKIPS the request for a clearly-non-collectible category (isPriceChartingApplicable),
+// and (2) filterPriceChartingByRelevance drops any returned row that doesn't share
+// enough of the query's distinctive tokens with its title — a genuine match shares
+// most, a fuzzy junk match shares one.
 const PRICECHARTING_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml',
@@ -1146,9 +1157,55 @@ export function parsePriceChartingHtml(html) {
   return items;
 }
 
-export async function fetchPriceChartingComps(query, signal = null) {
+// Distinctive query tokens (≥2 chars, common stopwords + units removed) used to
+// score a PriceCharting row's relevance. Units like "oz"/"lb" are dropped so the
+// "80 oz" in a vacuum query can't pull in "Wizard of Oz".
+const PC_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'of', 'a', 'an', 'to', 'in', 'on', 'by', 'or', 'at', 'it', 'is',
+  'oz', 'lb', 'lbs', 'ml', 'pack', 'set', 'new', 'used', 'piece', 'pcs', 'count', 'ct',
+]);
+function pcTokens(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .filter(t => t.length >= 2 && !PC_STOPWORDS.has(t));
+}
+
+/**
+ * Drop PriceCharting rows that don't genuinely match the query. PriceCharting's
+ * search fuzzily matches the WHOLE catalog on any single shared token, so a
+ * non-game query returns dozens of unrelated games/cards/comics. A real match
+ * shares MOST of the query's distinctive tokens with the result title; a junk
+ * fuzzy match shares one. Keep a row only when it clears a token-overlap bar:
+ * a 1–2-token query must match ALL its tokens; a longer query must match ≥2
+ * tokens AND ≥40% of them. Applies ONLY to PriceCharting (the fuzzy source) —
+ * other comp sources are unaffected. PURE for testability.
+ */
+export function filterPriceChartingByRelevance(items, query) {
+  const list = Array.isArray(items) ? items : [];
+  const qToks = [...new Set(pcTokens(query))];
+  if (qToks.length === 0) return list;                 // nothing to match on → don't over-filter
+  const need = qToks.length <= 2 ? qToks.length : 2;
+  return list.filter(it => {
+    const tToks = new Set(pcTokens(it?.title));
+    let hits = 0;
+    for (const t of qToks) if (tToks.has(t)) hits++;
+    return hits >= need && hits / qToks.length >= 0.4;
+  });
+}
+
+export async function fetchPriceChartingComps(query, signal = null, { category } = {}) {
   const q = String(query || '').trim();
   if (!q) return { items: [], warning: null };
+  // Skip the request entirely for a clearly-non-collectible category — saves a
+  // wasted round-trip and stops a game-price site from appearing as a source for
+  // a vacuum/appliance/etc. Unknown/blank category falls through (still fetched,
+  // then relevance-filtered). `skipped` lets the caller distinguish "n/a here"
+  // from a genuine empty result.
+  if (category !== undefined && !isPriceChartingApplicable(category)) {
+    return { items: [], url: null, warning: null, skipped: true };
+  }
   const url = `https://www.pricecharting.com/search-products?q=${encodeURIComponent(q)}&type=prices`;
   let res;
   try {
@@ -1161,7 +1218,11 @@ export async function fetchPriceChartingComps(query, signal = null) {
     logger.warn(`[PriceCharting] HTTP ${res.status}`);
     return { items: [], url, warning: { code: 'task-failed', severity: 'block', evidence: `HTTP ${res.status} (server bot-gate or rate-limit)` } };
   }
-  const items = parsePriceChartingHtml(await res.text());
+  const parsed = parsePriceChartingHtml(await res.text());
+  const items = filterPriceChartingByRelevance(parsed, q);
+  if (parsed.length > 0 && items.length < parsed.length) {
+    logger.info(`[PriceCharting] relevance filter kept ${items.length}/${parsed.length} row(s) for "${q.slice(0, 80)}"`);
+  }
   return { items, url, warning: null };
 }
 

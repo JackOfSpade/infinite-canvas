@@ -327,6 +327,13 @@ async function executeScrape(url, extractorJS, options = {}) {
         await new Promise(r => setTimeout(r, firstBeatMs));
 
         let extractorResult = null;
+        // A SITE_CHANGED throw (extractor matched 0 cards) is DEFERRED here, not
+        // rethrown on the spot: a 0-card page is sometimes an anti-bot challenge
+        // (Cloudflare "Just a moment…", a 403/503 interstitial) rather than real
+        // selector drift, and an immediate throw skips the anti-bot detector below
+        // — mislabeling a hard block as `stale-selectors` (warn) all the way to the
+        // source card. Capture it, break, and let detection have first look.
+        let siteChangedError = null;
         let lastCount = -2;   // sentinel so the first real read always "changes"
         let stableReads = 0;
         let zeroReads = 0;
@@ -336,7 +343,7 @@ async function executeScrape(url, extractorJS, options = {}) {
           let r = null;
           try { r = await page.evaluate(extractorJS); }
           catch (evalErr) {
-            if (/SITE_CHANGED/i.test(evalErr?.message || '')) throw evalErr;
+            if (/SITE_CHANGED/i.test(evalErr?.message || '')) { siteChangedError = evalErr; break; }
             /* navigated mid-evaluate — retry next tick */
           }
           if (r != null) {
@@ -368,12 +375,14 @@ async function executeScrape(url, extractorJS, options = {}) {
         // Time-to-ready for the budget learner — only the clean positive-stable
         // case (recorded below, after anti-bot detection rules out a block).
         const stableElapsedMs = settledPositively ? Date.now() - scrapeStart : null;
-        // Guarantee a value even if every evaluate threw (rare).
-        if (extractorResult == null) {
+        // Guarantee a value even if every evaluate threw (rare). Skip when a
+        // SITE_CHANGED is already deferred — re-running the extractor would just
+        // re-throw, and we want detection to run on the page we already have.
+        if (extractorResult == null && !siteChangedError) {
           try { extractorResult = await page.evaluate(extractorJS); }
           catch (evalErr) {
-            if (/SITE_CHANGED/i.test(evalErr?.message || '')) throw evalErr;
-            extractorResult = [];
+            if (/SITE_CHANGED/i.test(evalErr?.message || '')) siteChangedError = evalErr;
+            else extractorResult = [];
           }
         }
 
@@ -422,6 +431,23 @@ async function executeScrape(url, extractorJS, options = {}) {
         // EMA tracks healthy timing, not stall duration.
         if (stableElapsedMs != null && warning?.severity !== 'block') {
           recordReady(sourceKey, stableElapsedMs);
+        }
+
+        // Resolve a deferred SITE_CHANGED throw now that anti-bot detection has
+        // run on the same page. If the 0-card page is actually a hard block
+        // (Cloudflare "Just a moment…", 403/503, a challenge interstitial), surface
+        // the BLOCK — it carries a Solve affordance and the correct 'block'
+        // rate-limiter outcome — instead of letting the throw mislabel it as
+        // stale-selectors downstream. A genuinely-served page with 0 cards (real
+        // design-system drift, e.g. eBay changing su-styled-text) re-throws and
+        // stays stale-selectors. Conservative on purpose: reroute ONLY on a
+        // high-confidence `block`, never a throttle/empty, so real drift is never
+        // downgraded into an unclearable Solve loop.
+        if (siteChangedError) {
+          if (warning?.severity === 'block') {
+            return { data: [], warning, yieldStats: null };
+          }
+          throw siteChangedError;
         }
 
         // `data` stays a bare array for every downstream consumer; yieldStats was

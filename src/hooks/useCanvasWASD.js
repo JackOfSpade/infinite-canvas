@@ -61,6 +61,11 @@ export function useCanvasWASD({ isAnimatingRef }) {
     const onKeyDown = (e) => {
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+      // Ignore arrow/WASD pans when Ctrl/Cmd/Alt are held — those are OS/app
+      // shortcuts (e.g. macOS Ctrl+Arrow switches Spaces) that steal the matching
+      // keyup, which would otherwise leave the key stuck "down" and pan forever.
+      // Shift is allowed: it's the speed-boost modifier (read below as keys.shift).
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       const k = e.key.toLowerCase();
       if (k === 'w' || k === 'a' || k === 's' || k === 'd' || k === 'arrowup' || k === 'arrowleft' || k === 'arrowdown' || k === 'arrowright') {
         keys[k] = true;

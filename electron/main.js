@@ -223,13 +223,19 @@ function getTargetCanvasWindow() {
 function requestSaveAndWait(win) {
   return new Promise(resolve => {
     let saveTimeoutId;
-    const saveHandler = (_e, { success }) => { clearTimeout(saveTimeoutId); resolve(success); };
-    electronPkg.ipcMain.once('save-response', saveHandler);
-    safeMenuSend(win, 'request-save-and-respond');
+    const expectedSender = win.webContents;
+    const saveHandler = (event, { success } = {}) => {
+      if (event.sender !== expectedSender) return;
+      clearTimeout(saveTimeoutId);
+      electronPkg.ipcMain.removeListener('save-response', saveHandler);
+      resolve(Boolean(success));
+    };
+    electronPkg.ipcMain.on('save-response', saveHandler);
     saveTimeoutId = setTimeout(() => {
       electronPkg.ipcMain.removeListener('save-response', saveHandler);
       resolve(false);
     }, 3000);
+    safeMenuSend(win, 'request-save-and-respond');
   });
 }
 
@@ -261,21 +267,25 @@ async function checkUnsavedChanges(win, actionType = 'close') {
     return { action: 'proceed' };
   }
 
-  win.webContents.send('quit-request');
-  
+  const expectedSender = win.webContents;
+
   const rendererState = await new Promise(resolve => {
     let timeoutId;
-    const handler = (_e, { hasUnsavedChanges }) => {
+    const handler = (event, { hasUnsavedChanges } = {}) => {
+      if (event.sender !== expectedSender) return;
       clearTimeout(timeoutId);
+      electronPkg.ipcMain.removeListener('quit-response', handler);
       resolve({ hasUnsavedChanges });
     };
 
-    electronPkg.ipcMain.once('quit-response', handler);
+    electronPkg.ipcMain.on('quit-response', handler);
 
     timeoutId = setTimeout(() => {
       electronPkg.ipcMain.removeListener('quit-response', handler);
       resolve({ timeout: true });
     }, 1500);
+
+    safeMenuSend(win, 'quit-request');
   });
 
   if (rendererState.hasUnsavedChanges) {
@@ -794,18 +804,21 @@ if (!gotTheLock) {
     setupApplicationMenu();
     createWindow({ mode: 'auto' });
 
-    // Let the renderer mount and auto-load the workspace before launching the
-    // Chrome-based marketplace/account verifier windows. The verifier still runs
-    // every launch; it just stops competing with first paint and image decode.
-    setTimeout(() => {
-      verifyAllPlatforms({
-        notify: (event, data) => {
-          for (const win of canvasWindows) {
-            if (!win.isDestroyed()) win.webContents.send(event, data);
-          }
-        },
-      }).catch(() => {});
-    }, 2500);
+    if (process.env.INFINITE_CANVAS_E2E !== '1') {
+      // Let the renderer mount and auto-load the workspace before launching the
+      // Chrome-based marketplace/account verifier windows. The verifier still runs
+      // every normal launch; UI automation disables it to stay isolated and avoid
+      // leaving unrelated browser processes behind.
+      setTimeout(() => {
+        verifyAllPlatforms({
+          notify: (event, data) => {
+            for (const win of canvasWindows) {
+              if (!win.isDestroyed()) win.webContents.send(event, data);
+            }
+          },
+        }).catch(() => {});
+      }, 2500);
+    }
 
     app.on('activate', () => {
       // macOS: re-opening from the dock with no windows restores the last

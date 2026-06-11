@@ -5,7 +5,7 @@ import { TIMINGS } from '../../utils/timings';
 import { SELL_PLATFORMS } from '../../utils/constants';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
-import { selectListingPriceTiers } from '../../utils/bundlePricing';
+import { buildFinalListingTitle, normalizeBundlePricingResult, selectListingPriceTiers } from '../../utils/bundlePricing';
 
 /**
  * Title that toggles between one-line truncate and full wrapped text on click,
@@ -56,15 +56,25 @@ function formatPrice(value) {
   if (value === null || value === undefined || value === '') return '—';
   const price = Number(value);
   if (!Number.isFinite(price)) return '—';
-  return `$${Number.isInteger(price) ? price : price.toFixed(2)}`;
+  const rounded = Math.round(price * 100) / 100;
+  if (rounded <= 0) return '—';
+  return `$${Number.isInteger(rounded) ? rounded : rounded.toFixed(2)}`;
+}
+
+function hasPositivePrice(value) {
+  if (value === null || value === undefined || value === '') return false;
+  const price = Number(value);
+  return Number.isFinite(price) && Math.round(price * 100) / 100 > 0;
 }
 
 function buildFinalExplanation({ pricing, itemPricings, bundlePricing, bundleTotal, best }) {
   const isBundle = Array.isArray(itemPricings) && itemPricings.length > 1;
   if (!isBundle) return pricing?.justification || '';
+  const pricedCount = itemPricings.filter(it => hasPositivePrice(it?.pricing?.recommended_price)).length;
+  const unpricedCount = itemPricings.length - pricedCount;
   return bundlePricing?.justification
     || (best != null && bundleTotal != null
-      ? `The combined listing price is ${formatPrice(best)} versus ${formatPrice(bundleTotal)} if the items were sold separately.`
+      ? `The combined listing price is ${formatPrice(best)} versus ${formatPrice(bundleTotal)} if the priced items were sold separately.${unpricedCount > 0 ? ` ${unpricedCount} unpriced item${unpricedCount === 1 ? ' was' : 's were'} excluded from the recommendation.` : ''}`
       : '');
 }
 
@@ -117,8 +127,6 @@ export function SellHubPricedState({
   // Phase-2 redesign: marketplace cards replace the platform-toggles UX.
   spawnedMarketplaceIds = [], // ids already represented by a connected MarketplaceCardNode
   onSpawnMarketplaceCard,     // (platformId) => spawn a card next to the hub
-  onCheckAllStatuses,         // () => trigger checkStatus on every connected card
-  checkingAll = false,
   // { ebay: { fit: 'good' }, mercari: { fit: 'unfit', reason: '...' }, ... }
   // null/undefined means assessment not yet complete (or failed) — UI falls
   // back to showing every platform unfiltered. Always-clickable; "unfit" only
@@ -134,10 +142,22 @@ export function SellHubPricedState({
   const [showUnfit, setShowUnfit] = useState(false);
   const [expandedItemReasons, setExpandedItemReasons] = useState({});
   const { addToast } = useToast();
-  const tiers = selectListingPriceTiers({ pricing, itemPricings, bundlePricing, bundleTotal });
+  const pricedItemCount = Array.isArray(itemPricings)
+    ? itemPricings.filter(it => hasPositivePrice(it?.pricing?.recommended_price)).length
+    : 0;
+  const unpricedItemCount = Array.isArray(itemPricings) ? itemPricings.length - pricedItemCount : 0;
+  // Also normalize on read so results saved before the consistency guard was
+  // added cannot keep showing contradictory bundle explanation text.
+  const displayBundlePricing = normalizeBundlePricingResult(
+    bundlePricing,
+    bundleTotal,
+    bundlePricing?.item_count ?? pricedItemCount,
+  );
+  const tiers = selectListingPriceTiers({ pricing, itemPricings, bundlePricing: displayBundlePricing, bundleTotal });
   const resultItems = tiers.isBundle
     ? itemPricings
     : [{ key: 'primary', label: product.generated_title || 'Item', pricing }];
+  const finalListingTitle = buildFinalListingTitle(product, itemPricings);
   const bundleDelta = tiers.isBundle && tiers.best != null && bundleTotal != null
     ? tiers.best - bundleTotal
     : null;
@@ -151,7 +171,7 @@ export function SellHubPricedState({
   const finalExplanation = buildFinalExplanation({
     pricing,
     itemPricings,
-    bundlePricing,
+    bundlePricing: displayBundlePricing,
     bundleTotal,
     best: tiers.best,
   });
@@ -171,7 +191,7 @@ export function SellHubPricedState({
         onAddImages={onAddPhotos}
       />
 
-      <ExpandableTitle title={product.generated_title || 'Item'} addToast={addToast} />
+      <ExpandableTitle title={finalListingTitle} addToast={addToast} />
 
       {/* Anti-bot / throttle warnings collected during the multi-source
           scrape. The comp-source cards are ephemeral (reaped after research),
@@ -215,6 +235,11 @@ export function SellHubPricedState({
               </div>
             ))}
           </div>
+          {tiers.isBundle && unpricedItemCount > 0 && (
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/[0.07] px-2 py-1 text-[8px] leading-snug text-amber-200/70">
+              {unpricedItemCount} item{unpricedItemCount === 1 ? ' has' : 's have'} no market price and {unpricedItemCount === 1 ? 'is' : 'are'} excluded from this recommendation.
+            </div>
+          )}
 
           {finalExplanation && (
             <ReasonDisclosure
@@ -257,7 +282,7 @@ export function SellHubPricedState({
           </ul>
           {tiers.isBundle && bundleTotal != null && (
             <div className="flex items-center justify-between gap-2 border-t border-white/[0.07] pt-1.5 text-[9px]">
-              <span className="text-white/35">Value if sold separately</span>
+              <span className="text-white/35">{unpricedItemCount > 0 ? 'Priced-item value if sold separately' : 'Value if sold separately'}</span>
               <span className="shrink-0 text-white/50">{formatPrice(bundleTotal)}</span>
             </div>
           )}
@@ -268,25 +293,11 @@ export function SellHubPricedState({
           Each card persists on the canvas, holds its own listing URL, and can
           be status-checked independently. Replaces the old auto-post toggles. */}
       <div className="pt-1 border-t border-white/5 space-y-1.5">
-        <div className="flex items-center justify-between">
-          <div className="text-white/20 text-[9px] font-semibold uppercase tracking-wider">
-            Marketplaces
-          </div>
-          {spawnedMarketplaceIds.length > 0 && !locked && (
-            <button
-              onClick={onCheckAllStatuses}
-              disabled={checkingAll}
-              onPointerDown={(e) => e.stopPropagation()}
-              className="nodrag flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 text-[9px] font-medium border border-blue-500/20 transition-colors disabled:opacity-50"
-              title="Ask AI to check the current status of every connected marketplace listing"
-            >
-              <Activity size={9} className={checkingAll ? 'animate-pulse' : ''} />
-              {checkingAll ? 'Checking…' : 'Check All'}
-            </button>
-          )}
+        <div className="text-white/20 text-[9px] font-semibold uppercase tracking-wider">
+          Marketplaces
         </div>
         <div className="text-white/30 text-[9px] leading-snug">
-          Spawn a card for each marketplace you list on. Each card holds a listing URL you paste after posting manually.
+          Spawn a card for each marketplace you list on. Each card holds a listing URL you paste after posting manually. Use a Marketplace Status Module to monitor them.
         </div>
         {platformFitPending ? (
           // Fit assessment still running — hold the list rather than show every

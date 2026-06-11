@@ -370,7 +370,7 @@ export const CanvasToolbar = React.memo(function CanvasToolbar({
           </button>
         </ToolbarTooltip>
 
-        <ToolbarTooltip label="Redo" shortcut="⌘⇧Z">
+        <ToolbarTooltip label="Redo" shortcut="⌘Y / ⌘⇧Z">
           <button
             onClick={redo}
             className={`p-3 rounded-full transition ${canRedo ? 'text-white/70 hover:text-white hover:bg-white/10' : 'text-white/20 cursor-not-allowed'}`}

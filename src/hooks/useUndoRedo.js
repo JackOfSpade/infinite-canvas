@@ -5,20 +5,11 @@ import { fingerprint } from '../utils/serializationUtils';
 import { TIMINGS, maxUndoHistory } from '../utils/timings';
 import { mergeNonRestorableNodeDataFromLive } from '../utils/undoNonRestorableState';
 import { isTextEditingTarget, shouldUseNativeTextUndo } from '../utils/nativeTextUndo';
+import { matchesRedoShortcut, matchesShortcut, matchesStandardRedoShortcut } from '../utils/keyboardShortcuts';
 
 // Resolved once at module load — each snapshot is a full canvas clone, so this
 // scales down on low-memory devices (see maxUndoHistory).
 const MAX_HISTORY = maxUndoHistory();
-
-function matchesShortcut(e, binding) {
-  if (!binding) return false;
-  const isMod = e.ctrlKey || e.metaKey;
-  if (binding.meta  && !isMod)    return false;
-  if (!binding.meta && isMod)     return false;
-  if (binding.shift !== e.shiftKey) return false;
-  if (binding.alt   !== e.altKey)   return false;
-  return e.key.toLowerCase() === binding.key.toLowerCase();
-}
 
 /**
  * Undo/Redo hook.
@@ -214,10 +205,13 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
         if (tag === 'TEXTAREA' && e.target.value.trim().length > 0) return;
       }
 
-      if (matchesShortcut(e, sc.undo)) {
+      if (matchesStandardRedoShortcut(e)) {
+        e.preventDefault();
+        redo();
+      } else if (matchesShortcut(e, sc.undo)) {
         e.preventDefault();
         undo();
-      } else if (matchesShortcut(e, sc.redo) || matchesShortcut(e, sc.redoAlt)) {
+      } else if (matchesRedoShortcut(e, sc)) {
         e.preventDefault();
         redo();
       }

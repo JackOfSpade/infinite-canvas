@@ -71,6 +71,16 @@ function createSellHubNode(position, extra = {}) {
   };
 }
 
+// Marketplace Status Module — monitors all listings on the canvas via each
+// platform's notification hub. No file drop, no hubState; it derives everything
+// from the marketplace cards already on the canvas + the watch URLs in Settings.
+function createMarketplaceStatusNode(position, extra = {}) {
+  return {
+    id: generateId(), type: 'marketplacestatus', position,
+    data: { ...extra },
+  };
+}
+
 // Job Board: aggregates results from connected Job Search Modules. No file drop
 // and no résumé — its inputs arrive purely through edge connections.
 function createJobBoardNode(position, extra = {}) {
@@ -88,6 +98,7 @@ export const NODE_FACTORIES = {
   jobhub: createJobSearchNode,
   jobboard: createJobBoardNode,
   sellhub: createSellHubNode,
+  marketplacestatus: createMarketplaceStatusNode,
 };
 
 // Hub states that indicate an active background job — clones should not inherit these.

@@ -16,7 +16,6 @@ import { SellHubDraftState } from './sellhub/SellHubDraftState';
 import { SellHubPricedState } from './sellhub/SellHubPricedState';
 import { HubErrorBanner } from '../components/HubErrorBanner';
 import { SellHubCompsReadyDecision } from './sellhub/SellHubCompsReadyDecision';
-import { useCheckAllConnected } from '../hooks/useCheckAllConnected';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
 import { useEpochCancellation, isNodeDeletedAbort } from '../hooks/useEpochCancellation';
 import { useSourceProgress } from '../hooks/useSourceProgress';
@@ -24,12 +23,13 @@ import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { filesToProductImagePaths, summarizeFileExtensions } from '../utils/fileDropUtils';
 import { mergeSourceIntoComps, retryWarningRequiringAction, updateResolvedSourceWarning } from '../utils/compsMerge';
-import { buildResearchItems, computeBundleTotal, selectBundleHeadline } from '../utils/bundlePricing';
+import { buildFinalListingTitle, buildRefreshResearchItems, computeBundleTotal, selectBundleHeadline } from '../utils/bundlePricing';
 import { generateId } from '../utils/idGenerator';
 import { canSellHubReplaceFailedInitialPhotos, getHubDropLockReason } from '../utils/hubDropEligibility';
 import { appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../utils/photoPathList';
 import { enqueueUniqueSourceResolve } from '../utils/sourceResolveQueue';
 import { getRequiredCompLoginPlatformIds } from '../utils/marketplaceLoginPreflight';
+import { useIsMountedRef } from '../hooks/useIsMountedRef';
 
 /**
  * SellHubNode — draggable canvas module for marketplace selling.
@@ -48,6 +48,15 @@ function isOversizedImageError(message) {
   return /image file too large/i.test(String(message || ''));
 }
 
+// Comp-source cards linger as a visual "all sources done" summary, then the
+// CLEAN ones dismiss together this long after EVERY card has reached a terminal
+// state — instead of each clean card popping away on its own 3s timer. Mirrors
+// Job Search Module (SOURCE_CARD_DISMISS_GRACE_MS / job-source-dismiss-clean).
+// Purely visual: synthesis/pricing already ran independently, so this never
+// gates the AI analysis. Blocked/errored/warned cards stay actionable.
+const COMP_CARD_DISMISS_GRACE_MS = 10_000;
+const TERMINAL_COMP_STATUSES = new Set(['done', 'error', 'skipped']);
+
 export function SellHubNode({ id, data }) {
 
   // id is stable for this component's lifetime — ReactFlow never reuses
@@ -65,16 +74,13 @@ export function SellHubNode({ id, data }) {
   const pendingMergesRef = useRef([]);
   const activeResolveSourceIdsRef = useRef(new Set());
   const initialDropAcceptedRef = useRef(false);
-  const isMountedRef = useRef(true);
+  const isMountedRef = useIsMountedRef();
   // Cancellation epoch — see hooks/useEpochCancellation.js. In-flight async
   // workflows (startAnalysis / handleConfirmDraft / synthesizeAndPrice)
   // call `epoch.start()` and re-check `cancelled()` after each await so a
   // user-triggered reset (which bumps the epoch) doesn't get clobbered by
   // a late settlement.
   const epoch = useEpochCancellation();
-  useEffect(() => {
-    return () => { isMountedRef.current = false; };
-  }, []);
   // Stable ref so handleDrop always calls the latest startAnalysis without needing deps.
   const startAnalysisRef = useRef(null);
   const {
@@ -85,17 +91,9 @@ export function SellHubNode({ id, data }) {
 
   // ── Phase-2 marketplace cards ──────────────────────────────────────────
   // Each platform the user is selling on becomes its own canvas node spawned
-  // from here and connected by an edge. The hub then becomes the control
-  // center: spawn cards + "Check All Statuses" (walks each connected card).
-  const { checkingAll, checkAll: handleCheckAllStatuses } = useCheckAllConnected({
-    hubId: id,
-    cardType: 'marketplacecard',
-    getUrl: (d) => d?.listingUrl,
-    getPlatformId: (d) => d?.platformId,
-    fields: { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked', attention: 'attention', trace: 'lastCheckTrace' },
-    updateNode: updateGlobal,
-    itemLabel: 'marketplace',
-  });
+  // from here and connected by an edge. Status monitoring is no longer per-card
+  // or hub-driven — a Marketplace Status Module checks each platform's aggregate
+  // notification hub instead (see MarketplaceStatusNode).
 
   // Query the WHOLE canvas (not just edge-connected) by hubId backlink so a
   // user who detached a card can't accidentally double-spawn the same
@@ -125,6 +123,7 @@ export function SellHubNode({ id, data }) {
     while (usedSlots.has(index)) index++;
     const cardId = `mkt-${id}-${platformId}-${Date.now()}`;
     const bundleHeadline = selectBundleHeadline(data.bundlePricing, data.bundleTotal).headline;
+    const finalListingTitle = buildFinalListingTitle(product, data.itemPricings);
     const newNode = {
       id: cardId,
       type: 'marketplacecard',
@@ -134,9 +133,10 @@ export function SellHubNode({ id, data }) {
         hubId: id,
         listingUrl: '',
         status: 'unknown',
-        productSnapshot: product?.generated_title
-          ? { title: product.generated_title, price: bundleHeadline ?? data.pricing?.recommended_price ?? null }
-          : null,
+        productSnapshot: {
+          title: finalListingTitle,
+          price: bundleHeadline ?? data.pricing?.recommended_price ?? null,
+        },
       },
     };
     const newEdge = {
@@ -161,7 +161,7 @@ export function SellHubNode({ id, data }) {
       addEdges([newEdge]);
     }
   }, [
-    data.locked, data.bundlePricing, data.bundleTotal, spawnedMarketplaceIds, id, getNode, getNodes, product, data.pricing?.recommended_price,
+    data.locked, data.bundlePricing, data.bundleTotal, data.itemPricings, spawnedMarketplaceIds, id, getNode, getNodes, product, data.pricing?.recommended_price,
     addElementsGlobally, addNodes, addEdges,
   ]);
 
@@ -172,6 +172,10 @@ export function SellHubNode({ id, data }) {
   // 1 left" reports hard to diagnose.
   const [queuedResolvesCount, setQueuedResolvesCount] = useState(0);
   const [isApplyingResolves, setIsApplyingResolves] = useState(false);
+  // "Waiting behind N price check(s)" — the backend serializes sell-side browser
+  // ops (marketplaceBrowserLock); a queued op emits queuedBehind>0, then 0 once
+  // it acquires the shared browser.
+  const [queueWait, setQueueWait] = useState(0);
 
   const syncResolveWorkCount = useCallback(() => {
     setQueuedResolvesCount(pendingMergesRef.current.length + activeResolveSourceIdsRef.current.size);
@@ -199,7 +203,9 @@ export function SellHubNode({ id, data }) {
   useEffect(() => { scrapeWarningsRef.current = data.scrapeWarnings; }, [data.scrapeWarnings]);
   useEffect(() => { pendingItemsRef.current   = data.pendingItems;   }, [data.pendingItems]);
   useEffect(() => { hubStateRef.current       = hubState;            }, [hubState]);
-  useEffect(() => { researchItemsRef.current  = buildResearchItems(data.product, data.extraItems, data.pricingNotes); }, [data.product, data.extraItems, data.pricingNotes]);
+  useEffect(() => {
+    researchItemsRef.current = buildRefreshResearchItems(data.product, data.extraItems, data.itemPricings, data.pricingNotes);
+  }, [data.product, data.extraItems, data.itemPricings, data.pricingNotes]);
 
   const canReplaceFailedInitialPhotos = canSellHubReplaceFailedInitialPhotos({ type: 'sellhub', data });
   const dropLockReason = getHubDropLockReason({ type: 'sellhub', data });
@@ -225,13 +231,80 @@ export function SellHubNode({ id, data }) {
     reset: resetCompProgress,
   } = useSourceProgress(window.electronAPI?.onPriceSourceProgress, id);
 
+  // Subscribe to the serialization queue status so the hub can show a transient
+  // "waiting behind N" banner while another sell-side browser op runs first.
+  useEffect(() => {
+    const sub = window.electronAPI?.onPriceQueueStatus;
+    if (!sub) return undefined;
+    const cleanup = sub((payload) => {
+      if (payload?.nodeId && payload.nodeId !== id) return;
+      // Hub banner is for the hub-level price-check SCRAPE (no sourceId). A
+      // per-source resolve/rescrape wait (carries sourceId) surfaces on that
+      // card's Solve button instead, so ignore it here.
+      if (payload?.sourceId) return;
+      setQueueWait(payload?.queuedBehind || 0);
+    });
+    return () => cleanup?.();
+  }, [id]);
+
   // Surface the live ring state to the bug-report snapshot so reports like
   // "old comps circle is still showing" can be diagnosed from the report alone
   // (otherwise compProgress is only visible to the user's eyes).
   useEffect(() => {
-    EventLogger.registerNodeState(id, { hubState, compProgress, queuedResolvesCount, isApplyingResolves });
+    EventLogger.registerNodeState(id, { hubState, compProgress, queuedResolvesCount, isApplyingResolves, queueWait });
     return () => EventLogger.unregisterNodeState(id);
-  }, [id, hubState, compProgress, queuedResolvesCount, isApplyingResolves]);
+  }, [id, hubState, compProgress, queuedResolvesCount, isApplyingResolves, queueWait]);
+
+  // ── Coordinated comp-card dismissal (mirrors Job Search Module) ───────────
+  // Keep every comp-source card visible as a set while the price check runs,
+  // then dismiss the CLEAN ones together COMP_CARD_DISMISS_GRACE_MS after EVERY
+  // card has reached a terminal state. The grace timer dispatches an event the
+  // cards listen for; it is purely cosmetic and runs alongside (never before)
+  // synthesis, so it cannot delay the AI pricing. Blocked cards ignore the event.
+  const sourceDismissTimerRef = useRef(null);
+
+  const scheduleCleanCompCardDismiss = useCallback((reason = 'all-sources-terminal') => {
+    if (sourceDismissTimerRef.current) return; // idempotent — first all-terminal moment wins
+    sourceDismissTimerRef.current = setTimeout(() => {
+      sourceDismissTimerRef.current = null;
+      document.dispatchEvent(new CustomEvent('comp-source-dismiss-clean', {
+        detail: { hubId: id, reason },
+      }));
+    }, COMP_CARD_DISMISS_GRACE_MS);
+  }, [id]);
+
+  const cancelCleanCompCardDismiss = useCallback(() => {
+    if (!sourceDismissTimerRef.current) return;
+    clearTimeout(sourceDismissTimerRef.current);
+    sourceDismissTimerRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    const sourceCards = getNodes().filter(n => n.type === 'compsourcecard' && n.data?.hubId === id);
+    if (sourceCards.length === 0) {
+      cancelCleanCompCardDismiss();
+      return;
+    }
+    // All cards terminal (done/error/skipped) → start the grace timer. A card
+    // still 'searching' (e.g. a live re-fetch after Solve) cancels it. Falls back
+    // to persistedProgress so a save-quit-reopen in 'comps-ready' is handled too.
+    const allVisibleCardsTerminal = sourceCards.every((node) => {
+      const live = compProgress[node.data?.sourceId];
+      const persisted = node.data?.persistedProgress;
+      const persistedCleanTerminal = persisted?.status === 'done' && !persisted.warning;
+      const effective = live?.status === 'searching'
+        ? live
+        : persistedCleanTerminal
+          ? persisted
+          : (live || persisted);
+      return !!effective && TERMINAL_COMP_STATUSES.has(effective.status);
+    });
+    if (allVisibleCardsTerminal) {
+      scheduleCleanCompCardDismiss();
+    } else {
+      cancelCleanCompCardDismiss();
+    }
+  }, [compProgress, id, getNodes, scheduleCleanCompCardDismiss, cancelCleanCompCardDismiss]);
 
 
   const startAnalysis = useCallback(async (imagePaths) => {
@@ -321,7 +394,7 @@ export function SellHubNode({ id, data }) {
         processingRef.current = false;
       }
     }
-  }, [id, updateGlobal, addToast, epoch, resetCompProgress, moduleRunQueue]);
+  }, [id, updateGlobal, addToast, epoch, resetCompProgress, moduleRunQueue, isMountedRef]);
 
   // Keep ref in sync so handleDrop always invokes the latest closure.
   useEffect(() => {
@@ -367,9 +440,10 @@ export function SellHubNode({ id, data }) {
 
   // Reap every comp-source card belonging to this hub. Called defensively at
   // the start of a new scrape run (clean slate) and on user-cancel from the
-  // 'comps-ready' state. Individual cards self-manage in normal flow:
-  // clean-success cards self-delete on a 3s timer, warned/errored cards
-  // stick around until the user clicks Solve or Skip on them.
+  // 'comps-ready' state. Individual cards self-manage in normal flow: clean
+  // cards dismiss together ~10s after every card is terminal (the hub fires
+  // `comp-source-dismiss-clean`); warned/errored cards stick around until the
+  // user clicks Solve or Skip on them.
   const cleanupCompSourceCards = useCallback(() => {
     deleteChildrenByHubId({
       getNodes, getEdges, deleteElements, hubId: id,
@@ -525,14 +599,21 @@ export function SellHubNode({ id, data }) {
       // Arithmetic sum of the per-item prices — kept as the reference figure AND
       // the fallback if the AI combine call is unavailable or fails.
       const bundleTotal = isBundle ? computeBundleTotal(itemPricings) : null;
-      // AI combine: ask for ONE bundle asking price that accounts for synergy
-      // (complementary items worth more together; a forced bundle worth a touch
-      // less) — NOT just the sum. Non-fatal: on any failure we keep bundleTotal
-      // as the headline so a synergy hiccup never blocks pricing.
+      // AI combine: ask for attributable bundle/tier pricing factors, then the
+      // backend deterministically derives every whole-listing price from them.
+      // Non-fatal: on any failure we keep bundleTotal as the headline.
       let bundlePricing = null;
+      const pricedItemCount = itemPricings.filter((it) => {
+        const price = Number(it.pricing?.recommended_price);
+        return it.pricing?.recommended_price !== null
+          && it.pricing?.recommended_price !== undefined
+          && it.pricing?.recommended_price !== ''
+          && Number.isFinite(price)
+          && Math.round(price * 100) / 100 > 0;
+      }).length;
+      const unpricedItemCount = itemPricings.length - pricedItemCount;
       if (isBundle) {
-        const anyPriced = itemPricings.some(it => it.pricing?.recommended_price != null);
-        if (anyPriced && window.electronAPI?.synthesizeBundlePrice) {
+        if (pricedItemCount >= 2 && window.electronAPI?.synthesizeBundlePrice) {
           try {
             bundlePricing = await synthesizeBundlePrice(
               itemPricings.map(it => ({
@@ -569,13 +650,31 @@ export function SellHubNode({ id, data }) {
         // priced state renders exactly as before.
         itemPricings: isBundle ? itemPricings : null,
         bundleTotal,
-        // AI synergy-aware combined price (null → UI falls back to bundleTotal).
+        // Factor-derived combined price (null → UI falls back to bundleTotal).
         bundlePricing: isBundle ? bundlePricing : null,
         scrapeWarnings: Array.isArray(scrapeWarnings) ? scrapeWarnings : [],
         platformFit: null,
         platformFitPending: willAssessFit,
         errorMessage: null,
       });
+      // Attached marketplace cards survive a price recheck. Refresh only their
+      // listing snapshot so status checks use the new whole-bundle title/price;
+      // card URLs, statuses, attention, and watch URLs remain untouched.
+      const finalListingTitle = buildFinalListingTitle(data.product, itemPricings);
+      const finalListingPrice = selectBundleHeadline(bundlePricing, bundleTotal).headline
+        ?? primary.pricing?.recommended_price
+        ?? null;
+      for (const card of getNodes().filter(node => (
+        node.type === 'marketplacecard' && node.data?.hubId === currentId
+      ))) {
+        updateGlobal(card.id, {
+          productSnapshot: {
+            ...(card.data?.productSnapshot || {}),
+            title: finalListingTitle,
+            price: finalListingPrice,
+          },
+        });
+      }
       // Fire platform-fit assessment in the background; clear `pending` whether
       // it succeeds OR fails (on failure platformFit stays null → the list falls
       // back to showing every platform unfiltered, never a stuck spinner).
@@ -599,14 +698,17 @@ export function SellHubNode({ id, data }) {
       }
       const rec = primary.pricing?.recommended_price;
       const warnCount = Array.isArray(scrapeWarnings) ? scrapeWarnings.length : 0;
-      // Headline bundle figure = AI combined price when we got one, else the sum.
+      // Headline bundle figure = factor-derived price when available, else sum.
       const bundleHeadline = bundlePricing?.bundle_price ?? bundleTotal;
+      const bundleScope = unpricedItemCount > 0
+        ? ` for ${pricedItemCount} priced item${pricedItemCount === 1 ? '' : 's'} (${unpricedItemCount} unpriced excluded)`
+        : '';
       addToast({
         title: 'Pricing Engine',
         description: isBundle
           ? (bundleHeadline != null
-              ? `Bundle of ${itemPricings.length}: suggested $${bundleHeadline}${bundlePricing?.synergy && bundlePricing.synergy !== 'neutral' ? ` (${bundlePricing.synergy} vs $${bundleTotal} apart)` : ''}${warnCount > 0 ? ` — ${warnCount} blocked source(s)` : ''}`
-              : `Priced ${itemPricings.length} items — set your own total.`)
+              ? `Bundle of ${itemPricings.length}: suggested $${bundleHeadline}${bundleScope}${bundlePricing?.synergy && bundlePricing.synergy !== 'neutral' ? ` (${bundlePricing.synergy} vs $${bundleTotal} apart)` : ''}${warnCount > 0 ? ` — ${warnCount} blocked source(s)` : ''}`
+              : `${pricedItemCount > 0 ? `Priced ${pricedItemCount} of ${itemPricings.length} items` : 'No items could be priced'} — set your own total.`)
           : (rec != null
               ? `Recommended price: $${rec}${warnCount > 0 ? ` (synthesized without ${warnCount} blocked source(s))` : ''}`
               : 'No similar listings — set your own price.'),
@@ -622,7 +724,7 @@ export function SellHubNode({ id, data }) {
       });
       addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
     }
-  }, [id, updateGlobal, synthesizePrice, synthesizeBundlePrice, addToast, data.product, cleanupCompSourceCards]);
+  }, [id, updateGlobal, synthesizePrice, synthesizeBundlePrice, addToast, data.product, cleanupCompSourceCards, getNodes]);
 
   const queueSynthesizeAndPrice = useCallback(async (items, scrapeWarnings, cancelled) => {
     let lease = null;
@@ -689,7 +791,15 @@ export function SellHubNode({ id, data }) {
         warning: retryWarning ? { ...retryWarning, sourceId } : null,
       };
     }
-    const res = await rescrapeSource(sourceId, researchItems.map(ri => ({ key: ri.key, query: ri.query })));
+    // Pass noChallengeConfirmed so the backend's aggregate progress event clears
+    // too (it re-derives the per-item verdict). The visible Solve proved this
+    // host/session has no anti-bot wall — a property that holds for EVERY item
+    // query on the same host this session, so a genuinely-empty item (e.g. a
+    // vacuum on Swappa, which sells only electronics) is the page's real answer,
+    // not a block to re-arm. Without this a multi-item bundle whose source is
+    // truly empty stays stuck in error/retry-empty forever (the "swappa/ebay
+    // unable to finish" report) — the single-item path already trusts this proof.
+    const res = await rescrapeSource(sourceId, researchItems.map(ri => ({ key: ri.key, query: ri.query })), noChallengeConfirmed);
     if (cancelled()) return { items, warning: null };
     const perItem = Array.isArray(res.perItem) ? res.perItem : [];
     const mergedItems = items.map((it, k) => {
@@ -698,7 +808,7 @@ export function SellHubNode({ id, data }) {
       return { ...it, comps: mergeSourceIntoComps(it.comps || { sold: [], active: [] }, { sourceId, category: pi.category || category || 'sold', items: pi.items }) };
     });
     const failedWarnings = perItem
-      .map(pi => retryWarningRequiringAction(pi?.warning, pi?.items))
+      .map(pi => retryWarningRequiringAction(pi?.warning, pi?.items, { noChallengeConfirmed }))
       .filter(Boolean);
     const missing = Math.max(0, items.length - perItem.length);
     const failedCount = failedWarnings.length + missing;
@@ -848,7 +958,7 @@ export function SellHubNode({ id, data }) {
 
       // Primary item (from the AI photo analysis) + any user-added extras —
       // each gets its OWN complete pass through the comp sources server-side.
-      const researchItems = buildResearchItems(data.product, data.extraItems, data.pricingNotes);
+      const researchItems = buildRefreshResearchItems(data.product, data.extraItems, data.itemPricings, data.pricingNotes);
       const scrapeResult = await scrapePriceComps(researchItems);
       scrapeInFlightRef.current = false;
       if (cancelled()) return;
@@ -943,7 +1053,7 @@ export function SellHubNode({ id, data }) {
       // Source cards are removed when synthesis begins; warned cards remain only
       // while the hub is paused in comps-ready awaiting Resolve/Skip.
     }
-  }, [id, updateGlobal, scrapePriceComps, synthesizeAndPrice, addToast, data.product, data.extraItems, data.pricingNotes, drainQueuedResolves, spawnCompSourceCards, epoch, resetCompProgress, syncResolveWorkCount, moduleRunQueue]);
+  }, [id, updateGlobal, scrapePriceComps, synthesizeAndPrice, addToast, data.product, data.extraItems, data.itemPricings, data.pricingNotes, drainQueuedResolves, spawnCompSourceCards, epoch, resetCompProgress, syncResolveWorkCount, moduleRunQueue]);
 
   // Per-source skip — fired by a comp card's Skip button. Drops the source
   // from data.scrapeWarnings, deletes the card, then if the warnings list
@@ -1344,6 +1454,17 @@ export function SellHubNode({ id, data }) {
       verifyProgress={platformsVerifying ? { done: verifyDone, total: verifyTotal } : null}
       dragHover={data.dragHover || null}
     >
+        {/* Transient: this hub's price check is queued behind another sell-side
+            browser op (serialized to avoid the shared-browser captcha-resolve
+            collision). queueWait is driven entirely by backend emits — set on
+            queue, cleared on acquire, and force-cleared in the handler's finally
+            even on an abort-while-queued — so it can't strand. */}
+        {queueWait > 0 && (
+          <div className="mx-2 mt-2 px-2.5 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-200/90 text-[11px] flex items-center gap-1.5">
+            <span className="animate-pulse">⏳</span>
+            Waiting behind {queueWait} price check{queueWait === 1 ? '' : 's'} — serializing the shared browser to avoid collisions…
+          </div>
+        )}
         {/* ── Empty: drop zone (+ banner if a prior attempt failed) ─────── */}
         {hubState === 'empty' && (
           <>
@@ -1455,8 +1576,6 @@ export function SellHubNode({ id, data }) {
             onReresearch={handleConfirmDraft}
             spawnedMarketplaceIds={spawnedMarketplaceIds}
             onSpawnMarketplaceCard={handleSpawnMarketplaceCard}
-            onCheckAllStatuses={handleCheckAllStatuses}
-            checkingAll={checkingAll}
             platformFit={data.platformFit || null}
             platformFitPending={!!data.platformFitPending}
           />

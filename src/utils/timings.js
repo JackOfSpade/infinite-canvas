@@ -34,6 +34,7 @@ export const TIMINGS = {
   FOCUS_DELAY_MS:     100, // let an element mount/expand before focusing it
   SEARCH_AUTODIVE_MS: 700, // grace period before auto-diving into a matched sub-canvas
   SUBMENU_CLOSE_MS:   120, // bridge the mouse gap before closing a context submenu
+  MODAL_RESOLVE_GUARD_MS: 200, // keep modal shield mounted through a rapid second click
 
   // ── Background polling ────────────────────────────────────────────────────
   SETTINGS_LISTENER_POLL_MS:   100,   // retry interval while wiring the settings listener

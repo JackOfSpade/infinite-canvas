@@ -3,6 +3,7 @@ import { toPng } from 'html-to-image';
 import { EventLogger } from '../utils/EventLogger';
 import { runNodeMigrations, CURRENT_SCHEMA_VERSION, sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
 import { TIMINGS } from '../utils/timings';
+import { useIsMountedRef } from './useIsMountedRef';
 
 
 /**
@@ -32,11 +33,7 @@ export function useCanvasPersistence({
   const [currentFile, setCurrentFile] = useState(null);
   const [saveState, setSaveState] = useState('idle');
   const [loadState, setLoadState] = useState({ active: false, progress: 0, label: '' });
-  const isMountedRef = useRef(true);
-
-  useEffect(() => {
-    return () => { isMountedRef.current = false; };
-  }, []);
+  const isMountedRef = useIsMountedRef();
 
   const isExportingRef = useRef(false);
   const saveStateTimerRef = useRef(null);
@@ -126,7 +123,7 @@ export function useCanvasPersistence({
       addToast({ title: 'Save Error', description: reason, type: 'error' });
       return false;
     }
-  }, [addToast, flushStack, isAnimatingRef, updateSetting]); // currentFile read via ref — omitted intentionally
+  }, [addToast, flushStack, isAnimatingRef, updateSetting, isMountedRef]); // currentFile read via ref — omitted intentionally
 
   const handleSaveRequest = useEffectEvent(async () => saveCanvas());
 
@@ -290,7 +287,7 @@ export function useCanvasPersistence({
       // Clear auto-load config if it fails completely (deleted or broken) so we don't boot loop into it
       if (isSilent) updateSetting?.('lastOpenedWorkspace', null);
     }
-  }, [handleUnsavedChanges, setNodes, setEdges, setDrawings, customFitView, addToast, resetStack, clearHistory, isAnimatingRef, updateSetting]);
+  }, [handleUnsavedChanges, setNodes, setEdges, setDrawings, customFitView, addToast, resetStack, clearHistory, isAnimatingRef, updateSetting, isMountedRef]);
 
   const exportCanvasToPNG = useCallback(() => {
     if (isAnimatingRef?.current || isExportingRef.current) return;
@@ -315,7 +312,7 @@ export function useCanvasPersistence({
       .finally(() => {
         isExportingRef.current = false;
       });
-  }, [addToast, isAnimatingRef]);
+  }, [addToast, isAnimatingRef, isMountedRef]);
 
   return {
     saveCanvas,

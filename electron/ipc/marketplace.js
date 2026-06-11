@@ -16,15 +16,19 @@ import {
   aggregateStrongest,
   extractListingIdentifier,
   plainFetcher,
+  scanSellerHubPages,
 } from './listingStatusCheck.js';
-import { openCaptchaResolveWindow } from './browser/authWindows.js';
+import { openCaptchaResolveWindow, getLastCaptchaHandoffAt } from './browser/authWindows.js';
 import { withStatusCheckLock, getStatusCheckQueueDepth } from './statusCheckLock.js';
+import { withMarketplaceBrowserLock, getMarketplaceBrowserQueueDepth } from './marketplaceBrowserLock.js';
 import { createAggregatingProgress } from './compProgressAggregator.js';
 import { getStatusCacheSync, verifySellMonitorLogin, writeStatusCache } from './accounts.js';
 import { compsForPricing } from './resultCaps.js';
 import { isCompSourceEnabledInScope } from '../../src/utils/compSourceScope.js';
 import { COMP_SOURCE_LOGIN_PLATFORM, getRequiredCompLoginPlatformIds } from '../../src/utils/marketplaceLoginPreflight.js';
 import { retryWarningRequiringAction } from '../../src/utils/compsMerge.js';
+import { deriveBundlePricingResult } from '../../src/utils/bundlePricing.js';
+import { CONDITION_VALUES, formatConditionGuideForPrompt, formatConditionForPricingPrompt } from '../../src/utils/productConditions.js';
 import { logger } from '../logger.js';
 import { VISION_PRODUCT_ANALYSIS_SCHEMA, PRICE_SYNTHESIS_SCHEMA, BUNDLE_PRICE_SCHEMA, buildPlatformFitSchema } from './aiSchemas.js';
 import {
@@ -55,14 +59,14 @@ const marketplaceTelemetry = {
   // a marketplace run from one canvas leaks into another canvas's report.
   nodeId:    null,
   analyze:   null, // { ts, photos, title, model }
-  scrape:    null, // { ts, sold, active, sources, warnings, blocked }
+  scrape:    null, // { ts, sold, active, sources, warnings, blocked, browserContention }
   resolves:  {},   // { [sourceId]: { ts, extracted, category } } — keyed so a
                    // multi-source recovery (e.g. Mercari then eBay) keeps every
                    // resolve; re-resolving a source replaces its entry. Reset
                    // when a fresh scrape stamps so resolves are scoped to it.
   synthesis: null, // { ts, soldFound, activeFound, soldUsed, activeUsed, recommendedPrice, matchQuality }
   syntheses: [],   // One entry per independently-priced bundle item; synthesis = latest for back-compat.
-  bundle:    null, // { ts, items, sum, quickPrice, bundlePrice, maxPrice, synergy, model } — multi-item combine
+  bundle:    null, // { ts, items, sum, quickPrice, bundlePrice, maxPrice, synergy, factors, model } — multi-item combine
   fit:       null, // { ts, platforms, good, unfit }
 };
 
@@ -75,6 +79,10 @@ export function formatPricingNotesForPrompt(notes) {
   return normalized
     ? `\nUSER NOTES FROM SELLER:\n${normalized}\n`
     : '';
+}
+
+function currencyAmount(value) {
+  return Math.round(Number(value) * 100) / 100;
 }
 
 export function getMarketplaceTelemetry() {
@@ -388,11 +396,21 @@ export function classifyCompScrapeFailure(error, sourceId, sessionCache = {}) {
         suggestion: `Navigation didn't finish within the timeout — usually the page never loaded at all (check "Timeout state … bodyLen=0" in Recent Logs). That's a slow/hung site or an anti-bot tarpit, NOT a browser-launch/profile-lock conflict.${notConnected ? ` ${platform} is also not logged in — an anonymous request is likelier to be tarpitted; log in and retry.` : ''}`,
       };
     }
-    // Genuine internal throw before completing — browser-launch/profile-lock/network.
+    // Genuine internal throw before completing. "Navigating frame was detached"
+    // specifically = the page's browser was closed out from under it — by FAR
+    // the most common cause is a CONCURRENT sell-side browser op (another node's
+    // price check, or a captcha-resolve window) closing the shared stealth
+    // browser mid-scrape; sell-side price checks now serialize to prevent that
+    // (marketplaceBrowserLock), so a residual one points at a JOB-side
+    // captcha-resolve. Other internal throws are a browser-launch/profile-lock
+    // conflict or a network error. None of these are anti-bot or a nav timeout.
+    const detached = /Navigating frame was detached|Target closed|Session closed|Protocol error/i.test(msg);
     return {
       sourceId, severity: 'block', code: 'task-failed',
       evidence: msg,
-      suggestion: 'Scrape threw before completing — a browser-launch/profile-lock conflict or network error (NOT anti-bot, NOT a navigation timeout). Check Recent Main-Process Logs in the bug report.',
+      suggestion: detached
+        ? 'Scrape’s browser was closed mid-run ("Navigating frame was detached") — almost always a CONCURRENT browser op (another price check or a captcha-resolve window) closing the shared stealth browser, NOT anti-bot and NOT a nav timeout. Sell-side price checks now serialize (marketplaceBrowserLock); if this still fires, check whether a job-side captcha-resolve overlapped (see the Browser contention line + Recent Logs).'
+        : 'Scrape threw before completing — a browser-launch/profile-lock conflict or network error (NOT anti-bot, NOT a navigation timeout). Check Recent Main-Process Logs in the bug report.',
     };
   }
   const loginWall = /LOGIN-WALL/i.test(msg);
@@ -502,17 +520,19 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
  * Fetch API-based marketplace sources in parallel (no Puppeteer needed).
  * Reverb uses an internal REST API.
  */
-async function fetchApiMarketplaceSources(query, signal = null, emit = null) {
+async function fetchApiMarketplaceSources(query, signal = null, emit = null, category = undefined) {
   // PriceCharting is a product-catalog search (not a listing index): seller-style
   // titles miss the exact product and fall back to ~100 fuzzy results, so the
   // query is normalized to the canonical product name (see priceChartingQuery).
   // `effectiveQuery` is the string actually sent — surfaced in the bug report so a
   // surprising count (e.g. 3 vs the catalog's many variants, or 0) can be told
   // apart as "normalizer over-stripped" vs "only N products exist".
+  // `category` (the item's vision category) lets PriceCharting skip the request
+  // for a clearly-non-collectible item — see fetchPriceChartingComps.
   const pcQuery = priceChartingQuery(query);
   const apiTasks = [
     { sourceId: 'reverb', effectiveQuery: query, fn: (s) => fetchReverbListings(query, true, s) },
-    { sourceId: 'pricecharting', effectiveQuery: pcQuery, fn: (s) => fetchPriceChartingComps(pcQuery, s) },
+    { sourceId: 'pricecharting', effectiveQuery: pcQuery, fn: (s) => fetchPriceChartingComps(pcQuery, s, { category }) },
   ].filter(task => isCompSourceEnabledInScope(task.sourceId));
 
   return Promise.all(apiTasks.map(async ({ sourceId, effectiveQuery, fn }) => {
@@ -542,7 +562,7 @@ async function fetchApiMarketplaceSources(query, signal = null, emit = null) {
  * preflight is the CALLER's job — it's per-platform, not per-query, so a
  * multi-item run only does it once.
  */
-async function scrapeCompsForQuery(query, { emit, signal, sessionCache }) {
+async function scrapeCompsForQuery(query, { emit, signal, sessionCache, category }) {
   const tasks = buildCompTasks(query);
   for (const t of tasks) emit(t.id, { status: 'searching', count: 0 });
 
@@ -562,7 +582,7 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache }) {
 
   const apiSourceIds = ['reverb', 'pricecharting'].filter(isCompSourceEnabledInScope);
   for (const sourceId of apiSourceIds) emit(sourceId, { status: 'searching', count: 0 });
-  const apiResultsPromise = fetchApiMarketplaceSources(query, signal, emit);
+  const apiResultsPromise = fetchApiMarketplaceSources(query, signal, emit, category);
 
   const [scrapeResults, apiResults] = await Promise.all([scrapeResultsPromise, apiResultsPromise]);
 
@@ -574,6 +594,15 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache }) {
   const provenanceBySource = {};  // url + claimed sold/active category per source
   for (const t of tasks) provenanceBySource[t.id] = { url: t.url, category: t.category };
   const apiQueryBySource = {};    // effective (possibly-rewritten) query per API source
+  const samplesBySource = {};     // top-few {title, price} per source — for the report's irrelevance check
+  // A small sample of what a source ACTUALLY returned. Counts alone can't reveal
+  // an off-target match (PriceCharting's fuzzy catalog hits, Poshmark accessories,
+  // Swappa wrong-model); the titles make it self-evident. Capped + truncated so
+  // the report stays small.
+  const sampleOf = (arr) => (Array.isArray(arr) ? arr : []).slice(0, 4).map(it => ({
+    title: String(it?.title || '').slice(0, 80),
+    price: Number.isFinite(Number(it?.price)) ? Number(it.price) : null,
+  }));
 
   for (const r of scrapeResults) {
     if (!r.success) {
@@ -584,10 +613,11 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache }) {
     }
     const { id, data: items, warning } = r;
     if (warning) scrapeWarnings.push({ sourceId: id, ...warning });
-    const category = taskCategoryMap[id] ?? 'sold';
+    const cat = taskCategoryMap[id] ?? 'sold';
     bySource[id] = Array.isArray(items) ? items.length : 0;
     if (r.yieldStats) yieldBySource[id] = r.yieldStats;
-    if (Array.isArray(items)) comps[category].push(...items);
+    if (Array.isArray(items) && items.length > 0) samplesBySource[id] = sampleOf(items);
+    if (Array.isArray(items)) comps[cat].push(...items);
   }
 
   for (const res of apiResults) {
@@ -596,10 +626,11 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache }) {
     if (typeof res.effectiveQuery === 'string') {
       apiQueryBySource[res.sourceId] = { query: res.effectiveQuery, url: res.url || null };
     }
+    if (Array.isArray(res.items) && res.items.length > 0) samplesBySource[res.sourceId] = sampleOf(res.items);
     if (res.items.length > 0) comps.sold.push(...res.items);
   }
 
-  return { comps, scrapeWarnings, bySource, yieldBySource, provenanceBySource, apiQueryBySource, sourceCount: tasks.length + apiSourceIds.length };
+  return { comps, scrapeWarnings, bySource, yieldBySource, provenanceBySource, apiQueryBySource, samplesBySource, sourceCount: tasks.length + apiSourceIds.length };
 }
 
 /**
@@ -669,7 +700,13 @@ export async function checkListingStatusMultiSource({
   }
   if (monitorConfig && sessionVerifier) {
     const verdict = await sessionVerifier(platformId);
-    if (!verdict?.connected) {
+    // Only a CONCLUSIVE not-connected (auth wall, login redirect, logged-out body)
+    // becomes a needs-login card + poisons the session cache. An inconclusive
+    // verdict means the verify fetch timed out / errored before reading the page
+    // (e.g. an anti-bot reload loop) — that is not a logout, so fall through to
+    // the actual listing/watch checks below (which carry their own auth handling)
+    // rather than masking the listing's real state behind a false "needs login".
+    if (!verdict?.connected && !verdict?.inconclusive) {
       try {
         await writeSessionStatus?.(platformId, false, { lastReason: verdict?.reason, lastTrace: verdict?.trace });
       } catch { /* cache write failures are non-fatal for the card verdict */ }
@@ -784,15 +821,20 @@ Return a JSON object:
   "brand": "Identified brand name (or 'Unknown' if unclear)",
   "model": "Specific model name/number if identifiable (or 'Unknown')",
   "category": "Category > Subcategory (e.g. 'Electronics > Headphones > Over-Ear')",
-  "condition": "New | Like New | Used - Excellent | Used - Good | Used - Fair | For Parts",
+  "condition": "${CONDITION_VALUES.join(' | ')} — pick the single best-fitting tier using the CONDITION GUIDE below",
   "color": "Primary color(s)",
   "notable_features": "Any visible accessories, damage, special features",
   "generated_title": "An optimized selling title (80 chars max, include brand + model + key features + condition indicator)",
   "generated_description": "A detailed, buyer-friendly selling description (include specs if identifiable, condition details, what's included). 3-4 sentences.",
-  "search_query": "A short, neutral query string for marketplace search engines. Include ONLY brand + model + the 1-2 most price-driving specs (storage size, screen size, year, capacity, etc. — whatever's relevant for the category). EXCLUDE condition keywords ('For Parts', 'Used', 'Refurbished'), color (unless brand-defining), and marketing fluff. Goal: broad enough to surface variants for price comparison. Examples: 'Apple iPhone XS 512GB', 'Sony WH-1000XM4', 'Nintendo Switch OLED'."
+  "search_query": "A short, neutral query string for marketplace search engines. Describe ONLY the single primary product identified above (the SAME one as brand / model / generated_title) — never combine two products or add words like 'bundle', 'lot', or 'set'. Include ONLY brand + model + the 1-2 most price-driving specs (storage size, screen size, year, capacity, etc. — whatever's relevant for the category). EXCLUDE condition keywords ('For Parts', 'Used', 'Refurbished'), color (unless brand-defining), and marketing fluff. Goal: broad enough to surface variants for price comparison. Examples: 'Apple iPhone XS 512GB', 'Sony WH-1000XM4', 'Nintendo Switch OLED'."
 }
 
-Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.`, { signal, task: 'vision-product-analysis', responseSchema: VISION_PRODUCT_ANALYSIS_SCHEMA, meta: aiMeta });
+Be specific about what you can clearly see. If you can't identify brand or model from the photos, say 'Unknown' — don't guess.
+
+CONDITION GUIDE — choose the condition tier whose definition best matches what the photos show. When between two tiers, pick the LOWER (more conservative) one unless the photos clearly support the higher:
+${formatConditionGuideForPrompt()}
+
+If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGLE most prominent / highest-value product and describe ONLY that one across every field (brand, model, generated_title, search_query). Do NOT fold the other products into the title or query — the seller lists them separately as additional items afterward.`, { signal, task: 'vision-product-analysis', responseSchema: VISION_PRODUCT_ANALYSIS_SCHEMA, meta: aiMeta });
 
     logger.info(`[Marketplace][${nodeId}] Product identified:`, result?.generated_title || 'Unknown', `(model: ${aiMeta.model || '?'})`);
     marketplaceTelemetry.analyze = {
@@ -812,6 +854,31 @@ Be specific about what you can clearly see. If you can't identify brand or model
   // calls `synthesize-price` afterward with the comps it decides to use.
   handleSafe('scrape-price-comps', async (event, args = {}, signal) => {
     const { nodeId } = args;
+    // Serialize against every other sell-side browser op — other nodes' price
+    // checks AND captcha-resolve windows — via marketplaceBrowserLock. Without
+    // it, a concurrent captcha-resolve calls closeStealthBrowser() mid-scrape
+    // and detaches OUR in-flight pages ("Navigating frame was detached"), which
+    // gets mis-reported as per-source anti-bot blocks (task-failed). If another
+    // op is ahead, tell the renderer so the hub shows a "waiting behind N" banner.
+    const aheadInQueue = getMarketplaceBrowserQueueDepth();
+    if (aheadInQueue > 0) {
+      logger.info(`[Marketplace][${nodeId}] Price check queued behind ${aheadInQueue} in-flight browser op(s)`);
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('price-queue-status', { nodeId, queuedBehind: aheadInQueue });
+      }
+    }
+    // The body runs inside the lock (one level of indentation is intentionally
+    // kept flat to keep this a minimal, reviewable diff over the legacy handler).
+    // The try/finally guarantees the "waiting" banner clears even on an
+    // abort-while-queued, when the in-callback queuedBehind:0 below never runs.
+    try {
+    return await withMarketplaceBrowserLock(async () => {
+    // We hold the browser now: clear the "waiting" banner and snapshot the
+    // captcha-handoff watermark so we can tell, after the run, whether a
+    // browser-close (a JOB-side captcha-resolve — this lock does NOT gate those)
+    // detached any of our pages mid-scrape and turned them into false blocks.
+    if (!event.sender.isDestroyed()) event.sender.send('price-queue-status', { nodeId, queuedBehind: 0 });
+    const handoffAtStart = getLastCaptchaHandoffAt();
     // Multi-item ("bundle") support: a single listing can package several
     // independent products (kayak + paddle). Each item runs its own complete
     // pass through the pricing sources. Fall back to a single legacy `query`
@@ -896,19 +963,28 @@ Be specific about what you can clearly see. If you can't identify brand or model
     };
     const progressFactory = createAggregatingProgress({ totalItems: items.length, send });
 
+    // Hub-level product category (vision analysis of the primary item) — lets
+    // PriceCharting skip the request for a clearly-non-collectible listing. A
+    // bundle is thematically coherent (a vacuum + its formula), so the primary's
+    // category applies to every item; the per-item synthesis relevance gate is
+    // the backstop for a genuinely mixed bundle.
+    const productCategory = typeof args.category === 'string' ? args.category : undefined;
+
     const perItem = [];
     // Telemetry accumulators across items (the bug report reads these).
     const bySource = {};            // summed raw item count per source
     const yieldBySource = {};       // {seen,noFields} per browser-pool source
     const provenanceBySource = {};  // url + claimed category per source
     const apiQueryBySource = {};    // effective query per API source
+    const samplesBySource = {};     // last-item sample of extracted comp titles per source
     let sourceCount = 0;
     for (let k = 0; k < items.length; k++) {
       if (signal.aborted) throw new Error('Window closed');
       const emit = progressFactory(k);
-      const res = await scrapeCompsForQuery(items[k].query, { emit, signal, sessionCache });
+      const res = await scrapeCompsForQuery(items[k].query, { emit, signal, sessionCache, category: productCategory });
       perItem.push({
         query: items[k].query,
+        label: items[k].label || null,
         condition: items[k].condition || null,
         comps: res.comps,
         scrapeWarnings: res.scrapeWarnings,
@@ -918,6 +994,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
       Object.assign(yieldBySource, res.yieldBySource);
       Object.assign(provenanceBySource, res.provenanceBySource);
       Object.assign(apiQueryBySource, res.apiQueryBySource);
+      Object.assign(samplesBySource, res.samplesBySource);
       sourceCount = res.sourceCount;
     }
 
@@ -942,6 +1019,16 @@ Be specific about what you can clearly see. If you can't identify brand or model
         sourceWarnings[w.sourceId] = { code: w.code, severity: w.severity, evidence: w.evidence };
       }
     }
+    // Did a captcha-resolve browser-close land DURING this scrape? We hold the
+    // sell-side lock, so a handoff inside our window can only be a JOB-side
+    // captcha-resolve (un-gated) closing the shared browser — which would have
+    // detached our in-flight pages. If so, the `task-failed` sources below are
+    // internal browser contention, not anti-bot, and the report should say so.
+    const detachedSources = scrapeWarnings.filter(w => w?.code === 'task-failed').map(w => w.sourceId);
+    const handoffNow = getLastCaptchaHandoffAt();
+    const browserContention = (handoffNow > handoffAtStart && detachedSources.length > 0)
+      ? { handoffAt: handoffNow, detachedSources }
+      : null;
     marketplaceTelemetry.scrape = {
       ts: Date.now(),
       sold: totalSold,
@@ -949,6 +1036,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
       sources: sourceCount,
       items: items.length,
       warnings: scrapeWarnings.length,
+      browserContention,
       // Anti-bot blocks vs. internal scrape errors vs. timeouts vs. not-logged-in
       // are different failures with different fixes — keep them separate.
       blocked: scrapeWarnings.filter(w => w?.severity === 'block' && !['task-failed', 'scrape-timeout', 'login-required'].includes(w?.code)).length,
@@ -959,10 +1047,12 @@ Be specific about what you can clearly see. If you can't identify brand or model
       yieldBySource,
       provenanceBySource,
       apiQueryBySource,
+      samplesBySource,
       sourceWarnings,
       itemDetails: perItem.map((it, index) => ({
         index,
         query: it.query,
+        label: it.label,
         condition: it.condition,
         sold: it.comps.sold?.length || 0,
         active: it.comps.active?.length || 0,
@@ -976,6 +1066,13 @@ Be specific about what you can clearly see. If you can't identify brand or model
     // `comps` = the PRIMARY item (back-compat for any single-comps reader);
     // `items` is the per-item breakdown the renderer prices individually.
     return { items: perItem, comps: perItem[0].comps, scrapeWarnings };
+    }, signal);   // end withMarketplaceBrowserLock — releases the shared browser
+    } finally {
+      // Bulletproof the hub's "waiting behind N" banner: if this op was aborted
+      // while still queued, the in-callback queuedBehind:0 never fired — emit it
+      // here so the renderer's queueWait can't strand > 0.
+      if (!event.sender.isDestroyed()) event.sender.send('price-queue-status', { nodeId, queuedBehind: 0 });
+    }
   });
 
   // ── Synthesize Price (AI step, takes pre-scraped comps) ───────────────────
@@ -1127,7 +1224,7 @@ Be specific about what you can clearly see. If you can't identify brand or model
 You are a pricing analyst and marketplace routing expert. Given these similar listings from multiple sources, recommend a selling price AND which platforms to list on. Use plain English in your justification — don't say "comp(s)" or "comparable"; say "similar listing(s)" or "sold listing(s)".
 
 ITEM: ${query}
-CONDITION: ${condition}
+CONDITION: ${formatConditionForPricingPrompt(condition)}
 ${formatPricingNotesForPrompt(userPricingNotes)}
 
 The listings below are pre-sorted by how closely each title matches the ITEM's spec (best match first). Use that ordering as your first hint when identifying anchor vs. adjusted vs. bound listings, then refine using the spec details inside each listing.
@@ -1146,6 +1243,8 @@ WEIGHTING — rank each listing by how closely its spec matches the ITEM:
 If exact-match listings are scarce, lean on adjusted listings — DO NOT refuse to price. Note the weighting and your adjustments in the justification so the user can sanity-check.
 
 If USER NOTES FROM SELLER are present, treat them as high-priority item facts and seller preferences for pricing. Use them to adjust anchor/adjusted/bound classification and price reasoning when they describe condition, size, defects, included accessories, authenticity, urgency, original cost, or local-pickup constraints. Do not let notes change the required JSON shape.
+
+A stated retail price / MSRP / original cost in the notes is CONTEXT ONLY — it is NOT a ceiling or a floor. Anchor the recommendation on the sold and active listings above, and price ABOVE retail when the comps support it: discontinued, collectible, or supply-constrained items (e.g. certain memory/flash, out-of-production gear) routinely sell for more than they originally cost. Conversely, never mark a price down just because the item is old or used — the comps decide the number, and retail is only a sanity check.
 
 MATCH QUALITY — pick one of these three values for the "match_quality" field:
   strong   — 3 or more anchor listings within a tight price band
@@ -1297,12 +1396,11 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
   // ── Combine independently-priced items into ONE bundle asking price ────────
   // A SellHub listing can package several independent items (kayak + paddle);
   // each is priced on its own from real comps (synthesize-price, above), then
-  // this call decides the single combined asking price. It is deliberately NOT
-  // the arithmetic sum: complementary items can be worth more together (a
-  // watering system + a jug to hold the water), and a forced bundle can warrant a
-  // small discount. The model returns a synergy verdict + reasoning so the user
-  // can see WHY the bundle price differs from the sum. Text-only (no photos): the
-  // items were already identified/priced; this step reasons over those results.
+  // this call identifies attributable pricing factors. Complementary items can
+  // add premium factors, while a forced bundle can add discount factors. Code
+  // sums those factors and derives every dollar price + explanation from them,
+  // so the rationale and price cannot drift. Text-only (no photos): the items
+  // were already identified/priced; this step reasons over those results.
   handleSafe('synthesize-bundle-price', async (event, { items, sumOfPrices, nodeId } = {}, signal) => {
     marketplaceTelemetry.nodeId = nodeId;
     marketplaceTelemetry.windowId = event.sender?.id ?? null;
@@ -1310,13 +1408,28 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
     // Bundling is only meaningful with 2+ items, and we can only reason about
     // synergy for the ones that actually got a price. Fewer than 2 priced → let
     // the caller fall back to the arithmetic sum.
-    const priced = list.filter(it => it && it.recommended_price != null && Number.isFinite(Number(it.recommended_price)));
+    const priced = list.filter(it => (
+      it
+      && it.recommended_price !== null
+      && it.recommended_price !== undefined
+      && it.recommended_price !== ''
+      && Number.isFinite(Number(it.recommended_price))
+      && currencyAmount(it.recommended_price) > 0
+    ));
     if (priced.length < 2) {
       return { bundlePricing: null };
     }
-    const sum = Number.isFinite(Number(sumOfPrices))
+    const sum = currencyAmount(priced.reduce((n, it) => n + currencyAmount(it.recommended_price), 0));
+    const suppliedSum = sumOfPrices !== null && sumOfPrices !== undefined && sumOfPrices !== '' && Number.isFinite(Number(sumOfPrices))
       ? Number(sumOfPrices)
-      : priced.reduce((n, it) => n + Number(it.recommended_price), 0);
+      : null;
+    if (suppliedSum != null && Math.abs(suppliedSum - sum) >= 0.01) {
+      logger.warn(`[Marketplace][${nodeId}] Ignoring stale bundle sum $${suppliedSum}; priced items currently sum to $${sum}`);
+    }
+    if (sum <= 0) {
+      logger.warn(`[Marketplace][${nodeId}] Skipping bundle factor synthesis because priced items sum to non-positive value $${sum}`);
+      return { bundlePricing: null };
+    }
     logger.info(`[Marketplace][${nodeId}] Synthesizing bundle price for ${priced.length} item(s) (sum $${sum})`);
 
     // Only the priced items inform the combined price; an unpriced item ("set
@@ -1326,12 +1439,16 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
       item: i + 1,
       label: it.label,
       condition: it.condition,
-      individual_price: Number(it.recommended_price),
-      individual_quick_sell_price: it.quick_sell_price != null && Number.isFinite(Number(it.quick_sell_price))
-        ? Number(it.quick_sell_price)
+      individual_price: currencyAmount(it.recommended_price),
+      individual_quick_sell_price: it.quick_sell_price != null
+        && Number.isFinite(Number(it.quick_sell_price))
+        && currencyAmount(it.quick_sell_price) > 0
+        ? currencyAmount(it.quick_sell_price)
         : undefined,
-      individual_max_profit_price: it.max_profit_price != null && Number.isFinite(Number(it.max_profit_price))
-        ? Number(it.max_profit_price)
+      individual_max_profit_price: it.max_profit_price != null
+        && Number.isFinite(Number(it.max_profit_price))
+        && currencyAmount(it.max_profit_price) > 0
+        ? currencyAmount(it.max_profit_price)
         : undefined,
       match_quality: it.match_quality || undefined,
       seller_notes: (it.notes || '').trim() || undefined,
@@ -1339,29 +1456,20 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
     }));
 
     const bundleMeta = {};
-    const result = await callLLMText(`
-You are a pricing analyst. A seller is listing MULTIPLE independent items together in ONE listing. Each item has ALREADY been priced individually from real market evidence. Your job is to produce the complete final pricing result for the WHOLE bundle.
+    const decision = await callLLMText(`
+You are a pricing analyst. A seller is listing MULTIPLE independent items together in ONE listing. Each item has ALREADY been priced individually from real market evidence. Your job is to identify STRUCTURED, ATTRIBUTABLE pricing factors. Do NOT calculate or return dollar prices, a final relationship label, or a final adjustment. Application code will derive them by summing your factors.
 
 Selling items together can change their total value versus selling them separately:
 - PREMIUM: the items complement each other and are more useful as a set, so a buyer will pay more for the convenience of getting them together (e.g. a watering system + a jug to hold the water; a camera body + a matching lens; a kayak + its paddle). The bundle can ask MORE than the sum.
 - DISCOUNT: bundling forces the buyer to take items they may not all want, OR the seller accepts a small markdown to move everything in one faster transaction. The bundle may ask LESS than the sum.
 - NEUTRAL: the items are unrelated and bundling adds nothing — the bundle ≈ the sum.
 
-Decide which applies and roughly by how much, using the items' nature and any seller notes. Be disciplined: synergy adjustments are usually MODEST (typically within ±15% of the sum). Only exceed that when the set is genuinely worth much more (or much less) together than apart, and say why.
+Encode each reason and its numerical effect together:
+- bundle_factors: every independent reason the bundle should differ from separate value. direction="premium" adds percent; direction="discount" subtracts percent. An empty list means neutral. Code sums these signed factors to derive Best and the relationship badge.
+- quick_sell_factors: every independent liquidity reason to reduce Best for a likely sale in 1-3 days. Code sums their percentages.
+- max_profit_factors: every independent reason a patient seller might increase Best for a 3-4 week sale. Code sums their percentages.
 
-Return THREE prices for the whole bundle:
-- quick_sell_price: a bundle price likely to sell in 1-3 days
-- bundle_price: the best bundle asking price for a sale within 1-2 weeks
-- max_profit_price: the highest reasonable bundle price with 3-4 weeks of patience
-- Always keep quick_sell_price <= bundle_price <= max_profit_price.
-
-The justification is displayed directly under the FINAL BUNDLE price. Keep it
-strictly bundle-level:
-- Explain why the final bundle price is above, below, or equal to the sum of the individual prices.
-- Explain how the items' relationship, conditions, and seller notes affect that bundle adjustment.
-- Briefly explain the tradeoff represented by the quick and max bundle prices.
-- Do NOT repeat or rewrite each item's individual pricing justification; those are displayed separately under each item.
-- Do not use the word "comps"; say "similar listings" or "sold listings."
+Each factor MUST have a specific reason that supports its direction and percentage. Do not add a factor unless it changes price. Avoid double-counting overlapping reasons. Bundle factors are usually modest and should normally net within ±15%. Hard aggregate limits enforced by code: bundle net ±50%, quick reduction 75%, max increase 100%. Return at most 8 factors in each list. Do NOT repeat each item's individual pricing justification; those are displayed separately. Do not calculate or state dollar prices. Do not use the word "comps"; say "similar listings" or "sold listings."
 
 SUM OF INDIVIDUAL PRICES: $${sum}
 
@@ -1371,11 +1479,16 @@ ${JSON.stringify(itemsForPrompt, null, 2)}
 Return ONLY a single JSON object with EXACTLY this shape. No prose outside the JSON.
 
 {
-  "quick_sell_price": 0,
-  "bundle_price": 0,
-  "max_profit_price": 0,
-  "synergy": "premium",
-  "justification": "2-4 sentences explaining only the final bundle adjustment and the quick/best/max bundle tradeoff. Plain English."
+  "bundle_factors": [
+    { "direction": "premium", "percent": 8, "reason": "The items form a complete ready-to-use system." },
+    { "direction": "discount", "percent": 3, "reason": "A buyer must take all items in one purchase." }
+  ],
+  "quick_sell_factors": [
+    { "percent": 10, "reason": "The complete set has a focused buyer pool." }
+  ],
+  "max_profit_factors": [
+    { "percent": 10, "reason": "A patient seller can wait for a buyer seeking the complete set." }
+  ]
 }`, {
       signal,
       task: 'bundle-price-synthesis',
@@ -1383,6 +1496,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
       responseSchema: BUNDLE_PRICE_SCHEMA,
       meta: bundleMeta,
     });
+    const result = deriveBundlePricingResult(decision, sum, priced.length);
 
     marketplaceTelemetry.bundle = {
       ts: Date.now(),
@@ -1393,10 +1507,22 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
       bundlePrice: result?.bundle_price ?? null,
       maxPrice: result?.max_profit_price ?? null,
       synergy: result?.synergy || null,
+      adjustmentPercent: result?.bundle_adjustment_percent ?? null,
+      quickReductionPercent: result?.quick_sell_reduction_percent ?? null,
+      maxIncreasePercent: result?.max_profit_increase_percent ?? null,
+      bundleFactors: result?.bundle_factors || [],
+      quickFactors: result?.quick_sell_factors || [],
+      maxFactors: result?.max_profit_factors || [],
+      factorCapsApplied: result?.factor_caps_applied || null,
+      rejectedFactors: result?.rejected_factors || null,
       model: bundleMeta.model || null,
       fallback: bundleMeta.fallback || null,
     };
-    logger.info(`[Marketplace][${nodeId}] Bundle price: $${result?.bundle_price} (${result?.synergy}, sum $${sum})`);
+    if (result) {
+      logger.info(`[Marketplace][${nodeId}] Bundle price: $${result.bundle_price} (${result.synergy}, sum $${sum})`);
+    } else {
+      logger.warn(`[Marketplace][${nodeId}] Invalid bundle factor response; using separate-item sum $${sum}`);
+    }
     return { bundlePricing: result };
   });
 
@@ -1405,7 +1531,16 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
   // instead of throwing away the prior scrape's ~70 successful comps and
   // re-paying for a full multi-source run. The renderer merges the returned
   // items into pendingComps and drops the source from scrapeWarnings.
-  handleSafe('rescrape-source', async (event, { sourceId, query, items, nodeId }, signal) => {
+  handleSafe('rescrape-source', async (event, { sourceId, query, items, nodeId, noChallengeConfirmed = false }, signal) => {
+    // Serialize on the shared browser like the full scrape — a rescrape runs
+    // headless scrapes on the one stealth browser, so it must not overlap
+    // another node's captcha-resolve closing that browser. See marketplaceBrowserLock.
+    const aheadInQueue = getMarketplaceBrowserQueueDepth();
+    if (aheadInQueue > 0 && !event.sender.isDestroyed()) {
+      event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: aheadInQueue });
+    }
+    return withMarketplaceBrowserLock(async () => {
+    if (!event.sender.isDestroyed()) event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: 0 });
     // Multi-item bundle: re-scrape this source once per item's query so a Solve
     // recovers comps for EVERY item, not just the primary. Returns per-item
     // results the renderer merges into each item's comps.
@@ -1415,7 +1550,11 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
       for (const it of items) {
         if (signal.aborted) throw new Error('Window closed');
         const r = await scrapeOneSource(sourceId, it.query, event.sender, signal, nodeId);
-        const warning = retryWarningRequiringAction(r.warning, r.items);
+        // noChallengeConfirmed: the visible Solve proved this host/session has no
+        // wall, so a per-item empty (incl. a readiness-loop timeout on a genuine
+        // 0-results page) is the page's real answer — clear it instead of re-arming
+        // retry-empty, which would strand a truly-empty bundle source forever.
+        const warning = retryWarningRequiringAction(r.warning, r.items, { noChallengeConfirmed });
         perItem.push({
           key: it.key ?? null,
           query: it.query,
@@ -1457,7 +1596,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
 
     logger.info(`[Marketplace][${nodeId}] Rescraping single source: ${sourceId}`);
     const result = await scrapeOneSource(sourceId, query, event.sender, signal, nodeId);
-    const warning = retryWarningRequiringAction(result.warning, result.items);
+    const warning = retryWarningRequiringAction(result.warning, result.items, { noChallengeConfirmed });
     const normalizedResult = {
       ...result,
       warning,
@@ -1487,6 +1626,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
       warningCount: warning ? 1 : 0,
     };
     return normalizedResult;
+    }, signal);   // end withMarketplaceBrowserLock
   });
 
   // ── Resolve captcha / anti-bot challenge that blocked a comp scrape ───────
@@ -1496,6 +1636,17 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
   // TTL, so the renderer's follow-up "Refresh Prices" call lands on a
   // clean page instead of bouncing back into the same wall.
   handleSafe('resolve-captcha', async (event, { url, sourceId, nodeId } = {}, signal) => {
+    // Hold the sell-side browser lock for the WHOLE resolve: this op CLOSES the
+    // shared stealth browser to hand its profile to a visible Chrome, so it must
+    // not run while a price-check scrape still has pages in flight (that is the
+    // exact collision that detached them). Holding across the manual solve is
+    // fine — the visible window holds the profile, so no scrape could run anyway.
+    const aheadInQueue = getMarketplaceBrowserQueueDepth();
+    if (aheadInQueue > 0 && !event.sender.isDestroyed()) {
+      event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: aheadInQueue });
+    }
+    return withMarketplaceBrowserLock(async () => {
+    if (!event.sender.isDestroyed()) event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: 0 });
     logger.info(`[Marketplace][${nodeId}] User opening captcha-resolve window for ${sourceId}: ${url}`);
     // Look up the source's extractor + category (browser-pool sources only —
     // API sources like reverb/stockx don't have one and never go through
@@ -1575,6 +1726,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
       via: 'inline',
     };
     return { ...result, category, warning: inlineWarning };
+    }, signal);   // end withMarketplaceBrowserLock
   });
 
   // ── Assess platform fit (which marketplaces suit this specific item) ──────
@@ -1674,6 +1826,80 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
       });
       logger.info(`[Marketplace][${nodeId}] Result: ${result.status} — ${result.message}`);
       return result;
-    });
+    }, signal);
+  });
+
+  // ── Marketplace Status Module: aggregate hub scan ─────────────────────────
+  // Instead of checking each listing individually (slow + token-heavy at 20+
+  // listings), scan each platform's aggregate notification hub — the watch URLs
+  // the user configured in Settings — ONCE per platform, and surface anything
+  // across all their listings that needs action. The renderer only sends
+  // platforms that have BOTH a listing on this canvas AND a configured watch URL.
+  handleSafe('check-marketplace-status', async (_event, { platformIds, nodeId } = {}, signal) => {
+    const ids = Array.isArray(platformIds) ? platformIds.filter(Boolean) : [];
+    if (ids.length === 0) return { results: {} };
+
+    // Share the listing-status FIFO mutex: hub scans read the same auth-walled
+    // seller dashboards and must not double the single-IP burst against any
+    // residual per-listing check (see statusCheckLock).
+    const ahead = getStatusCheckQueueDepth();
+    if (ahead > 0) {
+      logger.info(`[MarketplaceStatus][${nodeId}] queued behind ${ahead} in-flight status check(s)`);
+    }
+    return withStatusCheckLock(async () => {
+      const results = {};
+      for (const platformId of ids) {
+        if (signal?.aborted) break;
+        const lastChecked = new Date().toISOString();
+
+        // Session gate: a dead cookie should read as an explicit needs-login,
+        // not a vague "unknown" from an auth-walled hub page. Mirrors the gate in
+        // checkListingStatusMultiSource (kept local so that tested path's
+        // injected verifier/cache stays untouched).
+        const monitorConfig = getSellMonitorConfig(platformId);
+        const cached = monitorConfig ? getStatusCacheSync()[platformId] : null;
+        let gateReason; // undefined = pass; otherwise the needs-login reason
+        if (cached && cached.connected === false) {
+          gateReason = cached.lastReason || '';
+        } else if (monitorConfig) {
+          const verdict = await verifySellMonitorLogin(platformId).catch(() => null);
+          if (!verdict?.connected) {
+            try { await writeStatusCache(platformId, false, { lastReason: verdict?.reason, lastTrace: verdict?.trace }); }
+            catch { /* cache write failures are non-fatal for the verdict */ }
+            gateReason = verdict?.reason || '';
+          }
+        }
+        if (gateReason !== undefined) {
+          const name = monitorConfig?.name || platformId;
+          results[platformId] = {
+            status: 'needs-login',
+            message: `${name} session needs login.${gateReason ? ` ${gateReason}` : ''} Open Settings → Marketplace Login, then run Check Status again.`,
+            summary: '', attention: [], sources: [], lastChecked,
+          };
+          continue;
+        }
+
+        const watchUrls = getMarketplaceWatchUrls(platformId);
+        if (watchUrls.length === 0) {
+          results[platformId] = {
+            status: 'unknown',
+            message: 'No watch URL configured — add one in Settings → Marketplace Monitors.',
+            summary: '', attention: [], sources: [], lastChecked,
+          };
+          continue;
+        }
+
+        const urlSpecs = watchUrls.map((url) => ({
+          url,
+          urlLabel: 'hub',
+          fetcher: (u, sig) => fetchHtmlAuthed(u, { signal: sig }),
+        }));
+        logger.info(`[MarketplaceStatus][${nodeId}] Scanning ${platformId} across ${watchUrls.length} hub URL(s)`);
+        const scan = await scanSellerHubPages({ urlSpecs, platformId, signal });
+        logger.info(`[MarketplaceStatus][${nodeId}] ${platformId}: ${scan.status} — ${scan.attention.length} attention item(s)`);
+        results[platformId] = { ...scan, lastChecked };
+      }
+      return { results };
+    }, signal);
   });
 }

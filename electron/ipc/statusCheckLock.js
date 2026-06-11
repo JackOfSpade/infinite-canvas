@@ -41,11 +41,20 @@ let _pending = 0;
  *
  * @template T
  * @param {() => Promise<T> | T} fn
+ * @param {{ aborted?: boolean } | null} [signal] optional AbortSignal — if it is
+ *   already aborted when this caller reaches the head of the queue, fn is NOT run.
  * @returns {Promise<T>}
  */
-export function withStatusCheckLock(fn) {
+export function withStatusCheckLock(fn, signal = null) {
   _pending++;
-  const result = _tail.then(() => fn());
+  const result = _tail.then(() => {
+    if (signal?.aborted) {
+      const err = new Error('Aborted before acquiring the status-check lock');
+      err.name = 'AbortError';
+      throw err;
+    }
+    return fn();
+  });
   // Advance the tail regardless of outcome so one failure doesn't wedge the
   // queue; the caller still observes `result`'s resolution/rejection.
   _tail = result.then(() => {}, () => {});

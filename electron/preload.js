@@ -79,7 +79,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   recordResolveMerge: (args) => ipcRenderer.invoke('record-resolve-merge', args),
   bucketJobs: (args) => ipcRenderer.invoke('bucket-jobs', args),
 
-  // ── Marketplace Module ──────────────────────────────────────────────────
+  // ── Price Check Module ──────────────────────────────────────────────────
   analyzePhotos: (args) => ipcRenderer.invoke('analyze-photos', args),
   scrapePriceComps: (args) => ipcRenderer.invoke('scrape-price-comps', args),
   rescrapeSource: (args) => ipcRenderer.invoke('rescrape-source', args),
@@ -87,7 +87,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   synthesizeBundlePrice: (args) => ipcRenderer.invoke('synthesize-bundle-price', args),
   assessPlatformFit: (args) => ipcRenderer.invoke('assess-platform-fit', args),
   resolveCaptcha: (args) => ipcRenderer.invoke('resolve-captcha', args),
-  checkListingStatus: (args) => ipcRenderer.invoke('check-listing-status', args),
+  // ── Marketplace Status Module ───────────────────────────────────────────
+  // Scrapes each platform's aggregate notification hub (the watch URLs in
+  // Settings) for anything needing the seller's attention — NOT per-listing.
+  checkMarketplaceStatus: (args) => ipcRenderer.invoke('check-marketplace-status', args),
   getSellPlatforms: async () => {
     const res = await ipcRenderer.invoke('get-sell-platforms');
     return res.success ? (res.platforms || []) : [];
@@ -106,6 +109,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   onPriceSourceProgress: createListener('price-source-progress'),
+  // Emitted while a sell-side browser op is serialized behind another (queued
+  // behind N), then with queuedBehind:0 once it acquires the shared browser.
+  onPriceQueueStatus: createListener('price-queue-status'),
 
   // ── Accounts Module ───────────────────────────────────────────────────
   getPlatforms: async () => {

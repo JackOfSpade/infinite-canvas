@@ -83,3 +83,29 @@ export function normalizeCompWarnings(warnings, cardIds = []) {
   }
   return [...represented, ...unexpected];
 }
+
+// ── PriceCharting category applicability ────────────────────────────────────
+// PriceCharting indexes a FIXED catalog: video games, gaming hardware/consoles,
+// trading-card games (Pokémon/Magic/Yu-Gi-Oh/Lorcana/sports cards), comics, and
+// a handful of collectible toys (Funko/amiibo/LEGO). Its /search-products is a
+// fuzzy WHOLE-catalog keyword match that NEVER returns [] — a household-goods
+// query ("BISSELL Multi-Surface Pet Formula … Crosswave 80 oz") fuzzily matches
+// dozens of unrelated catalog entries ("Azur Lane: Crosswave", "Formula One 99",
+// "Wizard of Oz"), polluting the comp pool and showing an alarming match count.
+// So we only spend a PriceCharting request when the item's category PLAUSIBLY
+// falls in its catalog. The match is intentionally generous (a stray collectible
+// is harmless — the source-level relevance filter + synthesis gate still guard);
+// the goal is only to skip it for the clearly-non-collectible majority.
+const PRICECHARTING_CATEGORY_RE = /\b(video\s*games?|gaming|game\s*boy|consoles?|handhelds?|nintendo|switch|playstation|ps[1-5]\b|xbox|sega|genesis|dreamcast|atari|gamecube|wii\b|n64|nes\b|snes\b|3ds\b|retro|amiibo|trading\s*cards?|tcg|ccg|pok[eé]mon|magic[:\s-]*the\s*gathering|\bmtg\b|yu-?gi-?oh|lorcana|sports?\s*cards?|baseball\s*cards?|comics?|funko|\blego\b|board\s*games?|collectib)/i;
+
+/**
+ * Should a PriceCharting price-comp request run for an item in this category?
+ * `category` is the free-text "Category > Subcategory" from the vision product
+ * analysis. Unknown/blank → true (back-compat: don't suppress when we can't
+ * classify; the source-level relevance filter still drops off-target results).
+ */
+export function isPriceChartingApplicable(category) {
+  const c = String(category || '').trim();
+  if (!c) return true;
+  return PRICECHARTING_CATEGORY_RE.test(c);
+}

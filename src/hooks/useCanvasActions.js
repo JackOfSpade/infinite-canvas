@@ -222,11 +222,13 @@ export function useCanvasActions({
     takeSnapshot();
 
     // If we're nested, we only clear the current canvas level (this is fully undoable).
-    // If we're at the root level, we also reset the file association because it's effectively a "New Workspace".
+    // At root level this becomes an untitled workspace rather than silently
+    // overwriting the prior file on auto-save. It is still unsaved work: closing
+    // immediately after clearing must offer a chance to save or undo it.
     if (depth === 0) {
       resetStack?.();
       setCurrentFile(null);
-      setHasUnsavedChanges(false);
+      setHasUnsavedChanges(true);
     }
 
     const allNodes = getNodes();

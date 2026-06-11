@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /* ============================================================
    build/test.js — self-verification
    ----------------------------------------------------------
@@ -11,13 +10,13 @@
    Run from the project root:    node build/test.js
    Exit code 0 on success, non-zero on first failure.
 
-   No external deps beyond the vendored pdf-lib. No filesystem
-   side effects (everything in memory).
+   No external deps beyond the pdf-lib npm package (`npm i pdf-lib@1.17.1`).
+   No filesystem side effects (everything in memory).
    ============================================================ */
 
 'use strict';
 
-var PDFLib = require('./vendor/pdf-lib.min.js');
+var PDFLib = require('pdf-lib');
 var Mod    = require('./dual-mode-pdf.js');
 var addOcgBackground = Mod.addOcgBackground;
 
@@ -173,7 +172,7 @@ async function run() {
   await expectThrow(function () { return addOcgBackground(customOut, { layerName: 'Other layer' }); },
     'guard fires when re-adding the same-named layer', /already has an OCG/);
   var passedThrough = false;
-  try { await addOcgBackground(customOut); passedThrough = true; } catch { /* ignore */ }
+  try { await addOcgBackground(customOut); passedThrough = true; } catch (e) { /* ignore */ }
   assert(passedThrough, 'PDF with unrelated OCGs (different layer name) does NOT trigger the guard');
 
   header('Custom cream colour');

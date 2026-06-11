@@ -1,7 +1,7 @@
 <!doctype html>
 <!--
   browser-test.html — browser companion to build/test.js.
-  Loads the vendored pdf-lib + dual-mode-pdf.js through their UMD
+  Loads pdf-lib (from CDN) + dual-mode-pdf.js through their UMD
   *browser* path (window.PDFLib → window.DualModePdf) and runs the
   same assertion suite test.js runs under Node. Covers the
   browser/Puppeteer access path that the Node test cannot reach.
@@ -17,7 +17,7 @@
   #summary { font-size:16px; margin-top:18px; padding:10px 14px; border-radius:6px; }
   #summary.ok { background:#16301d; color:#7CCB8E; } #summary.bad { background:#3a1517; color:#FF8A80; }
 </style>
-<script src="vendor/pdf-lib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <script src="dual-mode-pdf.js"></script>
 </head>
 <body>

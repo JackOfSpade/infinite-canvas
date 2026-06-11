@@ -22,6 +22,8 @@ import { shortId, renderSessionRows, renderSessionTraceBlocks } from './bugRepor
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
+import { buildMarketplaceStatusRollup } from './bugReport/marketplaceStatusRollup.js';
+import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
 import { getAuthWindowDiagnostics } from './browser/authWindows.js';
 import {
   getJobSearchTransientKeysForSave,
@@ -681,7 +683,11 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
         const t = d.lastCheckTrace;
         const formatted = t.sources.map(s => {
           const m = s.matched === true ? '·matched' : s.matched === false ? '·no-match' : '';
-          return `${s.label || '?'}=${s.status || '?'}${m}`;
+          // `reason` is captured for error verdicts only (see compactCheckTrace) —
+          // it's the WHY behind a bare `listing=error` (fetch timeout vs anti-bot
+          // drop vs AI failure), so a systematic source failure is diagnosable.
+          const why = s.reason ? ` (${s.reason})` : '';
+          return `${s.label || '?'}=${s.status || '?'}${m}${why}`;
         });
         // Collapse consecutive identical entries (e.g. a card with 5 platform-
         // watch URLs that all no-match) → `platform watch=unknown·no-match ×5`.
@@ -1332,6 +1338,19 @@ ${aiConfig.provider === 'gemini' ? `
   try { marketplacePipelineMarkdown = buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId); }
   catch { /* never break the report on diagnostic failure */ }
 
+  // Status-check roll-up renders EARLY (before the unbounded node table) so the
+  // answer to "did the status check go smoothly?" survives clipboard truncation.
+  let marketplaceStatusRollupMarkdown = '';
+  if (hasSellNodes) try { marketplaceStatusRollupMarkdown = buildMarketplaceStatusRollup(nodes); }
+    catch { /* never break the report on diagnostic failure */ }
+
+  // The Marketplace Status MODULE's own hub-scan results (data.platformStatus) —
+  // self-gates to '' when no marketplacestatus node has results, so call it
+  // unconditionally (a module can exist on a canvas with no sell-hub nodes).
+  let marketplaceModuleRollupMarkdown = '';
+  try { marketplaceModuleRollupMarkdown = buildMarketplaceModuleRollup(nodes); }
+  catch { /* never break the report on diagnostic failure */ }
+
   let scraperAdaptationMarkdown = '';
   if (hasJobNodes || hasSellNodes) try { scraperAdaptationMarkdown = buildScraperAdaptationSnapshot(); }
     catch { /* never break the report on diagnostic failure */ }
@@ -1377,7 +1396,7 @@ ${payload.filterCode ? `\n**Filter code applied:** \`${payload.filterCode}\`${pa
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceStatusRollupMarkdown}${marketplaceModuleRollupMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   // Static safety bound (not adaptive): keeps the assembled bug-report payload

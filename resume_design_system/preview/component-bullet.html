@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- @dsCard group="Components" name="Component · Bullet" subtitle="Bullet with inline scope and trade-off annotations" viewport="700x240" -->
+<html lang="en"><head><meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<link rel="stylesheet" href="_card.css">
+<style>
+  .bullets { padding: 0; margin: 0; list-style: none; }
+  .bullets li { padding-left: 1.05em; position: relative; font-size: 10.25pt; line-height: 1.45; margin-bottom: 8px; }
+  .bullets li::before { content: "•"; position: absolute; left: 0; color: var(--ink-3); }
+  .bullets li:last-child { margin-bottom: 0; }
+  .bullets strong { font-weight: 600; }
+  .scope { font-size: 8.75pt; color: var(--ink-2); letter-spacing: -0.005em; }
+  .scope::before { content: " — "; color: var(--ink-4); }
+  .tradeoff { font-size: 8.75pt; color: var(--ink-2); font-style: italic; letter-spacing: -0.005em; }
+  .tradeoff::before { content: " · trade-off: "; color: var(--ink-4); font-style: normal; }
+  .tag { font-family: var(--ff-mono); font-size: 7.5pt; color: var(--ink-4); letter-spacing: 0.06em; text-transform: uppercase; margin-left: 6px; }
+</style>
+</head><body>
+<ul class="bullets">
+  <li>Plain bullet — <strong>1.4M QPS</strong> at p99 <strong>38 ms</strong> across 19 PB. <span class="tag">plain</span></li>
+  <li>With scope chip — owned the multi-region replication design.<span class="scope">8 engineers, 11-month project</span> <span class="tag">x_scope</span></li>
+  <li>With trade-off — chose CRDT metadata sync over Raft.<span class="tradeoff">eventual convergence in exchange for fewer quorum-loss outages.</span> <span class="tag">x_tradeoff</span></li>
+</ul>
+</body></html>

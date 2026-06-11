@@ -5,17 +5,57 @@ import { PhotoStrip } from '../../components/PhotoStrip';
 import { buildItemQuery } from '../../utils/bundlePricing';
 import { EventLogger } from '../../utils/EventLogger';
 import { syncUncontrolledTextValue } from '../../utils/uncontrolledTextValue';
+import { useToast } from '../../components/ToastProvider';
+import {
+  PRODUCT_CONDITIONS,
+  CONDITION_VALUES,
+  DEFAULT_CONDITION,
+  getConditionDef,
+} from '../../utils/productConditions';
 
-// Mirrors the enum the AI is prompted to pick from in marketplace.js so the
-// dropdown options match what's already living in `product.condition`.
-const CONDITION_OPTIONS = [
-  'New',
-  'Like New',
-  'Used - Excellent',
-  'Used - Good',
-  'Used - Fair',
-  'For Parts',
-];
+/**
+ * Condition picker shared by the primary product and each extra bundle item.
+ * Surfaces the tier definitions the user asked for: a hover tooltip with what
+ * each tier includes/excludes — on the select AND every option, so tiers can be
+ * compared while the menu is open — plus an always-visible one-line summary of
+ * the current choice. The SAME definitions are fed to the pricing AI; both come
+ * from the single source of truth in src/utils/productConditions.js.
+ *
+ * `allowUnknown` keeps a pre-existing out-of-enum value (e.g. an old "Unknown"
+ * the vision model returned) selectable as a disabled placeholder rather than
+ * silently coercing it; extra items have no such legacy state so they default
+ * straight to the standard fallback tier.
+ */
+function ConditionSelect({ value, onChange, locked, allowUnknown = false }) {
+  const isKnown = CONDITION_VALUES.includes(value);
+  const selected = isKnown ? value : (allowUnknown ? '' : DEFAULT_CONDITION);
+  const def = getConditionDef(selected);
+  const tip = (c) => `${c.summary}\nIncludes: ${c.includes}\nDoes not include: ${c.excludes}`;
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-1 text-[10px]">
+        <span className="text-white/30">Condition:</span>
+        <select
+          value={selected}
+          onChange={(e) => onChange(e.target.value)}
+          onPointerDown={(e) => e.stopPropagation()}
+          disabled={locked}
+          title={def ? tip(def) : undefined}
+          className="nodrag bg-white/5 border border-white/10 rounded px-1 py-0.5 text-white/70 text-[10px] focus:outline-none focus:border-blue-400/50 disabled:opacity-50 disabled:cursor-default"
+        >
+          {allowUnknown && !isKnown && (
+            <option value="" disabled>{value || 'Unknown'}</option>
+          )}
+          {PRODUCT_CONDITIONS.map((c) => (
+            <option key={c.value} value={c.value} title={tip(c)}>{c.value}</option>
+          ))}
+        </select>
+      </div>
+      {def && <p className="text-white/35 text-[9px] leading-snug">{def.summary}</p>}
+    </div>
+  );
+}
 
 function selectionLabel(element) {
   const start = Number.isInteger(element?.selectionStart) ? element.selectionStart : '?';
@@ -91,7 +131,18 @@ function PricingNotesTextarea({ value, onChange, locked, diagnosticId }) {
  */
 function ExtraItemEditor({ item, index, onEdit, onRemove, locked, hubId }) {
   const [editing, setEditing] = useState(null); // 'title' | 'brand' | 'model' | null
-  const save = (field) => (v) => { onEdit?.(item.id, { [field]: v }); setEditing(null); };
+  const { addToast } = useToast();
+  const save = (field) => (v) => {
+    // Title is required for an extra item too — reject an empty/whitespace title
+    // and keep the previous one. Brand/model may be cleared and stay empty.
+    if (field === 'generated_title' && !String(v ?? '').trim()) {
+      addToast({ title: 'Title required', description: "An item title can't be empty — keeping the previous title.", type: 'error' });
+      setEditing(null);
+      return;
+    }
+    onEdit?.(item.id, { [field]: v });
+    setEditing(null);
+  };
 
   return (
     <div className="space-y-2 rounded-md border border-white/10 bg-white/[0.02] p-2">
@@ -141,18 +192,11 @@ function ExtraItemEditor({ item, index, onEdit, onRemove, locked, hubId }) {
         </div>
       </div>
 
-      <div className="flex items-center gap-1 text-[10px]">
-        <span className="text-white/30">Condition:</span>
-        <select
-          value={CONDITION_OPTIONS.includes(item.condition) ? item.condition : 'Used - Good'}
-          onChange={(e) => onEdit?.(item.id, { condition: e.target.value })}
-          onPointerDown={(e) => e.stopPropagation()}
-          disabled={locked}
-          className="nodrag bg-white/5 border border-white/10 rounded px-1 py-0.5 text-white/70 text-[10px] focus:outline-none focus:border-blue-400/50 disabled:opacity-50 disabled:cursor-default"
-        >
-          {CONDITION_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
-      </div>
+      <ConditionSelect
+        value={item.condition}
+        onChange={(v) => onEdit?.(item.id, { condition: v })}
+        locked={locked}
+      />
 
       <div className="space-y-1">
         <label className="block text-white/30 text-[10px]">Pricing notes</label>
@@ -226,23 +270,12 @@ export function SellHubDraftState({
         </div>
       </div>
 
-      <div className="flex items-center gap-1 text-[10px]">
-        <span className="text-white/30">Condition:</span>
-        <select
-          value={CONDITION_OPTIONS.includes(product.condition) ? product.condition : ''}
-          onChange={(e) => handleFieldEdit('condition', e.target.value)}
-          onPointerDown={(e) => e.stopPropagation()}
-          disabled={locked}
-          className="nodrag bg-white/5 border border-white/10 rounded px-1 py-0.5 text-white/70 text-[10px] focus:outline-none focus:border-blue-400/50 disabled:opacity-50 disabled:cursor-default"
-        >
-          {!CONDITION_OPTIONS.includes(product.condition) && (
-            <option value="" disabled>{product.condition || 'Unknown'}</option>
-          )}
-          {CONDITION_OPTIONS.map(c => (
-            <option key={c} value={c}>{c}</option>
-          ))}
-        </select>
-      </div>
+      <ConditionSelect
+        value={product.condition}
+        onChange={(v) => handleFieldEdit('condition', v)}
+        locked={locked}
+        allowUnknown
+      />
 
       <div className="space-y-1">
         <label className="block text-white/30 text-[10px]">Pricing notes</label>

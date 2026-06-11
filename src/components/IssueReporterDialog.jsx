@@ -3,6 +3,7 @@ import { Dialog } from './Dialog';
 import { Clipboard, Save, Sparkles, Copy, AlertTriangle } from 'lucide-react';
 import { EventLogger } from '../utils/EventLogger';
 import { previewBugReportCode, buildAiPrompt } from '../utils/bugReportCodes';
+import { useIsMountedRef } from '../hooks/useIsMountedRef';
 
 // Persist the in-progress description across dialog open/close cycles but NOT
 // across app restarts/exit.
@@ -33,10 +34,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
     } catch { /* ignore */ }
   }, []);
 
-  const isMountedRef = React.useRef(true);
-  React.useEffect(() => {
-    return () => { isMountedRef.current = false; };
-  }, []);
+  const isMountedRef = useIsMountedRef();
 
   const handleClose = useCallback(() => {
     setFilterCode(DEFAULT_FILTER_CODE);
@@ -80,7 +78,7 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
       setIsSubmitting(false);
       setActiveMode(null);
     }
-  }, [filterCode, handleClose, isSubmitting, onSubmit, description]);
+  }, [filterCode, handleClose, isSubmitting, onSubmit, description, isMountedRef]);
 
   if (!isOpen) return null;
 

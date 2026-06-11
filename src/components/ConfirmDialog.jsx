@@ -1,7 +1,8 @@
-import React, { useEffect } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, X } from 'lucide-react';
 import { updateModalCount } from './modalStack';
+import { TIMINGS } from '../utils/timings';
 
 /**
  * Styled confirmation dialog — replaces the browser-native `confirm()`.
@@ -39,6 +40,18 @@ const VARIANT_STYLES = {
  */
 export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', onConfirm, onCancel, onAbort, variant = 'danger' }) {
   const style = VARIANT_STYLES[variant] || VARIANT_STYLES.danger;
+  const [isResolving, setIsResolving] = useState(false);
+  const resolvingRef = useRef(false);
+  const resolveTimerRef = useRef(null);
+
+  const resolveOnce = useCallback((action) => {
+    if (resolvingRef.current) return;
+    resolvingRef.current = true;
+    setIsResolving(true);
+    // Keep the backdrop mounted briefly so a rapid second click cannot land on
+    // the canvas underneath after the first action unmounts this dialog.
+    resolveTimerRef.current = setTimeout(action, TIMINGS.MODAL_RESOLVE_GUARD_MS);
+  }, []);
 
   // Participate in the modal stack so global shortcuts (undo/redo) are suppressed
   // while a destructive confirm is showing — otherwise Cmd+Z on the canvas
@@ -52,16 +65,20 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
   // the dialog (triggers onAbort to undo if available, else falls back to onCancel).
   useEffect(() => {
     const handleKey = (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); (onAbort || onCancel)(); }
+      if (e.key === 'Escape') { e.preventDefault(); resolveOnce(onAbort || onCancel); }
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [onCancel, onAbort]);
+  }, [onCancel, onAbort, resolveOnce]);
+
+  useEffect(() => () => {
+    if (resolveTimerRef.current) clearTimeout(resolveTimerRef.current);
+  }, []);
 
   return createPortal(
     <div
       className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onClick={onAbort || onCancel}
+      onClick={() => resolveOnce(onAbort || onCancel)}
     >
       <div
         className="w-[360px] bg-neutral-900/95 border border-white/10 rounded-2xl shadow-2xl overflow-hidden onboarding-panel relative"
@@ -69,7 +86,8 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
       >
         {onAbort && (
           <button
-            onClick={onAbort}
+            onClick={() => resolveOnce(onAbort)}
+            disabled={isResolving}
             className="absolute top-2.5 left-2.5 text-white/30 hover:text-white/70 transition-colors p-1 rounded hover:bg-white/5"
             title="Cancel and undo (restores anything this dialog was about to act on)"
             aria-label="Cancel and undo"
@@ -90,13 +108,15 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
 
         <div className="px-6 pb-6 flex gap-3">
           <button
-            onClick={onCancel}
+            onClick={() => resolveOnce(onCancel)}
+            disabled={isResolving}
             className="flex-1 px-4 py-2.5 rounded-lg text-xs font-medium bg-white/5 text-white/70 hover:bg-white/10 transition-colors"
           >
             {cancelLabel}
           </button>
           <button
-            onClick={onConfirm}
+            onClick={() => resolveOnce(onConfirm)}
+            disabled={isResolving}
             className={`flex-1 px-4 py-2.5 rounded-lg text-xs font-medium transition-colors ${style.button}`}
           >
             {confirmLabel}
