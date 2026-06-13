@@ -7,6 +7,7 @@ import { EventLogger } from '../utils/EventLogger';
 import { languageLabel } from '../utils/jobLanguageLabels';
 import { NodeHandles } from './_shared/NodeHandles';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
+import { computeJobTreeView } from './jobsearch/buildJobTree';
 
 // Accent color encodes the match score (interview-likelihood) band, so the
 // card's color reinforces the single metric: greener = better odds. Bands match
@@ -29,11 +30,13 @@ function scoreColor(score) {
  *
  * data shape:
  *   title, company, location, salary, snippet, url, source, posted,
- *   matchScore, reasoning, careerDirection, hubId,
+ *   matchScore, reasoning, careerDirection,
+ *   hubId,       // the Job Board that spawned this card (owns the cascade)
+ *   originHubId, // the Job Search Module whose search found it (owns careerData)
  *   language (optional 2-letter code, set only when non-English → shows a chip)
  */
 export function JobCardNode({ id, data }) {
-  const { deleteElements, getNode } = useReactFlow();
+  const { deleteElements, getNode, setNodes } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const { addToast } = useToast();
 
@@ -55,19 +58,39 @@ export function JobCardNode({ id, data }) {
     }
   }, [data.url]);
 
+  // Dismiss = delete this card, then re-derive the tree view so the column
+  // tightens and the role leaf's pagination window backfills the next matching
+  // card (the group badges are live via their own store selector). Lock is
+  // checked at click time against BOTH this card and the owning board — a
+  // render-time read would go stale on already-mounted cards.
+  const dismissCard = useCallback(async () => {
+    if (data.locked || getNode(data.hubId)?.data?.locked) return;
+    await deleteElements({ nodes: [{ id }] });
+    const hubData = getNode(data.hubId)?.data || {};
+    const filter = { scoreThreshold: hubData.scoreThreshold ?? 0, sourceFilter: hubData.sourceFilter ?? null };
+    setNodes((nodes) => computeJobTreeView(nodes, data.hubId, filter));
+  }, [id, data.locked, data.hubId, deleteElements, getNode, setNodes]);
+
   // ── Full application (tailored résumé + cover letter PDFs) ─────────────────
-  // Reads the merged career data from the owning hub (not stored per-card, to
-  // avoid bloating the canvas file). The backend researches the company, fills
-  // the design system, renders both PDFs, then writes them straight into
+  // Reads the merged career data from the ORIGIN Job Search Module — the
+  // module whose search produced this job (cards are spawned by the Job Board,
+  // which merges several modules and holds no career data itself; data.hubId
+  // is the board). Not stored per-card, to avoid bloating the canvas file.
+  // The backend researches the company, fills the design system, renders both
+  // PDFs, then writes them straight into
   //   <canvas dir>/Applied Jobs/<company>/<job title>/
   // and opens that folder in Finder — no save dialog.
   const generateApplication = useCallback(async () => {
     if (!window.electronAPI?.generateApplication) return;
-    const careerData = getNode(data.hubId)?.data?.careerData;
+    if (getNode(data.hubId)?.data?.locked) return; // board lock freezes cards too
+    const originHub = getNode(data.originHubId || data.hubId);
+    const careerData = originHub?.data?.careerData;
     if (!careerData) {
       addToast({
         title: 'No Career Data',
-        description: 'Re-run the job search by dropping your career files on the hub, then try again.',
+        description: data.originHubId && !originHub
+          ? 'The Job Search Module this card came from was deleted, so its career files are gone. Re-run a search and re-combine the board.'
+          : 'The origin Job Search Module has no stored career data. Drop your career files on it, re-run the search, then re-combine the board.',
         type: 'error',
       });
       return;
@@ -127,7 +150,7 @@ export function JobCardNode({ id, data }) {
     } finally {
       if (isMountedRef.current) setGeneratingApp(false);
     }
-  }, [data.hubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, getNode, nav, addToast, isMountedRef]);
+  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, getNode, nav, addToast, isMountedRef]);
 
   return (
     <div
@@ -150,7 +173,7 @@ export function JobCardNode({ id, data }) {
           {data.salary && <div className="text-emerald-400/80 text-xs mt-0.5">{data.salary}</div>}
 
           <button
-            onClick={data.locked ? undefined : () => deleteElements({ nodes: [{ id }] })}
+            onClick={data.locked ? undefined : () => dismissCard()}
             disabled={!!data.locked}
             className={`absolute top-0 -right-2 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all ${
               data.locked ? 'hidden' : 'text-white/30 hover:text-red-400 hover:bg-white/10'

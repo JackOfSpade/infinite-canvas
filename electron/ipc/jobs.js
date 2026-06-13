@@ -37,13 +37,14 @@ import {
 } from '../extractors/apiExtractors.js';
 import { fetchIndeedListingsBrowser } from '../extractors/indeedBrowser.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
-import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage as setJobRunStage, readRunState, clearRun } from './jobRunStaging.js';
-import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory } from './jobsHistory.js';
+import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage as setJobRunStage, readRunState, clearRun, computeResumeStartPage } from './jobRunStaging.js';
+import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory, filterHistoryForResume } from './jobsHistory.js';
 import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
 import { getJobsSettings, getAISettings } from './settings.js';
 import { readStatusCache } from './accounts.js';
 import { getScopedJobSourceIds, JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
 import { dedupeJobsByKey, jobTitleCompanyKey } from '../../src/utils/jobIdentity.js';
+import { normalizeBands, placeBand } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { deriveLocationParam, summarizeLocationAdherence, LOCATION_TREATMENT } from '../../src/utils/jobLocation.js';
 import { tagJobLanguages, summarizeJobLanguages } from '../../src/utils/jobLanguage.js';
 import { repairJobsMojibake } from '../../src/utils/textEncoding.js';
@@ -878,7 +879,7 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
   return { items, warning };
 }
 
-async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], preferredLocation = '', onlySources = null, emit = null) {
+async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], preferredLocation = '', onlySources = null, emit = null, stageSource = null) {
   // Route progress through the caller's recorder (emitProgress) so the five
   // pure-HTTP sources appear in jobsTelemetry.sourceEvents — without this they
   // bypassed the trail and were invisible in bug reports (exactly the sources
@@ -962,6 +963,15 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
         completed: queryTotal,
         total: queryTotal,
       });
+      // Flush this source to crash-recovery staging the moment IT finishes —
+      // HTTP sources resolve in seconds while the browser phase runs for
+      // minutes (the dominant crash window), so waiting for the gather join
+      // (the old behavior) lost all HTTP results to a browser-phase crash and
+      // forced a resume to re-fetch them (re-burning LinkedIn's enrichment
+      // budget for the list fetch). Best-effort, like all staging.
+      if (stageSource && jobs.length > 0) {
+        await stageSource({ sourceId, jobs });
+      }
       return { sourceId, jobs, warning, gathered };
     } catch (error) {
       send({ nodeId, sourceId, status: 'error', count: 0, completed: queryTotal, total: queryTotal });
@@ -1222,21 +1232,24 @@ Be creative with suggestedRoleQueries — think about what career directions the
     let resumeScope = null;       // Set<sourceId> to re-scrape (null = all = fresh run)
     let resumeStartPages = null;  // { [sourceId]: 1-based next page }
     let recoveredStaged = [];     // jobs recovered from the prior (crashed) run's staging
+    let priorRunStartedAt = null; // crashed run's start — scopes the history exemption below
     if (resume) {
       const prior = await readRunState(canvasFilePath, Date.now());
       if (prior?.incomplete) {
         recoveredStaged = prior.stagedJobs.map(s => ({ ...s.job, source: s.sourceId }));
+        priorRunStartedAt = prior.manifest.startedAt ?? null;
         const priorSources = prior.manifest.sources || {};
         resumeScope = new Set();
         resumeStartPages = {};
         for (const sid of ACTIVE_SOURCE_IDS) {
           if (priorSources[sid]?.status === 'done') continue; // complete — reuse its staged jobs
           resumeScope.add(sid);
-          // Resume from the LEAST-progressed query's next page (min lastPage + 1)
-          // so no query is skipped; the cross-source dedup absorbs any overlap.
-          const pages = Object.values(priorSources[sid]?.queries || {})
-            .map(q => q.lastPage).filter(n => typeof n === 'number' && n >= 0);
-          resumeStartPages[sid] = pages.length ? Math.min(...pages) + 1 : 1;
+          // Resume from the LEAST-progressed query's next page (min lastPage + 1),
+          // but ONLY when every query recorded a page — buildJobTasks applies one
+          // start page to EVERY query of the source, so fast-forwarding while some
+          // query never flushed would silently skip that query's early pages.
+          // Unrecorded queries ⇒ restart at 1; the cross-source dedup absorbs overlap.
+          resumeStartPages[sid] = computeResumeStartPage(priorSources[sid], queries.length);
         }
         logger.info(`[Jobs][${nodeId}] Resume: re-scrape [${[...resumeScope].join(',') || 'none'}] from ${JSON.stringify(resumeStartPages)}; recovered ${recoveredStaged.length} staged job(s)`);
       } else {
@@ -1284,7 +1297,15 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Resume: seed the gathered set with jobs recovered from the prior run's
     // staging so 'done' sources aren't re-scraped and incomplete sources keep the
     // pages already captured before the interruption (re-scraping only adds deeper pages).
+    // The staging file is append-only chronological, so when the same job appears
+    // twice the LAST copy wins — post-enrichment re-stages (LinkedIn descriptions)
+    // append after the bare gather-time rows, and the enriched copy is the one
+    // worth recovering. First-seen order is preserved (Map insertion semantics).
+    const recoveredByKey = new Map();
     for (const j of recoveredStaged) {
+      recoveredByKey.set(`${j.source || '?'}|${j.url || jobTitleCompanyKey(j)}`, j);
+    }
+    for (const j of recoveredByKey.values()) {
       const sid = j.source || '?';
       if (!sourceResults[sid]) sourceResults[sid] = { jobs: [], errors: 0, warnings: [] };
       sourceResults[sid].jobs.push(j);
@@ -1420,22 +1441,21 @@ Be creative with suggestedRoleQueries — think about what career directions the
       return { manualResults, indeedResult };
     };
 
+    // Pure-HTTP sources stage themselves per-source the moment each finishes
+    // (they don't paginate through the page hook); browser sources stage
+    // per-page via stageOnPage. So a crash anywhere in the long browser phase
+    // already has every finished HTTP source's jobs on disk.
+    const stageHttpSource = ({ sourceId, jobs }) =>
+      recordSourcePage(canvasFilePath, { sourceId, query: '', page: 0, jobs, now: Date.now() });
+
     const [browserOut, httpResults] = await Promise.all([
       withSharedProfileLock(runBrowserSourcesInOrder),
-      fetchHttpSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, preferredLocation, resumeScope, emitProgress),
+      fetchHttpSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, preferredLocation, resumeScope, emitProgress, stageHttpSource),
     ]);
     const results = browserOut.manualResults;
     // Indeed (browser) is appended to the API-shaped results so all downstream
     // processing (per-source funnel, gathered/warning handling) stays unchanged.
     const apiResults = browserOut.indeedResult ? [...httpResults, browserOut.indeedResult] : [...httpResults];
-
-    // Stage pure-HTTP source results per-source (they don't paginate through the
-    // page hook); Indeed already staged per-page via stageOnPage above.
-    for (const res of httpResults) {
-      if (Array.isArray(res.jobs) && res.jobs.length > 0) {
-        await recordSourcePage(canvasFilePath, { sourceId: res.sourceId, query: '', page: 0, jobs: res.jobs, now: Date.now() });
-      }
-    }
 
     // Process Scraper Results
     for (const result of results) {
@@ -1651,8 +1671,20 @@ Be creative with suggestedRoleQueries — think about what career directions the
     let kept = ageFiltered;
     let historyDropped = 0;
     if (canvasFilePath) {
-      const history = await loadJobsHistory(canvasFilePath);
+      let history = await loadJobsHistory(canvasFilePath);
       logger.info(`[Jobs][${nodeId}] History: ${history.length} entries loaded from ${path.basename(canvasFilePath)}`);
+      // A RESUMED run must not be dedup'd against the history rows the crashed
+      // run wrote about these very jobs (the pre-scoring append below runs
+      // before scoring, so a crash in the scoring/'gathered' window left every
+      // recovered staged job already "seen" — and the whole recovery collapsed
+      // to ~0). Exempt exactly those rows; older-run history still applies.
+      if (resumeScope && recoveredStaged.length > 0 && priorRunStartedAt) {
+        const before = history.length;
+        history = filterHistoryForResume(history, recoveredStaged, priorRunStartedAt);
+        if (history.length !== before) {
+          logger.info(`[Jobs][${nodeId}] History: exempted ${before - history.length} row(s) written by the resumed run itself`);
+        }
+      }
       const result = dedupAgainstHistory(ageFiltered, history);
       kept = result.kept;
       historyDropped = result.removed;
@@ -1865,6 +1897,18 @@ Be creative with suggestedRoleQueries — think about what career directions the
           emitProgress({ nodeId, sourceId: 'linkedin', count: linkedinKept.length, status: 'done', completed: 1, total: 1 });
           recordLinkedinEnrichPass({ kind: 'search', ip: null, ipOk: null, walled: false, enriched: lkSuccess, contextRotations: lkRotations, noDesc: lkNoDesc, noDescSoftBlock: lkNoDescSoft, noDescGenuine: lkNoDescGenuine, evalErrors: lkEvalErrors, navErrors: lkNavErrors, browserGen: lkBrowserGen, browserAgeMs: lkBrowserAgeMs, startedAt: lkPassStartedAt });
         }
+      }
+
+      // Re-stage the enriched LinkedIn rows. The page-level rows staged at
+      // gather time have no descriptions, so a crash AFTER this point — the
+      // long renderer-driven scoring/bucketing window, including a ≤24h pending
+      // Batch run — would resume and re-burn the guest enrichment budget (the
+      // pipeline's scarcest resource) on descriptions already fetched. The
+      // recovery seed keeps the LAST staged copy per job, so these supersede
+      // the bare gather-time rows. Best-effort, like all staging.
+      const lkEnrichedRows = kept.filter(j => j.source === 'linkedin' && j.snippet && j.snippet.length >= 100);
+      if (lkEnrichedRows.length > 0) {
+        await recordSourcePage(canvasFilePath, { sourceId: 'linkedin', query: '', page: 1, jobs: lkEnrichedRows, now: Date.now() });
       }
     }
 
@@ -2529,16 +2573,13 @@ RULES:
 
     // Per-level breakdown so a bug report can judge whether the AI taxonomy is
     // sensible without reconstructing the tree from raw node diagnostics. Band
-    // counts are deterministic (placed by score, same rule as the renderer).
-    const bands = [...(result?.likelihoodBands || [])].sort((a, b) => (b.minScore || 0) - (a.minScore || 0));
-    const placeBandLabel = (score) => {
-      const s = typeof score === 'number' ? score : 0;
-      for (const b of bands) if (s >= (b.minScore || 0)) return b.label || 'Match';
-      return bands[bands.length - 1]?.label || 'Match';
-    };
+    // counts are deterministic — placed by THE SAME normalizeBands/placeBand the
+    // renderer uses (buildJobTree.js), so this funnel can never silently report
+    // different band counts than the canvas shows.
+    const bands = normalizeBands(result?.likelihoodBands);
     const bandCounts = new Map();
     if (bands.length) for (const j of jobs) {
-      const lbl = placeBandLabel(j.matchScore);
+      const lbl = placeBand(j.matchScore, bands)?.label || 'Match';
       bandCounts.set(lbl, (bandCounts.get(lbl) || 0) + 1);
     }
     const bandSummary = bands.map(b => ({ label: b.label, count: bandCounts.get(b.label) || 0 }));

@@ -113,6 +113,71 @@ function ShortcutRow({ id, binding, onSave, isCapturing, onStartCapture, onCance
  *      that hasn't been re-rendered yet.
  */
 /**
+ * Three-state session pill shared by the marketplace-monitor and job-board
+ * login rows: in-flight verification → connected (re-login) → logged out.
+ * One home so the two sections render login state identically and can't drift.
+ */
+function LoginStatusPill({ pending, connected, sessionNoun, onClick }) {
+  if (pending) {
+    return (
+      <span
+        className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border bg-white/[0.04] border-white/10 text-white/50 select-none"
+        title="Verifying session…"
+      >
+        <Loader2 size={10} className="animate-spin" />
+        Verifying<span className="login-pending-dots" />
+      </span>
+    );
+  }
+  return connected ? (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border transition-colors bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
+      title={`Re-open login window to refresh this ${sessionNoun} session`}
+    >
+      <Check size={10} />
+      Re-login
+    </button>
+  ) : (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border transition-colors bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20"
+      title={`Open a window to log into this ${sessionNoun}`}
+    >
+      <LogIn size={10} />
+      Log in
+    </button>
+  );
+}
+
+/**
+ * Shared "open login window → adopt verdict → toast the reason" flow for both
+ * login sections. The open-login-window IPC returns the verify verdict inline
+ * ({ connected, reason }) — no second roundtrip — and surfacing the reason
+ * tells the user WHY a login didn't stick (e.g. "Redirected to /signin —
+ * login not completed"), the difference between "I think nothing happened"
+ * and "oh, the verifier hit a seller-only page and bounced." A plain async
+ * function rather than a hook so each section keeps its own state inline.
+ */
+async function runLoginWindowFlow({ platformId, niceName, setAuthByPlatform, setPendingByPlatform, addToast }) {
+  setPendingByPlatform(prev => ({ ...prev, [platformId]: true }));
+  try {
+    const res = await window.electronAPI?.openLoginWindow?.({ platformId });
+    const connected = !!res?.connected;
+    setAuthByPlatform(prev => ({ ...prev, [platformId]: connected }));
+    if (connected) {
+      addToast({ title: `${niceName}: logged in`, description: res?.reason || 'Session verified.', type: 'success' });
+    } else {
+      addToast({ title: `${niceName}: login not verified`, description: res?.reason || 'Closed the login window without completing sign-in. Try again.', type: 'error' });
+    }
+  } catch (err) {
+    addToast({ title: 'Login failed', description: err?.message || String(err), type: 'error' });
+  } finally {
+    setPendingByPlatform(prev => ({ ...prev, [platformId]: false }));
+  }
+}
+
+/**
  * One platform's row. Owns its own textarea state via useSyncWhileFocused so:
  *   - Async settings load AFTER panel open populates the textarea (the old
  *     useState-initializer approach captured the empty initial map forever,
@@ -138,33 +203,12 @@ function PlatformWatchUrlsRow({ platform, urls, connected, pending, onLogin, onC
       <div className="flex items-center gap-2">
         <PlatformBadge name={platform.name} letter={platform.letter} color={platform.color} domain={platform.domain} size={20} />
         <div className="flex-1 text-white/80 text-xs font-semibold">{platform.name}</div>
-        {pending ? (
-          <span
-            className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border bg-white/[0.04] border-white/10 text-white/50 select-none"
-            title="Verifying session…"
-          >
-            <Loader2 size={10} className="animate-spin" />
-            Verifying<span className="login-pending-dots" />
-          </span>
-        ) : connected ? (
-          <button
-            onClick={() => onLogin(platform.id)}
-            className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border transition-colors bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
-            title="Re-open login window to refresh this marketplace session"
-          >
-            <Check size={10} />
-            Re-login
-          </button>
-        ) : (
-          <button
-            onClick={() => onLogin(platform.id)}
-            className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border transition-colors bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20"
-            title="Open a window to log into this marketplace"
-          >
-            <LogIn size={10} />
-            Log in
-          </button>
-        )}
+        <LoginStatusPill
+          pending={pending}
+          connected={connected}
+          sessionNoun="marketplace"
+          onClick={() => onLogin(platform.id)}
+        />
       </div>
       <div>
         <div className="flex items-center gap-1.5 mb-1">
@@ -215,66 +259,30 @@ function JobPlatformLoginsSection() {
     return () => { cancelled = true; };
   }, []);
 
-  const handleLogin = useCallback(async (platformId) => {
-    setPendingByPlatform(prev => ({ ...prev, [platformId]: true }));
-    try {
-      const res = await window.electronAPI?.openLoginWindow?.({ platformId });
-      const connected = !!res?.connected;
-      setAuthByPlatform(prev => ({ ...prev, [platformId]: connected }));
-      const niceName = JOB_SOURCE_BY_ID[platformId]?.name || platformId;
-      if (connected) {
-        addToast({ title: `${niceName}: logged in`, description: res?.reason || 'Session verified.', type: 'success' });
-      } else {
-        addToast({ title: `${niceName}: login not verified`, description: res?.reason || 'Closed without completing sign-in.', type: 'error' });
-      }
-    } catch (err) {
-      addToast({ title: 'Login failed', description: err?.message || String(err), type: 'error' });
-    } finally {
-      setPendingByPlatform(prev => ({ ...prev, [platformId]: false }));
-    }
-  }, [addToast]);
+  const handleLogin = useCallback((platformId) => runLoginWindowFlow({
+    platformId,
+    niceName: JOB_SOURCE_BY_ID[platformId]?.name || platformId,
+    setAuthByPlatform,
+    setPendingByPlatform,
+    addToast,
+  }), [addToast]);
 
   return (
     <div className="space-y-3">
-      {JOB_LOGIN_PLATFORMS.map(platform => {
-        const connected = authByPlatform[platform.id];
-        const pending = !!pendingByPlatform[platform.id];
-        return (
-          <div key={platform.id} className="bg-white/[0.02] border border-white/5 rounded-lg p-3">
-            <div className="flex items-center gap-2">
-              <PlatformBadge name={platform.name} letter={platform.letter} color={platform.color} domain={platform.domain} size={20} />
-              <div className="flex-1 text-white/80 text-xs font-semibold">{platform.name}</div>
-              {pending ? (
-                <span
-                  className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border bg-white/[0.04] border-white/10 text-white/50 select-none"
-                  title="Verifying session…"
-                >
-                  <Loader2 size={10} className="animate-spin" />
-                  Verifying<span className="login-pending-dots" />
-                </span>
-              ) : connected ? (
-                <button
-                  onClick={() => handleLogin(platform.id)}
-                  className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border transition-colors bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
-                  title="Re-open login window to refresh this job board session"
-                >
-                  <Check size={10} />
-                  Re-login
-                </button>
-              ) : (
-                <button
-                  onClick={() => handleLogin(platform.id)}
-                  className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border transition-colors bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20"
-                  title="Open a window to log into this job board"
-                >
-                  <LogIn size={10} />
-                  Log in
-                </button>
-              )}
-            </div>
+      {JOB_LOGIN_PLATFORMS.map(platform => (
+        <div key={platform.id} className="bg-white/[0.02] border border-white/5 rounded-lg p-3">
+          <div className="flex items-center gap-2">
+            <PlatformBadge name={platform.name} letter={platform.letter} color={platform.color} domain={platform.domain} size={20} />
+            <div className="flex-1 text-white/80 text-xs font-semibold">{platform.name}</div>
+            <LoginStatusPill
+              pending={!!pendingByPlatform[platform.id]}
+              connected={authByPlatform[platform.id]}
+              sessionNoun="job board"
+              onClick={() => handleLogin(platform.id)}
+            />
           </div>
-        );
-      })}
+        </div>
+      ))}
     </div>
   );
 }
@@ -305,30 +313,13 @@ function MarketplaceMonitorSection({ watchUrlsByPlatform, onChangeWatchUrls }) {
     return () => { cancelled = true; };
   }, []);
 
-  const handleLogin = useCallback(async (platformId) => {
-    setPendingByPlatform(prev => ({ ...prev, [platformId]: true }));
-    try {
-      // open-login-window now returns the verify verdict inline
-      // ({ connected, reason }) — no need for a second IPC roundtrip.
-      // Surfacing the reason as a toast tells the user WHY a login didn't
-      // stick (e.g. "Redirected to /signin — login not completed"), which
-      // is the difference between "I think nothing happened" and "oh, the
-      // verifier hit a seller-only page and bounced."
-      const res = await window.electronAPI?.openLoginWindow?.({ platformId });
-      const connected = !!res?.connected;
-      setAuthByPlatform(prev => ({ ...prev, [platformId]: connected }));
-      const niceName = SELL_PLATFORM_BY_ID[platformId]?.name || platformId;
-      if (connected) {
-        addToast({ title: `${niceName}: logged in`, description: res?.reason || 'Session verified.', type: 'success' });
-      } else {
-        addToast({ title: `${niceName}: login not verified`, description: res?.reason || 'Closed the login window without completing sign-in. Try again.', type: 'error' });
-      }
-    } catch (err) {
-      addToast({ title: 'Login failed', description: err?.message || String(err), type: 'error' });
-    } finally {
-      setPendingByPlatform(prev => ({ ...prev, [platformId]: false }));
-    }
-  }, [addToast]);
+  const handleLogin = useCallback((platformId) => runLoginWindowFlow({
+    platformId,
+    niceName: SELL_PLATFORM_BY_ID[platformId]?.name || platformId,
+    setAuthByPlatform,
+    setPendingByPlatform,
+    addToast,
+  }), [addToast]);
 
   return (
     <div className="space-y-3">

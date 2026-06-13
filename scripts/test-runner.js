@@ -19,6 +19,7 @@ import {
   jobTitleCompanyKey,
   jobTitleCompanyUrlKey,
   jobTitleCompanyLocationKey,
+  sourceJobKey,
   dedupeJobsByKey,
   uniqueJobsNotIn,
 } from '../src/utils/jobIdentity.js';
@@ -39,14 +40,16 @@ import { ALL_COMP_SOURCE_IDS, CANVAS_ZOOM_LIMITS, getNodeDims, getNodesBounds, S
 import { listingUrlMatchesPlatform, isFacebookShareUrl } from '../src/utils/platformUrlMatch.js';
 import { mergeSourceIntoComps, retryWarningRequiringAction, updateResolvedSourceWarning } from '../src/utils/compsMerge.js';
 import { mergeResolvedSourceItems } from '../src/utils/jobSourceResolveMerge.js';
+import { collectMarketplaceListings } from '../src/utils/marketplaceStatusScan.js';
+import { deepUpdateNode, deepAddElements, getCanvasData } from '../src/utils/navigationUtils.js';
 import {
   buildJobTreeNodes,
   computeLayoutPositions,
   computeJobTreeView,
-  partitionJobsForBranches,
+  countMatchingDescendantCards,
   COL_X,
 } from '../src/nodes/jobsearch/buildJobTree.js';
-import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason } from '../src/nodes/jobboard/mergeJobs.js';
+import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature } from '../src/nodes/jobboard/mergeJobs.js';
 import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, selectReverbPriceGuides, reverbTransactionsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription } from '../electron/extractors/apiExtractors.js';
 import { isPriceChartingApplicable } from '../src/utils/compSourceScope.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
@@ -54,11 +57,14 @@ import {
   fingerprint,
   migrateGroupNodes,
   migrateLegacyJobHubResults,
+  migrateMarketplaceCardCreatedAt,
   runNodeMigrations,
   CURRENT_SCHEMA_VERSION,
   sanitizeEdgesForSave,
   sanitizeNodesForSave,
 } from '../src/utils/serializationUtils.js';
+import { createdAtMsFromCardId, isPriceDropReminderDue, MS_PER_WEEK } from '../src/utils/priceDropReminder.js';
+import { matchesQuery } from '../src/utils/searchMatch.js';
 import { mergeNonRestorableNodeDataFromLive } from '../src/utils/undoNonRestorableState.js';
 import { cloneNode, reassignCanvasDataIDs } from '../src/utils/nodeFactory.js';
 import {
@@ -96,7 +102,8 @@ import { getBrowserPoolQueueState, pauseBrowserPool, queueScrape } from '../elec
 import { getSoftLoginWallMatch, getStatusCacheSync, writeStatusCache } from '../electron/ipc/accounts.js';
 import { getSellMonitorConfig } from '../electron/ipc/stealthBrowser.js';
 import os from 'node:os';
-import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
+import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, computeResumeStartPage, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
+import { dedupAgainstHistory, filterHistoryForResume } from '../electron/ipc/jobsHistory.js';
 import { modelTag, overPricedSoldFlag } from '../electron/ipc/bugReport/helpers.js';
 import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
 import { checkListingStatusMultiSource, classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
@@ -386,6 +393,12 @@ const tests = [
         ['Posted 30+ days ago', '30+ days ago', 30],
         ['Reposted 3 weeks ago', '3 weeks ago', 21],
         ['Posted 5 hours ago', '5 hours ago', 0],
+        // Regression: these were captured by the old pattern but UNPARSEABLE —
+        // "Posted today" parsed to null so the freshest jobs sorted LAST in the
+        // recency cap, and "2 years ago" leaked through every age window.
+        ['Posted today', 'Posted today', 0],
+        ['Posted 2 years ago', '2 years ago', 730],
+        ['Posted 30 seconds ago', '30 seconds ago', 0],
       ];
       for (const [raw, phrase, ageDays] of cases) {
         const m = raw.match(re);
@@ -393,11 +406,24 @@ const tests = [
         const parsed = parsePostedDate(m[0]); // returns a Date
         assert(parsed && ageOf(parsed) === ageDays, `parse "${phrase}" → ${ageDays}d (got ${ageOf(parsed)})`);
       }
+      // Structural guarantee: EVERY unit the harvest pattern can capture must
+      // convert — the pattern and parser are built from one unit table now.
+      for (const unit of ['second', 'minute', 'hour', 'day', 'week', 'month', 'year']) {
+        const phrase = `3 ${unit}s ago`;
+        assert(phrase.match(re)?.[0] === phrase, `pattern captures "${phrase}"`);
+        assert(parsePostedDate(phrase) !== null, `parser converts "${phrase}"`);
+      }
       // "just posted" captures and parses to ~today.
       assert('Just posted'.match(re)?.[0].toLowerCase() === 'just posted', 'captures "just posted"');
       assert(parsePostedDate('just posted') !== null, '"just posted" parses to a recent date');
-      // Must NOT false-positive on prose that merely contains a number.
+      // The age filter now actually drops year-old postings.
+      const aged = filterJobsByAge([{ posted: '2 years ago' }, { posted: '3 days ago' }], 21);
+      assert(aged.length === 1 && aged[0].posted === '3 days ago', 'age filter drops "2 years ago" within a 21d window');
+      // Must NOT false-positive on prose that merely contains a number, and the
+      // bare word "today" must stay parser-only (page prose says "Apply today!").
       assert(!('We have 28 open roles on our careers page.'.match(re)), 'no false-positive on non-date prose');
+      assert(!('Apply today!'.match(re)), 'bare "today" is not harvested from prose');
+      assert(parsePostedDate('today') !== null, 'bare "today" still parses when an extractor hands it over');
       return { ok: true };
     },
   },
@@ -634,8 +660,16 @@ const tests = [
       const nodes = [
         { id: 'hub', type: 'jobhub', position: { x: 0, y: 0 }, data: { hubState: 'queued', queuedModuleRun: { position: 1 }, pendingJobs: [1], scrapeWarnings: [2], errorMessage: 'old' } },
         { id: 'job', type: 'jobcard', position: { x: 1, y: 1 }, style: { opacity: 0.3, width: 180 }, data: { title: 'A', isDropTarget: true } },
+        { id: 'paused-hub', type: 'jobhub', position: { x: 9, y: 9 }, data: { hubState: 'sources-ready', pendingJobs: [1], scrapeWarnings: [{ sourceId: 'indeed' }] } },
         { id: 'clean-source', type: 'jobsourcecard', position: { x: 2, y: 2 }, data: { persistedProgress: { status: 'done' } } },
         { id: 'blocked-source', type: 'jobsourcecard', position: { x: 3, y: 3 }, data: { persistedProgress: { status: 'error', warning: { code: 'captcha' } } } },
+        // Warned cards persist ONLY when their hub keeps its run context across
+        // the reload: a mid-run hub resets to 'empty' (its warned cards would
+        // orphan Solve buttons), and a deleted hub leaves nothing to act on.
+        { id: 'paused-blocked-source', type: 'jobsourcecard', position: { x: 5, y: 5 }, data: { hubId: 'paused-hub', persistedProgress: { status: 'error', warning: { code: 'captcha' } } } },
+        { id: 'midrun-blocked-source', type: 'jobsourcecard', position: { x: 6, y: 6 }, data: { hubId: 'hub', persistedProgress: { status: 'error', warning: { code: 'captcha' } } } },
+        { id: 'orphan-blocked-source', type: 'jobsourcecard', position: { x: 7, y: 7 }, data: { hubId: 'deleted-hub', persistedProgress: { status: 'error', warning: { code: 'captcha' } } } },
+        { id: 'marketplace-note', type: 'marketplacecard', position: { x: 8, y: 8 }, data: { platformId: 'ebay', notes: 'Lower price on Monday' } },
         { id: 'group', type: 'group', position: { x: 4, y: 4 }, data: { isDropTarget: true, canvasData: { nodes: [
           { id: 'inner-job', type: 'jobcard', position: { x: 0, y: 0 }, style: { opacity: 0.1 }, data: { title: 'Inner' } },
         ], edges: [], drawings: [] } } },
@@ -648,6 +682,12 @@ const tests = [
       assert(!('isDropTarget' in job.data) && job.style.opacity === undefined && job.style.width === 180, 'Serialization sanitizes transient state: node transient UI state should be stripped');
       assert(!sanitized.some(n => n.id === 'clean-source'), 'Serialization sanitizes transient state: clean source card should be dropped');
       assert(sanitized.some(n => n.id === 'blocked-source'), 'Serialization sanitizes transient state: blocked source card should persist');
+      assert(sanitized.some(n => n.id === 'paused-blocked-source'), 'Serialization: warned card of a sources-ready hub persists (Solve/Skip recovery)');
+      assert(!sanitized.some(n => n.id === 'midrun-blocked-source'), 'Serialization: warned card of a mid-run hub (resets to empty) is dropped, not orphaned');
+      assert(!sanitized.some(n => n.id === 'orphan-blocked-source'), 'Serialization: warned card whose hub is gone is dropped');
+      const pausedHub = sanitized.find(n => n.id === 'paused-hub');
+      assert(pausedHub.data.hubState === 'sources-ready' && Array.isArray(pausedHub.data.pendingJobs), 'Serialization: sources-ready hub keeps its paused run context');
+      assert(sanitized.find(n => n.id === 'marketplace-note').data.notes === 'Lower price on Monday', 'Serialization: marketplace listing notes should persist');
       assert(sanitized.find(n => n.id === 'group').data.canvasData.nodes[0].style === undefined, 'Serialization sanitizes transient state: nested nodes should be sanitized');
       const edges = sanitizeEdgesForSave([
         { id: 'keep', source: 'hub', target: 'job' },
@@ -797,6 +837,7 @@ const tests = [
         position: { x: 0, y: 0 },
         data: {
           listingUrl: 'https://market.test/listing/1',
+          notes: 'Lower price on Monday',
           status: 'unknown',
           statusMessage: '',
           lastChecked: '2026-01-01T00:00:00.000Z',
@@ -826,8 +867,23 @@ const tests = [
         'Undo fingerprints ignore marketplace status checks: listing URL edits should remain undoable'
       );
 
-      const restored = mergeNonRestorableNodeDataFromLive([base], [edited]);
+      const notesEdited = { ...checked, data: { ...checked.data, notes: 'Buyer asked about accessories' } };
+      assert(
+        fingerprint({ nodes: [base], edges: [], drawings: [] }) !== fingerprint({ nodes: [notesEdited], edges: [], drawings: [] }),
+        'Undo fingerprints ignore marketplace status checks: user note edits should remain undoable'
+      );
+
+      const liveEdited = {
+        ...checked,
+        data: {
+          ...checked.data,
+          listingUrl: edited.data.listingUrl,
+          notes: notesEdited.data.notes,
+        },
+      };
+      const restored = mergeNonRestorableNodeDataFromLive([base], [liveEdited]);
       assert(restored[0].data.listingUrl === base.data.listingUrl, 'Undo restore should still restore undoable listing URL data');
+      assert(restored[0].data.notes === base.data.notes, 'Undo restore should still restore user-authored listing notes');
       assert(restored[0].data.status === 'live' && restored[0].data.lastChecked === checked.data.lastChecked, 'Undo restore should preserve live status fields');
       assert(restored[0].data.lastCheckTrace.checked === 2, 'Undo restore should preserve live status trace');
       return { ok: true };
@@ -894,6 +950,93 @@ const tests = [
       assert(out2.find(n => n.id === 'top-hub').data.scoredJobs.length === 2, 'runNodeMigrations: idempotent — scoredJobs not duplicated');
       assert(!out2.some(n => n.type === 'jobcard'), 'runNodeMigrations: idempotent — no cascade resurrected');
       return { current: CURRENT_SCHEMA_VERSION };
+    },
+  },
+  {
+    name: 'Price-drop reminder: createdAt migration + due math + undo isolation',
+    run: () => {
+      // ── createdAtMsFromCardId: real spawn ids carry a Date.now() suffix.
+      const spawnMs = Date.UTC(2025, 4, 1, 12, 0, 0);
+      assert(createdAtMsFromCardId(`mkt-hub-1-ebay-${spawnMs}`) === spawnMs, 'reminder: id timestamp recovered');
+      assert(createdAtMsFromCardId('mkt-hub-1-ebay') === null, 'reminder: no suffix → null');
+      assert(createdAtMsFromCardId('mkt-hub-1-ebay-123') === null, 'reminder: implausibly small suffix rejected');
+      assert(createdAtMsFromCardId(`mkt-h-ebay-${Date.now() + 86400000 * 30}`) === null, 'reminder: future suffix rejected');
+
+      // ── Migration v3: stamps createdAt from the id when absent, else "now".
+      const cards = [
+        { id: `mkt-hub-1-ebay-${spawnMs}`, type: 'marketplacecard', position: { x: 0, y: 0 }, data: { platformId: 'ebay' } },
+        { id: 'mkt-legacy-nostamp', type: 'marketplacecard', position: { x: 0, y: 0 }, data: { platformId: 'mercari' } },
+        { id: 'mkt-already', type: 'marketplacecard', position: { x: 0, y: 0 }, data: { platformId: 'poshmark', createdAt: '2024-02-01T00:00:00.000Z' } },
+        { id: 'txt', type: 'text', position: { x: 0, y: 0 }, data: { text: 'hi' } },
+      ];
+      const before = Date.now();
+      const migrated = migrateMarketplaceCardCreatedAt(cards);
+      assert(migrated !== cards, 'reminder migration: changed → new ref');
+      assert(Date.parse(migrated[0].data.createdAt) === spawnMs, 'reminder migration: createdAt recovered from id suffix');
+      const fallbackMs = Date.parse(migrated[1].data.createdAt);
+      assert(fallbackMs >= before && fallbackMs <= Date.now(), 'reminder migration: missing data → current date fallback');
+      assert(migrated[2] === cards[2], 'reminder migration: already-stamped card untouched (same ref)');
+      assert(migrated[3] === cards[3], 'reminder migration: non-marketplace node untouched');
+      assert(migrateMarketplaceCardCreatedAt(migrated) === migrated, 'reminder migration: idempotent — second run is a same-ref no-op');
+
+      // Registered in the versioned runner: a v2 file heals, a current file is free.
+      const viaRunner = runNodeMigrations(cards.map(c => ({ ...c, data: { ...c.data } })), 2);
+      assert(Date.parse(viaRunner.find(n => n.id === cards[0].id).data.createdAt) === spawnMs, 'reminder migration: runs via runNodeMigrations from v2');
+      assert(CURRENT_SCHEMA_VERSION >= 3, 'reminder migration: schema version advanced');
+
+      // ── Due math: anchor + weeks*week <= now → due; weeks <= 0 disables.
+      const now = Date.now();
+      const anchor = new Date(now - 2 * MS_PER_WEEK).toISOString();
+      assert(isPriceDropReminderDue({ anchorIso: anchor, weeks: 2, nowMs: now }) === true, 'reminder due: anchor + interval == now fires (inclusive)');
+      assert(isPriceDropReminderDue({ anchorIso: anchor, weeks: 2.5, nowMs: now }) === false, 'reminder due: decimal interval not yet elapsed');
+      assert(isPriceDropReminderDue({ anchorIso: anchor, weeks: 1.5, nowMs: now }) === true, 'reminder due: decimal interval elapsed');
+      assert(isPriceDropReminderDue({ anchorIso: anchor, weeks: 0, nowMs: now }) === false, 'reminder due: weeks=0 → reminders off');
+      assert(isPriceDropReminderDue({ anchorIso: null, weeks: 2, nowMs: now }) === false, 'reminder due: missing anchor → never fires');
+
+      // ── Undo isolation: clock-driven reminder fields neither dirty the undo
+      // fingerprint nor get rolled back by a restore; createdAt stays undoable.
+      const base = { id: 'mc', type: 'marketplacecard', position: { x: 0, y: 0 }, data: { platformId: 'ebay', listingUrl: 'u', createdAt: '2026-01-01T00:00:00.000Z' } };
+      const fired = { ...base, data: { ...base.data, priceDropReminderDue: true, lastPriceDropAt: new Date(now).toISOString() } };
+      assert(
+        fingerprint({ nodes: [base], edges: [], drawings: [] }) === fingerprint({ nodes: [fired], edges: [], drawings: [] }),
+        'reminder undo: firing the reminder does not dirty the undo fingerprint'
+      );
+      const restored = mergeNonRestorableNodeDataFromLive([base], [fired]);
+      assert(restored[0].data.priceDropReminderDue === true && restored[0].data.lastPriceDropAt === fired.data.lastPriceDropAt, 'reminder undo: restore keeps LIVE reminder state');
+      return { schema: CURRENT_SCHEMA_VERSION };
+    },
+  },
+  {
+    name: 'Search matching: item name finds hub AND its marketplace cards',
+    run: () => {
+      const q = (s) => s.toLowerCase();
+      const hub = { id: 'h', type: 'sellhub', data: { product: { generated_title: 'WiFi Router Storage Box', brand: 'Calibrite', model: 'CCPV2' } } };
+      const card = { id: 'c', type: 'marketplacecard', data: { platformId: 'ebay', productSnapshot: { title: 'WiFi Router Storage Box' }, notes: 'Lower price on Monday', listingUrl: 'https://www.ebay.com/itm/123' } };
+
+      // Item name (case-insensitive, substring) → hub and card both match.
+      assert(matchesQuery(hub, q('wifi router')), 'search: sellhub matches by generated_title');
+      assert(matchesQuery(card, q('wifi router')), 'search: marketplacecard matches by productSnapshot.title');
+      assert(matchesQuery(hub, q('CALIBRITE')) && matchesQuery(hub, q('ccpv2')), 'search: sellhub matches by brand/model (parity with listing)');
+
+      // Card-specific content: user notes and pasted listing URL.
+      assert(matchesQuery(card, q('monday')), 'search: marketplacecard matches by notes');
+      assert(matchesQuery(card, q('ebay.com/itm')), 'search: marketplacecard matches by listing URL');
+      assert(!matchesQuery(card, q('poshmark')), 'search: marketplacecard non-match stays false');
+
+      // Bundle: a SECONDARY item's name still finds the hub pricing it.
+      const bundleHub = { id: 'b', type: 'sellhub', data: { product: { generated_title: 'Pelican Kayak' }, itemPricings: [
+        { label: 'Pelican Kayak' }, { label: 'Carlisle Paddle', query: 'carlisle magic plus paddle' }, { notes: 'no label' },
+      ] } };
+      assert(matchesQuery(bundleHub, q('carlisle paddle')), 'search: bundle hub matches by secondary item label');
+      assert(matchesQuery(bundleHub, q('magic plus')), 'search: bundle hub matches by secondary item query');
+      assert(!matchesQuery(bundleHub, q('snowboard')), 'search: bundle hub non-match stays false');
+
+      // Pre-existing type behaviors preserved; malformed nodes are safe.
+      assert(matchesQuery({ type: 'text', data: { text: 'Call the buyer' } }, q('buyer')), 'search: text node still matches');
+      assert(matchesQuery({ type: 'jobcard', data: { title: 'Engineer', company: 'Acme' } }, q('acme')), 'search: jobcard still matches');
+      assert(!matchesQuery({ type: 'sellhub', data: {} }, q('x')), 'search: hub without product is a safe non-match');
+      assert(!matchesQuery({ type: 'marketplacecard' }, q('x')) && !matchesQuery(null, q('x')), 'search: missing data / null node are safe non-matches');
+      return { ok: true };
     },
   },
   {
@@ -1346,6 +1489,20 @@ const tests = [
       assert(deduped.length === 1, `Job identity helpers: expected title/company dedupe to keep 1, got ${deduped.length}`);
       const fresh = uniqueJobsNotIn([a], [b, c], jobTitleCompanyUrlKey);
       assert(fresh.length === 1 && fresh[0] === c, 'Job identity helpers: uniqueJobsNotIn should preserve only unseen candidates');
+
+      // sourceJobKey: native id wins, then url, then the location-aware fallback.
+      // Both Indeed extractors share it so the within-source gather can't
+      // over-collapse two distinct-location reqs that share a title + company.
+      assert(sourceJobKey({ jobkey: 'JK1', url: 'u', title: 't', company: 'co' }) === 'JK1',
+        'sourceJobKey: native jobkey wins over url/composed');
+      assert(sourceJobKey({ url: 'https://x/job', title: 't', company: 'co' }) === 'https://x/job',
+        'sourceJobKey: url wins when no native id');
+      const sf = { title: 'SWE', company: 'Google', location: 'San Francisco, CA' };
+      const nyc = { title: 'SWE', company: 'Google', location: 'New York, NY' };
+      assert(sourceJobKey(sf) !== sourceJobKey(nyc),
+        'sourceJobKey: idless same-title/company reqs in different cities stay distinct (no over-collapse)');
+      assert(dedupeJobsByKey([sf, nyc], sourceJobKey).length === 2,
+        'sourceJobKey: nationwide distinct-location reqs both survive within-source dedup');
       return { deduped: deduped.length, fresh: fresh.length };
     },
   },
@@ -1376,12 +1533,12 @@ const tests = [
   {
     name: 'Job card filters',
     run: () => {
-      const job = { source: 'indeed', matchScore: 72, status: 'New' };
+      const job = { source: 'indeed', matchScore: 72 };
       assert(isJobCardVisible(job, { sourceFilter: 'indeed', scoreThreshold: 70 }), 'Job card filters: matching source and score should be visible');
       assert(!isJobCardVisible(job, { sourceFilter: 'linkedin' }), 'Job card filters: non-matching source should be hidden');
       assert(!isJobCardVisible(job, { scoreThreshold: 80 }), 'Job card filters: score below threshold should be hidden');
-      assert(isJobCardVisible({ ...job, status: undefined }, { statusFilters: ['New'] }), 'Job card filters: missing status should default to New');
-      assert(!isJobCardVisible(job, { statusFilters: ['Filled'] }), 'Job card filters: non-matching status should be hidden');
+      assert(isJobCardVisible({}, {}), 'Job card filters: empty filter shows everything');
+      assert(!isJobCardVisible({}, { scoreThreshold: 1 }), 'Job card filters: missing score counts as 0');
       return { ok: true };
     },
   },
@@ -1534,26 +1691,81 @@ const tests = [
       ], 'linkedin', { replaceSourceItems: true });
       assert(replacement.replacedExisting === 1, 'Job source resolve merge: replacement source should drop stale same-source jobs');
       assert(replacement.mergedPending.filter(j => j.source === 'linkedin').length === 2, 'Job source resolve merge: replacement source should use returned full source set');
+
+      // Cross-source collapse (same-run policy): a resolved LinkedIn copy of a
+      // posting Indeed already returned must NOT enter pendingJobs twice — the
+      // backend's dedupByTitleCompany would have collapsed it had LinkedIn not
+      // blocked. (Was URL-keyed, so the two copies both reached the scorer.)
+      const crossSource = mergeResolvedSourceItems(existing, [
+        { title: 'Indeed A', company: 'Acme', url: 'https://jobs/li-dup', source: 'linkedin' },
+        { title: 'LinkedIn New', company: 'Acme', url: 'https://jobs/li-new', source: 'linkedin' },
+      ], 'linkedin');
+      assert(crossSource.fresh.length === 1 && crossSource.fresh[0].title === 'LinkedIn New',
+        'Job source resolve merge: cross-source duplicate (same title+company, different board URL) collapses');
       return { incremental: incremental.mergedPending.length, replacement: replacement.mergedPending.length };
     },
   },
   {
-    name: 'Job partitioning: display set = ALL scored jobs (target ≡ no-target; no gate, fill, or split)',
+    name: 'computeJobTreeView: pagination window slices MATCHING cards (filter backfill + ghost tolerance)',
     run: () => {
-      // Target and no-target runs are identical post-scoring: every scored job is
-      // displayed, nothing gated/filled/hidden, no target/other partition. A target
-      // role only adds queries upstream. partitionJobsForBranches is a passthrough.
-      const jobs = [
-        { title: 'A', company: 'Co', url: '1', matchScore: 90 },
-        { title: 'B', company: 'Co', url: '2', matchScore: 30 },
-        { title: 'C', company: 'Co', url: '3', matchScore: 80 },
-        { title: 'D', company: 'Co', url: '4', matchScore: 12 },  // low score — STILL shown (no gate)
-      ];
-      const out = partitionJobsForBranches(jobs);
-      assert(out.displayedJobs.length === jobs.length, `must show all ${jobs.length} jobs, got ${out.displayedJobs.length}`);
-      assert(out.displayedJobs === jobs, 'displayedJobs is the scored set itself (pure passthrough)');
-      assert(out.targetList === undefined && out.otherList === undefined, 'no target/other split fields anymore');
-      return { displayed: out.displayedJobs.length };
+      // Role leaf with 15 cards: the first 10 from 'lever', the last 5 from
+      // 'dice'. Regression: the window used to slice RAW childIds then filter,
+      // so a dice source-filter on the expanded role revealed slice(0,10) → 0
+      // cards while 5 matches sat beyond the window ("empty" expanded role).
+      const cardIds = Array.from({ length: 15 }, (_, i) => `c${i}`);
+      const tree = () => ([
+        { id: 'hub', type: 'jobboard', position: { x: 0, y: 0 }, data: {} },
+        { id: 'R', type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'role', label: 'Eng', childIds: cardIds, expanded: true, visibleCount: 10 } },
+        ...cardIds.map((id, i) => ({
+          id, type: 'jobcard', hidden: true, position: { x: 0, y: 0 },
+          data: { hubId: 'hub', matchScore: 90 - i, source: i < 10 ? 'lever' : 'dice' },
+        })),
+      ]);
+      const hiddenOf = (out, id) => !!out.find(n => n.id === id)?.hidden;
+
+      const diced = computeJobTreeView(tree(), 'hub', { sourceFilter: 'dice' });
+      const revealedDice = cardIds.filter(id => !hiddenOf(diced, id));
+      assert(revealedDice.length === 5 && revealedDice.every(id => Number(id.slice(1)) >= 10),
+        `source filter backfills matches beyond the raw window (got ${revealedDice.join(',')})`);
+      // Every revealed card must also get a layout position (the layout walks
+      // ALL children and skips hidden — it must not re-impose the raw window).
+      const positioned = computeLayoutPositions(diced, 'hub', COL_X, { x: 0, y: 0 });
+      assert(revealedDice.every(id => positioned[id]), 'revealed beyond-window cards are positioned');
+
+      // No filter: the window still reveals exactly the first 10.
+      const plain = computeJobTreeView(tree(), 'hub', {});
+      const revealedPlain = cardIds.filter(id => !hiddenOf(plain, id));
+      assert(revealedPlain.length === 10 && revealedPlain.every(id => Number(id.slice(1)) < 10),
+        'no filter: window reveals exactly the first visibleCount cards');
+
+      // Dismissed ghosts: drop 3 of the first 10 cards from the node set — the
+      // window must backfill the next live cards instead of counting ghosts.
+      const withGhosts = tree().filter(n => !['c0', 'c1', 'c2'].includes(n.id));
+      const backfilled = computeJobTreeView(withGhosts, 'hub', {});
+      const revealedLive = cardIds.filter(id => withGhosts.some(n => n.id === id) && !hiddenOf(backfilled, id));
+      assert(revealedLive.length === 10, `ghost ids do not consume pagination slots (revealed ${revealedLive.length})`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'countMatchingDescendantCards: live badge/pagination math skips ghosts + filtered cards',
+    run: () => {
+      const nodes = new Map([
+        ['R', { id: 'R', type: 'jobgroup', data: { childIds: ['a', 'b', 'gone'] } }],
+        ['S', { id: 'S', type: 'jobgroup', data: { childIds: ['R', 'c'] } }],
+        ['a', { id: 'a', type: 'jobcard', data: { matchScore: 90, source: 'lever' } }],
+        ['b', { id: 'b', type: 'jobcard', data: { matchScore: 40, source: 'dice' } }],
+        ['c', { id: 'c', type: 'jobcard', data: { matchScore: 70, source: 'dice' } }],
+      ]);
+      const get = (id) => nodes.get(id);
+      assert(countMatchingDescendantCards(['a', 'b', 'gone'], get, {}) === 2, 'leaf: dismissed id does not count');
+      assert(countMatchingDescendantCards(['a', 'b'], get, { scoreThreshold: 50 }) === 1, 'leaf: filtered card does not count');
+      assert(countMatchingDescendantCards(['R', 'c'], get, {}) === 3, 'recursive: counts cards under nested groups');
+      assert(countMatchingDescendantCards(['R', 'c'], get, { sourceFilter: 'dice' }) === 2, 'recursive + filter');
+      // Cycle-safe: a malformed tree must not hang.
+      nodes.set('X', { id: 'X', type: 'jobgroup', data: { childIds: ['X', 'a'] } });
+      assert(countMatchingDescendantCards(['X'], get, {}) === 1, 'cycle-guarded');
+      return { ok: true };
     },
   },
   {
@@ -1566,7 +1778,7 @@ const tests = [
       });
       // idx0 strong+highpay+Brand, idx1 strong+lowpay+Growth, idx2 weak+nopay+Brand
       const displayedJobs = [
-        mk('Brand Lead', 92, '$150,000 a year', 'https://jobs/0'),
+        { ...mk('Brand Lead', 92, '$150,000 a year', 'https://jobs/0'), originHubId: 'search-A' },
         mk('Growth Mgr', 88, '$70,000 a year', 'https://jobs/1'),
         mk('Brand Intern', 30, '', 'https://jobs/2'),
       ];
@@ -1618,6 +1830,11 @@ const tests = [
       // Role leaves hold the cards.
       assert(roles.every(r => (r.data.childIds || []).every(cid => cards.some(c => c.id === cid))), 'hierarchy: role children should be cards');
       assert(result.scoreRangeMin === 30 && result.scoreRangeMax === 92, 'hierarchy: score range from displayed jobs');
+      // Cards carry a string reference to their ORIGIN search module (for
+      // "Generate Résumé" career-data lookup), never a profile deep copy.
+      const brandLead = cards.find(c => c.data.title === 'Brand Lead');
+      assert(brandLead.data.originHubId === 'search-A', 'hierarchy: card carries its origin module id');
+      assert(cards.every(c => !('resumeProfile' in c.data)), 'hierarchy: no per-card resumeProfile copies');
       return { cards: cards.length, bands: bands.length, salary: salary.length, roles: roles.length };
     },
   },
@@ -1663,19 +1880,19 @@ const tests = [
     name: 'Job Board: unionScoredJobs dedups by identity, keeps higher score',
     run: () => {
       const a = [
-        { title: 'Eng', company: 'Acme', url: 'https://j/1', matchScore: 60, resumeProfile: { id: 'A' } },
-        { title: 'PM', company: 'Beta', url: 'https://j/2', matchScore: 80, resumeProfile: { id: 'A' } },
+        { title: 'Eng', company: 'Acme', url: 'https://j/1', matchScore: 60, originHubId: 'A' },
+        { title: 'PM', company: 'Beta', url: 'https://j/2', matchScore: 80, originHubId: 'A' },
       ];
       const b = [
-        { title: 'Eng', company: 'Acme', url: 'https://j/1', matchScore: 90, resumeProfile: { id: 'B' } }, // dup of a[0], higher
-        { title: 'Designer', company: 'Gamma', url: '', matchScore: 50, resumeProfile: { id: 'B' } },
-        { title: 'designer', company: 'gamma', url: '', matchScore: 70, resumeProfile: { id: 'B' } }, // dup by title|company (no url)
+        { title: 'Eng', company: 'Acme', url: 'https://j/1', matchScore: 90, originHubId: 'B' }, // dup of a[0], higher
+        { title: 'Designer', company: 'Gamma', url: '', matchScore: 50, originHubId: 'B' },
+        { title: 'designer', company: 'gamma', url: '', matchScore: 70, originHubId: 'B' }, // dup by title|company (no url)
       ];
       const out = unionScoredJobs([a, b]);
       assert(out.length === 3, `union: expected 3 unique, got ${out.length}`);
       const eng = out.find(j => j.url === 'https://j/1');
       assert(eng.matchScore === 90, `union: higher score should win (got ${eng.matchScore})`);
-      assert(eng.resumeProfile?.id === 'B', 'union: winning copy carries its own resumeProfile');
+      assert(eng.originHubId === 'B', 'union: winning copy carries its own origin module id');
       // First-seen order preserved: Eng (a[0]), PM, Designer.
       assert(out[0].url === 'https://j/1' && out[1].url === 'https://j/2', 'union: first-seen order preserved');
       const designer = out.find(j => j.company.toLowerCase() === 'gamma');
@@ -1719,16 +1936,29 @@ const tests = [
     },
   },
   {
-    name: 'Job Board: moduleFingerprint changes on count OR score change, stable otherwise',
+    name: 'Job Board: moduleFingerprint catches re-runs the old count+sum format missed',
     run: () => {
-      const a = [{ matchScore: 90 }, { matchScore: 80 }];
-      assert(moduleFingerprint(a) === moduleFingerprint([{ matchScore: 80 }, { matchScore: 90 }]),
-        'fingerprint: order-insensitive (sum-based), same set → same fp');
-      assert(moduleFingerprint(a) !== moduleFingerprint([{ matchScore: 90 }]),
+      const a = [{ matchScore: 90, title: 'Eng' }, { matchScore: 80, title: 'PM' }];
+      assert(moduleFingerprint(a) === moduleFingerprint([{ matchScore: 90, title: 'Eng' }, { matchScore: 80, title: 'PM' }]),
+        'fingerprint: identical data → same fp');
+      assert(moduleFingerprint(a) !== moduleFingerprint([{ matchScore: 90, title: 'Eng' }]),
         'fingerprint: fewer jobs → different fp');
-      assert(moduleFingerprint(a) !== moduleFingerprint([{ matchScore: 90 }, { matchScore: 81 }]),
+      assert(moduleFingerprint(a) !== moduleFingerprint([{ matchScore: 90, title: 'Eng' }, { matchScore: 81, title: 'PM' }]),
         'fingerprint: re-scored (same count, different score) → different fp');
-      assert(moduleFingerprint(null) === '0.0', 'fingerprint: nullish → "0.0"');
+      // Regression: the old count+score-sum fingerprint was blind to BOTH of
+      // these, silently leaving the board un-stale after a real re-run.
+      assert(moduleFingerprint([{ matchScore: 80, title: 'Eng' }, { matchScore: 90, title: 'PM' }])
+          !== moduleFingerprint([{ matchScore: 85, title: 'Eng' }, { matchScore: 85, title: 'PM' }]),
+        'fingerprint: equal-sum rescore ([80,90] vs [85,85]) → different fp');
+      assert(moduleFingerprint(a) !== moduleFingerprint([{ matchScore: 90, title: 'Lead' }, { matchScore: 80, title: 'PM' }]),
+        'fingerprint: same scores, different jobs → different fp');
+      assert(moduleFingerprint(null) === '2:0:0', 'fingerprint: nullish → versioned empty');
+      // Legacy detection: pre-versioned signatures adopt-as-baseline, not stale.
+      assert(isLegacyCombineSignature('hub-1=5.10|hub-2=3.7'), 'legacy count.sum signature detected');
+      assert(!isLegacyCombineSignature(combineSignature([{ id: 'A', fingerprint: moduleFingerprint(a) }])),
+        'current-format signature is not legacy');
+      assert(!isLegacyCombineSignature('') && !isLegacyCombineSignature(null),
+        'empty/null signature is not legacy (handled by the null-adopt path)');
       return { ok: true };
     },
   },
@@ -1843,20 +2073,22 @@ const tests = [
   {
     name: 'Job tree layout positions',
     run: () => {
+      // Windowing is owned by `hidden` (computeJobTreeView): the layout walks
+      // every child and skips hidden ones — job-2 is the beyond-window card.
       const nodes = [
         { id: 'hub', type: 'jobhub', position: { x: 10, y: 20 }, data: {} },
         { id: 'L', type: 'jobgroup', position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'likelihood', childIds: ['S'], expanded: true } },
         { id: 'S', type: 'jobgroup', position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'salary', childIds: ['R'], expanded: true } },
         { id: 'R', type: 'jobgroup', position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'role', childIds: ['job-1', 'job-2'], expanded: true, visibleCount: 1 } },
         { id: 'job-1', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'hub' } },
-        { id: 'job-2', type: 'jobcard', position: { x: 0, y: 0 }, data: { hubId: 'hub' } },
+        { id: 'job-2', type: 'jobcard', hidden: true, position: { x: 0, y: 0 }, data: { hubId: 'hub' } },
       ];
       const positions = computeLayoutPositions(nodes, 'hub', COL_X, { x: 10, y: 20 });
       assert(positions.L?.x === 10 + COL_X.likelihood && positions.L?.y === 20, 'layout: likelihood position mismatch');
       assert(positions.S?.x === 10 + COL_X.salary && positions.S?.y === 20, 'layout: salary position mismatch');
       assert(positions.R?.x === 10 + COL_X.role && positions.R?.y === 20, 'layout: role position mismatch');
       assert(positions['job-1']?.x === 10 + COL_X.job && positions['job-1']?.y === 20, 'layout: visible job position mismatch');
-      assert(!positions['job-2'], 'layout: hidden overflow job (past visibleCount) should not be positioned');
+      assert(!positions['job-2'], 'layout: hidden card takes no space and gets no position');
       return positions;
     },
   },
@@ -2391,6 +2623,15 @@ const tests = [
       // Remote → empty param (no geo filter sent → nationwide, which includes remote).
       assert(deriveLocationParam({ city: '', stateCode: '', region: '', isRemote: true, display: 'Remote' }) === '', 'remote → empty param');
       assert(deriveLocationParam({ city: '', stateCode: '', region: '', isRemote: false, display: 'Remote' }) === '', '"Remote" display is never sent as a geo filter');
+      // Regression: isRemote used to be checked AFTER the place-shaped display
+      // fallback, so a remote-in-country search leaked the literal string
+      // "Remote, United States" into every board's location filter.
+      assert(deriveLocationParam({ city: '', stateCode: '', region: '', country: 'United States', isRemote: true, display: 'Remote, United States' }) === '',
+        'remote-in-country: display never leaks as a geo param');
+      assert(deriveLocationParam({ city: '', stateCode: '', region: '', isRemote: false, display: 'Remote, USA' }, '') === '',
+        'remote-flavored display is rejected by the place-shape guard even when isRemote is unset');
+      assert(deriveLocationParam({ city: 'Denver', stateCode: 'CO', country: 'United States', isRemote: true, display: 'Remote' }) === 'Denver, CO',
+        'hybrid (remote + a real city) still geo-filters to the city');
       // Defensive: a non-object (legacy/empty) falls back to the raw input, never throws.
       assert(deriveLocationParam(null, 'denvr') === 'denvr', 'null struct → raw fallback');
       assert(deriveLocationParam({}, '') === '', 'empty struct + no fallback → ""');
@@ -3982,12 +4223,14 @@ const tests = [
         const stale = await readRunState(canvas, T0 + RESUMABLE_MAX_AGE_MS + 5);
         assert(stale.incomplete && !stale.resumable, 'stale run is not auto-resumable');
 
-        // finished → not incomplete; clearRun removes both sidecars
-        await setStage(canvas, 'done', T0 + 200);
-        const done = await readRunState(canvas, T0 + 300);
-        assert(done && !done.incomplete && !done.resumable, 'done run is not resumable');
+        // 'gathered' (search done, scoring still owed) stays resumable — a
+        // manifest on disk IS an unfinished run; completion = sidecar DELETION.
+        await setStage(canvas, 'gathered', T0 + 200);
+        const gathered = await readRunState(canvas, T0 + 300);
+        assert(gathered && gathered.incomplete && gathered.resumable && gathered.manifest.stage === 'gathered',
+          'gathered-stage run is still resumable (scoring not finished)');
         await clearRun(canvas);
-        assert((await readRunState(canvas, T0 + 400)) === null, 'cleared run → null state');
+        assert((await readRunState(canvas, T0 + 400)) === null, 'cleared run → null state (the completion signal)');
 
         return { ok: true, staged: staged.length };
       } finally {
@@ -4025,6 +4268,67 @@ const tests = [
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    // Regression: resume start page was min(lastPage)+1 over the RECORDED
+    // queries only — a query that crashed before flushing its first page had no
+    // ledger entry, and since buildJobTasks applies ONE start page to EVERY
+    // query of the source, that query's early pages were silently skipped.
+    name: 'computeResumeStartPage: fast-forwards only when EVERY query recorded a page',
+    run: () => {
+      // Both queries recorded → min(lastPage)+1.
+      assert(computeResumeStartPage({ queries: { qa: { lastPage: 3 }, qb: { lastPage: 1 } } }, 2) === 2,
+        'all queries recorded → min(1)+1 = 2');
+      // Query B never flushed → restart at 1 so its pages 1..N are not skipped.
+      assert(computeResumeStartPage({ queries: { qa: { lastPage: 3 } } }, 2) === 1,
+        'unrecorded query → start page 1');
+      // Nothing recorded at all → 1.
+      assert(computeResumeStartPage({ queries: {} }, 3) === 1, 'no ledger → 1');
+      assert(computeResumeStartPage(undefined, 3) === 1, 'no source entry → 1');
+      // Single-query run fully recorded → resumes past its last page.
+      assert(computeResumeStartPage({ queries: { only: { lastPage: 0 } } }, 1) === 1 + 0,
+        'single query at page 0 → resume at 1 (0-based ledger, 1-based start)');
+      assert(computeResumeStartPage({ queries: { only: { lastPage: 4 } } }, 1) === 5,
+        'single query at page 4 → resume at 5');
+      return { ok: true };
+    },
+  },
+  {
+    // Regression: search-jobs appends kept jobs to history BEFORE scoring, so a
+    // crash in the scoring window left every staged job already "seen" — the
+    // resume recovered them from staging and dedupAgainstHistory then deleted
+    // the entire recovery (~0 jobs from an hour of scraping).
+    name: 'filterHistoryForResume: exempts the crashed run\'s own rows, keeps older history',
+    run: () => {
+      const T_RUN = Date.parse('2026-06-10T08:00:00Z');
+      const recovered = [
+        { title: 'Eng', company: 'Acme', location: 'Denver', url: 'https://jobs/eng' },
+        { title: 'PM', company: 'Beta', location: '', url: 'https://jobs/pm' },
+      ];
+      const history = [
+        // Written by the crashed run itself (same day, matching keys) → exempt.
+        { seen_date: '2026-06-10', source: 'indeed', company: 'Acme', title: 'Eng', location: 'Denver', url: 'https://jobs/eng' },
+        { seen_date: '2026-06-10', source: 'dice', company: 'Beta', title: 'PM', location: '', url: 'https://jobs/pm' },
+        // Same day but NOT among the recovered jobs (another hub's completed run) → kept.
+        { seen_date: '2026-06-10', source: 'lever', company: 'Other', title: 'Designer', location: '', url: 'https://jobs/dsn' },
+        // Older run's row for one of the SAME jobs → kept (the original run
+        // would have dropped this job too; resume must behave identically).
+        { seen_date: '2026-06-01', source: 'indeed', company: 'Acme', title: 'Eng', location: 'Denver', url: 'https://jobs/eng' },
+      ];
+      const filtered = filterHistoryForResume(history, recovered, T_RUN);
+      assert(filtered.length === 2, `exempts exactly the run's own rows (kept ${filtered.length})`);
+      assert(filtered.some(r => r.title === 'Designer'), 'same-day row for a non-recovered job is kept');
+      assert(filtered.some(r => r.seen_date === '2026-06-01'), 'older-run row for the same job is kept');
+      // End-to-end: the recovered Eng job is STILL dropped (older history hit),
+      // but PM survives — its only history row was the crashed run's own write.
+      const { kept, removed } = dedupAgainstHistory(recovered, filtered);
+      assert(kept.length === 1 && kept[0].title === 'PM' && removed === 1,
+        'resume keeps the recovery except genuinely-seen-before jobs');
+      // Guards: no recovery / no timestamp → untouched.
+      assert(filterHistoryForResume(history, [], T_RUN).length === history.length, 'no recovered jobs → no exemption');
+      assert(filterHistoryForResume(history, recovered, NaN).length === history.length, 'no run timestamp → no exemption');
+      return { ok: true };
     },
   },
   {
@@ -4385,6 +4689,76 @@ const tests = [
       assert(snap.events[snap.events.length - 1].context === 'c14', 'newest event retained');
       assert(snap.total === 17, `total keeps counting past the ring cap (got ${snap.total})`);
       _resetLaunchCollisions();
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Marketplace status scan: collects listing cards across nested canvases, grouped by platform',
+    run: () => {
+      const nodes = [
+        { id: 'a', type: 'marketplacecard', data: { platformId: 'ebay', listingUrl: ' https://ebay.com/itm/1 ', productSnapshot: { title: 'Kayak' } } },
+        { id: 'b', type: 'marketplacecard', data: { platformId: 'ebay', listingUrl: '', productSnapshot: { title: 'Paddle' } } }, // url-less placeholder
+        { id: 'sticky', type: 'text', data: { text: 'not a card' } },
+        // A card buried two canvases deep must still be found (group → canvasData → group → canvasData).
+        { id: 'g1', type: 'group', data: { canvasData: { nodes: [
+          { id: 'c', type: 'marketplacecard', data: { platformId: 'mercari', listingUrl: 'https://mercari.com/x', productSnapshot: { title: 'Lamp' } } },
+          { id: 'g2', type: 'group', data: { canvasData: { nodes: [
+            { id: 'd', type: 'marketplacecard', data: { platformId: 'ebay', listingUrl: 'https://ebay.com/itm/2' } },
+          ] } } },
+        ] } } },
+        { id: 'noplat', type: 'marketplacecard', data: { listingUrl: 'https://x' } }, // no platformId → ignored
+      ];
+      const byPlatform = collectMarketplaceListings(nodes);
+      assert(byPlatform.size === 2, `status scan: expected ebay+mercari, got ${[...byPlatform.keys()].join(',')}`);
+      const ebay = byPlatform.get('ebay');
+      assert(ebay.listingCount === 3, `status scan: ebay count incl. nested + url-less = 3, got ${ebay.listingCount}`);
+      assert(ebay.listingUrls.length === 2, `status scan: only the 2 ebay cards WITH a url contribute urls, got ${ebay.listingUrls.length}`);
+      assert(ebay.listingUrls[0] === 'https://ebay.com/itm/1', 'status scan: listing url is trimmed');
+      assert(byPlatform.get('mercari').listingCount === 1, 'status scan: nested mercari card counted once');
+      assert(collectMarketplaceListings(null).size === 0, 'status scan: nullish input → empty map');
+      return { platforms: byPlatform.size, ebayCount: ebay.listingCount };
+    },
+  },
+  {
+    name: 'Nested-canvas deep ops: deepUpdateNode + deepAddElements reach arbitrarily deep, without disturbing siblings',
+    run: () => {
+      const tree = () => [
+        { id: 'top', type: 'text', data: { text: 'a' } },
+        { id: 'g1', type: 'group', data: { canvasData: { nodes: [
+          { id: 'mid', type: 'text', data: { text: 'b' } },
+          { id: 'g2', type: 'group', data: { canvasData: { nodes: [
+            { id: 'deep', type: 'text', data: { text: 'c' } },
+          ], edges: [] } } },
+        ], edges: [] } } },
+      ];
+
+      // deepUpdateNode: updates a 2-levels-deep node and reports updated=true.
+      const up = deepUpdateNode(tree(), 'deep', { text: 'C!' });
+      assert(up.updated === true, 'deepUpdateNode: reports updated for a deeply-nested target');
+      assert(up.nodes[1].data.canvasData.nodes[1].data.canvasData.nodes[0].data.text === 'C!',
+        'deepUpdateNode: the deep node is mutated');
+      assert(up.nodes[0].data.text === 'a' && up.nodes[1].data.canvasData.nodes[0].data.text === 'b',
+        'deepUpdateNode: untouched siblings preserved');
+      assert(deepUpdateNode(tree(), 'ghost', { text: 'x' }).updated === false,
+        'deepUpdateNode: missing target → updated=false');
+
+      // deepAddElements 'sibling': new node lands ALONGSIDE a deeply-nested target.
+      const added = deepAddElements(tree(), [], 'deep', [{ id: 'newSib', type: 'text', data: {} }], [], 'sibling');
+      assert(added.updated === true, 'deepAddElements(sibling): reports updated');
+      const g2kids = added.nodes[1].data.canvasData.nodes[1].data.canvasData.nodes;
+      assert(g2kids.length === 2 && g2kids[1].id === 'newSib',
+        'deepAddElements(sibling): appended next to the nested target, not at the root');
+      assert(added.nodes.length === 2, 'deepAddElements(sibling): root level node count unchanged');
+
+      // deepAddElements 'inside': new node lands INSIDE the target group's canvasData.
+      const inside = deepAddElements(tree(), [], 'g2', [{ id: 'innerNew', type: 'text', data: {} }], [], 'inside');
+      const g2Inner = inside.nodes[1].data.canvasData.nodes[1].data.canvasData.nodes;
+      assert(g2Inner.length === 2 && g2Inner[1].id === 'innerNew',
+        'deepAddElements(inside): appended into the target group’s own canvasData');
+
+      // getCanvasData tolerates legacy shape (nodes/edges directly on data).
+      const legacy = getCanvasData({ data: { nodes: [{ id: 'L' }], edges: [{ id: 'e' }] } });
+      assert(legacy.nodes[0].id === 'L' && legacy.edges[0].id === 'e', 'getCanvasData: legacy shape fallback');
       return { ok: true };
     },
   },

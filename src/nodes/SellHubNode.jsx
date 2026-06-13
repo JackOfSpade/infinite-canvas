@@ -132,7 +132,11 @@ export function SellHubNode({ id, data }) {
         platformId,
         hubId: id,
         listingUrl: '',
+        notes: '',
         status: 'unknown',
+        // Price-drop reminder anchor — shown on the card and aged against
+        // this hub's priceDropReminderWeeks (see priceDropReminder.js).
+        createdAt: new Date().toISOString(),
         productSnapshot: {
           title: finalListingTitle,
           price: bundleHeadline ?? data.pricing?.recommended_price ?? null,
@@ -1275,6 +1279,15 @@ export function SellHubNode({ id, data }) {
     startAnalysisRef.current?.(validPaths);
   }, [addToast, canReplaceFailedInitialPhotos, dropLockReason, hubState, id]);
 
+  // Per-item price-drop reminder cadence — persisted on the hub, consumed by
+  // this hub's marketplace cards (each reads it via its hubId backlink). The
+  // equality guard keeps a no-change blur from dirtying the canvas.
+  const handleChangePriceDropReminderWeeks = useCallback((weeks) => {
+    if (data.locked) return;
+    if ((Number(data.priceDropReminderWeeks) || 0) === weeks) return;
+    updateGlobal(id, { priceDropReminderWeeks: weeks });
+  }, [data.locked, data.priceDropReminderWeeks, id, updateGlobal]);
+
   const handleRemoveDisplayPhoto = useCallback((index) => {
     if (data.locked) return;
     const before = data.imagePaths || [];
@@ -1578,6 +1591,8 @@ export function SellHubNode({ id, data }) {
             onSpawnMarketplaceCard={handleSpawnMarketplaceCard}
             platformFit={data.platformFit || null}
             platformFitPending={!!data.platformFitPending}
+            priceDropReminderWeeks={Number(data.priceDropReminderWeeks) || 0}
+            onChangePriceDropReminderWeeks={handleChangePriceDropReminderWeeks}
           />
         )}
       </HubContainer>

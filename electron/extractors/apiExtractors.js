@@ -18,7 +18,7 @@ import { resolveBudget } from '../ipc/scrapeBudget.js';
 import { safeApiFetch } from '../ipc/antiBotDetector.js';
 import { JOB_RESULT_CAP } from '../ipc/resultCaps.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
-import { jobTitleCompanyLocationKey } from '../../src/utils/jobIdentity.js';
+import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { isPriceChartingApplicable } from '../../src/utils/compSourceScope.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
@@ -1382,7 +1382,7 @@ function dedupeIndeedJobs(jobs) {
   const out = [];
   for (const job of jobs) {
     if (!job?.title) continue;
-    const key = job.jobkey || job.url || jobTitleCompanyLocationKey(job);
+    const key = sourceJobKey(job);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(job);

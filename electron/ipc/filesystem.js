@@ -142,10 +142,21 @@ function rememberCanvasInode(sender, filePath) {
  * it and follow the file to its new name. Returns the original path unchanged when
  * nothing was recorded, the file is untouched, or the inode can't be found (the
  * file was deleted or moved out of the directory — there's nowhere to follow it).
+ *
+ * ONLY the window's own canvas path is reconciled. A save aimed at any OTHER
+ * path is an explicit retarget (a new file / programmatic write), and "requested
+ * path missing + our inode lives elsewhere in that directory" describes that
+ * case just as well as a Finder rename — following the inode there hijacks the
+ * NEW file's contents into the PREVIOUSLY-saved canvas (the new path is never
+ * created and the old file is silently overwritten; observed when two saves to
+ * different names in one directory came from the same window).
  */
 async function reconcileRenamedCanvas(sender, knownPath) {
   const tracked = sender?.__canvasInode;
   if (!tracked?.ino) return knownPath;
+  if (!sender.__canvasPath || path.resolve(sender.__canvasPath) !== path.resolve(knownPath)) {
+    return knownPath; // saving somewhere other than "the canvas" — honor it verbatim
+  }
   try {
     const st = await fs.promises.stat(knownPath);
     if (st.ino === tracked.ino && st.dev === tracked.dev) return knownPath;

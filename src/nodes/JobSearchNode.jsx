@@ -7,7 +7,11 @@ import { HubContainer } from '../components/HubContainer';
 import { Briefcase, Clock } from 'lucide-react';
 import { JOB_SOURCE_BY_ID, ACTIVE_JOB_SOURCES } from '../utils/constants';
 import { isJobSourceEnabledInScope, JOB_SEARCH_TEST_MODE } from '../utils/jobSourceScope';
-import { dedupeJobsByKey, jobTitleCompanyUrlKey, uniqueJobsNotIn } from '../utils/jobIdentity';
+// Same-run merges use jobTitleCompanyKey — the backend's cross-source dedup
+// key — so a posting that arrives late (post-Solve resolve, background USAJobs)
+// collapses against the copy another board already returned, exactly as it
+// would have in the main gather. See the policy note in jobIdentity.js.
+import { dedupeJobsByKey, jobTitleCompanyKey, uniqueJobsNotIn } from '../utils/jobIdentity';
 import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
 import { mergeResolvedSourceItems } from '../utils/jobSourceResolveMerge';
 import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
@@ -281,7 +285,7 @@ export function JobSearchNode({ id, data }) {
   const appendJobsToDoneCanvas = useCallback(({ scoredJobs, filteredWarnings, gatheredDelta = 0 }) => {
     const fresh = Array.isArray(scoredJobs) ? scoredJobs : [];
     const existing = Array.isArray(data.scoredJobs) ? data.scoredJobs : [];
-    const added = uniqueJobsNotIn(existing, fresh, jobTitleCompanyUrlKey);
+    const added = uniqueJobsNotIn(existing, fresh, jobTitleCompanyKey);
     const nextScored = added.length ? [...existing, ...added] : existing;
 
     const finalSourceCounts = { ...data.finalSourceCounts };
@@ -361,7 +365,7 @@ export function JobSearchNode({ id, data }) {
 
       if (currentState === 'sources-ready') {
         const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
-        const fresh = uniqueJobsNotIn(prevPending, freshJobs, jobTitleCompanyUrlKey);
+        const fresh = uniqueJobsNotIn(prevPending, freshJobs, jobTitleCompanyKey);
         const mergedPending = [...prevPending, ...fresh];
         pendingJobsRef.current = mergedPending;
         scrapeWarningsRef.current = filteredWarnings;
@@ -545,12 +549,15 @@ export function JobSearchNode({ id, data }) {
     updateGlobal(id, { batchScoring: !!on });
   }, [id, updateGlobal]);
 
-  // Cascade-delete every spawned child on hub unmount.
+  // Cascade-delete every spawned child on hub unmount. Only source cards: the
+  // results cascade (jobcard/jobgroup) is spawned and owned by the Job Board
+  // Module — no card ever carries this hub's id as hubId (the legacy pre-split
+  // cascades are healed away by the v2 load migration).
   const cleanupAllJobChildren = useCallback(() => {
-    EventLogger.log(`[JobSearch][${id}] Cleaning up all children (source cards, jobs, groups)`);
+    EventLogger.log(`[JobSearch][${id}] Cleaning up source cards`);
     deleteChildrenByHubId({
       getNodes, getEdges, deleteElements, hubId: id,
-      childTypes: ['jobsourcecard', 'jobcard', 'jobgroup'],
+      childTypes: ['jobsourcecard'],
     });
   }, [id, getNodes, getEdges, deleteElements]);
 
@@ -1173,13 +1180,17 @@ export function JobSearchNode({ id, data }) {
 
       // Merge backend's foundJobs with any jobs already resolved via paste during
       // the search — they're in pendingJobsRef but absent from the backend result.
+      // Resolved items go FIRST: the dedup is first-wins, and on a collision the
+      // resolved copy is the one carrying work the user paid for mid-run (a
+      // LinkedIn Solve's enriched descriptions) while the backend copy of the
+      // same posting is the pre-enrichment one.
       let foundJobs = (searchResult.success && Array.isArray(searchResult.jobs)) ? searchResult.jobs : [];
       const rawGatheredCount = searchResult.rawCount ?? foundJobs.length;
       if (alreadyResolved.size > 0) {
         const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
         const resolvedItems = prevPending.filter(j => alreadyResolved.has(j?.source));
         if (resolvedItems.length > 0) {
-          foundJobs = dedupeJobsByKey([...foundJobs, ...resolvedItems], jobTitleCompanyUrlKey);
+          foundJobs = dedupeJobsByKey([...resolvedItems, ...foundJobs], jobTitleCompanyKey);
         }
       }
 
@@ -1754,13 +1765,9 @@ export function JobSearchNode({ id, data }) {
       return;
     }
 
-    // Remove old result tree before re-running. jobsourcecard tiles are
-    // excluded — they're persistent platform tiles whose drag-adjusted
-    // positions should survive a re-run.
-    deleteChildrenByHubId({
-      getNodes, getEdges, deleteElements, hubId: id,
-      childTypes: ['jobcard', 'jobgroup'],
-    });
+    // (No result tree to remove — the cascade lives on the Job Board Module,
+    // which detects this hub's new data via its staleness signature and
+    // prompts a re-combine. Source-card tiles persist across re-runs.)
 
     // Clear any paused-pipeline buffer so the new run doesn't accidentally
     // resume the previous attempt's partial results. Also wipe the prior run's
@@ -1783,7 +1790,7 @@ export function JobSearchNode({ id, data }) {
       addToast({ title: 'Re-running Search', description: 'Using stored career profile — original files not needed.', type: 'info' });
       startProcessingWithProfile(data.resumeProfile, { frameSourceCards });
     }
-  }, [data.locked, data.filePath, data.resumeProfile, id, getNodes, getEdges, deleteElements, addToast, startProcessingWithProfile, resetSourceProgress, updateGlobal, cancelCleanSourceCardDismiss]);
+  }, [data.locked, data.filePath, data.resumeProfile, id, addToast, startProcessingWithProfile, resetSourceProgress, updateGlobal, cancelCleanSourceCardDismiss]);
 
   const isProcessing = PROCESSING_STATES.includes(hubState);
 
@@ -1879,15 +1886,6 @@ export function JobSearchNode({ id, data }) {
       processingRef.current = true;
       cancelCleanSourceCardDismiss();
       resetSourceProgress();
-      if (hubState === 'done') {
-        deleteChildrenByHubId({
-          getNodes,
-          getEdges,
-          deleteElements,
-          hubId: id,
-          childTypes: ['jobcard', 'jobgroup'],
-        });
-      }
       const currentId = id;
       const cancelled = epoch.start();
       const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
@@ -1932,7 +1930,7 @@ export function JobSearchNode({ id, data }) {
     } finally {
       if (isMountedRef.current) setSavedAnalysisLoading(false);
     }
-  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.locked, deleteElements, epoch, getEdges, getNode, getNodes, hubState, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef]);
+  }, [addToast, cancelCleanSourceCardDismiss, canvasFilePath, data.locked, epoch, getNode, id, platformsVerifying, resetSourceProgress, runScoringAndSpawn, updateGlobal, isMountedRef]);
 
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[JobSearch][${id}] User clicked Dismiss Error`);

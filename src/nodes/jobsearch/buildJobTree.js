@@ -22,9 +22,9 @@ import { isJobCardVisible } from '../../utils/jobCardFilters.js';
  * fall into a swept "Other" role.
  *
  * Exports:
- *  - partitionJobsForBranches → display set = all scored jobs (target ≡ no-target)
  *  - parseSalaryToNumeric     → salary text → annual USD
  *  - computeLayoutPositions   → tight (x,y) for the current expand state
+ *  - computeJobTreeView       → single derivation of `hidden` from expand × filter
  *  - buildJobTreeNodes        → emits the {nodes, edges} graph
  */
 
@@ -74,16 +74,6 @@ export function parseSalaryToNumeric(salaryStr) {
     else if (clean.includes('day')) val = val * 5 * 52;
   }
   return val;
-}
-
-/**
- * Display set = EVERY scored job. Target and no-target runs are identical here:
- * a target role only adds queries upstream (see generate-job-queries); it never
- * gates, fills, sorts, or categorizes the results differently. Kept as a named
- * function so the "all scored jobs are shown" contract has one tested home.
- */
-export function partitionJobsForBranches(scoredJobs) {
-  return { displayedJobs: scoredJobs };
 }
 
 // ── Deterministic placement ────────────────────────────────────────────────
@@ -178,20 +168,55 @@ export function computeLayoutPositions(nodes, hubId, COL_X_, hubPos) {
     }
     if (!node.data?.expanded) return startY + ROW_H.group;
 
+    // Walk EVERY child: visibility (incl. the role leaves' visibleCount window,
+    // which under a filter slices the MATCHING cards, not raw childIds) is
+    // owned entirely by `hidden` (computeJobTreeView), and hidden nodes take no
+    // layout space — so the old visibleCount slice here would have skipped
+    // revealed cards that sit beyond the raw-index window when a filter is on,
+    // leaving them unpositioned.
     const childIds = Array.isArray(node.data?.childIds) ? node.data.childIds : [];
-    const childrenAreCards = childIds.length > 0 && nodeById.get(childIds[0])?.type === 'jobcard';
-    const visCount = childrenAreCards
-      ? Math.min(node.data?.visibleCount ?? ROLE_VISIBLE_DEFAULT, childIds.length)
-      : childIds.length;
-
     let nextY = startY;
-    for (let i = 0; i < visCount; i++) nextY = layoutNode(childIds[i], nextY);
+    for (const cid of childIds) nextY = layoutNode(cid, nextY);
     return nextY;
   }
 
   let nextY = hubPos.y;
   for (const root of rootGroups) nextY = layoutNode(root.id, nextY);
   return positions;
+}
+
+/**
+ * Count the LIVE, filter-matching job cards under a group's childIds —
+ * recursively, so it works for band/salary groups (whose children are groups)
+ * and role leaves (whose children are cards) alike. Dismissed cards (ids whose
+ * node no longer exists) and filtered-out cards don't count, so group badges
+ * and the role leaves' "Show more" math stay truthful as cards are dismissed —
+ * dismissal being the PRIMARY interaction on disposable cards. Pure: the node
+ * accessor is injected so it runs against ReactFlow's nodeLookup (in a store
+ * selector) or a plain Map (in tests).
+ *
+ * @param {string[]} childIds   the group's data.childIds
+ * @param {(id: string) => object|undefined} getNodeById
+ * @param {{scoreThreshold?: number, sourceFilter?: string|null}} filter
+ * @returns {number}
+ */
+export function countMatchingDescendantCards(childIds, getNodeById, filter = {}) {
+  let count = 0;
+  const visited = new Set();
+  const stack = Array.isArray(childIds) ? [...childIds] : [];
+  while (stack.length > 0) {
+    const cid = stack.pop();
+    if (visited.has(cid)) continue;
+    visited.add(cid);
+    const n = getNodeById(cid);
+    if (!n) continue; // dismissed/deleted — takes no slot
+    if (n.type === 'jobcard') {
+      if (isJobCardVisible(n.data || {}, filter)) count++;
+    } else if (Array.isArray(n.data?.childIds)) {
+      stack.push(...n.data.childIds);
+    }
+  }
+  return count;
 }
 
 /**
@@ -234,9 +259,12 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X) {
   const rootGroups = list.filter(n => n.data?.hubId === hubId && n.type === 'jobgroup' && !allChildIds.has(n.id));
 
   // Walk open paths; collect what should be VISIBLE (matching cards + non-empty
-  // branches on an expanded path). Role leaves reveal the same childIds[0..N]
-  // window the layout paginates, minus non-matching — kept in lockstep with
-  // computeLayoutPositions' visibleCount slice.
+  // branches on an expanded path). Role leaves paginate over the MATCHING,
+  // still-on-canvas cards: slicing raw childIds (the old behavior) let
+  // non-matching cards and dismissed ghosts consume pagination slots, so an
+  // expanded role under a source filter could render zero cards while matches
+  // sat beyond the window. Layout positions whatever is revealed (it walks all
+  // children and skips hidden), so window math lives only here.
   const visible = new Set();
   const walk = (id) => {
     const node = byId.get(id);
@@ -246,10 +274,12 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X) {
     visible.add(id);
     if (!node.data?.expanded) return;
     const childIds = Array.isArray(node.data?.childIds) ? node.data.childIds : [];
-    const childrenAreCards = childIds.length > 0 && byId.get(childIds[0])?.type === 'jobcard';
+    const childrenAreCards = childIds.some(cid => byId.get(cid)?.type === 'jobcard');
     if (childrenAreCards) {
-      childIds.slice(0, node.data?.visibleCount ?? ROLE_VISIBLE_DEFAULT)
-        .forEach(cid => { if (cardMatch(byId.get(cid)?.data)) visible.add(cid); });
+      childIds
+        .filter(cid => { const c = byId.get(cid); return c?.type === 'jobcard' && cardMatch(c.data); })
+        .slice(0, node.data?.visibleCount ?? ROLE_VISIBLE_DEFAULT)
+        .forEach(cid => visible.add(cid));
     } else {
       childIds.forEach(walk);
     }
@@ -304,7 +334,6 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X) {
 export function buildJobTreeNodes({
   displayedJobs,
   bucketTree,
-  profile,
   originalPos,
   hubId,
   baseNodeId,
@@ -329,11 +358,12 @@ export function buildJobTreeNodes({
         salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
         reasoning: job.reasoning, careerDirection: job.careerDirection,
         source: job.source, url: job.url, posted: job.posted, language: job.language,
-        // Per-job résumé wins when present (Job Board merges cards from several
-        // search modules, each scored against its own résumé) so the card's
-        // "Generate Résumé" uses the right origin; falls back to the single
-        // `profile` for the normal single-hub path (where jobs carry none).
-        resumeProfile: job.resumeProfile || profile, isNew: false,
+        // The ORIGIN search module's id (the board merges cards from several
+        // modules, each with its own career data) — the card's "Generate
+        // Résumé" reads careerData from this hub. A string reference, not a
+        // copy: the old per-card resumeProfile clone persisted N identical
+        // profile objects into the canvas file and nothing ever read it.
+        originHubId: job.originHubId || null, isNew: false,
       },
     });
     return id;
@@ -437,7 +467,7 @@ export function buildJobTreeNodes({
             salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
             reasoning: job.reasoning, careerDirection: job.careerDirection,
             source: job.source, url: job.url, posted: job.posted, language: job.language,
-            resumeProfile: job.resumeProfile || profile, isNew: false,
+            originHubId: job.originHubId || null, isNew: false,
           },
         });
         pushEdge(hubId, id);

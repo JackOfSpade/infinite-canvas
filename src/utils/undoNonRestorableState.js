@@ -1,9 +1,15 @@
+// Marketplace-card data driven by background processes (status checks, the
+// price-drop reminder clock) rather than user edits. Stripped from undo
+// fingerprints/snapshots and re-merged from the live nodes on restore, so
+// undo/redo never resurrects a cleared reminder or rolls back a status check.
 const MARKETPLACE_STATUS_FIELDS = [
   'status',
   'statusMessage',
   'lastChecked',
   'attention',
   'lastCheckTrace',
+  'lastPriceDropAt',
+  'priceDropReminderDue',
 ];
 
 function isMarketplaceCard(node) {

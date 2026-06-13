@@ -168,6 +168,21 @@ export async function loadJobsHistory(canvasFilePath) {
   return out;
 }
 
+// Per-history-path FIFO mutex. appendJobsHistory is a whole-file
+// read-modify-write; without serialization two overlapping appends (the
+// fire-and-forget pre-scoring write in search-jobs vs. the renderer's
+// post-scoring IPC, or two hubs on one canvas) both read the same baseline and
+// the last rename wins — silently dropping the other's rows from the "never
+// re-show a job" dedup record. Keyed by path so different canvases never block
+// one another. Same dependency-free pattern as jobRunStaging's manifest lock.
+const _historyTails = new Map();
+function withHistoryLock(filePath, fn) {
+  const prev = _historyTails.get(filePath) || Promise.resolve();
+  const result = prev.then(fn, fn); // run regardless of the prior op's outcome
+  _historyTails.set(filePath, result.then(() => {}, () => {}));
+  return result;
+}
+
 /**
  * Append new rows to history while pruning entries older than MAX_AGE_DAYS.
  * Returns counts for diagnostics; never throws (logged + skipped on error).
@@ -176,7 +191,10 @@ export async function appendJobsHistory(canvasFilePath, jobs) {
   const filePath = historyPathForCanvas(canvasFilePath);
   if (!filePath) return { written: 0, pruned: 0, skipped: 'no-canvas-path' };
   if (!Array.isArray(jobs) || jobs.length === 0) return { written: 0, pruned: 0 };
+  return withHistoryLock(filePath, () => appendJobsHistoryLocked(canvasFilePath, filePath, jobs));
+}
 
+async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
   try {
     const existing = await loadJobsHistory(canvasFilePath);
     const fresh = existing.filter(r => isWithinAge(r.seen_date));
@@ -221,6 +239,46 @@ export async function appendJobsHistory(canvasFilePath, jobs) {
     logger.warn('[JobsHistory] Append failed:', err?.message || String(err));
     return { written: 0, pruned: 0, error: err?.message || String(err) };
   }
+}
+
+/**
+ * Drop the history rows a CRASHED run wrote about its own gathered jobs, so
+ * resuming that run doesn't dedup-away everything it recovers from staging.
+ *
+ * search-jobs appends kept jobs to history BEFORE returning (deliberate: an
+ * aborted run still marks them seen for FUTURE runs). But a resume of that
+ * same run recovers those very jobs from the staging sidecar — left alone,
+ * dedupAgainstHistory would collapse the entire recovery to ~0. A history row
+ * is exempted only when BOTH hold:
+ *   - its seen_date is on/after the resumed run's start day (rows are stamped
+ *     at day resolution, so this is the tightest available time scope), AND
+ *   - it matches a recovered staged job's dedup key (so a different hub's
+ *     same-day completed run keeps suppressing ITS jobs).
+ * Jobs the original run itself dropped against OLDER history still carry only
+ * pre-run-day rows → still dropped on resume, exactly like the original run.
+ * Worst case (an earlier SAME-DAY run had shown one of these jobs) is a single
+ * over-show — the stated lesser evil for this pipeline.
+ *
+ * @param {object[]} historyRows   loadJobsHistory output
+ * @param {object[]} recoveredJobs jobs recovered from the run's staging sidecar
+ * @param {number}   runStartedAt  the resumed run's manifest.startedAt (ms)
+ * @returns {object[]} historyRows minus the resumed run's own appends
+ */
+export function filterHistoryForResume(historyRows, recoveredJobs, runStartedAt) {
+  const rows = Array.isArray(historyRows) ? historyRows : [];
+  if (!Number.isFinite(runStartedAt) || !Array.isArray(recoveredJobs) || recoveredJobs.length === 0) {
+    return rows;
+  }
+  const runDay = new Date(runStartedAt).toISOString().slice(0, 10);
+  const recoveredKeys = new Set();
+  for (const j of recoveredJobs) {
+    for (const k of dedupKeysFor(j)) recoveredKeys.add(k);
+  }
+  return rows.filter(r => {
+    const sameRunWindow = String(r?.seen_date || '') >= runDay; // YYYY-MM-DD sorts lexicographically
+    if (!sameRunWindow) return true;
+    return !dedupKeysFor(r).some(k => recoveredKeys.has(k));
+  });
 }
 
 export function dedupAgainstHistory(jobs, historyRows) {

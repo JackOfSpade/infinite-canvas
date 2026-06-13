@@ -9,7 +9,7 @@ import { useUnmountEffect } from '../hooks/useUnmountEffect';
 import { EventLogger } from '../utils/EventLogger';
 import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
-import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason } from './jobboard/mergeJobs';
+import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature } from './jobboard/mergeJobs';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 
 // Human label for a connected Job Search Module, from its search params.
@@ -171,7 +171,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // current connections as their baseline instead of falsely going stale.
   useEffect(() => {
     if (hubState !== 'done' || data.locked) return; // locked = frozen snapshot
-    if (data.combineSignature == null) {
+    // No stored signature (pre-staleness boards) OR a signature in the legacy
+    // pre-versioned fingerprint format (its math can't be compared against
+    // live fingerprints) → adopt the current connections as the baseline
+    // instead of falsely going stale.
+    if (data.combineSignature == null || isLegacyCombineSignature(data.combineSignature)) {
       updateGlobal(id, { combineSignature: liveSignature, stale: false });
       return;
     }
@@ -212,14 +216,16 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // Capture the input signature NOW so a connection change mid-combine is
       // correctly detected as stale afterwards (matches the live-signature math).
       const sigAtCombine = combineSignature(readyModules);
-      // Gather each ready module's scored jobs, tagging each with its module's
-      // résumé so a merged card's "Generate Résumé" uses the right origin.
+      // Gather each ready module's scored jobs, tagging each with its ORIGIN
+      // module id so a merged card's "Generate Résumé" reads career data from
+      // the right search module (a string per card, not a deep résumé copy —
+      // the old per-job resumeProfile clone persisted N identical profile
+      // objects into the canvas file and was read by nothing).
       const byId = new Map(getNodes().map((n) => [n.id, n]));
       const jobArrays = readyModules.map((m) => {
         const n = byId.get(m.id);
-        const profile = n?.data?.resumeProfile || null;
         return (Array.isArray(n?.data?.scoredJobs) ? n.data.scoredJobs : [])
-          .map((j) => ({ ...j, resumeProfile: j.resumeProfile || profile }));
+          .map((j) => ({ ...j, originHubId: j.originHubId || m.id }));
       });
       const mergeStats = {};
       const union = unionScoredJobs(jobArrays, mergeStats);
@@ -235,13 +241,19 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         return;
       }
 
-      // Replace any prior combine before rebuilding.
-      clearBoardChildren();
-
-      // Re-bucket over the union (compact, cheap LLM call — titles/salary only).
+      // Re-bucket over the union. Ship only the projection the taxonomy needs
+      // (the handler strips to exactly these fields anyway) — the full union
+      // carries snippets/reasoning and used to serialize hundreds of KB over
+      // IPC for nothing. Index alignment with `union` is what matters.
       let bucketTree = null;
       try {
-        const res = await window.electronAPI.bucketJobs({ jobs: union, nodeId: id });
+        const compactJobs = union.map((j) => ({
+          careerDirection: j.careerDirection || '',
+          matchScore: typeof j.matchScore === 'number' ? j.matchScore : 0,
+          salary: j.salary || '',
+          title: j.title || '',
+        }));
+        const res = await window.electronAPI.bucketJobs({ jobs: compactJobs, nodeId: id });
         if (res?.success && Array.isArray(res.roles)) {
           bucketTree = {
             likelihoodBands: res.likelihoodBands || [],
@@ -260,12 +272,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       const { newNodes, newEdges, scoreRangeMin, scoreRangeMax } = buildJobTreeNodes({
         displayedJobs: union,
         bucketTree,
-        profile: null, // each job carries its own resumeProfile
         originalPos,
         hubId: id,
         baseNodeId,
       });
 
+      // Replace the prior combine only now that the new cascade is BUILT — the
+      // clear used to run before the multi-second bucketing await, so any
+      // failure in that window left a board claiming "N unique jobs" over an
+      // empty canvas. Clearing and adding back-to-back (no await between)
+      // closes that orphan window: a throw above leaves the old board intact.
+      clearBoardChildren();
       if (newNodes.length > 0) {
         document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
         if (addElementsGlobally) addElementsGlobally(id, newNodes, newEdges, 'sibling');

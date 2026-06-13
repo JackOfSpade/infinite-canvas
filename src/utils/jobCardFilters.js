@@ -1,15 +1,11 @@
-const DEFAULT_JOB_STATUS = 'New';
-
+// The board's card filter: a single source pill + a min-score slider. Job
+// cards are deliberately disposable (anti-CRM) — there is no status field to
+// filter on, so the filter contract is exactly these two knobs.
 export function isJobCardVisible(jobData = {}, {
   sourceFilter = null,
   scoreThreshold = 0,
-  statusFilters = [],
 } = {}) {
-  const activeStatusFilters = Array.isArray(statusFilters) ? statusFilters : [];
   const sourceOk = !sourceFilter || jobData.source === sourceFilter;
   const scoreOk = (jobData.matchScore ?? 0) >= scoreThreshold;
-  const statusOk = activeStatusFilters.length === 0 ||
-    activeStatusFilters.includes(jobData.status || DEFAULT_JOB_STATUS);
-
-  return sourceOk && scoreOk && statusOk;
+  return sourceOk && scoreOk;
 }

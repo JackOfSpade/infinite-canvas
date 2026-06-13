@@ -4,24 +4,8 @@ import { Search, X, ChevronUp, ChevronDown } from 'lucide-react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { getNodeDims } from '../utils/constants';
 import { panDuration } from '../utils/layoutGeometry';
+import { matchesQuery } from '../utils/searchMatch';
 import { TIMINGS } from '../utils/timings';
-
-/**
- * Returns true if a node's content matches the lowercased query string.
- * Used for both top-level and deep (nested canvas) searches.
- */
-function matchesQuery(node, q) {
-  return (
-    (node.type === 'document' && node.data?.filename?.toLowerCase().includes(q)) ||
-    (node.type === 'group'    && node.data?.title?.toLowerCase().includes(q)) ||
-    (node.type === 'text'     && node.data?.text?.toLowerCase().includes(q)) ||
-    (node.type === 'link'     && (node.data?.label?.toLowerCase().includes(q) || node.data?.url?.toLowerCase().includes(q))) ||
-    (node.type === 'jobcard'  && (node.data?.title?.toLowerCase().includes(q) || node.data?.company?.toLowerCase().includes(q))) ||
-    (node.type === 'listing'  && (node.data?.product?.generated_title?.toLowerCase().includes(q) || node.data?.product?.brand?.toLowerCase().includes(q) || node.data?.product?.model?.toLowerCase().includes(q))) ||
-    (node.type === 'jobhub'   && node.data?.resumeSummary?.toLowerCase().includes(q)) ||
-    (node.type === 'sellhub'  && node.data?.product?.generated_title?.toLowerCase().includes(q))
-  );
-}
 
 /**
  * Canvas search bar with match count indicator and navigation.

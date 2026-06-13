@@ -105,6 +105,96 @@ try {
   assert.equal(ipcRoundTrip.settings.jobs.usajobsEmail, 'e2e@example.com', 'settings update should persist');
   assert.equal(ipcRoundTrip.updatedSettings.jobs.usajobsEmail, 'e2e@example.com', 'settings update should return merged data');
 
+  // ── Marketplace listing reminder + search, against a loaded canvas ────────
+  // Exercises the load→migrate→render pipeline the blank-canvas steps can't
+  // reach: a saved sellhub (priced, per-item reminder weeks set) + a listing
+  // card saved WITHOUT createdAt (schemaVersion 2) whose id carries the real
+  // spawn timestamp. On load the v3 migration must recover that date, the
+  // overdue reminder must fire (pulsing border + ack strip), search must find
+  // the item on both hub and card, and the ack must clear the pulse.
+  step('load fixture: listing reminder fires, search finds item, ack clears');
+  const fixturePath = path.join(userDataDir, 'reminder-fixture.json');
+  // 2025-05-01T12:00Z — ~1 year before "now", so a 1-week cadence is overdue.
+  const spawnMs = Date.UTC(2025, 4, 1, 12, 0, 0);
+  await page.evaluate(async ({ filePath, spawnMs: ts }) => {
+    const fixture = {
+      schemaVersion: 2, // pre-createdAt schema — load must run the v3 migration
+      nodes: [
+        {
+          id: 'fixture-sellhub', type: 'sellhub', position: { x: 80, y: 160 },
+          data: {
+            hubState: 'priced',
+            product: { generated_title: 'Acme Widget Deluxe', brand: 'Acme', model: 'WD-100', condition: 'used_good', category: 'electronics' },
+            pricing: { recommended_price: 42, quick_sell_price: 35, max_profit_price: 55, justification: 'e2e fixture' },
+            imagePaths: [],
+            priceDropReminderWeeks: 1,
+          },
+        },
+        {
+          id: `mkt-fixture-sellhub-ebay-${ts}`, type: 'marketplacecard', position: { x: 560, y: 160 },
+          data: {
+            platformId: 'ebay', hubId: 'fixture-sellhub', listingUrl: '', notes: '', status: 'unknown',
+            productSnapshot: { title: 'Acme Widget Deluxe', price: 42 },
+          },
+        },
+      ],
+      edges: [],
+      drawings: [],
+    };
+    await window.electronAPI.saveWorkspace({ data: fixture, filePath });
+    // Point session-restore at the fixture; the reload below auto-loads it.
+    const KEY = 'infiniteCanvas.settings';
+    const settings = JSON.parse(localStorage.getItem(KEY) || '{}');
+    settings.lastOpenedWorkspace = filePath;
+    localStorage.setItem(KEY, JSON.stringify(settings));
+  }, { filePath: fixturePath, spawnMs });
+  await page.reload();
+  await page.waitForLoadState('domcontentloaded');
+  await page.locator('.react-flow__node-sellhub').waitFor();
+  await page.locator('.react-flow__node-marketplacecard').waitFor();
+
+  // Migration recovered the card's TRUE creation date from its id suffix.
+  await page.locator('.react-flow__node-marketplacecard').getByText(/^Created .*2025/).waitFor();
+  // The overdue reminder fired: pulsing border + the ack strip.
+  await page.locator('.react-flow__node-marketplacecard .price-reminder-pulse, .react-flow__node-marketplacecard.price-reminder-pulse').waitFor();
+  await expectVisible(page, 'Still listed — consider lowering the price.');
+  // The hub shows this item's reminder cadence.
+  assert.equal(
+    await page.locator('.react-flow__node-sellhub input[placeholder="off"]').inputValue(), '1',
+    'hub priced state should show the per-item reminder weeks',
+  );
+
+  // Search finds the item on BOTH the hub and its listing card.
+  await page.keyboard.press(`${modKey}+f`);
+  const fixtureSearch = page.locator('[data-search-bar] input');
+  await fixtureSearch.fill('Acme Widget Deluxe');
+  await expectVisible(page, '2 matches');
+  await page.keyboard.press('Escape');
+
+  // Acknowledge: "I lowered the price" clears the pulse and the strip.
+  await page.getByText('I lowered the price', { exact: true }).click();
+  await waitForCount(page.locator('.price-reminder-pulse'), (n) => n === 0, 'ack should clear the reminder pulse');
+  assert.equal(
+    await page.getByText('Still listed — consider lowering the price.').count(), 0,
+    'ack should remove the reminder strip',
+  );
+
+  // The fire + ack wrote node data — save silently (the file path is known) so
+  // the restore-blank reload below isn't blocked by the unsaved-changes guard.
+  await page.keyboard.press(`${modKey}+s`);
+  await page.waitForFunction(() => document.title === 'reminder-fixture');
+
+  // Back to a blank canvas for the rest of the suite.
+  await page.evaluate(() => {
+    const KEY = 'infiniteCanvas.settings';
+    const settings = JSON.parse(localStorage.getItem(KEY) || '{}');
+    settings.lastOpenedWorkspace = null;
+    localStorage.setItem(KEY, JSON.stringify(settings));
+  });
+  await page.reload();
+  await page.waitForLoadState('domcontentloaded');
+  await waitForCount(page.locator('.react-flow__node'), (n) => n === 0, 'restored blank canvas should be empty');
+
   // Create and edit a text node, then verify history controls.
   step('create, edit, undo, and redo text');
   await clickToolbar(page, 'Add Text');
@@ -256,17 +346,20 @@ try {
   step('exercise sidebar drag/drop panels and issue reporter');
   await page.locator('button[title="Jobs"]').click();
   await expectVisible(page, 'Job Search Module');
+  // Module drops land via HTML5 DnD + a React state commit — poll instead of
+  // asserting the instant dragTo returns (the suite's documented flake source;
+  // the Marketplace Status drop was observed flaking 0 !== 1 with bare asserts).
   await page.getByText('Job Search Module', { exact: true }).locator('..').dragTo(
     page.locator('.react-flow__pane'),
     { targetPosition: { x: 700, y: 300 } },
   );
-  assert.equal(await nodeCount(page, 'jobhub'), 1, 'dragging Job Search module should create a hub');
+  await waitForCount(page.locator('.react-flow__node-jobhub'), (n) => n === 1, 'dragging Job Search module should create a hub');
 
   await page.getByText('Job Board Module', { exact: true }).locator('..').dragTo(
     page.locator('.react-flow__pane'),
     { targetPosition: { x: 120, y: 150 } },
   );
-  assert.equal(await nodeCount(page, 'jobboard'), 1, 'dragging Job Board module should create a board');
+  await waitForCount(page.locator('.react-flow__node-jobboard'), (n) => n === 1, 'dragging Job Board module should create a board');
 
   await page.locator('button[title="Sell"]').click();
   await expectVisible(page, 'Price Check Module');
@@ -278,14 +371,14 @@ try {
     page.locator('.react-flow__pane'),
     { targetPosition: { x: 380, y: 600 } },
   );
-  assert.equal(await nodeCount(page, 'sellhub'), 1, 'dragging Marketplace module should create a hub');
+  await waitForCount(page.locator('.react-flow__node-sellhub'), (n) => n === 1, 'dragging Marketplace module should create a hub');
 
   await page.getByText('Marketplace Status Module', { exact: true }).locator('..').dragTo(
     page.locator('.react-flow__pane'),
     { targetPosition: { x: 850, y: 80 } },
   );
-  assert.equal(
-    await nodeCount(page, 'marketplacestatus'), 1,
+  await waitForCount(
+    page.locator('.react-flow__node-marketplacestatus'), (n) => n === 1,
     'dragging Marketplace Status module should create a monitor',
   );
 

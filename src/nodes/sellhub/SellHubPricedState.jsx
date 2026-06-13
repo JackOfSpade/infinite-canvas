@@ -5,7 +5,54 @@ import { TIMINGS } from '../../utils/timings';
 import { SELL_PLATFORMS } from '../../utils/constants';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
+import { useSyncWhileFocused } from '../../hooks/useSyncWhileFocused';
 import { buildFinalListingTitle, normalizeBundlePricingResult, selectListingPriceTiers } from '../../utils/bundlePricing';
+
+/**
+ * Per-ITEM price-drop reminder cadence, stored on the hub
+ * (data.priceDropReminderWeeks) and read by this hub's marketplace cards —
+ * each card pulses when the interval elapses since its creation / last
+ * acknowledged drop (see priceDropReminder.js). Empty / 0 = off.
+ *
+ * Plain-text input with blur-commit (useSyncWhileFocused) so decimals like
+ * "1.5" type naturally and there are no number-spinner artifacts.
+ */
+function PriceDropReminderRow({ weeks, locked, onChange }) {
+  const { value, setValue, focusProps } = useSyncWhileFocused(weeks > 0 ? String(weeks) : '');
+
+  const handleBlur = () => {
+    focusProps.onBlur();
+    const parsed = parseFloat(value);
+    const next = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    onChange?.(next);
+    setValue(next > 0 ? String(next) : '');
+  };
+
+  return (
+    <div className="pt-1">
+      <div className="flex items-center gap-1.5">
+        <TrendingDown size={9} className="text-white/25 shrink-0" />
+        <span className="text-white/35 text-[9px]">Remind to lower price every</span>
+        <input
+          type="text"
+          inputMode="decimal"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onFocus={focusProps.onFocus}
+          onBlur={handleBlur}
+          onPointerDown={(e) => e.stopPropagation()}
+          placeholder="off"
+          disabled={locked}
+          className="nodrag w-10 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-white/70 text-[9px] text-center outline-none focus:border-blue-400/50 disabled:opacity-50 placeholder:text-white/20"
+        />
+        <span className="text-white/35 text-[9px]">weeks</span>
+      </div>
+      <div className="text-white/20 text-[9px] leading-snug mt-0.5">
+        This item's marketplace cards pulse when the interval elapses. Decimals ok; empty = off.
+      </div>
+    </div>
+  );
+}
 
 /**
  * Title that toggles between one-line truncate and full wrapped text on click,
@@ -138,6 +185,10 @@ export function SellHubPricedState({
   // later. Cleared on success OR failure (failure → platformFit stays null →
   // fall back to the unfiltered list below).
   platformFitPending = false,
+  // Per-item price-drop reminder cadence (weeks, decimals ok, 0 = off) —
+  // persisted on the hub, consumed by this hub's marketplace cards.
+  priceDropReminderWeeks = 0,
+  onChangePriceDropReminderWeeks,
 }) {
   const [showUnfit, setShowUnfit] = useState(false);
   const [expandedItemReasons, setExpandedItemReasons] = useState({});
@@ -290,14 +341,14 @@ export function SellHubPricedState({
       </div>
 
       {/* Marketplace cards — spawn one per platform you list on.
-          Each card persists on the canvas, holds its own listing URL, and can
-          be status-checked independently. Replaces the old auto-post toggles. */}
+          Each card persists on the canvas and holds its own listing URL and
+          personal notes. Replaces the old auto-post toggles. */}
       <div className="pt-1 border-t border-white/5 space-y-1.5">
         <div className="text-white/20 text-[9px] font-semibold uppercase tracking-wider">
           Marketplaces
         </div>
         <div className="text-white/30 text-[9px] leading-snug">
-          Spawn a card for each marketplace you list on. Each card holds a listing URL you paste after posting manually. Use a Marketplace Status Module to monitor them.
+          Spawn a card for each marketplace you list on. Each card holds a listing URL and personal notes. Use a Marketplace Status Module to monitor them.
         </div>
         {platformFitPending ? (
           // Fit assessment still running — hold the list rather than show every
@@ -379,6 +430,11 @@ export function SellHubPricedState({
             </>
           );
         })()}
+        <PriceDropReminderRow
+          weeks={Number(priceDropReminderWeeks) || 0}
+          locked={locked}
+          onChange={onChangePriceDropReminderWeeks}
+        />
       </div>
 
       {/* Refresh prices */}

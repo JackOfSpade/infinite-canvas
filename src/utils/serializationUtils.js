@@ -1,4 +1,5 @@
 import { getNodeDims } from './constants.js';
+import { createdAtMsFromCardId } from './priceDropReminder.js';
 import {
   getJobSearchTransientKeysForSave,
   SELLHUB_TRANSIENT_KEYS,
@@ -173,6 +174,25 @@ export function migrateLegacyJobHubResults(nodes) {
   return out;
 }
 
+/**
+ * Stamp `createdAt` on marketplace listing cards saved before the card carried
+ * a creation timestamp (the price-drop reminder anchors on it). The card's id
+ * embeds its real Date.now() spawn suffix, so existing cards usually recover
+ * their TRUE creation date; ids without a plausible timestamp fall back to
+ * "now". Shape-gated on the field being absent, so it runs once per card.
+ */
+export function migrateMarketplaceCardCreatedAt(nodes) {
+  if (!Array.isArray(nodes)) return nodes;
+  let changed = false;
+  const out = nodes.map(n => {
+    if (n.type !== 'marketplacecard' || n.data?.createdAt) return n;
+    changed = true;
+    const fromId = createdAtMsFromCardId(n.id);
+    return { ...n, data: { ...n.data, createdAt: new Date(fromId ?? Date.now()).toISOString() } };
+  });
+  return changed ? out : nodes;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Versioned node-migration framework
 //
@@ -198,6 +218,7 @@ export function migrateLegacyJobHubResults(nodes) {
 const MIGRATIONS = [
   { version: 1, name: 'group→canvasData',        migrate: migrateGroupNodes,          selfRecursive: true  },
   { version: 2, name: 'legacy-jobhub→scoredJobs', migrate: migrateLegacyJobHubResults, selfRecursive: false },
+  { version: 3, name: 'marketplacecard+createdAt', migrate: migrateMarketplaceCardCreatedAt, selfRecursive: false },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.length ? MIGRATIONS[MIGRATIONS.length - 1].version : 0;
@@ -280,15 +301,30 @@ export function sanitizeNodesForSave(nodes) {
   if (!Array.isArray(nodes)) return nodes;
   // Drop ephemeral nodes (e.g. comp-source cards spawned during price research)
   // EXCEPT those carrying actionable warning/error state — those represent a
-  // paused 'comps-ready' flow the user needs to recover on reload. Without
-  // this carve-out, quitting from comps-ready would persist the hub (with
-  // pendingComps and scrapeWarnings) but strip the cards that hold the
-  // Solve/Skip buttons, leaving the user no way to act.
+  // paused 'comps-ready'/'sources-ready' flow the user needs to recover on
+  // reload. Without this carve-out, quitting from a paused state would persist
+  // the hub (with pendingJobs/pendingComps and scrapeWarnings) but strip the
+  // cards that hold the Solve/Skip buttons, leaving the user no way to act.
+  //
+  // The carve-out is scoped to hubs that KEEP their run context across the
+  // reload: a hub saved mid-run (a TRANSIENT_PROCESSING_HUB_STATE, e.g.
+  // 'searching') is reset to 'empty' below with its pendingJobs/scrapeWarnings
+  // stripped — persisting its warned cards would orphan Solve buttons over a
+  // hub that no longer knows about the run (and the staging sidecar's Resume
+  // banner is the real recovery path there). Hub gone entirely → same drop.
+  const hubStateById = new Map();
+  for (const n of nodes) {
+    if (n.type === 'jobhub' || n.type === 'sellhub') hubStateById.set(n.id, n.data?.hubState || 'empty');
+  }
   const filtered = nodes.filter(n => {
     const isEphemeral = n.type === 'compsourcecard' || n.type === 'jobsourcecard' || n.data?.ephemeral;
     if (!isEphemeral) return true;
     const p = n.data?.persistedProgress;
-    return !!(p?.warning || p?.status === 'error');
+    if (!(p?.warning || p?.status === 'error')) return false;
+    const hubId = n.data?.hubId;
+    if (!hubId) return true; // not hub-owned — keep the old behavior
+    if (!hubStateById.has(hubId)) return false; // owning hub gone → orphan
+    return !TRANSIENT_PROCESSING_HUB_STATES.includes(hubStateById.get(hubId));
   });
   return filtered.map(n => {
     // Recurse into nested canvas nodes first so deeply-nested nodes are also sanitized.

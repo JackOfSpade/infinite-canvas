@@ -1,9 +1,9 @@
-import React from 'react';
-import { useReactFlow } from '@xyflow/react';
+import React, { useCallback } from 'react';
+import { useReactFlow, useStore } from '@xyflow/react';
 import { ChevronRight, ChevronDown, Plus } from 'lucide-react';
 import { NodeHandles } from './_shared/NodeHandles';
 import { EventLogger } from '../utils/EventLogger';
-import { computeJobTreeView } from './jobsearch/buildJobTree';
+import { computeJobTreeView, countMatchingDescendantCards } from './jobsearch/buildJobTree';
 
 /**
  * JobGroupNode — collapsible header that owns a slice of the job-tree.
@@ -15,22 +15,28 @@ import { computeJobTreeView } from './jobsearch/buildJobTree';
  *                         Reveals all on expand.
  *   - kind='role'       — job-role grouping (the LEAF). Children are JobCardNode.
  *                         Paginated: only the first `visibleCount` (default 10)
- *                         are shown on expand; "Show more" reveals the next 10.
+ *                         MATCHING cards are shown on expand; "Show more"
+ *                         reveals the next 10.
  *
- * Click toggles expand. Expanding flips `hidden: false` on each direct child up
- * to `visibleCount` (role leaves only — likelihood/salary show all direct
- * children at once). Collapsing recursively re-hides EVERYTHING under this node
- * so a closed parent never leaves stale visible descendants.
+ * Click toggles expand. Collapsing recursively re-hides EVERYTHING under this
+ * node so a closed parent never leaves stale visible descendants.
+ *
+ * The count badge and the pagination math are LIVE: they count the matching,
+ * still-on-canvas descendant cards via a store selector — cards are disposable
+ * (dismissal is the primary interaction) and the spawned `data.count`/raw
+ * childIds would otherwise drift stale, showing ghost counts and pagination
+ * windows full of deleted ids. The owning hub's lock flag is read through the
+ * same reactive store so locking the board freezes already-mounted groups too.
  *
  * data shape:
  *   {
  *     kind: 'likelihood' | 'salary' | 'role',
  *     label: string,
- *     count: number,
+ *     count: number,         // spawn-time total (display fallback only)
  *     hubId: string,
  *     childIds: string[],
  *     expanded?: boolean,
- *     visibleCount?: number,  // role only — how many cards are currently revealed
+ *     visibleCount?: number, // role only — how many matching cards are revealed
  *   }
  */
 export function JobGroupNode({ id, data }) {
@@ -41,21 +47,37 @@ export function JobGroupNode({ id, data }) {
   const isLikelihood = kind === 'likelihood';
   const isSalary     = kind === 'salary';
   const isLeaf       = kind === 'role'; // leaf group: paginates its job cards
-  // Hub-cascading lock: when the owning Job Search Module is locked, expand/collapse
-  // becomes a no-op so the canvas state can't be mutated.
-  const hubLocked = !!getNode(data.hubId)?.data?.locked;
+  const childIds = Array.isArray(data.childIds) ? data.childIds : [];
+
+  // Hub-cascading lock + live matching-card count, both reactive: a plain
+  // getNode() read goes stale on already-mounted groups (locking the hub or
+  // dismissing a card doesn't re-render THIS node), so badge, "Show more"
+  // math, and the lock guard all derive from a store selector instead.
+  const hubLocked = useStore(
+    useCallback((s) => !!s.nodeLookup.get(data.hubId)?.data?.locked, [data.hubId])
+  );
+  const liveCount = useStore(
+    useCallback((s) => {
+      const hubData = s.nodeLookup.get(data.hubId)?.data || {};
+      return countMatchingDescendantCards(
+        data.childIds || [],
+        (nid) => s.nodeLookup.get(nid),
+        { scoreThreshold: hubData.scoreThreshold ?? 0, sourceFilter: hubData.sourceFilter ?? null },
+      );
+    }, [data.hubId, data.childIds])
+  );
+
+  const visibleCount = isLeaf
+    ? Math.min(data.visibleCount ?? 10, liveCount)
+    : liveCount;
+  const hasMore = isLeaf && visibleCount < liveCount;
+  const remaining = liveCount - visibleCount;
 
   const accent = isLikelihood
     ? { border: '#a855f755', text: 'text-purple-100', count: 'bg-purple-500/25 text-purple-100' }
     : isSalary
       ? { border: '#3b82f655', text: 'text-blue-200',  count: 'bg-blue-500/25 text-blue-100' }
       : { border: '#14b8a655', text: 'text-teal-100',  count: 'bg-teal-500/25 text-teal-100' };
-
-  const childIds = Array.isArray(data.childIds) ? data.childIds : [];
-  const visibleCount = isLeaf
-    ? Math.min(data.visibleCount ?? 10, childIds.length)
-    : childIds.length;
-  const hasMore = isLeaf && visibleCount < childIds.length;
 
   // The owning hub/board's active card filter — reveal must respect it, so an
   // expand under a filter only shows matching cards / non-empty branches.
@@ -118,7 +140,7 @@ export function JobGroupNode({ id, data }) {
   const showMore = (e) => {
     e.stopPropagation();
     if (!isLeaf || !hasMore || hubLocked) return;
-    const nextCount = Math.min(visibleCount + 10, childIds.length);
+    const nextCount = Math.min(visibleCount + 10, liveCount);
     const filter = hubFilter();
     setNodes(nodes =>
       computeJobTreeView(
@@ -127,7 +149,7 @@ export function JobGroupNode({ id, data }) {
         filter,
       ),
     );
-    EventLogger.log(`[JobTree] show more in role "${data.label}" id=${id} (now ${nextCount}/${childIds.length})`);
+    EventLogger.log(`[JobTree] show more in role "${data.label}" id=${id} (now ${nextCount}/${liveCount})`);
   };
 
   return (
@@ -148,7 +170,7 @@ export function JobGroupNode({ id, data }) {
           : <ChevronRight size={14} className="text-white/60 shrink-0" />}
         <span className={`flex-1 min-w-0 text-[12px] font-semibold truncate ${accent.text}`}>{data.label}</span>
         <span className={`text-[10px] font-bold leading-none px-2 py-1 rounded-full ${accent.count}`}>
-          {data.count ?? 0}
+          {liveCount}
         </span>
       </div>
       {/* Pagination control: only on expanded buckets that have more hidden
@@ -159,10 +181,10 @@ export function JobGroupNode({ id, data }) {
           onClick={showMore}
           onPointerDown={(e) => e.stopPropagation()}
           className="nodrag w-full flex items-center justify-center gap-1 px-2 py-1.5 bg-white/[0.03] hover:bg-white/10 text-white/50 hover:text-white/80 text-[10px] border-t border-white/5 transition-colors"
-          title={`Show next ${Math.min(10, childIds.length - visibleCount)} of ${childIds.length - visibleCount} remaining`}
+          title={`Show next ${Math.min(10, remaining)} of ${remaining} remaining`}
         >
           <Plus size={10} />
-          Show {Math.min(10, childIds.length - visibleCount)} more · {childIds.length - visibleCount} left
+          Show {Math.min(10, remaining)} more · {remaining} left
         </button>
       )}
     </div>

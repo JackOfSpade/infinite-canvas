@@ -19,7 +19,7 @@ import { JOB_MAX_PAGES, JOB_RESULT_CAP, JOB_PER_PAGE_CAP } from '../ipc/resultCa
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from '../ipc/browser/scraperOverlay.js';
 import { humanCooldown } from '../utils/humanDelay.js';
-import { jobTitleCompanyKey } from '../../src/utils/jobIdentity.js';
+import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 
 // Display-only overlay — no pause button or exposeFunction CDP bindings (Cloudflare fingerprint risk).
 const OVERLAY_SCRIPT = buildOverlayScript({ withPause: false });
@@ -659,7 +659,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         const pageAdded = [];
         for (let i = 0; i < pageJobs.length; i++) {
           const job = pageJobs[i];
-          const dk = job.jobkey || job.url || jobTitleCompanyKey(job);
+          const dk = sourceJobKey(job);
           if (seenKeys.has(dk)) continue;
           seenKeys.add(dk);
           allJobs.push(job);

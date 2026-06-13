@@ -15,14 +15,20 @@
  *                                  signal + where each (source,query) got to:
  *     {
  *       version, runId, startedAt, lastUpdated,
- *       stage: 'searching' | 'scoring' | 'bucketing' | 'done',
+ *       stage: 'searching' | 'gathered',
  *       inputs: { queries, profileFingerprint, targetRole, maxAgeDays, nodeId },
  *       sources: { [sourceId]: { status: 'pending'|'done'|'blocked',
  *                                queries: { [query]: { lastPage } } } }
  *     }
  *
- * On a clean finish both files are deleted. On the next launch, an incomplete +
- * recent manifest is what the renderer detects to offer "Resume or start fresh?".
+ * `stage` values actually written: 'searching' (run start / resume re-entry)
+ * and 'gathered' (search phase finished; the renderer-driven scoring/bucketing
+ * that follows can crash and still resume from the staged jobs). There is NO
+ * 'done' stage — a clean finish is signaled by DELETING both sidecars
+ * (complete-job-run), so any manifest on disk means an unfinished run.
+ *
+ * On the next launch, an incomplete + recent manifest is what the renderer
+ * detects to offer "Resume or start fresh?".
  *
  * Atomicity: the manifest is written tmp→rename (never half-written). The staging
  * file is append-only — a torn final line after a hard crash is just one
@@ -160,7 +166,7 @@ export async function markSourceStatus(canvasFilePath, sourceId, status, now) {
   });
 }
 
-/** Advance the pipeline stage ('searching'→'scoring'→'bucketing'→'done'). */
+/** Advance the pipeline stage ('searching'→'gathered'; see the header). */
 export async function setStage(canvasFilePath, stage, now) {
   const files = runFilesForCanvas(canvasFilePath);
   if (!files) return;
@@ -198,13 +204,38 @@ export async function readStagedJobs(canvasFilePath) {
 export async function readRunState(canvasFilePath, now = null) {
   const manifest = await readManifest(canvasFilePath);
   if (!manifest) return null;
-  const incomplete = manifest.stage !== 'done';
+  // A manifest on disk IS an unfinished run — clean finishes delete the
+  // sidecars (see header). `incomplete` is kept on the return shape for the
+  // renderer's peek payload rather than re-derived at every consumer.
+  const incomplete = true;
   const ageMs = (typeof now === 'number' && typeof manifest.lastUpdated === 'number')
     ? now - manifest.lastUpdated
     : null;
   const recent = ageMs == null ? true : ageMs <= RESUMABLE_MAX_AGE_MS;
-  const stagedJobs = incomplete ? await readStagedJobs(canvasFilePath) : [];
+  const stagedJobs = await readStagedJobs(canvasFilePath);
   return { manifest, stagedJobs, incomplete, ageMs, resumable: incomplete && recent };
+}
+
+/**
+ * 1-based page a URL-paginated source should resume from, given its manifest
+ * ledger. Fast-forwards to min(lastPage)+1 ONLY when every query of the run
+ * recorded at least one page — buildJobTasks applies ONE start page to EVERY
+ * query of the source, and a query that crashed before flushing its first page
+ * has no ledger entry, so fast-forwarding past page min(...) would silently
+ * skip that query's early pages. Any unrecorded query ⇒ restart at page 1
+ * (the cross-source dedup absorbs the re-scraped overlap).
+ *
+ * @param {object} sourceLedger  manifest.sources[sid] ({ queries: { [q]: { lastPage } } })
+ * @param {number} totalQueryCount  how many queries the run scrapes per source
+ * @returns {number} 1-based start page
+ */
+export function computeResumeStartPage(sourceLedger, totalQueryCount) {
+  const qmap = sourceLedger?.queries || {};
+  const pages = Object.values(qmap)
+    .map(q => q?.lastPage)
+    .filter(n => typeof n === 'number' && n >= 0);
+  const allQueriesRecorded = pages.length >= Math.max(1, totalQueryCount | 0);
+  return (pages.length && allQueriesRecorded) ? Math.min(...pages) + 1 : 1;
 }
 
 /**

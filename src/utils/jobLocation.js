@@ -58,8 +58,8 @@ function detectCountryTarget(seg) {
  * Flatten the structured canonicalLocation into one board-ready location-filter
  * string — deterministically, so a stray prose token the model might leave in
  * `display` can never reach a board's location field. Most-specific scope wins:
- * city (+ US state code or non-US province) → region → place-shaped display →
- * (remote ⇒ no param) → country → raw fallback. For NON-US places the country is
+ * city (+ US state code or non-US province) → region → (remote ⇒ no param) →
+ * place-shaped display → country → raw fallback. For NON-US places the country is
  * appended ("Whitby, Ontario, Canada") so an international city isn't ambiguous;
  * US places omit it ("Denver, CO"). Returns "" for remote-only / unresolvable so
  * no geo param is sent (nationwide, which already includes remote). Country is the
@@ -90,21 +90,28 @@ export function deriveLocationParam(struct, rawFallback = '') {
     return withCountry(sub ? `${city}, ${sub}` : city);
   }
   if (region) return withCountry(region);
+  // Remote-only → no geo param (nationwide already includes remote). Checked
+  // BEFORE the display fallback AND before country: a remote-in-country search
+  // often arrives as {isRemote: true, display: "Remote, United States"} — that
+  // display is "place-shaped" by the guard below, so checking it first used to
+  // leak the literal string "Remote, United States" into every board's location
+  // filter (Indeed l=, ZipRecruiter location=, USAJobs LocationName=…), which
+  // zero-results or mis-filters. isRemote with a real city/region resolved above
+  // still geo-filters (hybrid searches want the place).
+  if (struct.isRemote) return '';
   // Only trust the model's free-text `display` if it's PLACE-SHAPED (short, no
-  // sentence punctuation, no prose filler). The schema says display must be a
-  // place, never a sentence — this guards against model misbehavior so a stray
-  // phrase ("somewhere in the midwest, ideally") never reaches a board's location
+  // sentence punctuation, no prose filler — and no "remote", which is a work
+  // mode, not a place). The schema says display must be a place, never a
+  // sentence — this guards against model misbehavior so a stray phrase
+  // ("somewhere in the midwest, ideally") never reaches a board's location
   // field. Word/length bounds allow "City, Province, Country". Rarely reached now
   // that city/region assemble above; an unshaped display falls back to raw input.
   const placeShaped = display
     && display.length <= 48
     && !/[.;:!?]/.test(display)
     && (display.match(/\s/g) || []).length <= 5
-    && !/\b(in|of|the|or|near|around|somewhere|anywhere|ideally|preferably|maybe)\b/i.test(display);
-  if (placeShaped && !/^remote$/i.test(display)) return display;
-  // Remote-only → no geo param. Checked BEFORE country so a "remote in the US"
-  // search isn't pinned to "United States" (country is always set on US searches).
-  if (struct.isRemote) return '';
+    && !/\b(in|of|the|or|near|around|somewhere|anywhere|ideally|preferably|maybe|remote|hybrid)\b/i.test(display);
+  if (placeShaped) return display;
   // Country-only scope (nothing finer resolved) — emitted from the structured
   // field (already normalized above) so a genuine country search ("Canada") and
   // the career-data no-location default reach every board's filter.

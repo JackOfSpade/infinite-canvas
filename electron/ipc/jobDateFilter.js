@@ -6,26 +6,52 @@
  * relevant listing because the source uses some format we missed.
  */
 
+// ── Single source of truth for relative-date units ──────────────────────────
+// One table drives all three consumers that previously each kept their own
+// list (and drifted: the harvest pattern captured "second/year/posted today"
+// that the parser couldn't convert, so a "Posted today" job parsed to null and
+// sorted BEHIND month-old jobs, and "2 years ago" leaked through the age
+// filter):
+//   1. POSTED_DATE_PATTERN — the browser-injected harvest regex (manualScraper)
+//   2. the relative matcher inside parsePostedDate
+//   3. the unit→days multiplier
+// Each family lists its tokens longest-first so a short unit never shadows a
+// longer one ("months?" before "mo" before bare "m"); the day count rides
+// alongside so a token can never exist without a conversion.
+const UNIT_FAMILIES = [
+  { tokens: ['years?', 'yrs?', 'y'], days: 365 },
+  { tokens: ['months?', 'mo'], days: 30 },
+  { tokens: ['weeks?', 'w'], days: 7 },
+  { tokens: ['days?', 'd'], days: 1 },
+  // Hours / minutes / seconds → same calendar day. Bare "m" is minutes
+  // (LinkedIn/Twitter convention); "mo" above wins for months.
+  { tokens: ['hours?', 'h', 'minutes?', 'mins?', 'm', 'seconds?', 'secs?', 's'], days: 0 },
+];
+const UNIT_ALTERNATION = UNIT_FAMILIES.flatMap(f => f.tokens).join('|');
+const UNIT_TO_DAYS = UNIT_FAMILIES.map(f => [new RegExp(`^(?:${f.tokens.join('|')})$`), f.days]);
+
+// "Fresh right now" phrases with no number to convert — parsed as today.
+// HARVEST_TODAY_PHRASES feed the browser-injected pattern and deliberately
+// EXCLUDE bare "today": page prose ("Apply today!") would match it and stamp a
+// stale job as fresh. The parser additionally accepts bare "today" because
+// structured extractors hand it over as the complete posted string.
+const HARVEST_TODAY_PHRASES = ['just posted', 'posted today', 'just now'];
+const TODAY_PHRASES = [...HARVEST_TODAY_PHRASES, 'today'];
+
 // Relative-date pattern for the visible "Posted X ago" label some detail pages
 // expose with NO structured date (verified on ZipRecruiter's /jobs/{co}/{slug}
 // pages: no JSON-LD / __NEXT_DATA__ / <time>). A source string so it can be both
 // injected into a browser-context evaluate (manualScraper's description harvest)
-// AND unit-tested here against parsePostedDate. Captures the clean phrase —
-// "28 days ago", "just posted", etc. — which parsePostedDate turns into an age.
-export const POSTED_DATE_PATTERN = '(\\d+\\+?\\s*(?:second|minute|hour|day|week|month|year)s?\\s*ago|just\\s*posted|posted\\s*today|just\\s*now)';
+// AND unit-tested here against parsePostedDate. Built from the SAME unit table
+// the parser consumes, so the harvest can never capture a phrase the parser
+// can't convert. Captures the clean phrase — "28 days ago", "just posted", etc.
+export const POSTED_DATE_PATTERN =
+  `(\\d+\\+?\\s*(?:${UNIT_ALTERNATION})\\s*ago|${HARVEST_TODAY_PHRASES.join('|').replace(/ /g, '\\s*')})`;
 
-// Relative-unit token → day multiplier. Each pattern is fully anchored (^…$)
-// so a token matches EXACTLY its set — there's no "starts-with-mo" overlap
-// between months ("mo") and minutes ("m"), which is the disambiguation the old
-// unanchored /^mo/ etc. relied on alternation luck to get right. Hours and
-// minutes map to 0 (same calendar day). The matcher regex below lists each
-// family longest-first so a short unit never shadows a longer one.
-const UNIT_TO_DAYS = [
-  [/^(?:months?|mo)$/, 30],
-  [/^(?:weeks?|w)$/, 7],
-  [/^(?:days?|d)$/, 1],
-  [/^(?:hours?|h|minutes?|mins?|m)$/, 0],
-];
+// `\b` after the unit so "3 saturdays" can't match bare "s"; longest-first
+// within each family so the engine never grabs a short prefix when a longer
+// unit is present.
+const RELATIVE_MATCHER = new RegExp(`(\\d+)\\+?\\s*(${UNIT_ALTERNATION})\\b`);
 
 export function parsePostedDate(raw) {
   if (!raw) return null;
@@ -42,7 +68,12 @@ export function parsePostedDate(raw) {
   }
 
   const lower = s.toLowerCase();
-  if (lower === 'today' || lower === 'just posted' || lower === 'just now' || lower.includes('active today')) {
+  // 'active today' arrives embedded in longer Indeed strings → substring match;
+  // the standalone phrases ('posted today', 'just posted', …) match exactly,
+  // with whitespace collapsed because the harvest pattern's `\s*` can capture
+  // doubled spaces ("posted  today") verbatim.
+  const norm = lower.replace(/\s+/g, ' ');
+  if (TODAY_PHRASES.includes(norm) || lower.includes('active today')) {
     return new Date();
   }
   if (lower === 'yesterday') {
@@ -51,16 +82,10 @@ export function parsePostedDate(raw) {
     return d;
   }
 
-  // "Nd ago" / "N days ago" / "Nh ago" / "N weeks ago" / "N months ago"
-  // Note: bare "Nm" is treated as minutes (matches the LinkedIn/Twitter
-  // convention); "Nmo" is months. Both are recent enough that any reasonable
-  // maxAgeDays will keep them.
-  // Longest-first within each family (months? before mo, weeks? before w, …)
-  // so the engine never grabs a short prefix when a longer unit is present —
-  // correctness no longer depends on the trailing \b alone.
+  // "Nd ago" / "N days ago" / "Nh ago" / "N weeks ago" / "N months ago" …
   // `\+?` tolerates LinkedIn's oldest-bucket literal "30+ days ago" (treated as
   // exactly 30 days — the conservative floor, so any maxAgeDays < 30 drops it).
-  const m = lower.match(/(\d+)\+?\s*(months?|mo|weeks?|w|days?|d|hours?|h|minutes?|mins?|m)\b/);
+  const m = lower.match(RELATIVE_MATCHER);
   if (m) {
     const n = parseInt(m[1], 10);
     const unit = m[2];
