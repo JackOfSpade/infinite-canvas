@@ -16,7 +16,12 @@ export function getRuntimeEnv() {
 }
 
 export function getEnvValue(env, key) {
-  return env[key] ?? env[`VITE_${key}`];
+  // Treat a defined-but-empty unprefixed var (e.g. `FOO=` in a shell/.env) as
+  // absent so it doesn't shadow a real `VITE_FOO=true`. Plain `??` only falls
+  // through on null/undefined, which would return '' here and hide the prefixed value.
+  const direct = env[key];
+  if (direct != null && direct !== '') return direct;
+  return env[`VITE_${key}`];
 }
 
 // Parse a scope env var into a boolean: known truthy/falsy spellings win, an

@@ -46,22 +46,19 @@ export async function readStatusCache() {
 export function getStatusCacheSync() {
   return _statusCache;
 }
-/**
- * After the login window closes, verify the user actually completed login
- * by hitting the platform's seller URL with the same persistent userDataDir
- * cookies. If the response 4xxs or redirects to /login etc., we know the
- * user closed the window without finishing — and we should NOT cache
- * connected:true.
- *
- * Returns { connected, reason } so callers can surface a meaningful message
- * ("redirected to login" vs "server error vs verifying") rather than just a
- * bare boolean.
- */
+
+/** True only when a verifier positively established that the session is out. */
+export function isConfirmedDisconnectedVerdict(verdict) {
+  return verdict?.connected === false && verdict?.inconclusive !== true;
+}
+
 /**
  * Returns { connected, reason, trace } where trace is a diagnostic record
  * the cache persists (target URL, final URL, status, body-sniff result).
  * The trace is what the bug report surfaces when "I just logged in but the
  * pill still says Log in" — without it the verifier is a black box.
+ * Inconclusive transport failures are explicitly not confirmed disconnects;
+ * callers should use isConfirmedDisconnectedVerdict before gating work.
  */
 export async function verifySellMonitorLogin(platformId) {
   // Outer try/catch so any unforeseen exception (Chrome failed to launch,

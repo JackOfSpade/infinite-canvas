@@ -1,21 +1,20 @@
 /**
- * Status-code → human label map for the marketplace monitor pill — the status
- * codes the AI classifier emits via `check-listing-status`, mapped to wording.
- * (A parallel job-board vocabulary once lived here, but the transient-card
- * overhaul removed job-card monitoring, so only the marketplace map remains.)
+ * Status-code → human label map for the Marketplace Status Module's per-platform
+ * monitor pill — the hub-scan read states (`ok` / `needs-login` / `error` /
+ * `unknown`) mapped to wording. (A per-listing label map and a job-board
+ * vocabulary once lived here too, but both of those monitoring paths were
+ * removed, so only the hub-scan map remains.)
  */
 
-export const MARKETPLACE_STATUS_LABELS = {
-  live:          'Live',
-  sold:          'Sold',
-  ended:         'Ended',
-  expired:       'Ended', // back-compat: nodes saved before the rename
-  'needs-login': 'Needs login',
+const MARKETPLACE_HUB_STATUS_LABELS = {
+  ok:            'Checked',
+  'needs-login': 'Login needed',
   error:         'Error',
   unknown:       'Unknown',
 };
 
-export function getMarketplaceStatusLabel(status, lastChecked) {
-  if (status === 'unknown' && !lastChecked) return 'Not checked';
-  return MARKETPLACE_STATUS_LABELS[status] || MARKETPLACE_STATUS_LABELS.unknown || status;
+/** Marketplace Status Module labels use platform-level hub-scan states. */
+export function getMarketplaceHubStatusLabel(status, lastChecked) {
+  if ((!status || status === 'unknown') && !lastChecked) return 'Not checked';
+  return MARKETPLACE_HUB_STATUS_LABELS[status] || MARKETPLACE_HUB_STATUS_LABELS.unknown;
 }

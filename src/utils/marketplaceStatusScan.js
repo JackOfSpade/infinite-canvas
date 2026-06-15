@@ -8,8 +8,13 @@
  * Modules. The result tells the status module which platforms the user actually
  * has listings on *in this canvas*, so it only ever checks those.
  *
+ * The module only needs to know which platforms are represented and how many
+ * cards each has. Listing URLs/titles are deliberately not collected: hub scans
+ * are platform-level, and including per-card content in the subscription
+ * signature caused unrelated URL/title edits to re-render the whole module.
+ *
  * Returns a Map keyed by platformId:
- *   platformId → { platformId, listingCount, listingUrls: string[], titles: string[] }
+ *   platformId → { platformId, listingCount }
  */
 export function collectMarketplaceListings(nodes) {
   const byPlatform = new Map();
@@ -23,14 +28,10 @@ export function collectMarketplaceListings(nodes) {
         if (platformId) {
           let entry = byPlatform.get(platformId);
           if (!entry) {
-            entry = { platformId, listingCount: 0, listingUrls: [], titles: [] };
+            entry = { platformId, listingCount: 0 };
             byPlatform.set(platformId, entry);
           }
           entry.listingCount += 1;
-          const url = String(node.data?.listingUrl || '').trim();
-          if (url) entry.listingUrls.push(url);
-          const title = node.data?.productSnapshot?.title;
-          if (title) entry.titles.push(title);
         }
       }
       // Recurse into nested canvases (group nodes hold a full canvasData tree).
@@ -41,4 +42,13 @@ export function collectMarketplaceListings(nodes) {
 
   visit(nodes);
   return byPlatform;
+}
+
+/** Stable equality signature for the Marketplace Status store subscription. */
+export function marketplaceListingsSignature(map) {
+  if (!(map instanceof Map)) return '';
+  return [...map.values()]
+    .map((entry) => `${entry.platformId}:${entry.listingCount}`)
+    .sort()
+    .join('|');
 }

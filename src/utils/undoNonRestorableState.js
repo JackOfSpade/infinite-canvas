@@ -1,7 +1,9 @@
-// Marketplace-card data driven by background processes (status checks, the
-// price-drop reminder clock) rather than user edits. Stripped from undo
-// fingerprints/snapshots and re-merged from the live nodes on restore, so
-// undo/redo never resurrects a cleared reminder or rolls back a status check.
+// Marketplace-card data that must not participate in undo: the price-drop
+// reminder clock fields (live), plus the per-card status-check fields the
+// Marketplace Status Module retired — kept here so an OLD saved canvas still
+// carrying them stays undo-isolated. Stripped from undo fingerprints/snapshots
+// and re-merged from the live nodes on restore, so undo/redo never resurrects a
+// cleared reminder or rolls one of these background fields back.
 const MARKETPLACE_STATUS_FIELDS = [
   'status',
   'statusMessage',

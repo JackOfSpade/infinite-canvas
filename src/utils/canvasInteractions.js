@@ -25,16 +25,18 @@ export const TitleZoneCorrection = new Map();
 
 /**
  * Recursively cancels active background IPC tasks for a node tree.
- * Requires `window.electronAPI.cancelNodeTask` to be available — callers
- * are responsible for the existence check before calling this function.
+ * Optional-chains the IPC call so a missing `window.electronAPI` (or a single
+ * throwing cancel) can't abort the recursion mid-tree and strand the remaining
+ * nodes' background tasks (partial cancellation).
  *
  * @param {Array}  nodes   - Array of ReactFlow node objects to process
  * @param {Set}   [skipIds] - Optional set of node IDs to skip (e.g. locked nodes)
  */
 export function cancelNodeTasksRecursively(nodes, skipIds) {
+  if (!Array.isArray(nodes)) return;
   nodes.forEach(n => {
     if (skipIds?.has(n.id)) return;
-    window.electronAPI.cancelNodeTask(n.id);
+    window.electronAPI?.cancelNodeTask?.(n.id);
     if (n.data?.canvasData?.nodes) cancelNodeTasksRecursively(n.data.canvasData.nodes, skipIds);
     // Legacy nodes shape fallback
     if (n.data?.nodes) cancelNodeTasksRecursively(n.data.nodes, skipIds);

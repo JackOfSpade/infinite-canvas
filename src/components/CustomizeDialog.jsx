@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Dialog } from './Dialog';
+import { normalizeStaticGlowColor, parseStaticGlowColor } from '../utils/staticGlowColor';
 
 /**
  * Font family options available in the picker.
@@ -62,6 +63,7 @@ const TEXT_COLORS = [
 ];
 
 const BG_COLORS = ['transparent', ...TEXT_COLORS];
+const GLOW_COLORS = ['transparent', ...TEXT_COLORS];
 
 const ColorSection = ({ label, colors, value, onSwatchClick, onInputChange, onInputBlur }) => {
   const currentRep = (value === null || value === '') ? 'transparent' : value;
@@ -105,9 +107,12 @@ export function CustomizeDialog({
   fontFamily: initialFamily,
   textColor: initialColor = '#ffffff',
   backgroundColor: initialBgColor = 'transparent',
+  staticGlowColor: initialStaticGlowColor = 'transparent',
   titleSpacing: initialSpacing,
   showFont = false,
   showSpacing = false,
+  showBackground = true,
+  showStaticGlow = false,
   onApply,
   onClose,
 }) {
@@ -115,6 +120,8 @@ export function CustomizeDialog({
   const [fontFamily, setFontFamily] = useState(initialFamily || 'sans-serif');
   const [textColor, setTextColor] = useState(initialColor);
   const [backgroundColor, setBackgroundColor] = useState(initialBgColor);
+  const [staticGlowColor, setStaticGlowColor] = useState(() => normalizeStaticGlowColor(initialStaticGlowColor));
+  const appliedStaticGlowColorRef = useRef(normalizeStaticGlowColor(initialStaticGlowColor));
   const [titleSpacing, setTitleSpacing] = useState(initialSpacing ?? 0);
 
   const hasFont = showFont;
@@ -124,7 +131,8 @@ export function CustomizeDialog({
     const payload = {
       ...(hasFont ? { fontSize, fontFamily, textColor } : {}),
       ...(showSpacing ? { titleSpacing } : {}),
-      backgroundColor,
+      ...(showBackground ? { backgroundColor } : {}),
+      ...(showStaticGlow ? { staticGlowColor: appliedStaticGlowColorRef.current } : {}),
       ...overrides
     };
     const cleanPayload = Object.fromEntries(Object.entries(payload).filter(([, v]) => v !== undefined));
@@ -187,6 +195,27 @@ export function CustomizeDialog({
     if (val === '' || /^#[0-9a-fA-F]{3,8}$/.test(val) || /^rgba?\(/.test(val) || /^[a-zA-Z]+$/.test(val)) {
       emit({ backgroundColor: finalColor });
     }
+  };
+
+  const handleStaticGlowSwatch = (c) => {
+    const finalColor = c === 'transparent' ? null : c;
+    setStaticGlowColor(finalColor);
+    appliedStaticGlowColorRef.current = finalColor;
+    emit({ staticGlowColor: finalColor });
+  };
+
+  const handleStaticGlowInput = (val) => {
+    setStaticGlowColor(val);
+    const parsed = parseStaticGlowColor(val);
+    if (parsed.valid) {
+      appliedStaticGlowColorRef.current = parsed.color;
+      emit({ staticGlowColor: parsed.color });
+    }
+  };
+
+  const handleStaticGlowBlur = (val) => {
+    const parsed = parseStaticGlowColor(val);
+    setStaticGlowColor(parsed.valid ? parsed.color : appliedStaticGlowColorRef.current);
   };
 
   return (
@@ -253,14 +282,27 @@ export function CustomizeDialog({
       )}
 
       {/* Background colour */}
-      <ColorSection
-        label="Background Color"
-        colors={BG_COLORS}
-        value={backgroundColor}
-        onSwatchClick={handleBgColorSwatch}
-        onInputChange={handleBgColorInput}
-        onInputBlur={(val) => emit({ backgroundColor: val === '' ? null : val })}
-      />
+      {showBackground && (
+        <ColorSection
+          label="Background Color"
+          colors={BG_COLORS}
+          value={backgroundColor}
+          onSwatchClick={handleBgColorSwatch}
+          onInputChange={handleBgColorInput}
+          onInputBlur={(val) => emit({ backgroundColor: val === '' ? null : val })}
+        />
+      )}
+
+      {showStaticGlow && (
+        <ColorSection
+          label="Static Glow"
+          colors={GLOW_COLORS}
+          value={staticGlowColor}
+          onSwatchClick={handleStaticGlowSwatch}
+          onInputChange={handleStaticGlowInput}
+          onInputBlur={handleStaticGlowBlur}
+        />
+      )}
     </Dialog>
   );
 }

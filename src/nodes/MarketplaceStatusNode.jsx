@@ -1,12 +1,31 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { Radar, RefreshCw, Settings as SettingsIcon, CheckCircle2, AlertCircle, LogIn, Circle } from 'lucide-react';
 import { SELL_PLATFORMS } from '../utils/constants';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { AttentionPanels } from '../components/AttentionPanels';
+import { getMarketplaceHubStatusLabel } from '../components/monitorStatusLabels';
 import { useToast } from '../components/ToastProvider';
-import { collectMarketplaceListings } from '../utils/marketplaceStatusScan';
+import { collectMarketplaceListings, marketplaceListingsSignature } from '../utils/marketplaceStatusScan';
+import {
+  bestMarketplaceStatusColumnCount,
+  MARKETPLACE_STATUS_GRID as GRID,
+  marketplaceStatusNodeWidth,
+} from '../utils/marketplaceStatusLayout';
+import { normalizeMarketplaceWatchUrls } from '../utils/marketplaceWatchUrls';
+import {
+  beginMarketplaceStatusRun,
+  completeMarketplaceStatusPlatform,
+  finishMarketplaceStatusRun,
+  getMarketplaceStatusActiveRuns,
+  marketplaceStatusCheckingIds,
+  mergeMarketplaceStatusResults,
+  publishMarketplaceStatusCheckingIds,
+  subscribeMarketplaceStatusCheckingIds,
+} from '../utils/marketplaceStatusProgress';
+import { generateId } from '../utils/idGenerator';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
+import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 
 /**
  * MarketplaceStatusNode — the Marketplace Status Module.
@@ -14,7 +33,7 @@ import { useIsMountedRef } from '../hooks/useIsMountedRef';
  * Drop it on any canvas. It auto-detects every marketplace listing card
  * (`marketplacecard`) spawned by the Price Check Modules on that canvas AND in
  * its nested sub-canvases, and shows which platforms you're listed on. Pressing
- * "Check Status" scrapes only the per-platform watch URLs configured in Settings
+ * "Check All" scrapes only the per-platform watch URLs configured in Settings
  * (each marketplace's own notification hub / seller dashboard) and runs a single
  * non-listing-specific AI scan per platform for anything that needs action —
  * instead of checking each listing one-by-one (slow + token-heavy at scale).
@@ -26,101 +45,18 @@ import { useIsMountedRef } from '../hooks/useIsMountedRef';
  *   { platformStatus?: { [platformId]: { status, message, summary, attention[], sources[], lastChecked } } }
  */
 
-// Cheap signature of a collected-listings map, used as the equality test for the
-// store subscription below so the module re-renders only when the listing set
-// actually changes — not on every drag frame.
-function mapSignature(map) {
-  return [...map.values()]
-    .map(e => `${e.platformId}:${e.listingCount}:${e.listingUrls.join(',')}`)
-    .sort()
-    .join('|');
-}
-
-// --- 16:9 grid geometry ---------------------------------------------------
-// The module lays its per-platform cards out in a grid whose column count is
-// chosen so the WHOLE node's bounding box lands as close to 16:9 as possible,
-// re-deriving every time a platform is added/removed or a card's height changes.
-//
-// Both the per-card heights AND the surrounding overhead (header + Check button
-// + paddings + any hint) are MEASURED from the DOM, so the chosen column count
-// reflects real heights — a checked card with a summary + collapsed lane buttons
-// is taller than a "not checked" one. Crucially the per-card height is the
-// COLLAPSED height (open Action Needed / Info lane bodies are subtracted), so
-// expanding a lane never reflows the grid — only the fully-collapsed node is
-// fitted to 16:9; expansions are free to overflow it. The grid uses
-// align-items:start so each card renders at its natural content height;
-// overhead = rootHeight − gridHeight.
-//
-// This is non-circular AND non-oscillating: every grid column is exactly CARD_W
-// wide regardless of column count, so a card's width — and thus its height —
-// never depends on the layout we pick; and the overhead is kept width-invariant
-// (header text is truncated to one line, the no-watch-URL hint is capped at
-// CARD_W) so it doesn't shift when the column count changes the node width. The
-// *_EST constants below are only first-paint fallbacks, used until the measure
-// pass runs. Width IS exact: each grid column is CARD_W wide.
-const GRID = {
-  CARD_W: 272,        // px width of each platform card (≈ the old 300px single-col feel)
-  CARD_H_EST: 104,    // px fallback card height — used only until cards are measured
-  GAP: 8,             // px grid gap (gap-2)
-  PAD: 12,            // px content padding (p-3)
-  HEADER_H: 46,       // px header strip (fallback only)
-  BUTTON_BLOCK_H: 40, // px Check button + space-y gap above the grid (fallback only)
-};
-const TARGET_RATIO = 16 / 9;
-// Fallback for the measured overhead (header + button block + content padding),
-// used only on the first paint before rootHeight − gridHeight is available.
-const OVERHEAD_EST = GRID.HEADER_H + GRID.BUTTON_BLOCK_H + 2 * GRID.PAD;
-
-// Width of the node for a given column count (exact — drives the inline style).
-function nodeWidthForCols(cols) {
-  return cols * GRID.CARD_W + (cols - 1) * GRID.GAP + 2 * GRID.PAD;
-}
-
+// The layout helper chooses a fixed-width grid closest to 16:9. We feed it each
+// card's measured collapsed height so opening an attention lane never reflows
+// the node.
 function arraysEqual(a, b) {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
-// Pick the column count (1..n) whose resulting node aspect ratio is closest to
-// 16:9. `heights` are the measured per-card COLLAPSED heights in row order and `overhead`
-// is the measured non-grid height (both fall back to estimates when missing or
-// non-positive). Row-major fill: each grid row's height is the tallest card in
-// it (align-items:start ⇒ track = max content height), so total height is the
-// sum of row maxima plus overhead. Error is log-symmetric, so "2× too tall" and
-// "2× too wide" rank equally — without it the unbounded wide side would be
-// over-favoured. Cheap brute-force search — n ≤ # platforms.
-function bestColumnCount(n, heights = [], overhead) {
-  if (n <= 1) return 1;
-  const oh = overhead > 0 ? overhead : OVERHEAD_EST;
-  let best = 1;
-  let bestErr = Infinity;
-  for (let cols = 1; cols <= n; cols++) {
-    const gridRows = Math.ceil(n / cols);
-    let gridH = (gridRows - 1) * GRID.GAP;
-    for (let r = 0; r < gridRows; r++) {
-      let rowMax = 0;
-      for (let c = 0; c < cols; c++) {
-        const idx = r * cols + c;
-        if (idx >= n) break;
-        rowMax = Math.max(rowMax, heights[idx] || GRID.CARD_H_EST);
-      }
-      gridH += rowMax;
-    }
-    const w = nodeWidthForCols(cols);
-    const h = oh + gridH;
-    const err = Math.abs(Math.log(w / h / TARGET_RATIO));
-    if (err < bestErr) {
-      bestErr = err;
-      best = cols;
-    }
-  }
-  return best;
-}
-
 const STATUS_PILL = {
-  ok:            { icon: CheckCircle2, cls: 'text-emerald-300 bg-emerald-500/15 border-emerald-500/30', label: 'Checked' },
-  'needs-login': { icon: LogIn,        cls: 'text-yellow-300 bg-yellow-500/15 border-yellow-500/30',     label: 'Login needed' },
-  error:         { icon: AlertCircle,  cls: 'text-red-300 bg-red-500/15 border-red-500/30',             label: 'Error' },
-  unknown:       { icon: Circle,       cls: 'text-white/40 bg-white/5 border-white/10',                 label: 'Not checked' },
+  ok:            { icon: CheckCircle2, cls: 'text-emerald-300 bg-emerald-500/15 border-emerald-500/30' },
+  'needs-login': { icon: LogIn,        cls: 'text-yellow-300 bg-yellow-500/15 border-yellow-500/30' },
+  error:         { icon: AlertCircle,  cls: 'text-red-300 bg-red-500/15 border-red-500/30' },
+  unknown:       { icon: Circle,       cls: 'text-white/40 bg-white/5 border-white/10' },
 };
 
 function StatusPill({ result, checking }) {
@@ -140,26 +76,30 @@ function StatusPill({ result, checking }) {
   const Icon = meta.icon;
   return (
     <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-medium border ${meta.cls}`}>
-      <Icon size={9} /> {meta.label}
+      <Icon size={9} /> {getMarketplaceHubStatusLabel(key, result?.lastChecked)}
     </span>
   );
 }
 
 export function MarketplaceStatusNode({ id, data }) {
   const { updateNodeData } = useReactFlow();
+  const navigation = useContext(CanvasNavigationContext);
+  const updateGlobal = navigation?.updateNodeDataGlobally || updateNodeData;
   const { addToast } = useToast();
   const isMountedRef = useIsMountedRef();
   const [watchUrlsByPlatform, setWatchUrlsByPlatform] = useState(null); // null = not yet loaded
   // Platform ids with an in-flight hub scan. A Set (not a bool) so an individual
   // platform check spins only its own row while the others stay interactive.
-  const [checkingIds, setCheckingIds] = useState(() => new Set());
+  const activeCheckRuns = useMemo(() => getMarketplaceStatusActiveRuns(id), [id]);
+  const [checkingIds, setCheckingIds] = useState(() => marketplaceStatusCheckingIds(activeCheckRuns));
+  const checkingIdsRef = useRef(checkingIds);
 
   // Collect the marketplace listings across this canvas + its sub-canvases. The
   // signature-based equality makes this re-render only when the listing set
   // actually changes — drags (which churn the store) don't trigger a rebuild.
   const listingsByPlatform = useStore(
     (s) => collectMarketplaceListings(s.nodes),
-    (a, b) => mapSignature(a) === mapSignature(b),
+    (a, b) => marketplaceListingsSignature(a) === marketplaceListingsSignature(b),
   );
 
   // Load per-platform watch URLs from Settings, and keep them fresh when the
@@ -185,7 +125,7 @@ export function MarketplaceStatusNode({ id, data }) {
       .filter((p) => listingsByPlatform.has(p.id))
       .map((p) => {
         const listing = listingsByPlatform.get(p.id);
-        const watchCount = ((watchUrlsByPlatform || {})[p.id] || []).filter((u) => typeof u === 'string' && u.trim()).length;
+        const watchCount = normalizeMarketplaceWatchUrls((watchUrlsByPlatform || {})[p.id]).length;
         return {
           platform: p,
           listingCount: listing.listingCount,
@@ -199,33 +139,99 @@ export function MarketplaceStatusNode({ id, data }) {
   const eligibleIds = useMemo(() => rows.filter((r) => r.eligible).map((r) => r.platform.id), [rows]);
   const watchLoaded = watchUrlsByPlatform !== null;
 
+  // Active runs live outside this component so navigating away and back while a
+  // scan is running restores the correct per-platform spinners and accepts the
+  // remaining progress events instead of allowing a duplicate Check All.
+  useEffect(() => subscribeMarketplaceStatusCheckingIds(id, (next) => {
+    checkingIdsRef.current = next;
+    setCheckingIds(next);
+  }), [id]);
+
+  const publishCheckingIds = useCallback(() => {
+    publishMarketplaceStatusCheckingIds(id);
+  }, [id]);
+
+  // The main process scans one platform at a time and emits each result as soon
+  // as that platform's fetch + AI pass completes. Patch only that platform and
+  // stop only its spinner; the remaining cards continue showing Checking.
+  useEffect(() => {
+    if (!window.electronAPI?.onMarketplaceStatusProgress) return undefined;
+    return window.electronAPI.onMarketplaceStatusProgress((payload) => {
+      if (!payload?.result) return;
+      const completion = completeMarketplaceStatusPlatform(activeCheckRuns, payload, id);
+      if (!completion.accepted) return;
+      // updateGlobal also reaches a temporarily hidden/nested node and safely
+      // no-ops when the node was actually deleted.
+      updateGlobal(id, (node) => ({
+        platformStatus: mergeMarketplaceStatusResults(node?.data?.platformStatus, {
+          [payload.platformId]: payload.result,
+        }),
+      }));
+      publishCheckingIds();
+    });
+  }, [id, updateGlobal, activeCheckRuns, publishCheckingIds]);
+
   // Run a hub scan for a specific set of platform ids — shared by the bulk
-  // "Check Status" button (all eligible) and each row's own check button (just
+  // "Check All" button (all eligible) and each row's own check button (just
   // that one). Per-id tracking lets one row spin without freezing the rest, and
   // the FUNCTIONAL updateNodeData merge means a single-platform result patches
   // only its own key — it never clobbers the others' verdicts, even if two
-  // checks overlap (backend serializes them on the marketplace browser lock).
+  // checks overlap (backend serializes them on the status-check lock).
   const runCheck = useCallback(async (platformIds) => {
-    const ids = (platformIds || []).filter((p) => !checkingIds.has(p));
+    const candidates = Array.isArray(platformIds) ? platformIds : [];
+    const ids = [...new Set(candidates)].filter((p) => p && !checkingIdsRef.current.has(p));
     if (ids.length === 0) return;
-    setCheckingIds((prev) => { const next = new Set(prev); for (const p of ids) next.add(p); return next; });
+    const runId = generateId();
+    beginMarketplaceStatusRun(activeCheckRuns, runId, ids);
+    publishCheckingIds();
     try {
-      const res = await window.electronAPI?.checkMarketplaceStatus?.({ platformIds: ids, nodeId: id });
-      if (!isMountedRef.current) return;
+      const res = await window.electronAPI?.checkMarketplaceStatus?.({ platformIds: ids, nodeId: id, runId });
       if (!res || res.success === false) {
-        addToast({ title: 'Status check failed', description: res?.error || 'The marketplace status check did not complete.', type: 'error' });
+        if (isMountedRef.current) {
+          addToast({ title: 'Status check failed', description: res?.error || 'The marketplace status check did not complete.', type: 'error' });
+        }
         return;
       }
       const results = res.results || {};
-      updateNodeData(id, (node) => ({ platformStatus: { ...(node?.data?.platformStatus || {}), ...results } }));
+      const checkedCount = Object.keys(results).length;
+      if (checkedCount === 0) {
+        if (isMountedRef.current) {
+          addToast({ title: 'Status check failed', description: 'The marketplace status check returned no platform results.', type: 'error' });
+        }
+        return;
+      }
+      // Keep results even if this component unmounted because the user
+      // navigated into/out of a nested canvas while Check All was running.
+      // updateGlobal safely no-ops when the node was actually deleted.
+      updateGlobal(id, (node) => ({
+        platformStatus: mergeMarketplaceStatusResults(node?.data?.platformStatus, results),
+      }));
+      if (!isMountedRef.current) return;
 
       const verdicts = Object.values(results);
-      const checkedCount = ids.length;
       const needsLogin = verdicts.filter((v) => v?.status === 'needs-login').length;
+      const failed = verdicts.filter((v) => v?.status === 'error').length;
       const actionItems = verdicts.reduce((n, v) => n + (Array.isArray(v?.attention) ? v.attention.filter((a) => a.urgency === 'high').length : 0), 0);
       const totalItems = verdicts.reduce((n, v) => n + (Array.isArray(v?.attention) ? v.attention.length : 0), 0);
-      if (needsLogin > 0) {
-        addToast({ title: 'Marketplace login needed', description: `${needsLogin} platform${needsLogin === 1 ? '' : 's'} need a refreshed login. Open Settings → Marketplace Login.`, type: 'error', duration: 7000 });
+      if (needsLogin > 0 || failed > 0) {
+        // A login wall on one platform shouldn't bury action items the scan DID
+        // surface on the reachable platforms — fold them into the same toast
+        // (one toast beats two stacked ones on a Check All that trips both).
+        const alsoFlagged = actionItems > 0
+          ? ` Also ${actionItems} high-urgency action item${actionItems === 1 ? '' : 's'} flagged on other platform${actionItems === 1 ? '' : 's'}.`
+          : '';
+        const loginText = needsLogin > 0
+          ? `${needsLogin} platform${needsLogin === 1 ? '' : 's'} need a refreshed login. Open Settings → Marketplace Login.`
+          : '';
+        const failedText = failed > 0
+          ? `${loginText ? ' ' : ''}${failed} platform scan${failed === 1 ? '' : 's'} failed; retry the affected card${failed === 1 ? '' : 's'}.`
+          : '';
+        addToast({
+          title: needsLogin > 0 ? 'Marketplace login needed' : 'Marketplace status incomplete',
+          description: `${loginText}${failedText}${alsoFlagged}`,
+          type: 'error',
+          duration: 7000,
+        });
       } else if (totalItems > 0) {
         addToast({ title: 'Marketplace status checked', description: `${actionItems} action item${actionItems === 1 ? '' : 's'} and ${totalItems - actionItems} FYI across ${checkedCount} platform${checkedCount === 1 ? '' : 's'}.`, type: actionItems > 0 ? 'info' : 'success' });
       } else {
@@ -234,9 +240,10 @@ export function MarketplaceStatusNode({ id, data }) {
     } catch (err) {
       if (isMountedRef.current) addToast({ title: 'Status check failed', description: err?.message || String(err), type: 'error' });
     } finally {
-      if (isMountedRef.current) setCheckingIds((prev) => { const next = new Set(prev); for (const p of ids) next.delete(p); return next; });
+      finishMarketplaceStatusRun(activeCheckRuns, runId);
+      publishCheckingIds();
     }
-  }, [checkingIds, id, updateNodeData, addToast, isMountedRef]);
+  }, [id, updateGlobal, addToast, isMountedRef, activeCheckRuns, publishCheckingIds]);
 
   const handleCheck = useCallback(() => { runCheck(eligibleIds); }, [runCheck, eligibleIds]);
 
@@ -292,10 +299,10 @@ export function MarketplaceStatusNode({ id, data }) {
   // closest to 16:9. Recomputes whenever the platform count or a measured height
   // changes; the empty state keeps a fixed compact width.
   const cols = useMemo(
-    () => bestColumnCount(rows.length, metrics.heights, metrics.overhead),
+    () => bestMarketplaceStatusColumnCount(rows.length, metrics.heights, metrics.overhead),
     [rows.length, metrics],
   );
-  const nodeWidth = rows.length === 0 ? 300 : nodeWidthForCols(cols);
+  const nodeWidth = rows.length === 0 ? 300 : marketplaceStatusNodeWidth(cols);
 
   return (
     <div

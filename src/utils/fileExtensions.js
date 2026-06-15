@@ -17,9 +17,20 @@ export const CODE_EXT_RE = /\.(?:js|ts|jsx|tsx|py|rb|go|rs|java|c|cpp|h|cs|php|s
 // regexes were removed with that auto-spawn branch — don't reintroduce them here.
 
 /**
- * Product photos accepted by the selling flow. Matches every image format the
- * canvas can display + AI vision can read: web-native (png/jpg/webp/gif/svg/bmp/
- * ico/avif) plus the sips-transcoded ones (heic/heif from iOS, tiff/tif, jxl).
- * Kept in sync with getFileCategoryInfo()'s IMAGE set and main.js display.
+ * Product photos accepted by the selling flow. Covers every image format the
+ * canvas can display + AI vision can read: web-native formats plus the
+ * sips-transcoded ones. Keep consumers on these helpers so preview serving,
+ * drag/drop, and moved-image relinking cannot drift apart.
  */
-export const PRODUCT_IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|svg|bmp|ico|heic|heif|tiff?|avif|jxl)$/i;
+const PRODUCT_IMAGE_EXTENSION_NAMES = [
+  'png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'bmp', 'ico',
+  'heic', 'heif', 'tiff', 'tif', 'avif', 'jxl',
+];
+const PRODUCT_IMAGE_EXTENSIONS = new Set(PRODUCT_IMAGE_EXTENSION_NAMES);
+
+export const PRODUCT_IMAGE_EXT_RE = new RegExp(`\\.(${PRODUCT_IMAGE_EXTENSION_NAMES.join('|')})$`, 'i');
+
+export function isProductImageExtension(extension) {
+  if (typeof extension !== 'string') return false;
+  return PRODUCT_IMAGE_EXTENSIONS.has(extension.trim().replace(/^\./, '').toLowerCase());
+}

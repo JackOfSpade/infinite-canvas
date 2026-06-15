@@ -100,3 +100,104 @@ export function formatConditionForPricingPrompt(value) {
   if (!c) return value ? `${value} (no standard definition on file — interpret literally)` : 'Unknown';
   return `${c.value} — ${c.summary}\n  Includes: ${c.includes}\n  Does not include: ${c.excludes}\n  Equivalent tiers on other platforms: ${c.platforms}`;
 }
+
+const EXPLICIT_TITLE_CONDITION = [
+  'brand[ -]?new',
+  'new\\s+in\\s+(?:box|original\\s+packaging)',
+  'new\\s+with(?:out)?\\s+tags',
+  'nwt',
+  'nwot',
+  'open[ -]?box',
+  'like[ -]?new',
+  'mint\\s+condition',
+  'excellent\\s+condition',
+  'very\\s+good\\s+condition',
+  'good\\s+condition',
+  'fair\\s+condition',
+  'poor\\s+condition',
+  'used\\s*[-–—/]\\s*(?:excellent|good|fair)',
+  'used(?:\\s+condition)?',
+  'pre[ -]?owned',
+  'refurbished',
+  'for\\s+parts(?:\\s*(?:\\/|or)\\s*not\\s+working)?',
+  'not\\s+working',
+  'parts\\s+only',
+  'as[ -]?is',
+].join('|');
+
+// Bare grades are ambiguous inside names ("Good Cook", "Mint Mobile"), so they
+// are removed globally only when they are the entire title or bracketed. For
+// ordinary title clauses, only aliases of the selected condition are removed.
+const BARE_TITLE_CONDITION_GRADE = [
+  'mint',
+  'excellent',
+  'very\\s+good',
+  'good',
+  'fair',
+  'poor',
+].join('|');
+
+const TITLE_SEPARATOR = '\\s*(?:[-–—|,:/]|\\u2022)\\s*';
+const STRONG_TITLE_SEPARATOR = '\\s*(?:[-–—|]|\\u2022)\\s*';
+
+const CONDITION_TITLE_ALIASES = {
+  'Like New': ['mint'],
+  'Used - Excellent': ['excellent'],
+  'Used - Good': ['very good', 'good'],
+  'Used - Fair': ['fair'],
+  'For Parts': ['poor'],
+};
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Generated listing titles identify the item; condition belongs in the separate
+ * condition field. This removes condition-only clauses at title boundaries while
+ * preserving identity words that happen to resemble a condition, such as
+ * "New Balance" or "Good Cook".
+ *
+ * User-edited titles do not pass through this helper.
+ */
+export function stripConditionFromGeneratedTitle(title, selectedCondition = '') {
+  let cleaned = String(title || '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return '';
+
+  // Remove condition-only clauses first. This includes a title that contains
+  // nothing except condition, and condition in the middle of a separated title
+  // such as "Apple iPhone - Refurbished - 256GB".
+  const explicit = `(?:${EXPLICIT_TITLE_CONDITION})`;
+  const exactOrBracketedCondition = `(?:${EXPLICIT_TITLE_CONDITION}|${BARE_TITLE_CONDITION_GRADE})`;
+  cleaned = cleaned
+    .replace(new RegExp(`^\\s*${exactOrBracketedCondition}\\s*$`, 'i'), '')
+    .replace(new RegExp(`\\s*[([]\\s*${exactOrBracketedCondition}\\s*[)\\]]\\s*`, 'ig'), ' ')
+    .replace(new RegExp(`^${explicit}${TITLE_SEPARATOR}`, 'i'), '')
+    .replace(new RegExp(`${TITLE_SEPARATOR}${explicit}(?=${TITLE_SEPARATOR}|$)`, 'ig'), '')
+    // Explicit multi-word phrases are sufficiently unambiguous to strip when
+    // attached with whitespace instead of a title separator.
+    .replace(new RegExp(`^${explicit}(?:${TITLE_SEPARATOR}|\\s+)`, 'i'), '')
+    .replace(new RegExp(`(?:${TITLE_SEPARATOR}|\\s+)${explicit}$`, 'i'), '');
+
+  // The selected canonical tier may appear verbatim or as its final grade after
+  // a separator ("- Used - Excellent" / "- Excellent"). Strip only exact,
+  // bracketed, or separator-delimited clauses so a product named "New Balance"
+  // remains intact.
+  const canonical = String(selectedCondition || '').trim();
+  const grade = canonical.replace(/^Used\s*-\s*/i, '').trim();
+  const aliases = CONDITION_TITLE_ALIASES[canonical] || [];
+  for (const term of new Set([canonical, grade, ...aliases].filter(Boolean))) {
+    const escaped = escapeRegExp(term);
+    cleaned = cleaned
+      .replace(new RegExp(`^\\s*${escaped}\\s*$`, 'i'), '')
+      .replace(new RegExp(`\\s*[([]\\s*${escaped}\\s*[)\\]]\\s*`, 'ig'), ' ')
+      .replace(new RegExp(`^${escaped}${STRONG_TITLE_SEPARATOR}`, 'i'), '')
+      .replace(new RegExp(`${STRONG_TITLE_SEPARATOR}${escaped}(?=${STRONG_TITLE_SEPARATOR}|$)`, 'ig'), '');
+  }
+
+  return cleaned
+    .replace(/\s{2,}/g, ' ')
+    .replace(/(?:\s*[-–—|,:/]\s*)+$/g, '')
+    .replace(/^(?:\s*[-–—|,:/]\s*)+/g, '')
+    .trim();
+}

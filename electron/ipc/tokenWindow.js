@@ -18,7 +18,7 @@
 //     beta header); Haiku 4.5 is 200K. "maxOutput" is the synchronous Messages
 //     API ceiling. (Claude 4.5+ overflow is graceful: input+max_tokens over the
 //     window doesn't 400 — generation stops with `model_context_window_exceeded`.)
-//   • Google — every Flash / Flash-Lite in our cascade is 1,048,576 input /
+//   • Google — every general-purpose model in our cascade is 1,048,576 input /
 //     65,536 output. (Gemini's input and output limits are technically separate,
 //     not one shared budget; we still subtract output from the window, which is
 //     safely conservative — it costs ~2% of a 1M window.)
@@ -27,9 +27,11 @@ const MODEL_METADATA = {
   'claude-opus-4-8':           { contextWindow: 1000000, maxOutput: 128000, provider: 'claude' },
   'claude-sonnet-4-6':         { contextWindow: 1000000, maxOutput: 64000,  provider: 'claude' },
   'claude-haiku-4-5-20251001': { contextWindow: 200000,  maxOutput: 64000,  provider: 'claude' },
+  'gemini-3.1-pro-preview':    { contextWindow: 1048576, maxOutput: 65536,  provider: 'gemini' },
   'gemini-3.5-flash':          { contextWindow: 1048576, maxOutput: 65536,  provider: 'gemini' },
   'gemini-3-flash-preview':    { contextWindow: 1048576, maxOutput: 65536,  provider: 'gemini' },
   'gemini-3.1-flash-lite':     { contextWindow: 1048576, maxOutput: 65536,  provider: 'gemini' },
+  'gemini-2.5-pro':            { contextWindow: 1048576, maxOutput: 65536,  provider: 'gemini' },
   'gemini-2.5-flash':          { contextWindow: 1048576, maxOutput: 65536,  provider: 'gemini' },
   'gemini-2.5-flash-lite':     { contextWindow: 1048576, maxOutput: 65536,  provider: 'gemini' },
 };

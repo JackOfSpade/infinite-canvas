@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useContext, useMemo } from 'react';
-import { useReactFlow } from '@xyflow/react';
+import { useReactFlow, useStore } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { usePlatformsVerifyingProgress } from '../contexts/useSessionStatus';
@@ -23,12 +23,23 @@ import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { filesToProductImagePaths, summarizeFileExtensions } from '../utils/fileDropUtils';
 import { mergeSourceIntoComps, retryWarningRequiringAction, updateResolvedSourceWarning } from '../utils/compsMerge';
-import { buildFinalListingTitle, buildRefreshResearchItems, computeBundleTotal, selectBundleHeadline } from '../utils/bundlePricing';
+import { buildFinalListingTitle, buildRefreshResearchItems, computeBundleTotal, selectBundleHeadline, selectListingPriceTiers } from '../utils/bundlePricing';
 import { generateId } from '../utils/idGenerator';
 import { canSellHubReplaceFailedInitialPhotos, getHubDropLockReason } from '../utils/hubDropEligibility';
 import { appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../utils/photoPathList';
 import { enqueueUniqueSourceResolve } from '../utils/sourceResolveQueue';
 import { getRequiredCompLoginPlatformIds } from '../utils/marketplaceLoginPreflight';
+import {
+  effectivePriceDropTargetPercent,
+  normalizePriceDropMustSellDate,
+  normalizePriceDropReminderWeeks,
+  normalizePriceDropStartingPrice,
+  normalizePriceDropStartingTier,
+  normalizePriceDropTargetPercent,
+  oldestPriceDropCardCreatedAtIso,
+  priceDropStartingPrice,
+} from '../utils/priceDropReminder';
+import { getConnectedHubCards } from '../utils/connectedHubCards';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
 
 /**
@@ -104,6 +115,14 @@ export function SellHubNode({ id, data }) {
     .filter(n => n.type === 'marketplacecard' && n.data?.hubId === id)
     .map(n => n.data?.platformId)
     .filter(Boolean);
+  const priceDropScheduleStartedAt = useStore(
+    useCallback((s) => oldestPriceDropCardCreatedAtIso(getConnectedHubCards({
+      nodes: s.nodes,
+      edges: s.edges,
+      hubId: id,
+      cardType: 'marketplacecard',
+    })), [id])
+  );
 
   const handleSpawnMarketplaceCard = useCallback((platformId) => {
     if (data.locked) return;
@@ -1279,14 +1298,70 @@ export function SellHubNode({ id, data }) {
     startAnalysisRef.current?.(validPaths);
   }, [addToast, canReplaceFailedInitialPhotos, dropLockReason, hubState, id]);
 
-  // Per-item price-drop reminder cadence — persisted on the hub, consumed by
-  // this hub's marketplace cards (each reads it via its hubId backlink). The
-  // equality guard keeps a no-change blur from dirtying the canvas.
-  const handleChangePriceDropReminderWeeks = useCallback((weeks) => {
-    if (data.locked) return;
-    if ((Number(data.priceDropReminderWeeks) || 0) === weeks) return;
-    updateGlobal(id, { priceDropReminderWeeks: weeks });
-  }, [data.locked, data.priceDropReminderWeeks, id, updateGlobal]);
+  // Shared price-drop plan — persisted on the hub and consumed by every
+  // marketplace card carrying this hubId backlink. Normalize at this boundary
+  // so malformed saved/editor values cannot leak into reminder calculations.
+  const handleChangePriceDropPlan = useCallback((updates) => {
+    if (data.locked || !updates || typeof updates !== 'object') return;
+    const next = {};
+    const resnapshotStartingTier = Object.hasOwn(updates, 'startingTier');
+    if (Object.hasOwn(updates, 'weeks')) {
+      const weeks = normalizePriceDropReminderWeeks(updates.weeks);
+      if (normalizePriceDropReminderWeeks(data.priceDropReminderWeeks) !== weeks) {
+        next.priceDropReminderWeeks = weeks;
+      }
+    }
+    if (Object.hasOwn(updates, 'mustSellDate')) {
+      const mustSellDate = normalizePriceDropMustSellDate(updates.mustSellDate);
+      if (normalizePriceDropMustSellDate(data.priceDropMustSellDate) !== mustSellDate) {
+        next.priceDropMustSellDate = mustSellDate;
+      }
+    }
+    if (Object.hasOwn(updates, 'targetPercent')) {
+      const targetPercent = normalizePriceDropTargetPercent(updates.targetPercent);
+      if (
+        targetPercent != null
+        && effectivePriceDropTargetPercent(data.priceDropTargetPercent) !== targetPercent
+      ) {
+        next.priceDropTargetPercent = targetPercent;
+      }
+    }
+    if (Object.hasOwn(updates, 'startingTier')) {
+      const startingTier = normalizePriceDropStartingTier(updates.startingTier);
+      if (normalizePriceDropStartingTier(data.priceDropStartingTier) !== startingTier) {
+        next.priceDropStartingTier = startingTier;
+      }
+    }
+    if (Object.keys(next).length > 0 || resnapshotStartingTier) {
+      // Snapshot the selected tier as the calculation's starting value. Timing
+      // remains anchored to the oldest connected listing card.
+      const selectedTier = next.priceDropStartingTier
+        ?? normalizePriceDropStartingTier(data.priceDropStartingTier);
+      const startingPrice = priceDropStartingPrice(selectListingPriceTiers({
+        pricing: data.pricing,
+        itemPricings: data.itemPricings,
+        bundlePricing: data.bundlePricing,
+        bundleTotal: data.bundleTotal,
+      }), selectedTier);
+      if (startingPrice != null) next.priceDropPlanStartingPrice = startingPrice;
+      // Remove the obsolete timeline field written by the earlier plan-start
+      // implementation. Undefined is omitted from persisted JSON.
+      next.priceDropPlanStartedAt = undefined;
+      updateGlobal(id, next);
+    }
+  }, [
+    data.locked,
+    data.priceDropMustSellDate,
+    data.priceDropReminderWeeks,
+    data.priceDropStartingTier,
+    data.priceDropTargetPercent,
+    data.pricing,
+    data.itemPricings,
+    data.bundlePricing,
+    data.bundleTotal,
+    id,
+    updateGlobal,
+  ]);
 
   const handleRemoveDisplayPhoto = useCallback((index) => {
     if (data.locked) return;
@@ -1591,8 +1666,15 @@ export function SellHubNode({ id, data }) {
             onSpawnMarketplaceCard={handleSpawnMarketplaceCard}
             platformFit={data.platformFit || null}
             platformFitPending={!!data.platformFitPending}
-            priceDropReminderWeeks={Number(data.priceDropReminderWeeks) || 0}
-            onChangePriceDropReminderWeeks={handleChangePriceDropReminderWeeks}
+            priceDropPlan={{
+              weeks: normalizePriceDropReminderWeeks(data.priceDropReminderWeeks),
+              mustSellDate: normalizePriceDropMustSellDate(data.priceDropMustSellDate),
+              targetPercent: effectivePriceDropTargetPercent(data.priceDropTargetPercent),
+              scheduleStartedAt: priceDropScheduleStartedAt,
+              startingPrice: normalizePriceDropStartingPrice(data.priceDropPlanStartingPrice),
+              startingTier: normalizePriceDropStartingTier(data.priceDropStartingTier),
+            }}
+            onChangePriceDropPlan={handleChangePriceDropPlan}
           />
         )}
       </HubContainer>

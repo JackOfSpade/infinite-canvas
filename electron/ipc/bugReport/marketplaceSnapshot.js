@@ -106,7 +106,11 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
   if (t.analyze) {
     const a = t.analyze;
     lines.push(`### Product analysis${ago(a.ts)}`);
-    lines.push(`- ${a.photos} photo(s) → "${a.title}"${modelTag(a.model, a.fallback)}`);
+    const condition = a.condition ? ` · condition: \`${a.condition}\`` : '';
+    const cleanup = a.titleCleaned && a.rawTitle
+      ? ` · cleaned from raw title "${a.rawTitle}"`
+      : '';
+    lines.push(`- ${a.photos} photo(s) → "${a.title}"${condition}${cleanup}${modelTag(a.model, a.fallback)}`);
   }
 
   if (t.scrape) {

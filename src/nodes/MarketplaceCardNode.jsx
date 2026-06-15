@@ -1,10 +1,27 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Handle, Position, useReactFlow, useStore } from '@xyflow/react';
-import { ExternalLink, TrendingDown } from 'lucide-react';
+import { ExternalLink, Palette, TrendingDown } from 'lucide-react';
 import { SELL_PLATFORM_BY_ID } from '../utils/constants';
 import { syncUncontrolledTextValue } from '../utils/uncontrolledTextValue';
-import { createdAtMsFromCardId, isPriceDropReminderDue } from '../utils/priceDropReminder';
+import { normalizeStaticGlowColor } from '../utils/staticGlowColor';
+import {
+  calculatePriceDropSuggestion,
+  createdAtMsFromCardId,
+  effectivePriceDropTargetPercent,
+  INITIAL_PRICE_DROP_CHECK_DELAY_MS,
+  MAX_PRICE_DROP_TIMER_DELAY_MS,
+  normalizePriceDropMustSellDate,
+  normalizePriceDropReminderWeeks,
+  normalizePriceDropStartingPrice,
+  oldestPriceDropCardCreatedAtIso,
+  priceDropDeadlineReminderDelayMs,
+  priceDropStartingPrice,
+  priceDropReminderDelayMs,
+} from '../utils/priceDropReminder';
+import { selectListingPriceTiers } from '../utils/bundlePricing';
+import { getConnectedHubCards } from '../utils/connectedHubCards';
 import { PlatformBadge } from '../components/PlatformBadge';
+import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 
 /**
  * MarketplaceCardNode — one persistent canvas node per marketplace the user is
@@ -27,8 +44,9 @@ import { PlatformBadge } from '../components/PlatformBadge';
  *     notes?: string, // user-only reminder; not consumed by app logic
  *     productSnapshot?: { title, price } // copied from parent hub for display
  *     createdAt?: string,            // ISO — card creation, shown in the footer
- *     lastPriceDropAt?: string,      // ISO — price-drop reminder anchor (falls back to createdAt)
+ *     lastPriceDropAt?: string,      // ISO — last acknowledgment on the shared cadence
  *     priceDropReminderDue?: boolean // reminder fired, awaiting "price lowered" ack
+ *     staticGlowColor?: string       // user-selected persistent glow; empty/absent = off
  *   }
  */
 
@@ -36,6 +54,10 @@ import { PlatformBadge } from '../components/PlatformBadge';
 function formatDayLabel(ms) {
   if (!Number.isFinite(ms)) return null;
   return new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function formatReminderPrice(value) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
 function MarketplaceNotesTextarea({ value, onChange, locked }) {
@@ -72,6 +94,8 @@ function MarketplaceNotesTextarea({ value, onChange, locked }) {
 
 export function MarketplaceCardNode({ id, data }) {
   const { updateNodeData } = useReactFlow();
+  const navigation = useContext(CanvasNavigationContext);
+  const updateGlobal = navigation?.updateNodeDataGlobally || updateNodeData;
   const platform = SELL_PLATFORM_BY_ID[data.platformId];
   const url = data.listingUrl?.trim() || '';
 
@@ -82,44 +106,117 @@ export function MarketplaceCardNode({ id, data }) {
   const createdAtMs = Number.isFinite(createdAtParsed) ? createdAtParsed : createdAtMsFromCardId(id);
   const createdLabel = formatDayLabel(createdAtMs);
 
-  // Price-drop reminder. The cadence is PER-ITEM: it lives on this card's
-  // parent hub (data.priceDropReminderWeeks, set in the hub's priced state)
-  // and is read reactively here — a getNode() read would go stale, since
-  // editing the hub doesn't re-render this card. Hub gone or unset → 0 → off.
-  // Anchor = last acknowledged drop, else creation. While the hub's setting is
-  // off (weeks <= 0) nothing fires or renders, but an already-due flag is kept
-  // so re-enabling restores the pulse.
+  // Price-drop reminder. All connected cards use a fixed cadence that starts
+  // at their oldest creation date. Hub settings and card membership are read
+  // reactively so every card stays on the same schedule.
   const reminderWeeks = useStore(
-    useCallback((s) => Number(s.nodeLookup.get(data.hubId)?.data?.priceDropReminderWeeks) || 0, [data.hubId])
+    useCallback((s) => normalizePriceDropReminderWeeks(s.nodeLookup.get(data.hubId)?.data?.priceDropReminderWeeks), [data.hubId])
   );
-  const anchorIso = data.lastPriceDropAt || data.createdAt || null;
+  const mustSellDate = useStore(
+    useCallback((s) => normalizePriceDropMustSellDate(s.nodeLookup.get(data.hubId)?.data?.priceDropMustSellDate), [data.hubId])
+  );
+  const targetPercent = useStore(
+    useCallback((s) => effectivePriceDropTargetPercent(s.nodeLookup.get(data.hubId)?.data?.priceDropTargetPercent), [data.hubId])
+  );
+  const scheduleStartedAtIso = useStore(
+    useCallback((s) => oldestPriceDropCardCreatedAtIso(getConnectedHubCards({
+      nodes: s.nodes,
+      edges: s.edges,
+      hubId: data.hubId,
+      cardType: 'marketplacecard',
+    })), [data.hubId])
+  );
+  const startingPrice = useStore(
+    useCallback((s) => {
+      const hubData = s.nodeLookup.get(data.hubId)?.data;
+      if (!hubData) return null;
+      const savedStartingPrice = normalizePriceDropStartingPrice(hubData.priceDropPlanStartingPrice);
+      if (savedStartingPrice != null) return savedStartingPrice;
+      const tiers = selectListingPriceTiers({
+        pricing: hubData.pricing,
+        itemPricings: hubData.itemPricings,
+        bundlePricing: hubData.bundlePricing,
+        bundleTotal: hubData.bundleTotal,
+      });
+      return priceDropStartingPrice(tiers, hubData.priceDropStartingTier);
+    }, [data.hubId])
+  );
   const reminderActive = !!data.priceDropReminderDue && reminderWeeks > 0;
+  const suggestedPrice = reminderActive && mustSellDate
+    ? calculatePriceDropSuggestion({
+      startingPrice,
+      targetPercent,
+      scheduleStartedAtIso,
+      mustSellDate,
+      weeks: reminderWeeks,
+    })
+    : null;
+  const staticGlowColor = normalizeStaticGlowColor(data.staticGlowColor);
+  const hasStaticGlow = !!staticGlowColor;
 
   useEffect(() => {
-    if (data.priceDropReminderDue || !(reminderWeeks > 0) || !anchorIso) return undefined;
-    const check = () => {
-      if (!isPriceDropReminderDue({ anchorIso, weeks: reminderWeeks })) return;
-      // On fire the anchor resets to NOW — not anchor + interval — so a
-      // listing far older than the interval reminds once and then waits a
-      // full fresh interval after the ack instead of immediately re-firing.
-      updateNodeData(id, { priceDropReminderDue: true, lastPriceDropAt: new Date().toISOString() });
+    if (data.priceDropReminderDue || !(reminderWeeks > 0) || !scheduleStartedAtIso) return undefined;
+    let timer;
+    let cancelled = false;
+    const schedule = () => {
+      if (cancelled) return;
+      const delay = mustSellDate
+        ? priceDropDeadlineReminderDelayMs({
+          scheduleStartedAtIso,
+          lastAcknowledgedAtIso: data.lastPriceDropAt,
+          mustSellDate,
+          weeks: reminderWeeks,
+        })
+        : priceDropReminderDelayMs({
+          scheduleStartedAtIso,
+          lastAcknowledgedAtIso: data.lastPriceDropAt,
+          weeks: reminderWeeks,
+        });
+      if (delay == null) return;
+      if (delay > 0) {
+        // Browser timers cap around 24.8 days. Long reminder intervals wake at
+        // that cap and schedule the remaining delay without minute polling.
+        timer = setTimeout(schedule, Math.min(delay, MAX_PRICE_DROP_TIMER_DELAY_MS));
+        return;
+      }
+      // Firing is not a price drop. Acknowledgment advances only this card
+      // through the shared fixed cadence.
+      updateGlobal(id, { priceDropReminderDue: true });
     };
-    check();
-    const timer = setInterval(check, 60_000);
-    return () => clearInterval(timer);
-  }, [data.priceDropReminderDue, reminderWeeks, anchorIso, id, updateNodeData]);
+    // A loaded workspace is marked clean shortly after its first render. Let
+    // that settle before an overdue reminder writes controlled node state, or
+    // the loader's cleanup can clear the dirty flag and prevent autosave.
+    timer = setTimeout(schedule, INITIAL_PRICE_DROP_CHECK_DELAY_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    data.lastPriceDropAt,
+    data.priceDropReminderDue,
+    reminderWeeks,
+    scheduleStartedAtIso,
+    mustSellDate,
+    id,
+    updateGlobal,
+  ]);
 
   const acknowledgePriceDrop = useCallback(() => {
-    updateNodeData(id, { priceDropReminderDue: false, lastPriceDropAt: new Date().toISOString() });
-  }, [id, updateNodeData]);
+    updateGlobal(id, { priceDropReminderDue: false, lastPriceDropAt: new Date().toISOString() });
+  }, [id, updateGlobal]);
 
   const setUrl = useCallback((newUrl) => {
-    updateNodeData(id, { listingUrl: newUrl });
-  }, [id, updateNodeData]);
+    updateGlobal(id, { listingUrl: newUrl });
+  }, [id, updateGlobal]);
 
   const setNotes = useCallback((notes) => {
-    updateNodeData(id, { notes });
-  }, [id, updateNodeData]);
+    updateGlobal(id, { notes });
+  }, [id, updateGlobal]);
+
+  const openGlowCustomizer = useCallback(() => {
+    if (navigation?.isAnimating) return;
+    document.dispatchEvent(new CustomEvent('open-multi-customize', { detail: { ids: [id] } }));
+  }, [id, navigation?.isAnimating]);
 
   const openInBrowser = useCallback(() => {
     // No listing URL yet → open the marketplace's "create listing" page so the
@@ -140,8 +237,13 @@ export function MarketplaceCardNode({ id, data }) {
 
   return (
     <div
-      className={`w-[240px] rounded-2xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden ${reminderActive ? 'price-reminder-pulse' : ''}`}
-      style={{ borderColor: reminderActive ? 'rgba(245,158,11,0.9)' : `${platform.color}55` }}
+      className={`marketplace-listing-card w-[240px] rounded-2xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden ${hasStaticGlow ? 'marketplace-static-glow' : ''} ${reminderActive ? 'price-reminder-pulse' : ''}`}
+      style={{
+        borderColor: hasStaticGlow
+          ? staticGlowColor
+          : (reminderActive ? 'rgba(245,158,11,0.9)' : `${platform.color}55`),
+        ...(hasStaticGlow ? { '--listing-static-glow-color': staticGlowColor } : {}),
+      }}
     >
       <Handle type="target" position={Position.Left} className="!bg-white/30 !border-white/10" />
 
@@ -163,6 +265,23 @@ export function MarketplaceCardNode({ id, data }) {
             <div className="text-white/40 text-[9px] truncate">{data.productSnapshot.title}</div>
           )}
         </div>
+        <button
+          type="button"
+          onClick={openGlowCustomizer}
+          onPointerDown={(e) => e.stopPropagation()}
+          disabled={!!navigation?.isAnimating}
+          className="nodrag relative shrink-0 w-7 h-7 rounded-md border border-white/10 bg-black/20 hover:bg-white/10 text-white/55 hover:text-white/90 flex items-center justify-center transition-colors disabled:opacity-40 disabled:cursor-default"
+          title="Customize static glow"
+          aria-label="Customize static glow"
+        >
+          <Palette size={13} />
+          {hasStaticGlow && (
+            <span
+              className="absolute right-0.5 bottom-0.5 w-2 h-2 rounded-full border border-white/50 shadow-[0_0_3px_rgba(0,0,0,0.9)] pointer-events-none"
+              style={{ backgroundColor: staticGlowColor }}
+            />
+          )}
+        </button>
       </div>
 
       <div className="p-3 space-y-2">
@@ -210,7 +329,9 @@ export function MarketplaceCardNode({ id, data }) {
         {reminderActive && (
           <div className="rounded-md bg-amber-500/10 border border-amber-500/30 p-2 space-y-1.5">
             <div className="text-amber-300/90 text-[10px] leading-snug">
-              Still listed — consider lowering the price.
+              {suggestedPrice != null
+                ? `Lower price to $${formatReminderPrice(suggestedPrice)}.`
+                : 'Still listed — consider lowering the price.'}
             </div>
             {/* Enabled even when the card is locked — lock freezes content
                 (URL, notes), not actions (see Open Listing); a disabled ack
@@ -219,7 +340,7 @@ export function MarketplaceCardNode({ id, data }) {
               onClick={acknowledgePriceDrop}
               onPointerDown={(e) => e.stopPropagation()}
               className="nodrag w-full flex items-center justify-center gap-1 px-2 py-1.5 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-[10px] font-medium transition-colors border border-amber-500/30"
-              title={`Clears the reminder and restarts the ${reminderWeeks}-week timer from now`}
+              title={`Marks this reminder handled; the next reminder stays on the shared ${reminderWeeks}-week schedule`}
             >
               <TrendingDown size={10} />
               I lowered the price

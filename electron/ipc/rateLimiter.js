@@ -83,10 +83,13 @@ export const perDomainLimit = MAX_PER_DOMAIN;
 // ── Domain canonicalization ───────────────────────────────────────────────────
 /** Canonicalize a raw hostname against known policy keys (e.g. 'm.ebay.com' → 'ebay.com'). */
 export function getCanonicalDomain(rawDomain) {
+  // Coerce up front: this is exported and called directly, so a null/undefined
+  // (or non-string) domain must not throw on `.includes`.
+  const domain = String(rawDomain || '');
   for (const [key] of DOMAIN_POLICY_ENTRIES) {
-    if (rawDomain.includes(key)) return key;
+    if (domain.includes(key)) return key;
   }
-  return rawDomain;
+  return domain;
 }
 
 /** Returns the canonical policy key for a URL. */
@@ -178,7 +181,6 @@ export function recordOutcome(domain, outcome) {
   }
 }
 
-/**
 /** Diagnostic snapshot for bug reports / debugging. */
 export function getRateLimiterSnapshot() {
   const domains = {};
@@ -186,4 +188,13 @@ export function getRateLimiterSnapshot() {
     domains[d] = { tighten: Math.round(t * 10) / 10, recent: history.get(d) || [] };
   }
   return { pressure, effectiveConcurrency: effectiveConcurrency(), domains };
+}
+
+/** Test-only: clear all per-session adaptive state so unit cases don't leak into
+ *  each other (mirrors browserLaunchTelemetry._resetLaunchCollisions). */
+export function _resetRateLimiter() {
+  tighten.clear();
+  nextAllowed.clear();
+  history.clear();
+  pressure = 0;
 }

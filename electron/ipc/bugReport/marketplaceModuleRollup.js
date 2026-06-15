@@ -1,11 +1,10 @@
 /**
  * Compact view of every Marketplace Status MODULE node's OWN last hub-scan
  * (`marketplacestatus` node → `data.platformStatus`). This answers "did
- * pressing Check Status complete, and what did each platform's notification hub
+ * pressing Check All complete, and what did each platform's notification hub
  * return?" — which is invisible everywhere else in the report: the Node
- * Diagnostics preview has no `platformStatus` branch (the module row reads blank),
- * and the per-card "Marketplace Status Roll-up" is a DIFFERENT thing (per-listing
- * checks, often hours stale). Rendered EARLY so it survives clipboard truncation.
+ * Diagnostics preview has no `platformStatus` branch (the module row reads blank).
+ * Rendered EARLY so it survives clipboard truncation.
  *
  * Per platform it shows: read status (ok / needs-login / error / unknown), how
  * long ago it was checked (a recent age proves the check actually just ran vs a
@@ -51,6 +50,9 @@ export function buildMarketplaceModuleRollup(nodes) {
   let needsLogin = 0;
   let errored = 0;
   let sourcesErrored = 0;
+  // Platforms that read OK overall but had at least one hub URL blocked
+  // (logged-out / unreadable) — the masking case "any ok source wins" hides.
+  let maskedBlocked = 0;
   let totalHigh = 0;
   let anyReadState = false; // did any hub carry a message read/unread signal?
 
@@ -62,6 +64,10 @@ export function buildMarketplaceModuleRollup(nodes) {
       const high = attention.filter(a => a?.urgency === 'high').length;
       const sources = Array.isArray(r.sources) ? r.sources : [];
       const srcErr = sources.filter(s => s?.status === 'error').length;
+      // Distinct from srcErr: a needs-login / unknown SOURCE is an auth wall or
+      // unreadable page, not a fetch/AI failure — conflating them would mislabel
+      // the column. Only counts as "masked" when the platform itself read OK.
+      const srcBlocked = sources.filter(s => s?.status === 'needs-login' || s?.status === 'unknown').length;
       const ts = r.lastChecked ? new Date(r.lastChecked).getTime() : 0;
       const rs = r.readState && typeof r.readState === 'object' ? r.readState : null;
       const rsRead = Number(rs?.read) || 0;
@@ -71,6 +77,7 @@ export function buildMarketplaceModuleRollup(nodes) {
       if (status === 'needs-login') needsLogin += 1;
       if (status === 'error') errored += 1;
       if (srcErr > 0) sourcesErrored += 1;
+      if (status === 'ok' && srcBlocked > 0) maskedBlocked += 1;
       totalHigh += high;
 
       const label = `${multi ? `${String(m.nodeId).slice(0, 6)}/` : ''}${platformId}`;
@@ -79,7 +86,7 @@ export function buildMarketplaceModuleRollup(nodes) {
       // (often a quoted buyer message) that can contain a literal `|`.
       const summary = (r.summary || r.message || '').replace(/\s+/g, ' ').trim().slice(0, 80).replace(/\|/g, '\\|');
       rows.push(
-        `| ${label} | ${status} | ${Number.isFinite(ts) && ts ? formatAge(ts) : 'never'} | ${attention.length} (${high}) | ${readCol} | ${sources.length} (${srcErr}) | ${summary || '—'} |`,
+        `| ${label} | ${status} | ${Number.isFinite(ts) && ts ? formatAge(ts) : 'never'} | ${attention.length} (${high}) | ${readCol} | ${sources.length} (${srcErr}/${srcBlocked}) | ${summary || '—'} |`,
       );
 
       // Per-platform flagged-item detail — the headline + verbatim evidence the
@@ -109,8 +116,9 @@ export function buildMarketplaceModuleRollup(nodes) {
   ];
   if (needsLogin > 0) lines.push(`- ⚠️ ${needsLogin} platform(s) read **needs-login** — the hub scan was skipped there; user must re-login in Settings → Marketplace Login.`);
   if (errored > 0) lines.push(`- ⚠️ ${errored} platform(s) read **error** — could not read the hub pages at all.`);
-  if (sourcesErrored > 0) lines.push(`- ⚠️ ${sourcesErrored} platform(s) had a hub page **error** (AI scan ran on incomplete input — see Sources (err) column).`);
-  if (needsLogin === 0 && errored === 0 && sourcesErrored === 0) lines.push(`- ✅ Every checked platform read its hub cleanly${totalHigh > 0 ? ` (${totalHigh} high-urgency action item(s) flagged)` : ''}.`);
+  if (sourcesErrored > 0) lines.push(`- ⚠️ ${sourcesErrored} platform(s) had a hub page **error** (AI scan ran on incomplete input — see the \`err\` count in the Sources column).`);
+  if (maskedBlocked > 0) lines.push(`- ⚠️ ${maskedBlocked} platform(s) read **ok** but had a hub URL **blocked** (logged-out / unreadable — see the \`blk\` count) — the platform looks clean because a sibling watch URL read fine, yet one of its hub URLs needs attention.`);
+  if (needsLogin === 0 && errored === 0 && sourcesErrored === 0 && maskedBlocked === 0) lines.push(`- ✅ Every checked platform read its hub cleanly${totalHigh > 0 ? ` (${totalHigh} high-urgency action item(s) flagged)` : ''}.`);
   if (anyReadState) lines.push(`- 📨 Message read-state was detected (\`r/u\` column = read/unread conversations on the hub page(s)). An already-read message should NOT be flagged high-urgency — if one is, check the flagged-item evidence below.`);
 
   const detailSection = detailBlocks.length > 0
@@ -120,17 +128,19 @@ export function buildMarketplaceModuleRollup(nodes) {
   return `
 ## Marketplace Status Module
 > Each \`marketplacestatus\` node's OWN last hub-scan (\`data.platformStatus\`) —
-> "did Check Status complete, and what did each platform's hub return?". Distinct
-> from the per-card "Marketplace Status Roll-up" (that's per-listing checks). The
+> "did Check All complete, and what did each platform's hub return?". The
 > Node Diagnostics row for this node shows no platformStatus, so this is the only
 > place it appears. \`Checked\` age proves whether the result is from a check that
 > just ran or a persisted older one. \`Attention\` is total (high-urgency). \`r/u\`
 > = read/unread message conversations the scan saw (a read message flagged
-> high-urgency is a bug — see the flagged-item evidence below).
+> high-urgency is a bug — see the flagged-item evidence below). \`Sources\` is
+> \`total (err/blk)\`: err = a hub page that failed to fetch / AI-scan, blk = a
+> hub URL that was logged-out or unreadable while a sibling read OK (so the
+> platform reads clean but one watch URL still needs attention).
 
 ${lines.join('\n')}
 
-| Platform | Status | Checked | Attention (high) | r/u | Sources (err) | Summary |
+| Platform | Status | Checked | Attention (high) | r/u | Sources (err/blk) | Summary |
 | --- | --- | --- | --- | --- | --- | --- |
 ${rows.join('\n')}${detailSection}
 `;

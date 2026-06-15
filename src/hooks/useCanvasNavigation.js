@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useLayoutEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { getNodeDims, getNodesBounds } from '../utils/constants';
 
@@ -45,7 +45,10 @@ export function useCanvasNavigation({
     };
   }, []);
 
-  useEffect(() => {
+  // flushStack can run from a save shortcut immediately after a visible node
+  // update. Layout timing guarantees these refs match that committed render
+  // before the user can trigger save.
+  useLayoutEffect(() => {
     nodesRef.current = nodes;
     edgesRef.current = edges;
     drawingsRef.current = drawings;

@@ -7,49 +7,117 @@ import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
 import { useSyncWhileFocused } from '../../hooks/useSyncWhileFocused';
 import { buildFinalListingTitle, normalizeBundlePricingResult, selectListingPriceTiers } from '../../utils/bundlePricing';
+import {
+  DEFAULT_PRICE_DROP_TARGET_PERCENT,
+  normalizePriceDropReminderWeeks,
+  normalizePriceDropTargetPercent,
+  priceDropReminderCountBeforeMustSell,
+  priceDropTargetPrice,
+  resolvePriceDropStartingTier,
+} from '../../utils/priceDropReminder';
 
 /**
- * Per-ITEM price-drop reminder cadence, stored on the hub
- * (data.priceDropReminderWeeks) and read by this hub's marketplace cards —
- * each card pulses when the interval elapses since its creation / last
- * acknowledged drop (see priceDropReminder.js). Empty / 0 = off.
+ * Per-item price-drop plan stored on the hub and read by its marketplace cards.
+ * The cadence enables the pulse. An optional must-sell date adds a calculated
+ * price target, using the selected Quick/Best/Max tier as the starting value.
  *
  * Plain-text input with blur-commit (useSyncWhileFocused) so decimals like
  * "1.5" type naturally and there are no number-spinner artifacts.
  */
-function PriceDropReminderRow({ weeks, locked, onChange }) {
-  const { value, setValue, focusProps } = useSyncWhileFocused(weeks > 0 ? String(weeks) : '');
+function PriceDropReminderPlan({ plan, locked, onChange }) {
+  const weeksEditor = useSyncWhileFocused(plan.weeks > 0 ? String(plan.weeks) : '');
+  const targetEditor = useSyncWhileFocused(String(plan.targetPercent));
+  const targetPrice = priceDropTargetPrice(plan.startingPrice, plan.targetPercent);
+  const priorReminderCount = priceDropReminderCountBeforeMustSell({
+    scheduleStartedAtIso: plan.scheduleStartedAt,
+    mustSellDate: plan.mustSellDate,
+    weeks: plan.weeks,
+  });
 
-  const handleBlur = () => {
-    focusProps.onBlur();
-    const parsed = parseFloat(value);
-    const next = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-    onChange?.(next);
-    setValue(next > 0 ? String(next) : '');
+  const commitWeeks = () => {
+    weeksEditor.focusProps.onBlur();
+    const next = normalizePriceDropReminderWeeks(weeksEditor.value);
+    onChange?.({ weeks: next });
+    weeksEditor.setValue(next > 0 ? String(next) : '');
+  };
+
+  const commitTarget = () => {
+    targetEditor.focusProps.onBlur();
+    const raw = targetEditor.value.trim();
+    const next = raw === ''
+      ? DEFAULT_PRICE_DROP_TARGET_PERCENT
+      : normalizePriceDropTargetPercent(raw);
+    if (next == null) {
+      targetEditor.setValue(String(plan.targetPercent));
+      return;
+    }
+    onChange?.({ targetPercent: next });
+    targetEditor.setValue(String(next));
   };
 
   return (
-    <div className="pt-1">
+    <div className="pt-1 space-y-1">
       <div className="flex items-center gap-1.5">
         <TrendingDown size={9} className="text-white/25 shrink-0" />
         <span className="text-white/35 text-[9px]">Remind to lower price every</span>
         <input
           type="text"
           inputMode="decimal"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onFocus={focusProps.onFocus}
-          onBlur={handleBlur}
+          value={weeksEditor.value}
+          onChange={(e) => weeksEditor.setValue(e.target.value)}
+          onFocus={weeksEditor.focusProps.onFocus}
+          onBlur={commitWeeks}
           onPointerDown={(e) => e.stopPropagation()}
           placeholder="off"
+          aria-label="Price-drop reminder interval in weeks"
           disabled={locked}
           className="nodrag w-10 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-white/70 text-[9px] text-center outline-none focus:border-blue-400/50 disabled:opacity-50 placeholder:text-white/20"
         />
         <span className="text-white/35 text-[9px]">weeks</span>
       </div>
-      <div className="text-white/20 text-[9px] leading-snug mt-0.5">
-        This item's marketplace cards pulse when the interval elapses. Decimals ok; empty = off.
+      <div className="flex items-center gap-1.5">
+        <span className="w-[9px] shrink-0" />
+        <span className="text-white/35 text-[9px]">Must sell by</span>
+        <input
+          type="date"
+          value={plan.mustSellDate}
+          onChange={(e) => onChange?.({ mustSellDate: e.target.value })}
+          onPointerDown={(e) => e.stopPropagation()}
+          aria-label="Must sell by"
+          disabled={locked}
+          className="nodrag min-w-0 flex-1 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-white/65 text-[9px] outline-none focus:border-blue-400/50 disabled:opacity-50 [color-scheme:dark]"
+        />
       </div>
+      <div className="flex items-center gap-1.5">
+        <span className="w-[9px] shrink-0" />
+        <span className="text-white/35 text-[9px]">Max % of starting price by then</span>
+        <input
+          type="text"
+          inputMode="decimal"
+          value={targetEditor.value}
+          onChange={(e) => targetEditor.setValue(e.target.value)}
+          onFocus={targetEditor.focusProps.onFocus}
+          onBlur={commitTarget}
+          onPointerDown={(e) => e.stopPropagation()}
+          aria-label="Max percent of starting price by must-sell date"
+          disabled={locked}
+          className="nodrag w-14 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-white/70 text-[9px] text-right outline-none focus:border-blue-400/50 disabled:opacity-50"
+        />
+        <span className="text-white/30 text-[9px]">%</span>
+      </div>
+      <div className="text-white/20 text-[9px] leading-snug mt-0.5">
+        Cards share a cadence starting from the oldest listing card. The final decrease is scheduled on the last reminder strictly before the must-sell date.
+      </div>
+      {targetPrice != null && (
+        <div className="text-white/25 text-[9px] leading-snug">
+          Deadline maximum: {formatPrice(targetPrice)} ({plan.targetPercent}% of {formatPrice(plan.startingPrice)}).
+        </div>
+      )}
+      {priorReminderCount === 0 && (
+        <div className="text-amber-300/70 text-[9px] leading-snug">
+          No reminder fits before this date. Choose a later date or shorter interval to guarantee the target.
+        </div>
+      )}
     </div>
   );
 }
@@ -185,10 +253,16 @@ export function SellHubPricedState({
   // later. Cleared on success OR failure (failure → platformFit stays null →
   // fall back to the unfiltered list below).
   platformFitPending = false,
-  // Per-item price-drop reminder cadence (weeks, decimals ok, 0 = off) —
-  // persisted on the hub, consumed by this hub's marketplace cards.
-  priceDropReminderWeeks = 0,
-  onChangePriceDropReminderWeeks,
+  // Shared price-drop plan, persisted on the hub and consumed by its cards.
+  priceDropPlan = {
+    weeks: 0,
+    mustSellDate: '',
+    targetPercent: DEFAULT_PRICE_DROP_TARGET_PERCENT,
+    scheduleStartedAt: null,
+    startingPrice: null,
+    startingTier: 'best',
+  },
+  onChangePriceDropPlan,
 }) {
   const [showUnfit, setShowUnfit] = useState(false);
   const [expandedItemReasons, setExpandedItemReasons] = useState({});
@@ -205,6 +279,8 @@ export function SellHubPricedState({
     bundlePricing?.item_count ?? pricedItemCount,
   );
   const tiers = selectListingPriceTiers({ pricing, itemPricings, bundlePricing: displayBundlePricing, bundleTotal });
+  const selectedStartingTier = resolvePriceDropStartingTier(tiers, priceDropPlan.startingTier);
+  const planStartingPrice = priceDropPlan.startingPrice ?? tiers[selectedStartingTier] ?? null;
   const resultItems = tiers.isBundle
     ? itemPricings
     : [{ key: 'primary', label: product.generated_title || 'Item', pricing }];
@@ -273,17 +349,35 @@ export function SellHubPricedState({
             )}
           </div>
 
+          <div className="text-white/25 text-[8px] leading-snug">
+            Price-drop starting value: {formatPrice(planStartingPrice)}. Select a tier to use its current price.
+          </div>
           <div className="grid grid-cols-3 gap-1.5">
             {[
-              { label: 'Quick', subline: '1–3 days', price: tiers.quick, cls: 'border-amber-500/20 bg-amber-500/[0.08] text-amber-300' },
-              { label: 'Best', subline: '1–2 weeks', price: tiers.best, cls: 'border-emerald-500/30 bg-emerald-500/[0.12] text-emerald-300' },
-              { label: 'Max', subline: '3–4 weeks', price: tiers.max, cls: 'border-purple-500/20 bg-purple-500/[0.08] text-purple-200' },
+              { id: 'quick', label: 'Quick', subline: '1–3 days', price: tiers.quick, cls: 'border-amber-500/20 bg-amber-500/[0.08] text-amber-300' },
+              { id: 'best', label: 'Best', subline: '1–2 weeks', price: tiers.best, cls: 'border-emerald-500/30 bg-emerald-500/[0.12] text-emerald-300' },
+              { id: 'max', label: 'Max', subline: '3–4 weeks', price: tiers.max, cls: 'border-purple-500/20 bg-purple-500/[0.08] text-purple-200' },
             ].map(tier => (
-              <div key={tier.label} className={`rounded-lg border px-1.5 py-1.5 text-center ${tier.cls}`}>
+              <button
+                type="button"
+                key={tier.id}
+                onClick={() => onChangePriceDropPlan?.({ startingTier: tier.id })}
+                onPointerDown={(e) => e.stopPropagation()}
+                disabled={locked || !hasPositivePrice(tier.price)}
+                aria-label={`Use ${tier.label} price as price-drop starting value`}
+                aria-pressed={selectedStartingTier === tier.id}
+                title={`Use ${tier.label} price as the price-drop plan's starting value`}
+                className={`nodrag relative rounded-lg border px-1.5 py-1.5 text-center transition-shadow disabled:opacity-50 ${tier.cls} ${
+                  selectedStartingTier === tier.id ? 'ring-1 ring-inset ring-blue-300/80' : ''
+                }`}
+              >
+                {selectedStartingTier === tier.id && (
+                  <span className="absolute right-1 top-0.5 text-[6px] font-bold uppercase tracking-wide text-blue-200/80">Start</span>
+                )}
                 <div className="text-[8px] font-semibold uppercase tracking-wider opacity-70">{tier.label}</div>
                 <div className="text-[12px] font-bold">{formatPrice(tier.price)}</div>
                 <div className="text-white/25 text-[7px]">{tier.subline}</div>
-              </div>
+              </button>
             ))}
           </div>
           {tiers.isBundle && unpricedItemCount > 0 && (
@@ -430,10 +524,13 @@ export function SellHubPricedState({
             </>
           );
         })()}
-        <PriceDropReminderRow
-          weeks={Number(priceDropReminderWeeks) || 0}
+        <PriceDropReminderPlan
+          plan={{
+            ...priceDropPlan,
+            weeks: normalizePriceDropReminderWeeks(priceDropPlan.weeks),
+          }}
           locked={locked}
-          onChange={onChangePriceDropReminderWeeks}
+          onChange={onChangePriceDropPlan}
         />
       </div>
 

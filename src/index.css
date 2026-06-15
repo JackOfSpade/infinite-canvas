@@ -128,11 +128,37 @@ body {
   animation: monitoring-glow 3s ease-in-out infinite;
 }
 
-/* Pulsing amber ring on a listing card whose price-drop reminder is due.
-   Animates box-shadow only — the card's border color is inline-styled. */
+/* A user-selected listing glow remains fixed. The reminder's ring/halo spreads
+   grow when it is present, keeping the amber pulse visually outermost. */
+.marketplace-listing-card {
+  --listing-static-ring: 0 0 0 0 transparent;
+  --listing-static-halo: 0 0 0 0 transparent;
+  --price-reminder-ring-spread: 5px;
+  --price-reminder-halo-blur: 24px;
+}
+
+.marketplace-static-glow {
+  --listing-static-ring: 0 0 0 5px color-mix(in srgb, var(--listing-static-glow-color) 35%, transparent);
+  --listing-static-halo: 0 0 24px color-mix(in srgb, var(--listing-static-glow-color) 45%, transparent);
+  --price-reminder-ring-spread: 10px;
+  --price-reminder-halo-blur: 34px;
+  box-shadow: var(--listing-static-ring), var(--listing-static-halo);
+}
+
 @keyframes price-reminder-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
-  50% { box-shadow: 0 0 0 5px rgba(245, 158, 11, 0.35), 0 0 24px rgba(245, 158, 11, 0.45); }
+  0%, 100% {
+    box-shadow:
+      var(--listing-static-ring),
+      var(--listing-static-halo),
+      0 0 0 0 rgba(245, 158, 11, 0);
+  }
+  50% {
+    box-shadow:
+      var(--listing-static-ring),
+      var(--listing-static-halo),
+      0 0 0 var(--price-reminder-ring-spread) rgba(245, 158, 11, 0.35),
+      0 0 var(--price-reminder-halo-blur) rgba(245, 158, 11, 0.45);
+  }
 }
 
 .price-reminder-pulse {
@@ -470,4 +496,3 @@ kbd {
   text-align: left;
   animation: login-pending-dots 1.2s steps(4, end) infinite;
 }
-

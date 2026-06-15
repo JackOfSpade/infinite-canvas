@@ -11,6 +11,18 @@ import { resolveServiceAccountPath, getAISettings } from './settings.js';
 import { callClaudeText, probeClaude, CLAUDE_MODELS_IN_USE } from './claude.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP, DOCUMENT_MIME_MAP } from '../utils/mimeTypes.js';
+import {
+  GEMINI_MODEL_FALLBACKS,
+  GEMINI_MODEL_REGISTRY,
+  classifyGeminiFailure,
+  describeGeminiFailure,
+  getGeminiDefaultThinkingConfig,
+  getGeminiLifecycleWarning,
+  isGeminiProviderAvailable,
+  orderGeminiModels,
+} from './geminiModels.js';
+
+export { GEMINI_MODEL_FALLBACKS } from './geminiModels.js';
 
 // Determinism for structured/JSON output (not a telemetry-learning candidate —
 // temperature is a quality knob, not a budget).
@@ -24,21 +36,6 @@ const MAX_AI_FILE_BYTES  = 15 * 1024 * 1024; // 15MB
 
 const GEMINI_MODEL = 'gemini-3.5-flash';
 const LOCATION = 'us-central1';
-
-// Best → worst across the FREE-tier text/JSON Gemini models, in cascade order
-// (callGemini falls down this list on 429/cooldown). Hoisted to module scope so
-// the token-fit preflight (checkPromptFits) can budget against the WHOLE cascade
-// — i.e. the smallest window any step might use — rather than just the entry
-// model. Today every entry is 1,048,576/65,536 so the cascade is homogeneous,
-// but taking the min keeps the preflight correct if a smaller-window model is
-// ever added. See the long rationale at the use site in callGemini.
-export const GEMINI_MODEL_FALLBACKS = [
-  'gemini-3.5-flash',         // ~20 RPD / 5 RPM free — best quality available on free tier
-  'gemini-3-flash-preview',   // ~20 RPD / 5 RPM free  (display name "Gemini 3 Flash")
-  'gemini-2.5-flash',         // ~20 RPD / 5 RPM free
-  'gemini-2.5-flash-lite',    // ~20 RPD / 10 RPM free
-  'gemini-3.1-flash-lite',    // ~500 RPD / 15 RPM free — workhorse, completes bulk runs
-];
 
 /**
  * Convert standard JSON Schema (lowercase types) to Gemini's responseSchema
@@ -220,12 +217,113 @@ let lastAttemptedModel = '(none)';
 let lastSuccessfulModel = '(none)';
 let lastAttemptedError = '(none)';
 
-// Per-model rate-limit cooldown: model id → epoch ms until which it's known to be
-// 429'd. Populated from each 429's "retry in Ns" hint and consulted by the fallback
-// loop so subsequent calls SKIP a model that's still cooling instead of re-hitting
-// it for a wasted round-trip every batch. Process-scoped (resets on restart), which
-// is correct — a rate-limit window is short-lived. See callGemini's loop.
-const modelCooldownUntil = new Map();
+// Per-model suppression and warning state. Rate limits use the provider's short
+// retry hint; structurally unavailable / access-denied endpoints are retried
+// after a longer interval or immediately when the user runs Check availability.
+// Process-local state avoids permanently blacklisting a model after quota/access
+// changes.
+//
+// State is keyed by (credential+endpoint, model), NOT model alone: a model that
+// is rate-limited on one API key, denied for one key, or unreachable on Vertex in
+// one region must not be treated as suppressed for a DIFFERENT key, a freshly
+// configured key, or the other endpoint. The scope is recomputed per call from
+// the active credential; switching keys therefore starts from a clean slate.
+const modelSuppressedUntil = new Map();  // `${scope} ${model}` → timestamp
+const modelRuntimeState = new Map();     // `${scope} ${model}` → state
+const UNAVAILABLE_RECHECK_MS = 6 * 60 * 60_000;
+// Request-specific failures (truncation / server / timeout / malformed) are NOT
+// model-health problems — their warning self-expires so one bad request can't
+// leave a healthy model permanently flagged as problematic in Settings/bug reports.
+const REQUEST_FAILURE_WARN_MS = 15 * 60_000;
+
+// Most-recently-used scope, so telemetry readers (bug report, get-ai-status) that
+// don't know the active credential still surface the right scope's warnings.
+let lastActiveScope = null;
+
+/** Stable, non-secret-leaking fingerprint of a credential string. */
+function hashCredential(value) {
+  const str = String(value || '');
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+/**
+ * Scope key for the active credential + endpoint. AI Studio scopes by API key;
+ * Vertex by service-account file (or project). `cachedKeyFile`/`projectId` are
+ * populated by getAuthClient() before any Vertex call records failures.
+ */
+function credentialScope(apiKey) {
+  if (apiKey) return `ai:${hashCredential(apiKey)}`;
+  return `vx:${hashCredential(cachedKeyFile || projectId || 'default')}`;
+}
+
+function scopedKey(scope, model) {
+  return `${scope} ${model}`;
+}
+
+/** Build a model→suppressedUntil view for the given scope (only cooling entries). */
+function suppressionMapForScope(scope, now) {
+  const m = new Map();
+  for (const { id } of GEMINI_MODEL_REGISTRY) {
+    const until = modelSuppressedUntil.get(scopedKey(scope, id)) || 0;
+    if (until > now) m.set(id, until);
+  }
+  return m;
+}
+
+function clearGeminiModelFailure(scope, model) {
+  modelSuppressedUntil.delete(scopedKey(scope, model));
+  modelRuntimeState.delete(scopedKey(scope, model));
+}
+
+function rememberGeminiModelFailure(scope, model, classification, message, suppressedUntil = null) {
+  const key = scopedKey(scope, model);
+  if (suppressedUntil) modelSuppressedUntil.set(key, suppressedUntil);
+  // Warning visibility window: a suppressed failure stays visible until it's
+  // eligible to retry; a transient/request-specific failure self-expires.
+  const warnUntil = suppressedUntil ?? (Date.now() + REQUEST_FAILURE_WARN_MS);
+  modelRuntimeState.set(key, {
+    model,
+    classification,
+    message: describeGeminiFailure(classification, message).slice(0, 300),
+    observedAt: Date.now(),
+    suppressedUntil,
+    warnUntil,
+  });
+}
+
+function geminiWarnings(scope = lastActiveScope) {
+  const warnings = [];
+  const now = Date.now();
+  for (const { id } of GEMINI_MODEL_REGISTRY) {
+    const lifecycle = getGeminiLifecycleWarning(id);
+    if (lifecycle) warnings.push({ model: id, type: 'lifecycle', message: lifecycle });
+    if (!scope) continue;
+    const runtime = modelRuntimeState.get(scopedKey(scope, id));
+    if (!runtime) continue;
+    if (runtime.warnUntil && runtime.warnUntil <= now) {
+      modelRuntimeState.delete(scopedKey(scope, id));  // expired — stop warning
+      continue;
+    }
+    warnings.push({ model: id, type: runtime.classification, message: runtime.message });
+  }
+  return warnings;
+}
+
+function suppressionUntilForFailure(classification, retryAfterMs = null) {
+  if (
+    classification === 'unavailable'
+    || classification === 'model-access'
+    || classification === 'no-quota'
+    || classification === 'daily-quota'
+  ) {
+    return Date.now() + UNAVAILABLE_RECHECK_MS;
+  }
+  if (classification !== 'rate-limit') return null;
+  const cooldownMs = Math.min(10 * 60_000, Math.max(1000, retryAfterMs ?? 30_000));
+  return Date.now() + cooldownMs;
+}
 
 /** Parse a Gemini 429 error MESSAGE (string) for its "retry in Ns / Nms" hint →
  *  milliseconds, or null. The API phrases it as "Please retry in 53.39s." or
@@ -247,7 +345,9 @@ export function getGeminiTelemetry() {
   return {
     lastAttemptedModel,
     lastSuccessfulModel,
-    lastAttemptedError
+    lastAttemptedError,
+    compatibleModels: [...GEMINI_MODEL_FALLBACKS],
+    warnings: geminiWarnings(),
   };
 }
 
@@ -280,7 +380,38 @@ function extractGeminiErr(body, status) {
 }
 
 /**
- * Availability probe for the AI Studio key path: a 1-token generateContent ping.
+ * Flatten the structured google.rpc detail blocks (QuotaFailure / RetryInfo) from
+ * a Gemini error body. The flat `error.message` usually omits the violated
+ * quota's `quotaValue` ("0" for a Pro model with no free-tier quota) and the
+ * per-day quotaId — so the suppression policy can't tell a zero-quota model from
+ * a transient burst without this. Returns '' when there are no structured details.
+ */
+function extractGeminiErrorDetails(body) {
+  if (!body) return '';
+  try {
+    const details = JSON.parse(body)?.error?.details;
+    if (Array.isArray(details) && details.length) return JSON.stringify(details).slice(0, 1000);
+  } catch { /* not JSON */ }
+  return '';
+}
+
+// Minimal probe body: we only inspect the HTTP status (ok / 429 / 4xx), never the
+// content, so the smallest possible output cap keeps each probe's token footprint
+// near zero. It's still one request against the model's RPD pool — inherent to
+// verifying real availability — but no longer spends a 256-token budget per model.
+function geminiProbeBody(model) {
+  return JSON.stringify({
+    contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
+    generationConfig: {
+      maxOutputTokens: 8,
+      responseMimeType: 'text/plain',
+      thinkingConfig: getGeminiDefaultThinkingConfig(model),
+    },
+  });
+}
+
+/**
+ * Availability probe for the AI Studio key path: a tiny generateContent ping.
  * NEVER throws — returns {ok,status,...}. Unlike Claude, Gemini exposes NO
  * remaining-quota on success (only a retry hint on 429), so there is no
  * `rateLimit` block by design — we don't fabricate one.
@@ -294,8 +425,9 @@ export async function probeGemini(apiKey, model = 'gemini-3.1-flash-lite', quota
   try {
     res = await fetch(url, {
       method: 'POST',
+      signal: AbortSignal.timeout(30_000),
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: 'ping' }] }], generationConfig: { maxOutputTokens: 1 } }),
+      body: geminiProbeBody(model),
     });
   } catch (e) {
     return { ok: false, status: null, model, error: e?.message || String(e) };
@@ -305,7 +437,70 @@ export async function probeGemini(apiKey, model = 'gemini-3.1-flash-lite', quota
   if (res.ok) return { ok: true, status: res.status, model, quotaStats };
   let body = '';
   try { body = await res.text(); } catch { /* ignore */ }
-  return { ok: false, status: res.status, model, error: extractGeminiErr(body, res.status), retryAfterMs: parseGeminiRetryMs(res, body), quotaStats };
+  const error = extractGeminiErr(body, res.status);
+  const errorDetails = extractGeminiErrorDetails(body);
+  const classification = classifyGeminiFailure(res.status, `${error}\n${errorDetails}`);
+  return {
+    ok: false,
+    status: res.status,
+    model,
+    error,
+    errorDetails,
+    classification,
+    diagnostic: describeGeminiFailure(classification, error),
+    retryAfterMs: parseGeminiRetryMs(res, body),
+    quotaStats,
+  };
+}
+
+/**
+ * Availability probe for the VERTEX (service-account) path — the equivalent of
+ * probeGemini for users who configured a service-account.json but no AI Studio
+ * key. Without this, "Check availability" reports "no Gemini key" even though
+ * normal Gemini calls work fine through Vertex (Finding 4). NEVER throws.
+ */
+export async function probeGeminiVertex(model = 'gemini-3.1-flash-lite', quotaStatsMap = null) {
+  let token;
+  let pid;
+  try {
+    token = await getToken();   // populates module-level projectId via getAuthClient
+    pid = projectId;
+    if (!token || !pid) {
+      return { ok: false, status: null, model, error: 'No usable Vertex service-account credential.' };
+    }
+  } catch (e) {
+    return { ok: false, status: null, model, error: e?.message || String(e) };
+  }
+  const url = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${pid}/locations/${LOCATION}/publishers/google/models/${model}:generateContent`;
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      signal: AbortSignal.timeout(30_000),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: geminiProbeBody(model),
+    });
+  } catch (e) {
+    return { ok: false, status: null, model, error: e?.message || String(e) };
+  }
+  const quotaStats = quotaStatsMap?.[model] ?? null;
+  if (res.ok) return { ok: true, status: res.status, model, quotaStats };
+  let body = '';
+  try { body = await res.text(); } catch { /* ignore */ }
+  const error = extractGeminiErr(body, res.status);
+  const errorDetails = extractGeminiErrorDetails(body);
+  const classification = classifyGeminiFailure(res.status, `${error}\n${errorDetails}`);
+  return {
+    ok: false,
+    status: res.status,
+    model,
+    error,
+    errorDetails,
+    classification,
+    diagnostic: describeGeminiFailure(classification, error),
+    retryAfterMs: parseGeminiRetryMs(res, body),
+    quotaStats,
+  };
 }
 
 /**
@@ -425,10 +620,14 @@ export async function fetchGeminiQuotaStats() {
     return null;
   }
 
-  // Because quota metrics are project-wide (not per-model in the returned labels
-  // for the AI Studio free-tier API), we aggregate all rpm/rpd/tpm values and
-  // distribute them equally across all our fallback models — the dashboard shows
-  // the same project-wide numbers per model anyway.
+  // The serviceruntime quota timeSeries we can read here are reported at the
+  // PROJECT level — the returned labels don't reliably carry a per-model
+  // dimension on the generativelanguage free tier (a model-labelled query isn't
+  // dependable and risks 400-ing the whole call). So these rpm/rpd/tpm figures
+  // are a single project-wide snapshot, NOT per-model. We therefore tag each
+  // entry `scope: 'project'` and the UI labels it as shared rather than
+  // pretending each model has its own numbers — Google's per-model dashboard
+  // (e.g. Pro at 0/0) is the source of truth for model-specific limits.
   const aggregated = { rpm: { used: 0, limit: 0 }, rpd: { used: 0, limit: 0 }, tpm: { used: 0, limit: 0 } };
   const seenDimensions = new Set();
   for (const qm of new Set([...Object.keys(usages), ...Object.keys(limits)])) {
@@ -442,8 +641,7 @@ export async function fetchGeminiQuotaStats() {
     }
   }
 
-  // Return the same stats for every fallback model. If no data came back at all,
-  // return null so the UI falls back to ping-only display.
+  // If no data came back at all, return null so the UI falls back to ping-only.
   const hasData = seenDimensions.size > 0;
   if (!hasData) return null;
 
@@ -453,6 +651,7 @@ export async function fetchGeminiQuotaStats() {
       rpm: aggregated.rpm.limit > 0 ? aggregated.rpm : null,
       rpd: aggregated.rpd.limit > 0 ? aggregated.rpd : null,
       tpm: aggregated.tpm.limit > 0 ? aggregated.tpm : null,
+      scope: 'project',   // these figures are project-wide, not model-specific
     };
   }
   return result;
@@ -461,6 +660,71 @@ export async function fetchGeminiQuotaStats() {
 // Last live "Check availability" result per provider, so the Settings panel can
 // render the most recent verdict immediately on open (the button refreshes it).
 const lastProbe = { gemini: null, claude: null };
+
+// Coalesce concurrent Gemini "Check availability" runs. Each run probes EVERY
+// compatible model (one request per model against its RPD pool), so a double-click
+// or a second open panel must reuse the in-flight batch rather than fire a fresh
+// one. Sequential checks (after this settles) still re-probe for fresh status.
+let geminiCheckInFlight = null;
+
+/**
+ * Run one Gemini availability sweep: probe every compatible model and fold the
+ * verdicts into this credential's suppression state. Supports BOTH the AI Studio
+ * key path and the Vertex (service-account) path — a Vertex-only setup is no
+ * longer falsely reported as "no Gemini key" (Finding 4). Never throws.
+ */
+async function runGeminiAvailabilityCheck(settings) {
+  const apiKey = settings.geminiApiKey || null;
+  const hasServiceAccount = !!resolveServiceAccountPath();
+
+  if (!apiKey && !hasServiceAccount) {
+    return {
+      ok: false,
+      models: [{ ok: false, status: null, model: null,
+        error: 'No Gemini credential set — add an AI Studio API key or a service-account.json in Settings.' }],
+    };
+  }
+
+  // Pre-warm the shared auth client so the parallel Vertex probes reuse one
+  // cached client+token instead of racing getAuthClient — a concurrent
+  // rebuild/reset (getToken clears authClient on error) could otherwise make
+  // sibling probes spuriously fail. Errors here are surfaced by the probes.
+  if (!apiKey) { try { await getAuthClient(); } catch { /* probes report it */ } }
+
+  // Probe via AI Studio when a key is set, else via the Vertex service account.
+  const probeOne = apiKey
+    ? (m) => probeGemini(apiKey, m, null)
+    : (m) => probeGeminiVertex(m, null);
+  const [quotaStatsMap, ...probeResults] = await Promise.all([
+    fetchGeminiQuotaStats(),
+    ...GEMINI_MODEL_FALLBACKS.map((m) => probeOne(m)),
+  ]);
+
+  const models = probeResults.map((probe, i) => ({
+    ...probe,
+    quotaStats: quotaStatsMap?.[GEMINI_MODEL_FALLBACKS[i]] ?? null,
+  }));
+
+  // Fold verdicts into THIS credential+endpoint's scope so the check updates the
+  // same suppression state the live fallback loop reads (and clears recovered ones).
+  const scope = credentialScope(apiKey);
+  lastActiveScope = scope;
+  for (const modelResult of models) {
+    if (!modelResult.model) continue;
+    if (modelResult.ok) { clearGeminiModelFailure(scope, modelResult.model); continue; }
+    const failureText = `${modelResult.error || ''}\n${modelResult.errorDetails || ''}`;
+    const classification = modelResult.classification || classifyGeminiFailure(modelResult.status, failureText);
+    const suppressedUntil = suppressionUntilForFailure(classification, modelResult.retryAfterMs);
+    rememberGeminiModelFailure(scope, modelResult.model, classification, modelResult.error, suppressedUntil);
+  }
+
+  return {
+    ok: isGeminiProviderAvailable(models),
+    models,
+    hasQuotaStats: quotaStatsMap !== null,
+    endpoint: apiKey ? 'ai-studio' : 'vertex',
+  };
+}
 
 /**
  * Inner executor for a single Gemini API request.
@@ -500,11 +764,11 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
     // output cap → MAX_TOKENS truncation → forced fallback to the WEAKEST model,
     // and (b) ran long enough to trip the 60s request timeout. Net effect: thinking
     // was knocking out the strong models and DEGRADING quality, not improving it.
-    // thinkingBudget:0 is accepted by every model in the fallback chain (verified
-    // live against all 5 — all 200, thoughts→0, valid JSON) and is the single
-    // biggest free-tier reliability/latency win. A task that genuinely benefits
-    // from reasoning can re-enable it by passing thinkingConfig via genConfig.
-    thinkingConfig: { thinkingBudget: 0 },
+    // Thinking controls differ by model family: Gemini 3 uses thinkingLevel,
+    // while 2.5 uses thinkingBudget and 2.5 Pro cannot disable thinking. The
+    // registry supplies the lowest documented setting each model accepts. A
+    // task that genuinely benefits from reasoning can still override it.
+    thinkingConfig: getGeminiDefaultThinkingConfig(model),
     ...restGenConfig,
   };
   if (responseSchema) {
@@ -546,7 +810,13 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
     let errMsg;
     try { errMsg = JSON.parse(errText)?.error?.message || errText; }
     catch { errMsg = errText; }
-    throw new Error(`${endpointName} error ${response.status}: ${errMsg}`);
+    const error = new Error(`${endpointName} error ${response.status}: ${errMsg}`);
+    error.status = response.status;
+    error.retryAfterMs = parseGeminiRetryMs(response, errText);
+    // Carry the structured quota/retry details so the suppression policy can see
+    // quotaValue:"0" / per-day quotas that the flat message drops (Finding 3).
+    error.details = extractGeminiErrorDetails(errText);
+    throw error;
   }
 
   const data = await response.json();
@@ -597,59 +867,43 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
 
 /**
  * Core Gemini call — sends parts (text + optional images) to Vertex AI or AI Studio,
- * automatically falling back across the available text/JSON-capable Gemini models
- * in descending capability order
- * when rate limits or quotas are exceeded.
+ * automatically falling back across the available text/JSON-capable Gemini
+ * models. Quality tasks prefer Pro; lightweight tasks exhaust Lite/Flash before
+ * using Pro. Rate limits and unavailable endpoints move to the tail.
  * @param {Array} parts — Array of { text } or { inlineData: { mimeType, data } } objects
  * @param {string} apiKey - Optional Gemini API Key. If missing, falls back to Vertex AI.
- * @param {string} model - Ignored for Gemini calls to enforce progressive fallback.
+ * @param {string} model - Preferred model for this task; all compatible models remain fallbacks.
  * @param {object} [genConfig] — generationConfig overrides
  * @returns {Promise<string>} — Raw text response from Gemini
  */
 async function callGemini(parts, apiKey, model, genConfig = {}) {
   // Without an API key we use the Vertex/service-account path; verify that
   // credential up front so a missing one fails fast with one clear error
-  // instead of throwing the same auth failure against all 10 fallback models.
+  // instead of throwing the same auth failure against all fallback models.
   // (With a key we hit AI Studio directly — no service-account probe needed.)
   if (!apiKey) await getAuthClient();
 
-  // Best → worst across the text/JSON-capable Gemini models, scoped to ONLY the
-  // models with real FREE-tier quota (this app runs on a free-tier key). IDs
-  // verified live against the v1beta ListModels endpoint (May 2026); `*-tts` /
-  // `*-image` / `computer-use` / `robotics` and the non-existent `gemini-3-flash`
-  // (real id is `gemini-3-flash-preview`) are excluded — they don't serve plain
-  // generateContent text/JSON.
-  //
-  // DELIBERATELY EXCLUDED: every "Pro" model (gemini-3.1-pro, gemini-3-pro,
-  // gemini-2.5-pro) — all are limit 0/0 on the free tier per the AI Studio
-  // rate-limit dashboard, i.e. they 429 on EVERY call. Listing one first (as a
-  // paid-tier hedge) only burned ~150ms per AI call on a guaranteed 429 before
-  // falling through. If a billed/Tier-1 key is ever used, re-add 'gemini-3.1-pro-
-  // preview' at the head — it's the strongest model there.
-  //
-  // Free-tier reality for the models we DO keep:
-  //   • The 4 flash / flash-lite "20 RPD" models are each a SEPARATE quota
-  //     bucket (~5–10 RPM), so chaining them multiplies usable headroom and
-  //     burst capacity — a 429 on one pool spills into the next.
-  //   • gemini-3.1-flash-lite has ~500 RPD / 15 RPM — 25× the others — so it's
-  //     the workhorse tail: last in line, it still completes a bulk run after
-  //     every smaller pool has drained.
-  // (The list itself is hoisted to module scope — GEMINI_MODEL_FALLBACKS — so the
-  // token-fit preflight can budget against the whole cascade.)
+  // Scope suppression to THIS credential + endpoint (getAuthClient above has
+  // populated cachedKeyFile/projectId for the Vertex path) so a failure on one
+  // key/endpoint never suppresses a model for another. A grounded call's
+  // feature-specific failures are also kept out of the persistent model state.
+  const scope = credentialScope(apiKey);
+  lastActiveScope = scope;
+  const grounded = !!genConfig.grounding;
 
   const attemptedErrors = [];
+  if (genConfig.meta && typeof genConfig.meta === 'object') {
+    genConfig.meta.fallback = { attempts: 0, preferredModel: model };
+  }
 
-  // Try models NOT currently in a 429 cooldown first; keep cooling ones only as a
-  // last resort (the retry-after is an estimate, and attempting beats failing if
-  // every pool happens to be cooling). On the free tier the top two flash pools
-  // exhaust within a run, so without this every scoring/bucketing batch re-hit them
-  // for two throwaway 429 round-trips before reaching gemini-2.5-flash.
+  // Honor the per-task preference, then cascade through every compatible model.
+  // Known rate-limited/unreachable endpoints move to the tail as a last resort.
   const _now = Date.now();
-  const _ready   = GEMINI_MODEL_FALLBACKS.filter(m => (modelCooldownUntil.get(m) || 0) <= _now);
-  const _cooling = GEMINI_MODEL_FALLBACKS.filter(m => (modelCooldownUntil.get(m) || 0) >  _now);
-  const modelOrder = [..._ready, ..._cooling];
-  if (_cooling.length > 0 && _ready.length > 0) {
-    logger.info(`[Gemini] Skipping ${_cooling.length} rate-limited model(s) still cooling: ${_cooling.join(', ')}`);
+  const scopeSuppression = suppressionMapForScope(scope, _now);
+  const modelOrder = orderGeminiModels(model, scopeSuppression, _now);
+  const _cooling = modelOrder.filter(m => scopeSuppression.has(m));
+  if (_cooling.length > 0 && _cooling.length < modelOrder.length) {
+    logger.info(`[Gemini] Deferring ${_cooling.length} suppressed model(s): ${_cooling.join(', ')}`);
   }
 
   for (const currentModel of modelOrder) {
@@ -671,7 +925,7 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
       const result = await callGeminiSingle(parts, apiKey, currentModel, genConfig);
 
       lastSuccessfulModel = currentModel;
-      modelCooldownUntil.delete(currentModel); // it just succeeded — clear any stale cooldown
+      clearGeminiModelFailure(scope, currentModel);
       // Clear the per-attempt error on success. Otherwise it stays pinned to the
       // last failed hop — on the FREE tier the small "20 RPD" pools exhaust fast,
       // so a healthy call that simply fell through to a later model would forever
@@ -681,11 +935,11 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
       lastAttemptedError = '(none)';
       // Report the model that actually served this call back to the caller (by
       // reference) so per-stage telemetry can record WHICH model produced each
-      // result — e.g. a price synthesized by a weak flash-lite fallback after the
-      // stronger models 429'd looks identical in the output otherwise.
+      // result — e.g. a price synthesized by a weaker fallback after the
+      // preferred models 429'd looks identical in the output otherwise.
       if (genConfig.meta && typeof genConfig.meta === 'object') {
         genConfig.meta.model = currentModel;
-        // When stronger models were skipped to land here, record WHY — quota/
+        // When earlier models were skipped to land here, record WHY — quota/
         // rate-limit (external: wait or upgrade tier) vs token-cap truncation
         // (our cap is too low: raise it in llm.js TASK_MAX_TOKENS) vs server
         // (overload). The bug-report funnel otherwise only knows "weak fallback"
@@ -694,56 +948,61 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
         if (attemptedErrors.length > 0) {
           const counts = {};
           for (const e of attemptedErrors) {
-            const m = String(e.error || '').toLowerCase();
-            const k = (m.includes('truncat') || m.includes('max_tokens') || m.includes('token output cap')) ? 'truncation'
-              : (m.includes('429') || m.includes('quota') || m.includes('rate limit')) ? 'rate-limit'
-                : /\b(404|500|502|503|504)\b/.test(m) ? 'server' : 'other';
+            const k = e.classification || 'other';
             counts[k] = (counts[k] || 0) + 1;
           }
           const reason = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
-          genConfig.meta.fallback = { attempts: attemptedErrors.length, reason, counts };
+          genConfig.meta.fallback = { attempts: attemptedErrors.length, reason, counts, preferredModel: model };
         }
       }
       return result;
     } catch (err) {
       const errMsg = err.message || String(err);
+      const failureText = err.details ? `${errMsg}\n${err.details}` : errMsg;
+      const classification = classifyGeminiFailure(err.status, failureText);
       logger.warn(`[Gemini] Model ${currentModel} failed: ${errMsg}`);
       
       lastAttemptedError = `${currentModel}: ${errMsg}`;
-      attemptedErrors.push({ model: currentModel, error: errMsg });
+      attemptedErrors.push({ model: currentModel, error: errMsg, classification });
 
-      const isRateLimitOrQuota = 
-        errMsg.includes('429') ||
-        errMsg.toLowerCase().includes('quota') ||
-        errMsg.toLowerCase().includes('rate limit') ||
-        errMsg.includes('404') || // model not found or enabled in this region/key
-        errMsg.includes('503') || // overloaded
-        errMsg.includes('500') ||
-        errMsg.includes('502') ||
-        errMsg.includes('504');
+      // Only a CREDENTIAL-level auth failure aborts the whole chain — every model
+      // would fail identically. A per-model 403 (model-access) does NOT: it
+      // suppresses just that model and cascades to the next (Finding 1).
+      if (genConfig.signal?.aborted || classification === 'auth') throw err;
 
-      if (isRateLimitOrQuota) {
-        // For a genuine rate-limit/quota 429, remember when this model is allowed
-        // again (from the API's "retry in Ns" hint) so later calls skip it until
-        // then. 404/5xx are structural/transient, not rate windows — don't cool
-        // those (they'd wrongly suppress a model that's actually available).
-        const is429 = errMsg.includes('429') || errMsg.toLowerCase().includes('quota') || errMsg.toLowerCase().includes('rate limit');
-        if (is429) {
-          const retryMs = parseRetryMsFromError(errMsg);
-          const cooldownMs = Math.min(10 * 60_000, Math.max(1000, retryMs ?? 30_000)); // clamp 1s–10min; 30s default when unparseable
-          modelCooldownUntil.set(currentModel, Date.now() + cooldownMs);
-        }
+      if (classification === 'rate-limit' || classification === 'no-quota' || classification === 'daily-quota') {
+        const retryMs = err.retryAfterMs ?? parseRetryMsFromError(errMsg);
+        rememberGeminiModelFailure(scope, currentModel, classification, errMsg, suppressionUntilForFailure(classification, retryMs));
+        logger.warn(`[Gemini] Falling back to the next best model...`);
+        continue;
+      }
+      if (classification === 'unavailable' || classification === 'model-access') {
+        // A grounded request's unavailable/access failure may be feature-specific
+        // (the model is fine for normal JSON calls), so don't persist suppression —
+        // just cascade for THIS call (Finding 2). Non-grounded failures suppress.
+        const suppressedUntil = grounded ? null : suppressionUntilForFailure(classification);
+        rememberGeminiModelFailure(scope, currentModel, classification, errMsg, suppressedUntil);
         logger.warn(`[Gemini] Falling back to the next best model...`);
         continue;
       }
 
+      // Request-specific failure (truncation/server/timeout/malformed): record an
+      // EXPIRING warning, never a permanent suppression (Finding 6).
+      rememberGeminiModelFailure(scope, currentModel, classification, errMsg);
       logger.warn(`[Gemini] Proceeding to fallback after non-transient failure: ${errMsg}`);
     }
   }
 
   // If we reach here, all models have failed!
   const errorDetails = attemptedErrors.map(e => `* ${e.model}: ${e.error}`).join('\n');
-  const finalError = new Error(`All Gemini models failed. Usage limits or quotas may have been exceeded on all fallback models.\n\nDetails:\n${errorDetails}`);
+  const noQuotaCount = attemptedErrors.filter((e) => e.classification === 'no-quota').length;
+  const dailyQuotaCount = attemptedErrors.filter((e) => e.classification === 'daily-quota').length;
+  const quotaSummary = noQuotaCount > 0
+    ? `${noQuotaCount} model(s) have no quota allocated for this credential/project`
+    : dailyQuotaCount > 0
+      ? `${dailyQuotaCount} model(s) exhausted their daily quota`
+      : 'Usage limits or quotas may have been exceeded on the fallback models';
+  const finalError = new Error(`All Gemini models failed. ${quotaSummary}.\n\nDetails:\n${errorDetails}`);
 
   // Tag as rate limit if any of the errors were rate limits
   const hasRateLimit = attemptedErrors.some(e => 
@@ -1025,8 +1284,8 @@ export function registerGeminiHandlers() {
   // uses (CLAUDE_MODELS_IN_USE) — Anthropic limits are per-model, so checking one
   // model (esp. the lightest) misrepresents whether a real run will hit limits —
   // and returns per-model {ok,status,rateLimit} from the response headers. For
-  // Gemini it's a single up/rate-limited/bad-key probe + retry hint (no
-  // remaining-quota API exists).
+  // Gemini also probes every compatible model so partial quota/access is visible
+  // without declaring the whole provider unavailable.
   handleSafe('check-ai-availability', async (event, args) => {
     const settings = getAISettings();
     const provider = (args && args.provider) || settings.provider || 'gemini';
@@ -1042,26 +1301,21 @@ export function registerGeminiHandlers() {
         result = { ok: models.length > 0 && models.every((m) => m.ok), models };
       }
     } else {
-      if (!settings.geminiApiKey) {
-        result = { ok: false, models: [{ ok: false, status: null, model: null, error: 'No Gemini API key set.' }] };
+      // Coalesce concurrent checks so a double-click doesn't double-spend RPD.
+      if (geminiCheckInFlight) {
+        result = await geminiCheckInFlight;
       } else {
-        // Fetch real quota stats (service account path) and ping all models in parallel.
-        // fetchGeminiQuotaStats returns null if no service account is configured —
-        // probeGemini attaches null quotaStats in that case and the UI shows ping-only.
-        const [quotaStatsMap, ...probeResults] = await Promise.all([
-          fetchGeminiQuotaStats(),
-          ...GEMINI_MODEL_FALLBACKS.map((m) => probeGemini(settings.geminiApiKey, m, null)),
-        ]);
-        // Re-run probes with the quota stats map attached (they already finished, just re-attach).
-        const models = probeResults.map((probe, i) => ({
-          ...probe,
-          quotaStats: quotaStatsMap?.[GEMINI_MODEL_FALLBACKS[i]] ?? null,
-        }));
-        result = { ok: models.length > 0 && models.every((m) => m.ok), models, hasQuotaStats: quotaStatsMap !== null };
+        geminiCheckInFlight = runGeminiAvailabilityCheck(settings);
+        try { result = await geminiCheckInFlight; }
+        finally { geminiCheckInFlight = null; }
       }
     }
     lastProbe[provider] = { ...result, at: Date.now() };
-    return { provider, ...lastProbe[provider] };
+    return {
+      provider,
+      ...lastProbe[provider],
+      ...(provider === 'gemini' ? { telemetry: getGeminiTelemetry() } : {}),
+    };
   });
 
   // Passive status for the initial panel render: the last probe per provider

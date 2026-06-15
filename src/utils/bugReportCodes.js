@@ -72,6 +72,13 @@ export const CODE_DEFINITIONS = {
       /video|audio|media|playback|seek|play|pause/i.test(line),
   },
 
+  PREVIEW: {
+    label: 'Image Previews & Relinking',
+    description: 'Broken image previews, thumbnail/lightbox activity, local-file requests, and automatic moved-image relinking diagnostics',
+    logFilter: line =>
+      /image|photo|preview|thumbnail|lightbox|local-file|relink/i.test(line),
+  },
+
   SETTINGS: {
     label: 'Settings Changes',
     description: 'Settings and configuration change events',
@@ -165,6 +172,18 @@ export const CODE_DEFINITIONS = {
     label: 'No Media State',
     description: 'Omit the media player state snapshot',
     excludeSections: ['mediaState', 'imageState'],
+  },
+
+  XNODES: {
+    label: 'Exclude Node Diagnostics',
+    description: 'Omit the per-node Node Diagnostics table (positions/sizes/component state). On a canvas with many nodes this table can dwarf the whole clipboard budget and crowd out the logs + event timeline; node COUNTS and every pipeline/session section are kept. Combine with FULL (e.g. "FULL+XNODES") to get everything except the heavy node table.',
+    excludeSections: ['nodeInternals', 'nodeComponentStates'],
+  },
+
+  XSESS: {
+    label: 'Exclude Session Verify Traces',
+    description: 'Omit the verbose per-platform "Last verify trace" blocks (target/final URL + bodyHead HTML dumps) under Marketplace/Job Platform Sessions. The compact session summary tables (connected? / last reason) are kept. Use to fit a marketplace/job report under the clipboard cap without losing its logs.',
+    excludeSections: ['sessionTraces'],
   },
 
   // ── Composite lenses ──────────────────────────────────────────────────────

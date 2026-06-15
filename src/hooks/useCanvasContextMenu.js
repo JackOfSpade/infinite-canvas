@@ -5,6 +5,7 @@ import { NODE_FACTORIES } from '../utils/nodeFactory';
 import { useToast } from '../components/ToastProvider';
 import { computeTidiedNodes } from '../utils/layoutUtils';
 import { useIsMountedRef } from './useIsMountedRef';
+import { nodeSupportsCustomization } from '../utils/nodeCustomization';
 
 // Helper to determine if an action applies to a single clicked node or the entire selected group
 const getTargetNodeIds = (reactFlow, menuNodeId) => {
@@ -240,10 +241,9 @@ export function useCanvasContextMenu({
     if (menu.type === 'node') {
       const isText     = menu.node.type === 'text';
       const isLink     = menu.node.type === 'link';
-      const isGroup    = menu.node.type === 'group';
-      const isDocument = menu.node.type === 'document';
+      const isMarketplaceCard = menu.node.type === 'marketplacecard';
       const isLocked   = menu.node.data?.locked;
-      const supportsColor = isText || isLink || isGroup || isDocument;
+      const supportsCustomize = nodeSupportsCustomization(menu.node.type);
 
       const items = [];
 
@@ -270,13 +270,13 @@ export function useCanvasContextMenu({
       items.push({ label: 'Bring to Front', onClick: bringToFront, disabled: isLocked });
       items.push({ label: 'Send to Back',   onClick: sendToBack,   disabled: isLocked });
 
-      if (supportsColor) {
+      if (supportsCustomize) {
         items.push({ divider: true });
         items.push({
           label: 'Customize',
-          disabled: isLocked,
-          onClick: isLocked ? undefined : () => {
-            const targetIds = getTargetNodeIds(reactFlow, menu.node.id);
+          disabled: isLocked && !isMarketplaceCard,
+          onClick: isLocked && !isMarketplaceCard ? undefined : () => {
+            const targetIds = isMarketplaceCard ? [menu.node.id] : getTargetNodeIds(reactFlow, menu.node.id);
             document.dispatchEvent(new CustomEvent('open-multi-customize', { detail: { ids: targetIds } }));
             closeMenu();
           }

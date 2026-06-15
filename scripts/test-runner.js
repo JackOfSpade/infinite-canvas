@@ -40,8 +40,19 @@ import { ALL_COMP_SOURCE_IDS, CANVAS_ZOOM_LIMITS, getNodeDims, getNodesBounds, S
 import { listingUrlMatchesPlatform, isFacebookShareUrl } from '../src/utils/platformUrlMatch.js';
 import { mergeSourceIntoComps, retryWarningRequiringAction, updateResolvedSourceWarning } from '../src/utils/compsMerge.js';
 import { mergeResolvedSourceItems } from '../src/utils/jobSourceResolveMerge.js';
-import { collectMarketplaceListings } from '../src/utils/marketplaceStatusScan.js';
+import { collectMarketplaceListings, marketplaceListingsSignature } from '../src/utils/marketplaceStatusScan.js';
+import {
+  bestMarketplaceStatusColumnCount,
+  MARKETPLACE_STATUS_GRID,
+  marketplaceStatusNodeWidth,
+} from '../src/utils/marketplaceStatusLayout.js';
+import { normalizeMarketplaceWatchUrls } from '../src/utils/marketplaceWatchUrls.js';
 import { deepUpdateNode, deepAddElements, getCanvasData } from '../src/utils/navigationUtils.js';
+import {
+  buildCustomizationDialogData,
+  filterNodeCustomizationUpdates,
+  nodeSupportsCustomization,
+} from '../src/utils/nodeCustomization.js';
 import {
   buildJobTreeNodes,
   computeLayoutPositions,
@@ -63,7 +74,26 @@ import {
   sanitizeEdgesForSave,
   sanitizeNodesForSave,
 } from '../src/utils/serializationUtils.js';
-import { createdAtMsFromCardId, isPriceDropReminderDue, MS_PER_WEEK } from '../src/utils/priceDropReminder.js';
+import {
+  calculatePriceDropSuggestion,
+  createdAtMsFromCardId,
+  effectivePriceDropTargetPercent,
+  isPriceDropReminderDue,
+  MS_PER_WEEK,
+  normalizePriceDropMustSellDate,
+  normalizePriceDropReminderWeeks,
+  normalizePriceDropStartingPrice,
+  normalizePriceDropStartingTier,
+  normalizePriceDropTargetPercent,
+  oldestPriceDropCardCreatedAtIso,
+  priceDropDeadlineReminderDelayMs,
+  priceDropStartingPrice,
+  priceDropReminderDelayMs,
+  priceDropReminderCountBeforeMustSell,
+  priceDropMustSellDateMs,
+  priceDropTargetPrice,
+  resolvePriceDropStartingTier,
+} from '../src/utils/priceDropReminder.js';
 import { matchesQuery } from '../src/utils/searchMatch.js';
 import { mergeNonRestorableNodeDataFromLive } from '../src/utils/undoNonRestorableState.js';
 import { cloneNode, reassignCanvasDataIDs } from '../src/utils/nodeFactory.js';
@@ -84,9 +114,22 @@ import {
 } from '../src/utils/layoutGeometry.js';
 import { computeTidiedNodes, findNonOverlappingPlacement } from '../src/utils/layoutUtils.js';
 import { FILE_CATEGORIES, getFileCategoryInfo, toLocalFileUrl } from '../src/utils/fileDisplayUtils.js';
+import { isProductImageExtension } from '../src/utils/fileExtensions.js';
 import { parsePostedDate, filterJobsByAge, POSTED_DATE_PATTERN } from '../electron/ipc/jobDateFilter.js';
 import { compsForPricing, priceSynthesisMaxTokens, jobScoringBatchSize, JOB_MAX_PAGES, JOB_PER_PAGE_CAP } from '../electron/ipc/resultCaps.js';
 import { modelMeta, contextWindowForModel, maxOutputForModel, estimateTokensFromChars, assessPromptFit, planSplits, LOCAL_CHARS_PER_TOKEN } from '../electron/ipc/tokenWindow.js';
+import {
+  GEMINI_MODEL_FALLBACKS,
+  classifyGeminiFailure,
+  describeGeminiFailure,
+  getGeminiDefaultThinkingConfig,
+  getGeminiLifecycleWarning,
+  isGeminiDailyQuota,
+  isGeminiProviderAvailable,
+  isGeminiZeroQuota,
+  isGeminiZeroOrDailyQuota,
+  orderGeminiModels,
+} from '../electron/ipc/geminiModels.js';
 import { parseGeminiJSON } from '../electron/ipc/gemini.js';
 import { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
 import { withStatusCheckLock, getStatusCheckQueueDepth } from '../electron/ipc/statusCheckLock.js';
@@ -95,19 +138,25 @@ import { createAggregatingProgress } from '../electron/ipc/compProgressAggregato
 import { buildFinalListingTitle, buildRefreshResearchItems, buildResearchItems, computeBundleTotal, selectBundleHeadline, selectListingPriceTiers, buildItemQuery, bundleSynergyForPrices, deriveBundlePricingResult, normalizeBundlePricingResult } from '../src/utils/bundlePricing.js';
 import {
   clearMissingPreviewRelinkCache,
+  clearMissingPreviewRelinkDiagnostics,
+  clearMissingPreviewSearchRoots,
   findExactFilenameBelow,
+  getMissingPreviewRelinkDiagnostics,
+  rememberMissingPreviewSearchRoot,
   resolveMissingPreviewPath,
 } from '../electron/ipc/missingPreviewRelink.js';
+import { resolvePortableFilePaths, resolvePortableImagePath } from '../electron/ipc/filesystem.js';
+import { decodeLocalFileRequestPath } from '../electron/localFileProtocol.js';
 import { getBrowserPoolQueueState, pauseBrowserPool, queueScrape } from '../electron/ipc/browserPool.js';
-import { getSoftLoginWallMatch, getStatusCacheSync, writeStatusCache } from '../electron/ipc/accounts.js';
+import { getSoftLoginWallMatch, getStatusCacheSync, isConfirmedDisconnectedVerdict, writeStatusCache } from '../electron/ipc/accounts.js';
 import { getSellMonitorConfig } from '../electron/ipc/stealthBrowser.js';
 import os from 'node:os';
 import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, computeResumeStartPage, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
 import { dedupAgainstHistory, filterHistoryForResume } from '../electron/ipc/jobsHistory.js';
 import { modelTag, overPricedSoldFlag } from '../electron/ipc/bugReport/helpers.js';
 import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
-import { checkListingStatusMultiSource, classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
-import { aggregateStrongest, classifyOneUrl, deterministicListingStatusFromText, goneListingResult, resolveAttentionSourceUrls, annotateReadState, summarizeReadState, stripHtmlForAnalysis, stripReadStateTokens, READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN } from '../electron/ipc/listingStatusCheck.js';
+import { classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
+import { aggregateStrongest, classifyOneUrl, deriveHubScanStatus, deterministicListingStatusFromText, goneListingResult, resolveAttentionSourceUrls, scanSellerHubPages, annotateReadState, summarizeReadState, stripHtmlForAnalysis, stripReadStateTokens, READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN } from '../electron/ipc/listingStatusCheck.js';
 import { isAuthChallengeUrl, PLATFORM_AUTH_COOKIES, PLATFORM_LOGIN_URLS, unwrapInlineExtractorItems } from '../electron/ipc/browser/authWindows.js';
 import { PRICE_SYNTHESIS_SCHEMA } from '../electron/ipc/aiSchemas.js';
 import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation } from '../src/utils/jobLocation.js';
@@ -116,14 +165,13 @@ import { repairMojibake, hasMojibake, repairJobsMojibake } from '../src/utils/te
 import { foldVerificationSample, orderByVerification, verificationScore } from '../src/utils/scrapeOrder.js';
 import { canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, getHubDropRejectLabel, getHubFileDropMode } from '../src/utils/hubDropEligibility.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
+import { enforceClipboardMarkdownCap } from '../electron/ipc/bugReport/clipboardCap.js';
 import { createJobSearchTestMode, parseJobSearchEnvBoolean } from '../src/utils/jobSourceScope.js';
 import { createMarketplaceTestMode, parseMarketplaceEnvBoolean, getScopedCompSourceIds, isCompSourceEnabledInScope, normalizeCompWarnings } from '../src/utils/compSourceScope.js';
 import { getJobAuthPreflightSourceIds, JOB_AUTH_PREFLIGHT_SOURCE_IDS } from '../src/utils/jobAuthPreflight.js';
-import { getMarketplaceStatusLabel } from '../src/components/monitorStatusLabels.js';
+import { getMarketplaceHubStatusLabel } from '../src/components/monitorStatusLabels.js';
 import { appendPhotoFiles, appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../src/utils/photoPathList.js';
 import { filesToDropPayloads, filesToProductImagePaths, getLocalFilePath, summarizeFileExtensions } from '../src/utils/fileDropUtils.js';
-import { cachedAuthNeedsLoginResult, statusErrorWrites, statusCheckWrites } from '../src/utils/listingStatusWrites.js';
-import { buildMarketplaceStatusRollup } from '../electron/ipc/bugReport/marketplaceStatusRollup.js';
 import { buildMarketplaceModuleRollup } from '../electron/ipc/bugReport/marketplaceModuleRollup.js';
 import { shouldUseNativeTextUndo } from '../src/utils/nativeTextUndo.js';
 import { matchesRedoShortcut } from '../src/utils/keyboardShortcuts.js';
@@ -134,6 +182,21 @@ import { createModuleRunQueue } from '../src/utils/moduleRunQueue.js';
 import { deleteChildrenByHubId } from '../src/nodes/_shared/hubChildCleanup.js';
 import { getConnectedHubCards } from '../src/utils/connectedHubCards.js';
 import { enqueueStatusCheckAction, getStatusCheckActionQueueDepth } from '../src/utils/statusCheckActionQueue.js';
+import { getCanonicalDomain, extractDomain, effectiveConcurrency, isCoolingDown, recordOutcome, getRateLimiterSnapshot, _resetRateLimiter } from '../electron/ipc/rateLimiter.js';
+import { recordTokenUsage, recordTruncation, effectiveCap, TOKEN_HARD_CAP } from '../electron/ipc/tokenBudget.js';
+import { PRODUCT_CONDITIONS, CONDITION_VALUES, DEFAULT_CONDITION, getConditionDef, formatConditionForPricingPrompt, formatConditionGuideForPrompt, stripConditionFromGeneratedTitle } from '../src/utils/productConditions.js';
+import { beginMarketplaceStatusRun, completeMarketplaceStatusPlatform, finishMarketplaceStatusRun, getMarketplaceStatusActiveRuns, marketplaceStatusCheckingIds, mergeMarketplaceStatusResults, publishMarketplaceStatusCheckingIds, subscribeMarketplaceStatusCheckingIds } from '../src/utils/marketplaceStatusProgress.js';
+import { TIMINGS, autosaveDebounceMs, docSaveDebounceMs, maxUndoHistory } from '../src/utils/timings.js';
+import { generateId } from '../src/utils/idGenerator.js';
+import { clamp } from '../src/utils/mathUtils.js';
+import { LANGUAGE_LABELS, languageLabel } from '../src/utils/jobLanguageLabels.js';
+import { getEnvValue, parseScopeEnvBoolean } from '../src/utils/sourceScopeShared.js';
+import { pickEdgeHandles, structuralEdge } from '../src/nodes/_shared/edgeHelpers.js';
+import { WORD_DOC_EXT, isWordDoc } from '../electron/ipc/docUtils.js';
+import { CODE_EXT_RE, PRODUCT_IMAGE_EXT_RE } from '../src/utils/fileExtensions.js';
+import { cancelNodeTasksRecursively } from '../src/utils/canvasInteractions.js';
+import { getKnownTaskIds, modelForTask } from '../electron/ipc/llm.js';
+import { CLAUDE_MODELS_IN_USE } from '../electron/ipc/claude.js';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -218,6 +281,146 @@ const tests = [
     },
   },
   {
+    name: 'marketplace watch URLs: trims, deduplicates, and preserves order',
+    run: () => {
+      const normalized = normalizeMarketplaceWatchUrls([
+        ' https://example.com/dashboard ',
+        '',
+        'https://example.com/messages',
+        'https://example.com/dashboard',
+        null,
+        42,
+      ]);
+      assert(normalized.join(',') === 'https://example.com/dashboard,https://example.com/messages',
+        `watch URL normalization should preserve first-seen order, got ${normalized.join(',')}`);
+      assert(normalizeMarketplaceWatchUrls(null).length === 0, 'non-array watch URLs normalize to empty');
+      return { urls: normalized.length };
+    },
+  },
+  {
+    name: 'Marketplace hub scan: isolates page/AI failures, preserves account items, and derives outcomes',
+    run: async () => {
+      const dashboard = 'https://example.com/dashboard';
+      const messages = 'https://example.com/messages';
+      const readableHtml = `<main>${'Quiet seller dashboard. '.repeat(20)}</main>`;
+      let llmCalls = 0;
+      const result = await scanSellerHubPages({
+        platformId: 'test-platform',
+        urlSpecs: [
+          { url: dashboard, urlLabel: 'hub', fetcher: async () => { throw new Error('network down'); } },
+          { url: messages, urlLabel: 'hub', fetcher: async () => ({ ok: true, status: 200, finalUrl: messages, html: readableHtml }) },
+        ],
+        llmText: async () => {
+          llmCalls += 1;
+          return {
+            summary: 'One buyer offer',
+            attention: [
+              { urgency: 'low', category: 'offer', headline: 'Buyer offered $50', evidence: 'Offer $50', sourceUrl: messages },
+              { urgency: 'high', category: 'offer', headline: 'Buyer offered $50', evidence: 'Offer expires today', sourceUrl: messages },
+            ],
+          };
+        },
+      });
+      assert(llmCalls === 1, `one readable page should produce one consolidated LLM call, got ${llmCalls}`);
+      assert(result.status === 'ok', `a readable page should win over a sibling fetch error, got ${result.status}`);
+      assert(result.sources.length === 2 && result.sources.some(s => s.status === 'error') && result.sources.some(s => s.status === 'ok'),
+        'hub scan keeps both readable and failed source outcomes');
+      assert(result.attention.length === 2,
+        'account-wide scan keeps same-headline items because they may belong to separate listings');
+      assert(result.attention.every(item => item.sourceUrl === messages), 'attention items keep their validated source URL');
+
+      let shouldNotCall = 0;
+      const failed = await scanSellerHubPages({
+        platformId: 'test-platform',
+        urlSpecs: [{ url: dashboard, urlLabel: 'hub', fetcher: async () => { throw new Error('offline'); } }],
+        llmText: async () => { shouldNotCall += 1; return {}; },
+      });
+      assert(failed.status === 'error' && shouldNotCall === 0, 'all fetch failures return error without an LLM call');
+      const invalidResponse = await scanSellerHubPages({
+        platformId: 'test-platform',
+        urlSpecs: [{ url: dashboard, urlLabel: 'hub', fetcher: async () => null }],
+        llmText: async () => { shouldNotCall += 1; return {}; },
+      });
+      assert(invalidResponse.status === 'error' && invalidResponse.sources[0]?.message.includes('returned no response'),
+        'malformed fetcher output becomes a diagnostic page error');
+      // A hub URL that RESOLVES to a 4xx/5xx with a styled error body (fetchHtmlAuthed
+      // reports ok:true for any HTTP status) must terminate as an error — NOT get
+      // stripped and sent to the token-heavy hub-scan LLM as if it were content.
+      const brokenWatch = await scanSellerHubPages({
+        platformId: 'test-platform',
+        urlSpecs: [{ url: dashboard, urlLabel: 'hub', fetcher: async () => ({ ok: true, status: 404, finalUrl: dashboard, html: `<main>${'Page not found. '.repeat(40)}</main>` }) }],
+        llmText: async () => { shouldNotCall += 1; return {}; },
+      });
+      assert(brokenWatch.status === 'error' && /HTTP 404/.test(brokenWatch.sources[0]?.message || ''),
+        `a 4xx hub page becomes a terminal error, got ${brokenWatch.status} / ${brokenWatch.sources[0]?.message}`);
+      assert(shouldNotCall === 0, '4xx hub page must not reach the LLM');
+      const noUrls = await scanSellerHubPages({ platformId: 'test-platform', urlSpecs: null, llmText: async () => ({}) });
+      assert(noUrls.status === 'unknown' && noUrls.sources.length === 0, 'missing URL list returns a clean unknown result');
+      assert(deriveHubScanStatus([{ status: 'needs-login' }, { status: 'error' }]) === 'needs-login', 'needs-login wins when no page was readable');
+      assert(deriveHubScanStatus([{ status: 'unknown' }, { status: 'error' }]) === 'unknown', 'mixed unknown/error remains unknown');
+
+      const aiFailed = await scanSellerHubPages({
+        platformId: 'test-platform',
+        urlSpecs: [{ url: messages, urlLabel: 'hub', fetcher: async () => ({ ok: true, status: 200, finalUrl: messages, html: readableHtml }) }],
+        llmText: async () => { throw new Error('model unavailable'); },
+      });
+      assert(aiFailed.status === 'error' && aiFailed.sources[0]?.message.includes('AI scan failed'),
+        'AI failure turns readable inputs into an explicit error outcome');
+
+      // sanitizeAttention scrub + coercion wiring: a non-compliant model can leak
+      // ⟦READ⟧/⟦UNREAD⟧ sentinels into headline/evidence/summary and emit an
+      // invalid urgency/category. The scan must scrub the tokens everywhere and
+      // coerce to low/other — this backs the read-message false-flag fix and is
+      // only reachable through scanSellerHubPages (sanitizeAttention isn't exported).
+      const scrubbed = await scanSellerHubPages({
+        platformId: 'test-platform',
+        urlSpecs: [{ url: messages, urlLabel: 'hub', fetcher: async () => ({ ok: true, status: 200, finalUrl: messages, html: readableHtml }) }],
+        llmText: async () => ({
+          summary: `Quiet ${READ_STATE_READ_TOKEN} inbox`,
+          attention: [{
+            urgency: 'CRITICAL',
+            category: 'totally-made-up',
+            headline: `Buyer ${READ_STATE_UNREAD_TOKEN} asked a question`,
+            evidence: `${READ_STATE_READ_TOKEN} Is this still available?`,
+            sourceUrl: messages,
+          }],
+        }),
+      });
+      assert(scrubbed.attention.length === 1, 'a valid-but-non-compliant attention item survives sanitization');
+      const scrubbedItem = scrubbed.attention[0];
+      assert(scrubbedItem.urgency === 'low', `invalid urgency coerces to low, got ${scrubbedItem.urgency}`);
+      assert(scrubbedItem.category === 'other', `invalid category coerces to other, got ${scrubbedItem.category}`);
+      assert(![scrubbedItem.headline, scrubbedItem.evidence, scrubbed.summary].some(s => s.includes(READ_STATE_READ_TOKEN) || s.includes(READ_STATE_UNREAD_TOKEN)),
+        'read-state sentinels are scrubbed from headline, evidence, and summary');
+      assert(scrubbedItem.headline.includes('Buyer') && scrubbedItem.headline.includes('asked a question'), 'scrubbed headline keeps its words');
+      assert(scrubbedItem.sourceUrl === messages, 'sanitized item keeps a resolved sourceUrl');
+
+      const controller = new AbortController();
+      controller.abort();
+      let abortPropagated = false;
+      try {
+        await scanSellerHubPages({
+          platformId: 'test-platform',
+          signal: controller.signal,
+          urlSpecs: [{
+            url: messages,
+            urlLabel: 'hub',
+            fetcher: async () => {
+              const error = new Error('aborted');
+              error.name = 'AbortError';
+              throw error;
+            },
+          }],
+          llmText: async () => ({}),
+        });
+      } catch (error) {
+        abortPropagated = error?.name === 'AbortError';
+      }
+      assert(abortPropagated, 'abort errors propagate instead of being downgraded to a page failure');
+      return { sources: result.sources.length, attention: result.attention.length };
+    },
+  },
+  {
     name: 'annotateReadState: read/unread CSS markers survive stripping next to the message text',
     run: () => {
       // Verbatim read conversation card from the eBay messages inbox (the bug:
@@ -285,6 +488,18 @@ const tests = [
       assert(/\b4r\/1u\b/.test(md), 'read/unread column shows 4r/1u');
       assert(md.includes('read-state'), 'notes that read-state was detected');
       assert(md.includes('$50 \\| OBO'), 'literal pipe in summary is escaped so the table row keeps its 7 cells');
+      // Masking case: a platform reads OK overall but one of its watch URLs logged
+      // out. "Any ok source wins" (deriveHubScanStatus) hides that, so the rollup
+      // must surface a blocked tally AND withhold the all-clear line.
+      const maskedMd = buildMarketplaceModuleRollup([{
+        id: 'mod-2', type: 'marketplacestatus',
+        data: { platformStatus: {
+          mercari: { status: 'ok', summary: 'Quiet', attention: [], sources: [{ status: 'ok' }, { status: 'needs-login' }], lastChecked: new Date().toISOString() },
+        } },
+      }]);
+      assert(/read \*\*ok\*\* but had a hub URL \*\*blocked\*\*/.test(maskedMd), 'a logged-out sibling watch URL surfaces a blocked tally even when the platform reads ok');
+      assert(!/Every checked platform read its hub cleanly/.test(maskedMd), 'the all-clear line is withheld when a watch URL was blocked');
+      assert(/\| mercari \| ok \|.*\| 2 \(0\/1\) \|/.test(maskedMd), 'the Sources column shows total (err/blk) with the blocked count');
       // No marketplacestatus node → empty (unchanged behavior).
       assert(buildMarketplaceModuleRollup([{ id: 'x', type: 'sellhub', data: {} }]) === '', 'no module node → empty string');
       return { ok: true };
@@ -321,15 +536,118 @@ const tests = [
     },
   },
   {
+    name: 'Gemini registry: supports every compatible current model with safe routing metadata',
+    run: () => {
+      assert(GEMINI_MODEL_FALLBACKS.length === 7, `expected 7 compatible Gemini models, got ${GEMINI_MODEL_FALLBACKS.length}`);
+      for (const model of [
+        'gemini-3.1-pro-preview',
+        'gemini-2.5-pro',
+        'gemini-3.5-flash',
+        'gemini-3-flash-preview',
+        'gemini-2.5-flash',
+        'gemini-3.1-flash-lite',
+        'gemini-2.5-flash-lite',
+      ]) {
+        assert(GEMINI_MODEL_FALLBACKS.includes(model), `compatible model missing from registry: ${model}`);
+      }
+      assert(!GEMINI_MODEL_FALLBACKS.some(model => /image|tts|live|embedding|robotics|gemma/i.test(model)),
+        'special-purpose Gemini/Gemma models must not enter the universal generateContent fallback chain');
+
+      assert(getGeminiDefaultThinkingConfig('gemini-2.5-pro').thinkingBudget === 128,
+        '2.5 Pro uses its documented minimum thinking budget because thinking cannot be disabled');
+      assert(getGeminiDefaultThinkingConfig('gemini-2.5-flash').thinkingBudget === 0,
+        '2.5 Flash disables thinking for short structured workflows');
+      assert(getGeminiDefaultThinkingConfig('gemini-3.1-pro-preview').thinkingLevel === 'low',
+        '3.1 Pro uses low because it does not support minimal/full thinking-off');
+      assert(getGeminiDefaultThinkingConfig('gemini-3.5-flash').thinkingLevel === 'minimal',
+        'Gemini 3 Flash family uses the current thinkingLevel control');
+
+      const preferredPro = orderGeminiModels('gemini-3.1-pro-preview');
+      assert(preferredPro[0] === 'gemini-3.1-pro-preview' && preferredPro[1] === 'gemini-2.5-pro',
+        'quality tasks use 2.5 Pro before falling back to Flash');
+      const preferredLite = orderGeminiModels('gemini-3.1-flash-lite');
+      assert(preferredLite[0] === 'gemini-3.1-flash-lite' && preferredLite[1] === 'gemini-2.5-flash-lite',
+        'lightweight tasks exhaust Lite models before stronger/costlier fallbacks');
+      assert(preferredLite.indexOf('gemini-3.5-flash') < preferredLite.indexOf('gemini-3.1-pro-preview'),
+        'lightweight tasks try Flash before Pro');
+      const now = Date.now();
+      const deferred = orderGeminiModels('gemini-3.1-pro-preview', new Map([['gemini-3.1-pro-preview', now + 1000]]), now);
+      assert(deferred[0] === 'gemini-2.5-pro' && deferred.at(-1) === 'gemini-3.1-pro-preview',
+        'known-suppressed preferred model moves to the tail without being removed');
+      return { models: GEMINI_MODEL_FALLBACKS.length };
+    },
+  },
+  {
+    name: 'Gemini registry: lifecycle and live-failure warnings stay distinct',
+    run: () => {
+      const beforeShutdown = Date.parse('2026-06-13T00:00:00Z');
+      const afterShutdown = Date.parse('2026-10-17T00:00:00Z');
+      const scheduled = getGeminiLifecycleWarning('gemini-2.5-pro', beforeShutdown);
+      assert(/October 16, 2026/.test(scheduled) && /gemini-3.1-pro-preview/.test(scheduled),
+        `2.5 Pro warning includes shutdown and replacement -> ${scheduled}`);
+      assert(/may no longer be reachable/.test(getGeminiLifecycleWarning('gemini-2.5-pro', afterShutdown)),
+        'a passed shutdown date warns that the endpoint may be unreachable');
+      assert(getGeminiLifecycleWarning('gemini-3.5-flash', beforeShutdown) === null,
+        'models without an announced shutdown do not get fabricated lifecycle warnings');
+
+      assert(classifyGeminiFailure(404, 'model not found') === 'unavailable', '404 model endpoint is unavailable');
+      assert(classifyGeminiFailure(429, 'quota limit: 0') === 'no-quota', 'quota-zero is distinct from consumed quota');
+      assert(classifyGeminiFailure(429, 'quota exceeded [{"quotaValue":"0"}]') === 'no-quota',
+        'structured quotaValue zero classifies as no-quota');
+      assert(classifyGeminiFailure(429, 'GenerateRequestsPerDayPerProjectPerModel quota exceeded') === 'daily-quota',
+        'daily quota exhaustion is distinct from a short burst rate limit');
+      assert(classifyGeminiFailure(429, 'Please retry in 24.15s') === 'rate-limit',
+        'a retryable burst limit remains a short rate-limit');
+      // A 429 that mentions "per API key" must NOT be misread as a credential failure.
+      assert(classifyGeminiFailure(429, 'Quota exceeded per API key for this project') === 'rate-limit',
+        'a quota message that mentions "API key" is still rate-limit, not auth');
+      // Finding 1: a bare per-model 403 must NOT abort the chain (it is model-access,
+      // not credential auth) so a denied Pro model still falls through to Flash.
+      assert(classifyGeminiFailure(403, 'permission denied') === 'model-access',
+        'a per-model 403 is model-access (cascade), not chain-aborting auth');
+      assert(classifyGeminiFailure(403, 'Permission denied on resource model gemini-3.1-pro-preview') === 'model-access',
+        'PERMISSION_DENIED on a specific model is model-access');
+      // ...but a CREDENTIAL/project-level 403 IS auth (every model fails identically).
+      assert(classifyGeminiFailure(403, 'API key not valid. Please pass a valid API key.') === 'auth',
+        'a 403 about the API key itself is credential auth');
+      assert(classifyGeminiFailure(403, 'Generative Language API has not been used in project 123 before or it is disabled') === 'auth',
+        'a project-level "API not enabled" 403 is credential auth');
+      assert(classifyGeminiFailure(401, 'unauthorized') === 'auth', '401 is always credential auth');
+      assert(classifyGeminiFailure(null, 'invalid api key') === 'auth', 'a message-only bad-key failure is auth');
+      assert(classifyGeminiFailure(503, 'overloaded') === 'server', 'provider overload is server failure');
+      assert(classifyGeminiFailure(null, 'AI response was truncated') === 'truncation', 'output-cap failure is truncation');
+      assert(isGeminiProviderAvailable([{ ok: false }, { ok: true }]), 'one working model makes Gemini usable');
+      assert(!isGeminiProviderAvailable([{ ok: false }, { ok: false }]), 'no working model makes Gemini unavailable');
+
+      // Finding 3: zero / per-day quota detection. The decisive quotaValue:"0"
+      // signal only appears in the STRUCTURED details we now preserve on the error,
+      // not in the flat 429 message — so a Pro model with no free-tier quota is
+      // deferred on the long timer instead of being re-hammered every 30s.
+      assert(isGeminiZeroOrDailyQuota('You exceeded your quota. [{"@type":"...QuotaFailure","violations":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaValue":"0"}]}]') === true,
+        'structured quotaValue:"0" in appended details is detected as a zero quota');
+      assert(isGeminiZeroQuota('quota limit: 0') === true && isGeminiDailyQuota('quota limit: 0') === false,
+        'zero entitlement is not mislabeled as daily exhaustion');
+      assert(isGeminiZeroOrDailyQuota('quota exceeded: requests per day') === true, 'a per-day quota is a long-window quota');
+      assert(isGeminiZeroOrDailyQuota('GenerateRequestsPerDayPerProjectPerModel') === true, 'camelCase PerDay quotaId is detected');
+      assert(isGeminiZeroOrDailyQuota('Please retry in 24.15s') === false, 'a transient burst retry hint is NOT a zero/daily quota');
+      assert(isGeminiZeroOrDailyQuota('rate limit exceeded, retry in 5s') === false, 'a generic per-minute rate limit is not long-window');
+      assert(describeGeminiFailure('no-quota', 'generic provider prelude').includes('0 / 0'),
+        'no-quota diagnostic explains the dashboard 0 / 0 state');
+      return { ok: true };
+    },
+  },
+  {
     name: 'tokenWindow: per-model context windows + max output (verified registry)',
     run: () => {
       // Verified against provider docs (May 2026): Sonnet 4.6 & Opus 4.8 are 1M
-      // natively; Haiku 4.5 is 200K; every Gemini flash is 1,048,576 / 65,536.
+      // natively; Haiku 4.5 is 200K; every compatible Gemini is 1,048,576 / 65,536.
       assert(contextWindowForModel('claude-sonnet-4-6') === 1000000, 'Sonnet 4.6 window should be 1M');
       assert(contextWindowForModel('claude-opus-4-8') === 1000000, 'Opus 4.8 window should be 1M');
       assert(contextWindowForModel('claude-haiku-4-5-20251001') === 200000, 'Haiku 4.5 window should be 200K');
       assert(contextWindowForModel('gemini-3.5-flash') === 1048576, 'Gemini 3.5 flash window should be 1,048,576');
+      assert(contextWindowForModel('gemini-3.1-pro-preview') === 1048576, 'Gemini 3.1 Pro window should be 1,048,576');
       assert(maxOutputForModel('claude-opus-4-8') === 128000, 'Opus 4.8 max output should be 128K');
+      assert(maxOutputForModel('gemini-2.5-pro') === 65536, 'Gemini 2.5 Pro max output should be 65,536');
       assert(maxOutputForModel('gemini-2.5-flash-lite') === 65536, 'Gemini flash-lite max output should be 65,536');
       // Family fallbacks: unknown gemini → 1M; unknown claude → conservative 200K.
       assert(contextWindowForModel('gemini-99-ultra-flash') === 1048576, 'unknown gemini → 1M family default');
@@ -984,26 +1302,224 @@ const tests = [
       assert(Date.parse(viaRunner.find(n => n.id === cards[0].id).data.createdAt) === spawnMs, 'reminder migration: runs via runNodeMigrations from v2');
       assert(CURRENT_SCHEMA_VERSION >= 3, 'reminder migration: schema version advanced');
 
-      // ── Due math: anchor + weeks*week <= now → due; weeks <= 0 disables.
+      // v3 must reach cards nested inside a 'group' sub-canvas (the runner recurses
+      // on type==='group' via applyStepRecursive); otherwise a nested card never
+      // gets its createdAt anchor and its price-drop reminder silently never fires.
+      const nestedSpawnMs = Date.UTC(2025, 2, 15, 9, 0, 0);
+      const nestedTree = [{
+        id: 'grp-1', type: 'group', position: { x: 0, y: 0 },
+        data: { canvasData: { nodes: [
+          { id: `mkt-nested-ebay-${nestedSpawnMs}`, type: 'marketplacecard', position: { x: 0, y: 0 }, data: { platformId: 'ebay' } },
+        ], edges: [], drawings: [] } },
+      }];
+      const nestedCard = runNodeMigrations(nestedTree, 2)[0].data.canvasData.nodes[0];
+      assert(Date.parse(nestedCard.data.createdAt) === nestedSpawnMs, 'reminder migration: stamps a card nested in a group sub-canvas, recovered from its id suffix');
+
+      // ── Due math: every connected card shares a fixed cadence from the
+      // oldest card's creation date; acknowledgments do not shift that cadence.
       const now = Date.now();
       const anchor = new Date(now - 2 * MS_PER_WEEK).toISOString();
-      assert(isPriceDropReminderDue({ anchorIso: anchor, weeks: 2, nowMs: now }) === true, 'reminder due: anchor + interval == now fires (inclusive)');
-      assert(isPriceDropReminderDue({ anchorIso: anchor, weeks: 2.5, nowMs: now }) === false, 'reminder due: decimal interval not yet elapsed');
-      assert(isPriceDropReminderDue({ anchorIso: anchor, weeks: 1.5, nowMs: now }) === true, 'reminder due: decimal interval elapsed');
-      assert(isPriceDropReminderDue({ anchorIso: anchor, weeks: 0, nowMs: now }) === false, 'reminder due: weeks=0 → reminders off');
-      assert(isPriceDropReminderDue({ anchorIso: null, weeks: 2, nowMs: now }) === false, 'reminder due: missing anchor → never fires');
+      const laterCardCreatedAt = new Date(now - MS_PER_WEEK).toISOString();
+      const connectedReminderCards = getConnectedHubCards({
+        nodes: [
+          { id: 'hub-reminder', type: 'sellhub', data: {} },
+          { id: 'old-card', type: 'marketplacecard', data: { hubId: 'hub-reminder', createdAt: anchor } },
+          { id: 'new-card', type: 'marketplacecard', data: { hubId: 'hub-reminder', createdAt: laterCardCreatedAt } },
+          { id: 'other-card', type: 'marketplacecard', data: { hubId: 'other-hub', createdAt: '2020-01-01T00:00:00.000Z' } },
+        ],
+        edges: [],
+        hubId: 'hub-reminder',
+        cardType: 'marketplacecard',
+      });
+      assert(oldestPriceDropCardCreatedAtIso(connectedReminderCards) === anchor,
+        'reminder scheduling: oldest connected listing card starts the shared cadence');
+      assert(oldestPriceDropCardCreatedAtIso([
+        { id: `mkt-legacy-ebay-${spawnMs}`, type: 'marketplacecard', data: {} },
+      ]) === new Date(spawnMs).toISOString(),
+      'reminder scheduling: oldest-card lookup falls back to the spawn timestamp in a legacy id');
+      assert(oldestPriceDropCardCreatedAtIso([
+        { id: 'future-card-without-valid-id', type: 'marketplacecard', data: { createdAt: new Date(now + MS_PER_WEEK).toISOString() } },
+      ], now) === null, 'reminder scheduling: impossible future card creation timestamps are not schedule origins');
+      assert(isPriceDropReminderDue({ scheduleStartedAtIso: anchor, weeks: 2, nowMs: now }) === true,
+        'reminder due: shared start + interval == now fires (inclusive)');
+      assert(isPriceDropReminderDue({ scheduleStartedAtIso: laterCardCreatedAt, weeks: 2, nowMs: now }) === false,
+        'reminder due: a newer card would not be due on its own, proving the oldest-card origin changes its timing');
+      assert(isPriceDropReminderDue({ scheduleStartedAtIso: anchor, weeks: 2.5, nowMs: now }) === false,
+        'reminder due: decimal interval not yet elapsed');
+      assert(isPriceDropReminderDue({ scheduleStartedAtIso: anchor, weeks: 1.5, nowMs: now }) === true,
+        'reminder due: elapsed shared cadence step fires');
+      assert(isPriceDropReminderDue({ scheduleStartedAtIso: anchor, weeks: 0, nowMs: now }) === false,
+        'reminder due: weeks=0 → reminders off');
+      assert(isPriceDropReminderDue({ scheduleStartedAtIso: null, weeks: 2, nowMs: now }) === false,
+        'reminder due: missing shared start → never fires');
+      assert(normalizePriceDropReminderWeeks('1.5') === 1.5, 'reminder input: numeric decimal string accepted');
+      assert(normalizePriceDropReminderWeeks('1.5 weeks') === 0, 'reminder input: partial numeric garbage rejected instead of parseFloat acceptance');
+      assert(normalizePriceDropReminderWeeks('0x10') === 0 && normalizePriceDropReminderWeeks(true) === 0, 'reminder input: non-decimal/non-numeric types rejected');
+      assert(normalizePriceDropReminderWeeks(-2) === 0 && normalizePriceDropReminderWeeks(Infinity) === 0, 'reminder input: non-positive/non-finite values disable');
+      assert(priceDropReminderDelayMs({ scheduleStartedAtIso: anchor, weeks: 2.5, nowMs: now }) === 0.5 * MS_PER_WEEK,
+        'reminder scheduling: next shared cadence returns exact remaining delay');
+      assert(priceDropReminderDelayMs({ scheduleStartedAtIso: anchor, weeks: 2, nowMs: now }) === 0,
+        'reminder scheduling: elapsed shared cadence returns zero');
+      assert(priceDropReminderDelayMs({
+        scheduleStartedAtIso: anchor,
+        lastAcknowledgedAtIso: new Date(now + 60 * 60 * 1000).toISOString(),
+        weeks: 1,
+        nowMs: now + 60 * 60 * 1000,
+      }) === MS_PER_WEEK - 60 * 60 * 1000,
+      'reminder scheduling: a late acknowledgment does not drift interval-only reminders');
+      assert(priceDropReminderDelayMs({ scheduleStartedAtIso: 'bad', weeks: 2, nowMs: now }) === null,
+        'reminder scheduling: invalid shared start is unschedulable');
+
+      // ── Must-sell plan: strict editor normalization + a linear schedule whose
+      // final reminder strictly before the date reaches <=10% of the start.
+      assert(normalizePriceDropMustSellDate('2028-02-29') === '2028-02-29', 'reminder plan: valid leap date accepted');
+      assert(normalizePriceDropMustSellDate('2027-02-29') === '', 'reminder plan: impossible calendar date rejected');
+      assert(normalizePriceDropMustSellDate('06/15/2026') === '', 'reminder plan: non-date-input format rejected');
+      assert(Number.isFinite(priceDropMustSellDateMs('2028-02-29')), 'reminder plan: valid date resolves to local midnight');
+      assert(normalizePriceDropTargetPercent('8.505') === 8.51, 'reminder plan: target percentage rounds to two decimals');
+      assert(normalizePriceDropTargetPercent('10 percent') === null, 'reminder plan: malformed target percentage rejected');
+      assert(normalizePriceDropTargetPercent(-1) === null && normalizePriceDropTargetPercent(10.01) === null,
+        'reminder plan: target percentage is constrained to 0–10%');
+      assert(effectivePriceDropTargetPercent(undefined) === 10, 'reminder plan: absent target defaults to 10%');
+      assert(priceDropTargetPrice(19.99, 10) === 1.99,
+        'reminder plan: deadline target floors cents so rounding cannot exceed 10%');
+      assert(normalizePriceDropStartingTier('quick') === 'quick' && normalizePriceDropStartingTier('other') === 'best',
+        'reminder plan: starting tier is constrained with Best as default');
+      assert(normalizePriceDropStartingPrice('42.50') === 42.5 && normalizePriceDropStartingPrice(0) === null,
+        'reminder plan: snapshotted starting price must remain positive currency');
+      const tierPrices = { quick: 35, best: 42, max: 55 };
+      assert(resolvePriceDropStartingTier(tierPrices, 'max') === 'max' && priceDropStartingPrice(tierPrices, 'max') === 55,
+        'reminder plan: selected tier supplies the starting price');
+      assert(resolvePriceDropStartingTier({ quick: 35, best: null, max: null }, 'best') === 'quick',
+        'reminder plan: missing selected tier falls back to an available price');
+
+      const scheduleStartMs = new Date(2026, 0, 1).getTime();
+      const scheduleStartIso = new Date(scheduleStartMs).toISOString();
+      const scheduleArgs = {
+        startingPrice: 100,
+        targetPercent: 10,
+        scheduleStartedAtIso: scheduleStartIso,
+        mustSellDate: '2026-01-29',
+        weeks: 1,
+      };
+      assert(priceDropReminderCountBeforeMustSell(scheduleArgs) === 3,
+        'reminder plan: exact fourth-interval deadline excludes the reminder on the must-sell date');
+      assert(priceDropDeadlineReminderDelayMs({
+        ...scheduleArgs,
+        nowMs: scheduleStartMs,
+      }) === MS_PER_WEEK, 'reminder plan: first trigger follows the fixed oldest-card cadence');
+      assert(priceDropDeadlineReminderDelayMs({
+        ...scheduleArgs,
+        lastAcknowledgedAtIso: new Date(scheduleStartMs + MS_PER_WEEK + 60 * 60 * 1000).toISOString(),
+        nowMs: scheduleStartMs + MS_PER_WEEK + 60 * 60 * 1000,
+      }) === MS_PER_WEEK - 60 * 60 * 1000,
+      'reminder plan: a late acknowledgment does not drift the next fixed trigger');
+      assert(priceDropDeadlineReminderDelayMs({
+        ...scheduleArgs,
+        lastAcknowledgedAtIso: new Date(scheduleStartMs + 3 * MS_PER_WEEK).toISOString(),
+        nowMs: scheduleStartMs + 3 * MS_PER_WEEK,
+      }) === null, 'reminder plan: after the final prior reminder, none is scheduled on the must-sell date');
+      assert(priceDropDeadlineReminderDelayMs({
+        ...scheduleArgs,
+        nowMs: scheduleStartMs + 4 * MS_PER_WEEK,
+      }) === null, 'reminder plan: reopening on the must-sell date does not trigger an overdue prior reminder');
+      assert(priceDropDeadlineReminderDelayMs({
+        ...scheduleArgs,
+        nowMs: scheduleStartMs + 5 * MS_PER_WEEK,
+      }) === null, 'reminder plan: reopening after the must-sell date does not trigger an overdue prior reminder');
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + MS_PER_WEEK }) === 70,
+        'reminder plan: first of three prior reminders takes one linear step');
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + 2 * MS_PER_WEEK }) === 40,
+        'reminder plan: second reminder takes the next linear step');
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + 3 * MS_PER_WEEK }) === 10,
+        'reminder plan: final reminder before an exact deadline reaches 10%');
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + 10 * MS_PER_WEEK }) === 10,
+        'reminder plan: overdue reminder catches up without dropping below target');
+      assert(priceDropReminderCountBeforeMustSell({ ...scheduleArgs, mustSellDate: '2026-01-22' }) === 2,
+        'reminder plan: a reminder exactly on an earlier must-sell date is excluded');
+      assert(priceDropReminderCountBeforeMustSell({ ...scheduleArgs, mustSellDate: '2026-01-08' }) === 0,
+        'reminder plan: a deadline at the first cadence has no valid prior reminder');
+      assert(calculatePriceDropSuggestion({
+        ...scheduleArgs,
+        mustSellDate: '2026-01-08',
+        nowMs: scheduleStartMs + MS_PER_WEEK,
+      }) === null, 'reminder plan: infeasible deadline does not falsely claim the target can be guaranteed');
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, mustSellDate: '', nowMs: now }) === null,
+        'reminder plan: optional missing must-sell date disables suggestions');
+      for (const startingPrice of [0.01, 19.99, 55, 181, 9999.99]) {
+        for (const targetPercent of [0, 1, 8.5, 10]) {
+          const targetPrice = priceDropTargetPrice(startingPrice, targetPercent);
+          const finalSuggestion = calculatePriceDropSuggestion({
+            ...scheduleArgs,
+            startingPrice,
+            targetPercent,
+            nowMs: scheduleStartMs + 3 * MS_PER_WEEK,
+          });
+          assert(finalSuggestion === targetPrice,
+            `reminder plan: final prior reminder reaches exact floored target (${startingPrice}, ${targetPercent}%)`);
+          assert(finalSuggestion <= startingPrice * 0.1,
+            `reminder plan: allowed target never exceeds 10% of start (${startingPrice} → ${finalSuggestion})`);
+        }
+      }
 
       // ── Undo isolation: clock-driven reminder fields neither dirty the undo
       // fingerprint nor get rolled back by a restore; createdAt stays undoable.
       const base = { id: 'mc', type: 'marketplacecard', position: { x: 0, y: 0 }, data: { platformId: 'ebay', listingUrl: 'u', createdAt: '2026-01-01T00:00:00.000Z' } };
-      const fired = { ...base, data: { ...base.data, priceDropReminderDue: true, lastPriceDropAt: new Date(now).toISOString() } };
+      const liveReminderState = { ...base, data: { ...base.data, priceDropReminderDue: true, lastPriceDropAt: new Date(now).toISOString() } };
       assert(
-        fingerprint({ nodes: [base], edges: [], drawings: [] }) === fingerprint({ nodes: [fired], edges: [], drawings: [] }),
-        'reminder undo: firing the reminder does not dirty the undo fingerprint'
+        fingerprint({ nodes: [base], edges: [], drawings: [] }) === fingerprint({ nodes: [liveReminderState], edges: [], drawings: [] }),
+        'reminder undo: live reminder fields do not dirty the undo fingerprint'
       );
-      const restored = mergeNonRestorableNodeDataFromLive([base], [fired]);
-      assert(restored[0].data.priceDropReminderDue === true && restored[0].data.lastPriceDropAt === fired.data.lastPriceDropAt, 'reminder undo: restore keeps LIVE reminder state');
+      const restored = mergeNonRestorableNodeDataFromLive([base], [liveReminderState]);
+      assert(restored[0].data.priceDropReminderDue === true && restored[0].data.lastPriceDropAt === liveReminderState.data.lastPriceDropAt, 'reminder undo: restore keeps LIVE reminder state');
       return { schema: CURRENT_SCHEMA_VERSION };
+    },
+  },
+  {
+    name: 'Node customization: compatibility filtering and dialog sources stay aligned',
+    run: () => {
+      assert(nodeSupportsCustomization('marketplacecard'), 'customization: listing cards support static glow');
+      assert(!nodeSupportsCustomization('sellhub'), 'customization: unsupported nodes stay excluded');
+      assert(!nodeSupportsCustomization('toString'), 'customization: object-prototype names stay excluded');
+
+      const mixedUpdates = {
+        fontSize: 18,
+        backgroundColor: '#111111',
+        staticGlowColor: '#00ff00',
+        unknownField: 'drop-me',
+      };
+      assert(
+        JSON.stringify(filterNodeCustomizationUpdates({ type: 'text', data: {} }, mixedUpdates))
+          === JSON.stringify({ fontSize: 18, backgroundColor: '#111111' }),
+        'customization: text receives only supported fields',
+      );
+      assert(
+        JSON.stringify(filterNodeCustomizationUpdates({ type: 'marketplacecard', data: {} }, mixedUpdates))
+          === JSON.stringify({ staticGlowColor: '#00ff00' }),
+        'customization: listing cards receive only static glow',
+      );
+      assert(
+        Object.keys(filterNodeCustomizationUpdates({ type: 'sellhub', data: {} }, mixedUpdates)).length === 0,
+        'customization: unsupported nodes produce a no-op update',
+      );
+      assert(
+        Object.keys(filterNodeCustomizationUpdates({ type: 'marketplacecard', data: { staticGlowColor: '#00ff00' } }, mixedUpdates)).length === 0,
+        'customization: unchanged compatible values produce a no-op update',
+      );
+
+      const dialog = buildCustomizationDialogData([
+        { id: 'listing', type: 'marketplacecard', data: { staticGlowColor: '#00ff00' } },
+        { id: 'text', type: 'text', data: { fontSize: 22, fontFamily: 'serif', textColor: '#ffffff', backgroundColor: '#222222' } },
+        { id: 'group', type: 'group', data: { titleSpacing: 8 } },
+      ]);
+      assert(dialog.showFont && dialog.showSpacing && dialog.showBackground && dialog.showStaticGlow,
+        'customization: mixed compatible selection exposes every supported section');
+      assert(dialog.fontSize === 22 && dialog.titleSpacing === 8 && dialog.backgroundColor === '#222222',
+        'customization: each section uses the first compatible baseline');
+      assert(dialog.staticGlowColor === '#00ff00', 'customization: static glow baseline comes from the listing card');
+      assert(buildCustomizationDialogData([{ id: 'hub', type: 'sellhub', data: {} }]) === null,
+        'customization: unsupported-only selections do not open an empty dialog');
+      return { ok: true };
     },
   },
   {
@@ -1234,38 +1750,130 @@ const tests = [
       assert(getFileCategoryInfo('script.tsx').category === FILE_CATEGORIES.CODE, 'File display helpers: TSX should be code');
       assert(getFileCategoryInfo('report.pdf').label === 'PDF Document', 'File display helpers: PDF label mismatch');
       assert(getFileCategoryInfo('unknown').badge === 'FILE', 'File display helpers: extensionless badge mismatch');
+      assert(isProductImageExtension('.svg') && isProductImageExtension('JpEg') && !isProductImageExtension('.pdf'),
+        'File display helpers: shared image extension check should cover every accepted preview format');
+      assert(decodeLocalFileRequestPath('local-file:///tmp/a%20b%23c%3F.png', 'darwin') === '/tmp/a b#c?.png',
+        'File display helpers: local-file path decoder should preserve encoded filename delimiters');
+      assert(decodeLocalFileRequestPath('local-file://private/tmp/photo.png', 'darwin') === '/private/tmp/photo.png',
+        'File display helpers: local-file path decoder should restore a POSIX first segment canonicalized as a hostname');
+      assert(decodeLocalFileRequestPath('local-file://C:/Pictures/photo.png', 'win32') === 'C:/Pictures/photo.png',
+        'File display helpers: local-file path decoder should retain a Windows drive letter parsed as a URL hostname');
+      assert(decodeLocalFileRequestPath('local-file:///C:/Pictures/photo.png', 'win32') === 'C:/Pictures/photo.png',
+        'File display helpers: local-file path decoder should retain a Windows drive letter in triple-slash URLs');
       return { image: getFileCategoryInfo('photo.HEIC').label };
     },
   },
   {
-    name: 'Missing preview relink uses exact nearest filename and refuses ambiguity',
+    name: 'Missing preview relink stays in the current hierarchy, finds exact names, and refuses ambiguity',
     run: () => {
       const root = path.join(os.tmpdir(), `ic-preview-relink-${process.pid}-${Date.now()}`);
-      const original = path.join(root, 'photo.jpg');
-      const moved = path.join(root, 'products', 'archived', 'photo.jpg');
-      const ambiguousRoot = path.join(root, 'ambiguous');
+      const workspace = path.join(root, 'workspace');
+      const original = path.join(workspace, 'products', 'photo.jpg');
+      const moved = path.join(workspace, 'archived', 'photo.jpg');
+      const parentDecoy = path.join(root, 'photo.jpg');
+      const externalRoot = path.join(root, 'external');
+      const externalOriginal = path.join(externalRoot, 'camera', 'external.jpg');
+      const externalMoved = path.join(externalRoot, 'camera', 'sorted', 'external.jpg');
+      const ambiguousRoot = path.join(workspace, 'ambiguous');
+      const documentOriginal = path.join(workspace, 'documents', 'document-photo.png');
+      const documentMoved = path.join(workspace, 'documents', 'sorted', 'document-photo.png');
+      const crossDepthRoot = path.join(workspace, 'cross-depth');
       try {
+        // A broken path can be replaced by a directory with the same name.
+        // It is not a valid preview and must not block the descendant search.
+        fs.mkdirSync(original, { recursive: true });
         fs.mkdirSync(path.dirname(moved), { recursive: true });
         fs.writeFileSync(moved, 'image');
+        fs.writeFileSync(parentDecoy, 'wrong parent image');
+        fs.mkdirSync(path.dirname(externalMoved), { recursive: true });
+        fs.writeFileSync(externalMoved, 'external image');
         fs.mkdirSync(path.join(ambiguousRoot, 'a'), { recursive: true });
         fs.mkdirSync(path.join(ambiguousRoot, 'b'), { recursive: true });
         fs.writeFileSync(path.join(ambiguousRoot, 'a', 'duplicate.jpg'), 'a');
         fs.writeFileSync(path.join(ambiguousRoot, 'b', 'duplicate.jpg'), 'b');
+        fs.mkdirSync(path.dirname(documentMoved), { recursive: true });
+        fs.writeFileSync(documentMoved, 'document image');
+        fs.writeFileSync(path.join(root, 'document-photo.png'), 'wrong parent document image');
+        fs.mkdirSync(path.join(crossDepthRoot, 'near'), { recursive: true });
+        fs.mkdirSync(path.join(crossDepthRoot, 'far', 'deeper'), { recursive: true });
+        fs.writeFileSync(path.join(crossDepthRoot, 'near', 'cross-depth.jpg'), 'near');
+        fs.writeFileSync(path.join(crossDepthRoot, 'far', 'deeper', 'cross-depth.jpg'), 'far');
 
         clearMissingPreviewRelinkCache();
+        clearMissingPreviewRelinkDiagnostics();
+        clearMissingPreviewSearchRoots();
+        const portableFound = resolvePortableImagePath(
+          path.join(workspace, 'canvas.json'),
+          original,
+          path.join('.', 'products', 'photo.jpg'),
+        );
+        assert(portableFound === moved, 'workspace loading should relink a moved image within the canvas hierarchy, not its parent');
+
+        clearMissingPreviewRelinkCache();
+        clearMissingPreviewRelinkDiagnostics();
+        clearMissingPreviewSearchRoots();
+        rememberMissingPreviewSearchRoot(original, workspace);
         const found = resolveMissingPreviewPath(original);
-        assert(found.status === 'found' && found.path === moved, `missing preview should relink to exact descendant filename -> ${JSON.stringify(found)}`);
+        assert(found.status === 'found' && found.path === moved, `missing preview should relink within its remembered current hierarchy -> ${JSON.stringify(found)}`);
+        assert(found.root === workspace && found.rootSource === 'remembered', 'missing preview should report its bounded remembered hierarchy');
         const cached = resolveMissingPreviewPath(original);
         assert(cached.cached === true && cached.path === moved, 'repeated preview requests should reuse the bounded relink cache');
 
-        const wrongCase = findExactFilenameBelow(root, 'Photo.jpg');
+        clearMissingPreviewRelinkCache();
+        clearMissingPreviewSearchRoots();
+        const lateOriginal = path.join(workspace, 'empty', 'photo.jpg');
+        const parentOnly = resolveMissingPreviewPath(lateOriginal);
+        assert(parentOnly.status === 'not-found', 'missing preview relink must not climb upward to a same-name file in the parent folder');
+        const lateMoved = path.join(workspace, 'empty', 'later', 'photo.jpg');
+        fs.mkdirSync(path.dirname(lateMoved), { recursive: true });
+        fs.writeFileSync(lateMoved, 'late image');
+        const recoveredAfterNotFound = resolveMissingPreviewPath(lateOriginal);
+        assert(recoveredAfterNotFound.status === 'found' && recoveredAfterNotFound.path === lateMoved,
+          'not-found preview searches should not be cached across a move/copy completion');
+
+        const external = resolvePortableImagePath(path.join(workspace, 'canvas.json'), externalOriginal, '');
+        assert(external === externalMoved,
+          'external image relink should ignore an empty legacy relative path and search its original folder and descendants only');
+
+        const documentData = {
+          nodes: [{
+            type: 'document',
+            data: {
+              filename: 'document-photo.png',
+              filePath: documentOriginal,
+              relativeFilePath: path.join('.', 'documents', 'document-photo.png'),
+            },
+          }],
+        };
+        resolvePortableFilePaths(documentData, path.join(workspace, 'canvas.json'));
+        assert(documentData.nodes[0].data.filePath === documentMoved,
+          'document image previews should use the same descendant-only relinking as SellHub photos');
+
+        const wrongCase = findExactFilenameBelow(workspace, 'Photo.jpg');
         assert(wrongCase.status === 'not-found', 'missing preview relink should require an exact case-sensitive filename');
 
         const ambiguous = findExactFilenameBelow(ambiguousRoot, 'duplicate.jpg');
         assert(ambiguous.status === 'ambiguous' && ambiguous.path === null && ambiguous.matches.length === 2, 'same-depth duplicate filenames should be left unresolved');
-        return { found: path.relative(root, found.path), ambiguous: ambiguous.matches.length };
+        const crossDepthAmbiguous = findExactFilenameBelow(crossDepthRoot, 'cross-depth.jpg');
+        assert(crossDepthAmbiguous.status === 'ambiguous' && crossDepthAmbiguous.matches.length === 2,
+          'duplicate filenames at different depths should be left unresolved instead of silently choosing the nearer one');
+        const ambiguousMissing = path.join(ambiguousRoot, 'missing', 'duplicate.jpg');
+        const initiallyAmbiguous = resolveMissingPreviewPath(ambiguousMissing, { searchRoot: ambiguousRoot });
+        assert(initiallyAmbiguous.status === 'ambiguous', 'resolver should report duplicate matches as ambiguous');
+        fs.rmSync(path.join(ambiguousRoot, 'b', 'duplicate.jpg'));
+        const resolvedAfterDuplicateRemoved = resolveMissingPreviewPath(ambiguousMissing, { searchRoot: ambiguousRoot });
+        assert(resolvedAfterDuplicateRemoved.status === 'found' && resolvedAfterDuplicateRemoved.path === path.join(ambiguousRoot, 'a', 'duplicate.jpg'),
+          'negative/ambiguous preview results should not stay cached after the hierarchy changes');
+        const diagnostics = getMissingPreviewRelinkDiagnostics();
+        assert(diagnostics.attempts.some(attempt => attempt.status === 'not-found' && attempt.searchRoot === path.join(workspace, 'empty')),
+          'missing preview diagnostics should retain not-found search scope for FULL reports');
+        assert(diagnostics.attempts.every(attempt => attempt.searchRoot !== root),
+          'missing preview diagnostics should prove no attempt climbed to the parent hierarchy');
+        return { found: path.relative(root, found.path), ambiguous: ambiguous.matches.length, attempts: diagnostics.attempts.length };
       } finally {
         clearMissingPreviewRelinkCache();
+        clearMissingPreviewRelinkDiagnostics();
+        clearMissingPreviewSearchRoots();
         fs.rmSync(root, { recursive: true, force: true });
       }
     },
@@ -1469,9 +2077,65 @@ const tests = [
       assert(text.filteredLogs.some(line => line.includes('[TextEdit]')) && text.matchedCodes.includes('TEXT'), 'Bug report code filtering: TEXT should retain text-edit diagnostics');
       const viewport = applyBugReportCode([...logs, 'viewport changed source=programmatic zoom=0.2818 x=-181.31 y=237.18'], {}, 'VIEWPORT');
       assert(viewport.filteredLogs.some(line => line.includes('viewport changed')) && viewport.matchedCodes.includes('VIEWPORT'), 'Bug report code filtering: VIEWPORT should retain zoom/pan diagnostics');
+      const imagePreview = applyBugReportCode([...logs, '[local-file] Relinked missing preview image within current hierarchy'], {}, 'PREVIEW');
+      assert(imagePreview.filteredLogs.some(line => line.includes('Relinked missing preview')) && imagePreview.matchedCodes.includes('PREVIEW'),
+        'Bug report code filtering: PREVIEW should retain broken-preview and relink diagnostics');
       const preview = previewBugReportCode(logs, 'ERR+NOPE');
       assert(preview.unknownCodes.includes('NOPE') && preview.valid, 'Bug report code filtering: preview should report unknown codes while keeping valid matches');
+
+      // XNODES drops the heavy per-node payload (so the clipboard cap doesn't
+      // sacrifice the logs + timeline to a giant Node Diagnostics table), and
+      // composes with FULL to mean "everything except the node table".
+      const xnodes = applyBugReportCode(logs, {}, 'FULL+XNODES');
+      assert(xnodes.sectionExclusions.has('nodeInternals') && xnodes.sectionExclusions.has('nodeComponentStates'),
+        'Bug report code filtering: XNODES should exclude nodeInternals + nodeComponentStates');
+      assert(xnodes.filteredLogs.length === logs.length,
+        'Bug report code filtering: FULL+XNODES should keep all log lines (no log filtering)');
+      // XSESS drops the verbose per-platform verify-trace blocks (bodyHead dumps).
+      const xsess = applyBugReportCode(logs, {}, 'XSESS');
+      assert(xsess.sectionExclusions.has('sessionTraces') && xsess.matchedCodes.includes('XSESS'),
+        'Bug report code filtering: XSESS should exclude sessionTraces');
       return { filtered: filtered.filteredLogs.length, unknown: preview.unknownCodes };
+    },
+  },
+  {
+    name: 'Bug report clipboard cap reserves the logs + event timeline',
+    run: () => {
+      const events = Array.from({ length: 200 }, (_, i) => `EVT ${i} something happened on the canvas`);
+      const logs = Array.from({ length: 60 }, (_, i) => `[Marketplace] LOG ${i} scrape/resolve detail line`);
+
+      // Small base, tiny cap unreachable: nothing truncated, everything present.
+      const roomy = enforceClipboardMarkdownCap('# Bug Report\nbody\n', events, logs, 1_000_000);
+      assert(!roomy.truncated && roomy.markdown.includes('## Event History') && roomy.markdown.includes('## Recent Main-Process Logs'),
+        'Clipboard cap: roomy budget keeps logs + full event history untouched');
+      assert(roomy.markdown.includes('EVT 0 ') && roomy.markdown.includes('EVT 199 '),
+        'Clipboard cap: roomy budget keeps both oldest and newest events');
+
+      // Phase 1: base fits but full tail doesn't — oldest events trimmed first,
+      // newest events + the logs survive.
+      const cap = 8_000;
+      const smallBase = '# Bug Report\n' + 'x'.repeat(2_000) + '\n';
+      const phase1 = enforceClipboardMarkdownCap(smallBase, events, logs, cap);
+      assert(phase1.markdown.length <= cap, `Clipboard cap: phase-1 output must respect the cap (${phase1.markdown.length} <= ${cap})`);
+      assert(phase1.trimmedEventCount > 0 && !phase1.hardTruncated, 'Clipboard cap: phase-1 should trim oldest events, not hard-truncate');
+      assert(phase1.markdown.includes('EVT 199 ') && !phase1.markdown.includes('EVT 0 '),
+        'Clipboard cap: phase-1 keeps the NEWEST events and sheds the oldest');
+      assert(phase1.markdown.includes('## Recent Main-Process Logs') && phase1.markdown.includes('LOG 59'),
+        'Clipboard cap: phase-1 must not sacrifice the main-process logs');
+
+      // Phase 2: the static base ALONE exceeds the cap (the bug from this report).
+      // The logs + most-recent events MUST survive; the base tail is what gets cut.
+      const giantBase = '# Bug Report\nNARRATIVE TOP\n' + 'Z'.repeat(40_000) + '\n## Node Diagnostics\nNODE TAIL\n';
+      const phase2 = enforceClipboardMarkdownCap(giantBase, events, logs, cap);
+      assert(phase2.markdown.length <= cap, `Clipboard cap: phase-2 output must respect the cap (${phase2.markdown.length} <= ${cap})`);
+      assert(phase2.hardTruncated, 'Clipboard cap: phase-2 should flag a hard truncation');
+      assert(phase2.markdown.includes('## Event History') && phase2.markdown.includes('EVT 199 '),
+        'Clipboard cap: phase-2 MUST preserve the recent event timeline (regression guard)');
+      assert(phase2.markdown.includes('## Recent Main-Process Logs') && phase2.markdown.includes('LOG 59'),
+        'Clipboard cap: phase-2 MUST preserve the main-process logs (regression guard)');
+      assert(phase2.markdown.includes('NARRATIVE TOP') && !phase2.markdown.includes('NODE TAIL'),
+        'Clipboard cap: phase-2 keeps the curated top of the base and sheds its low-value tail');
+      return { phase1Len: phase1.markdown.length, phase2Len: phase2.markdown.length, phase1Trimmed: phase1.trimmedEventCount };
     },
   },
   {
@@ -2980,11 +3644,23 @@ const tests = [
     },
   },
   {
-    name: 'marketplace status badge label: unchecked vs checked unknown',
+    name: 'marketplace auth gate: only conclusive disconnects become needs-login',
     run: () => {
-      assert(getMarketplaceStatusLabel('unknown', null) === 'Not checked', 'unknown without timestamp means not checked');
-      assert(getMarketplaceStatusLabel('unknown', '2026-06-03T19:39:47.686Z') === 'Unknown', 'unknown with timestamp means checked but inconclusive');
-      assert(getMarketplaceStatusLabel('needs-login', '2026-06-03T19:39:47.686Z') === 'Needs login', 'needs-login label remains explicit');
+      assert(isConfirmedDisconnectedVerdict({ connected: false, reason: 'redirected to login' }) === true,
+        'explicit disconnected verdict gates the marketplace scan');
+      assert(isConfirmedDisconnectedVerdict({ connected: false, inconclusive: true, reason: 'network timeout' }) === false,
+        'inconclusive transport failure must not masquerade as logout');
+      assert(isConfirmedDisconnectedVerdict({ connected: true }) === false, 'connected verdict is not a disconnect');
+      assert(isConfirmedDisconnectedVerdict(null) === false, 'missing verifier result is not proof of logout');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'marketplace hub status labels: distinguish unchecked from inconclusive',
+    run: () => {
+      assert(getMarketplaceHubStatusLabel('unknown', null) === 'Not checked', 'hub unknown without timestamp means not checked');
+      assert(getMarketplaceHubStatusLabel('unknown', '2026-06-03T19:39:47.686Z') === 'Unknown', 'checked hub unknown is labeled inconclusive, not not-checked');
+      assert(getMarketplaceHubStatusLabel('ok', '2026-06-03T19:39:47.686Z') === 'Checked', 'hub ok label is checked');
       return { ok: true };
     },
   },
@@ -3018,6 +3694,41 @@ const tests = [
       assert(filtered.kept.length === 3 && filtered.rejected.length === 2, 'all good-source comps kept; wrong-source comps rejected');
       const oneSource = filterGrosslyOffTargetSources([{ source: 'only', score: 0 }], item => item.score);
       assert(oneSource.kept.length === 1 && oneSource.rejected.length === 0, 'never reject the only available source');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'marketplace pipeline report: product-title condition cleanup is explicit',
+    run: () => {
+      const telemetry = getMarketplaceTelemetry();
+      const saved = { ...telemetry };
+      Object.assign(telemetry, {
+        nodeId: 'title-cleanup-hub',
+        windowId: 6,
+        analyze: {
+          ts: Date.now(),
+          photos: 5,
+          rawTitle: 'Modern Round Wood Coffee Table - Excellent Condition',
+          title: 'Modern Round Wood Coffee Table',
+          titleCleaned: true,
+          condition: 'Used - Excellent',
+          model: 'gemini-3.5-flash',
+        },
+        scrape: null,
+        resolves: {},
+        synthesis: null,
+        syntheses: [],
+        bundle: null,
+        fit: null,
+      });
+      try {
+        const report = buildMarketplacePipelineSnapshot(new Set(['title-cleanup-hub']), 6);
+        assert(report.includes('condition: `Used - Excellent`'), 'FULL report preserves the selected condition');
+        assert(report.includes('cleaned from raw title "Modern Round Wood Coffee Table - Excellent Condition"'),
+          'FULL report preserves the raw title and confirms cleanup occurred');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
       return { ok: true };
     },
   },
@@ -3229,76 +3940,6 @@ const tests = [
     },
   },
   {
-    name: 'listing status: listing URL is required before watch URLs are scanned',
-    run: async () => {
-      const result = await checkListingStatusMultiSource({
-        listingUrl: '',
-        platformId: 'ebay',
-        watchUrls: ['https://www.ebay.com/sh/lst/active'],
-        productTitle: 'Apple iPhone 14 Pro',
-      });
-      assert(result.status === 'error', `blank listing URL should fail before scraping, got ${result.status}`);
-      assert(/No listing URL/i.test(result.message), `message should ask for listing URL -> ${result.message}`);
-      assert(Array.isArray(result.sources) && result.sources.length === 0, 'blank listing URL should not scan watch URLs');
-      return { ok: true };
-    },
-  },
-  {
-    name: 'listing status: expired marketplace session returns needs-login before scraping',
-    run: async () => {
-      let verifiedPlatform = null;
-      let wroteStatus = null;
-      const result = await checkListingStatusMultiSource({
-        listingUrl: 'https://www.facebook.com/marketplace/item/123456789',
-        platformId: 'facebook',
-        productTitle: 'Apple iPhone XS',
-        sessionVerifier: async (platformId) => {
-          verifiedPlatform = platformId;
-          return { connected: false, reason: 'Redirected to https://www.facebook.com/login', trace: { finalUrl: 'https://www.facebook.com/login' } };
-        },
-        writeSessionStatus: async (platformId, connected, extras) => {
-          wroteStatus = { platformId, connected, extras };
-        },
-      });
-      assert(verifiedPlatform === 'facebook', `session verifier should run for facebook, got ${verifiedPlatform}`);
-      assert(wroteStatus?.platformId === 'facebook' && wroteStatus.connected === false, 'expired session should be written to cache');
-      assert(result.status === 'needs-login', `expired session should return needs-login, got ${result.status}`);
-      assert(/log in to Facebook/i.test(result.message), `message should tell user to log in -> ${result.message}`);
-      assert(result.sources?.[0]?.urlLabel === 'session', 'needs-login result should include a session source trace');
-      return { ok: true };
-    },
-  },
-  {
-    name: 'listing status: cached disconnected marketplace session blocks before scraping',
-    run: async () => {
-      const cache = getStatusCacheSync();
-      const hadPrior = Object.prototype.hasOwnProperty.call(cache, 'mercari');
-      const prior = cache.mercari;
-      await writeStatusCache('mercari', false, { lastReason: 'Verification fetch error: page.content() timed out' });
-      try {
-        let verifierCalled = false;
-        const result = await checkListingStatusMultiSource({
-          listingUrl: 'https://www.mercari.com/us/item/m44325565616/',
-          platformId: 'mercari',
-          productTitle: 'Calibrite ColorChecker Passport Video 2',
-          sessionVerifier: async () => {
-            verifierCalled = true;
-            return { connected: true, reason: 'should not run' };
-          },
-        });
-        assert(!verifierCalled, 'cached disconnected session should block before verifier/scrape');
-        assert(result.status === 'needs-login', `cached disconnected session should return needs-login, got ${result.status}`);
-        assert(/Mercari session needs login/i.test(result.message), `needs-login message should name Mercari -> ${result.message}`);
-        assert(/page\.content\(\) timed out/i.test(result.message), `needs-login message should include cached verifier reason -> ${result.message}`);
-        assert(result.sources?.[0]?.urlLabel === 'session', 'cached auth gate should include a session source trace');
-      } finally {
-        if (hadPrior) cache.mercari = prior;
-        else delete cache.mercari;
-      }
-      return { ok: true };
-    },
-  },
-  {
     name: 'listing status: hard client errors distinguish canonical listings from Facebook share links',
     run: () => {
       // 400 on most canonical listing pages is gone. Facebook listing URLs are
@@ -3429,111 +4070,6 @@ const tests = [
     },
   },
   {
-    name: 'listing status: statusCheckWrites persists a compact per-URL check trace',
-    run: () => {
-      const res = {
-        status: 'unknown',
-        message: '[listing] 400 …',
-        attention: [],
-        listingIdentifier: '1FpnZtE25M',
-        sources: [
-          { url: 'https://www.facebook.com/share/1FpnZtE25M/', urlLabel: 'listing', status: 'unknown', matched: false },
-          { url: 'https://www.facebook.com/marketplace/you/selling', urlLabel: 'platform watch', status: 'unknown', matched: false },
-        ],
-      };
-      const fields = { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked', trace: 'lastCheckTrace' };
-      const writes = statusCheckWrites(res, fields);
-      assert(writes.lastCheckTrace?.identifier === '1FpnZtE25M', 'trace keeps the identity anchor');
-      assert(writes.lastCheckTrace?.sources?.length === 2, 'trace keeps per-URL rows');
-      assert(writes.lastCheckTrace.sources[0].label === 'listing' && writes.lastCheckTrace.sources[0].status === 'unknown', 'trace row carries label + status');
-      assert(writes.lastCheckTrace.sources[1].matched === false, 'trace row carries the identity-anchor match flag');
-      assert(!('reason' in writes.lastCheckTrace.sources[0]), 'non-error rows carry no reason (would bloat the trace + break ×N collapse)');
-      // An `error` row captures a bounded reason (the WHY behind a bare
-      // `listing=error`), with the `[label]` prefix stripped and capped at 80 chars.
-      const errRes = {
-        status: 'live', message: '[platform watch] live', attention: [], listingIdentifier: '236855247964',
-        sources: [
-          { url: 'https://www.ebay.com/itm/236855247964', urlLabel: 'listing', status: 'error', matched: null, message: '[listing] Fetch failed: net::ERR_CONNECTION_RESET navigating the eBay item page after anti-bot rate-limit' },
-          { url: 'https://www.ebay.com/sh/lst/active', urlLabel: 'platform watch', status: 'live', matched: true, message: '[platform watch] live in Active table' },
-        ],
-      };
-      const errWrites = statusCheckWrites(errRes, fields);
-      const errRow = errWrites.lastCheckTrace.sources[0];
-      assert(errRow.reason && errRow.reason.startsWith('Fetch failed:'), `error row captures the reason with [label] stripped -> ${errRow.reason}`);
-      assert(errRow.reason.length <= 80, `error reason is capped at 80 chars -> ${errRow.reason.length}`);
-      assert(!('reason' in errWrites.lastCheckTrace.sources[1]), 'the live watch row that saved the card carries no reason');
-      // Back-compat: a caller without a trace field never gets one written.
-      const noTrace = statusCheckWrites(res, { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked' });
-      assert(!('lastCheckTrace' in noTrace), 'trace omitted when fields.trace is absent');
-      return { ok: true };
-    },
-  },
-  {
-    name: 'marketplace status roll-up: flags listing-err→watch rescues + needs-login; empty canvas → no section',
-    run: () => {
-      const card = (platformId, status, listingStatus, lastChecked) => ({
-        type: 'marketplacecard',
-        data: {
-          platformId, status, lastChecked,
-          lastCheckTrace: { sources: [
-            { label: 'listing', status: listingStatus },
-            { label: 'platform watch', status: status === 'live' ? 'live' : 'unknown' },
-          ] },
-        },
-      });
-      const now = Date.now();
-      const nodes = [
-        card('ebay', 'live', 'error', new Date(now - 1000).toISOString()),   // rescued
-        card('ebay', 'live', 'error', new Date(now - 2000).toISOString()),   // rescued
-        card('ebay', 'live', 'live', new Date(now - 3000).toISOString()),    // clean direct check
-        card('mercari', 'needs-login', 'needs-login', new Date(now - 4000).toISOString()),
-        card('facebook', 'unknown', 'unknown', new Date(now - 5000).toISOString()),
-      ];
-      const md = buildMarketplaceStatusRollup(nodes);
-      assert(/## Marketplace Status Roll-up/.test(md), 'renders the roll-up section');
-      assert(/5 listing card\(s\) across 3 platform\(s\)/.test(md), `counts cards + platforms -> ${md.split('\n').find(l => l.includes('listing card'))}`);
-      assert(/2 card\(s\) had the \*\*listing-page check error, rescued by a platform-watch\*\* \(ebay ×2\)/.test(md), 'flags the eBay listing-err→watch rescues');
-      assert(/1 needs-login \(mercari ×1\)/.test(md), 'flags the needs-login card');
-      assert(/\| ebay \| 3 \| 3 \| 0 \| 0 \| 0 \| 0 \| 0 \| 2 \|/.test(md), `per-platform table: ebay 3 cards, 3 live, 2 rescued -> ${md.split('\n').find(l => l.startsWith('| ebay'))}`);
-      // A canvas with no marketplace cards emits nothing (no empty section).
-      assert(buildMarketplaceStatusRollup([{ type: 'jobcard', data: {} }]) === '', 'no marketplace cards → empty string');
-      // A fully-clean run says so.
-      const clean = buildMarketplaceStatusRollup([card('ebay', 'live', 'live', new Date().toISOString())]);
-      assert(/✅ No errored, rescued, or needs-login cards/.test(clean), 'clean run gets the all-clear line');
-      return { ok: true };
-    },
-  },
-  {
-    name: 'listing status writes: cached auth gate writes needs-login card state',
-    run: () => {
-      const res = cachedAuthNeedsLoginResult({
-        platformId: 'mercari',
-        name: 'Mercari',
-        reason: 'Verification fetch error: page.content() timed out',
-      });
-      const writes = statusCheckWrites(res, { status: 'status', message: 'statusMessage', lastChecked: 'lastChecked', trace: 'lastCheckTrace' });
-      assert(writes.status === 'needs-login', `cached auth writes needs-login, got ${writes.status}`);
-      assert(/Mercari session needs login/i.test(writes.statusMessage), `cached auth message names Mercari -> ${writes.statusMessage}`);
-      assert(writes.lastCheckTrace?.sources?.[0]?.label === 'session', 'cached auth writes session trace');
-      return { ok: true };
-    },
-  },
-  {
-    name: 'listing status writes: thrown errors clear stale attention',
-    run: () => {
-      const writes = statusErrorWrites(new Error('Browser closed'), {
-        status: 'status',
-        message: 'statusMessage',
-        lastChecked: 'lastChecked',
-        attention: 'attention',
-      });
-      assert(writes.status === 'error', `thrown error should write error status, got ${writes.status}`);
-      assert(Array.isArray(writes.attention) && writes.attention.length === 0, 'thrown error should clear stale attention panels');
-      assert(!!writes.lastChecked, 'thrown error should stamp lastChecked');
-      return { ok: true };
-    },
-  },
-  {
     name: 'marketplace platform support excludes Whatnot',
     run: () => {
       const sellIds = SELL_PLATFORMS.map(p => p.id);
@@ -3592,19 +4128,21 @@ const tests = [
       // Lite model WITH reason → reason is surfaced (the gap this closes): a
       // reader sees quota (external) vs truncation (our cap) without the logs.
       const quota = modelTag('gemini-3.1-flash-lite', { attempts: 3, reason: 'rate-limit' });
-      assert(quota.includes('⚠️ weak fallback (rate-limit: 3 stronger model(s) failed)'), `modelTag: lite with reason → ${quota}`);
+      assert(quota.includes('⚠️ weak fallback (rate-limit: 3 earlier model(s) failed)'), `modelTag: lite with reason → ${quota}`);
       // Non-lite model that still fell back → lighter "↪ fell back" note.
       const partial = modelTag('gemini-3.5-flash', { attempts: 1, reason: 'truncation' });
-      assert(partial.includes('↪ fell back (truncation: 1 stronger model(s) failed)'), `modelTag: non-lite partial fallback → ${partial}`);
+      assert(partial.includes('↪ fell back (truncation: 1 earlier model(s) failed)'), `modelTag: non-lite partial fallback → ${partial}`);
       assert(!partial.includes('weak fallback'), 'modelTag: non-lite is not flagged weak');
       // MIXED chain (the reported trap): 2 quota + 1 truncation. `reason` alone
       // would say only "rate-limit" and hide the truncation (whose fix — raise our
       // cap — is the opposite of quota's). counts must drive a breakdown.
       const mixed = modelTag('gemini-3.1-flash-lite', { attempts: 3, reason: 'rate-limit', counts: { 'rate-limit': 2, truncation: 1 } });
-      assert(mixed.includes('rate-limit×2 + truncation×1: 3 stronger model(s) failed'), `modelTag: mixed chain must show breakdown → ${mixed}`);
+      assert(mixed.includes('rate-limit×2 + truncation×1: 3 earlier model(s) failed'), `modelTag: mixed chain must show breakdown → ${mixed}`);
       // Single-cause counts → no ×N noise, falls back to the plain reason.
       const single = modelTag('gemini-3.1-flash-lite', { attempts: 3, reason: 'rate-limit', counts: { 'rate-limit': 3 } });
-      assert(single.includes('(rate-limit: 3 stronger model(s) failed)'), `modelTag: single-cause stays plain → ${single}`);
+      assert(single.includes('(rate-limit: 3 earlier model(s) failed)'), `modelTag: single-cause stays plain → ${single}`);
+      assert(modelTag('gemini-3.1-flash-lite', { attempts: 0, preferredModel: 'gemini-3.1-flash-lite' })
+        === ' · model: `gemini-3.1-flash-lite`', 'a preferred Lite model is not mislabeled as weak fallback');
       return { ok: true };
     },
   },
@@ -4712,11 +5250,106 @@ const tests = [
       assert(byPlatform.size === 2, `status scan: expected ebay+mercari, got ${[...byPlatform.keys()].join(',')}`);
       const ebay = byPlatform.get('ebay');
       assert(ebay.listingCount === 3, `status scan: ebay count incl. nested + url-less = 3, got ${ebay.listingCount}`);
-      assert(ebay.listingUrls.length === 2, `status scan: only the 2 ebay cards WITH a url contribute urls, got ${ebay.listingUrls.length}`);
-      assert(ebay.listingUrls[0] === 'https://ebay.com/itm/1', 'status scan: listing url is trimmed');
+      assert(!('listingUrls' in ebay) && !('titles' in ebay), 'status scan: per-listing content is not retained for platform-level hub scans');
       assert(byPlatform.get('mercari').listingCount === 1, 'status scan: nested mercari card counted once');
       assert(collectMarketplaceListings(null).size === 0, 'status scan: nullish input → empty map');
+      const sameCountsDifferentUrls = collectMarketplaceListings([
+        { id: 'x', type: 'marketplacecard', data: { platformId: 'ebay', listingUrl: 'https://different.example/item' } },
+        { id: 'y', type: 'marketplacecard', data: { platformId: 'ebay' } },
+        { id: 'z', type: 'marketplacecard', data: { platformId: 'ebay' } },
+        { id: 'm', type: 'marketplacecard', data: { platformId: 'mercari' } },
+      ]);
+      assert(marketplaceListingsSignature(byPlatform) === marketplaceListingsSignature(sameCountsDifferentUrls),
+        'status scan signature ignores irrelevant listing URL/title edits');
       return { platforms: byPlatform.size, ebayCount: ebay.listingCount };
+    },
+  },
+  {
+    name: 'Marketplace status progress: completes platforms incrementally without clearing overlapping runs',
+    run: () => {
+      const active = new Map();
+      let checking = beginMarketplaceStatusRun(active, 'bulk', ['ebay', 'facebook', 'mercari']);
+      assert([...checking].sort().join(',') === 'ebay,facebook,mercari', 'bulk run starts every platform spinner');
+
+      let completion = completeMarketplaceStatusPlatform(active, {
+        nodeId: 'status-node',
+        runId: 'bulk',
+        platformId: 'ebay',
+      }, 'status-node');
+      assert(completion.accepted && !completion.checkingIds.has('ebay') && completion.checkingIds.has('facebook'),
+        'first completed platform stops independently while remaining platforms keep checking');
+
+      checking = beginMarketplaceStatusRun(active, 'single', ['ebay']);
+      assert(checking.has('ebay') && checking.has('facebook') && checking.has('mercari'),
+        'a new single-platform run can coexist with the unfinished bulk run');
+
+      completion = completeMarketplaceStatusPlatform(active, {
+        nodeId: 'other-node',
+        runId: 'bulk',
+        platformId: 'facebook',
+      }, 'status-node');
+      assert(!completion.accepted && completion.checkingIds.has('facebook'),
+        'progress for another module is ignored');
+
+      checking = finishMarketplaceStatusRun(active, 'bulk');
+      assert(checking.size === 1 && checking.has('ebay'),
+        'finishing the bulk run does not clear a platform owned by another run');
+
+      completion = completeMarketplaceStatusPlatform(active, {
+        nodeId: 'status-node',
+        runId: 'single',
+        platformId: 'ebay',
+      }, 'status-node');
+      assert(completion.accepted && marketplaceStatusCheckingIds(active).size === 0,
+        'the final platform completion clears the last spinner');
+
+      const newer = { status: 'ok', lastChecked: '2026-06-14T10:02:00.000Z' };
+      const stale = { status: 'error', lastChecked: '2026-06-14T10:01:00.000Z' };
+      const merged = mergeMarketplaceStatusResults({ ebay: newer }, { ebay: stale, mercari: stale });
+      assert(merged.ebay === newer && merged.mercari === stale,
+        'an older bulk response cannot overwrite a newer recheck, but still fills missing platforms');
+
+      const sameTime = '2026-06-14T10:03:00.000Z';
+      const seq2 = { status: 'new', lastChecked: sameTime, _statusUpdate: { epoch: 'process-a', sequence: 2 } };
+      const seq1 = { status: 'old', lastChecked: sameTime, _statusUpdate: { epoch: 'process-a', sequence: 1 } };
+      assert(mergeMarketplaceStatusResults({ ebay: seq2 }, { ebay: seq1 }).ebay === seq2,
+        'monotonic completion sequence prevents an equal-timestamp stale response from winning');
+
+      const shared = getMarketplaceStatusActiveRuns('remount-status-node');
+      beginMarketplaceStatusRun(shared, 'remount-run', ['ebay', 'mercari']);
+      publishMarketplaceStatusCheckingIds('remount-status-node');
+      let remountedChecking = new Set();
+      const unsubscribe = subscribeMarketplaceStatusCheckingIds('remount-status-node', (next) => {
+        remountedChecking = next;
+      });
+      assert(remountedChecking.has('ebay') && remountedChecking.has('mercari'),
+        'a remounted status module restores the shared in-flight platform set');
+      completeMarketplaceStatusPlatform(shared, {
+        nodeId: 'remount-status-node',
+        runId: 'remount-run',
+        platformId: 'ebay',
+      }, 'remount-status-node');
+      publishMarketplaceStatusCheckingIds('remount-status-node');
+      assert(!remountedChecking.has('ebay') && remountedChecking.has('mercari'),
+        'the remounted module receives later incremental completions');
+      finishMarketplaceStatusRun(shared, 'remount-run');
+      publishMarketplaceStatusCheckingIds('remount-status-node');
+      unsubscribe();
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Marketplace status layout: fixed-width geometry chooses a compact 16:9 grid',
+    run: () => {
+      const expectedTwoColWidth = 2 * MARKETPLACE_STATUS_GRID.CARD_W
+        + MARKETPLACE_STATUS_GRID.GAP
+        + 2 * MARKETPLACE_STATUS_GRID.PAD;
+      assert(marketplaceStatusNodeWidth(2) === expectedTwoColWidth, 'status layout width follows fixed card/gap/padding geometry');
+      assert(bestMarketplaceStatusColumnCount(1) === 1, 'single platform uses one column');
+      assert(bestMarketplaceStatusColumnCount(4, [104, 104, 104, 104], 110) === 2,
+        'four equal platform cards choose a balanced two-column grid');
+      assert(bestMarketplaceStatusColumnCount(0) === 1, 'empty/invalid count retains safe one-column geometry');
+      return { twoColWidth: expectedTwoColWidth };
     },
   },
   {
@@ -4741,6 +5374,9 @@ const tests = [
         'deepUpdateNode: untouched siblings preserved');
       assert(deepUpdateNode(tree(), 'ghost', { text: 'x' }).updated === false,
         'deepUpdateNode: missing target → updated=false');
+      const functional = deepUpdateNode(tree(), 'deep', node => ({ text: `${node.data.text}!` }));
+      assert(functional.nodes[1].data.canvasData.nodes[1].data.canvasData.nodes[0].data.text === 'c!',
+        'deepUpdateNode: functional patches receive the matched node and merge into controlled state');
 
       // deepAddElements 'sibling': new node lands ALONGSIDE a deeply-nested target.
       const added = deepAddElements(tree(), [], 'deep', [{ id: 'newSib', type: 'text', data: {} }], [], 'sibling');
@@ -4760,6 +5396,268 @@ const tests = [
       const legacy = getCanvasData({ data: { nodes: [{ id: 'L' }], edges: [{ id: 'e' }] } });
       assert(legacy.nodes[0].id === 'L' && legacy.edges[0].id === 'e', 'getCanvasData: legacy shape fallback');
       return { ok: true };
+    },
+  },
+  {
+    name: 'rateLimiter: domain canonicalization is null-safe; escalation tightens, clamps, and relaxes',
+    run: () => {
+      _resetRateLimiter();
+      // getCanonicalDomain is exported + called directly, so it must not throw on null/undefined.
+      assert(getCanonicalDomain(null) === '', 'getCanonicalDomain(null) → "" (no throw)');
+      assert(getCanonicalDomain(undefined) === '', 'getCanonicalDomain(undefined) → "" (no throw)');
+      assert(getCanonicalDomain('m.ebay.com') === 'ebay.com', 'subdomain canonicalizes to the policy key');
+      assert(getCanonicalDomain('foo.unknown.io') === 'foo.unknown.io', 'unknown host passes through');
+      assert(extractDomain('not a url') === 'unknown', 'invalid URL → unknown');
+      assert(extractDomain('https://www.ebay.com/sch/i.html') === 'ebay.com', 'valid URL → canonical host (www stripped)');
+
+      // A block arms a cooldown and tightens the multiplier above 1; repeated blocks clamp at a ceiling.
+      _resetRateLimiter();
+      recordOutcome('ebay.com', 'block');
+      assert(isCoolingDown('ebay.com') === true, 'a block arms a cooldown window');
+      const t1 = getRateLimiterSnapshot().domains['ebay.com'].tighten;
+      assert(t1 > 1, `first block raises tighten above 1 (got ${t1})`);
+      for (let i = 0; i < 12; i++) recordOutcome('ebay.com', 'block');
+      const tA = getRateLimiterSnapshot().domains['ebay.com'].tighten;
+      recordOutcome('ebay.com', 'block');
+      const tB = getRateLimiterSnapshot().domains['ebay.com'].tighten;
+      assert(tA === tB && tA > t1, `tighten clamps at a ceiling under sustained blocks (${tA} === ${tB})`);
+
+      // 'ok' relaxes the multiplier back toward the floor.
+      _resetRateLimiter();
+      recordOutcome('reverb.com', 'block');
+      const blocked = getRateLimiterSnapshot().domains['reverb.com'].tighten;
+      recordOutcome('reverb.com', 'ok');
+      const relaxed = getRateLimiterSnapshot().domains['reverb.com'].tighten;
+      assert(relaxed < blocked, `an ok relaxes the tighten multiplier (${blocked} → ${relaxed})`);
+
+      // Global concurrency shrinks under sustained cross-domain pressure but never below the floor.
+      _resetRateLimiter();
+      const c0 = effectiveConcurrency();
+      assert(c0 >= 1, 'baseline concurrency is at least 1');
+      for (let i = 0; i < 6; i++) recordOutcome('block-spam.com', 'block');
+      const c1 = effectiveConcurrency();
+      assert(c1 <= c0 && c1 >= 1, `sustained blocks shrink concurrency but never below 1 (${c0} → ${c1})`);
+      _resetRateLimiter();
+      return { ok: true, c0, c1 };
+    },
+  },
+  {
+    name: 'tokenBudget: seed/hard-cap pure paths + non-finite samples rejected',
+    run: () => {
+      assert(TOKEN_HARD_CAP > 0, 'hard cap is a positive ceiling');
+      // No recorded data → returns the seed unchanged (the common path).
+      assert(effectiveCap('tb-unit-seed', 5000) === 5000, 'no data → seed unchanged');
+      // A non-positive seed falls back to the hard cap (max headroom).
+      assert(effectiveCap('tb-unit-zero', 0) === TOKEN_HARD_CAP, 'zero seed → HARD_CAP');
+      assert(effectiveCap('tb-unit-neg', -10) === TOKEN_HARD_CAP, 'negative seed → HARD_CAP');
+      // The Infinity/NaN guard: a non-finite sample must be a no-op (no throw, no poison).
+      recordTokenUsage('tb-unit-inf', Infinity);
+      recordTokenUsage('tb-unit-inf', NaN);
+      recordTruncation('tb-unit-inf', Infinity);
+      assert(effectiveCap('tb-unit-inf', 4000) === 4000, 'Infinity/NaN samples do not poison the cap');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'productConditions: canonical six-tier list + prompt formatting',
+    run: () => {
+      assert(CONDITION_VALUES.length === 6, `six condition tiers (got ${CONDITION_VALUES.length})`);
+      assert(PRODUCT_CONDITIONS.length === CONDITION_VALUES.length, 'values mirror the condition objects');
+      assert(CONDITION_VALUES.includes(DEFAULT_CONDITION), 'default condition is a real tier (no rename drift)');
+      assert(getConditionDef('nope') === null, 'unknown condition → null');
+      assert(getConditionDef(DEFAULT_CONDITION)?.value === DEFAULT_CONDITION, 'known condition resolves');
+      assert(formatConditionForPricingPrompt('') === 'Unknown', 'empty condition → Unknown');
+      assert(typeof formatConditionForPricingPrompt(DEFAULT_CONDITION) === 'string' && formatConditionForPricingPrompt(DEFAULT_CONDITION).length > 0, 'known condition formats to a non-empty string');
+      assert(typeof formatConditionGuideForPrompt() === 'string' && formatConditionGuideForPrompt().length > 0, 'guide is a non-empty string');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'productConditions: generated titles identify the item without condition clauses',
+    run: () => {
+      assert(
+        stripConditionFromGeneratedTitle(
+          'Modern Round Wood Coffee Table with Tree Ring Pattern - Excellent Condition',
+          'Used - Excellent',
+        ) === 'Modern Round Wood Coffee Table with Tree Ring Pattern',
+        'reported trailing Excellent Condition clause is removed',
+      );
+      assert(stripConditionFromGeneratedTitle('Like New Sony WH-1000XM4 Headphones', 'Like New') === 'Sony WH-1000XM4 Headphones',
+        'leading Like New condition is removed');
+      assert(stripConditionFromGeneratedTitle('Apple iPhone XS (Used - Good)', 'Used - Good') === 'Apple iPhone XS',
+        'parenthesized canonical condition is removed');
+      assert(stripConditionFromGeneratedTitle('Nintendo Switch OLED - Fair', 'Used - Fair') === 'Nintendo Switch OLED',
+        'selected condition grade is removed when it is a trailing clause');
+      assert(stripConditionFromGeneratedTitle('Excellent Condition', 'Used - Excellent') === '',
+        'condition-only title is discarded so identification fallback can be used');
+      assert(stripConditionFromGeneratedTitle('Used - Good', 'Used - Good') === '',
+        'canonical condition-only title is discarded as one clause');
+      assert(stripConditionFromGeneratedTitle('Apple iPhone - Refurbished - 256GB', 'Used - Excellent') === 'Apple iPhone - 256GB',
+        'separator-delimited condition clause is removed from the middle');
+      assert(stripConditionFromGeneratedTitle('Sony WH-1000XM4 - Excellent', 'Used - Excellent') === 'Sony WH-1000XM4',
+        'bare grade clause matching selected condition is removed');
+      assert(stripConditionFromGeneratedTitle('New Balance 574 Core Sneakers', 'New') === 'New Balance 574 Core Sneakers',
+        'identity word New is preserved when it is part of a brand name');
+      assert(stripConditionFromGeneratedTitle('New Nintendo 3DS XL', 'New') === 'New Nintendo 3DS XL',
+        'identity word New is preserved when it is part of a model name');
+      assert(stripConditionFromGeneratedTitle('Good Cook Nonstick Baking Pan', 'Used - Good') === 'Good Cook Nonstick Baking Pan',
+        'identity word Good is preserved when it is not a condition clause');
+      assert(stripConditionFromGeneratedTitle('Mint Mobile Phone', 'Like New') === 'Mint Mobile Phone',
+        'bare grade-like word is preserved inside a brand identity');
+      assert(stripConditionFromGeneratedTitle('Good, Bad and Ugly DVD', 'Used - Excellent') === 'Good, Bad and Ugly DVD',
+        'bare grade-like word is preserved at the start of a proper title');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'timings: content-aware debounces clamp and never return NaN',
+    run: () => {
+      assert(autosaveDebounceMs(0) === 2000, 'small canvas floored at 2000');
+      assert(autosaveDebounceMs(1000) === 5000, 'large canvas capped at 5000');
+      assert(autosaveDebounceMs(250) === 3500, 'mid scales linearly (2000 + 250×6)');
+      assert(docSaveDebounceMs(0) === 800, 'short doc floored at 800');
+      assert(docSaveDebounceMs(1000000) === 2500, 'long doc capped at 2500');
+      // NaN guard (feeds setTimeout): a non-numeric input must floor, not return NaN.
+      assert(autosaveDebounceMs('abc') === 2000, 'non-numeric node count → floor, not NaN');
+      assert(docSaveDebounceMs(undefined) === 800, 'undefined char count → floor');
+      assert(Number.isFinite(maxUndoHistory()) && maxUndoHistory() >= 50, 'maxUndoHistory is finite + floored');
+      assert(typeof TIMINGS.FEEDBACK_MS === 'number', 'TIMINGS constants present');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'idGenerator: valid v4 UUIDs, unique across a batch',
+    run: () => {
+      const re = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+      assert(re.test(generateId()), 'generateId produces a v4 UUID');
+      const set = new Set();
+      for (let i = 0; i < 2000; i++) set.add(generateId());
+      assert(set.size === 2000, 'no collisions across 2000 ids');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'mathUtils.clamp: bounds + inclusive edges',
+    run: () => {
+      assert(clamp(5, 0, 10) === 5, 'in range');
+      assert(clamp(-3, 0, 10) === 0, 'below lo');
+      assert(clamp(99, 0, 10) === 10, 'above hi');
+      assert(clamp(0, 0, 10) === 0 && clamp(10, 0, 10) === 10, 'inclusive bounds');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'jobLanguageLabels: case-insensitive lookup + uppercase fallback',
+    run: () => {
+      assert(languageLabel('en') === 'English', 'known lowercase code');
+      assert(languageLabel('EN') === 'English', 'wrong-case code still resolves (case-insensitive fix)');
+      assert(languageLabel(' Fr ') === 'Français', 'trimmed + lowercased');
+      assert(languageLabel('xx') === 'XX', 'unknown code → uppercased fallback');
+      assert(languageLabel('') === '' && languageLabel(null) === '' && languageLabel(undefined) === '', 'empty/null → empty string');
+      assert(Object.keys(LANGUAGE_LABELS).every(k => k === k.toLowerCase()), 'all map keys are canonical lowercase');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'sourceScopeShared: env resolution + empty-string does not shadow VITE_ key',
+    run: () => {
+      assert(parseScopeEnvBoolean('yes') === true && parseScopeEnvBoolean('OFF') === false, 'truthy/falsy spellings (case-insensitive)');
+      assert(parseScopeEnvBoolean('  TRUE  ') === true, 'trimmed');
+      assert(parseScopeEnvBoolean('', true) === true && parseScopeEnvBoolean(null) === false, 'empty/null → fallback');
+      assert(parseScopeEnvBoolean(true) === true && parseScopeEnvBoolean('maybe', true) === true, 'boolean passthrough + unknown → fallback');
+      assert(getEnvValue({ FOO: 'x' }, 'FOO') === 'x', 'direct key wins');
+      assert(getEnvValue({ VITE_FOO: 'y' }, 'FOO') === 'y', 'VITE_-prefixed fallback resolves');
+      assert(getEnvValue({ FOO: '', VITE_FOO: 'true' }, 'FOO') === 'true', 'empty FOO falls through to VITE_FOO (precedence fix)');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'edgeHelpers: directional handle pairs + non-detachable structural edge',
+    run: () => {
+      const px = pickEdgeHandles({ x: 100, y: 0 }, { x: 0, y: 0 });
+      assert(px.sourceHandle === 'right' && px.targetHandle === 'left', 'dominant +x → right/left');
+      const nx = pickEdgeHandles({ x: -100, y: 10 }, { x: 0, y: 0 });
+      assert(nx.sourceHandle === 'left-out' && nx.targetHandle === 'right-in', 'dominant −x → left-out/right-in');
+      const py = pickEdgeHandles({ x: 5, y: 100 }, { x: 0, y: 0 });
+      assert(py.sourceHandle === 'bottom' && py.targetHandle === 'top', 'dominant +y → bottom/top');
+      const ny = pickEdgeHandles({ x: 5, y: -100 }, { x: 0, y: 0 });
+      assert(ny.sourceHandle === 'top-out' && ny.targetHandle === 'bottom-in', 'dominant −y → top-out/bottom-in');
+      const se = structuralEdge('rgba(1,2,3,1)');
+      assert(se.selectable === false && se.deletable === false && se.focusable === false, 'structural edge is non-detachable');
+      assert(se.animated === true && se.type === 'smoothstep' && se.style.stroke === 'rgba(1,2,3,1)' && se.style.strokeWidth === 2, 'structural edge styling');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'docUtils.isWordDoc: extension detection (case/path/dotfile safe)',
+    run: () => {
+      assert(isWordDoc('Resume.DOCX') === true, 'uppercase extension');
+      assert(isWordDoc('legacy.doc') === true && isWordDoc('report.pdf') === false, 'doc vs non-doc');
+      assert(isWordDoc(null) === false && isWordDoc(undefined) === false, 'null-safe');
+      assert(isWordDoc('/a/b/c.docx') === true, 'path with directories');
+      assert(isWordDoc('archive.docx.bak') === false, 'only the final extension counts');
+      assert(WORD_DOC_EXT.has('.docx') && WORD_DOC_EXT.has('.doc'), 'the extension set');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'fileExtensions: CODE_EXT_RE + PRODUCT_IMAGE_EXT_RE end-anchoring',
+    run: () => {
+      assert(CODE_EXT_RE.test('main.tsx') && CODE_EXT_RE.test('notes.md') && CODE_EXT_RE.test('a.JS'), 'code/text extensions match (case-insensitive)');
+      assert(CODE_EXT_RE.test('archive.zip') === false, 'a non-code extension does not match');
+      assert(CODE_EXT_RE.test('readme.mdx') === false, 'end-anchored: "md" must not partial-match "mdx"');
+      assert(PRODUCT_IMAGE_EXT_RE.test('shot.jpeg') && PRODUCT_IMAGE_EXT_RE.test('shot.avif'), 'image extensions match');
+      assert(PRODUCT_IMAGE_EXT_RE.test('shot.png.bak') === false, 'end-anchored: no mid-name match');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'canvasInteractions: cancelNodeTasksRecursively walks tree, honors skipIds, API-guarded',
+    run: () => {
+      const prevWindow = globalThis.window;
+      try {
+        const calls = [];
+        globalThis.window = { electronAPI: { cancelNodeTask: (id) => calls.push(id) } };
+        cancelNodeTasksRecursively([{ id: 'a' }, { id: 'b', data: { canvasData: { nodes: [{ id: 'c' }] } } }]);
+        assert(calls.join(',') === 'a,b,c', `walks nested (new-shape) tree (got ${calls.join(',')})`);
+
+        calls.length = 0;
+        cancelNodeTasksRecursively([{ id: 'a', data: { nodes: [{ id: 'z' }] } }]);
+        assert(calls.join(',') === 'a,z', 'walks legacy nodes shape');
+
+        calls.length = 0;
+        cancelNodeTasksRecursively([{ id: 'a' }, { id: 'b' }, { id: 'c' }], new Set(['b']));
+        assert(calls.join(',') === 'a,c', 'skipIds excludes a node');
+
+        // Guard: missing electronAPI must NOT throw mid-tree (partial-cancellation fix).
+        globalThis.window = {};
+        let threw = false;
+        try { cancelNodeTasksRecursively([{ id: 'a' }, { id: 'b' }]); } catch { threw = true; }
+        assert(threw === false, 'missing electronAPI no longer throws (no partial cancellation)');
+      } finally {
+        globalThis.window = prevWindow;
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'llm/claude: every known task maps to a real model; Claude catalog is current',
+    run: () => {
+      const catalog = new Set(['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001']);
+      assert(CLAUDE_MODELS_IN_USE.length === 3, `three Claude models in use (got ${CLAUDE_MODELS_IN_USE.length})`);
+      assert(CLAUDE_MODELS_IN_USE.every(m => catalog.has(m)), 'CLAUDE_MODELS_IN_USE are current catalog ids');
+      const tasks = getKnownTaskIds();
+      assert(tasks.size > 0 && !tasks.has('default'), 'known task set is non-empty and excludes "default"');
+      // Every task must resolve to a real Gemini fallback OR a current Claude id —
+      // catches a typo'd / retired model id slipped into the per-task table.
+      const validModels = new Set([...GEMINI_MODEL_FALLBACKS, ...catalog]);
+      for (const t of tasks) {
+        const m = modelForTask(t);
+        assert(validModels.has(m), `task "${t}" resolves to a known model (got ${m})`);
+      }
+      // An unknown task falls back to the default model without throwing.
+      assert(validModels.has(modelForTask('totally-unknown-task-xyz')), 'unknown task → default model (no throw)');
+      return { ok: true, tasks: tasks.size };
     },
   },
 ];

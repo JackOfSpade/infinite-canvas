@@ -17,5 +17,8 @@ export const LANGUAGE_LABELS = {
 // Falls back to the uppercased code so an unlabeled-but-detected language still
 // shows something sensible on the chip (we keep ALL non-English jobs regardless).
 export function languageLabel(code) {
-  return LANGUAGE_LABELS[code] || String(code || '').toUpperCase();
+  // ISO 639-1 codes are canonically lowercase (so are the map keys); normalize the
+  // lookup so a wrong-case code ('EN') still resolves instead of falling back.
+  const key = String(code || '').trim().toLowerCase();
+  return LANGUAGE_LABELS[key] || key.toUpperCase();
 }

@@ -2,6 +2,7 @@ import Store from 'electron-store';
 import electronPkg from 'electron';
 import fs from 'fs';
 import { handleSafe } from './ipcUtils.js';
+import { normalizeMarketplaceWatchUrls } from '../../src/utils/marketplaceWatchUrls.js';
 
 const { dialog, BrowserWindow } = electronPkg;
 
@@ -36,13 +37,9 @@ function getStore() {
         // it across canvases without copying.
         serviceAccountPath: '',
       },
-      // Extra URLs to scrape during a marketplace listing status check, keyed
-      // by platformId. The listing's own URL is always checked; these are
-      // platform-wide "places the status might surface" — the seller dashboard,
-      // notifications center, sold-items tab. AI classification of each URL
-      // runs in parallel and the strongest signal wins, which is what makes
-      // the system robust to "the SOLD notification lives in the activity feed,
-      // not on the listing page yet."
+      // Aggregate seller pages scanned by the Marketplace Status Module, keyed
+      // by platformId: dashboards, notification centers, messages, sold-items
+      // tabs, etc. Legacy per-listing checks also use them as extra evidence.
       marketplaceWatchUrls: {},
       // Per-source credentials for job-search APIs that require keys. Used by
       // electron/ipc/jobs.js fetchApiSources. Storing here (vs .env) lets the
@@ -176,16 +173,14 @@ export function saveGlassdoorLocId(locationKey, value) {
 }
 
 /**
- * Watch URLs configured for a given platform's status check. The listing's
- * own URL is always checked separately by the caller; this returns the
- * platform-wide extras (dashboard, notifications, etc.) the user has added
- * via Settings → Marketplace.
+ * Platform-wide hub pages (dashboard, notifications, etc.) configured through
+ * Settings → Marketplace Monitors. Marketplace Status scans only these pages;
+ * legacy per-listing checks use them as extra evidence alongside a listing URL.
  */
 export function getMarketplaceWatchUrls(platformId) {
   if (!platformId) return [];
   const all = tryGetStore()?.get('marketplaceWatchUrls') || {};
-  const list = all[platformId];
-  return Array.isArray(list) ? list.filter(u => typeof u === 'string' && u.trim().length > 0) : [];
+  return normalizeMarketplaceWatchUrls(all[platformId]);
 }
 
 /**

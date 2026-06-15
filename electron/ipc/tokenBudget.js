@@ -47,7 +47,10 @@ function allTruncations() {
 
 /** Record the real output tokens (visible + thinking) a task's call produced. */
 export function recordTokenUsage(task, totalOutputTokens) {
-  if (!task || !(totalOutputTokens > 0)) return;
+  // Number.isFinite rejects Infinity/NaN: `Infinity > 0` is true, so without this
+  // an Infinity sample would poison p95 forever (it sorts to the top and never
+  // ages out faster than real samples).
+  if (!task || !Number.isFinite(totalOutputTokens) || totalOutputTokens <= 0) return;
   const all = allUsage();
   const arr = all[task] || [];
   arr.push(Math.round(totalOutputTokens));
@@ -73,7 +76,9 @@ export function recordTokenUsage(task, totalOutputTokens) {
  * but the self-calibration hadn't yet grown past it.
  */
 export function recordTruncation(task, capHit, formulaSeed) {
-  if (!task || !(capHit > 0)) return;
+  // Reject Infinity/NaN (see recordTokenUsage) — an Infinite truncatedAt would
+  // make the truncation floor Infinity and pin the cap at HARD_CAP permanently.
+  if (!task || !Number.isFinite(capHit) || capHit <= 0) return;
   const all = allTruncations();
   const prev = all[task] || {};
   const prevCap = typeof prev === 'number' ? prev : (prev.capHit || 0);

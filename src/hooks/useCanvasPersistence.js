@@ -1,4 +1,4 @@
-import { useCallback, useState, useRef, useEffect, useEffectEvent } from 'react';
+import { useCallback, useState, useRef, useEffect, useEffectEvent, useLayoutEffect } from 'react';
 import { toPng } from 'html-to-image';
 import { EventLogger } from '../utils/EventLogger';
 import { runNodeMigrations, CURRENT_SCHEMA_VERSION, sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
@@ -43,7 +43,9 @@ export function useCanvasPersistence({
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
   const drawingsRef = useRef(drawings);
-  useEffect(() => {
+  // Save shortcuts may fire immediately after a committed canvas update.
+  // Synchronize before paint so saveCanvas never reads the prior render.
+  useLayoutEffect(() => {
     nodesRef.current = nodes;
     edgesRef.current = edges;
     drawingsRef.current = drawings;
@@ -52,17 +54,17 @@ export function useCanvasPersistence({
   // Mirror currentFile into a ref so saveCanvas can read it without being recreated
   // on every file-path change (which would cascade into loadCanvas / handleUnsavedChanges).
   const currentFileRef = useRef(currentFile);
-  useEffect(() => { currentFileRef.current = currentFile; }, [currentFile]);
+  useLayoutEffect(() => { currentFileRef.current = currentFile; }, [currentFile]);
 
   // Mirror hasUnsavedChanges into a ref so the quit/unload listeners can
   // read the live value without being recreated on every state change.
   const hasUnsavedChangesRef = useRef(hasUnsavedChanges);
-  useEffect(() => { hasUnsavedChangesRef.current = hasUnsavedChanges; }, [hasUnsavedChanges]);
+  useLayoutEffect(() => { hasUnsavedChangesRef.current = hasUnsavedChanges; }, [hasUnsavedChanges]);
 
   // Mirror saveState into a ref so saveCanvas can guard concurrent calls
   // without listing saveState as a dep (same pattern as hasUnsavedChangesRef).
   const saveStateRef = useRef(saveState);
-  useEffect(() => { saveStateRef.current = saveState; }, [saveState]);
+  useLayoutEffect(() => { saveStateRef.current = saveState; }, [saveState]);
 
   const saveCanvas = useCallback(async () => {
     if (!window.electronAPI || saveStateRef.current !== 'idle' || isAnimatingRef?.current) return;

@@ -71,6 +71,7 @@ import { useCanvasOSDeletion } from './hooks/useCanvasOSDeletion';
 import { useConfirmDialog } from './hooks/useConfirmDialog';
 import { ArrowUpLeft } from 'lucide-react';
 import { viewportForZoomAtScreenPoint } from './utils/layoutGeometry';
+import { buildCustomizationDialogData, filterNodeCustomizationUpdates } from './utils/nodeCustomization';
 
 const wheelZoomDelta = (event) => {
   const platform = window.navigator?.platform || '';
@@ -662,27 +663,16 @@ export function Canvas() {
 
   const handleCustomizeApply = useCallback((updates) => {
     if (customizeTargetIds.length === 0) return;
+    const targetIds = new Set(customizeTargetIds);
 
     setNodes(nds => nds.map(n => {
-      if (customizeTargetIds.includes(n.id)) {
-        // Filter updates based on node type to ensure compatibility
-        // Text/Link/Canvas nodes support font properties; Document only supports background
-        const isCompatibleWithFont = ['text', 'link', 'group'].includes(n.type);
-        const filteredUpdates = { ...updates };
-
-        if (!isCompatibleWithFont) {
-          delete filteredUpdates.fontSize;
-          delete filteredUpdates.fontFamily;
-          delete filteredUpdates.textColor;
-          delete filteredUpdates.titleSpacing;
-        }
-
-        return {
-          ...n,
-          data: { ...n.data, ...filteredUpdates }
-        };
-      }
-      return n;
+      if (!targetIds.has(n.id)) return n;
+      const filteredUpdates = filterNodeCustomizationUpdates(n, updates);
+      if (Object.keys(filteredUpdates).length === 0) return n;
+      return {
+        ...n,
+        data: { ...n.data, ...filteredUpdates }
+      };
     }));
 
     // Remember the most recent text/link customization so newly-created text/link
@@ -707,25 +697,8 @@ export function Canvas() {
 
   const customizeInitialData = useMemo(() => {
     if (customizeTargetIds.length === 0) return null;
-    const targetNodes = nodes.filter(n => customizeTargetIds.includes(n.id));
-    if (targetNodes.length === 0) return null;
-
-    const hasFontCompatible = targetNodes.some(n => ['text', 'link', 'group'].includes(n.type));
-    const hasSpacingCompatible = targetNodes.some(n => n.type === 'group');
-
-    // Use the first node that supports the property as the baseline for the dialog
-    const fontNode = targetNodes.find(n => ['text', 'link', 'group'].includes(n.type));
-    const bgNode   = targetNodes[0];
-
-    return {
-      fontSize: fontNode?.data?.fontSize,
-      fontFamily: fontNode?.data?.fontFamily,
-      textColor: fontNode?.data?.textColor,
-      titleSpacing: targetNodes.find(n => n.type === 'group')?.data?.titleSpacing,
-      backgroundColor: bgNode?.data?.backgroundColor,
-      showFont: hasFontCompatible,
-      showSpacing: hasSpacingCompatible
-    };
+    const targetIds = new Set(customizeTargetIds);
+    return buildCustomizationDialogData(nodes.filter(n => targetIds.has(n.id)));
   }, [customizeTargetIds, nodes]);
 
   // Dashboard stats: computed once per node change here so <Sidebar> can be a

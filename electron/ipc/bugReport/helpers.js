@@ -21,13 +21,12 @@ export function formatAge(ts) {
 }
 
 // Renders the model that actually served an AI stage (recorded per stage via the
-// LLM layer's `meta` out-param). Flags a degraded run: a `*-lite` model = the
-// call fell through every stronger model to the weakest fallback — so e.g. a
-// "strong match" price is really flash-lite's verdict, not a top model's. Empty
-// when no model was recorded (older telemetry).
+// LLM layer's `meta` out-param). Flags a degraded run: a `*-lite` model is weak
+// only when the task preferred a non-lite model (or older telemetry did not
+// record the preference). Lightweight tasks legitimately prefer Lite.
 //
-// `fallback` (optional, `{ attempts, reason, counts }` from gemini.js) names WHY
-// stronger models were skipped — `rate-limit`/quota (external: wait or upgrade
+// `fallback` (optional, `{ attempts, reason, counts, preferredModel }` from
+// gemini.js) names WHY earlier models were skipped — `rate-limit`/quota (external: wait or upgrade
 // tier), `truncation` (our token cap is too low: raise it in llm.js), or `server`
 // (overload). Without it, "weak fallback" collapses three causes with opposite
 // fixes into one ambiguous flag, and the reason otherwise lives only in the
@@ -41,7 +40,8 @@ export function formatAge(ts) {
 // render the breakdown ("rate-limit×2 + truncation×1") instead of just the winner.
 export const modelTag = (model, fallback) => {
   if (!model) return '';
-  const weak = /lite/.test(model);
+  const preferredModel = fallback?.preferredModel || '';
+  const weak = /lite/.test(model) && (!preferredModel || !/lite/.test(preferredModel));
   const fellBack = fallback && fallback.attempts > 0;
   // Distinct-cause breakdown when the chain was mixed; else the single reason.
   const causeLabel = (fb) => {
@@ -52,7 +52,7 @@ export const modelTag = (model, fallback) => {
     }
     return fb ? fb.reason : '';
   };
-  const why = fellBack ? `${causeLabel(fallback)}: ${fallback.attempts} stronger model(s) failed` : '';
+  const why = fellBack ? `${causeLabel(fallback)}: ${fallback.attempts} earlier model(s) failed` : '';
   let suffix = '';
   if (weak) suffix = ` ⚠️ weak fallback${why ? ` (${why})` : ''}`;
   else if (fellBack) suffix = ` ↪ fell back (${why})`;

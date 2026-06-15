@@ -3,6 +3,8 @@ const { app, BrowserWindow, Menu, protocol, nativeImage } = electronPkg;
 import path from 'path';
 import { registerFilesystemHandlers } from './ipc/filesystem.js';
 import { resolveMissingPreviewPath } from './ipc/missingPreviewRelink.js';
+import { decodeLocalFileRequestPath } from './localFileProtocol.js';
+import { isProductImageExtension } from '../src/utils/fileExtensions.js';
 import { logger } from './logger.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
@@ -75,6 +77,14 @@ function clampNumber(value, fallback, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function isExistingFile(filePath) {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function resizeNativeImageToFit(image, maxDimension) {
@@ -555,11 +565,11 @@ if (!gotTheLock) {
   app.whenReady().then(() => {
     protocol.handle('local-file', async (request) => {
       let requestParams = new URLSearchParams();
-      try { requestParams = new URL(request.url).searchParams; } catch { /* ignore */ }
-      let url = request.url.replace(/^local-file:\/\//, '');
-      url = url.split('?')[0].split('#')[0]; // Strip query and hash
       try {
-        const decodedPath = decodeURIComponent(url);
+        requestParams = new URL(request.url).searchParams;
+      } catch { /* malformed legacy URL; path decoder below has its own fallback */ }
+      try {
+        const decodedPath = decodeLocalFileRequestPath(request.url);
         // ── Protocol Security Hardening ──────────────────────────────────────────
         // 1. Resolve to an absolute path immediately to catch relative traversal attempts.
         // 2. Normalize segments. 
@@ -568,23 +578,23 @@ if (!gotTheLock) {
         const normalizedPath = path.normalize(absolutePath);
         const previewMode = requestParams.get('preview');
         const requestedExt = path.extname(normalizedPath).toLowerCase();
+        const isImageRequest = isProductImageExtension(requestedExt);
         
         let targetPath = normalizedPath;
         try { targetPath = fs.realpathSync(normalizedPath); } catch { /* ignore */ }
 
         if (
-          previewMode === 'marketplace'
-          && MARKETPLACE_PREVIEW_EXT.has(requestedExt)
-          && !fs.existsSync(targetPath)
+          isImageRequest
+          && !isExistingFile(targetPath)
         ) {
           const relink = resolveMissingPreviewPath(normalizedPath);
           if (relink.status === 'found') {
             targetPath = relink.path;
             if (!relink.cached) {
-              logger.info(`[local-file] Relinked missing preview image by exact filename: ${normalizedPath} → ${targetPath} (scanned ${relink.entriesScanned} entries)`);
+              logger.info(`[local-file] Relinked missing preview image within current hierarchy: ${normalizedPath} → ${targetPath} (root ${relink.root}, scanned ${relink.entriesScanned} entries)`);
             }
           } else if (!relink.cached && (relink.status === 'ambiguous' || relink.status === 'limit')) {
-            logger.warn(`[local-file] Could not relink missing preview image (${relink.status}): ${normalizedPath} (scanned ${relink.entriesScanned} entries)`);
+            logger.warn(`[local-file] Could not relink missing preview image (${relink.status}) within ${relink.root}: ${normalizedPath} (scanned ${relink.entriesScanned} entries)`);
           }
         }
         
@@ -619,7 +629,12 @@ if (!gotTheLock) {
         // (HEIC transcoding and range-streaming both need these).
         let stat;
         try { stat = fs.statSync(targetPath); }
-        catch { return new Response('Not Found', { status: 404 }); }
+        catch (error) {
+          if (isImageRequest) {
+            logger.warn(`[local-file] Image preview target not found after relink: request=${request.url} normalized=${normalizedPath} target=${targetPath} (${error?.code || error?.message || 'stat failed'})`);
+          }
+          return new Response('Not Found', { status: 404 });
+        }
         if (!stat.isFile()) return new Response('Not Found', { status: 404 });
 
         const ext = path.extname(targetPath).toLowerCase();

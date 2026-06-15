@@ -99,8 +99,8 @@ export async function processDroppedFiles(files, startPosition) {
   for (const file of files) {
     try {
       const result = await window.electronAPI.scanDirectory(file.path);
-      if (result && result.success === false) {
-        EventLogger.log(`Drop: skipping file/folder ${file.path}: ${result.error}`);
+      if (!result || result.success === false) {
+        EventLogger.log(`Drop: skipping file/folder ${file.path}: ${result?.error || 'no result from scanDirectory'}`);
         continue;
       }
       const fsItem = result.isFile ? result.file : result;

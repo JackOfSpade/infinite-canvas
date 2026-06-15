@@ -91,6 +91,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Scrapes each platform's aggregate notification hub (the watch URLs in
   // Settings) for anything needing the seller's attention — NOT per-listing.
   checkMarketplaceStatus: (args) => ipcRenderer.invoke('check-marketplace-status', args),
+  onMarketplaceStatusProgress: createListener('marketplace-status-progress'),
   getSellPlatforms: async () => {
     const res = await ipcRenderer.invoke('get-sell-platforms');
     return res.success ? (res.platforms || []) : [];

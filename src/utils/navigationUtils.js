@@ -62,7 +62,8 @@ export function deepUpdateNode(nodes, id, dataUpdate) {
   const newNodes = nodes.map(n => {
     if (n.id === id) {
       anyUpdated = true;
-      return { ...n, data: { ...n.data, ...dataUpdate } };
+      const patch = typeof dataUpdate === 'function' ? dataUpdate(n) : dataUpdate;
+      return { ...n, data: { ...n.data, ...(patch || {}) } };
     }
     if (n.data?.canvasData?.nodes) {
       const { updated, nodes: childNodes } = deepUpdateNode(n.data.canvasData.nodes, id, dataUpdate);

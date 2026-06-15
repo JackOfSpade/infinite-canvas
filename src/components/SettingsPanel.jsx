@@ -9,6 +9,7 @@ import { ANIMATION_DURATIONS, DEFAULT_SHORTCUTS } from '../hooks/useSettings';
 import { useSyncWhileFocused } from '../hooks/useSyncWhileFocused';
 import { useToast } from './ToastProvider';
 import { SELL_PLATFORMS, SELL_PLATFORM_BY_ID, JOB_SOURCES, JOB_SOURCE_BY_ID } from '../utils/constants';
+import { normalizeMarketplaceWatchUrls } from '../utils/marketplaceWatchUrls';
 import { PlatformBadge } from './PlatformBadge';
 
 const SPEED_OPTIONS = [
@@ -103,14 +104,12 @@ function ShortcutRow({ id, binding, onSave, isCapturing, onStartCapture, onCance
  *      existing `openLoginWindow` IPC, which persists cookies in the stealth
  *      browser's userDataDir — one login lasts until cookies expire.
  *
- *   2. Add "watch URLs" the AI check should also scrape every time it runs
- *      for any card on this platform. These are typically:
+ *   2. Add platform-wide "watch URLs" the Marketplace Status Module scans once
+ *      per check. These are typically:
  *        - the seller dashboard / active-listings page
  *        - a notifications / activity feed
  *        - a sold-items tab
- *      The strongest signal across all URLs wins, so a SOLD notification in
- *      the feed will outrank a "still live" reading from the listing page
- *      that hasn't been re-rendered yet.
+ *      All configured pages feed one consolidated account-wide scan.
  */
 /**
  * Three-state session pill shared by the marketplace-monitor and job-board
@@ -190,13 +189,14 @@ function PlatformWatchUrlsRow({ platform, urls, connected, pending, onLogin, onC
 
   const handleBlur = () => {
     focusProps.onBlur();
-    const lines = (value || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const lines = normalizeMarketplaceWatchUrls((value || '').split(/\r?\n/));
     onChangeUrls(platform.id, lines);
+    setValue(lines.join('\n'));
   };
 
   // Live count from the editor reflects unsaved edits — friendlier than
   // showing the persisted count while the user is mid-typing.
-  const liveCount = (value || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean).length;
+  const liveCount = normalizeMarketplaceWatchUrls((value || '').split(/\r?\n/)).length;
 
   return (
     <div className="bg-white/[0.02] border border-white/5 rounded-lg p-3 space-y-2">
@@ -227,7 +227,7 @@ function PlatformWatchUrlsRow({ platform, urls, connected, pending, onLogin, onC
           className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-white/80 text-[10px] outline-none focus:border-blue-400/50 font-mono leading-relaxed resize-none"
         />
         <div className="text-white/30 text-[9px] mt-1 leading-snug">
-          One URL per line. Each is fetched (logged-in if you're signed in) and scanned by AI for THIS listing's status. The strongest signal across all URLs wins.
+          One URL per line. Marketplace Status scans these logged-in dashboard, notification, and message pages once per platform.
         </div>
       </div>
     </div>
@@ -367,19 +367,28 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
     if (!p) return null;
     if (p.ok) return { cls: 'text-emerald-400', text: '✅ Available' };
     const prl = p.rateLimit || null;
+    if (p.classification === 'no-quota') {
+      return { cls: 'text-red-400', text: '❌ No quota allocated — dashboard 0 / 0 is not consumed usage' };
+    }
+    if (p.classification === 'daily-quota') {
+      return { cls: 'text-amber-400', text: '⚠️ Daily quota exhausted' };
+    }
     if (p.status === 429) {
       const hint = isClaude
         ? (prl?.requests?.resetInSec != null ? `resets in ${fmtSecLeft(prl.requests.resetInSec)}` : '')
         : (p.retryAfterMs != null ? `retry in ${fmtSecLeft(Math.round(p.retryAfterMs / 1000))}` : '');
-      return { cls: 'text-amber-400', text: `⚠️ Rate-limited / quota exhausted${hint ? ` — ${hint}` : ''}` };
+      return { cls: 'text-amber-400', text: `⚠️ Temporarily rate-limited${hint ? ` — ${hint}` : ''}` };
     }
-    if (p.status === 401 || p.status === 403) return { cls: 'text-red-400', text: '❌ Invalid or unauthorized API key' };
+    if (p.status === 401) return { cls: 'text-red-400', text: '❌ Invalid or unauthorized API key' };
+    // A 403 can mean a bad key OR that this specific model isn't enabled for the
+    // key/project (a Pro preview that needs allow-listing). The fallback chain
+    // keeps using the other models, so don't imply the whole key is dead.
+    if (p.status === 403) return { cls: 'text-red-400', text: '❌ Unauthorized — key invalid or this model not enabled for it' };
     return { cls: 'text-red-400', text: `❌ ${p.error || `Error ${p.status ?? ''}`}` };
   };
 
-  // Gemini probes ONE model (the high-quota fallback tail), so it names the model
-  // that answered. Claude probes EVERY model in use and renders one row each — so
-  // the per-model rate limits reflect what a real run actually consumes.
+  // Backward-compatible rendering for an older single-model Gemini probe.
+  // Current Gemini and Claude checks both render their per-model rows above.
   const geminiVerdict = (!isClaude && probe && !probe.models) ? (() => {
     const v = verdictFor(probe);
     if (v && probe.ok && probe.model) v.text = `✅ Available — ${probe.model} responded`;
@@ -465,6 +474,11 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
                         TPM: <QuotaCell used={fmtK(qs.tpm.used)} limit={fmtK(qs.tpm.limit)} />
                       </span>
                     )}
+                    {/* These figures are project-wide, not model-specific — say so
+                        rather than implying each model has its own numbers. */}
+                    {qs.scope === 'project' && (qs.rpm || qs.rpd || qs.tpm) && (
+                      <span className="text-white/25" title="Reported at the project level by Cloud Monitoring — not a per-model breakdown. See Google's dashboard for model-specific limits (e.g. Pro at 0/0).">project-wide</span>
+                    )}
                   </div>
                 )}
               </div>
@@ -477,16 +491,33 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
 
       {!isClaude && (
         <div className="text-white/40 text-[10px] leading-relaxed space-y-0.5">
+          {Array.isArray(tele?.compatibleModels) && tele.compatibleModels.length > 0 && (
+            <div>Compatible fallback catalog: <span className="text-white/55">{tele.compatibleModels.length}</span></div>
+          )}
           {tele?.lastSuccessfulModel && tele.lastSuccessfulModel !== '(none)' && (
             <div>Last success: <span className="text-white/55">{tele.lastSuccessfulModel}</span></div>
           )}
           {tele?.lastAttemptedError && tele.lastAttemptedError !== '(none)' && (
             <div className="text-amber-400/70 truncate" title={tele.lastAttemptedError}>Last error: {tele.lastAttemptedError.slice(0, 90)}</div>
           )}
-          <a href="https://ai.dev/rate-limit" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">View free-tier quota dashboard ↗</a>
+          {Array.isArray(tele?.warnings) && tele.warnings.length > 0 && (
+            <div className="pt-1 space-y-1">
+              <div className="text-amber-400/70">Model warnings:</div>
+              {tele.warnings.map((warning, i) => (
+                <div
+                  key={`${warning.model || 'model'}-${warning.type || 'warning'}-${i}`}
+                  className="pl-2 text-amber-300/55"
+                  title={warning.message}
+                >
+                  <span className="font-mono">{warning.model}</span>: {String(warning.message || '').slice(0, 160)}
+                </div>
+              ))}
+            </div>
+          )}
+          <a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">View quota dashboard ↗</a>
           {hasQuotaStats
             ? <div className="text-emerald-500/50 text-[9px]">✓ Usage data sourced from Cloud Monitoring API — 100% confirmed from Google.</div>
-            : <div className="text-white/25 text-[9px]">No service account configured — live check reports up / rate-limited only. Add a service-account.json to see real RPM/RPD/TPM.</div>
+            : <div className="text-white/25 text-[9px]">No service account configured — live checks distinguish available, temporary rate limits, daily exhaustion, and zero allocated quota. Add a service-account.json to see project-wide RPM/RPD/TPM.</div>
           }
         </div>
       )}
@@ -532,7 +563,14 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
     try {
       const res = await window.electronAPI.checkAIAvailability({ provider });
       if (res?.success) {
-        setAiStatus(prev => ({ ...prev, [provider]: { ...(prev[provider] || {}), lastProbe: res } }));
+        setAiStatus(prev => ({
+          ...prev,
+          [provider]: {
+            ...(prev[provider] || {}),
+            lastProbe: res,
+            ...(res.telemetry ? { telemetry: res.telemetry } : {}),
+          },
+        }));
       }
     } catch { /* ignore — leave prior status */ }
     finally { setCheckingProvider(null); }
@@ -659,7 +697,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                 {aiSettings.provider === 'gemini' && (
                   <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
                     <div className="text-white/40 text-[10px] leading-snug">
-                      Model is picked automatically per task — Flash for vision &amp; pricing, Flash-Lite for status checks &amp; light edits.
+                      Model is picked automatically per task — Pro preferred for quality-sensitive work, Flash-Lite preferred for status checks and light edits, with every compatible current model available as fallback.
                     </div>
                     <div>
                       <div className="flex justify-between items-end mb-1">
@@ -835,7 +873,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
               </span>
             </div>
             <div className="text-white/40 text-[11px] mb-3 leading-relaxed">
-              Log in once per marketplace so status checks can read your dashboards and notification feeds, then list any extra pages you want every check to scan for THIS listing's status.
+              Log in once per marketplace, then add the dashboard, notification, message, or activity pages Marketplace Status should scan for account-wide updates.
             </div>
             <MarketplaceMonitorSection
               watchUrlsByPlatform={watchUrlsByPlatform}

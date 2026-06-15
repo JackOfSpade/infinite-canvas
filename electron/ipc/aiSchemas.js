@@ -31,7 +31,7 @@ export const VISION_PRODUCT_ANALYSIS_SCHEMA = {
     condition:         { type: 'string', enum: CONDITION_VALUES, description: 'Item condition tier' },
     color:             { type: 'string' },
     notable_features:  { type: 'string', description: 'Accessories, damage, special features' },
-    generated_title:   { type: 'string', description: 'Optimized selling title (~80 chars)' },
+    generated_title:   { type: 'string', description: 'Identification-only selling title (~80 chars); exclude condition/wear descriptors unless part of the official brand, model, or product name' },
     generated_description: { type: 'string', description: 'Buyer-friendly description, 3-4 sentences' },
     search_query:      { type: 'string', description: 'Marketplace-search query for the SINGLE primary product — brand + model + 1-2 price-driving specs; no condition keywords, no bundle/lot/second-product terms' },
   },

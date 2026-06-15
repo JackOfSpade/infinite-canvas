@@ -606,6 +606,15 @@ function dedupeAttention(items) {
   return arr;
 }
 
+/** Derive the platform-level hub status from its per-page source outcomes. */
+export function deriveHubScanStatus(sources) {
+  const statuses = (Array.isArray(sources) ? sources : []).map((source) => source?.status);
+  if (statuses.includes('ok')) return 'ok';
+  if (statuses.includes('needs-login')) return 'needs-login';
+  if (statuses.length > 0 && statuses.every((status) => status === 'error')) return 'error';
+  return 'unknown';
+}
+
 /**
  * Default fetcher — plain Node fetch with a real-browser UA. Returns the same
  * shape as the puppeteer-based fetcher so the check pipeline doesn't care
@@ -1061,30 +1070,66 @@ const HUB_HEAD_CHARS = 8000;
  * @returns {{ status:'ok'|'needs-login'|'error'|'unknown', message:string,
  *   summary:string, attention:object[], sources:object[] }}
  */
-export async function scanSellerHubPages({ urlSpecs, platformId, signal }) {
-  if (!urlSpecs || urlSpecs.length === 0) {
+export async function scanSellerHubPages({ urlSpecs, platformId, signal, llmText = callLLMText }) {
+  if (!Array.isArray(urlSpecs) || urlSpecs.length === 0) {
     return { status: 'unknown', message: 'No watch URLs configured for this platform.', summary: '', attention: [], sources: [] };
   }
 
   // Fetch + strip every hub URL in parallel; resolve transport-level outcomes
   // (auth wall, fetch error, empty) up front so they never cost an LLM call.
   const prepared = await Promise.all(urlSpecs.map(async (s) => {
-    const r = await s.fetcher(s.url, signal);
-    if (!r.ok) {
-      return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, status: 'error', message: `Fetch failed: ${r.error}` } };
+    const spec = s && typeof s === 'object' ? s : {};
+    const { url, urlLabel } = spec;
+    let r;
+    try {
+      if (typeof spec.fetcher !== 'function') throw new Error('missing fetcher');
+      r = await spec.fetcher(url, signal);
+    } catch (err) {
+      if (signal?.aborted || err?.name === 'AbortError') throw err;
+      return {
+        spec,
+        terminal: {
+          url,
+          urlLabel,
+          status: 'error',
+          message: `Fetch failed: ${err?.message || String(err)}`,
+        },
+      };
     }
-    const authWallSignal = getAuthWallSignal({ status: r.status, finalUrl: r.finalUrl, url: s.url, html: r.html, platformId });
+    if (!r || typeof r !== 'object') {
+      return {
+        spec,
+        terminal: {
+          url,
+          urlLabel,
+          status: 'error',
+          message: 'Fetch failed: fetcher returned no response.',
+        },
+      };
+    }
+    if (!r.ok) {
+      const detail = r.error || (r.status ? `HTTP ${r.status}` : 'unknown error');
+      return { spec, terminal: { url, urlLabel, status: 'error', message: `Fetch failed: ${detail}` } };
+    }
+    const authWallSignal = getAuthWallSignal({ status: r.status, finalUrl: r.finalUrl, url, html: r.html, platformId });
     if (authWallSignal) {
-      const verdict = await disambiguateAuthFailure({ platformId, status: r.status, finalUrl: r.finalUrl, url: s.url, urlLabel: s.urlLabel });
-      return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, ...verdict } };
+      const verdict = await disambiguateAuthFailure({ platformId, status: r.status, finalUrl: r.finalUrl, url, urlLabel });
+      return { spec, terminal: { url, urlLabel, ...verdict } };
+    }
+    // Any other 4xx/5xx (auth walls were handled just above) means a broken or
+    // changed watch URL, not readable hub content. Surface it as a terminal error
+    // instead of stripping the error-page body and paying for a token-heavy
+    // hub-scan LLM call that could only return a misleading "unknown".
+    if (r.status >= 400) {
+      return { spec, terminal: { url, urlLabel, status: 'error', message: `Hub page returned HTTP ${r.status} — the watch URL is broken or changed.` } };
     }
     if (!r.html || r.html.length < MIN_CONTENT_CHARS) {
-      return { spec: s, terminal: { url: s.url, urlLabel: s.urlLabel, status: 'unknown', message: `Empty or near-empty response (${r.html?.length || 0} bytes).` } };
+      return { spec, terminal: { url, urlLabel, status: 'unknown', message: `Empty or near-empty response (${r.html?.length || 0} bytes).` } };
     }
     // Preserve message read/unread state (CSS-class-only) BEFORE stripping wipes
     // it, so the model can tell an already-read message from a new one.
     const snippet = stripHtmlForAnalysis(annotateReadState(r.html)).slice(0, HUB_HEAD_CHARS);
-    return { spec: s, status: r.status, finalUrl: r.finalUrl, snippet, readState: summarizeReadState(r.html) };
+    return { spec, status: r.status, finalUrl: r.finalUrl, snippet, readState: summarizeReadState(r.html) };
   }));
 
   const sources = [];
@@ -1156,7 +1201,7 @@ Rules:
 - If nothing notable is present, return an empty attention array.`;
 
     try {
-      const parsed = await callLLMText(prompt, {
+      const parsed = await llmText(prompt, {
         signal,
         task: 'marketplace-hub-scan',
         hints: { urlCount: llmInputs.length },
@@ -1165,9 +1210,15 @@ Rules:
       // Bind each item to the hub page it was read from (validated against the
       // pages we actually fetched) so the card can offer a jump-to-page button.
       attention = resolveAttentionSourceUrls(sanitizeAttention(parsed?.attention), llmInputs.map((p) => p.spec.url));
-      summary = cleanMessage(parsed?.summary);
+      // Scrub read-state sentinels from the summary too (sanitizeAttention already
+      // does this for headline/evidence). The summary is a free-form model line
+      // that sits right next to the annotated message text, so a non-compliant
+      // model can leak a ⟦READ⟧/⟦UNREAD⟧ token into it — strip before it reaches
+      // the card and the bug report.
+      summary = cleanMessage(stripReadStateTokens(parsed?.summary));
       for (const p of llmInputs) sources.push({ url: p.spec.url, urlLabel: p.spec.urlLabel, status: 'ok' });
     } catch (err) {
+      if (signal?.aborted || err?.name === 'AbortError') throw err;
       for (const p of llmInputs) {
         sources.push({ url: p.spec.url, urlLabel: p.spec.urlLabel, status: 'error', message: `AI scan failed: ${err?.message || String(err)}` });
       }
@@ -1177,12 +1228,7 @@ Rules:
   // Platform-level read status: 'ok' if we read any hub page; else surface the
   // strongest blocking reason (a dead session → needs-login; all errors →
   // error; otherwise unknown for anti-bot / login-gated-but-alive pages).
-  const statuses = sources.map(s => s.status);
-  let status;
-  if (statuses.includes('ok')) status = 'ok';
-  else if (statuses.includes('needs-login')) status = 'needs-login';
-  else if (statuses.length > 0 && statuses.every(s => s === 'error')) status = 'error';
-  else status = 'unknown';
+  const status = deriveHubScanStatus(sources);
 
   const message = summary || (
     status === 'ok'          ? (attention.length ? `${attention.length} item${attention.length === 1 ? '' : 's'} flagged.` : 'No action items found.')

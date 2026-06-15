@@ -5,6 +5,10 @@ import path from 'node:path';
 import { _electron as electron } from 'playwright';
 
 const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'infinite-canvas-e2e-'));
+const previewFixtureRoot = await fs.mkdtemp(path.join(
+  process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(),
+  'infinite-canvas-preview-e2e-',
+));
 const workspacePath = path.join(userDataDir, 'roundtrip.json');
 const env = { ...process.env };
 const modKey = process.platform === 'darwin' ? 'Meta' : 'Control';
@@ -47,6 +51,19 @@ async function waitForCount(locator, predicate, label, timeoutMs = 5000) {
     const n = await locator.count();
     if (predicate(n)) return n;
     if (Date.now() > deadline) assert.fail(`${label} (count=${n})`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+async function waitForWorkspaceNodeData(page, filePath, nodeType, predicate, label, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const data = await page.evaluate(async ({ path: workspaceFile, type }) => {
+      const loaded = await window.electronAPI.loadWorkspace({ filePath: workspaceFile });
+      return loaded.data.nodes.find(node => node.type === type)?.data;
+    }, { path: filePath, type: nodeType });
+    if (predicate(data)) return data;
+    if (Date.now() > deadline) assert.fail(`${label} (data=${JSON.stringify(data)})`);
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
@@ -105,18 +122,35 @@ try {
   assert.equal(ipcRoundTrip.settings.jobs.usajobsEmail, 'e2e@example.com', 'settings update should persist');
   assert.equal(ipcRoundTrip.updatedSettings.jobs.usajobsEmail, 'e2e@example.com', 'settings update should return merged data');
 
-  // ── Marketplace listing reminder + search, against a loaded canvas ────────
+  // ── Marketplace listing reminder + status module, against a loaded canvas ─
   // Exercises the load→migrate→render pipeline the blank-canvas steps can't
-  // reach: a saved sellhub (priced, per-item reminder weeks set) + a listing
+  // reach: a saved sellhub (priced, shared reminder weeks set) + a listing
   // card saved WITHOUT createdAt (schemaVersion 2) whose id carries the real
   // spawn timestamp. On load the v3 migration must recover that date, the
-  // overdue reminder must fire (pulsing border + ack strip), search must find
-  // the item on both hub and card, and the ack must clear the pulse.
-  step('load fixture: listing reminder fires, search finds item, ack clears');
-  const fixturePath = path.join(userDataDir, 'reminder-fixture.json');
+  // overdue reminder must fire (pulsing border + ack strip), Marketplace Status
+  // must detect the listing and dedupe watch URLs, search must find the item on
+  // both hub and card, and the ack must clear the pulse.
+  step('load fixture: reminder and Marketplace Status render correctly');
+  const fixtureDir = path.join(previewFixtureRoot, 'workspace');
+  const fixturePath = path.join(fixtureDir, 'reminder-fixture.json');
+  const originalPhotoPath = path.join(fixtureDir, 'original', 'product-photo.png');
+  const movedPhotoPath = path.join(fixtureDir, 'archive', 'product-photo.png');
+  const originalSvgPath = path.join(fixtureDir, 'original', 'product-photo.svg');
+  const movedSvgPath = path.join(fixtureDir, 'archive', 'product-photo.svg');
+  const parentPhotoDecoy = path.join(previewFixtureRoot, 'product-photo.png');
+  const parentSvgDecoy = path.join(previewFixtureRoot, 'product-photo.svg');
+  const validPhotoFixture = path.resolve('build/icon.png');
+  await fs.mkdir(path.dirname(movedPhotoPath), { recursive: true });
+  await fs.copyFile(validPhotoFixture, movedPhotoPath);
+  await fs.copyFile(validPhotoFixture, parentPhotoDecoy);
+  // A directory can remain at the stale image path after a reorganization. It
+  // is not a valid preview and must not prevent the descendant search.
+  await fs.mkdir(originalPhotoPath, { recursive: true });
+  await fs.writeFile(movedSvgPath, '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>');
+  await fs.writeFile(parentSvgDecoy, '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="blue"/></svg>');
   // 2025-05-01T12:00Z — ~1 year before "now", so a 1-week cadence is overdue.
   const spawnMs = Date.UTC(2025, 4, 1, 12, 0, 0);
-  await page.evaluate(async ({ filePath, spawnMs: ts }) => {
+  await page.evaluate(async ({ filePath, originalPhotoPath: photoPath, originalSvgPath: svgPath, spawnMs: ts }) => {
     const fixture = {
       schemaVersion: 2, // pre-createdAt schema — load must run the v3 migration
       nodes: [
@@ -126,9 +160,18 @@ try {
             hubState: 'priced',
             product: { generated_title: 'Acme Widget Deluxe', brand: 'Acme', model: 'WD-100', condition: 'used_good', category: 'electronics' },
             pricing: { recommended_price: 42, quick_sell_price: 35, max_profit_price: 55, justification: 'e2e fixture' },
-            imagePaths: [],
+            imagePaths: [photoPath, svgPath],
             priceDropReminderWeeks: 1,
+            priceDropMustSellDate: '',
+            priceDropTargetPercent: 10,
+            priceDropStartingTier: 'best',
+            priceDropPlanStartingPrice: 42,
+            priceDropPlanStartedAt: new Date(ts).toISOString(),
           },
+        },
+        {
+          id: 'fixture-document-image', type: 'document', position: { x: 80, y: 500 },
+          data: { filename: 'product-photo.png', filePath: photoPath },
         },
         {
           id: `mkt-fixture-sellhub-ebay-${ts}`, type: 'marketplacecard', position: { x: 560, y: 160 },
@@ -137,32 +180,255 @@ try {
             productSnapshot: { title: 'Acme Widget Deluxe', price: 42 },
           },
         },
+        {
+          id: 'fixture-marketplace-status', type: 'marketplacestatus', position: { x: 840, y: 160 },
+          data: {
+            platformStatus: {
+              ebay: {
+                status: 'unknown',
+                message: 'Could not read this platform’s hub pages.',
+                summary: '',
+                attention: [],
+                sources: [],
+                lastChecked: '2026-06-01T12:00:00.000Z',
+              },
+            },
+          },
+        },
       ],
       edges: [],
       drawings: [],
     };
     await window.electronAPI.saveWorkspace({ data: fixture, filePath });
+    await window.electronAPI.updateSettings({
+      marketplaceWatchUrls: {
+        ebay: [
+          ' https://www.ebay.com/sh/ovw ',
+          'https://www.ebay.com/sh/ovw',
+        ],
+      },
+    });
     // Point session-restore at the fixture; the reload below auto-loads it.
     const KEY = 'infiniteCanvas.settings';
     const settings = JSON.parse(localStorage.getItem(KEY) || '{}');
     settings.lastOpenedWorkspace = filePath;
     localStorage.setItem(KEY, JSON.stringify(settings));
-  }, { filePath: fixturePath, spawnMs });
+  }, { filePath: fixturePath, originalPhotoPath, originalSvgPath, spawnMs });
   await page.reload();
   await page.waitForLoadState('domcontentloaded');
   await page.locator('.react-flow__node-sellhub').waitFor();
   await page.locator('.react-flow__node-marketplacecard').waitFor();
+  const marketplaceStatus = page.locator('.react-flow__node-marketplacestatus');
+  await marketplaceStatus.waitFor();
+
+  // The original image path is broken. Loading searches only this workspace
+  // hierarchy and relinks the exact filename below it, ignoring the same-name
+  // decoy in the parent folder.
+  const relinkedPaths = await page.evaluate(async (filePath) => {
+    const loaded = await window.electronAPI.loadWorkspace({ filePath });
+    return {
+      sellHub: loaded.data.nodes.find(node => node.type === 'sellhub')?.data?.imagePaths,
+      document: loaded.data.nodes.find(node => node.id === 'fixture-document-image')?.data?.filePath,
+    };
+  }, fixturePath);
+  assert.equal(relinkedPaths.sellHub?.[0], movedPhotoPath, 'workspace load should relink moved SellHub preview within the current hierarchy');
+  assert.equal(relinkedPaths.sellHub?.[1], movedSvgPath, 'workspace load should relink every accepted SellHub image format');
+  assert.equal(relinkedPaths.document, movedPhotoPath, 'workspace load should relink moved document-image previews');
+  const relinkedPreview = page.locator('.react-flow__node-sellhub img[alt="Product photo 1"]');
+  await relinkedPreview.waitFor({ state: 'attached' });
+  const previewProbe = await relinkedPreview.evaluate(async (image) => {
+    const response = await fetch(image.src);
+    return {
+      status: response.status,
+      contentType: response.headers.get('content-type'),
+      bytes: (await response.arrayBuffer()).byteLength,
+    };
+  });
+  assert.equal(previewProbe.status, 200, `relinked preview request should succeed: ${JSON.stringify(previewProbe)}`);
+  assert.ok(previewProbe.bytes > 0 && previewProbe.contentType?.startsWith('image/'),
+    `relinked preview should return image bytes: ${JSON.stringify(previewProbe)}`);
+  const runtimeRelinkProbe = await page.evaluate(async ({ pngPath, svgPath }) => {
+    const localUrl = (filePath) => (
+      `local-file://${filePath.replace(/%/g, '%25').replace(/ /g, '%20').replace(/#/g, '%23').replace(/\?/g, '%3F')}`
+    );
+    const direct = await fetch(localUrl(pngPath));
+    const svg = await fetch(`${localUrl(svgPath)}?preview=marketplace`);
+    const svgText = await svg.text();
+    const report = await window.electronAPI.generateBugReportMarkdown({
+      description: 'e2e moved-image relink probe',
+      nodes: [],
+      edges: [],
+      drawings: [],
+      frontEndState: {},
+      eventLogs: [],
+    });
+    return {
+      direct: { status: direct.status, contentType: direct.headers.get('content-type'), bytes: (await direct.arrayBuffer()).byteLength },
+      svg: { status: svg.status, contentType: svg.headers.get('content-type'), bytes: svgText.length, movedMarker: svgText.includes('fill="red"') },
+      diagnostics: String(report?.markdown || '')
+        .split('\n')
+        .filter(line => line.includes('product-photo') || line.includes('[local-file]'))
+        .slice(-20),
+    };
+  }, { pngPath: originalPhotoPath, svgPath: originalSvgPath });
+  assert.equal(runtimeRelinkProbe.direct.status, 200,
+    `plain document-image requests should relink without a marketplace preview query: ${JSON.stringify(runtimeRelinkProbe)}`);
+  assert.equal(runtimeRelinkProbe.svg.status, 200,
+    `accepted SVG preview requests should relink at runtime: ${JSON.stringify(runtimeRelinkProbe.svg)}`);
+  assert.equal(runtimeRelinkProbe.svg.contentType, 'image/svg+xml',
+    `runtime SVG relink should preserve its image content type: ${JSON.stringify(runtimeRelinkProbe.svg)}`);
+  assert.equal(runtimeRelinkProbe.svg.movedMarker, true,
+    `runtime SVG relink should use the descendant image, not the same-name parent decoy: ${JSON.stringify(runtimeRelinkProbe.svg)}`);
+  await page.waitForFunction(() => {
+    const image = document.querySelector('.react-flow__node-sellhub img[alt="Product photo 1"]');
+    return image?.complete && image.naturalWidth > 0;
+  });
+  await page.waitForFunction(() => {
+    const svg = document.querySelector('.react-flow__node-sellhub img[alt="Product photo 2"]');
+    const documentImage = document.querySelector('.react-flow__node-document img[alt="product-photo.png"]');
+    return svg?.complete && svg.naturalWidth > 0
+      && documentImage?.complete && documentImage.naturalWidth > 0;
+  });
+  assert.equal(await page.locator('.react-flow__node-sellhub').getByText('Missing', { exact: true }).count(), 0,
+    'auto-relinked preview should render instead of the missing-image state');
 
   // Migration recovered the card's TRUE creation date from its id suffix.
   await page.locator('.react-flow__node-marketplacecard').getByText(/^Created .*2025/).waitFor();
   // The overdue reminder fired: pulsing border + the ack strip.
   await page.locator('.react-flow__node-marketplacecard .price-reminder-pulse, .react-flow__node-marketplacecard.price-reminder-pulse').waitFor();
   await expectVisible(page, 'Still listed — consider lowering the price.');
+
+  // Static glow is opened from a visible card control, accepts arbitrary valid
+  // CSS colors, rejects invalid input, and keeps the reminder pulse outermost.
+  step('customize listing-card static glow from its visible palette button');
+  const listingCard = page.locator('.react-flow__node-marketplacecard .marketplace-listing-card');
+  const glowTrigger = listingCard.getByRole('button', { name: 'Customize static glow' });
+  await glowTrigger.waitFor();
+  await glowTrigger.click();
+  await page.getByRole('heading', { name: 'Customize', exact: true }).waitFor();
+  const glowInput = page.getByText('Static Glow', { exact: true }).locator('..').locator('input[type="text"]');
+  await glowInput.fill('#00ff00');
+  await page.waitForFunction(() => {
+    const card = document.querySelector('.marketplace-listing-card');
+    return card?.classList.contains('marketplace-static-glow')
+      && getComputedStyle(card).borderColor === 'rgb(0, 255, 0)';
+  });
+  const layeredGlow = await listingCard.evaluate((card) => {
+    const style = getComputedStyle(card);
+    return {
+      animationName: style.animationName,
+      ringSpread: style.getPropertyValue('--price-reminder-ring-spread').trim(),
+      haloBlur: style.getPropertyValue('--price-reminder-halo-blur').trim(),
+    };
+  });
+  assert.equal(layeredGlow.animationName, 'price-reminder-pulse', 'static glow should not replace the reminder animation');
+  assert.equal(layeredGlow.ringSpread, '10px', 'reminder ring should expand outside the static glow');
+  assert.equal(layeredGlow.haloBlur, '34px', 'reminder halo should expand outside the static glow');
+
+  await glowInput.fill('not-a-color');
+  await glowInput.press('Tab');
+  assert.equal(await glowInput.inputValue(), '#00ff00', 'invalid glow input should restore the last applied color');
+  assert.equal(await listingCard.evaluate(card => getComputedStyle(card).borderColor), 'rgb(0, 255, 0)',
+    'invalid glow input should not alter the rendered card');
+  await glowInput.fill('inherit');
+  await glowInput.press('Tab');
+  assert.equal(await glowInput.inputValue(), '#00ff00', 'CSS-wide keywords should not invalidate the glow shadows');
+
+  await glowInput.fill('rgba(255, 0, 0, 0)');
+  await waitForCount(page.locator('.marketplace-static-glow'), n => n === 0, 'fully transparent glow should clear');
+  const pulseWithoutStatic = await listingCard.evaluate((card) => {
+    const style = getComputedStyle(card);
+    return {
+      ringSpread: style.getPropertyValue('--price-reminder-ring-spread').trim(),
+      haloBlur: style.getPropertyValue('--price-reminder-halo-blur').trim(),
+    };
+  });
+  assert.equal(pulseWithoutStatic.ringSpread, '5px', 'cleared glow should restore the normal reminder ring');
+  assert.equal(pulseWithoutStatic.haloBlur, '24px', 'cleared glow should restore the normal reminder halo');
+  await glowInput.fill('#00ff00');
+  await page.locator('.marketplace-static-glow').waitFor();
+  await page.keyboard.press('Escape');
+  await page.getByRole('heading', { name: 'Customize', exact: true }).waitFor({ state: 'hidden' });
+
   // The hub shows this item's reminder cadence.
   assert.equal(
     await page.locator('.react-flow__node-sellhub input[placeholder="off"]').inputValue(), '1',
-    'hub priced state should show the per-item reminder weeks',
+    'hub priced state should show the shared reminder weeks',
   );
+  const sellHub = page.locator('.react-flow__node-sellhub');
+  const mustSellInput = sellHub.getByLabel('Must sell by');
+  const targetPercentInput = sellHub.getByLabel('Max percent of starting price by must-sell date');
+  assert.equal(await mustSellInput.inputValue(), '', 'hub should show that the optional must-sell date is initially unset');
+  assert.equal(await targetPercentInput.inputValue(), '10', 'hub should show the persisted target percentage');
+
+  const bestStartingTier = sellHub.getByRole('button', { name: 'Use Best price as price-drop starting value' });
+  const maxStartingTier = sellHub.getByRole('button', { name: 'Use Max price as price-drop starting value' });
+  assert.equal(await bestStartingTier.getAttribute('aria-pressed'), 'true', 'Best should be the selected starting tier');
+  await maxStartingTier.click();
+  assert.equal(await maxStartingTier.getAttribute('aria-pressed'), 'true', 'price tiers should be selectable starting values');
+  await sellHub.getByText(/^Price-drop starting value: \$55\./).waitFor();
+
+  await targetPercentInput.fill('8.5');
+  await targetPercentInput.press('Tab');
+  await sellHub.getByText('Deadline maximum: $4.67 (8.5% of $55).', { exact: true }).waitFor();
+  await targetPercentInput.fill('10.01');
+  await targetPercentInput.press('Tab');
+  assert.equal(await targetPercentInput.inputValue(), '8.5', 'target percentage above 10% should restore the last valid value');
+  await mustSellInput.fill('');
+  await expectVisible(page, 'Still listed — consider lowering the price.');
+  const futureMustSellDate = new Date(Date.now() + 35 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  await mustSellInput.fill(futureMustSellDate);
+  await page.getByText(/^Lower price to \$/).waitFor();
+
+  await marketplaceStatus.getByText('1 listing across 1 platform', { exact: true }).waitFor();
+  await marketplaceStatus.getByText('1 listing · 1 watch URL', { exact: true }).waitFor();
+  await marketplaceStatus.getByText('Check All (1)', { exact: true }).waitFor();
+  await marketplaceStatus.getByText('Unknown', { exact: true }).waitFor();
+  assert.equal(await marketplaceStatus.getByText('Not checked', { exact: true }).count(), 0,
+    'a completed but inconclusive hub scan should not be labeled Not checked');
+
+  // Firing the reminder must not falsely claim the user already lowered price.
+  await page.keyboard.press(`${modKey}+s`);
+  const firedReminderData = await waitForWorkspaceNodeData(
+    page,
+    fixturePath,
+    'marketplacecard',
+    data => data?.priceDropReminderDue === true,
+    'save should persist the fired reminder state',
+  );
+  assert.equal(firedReminderData.priceDropReminderDue, true, 'fired reminder should persist its due flag');
+  assert.equal(firedReminderData.lastPriceDropAt, undefined, 'firing alone must not write lastPriceDropAt');
+  assert.equal(firedReminderData.staticGlowColor, '#00ff00', 'save should persist the listing-card static glow');
+  const savedReminderPlan = await waitForWorkspaceNodeData(
+    page,
+    fixturePath,
+    'sellhub',
+    data => data?.priceDropStartingTier === 'max'
+      && data?.priceDropTargetPercent === 8.5
+      && data?.priceDropPlanStartingPrice === 55,
+    'save should persist the must-sell reminder plan',
+  );
+  assert.equal(savedReminderPlan.priceDropMustSellDate, futureMustSellDate, 'save should persist the must-sell date');
+  assert.equal(savedReminderPlan.priceDropPlanStartingPrice, 55,
+    'editing the plan should snapshot the selected tier price');
+  assert.equal(savedReminderPlan.priceDropPlanStartedAt, undefined,
+    'editing the plan should not replace the oldest-card schedule with a separate plan-start timestamp');
+
+  // Re-selecting the active tier re-snapshots its current value without
+  // changing the shared oldest-card schedule.
+  await maxStartingTier.click();
+  await page.keyboard.press(`${modKey}+s`);
+  const reselectedReminderPlan = await waitForWorkspaceNodeData(
+    page,
+    fixturePath,
+    'sellhub',
+    data => data?.priceDropStartingTier === 'max' && data?.priceDropPlanStartingPrice === 55,
+    're-selecting the active tier should preserve its snapshotted starting value',
+  );
+  assert.equal(reselectedReminderPlan.priceDropPlanStartingPrice, 55,
+    'same-tier selection should retain the selected current tier value');
+  assert.equal(reselectedReminderPlan.priceDropPlanStartedAt, undefined,
+    'same-tier selection should leave the oldest-card schedule unchanged');
 
   // Search finds the item on BOTH the hub and its listing card.
   await page.keyboard.press(`${modKey}+f`);
@@ -174,15 +440,33 @@ try {
   // Acknowledge: "I lowered the price" clears the pulse and the strip.
   await page.getByText('I lowered the price', { exact: true }).click();
   await waitForCount(page.locator('.price-reminder-pulse'), (n) => n === 0, 'ack should clear the reminder pulse');
+  assert.equal(await page.locator('.marketplace-static-glow').count(), 1, 'ack should leave the static glow in place');
   assert.equal(
-    await page.getByText('Still listed — consider lowering the price.').count(), 0,
+    await page.getByText(/^Lower price to \$/).count(), 0,
     'ack should remove the reminder strip',
   );
+
+  // Reminder input normalization runs through the real blur-commit UI.
+  const reminderInput = page.locator('.react-flow__node-sellhub input[placeholder="off"]');
+  await reminderInput.fill('1.5 weeks');
+  await reminderInput.press('Tab');
+  assert.equal(await reminderInput.inputValue(), '', 'malformed reminder cadence should normalize to off');
+  await reminderInput.fill('.5');
+  await reminderInput.press('Tab');
+  assert.equal(await reminderInput.inputValue(), '0.5', 'decimal reminder cadence should normalize and persist');
 
   // The fire + ack wrote node data — save silently (the file path is known) so
   // the restore-blank reload below isn't blocked by the unsaved-changes guard.
   await page.keyboard.press(`${modKey}+s`);
-  await page.waitForFunction(() => document.title === 'reminder-fixture');
+  const acknowledgedReminderData = await waitForWorkspaceNodeData(
+    page,
+    fixturePath,
+    'marketplacecard',
+    data => data?.priceDropReminderDue === false && Number.isFinite(Date.parse(data?.lastPriceDropAt)),
+    'save should persist the acknowledged reminder state',
+  );
+  assert.equal(acknowledgedReminderData.priceDropReminderDue, false, 'ack should persist a cleared due flag');
+  assert.ok(Number.isFinite(Date.parse(acknowledgedReminderData.lastPriceDropAt)), 'ack should persist the actual price-drop timestamp');
 
   // Back to a blank canvas for the rest of the suite.
   await page.evaluate(() => {
@@ -420,4 +704,5 @@ try {
   }).catch(() => {});
   await new Promise((resolve) => setTimeout(resolve, 250));
   await fs.rm(userDataDir, { recursive: true, force: true });
+  await fs.rm(previewFixtureRoot, { recursive: true, force: true });
 }

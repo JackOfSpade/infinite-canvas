@@ -8,7 +8,11 @@ import { logger } from '../logger.js';
 import path from 'path';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
-import { resolveMissingPreviewPath } from './missingPreviewRelink.js';
+import {
+  rememberMissingPreviewSearchRoot,
+  resolveMissingPreviewPath,
+} from './missingPreviewRelink.js';
+import { isProductImageExtension } from '../../src/utils/fileExtensions.js';
 
 /**
  * Global registry of active file watchers.
@@ -261,29 +265,71 @@ function resolvePortablePath(canvasPath, filePath, relativePath) {
   return filePath;
 }
 
-function resolvePortableImagePath(canvasPath, filePath, relativePath) {
-  const resolved = resolvePortablePath(canvasPath, filePath, relativePath);
-  if (!resolved || fs.existsSync(resolved)) return resolved;
+function isWithinDirectory(rootDir, candidatePath) {
+  if (!rootDir || !candidatePath) return false;
+  const relative = path.relative(path.resolve(rootDir), path.resolve(candidatePath));
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
 
+function isExistingFile(filePath) {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isImagePath(filePath) {
+  return typeof filePath === 'string' && isProductImageExtension(path.extname(filePath));
+}
+
+export function resolvePortableImagePath(canvasPath, filePath, relativePath) {
   const baseDir = path.dirname(canvasPath);
-  const relativeCandidate = typeof relativePath === 'string'
+  const absoluteCandidate = typeof filePath === 'string' && filePath.length > 0
+    ? (path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(baseDir, filePath))
+    : null;
+  const relativeCandidate = typeof relativePath === 'string' && relativePath.length > 0
     ? path.resolve(baseDir, relativePath)
     : null;
-  const relink = resolveMissingPreviewPath(resolved, [
-    relativeCandidate ? path.dirname(relativeCandidate) : null,
-    baseDir,
-  ]);
+  const safeRelativeCandidate = isWithinDirectory(baseDir, relativeCandidate) ? relativeCandidate : null;
+
+  // Prefer the exact stored path, then the exact portable relative path. While
+  // each still exists, register the hierarchy the local-file protocol should
+  // search if the image is moved later in this session.
+  if (absoluteCandidate && isExistingFile(absoluteCandidate)) {
+    const searchRoot = isWithinDirectory(baseDir, absoluteCandidate)
+      ? baseDir
+      : path.dirname(absoluteCandidate);
+    rememberMissingPreviewSearchRoot(absoluteCandidate, searchRoot);
+    return absoluteCandidate;
+  }
+  if (safeRelativeCandidate && isExistingFile(safeRelativeCandidate)) {
+    rememberMissingPreviewSearchRoot(safeRelativeCandidate, baseDir);
+    return safeRelativeCandidate;
+  }
+
+  const missingPath = safeRelativeCandidate || absoluteCandidate;
+  if (!missingPath) return filePath;
+
+  // Workspace-contained images search from the workspace folder down. External
+  // images search from their own original folder down. Neither path may broaden
+  // upward to a parent folder.
+  const belongsToWorkspaceHierarchy = !!safeRelativeCandidate || isWithinDirectory(baseDir, missingPath);
+  const searchRoot = belongsToWorkspaceHierarchy ? baseDir : path.dirname(missingPath);
+  rememberMissingPreviewSearchRoot(missingPath, searchRoot);
+  const relink = resolveMissingPreviewPath(missingPath, { searchRoot });
 
   if (relink.status === 'found') {
+    rememberMissingPreviewSearchRoot(relink.path, searchRoot);
     if (!relink.cached) {
-      logger.info(`[FileSystem] Relinked missing preview image by exact filename: ${resolved} → ${relink.path} (scanned ${relink.entriesScanned} entries)`);
+      logger.info(`[FileSystem] Relinked missing preview image within current hierarchy: ${missingPath} → ${relink.path} (root ${relink.root}, scanned ${relink.entriesScanned} entries)`);
     }
     return relink.path;
   }
   if (!relink.cached && (relink.status === 'ambiguous' || relink.status === 'limit')) {
-    logger.warn(`[FileSystem] Could not relink missing preview image (${relink.status}): ${resolved} (scanned ${relink.entriesScanned} entries)`);
+    logger.warn(`[FileSystem] Could not relink missing preview image (${relink.status}) within ${relink.root}: ${missingPath} (scanned ${relink.entriesScanned} entries)`);
   }
-  return resolved;
+  return missingPath;
 }
 
 function traverseCanvasNodes(nodes, fn) {
@@ -304,9 +350,21 @@ function annotatePortableFilePaths(data, canvasPath) {
     const rel = relativePortablePath(canvasPath, d.filePath);
     if (rel) d.relativeFilePath = rel;
     else delete d.relativeFilePath;
+    if (typeof d.filePath === 'string' && path.isAbsolute(d.filePath) && isImagePath(d.filePath)) {
+      rememberMissingPreviewSearchRoot(
+        d.filePath,
+        rel ? path.dirname(canvasPath) : path.dirname(d.filePath),
+      );
+    }
 
     if (Array.isArray(d.imagePaths)) {
-      d.relativeImagePaths = d.imagePaths.map(p => relativePortablePath(canvasPath, p));
+      d.relativeImagePaths = d.imagePaths.map((p) => {
+        const rel = relativePortablePath(canvasPath, p);
+        if (typeof p === 'string' && path.isAbsolute(p)) {
+          rememberMissingPreviewSearchRoot(p, rel ? path.dirname(canvasPath) : path.dirname(p));
+        }
+        return rel;
+      });
       if (!d.relativeImagePaths.some(Boolean)) delete d.relativeImagePaths;
     } else {
       delete d.relativeImagePaths;
@@ -314,21 +372,25 @@ function annotatePortableFilePaths(data, canvasPath) {
   });
 }
 
-function resolvePortableFilePaths(data, canvasPath) {
+export function resolvePortableFilePaths(data, canvasPath) {
   traverseCanvasNodes(data?.nodes, (node) => {
     const d = node?.data;
     if (!d) return;
 
     if (d.filePath) {
-      d.filePath = resolvePortablePath(canvasPath, d.filePath, d.relativeFilePath);
+      d.filePath = isImagePath(d.filePath) || isImagePath(d.filename)
+        ? resolvePortableImagePath(canvasPath, d.filePath, d.relativeFilePath)
+        : resolvePortablePath(canvasPath, d.filePath, d.relativeFilePath);
       const rel = relativePortablePath(canvasPath, d.filePath);
       if (rel) d.relativeFilePath = rel;
+      else delete d.relativeFilePath;
     }
 
     if (Array.isArray(d.imagePaths)) {
       d.imagePaths = d.imagePaths.map((p, i) => resolvePortableImagePath(canvasPath, p, d.relativeImagePaths?.[i]));
       const rels = d.imagePaths.map(p => relativePortablePath(canvasPath, p));
       if (rels.some(Boolean)) d.relativeImagePaths = rels;
+      else delete d.relativeImagePaths;
     }
   });
 }

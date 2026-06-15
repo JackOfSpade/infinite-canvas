@@ -51,7 +51,10 @@ export const TIMINGS = {
  * @param {number} nodeCount
  */
 export function autosaveDebounceMs(nodeCount = 0) {
-  return clamp(Math.round(2000 + (nodeCount || 0) * 6), 2000, 5000);
+  // Coerce defensively: a non-numeric input would make the result NaN, and a NaN
+  // debounce fed to setTimeout fires immediately → save storm.
+  const n = Number(nodeCount) || 0;
+  return clamp(Math.round(2000 + n * 6), 2000, 5000);
 }
 
 /**
@@ -61,7 +64,8 @@ export function autosaveDebounceMs(nodeCount = 0) {
  * @param {number} charCount
  */
 export function docSaveDebounceMs(charCount = 0) {
-  return clamp(Math.round(800 + (charCount || 0) / 50), 800, 2500);
+  const c = Number(charCount) || 0;   // see autosaveDebounceMs — avoid NaN → setTimeout(NaN)
+  return clamp(Math.round(800 + c / 50), 800, 2500);
 }
 
 /**

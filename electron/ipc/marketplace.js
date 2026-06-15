@@ -11,24 +11,18 @@ import { handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
 import { fetchHtmlAuthed, getSellMonitorConfig } from './stealthBrowser.js';
 import { getMarketplaceWatchUrls } from './settings.js';
-import {
-  classifyMultipleUrls,
-  aggregateStrongest,
-  extractListingIdentifier,
-  plainFetcher,
-  scanSellerHubPages,
-} from './listingStatusCheck.js';
+import { scanSellerHubPages } from './listingStatusCheck.js';
 import { openCaptchaResolveWindow, getLastCaptchaHandoffAt } from './browser/authWindows.js';
 import { withStatusCheckLock, getStatusCheckQueueDepth } from './statusCheckLock.js';
 import { withMarketplaceBrowserLock, getMarketplaceBrowserQueueDepth } from './marketplaceBrowserLock.js';
 import { createAggregatingProgress } from './compProgressAggregator.js';
-import { getStatusCacheSync, verifySellMonitorLogin, writeStatusCache } from './accounts.js';
+import { getStatusCacheSync, isConfirmedDisconnectedVerdict, verifySellMonitorLogin, writeStatusCache } from './accounts.js';
 import { compsForPricing } from './resultCaps.js';
 import { isCompSourceEnabledInScope } from '../../src/utils/compSourceScope.js';
 import { COMP_SOURCE_LOGIN_PLATFORM, getRequiredCompLoginPlatformIds } from '../../src/utils/marketplaceLoginPreflight.js';
 import { retryWarningRequiringAction } from '../../src/utils/compsMerge.js';
 import { deriveBundlePricingResult } from '../../src/utils/bundlePricing.js';
-import { CONDITION_VALUES, formatConditionGuideForPrompt, formatConditionForPricingPrompt } from '../../src/utils/productConditions.js';
+import { CONDITION_VALUES, formatConditionGuideForPrompt, formatConditionForPricingPrompt, stripConditionFromGeneratedTitle } from '../../src/utils/productConditions.js';
 import { logger } from '../logger.js';
 import { VISION_PRODUCT_ANALYSIS_SCHEMA, PRICE_SYNTHESIS_SCHEMA, BUNDLE_PRICE_SCHEMA, buildPlatformFitSchema } from './aiSchemas.js';
 import {
@@ -58,7 +52,7 @@ const marketplaceTelemetry = {
   // main-process singletons shared by every open window/canvas, so without this
   // a marketplace run from one canvas leaks into another canvas's report.
   nodeId:    null,
-  analyze:   null, // { ts, photos, title, model }
+  analyze:   null, // { ts, photos, title, rawTitle, titleCleaned, condition, model }
   scrape:    null, // { ts, sold, active, sources, warnings, blocked, browserContention }
   resolves:  {},   // { [sourceId]: { ts, extracted, category } } — keyed so a
                    // multi-source recovery (e.g. Mercari then eBay) keeps every
@@ -69,6 +63,12 @@ const marketplaceTelemetry = {
   bundle:    null, // { ts, items, sum, quickPrice, bundlePrice, maxPrice, synergy, factors, model } — multi-item combine
   fit:       null, // { ts, platforms, good, unfit }
 };
+
+// Results can cross in transit: the next queued run may emit progress before
+// the previous invoke response reaches the renderer. Wall-clock timestamps can
+// tie within one millisecond, so stamp a per-process monotonic sequence too.
+const marketplaceStatusProcessEpoch = `${process.pid}:${Date.now()}`;
+let marketplaceStatusResultSequence = 0;
 
 export function normalizePricingNotes(notes) {
   return String(notes || '').replace(/\s+/g, ' ').trim();
@@ -634,169 +634,6 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache, category
 }
 
 /**
- * Multi-source marketplace listing status check.
- *
- * Requires the listing URL, then checks it alongside per-card watchUrls and
- * per-platform watchUrls from Settings. Each fetched page is passed to the LLM
- * as "what is the state of listing X?" — not "what is on this page?" That identifier anchoring
- * is what lets the same engine handle:
- *   - the listing's own page (SOLD banner above the buy button)
- *   - a notifications/activity center ("Your item just sold for $180")
- *   - the seller's account dashboard with N listings (find this row's status)
- *
- * The listing URL is the required identity anchor. Watch URLs are supplemental:
- * they can confirm newer dashboard/feed signals for that same listing, but
- * they are not used to identify a blank card. Public listing URLs go through
- * plain fetch. Per-card watchUrls and
- * per-platform watchUrls (typically dashboards / notification feeds) route
- * through the stealth browser so the persistent userDataDir's cookies — set
- * by a prior `openLoginWindow` — keep us logged in.
- *
- * Returns { status, message, sources, attention } where status is the strongest
- * signal across all URLs (sold > expired > needs-login > live > unknown), message
- * is a human sentence quoting that evidence, sources is the per-URL trace, and
- * attention is the list of URLs the renderer should surface for follow-up.
- */
-export async function checkListingStatusMultiSource({
-  listingUrl,
-  platformId,
-  watchUrls = [],
-  productTitle,
-  listingId,
-  signal,
-  sessionVerifier = verifySellMonitorLogin,
-  writeSessionStatus = writeStatusCache,
-}) {
-  const normalizedListingUrl = String(listingUrl || '').trim();
-  if (!normalizedListingUrl) {
-    return { status: 'error', message: 'No listing URL to check (paste the marketplace listing URL first)', sources: [] };
-  }
-
-  const monitorConfig = getSellMonitorConfig(platformId);
-  const needsLoginResult = (reasonOverride = null) => {
-    const platformName = monitorConfig?.name || platformId;
-    const reason = reasonOverride ? ` ${reasonOverride}` : '';
-    const message = `${platformName} session needs login.${reason} Open Settings > Accounts and log in to ${platformName}, then run Check again.`;
-    return {
-      status: 'needs-login',
-      message,
-      attention: [],
-      sources: [{
-        url: monitorConfig?.verifyUrl || monitorConfig?.sellerUrl || normalizedListingUrl,
-        urlLabel: 'session',
-        status: 'needs-login',
-        message,
-      }],
-    };
-  };
-
-  // Status checks read seller dashboards / notification feeds, not just public
-  // listing pages. A stale cookie should therefore become an explicit card state
-  // before the page classifier runs; otherwise a login wall can look like a vague
-  // "unknown" page and leave old Live/attention state visible.
-  const cachedSession = monitorConfig ? getStatusCacheSync()[platformId] : null;
-  if (cachedSession && cachedSession.connected === false) {
-    return needsLoginResult(cachedSession.lastReason);
-  }
-  if (monitorConfig && sessionVerifier) {
-    const verdict = await sessionVerifier(platformId);
-    // Only a CONCLUSIVE not-connected (auth wall, login redirect, logged-out body)
-    // becomes a needs-login card + poisons the session cache. An inconclusive
-    // verdict means the verify fetch timed out / errored before reading the page
-    // (e.g. an anti-bot reload loop) — that is not a logout, so fall through to
-    // the actual listing/watch checks below (which carry their own auth handling)
-    // rather than masking the listing's real state behind a false "needs login".
-    if (!verdict?.connected && !verdict?.inconclusive) {
-      try {
-        await writeSessionStatus?.(platformId, false, { lastReason: verdict?.reason, lastTrace: verdict?.trace });
-      } catch { /* cache write failures are non-fatal for the card verdict */ }
-      return needsLoginResult(verdict?.reason);
-    }
-  }
-
-  // Identity anchor — model uses this to find the right row/banner across
-  // any page format. Falls back to product title when the URL has no
-  // recognizable item id.
-  const identifier = listingId || extractListingIdentifier(normalizedListingUrl, productTitle);
-
-  // Per-platform watch URLs are configured once and apply to every card on
-  // that platform. Plus optional per-card watchUrls (rare; for power users).
-  const platformWatchUrls = getMarketplaceWatchUrls(platformId);
-  const cardWatchUrls     = (watchUrls || []).filter(Boolean);
-
-  // De-duplicate while preserving order: listingUrl first (cheapest, public),
-  // then per-card overrides, then platform-wide watch URLs.
-  const seen = new Set();
-  const all = [];
-  const pushUnique = (u, source) => {
-    const key = String(u || '').trim();
-    if (!key || seen.has(key)) return;
-    seen.add(key);
-    all.push({ url: key, source });
-  };
-  pushUnique(normalizedListingUrl, 'listing');
-  cardWatchUrls.forEach(u => pushUnique(u, 'card-watch'));
-  platformWatchUrls.forEach(u => pushUnique(u, 'platform-watch'));
-
-  // Watch URLs are almost always auth-walled (dashboards, notification
-  // feeds), so route them through the cookie-bearing stealth browser. The
-  // canonical listing URL tries the fast unauthenticated fetch FIRST, but
-  // escalates to the authed browser when that hits an auth wall — some
-  // platforms (Facebook Marketplace) gate even the item page behind login, so
-  // a plain fetch always redirects to /login there regardless of whether the
-  // user is logged in. Escalating reads the real page instead of reporting a
-  // false "needs-login" for a logged-in user. classifyMultipleUrls fetches all
-  // N URLs in parallel, then makes ONE consolidated LLM call so the instruction
-  // block + listing identity preamble is paid once instead of N times.
-  // fetchHtmlAuthed takes an options object ({ signal }); the classify engine
-  // invokes fetchers positionally as (url, signal). Adapt the shape here so the
-  // AbortSignal actually reaches the page — passing it positionally silently
-  // dropped it, leaving a cancelled check's puppeteer page navigating for ~25s.
-  const authedFetcher = (u, sig) => fetchHtmlAuthed(u, { signal: sig });
-  const isFacebookItemUrl = (u) => {
-    try {
-      const parsed = new URL(u);
-      return platformId === 'facebook' &&
-        /(^|\.)facebook\.com$/i.test(parsed.hostname) &&
-        /^\/marketplace\/item\/[^/]+\/?$/i.test(parsed.pathname);
-    } catch {
-      return false;
-    }
-  };
-  const escalatingListingFetcher = async (u, sig) => {
-    const r = await plainFetcher(u, sig);
-    if (!r.ok) return r; // network error — let the classifier surface it
-    const fin = String(r.finalUrl || u).toLowerCase();
-    const walled = r.status === 401 || r.status === 403 ||
-      /\/(login|signin|sign-in|account\/login)/i.test(fin);
-    // Facebook can return HTTP 400 to unauthenticated/automation fetches for a
-    // seller-owned item that is still active but under review. Retry with the
-    // logged-in browser before the classifier sees that 400 as transport data.
-    const facebookSellerOnlyItem = r.status === 400 && isFacebookItemUrl(u);
-    return (walled || facebookSellerOnlyItem) ? authedFetcher(u, sig) : r;
-  };
-  const urlSpecs = all.map(({ url, source }) => ({
-    url,
-    urlLabel: source === 'listing' ? 'listing' : source === 'card-watch' ? 'card watch' : 'platform watch',
-    fetcher:  source === 'listing' ? escalatingListingFetcher : authedFetcher,
-  }));
-
-  const perUrl = await classifyMultipleUrls({
-    urlSpecs,
-    listingIdentifier: identifier,
-    productTitle,
-    platformId,
-    signal,
-  });
-
-  // Surface the identity anchor alongside the aggregate so the card (and the
-  // bug report's status-check trace) can show WHICH needle was searched — a
-  // /share/<hash> listing URL yields an anchor that never appears on the seller
-  // dashboard, which is why a share-linked card reads "unknown".
-  return { ...aggregateStrongest(perUrl), listingIdentifier: identifier };
-}
-
-/**
  * Register all Marketplace IPC handlers.
  */
 export function registerMarketplaceHandlers() {
@@ -824,7 +661,7 @@ Return a JSON object:
   "condition": "${CONDITION_VALUES.join(' | ')} — pick the single best-fitting tier using the CONDITION GUIDE below",
   "color": "Primary color(s)",
   "notable_features": "Any visible accessories, damage, special features",
-  "generated_title": "An optimized selling title (80 chars max, include brand + model + key features + condition indicator)",
+  "generated_title": "An identification-only selling title (80 chars max). Include brand + model + price-driving identity features. EXCLUDE condition, wear, damage, and words such as New, Used, Like New, Excellent Condition, Good Condition, For Parts, or Refurbished ONLY when they describe the item's condition — retain them when they are part of the official brand, model, or product name (for example, New Balance or New Nintendo 3DS). Condition details belong only in condition / notable_features / generated_description.",
   "generated_description": "A detailed, buyer-friendly selling description (include specs if identifiable, condition details, what's included). 3-4 sentences.",
   "search_query": "A short, neutral query string for marketplace search engines. Describe ONLY the single primary product identified above (the SAME one as brand / model / generated_title) — never combine two products or add words like 'bundle', 'lot', or 'set'. Include ONLY brand + model + the 1-2 most price-driving specs (storage size, screen size, year, capacity, etc. — whatever's relevant for the category). EXCLUDE condition keywords ('For Parts', 'Used', 'Refurbished'), color (unless brand-defining), and marketing fluff. Goal: broad enough to surface variants for price comparison. Examples: 'Apple iPhone XS 512GB', 'Sony WH-1000XM4', 'Nintendo Switch OLED'."
 }
@@ -836,15 +673,37 @@ ${formatConditionGuideForPrompt()}
 
 If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGLE most prominent / highest-value product and describe ONLY that one across every field (brand, model, generated_title, search_query). Do NOT fold the other products into the title or query — the seller lists them separately as additional items afterward.`, { signal, task: 'vision-product-analysis', responseSchema: VISION_PRODUCT_ANALYSIS_SCHEMA, meta: aiMeta });
 
-    logger.info(`[Marketplace][${nodeId}] Product identified:`, result?.generated_title || 'Unknown', `(model: ${aiMeta.model || '?'})`);
+    const rawTitle = String(result?.generated_title || '');
+    const normalizedRawTitle = rawTitle.replace(/\s+/g, ' ').trim();
+    const cleanTitle = stripConditionFromGeneratedTitle(rawTitle, result?.condition);
+    const identityParts = [result?.brand, result?.model]
+      .map((value) => String(value || '').trim())
+      .filter((value) => value && !/^unknown$/i.test(value));
+    const identityFallback = identityParts.length === 2
+      && (identityParts[1].toLowerCase() === identityParts[0].toLowerCase()
+        || identityParts[1].toLowerCase().startsWith(`${identityParts[0].toLowerCase()} `))
+      ? identityParts[1]
+      : [...new Set(identityParts)].join(' ');
+    const finalTitle = cleanTitle || identityFallback || 'Unidentified item';
+    const product = result
+      ? { ...result, generated_title: finalTitle }
+      : result;
+    const titleCleaned = !!normalizedRawTitle && normalizedRawTitle !== finalTitle;
+    if (titleCleaned) {
+      logger.info(`[Marketplace][${nodeId}] Cleaned generated title: "${rawTitle}" → "${finalTitle}"`);
+    }
+    logger.info(`[Marketplace][${nodeId}] Product identified:`, product?.generated_title || 'Unknown', `(model: ${aiMeta.model || '?'})`);
     marketplaceTelemetry.analyze = {
       ts: Date.now(),
       photos: Array.isArray(imagePaths) ? imagePaths.length : 0,
-      title: result?.generated_title || '(unknown)',
+      title: product?.generated_title || '(unknown)',
+      rawTitle: titleCleaned ? rawTitle : null,
+      titleCleaned,
+      condition: product?.condition || null,
       model: aiMeta.model || null,
       fallback: aiMeta.fallback || null,
     };
-    return { product: result };
+    return { product };
   });
 
   // ── Scrape Comps (no AI synthesis) ────────────────────────────────────────
@@ -1797,46 +1656,14 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
     return { fit: verdict || {} };
   });
 
-  // ── Check listing status (per-marketplace card) ───────────────────────────
-  // Renderer passes the listing URL + optional per-card watch URLs + the
-  // product title (for identifier fallback + AI context). Per-platform watch
-  // URLs are merged in from settings server-side so the renderer never has
-  // to re-fetch them.
-  handleSafe('check-listing-status', async (_event, args = {}, signal) => {
-    const { url, platformId, nodeId, watchUrls, productTitle, listingId } = args;
-    // Serialize across every hub/card: two concurrent checks would double the
-    // single-IP burst and trip false needs-login/captcha (see statusCheckLock).
-    // A "Check All" loop is already sequential; this also covers two Check-Alls
-    // or a per-card Check firing during one. The "Checking…" log lives INSIDE
-    // the lock so the bug-report timeline reflects real start order, not enqueue.
-    const ahead = getStatusCheckQueueDepth();
-    if (ahead > 0) {
-      logger.info(`[Marketplace][${nodeId}] Status check queued behind ${ahead} in-flight check(s)`);
-    }
-    return withStatusCheckLock(async () => {
-      const urlCount = 1 + (Array.isArray(watchUrls) ? watchUrls.length : 0) + getMarketplaceWatchUrls(platformId).length;
-      logger.info(`[Marketplace][${nodeId}] Checking ${platformId} status across ${urlCount} URL(s); listing=${url}`);
-      const result = await checkListingStatusMultiSource({
-        listingUrl: url,
-        platformId,
-        watchUrls,
-        productTitle,
-        listingId,
-        signal,
-      });
-      logger.info(`[Marketplace][${nodeId}] Result: ${result.status} — ${result.message}`);
-      return result;
-    }, signal);
-  });
-
   // ── Marketplace Status Module: aggregate hub scan ─────────────────────────
   // Instead of checking each listing individually (slow + token-heavy at 20+
   // listings), scan each platform's aggregate notification hub — the watch URLs
   // the user configured in Settings — ONCE per platform, and surface anything
   // across all their listings that needs action. The renderer only sends
   // platforms that have BOTH a listing on this canvas AND a configured watch URL.
-  handleSafe('check-marketplace-status', async (_event, { platformIds, nodeId } = {}, signal) => {
-    const ids = Array.isArray(platformIds) ? platformIds.filter(Boolean) : [];
+  handleSafe('check-marketplace-status', async (event, { platformIds, nodeId, runId } = {}, signal) => {
+    const ids = [...new Set(Array.isArray(platformIds) ? platformIds.filter(Boolean) : [])];
     if (ids.length === 0) return { results: {} };
 
     // Share the listing-status FIFO mutex: hub scans read the same auth-walled
@@ -1848,14 +1675,41 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
     }
     return withStatusCheckLock(async () => {
       const results = {};
+      const recordResult = (platformId, result) => {
+        const completedResult = {
+          ...result,
+          lastChecked: new Date().toISOString(),
+          _statusUpdate: {
+            epoch: marketplaceStatusProcessEpoch,
+            sequence: ++marketplaceStatusResultSequence,
+          },
+        };
+        results[platformId] = completedResult;
+        if (!event.sender.isDestroyed()) {
+          try {
+            event.sender.send('marketplace-status-progress', {
+              nodeId,
+              runId: runId || null,
+              platformId,
+              result: completedResult,
+              completed: Object.keys(results).length,
+              total: ids.length,
+            });
+          } catch (error) {
+            // Progress delivery is best-effort; the invoke response still
+            // returns every result and must not lose later platforms because a
+            // renderer navigated away or closed between isDestroyed() and send().
+            logger.warn(`[MarketplaceStatus][${nodeId}] Could not emit ${platformId} progress:`, error?.message || String(error));
+          }
+        }
+      };
       for (const platformId of ids) {
         if (signal?.aborted) break;
-        const lastChecked = new Date().toISOString();
 
         // Session gate: a dead cookie should read as an explicit needs-login,
-        // not a vague "unknown" from an auth-walled hub page. Mirrors the gate in
-        // checkListingStatusMultiSource (kept local so that tested path's
-        // injected verifier/cache stays untouched).
+        // not a vague "unknown" from an auth-walled hub page. Mirrors the per-listing
+        // session gate the Marketplace Status Module replaced — kept inline so
+        // this handler stays self-contained.
         const monitorConfig = getSellMonitorConfig(platformId);
         const cached = monitorConfig ? getStatusCacheSync()[platformId] : null;
         let gateReason; // undefined = pass; otherwise the needs-login reason
@@ -1863,7 +1717,10 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
           gateReason = cached.lastReason || '';
         } else if (monitorConfig) {
           const verdict = await verifySellMonitorLogin(platformId).catch(() => null);
-          if (!verdict?.connected) {
+          // A transient/inconclusive verifier failure is not proof of logout.
+          // Continue into the actual hub reads, which report their own transport
+          // outcome, instead of poisoning the cache with a false needs-login.
+          if (isConfirmedDisconnectedVerdict(verdict)) {
             try { await writeStatusCache(platformId, false, { lastReason: verdict?.reason, lastTrace: verdict?.trace }); }
             catch { /* cache write failures are non-fatal for the verdict */ }
             gateReason = verdict?.reason || '';
@@ -1871,21 +1728,21 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
         }
         if (gateReason !== undefined) {
           const name = monitorConfig?.name || platformId;
-          results[platformId] = {
+          recordResult(platformId, {
             status: 'needs-login',
-            message: `${name} session needs login.${gateReason ? ` ${gateReason}` : ''} Open Settings → Marketplace Login, then run Check Status again.`,
-            summary: '', attention: [], sources: [], lastChecked,
-          };
+            message: `${name} session needs login.${gateReason ? ` ${gateReason}` : ''} Open Settings → Marketplace Login, then run Check All again.`,
+            summary: '', attention: [], sources: [],
+          });
           continue;
         }
 
         const watchUrls = getMarketplaceWatchUrls(platformId);
         if (watchUrls.length === 0) {
-          results[platformId] = {
+          recordResult(platformId, {
             status: 'unknown',
             message: 'No watch URL configured — add one in Settings → Marketplace Monitors.',
-            summary: '', attention: [], sources: [], lastChecked,
-          };
+            summary: '', attention: [], sources: [],
+          });
           continue;
         }
 
@@ -1895,9 +1752,22 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
           fetcher: (u, sig) => fetchHtmlAuthed(u, { signal: sig }),
         }));
         logger.info(`[MarketplaceStatus][${nodeId}] Scanning ${platformId} across ${watchUrls.length} hub URL(s)`);
-        const scan = await scanSellerHubPages({ urlSpecs, platformId, signal });
-        logger.info(`[MarketplaceStatus][${nodeId}] ${platformId}: ${scan.status} — ${scan.attention.length} attention item(s)`);
-        results[platformId] = { ...scan, lastChecked };
+        try {
+          const scan = await scanSellerHubPages({ urlSpecs, platformId, signal });
+          logger.info(`[MarketplaceStatus][${nodeId}] ${platformId}: ${scan.status} — ${scan.attention.length} attention item(s)`);
+          recordResult(platformId, scan);
+        } catch (error) {
+          if (signal?.aborted) break;
+          const message = error?.message || String(error);
+          logger.error(`[MarketplaceStatus][${nodeId}] ${platformId} failed:`, message);
+          recordResult(platformId, {
+            status: 'error',
+            message: `Could not complete the ${platformId} hub scan: ${message}`,
+            summary: '',
+            attention: [],
+            sources: [],
+          });
+        }
       }
       return { results };
     }, signal);

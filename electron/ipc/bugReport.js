@@ -19,11 +19,12 @@ import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { getKnownTaskIds } from './llm.js';
 import { shortId, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
+import { buildFencedTextBlock, buildMainProcessLogsMarkdown, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
-import { buildMarketplaceStatusRollup } from './bugReport/marketplaceStatusRollup.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
+import { getMissingPreviewRelinkDiagnostics } from './missingPreviewRelink.js';
 import { getAuthWindowDiagnostics } from './browser/authWindows.js';
 import {
   getJobSearchTransientKeysForSave,
@@ -187,7 +188,7 @@ function buildAIConfigSnapshot() {
 
   return {
     provider,
-    modelSelection: provider === 'gemini' ? 'dynamic fallback (best to worst across all Gemini models)' : 'auto (per-task; see llm.js TASK_MODELS)',
+    modelSelection: provider === 'gemini' ? 'auto per-task preference + all compatible Gemini fallbacks' : 'auto (per-task; see llm.js TASK_MODELS)',
     hasGeminiKey: !!geminiKey,
     hasAnthropicKey: !!claudeKey,
     activeKeyPrefix: keyPrefix,
@@ -199,6 +200,8 @@ function buildAIConfigSnapshot() {
     geminiLastAttemptedModel: telemetry.lastAttemptedModel,
     geminiLastSuccessfulModel: telemetry.lastSuccessfulModel,
     geminiLastAttemptedError: telemetry.lastAttemptedError,
+    geminiCompatibleModels: telemetry.compatibleModels,
+    geminiWarnings: telemetry.warnings,
   };
 }
 
@@ -387,71 +390,38 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
 // report content is identical regardless of how the user chooses to export it.
 const CLIPBOARD_BUG_REPORT_MAX_CHARS = 50_000;
 
-function buildFencedTextBlock(lines, emptyFallback) {
-  if (!Array.isArray(lines) || lines.length === 0) return `${emptyFallback}\n`;
-  return `\`\`\`text\n${lines.join('\n')}\n\`\`\`\n`;
-}
+function buildMissingPreviewRelinkMarkdown() {
+  const snapshot = getMissingPreviewRelinkDiagnostics();
+  const attempts = Array.isArray(snapshot?.attempts) ? snapshot.attempts : [];
+  if (attempts.length === 0) return '';
 
-function buildMainProcessLogsMarkdown(lines) {
-  if (!Array.isArray(lines) || lines.length === 0) return '';
+  const cell = (value) => String(value ?? '—').replace(/\|/g, '\\|').replace(/`/g, '\\`');
+  const rows = attempts.slice(-15).reverse().map((attempt) => {
+    const ageSeconds = Number.isFinite(attempt.ts)
+      ? `${Math.max(0, Math.round((Date.now() - attempt.ts) / 1000))}s ago`
+      : '—';
+    return (
+      `| ${ageSeconds} | ${cell(attempt.status)} | ${cell(attempt.rootSource)} ` +
+      `| \`${cell(attempt.searchRoot)}\` | \`${cell(attempt.missingPath)}\` ` +
+      `| ${attempt.resolvedPath ? `\`${cell(attempt.resolvedPath)}\`` : '—'} ` +
+      `| ${attempt.matches ?? 0} | ${attempt.entriesScanned ?? 0} |`
+    );
+  }).join('\n');
+
   return `
-## Recent Main-Process Logs
-> Last ~60 lines from the main process's logger (ring buffer). Use this to
-> see what \`[Accounts]\` / \`[StealthBrowser]\` / \`[Marketplace]\` actually
-> did and any errors that were swallowed by an IPC handler before the
-> renderer got a useful response.
+## Missing Preview Relink Diagnostics
+> Every broken image preview search is bounded to one current hierarchy and
+> walks downward only. \`root source\` shows whether that hierarchy was supplied
+> by workspace loading, remembered while the image existed, or conservatively
+> inferred from the original image parent. No search climbs above \`search root\`.
 
-\`\`\`
-${lines.join('\n')}
-\`\`\`
+- Remembered image-path hierarchies: ${snapshot.rememberedPathCount ?? 0}
+- Attempts retained: ${attempts.length} (showing newest ${Math.min(15, attempts.length)})
+
+| When | Result | Root source | Search root | Missing path | Resolved path | Matches | Entries scanned |
+|---|---|---|---|---|---|---|---|
+${rows}
 `;
-}
-
-function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProcessLogLines, maxChars) {
-  let eventWorking = Array.isArray(eventLines) ? [...eventLines] : [];
-  let logWorking = Array.isArray(mainProcessLogLines) ? [...mainProcessLogLines] : [];
-  let trimmedEventCount = 0;
-  let trimmedLogCount = 0;
-
-  const compose = (notice = '') => (
-    `${notice}${baseMarkdown}${buildMainProcessLogsMarkdown(logWorking)}## Event History\n${buildFencedTextBlock(eventWorking, '*(No events recorded)*')}`
-  );
-
-  let markdown = compose();
-  while (markdown.length > maxChars && eventWorking.length > 0) {
-    eventWorking.shift();
-    trimmedEventCount++;
-    markdown = compose();
-  }
-  while (markdown.length > maxChars && logWorking.length > 0) {
-    logWorking.shift();
-    trimmedLogCount++;
-    markdown = compose();
-  }
-
-  let hardTruncated = false;
-  let notice = '';
-  if (trimmedEventCount > 0 || trimmedLogCount > 0) {
-    const parts = [];
-    if (trimmedEventCount > 0) parts.push(`${trimmedEventCount} oldest event history line(s)`);
-    if (trimmedLogCount > 0) parts.push(`${trimmedLogCount} oldest main-process log line(s)`);
-    notice = `> Clipboard export truncated to ${maxChars} chars by dropping ${parts.join(' and ')} first.\n\n`;
-  }
-
-  markdown = compose(notice);
-  if (markdown.length > maxChars) {
-    hardTruncated = true;
-    const suffix = `\n\n> Clipboard export hit the hard ${maxChars}-character limit; remaining tail content was truncated.\n`;
-    markdown = markdown.slice(0, Math.max(0, maxChars - suffix.length)) + suffix;
-  }
-
-  return {
-    markdown,
-    truncated: trimmedEventCount > 0 || trimmedLogCount > 0 || hardTruncated,
-    trimmedEventCount,
-    trimmedLogCount,
-    hardTruncated,
-  };
 }
 
 export function generateMarkdown(payload, reportWindowId = null, options = {}) {
@@ -510,7 +480,12 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   });
 
   let nodeDiagMarkdown = '';
-  if (nodeInternals && nodeInternals.length > 0) {
+  if (sectionOmitted('nodeInternals')) {
+    // XNODES / LEAN / MARKET / JOBS / AUTH drop the heavy per-node payload. Render
+    // an explicit marker (like Nodes/Edges/Drawings above) so the absence reads as
+    // "omitted by filter code", not "no nodes".
+    nodeDiagMarkdown = '\n## Node Diagnostics\n*(omitted by filter code — per-node positions/sizes/component state)*\n';
+  } else if (nodeInternals && nodeInternals.length > 0) {
     // Cap the routine nodes a hub spawns into its results cascade (jobcard +
     // jobgroup) so a large board doesn't blow the clipboard char budget — at
     // ~150-200 chars/row, a 739-card cascade is >150KB and forces the far more
@@ -674,18 +649,18 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
         const high = d.attention.filter(a => a?.urgency === 'high').length;
         previewParts.push(`attention: ${d.attention.length} (${high} high)`);
       }
-      // Per-URL status-check trace (persisted by statusCheckWrites). The single
-      // most useful evidence for "did Check All work?": each URL's verdict and
-      // whether the identity anchor matched there. A deleted listing reads
-      // `listing=ended` (its page 4xx'd); a share-linked card reads
-      // `platform watch=unknown·no-match` (anchor absent from the dashboard).
+      // Per-URL status-check trace — LEGACY data from the per-card check the
+      // Marketplace Status Module replaced (no longer written, but old saved
+      // canvases can still carry it). Each URL's verdict + whether the identity
+      // anchor matched there: a deleted listing reads `listing=ended` (its page
+      // 4xx'd); a share-linked card reads `platform watch=unknown·no-match`.
       if (d.lastCheckTrace && Array.isArray(d.lastCheckTrace.sources) && d.lastCheckTrace.sources.length > 0) {
         const t = d.lastCheckTrace;
         const formatted = t.sources.map(s => {
           const m = s.matched === true ? '·matched' : s.matched === false ? '·no-match' : '';
-          // `reason` is captured for error verdicts only (see compactCheckTrace) —
-          // it's the WHY behind a bare `listing=error` (fetch timeout vs anti-bot
-          // drop vs AI failure), so a systematic source failure is diagnosable.
+          // `reason` was captured for error verdicts only — the WHY behind a bare
+          // `listing=error` (fetch timeout vs anti-bot drop vs AI failure), so a
+          // systematic source failure stays diagnosable on those legacy traces.
           const why = s.reason ? ` (${s.reason})` : '';
           return `${s.label || '?'}=${s.status || '?'}${m}${why}`;
         });
@@ -1004,6 +979,10 @@ ${statusQueueLine}
   try { persistedWorkspaceMarkdown = buildPersistedWorkspaceSnapshot(frontEndState); }
   catch { /* never break the report on diagnostic failure */ }
 
+  let missingPreviewRelinkMarkdown = '';
+  try { missingPreviewRelinkMarkdown = buildMissingPreviewRelinkMarkdown(); }
+  catch { /* never break the report on diagnostic failure */ }
+
   // ── Marketplace session snapshot ──────────────────────────────────────────
   // In-memory session cache (populated by verifyAllPlatforms on startup and
   // by writeStatusCache after each login flow). Truth source for the "Log in"
@@ -1034,7 +1013,7 @@ ${statusQueueLine}
 |---|---|---|---|---|
 ${rows}
 
-${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : ''}`;
+${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by filter code — XSESS)_\n' : (traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : '')}`;
   } catch { /* never break the report on diagnostic failure */ }
 
   // ── Job platform session snapshot ─────────────────────────────────────────
@@ -1063,7 +1042,7 @@ ${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : 
 |---|---|---|---|---|
 ${rows}
 
-${traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : ''}`;
+${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by filter code — XSESS)_\n' : (traceBlocks ? '### Last verify trace per platform\n\n' + traceBlocks + '\n' : '')}`;
   } catch { /* never break the report on diagnostic failure */ }
 
   // ── Login verification timing ─────────────────────────────────────────────
@@ -1298,6 +1277,10 @@ ${aiConfig.provider === 'gemini' ? `
 - Last attempted model: \`${aiConfig.geminiLastAttemptedModel}\`
 - Last successful model: \`${aiConfig.geminiLastSuccessfulModel}\`
 - Last attempted error: \`${aiConfig.geminiLastAttemptedError}\`
+- Compatible fallback catalog (availability varies by credential/project): ${(aiConfig.geminiCompatibleModels || []).map((model) => `\`${model}\``).join(', ') || '(none)'}
+${(aiConfig.geminiWarnings || []).length > 0
+    ? `- Model warnings:\n${aiConfig.geminiWarnings.map((warning) => `  - \`${warning.model}\` (${warning.type}): ${warning.message}`).join('\n')}`
+    : '- Model warnings: *(none)*'}
 ` : ''}${tokenBudgetMarkdown}
 `;
 
@@ -1338,15 +1321,10 @@ ${aiConfig.provider === 'gemini' ? `
   try { marketplacePipelineMarkdown = buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId); }
   catch { /* never break the report on diagnostic failure */ }
 
-  // Status-check roll-up renders EARLY (before the unbounded node table) so the
-  // answer to "did the status check go smoothly?" survives clipboard truncation.
-  let marketplaceStatusRollupMarkdown = '';
-  if (hasSellNodes) try { marketplaceStatusRollupMarkdown = buildMarketplaceStatusRollup(nodes); }
-    catch { /* never break the report on diagnostic failure */ }
-
   // The Marketplace Status MODULE's own hub-scan results (data.platformStatus) —
-  // self-gates to '' when no marketplacestatus node has results, so call it
-  // unconditionally (a module can exist on a canvas with no sell-hub nodes).
+  // renders EARLY (before the unbounded node table) so it survives clipboard
+  // truncation. Self-gates to '' when no marketplacestatus node has results, so
+  // call it unconditionally (a module can exist on a canvas with no sell-hub nodes).
   let marketplaceModuleRollupMarkdown = '';
   try { marketplaceModuleRollupMarkdown = buildMarketplaceModuleRollup(nodes); }
   catch { /* never break the report on diagnostic failure */ }
@@ -1396,7 +1374,7 @@ ${payload.filterCode ? `\n**Filter code applied:** \`${payload.filterCode}\`${pa
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceStatusRollupMarkdown}${marketplaceModuleRollupMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   // Static safety bound (not adaptive): keeps the assembled bug-report payload
