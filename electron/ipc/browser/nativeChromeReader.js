@@ -1,0 +1,526 @@
+import { execFile as execFileCb, spawn } from 'child_process';
+import { promisify } from 'util';
+import fs from 'fs';
+import path from 'path';
+import { logger } from '../../logger.js';
+import { closeStealthBrowser, getUserDataDir, findSystemChromePath, findChromePath } from '../stealthBrowser.js';
+import { pauseBrowserPool } from '../browserPool.js';
+import { withMarketplaceBrowserLock } from '../marketplaceBrowserLock.js';
+import { findGoogleSafeChromePath, isLoggedOutTitleForPlatform } from './authWindows.js';
+
+const execFile = promisify(execFileCb);
+
+// ── Why this module exists ───────────────────────────────────────────────────
+// A few marketplaces gate their seller hubs behind anti-bot that detects the
+// Chrome DevTools Protocol itself (Cloudflare Turnstile on Swappa → HTTP 403;
+// Mercari → a reload-loop that wedges the navigation), so EVERY Puppeteer/
+// headless read fails — 403 or a bounce to /login — even with a fully live
+// session and the cf_clearance cookie on disk. The only thing that reads past
+// that is a REAL GUI Chrome that is NOT driven over CDP. We already spawn such a
+// Chrome for native LOGIN (see authWindows.js NATIVE_LOGIN_PLATFORMS); this
+// extends the same plain-`spawn` Chrome to READING the hub pages.
+//
+// Mechanism (macOS-only): spawn system Chrome on the shared userDataDir (so the
+// logged-in cookies + cf_clearance are present), drive it via AppleScript. The
+// AppleScript *dictionary* (`set URL`, `loading`) needs no special permission;
+// pulling the rendered HTML needs `execute … javascript`, which requires the
+// user's one-time Chrome toggle: View → Developer → "Allow JavaScript from Apple
+// Events". When that toggle is off, osascript errors and we surface a precise
+// instruction (isAppleEventsJsDisabledError) instead of a cryptic failure.
+//
+// See memory: project_marketplace_login_status_reading, project_swappa_turnstile_native_login.
+
+// Platforms whose hub reads must go through native (non-CDP) Chrome. Keep this
+// tight — a visible/off-screen Chrome spawn is heavier than a headless fetch, so
+// only platforms that genuinely 403/wedge under CDP belong here. eBay/Facebook/
+// Reverb read fine headless and must NOT be added.
+export const NATIVE_READ_PLATFORMS = new Set(['swappa', 'mercari']);
+
+export function shouldUseNativeRead(platformId) {
+  return process.platform === 'darwin' && NATIVE_READ_PLATFORMS.has(platformId);
+}
+
+// AppleScript result separator between the settled finalUrl and the page HTML.
+// Long + improbable so it can't collide with real page text.
+const NR_SEP = '###NRSEP_8f3a2c###';
+const NR_ERR_NOWINDOW = 'NRERR:NOWINDOW';
+// osascript can return a multi-MB hub page; the default 1MB execFile buffer would
+// truncate it (and reject). Bound generously instead.
+const OSA_MAX_BUFFER = 64 * 1024 * 1024;
+// How long to wait for the spawned window to FIRST appear before giving up (spawn
+// handoff / osascript can't see it). Once it appears, the login wait is INDEFINITE
+// (a human is present during a user-triggered Check All) — the only escapes are
+// signing in, CLOSING the window (to skip that platform), or aborting Check All.
+// Mirrors the captcha-wait pattern (wait forever for a solvable human step). For
+// Swappa/Mercari this window IS the only login that works (non-CDP, passes the
+// Turnstile/anti-bot the headless/CDP login can't).
+const NATIVE_WINDOW_APPEAR_MS = 20000;
+
+/**
+ * True when an osascript failure is the "Allow JavaScript from Apple Events"
+ * Chrome toggle being OFF (the one manual prerequisite for this whole path).
+ * Detected so the bug report can tell the user exactly what to flip instead of
+ * showing an opaque AppleScript error.
+ */
+export function isAppleEventsJsDisabledError(msg) {
+  const s = String(msg || '');
+  return /JavaScript through AppleScript is turned off/i.test(s)
+    || /Allow JavaScript from Apple Events/i.test(s)
+    || /Executing JavaScript through AppleScript/i.test(s);
+}
+
+/**
+ * A page that, even via native Chrome on a logged-in profile, is actually the
+ * platform's client-rendered LOGIN FORM served inline at an auth-gated, on-host URL
+ * (HTTP 200, no /login redirect) — i.e. the session is logged OUT. Mercari does
+ * this: /mypage/listings/ returns 200 and renders "Log in to Mercari" over a
+ * generic SSR shell, so the URL/host check alone reads it as a hub. Detected so the
+ * read surfaces a precise "logged out" instead of mis-scanning login HTML as hub
+ * content, AND so the caller STOPS driving the tab (each reload resets the form's
+ * reCAPTCHA). Primary markers are unambiguous Mercari login headings; the secondary
+ * AND-combination guards a generic login form without false-tripping a logged-in
+ * page that merely contains one of the words. PURE for tests.
+ */
+export function nativeReadLooksLoggedOut(html) {
+  const s = String(html || '').toLowerCase();
+  if (s.includes('log in to mercari') || s.includes('continue with apple')) return true;
+  return s.includes('recaptcha') && s.includes('password') && s.includes('email address') && s.includes('log in');
+}
+
+/** A page that, even via native Chrome, is still an anti-bot challenge wall. */
+export function nativeReadLooksChallenged(html) {
+  const s = String(html || '').toLowerCase();
+  return s.includes('just a moment')
+    || s.includes('verify you are human')
+    || s.includes('checking if the site connection is secure')
+    || s.includes('cf-challenge')
+    || s.includes('challenge-platform')
+    || s.includes('/cdn-cgi/challenge-platform');
+}
+
+/** Split the osascript stdout into { finalUrl, html }. */
+export function parseNativeReadOutput(stdout) {
+  const raw = String(stdout ?? '');
+  const idx = raw.indexOf(NR_SEP);
+  if (idx === -1) {
+    // No separator — either the NOWINDOW sentinel or an unexpected shape.
+    return { finalUrl: '', html: '', sentinel: raw.trim() || null };
+  }
+  return {
+    finalUrl: raw.slice(0, idx).trim(),
+    html: raw.slice(idx + NR_SEP.length),
+    sentinel: null,
+  };
+}
+
+/**
+ * Map one native read into the { ok, status, finalUrl, html } shape that
+ * scanSellerHubPages's fetcher contract expects — classifying the blocked cases
+ * (toggle off / login bounce / challenge / empty) as terminal `ok:false` with a
+ * precise message, so they surface in the bug report's "Blocked / unreadable hub
+ * sources" section WITHOUT triggering scanSellerHubPages's headless disambiguate
+ * (which would relaunch the very CDP browser this path exists to avoid).
+ */
+export function nativeReadToFetchResult({ requestedUrl, finalUrl, html, error, sentinel } = {}) {
+  if (error) {
+    if (isAppleEventsJsDisabledError(error)) {
+      return { ok: false, error: 'Native read needs Chrome → View → Developer → “Allow JavaScript from Apple Events” (it is currently OFF).' };
+    }
+    return { ok: false, error: `Native Chrome read failed: ${error}` };
+  }
+  if (sentinel === NR_ERR_NOWINDOW) {
+    return { ok: false, error: 'Native Chrome window never appeared (spawn failed or was closed).' };
+  }
+  const landed = String(finalUrl || requestedUrl || '');
+  const landedLower = landed.toLowerCase();
+  if (/\/(login|signin|sign-in|account\/login|auth(?!or))/.test(landedLower)) {
+    return { ok: false, error: `Native Chrome was redirected to a login page (${landed}) — even without CDP the session is logged out or anti-bot bounced it; log in via Settings → Marketplace Login.` };
+  }
+  if (nativeReadLooksChallenged(html)) {
+    return { ok: false, error: `Native Chrome still hit an anti-bot challenge at ${landed} — solve it once in a visible Chrome window for this site, then retry.` };
+  }
+  if (nativeReadLooksLoggedOut(html)) {
+    return { ok: false, loggedOut: true, error: `Native Chrome landed on ${landed} (HTTP 200) but the page is a client-rendered LOGIN FORM — logged out despite the auth-gated hub URL; sign in via the open Chrome window, then re-run Check All.` };
+  }
+  if (!html || html.length < 200) {
+    return { ok: false, error: `Native Chrome returned an empty page (${html ? html.length : 0} bytes) at ${landed}.` };
+  }
+  return { ok: true, status: 200, finalUrl: landed, html };
+}
+
+// ── AppleScript: find OUR window by URL and drive its tab ──────────────────────
+// We locate the spawned window by its tab URL — the SAME proven mechanism the
+// native LOGIN flow uses (getNativeChromeTabs in authWindows.js), which reliably
+// finds the spawned window where the window-`id` approach did NOT (live: the id
+// was captured but never matched at read time). `matchHost` is the platform host;
+// we ALSO match accounts.google.com so the window is still found after a logged-out
+// hub bounces it to Google OAuth (Swappa). Navigation + load-wait use the
+// permission-free dictionary; only the final `execute … javascript` needs the
+// Apple-Events toggle.
+
+// Return OUR window's active-tab URL AND title (matched by host), or the no-window
+// sentinel. Used to POLL login state without navigating — so we can WAIT at a login
+// screen for the human to sign in instead of instantly failing. The title is read
+// via the plain AppleScript dictionary (`title of active tab`), which needs NO
+// "Allow JavaScript from Apple Events" toggle — so it is the only signal that can
+// discriminate an inline login form (on-host URL, generic SEO <title>) from a real
+// hub when the toggle is OFF.
+function buildPollTabUrlScript() {
+  return `on run argv
+  set matchHost to item 1 of argv
+  tell application "Google Chrome"
+    repeat with w in windows
+      try
+        set u to (URL of active tab of w) as string
+        set t to (title of active tab of w) as string
+        if (u contains matchHost) or (u contains "accounts.google.com") then return u & "${NR_SEP}" & t
+      end try
+    end repeat
+  end tell
+  return "${NR_ERR_NOWINDOW}"
+end run`;
+}
+
+// Navigate OUR window's tab (matched by host) to a URL, wait for load, read HTML.
+// Used AFTER login is confirmed, so the window is settled on the platform host.
+function buildNavigateReadScript() {
+  return `on run argv
+  set targetUrl to item 1 of argv
+  set matchHost to item 2 of argv
+  tell application "Google Chrome"
+    set theWin to missing value
+    repeat with w in windows
+      try
+        if (URL of active tab of w) contains matchHost then
+          set theWin to w
+          exit repeat
+        end if
+      end try
+    end repeat
+    if theWin is missing value then return "${NR_ERR_NOWINDOW}"
+    set theTab to active tab of theWin
+    set URL of theTab to targetUrl
+    repeat 100 times
+      delay 0.25
+      try
+        if (loading of theTab) is false then exit repeat
+      end try
+    end repeat
+    delay 0.7
+    set finalUrl to (URL of theTab) as string
+    set theHtml to (execute theTab javascript "document.documentElement.outerHTML")
+    if theHtml is missing value then set theHtml to ""
+    return finalUrl & "${NR_SEP}" & theHtml
+  end tell
+end run`;
+}
+
+/**
+ * Classify the read window's current tab URL into a login state. PURE for tests.
+ *   'no-window'  — osascript couldn't find OUR window (sentinel / empty / about:blank)
+ *   'logged-out' — a login / sign-in / Google-OAuth / 2FA screen (WAIT for the human)
+ *   'logged-in'  — settled on the platform host, not a login screen (read now)
+ *   'unknown'    — somewhere else (transient redirect); keep polling
+ */
+export function nativeReadLoginState(url, platformHost, title = '', platformId = '') {
+  const u = String(url || '').toLowerCase();
+  if (!u || u === NR_ERR_NOWINDOW.toLowerCase() || u === 'about:blank') return 'no-window';
+  if (/accounts\.google\.com|\/login|\/signin|\/sign-in|\/auth\b|two_step_verification|\/challenge/.test(u)) return 'logged-out';
+  // Inline login form served AT the auth-gated URL (HTTP 200, no redirect): the URL
+  // is on-host but the <title> is the generic marketing/login shell. Read toggle-free
+  // from the dictionary, the title is the ONLY discriminator in that case → classify
+  // 'logged-out' (WAIT for the human to sign in) instead of a false 'logged-in' that
+  // would drive the tab through the hub URLs and thrash the form's reCAPTCHA.
+  if (isLoggedOutTitleForPlatform(platformId, title)) return 'logged-out';
+  if (platformHost && u.includes(String(platformHost).toLowerCase())) return 'logged-in';
+  return 'unknown';
+}
+
+// Diagnostic for the "window did not open" failure: dump EVERY Chrome window's
+// active-tab URL (and any osascript error) so a bug report tells us whether
+// osascript saw NO windows (Automation permission / wrong Chrome instance), saw
+// the user's windows but not ours (two-process targeting), or saw ours on a
+// restore/challenge URL (profile lock / anti-bot) — instead of guessing.
+async function describeAllChromeWindows() {
+  const script = `tell application "Google Chrome"
+  set out to ""
+  set k to 0
+  repeat with w in windows
+    set k to k + 1
+    try
+      set out to out & k & ":" & (URL of active tab of w) & "  "
+    on error errMsg
+      set out to out & k & ":<" & errMsg & ">  "
+    end try
+  end repeat
+  if k is 0 then return "no-windows"
+  return out
+end tell`;
+  try {
+    const { stdout } = await execFile('/usr/bin/osascript', ['-e', script], { timeout: 4000, maxBuffer: 1024 * 1024 });
+    return String(stdout).trim().slice(0, 400) || '(empty)';
+  } catch (e) {
+    return `osascript error: ${(e?.stderr || e?.message || String(e)).slice(0, 200)}`;
+  }
+}
+
+/**
+ * Wait until no Chrome holds this profile, by polling for the absence of Chrome's
+ * `SingletonLock` (created in userDataDir while any Chrome runs on it, removed on
+ * clean exit). Chrome is one-process-per-userDataDir: spawning while a sibling
+ * still holds the lock makes our process HAND OFF the URL and exit immediately, so
+ * we must wait for it to clear first. Best-effort: returns false on timeout (a
+ * stale lock from a crashed Chrome) and the caller spawns anyway — Chrome itself
+ * recovers a stale lock on launch.
+ */
+async function waitForProfileUnlocked(userDataDir, timeoutMs = 5000) {
+  const lock = path.join(userDataDir, 'SingletonLock');
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      await fs.promises.lstat(lock); // exists (even as a dangling symlink) → still locked
+    } catch {
+      return true; // ENOENT → profile is free
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise(r => setTimeout(r, 150));
+  }
+}
+
+/** Resolve once the spawned Chrome process has fully exited (or after timeout). */
+function waitForChildExit(child, timeoutMs = 3000) {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => resolve();
+    child.once('exit', done);
+    setTimeout(() => { child.removeListener('exit', done); resolve(); }, timeoutMs);
+  });
+}
+
+async function pollMatchedTabUrl(matchHost) {
+  try {
+    const { stdout } = await execFile('/usr/bin/osascript', ['-e', buildPollTabUrlScript(), matchHost], { timeout: 4000 });
+    const raw = String(stdout).trim();
+    if (!raw || raw === NR_ERR_NOWINDOW) return { url: raw, title: '' };
+    const idx = raw.indexOf(NR_SEP); // split on the FIRST sep only — title is free text
+    if (idx === -1) return { url: raw, title: '' };
+    return { url: raw.slice(0, idx).trim(), title: raw.slice(idx + NR_SEP.length).trim() };
+  } catch {
+    return { url: '', title: '' };
+  }
+}
+
+/**
+ * Wait for OUR spawned window to reach a LOGGED-IN state on the platform host.
+ * Two phases:
+ *   1. BOUNDED (NATIVE_WINDOW_APPEAR_MS) wait for the window to first appear — if it
+ *      never does (spawn handoff / osascript can't see it) → 'no-window'.
+ *   2. Once visible, INDEFINITE wait for sign-in (the human is present during Check
+ *      All). The only escapes are: signing in → 'logged-in'; CLOSING the window →
+ *      'window-closed' (skip this platform); aborting Check All → 'aborted'.
+ * A transient osascript miss / brief off-host login redirect is debounced (3
+ * consecutive no-window reads) so it isn't mistaken for the user closing the window
+ * mid-login; a real close that quits Chrome is caught instantly by getBailed. Returns:
+ *   'logged-in' | 'window-closed' | 'no-window' | 'aborted'
+ */
+async function waitForHubLogin(matchHost, platformId, signal, getBailed) {
+  const appearDeadline = Date.now() + NATIVE_WINDOW_APPEAR_MS;
+  let seen = false;
+  let announced = false;
+  let misses = 0;
+  for (;;) {
+    if (signal?.aborted) return 'aborted';
+    // getBailed = spawn error OR the Chrome process exited. Before the window is
+    // seen that's a spawn handoff/failure (→ no-window); after, it's the user
+    // closing the window and Chrome quitting (→ window-closed/skip).
+    if (getBailed?.()) return seen ? 'window-closed' : 'no-window';
+
+    const { url: tabUrl, title: tabTitle } = await pollMatchedTabUrl(matchHost);
+    const state = nativeReadLoginState(tabUrl, matchHost, tabTitle, platformId);
+    if (state === 'logged-in') return 'logged-in';
+
+    if (state === 'no-window') {
+      if (!seen) {
+        if (Date.now() >= appearDeadline) return 'no-window'; // never appeared
+      } else if (++misses >= 3) {
+        return 'window-closed'; // was open, now gone (3 consecutive) = user closed it
+      }
+    } else {
+      seen = true;
+      misses = 0;
+      if (state === 'logged-out' && !announced) {
+        announced = true;
+        logger.info(`[NativeRead] ${platformId} is at a login screen — waiting (indefinitely) for you to sign in; CLOSE the window to skip this platform.`);
+      }
+    }
+    await new Promise(r => setTimeout(r, seen ? 1500 : 500));
+  }
+}
+
+async function navigateAndRead(targetUrl, matchHost) {
+  try {
+    const { stdout } = await execFile(
+      '/usr/bin/osascript',
+      ['-e', buildNavigateReadScript(), targetUrl, matchHost],
+      { timeout: 40000, maxBuffer: OSA_MAX_BUFFER },
+    );
+    const { finalUrl, html, sentinel } = parseNativeReadOutput(stdout);
+    return nativeReadToFetchResult({ requestedUrl: targetUrl, finalUrl, html, sentinel });
+  } catch (err) {
+    // osascript exits non-zero on AppleScript errors (incl. the Apple-Events
+    // toggle being off) — the message is on stderr/err.message.
+    const msg = err?.stderr ? String(err.stderr) : (err?.message || String(err));
+    return nativeReadToFetchResult({ requestedUrl: targetUrl, error: msg });
+  }
+}
+
+/**
+ * Read a platform's hub watch URLs through a non-CDP native Chrome and return a
+ * Map<url, { ok, status, finalUrl, html } | { ok:false, error }> — the exact
+ * fetcher-result shape scanSellerHubPages consumes, so the caller can feed these
+ * straight into the normal hub-scan analysis.
+ *
+ * Lifecycle: closes the headless stealth browser (one Chrome per userDataDir) and
+ * pauses the scrape pool so the native Chrome has exclusive profile access, then
+ * spawns ONE VISIBLE app window, waits for it to reach a logged-in state (the human
+ * signs in IN the window if the hub bounced to a login screen), drives it through
+ * the URLs sequentially, and kills exactly the process it spawned. macOS-only;
+ * returns per-URL errors on any other platform.
+ */
+export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal } = {}) {
+  const urls = Array.isArray(watchUrls) ? watchUrls.filter(Boolean) : [];
+  const results = new Map();
+  const fillAll = (error) => { for (const u of urls) results.set(u, { ok: false, error }); return results; };
+
+  if (process.platform !== 'darwin') return fillAll('Native (non-CDP) read is macOS-only.');
+  if (urls.length === 0) return results;
+
+  // Resolve to system GOOGLE Chrome specifically — the same binary native LOGIN
+  // uses (findGoogleSafeChromePath). The login cookies (incl. cf_clearance) are
+  // encrypted with that bundle ID's Keychain key, so a different binary
+  // (Chromium/Brave, or Puppeteer's Chrome-for-Testing that findChromePath
+  // prefers) would read them as a LOGGED-OUT session → endless /login bounce.
+  let fallbackPath = process.env.CHROME_PATH || (await findSystemChromePath());
+  if (!fallbackPath) { try { fallbackPath = await findChromePath(); } catch { /* none found */ } }
+  const chromePath = await findGoogleSafeChromePath(fallbackPath || null);
+  if (!chromePath) return fillAll('System Google Chrome not found for native read.');
+
+  const userDataDir = await getUserDataDir();
+
+  // Serialize against ALL other sell-side browser ops (price-check scrapes,
+  // rescrapes, captcha-resolve windows) via the SAME marketplaceBrowserLock they
+  // use: this path closeStealthBrowser()s + spawns a second Chrome on the one
+  // shared profile, which needs EXCLUSIVE access — without the lock a concurrent
+  // price-check's in-flight pages get detached ("Navigating frame was detached")
+  // and mis-reported as anti-bot blocks. Nesting is statusCheckLock (Check All) →
+  // marketplaceBrowserLock, which is deadlock-free (no sell-side op acquires
+  // statusCheckLock). The lock bails at the queue head if `signal` is aborted.
+  return withMarketplaceBrowserLock(async () => {
+    // Exclusive profile access: the headless stealth browser locks userDataDir, so
+    // it must be closed before a second Chrome can open the same profile (mirrors
+    // openLoginWindow). Pause the scrape pool so it can't relaunch mid-read. Both
+    // are set up INSIDE the try so a throw still releases the pause + kills Chrome.
+    const releasePool = pauseBrowserPool(`native-read:${platformId || 'hub'}`);
+    let child = null;
+    let childExited = false;
+    try {
+      await closeStealthBrowser();
+      // Chrome is one-process-per-userDataDir. If the just-closed stealth browser
+      // is still dying, or the PREVIOUS platform's native Chrome hasn't released
+      // the profile yet, our spawn HANDS OFF the URL to that process and exits
+      // immediately ("Opening in existing browser session") — its window flickers
+      // then dies, surfacing as "window never appeared" / "Application isn't
+      // running (-600)". Wait for the SingletonLock to clear so we get a real,
+      // surviving process. (closeStealthBrowser already waits ~2s for puppeteer's
+      // OWN exit; this also covers a sibling native read's Chrome.)
+      await waitForProfileUnlocked(userDataDir);
+      logger.info(`[NativeRead] Spawning non-CDP Chrome for ${platformId} (${urls.length} hub URL(s))`);
+      // Args identical to the PROVEN native LOGIN spawn (openNativeLoginWindow).
+      // The window is VISIBLE and stays open: if the hub is logged out it bounces
+      // to a login screen the human signs into IN this window (the only login that
+      // works for Swappa/Mercari's anti-bot — non-CDP).
+      child = spawn(chromePath, [
+        `--user-data-dir=${userDataDir}`,
+        '--profile-directory=Default',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--window-size=1100,800',
+        '--lang=en-US,en',
+        `--app=${urls[0]}`,
+      ], { stdio: 'ignore', detached: false });
+
+      let spawnError = null;
+      child.once('error', (e) => { spawnError = e?.message || String(e); });
+      // A real Chrome that grabbed the profile stays alive; a handoff process exits
+      // within ~1s. Track it so the login-wait bails fast on a handoff/launch fail.
+      child.once('exit', () => { childExited = true; });
+
+      // Find OUR window by tab URL (proven login-flow mechanism) and WAIT for it to
+      // reach a logged-in state — giving the human time to sign in at the login
+      // screen the hub bounced to, instead of instantly reporting an error.
+      // Strip a leading `www.` so the substring host-match (and the logged-in
+      // detector) survive a www↔non-www redirect post-login — otherwise the hub
+      // would read 'unknown' forever and falsely time out despite being logged in.
+      const matchHost = (() => { try { return new URL(urls[0]).host.replace(/^www\./, ''); } catch { return ''; } })();
+      const loginState = await waitForHubLogin(matchHost, platformId, signal, () => spawnError || childExited);
+      if (loginState !== 'logged-in') {
+        // Capture what osascript actually sees so the bug report distinguishes the
+        // real root causes (no windows / wrong instance / window closed).
+        const seen = await describeAllChromeWindows();
+        let error;
+        if (spawnError) {
+          error = `Native Chrome failed to launch: ${spawnError}`;
+        } else if (loginState === 'aborted') {
+          error = 'Aborted.';
+        } else if (loginState === 'window-closed') {
+          error = `Native Chrome window was closed before ${platformId} sign-in completed — skipped. Re-run Check All and sign in (or stay logged in) to read this hub.`;
+        } else if (childExited) {
+          error = `Native Chrome exited right after spawn — it handed off to another Chrome already holding the profile (profile not free). osascript sees: ${seen}`;
+        } else {
+          error = `Native Chrome window never became visible to osascript within ${Math.round(NATIVE_WINDOW_APPEAR_MS / 1000)}s. osascript sees: ${seen}`;
+        }
+        return fillAll(error);
+      }
+      logger.info(`[NativeRead] ${platformId} logged in — reading ${urls.length} hub URL(s)`);
+
+      for (const url of urls) {
+        if (signal?.aborted) {
+          results.set(url, { ok: false, error: 'Aborted.' });
+          continue;
+        }
+        const r = await navigateAndRead(url, matchHost);
+        results.set(url, r);
+        const ok = r.ok ? `ok (${r.html?.length || 0} bytes)` : `blocked — ${r.error}`;
+        logger.info(`[NativeRead] ${platformId} ${url} → ${ok}`);
+        // The hub served an inline login form despite the on-host URL → logged out.
+        // STOP driving the tab: each further navigateAndRead reloads the form and
+        // resets its reCAPTCHA (the reported "keeps refreshing / can't complete human
+        // verification"). Mark the remaining URLs and leave the window open so the
+        // user can sign in, then re-run Check All. (The title guard in waitForHubLogin
+        // normally catches this first; this is the toggle-on / hub-specific-title net.)
+        if (r.loggedOut) {
+          for (const rest of urls) if (!results.has(rest)) results.set(rest, { ok: false, loggedOut: true, error: r.error });
+          logger.info(`[NativeRead] ${platformId} stopping read — inline login form (logged out); awaiting sign-in`);
+          break;
+        }
+      }
+      return results;
+    } finally {
+      if (child?.pid && !childExited) {
+        try { child.kill('SIGTERM'); } catch { /* already gone */ }
+      }
+      // Wait for OUR Chrome to fully exit (release the SingletonLock) BEFORE
+      // releasing the marketplace lock, so the NEXT platform's native read spawns
+      // into a FREE profile instead of handing off to this dying process — the
+      // mercari→swappa "Application isn't running (-600)" race. Mirrors
+      // closeStealthBrowser's own post-close wait.
+      await waitForChildExit(child);
+      releasePool();
+    }
+  }, signal).catch((err) => {
+    // The lock rejects with AbortError if we were cancelled while queued behind
+    // another sell-side op — surface it as per-URL results, never throw (the
+    // caller treats a throw as a whole-platform scan failure).
+    return fillAll(`Native read did not run: ${err?.message || String(err)}`);
+  });
+}

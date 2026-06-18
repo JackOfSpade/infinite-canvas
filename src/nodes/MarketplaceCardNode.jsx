@@ -7,12 +7,12 @@ import { normalizeStaticGlowColor } from '../utils/staticGlowColor';
 import {
   calculatePriceDropSuggestion,
   createdAtMsFromCardId,
-  effectivePriceDropTargetPercent,
   INITIAL_PRICE_DROP_CHECK_DELAY_MS,
   MAX_PRICE_DROP_TIMER_DELAY_MS,
   normalizePriceDropMustSellDate,
   normalizePriceDropReminderWeeks,
   normalizePriceDropStartingPrice,
+  normalizePriceDropTargetPrice,
   oldestPriceDropCardCreatedAtIso,
   priceDropDeadlineReminderDelayMs,
   priceDropStartingPrice,
@@ -20,6 +20,7 @@ import {
 } from '../utils/priceDropReminder';
 import { selectListingPriceTiers } from '../utils/bundlePricing';
 import { getConnectedHubCards } from '../utils/connectedHubCards';
+import { useRenderStorm } from '../hooks/useRenderStorm';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 
@@ -93,6 +94,8 @@ function MarketplaceNotesTextarea({ value, onChange, locked }) {
 }
 
 export function MarketplaceCardNode({ id, data }) {
+  // Surface runaway re-render bursts in bug reports (see useRenderStorm).
+  useRenderStorm(`marketplacecard ${String(id).slice(0, 8)}`);
   const { updateNodeData } = useReactFlow();
   const navigation = useContext(CanvasNavigationContext);
   const updateGlobal = navigation?.updateNodeDataGlobally || updateNodeData;
@@ -105,6 +108,11 @@ export function MarketplaceCardNode({ id, data }) {
   const createdAtParsed = Date.parse(data.createdAt || '');
   const createdAtMs = Number.isFinite(createdAtParsed) ? createdAtParsed : createdAtMsFromCardId(id);
   const createdLabel = formatDayLabel(createdAtMs);
+  // ISO form of this card's own creation, used to floor the shared cadence so a
+  // card spawned mid-schedule joins at the next grid point instead of firing for
+  // an interval that elapsed before it existed. A future timestamp is ignored by
+  // the cadence math (see nextPriceDropReminder) so it can't push reminders out.
+  const cardCreatedAtIso = Number.isFinite(createdAtMs) ? new Date(createdAtMs).toISOString() : undefined;
 
   // Price-drop reminder. All connected cards use a fixed cadence that starts
   // at their oldest creation date. Hub settings and card membership are read
@@ -115,8 +123,8 @@ export function MarketplaceCardNode({ id, data }) {
   const mustSellDate = useStore(
     useCallback((s) => normalizePriceDropMustSellDate(s.nodeLookup.get(data.hubId)?.data?.priceDropMustSellDate), [data.hubId])
   );
-  const targetPercent = useStore(
-    useCallback((s) => effectivePriceDropTargetPercent(s.nodeLookup.get(data.hubId)?.data?.priceDropTargetPercent), [data.hubId])
+  const targetPrice = useStore(
+    useCallback((s) => normalizePriceDropTargetPrice(s.nodeLookup.get(data.hubId)?.data?.priceDropTargetPrice), [data.hubId])
   );
   const scheduleStartedAtIso = useStore(
     useCallback((s) => oldestPriceDropCardCreatedAtIso(getConnectedHubCards({
@@ -141,35 +149,51 @@ export function MarketplaceCardNode({ id, data }) {
       return priceDropStartingPrice(tiers, hubData.priceDropStartingTier);
     }, [data.hubId])
   );
+  // A must-sell plan needs BOTH a date and a usable target below the starting
+  // price. A date alone does nothing (no deadline suppression, no suggestion) —
+  // the cards stay on the plain cadence until a target is entered.
+  const mustSellPlanActive = !!mustSellDate
+    && targetPrice != null
+    && startingPrice != null
+    && targetPrice < startingPrice;
   const reminderActive = !!data.priceDropReminderDue && reminderWeeks > 0;
-  const suggestedPrice = reminderActive && mustSellDate
+  // The price the linear plan says this listing should be at when a cadence
+  // reminder is due. Plan edits can change that eventual suggestion, but they
+  // must not manufacture a reminder before the first interval has elapsed.
+  const planSuggestedPrice = mustSellPlanActive
     ? calculatePriceDropSuggestion({
       startingPrice,
-      targetPercent,
+      targetPrice,
       scheduleStartedAtIso,
       mustSellDate,
       weeks: reminderWeeks,
     })
     : null;
+  const suggestedPrice = reminderActive ? planSuggestedPrice : null;
   const staticGlowColor = normalizeStaticGlowColor(data.staticGlowColor);
   const hasStaticGlow = !!staticGlowColor;
 
   useEffect(() => {
+    // Once a reminder fires, it remains pending until the user acknowledges it.
+    // Plan edits can change future scheduling and the displayed suggestion, but
+    // must never silently clear an already-due reminder.
     if (data.priceDropReminderDue || !(reminderWeeks > 0) || !scheduleStartedAtIso) return undefined;
     let timer;
     let cancelled = false;
     const schedule = () => {
       if (cancelled) return;
-      const delay = mustSellDate
+      const delay = mustSellPlanActive
         ? priceDropDeadlineReminderDelayMs({
           scheduleStartedAtIso,
           lastAcknowledgedAtIso: data.lastPriceDropAt,
+          cardCreatedAtIso,
           mustSellDate,
           weeks: reminderWeeks,
         })
         : priceDropReminderDelayMs({
           scheduleStartedAtIso,
           lastAcknowledgedAtIso: data.lastPriceDropAt,
+          cardCreatedAtIso,
           weeks: reminderWeeks,
         });
       if (delay == null) return;
@@ -196,7 +220,9 @@ export function MarketplaceCardNode({ id, data }) {
     data.priceDropReminderDue,
     reminderWeeks,
     scheduleStartedAtIso,
+    cardCreatedAtIso,
     mustSellDate,
+    mustSellPlanActive,
     id,
     updateGlobal,
   ]);
@@ -330,7 +356,7 @@ export function MarketplaceCardNode({ id, data }) {
           <div className="rounded-md bg-amber-500/10 border border-amber-500/30 p-2 space-y-1.5">
             <div className="text-amber-300/90 text-[10px] leading-snug">
               {suggestedPrice != null
-                ? `Lower price to $${formatReminderPrice(suggestedPrice)}.`
+                ? `Set price to $${formatReminderPrice(suggestedPrice)}.`
                 : 'Still listed — consider lowering the price.'}
             </div>
             {/* Enabled even when the card is locked — lock freezes content

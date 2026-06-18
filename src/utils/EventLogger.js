@@ -182,6 +182,23 @@ class EventLoggerSingleton {
       origWarn.apply(console, args);
     };
 
+    // Capture focus entering a form control so the timeline shows WHICH field
+    // the user was interacting with when something went wrong — e.g. a native
+    // date/select popup flickering shut while a background task re-renders the
+    // node. Pairs with task-timing sections (startup verify, etc.) to place the
+    // interaction next to concurrent churn. Low-volume: fires once when focus
+    // enters a field (not per keystroke); consecutive repeats collapse via dedup.
+    window.addEventListener('focusin', (e) => {
+      const el = e.target;
+      if (!el || typeof el.tagName !== 'string') return;
+      const tag = el.tagName.toLowerCase();
+      if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') return;
+      const kind = tag === 'input' ? (el.getAttribute('type') || 'text') : tag;
+      const label = el.getAttribute('aria-label') || el.getAttribute('placeholder') || '';
+      const nodeId = el.closest?.('.react-flow__node')?.getAttribute('data-id') || '';
+      this.log(`[Focus] ${kind}${label ? ` "${label.slice(0, 40)}"` : ''}${nodeId ? ` node=${nodeId.slice(0, 8)}` : ''}`);
+    });
+
     // Capture paste events to help debug clipboard-related issues
     window.addEventListener('paste', (e) => {
       const types = e.clipboardData?.types || [];

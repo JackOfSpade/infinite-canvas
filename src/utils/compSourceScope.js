@@ -109,3 +109,33 @@ export function isPriceChartingApplicable(category) {
   if (!c) return true;
   return PRICECHARTING_CATEGORY_RE.test(c);
 }
+
+// ── AptDeco category applicability ───────────────────────────────────────────
+// AptDeco is a secondhand FURNITURE + home-furnishings marketplace. Its Algolia
+// search is typo-tolerant and fuzzy: a clearly non-furniture query still returns
+// loose matches (live: "iphone"→20, "nike shoes"→35, "vacuum cleaner"→28 hits)
+// that would pollute the comp pool for an electronics/fashion/appliance item.
+// Same shape as PriceCharting — so we only spend an AptDeco request when the
+// item's category PLAUSIBLY belongs to furniture/home furnishings. Match terms
+// are SPECIFIC furniture pieces + furnishing classes AptDeco actually carries
+// (rugs, lighting, mirrors, decor) — deliberately NOT bare "home"/"kitchen",
+// which would let appliances/kitchenware through.
+// Trailing (?:e?s)? makes every term plural-tolerant ("Desks", "Sofas",
+// "Benches") without listing each plural. Bare "console" is deliberately NOT a
+// term (it would match a video-game "Console" category) — only "console table" /
+// "media console" furniture forms are matched.
+const APTDECO_CATEGORY_RE = /\b(furniture|furnishings?|sofa|couch|sectional|loveseat|settee|armchair|recliner|chaise|ottoman|footstool|bench|stool|bar\s*stool|chair|table|desk|workstation|dresser|nightstand|night\s*stand|bedside|bed|bedframe|headboard|footboard|mattress|bookcase|bookshelf|shelf|shelving|cabinet|credenza|sideboard|buffet|hutch|console\s*table|wardrobe|armoire|dining|drawer|chest\s*of\s*drawers|rug|carpet|lighting|lamp|chandelier|sconce|pendant\s*light|mirror|d[eé]cor|vanity|crib|nursery|patio|outdoor|bar\s*cart|coffee\s*table|end\s*table|side\s*table|tv\s*stand|media\s*console)(?:e?s)?\b/i;
+
+/**
+ * Should an AptDeco price-comp request run for an item in this category?
+ * Mirrors isPriceChartingApplicable: free-text "Category > Subcategory" from the
+ * vision analysis, unknown/blank → true (don't suppress when we can't classify;
+ * AptDeco's Algolia returns [] for the truly-off-category and the global relevance
+ * ranker still guards). Skips the request (and the ghost card) for the
+ * non-furniture majority.
+ */
+export function isAptDecoApplicable(category) {
+  const c = String(category || '').trim();
+  if (!c) return true;
+  return APTDECO_CATEGORY_RE.test(c);
+}

@@ -77,7 +77,7 @@ function getStore() {
   return _store;
 }
 
-function tryGetStore() {
+export function tryGetStore() {
   try {
     return getStore();
   } catch {

@@ -42,7 +42,7 @@ export function getLastCaptchaHandoffAt() {
 }
 
 // Human-verification / challenge / signup interstitials are NOT a logged-in state —
-// the user is still mid-flow. These slip past LOGIN_URL_PATTERN in the auto-close
+// the user is still mid-flow. These slip past AUTH_LOGIN_URL_PATTERN in the auto-close
 // poll (eBay's captcha splash is /splashui/captcha, and the /signin in its `ru=`
 // query is URL-encoded so the login pattern misses it), and such a splash page
 // carries enough nav chrome ("Sign out") to false-trip the DOM logged-in heuristic
@@ -50,9 +50,99 @@ export function getLastCaptchaHandoffAt() {
 // (the reported bug). The poll keeps WAITING while this matches, auto-closing only
 // once the URL settles on a real post-auth page. Tokens are chosen to never match a
 // logged-in home (ebay.com, /feed, /mypage, /jobseeker/home, …) — see test-runner.
-const AUTH_CHALLENGE_URL_PATTERN = /captcha|splashui|\/challenge|checkpoint|\/signup|verif(y|ication)|two[-_]?step|two[-_]?factor|\/2fa|\/otp/i;
+const AUTH_CHALLENGE_URL_PATTERN = /captcha|splashui|\/challenge|checkpoint|__cf_chl|cf_chl_|cf-chl|\/signup|verif(y|ication)|two[-_]?step|two[-_]?factor|\/2fa|\/otp/i;
 export function isAuthChallengeUrl(url) {
   return AUTH_CHALLENGE_URL_PATTERN.test(String(url || ''));
+}
+
+// Post-login confirmation interstitials — the user IS already authenticated, but
+// the platform is showing a one-time security prompt that needs a click before
+// it settles on the real destination. eBay's "Trust this device?" page
+// (accounts.ebay.com/acctsec/trust-a-device?...&ru=<dest>) is the reported case:
+// it carries full logged-in nav chrome ("Sign out"), so the DOM logged-in
+// heuristic fires and the window auto-closed before the user could click "Trust"
+// — leaving the device permanently untrusted, so eBay re-prompts the 2FA/trust
+// step on every future login (the reported hassle). Keep WAITING here (like a
+// challenge) so the user can complete the prompt; once they click through, eBay
+// redirects to its `ru=` target and the normal auto-close fires on the settled
+// page. Closing the window manually still confirms login via the post-close
+// verify, so this never traps the user — declining the trust step still leaves
+// them logged in. Tokens are chosen to never match a logged-in home.
+const AUTH_POST_LOGIN_INTERSTITIAL_PATTERN = /trust-a-device|trust[-_]?(?:this[-_]?)?device|trusted[-_]?device/i;
+export function isPostLoginInterstitialUrl(url) {
+  return AUTH_POST_LOGIN_INTERSTITIAL_PATTERN.test(String(url || ''));
+}
+
+const AUTH_LOGIN_URL_PATTERN = /\/(signin|sign-in|login|log-in|authenticate|auth(?!or))/i;
+const AUTH_COOKIE_LOGIN_URL_BYPASS_PLATFORMS = new Set(['glassdoor']);
+
+export function canAuthCookieBypassLoginUrl(platformId) {
+  return AUTH_COOKIE_LOGIN_URL_BYPASS_PLATFORMS.has(String(platformId || '').toLowerCase());
+}
+
+export function getLoginAutoCloseWaitReason({
+  platformId,
+  currentUrl,
+  cookieSignal = false,
+  challengeDomSignal = false,
+} = {}) {
+  const url = String(currentUrl || '');
+  if (!url || url === 'about:blank') return 'blank-url';
+  if (isAuthChallengeUrl(url)) return 'challenge-url';
+  if (challengeDomSignal) return 'challenge-dom';
+  if (isPostLoginInterstitialUrl(url)) return 'post-login-interstitial';
+  if (AUTH_LOGIN_URL_PATTERN.test(url) && !(cookieSignal && canAuthCookieBypassLoginUrl(platformId))) {
+    return cookieSignal ? 'login-url-cookie-not-trusted' : 'login-url';
+  }
+  return null;
+}
+
+async function detectAuthChallengeDomSignal(page) {
+  return await page.evaluate(() => {
+    const isVisible = (el) => {
+      if (!el?.getBoundingClientRect) return false;
+      const rect = el.getBoundingClientRect();
+      if (!rect || rect.width <= 2 || rect.height <= 2) return false;
+      const style = window.getComputedStyle?.(el);
+      return !style || (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0');
+    };
+    const challengeSelectors = [
+      '#challenge-form',
+      '#challenge-running',
+      '#cf-challenge-running',
+      '[data-testid="challenge"]',
+      '.cf-browser-verification',
+      '.cf-turnstile',
+      '[id*="cf-chl-widget"]',
+      'iframe[src*="challenges.cloudflare.com"]',
+      'iframe[src*="recaptcha/api2/anchor"]',
+      'iframe[src*="recaptcha/api2/bframe"]',
+      'iframe[src*="recaptcha/enterprise"]',
+      'iframe[src*="hcaptcha.com"]',
+      '#datadome-captcha-container',
+      'iframe[src*="captcha-delivery.com"]',
+      '#px-captcha',
+      '[id*="px-captcha"]',
+      'iframe[src*="perimeterx"]',
+    ];
+    if (challengeSelectors.some(selector =>
+      Array.from(document.querySelectorAll(selector)).some(isVisible)
+    )) {
+      return true;
+    }
+    const text = (document.body?.innerText || document.body?.textContent || '').toLowerCase();
+    return (
+      text.includes('verify you are human') ||
+      text.includes('human verification') ||
+      text.includes('checking if the site connection is secure') ||
+      text.includes('review the security of your connection') ||
+      text.includes('additional verification required') ||
+      text.includes('please verify you are a human') ||
+      text.includes('press & hold') ||
+      text.includes('i am not a robot') ||
+      text.includes('complete the captcha')
+    );
+  }).catch(() => false);
 }
 
 export function unwrapInlineExtractorItems(result) {
@@ -61,17 +151,99 @@ export function unwrapInlineExtractorItems(result) {
   return null;
 }
 
-// Google rejects sign-in attempts from CDP-controlled Chrome. Indeed commonly
-// delegates auth to Google SSO, so use a plain Chrome process for that flow.
-const NATIVE_LOGIN_PLATFORMS = new Set(['indeed']);
+// Platforms whose login must run in a plain, hand-operated Chrome process — NO
+// Puppeteer/CDP attached. Two distinct reasons:
+//   • Google rejects CDP-controlled Chrome for sign-in. The platform delegates to
+//     Google SSO, so under CDP the Google page bounces straight back to the
+//     platform's own login screen — an endless loop the user can't escape. Indeed
+//     hits this; Mercari does too (its "Continue with Google" callback lands on
+//     mercari.com/account/googleauth then re-renders the login page — the reported
+//     "keeps redirecting google login back to mercari login page" bug). Mercari is
+//     ALSO a native-READ platform (NATIVE_READ_PLATFORMS), so its pages already
+//     need real Chrome — login belongs on the same path.
+//   • Cloudflare Turnstile rejects the challenge completion under CDP: the
+//     `interactiveEnd` postMessage is dropped as coming from an "unexpected source"
+//     (the CDP/pptr:evaluate context doesn't match the window Turnstile registered),
+//     so no clearance token is ever minted and the "Verify you are human" widget
+//     re-spawns forever. Swappa added Turnstile to its login page (it "worked
+//     before" under CDP); the only fix is a real, non-automated browser.
+export const NATIVE_LOGIN_PLATFORMS = new Set(['indeed', 'swappa', 'mercari']);
 const NATIVE_LOGIN_SUCCESS_URLS = {
   indeed: [
     'www.indeed.com/jobs',
   ],
+  // Login URL carries ?next=/my/swappa, so a completed login lands on the seller
+  // hub — a precise, logged-in-only marker the osascript tab poll can detect.
+  swappa: [
+    'swappa.com/my/swappa',
+  ],
+  // Login URL IS the auth-gated seller hub (mercari.com/mypage/listings/): an
+  // anonymous load bounces to the login page (with the Google button), and a
+  // completed login returns to /mypage — the same marker mercari's verifyUrl
+  // checks (connectedFinalUrlMustContain: 'mercari.com/mypage'). The Google-OAuth
+  // callback (mercari.com/account/googleauth) is explicitly rejected in
+  // isNativeLoginSuccess so the poll doesn't false-succeed mid-redirect.
+  mercari: [
+    'mercari.com/mypage',
+  ],
 };
+
+// Per-platform substrings that appear in the page <title> ONLY when logged OUT —
+// even though the URL still carries the success marker. Mercari serves its
+// login form INLINE at the auth-gated hub (HTTP 200, NO redirect to /login),
+// client-rendered over an SSR shell whose <title> is the generic marketing SEO
+// string. So a logged-out load of mercari.com/mypage/listings/ has the success
+// marker in the URL but this generic title — without this gate isNativeLoginSuccess
+// false-succeeds and the window is killed (NATIVE_LOGIN_COOKIE_FLUSH_MS) before
+// the user can sign in (the reported "keeps refreshing / can't complete human
+// verification" symptom). A real logged-in /mypage renders a "My Listings"-style
+// title, so this rejects the logged-out shell without blocking a real login.
+const NATIVE_LOGIN_LOGGED_OUT_TITLE_MARKERS = {
+  mercari: [
+    'go-to marketplace',          // "Your Go-to Marketplace for Deals on Used & Secondhand Items | Mercari"
+    'deals on used',
+    'log in to mercari',          // the inline form's own heading, if it reaches the title
+  ],
+};
+
+// True when a page <title> is one a platform serves ONLY when logged OUT at an
+// auth-gated URL that still carries the success/host marker (Mercari's inline,
+// client-rendered login form over a generic SSR shell). The SINGLE source of that
+// judgment, shared by both the native LOGIN success check (isNativeLoginSuccess)
+// and the native hub-READ login-state classifier (nativeChromeReader's
+// nativeReadLoginState) so the two can never drift. Empty/absent title → false (no
+// signal; never override the URL/host logic). PURE for tests.
+export function isLoggedOutTitleForPlatform(platformId, title) {
+  const t = String(title || '').toLowerCase();
+  if (!t) return false;
+  return (NATIVE_LOGIN_LOGGED_OUT_TITLE_MARKERS[platformId] || []).some(marker => t.includes(marker));
+}
 
 const activeAuthWindows = new Map();
 let lastAuthWindowDiagnostic = null;
+// Ring of COMPLETED login/captcha windows (most recent last). Unlike the single
+// `last` pointer and the main-log ring buffer (which scrolls a verbose login flow
+// out in seconds), this survives the session so a bug report can answer "I just
+// logged into X but it says logged out" — by showing whether X's login window
+// actually confirmed success (result=auto-detected) or never did (closed/timeout).
+const AUTH_HISTORY_CAP = 16;
+const authWindowHistory = [];
+
+/**
+ * Compact, render-safe record of one completed login window — the fields that
+ * discriminate "login confirmed" from "login never completed". PURE for tests.
+ */
+export function buildAuthAttemptRecord(diag = {}) {
+  return {
+    platformId: diag.platformId || null,
+    result: diag.result || null, // auto-detected | closed | timeout | launch-error | …
+    loginSignal: diag.loginSignal || diag.autoDetectedLoginSignal || null, // auth-cookie | dom | auth-gated-url | native-url
+    loginDetected: diag.loginDetected ?? (diag.result === 'auto-detected'),
+    mode: diag.mode || null, // puppeteer-visible | native-chrome
+    url: (String(diag.currentUrl || diag.loginUrl || '').replace(/`/g, "'").slice(0, 180)) || null,
+    finishedAt: diag.finishedAt || new Date().toISOString(),
+  };
+}
 
 function updateAuthWindowDiagnostic(platformId, patch = {}) {
   const previous = activeAuthWindows.get(platformId) || {};
@@ -92,6 +264,10 @@ function finishAuthWindowDiagnostic(platformId, patch = {}) {
     ...patch,
     finishedAt: new Date().toISOString(),
   });
+  authWindowHistory.push(buildAuthAttemptRecord(next));
+  if (authWindowHistory.length > AUTH_HISTORY_CAP) {
+    authWindowHistory.splice(0, authWindowHistory.length - AUTH_HISTORY_CAP);
+  }
   activeAuthWindows.delete(platformId);
   lastAuthWindowDiagnostic = next;
 }
@@ -100,10 +276,11 @@ export function getAuthWindowDiagnostics() {
   return {
     active: Array.from(activeAuthWindows.values()),
     last: lastAuthWindowDiagnostic,
+    history: authWindowHistory.slice(),
   };
 }
 
-async function findGoogleSafeChromePath(fallbackPath) {
+export async function findGoogleSafeChromePath(fallbackPath) {
   const candidates = process.platform === 'darwin'
     ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
     : process.platform === 'win32'
@@ -149,12 +326,26 @@ end tell`;
   }
 }
 
-function isNativeLoginSuccess(platformId, url, title = '') {
+// Domains whose native-Chrome tabs belong to this platform's login flow: the
+// platform's own site (from PLATFORM_COOKIE_DOMAINS) + Google (SSO delegation).
+// Used to pick the right tab out of the user's other open tabs during native login.
+function nativeLoginTabDomains(platformId) {
+  const own = (PLATFORM_COOKIE_DOMAINS[platformId] || []).map(d => d.replace(/^\./, ''));
+  return [...own, 'accounts.google.com'];
+}
+
+export function isNativeLoginSuccess(platformId, url, title = '') {
   const lower = String(url || '').toLowerCase();
   const titleLower = String(title || '').toLowerCase();
   if (/\/account\/googleauth\b/i.test(lower)) return false;
   if (!lower || /accounts\.google\.com|\/auth\b|\/login\b|\/signin\b|sign-in/i.test(lower)) return false;
   if (titleLower.includes('just a moment') || titleLower.includes('sign in')) return false;
+  // Reject the logged-out inline login form that some platforms (Mercari) serve
+  // AT the auth-gated success URL with HTTP 200 and no redirect: the URL marker
+  // matches but the <title> is the generic marketing/SEO string (or the login
+  // heading), not a logged-in page. Without this, clicking Login while logged
+  // out auto-"succeeds" and the window is killed before the user can sign in.
+  if (isLoggedOutTitleForPlatform(platformId, titleLower)) return false;
   return (NATIVE_LOGIN_SUCCESS_URLS[platformId] || []).some(marker => lower.includes(marker));
 }
 
@@ -173,11 +364,29 @@ export const PLATFORM_LOGIN_URLS = {
   // Marketplace — selling destinations
   ebay:          'https://signin.ebay.com/ws/eBayISAPI.dll?SignIn',
   facebook:      'https://www.facebook.com/login',
-  mercari:       'https://www.mercari.com/login/',
+  // Mercari is a NATIVE_LOGIN_PLATFORMS member (Google SSO loops under CDP). Open
+  // the auth-gated seller hub directly rather than /login/: logged out it bounces
+  // to the login page (Google button included) and returns here post-login, giving
+  // the precise mercari.com/mypage marker (NATIVE_LOGIN_SUCCESS_URLS.mercari);
+  // already logged in it lands straight on /mypage and auto-confirms immediately.
+  mercari:       'https://www.mercari.com/mypage/listings/',
   poshmark:      'https://poshmark.com/login',
   depop:         'https://www.depop.com/login/',
-  swappa:        'https://swappa.com/login',
+  // ?next=%2Fmy%2Fswappa so a completed login redirects to the seller hub — a precise
+  // logged-in marker for native auto-close (NATIVE_LOGIN_SUCCESS_URLS.swappa). The
+  // next path is URL-encoded to match how Swappa's own login flow emits it (seen in
+  // the CF redirect: /login?next=%2Fmy%2Fswappa). The post-login URL is decoded
+  // (/my/swappa), so the success marker is unaffected by this encoding.
+  swappa:        'https://swappa.com/login?next=%2Fmy%2Fswappa',
   reverb:        'https://reverb.com/login',
+  // AptDeco has NO server login route (/login, /signin, /users/sign_in all 404) —
+  // sign-in is a client-side modal. Open the create-listing page, which shows an
+  // "Already have an account? Sign in" entry to that modal AND is the verifyUrl,
+  // so it renders the logged-in seller form on success. The auto-close poller
+  // won't fire (this MinimalLayout page has no sign-out link in the DOM), so login
+  // is confirmed when the user closes the window → checkAndLogin re-runs
+  // verifySellMonitorLogin (its body-signal check is verified for both states).
+  aptdeco:       'https://www.aptdeco.com/sell/new',
   // Marketplace — pricing data only
   stockx:        'https://stockx.com/login',
 };
@@ -201,6 +410,11 @@ export const PLATFORM_AUTH_COOKIES = {
                                     // one. gdId / gdsid / cass / GSESSIONID appear in BOTH states, so they are NOT
                                     // login-only and would false-trip — do not add them here.
   reverb:      ['user_credentials'], // persistent signed credentials; `has_logged_in` is only historical and survives logout.
+  aptdeco:     ['token'],            // JWT session credential, set only when logged in (confirmed via cookieStore on a live
+                                     // logged-in session; NOT HttpOnly so the poller can read it). Deliberately NOT
+                                     // `aptdecofrontend` — that's a Rack/Rails server session that also exists for anonymous
+                                     // visitors, so it would false-trip. AptDeco's logged-in DOM is client-rendered, so this
+                                     // cookie is the ONLY render-safe login signal (the body-text sniff races the auth swap).
   // Others fall through to DOM signal — add here as we confirm them.
 };
 
@@ -235,8 +449,40 @@ export const PLATFORM_COOKIE_DOMAINS = {
   depop:         ['.depop.com'],
   swappa:        ['.swappa.com'],
   reverb:        ['.reverb.com'],
+  aptdeco:       ['.aptdeco.com'],
   stockx:        ['.stockx.com'],
 };
+
+// True if any of `names` is present in `cookies` with a non-empty, non-"0" value.
+// The single source of the "is this auth cookie set?" rule — shared by the
+// login-window auto-close poller and the cookie-first login verify. PURE for tests.
+export function cookieListHasAuth(cookies, names) {
+  const want = new Set(Array.isArray(names) ? names : []);
+  return (Array.isArray(cookies) ? cookies : []).some(c => want.has(c?.name) && c?.value && c.value !== '0');
+}
+
+// Read the live profile cookies and report whether this platform's configured
+// auth cookie (PLATFORM_AUTH_COOKIES) is set. Used as a render-safe PRIMARY login
+// signal for SPA platforms (AptDeco) whose logged-in DOM is client-rendered, so a
+// body-text verify races the client auth swap. Returns false on any error — never
+// a false "logged in".
+export async function hasPlatformAuthCookie(platformId) {
+  const names = PLATFORM_AUTH_COOKIES[platformId];
+  const domains = PLATFORM_COOKIE_DOMAINS[platformId];
+  if (!names?.length || !domains?.length) return false;
+  let page;
+  try {
+    const browser = await getStealthBrowser();
+    page = await browser.newPage();
+    const urls = domains.map(d => `https://${d.replace(/^\./, '')}`);
+    const cookies = await page.cookies(...urls);
+    return cookieListHasAuth(cookies, names);
+  } catch {
+    return false;
+  } finally {
+    if (page) await page.close().catch(() => {});
+  }
+}
 
 /**
  * Close a visible login browser robustly. Two failure modes this guards against,
@@ -399,11 +645,10 @@ export async function openLoginWindow(platformId, sender = null) {
     let autoCloseTimeout = null;
 
     // ── Auto-close polling ──────────────────────────────────────────────────
-    // After every ~0.5s, check whether the page looks "logged in." Two
-    // signals must both match to trigger auto-close (false-positive guard):
-    //   1. URL is no longer on a login/signin/auth path
-    //   2. Page DOM contains a sign-out / logout link (universal indicator
-    //      that the user is past authentication)
+    // After every ~0.5s, check whether the page looks "logged in." Challenge
+    // URLs/DOM and plain login URLs keep the window open. Auth-gated URLs,
+    // trusted auth cookies, or sign-out/logout DOM can auto-close after those
+    // guards pass.
     //
     // Catches both fresh logins (user types creds → site redirects → poll
     // sees the new URL + sign-out link) AND "already logged in" cases where
@@ -411,7 +656,6 @@ export async function openLoginWindow(platformId, sender = null) {
     //
     // Capped at 5 minutes so a tab the user walked away from doesn't poll
     // forever. User-initiated close still works the same way it always did.
-    const LOGIN_URL_PATTERN = /\/(signin|sign-in|login|log-in|authenticate|auth(?!or))/i;
     const AUTO_CLOSE_AFTER_MS = AUTH_WINDOW_AUTO_CLOSE_MS;
     const POLL_INTERVAL_MS = LOGIN_POLL_INTERVAL_MS;
 
@@ -423,6 +667,17 @@ export async function openLoginWindow(platformId, sender = null) {
     // Set by any auto-detection path — carried through cleanup() → resolve()
     // so the caller can skip the HTTP re-verify when we already confirmed login.
     let autoDetectedLoginUrl = null;
+    let autoDetectedLoginSignal = null;
+    let loginBrowserCloseRequested = false;
+    let loginBrowserClosePromise = null;
+
+    const requestLoginBrowserClose = async () => {
+      loginBrowserCloseRequested = true;
+      if (!loginBrowserClosePromise) {
+        loginBrowserClosePromise = closeLoginBrowserSafely(loginBrowser, platformId);
+      }
+      await loginBrowserClosePromise;
+    };
 
     autoClosePoll = setInterval(async () => {
       if (isTerminated) return;
@@ -449,21 +704,30 @@ export async function openLoginWindow(platformId, sender = null) {
         const expectedCookies = PLATFORM_AUTH_COOKIES[platformId];
         if (expectedCookies?.length) {
           try {
-            const cookies = await page.cookies();
-            cookieSignal = cookies.some(c =>
-              expectedCookies.includes(c.name) && c.value && c.value !== '0'
-            );
+            cookieSignal = cookieListHasAuth(await page.cookies(), expectedCookies);
           } catch { /* page may be navigating */ }
         }
 
-        // Challenge interstitials (captcha / 2FA / checkpoint / signup) stay a HARD block
-        // even when a session cookie is present — the full-session cookie can be written
-        // before the challenge is actually cleared, so closing here would be premature.
-        if (isAuthChallengeUrl(currentUrl)) return;
-        // Still on a plain login form with no session cookie yet — keep waiting. A
-        // definitive auth cookie overrides this so suppressed-redirect SPAs (Glassdoor)
-        // can still auto-close instead of looping on the re-rendered login form.
-        if (LOGIN_URL_PATTERN.test(currentUrl) && !cookieSignal) return;
+        const challengeDomSignal = await detectAuthChallengeDomSignal(page);
+        const waitReason = getLoginAutoCloseWaitReason({
+          platformId,
+          currentUrl,
+          cookieSignal,
+          challengeDomSignal,
+        });
+        if (waitReason) {
+          const now = Date.now();
+          if (now - lastHeartbeatLog > AUTH_HEARTBEAT_LOG_MS) {
+            lastHeartbeatLog = now;
+            const cookieNote = cookieSignal
+              ? `auth cookie present, but ${waitReason === 'login-url-cookie-not-trusted' ? 'this platform must leave the login page before auto-close' : 'a challenge/login guard is still active'}`
+              : expectedCookies?.length
+                ? `expected cookies ${expectedCookies.join(',')} not set`
+                : 'no auth-cookie config; DOM scrape only';
+            logger.info(`[StealthBrowser] ${platformId} auto-close waiting: URL ${currentUrl} — ${waitReason}; ${cookieNote}`);
+          }
+          return;
+        }
 
         if (lastNonLoginUrl !== currentUrl) {
           if (!lastNonLoginUrl) logger.info(`[StealthBrowser] ${platformId} URL transitioned past login: ${currentUrl}`);
@@ -479,9 +743,10 @@ export async function openLoginWindow(platformId, sender = null) {
         if (authGatedPath && currentUrl.includes(authGatedPath)) {
           logger.info(`[StealthBrowser] Auto-detected logged-in state for ${platformId} via auth-gated URL ${currentUrl} — closing window`);
           autoDetectedLoginUrl = currentUrl;
+          autoDetectedLoginSignal = 'auth-gated-url';
           if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
           if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
-          await closeLoginBrowserSafely(loginBrowser, platformId);
+          await requestLoginBrowserClose();
           return;
         }
 
@@ -507,12 +772,13 @@ export async function openLoginWindow(platformId, sender = null) {
           const via = cookieSignal ? 'auth cookie' : 'DOM signal';
           logger.info(`[StealthBrowser] Auto-detected logged-in state for ${platformId} via ${via} at ${currentUrl} — closing window`);
           autoDetectedLoginUrl = currentUrl;
+          autoDetectedLoginSignal = cookieSignal ? 'auth-cookie' : 'dom';
           if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
           if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
           // Programmatic close fires the 'disconnected' event → cleanup
           // below → resolves the promise → caller's verify runs and the
           // cache + Settings pill update with the success result.
-          await closeLoginBrowserSafely(loginBrowser, platformId);
+          await requestLoginBrowserClose();
           return;
         }
 
@@ -543,11 +809,12 @@ export async function openLoginWindow(platformId, sender = null) {
     loginBrowser.on('targetdestroyed', async (target) => {
       if (isTerminated) return;
       if (target.type?.() !== 'page') return;
+      if (loginBrowserCloseRequested) return;
       try {
         const remaining = await loginBrowser.pages();
         if (remaining.length === 0) {
           logger.info(`[StealthBrowser] ${platformId} last page closed by user — closing browser`);
-          await closeLoginBrowserSafely(loginBrowser, platformId);
+          await requestLoginBrowserClose();
         }
       } catch { /* browser may already be tearing down */ }
     });
@@ -559,7 +826,7 @@ export async function openLoginWindow(platformId, sender = null) {
       if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
       if (sender) sender.removeListener('destroyed', cleanup);
       try {
-        await closeLoginBrowserSafely(loginBrowser, platformId);
+        await requestLoginBrowserClose();
       } catch { /* ignored */ }
       // Chrome's `disconnected` event fires when the CDP WebSocket drops, but
       // SQLite cookie writes may still be in flight. Without this pause the verify
@@ -569,8 +836,16 @@ export async function openLoginWindow(platformId, sender = null) {
       // for Chrome's cookie flush on the slowest test machines while still feeling
       // instantaneous to the user.
       await new Promise(r => setTimeout(r, 800));
-      finishAuthWindowDiagnostic(platformId, { result: 'closed' });
-      resolve({ success: true, platform: platformId, closedByApp: sender?.isDestroyed?.(), loginDetected: !!autoDetectedLoginUrl, loginUrl: autoDetectedLoginUrl });
+      // Record whether THIS window confirmed login (cookie/DOM/auth-gated URL) vs
+      // just closed without detection — the discriminator for "I logged in but it
+      // says logged out" in the bug report's login-attempt history.
+      finishAuthWindowDiagnostic(platformId, {
+        result: autoDetectedLoginUrl ? 'auto-detected' : 'closed',
+        loginDetected: !!autoDetectedLoginUrl,
+        loginSignal: autoDetectedLoginSignal,
+        currentUrl: autoDetectedLoginUrl || undefined,
+      });
+      resolve({ success: true, platform: platformId, closedByApp: sender?.isDestroyed?.(), loginDetected: !!autoDetectedLoginUrl, loginUrl: autoDetectedLoginUrl, loginSignal: autoDetectedLoginSignal });
     };
 
     if (sender) {
@@ -664,11 +939,14 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
     poll = setInterval(async () => {
       if (settled) return;
       const tabs = await getNativeChromeTabs();
-      const matchingTab = tabs.find(t =>
-        String(t.url || '').includes('indeed.com') ||
-        String(t.url || '').includes('accounts.google.com') ||
-        String(t.title || '').toLowerCase().includes('indeed')
-      ) || tabs[0];
+      // Match the tab for THIS platform's flow by domain — the platform's own
+      // site plus Google (flows that delegate to Google SSO). Was hardcoded to
+      // indeed/google; derived now so each native platform (swappa, …) finds its tab.
+      const domains = nativeLoginTabDomains(platformId);
+      const matchingTab = tabs.find(t => {
+        const u = String(t.url || '').toLowerCase();
+        return domains.some(d => u.includes(d));
+      }) || tabs[0];
 
       if (!matchingTab) return;
       updateAuthWindowDiagnostic(platformId, {

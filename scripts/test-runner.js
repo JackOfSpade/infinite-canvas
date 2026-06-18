@@ -36,7 +36,7 @@ import {
 import { detectAntiBotSignal, matchesNoResultsSentinel } from '../electron/ipc/antiBotDetector.js';
 import { getStats } from '../src/utils/dashboardStats.js';
 import { resolveNodePresence } from '../src/utils/nodePresence.js';
-import { ALL_COMP_SOURCE_IDS, CANVAS_ZOOM_LIMITS, getNodeDims, getNodesBounds, SELL_PLATFORMS } from '../src/utils/constants.js';
+import { ALL_COMP_SOURCE_IDS, CANVAS_ZOOM_LIMITS, getNodeDims, getNodesBounds, SELL_PLATFORMS, SELL_PLATFORM_BY_ID } from '../src/utils/constants.js';
 import { listingUrlMatchesPlatform, isFacebookShareUrl } from '../src/utils/platformUrlMatch.js';
 import { mergeSourceIntoComps, retryWarningRequiringAction, updateResolvedSourceWarning } from '../src/utils/compsMerge.js';
 import { mergeResolvedSourceItems } from '../src/utils/jobSourceResolveMerge.js';
@@ -61,8 +61,8 @@ import {
   COL_X,
 } from '../src/nodes/jobsearch/buildJobTree.js';
 import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature } from '../src/nodes/jobboard/mergeJobs.js';
-import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, selectReverbPriceGuides, reverbTransactionsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription } from '../electron/extractors/apiExtractors.js';
-import { isPriceChartingApplicable } from '../src/utils/compSourceScope.js';
+import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, selectReverbPriceGuides, reverbTransactionsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, parseAptDecoComps, extractAlgoliaHits } from '../electron/extractors/apiExtractors.js';
+import { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
 import {
   fingerprint,
@@ -77,21 +77,20 @@ import {
 import {
   calculatePriceDropSuggestion,
   createdAtMsFromCardId,
-  effectivePriceDropTargetPercent,
   isPriceDropReminderDue,
   MS_PER_WEEK,
   normalizePriceDropMustSellDate,
   normalizePriceDropReminderWeeks,
   normalizePriceDropStartingPrice,
   normalizePriceDropStartingTier,
-  normalizePriceDropTargetPercent,
+  normalizePriceDropTargetPrice,
   oldestPriceDropCardCreatedAtIso,
   priceDropDeadlineReminderDelayMs,
   priceDropStartingPrice,
   priceDropReminderDelayMs,
-  priceDropReminderCountBeforeMustSell,
+  priceDropReminderCountThroughMustSell,
   priceDropMustSellDateMs,
-  priceDropTargetPrice,
+  priceDropMustSellDayEndMs,
   resolvePriceDropStartingTier,
 } from '../src/utils/priceDropReminder.js';
 import { matchesQuery } from '../src/utils/searchMatch.js';
@@ -148,16 +147,29 @@ import {
 import { resolvePortableFilePaths, resolvePortableImagePath } from '../electron/ipc/filesystem.js';
 import { decodeLocalFileRequestPath } from '../electron/localFileProtocol.js';
 import { getBrowserPoolQueueState, pauseBrowserPool, queueScrape } from '../electron/ipc/browserPool.js';
-import { getSoftLoginWallMatch, getStatusCacheSync, isConfirmedDisconnectedVerdict, writeStatusCache } from '../electron/ipc/accounts.js';
+import { getSoftLoginWallMatch, getStatusCacheSync, isConfirmedDisconnectedVerdict, writeStatusCache, selectRestorableStatuses } from '../electron/ipc/accounts.js';
 import { getSellMonitorConfig } from '../electron/ipc/stealthBrowser.js';
 import os from 'node:os';
 import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, computeResumeStartPage, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
 import { dedupAgainstHistory, filterHistoryForResume } from '../electron/ipc/jobsHistory.js';
-import { modelTag, overPricedSoldFlag } from '../electron/ipc/bugReport/helpers.js';
+import { modelTag, overPricedSoldFlag, renderSessionTraceBlocks } from '../electron/ipc/bugReport/helpers.js';
 import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
 import { classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
 import { aggregateStrongest, classifyOneUrl, deriveHubScanStatus, deterministicListingStatusFromText, goneListingResult, resolveAttentionSourceUrls, scanSellerHubPages, annotateReadState, summarizeReadState, stripHtmlForAnalysis, stripReadStateTokens, READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN } from '../electron/ipc/listingStatusCheck.js';
-import { isAuthChallengeUrl, PLATFORM_AUTH_COOKIES, PLATFORM_LOGIN_URLS, unwrapInlineExtractorItems } from '../electron/ipc/browser/authWindows.js';
+import {
+  canAuthCookieBypassLoginUrl,
+  getLoginAutoCloseWaitReason,
+  isAuthChallengeUrl,
+  isPostLoginInterstitialUrl,
+  PLATFORM_AUTH_COOKIES,
+  PLATFORM_LOGIN_URLS,
+  cookieListHasAuth,
+  isNativeLoginSuccess,
+  isLoggedOutTitleForPlatform,
+  NATIVE_LOGIN_PLATFORMS,
+  unwrapInlineExtractorItems,
+  buildAuthAttemptRecord,
+} from '../electron/ipc/browser/authWindows.js';
 import { PRICE_SYNTHESIS_SCHEMA } from '../electron/ipc/aiSchemas.js';
 import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation } from '../src/utils/jobLocation.js';
 import { detectLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
@@ -173,6 +185,16 @@ import { getMarketplaceHubStatusLabel } from '../src/components/monitorStatusLab
 import { appendPhotoFiles, appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../src/utils/photoPathList.js';
 import { filesToDropPayloads, filesToProductImagePaths, getLocalFilePath, summarizeFileExtensions } from '../src/utils/fileDropUtils.js';
 import { buildMarketplaceModuleRollup } from '../electron/ipc/bugReport/marketplaceModuleRollup.js';
+import {
+  NATIVE_READ_PLATFORMS,
+  shouldUseNativeRead,
+  isAppleEventsJsDisabledError,
+  nativeReadLooksChallenged,
+  nativeReadLooksLoggedOut,
+  parseNativeReadOutput,
+  nativeReadToFetchResult,
+  nativeReadLoginState,
+} from '../electron/ipc/browser/nativeChromeReader.js';
 import { shouldUseNativeTextUndo } from '../src/utils/nativeTextUndo.js';
 import { matchesRedoShortcut } from '../src/utils/keyboardShortcuts.js';
 import { syncUncontrolledTextValue } from '../src/utils/uncontrolledTextValue.js';
@@ -500,6 +522,33 @@ const tests = [
       assert(/read \*\*ok\*\* but had a hub URL \*\*blocked\*\*/.test(maskedMd), 'a logged-out sibling watch URL surfaces a blocked tally even when the platform reads ok');
       assert(!/Every checked platform read its hub cleanly/.test(maskedMd), 'the all-clear line is withheld when a watch URL was blocked');
       assert(/\| mercari \| ok \|.*\| 2 \(0\/1\) \|/.test(maskedMd), 'the Sources column shows total (err/blk) with the blocked count');
+      // Blocked-source REASON detail: a platform that reads `unknown` with every
+      // hub source blocked (Swappa Cloudflare wall, Mercari client-rendered shell)
+      // must surface WHY per source — the count column + "Could not read…" summary
+      // alone can't tell anti-bot (retry) from logout (re-login). Identical
+      // reasons are deduped with a ×N tally.
+      const blockedMd = buildMarketplaceModuleRollup([{
+        id: 'mod-3', type: 'marketplacestatus',
+        data: { platformStatus: {
+          swappa: { status: 'unknown', summary: 'Could not read this platform’s hub pages.', attention: [],
+            sources: [
+              { url: 'https://swappa.com/account/listings', status: 'unknown', message: 'Anti-bot challenge (HTTP 403 → cf wall); session is still logged in. Retry later.' },
+              { url: 'https://swappa.com/inbox', status: 'unknown', message: 'Anti-bot challenge (HTTP 403 → cf wall); session is still logged in. Retry later.' },
+            ],
+            lastChecked: new Date().toISOString() },
+          mercari: { status: 'unknown', summary: 'Could not read this platform’s hub pages.', attention: [],
+            sources: [
+              { url: 'https://www.mercari.com/mypage/listings/active/', status: 'unknown', message: 'Empty or near-empty response (412 bytes).' },
+            ],
+            lastChecked: new Date().toISOString() },
+        } },
+      }]);
+      assert(/Blocked \/ unreadable hub sources/.test(blockedMd), 'renders a blocked-source reason section when a hub source is non-ok');
+      assert(/Anti-bot challenge.*session is still logged in/.test(blockedMd), 'surfaces the Cloudflare/anti-bot block reason (retry, not logout)');
+      assert(/`unknown` ×2/.test(blockedMd), 'identical block reasons are deduped with a ×N tally');
+      assert(/Empty or near-empty response/.test(blockedMd), 'surfaces the empty client-rendered shell reason distinctly from the anti-bot one');
+      // A fully-clean platform (all sources ok) must NOT appear in the blocked section.
+      assert(!/Blocked \/ unreadable hub sources/.test(md), 'no blocked section when every source read ok');
       // No marketplacestatus node → empty (unchanged behavior).
       assert(buildMarketplaceModuleRollup([{ id: 'x', type: 'sellhub', data: {} }]) === '', 'no module node → empty string');
       return { ok: true };
@@ -1369,20 +1418,50 @@ const tests = [
       'reminder scheduling: a late acknowledgment does not drift interval-only reminders');
       assert(priceDropReminderDelayMs({ scheduleStartedAtIso: 'bad', weeks: 2, nowMs: now }) === null,
         'reminder scheduling: invalid shared start is unschedulable');
+      assert(priceDropReminderDelayMs({
+        scheduleStartedAtIso: new Date(now).toISOString(),
+        cardCreatedAtIso: new Date(now).toISOString(),
+        weeks: 0.5,
+        nowMs: now,
+      }) === 0.5 * MS_PER_WEEK,
+      'reminder scheduling: a newly created oldest listing starts at its selected price and waits a full interval');
+      // A card spawned mid-schedule (no ack) must NOT fire for grid points that
+      // elapsed before it existed — it joins at the next shared grid point.
+      assert(priceDropReminderDelayMs({
+        scheduleStartedAtIso: anchor,                     // oldest card: 2 weeks ago
+        cardCreatedAtIso: new Date(now).toISOString(),    // this card: just spawned
+        weeks: 2,
+        nowMs: now,
+      }) === 2 * MS_PER_WEEK,
+      'reminder scheduling: a card spawned mid-schedule joins the next shared grid point, not the elapsed one');
+      assert(priceDropReminderDelayMs({ scheduleStartedAtIso: anchor, weeks: 2, nowMs: now }) === 0
+        && priceDropReminderDelayMs({
+          scheduleStartedAtIso: anchor,
+          cardCreatedAtIso: anchor,                        // oldest card itself
+          weeks: 2,
+          nowMs: now,
+        }) === 0,
+      'reminder scheduling: the oldest card (created at the shared start) still fires on its own cadence');
+      assert(priceDropReminderDelayMs({
+        scheduleStartedAtIso: anchor,
+        cardCreatedAtIso: new Date(now + MS_PER_WEEK).toISOString(), // corrupt/skewed future
+        weeks: 2,
+        nowMs: now,
+      }) === 0,
+      'reminder scheduling: a future card creation time is ignored, not used to defer reminders');
 
       // ── Must-sell plan: strict editor normalization + a linear schedule whose
-      // final reminder strictly before the date reaches <=10% of the start.
+      // final reminder ON OR BEFORE the date reaches the exact target price.
       assert(normalizePriceDropMustSellDate('2028-02-29') === '2028-02-29', 'reminder plan: valid leap date accepted');
       assert(normalizePriceDropMustSellDate('2027-02-29') === '', 'reminder plan: impossible calendar date rejected');
       assert(normalizePriceDropMustSellDate('06/15/2026') === '', 'reminder plan: non-date-input format rejected');
       assert(Number.isFinite(priceDropMustSellDateMs('2028-02-29')), 'reminder plan: valid date resolves to local midnight');
-      assert(normalizePriceDropTargetPercent('8.505') === 8.51, 'reminder plan: target percentage rounds to two decimals');
-      assert(normalizePriceDropTargetPercent('10 percent') === null, 'reminder plan: malformed target percentage rejected');
-      assert(normalizePriceDropTargetPercent(-1) === null && normalizePriceDropTargetPercent(10.01) === null,
-        'reminder plan: target percentage is constrained to 0–10%');
-      assert(effectivePriceDropTargetPercent(undefined) === 10, 'reminder plan: absent target defaults to 10%');
-      assert(priceDropTargetPrice(19.99, 10) === 1.99,
-        'reminder plan: deadline target floors cents so rounding cannot exceed 10%');
+      assert(priceDropMustSellDayEndMs('2026-01-29') === new Date(2026, 0, 30).getTime(),
+        'reminder plan: day-end cutoff is the start of the day after the must-sell date');
+      assert(normalizePriceDropTargetPrice('42.50') === 42.5 && normalizePriceDropTargetPrice('19.99') === 19.99,
+        'reminder plan: target price accepts positive currency');
+      assert(normalizePriceDropTargetPrice('0') === null && normalizePriceDropTargetPrice(-5) === null && normalizePriceDropTargetPrice('abc') === null,
+        'reminder plan: non-positive or malformed target price is rejected');
       assert(normalizePriceDropStartingTier('quick') === 'quick' && normalizePriceDropStartingTier('other') === 'best',
         'reminder plan: starting tier is constrained with Best as default');
       assert(normalizePriceDropStartingPrice('42.50') === 42.5 && normalizePriceDropStartingPrice(0) === null,
@@ -1397,13 +1476,13 @@ const tests = [
       const scheduleStartIso = new Date(scheduleStartMs).toISOString();
       const scheduleArgs = {
         startingPrice: 100,
-        targetPercent: 10,
+        targetPrice: 10,
         scheduleStartedAtIso: scheduleStartIso,
         mustSellDate: '2026-01-29',
         weeks: 1,
       };
-      assert(priceDropReminderCountBeforeMustSell(scheduleArgs) === 3,
-        'reminder plan: exact fourth-interval deadline excludes the reminder on the must-sell date');
+      assert(priceDropReminderCountThroughMustSell(scheduleArgs) === 4,
+        'reminder plan: a cadence reminder landing on the must-sell day counts as the final reminder');
       assert(priceDropDeadlineReminderDelayMs({
         ...scheduleArgs,
         nowMs: scheduleStartMs,
@@ -1416,49 +1495,62 @@ const tests = [
       'reminder plan: a late acknowledgment does not drift the next fixed trigger');
       assert(priceDropDeadlineReminderDelayMs({
         ...scheduleArgs,
-        lastAcknowledgedAtIso: new Date(scheduleStartMs + 3 * MS_PER_WEEK).toISOString(),
-        nowMs: scheduleStartMs + 3 * MS_PER_WEEK,
-      }) === null, 'reminder plan: after the final prior reminder, none is scheduled on the must-sell date');
+        nowMs: scheduleStartMs + 4 * MS_PER_WEEK,
+      }) === 0, 'reminder plan: an unacked reminder landing on the must-sell day still fires (on-the-day reduction)');
       assert(priceDropDeadlineReminderDelayMs({
         ...scheduleArgs,
+        lastAcknowledgedAtIso: new Date(scheduleStartMs + 4 * MS_PER_WEEK).toISOString(),
         nowMs: scheduleStartMs + 4 * MS_PER_WEEK,
-      }) === null, 'reminder plan: reopening on the must-sell date does not trigger an overdue prior reminder');
+      }) === null, 'reminder plan: after acknowledging the final on-day reminder, none is scheduled');
       assert(priceDropDeadlineReminderDelayMs({
         ...scheduleArgs,
         nowMs: scheduleStartMs + 5 * MS_PER_WEEK,
-      }) === null, 'reminder plan: reopening after the must-sell date does not trigger an overdue prior reminder');
-      assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + MS_PER_WEEK }) === 70,
-        'reminder plan: first of three prior reminders takes one linear step');
-      assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + 2 * MS_PER_WEEK }) === 40,
+      }) === null, 'reminder plan: reopening after the must-sell day does not trigger an overdue reminder');
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + MS_PER_WEEK }) === 77.5,
+        'reminder plan: first of four reminders takes one linear step');
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + 2 * MS_PER_WEEK }) === 55,
         'reminder plan: second reminder takes the next linear step');
-      assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + 3 * MS_PER_WEEK }) === 10,
-        'reminder plan: final reminder before an exact deadline reaches 10%');
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + 3 * MS_PER_WEEK }) === 32.5,
+        'reminder plan: third reminder takes the next linear step');
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + 4 * MS_PER_WEEK }) === 10,
+        'reminder plan: the final on-day reminder reaches the exact target');
       assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + 10 * MS_PER_WEEK }) === 10,
         'reminder plan: overdue reminder catches up without dropping below target');
-      assert(priceDropReminderCountBeforeMustSell({ ...scheduleArgs, mustSellDate: '2026-01-22' }) === 2,
-        'reminder plan: a reminder exactly on an earlier must-sell date is excluded');
-      assert(priceDropReminderCountBeforeMustSell({ ...scheduleArgs, mustSellDate: '2026-01-08' }) === 0,
-        'reminder plan: a deadline at the first cadence has no valid prior reminder');
+      assert(priceDropReminderCountThroughMustSell({ ...scheduleArgs, mustSellDate: '2026-01-22' }) === 3,
+        'reminder plan: an earlier must-sell day includes its own on-day reminder');
+      assert(priceDropReminderCountThroughMustSell({ ...scheduleArgs, mustSellDate: '2026-01-08' }) === 1,
+        'reminder plan: a deadline on the first cadence keeps that single on-day reminder');
+      assert(priceDropReminderCountThroughMustSell({ ...scheduleArgs, mustSellDate: '2026-01-06' }) === 0,
+        'reminder plan: a deadline before the first cadence reminder fits none');
       assert(calculatePriceDropSuggestion({
         ...scheduleArgs,
         mustSellDate: '2026-01-08',
         nowMs: scheduleStartMs + MS_PER_WEEK,
-      }) === null, 'reminder plan: infeasible deadline does not falsely claim the target can be guaranteed');
+      }) === 10, 'reminder plan: a single on-day reminder reaches the target in one step');
+      assert(calculatePriceDropSuggestion({
+        ...scheduleArgs,
+        mustSellDate: '2026-01-06',
+        nowMs: scheduleStartMs + MS_PER_WEEK,
+      }) === null, 'reminder plan: infeasible deadline does not falsely claim the target can be reached');
       assert(calculatePriceDropSuggestion({ ...scheduleArgs, mustSellDate: '', nowMs: now }) === null,
         'reminder plan: optional missing must-sell date disables suggestions');
-      for (const startingPrice of [0.01, 19.99, 55, 181, 9999.99]) {
-        for (const targetPercent of [0, 1, 8.5, 10]) {
-          const targetPrice = priceDropTargetPrice(startingPrice, targetPercent);
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, targetPrice: undefined, nowMs: scheduleStartMs + 3 * MS_PER_WEEK }) === null,
+        'reminder plan: no target price → no suggested price (generic reminders only)');
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, targetPrice: 100, nowMs: scheduleStartMs + 3 * MS_PER_WEEK }) === null
+        && calculatePriceDropSuggestion({ ...scheduleArgs, targetPrice: 150, nowMs: scheduleStartMs + 3 * MS_PER_WEEK }) === null,
+        'reminder plan: a target at or above the starting price is not a valid drop');
+      for (const startingPrice of [19.99, 55, 181, 9999.99]) {
+        for (const fraction of [0.01, 0.25, 0.5, 0.9]) {
+          const targetPrice = Math.floor(startingPrice * fraction * 100) / 100;
+          if (!(targetPrice > 0 && targetPrice < startingPrice)) continue;
           const finalSuggestion = calculatePriceDropSuggestion({
             ...scheduleArgs,
             startingPrice,
-            targetPercent,
-            nowMs: scheduleStartMs + 3 * MS_PER_WEEK,
+            targetPrice,
+            nowMs: scheduleStartMs + 4 * MS_PER_WEEK,
           });
           assert(finalSuggestion === targetPrice,
-            `reminder plan: final prior reminder reaches exact floored target (${startingPrice}, ${targetPercent}%)`);
-          assert(finalSuggestion <= startingPrice * 0.1,
-            `reminder plan: allowed target never exceeds 10% of start (${startingPrice} → ${finalSuggestion})`);
+            `reminder plan: final reminder reaches the exact target (${startingPrice} → ${targetPrice})`);
         }
       }
 
@@ -2080,6 +2172,12 @@ const tests = [
       const imagePreview = applyBugReportCode([...logs, '[local-file] Relinked missing preview image within current hierarchy'], {}, 'PREVIEW');
       assert(imagePreview.filteredLogs.some(line => line.includes('Relinked missing preview')) && imagePreview.matchedCodes.includes('PREVIEW'),
         'Bug report code filtering: PREVIEW should retain broken-preview and relink diagnostics');
+      const form = applyBugReportCode([...logs, '[Focus] date "Must sell by" node=8e27f3ce'], {}, 'FORM');
+      assert(form.filteredLogs.some(line => line.includes('[Focus]')) && form.matchedCodes.includes('FORM'),
+        'Bug report code filtering: FORM should retain form-field focus events');
+      const render = applyBugReportCode([...logs, '[RenderStorm] sellhub 8e27f3ce: 24 renders in 1000ms'], {}, 'RENDER');
+      assert(render.filteredLogs.some(line => line.includes('[RenderStorm]')) && render.matchedCodes.includes('RENDER'),
+        'Bug report code filtering: RENDER should retain render-storm diagnostics');
       const preview = previewBugReportCode(logs, 'ERR+NOPE');
       assert(preview.unknownCodes.includes('NOPE') && preview.valid, 'Bug report code filtering: preview should report unknown codes while keeping valid matches');
 
@@ -3124,6 +3222,247 @@ const tests = [
     },
   },
   {
+    name: 'parseAptDecoComps extracts embedded Algolia records (active asking prices)',
+    run: () => {
+      // AptDeco's /catalog?q= SSR HTML embeds the first Algolia results page as a
+      // literal `"hits":[ … ]` JSON array. We parse those records directly (no
+      // browser). Each record's `price` is the CURRENT ask (the comp value);
+      // `original_price` is retail context and must NOT be used as the price.
+      const rec = (o) => JSON.stringify({
+        is_available: true, is_saleable: true, condition_title: 'Good',
+        ...o,
+      });
+      const html =
+        '<html><body><script>self.__next_f.push([1,' +
+        '{"results":[{"nbHits":1702,"hits":[' +
+        rec({ title: 'IKEA Light Brown Fabric Sleeper Sofa', price: 250, original_price: 400, page_url: 'ikea-light-brown-fabric-sleeper-sofa-1' }) + ',' +
+        // Bracket inside a string value → must NOT unbalance the array scanner.
+        rec({ title: 'Mid-Century [Floor Model] Sofa', price: 480, original_price: 1200, page_url: 'mid-century-floor-model-sofa', condition_title: 'Excellent' }) + ',' +
+        rec({ title: 'Sold Already Sofa', price: 99, page_url: 'sold-already-sofa', is_available: false }) + ',' +       // unavailable → skip
+        rec({ title: 'Not Saleable Sofa', price: 75, page_url: 'not-saleable-sofa', is_saleable: false }) + ',' +        // not saleable → skip
+        rec({ title: 'Zero Price Sofa', price: 0, page_url: 'zero-price-sofa' }) + ',' +                                  // price 0 → skip
+        rec({ title: 'Dup Sofa', price: 250, page_url: 'ikea-light-brown-fabric-sleeper-sofa-1' }) +                      // dup url → dedup
+        ']}]}' +
+        '])</script></body></html>';
+      const comps = parseAptDecoComps(html);
+      assert(comps.length === 2, `expected 2 comps (unavailable/not-saleable/zero/dup excluded), got ${comps.length}: ${comps.map(c => c.title).join(' | ')}`);
+      // Current ask, NOT original_price.
+      assert(comps[0].price === 250 && comps[0].priceText === '$250.00', `current ask not retail → ${JSON.stringify(comps[0])}`);
+      assert(comps[0].url === 'https://www.aptdeco.com/product/ikea-light-brown-fabric-sleeper-sofa-1', `absolute product url → ${comps[0].url}`);
+      assert(comps[0].source === 'aptdeco-active', `source tag → ${comps[0].source}`);
+      assert(comps[0].condition === 'Good', `condition mapped → ${comps[0].condition}`);
+      // String-aware scanner: a record AFTER the bracketed-title one is still parsed.
+      assert(comps[1].title === 'Mid-Century [Floor Model] Sofa' && comps[1].price === 480, `bracket-in-string title parsed → ${JSON.stringify(comps[1])}`);
+      // No hits / malformed / empty → [] (no throw — a restructured page yields no comps).
+      assert(parseAptDecoComps('<html><body>no algolia here</body></html>').length === 0, 'no hits marker → 0 comps');
+      assert(parseAptDecoComps('').length === 0, 'empty string → 0 comps');
+      assert(extractAlgoliaHits('"hits":[ {"broken": ').length === 0, 'unterminated array → []');
+      assert(extractAlgoliaHits('"hits":[]').length === 0, 'empty hits array → []');
+      return { ok: true, prices: comps.map(c => c.price) };
+    },
+  },
+  {
+    name: 'isAptDecoApplicable gates AptDeco to furniture / home furnishings',
+    run: () => {
+      // Furniture / home furnishings → run AptDeco.
+      assert(isAptDecoApplicable('Furniture > Sofas > Sectional') === true, 'sofa → applicable');
+      assert(isAptDecoApplicable('Furniture > Tables > Dining Table') === true, 'dining table → applicable');
+      assert(isAptDecoApplicable('Home & Office > Desks') === true, 'desk → applicable');
+      assert(isAptDecoApplicable('Home Decor > Rugs') === true, 'rug → applicable');
+      assert(isAptDecoApplicable('Lighting > Floor Lamp') === true, 'lamp → applicable');
+      assert(isAptDecoApplicable('Bedroom > Dresser') === true, 'dresser → applicable');
+      // Off-category → skip (the spurious-fuzzy-match cases observed live).
+      assert(isAptDecoApplicable('Electronics > Phones > Smartphone') === false, 'iphone → not applicable');
+      assert(isAptDecoApplicable('Clothing & Shoes > Sneakers') === false, 'sneakers → not applicable');
+      assert(isAptDecoApplicable('Video Games > Consoles') === false, 'console → not applicable');
+      assert(isAptDecoApplicable('Home & Garden > Vacuums') === false, 'vacuum → not applicable');
+      assert(isAptDecoApplicable('Musical Instruments > Guitars') === false, 'guitar → not applicable');
+      // Unknown/blank → don't suppress (back-compat; Algolia returns [] + ranker guards).
+      assert(isAptDecoApplicable('') === true, 'blank category → applicable');
+      assert(isAptDecoApplicable(undefined) === true, 'undefined category → applicable');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'AptDeco registered as comp source + sell platform (no login requirement)',
+    run: () => {
+      // Comp source present (family-scoped as `aptdeco`).
+      assert(ALL_COMP_SOURCE_IDS.includes('aptdeco-active'), `aptdeco-active in comp sources → ${ALL_COMP_SOURCE_IDS.join(', ')}`);
+      // Available as a selling platform with a post URL.
+      const plat = SELL_PLATFORM_BY_ID.aptdeco;
+      assert(plat && plat.id === 'aptdeco' && plat.domain === 'aptdeco.com', `aptdeco sell platform → ${JSON.stringify(plat)}`);
+      assert(typeof plat.postUrl === 'string' && plat.postUrl.includes('aptdeco.com'), `aptdeco postUrl → ${plat.postUrl}`);
+      // Public catalog (Algolia SSR) → NO login required for the price check.
+      assert(computeMissingLogins([{ id: 'aptdeco-active' }], {}).length === 0, 'aptdeco-active → no login requirement');
+      // The synthesis schema enum is derived from SELL_PLATFORMS → includes aptdeco
+      // and stays in lockstep (same length + every sell id present).
+      const schemaIds = PRICE_SYNTHESIS_SCHEMA.properties.recommended_platforms.items.properties.id.enum;
+      const sellIds = SELL_PLATFORMS.map(p => p.id);
+      assert(schemaIds.includes('aptdeco'), `recommended_platforms enum includes aptdeco → ${schemaIds.join(', ')}`);
+      assert(schemaIds.length === sellIds.length && sellIds.every(x => schemaIds.includes(x)),
+        'synthesis enum stays in sync with SELL_PLATFORMS');
+      // As a selling platform it must satisfy the sell-monitor auth invariant
+      // (every SELL_PLATFORMS id needs a config) — verified create-page auth gate.
+      const monitor = getSellMonitorConfig('aptdeco');
+      assert(monitor && monitor.verifyUrl && Array.isArray(monitor.bodySignals) && monitor.bodySignals.length > 0,
+        `aptdeco sell-monitor config present → ${JSON.stringify(monitor)}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'AptDeco login detection: auth prompt present only when logged out (verified live)',
+    run: () => {
+      // Both snippets are the REAL rendered /sell/new visible text (verified by
+      // logging in): AptDeco has no /login route — the create page IS the auth gate.
+      const cfg = getSellMonitorConfig('aptdeco');
+      // Logged OUT → the page offers "Already have an account? Sign in".
+      const loggedOut = "Let's start listing your furniture. This should only take a few minutes. Happy selling! First time selling? Check out our seller's guide Already have an account? Sign in Take $10 off your first purchase Sign up for the latest updates, products and offers Enter email address";
+      // Logged IN → the listing form renders instead (category picker, Save Draft /
+      // Submit); the auth prompt is gone. The "Sign up for the latest updates"
+      // NEWSLETTER persists in BOTH states, so it must NOT be a login-wall signal.
+      const loggedIn = "Let's start listing your furniture. This should only take a few minutes. Happy selling! First time selling? Check out our seller's guide 1. Basic Info What are you selling? Most furniture items can be sold on AptDeco, however there are a few exceptions. We cannot sell: mattresses, IKEA wardrobes, murphy beds or electronics. Beds Chairs Décor Lighting Outdoor & Garden Rugs Sofas Storage Tables 2. Product Overview 3. Product Details 4. Pickup Info Save Draft Submit Take $10 off your first purchase Sign up for the latest updates, products and offers Enter email address";
+      assert(getSoftLoginWallMatch(loggedOut, cfg) !== null, 'logged-out /sell/new → detected as login wall');
+      assert(getSoftLoginWallMatch(loggedIn, cfg) === null,
+        'logged-in /sell/new (form) → NOT a login wall (newsletter "sign up" / "enter email address" must not trip it)');
+      return { ok: true };
+    },
+  },
+  {
+    // AptDeco's logged-in DOM is client-rendered, so body-text verify races the
+    // auth swap and false-reads a logged-in user as logged out. The render-safe
+    // signal is the `token` JWT cookie (present only when logged in). This guards
+    // the cookie wiring + the pure match rule shared by the poller and the verify.
+    name: 'AptDeco cookie-based login signal (token cookie, render-safe)',
+    run: () => {
+      assert(Array.isArray(PLATFORM_AUTH_COOKIES.aptdeco) && PLATFORM_AUTH_COOKIES.aptdeco.includes('token'),
+        `aptdeco auth cookie must be the token JWT → ${JSON.stringify(PLATFORM_AUTH_COOKIES.aptdeco)}`);
+      // aptdecofrontend is a server session that also exists anonymously → must NOT be a signal.
+      assert(!PLATFORM_AUTH_COOKIES.aptdeco.includes('aptdecofrontend'), 'aptdecofrontend must not be an auth signal (exists anonymously)');
+      // The sell-monitor config opts into cookie-first verification.
+      assert(getSellMonitorConfig('aptdeco')?.verifyViaCookie === true, 'aptdeco must opt into verifyViaCookie');
+      // Pure match rule: token present (non-empty) → logged in.
+      const names = PLATFORM_AUTH_COOKIES.aptdeco;
+      assert(cookieListHasAuth([{ name: 'token', value: 'eyJhbGci...' }, { name: 'aptdecofrontend', value: 'abc' }], names) === true, 'token present → logged in');
+      // Only the anonymous server-session present (no token) → logged out.
+      assert(cookieListHasAuth([{ name: 'aptdecofrontend', value: 'abc' }, { name: 'aws-waf-token', value: 'x' }], names) === false, 'no token → logged out');
+      // Empty / "0" token value → not a valid signal.
+      assert(cookieListHasAuth([{ name: 'token', value: '' }], names) === false, 'empty token → logged out');
+      assert(cookieListHasAuth([], names) === false, 'no cookies → logged out');
+      return { ok: true };
+    },
+  },
+  {
+    // The login-attempt history is what answers "I just logged into X but it says
+    // logged out" — it must record whether each login window CONFIRMED login, since
+    // the verbose login logs scroll out of the main ring buffer in seconds.
+    name: 'buildAuthAttemptRecord: derives login-detected discriminator for the bug report',
+    run: () => {
+      // A confirmed login: result auto-detected + a signal → detected=true.
+      const ok = buildAuthAttemptRecord({ platformId: 'facebook', result: 'auto-detected', loginSignal: 'auth-cookie', mode: 'puppeteer-visible', currentUrl: 'https://www.facebook.com/' });
+      assert(ok.loginDetected === true && ok.loginSignal === 'auth-cookie' && ok.platformId === 'facebook', 'auto-detected with a signal → detected=true');
+      // A window that closed WITHOUT confirming login → detected=false (the "I logged
+      // in but it never registered" case we need to distinguish).
+      const closed = buildAuthAttemptRecord({ platformId: 'poshmark', result: 'closed', mode: 'puppeteer-visible' });
+      assert(closed.loginDetected === false, 'closed without detection → detected=false');
+      // Explicit loginDetected wins over the result-derived default.
+      assert(buildAuthAttemptRecord({ result: 'closed', loginDetected: true }).loginDetected === true, 'explicit loginDetected overrides the result default');
+      // autoDetectedLoginSignal (native path field) is accepted as the signal source.
+      assert(buildAuthAttemptRecord({ result: 'auto-detected', autoDetectedLoginSignal: 'dom' }).loginSignal === 'dom', 'autoDetectedLoginSignal falls through to loginSignal');
+      // URL is sanitized (backticks stripped) and bounded so it can't break the md table.
+      const longUrl = buildAuthAttemptRecord({ loginUrl: 'https://x.com/`' + 'a'.repeat(400) });
+      assert(!longUrl.url.includes('`') && longUrl.url.length <= 180, 'url is backtick-stripped and length-capped');
+      return { ok: true };
+    },
+  },
+  {
+    // Swappa added Cloudflare Turnstile to its login page; under Puppeteer/CDP the
+    // challenge's `interactiveEnd` postMessage is rejected as an "unexpected source"
+    // → no clearance token → the widget re-spawns forever. The fix is to run the
+    // login in a real, non-CDP Chrome (NATIVE_LOGIN_PLATFORMS) — the same path
+    // built for Google-SSO/Indeed. This guards the wiring + the generalized
+    // (previously indeed-only) native success detection.
+    name: 'Swappa login routes through native (non-CDP) Chrome with /my/swappa success marker',
+    run: () => {
+      assert(NATIVE_LOGIN_PLATFORMS.has('swappa'), 'swappa must be a native (non-CDP) login platform to pass Turnstile');
+      assert(NATIVE_LOGIN_PLATFORMS.has('indeed'), 'indeed native login must remain (regression guard)');
+      // Login URL carries an (encoded) ?next=/my/swappa so a completed login lands
+      // on a precise marker; the post-login URL is decoded so the marker still matches.
+      assert(/swappa\.com\/login\?next=(%2F|\/)my(%2F|\/)swappa/i.test(PLATFORM_LOGIN_URLS.swappa), `swappa login URL → ${PLATFORM_LOGIN_URLS.swappa}`);
+      // Success detection (generalized from indeed-only):
+      assert(isNativeLoginSuccess('swappa', 'https://swappa.com/my/swappa', 'My Swappa - Swappa') === true, 'landed on /my/swappa → logged in');
+      assert(isNativeLoginSuccess('swappa', 'https://swappa.com/login?next=/my/swappa', 'Sign In') === false, 'still on the login page → not yet');
+      assert(isNativeLoginSuccess('swappa', 'https://swappa.com/login', 'Just a moment...') === false, 'Cloudflare interstitial title → not a success');
+      assert(isNativeLoginSuccess('swappa', 'https://swappa.com/', 'Swappa') === false, 'homepage is not the success marker');
+      // Indeed detection unchanged.
+      assert(isNativeLoginSuccess('indeed', 'https://www.indeed.com/jobs?q=x', 'Jobs') === true, 'indeed success URL unchanged');
+      return { ok: true };
+    },
+  },
+  {
+    // Mercari delegates sign-in to Google SSO. Under Puppeteer/CDP, Google bounces
+    // the OAuth flow back to mercari.com/login → the reported "keeps redirecting
+    // google login back to mercari login page" loop. Fix: route Mercari login
+    // through the same native (non-CDP) Chrome path as indeed/swappa. The login URL
+    // is the auth-gated /mypage hub so a completed login returns to the precise
+    // mercari.com/mypage marker; the /account/googleauth OAuth callback must NOT
+    // false-succeed mid-redirect.
+    name: 'Mercari login routes through native (non-CDP) Chrome with /mypage success marker',
+    run: () => {
+      assert(NATIVE_LOGIN_PLATFORMS.has('mercari'), 'mercari must be a native (non-CDP) login platform (Google SSO loops under CDP)');
+      assert(NATIVE_LOGIN_PLATFORMS.has('swappa') && NATIVE_LOGIN_PLATFORMS.has('indeed'), 'swappa + indeed native login must remain (regression guard)');
+      // Login URL is the auth-gated seller hub so the post-login landing carries the marker.
+      assert(/mercari\.com\/mypage/i.test(PLATFORM_LOGIN_URLS.mercari), `mercari login URL → ${PLATFORM_LOGIN_URLS.mercari}`);
+      assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/mypage/listings/', 'My Listings - Mercari') === true, 'landed on /mypage → logged in');
+      assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/login/', 'Log in to Mercari') === false, 'still on the login page → not yet');
+      // Logged-out inline login form served AT the /mypage success URL (HTTP 200,
+      // NO redirect; SSR shell carries the generic marketing title): the URL marker
+      // matches but the title gate must reject it, else the window auto-closes
+      // before the user can sign in ("keeps refreshing / can't verify human").
+      assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/mypage/listings/active/', 'Your Go-to Marketplace for Deals on Used & Secondhand Items | Mercari') === false, 'logged-out inline form at /mypage → not a success');
+      assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/us/selling/dashboard/', 'Your Go-to Marketplace for Deals on Used & Secondhand Items | Mercari') === false, 'logged-out inline form at selling dashboard → not a success');
+      // The Google-OAuth callback step must not be mistaken for success.
+      assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/account/googleauth?code=abc', 'Mercari') === false, 'OAuth callback is not the success marker');
+      assert(isNativeLoginSuccess('mercari', 'https://accounts.google.com/o/oauth2/v2/auth?...', 'Sign in - Google Accounts') === false, 'on Google sign-in → not yet');
+      assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/', 'Mercari') === false, 'homepage is not the success marker');
+      return { ok: true };
+    },
+  },
+  {
+    // A login-verify FAILURE captured the page text per-check but never rendered
+    // it (top-level bodyHead is connected-path only), so a soft-wall "logged out"
+    // verdict showed no way to see WHAT the page said — was it a real sign-in
+    // shell, or a logged-in SPA that hadn't client-rendered its account UI yet?
+    // The bug-report trace must now surface the per-check bodyHead on failures.
+    name: 'session trace surfaces captured bodyHead on a verify FAILURE (not just connected)',
+    run: () => {
+      const platforms = [{ id: 'aptdeco', name: 'AptDeco' }];
+      // Soft-wall failure: no top-level bodyHead (matches verifySellMonitorLogin's
+      // failure return shape `{ target, checks }`), bodyHead lives on the check.
+      const failCache = {
+        aptdeco: { lastTrace: { target: 'https://www.aptdeco.com/sell/new', checks: [{
+          target: 'https://www.aptdeco.com/sell/new', status: 200, finalUrl: 'https://www.aptdeco.com/sell/new',
+          softWallMatch: 'already have an account? sign in',
+          bodyHead: "Let's start listing your furniture. First time selling? Already have an account? Sign in",
+        }] } },
+      };
+      const failOut = renderSessionTraceBlocks(platforms, failCache);
+      assert(/bodyHead:/.test(failOut), `failure trace must render the captured bodyHead -> ${failOut}`);
+      assert(/start listing your furniture/.test(failOut), 'the actual captured page text must appear so logged-out-shell vs logged-in-SPA is distinguishable');
+
+      // Connected path already has a top-level bodyHead — don't duplicate it per check.
+      const okCache = {
+        aptdeco: { lastTrace: {
+          target: 'https://www.aptdeco.com/sell/new', finalUrl: 'https://www.aptdeco.com/sell/new', status: 200,
+          bodyHead: 'Beds Chairs Sofas What are you selling',
+          checks: [{ target: 'https://www.aptdeco.com/sell/new', status: 200, bodyHead: 'Beds Chairs Sofas What are you selling' }],
+        } },
+      };
+      const okOut = renderSessionTraceBlocks(platforms, okCache);
+      assert((okOut.match(/bodyHead:/g) || []).length === 1, `connected trace renders bodyHead once (no per-check dup) -> ${okOut}`);
+      return { ok: true };
+    },
+  },
+  {
     name: 'Swappa SOLD extractor parses /xui sales fragment',
     run: () => {
       // Swappa's /listings page (active source) is asking prices; the REAL sold
@@ -3215,6 +3554,7 @@ const tests = [
         'https://www.depop.com/signup/google/',          // OAuth signup interstitial
         'https://www.linkedin.com/checkpoint/challenge/', // LinkedIn challenge
         'https://accounts.google.com/signin/v2/challenge/ipp',
+        'https://reverb.com/my/selling/listings?__cf_chl_rt_tk=abc123',
         'https://example.com/account/verify-email',
         'https://example.com/login/2fa',
       ];
@@ -3229,6 +3569,124 @@ const tests = [
         'https://www.ziprecruiter.com/jobseeker/home', 'https://www.glassdoor.com/member/home/index.htm',
       ];
       for (const u of loggedIn) assert(!isAuthChallengeUrl(u), `should NOT block auto-close on logged-in home ${u}`);
+      return { ok: true };
+    },
+  },
+  {
+    // Regression: eBay's post-login "Trust this device?" page (accounts.ebay.com/
+    // acctsec/trust-a-device) carries logged-in nav chrome, so the DOM heuristic
+    // fired and force-closed the window before the user could click "Trust" —
+    // leaving the device untrusted so eBay re-prompts 2FA every login (reported).
+    // The poller must WAIT on this interstitial and only auto-close once eBay
+    // redirects to its `ru=` destination.
+    name: 'login auto-close: wait on post-login trust-a-device interstitial, close on its destination',
+    run: () => {
+      const trustUrl = 'https://accounts.ebay.com/acctsec/trust-a-device?id=CoTckUcxRxFAYQo5uzBcP&ru=http%3A%2F%2Fwww.ebay.com';
+      assert(isPostLoginInterstitialUrl(trustUrl), 'eBay trust-a-device must be recognised as a post-login interstitial');
+      // Punctuation variants a redesign could ship.
+      for (const u of ['https://x/trust-this-device', 'https://x/trust_device', 'https://x/trusteddevice']) {
+        assert(isPostLoginInterstitialUrl(u), `device-trust variant should be recognised: ${u}`);
+      }
+      // Must NOT swallow real logged-in landings — those still auto-close.
+      for (const u of ['https://www.ebay.com/', 'https://www.ebay.com/mye/myebay/summary', 'https://www.ebay.com/sh/lst/active']) {
+        assert(!isPostLoginInterstitialUrl(u), `logged-in destination must NOT be treated as an interstitial: ${u}`);
+      }
+      // It is distinct from a captcha/challenge — different wait reason, same effect (keep waiting).
+      assert(!isAuthChallengeUrl(trustUrl), 'trust-a-device is not a captcha/challenge URL');
+      assert(getLoginAutoCloseWaitReason({ platformId: 'ebay', currentUrl: trustUrl }) === 'post-login-interstitial',
+        'poller must keep the window open on the eBay trust-a-device interstitial');
+      // After the user clicks through, eBay lands on the real destination → auto-close allowed.
+      assert(getLoginAutoCloseWaitReason({ platformId: 'ebay', currentUrl: 'https://www.ebay.com/' }) === null,
+        'poller must allow auto-close once eBay redirects past the trust prompt');
+      return { ok: true };
+    },
+  },
+  {
+    // Non-CDP native-Chrome hub reader (Swappa/Mercari sit behind CDP-detecting
+    // anti-bot that 403s/wedges every headless read). The osascript/spawn plumbing
+    // can't be unit-tested, but the pure classification helpers — which decide what
+    // the bug report shows and whether a read counts as ok — can and must be.
+    name: 'nativeChromeReader: platform gate + read-result classification',
+    run: () => {
+      // Only the CDP-walled platforms route through native reads; the headless ones must NOT.
+      assert(NATIVE_READ_PLATFORMS.has('swappa') && NATIVE_READ_PLATFORMS.has('mercari'), 'swappa+mercari are native-read platforms');
+      for (const p of ['ebay', 'facebook', 'reverb', 'poshmark']) {
+        assert(!NATIVE_READ_PLATFORMS.has(p), `${p} reads fine headless and must NOT be a native-read platform`);
+      }
+      // shouldUseNativeRead is darwin-gated; the test runner runs on darwin here.
+      if (process.platform === 'darwin') {
+        assert(shouldUseNativeRead('swappa') === true, 'swappa uses native read on macOS');
+        assert(shouldUseNativeRead('ebay') === false, 'ebay never uses native read');
+      } else {
+        assert(shouldUseNativeRead('swappa') === false, 'native read is macOS-only');
+      }
+
+      // The one manual prerequisite — detect the Apple-Events toggle being off so
+      // the bug report can name the exact fix instead of an opaque AppleScript error.
+      assert(isAppleEventsJsDisabledError('Google Chrome got an error: Executing JavaScript through AppleScript is turned off.'), 'detects toggle-off error');
+      assert(!isAppleEventsJsDisabledError('some unrelated osascript failure'), 'does not over-match unrelated errors');
+
+      // Challenge sniff catches Cloudflare even when native Chrome rendered it.
+      assert(nativeReadLooksChallenged('<title>Just a moment...</title>'), 'detects CF interstitial');
+      assert(nativeReadLooksChallenged('<div id="cf-challenge">x</div>'), 'detects cf-challenge marker');
+      assert(!nativeReadLooksChallenged('<html><body>My listings dashboard</body></html>'), 'a real dashboard is not a challenge');
+
+      // Output parsing: finalUrl <SEP> html, and the no-window sentinel.
+      const parsed = parseNativeReadOutput('https://swappa.com/account###NRSEP_8f3a2c###<html>hi</html>');
+      assert(parsed.finalUrl === 'https://swappa.com/account' && parsed.html === '<html>hi</html>', 'splits finalUrl from html');
+      assert(parseNativeReadOutput('NRERR:NOWINDOW').sentinel === 'NRERR:NOWINDOW', 'surfaces the no-window sentinel');
+
+      // Result classification → the scanSellerHubPages fetcher contract.
+      const good = nativeReadToFetchResult({ requestedUrl: 'https://swappa.com/account/listings', finalUrl: 'https://swappa.com/account/listings', html: '<html>'.padEnd(500, 'x') + '</html>' });
+      assert(good.ok === true && good.status === 200, 'real content → ok:200');
+
+      const bounced = nativeReadToFetchResult({ requestedUrl: 'https://www.mercari.com/mypage/listings/', finalUrl: 'https://www.mercari.com/login/?login_callback=%2Fmypage', html: '<html>login</html>' });
+      assert(bounced.ok === false && /login page/i.test(bounced.error), 'login bounce → terminal error, not a false-ok');
+
+      const challenged = nativeReadToFetchResult({ requestedUrl: 'https://swappa.com/my/swappa', finalUrl: 'https://swappa.com/my/swappa', html: 'Just a moment... checking your browser' });
+      assert(challenged.ok === false && /challenge/i.test(challenged.error), 'native CF challenge → terminal error');
+
+      const empty = nativeReadToFetchResult({ requestedUrl: 'https://swappa.com/x', finalUrl: 'https://swappa.com/x', html: '' });
+      assert(empty.ok === false && /empty/i.test(empty.error), 'empty page → terminal error');
+
+      const toggleOff = nativeReadToFetchResult({ requestedUrl: 'https://swappa.com/x', error: 'Executing JavaScript through AppleScript is turned off' });
+      assert(toggleOff.ok === false && /Allow JavaScript from Apple Events/i.test(toggleOff.error), 'toggle-off error names the exact Chrome setting');
+
+      // Login-state classifier: drives the "detect the login screen → WAIT for the
+      // human to sign in → then read" flow. A logged-out hub must be detected so we
+      // wait (not fail); a settled hub host must read as logged-in.
+      assert(nativeReadLoginState('https://www.mercari.com/us/selling/dashboard/', 'www.mercari.com') === 'logged-in', 'settled mercari hub → logged-in');
+      assert(nativeReadLoginState('https://www.mercari.com/login/?login_callback=%2Fmypage', 'www.mercari.com') === 'logged-out', 'mercari /login bounce → logged-out (wait for human)');
+      assert(nativeReadLoginState('https://accounts.google.com/v3/signin/challenge/pwd', 'swappa.com') === 'logged-out', 'swappa Google-OAuth bounce → logged-out');
+      assert(nativeReadLoginState('https://www.facebook.com/two_step_verification/authentication/?x=1', 'www.facebook.com') === 'logged-out', '2FA screen → logged-out');
+      assert(nativeReadLoginState('https://swappa.com/my/swappa', 'swappa.com') === 'logged-in', 'settled swappa hub → logged-in');
+      assert(nativeReadLoginState('NRERR:NOWINDOW', 'swappa.com') === 'no-window', 'no-window sentinel → no-window');
+      assert(nativeReadLoginState('about:blank', 'swappa.com') === 'no-window', 'about:blank (window still spawning) → no-window');
+      assert(nativeReadLoginState('https://example.com/x', 'swappa.com') === 'unknown', 'off-host non-login URL → unknown (keep polling)');
+
+      // Inline login form served AT the auth-gated URL (Mercari: HTTP 200, no /login
+      // redirect, generic SEO <title>). URL is on-host but the title is the marketing
+      // shell → must classify logged-out (WAIT) so the read doesn't thrash the tab.
+      // The title is the ONLY discriminator (read toggle-free) for this case.
+      assert(nativeReadLoginState('https://www.mercari.com/mypage/listings/active/', 'www.mercari.com', 'Your Go-to Marketplace for Deals on Used & Secondhand Items | Mercari', 'mercari') === 'logged-out', 'mercari inline login form (generic title) → logged-out (wait, do not thrash)');
+      assert(nativeReadLoginState('https://www.mercari.com/mypage/listings/active/', 'www.mercari.com', 'My Listings | Mercari', 'mercari') === 'logged-in', 'mercari real hub title → logged-in');
+      assert(nativeReadLoginState('https://www.mercari.com/us/selling/dashboard/', 'www.mercari.com', '', 'mercari') === 'logged-in', 'empty title (toggle-free poll gave none) → falls through to URL logic → logged-in');
+      assert(nativeReadLoginState('https://www.mercari.com/us/selling/dashboard/', 'www.mercari.com') === 'logged-in', 'back-compat: 2-arg call (no title) unchanged → logged-in');
+
+      // Shared logged-out-title helper (one source for native LOGIN + native READ).
+      assert(isLoggedOutTitleForPlatform('mercari', 'Your Go-to Marketplace for Deals on Used & Secondhand Items | Mercari') === true, 'mercari SEO/marketing title → logged-out');
+      assert(isLoggedOutTitleForPlatform('mercari', 'My Listings | Mercari') === false, 'mercari real hub title → not logged-out');
+      assert(isLoggedOutTitleForPlatform('mercari', '') === false, 'empty title → no signal');
+      assert(isLoggedOutTitleForPlatform('swappa', 'anything') === false, 'no markers configured for swappa → never flags (unverified title not fabricated)');
+
+      // Content-level inline-login detector (toggle-on net): a read that returns the
+      // login form HTML → ok:false loggedOut, and the read loop stops driving the tab.
+      assert(nativeReadLooksLoggedOut('<h1>Log in to Mercari</h1><input type=password>') === true, 'mercari login heading in body → looks logged-out');
+      assert(nativeReadLooksLoggedOut('<button>Continue with Apple</button>') === true, 'apple SSO button → looks logged-out');
+      assert(nativeReadLooksLoggedOut('Email address Password Log in protected by reCAPTCHA') === true, 'generic login form (recaptcha+email+password+log in) → looks logged-out');
+      assert(nativeReadLooksLoggedOut('<div>My Listings</div><a href="/logout">Log out</a> reCAPTCHA badge') === false, 'logged-in hub with a stray reCAPTCHA badge → NOT logged-out (no email/password form)');
+      const loggedOutRead = nativeReadToFetchResult({ requestedUrl: 'https://www.mercari.com/mypage/listings/', finalUrl: 'https://www.mercari.com/mypage/listings/active/', html: '<html><body><h1>Log in to Mercari</h1></body></html>' });
+      assert(loggedOutRead.ok === false && loggedOutRead.loggedOut === true && /LOGIN FORM/i.test(loggedOutRead.error), 'on-host inline login form read → ok:false loggedOut (surfaces in Blocked-sources, stops thrash)');
       return { ok: true };
     },
   },
@@ -3262,7 +3720,46 @@ const tests = [
     },
   },
   {
-    name: 'auth-cookie contract: Reverb detects completed login without post-login navigation',
+    name: 'login auto-close: Reverb auth cookie on login URL is not a completed login',
+    run: () => {
+      assert(canAuthCookieBypassLoginUrl('glassdoor'), 'Glassdoor keeps the suppressed-redirect auth-cookie exception');
+      assert(!canAuthCookieBypassLoginUrl('reverb'), 'Reverb auth cookie must not bypass the login URL guard');
+      assert(getLoginAutoCloseWaitReason({
+        platformId: 'reverb',
+        currentUrl: 'https://reverb.com/login',
+        cookieSignal: true,
+      }) === 'login-url-cookie-not-trusted',
+      'Reverb user_credentials on /login must keep the window open so human verification can finish');
+      assert(getLoginAutoCloseWaitReason({
+        platformId: 'glassdoor',
+        currentUrl: 'https://www.glassdoor.com/profile/login_input.htm',
+        cookieSignal: true,
+      }) === null,
+      'Glassdoor auth cookie may still close on its suppressed-redirect login URL');
+      assert(getLoginAutoCloseWaitReason({
+        platformId: 'glassdoor',
+        currentUrl: 'https://www.glassdoor.com/profile/login_input.htm',
+        cookieSignal: true,
+        challengeDomSignal: true,
+      }) === 'challenge-dom',
+      'Visible challenge DOM blocks auto-close even for a platform allowed to use cookie-on-login');
+      assert(getLoginAutoCloseWaitReason({
+        platformId: 'reverb',
+        currentUrl: 'https://reverb.com/',
+        cookieSignal: true,
+      }) === null,
+      'Reverb auth cookie can still auto-close after the browser reaches a non-login page');
+      assert(getLoginAutoCloseWaitReason({
+        platformId: 'reverb',
+        currentUrl: 'https://reverb.com/my/selling/listings?__cf_chl_rt_tk=abc123',
+        cookieSignal: true,
+      }) === 'challenge-url',
+      'Cloudflare challenge URLs block auto-close even when an auth cookie is present');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'auth-cookie contract: Reverb uses active credentials cookie, not historical marker',
     run: () => {
       const reverb = PLATFORM_AUTH_COOKIES.reverb || [];
       assert(reverb.includes('user_credentials'), 'Reverb should auto-detect its signed credentials cookie');
@@ -3652,6 +4149,31 @@ const tests = [
         'inconclusive transport failure must not masquerade as logout');
       assert(isConfirmedDisconnectedVerdict({ connected: true }) === false, 'connected verdict is not a disconnect');
       assert(isConfirmedDisconnectedVerdict(null) === false, 'missing verifier result is not proof of logout');
+      return { ok: true };
+    },
+  },
+  {
+    // Session-cache persistence (fixes "have to log in every restart"): only RECENT
+    // connected statuses are restored across launches, so the existing inconclusive-
+    // preserve logic survives a restart. Stale/not-connected/garbage entries must NOT
+    // be restored — a fresh verify must decide those.
+    name: 'session persistence: selectRestorableStatuses keeps only recent connected entries',
+    run: () => {
+      const now = 1_000_000_000_000;
+      const day = 24 * 60 * 60 * 1000;
+      const stored = {
+        ebay:     { connected: true,  ts: now - 2 * day,  lastReason: 'reached summary' }, // recent connected → restore
+        swappa:   { connected: true,  ts: now - 30 * day, lastReason: 'old' },             // too old → drop
+        facebook: { connected: false, ts: now - 1 * day,  lastReason: 'logged out' },      // not-connected → drop
+        depop:    { connected: true,  ts: 0 },                                             // no ts → drop
+        junk:     null,                                                                    // garbage → skip
+      };
+      const out = selectRestorableStatuses(stored, now, 14 * day);
+      assert(Object.keys(out).length === 1 && out.ebay, `only the recent connected entry restored (got ${JSON.stringify(out)})`);
+      assert(out.ebay.connected === true && out.ebay.restoredFromDisk === true, 'restored entry is flagged restoredFromDisk so the bug report can tell it apart');
+      assert(out.ebay.ts === now - 2 * day, 'restored entry preserves the original confirmation timestamp (so its age shows it is a prior-session status)');
+      assert(Object.keys(selectRestorableStatuses(null, now)).length === 0, 'no persisted blob → nothing restored');
+      assert(Object.keys(selectRestorableStatuses({}, now)).length === 0, 'empty blob → nothing restored');
       return { ok: true };
     },
   },
@@ -4077,6 +4599,30 @@ const tests = [
       assert(!sellIds.includes('whatnot'), `SELL_PLATFORMS should not include whatnot -> ${sellIds}`);
       assert(!schemaIds.includes('whatnot'), `recommended_platforms schema should not include whatnot -> ${schemaIds}`);
       assert(!Object.prototype.hasOwnProperty.call(PLATFORM_LOGIN_URLS, 'whatnot'), 'auth login registry should not include whatnot');
+      return { ok: true };
+    },
+  },
+  {
+    // Every sellable platform must be wired into ALL the registries the
+    // login/verify flow touches — not just the sell-monitor config. AptDeco
+    // shipped in SELL_PLATFORMS + SELL_MONITOR_PLATFORMS but was MISSING from
+    // PLATFORM_LOGIN_URLS, so clicking "Log in" threw "Unknown platform: aptdeco"
+    // in openLoginWindow. This invariant catches that whole class of half-wired
+    // platform before it reaches a user.
+    name: 'every SELL_PLATFORMS id is fully wired (login URL + sell-monitor config)',
+    run: () => {
+      const missingLoginUrl = [];
+      const missingMonitor = [];
+      for (const { id } of SELL_PLATFORMS) {
+        if (!PLATFORM_LOGIN_URLS[id]) missingLoginUrl.push(id);
+        if (!getSellMonitorConfig(id)) missingMonitor.push(id);
+      }
+      assert(missingLoginUrl.length === 0,
+        `SELL_PLATFORMS missing a PLATFORM_LOGIN_URLS entry (openLoginWindow would throw "Unknown platform"): ${missingLoginUrl.join(', ')}`);
+      assert(missingMonitor.length === 0,
+        `SELL_PLATFORMS missing a sell-monitor auth config: ${missingMonitor.join(', ')}`);
+      // AptDeco specifically — the platform from the bug report.
+      assert(/aptdeco\.com/.test(PLATFORM_LOGIN_URLS.aptdeco || ''), `aptdeco login URL → ${PLATFORM_LOGIN_URLS.aptdeco}`);
       return { ok: true };
     },
   },
@@ -5123,6 +5669,35 @@ const tests = [
       assert(ok === null, `populated page → null (got ${JSON.stringify(ok)})`);
       return { ok: true };
     },
+  },
+  {
+    // Underpins the verifySellMonitorLogin fix for the eBay re-login loop: eBay's
+    // anti-bot 200-REDIRECTS the verify to /splashui/captcha ("Security Measure").
+    // detectAntiBotSignal must flag that URL as a challenge EVEN AT HTTP 200, so the
+    // verify can return inconclusive (keep prior) instead of a false logout. A plain
+    // login form (no captcha/challenge markers) must NOT be flagged — that's a real
+    // logout the verify should still report.
+    run: () => {
+      const ebayCaptcha = detectAntiBotSignal({
+        status: 200,
+        finalUrl: 'https://www.ebay.com/splashui/captcha?ap=1&appName=orch&ru=https%3A%2F%2Fsignin.ebay.com%2Fws%2FeBayISAPI.dll%3FSignIn',
+        html: 'Security Measure | eBay Please verify yourself to continue',
+        sourceLabel: 'ebay',
+      });
+      assert(ebayCaptcha && ebayCaptcha.code === 'redirected-to-challenge',
+        `eBay /splashui/captcha at HTTP 200 must be detected as an anti-bot challenge (got ${JSON.stringify(ebayCaptcha)})`);
+      // A genuine login form (no challenge URL, no captcha keywords) → null, so the
+      // verify still treats it as a real logout (not masked as inconclusive).
+      const plainLogin = detectAntiBotSignal({
+        status: 200,
+        finalUrl: 'https://www.facebook.com/',
+        html: 'Log into Facebook Email or mobile number Password Log in Forgot password? Create new account',
+        sourceLabel: 'facebook',
+      });
+      assert(plainLogin === null, `a plain login form must NOT be flagged anti-bot (got ${JSON.stringify(plainLogin)})`);
+      return { ok: true };
+    },
+    name: 'detectAntiBotSignal: eBay /splashui/captcha at HTTP 200 is a challenge; plain login form is not',
   },
   {
     // Layer 3.6: a sub-floor item count must NOT be a block when the scrape

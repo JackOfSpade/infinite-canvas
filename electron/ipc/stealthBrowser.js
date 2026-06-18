@@ -378,7 +378,7 @@ export async function fetchHtmlAuthed(url, { timeoutMs = 25000, signal } = {}) {
  * The scraper path keeps the blocking because it saves real bandwidth at
  * scale; one-off verify calls don't need it.
  */
-export async function fetchHtmlClean(url, { timeoutMs = 25000, signal } = {}) {
+export async function fetchHtmlClean(url, { timeoutMs = 25000, signal, waitForRenderMs = 0 } = {}) {
   let page = null;
   try {
     const browser = await getStealthBrowser();
@@ -400,6 +400,18 @@ export async function fetchHtmlClean(url, { timeoutMs = 25000, signal } = {}) {
       if (!/timeout|ERR_ABORTED|net::ERR_/i.test(e?.message || '')) throw e;
     }
     if (signal?.aborted) throw new Error('Aborted');
+
+    // Bounded client-render settle for SPA verify pages (opt-in via waitForRenderMs).
+    // Under 'domcontentloaded' the content() below captures only the SSR shell; some
+    // marketplaces (Mercari) client-render their LOGIN FORM over a generic shell, so
+    // the body sign-in sniff races the render and misses → a logged-out user gets
+    // mis-verified as connected. Give the client a capped window to paint, kept
+    // INSIDE the content() budget so a wedged page still falls through to the
+    // content() timeout → { ok:false } (inconclusive), never a false logged-in.
+    if (waitForRenderMs > 0) {
+      await new Promise(r => setTimeout(r, Math.max(0, Math.min(waitForRenderMs, timeoutMs - 4000))));
+      if (signal?.aborted) throw new Error('Aborted');
+    }
 
     const status   = response?.status() ?? 0;
     const finalUrl = page.url() || url;
@@ -459,7 +471,15 @@ export async function clearBrowserSession() {
 
 // Forward exports from extracted modules for backwards compatibility with other files
 export { humanMouseMove, humanScroll, dismissCookieBanner } from './browser/humanEmulation.js';
-export { openLoginWindow, getSessionStatus, getAllSessionStatuses, getSupportedPlatforms } from './browser/authWindows.js';
+export {
+  openLoginWindow,
+  getSessionStatus,
+  getAllSessionStatuses,
+  getSupportedPlatforms,
+  getLoginAutoCloseWaitReason,
+  hasPlatformAuthCookie,
+  isNativeLoginSuccess,
+} from './browser/authWindows.js';
 export { getRandomUA };
 
 // ── Job Platform Login Registry ──────────────────────────────────────────────
@@ -806,6 +826,13 @@ const SELL_MONITOR_PLATFORMS = {
       'email address password log in',
     ],
     bodyScanChars: 2000,
+    // Mercari serves its login form CLIENT-rendered over a generic SSR shell at the
+    // auth-gated /mypage URL (HTTP 200, no /login redirect). Without a render settle,
+    // fetchHtmlClean captures only the ~19KB shell (generic SEO <title>, no form),
+    // the bodySignals above never match, and a logged-OUT user falls through to a
+    // false connected:true. This bounded wait lets the form paint so the existing
+    // sign-in sniff catches it. Kept inside the verify timeout budget.
+    verifyRenderWaitMs: 2000,
   },
   swappa:    {
     name: 'Swappa',
@@ -840,6 +867,26 @@ const SELL_MONITOR_PLATFORMS = {
       'sign in to reverb',
     ],
     bodyScanChars: 1200,
+  },
+  aptdeco:   {
+    name: 'AptDeco',
+    // AptDeco has no /login or /account route (both 404); the create-listing page
+    // IS its auth gate — anonymous users see the listing intro plus an "Already
+    // have an account? Sign in" prompt (verified live), which vanishes once logged
+    // in. Same create-page-as-verify pattern as Depop. No connectedFinalUrlMustContain
+    // (the logged-in redirect target is unverified) — the body sniff is the guard.
+    sellerUrl: 'https://www.aptdeco.com/sell/new',
+    verifyUrl: 'https://www.aptdeco.com/sell/new',
+    // AptDeco's logged-in content is CLIENT-rendered, so the body-text sniff races
+    // the auth swap and false-reads a logged-in user as logged out. Verify via the
+    // `token` auth cookie (PLATFORM_AUTH_COOKIES.aptdeco) FIRST — render-safe. The
+    // bodySignals below remain the fallback for the cookie-absent (logged-out) case.
+    verifyViaCookie: true,
+    bodySignals: [
+      'already have an account? sign in',
+      'already have an account',
+    ],
+    bodyScanChars: 800,
   },
 };
 

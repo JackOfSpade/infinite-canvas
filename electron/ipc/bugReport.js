@@ -25,7 +25,8 @@ import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
 import { getMissingPreviewRelinkDiagnostics } from './missingPreviewRelink.js';
-import { getAuthWindowDiagnostics } from './browser/authWindows.js';
+import { getAuthWindowDiagnostics, NATIVE_LOGIN_PLATFORMS } from './browser/authWindows.js';
+import { NATIVE_READ_PLATFORMS } from './browser/nativeChromeReader.js';
 import {
   getJobSearchTransientKeysForSave,
   TRANSIENT_PROCESSING_HUB_STATES,
@@ -583,6 +584,26 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       if (typeof d.matchScore === 'number') previewParts.push(`score: ${d.matchScore}`);
       if (d.url) previewParts.push(`url: ${String(d.url).slice(0, 50)}`);
       if (d.product?.brand) previewParts.push(`brand: ${d.product.brand}`);
+      // ── Price-drop reminder plan (sellhub) ──────────────────────────────
+      // The plan is configured on the hub and broadcast to its marketplace
+      // cards, yet none of it was visible in a FULL report before. Surfacing it
+      // makes "Apply to all didn't propagate to item X", "this item was excluded
+      // but still got overwritten", and "the suggested drop / cadence is wrong"
+      // diagnosable from Node Diagnostics alone — the plan math is renderer-side
+      // and otherwise leaves no trace in the logs or event timeline.
+      if (n.type === 'sellhub') {
+        const weeks = Number(d.priceDropReminderWeeks) || 0;
+        const planBits = [];
+        if (weeks > 0) planBits.push(`every ${weeks}wk`);
+        if (d.priceDropMustSellDate) planBits.push(`sell-by ${d.priceDropMustSellDate}`);
+        if (d.priceDropTargetPrice != null) planBits.push(`target $${d.priceDropTargetPrice}`);
+        if (d.priceDropStartingTier) planBits.push(`tier ${d.priceDropStartingTier}`);
+        if (d.priceDropPlanStartingPrice != null) planBits.push(`start $${d.priceDropPlanStartingPrice}`);
+        if (planBits.length > 0) previewParts.push(`priceDrop: ${planBits.join(', ')}`);
+        // The per-card opt-out from another item's "Apply to all". A card the
+        // user swears they updated that stayed stale is almost always this flag.
+        if (d.priceDropApplyAllExcluded) previewParts.push('applyAll: EXCLUDED');
+      }
       // Marketplace-card surface: status + statusMessage are the most common
       // signal for "why does this card say X?" reports. statusMessage is
       // truncated since the raw text (e.g. an AI error or a multi-URL
@@ -677,6 +698,25 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
       }
       if (Array.isArray(d.watchUrls) && d.watchUrls.length > 0) {
         previewParts.push(`watchUrls: ${d.watchUrls.length}`);
+      }
+      // ── Price-drop reminder state (marketplacecard) ─────────────────────
+      // Only emitted once a reminder is actually live (due) or acknowledged, so
+      // the already-heavy marketplacecard rows stay lean on canvases with no
+      // active plan. createdAt is the shared cadence anchor (the oldest card
+      // starts the schedule), so it's included here for context when relevant —
+      // it explains "the reminder fired on the wrong day".
+      if (n.type === 'marketplacecard' && (d.priceDropReminderDue || d.lastPriceDropAt)) {
+        const dropBits = [];
+        if (d.priceDropReminderDue) dropBits.push('DUE');
+        if (d.createdAt) {
+          const ageDays = Math.round((Date.now() - new Date(d.createdAt).getTime()) / 86_400_000);
+          if (Number.isFinite(ageDays)) dropBits.push(`created ${ageDays}d ago`);
+        }
+        if (d.lastPriceDropAt) {
+          const ackDays = Math.round((Date.now() - new Date(d.lastPriceDropAt).getTime()) / 86_400_000);
+          if (Number.isFinite(ackDays)) dropBits.push(`ack ${ackDays}d ago`);
+        }
+        if (dropBits.length > 0) previewParts.push(`priceDrop: ${dropBits.join(', ')}`);
       }
       // Per-source ring progress lives in component state, not node data.
       // Compact it as `comp: ebay-sold=done/12,poshmark=searching/0,...` so a
@@ -1134,6 +1174,23 @@ ${rows}
       const resolveDiagSection = resolveDiagRows.length > 0
         ? `\n### Resolve outcome (why the window closed / failed)\n> Persisted on the window record — survives the Recent Logs ring buffer.\n${resolveDiagRows.join('\n')}\n`
         : '';
+      // Login-attempt history — every COMPLETED login window this session, with
+      // whether it confirmed login. Survives the main-log ring buffer (a verbose
+      // login flow scrolls the others out in seconds). This is the discriminator
+      // for "I just logged into X but it says logged out": `detected` ⇒ the window
+      // confirmed login (so a later logged-out state = the session didn't persist
+      // or the re-verify rejected it), `not detected` ⇒ the login never completed.
+      const historyRows = (Array.isArray(diag?.history) ? diag.history : [])
+        .slice(-12)
+        .reverse()
+        .map(h => {
+          const age = h.finishedAt ? `${Math.round((Date.now() - new Date(h.finishedAt).getTime()) / 1000)}s ago` : '—';
+          const detected = h.loginDetected ? `✅ detected${h.loginSignal ? ` (${h.loginSignal})` : ''}` : '❌ NOT detected';
+          return `- \`${h.platformId || '?'}\` — ${h.result || '—'}, ${detected}, ${h.mode || '—'}, ${age}${h.url ? ` — \`${h.url}\`` : ''}`;
+        });
+      const historySection = historyRows.length > 0
+        ? `\n### Recent login attempts (this session)\n> Every completed login/captcha window + whether it CONFIRMED login. Survives the Recent Logs ring buffer. A platform you "just logged into" that still shows needs-login should appear here: **detected** ⇒ the window confirmed login (so a later logged-out state means the session didn't persist or the re-verify rejected it); **NOT detected** ⇒ the login never completed in the window.\n${historyRows.join('\n')}\n`
+        : '';
       // Scrape/stealth browser liveness — a captcha/login window launches a
       // VISIBLE Chrome on the SAME userDataDir, so an alive scrape browser here
       // is the prime suspect for a window that won't open (profile lock). A
@@ -1166,6 +1223,18 @@ ${rows}
           launchCollisionLine = `\n- ⚠️ Shared-profile launch collisions: **${lc.total}** total, ${lc.recovered} auto-recovered. A Chrome launch hit the userDataDir lock held by another window/scrape (captcha-resolve window racing a headless rescrape, or overlapping windows).${lastBit} Recovered ones retried silently; un-recovered ones forced a manual re-Solve/re-click.\n`;
         }
       } catch { /* ignore */ }
+      // Which platforms are SUPPOSED to use non-CDP Chrome — the decisive axis for
+      // login-loop bugs. A platform that delegates to Google SSO (or hits CF
+      // Turnstile) loops forever under CDP: Google bounces the OAuth flow back to
+      // the platform's own login page. So a `puppeteer-visible` Mode row for a
+      // platform that should be native (below) is itself the bug, not a symptom.
+      // Native READ platforms ALSO require the Chrome "Allow JavaScript from Apple
+      // Events" toggle (View → Developer) — when OFF, their hub reads fail with a
+      // precise instruction (see Marketplace Status), though login is unaffected
+      // (it reads tab URLs, not page JS).
+      const nativeLoginList = Array.from(NATIVE_LOGIN_PLATFORMS).join(', ') || '(none)';
+      const nativeReadList = Array.from(NATIVE_READ_PLATFORMS).join(', ') || '(none)';
+      const nativePathLine = `\n- Native (non-CDP) **login** platforms (Google-SSO / Turnstile — must NOT be \`puppeteer-visible\`): \`${nativeLoginList}\`\n- Native (non-CDP) **hub-read** platforms (need the Chrome "Allow JavaScript from Apple Events" toggle ON): \`${nativeReadList}\`\n`;
       authWindowMarkdown = `
 ## Auth Window Diagnostics
 > Snapshot of visible login/captcha windows. \`mode=native-chrome\` means the
@@ -1177,11 +1246,11 @@ ${rows}
 > "Resolve outcome" line below AND a live Active IPC Task for the same node is a
 > hung resolve: the window's cleanup never resolved its promise (cross-check the
 > Active IPC Tasks section).
-
+${nativePathLine}
 | State | Platform | Mode | Current/Login URL | Title | Result | Updated |
 |---|---|---|---|---|---|---|
 ${rows}
-${stealthLine}${launchCollisionLine}${argsSection}${resolveDiagSection}`;
+${stealthLine}${launchCollisionLine}${argsSection}${resolveDiagSection}${historySection}`;
     }
   } catch { /* never break the report on diagnostic failure */ }
 

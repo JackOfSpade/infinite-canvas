@@ -19,6 +19,13 @@
 // human/AI-facing definitions) lives in src/utils/productConditions.js, shared
 // with the renderer dropdown and the photo-analysis / price-synthesis prompts.
 import { CONDITION_VALUES } from '../../src/utils/productConditions.js';
+import { SELL_PLATFORMS } from '../../src/utils/constants.js';
+
+// The platform-id enum for recommended_platforms is DERIVED from SELL_PLATFORMS
+// (the single source of truth for selling platforms) so adding/removing a
+// platform there can't silently leave the AI schema out of sync — the synthesis
+// model would otherwise be unable to recommend a newly-added platform.
+const SELL_PLATFORM_IDS = SELL_PLATFORMS.map(p => p.id);
 
 // ── Vision: photo → product identification ──────────────────────────────────
 export const VISION_PRODUCT_ANALYSIS_SCHEMA = {
@@ -78,7 +85,7 @@ export const PRICE_SYNTHESIS_SCHEMA = {
         type: 'object',
         required: ['id', 'name', 'reason', 'estimated_fee_pct', 'net_payout'],
         properties: {
-          id:                { type: 'string', enum: ['ebay', 'facebook', 'mercari', 'poshmark', 'depop', 'swappa', 'reverb'] },
+          id:                { type: 'string', enum: SELL_PLATFORM_IDS },
           name:              { type: 'string' },
           reason:            { type: 'string', description: 'Why optimal for this item (1 sentence)' },
           estimated_fee_pct: { type: 'number', description: 'Total fee % including processing' },

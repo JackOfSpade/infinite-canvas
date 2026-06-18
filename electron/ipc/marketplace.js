@@ -13,6 +13,7 @@ import { fetchHtmlAuthed, getSellMonitorConfig } from './stealthBrowser.js';
 import { getMarketplaceWatchUrls } from './settings.js';
 import { scanSellerHubPages } from './listingStatusCheck.js';
 import { openCaptchaResolveWindow, getLastCaptchaHandoffAt } from './browser/authWindows.js';
+import { shouldUseNativeRead, readHubUrlsViaNativeChrome } from './browser/nativeChromeReader.js';
 import { withStatusCheckLock, getStatusCheckQueueDepth } from './statusCheckLock.js';
 import { withMarketplaceBrowserLock, getMarketplaceBrowserQueueDepth } from './marketplaceBrowserLock.js';
 import { createAggregatingProgress } from './compProgressAggregator.js';
@@ -36,6 +37,7 @@ import {
 import {
   fetchReverbListings,
   fetchPriceChartingComps,
+  fetchAptDecoComps,
 } from '../extractors/apiExtractors.js';
 
 // ── Pipeline telemetry ───────────────────────────────────────────────────────
@@ -513,6 +515,27 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
     }
   }
 
+  if (sourceId === 'aptdeco-active') {
+    // A manual rescrape of an AptDeco card means the item IS furniture (a
+    // non-furniture run auto-dismisses the card), so no category gate is needed.
+    send('searching', 0);
+    try {
+      const result = await fetchAptDecoComps(query, signal);
+      const items = Array.isArray(result?.items) ? result.items : [];
+      const warning = result?.warning || null;
+      send(warning ? 'error' : 'done', items.length, warning, result?.url || null);
+      return { sourceId, items, warning, category: 'active' };
+    } catch (error) {
+      send('error', 0);
+      return {
+        sourceId,
+        items: [],
+        warning: { code: 'fetch-error', severity: 'block', evidence: error?.message || String(error), suggestion: 'API call failed during single-source rescrape.' },
+        category: 'active',
+      };
+    }
+  }
+
   throw new Error(`Unknown sourceId: ${sourceId}`);
 }
 
@@ -530,12 +553,17 @@ async function fetchApiMarketplaceSources(query, signal = null, emit = null, cat
   // `category` (the item's vision category) lets PriceCharting skip the request
   // for a clearly-non-collectible item — see fetchPriceChartingComps.
   const pcQuery = priceChartingQuery(query);
+  // `category` is the comp bucket each source's results belong to. Reverb +
+  // PriceCharting are SOLD comps; AptDeco is ACTIVE asking prices (furniture) —
+  // the caller routes results by this field instead of assuming all API sources
+  // are sold. AptDeco skips itself for non-furniture (isAptDecoApplicable).
   const apiTasks = [
-    { sourceId: 'reverb', effectiveQuery: query, fn: (s) => fetchReverbListings(query, true, s) },
-    { sourceId: 'pricecharting', effectiveQuery: pcQuery, fn: (s) => fetchPriceChartingComps(pcQuery, s, { category }) },
+    { sourceId: 'reverb', category: 'sold', effectiveQuery: query, fn: (s) => fetchReverbListings(query, true, s) },
+    { sourceId: 'pricecharting', category: 'sold', effectiveQuery: pcQuery, fn: (s) => fetchPriceChartingComps(pcQuery, s, { category }) },
+    { sourceId: 'aptdeco-active', category: 'active', effectiveQuery: query, fn: (s) => fetchAptDecoComps(query, s, { category }) },
   ].filter(task => isCompSourceEnabledInScope(task.sourceId));
 
-  return Promise.all(apiTasks.map(async ({ sourceId, effectiveQuery, fn }) => {
+  return Promise.all(apiTasks.map(async ({ sourceId, category: sourceCategory, effectiveQuery, fn }) => {
     try {
       if (signal?.aborted) throw new Error('Aborted');
       // Each API fetcher now returns { items, warning } so blocks/throttles
@@ -545,10 +573,10 @@ async function fetchApiMarketplaceSources(query, signal = null, emit = null, cat
       const warning = Array.isArray(result) ? null : (result?.warning || null);
       const url = Array.isArray(result) ? null : (result?.url || null);
       emit?.(sourceId, { status: 'done', count: items.length, warning });
-      return { sourceId, items, warning, effectiveQuery, url };
+      return { sourceId, items, warning, effectiveQuery, url, category: sourceCategory };
     } catch (error) {
       emit?.(sourceId, { status: 'error', count: 0 });
-      return { sourceId, items: [], error: error?.message || String(error), effectiveQuery };
+      return { sourceId, items: [], error: error?.message || String(error), effectiveQuery, category: sourceCategory };
     }
   }));
 }
@@ -580,7 +608,7 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache, category
     });
   }, signal);
 
-  const apiSourceIds = ['reverb', 'pricecharting'].filter(isCompSourceEnabledInScope);
+  const apiSourceIds = ['reverb', 'pricecharting', 'aptdeco-active'].filter(isCompSourceEnabledInScope);
   for (const sourceId of apiSourceIds) emit(sourceId, { status: 'searching', count: 0 });
   const apiResultsPromise = fetchApiMarketplaceSources(query, signal, emit, category);
 
@@ -626,8 +654,14 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache, category
     if (typeof res.effectiveQuery === 'string') {
       apiQueryBySource[res.sourceId] = { query: res.effectiveQuery, url: res.url || null };
     }
+    // Record provenance (url + comp bucket) for API sources too — the browser-task
+    // loop above only sets it for scraped sources, leaving API sources missing from
+    // the report's per-source provenance.
+    provenanceBySource[res.sourceId] = { url: res.url || null, category: res.category || 'sold' };
     if (Array.isArray(res.items) && res.items.length > 0) samplesBySource[res.sourceId] = sampleOf(res.items);
-    if (res.items.length > 0) comps.sold.push(...res.items);
+    // Route by the source's bucket — most API sources are sold (reverb,
+    // pricecharting) but AptDeco is active asking prices. Default sold for safety.
+    if (res.items.length > 0) comps[res.category === 'active' ? 'active' : 'sold'].push(...res.items);
   }
 
   return { comps, scrapeWarnings, bySource, yieldBySource, provenanceBySource, apiQueryBySource, samplesBySource, sourceCount: tasks.length + apiSourceIds.length };
@@ -1155,12 +1189,12 @@ Platform routing rules for recommended_platforms (pick 2-4 most relevant):
 - Fashion/Apparel → Depop (3.3% fee) > Poshmark (20% fee but 40-60% STR) > Mercari (10%)
 - Sneakers → eBay (8% fee + Authenticity Guarantee) > StockX/GOAT
 - Collectibles/Trading Cards → eBay (13%) > Mercari (10%)
-- Furniture/Home → Facebook Marketplace (0% local) only
+- Furniture/Home → Facebook Marketplace (0% local) > AptDeco (furniture/home, handles white-glove delivery)
 - Musical Instruments → Reverb (5% fee, $500 cap) > eBay (6.35%)
 - Luxury/Designer → eBay (13% + free authentication) > Poshmark
 - General/Mixed → Mercari (10%) > eBay (13%) > Facebook (0% local)
 
-Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb`, {
+Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, aptdeco`, {
       signal,
       task: 'price-synthesis',
       // Cap scales with comp count — the prompt asks the AI to classify
@@ -1638,7 +1672,8 @@ Notes:
 - "For Parts" or "Used - Fair" electronics: Mercari, Poshmark, Depop are unfit. eBay + Swappa + Facebook are good.
 - Fashion items: Swappa and Reverb are unfit. Poshmark, Depop, Mercari, eBay are good.
 - Musical instruments: Reverb is the obvious fit. eBay also good. Others usually unfit unless mainstream-consumer audio.
-- Furniture / bulky home goods: Facebook (local) is good; everything else unfit (shipping kills the deal).
+- Furniture / bulky home goods: Facebook (local) and AptDeco (furniture/home specialist with white-glove delivery) are good; everything else unfit (shipping kills the deal).
+- AptDeco: GOOD only for furniture and home furnishings (sofas, tables, dressers, rugs, lighting, decor). UNFIT for electronics, fashion, instruments, collectibles, and anything not furniture/home.
 - Collectibles / cards: eBay is good; Mercari is plausible for mainstream collectibles; others usually unfit.
 
 Be confident — don't mark everything "good." If you're unsure, lean "good" unless there's a real policy/audience reason.`, { signal, task: 'platform-fit-assessment', responseSchema: buildPlatformFitSchema(platforms.map(p => p.id)), meta: fitMeta });
@@ -1703,37 +1738,54 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
           }
         }
       };
-      for (const platformId of ids) {
+      // Process CDP-readable platforms first, then the native-read ones. Native
+      // reads must close the headless stealth browser to take the shared Chrome
+      // profile (one Chrome per userDataDir); grouping them last means the
+      // stealth browser is torn down ONCE at the end instead of thrashing
+      // close→relaunch between every interleaved headless platform.
+      const orderedIds = [
+        ...ids.filter((id) => !shouldUseNativeRead(id)),
+        ...ids.filter((id) => shouldUseNativeRead(id)),
+      ];
+      for (const platformId of orderedIds) {
         if (signal?.aborted) break;
 
-        // Session gate: a dead cookie should read as an explicit needs-login,
-        // not a vague "unknown" from an auth-walled hub page. Mirrors the per-listing
-        // session gate the Marketplace Status Module replaced — kept inline so
-        // this handler stays self-contained.
+        // Native-read platforms (Swappa/Mercari) are CDP-walled: the headless
+        // verify can't reach their pages either (403 / 35s reload-loop wedge), so
+        // running the session gate would just waste that time and can't produce a
+        // useful verdict. Skip it — the native read below reports its own outcome
+        // (real content → ok; /login bounce or challenge → a precise blocked msg).
+        const useNative = shouldUseNativeRead(platformId);
         const monitorConfig = getSellMonitorConfig(platformId);
-        const cached = monitorConfig ? getStatusCacheSync()[platformId] : null;
-        let gateReason; // undefined = pass; otherwise the needs-login reason
-        if (cached && cached.connected === false) {
-          gateReason = cached.lastReason || '';
-        } else if (monitorConfig) {
-          const verdict = await verifySellMonitorLogin(platformId).catch(() => null);
-          // A transient/inconclusive verifier failure is not proof of logout.
-          // Continue into the actual hub reads, which report their own transport
-          // outcome, instead of poisoning the cache with a false needs-login.
-          if (isConfirmedDisconnectedVerdict(verdict)) {
-            try { await writeStatusCache(platformId, false, { lastReason: verdict?.reason, lastTrace: verdict?.trace }); }
-            catch { /* cache write failures are non-fatal for the verdict */ }
-            gateReason = verdict?.reason || '';
+        if (!useNative) {
+          // Session gate: a dead cookie should read as an explicit needs-login,
+          // not a vague "unknown" from an auth-walled hub page. Mirrors the per-listing
+          // session gate the Marketplace Status Module replaced — kept inline so
+          // this handler stays self-contained.
+          const cached = monitorConfig ? getStatusCacheSync()[platformId] : null;
+          let gateReason; // undefined = pass; otherwise the needs-login reason
+          if (cached && cached.connected === false) {
+            gateReason = cached.lastReason || '';
+          } else if (monitorConfig) {
+            const verdict = await verifySellMonitorLogin(platformId).catch(() => null);
+            // A transient/inconclusive verifier failure is not proof of logout.
+            // Continue into the actual hub reads, which report their own transport
+            // outcome, instead of poisoning the cache with a false needs-login.
+            if (isConfirmedDisconnectedVerdict(verdict)) {
+              try { await writeStatusCache(platformId, false, { lastReason: verdict?.reason, lastTrace: verdict?.trace }); }
+              catch { /* cache write failures are non-fatal for the verdict */ }
+              gateReason = verdict?.reason || '';
+            }
           }
-        }
-        if (gateReason !== undefined) {
-          const name = monitorConfig?.name || platformId;
-          recordResult(platformId, {
-            status: 'needs-login',
-            message: `${name} session needs login.${gateReason ? ` ${gateReason}` : ''} Open Settings → Marketplace Login, then run Check All again.`,
-            summary: '', attention: [], sources: [],
-          });
-          continue;
+          if (gateReason !== undefined) {
+            const name = monitorConfig?.name || platformId;
+            recordResult(platformId, {
+              status: 'needs-login',
+              message: `${name} session needs login.${gateReason ? ` ${gateReason}` : ''} Open Settings → Marketplace Login, then run Check All again.`,
+              summary: '', attention: [], sources: [],
+            });
+            continue;
+          }
         }
 
         const watchUrls = getMarketplaceWatchUrls(platformId);
@@ -1746,12 +1798,28 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
           continue;
         }
 
-        const urlSpecs = watchUrls.map((url) => ({
-          url,
-          urlLabel: 'hub',
-          fetcher: (u, sig) => fetchHtmlAuthed(u, { signal: sig }),
-        }));
-        logger.info(`[MarketplaceStatus][${nodeId}] Scanning ${platformId} across ${watchUrls.length} hub URL(s)`);
+        let urlSpecs;
+        if (useNative) {
+          // CDP-walled platform: read the hub pages through a non-CDP native
+          // Chrome (the only thing that gets past Cloudflare/anti-bot here), then
+          // feed the pre-fetched HTML into the SAME scanSellerHubPages analysis
+          // via no-op fetchers — reusing all the LLM scan / read-state / status
+          // logic. See browser/nativeChromeReader.js.
+          logger.info(`[MarketplaceStatus][${nodeId}] Scanning ${platformId} across ${watchUrls.length} hub URL(s) via native (non-CDP) Chrome`);
+          const nativeResults = await readHubUrlsViaNativeChrome(watchUrls, { platformId, signal });
+          urlSpecs = watchUrls.map((url) => ({
+            url,
+            urlLabel: 'hub',
+            fetcher: () => nativeResults.get(url) || { ok: false, error: 'Native read produced no result for this URL.' },
+          }));
+        } else {
+          urlSpecs = watchUrls.map((url) => ({
+            url,
+            urlLabel: 'hub',
+            fetcher: (u, sig) => fetchHtmlAuthed(u, { signal: sig }),
+          }));
+          logger.info(`[MarketplaceStatus][${nodeId}] Scanning ${platformId} across ${watchUrls.length} hub URL(s)`);
+        }
         try {
           const scan = await scanSellerHubPages({ urlSpecs, platformId, signal });
           logger.info(`[MarketplaceStatus][${nodeId}] ${platformId}: ${scan.status} — ${scan.attention.length} attention item(s)`);

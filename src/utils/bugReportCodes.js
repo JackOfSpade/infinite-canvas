@@ -102,6 +102,20 @@ export const CODE_DEFINITIONS = {
       /\[TextEdit\]/i.test(line),
   },
 
+  FORM: {
+    label: 'Form Field Focus',
+    description: 'Form-control focus events ([Focus] …) — which input/date-picker/select the user was interacting with, and on which node. Use for "X flickered / reset / closed / jumped while I was using it" reports: it places the interaction on the timeline next to concurrent background activity (e.g. startup login-verification re-rendering the canvas).',
+    logFilter: line =>
+      /\[Focus\]/i.test(line),
+  },
+
+  RENDER: {
+    label: 'Render Storms',
+    description: 'Abnormally fast re-render bursts ([RenderStorm] …) that fingerprint an effect/state feedback loop or a prop that is unstable every render — for "the canvas is janking / a node keeps flickering / fans spinning" reports. One event per burst (not per render), with the culprit node and rate.',
+    logFilter: line =>
+      /\[RenderStorm\]/i.test(line),
+  },
+
   NAV: {
     label: 'Canvas Navigation',
     description: 'Nested canvas dive-in and dive-out events',

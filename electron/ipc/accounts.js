@@ -16,12 +16,23 @@ import {
   getJobLoginPlatforms,
   getJobLoginConfig,
   fetchHtmlClean,
+  getLoginAutoCloseWaitReason,
+  hasPlatformAuthCookie,
+  isNativeLoginSuccess,
 } from './stealthBrowser.js';
 import { detectAntiBotSignal } from './antiBotDetector.js';
+import { PLATFORM_AUTH_COOKIES } from './browser/authWindows.js';
+import { tryGetStore } from './settings.js';
 
 // Timeout for a session-verify page fetch. Not a freshness/density signal —
 // it's an auth-check network bound (fixed).
 const SESSION_VERIFY_TIMEOUT_MS = 25000;
+
+// Visible-text tokens that appear only once a seller is logged in. Used PURELY to
+// FLAG (never gate) a connected verdict that may actually be a client-rendered SSR
+// shell — see the ambiguousShell diagnostic at the connected return below.
+const LOGGED_IN_BODY_TOKENS = ['sign out', 'log out', 'my listings', 'your listings', 'selling dashboard', 'seller hub', 'account settings'];
+const AMBIGUOUS_SHELL_MAX_BYTES = 30000;
 const DEFAULT_SOFT_WALL_SIGNALS = [
   'sign in to your account',
   'sign in to ebay',
@@ -33,11 +44,75 @@ const DEFAULT_SOFT_WALL_SIGNALS = [
   'enter your password',
 ];
 
-// ── Session status in-memory cache ───────────────────────────────────────────
-// Pure in-memory: starts empty each launch, populated by verifyAllPlatforms on
-// startup and by writeStatusCache after each login flow. No disk persistence —
-// every startup does a fresh verify so a stale file would only add noise.
+// ── Session status cache (in-memory, disk-backed for last-known-good) ─────────
+// In-memory during a run, populated by verifyAllPlatforms on startup and by
+// writeStatusCache after each login flow. The LAST-KNOWN-CONNECTED status is also
+// persisted to disk and restored at startup — see loadPersistedStatusCache. WHY:
+// the startup verify already KEEPS PRIOR status on an inconclusive (anti-bot)
+// verdict (verifyAllPlatforms `keepPrior`), but with a purely in-memory cache the
+// "prior" was empty every launch, so any platform whose verify got intermittently
+// anti-bot-walled (eBay captcha, Mercari reload-loop, Swappa CF) showed up as
+// "needs login" on EVERY restart even though the session was alive — forcing
+// constant re-logins (the reported pain). Restoring the prior connected status
+// lets the existing inconclusive-preserve logic survive restarts. A DEFINITIVE
+// not-connected verify still overwrites it (real logouts are caught); only an
+// inconclusive verify preserves the restored value, and it expires after
+// STATUS_CACHE_MAX_AGE_MS so a long-dead session can't linger forever.
 let _statusCache = {};
+
+const STATUS_CACHE_STORE_KEY = 'marketplaceSessionCache';
+const STATUS_CACHE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+let _statusCacheLoaded = false;
+
+// Pure restore policy (unit-tested): from a persisted blob, keep ONLY recent
+// `connected: true` entries. A stale or not-connected prior must never mask a
+// fresh verify, and an old connected is likely dead. A fresh verify overwrites
+// whatever we restore — restored values only survive an INCONCLUSIVE (anti-bot)
+// verify, which is exactly when we want to keep believing the user is logged in.
+export function selectRestorableStatuses(stored, now = Date.now(), maxAgeMs = STATUS_CACHE_MAX_AGE_MS) {
+  const out = {};
+  if (!stored || typeof stored !== 'object') return out;
+  for (const [id, v] of Object.entries(stored)) {
+    if (!v || typeof v !== 'object' || v.connected !== true) continue;
+    const ts = Number(v.ts) || 0;
+    if (!ts || (now - ts) >= maxAgeMs) continue;
+    out[id] = { connected: true, ts, lastReason: typeof v.lastReason === 'string' ? v.lastReason : undefined, restoredFromDisk: true };
+  }
+  return out;
+}
+
+// Restore last session's connected statuses from disk (once per process).
+export function loadPersistedStatusCache() {
+  if (_statusCacheLoaded) return;
+  _statusCacheLoaded = true;
+  try {
+    const restorable = selectRestorableStatuses(tryGetStore()?.get(STATUS_CACHE_STORE_KEY));
+    for (const [id, v] of Object.entries(restorable)) _statusCache[id] = v;
+    const restored = Object.keys(restorable).length;
+    if (restored > 0) logger.info(`[Accounts] Restored ${restored} prior connected session status(es) from disk (anti-bot-resilient across restarts)`);
+  } catch (e) {
+    logger.warn('[Accounts] Could not load persisted session cache:', e?.message || String(e));
+  }
+}
+
+function persistStatusCache() {
+  try {
+    const store = tryGetStore();
+    if (!store) return;
+    const compact = {};
+    for (const [id, v] of Object.entries(_statusCache)) {
+      if (!v) continue;
+      compact[id] = {
+        connected: !!v.connected,
+        ts: Number(v.ts) || Date.now(),
+        ...(typeof v.lastReason === 'string' ? { lastReason: v.lastReason.slice(0, 300) } : {}),
+      };
+    }
+    store.set(STATUS_CACHE_STORE_KEY, compact);
+  } catch (e) {
+    logger.warn('[Accounts] Could not persist session cache:', e?.message || String(e));
+  }
+}
 
 export async function readStatusCache() {
   return _statusCache;
@@ -77,7 +152,47 @@ export async function verifySellMonitorLogin(platformId) {
     if (targets.length === 0) {
       return { connected: false, reason: 'No verify URL configured for this platform.', trace: { target: null } };
     }
+
+    // Cookie-first verification (opt-in via config.verifyViaCookie). For SPA
+    // platforms whose logged-in content is CLIENT-rendered (AptDeco: /sell/new's
+    // SSR shell shows "Already have an account? Sign in" and only swaps in the
+    // account UI after an async client auth check), the body-text sniff below
+    // races that swap and false-reads a logged-in user as logged out. A non-empty
+    // auth cookie (PLATFORM_AUTH_COOKIES) is an immediate, render-safe signal:
+    // present → connected; absent → fall through to the normal body/URL verify,
+    // which correctly confirms the logged-out shell.
+    if (config?.verifyViaCookie && await hasPlatformAuthCookie(platformId)) {
+      logger.info(`[Accounts] ${platformId} verified via auth cookie (SPA client-render-safe; body verify skipped)`);
+      return {
+        connected: true,
+        reason: `Auth cookie present for ${platformId} — logged in (body/URL verify skipped; SPA client-render-safe).`,
+        trace: { target: targets[0], finalUrl: targets[0], status: 'auth-cookie', loginSignal: 'auth-cookie', checks: [{ target: 'profile-cookie', status: 'auth-cookie', loginSignal: 'auth-cookie' }] },
+      };
+    }
+
     const traces = [];
+    let lastVisibleText = ''; // visible text of the last target — fuels the ambiguousShell flag
+
+    // When a cookie-configured platform reads logged-out, record whether its auth
+    // cookie actually survived on disk — the discriminator the bug reports kept
+    // missing for "I just logged in but it says logged out / session expires too
+    // fast": cookie ABSENT ⇒ the login didn't persist locally (our problem to fix);
+    // cookie PRESENT but the page reads logged-out ⇒ the platform invalidated the
+    // session server-side (anti-automation expiry, e.g. Facebook's repeat-2FA),
+    // which we can't fix locally. Only runs on a logged-out verdict for platforms
+    // with a known auth cookie; the note lands in the cache's "Last reason".
+    const annotateCookieSurvival = async (result) => {
+      const names = PLATFORM_AUTH_COOKIES[platformId];
+      if (!names?.length) return result;
+      let present = null;
+      try { present = await hasPlatformAuthCookie(platformId); } catch { /* leave unknown */ }
+      if (present === null) return result;
+      result.trace = { ...(result.trace || {}), authCookiePresent: present, authCookieNames: names };
+      result.reason += present
+        ? ` Auth cookie ${names.join(',')} IS present on disk → session invalidated server-side (not a local persistence loss).`
+        : ` Auth cookie ${names.join(',')} ABSENT on disk → login did not persist locally.`;
+      return result;
+    };
 
     for (const target of targets) {
       logger.info(`[Accounts] Verifying ${platformId} login via ${target}`);
@@ -89,7 +204,7 @@ export async function verifySellMonitorLogin(platformId) {
         // authenticated sessions. The clean path uses the same persistent
         // cookies but loads images normally so eBay/etc don't fingerprint us
         // as a bot.
-        r = await fetchHtmlClean(target, { timeoutMs: config?.verifyTimeoutMs || SESSION_VERIFY_TIMEOUT_MS });
+        r = await fetchHtmlClean(target, { timeoutMs: config?.verifyTimeoutMs || SESSION_VERIFY_TIMEOUT_MS, waitForRenderMs: config?.verifyRenderWaitMs || 0 });
       } catch (e) {
         // We never got a readable page (the fetch threw — e.g. a `page.content()
         // timed out` anti-bot reload loop). That is NOT proof of logout, so mark
@@ -106,12 +221,18 @@ export async function verifySellMonitorLogin(platformId) {
       }
 
       const visibleText = stripTags(r.html || '');
+      lastVisibleText = visibleText;
+      // Capture the raw <title> (the smoking gun for SPA shells: a logged-out Mercari
+      // /mypage serves the generic SEO title). Extracted before stripTags, bounded.
+      const pageTitle = (String(r.html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '')
+        .replace(/\s+/g, ' ').trim().slice(0, 160);
       const trace = {
         target,
         finalUrl: r.finalUrl,
         status: r.status,
         htmlBytes: r.html?.length || 0,
         bodyHead: visibleText.slice(0, 300),
+        ...(pageTitle ? { pageTitle } : {}),
       };
       traces.push(trace);
       const finalUrlLower = String(r.finalUrl || '').toLowerCase();
@@ -122,18 +243,27 @@ export async function verifySellMonitorLogin(platformId) {
         sourceLabel: config?.name || platformId,
       });
 
+      // An ANTI-BOT challenge (Cloudflare/Turnstile/captcha/etc.) on the verify URL
+      // is NOT proof of logout — it means the bot wall blocked our HEADLESS request,
+      // which it does intermittently even for a genuinely live session (confirmed on
+      // Swappa: the same session that 403s here scrapes its hub fine minutes later).
+      // Checked at ANY status, not just 401/403: eBay 200-REDIRECTS the verify to
+      // /splashui/captcha ("Security Measure — please verify yourself"), which the old
+      // 401/403-only guard missed → it fell through to the "expected URL" check and
+      // HARD-flipped a logged-in user to needs-login, trapping them in a re-login loop
+      // (the reported bug). Treat as INCONCLUSIVE so a transient wall can't flip a
+      // logged-in platform to "needs login"; the caller keeps prior status. We still
+      // do NOT assert connected off stale cookies — inconclusive only PRESERVES, never
+      // upgrades. A plain 401/403 with NO challenge signal is still a genuine auth wall.
+      if (antiBot) {
+        const session = await getSessionStatus(platformId).catch(() => ({ connected: false, cookieCount: 0 }));
+        trace.antiBot = antiBot.code;
+        trace.sessionCookieHeuristic = !!session?.connected;
+        trace.sessionCookieCount = session?.cookieCount || 0;
+        return { connected: false, inconclusive: true, reason: `Anti-bot wall (${antiBot.code}) at ${target} (HTTP ${r.status}${r.finalUrl ? ` → ${r.finalUrl}` : ''}) — cannot confirm session; keeping prior status.`, trace: { target, checks: traces } };
+      }
       if (r.status === 401 || r.status === 403) {
-        // Record anti-bot signal in the trace for diagnostics, but do NOT
-        // use cookie presence to override a 401/403 as "connected". A CF/bot
-        // challenge on the verify URL means we cannot confirm the session is
-        // live — stale cookies satisfy session?.connected just as well as fresh
-        // ones. Return not-connected; the caller will open a fresh login window.
-        if (antiBot) {
-          const session = await getSessionStatus(platformId).catch(() => ({ connected: false, cookieCount: 0 }));
-          trace.antiBot = antiBot.code;
-          trace.sessionCookieHeuristic = !!session?.connected;
-          trace.sessionCookieCount = session?.cookieCount || 0;
-        }
+        // A plain 401/403 with no bot-challenge signal is a genuine auth wall.
         return { connected: false, reason: `Auth wall at ${target} (HTTP ${r.status}) — not logged in.`, trace: { target, checks: traces } };
       }
       // 404 on a "logged-in-only" page gives no signal — the URL may have been
@@ -144,7 +274,7 @@ export async function verifySellMonitorLogin(platformId) {
         return { connected: false, reason: `Verify URL returned 404 at ${target} — the URL may have changed on the platform's side. Update verifyUrl in JOB_LOGIN_PLATFORMS / SELL_MONITOR_PLATFORMS.`, trace: { target, checks: traces } };
       }
       if (/\/(login|signin|sign-in|account\/login|auth)/i.test(finalUrlLower)) {
-        return { connected: false, reason: `Redirected to ${r.finalUrl} — login not completed.`, trace: { target, checks: traces } };
+        return await annotateCookieSurvival({ connected: false, reason: `Redirected to ${r.finalUrl} — login not completed.`, trace: { target, checks: traces } });
       }
 
       // Platform-specific redirect guard: some platforms redirect anonymous users
@@ -154,22 +284,36 @@ export async function verifySellMonitorLogin(platformId) {
       if (config?.connectedFinalUrlMustContain) {
         const mustContain = config.connectedFinalUrlMustContain.toLowerCase();
         if (!finalUrlLower.includes(mustContain)) {
-          return { connected: false, reason: `Redirected to ${r.finalUrl} — expected URL to contain "${config.connectedFinalUrlMustContain}" for a logged-in session.`, trace: { target, checks: traces } };
+          return await annotateCookieSurvival({ connected: false, reason: `Redirected to ${r.finalUrl} — expected URL to contain "${config.connectedFinalUrlMustContain}" for a logged-in session.`, trace: { target, checks: traces } });
         }
       }
 
       const matched = getSoftLoginWallMatch(visibleText, config);
       if (matched) {
         trace.softWallMatch = matched;
-        return { connected: false, reason: `Page body looks logged out at ${target} ("${matched}") despite URL ${r.finalUrl}.`, trace: { target, checks: traces } };
+        return await annotateCookieSurvival({ connected: false, reason: `Page body looks logged out at ${target} ("${matched}") despite URL ${r.finalUrl}.`, trace: { target, checks: traces } });
       }
     }
 
     const lastTrace = traces[traces.length - 1];
+    // Diagnostic-only (NEVER gates the verdict): connected here is a DEFAULT reached
+    // because no negative check matched. For an SPA that client-renders its login form
+    // over a generic SSR shell (Mercari at /mypage), the login bodySignal can race the
+    // render and miss while the URL stays on-host — so we default to connected with NO
+    // positive logged-in evidence. Flag when the body shows no logged-in marker and the
+    // HTML is shell-sized, so the bug report surfaces a possible false-positive
+    // 'connected' (with the smoking-gun <title>) instead of it reading as confirmed.
+    const hasLoggedInMarker = LOGGED_IN_BODY_TOKENS.some(s => lastVisibleText.toLowerCase().includes(s));
+    const ambiguousShell = !hasLoggedInMarker && (lastTrace.htmlBytes || 0) < AMBIGUOUS_SHELL_MAX_BYTES;
     return {
       connected: true,
       reason: `Reached ${targets.length} verify URL(s); last ${lastTrace.finalUrl} (HTTP ${lastTrace.status}) without auth redirect or sign-in body.`,
-      trace: { target: targets[0], checks: traces, finalUrl: lastTrace.finalUrl, status: lastTrace.status, htmlBytes: lastTrace.htmlBytes, bodyHead: lastTrace.bodyHead },
+      trace: {
+        target: targets[0], checks: traces, finalUrl: lastTrace.finalUrl, status: lastTrace.status,
+        htmlBytes: lastTrace.htmlBytes, bodyHead: lastTrace.bodyHead,
+        ...(lastTrace.pageTitle ? { pageTitle: lastTrace.pageTitle } : {}),
+        ...(ambiguousShell ? { ambiguousShell: true, ambiguousReason: `Reached the host but the body has no logged-in marker and the HTML is only ${lastTrace.htmlBytes} bytes — likely an unrendered SPA shell or inline login form; the connected verdict is a DEFAULT, not a positive confirmation${lastTrace.pageTitle ? ` (title: "${lastTrace.pageTitle}")` : ''}.` } : {}),
+      },
     };
   } catch (e) {
     logger.error(`[Accounts] verifySellMonitorLogin unexpected error for ${platformId}:`, e);
@@ -209,13 +353,18 @@ export function getSoftLoginWallMatch(visibleText, config = {}) {
 
 export async function writeStatusCache(platformId, connected, extras = {}) {
   _statusCache[platformId] = { connected, ts: Date.now(), ...extras };
+  // Persist so the next launch can restore last-known-connected and survive an
+  // intermittent anti-bot verify without forcing a re-login (see loadPersistedStatusCache).
+  persistStatusCache();
 }
 
 function isTrustedNativeLoginResult(platformId, result) {
-  const currentUrl = String(result?.currentUrl || '').toLowerCase();
   if (!result?.nativeChrome || result?.result !== 'auto-detected') return false;
-  if (platformId !== 'indeed') return false;
-  return currentUrl.includes('https://www.indeed.com/jobs');
+  // Re-validate the landed URL against the platform's success markers (generic —
+  // was hardcoded to indeed). `auto-detected` is only emitted after the native
+  // poll already matched isNativeLoginSuccess, so this is a belt-and-suspenders
+  // confirmation that also covers any new native platform (swappa → /my/swappa).
+  return isNativeLoginSuccess(platformId, result.currentUrl, result.title);
 }
 
 function buildTrustedNativeLoginVerdict(platformId, result) {
@@ -245,24 +394,37 @@ function buildTrustedNativeLoginVerdict(platformId, result) {
 // Skip the HTTP re-verify — Cloudflare challenges the verify URL on new browser
 // sessions even when the session is genuinely live, causing false "not connected"
 // verdicts immediately after a successful login.
-function isTrustedPuppeteerLoginResult(result) {
-  return result?.loginDetected === true && !!result?.loginUrl;
+function isTrustedPuppeteerLoginResult(platformId, result) {
+  if (result?.loginDetected !== true || !result?.loginUrl) return false;
+  const waitReason = getLoginAutoCloseWaitReason({
+    platformId,
+    currentUrl: result.loginUrl,
+    cookieSignal: result.loginSignal === 'auth-cookie',
+  });
+  if (waitReason) {
+    logger.warn(`[Accounts] ${platformId} login auto-detect not trusted (${result.loginSignal || 'unknown'} at ${result.loginUrl}; ${waitReason}) — running HTTP re-verify`);
+    return false;
+  }
+  return true;
 }
 
 function buildTrustedPuppeteerLoginVerdict(platformId, result) {
+  const signal = result.loginSignal || 'DOM/cookie/auth-gated';
   return {
     connected: true,
-    reason: `Auto-detected logged-in state for ${platformId} at ${result.loginUrl} (DOM/cookie/auth-gated signal) — HTTP re-verify skipped.`,
+    reason: `Auto-detected logged-in state for ${platformId} at ${result.loginUrl} (${signal} signal) — HTTP re-verify skipped.`,
     trace: {
       target: result.loginUrl,
       // Top-level finalUrl + status so the bug-report session table sees the
       // auto-detected marker (see buildTrustedNativeLoginVerdict for why).
       finalUrl: result.loginUrl,
       status: 'auto-detected',
+      loginSignal: signal,
       checks: [{
         target: 'puppeteer-login-window',
         finalUrl: result.loginUrl,
         status: 'auto-detected',
+        loginSignal: signal,
       }],
     },
   };
@@ -304,6 +466,11 @@ export function getVerifyTimingSummary() {
 }
 
 export async function verifyAllPlatforms({ notify = () => {} } = {}) {
+  // Seed the cache with last session's connected statuses BEFORE verifying, so the
+  // keepPrior (inconclusive / anti-bot) branch below has a prior to preserve
+  // across restarts instead of an empty cache → false "needs login" every launch.
+  loadPersistedStatusCache();
+
   const sellIds = getSellMonitorPlatforms().map(p => p.id);
   const jobIds  = getJobLoginPlatforms().map(p => p.id);
   const allIds  = [...sellIds, ...jobIds];
@@ -514,7 +681,7 @@ export function registerAccountsHandlers() {
           logger.info(`[Accounts] ${platformId} native login verified: ${verdict.reason}`);
           return { ...(result || {}), connected: true, reason: verdict.reason };
         }
-        if (isTrustedPuppeteerLoginResult(result)) {
+        if (isTrustedPuppeteerLoginResult(platformId, result)) {
           const verdict = buildTrustedPuppeteerLoginVerdict(platformId, result);
           await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
           logger.info(`[Accounts] ${platformId} login auto-detected: ${verdict.reason}`);

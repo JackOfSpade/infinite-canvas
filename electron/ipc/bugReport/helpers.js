@@ -143,10 +143,12 @@ export const renderSessionRows = (platforms, cache) => platforms.map(p => {
   // proven logged-in by a different (DOM/cookie/auth-gated) signal.
   const isAutoDetected = traceStatus === 'auto-detected';
   const redirectMismatch = !staleMismatch && !isAutoDetected && entry?.connected && mustContain && !traceFinalUrl.includes(mustContain.toLowerCase());
+  const ambiguousShell = entry?.connected && entry?.lastTrace?.ambiguousShell;
   const connected = entry?.connected
     ? (staleMismatch ? `⚠️ true (last verify ${traceStatus} — URL may have changed)`
       : redirectMismatch ? `⚠️ true (redirected to ${entry.lastTrace.finalUrl} — expected path containing "${mustContain}")`
-        : '✅ true')
+        : ambiguousShell ? '⚠️ true (AMBIGUOUS shell — no positive logged-in signal; may be a client-rendered login page)'
+          : '✅ true')
     : entry ? '❌ false' : '— (no entry)';
   const lastConfirmed = entry?.ts
     ? `${new Date(entry.ts).toISOString()} (${Math.round((Date.now() - entry.ts) / 1000)}s ago)`
@@ -165,8 +167,10 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
     t.finalUrl != null ? `  - finalUrl: \`${t.finalUrl}\`` : null,
     t.status != null ? `  - HTTP status: \`${t.status}\`` : null,
     t.htmlBytes != null ? `  - htmlBytes: \`${t.htmlBytes}\`` : null,
+    t.pageTitle ? `  - pageTitle: \`${String(t.pageTitle).replace(/`/g, "'").slice(0, 160)}\`` : null,
     t.softWallMatch ? `  - softWallMatch: \`${t.softWallMatch}\`` : null,
     t.error ? `  - error: \`${t.error}\`` : null,
+    t.ambiguousShell ? `  - ⚠️ ambiguousShell: ${(t.ambiguousReason || 'body matched no logged-in marker (likely an unrendered SSR shell / inline login form)').replace(/`/g, "'")}` : null,
     t.bodyHead ? `  - bodyHead: \`${t.bodyHead.replace(/`/g, "'").slice(0, 240)}\`` : null,
   ].filter(Boolean);
   if (Array.isArray(t.checks) && t.checks.length > 0) {
@@ -182,6 +186,17 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
         check.error ? `error=${check.error}` : null,
       ].filter(Boolean);
       lines.push(`    - ${parts.join(' | ').replace(/`/g, "'").slice(0, 320)}`);
+      // Surface the captured visible-text head per check. The top-level bodyHead
+      // is only set on the CONNECTED return path, so on a verify FAILURE
+      // (soft-wall match, redirect, 401/403) the page text was captured per-check
+      // but never rendered — leaving "logged out per body sniff" with no way to
+      // see WHAT the page actually said. That's the difference between "genuinely
+      // logged out (login form / sign-in shell)" and "logged in but the signal
+      // mis-fired / an SPA hadn't client-rendered the account UI yet". Only when
+      // the top-level bodyHead is absent, to avoid duplicating it for connected.
+      if (!t.bodyHead && check.bodyHead) {
+        lines.push(`      bodyHead: \`${String(check.bodyHead).replace(/`/g, "'").slice(0, 240)}\``);
+      }
     }
   }
   return lines.join('\n');

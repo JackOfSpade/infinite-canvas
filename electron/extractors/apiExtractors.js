@@ -19,7 +19,7 @@ import { safeApiFetch } from '../ipc/antiBotDetector.js';
 import { JOB_RESULT_CAP } from '../ipc/resultCaps.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
-import { isPriceChartingApplicable } from '../../src/utils/compSourceScope.js';
+import { isPriceChartingApplicable, isAptDecoApplicable } from '../../src/utils/compSourceScope.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
 // shared scrapeBudget store so they live in one place and share the budget
@@ -36,6 +36,7 @@ const API_TIMEOUT_SEEDS = {
   'wwr-api':        10000,
   'reverb-api':     12000,
   'pricecharting-api': 10000,
+  'aptdeco-api':    10000,
   'dice-api':       10000,
   'scrapfly-api':  160000, // Scrapfly default read timeout is 155s; leave client overhead.
 };
@@ -1223,6 +1224,111 @@ export async function fetchPriceChartingComps(query, signal = null, { category }
   if (parsed.length > 0 && items.length < parsed.length) {
     logger.info(`[PriceCharting] relevance filter kept ${items.length}/${parsed.length} row(s) for "${q.slice(0, 80)}"`);
   }
+  return { items, url, warning: null };
+}
+
+// ── AptDeco (direct HTTP, NOT the stealth browser) ──────────────────────────
+// AptDeco is a secondhand FURNITURE / home-furnishings marketplace. Its
+// /catalog?q= page is a Next.js App-Router route whose server-rendered HTML
+// EMBEDS the full first page of Algolia search results as literal JSON (a
+// `"hits":[ ... ]` array of ~57 records, relevance-ranked). A plain HTTP GET with
+// a browser UA gets them — no browser/JS needed. These are ACTIVE asking prices
+// (each record's `price` is the current ask; `original_price` is retail context),
+// so the source is classified category:'active' (like swappa/ebay-active), NOT
+// sold. Same direct-HTTP pattern as Reverb/PriceCharting; the caller SKIPS the
+// request for a non-furniture category (isAptDecoApplicable) since AptDeco's
+// fuzzy Algolia returns loose matches even for off-category queries.
+const APTDECO_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml',
+};
+
+// Extract the first `"hits":[ … ]` JSON array from a blob of HTML and parse it.
+// String-aware: tracks quote/escape state so a `[` or `]` INSIDE a record's string
+// value (e.g. a title "Sofa [Floor Model]") can't unbalance the bracket counter.
+// Returns [] on any miss/parse failure — a malformed or restructured page yields
+// no comps rather than throwing. PURE (no I/O) for testability.
+export function extractAlgoliaHits(html) {
+  const s = String(html || '');
+  const marker = '"hits":[';
+  const at = s.indexOf(marker);
+  if (at < 0) return [];
+  const open = at + marker.length - 1;   // index of the '['
+  let depth = 0, inStr = false, esc = false, end = -1;
+  for (let k = open; k < s.length; k++) {
+    const c = s[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) { end = k + 1; break; } }
+  }
+  if (end < 0) return [];
+  try {
+    const arr = JSON.parse(s.slice(open, end));
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+// Map AptDeco's embedded Algolia records → the standard comp shape. PURE (no I/O)
+// for testability. Keeps only available/saleable, positively-priced listings;
+// de-duped by product URL. `price` is the current ask (the comp value);
+// `original_price`/MSRP is retail context and is NOT used as the comp price.
+export function parseAptDecoComps(html) {
+  const items = [];
+  const seen = new Set();
+  for (const rec of extractAlgoliaHits(html)) {
+    if (!rec || typeof rec !== 'object') continue;
+    // Skip sold/unavailable inventory — these are ACTIVE asking-price comps.
+    if (rec.is_available === false || rec.is_saleable === false) continue;
+    const title = String(rec.title || '').trim();
+    const price = Number(rec.price);
+    const slug = String(rec.page_url || '').trim();
+    if (!title || !slug || !(price > 0)) continue;
+    const url = `https://www.aptdeco.com/product/${slug}`;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    const condition = String(rec.condition_title || '').trim();
+    items.push({
+      title,
+      price,
+      priceText: '$' + price.toFixed(2),
+      url,
+      source: 'aptdeco-active',
+      ...(condition ? { condition } : {}),
+    });
+  }
+  return items;
+}
+
+export async function fetchAptDecoComps(query, signal = null, { category } = {}) {
+  const q = String(query || '').trim();
+  if (!q) return { items: [], url: null, warning: null };
+  // Skip the request for a clearly non-furniture category — AptDeco's fuzzy
+  // Algolia returns loose matches that would pollute an electronics/fashion item.
+  // `skipped` lets the caller tell "n/a here" apart from a genuine empty result.
+  if (category !== undefined && !isAptDecoApplicable(category)) {
+    return { items: [], url: null, warning: null, skipped: true };
+  }
+  const url = `https://www.aptdeco.com/catalog?q=${encodeURIComponent(q)}`;
+  let res;
+  try {
+    res = await fetch(url, { headers: APTDECO_HEADERS, signal: createTimeoutSignal(signal, apiTimeout('aptdeco-api')) });
+  } catch (e) {
+    logger.warn(`[AptDeco] fetch failed: ${String(e?.message || e).slice(0, 160)}`);
+    return { items: [], url, warning: { code: 'task-failed', severity: 'block', evidence: `fetch failed: ${String(e?.message || e).slice(0, 200)}` } };
+  }
+  if (!res.ok) {
+    logger.warn(`[AptDeco] HTTP ${res.status}`);
+    return { items: [], url, warning: { code: 'task-failed', severity: 'block', evidence: `HTTP ${res.status} (server bot-gate or rate-limit)` } };
+  }
+  const items = parseAptDecoComps(await res.text());
   return { items, url, warning: null };
 }
 

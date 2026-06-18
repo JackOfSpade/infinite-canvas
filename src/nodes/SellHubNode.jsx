@@ -30,17 +30,17 @@ import { appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../
 import { enqueueUniqueSourceResolve } from '../utils/sourceResolveQueue';
 import { getRequiredCompLoginPlatformIds } from '../utils/marketplaceLoginPreflight';
 import {
-  effectivePriceDropTargetPercent,
   normalizePriceDropMustSellDate,
   normalizePriceDropReminderWeeks,
   normalizePriceDropStartingPrice,
   normalizePriceDropStartingTier,
-  normalizePriceDropTargetPercent,
+  normalizePriceDropTargetPrice,
   oldestPriceDropCardCreatedAtIso,
   priceDropStartingPrice,
 } from '../utils/priceDropReminder';
 import { getConnectedHubCards } from '../utils/connectedHubCards';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
+import { useRenderStorm } from '../hooks/useRenderStorm';
 
 /**
  * SellHubNode — draggable canvas module for marketplace selling.
@@ -69,6 +69,10 @@ const COMP_CARD_DISMISS_GRACE_MS = 10_000;
 const TERMINAL_COMP_STATUSES = new Set(['done', 'error', 'skipped']);
 
 export function SellHubNode({ id, data }) {
+
+  // Surface runaway re-render bursts (effect/state loops, unstable props) in bug
+  // reports — otherwise re-render churn is invisible.
+  useRenderStorm(`sellhub ${String(id).slice(0, 8)}`);
 
   // id is stable for this component's lifetime — ReactFlow never reuses
   // instances with different ids, so we can safely close over it in callbacks.
@@ -1317,13 +1321,15 @@ export function SellHubNode({ id, data }) {
         next.priceDropMustSellDate = mustSellDate;
       }
     }
-    if (Object.hasOwn(updates, 'targetPercent')) {
-      const targetPercent = normalizePriceDropTargetPercent(updates.targetPercent);
-      if (
-        targetPercent != null
-        && effectivePriceDropTargetPercent(data.priceDropTargetPercent) !== targetPercent
-      ) {
-        next.priceDropTargetPercent = targetPercent;
+    if (Object.hasOwn(updates, 'targetPrice')) {
+      // Empty input clears the target → generic cadence reminders, no suggested
+      // price. A non-empty value must be positive currency to take effect.
+      const cleared = updates.targetPrice == null || String(updates.targetPrice).trim() === '';
+      const targetPrice = cleared ? null : normalizePriceDropTargetPrice(updates.targetPrice);
+      if (!cleared && targetPrice == null) {
+        // malformed → ignore, leaving the persisted value untouched
+      } else if (normalizePriceDropTargetPrice(data.priceDropTargetPrice) !== targetPrice) {
+        next.priceDropTargetPrice = targetPrice ?? undefined;
       }
     }
     if (Object.hasOwn(updates, 'startingTier')) {
@@ -1344,9 +1350,11 @@ export function SellHubNode({ id, data }) {
         bundleTotal: data.bundleTotal,
       }), selectedTier);
       if (startingPrice != null) next.priceDropPlanStartingPrice = startingPrice;
-      // Remove the obsolete timeline field written by the earlier plan-start
-      // implementation. Undefined is omitted from persisted JSON.
+      // Remove obsolete fields from earlier plan implementations: the plan-start
+      // timeline and the old percentage-based deadline target (now an absolute
+      // priceDropTargetPrice). Undefined is omitted from persisted JSON.
       next.priceDropPlanStartedAt = undefined;
+      if (data.priceDropTargetPercent !== undefined) next.priceDropTargetPercent = undefined;
       updateGlobal(id, next);
     }
   }, [
@@ -1354,6 +1362,7 @@ export function SellHubNode({ id, data }) {
     data.priceDropMustSellDate,
     data.priceDropReminderWeeks,
     data.priceDropStartingTier,
+    data.priceDropTargetPrice,
     data.priceDropTargetPercent,
     data.pricing,
     data.itemPricings,
@@ -1362,6 +1371,84 @@ export function SellHubNode({ id, data }) {
     id,
     updateGlobal,
   ]);
+
+  // Reactive count of OTHER item cards on THIS canvas level eligible to receive
+  // an "apply to all". `s.nodes` is the active canvas only — sub-canvas children
+  // live in their group's canvasData and parent levels in the nav stack, so this
+  // is naturally scoped to "current canvas in the hierarchy". Skips locked hubs
+  // (their plan UI is read-only) and cards opted out via the exclude toggle.
+  const applyPlanTargetCount = useStore(
+    useCallback((s) => s.nodes.filter(n => (
+      n.type === 'sellhub'
+      && n.id !== id
+      && n.data?.hubState === 'priced'
+      && !n.data?.locked
+      && !n.data?.priceDropApplyAllExcluded
+    )).length, [id])
+  );
+
+  // Broadcast this hub's price-drop plan to every eligible sibling item card on
+  // the current canvas. Cadence / must-sell date / target / starting tier are
+  // shared; each target's dollar starting value is recomputed from its OWN tiers
+  // so a $20 item and a $700 item both anchor correctly on the shared tier.
+  const handleApplyPriceDropPlanToAll = useCallback(() => {
+    if (data.locked) return;
+    const weeks = normalizePriceDropReminderWeeks(data.priceDropReminderWeeks);
+    const mustSellDate = normalizePriceDropMustSellDate(data.priceDropMustSellDate);
+    const targetPrice = normalizePriceDropTargetPrice(data.priceDropTargetPrice);
+    const startingTier = normalizePriceDropStartingTier(data.priceDropStartingTier);
+    // Re-query live at click time (the render-time count can lag a sibling's
+    // exclude-toggle change since ReactFlow only re-renders changed nodes).
+    const targets = getNodes().filter(n => (
+      n.type === 'sellhub'
+      && n.id !== id
+      && n.data?.hubState === 'priced'
+      && !n.data?.locked
+      && !n.data?.priceDropApplyAllExcluded
+    ));
+    if (targets.length === 0) {
+      addToast?.({ title: 'No other item cards to apply to', description: 'Only priced, non-excluded items on this canvas are updated.', type: 'info' });
+      return;
+    }
+    document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
+    for (const target of targets) {
+      // Per-item starting value from the target's own tiers on the shared tier.
+      // Mirrors handleChangePriceDropPlan's snapshot step. Cleared (undefined)
+      // when the target has no usable price so its card recomputes from the new
+      // tier instead of keeping a stale value from its previous tier.
+      const startingPrice = priceDropStartingPrice(selectListingPriceTiers({
+        pricing: target.data?.pricing,
+        itemPricings: target.data?.itemPricings,
+        bundlePricing: target.data?.bundlePricing,
+        bundleTotal: target.data?.bundleTotal,
+      }), startingTier);
+      updateGlobal(target.id, {
+        priceDropReminderWeeks: weeks,
+        priceDropMustSellDate: mustSellDate,
+        priceDropTargetPrice: targetPrice ?? undefined,
+        priceDropStartingTier: startingTier,
+        priceDropPlanStartingPrice: startingPrice ?? undefined,
+        // Drop obsolete fields the same way the per-hub editor does.
+        priceDropPlanStartedAt: undefined,
+        priceDropTargetPercent: undefined,
+      });
+    }
+    addToast?.({ title: `Applied to ${targets.length} item${targets.length === 1 ? '' : 's'}`, description: 'Price-drop plan copied to the other items on this canvas.', type: 'success' });
+  }, [
+    data.locked,
+    data.priceDropReminderWeeks,
+    data.priceDropMustSellDate,
+    data.priceDropTargetPrice,
+    data.priceDropStartingTier,
+    id, getNodes, updateGlobal, addToast,
+  ]);
+
+  // Per-card opt-out: when on, no sibling's "apply to all" overwrites this card's
+  // price-drop plan. Independent of this card's own ability to be a source.
+  const handleToggleApplyAllExcluded = useCallback(() => {
+    if (data.locked) return;
+    updateGlobal(id, { priceDropApplyAllExcluded: !data.priceDropApplyAllExcluded });
+  }, [data.locked, data.priceDropApplyAllExcluded, id, updateGlobal]);
 
   const handleRemoveDisplayPhoto = useCallback((index) => {
     if (data.locked) return;
@@ -1669,12 +1756,16 @@ export function SellHubNode({ id, data }) {
             priceDropPlan={{
               weeks: normalizePriceDropReminderWeeks(data.priceDropReminderWeeks),
               mustSellDate: normalizePriceDropMustSellDate(data.priceDropMustSellDate),
-              targetPercent: effectivePriceDropTargetPercent(data.priceDropTargetPercent),
+              targetPrice: normalizePriceDropTargetPrice(data.priceDropTargetPrice),
               scheduleStartedAt: priceDropScheduleStartedAt,
               startingPrice: normalizePriceDropStartingPrice(data.priceDropPlanStartingPrice),
               startingTier: normalizePriceDropStartingTier(data.priceDropStartingTier),
             }}
             onChangePriceDropPlan={handleChangePriceDropPlan}
+            applyPlanTargetCount={applyPlanTargetCount}
+            onApplyPriceDropPlanToAll={handleApplyPriceDropPlanToAll}
+            priceDropApplyAllExcluded={!!data.priceDropApplyAllExcluded}
+            onToggleApplyAllExcluded={handleToggleApplyAllExcluded}
           />
         )}
       </HubContainer>

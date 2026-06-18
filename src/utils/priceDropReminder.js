@@ -16,8 +16,6 @@
 export const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000;
 export const MAX_PRICE_DROP_TIMER_DELAY_MS = 2_147_000_000;
 export const INITIAL_PRICE_DROP_CHECK_DELAY_MS = 100;
-export const DEFAULT_PRICE_DROP_TARGET_PERCENT = 10;
-export const MAX_PRICE_DROP_TARGET_PERCENT = 10;
 export const DEFAULT_PRICE_DROP_STARTING_TIER = 'best';
 
 const PRICE_DROP_STARTING_TIERS = new Set(['quick', 'best', 'max']);
@@ -92,6 +90,20 @@ export function priceDropMustSellDateMs(raw) {
   return new Date(Number(year), Number(month) - 1, Number(day)).getTime();
 }
 
+/**
+ * Local midnight at the END of the must-sell day (start of the next day), or
+ * null. This is the inclusive cutoff for the plan: a reminder that naturally
+ * lands ANY time on the must-sell day still counts (a "reduction on the day
+ * of"), but reminders after the day are suppressed. `day + 1` lets the Date
+ * constructor roll the month/year and respect DST, unlike adding 24h of ms.
+ */
+export function priceDropMustSellDayEndMs(raw) {
+  const value = normalizePriceDropMustSellDate(raw);
+  if (!value) return null;
+  const [, year, month, day] = DATE_ONLY_RE.exec(value);
+  return new Date(Number(year), Number(month) - 1, Number(day) + 1).getTime();
+}
+
 function normalizeNonNegativeCurrency(raw) {
   let amount;
   if (typeof raw === 'number') {
@@ -107,24 +119,14 @@ function normalizeNonNegativeCurrency(raw) {
   return Math.round((amount + Number.EPSILON) * 100) / 100;
 }
 
-/** Strictly normalize a target percentage constrained to the required <=10%. */
-export function normalizePriceDropTargetPercent(raw) {
-  let percent;
-  if (typeof raw === 'number') {
-    percent = raw;
-  } else if (typeof raw === 'string') {
-    const value = raw.trim();
-    if (!DECIMAL_RE.test(value)) return null;
-    percent = Number(value);
-  } else {
-    return null;
-  }
-  if (!Number.isFinite(percent) || percent < 0 || percent > MAX_PRICE_DROP_TARGET_PERCENT) return null;
-  return Math.round((percent + Number.EPSILON) * 100) / 100;
-}
-
-export function effectivePriceDropTargetPercent(raw) {
-  return normalizePriceDropTargetPercent(raw) ?? DEFAULT_PRICE_DROP_TARGET_PERCENT;
+/**
+ * The absolute price the listing should reach BY the must-sell date — entered
+ * directly by the user. Positive currency or null (null = no target, so the
+ * cards fall back to generic cadence reminders without a suggested price).
+ */
+export function normalizePriceDropTargetPrice(raw) {
+  const price = normalizeNonNegativeCurrency(raw);
+  return price != null && price > 0 ? price : null;
 }
 
 export function normalizePriceDropStartingTier(raw) {
@@ -150,41 +152,36 @@ export function priceDropStartingPrice(tiers, raw) {
 }
 
 /**
- * Number of cadence reminders strictly before the must-sell date. A reminder
- * exactly at local midnight on that date is intentionally excluded.
+ * Number of cadence reminders that occur THROUGH the must-sell day — i.e. on or
+ * before it. A reminder that naturally lands any time on the must-sell day is
+ * the plan's final reminder (it reaches the exact target); reminders after the
+ * day are excluded. The last of these N reminders is the one that hits target.
  */
-export function priceDropReminderCountBeforeMustSell({ scheduleStartedAtIso, mustSellDate, weeks }) {
+export function priceDropReminderCountThroughMustSell({ scheduleStartedAtIso, mustSellDate, weeks }) {
   const intervalWeeks = normalizePriceDropReminderWeeks(weeks);
   const scheduleStartedAtMs = Date.parse(scheduleStartedAtIso || '');
-  const deadlineMs = priceDropMustSellDateMs(mustSellDate);
-  if (!intervalWeeks || !Number.isFinite(scheduleStartedAtMs) || !Number.isFinite(deadlineMs)) return null;
-  const scheduleSpanMs = deadlineMs - scheduleStartedAtMs;
+  const dayEndMs = priceDropMustSellDayEndMs(mustSellDate);
+  if (!intervalWeeks || !Number.isFinite(scheduleStartedAtMs) || !Number.isFinite(dayEndMs)) return null;
+  const scheduleSpanMs = dayEndMs - scheduleStartedAtMs;
   if (!(scheduleSpanMs > 0)) return 0;
   return Math.max(0, Math.ceil(scheduleSpanMs / (intervalWeeks * MS_PER_WEEK)) - 1);
 }
 
-/**
- * Maximum listing price at the deadline. Floor to cents so floating-point or
- * currency rounding can never push the result above the selected percentage.
- */
-export function priceDropTargetPrice(startingPrice, targetPercent = DEFAULT_PRICE_DROP_TARGET_PERCENT) {
-  const startPrice = normalizePriceDropStartingPrice(startingPrice);
-  const percent = normalizePriceDropTargetPercent(targetPercent);
-  if (startPrice == null || percent == null) return null;
-  const startCents = Math.round(startPrice * 100);
-  const percentBasisPoints = Math.round(percent * 100);
-  if (!Number.isSafeInteger(startCents) || !Number.isSafeInteger(startCents * percentBasisPoints)) return null;
-  return Math.floor(startCents * percentBasisPoints / 10_000) / 100;
-}
-
-function nextPriceDropReminder({ scheduleStartedAtIso, lastAcknowledgedAtIso, weeks, nowMs }) {
+function nextPriceDropReminder({ scheduleStartedAtIso, lastAcknowledgedAtIso, cardCreatedAtIso, weeks, nowMs }) {
   const intervalWeeks = normalizePriceDropReminderWeeks(weeks);
   const scheduleStartedAtMs = Date.parse(scheduleStartedAtIso || '');
   if (!intervalWeeks || !Number.isFinite(scheduleStartedAtMs) || !Number.isFinite(nowMs)) return null;
   const acknowledgedAtMs = Date.parse(lastAcknowledgedAtIso || '');
-  const scheduleCursorMs = Number.isFinite(acknowledgedAtMs)
-    ? Math.max(scheduleStartedAtMs, acknowledgedAtMs)
-    : scheduleStartedAtMs;
+  const cardCreatedAtMs = Date.parse(cardCreatedAtIso || '');
+  // A card never owes reminders from before it existed. Floor the cadence cursor
+  // at the card's own creation so one spawned mid-schedule joins at the next
+  // shared grid point instead of firing immediately for an interval that elapsed
+  // before the card was added (e.g. listing a second platform weeks later). A
+  // future creation time (corrupt or clock-skewed) is ignored — matching
+  // oldestPriceDropCardCreatedAtIso — so it can't push reminders out forever.
+  let scheduleCursorMs = scheduleStartedAtMs;
+  if (Number.isFinite(cardCreatedAtMs) && cardCreatedAtMs <= nowMs) scheduleCursorMs = Math.max(scheduleCursorMs, cardCreatedAtMs);
+  if (Number.isFinite(acknowledgedAtMs)) scheduleCursorMs = Math.max(scheduleCursorMs, acknowledgedAtMs);
   const intervalMs = intervalWeeks * MS_PER_WEEK;
   const nextStep = Math.max(1, Math.floor((scheduleCursorMs - scheduleStartedAtMs) / intervalMs) + 1);
   const nextDueAtMs = scheduleStartedAtMs + nextStep * intervalMs;
@@ -198,34 +195,38 @@ function nextPriceDropReminder({ scheduleStartedAtIso, lastAcknowledgedAtIso, we
 export function priceDropReminderDelayMs({
   scheduleStartedAtIso,
   lastAcknowledgedAtIso,
+  cardCreatedAtIso,
   weeks,
   nowMs = Date.now(),
 }) {
-  const next = nextPriceDropReminder({ scheduleStartedAtIso, lastAcknowledgedAtIso, weeks, nowMs });
+  const next = nextPriceDropReminder({ scheduleStartedAtIso, lastAcknowledgedAtIso, cardCreatedAtIso, weeks, nowMs });
   return next ? Math.max(0, next.nextDueAtMs - nowMs) : null;
 }
 
 /**
  * Delay to the next fixed-cadence must-sell-plan reminder. Acknowledging late
- * does not drift the remaining schedule, and no reminder is scheduled on or
- * after the must-sell date.
+ * does not drift the remaining schedule. Reminders fire on the shared cadence
+ * through the must-sell day (a natural on-the-day reminder is allowed) and stop
+ * once the day has fully passed — extending the must-sell date later naturally
+ * brings them back, since everything is derived from the date.
  */
 export function priceDropDeadlineReminderDelayMs({
   scheduleStartedAtIso,
   lastAcknowledgedAtIso,
+  cardCreatedAtIso,
   mustSellDate,
   weeks,
   nowMs = Date.now(),
 }) {
-  const deadlineMs = priceDropMustSellDateMs(mustSellDate);
-  const remindersBeforeDeadline = priceDropReminderCountBeforeMustSell({ scheduleStartedAtIso, mustSellDate, weeks });
-  const next = nextPriceDropReminder({ scheduleStartedAtIso, lastAcknowledgedAtIso, weeks, nowMs });
+  const dayEndMs = priceDropMustSellDayEndMs(mustSellDate);
+  const remindersThroughDeadline = priceDropReminderCountThroughMustSell({ scheduleStartedAtIso, mustSellDate, weeks });
+  const next = nextPriceDropReminder({ scheduleStartedAtIso, lastAcknowledgedAtIso, cardCreatedAtIso, weeks, nowMs });
   if (
     !next
-    || !Number.isFinite(deadlineMs)
-    || !(remindersBeforeDeadline > 0)
-    || nowMs >= deadlineMs
-    || next.nextStep > remindersBeforeDeadline
+    || !Number.isFinite(dayEndMs)
+    || !(remindersThroughDeadline > 0)
+    || nowMs >= dayEndMs
+    || next.nextStep > remindersThroughDeadline
   ) {
     return null;
   }
@@ -243,29 +244,31 @@ export function isPriceDropReminderDue(args) {
  * Linear price-drop schedule for a listing card.
  *
  * The oldest connected card's creation time starts the shared schedule.
- * Reminder opportunities are counted at the configured cadence, and the last
- * opportunity strictly before the must-sell date reaches the target percentage.
- * A late reminder catches up to the corresponding schedule step. When the
- * deadline is too close to contain a prior reminder, no suggestion is returned:
- * claiming the target can be reached would be mathematically false.
+ * Reminders are counted at the configured cadence through the must-sell day, and
+ * the final reminder (on or before that day) reaches the exact user-entered
+ * target price. A late reminder catches up to the corresponding schedule step.
+ * Returns null when there is no valid drop to suggest — no target, a target not
+ * below the starting price, or a deadline too close to contain any reminder
+ * (claiming the target can be reached would then be mathematically false).
  */
 export function calculatePriceDropSuggestion({
   startingPrice,
-  targetPercent = DEFAULT_PRICE_DROP_TARGET_PERCENT,
+  targetPrice,
   scheduleStartedAtIso,
   mustSellDate,
   weeks,
   nowMs = Date.now(),
 }) {
   const startPrice = normalizePriceDropStartingPrice(startingPrice);
-  const target = priceDropTargetPrice(startPrice, targetPercent);
+  const target = normalizePriceDropTargetPrice(targetPrice);
   const scheduleStartedAtMs = Date.parse(scheduleStartedAtIso || '');
-  const dropsBeforeDeadline = priceDropReminderCountBeforeMustSell({ scheduleStartedAtIso, mustSellDate, weeks });
+  const dropsThroughDeadline = priceDropReminderCountThroughMustSell({ scheduleStartedAtIso, mustSellDate, weeks });
   if (
     startPrice == null
     || target == null
+    || !(target < startPrice)
     || !Number.isFinite(scheduleStartedAtMs)
-    || !(dropsBeforeDeadline > 0)
+    || !(dropsThroughDeadline > 0)
     || !Number.isFinite(nowMs)
   ) {
     return null;
@@ -273,8 +276,8 @@ export function calculatePriceDropSuggestion({
 
   const intervalMs = normalizePriceDropReminderWeeks(weeks) * MS_PER_WEEK;
   const elapsedDrops = Math.max(1, Math.floor((nowMs - scheduleStartedAtMs) / intervalMs));
-  const currentStep = Math.min(dropsBeforeDeadline, elapsedDrops);
-  if (currentStep === dropsBeforeDeadline) return target;
-  const suggestion = startPrice - ((startPrice - target) * currentStep / dropsBeforeDeadline);
+  const currentStep = Math.min(dropsThroughDeadline, elapsedDrops);
+  if (currentStep === dropsThroughDeadline) return target;
+  const suggestion = startPrice - ((startPrice - target) * currentStep / dropsThroughDeadline);
   return Math.floor((suggestion + Number.EPSILON) * 100) / 100;
 }

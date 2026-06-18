@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { PhotoStrip } from '../../components/PhotoStrip';
-import { Check, Copy, RefreshCw, ChevronDown, ChevronRight, Plus, Activity, Sparkles, TrendingUp, TrendingDown, Minus, ChevronUp } from 'lucide-react';
+import { syncUncontrolledTextValue } from '../../utils/uncontrolledTextValue';
+import { Check, Copy, RefreshCw, ChevronDown, ChevronRight, Plus, Activity, Sparkles, TrendingUp, TrendingDown, Minus, ChevronUp, CheckSquare, Square, CopyPlus } from 'lucide-react';
 import { TIMINGS } from '../../utils/timings';
 import { SELL_PLATFORMS } from '../../utils/constants';
 import { useToast } from '../../components/ToastProvider';
@@ -8,31 +9,76 @@ import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
 import { useSyncWhileFocused } from '../../hooks/useSyncWhileFocused';
 import { buildFinalListingTitle, normalizeBundlePricingResult, selectListingPriceTiers } from '../../utils/bundlePricing';
 import {
-  DEFAULT_PRICE_DROP_TARGET_PERCENT,
   normalizePriceDropReminderWeeks,
-  normalizePriceDropTargetPercent,
-  priceDropReminderCountBeforeMustSell,
-  priceDropTargetPrice,
+  normalizePriceDropTargetPrice,
+  priceDropReminderCountThroughMustSell,
   resolvePriceDropStartingTier,
 } from '../../utils/priceDropReminder';
 
 /**
  * Per-item price-drop plan stored on the hub and read by its marketplace cards.
- * The cadence enables the pulse. An optional must-sell date adds a calculated
- * price target, using the selected Quick/Best/Max tier as the starting value.
+ * The cadence enables the pulse. An optional must-sell date + target price walk
+ * the listing from the selected Quick/Best/Max tier down to that target by the
+ * date — the final reminder on or before the date reaches the exact target.
  *
  * Plain-text input with blur-commit (useSyncWhileFocused) so decimals like
  * "1.5" type naturally and there are no number-spinner artifacts.
  */
-function PriceDropReminderPlan({ plan, locked, onChange }) {
+/**
+ * Must-sell date — uncontrolled (defaultValue + ref-synced while unfocused) so
+ * background re-renders never reconcile its value and snap the open native
+ * calendar popup shut. A controlled `<input type="date" value=…>` here flickered
+ * closed ("press open, it closes") whenever the hub re-rendered mid-interaction —
+ * notably during the ~40s startup login-verification, which re-renders the hub
+ * once per platform. The sibling weeks/target inputs dodge this via
+ * useSyncWhileFocused; this is the date-input analogue (MarketplaceNotesTextarea
+ * uses the same pattern).
+ */
+function MustSellDateInput({ value, onChange, locked }) {
+  const [initialValue] = useState(() => String(value ?? ''));
+  const inputRef = useRef(null);
+  const focusedRef = useRef(false);
+
+  useEffect(() => {
+    syncUncontrolledTextValue(inputRef.current, value, focusedRef.current);
+  }, [value]);
+
+  return (
+    <input
+      ref={inputRef}
+      type="date"
+      defaultValue={initialValue}
+      onChange={(e) => onChange?.(e.target.value)}
+      onFocus={() => { focusedRef.current = true; }}
+      onBlur={() => { focusedRef.current = false; syncUncontrolledTextValue(inputRef.current, value, false); }}
+      onPointerDown={(e) => e.stopPropagation()}
+      aria-label="Must sell by"
+      disabled={locked}
+      className="nodrag min-w-0 flex-1 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-white/65 text-[9px] outline-none focus:border-blue-400/50 disabled:opacity-50 [color-scheme:dark]"
+    />
+  );
+}
+
+function PriceDropReminderPlan({ plan, locked, onChange, applyTargetCount = 0, onApplyToAll, excluded = false, onToggleExcluded }) {
   const weeksEditor = useSyncWhileFocused(plan.weeks > 0 ? String(plan.weeks) : '');
-  const targetEditor = useSyncWhileFocused(String(plan.targetPercent));
-  const targetPrice = priceDropTargetPrice(plan.startingPrice, plan.targetPercent);
-  const priorReminderCount = priceDropReminderCountBeforeMustSell({
+  const targetEditor = useSyncWhileFocused(plan.targetPrice != null ? String(plan.targetPrice) : '');
+  const remindersThroughDeadline = priceDropReminderCountThroughMustSell({
     scheduleStartedAtIso: plan.scheduleStartedAt,
     mustSellDate: plan.mustSellDate,
     weeks: plan.weeks,
   });
+  // "Apply to all" only broadcasts a plan that actually does something: without
+  // a cadence (weeks > 0) there are no reminders, so enabling the button would
+  // just silently reset every sibling's plan to off — a footgun, not a feature.
+  const hasCadenceToApply = plan.weeks > 0;
+  const hasTarget = plan.targetPrice != null;
+  const hasStart = plan.startingPrice != null;
+  const targetBelowStart = hasTarget && hasStart && plan.targetPrice < plan.startingPrice;
+  const targetTooHigh = hasTarget && hasStart && plan.targetPrice >= plan.startingPrice;
+  // The full plan needs a date AND a usable target below the starting price.
+  const planActive = !!plan.mustSellDate && targetBelowStart;
+  // A must-sell date requires a target — without one the date does nothing.
+  const dateNeedsTarget = !!plan.mustSellDate && !hasTarget;
 
   const commitWeeks = () => {
     weeksEditor.focusProps.onBlur();
@@ -44,14 +90,17 @@ function PriceDropReminderPlan({ plan, locked, onChange }) {
   const commitTarget = () => {
     targetEditor.focusProps.onBlur();
     const raw = targetEditor.value.trim();
-    const next = raw === ''
-      ? DEFAULT_PRICE_DROP_TARGET_PERCENT
-      : normalizePriceDropTargetPercent(raw);
-    if (next == null) {
-      targetEditor.setValue(String(plan.targetPercent));
+    if (raw === '') {
+      onChange?.({ targetPrice: '' }); // empty clears the target
+      targetEditor.setValue('');
       return;
     }
-    onChange?.({ targetPercent: next });
+    const next = normalizePriceDropTargetPrice(raw);
+    if (next == null) {
+      targetEditor.setValue(plan.targetPrice != null ? String(plan.targetPrice) : '');
+      return;
+    }
+    onChange?.({ targetPrice: next });
     targetEditor.setValue(String(next));
   };
 
@@ -78,19 +127,16 @@ function PriceDropReminderPlan({ plan, locked, onChange }) {
       <div className="flex items-center gap-1.5">
         <span className="w-[9px] shrink-0" />
         <span className="text-white/35 text-[9px]">Must sell by</span>
-        <input
-          type="date"
+        <MustSellDateInput
           value={plan.mustSellDate}
-          onChange={(e) => onChange?.({ mustSellDate: e.target.value })}
-          onPointerDown={(e) => e.stopPropagation()}
-          aria-label="Must sell by"
-          disabled={locked}
-          className="nodrag min-w-0 flex-1 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-white/65 text-[9px] outline-none focus:border-blue-400/50 disabled:opacity-50 [color-scheme:dark]"
+          onChange={(v) => onChange?.({ mustSellDate: v })}
+          locked={locked}
         />
       </div>
       <div className="flex items-center gap-1.5">
         <span className="w-[9px] shrink-0" />
-        <span className="text-white/35 text-[9px]">Max % of starting price by then</span>
+        <span className="text-white/35 text-[9px]">Target price by then</span>
+        <span className="text-white/30 text-[9px]">$</span>
         <input
           type="text"
           inputMode="decimal"
@@ -99,25 +145,72 @@ function PriceDropReminderPlan({ plan, locked, onChange }) {
           onFocus={targetEditor.focusProps.onFocus}
           onBlur={commitTarget}
           onPointerDown={(e) => e.stopPropagation()}
-          aria-label="Max percent of starting price by must-sell date"
+          placeholder="off"
+          aria-label="Target price by must-sell date"
           disabled={locked}
-          className="nodrag w-14 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-white/70 text-[9px] text-right outline-none focus:border-blue-400/50 disabled:opacity-50"
+          className="nodrag w-16 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-white/70 text-[9px] text-right outline-none focus:border-blue-400/50 disabled:opacity-50 placeholder:text-white/20"
         />
-        <span className="text-white/30 text-[9px]">%</span>
       </div>
       <div className="text-white/20 text-[9px] leading-snug mt-0.5">
-        Cards share a cadence starting from the oldest listing card. The final decrease is scheduled on the last reminder strictly before the must-sell date.
+        Cards share a cadence starting from the oldest listing card. The price steps down to your target by the last reminder on or before the must-sell date.
       </div>
-      {targetPrice != null && (
+      {planActive && remindersThroughDeadline > 0 && (
         <div className="text-white/25 text-[9px] leading-snug">
-          Deadline maximum: {formatPrice(targetPrice)} ({plan.targetPercent}% of {formatPrice(plan.startingPrice)}).
+          Steps from {formatPrice(plan.startingPrice)} down to {formatPrice(plan.targetPrice)} across {remindersThroughDeadline} reminder{remindersThroughDeadline === 1 ? '' : 's'}.
         </div>
       )}
-      {priorReminderCount === 0 && (
+      {dateNeedsTarget && (
         <div className="text-amber-300/70 text-[9px] leading-snug">
-          No reminder fits before this date. Choose a later date or shorter interval to guarantee the target.
+          Enter a target price to activate the must-sell plan — until then reminders won&apos;t stop at the date.
         </div>
       )}
+      {targetTooHigh && (
+        <div className="text-amber-300/70 text-[9px] leading-snug">
+          Target must be below the starting price ({formatPrice(plan.startingPrice)}). Pick a lower target or a higher starting tier.
+        </div>
+      )}
+      {planActive && remindersThroughDeadline === 0 && (
+        <div className="text-amber-300/70 text-[9px] leading-snug">
+          No reminder fits on or before this date. Choose a later date or a shorter interval to reach the target.
+        </div>
+      )}
+      {/* Bulk apply + per-card opt-out. "Apply to all" copies this plan onto the
+          other priced item cards on the CURRENT canvas only (not sub-canvases or
+          the parent). The exclude toggle shields THIS card from any sibling's
+          "apply to all" — it stays an independent source for its own button. */}
+      <div className="flex items-center justify-between gap-2 pt-1 mt-0.5 border-t border-white/[0.06]">
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onToggleExcluded?.(); }}
+          onPointerDown={(e) => e.stopPropagation()}
+          disabled={locked || !onToggleExcluded}
+          aria-pressed={excluded}
+          title={excluded
+            ? 'This item is excluded from another item’s “Apply to all” — click to include it again'
+            : 'Exclude this item so another item’s “Apply to all” skips it'}
+          className="nodrag flex items-center gap-1 text-[9px] text-white/35 hover:text-white/65 transition-colors disabled:opacity-50"
+        >
+          {excluded
+            ? <CheckSquare size={10} className="text-amber-300/80 shrink-0" />
+            : <Square size={10} className="shrink-0" />}
+          <span className={excluded ? 'text-amber-300/70' : ''}>Exclude from &ldquo;Apply to all&rdquo;</span>
+        </button>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onApplyToAll?.(); }}
+          onPointerDown={(e) => e.stopPropagation()}
+          disabled={locked || !onApplyToAll || applyTargetCount === 0 || !hasCadenceToApply}
+          title={!hasCadenceToApply
+            ? 'Set a reminder cadence above before applying this plan to other items'
+            : applyTargetCount === 0
+              ? 'No other priced item cards on this canvas to apply to'
+              : `Apply this price-drop plan to ${applyTargetCount} other item${applyTargetCount === 1 ? '' : 's'} on this canvas`}
+          className="nodrag flex shrink-0 items-center gap-1 rounded border border-blue-400/30 bg-blue-500/10 px-1.5 py-0.5 text-[9px] font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-blue-500/10"
+        >
+          <CopyPlus size={9} />
+          Apply to all{applyTargetCount > 0 ? ` (${applyTargetCount})` : ''}
+        </button>
+      </div>
     </div>
   );
 }
@@ -257,12 +350,19 @@ export function SellHubPricedState({
   priceDropPlan = {
     weeks: 0,
     mustSellDate: '',
-    targetPercent: DEFAULT_PRICE_DROP_TARGET_PERCENT,
+    targetPrice: null,
     scheduleStartedAt: null,
     startingPrice: null,
     startingTier: 'best',
   },
   onChangePriceDropPlan,
+  // "Apply to all" broadcasts this hub's plan to sibling item cards on the
+  // current canvas; applyPlanTargetCount is how many would receive it.
+  applyPlanTargetCount = 0,
+  onApplyPriceDropPlanToAll,
+  // Per-card opt-out from being a target of another card's "Apply to all".
+  priceDropApplyAllExcluded = false,
+  onToggleApplyAllExcluded,
 }) {
   const [showUnfit, setShowUnfit] = useState(false);
   const [expandedItemReasons, setExpandedItemReasons] = useState({});
@@ -367,13 +467,10 @@ export function SellHubPricedState({
                 aria-label={`Use ${tier.label} price as price-drop starting value`}
                 aria-pressed={selectedStartingTier === tier.id}
                 title={`Use ${tier.label} price as the price-drop plan's starting value`}
-                className={`nodrag relative rounded-lg border px-1.5 py-1.5 text-center transition-shadow disabled:opacity-50 ${tier.cls} ${
+                className={`nodrag rounded-lg border px-1.5 py-1.5 text-center transition-shadow disabled:opacity-50 ${tier.cls} ${
                   selectedStartingTier === tier.id ? 'ring-1 ring-inset ring-blue-300/80' : ''
                 }`}
               >
-                {selectedStartingTier === tier.id && (
-                  <span className="absolute right-1 top-0.5 text-[6px] font-bold uppercase tracking-wide text-blue-200/80">Start</span>
-                )}
                 <div className="text-[8px] font-semibold uppercase tracking-wider opacity-70">{tier.label}</div>
                 <div className="text-[12px] font-bold">{formatPrice(tier.price)}</div>
                 <div className="text-white/25 text-[7px]">{tier.subline}</div>
@@ -531,6 +628,10 @@ export function SellHubPricedState({
           }}
           locked={locked}
           onChange={onChangePriceDropPlan}
+          applyTargetCount={applyPlanTargetCount}
+          onApplyToAll={onApplyPriceDropPlanToAll}
+          excluded={priceDropApplyAllExcluded}
+          onToggleExcluded={onToggleApplyAllExcluded}
         />
       </div>
 

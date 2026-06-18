@@ -22,6 +22,7 @@ export const SELL_PLATFORMS = [
   // Category specialists
   { id: 'swappa',    name: 'Swappa',     letter: 'Sw', color: '#27ae60', domain: 'swappa.com',    postUrl: 'https://swappa.com/sell' },
   { id: 'reverb',    name: 'Reverb',     letter: 'Rv', color: '#f04d23', domain: 'reverb.com',    postUrl: 'https://reverb.com/my/selling/listings/new' },
+  { id: 'aptdeco',   name: 'AptDeco',    letter: 'AD', color: '#00a66c', domain: 'aptdeco.com',   postUrl: 'https://www.aptdeco.com/sell/new' },
 ];
 
 export const SELL_PLATFORM_BY_ID = Object.fromEntries(SELL_PLATFORMS.map(platform => [platform.id, platform]));
@@ -58,6 +59,10 @@ export const PRICE_COMP_SOURCES = [
   { id: 'swappa',       name: 'Swappa Active', letter: 'Sw', color: '#27ae6080', domain: 'swappa.com' },
   // Tier 2 — Supplementary sold
   { id: 'mercari',      name: 'Mercari Sold',  letter: 'M',  color: '#6357ff',   domain: 'mercari.com' },
+  // Niche specialist: AptDeco indexes secondhand FURNITURE / home furnishings
+  // (active asking prices). Returns empty for non-furniture queries (the category
+  // gate auto-skips them), so its card auto-dismisses for the common item.
+  { id: 'aptdeco-active', name: 'AptDeco Active', letter: 'AD', color: '#00a66c', domain: 'aptdeco.com' },
   // Niche specialist: aggregated sold-price data for video games + retro
   // consoles. Returns empty for non-game queries (auto-dismisses).
   { id: 'pricecharting', name: 'PriceCharting', letter: 'PC', color: '#1d72b8',   domain: 'pricecharting.com' },

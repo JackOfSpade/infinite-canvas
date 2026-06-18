@@ -163,7 +163,7 @@ try {
             imagePaths: [photoPath, svgPath],
             priceDropReminderWeeks: 1,
             priceDropMustSellDate: '',
-            priceDropTargetPercent: 10,
+            priceDropTargetPrice: 10,
             priceDropStartingTier: 'best',
             priceDropPlanStartingPrice: 42,
             priceDropPlanStartedAt: new Date(ts).toISOString(),
@@ -352,14 +352,14 @@ try {
 
   // The hub shows this item's reminder cadence.
   assert.equal(
-    await page.locator('.react-flow__node-sellhub input[placeholder="off"]').inputValue(), '1',
+    await page.getByLabel('Price-drop reminder interval in weeks').inputValue(), '1',
     'hub priced state should show the shared reminder weeks',
   );
   const sellHub = page.locator('.react-flow__node-sellhub');
   const mustSellInput = sellHub.getByLabel('Must sell by');
-  const targetPercentInput = sellHub.getByLabel('Max percent of starting price by must-sell date');
+  const targetPriceInput = sellHub.getByLabel('Target price by must-sell date');
   assert.equal(await mustSellInput.inputValue(), '', 'hub should show that the optional must-sell date is initially unset');
-  assert.equal(await targetPercentInput.inputValue(), '10', 'hub should show the persisted target percentage');
+  assert.equal(await targetPriceInput.inputValue(), '10', 'hub should show the persisted target price');
 
   const bestStartingTier = sellHub.getByRole('button', { name: 'Use Best price as price-drop starting value' });
   const maxStartingTier = sellHub.getByRole('button', { name: 'Use Max price as price-drop starting value' });
@@ -368,17 +368,50 @@ try {
   assert.equal(await maxStartingTier.getAttribute('aria-pressed'), 'true', 'price tiers should be selectable starting values');
   await sellHub.getByText(/^Price-drop starting value: \$55\./).waitFor();
 
-  await targetPercentInput.fill('8.5');
-  await targetPercentInput.press('Tab');
-  await sellHub.getByText('Deadline maximum: $4.67 (8.5% of $55).', { exact: true }).waitFor();
-  await targetPercentInput.fill('10.01');
-  await targetPercentInput.press('Tab');
-  assert.equal(await targetPercentInput.inputValue(), '8.5', 'target percentage above 10% should restore the last valid value');
-  await mustSellInput.fill('');
-  await expectVisible(page, 'Still listed — consider lowering the price.');
   const futureMustSellDate = new Date(Date.now() + 35 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   await mustSellInput.fill(futureMustSellDate);
-  await page.getByText(/^Lower price to \$/).waitFor();
+  await targetPriceInput.fill('5');
+  await targetPriceInput.press('Tab');
+  await sellHub.getByText(/^Steps from \$55 down to \$5 across \d+ reminder/).waitFor();
+  await page.getByText(/^Set price to \$/).waitFor();
+  // A must-sell date REQUIRES a target: clearing it warns and deactivates the
+  // plan (no suggested price; reminders revert to the generic cadence).
+  await targetPriceInput.fill('');
+  await targetPriceInput.press('Tab');
+  await sellHub.getByText(/^Enter a target price/).waitFor();
+  await expectVisible(page, 'Still listed — consider lowering the price.');
+  await targetPriceInput.fill('5');
+  await targetPriceInput.press('Tab');
+  await page.getByText(/^Set price to \$/).waitFor();
+  // A target at or above the starting price warns and yields no suggestion.
+  await targetPriceInput.fill('60');
+  await targetPriceInput.press('Tab');
+  await sellHub.getByText(/^Target must be below the starting price/).waitFor();
+  await targetPriceInput.fill('5');
+  await targetPriceInput.press('Tab');
+  // Malformed input reverts to the last valid target.
+  await targetPriceInput.fill('abc');
+  await targetPriceInput.press('Tab');
+  assert.equal(await targetPriceInput.inputValue(), '5', 'malformed target price should restore the last valid value');
+  // Clearing the date falls back to a generic reminder (no suggested price).
+  await mustSellInput.fill('');
+  await expectVisible(page, 'Still listed — consider lowering the price.');
+  await mustSellInput.fill(futureMustSellDate);
+  await page.getByText(/^Set price to \$/).waitFor();
+
+  // A genuinely overdue reminder remains pending until acknowledgment. Editing
+  // the plan must not silently clear it just because the revised next cadence
+  // point would be in the future.
+  const reminderInput = page.getByLabel('Price-drop reminder interval in weeks');
+  await reminderInput.fill('1000');
+  await reminderInput.press('Tab');
+  await page.waitForTimeout(250);
+  assert.equal(await page.locator('.price-reminder-pulse').count(), 1,
+    'lengthening the cadence should not clear an already-due reminder');
+  assert.equal(await page.getByText('I lowered the price', { exact: true }).count(), 1,
+    'an already-due reminder should remain actionable after cadence edits');
+  await reminderInput.fill('1');
+  await reminderInput.press('Tab');
 
   await marketplaceStatus.getByText('1 listing across 1 platform', { exact: true }).waitFor();
   await marketplaceStatus.getByText('1 listing · 1 watch URL', { exact: true }).waitFor();
@@ -404,7 +437,7 @@ try {
     fixturePath,
     'sellhub',
     data => data?.priceDropStartingTier === 'max'
-      && data?.priceDropTargetPercent === 8.5
+      && data?.priceDropTargetPrice === 5
       && data?.priceDropPlanStartingPrice === 55,
     'save should persist the must-sell reminder plan',
   );
@@ -442,18 +475,32 @@ try {
   await waitForCount(page.locator('.price-reminder-pulse'), (n) => n === 0, 'ack should clear the reminder pulse');
   assert.equal(await page.locator('.marketplace-static-glow').count(), 1, 'ack should leave the static glow in place');
   assert.equal(
-    await page.getByText(/^Lower price to \$/).count(), 0,
+    await page.getByText(/^Set price to \$/).count(), 0,
     'ack should remove the reminder strip',
   );
 
+  // Editing the plan changes future suggestion math but does not manufacture a
+  // reminder before the next cadence interval.
+  const extendedMustSellDate = new Date(Date.now() + 70 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  await mustSellInput.fill(extendedMustSellDate);
+  await page.waitForTimeout(250);
+  assert.equal(await page.getByText(/^Set price to \$/).count(), 0,
+    'editing the must-sell date should not immediately demand another price drop');
+  assert.equal(await page.locator('.price-reminder-pulse').count(), 0,
+    'editing the must-sell date should keep an acknowledged listing clear');
+
   // Reminder input normalization runs through the real blur-commit UI.
-  const reminderInput = page.locator('.react-flow__node-sellhub input[placeholder="off"]');
   await reminderInput.fill('1.5 weeks');
   await reminderInput.press('Tab');
   assert.equal(await reminderInput.inputValue(), '', 'malformed reminder cadence should normalize to off');
   await reminderInput.fill('.5');
   await reminderInput.press('Tab');
   assert.equal(await reminderInput.inputValue(), '0.5', 'decimal reminder cadence should normalize and persist');
+  await page.waitForTimeout(250);
+  assert.equal(await page.getByText(/^Set price to \$/).count(), 0,
+    'editing the cadence should wait for the next interval instead of re-suggesting immediately');
+  assert.equal(await page.locator('.price-reminder-pulse').count(), 0,
+    'editing the cadence should keep an acknowledged listing clear');
 
   // The fire + ack wrote node data — save silently (the file path is known) so
   // the restore-blank reload below isn't blocked by the unsaved-changes guard.
