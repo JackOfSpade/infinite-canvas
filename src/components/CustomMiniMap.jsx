@@ -17,6 +17,22 @@ const CONTENT_PAD = 40;
 const vpTransformSelector = (s) => s.transform;
 const vpSizeSelector = (s) => ({ width: s.width, height: s.height });
 
+function samePoint(a, b) {
+  return a?.x === b?.x && a?.y === b?.y;
+}
+
+function sameStrokePreview(a, b) {
+  if (a === b) return true;
+  if ((a?.color || 'white') !== (b?.color || 'white')) return false;
+  const aPts = strokePoints(a);
+  const bPts = strokePoints(b);
+  if (aPts.length !== bPts.length) return false;
+  for (let i = 0; i < aPts.length; i++) {
+    if (!samePoint(aPts[i], bPts[i])) return false;
+  }
+  return true;
+}
+
 const ReactiveMiniMapSVG = React.memo(({ cMinX, cMinY, cMaxX, cMaxY, isAnimating, children }) => {
   const transform = useStore(vpTransformSelector);
   const size = useStore(vpSizeSelector);
@@ -208,10 +224,10 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
   if (prev.edges.length !== next.edges.length) return false;
   if ((prev.drawings || []).length !== (next.drawings || []).length) return false;
   
-  if (prev.drawings && next.drawings) {
-    for (let i = 0; i < prev.drawings.length; i++) {
-      if (strokePoints(prev.drawings[i]).length !== strokePoints(next.drawings[i]).length) return false;
-    }
+  const prevDrawings = prev.drawings || [];
+  const nextDrawings = next.drawings || [];
+  for (let i = 0; i < prevDrawings.length; i++) {
+    if (!sameStrokePreview(prevDrawings[i], nextDrawings[i])) return false;
   }
 
   // Custom check: only re-render if nodes' coordinates or data have meaningfully changed

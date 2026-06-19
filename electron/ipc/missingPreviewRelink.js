@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { isWithinDirectory, isExistingFile as isFile } from '../utils/pathSafety.js';
 
 const DEFAULT_MAX_DEPTH = 15;
 const DEFAULT_MAX_ENTRIES = 20_000;
@@ -35,14 +36,6 @@ function recordDiagnostic(entry) {
   if (diagnostics.length > DIAGNOSTIC_MAX_ENTRIES) diagnostics.shift();
 }
 
-function isFile(filePath) {
-  try {
-    return fs.statSync(filePath).isFile();
-  } catch {
-    return false;
-  }
-}
-
 function isSearchableDirectory(dirPath) {
   if (!dirPath || !path.isAbsolute(dirPath) || path.parse(dirPath).root === dirPath) return false;
   try {
@@ -50,12 +43,6 @@ function isSearchableDirectory(dirPath) {
   } catch {
     return false;
   }
-}
-
-function isWithinDirectory(rootDir, candidatePath) {
-  const relative = path.relative(path.resolve(rootDir), path.resolve(candidatePath));
-  return relative === ''
-    || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 
 /**

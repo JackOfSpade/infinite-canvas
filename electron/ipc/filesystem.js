@@ -13,6 +13,7 @@ import {
   resolveMissingPreviewPath,
 } from './missingPreviewRelink.js';
 import { isProductImageExtension } from '../../src/utils/fileExtensions.js';
+import { isWithinDirectory, isExistingFile } from '../utils/pathSafety.js';
 
 /**
  * Global registry of active file watchers.
@@ -263,20 +264,6 @@ function resolvePortablePath(canvasPath, filePath, relativePath) {
     if (fs.existsSync(candidate)) return candidate;
   }
   return filePath;
-}
-
-function isWithinDirectory(rootDir, candidatePath) {
-  if (!rootDir || !candidatePath) return false;
-  const relative = path.relative(path.resolve(rootDir), path.resolve(candidatePath));
-  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
-}
-
-function isExistingFile(filePath) {
-  try {
-    return fs.statSync(filePath).isFile();
-  } catch {
-    return false;
-  }
 }
 
 function isImagePath(filePath) {

@@ -225,6 +225,14 @@ import { CODE_EXT_RE, PRODUCT_IMAGE_EXT_RE } from '../src/utils/fileExtensions.j
 import { cancelNodeTasksRecursively } from '../src/utils/canvasInteractions.js';
 import { getKnownTaskIds, modelForTask } from '../electron/ipc/llm.js';
 import { CLAUDE_MODELS_IN_USE } from '../electron/ipc/claude.js';
+import { deriveTimeoutBudget } from '../electron/ipc/scrapeBudget.js';
+import { FINGERPRINT_PROFILES, getSessionProfile, getRandomUA } from '../electron/ipc/browser/antiDetectProfiles.js';
+import { isWithinDirectory, isExistingFile } from '../electron/utils/pathSafety.js';
+import {
+  resetManualSolveTracking,
+  markManualSolveRequired,
+  wasManualSolveRequired,
+} from '../electron/ipc/scrapeVerification.js';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -6690,6 +6698,89 @@ const tests = [
       // An unknown task falls back to the default model without throwing.
       assert(validModels.has(modelForTask('totally-unknown-task-xyz')), 'unknown task → default model (no throw)');
       return { ok: true, tasks: tasks.size };
+    },
+  },
+  {
+    name: 'scrapeBudget: derived timeout honors the seed as an absolute ceiling',
+    run: () => {
+      // No/insufficient learning → the seed passes through unchanged, not learned.
+      assert(deriveTimeoutBudget(null, 30000).timeoutMs === 30000, 'null stats → seed unchanged');
+      assert(deriveTimeoutBudget(null, 30000).learned === false, 'null stats → not learned');
+      assert(deriveTimeoutBudget({ ema: 5000, samples: 4 }, 30000).learned === false, 'under MIN_SAMPLES → not learned');
+      assert(deriveTimeoutBudget({ ema: 0, samples: 50 }, 30000).learned === false, 'non-positive ema → not learned');
+
+      // A fast source settles well under the seed → snappier failure timeout.
+      // ema 2000 → 2000*3 + 8000 = 14000, floored to MIN_BUDGET_MS (18000), under the 30000 seed.
+      const fast = deriveTimeoutBudget({ ema: 2000, samples: 10 }, 30000);
+      assert(fast.learned === true && fast.timeoutMs === 18000, `fast source floors at MIN_BUDGET (got ${fast.timeoutMs})`);
+
+      // The seed is the ABSOLUTE ceiling: a small API seed wins even over the floor.
+      const apiSeed = deriveTimeoutBudget({ ema: 2000, samples: 10 }, 8000);
+      assert(apiSeed.timeoutMs === 8000, `small seed clamps below MIN_BUDGET floor (got ${apiSeed.timeoutMs})`);
+
+      // A genuinely slow source can never exceed its seed.
+      const slow = deriveTimeoutBudget({ ema: 60000, samples: 10 }, 30000);
+      assert(slow.timeoutMs === 30000, `learned budget never exceeds the seed (got ${slow.timeoutMs})`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'pathSafety: isWithinDirectory contains descendants and rejects traversal escapes',
+    run: () => {
+      const root = '/Users/x/canvas';
+      assert(isWithinDirectory(root, '/Users/x/canvas') === true, 'the root itself is within');
+      assert(isWithinDirectory(root, '/Users/x/canvas/photos/a.jpg') === true, 'a nested file is within');
+      assert(isWithinDirectory(root, '/Users/x/canvas/../secrets.txt') === false, 'a ".." escape is rejected');
+      assert(isWithinDirectory(root, '/Users/x') === false, 'the parent directory is not within');
+      assert(isWithinDirectory(root, '/etc/passwd') === false, 'an unrelated absolute path is rejected');
+      assert(isWithinDirectory(root, '/Users/x/canvas-sibling/a') === false, 'a sibling sharing a name prefix is rejected');
+      // Null-safety (the regression that drifted between the two former copies).
+      assert(isWithinDirectory('', '/a') === false, 'empty root → false (no throw)');
+      assert(isWithinDirectory(root, null) === false, 'null candidate → false (no throw)');
+      // isExistingFile never throws on bad input.
+      assert(isExistingFile('/no/such/file/anywhere.xyz') === false, 'missing file → false');
+      assert(isExistingFile(null) === false, 'null path → false (no throw)');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'antiDetectProfiles: every fingerprint is internally consistent; session profile is stable',
+    run: () => {
+      assert(FINGERPRINT_PROFILES.length > 0, 'at least one fingerprint profile');
+      for (const p of FINGERPRINT_PROFILES) {
+        // A mismatched UA vs client-hints version is a detection vector — the
+        // UA Chrome major must equal the "Google Chrome" brand + fullVersionList major.
+        const uaMajor = p.ua.match(/Chrome\/(\d+)/)?.[1];
+        assert(uaMajor, `UA exposes a Chrome major version (${p.ua})`);
+        const brand = p.clientHints.brands.find(b => b.brand === 'Google Chrome');
+        assert(brand && brand.version === uaMajor, `brand version matches UA major (${uaMajor})`);
+        const fvl = p.clientHints.fullVersionList.find(b => b.brand === 'Google Chrome');
+        assert(fvl && fvl.version.split('.')[0] === uaMajor, `fullVersionList major matches UA (${uaMajor})`);
+        assert(p.platform === p.clientHints.platform, 'top-level platform matches client-hints platform');
+        assert(!p.clientHints.mobile, 'desktop profile is not flagged mobile');
+        assert(p.viewport.width > 0 && p.viewport.height > 0, 'viewport has positive dimensions');
+      }
+      // Documented invariant: ONE profile per session, never rotates.
+      const a = getSessionProfile();
+      const b = getSessionProfile();
+      assert(a === b, 'session profile is memoized (never rotates mid-session)');
+      assert(getRandomUA() === a.ua, 'getRandomUA returns the session profile UA');
+      assert(a.behavior && a.behavior.speed > 0, 'session profile carries a behavior temperament');
+      return { ok: true, profiles: FINGERPRINT_PROFILES.length };
+    },
+  },
+  {
+    name: 'scrapeVerification: per-run manual-solve tracking resets and records',
+    run: () => {
+      resetManualSolveTracking();
+      assert(wasManualSolveRequired('ebay') === false, 'fresh run: nothing marked');
+      markManualSolveRequired('ebay');
+      markManualSolveRequired('');         // falsy id is ignored, no throw
+      assert(wasManualSolveRequired('ebay') === true, 'marked source reads back true');
+      assert(wasManualSolveRequired('indeed') === false, 'unmarked source stays false');
+      resetManualSolveTracking();
+      assert(wasManualSolveRequired('ebay') === false, 'reset clears prior-run marks');
+      return { ok: true };
     },
   },
 ];

@@ -83,19 +83,35 @@ function writeStats(key, stats) {
  * @param {number} seedTimeoutMs  the configured timeout — treated as the ABSOLUTE ceiling
  * @returns {{ timeoutMs:number, firstBeatMs:number, learned:boolean }}
  */
+/**
+ * Pure budget-derivation math, isolated from persistence so the safety contract
+ * is unit-testable. Given a source's learned `stats` and the configured `seed`
+ * (already a positive integer = the ABSOLUTE ceiling), return the working hard
+ * timeout and whether it was learned. A learned budget is floored at
+ * MIN_BUDGET_MS but then re-clamped under the seed, so `timeoutMs ≤ seed` always
+ * holds — even when a small API seed sits below the floor.
+ *
+ * @param {{ema:number, samples:number}|null} stats
+ * @param {number} seed
+ * @returns {{ timeoutMs:number, learned:boolean }}
+ */
+export function deriveTimeoutBudget(stats, seed) {
+  if (!stats || stats.samples < MIN_SAMPLES || !(stats.ema > 0)) {
+    return { timeoutMs: seed, learned: false };
+  }
+  const learnedBudget = Math.max(MIN_BUDGET_MS, Math.round(stats.ema * SAFETY_MULT + SAFETY_MARGIN_MS));
+  return { timeoutMs: Math.min(seed, learnedBudget), learned: true };
+}
+
 export function resolveBudget(key, seedTimeoutMs) {
   const seed = Number(seedTimeoutMs) > 0 ? Math.round(Number(seedTimeoutMs)) : 30000;
   const stats = statsFor(key);
+  const { timeoutMs, learned } = deriveTimeoutBudget(stats, seed);
 
-  if (!stats || stats.samples < MIN_SAMPLES || !(stats.ema > 0)) {
-    return { timeoutMs: seed, firstBeatMs: READINESS.FIRST_BEAT_MIN_MS, learned: false };
+  if (!learned) {
+    return { timeoutMs, firstBeatMs: READINESS.FIRST_BEAT_MIN_MS, learned: false };
   }
 
-  const learnedBudget = Math.max(MIN_BUDGET_MS, Math.round(stats.ema * SAFETY_MULT + SAFETY_MARGIN_MS));
-  // The seed is the ABSOLUTE ceiling: never produce a budget above it, even if
-  // the MIN_BUDGET_MS floor would otherwise push past a small seed (e.g. an
-  // API source with an 8s seed). min() last guarantees timeoutMs ≤ seed always.
-  const timeoutMs = Math.min(seed, learnedBudget);
   const calculatedBeat = Math.max(
     READINESS.FIRST_BEAT_MIN_MS,
     Math.min(Math.round(stats.ema * FIRST_BEAT_RATIO), READINESS.FIRST_BEAT_MAX_MS),

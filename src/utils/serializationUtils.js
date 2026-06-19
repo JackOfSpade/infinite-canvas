@@ -56,11 +56,13 @@ export function fingerprint(snap) {
  */
 export function migrateGroupNodes(nodes) {
   if (!Array.isArray(nodes)) return [];
-  return nodes.map(node => {
+  let changed = false;
+  const out = nodes.map(node => {
     if (node.type === 'group' && !node.data?.canvasData && (node.data?.nodes || node.data?.edges || node.data?.drawings)) {
       const { nodes: innerNodes, edges: innerEdges, drawings: innerDrawings,
               collapsed: _collapsed, pushedNodes: _pushedNodes, items: _items, ...restData } = node.data;
       const { dragHandle: _dragHandle, ...restNode } = node;
+      changed = true;
       return {
         ...restNode,
         style: { width: getNodeDims(node).w, height: getNodeDims(node).h },
@@ -78,12 +80,14 @@ export function migrateGroupNodes(nodes) {
     // Use a separate variable — arrow-function parameters are const and cannot be reassigned.
     let current = node;
     if (current.data?.locked && current.deletable !== false) {
+      changed = true;
       current = { ...current, deletable: false };
     }
     // Recurse into existing canvasData for new-format group nodes
     if (current.type === 'group' && current.data?.canvasData?.nodes?.length > 0) {
       const migratedInner = migrateGroupNodes(current.data.canvasData.nodes);
       if (migratedInner !== current.data.canvasData.nodes) {
+        changed = true;
         return {
           ...current,
           data: {
@@ -95,6 +99,7 @@ export function migrateGroupNodes(nodes) {
     }
     return current;
   });
+  return changed ? out : nodes;
 }
 
 // Fields on a spawned jobcard that reconstruct a scored job (mirrors the scorer
@@ -286,7 +291,16 @@ export function sanitizeEdgesForSave(edges, sanitizedNodes) {
     }
   };
   collect(sanitizedNodes);
-  return edges.filter(e => liveIds.has(e?.source) && liveIds.has(e?.target));
+  let changed = false;
+  const out = [];
+  for (const edge of edges) {
+    if (liveIds.has(edge?.source) && liveIds.has(edge?.target)) {
+      out.push(edge);
+    } else {
+      changed = true;
+    }
+  }
+  return changed ? out : edges;
 }
 
 /**
@@ -316,29 +330,45 @@ export function sanitizeNodesForSave(nodes) {
   for (const n of nodes) {
     if (n.type === 'jobhub' || n.type === 'sellhub') hubStateById.set(n.id, n.data?.hubState || 'empty');
   }
-  const filtered = nodes.filter(n => {
+  let changed = false;
+  const out = [];
+
+  for (const n of nodes) {
     const isEphemeral = n.type === 'compsourcecard' || n.type === 'jobsourcecard' || n.data?.ephemeral;
-    if (!isEphemeral) return true;
-    const p = n.data?.persistedProgress;
-    if (!(p?.warning || p?.status === 'error')) return false;
-    const hubId = n.data?.hubId;
-    if (!hubId) return true; // not hub-owned — keep the old behavior
-    if (!hubStateById.has(hubId)) return false; // owning hub gone → orphan
-    return !TRANSIENT_PROCESSING_HUB_STATES.includes(hubStateById.get(hubId));
-  });
-  return filtered.map(n => {
+    if (isEphemeral) {
+      const p = n.data?.persistedProgress;
+      const keepWarned = p?.warning || p?.status === 'error';
+      const hubId = n.data?.hubId;
+      const keep = !!keepWarned && (
+        !hubId // not hub-owned — keep the old behavior
+        || (hubStateById.has(hubId) && !TRANSIENT_PROCESSING_HUB_STATES.includes(hubStateById.get(hubId)))
+      );
+      if (!keep) {
+        changed = true;
+        continue;
+      }
+    }
+
     // Recurse into nested canvas nodes first so deeply-nested nodes are also sanitized.
     // Also strip all transient data fields (isDropTarget, _hmr) from this group node.
     if (n.type === 'group' && n.data?.canvasData) {
-      const sanitizedInner = sanitizeNodesForSave(n.data.canvasData.nodes || []);
+      const innerNodes = n.data.canvasData.nodes || [];
+      const sanitizedInner = sanitizeNodesForSave(innerNodes);
       const { isDropTarget: _idt, _hmr: _h, ...cleanData } = n.data || {};
-      return {
-        ...n,
-        data: {
-          ...cleanData,
-          canvasData: { ...n.data.canvasData, nodes: sanitizedInner },
-        },
-      };
+      const hasTransientData = n.data && ('isDropTarget' in n.data || '_hmr' in n.data);
+      if (hasTransientData || sanitizedInner !== n.data.canvasData.nodes) {
+        changed = true;
+        out.push({
+          ...n,
+          data: {
+            ...cleanData,
+            canvasData: { ...n.data.canvasData, nodes: sanitizedInner },
+          },
+        });
+      } else {
+        out.push(n);
+      }
+      continue;
     }
 
     // For all node types: strip transient display state in a single pass.
@@ -365,7 +395,7 @@ export function sanitizeNodesForSave(nodes) {
     // "report an issue" banners from runs they don't remember. Stripping on
     // save means the same-session experience is unchanged (the fields live
     // in React state until the next save) but a fresh session loads clean.
-    const JOBSEARCH_TRANSIENT_KEYS = getJobSearchTransientKeysForSave(n.data?.hubState);
+    const JOBSEARCH_TRANSIENT_KEYS = isJobSearch ? getJobSearchTransientKeysForSave(n.data?.hubState) : [];
     const hasJobSearchTransient = isJobSearch && n.data && JOBSEARCH_TRANSIENT_KEYS.some(k => k in n.data);
 
     // SellHub: platformFitPending gates the marketplace list on the in-flight
@@ -376,7 +406,10 @@ export function sanitizeNodesForSave(nodes) {
     // immediately (or, if none were saved, the unfiltered list).
     const hasSellHubTransient = isSellHub && n.data && SELLHUB_TRANSIENT_KEYS.some(k => k in n.data);
 
-    if (!hasTransientData && !hasTransientOpacity && !hasTransientHubState && !hasJobSearchTransient && !hasSellHubTransient) return n;
+    if (!hasTransientData && !hasTransientOpacity && !hasTransientHubState && !hasJobSearchTransient && !hasSellHubTransient) {
+      out.push(n);
+      continue;
+    }
 
     let result = n;
     if (hasTransientData || hasTransientHubState || hasJobSearchTransient || hasSellHubTransient) {
@@ -394,6 +427,9 @@ export function sanitizeNodesForSave(nodes) {
       const { opacity: _opacity, ...restStyle } = result.style || {};
       result = { ...result, style: Object.keys(restStyle).length ? restStyle : undefined };
     }
-    return result;
-  });
+    changed = true;
+    out.push(result);
+  }
+
+  return changed ? out : nodes;
 }

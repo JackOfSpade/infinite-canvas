@@ -12,10 +12,6 @@ function supportedFieldsFor(type) {
     : null;
 }
 
-function findFieldSource(nodes, field) {
-  return nodes.find(node => supportedFieldsFor(node.type)?.has(field));
-}
-
 export function nodeSupportsCustomization(type) {
   return !!supportedFieldsFor(type);
 }
@@ -33,10 +29,21 @@ export function filterNodeCustomizationUpdates(node, updates) {
 export function buildCustomizationDialogData(nodes) {
   if (!Array.isArray(nodes) || nodes.length === 0) return null;
 
-  const fontNode = findFieldSource(nodes, 'fontSize');
-  const spacingNode = findFieldSource(nodes, 'titleSpacing');
-  const backgroundNode = findFieldSource(nodes, 'backgroundColor');
-  const staticGlowNode = findFieldSource(nodes, 'staticGlowColor');
+  let fontNode = null;
+  let spacingNode = null;
+  let backgroundNode = null;
+  let staticGlowNode = null;
+
+  for (const node of nodes) {
+    const supported = supportedFieldsFor(node.type);
+    if (!supported) continue;
+    if (!fontNode && supported.has('fontSize')) fontNode = node;
+    if (!spacingNode && supported.has('titleSpacing')) spacingNode = node;
+    if (!backgroundNode && supported.has('backgroundColor')) backgroundNode = node;
+    if (!staticGlowNode && supported.has('staticGlowColor')) staticGlowNode = node;
+    if (fontNode && spacingNode && backgroundNode && staticGlowNode) break;
+  }
+
   if (!fontNode && !spacingNode && !backgroundNode && !staticGlowNode) return null;
 
   return {

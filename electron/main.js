@@ -5,6 +5,7 @@ import { registerFilesystemHandlers } from './ipc/filesystem.js';
 import { resolveMissingPreviewPath } from './ipc/missingPreviewRelink.js';
 import { decodeLocalFileRequestPath } from './localFileProtocol.js';
 import { isProductImageExtension } from '../src/utils/fileExtensions.js';
+import { isExistingFile } from './utils/pathSafety.js';
 import { logger } from './logger.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
@@ -77,14 +78,6 @@ function clampNumber(value, fallback, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, Math.round(n)));
-}
-
-function isExistingFile(filePath) {
-  try {
-    return fs.statSync(filePath).isFile();
-  } catch {
-    return false;
-  }
 }
 
 function resizeNativeImageToFit(image, maxDimension) {
