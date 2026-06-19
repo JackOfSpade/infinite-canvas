@@ -228,8 +228,8 @@ let lastAttemptedError = '(none)';
 // one region must not be treated as suppressed for a DIFFERENT key, a freshly
 // configured key, or the other endpoint. The scope is recomputed per call from
 // the active credential; switching keys therefore starts from a clean slate.
-const modelSuppressedUntil = new Map();  // `${scope} ${model}` → timestamp
-const modelRuntimeState = new Map();     // `${scope} ${model}` → state
+const modelSuppressedUntil = new Map();  // `${scope}\x00${model}` → timestamp
+const modelRuntimeState = new Map();     // `${scope}\x00${model}` → state
 const UNAVAILABLE_RECHECK_MS = 6 * 60 * 60_000;
 // Request-specific failures (truncation / server / timeout / malformed) are NOT
 // model-health problems — their warning self-expires so one bad request can't
@@ -259,7 +259,7 @@ function credentialScope(apiKey) {
 }
 
 function scopedKey(scope, model) {
-  return `${scope} ${model}`;
+  return `${scope}\x00${model}`;
 }
 
 /** Build a model→suppressedUntil view for the given scope (only cooling entries). */

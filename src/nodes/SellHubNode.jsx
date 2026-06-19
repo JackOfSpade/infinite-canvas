@@ -68,6 +68,13 @@ function isOversizedImageError(message) {
 const COMP_CARD_DISMISS_GRACE_MS = 10_000;
 const TERMINAL_COMP_STATUSES = new Set(['done', 'error', 'skipped']);
 
+function formatPriceDropLogPrice(value) {
+  const price = Number(value);
+  if (!Number.isFinite(price)) return 'off';
+  const rounded = Math.round(price * 100) / 100;
+  return `$${Number.isInteger(rounded) ? rounded : rounded.toFixed(2)}`;
+}
+
 export function SellHubNode({ id, data }) {
 
   // Surface runaway re-render bursts (effect/state loops, unstable props) in bug
@@ -1308,34 +1315,39 @@ export function SellHubNode({ id, data }) {
   const handleChangePriceDropPlan = useCallback((updates) => {
     if (data.locked || !updates || typeof updates !== 'object') return;
     const next = {};
+    const logBits = [];
     const resnapshotStartingTier = Object.hasOwn(updates, 'startingTier');
     if (Object.hasOwn(updates, 'weeks')) {
       const weeks = normalizePriceDropReminderWeeks(updates.weeks);
       if (normalizePriceDropReminderWeeks(data.priceDropReminderWeeks) !== weeks) {
         next.priceDropReminderWeeks = weeks;
+        logBits.push(`interval=${weeks > 0 ? `${weeks}wk` : 'off'}`);
       }
     }
     if (Object.hasOwn(updates, 'mustSellDate')) {
       const mustSellDate = normalizePriceDropMustSellDate(updates.mustSellDate);
       if (normalizePriceDropMustSellDate(data.priceDropMustSellDate) !== mustSellDate) {
         next.priceDropMustSellDate = mustSellDate;
+        logBits.push(`mustSell=${mustSellDate || 'off'}`);
       }
     }
     if (Object.hasOwn(updates, 'targetPrice')) {
       // Empty input clears the target → generic cadence reminders, no suggested
-      // price. A non-empty value must be positive currency to take effect.
+      // price. A non-empty value must be non-negative currency to take effect.
       const cleared = updates.targetPrice == null || String(updates.targetPrice).trim() === '';
       const targetPrice = cleared ? null : normalizePriceDropTargetPrice(updates.targetPrice);
       if (!cleared && targetPrice == null) {
         // malformed → ignore, leaving the persisted value untouched
       } else if (normalizePriceDropTargetPrice(data.priceDropTargetPrice) !== targetPrice) {
         next.priceDropTargetPrice = targetPrice ?? undefined;
+        logBits.push(`target=${targetPrice == null ? 'off' : formatPriceDropLogPrice(targetPrice)}`);
       }
     }
     if (Object.hasOwn(updates, 'startingTier')) {
       const startingTier = normalizePriceDropStartingTier(updates.startingTier);
       if (normalizePriceDropStartingTier(data.priceDropStartingTier) !== startingTier) {
         next.priceDropStartingTier = startingTier;
+        logBits.push(`tier=${startingTier}`);
       }
     }
     if (Object.keys(next).length > 0 || resnapshotStartingTier) {
@@ -1356,6 +1368,9 @@ export function SellHubNode({ id, data }) {
       next.priceDropPlanStartedAt = undefined;
       if (data.priceDropTargetPercent !== undefined) next.priceDropTargetPercent = undefined;
       updateGlobal(id, next);
+      if (logBits.length > 0) {
+        EventLogger.log(`[SellHub][${id}] Price-drop plan updated: ${logBits.join(', ')}`);
+      }
     }
   }, [
     data.locked,

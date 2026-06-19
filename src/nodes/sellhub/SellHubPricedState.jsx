@@ -156,7 +156,7 @@ function PriceDropReminderPlan({ plan, locked, onChange, applyTargetCount = 0, o
       </div>
       {planActive && remindersThroughDeadline > 0 && (
         <div className="text-white/25 text-[9px] leading-snug">
-          Steps from {formatPrice(plan.startingPrice)} down to {formatPrice(plan.targetPrice)} across {remindersThroughDeadline} reminder{remindersThroughDeadline === 1 ? '' : 's'}.
+          Steps from {formatPrice(plan.startingPrice)} down to {formatPrice(plan.targetPrice, { allowZero: true })} across {remindersThroughDeadline} reminder{remindersThroughDeadline === 1 ? '' : 's'}.
         </div>
       )}
       {dateNeedsTarget && (
@@ -260,12 +260,13 @@ function ExpandableTitle({ title, addToast }) {
   );
 }
 
-function formatPrice(value) {
+function formatPrice(value, { allowZero = false } = {}) {
   if (value === null || value === undefined || value === '') return '—';
   const price = Number(value);
   if (!Number.isFinite(price)) return '—';
+  if (price < 0) return '—';
   const rounded = Math.round(price * 100) / 100;
-  if (rounded <= 0) return '—';
+  if (!allowZero && rounded <= 0) return '—';
   return `$${Number.isInteger(rounded) ? rounded : rounded.toFixed(2)}`;
 }
 

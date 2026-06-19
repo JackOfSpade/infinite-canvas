@@ -147,12 +147,12 @@ import {
 import { resolvePortableFilePaths, resolvePortableImagePath } from '../electron/ipc/filesystem.js';
 import { decodeLocalFileRequestPath } from '../electron/localFileProtocol.js';
 import { getBrowserPoolQueueState, pauseBrowserPool, queueScrape } from '../electron/ipc/browserPool.js';
-import { getSoftLoginWallMatch, getStatusCacheSync, isConfirmedDisconnectedVerdict, writeStatusCache, selectRestorableStatuses } from '../electron/ipc/accounts.js';
+import { getSoftLoginWallMatch, getStatusCacheSync, isConfirmedDisconnectedVerdict, writeStatusCache, selectRestorableStatuses, isTrustedNativeLoginResult } from '../electron/ipc/accounts.js';
 import { getSellMonitorConfig } from '../electron/ipc/stealthBrowser.js';
 import os from 'node:os';
 import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, computeResumeStartPage, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
 import { dedupAgainstHistory, filterHistoryForResume } from '../electron/ipc/jobsHistory.js';
-import { modelTag, overPricedSoldFlag, renderSessionTraceBlocks } from '../electron/ipc/bugReport/helpers.js';
+import { modelTag, overPricedSoldFlag, renderSessionTraceBlocks, visitCanvasNodes } from '../electron/ipc/bugReport/helpers.js';
 import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
 import { classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
 import { aggregateStrongest, classifyOneUrl, deriveHubScanStatus, deterministicListingStatusFromText, goneListingResult, resolveAttentionSourceUrls, scanSellerHubPages, annotateReadState, summarizeReadState, stripHtmlForAnalysis, stripReadStateTokens, READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN } from '../electron/ipc/listingStatusCheck.js';
@@ -166,9 +166,11 @@ import {
   cookieListHasAuth,
   isNativeLoginSuccess,
   isLoggedOutTitleForPlatform,
+  isInlineLoginPlatform,
   NATIVE_LOGIN_PLATFORMS,
   unwrapInlineExtractorItems,
   buildAuthAttemptRecord,
+  isLoginUrlPath,
 } from '../electron/ipc/browser/authWindows.js';
 import { PRICE_SYNTHESIS_SCHEMA } from '../electron/ipc/aiSchemas.js';
 import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation } from '../src/utils/jobLocation.js';
@@ -178,6 +180,8 @@ import { foldVerificationSample, orderByVerification, verificationScore } from '
 import { canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, getHubDropRejectLabel, getHubFileDropMode } from '../src/utils/hubDropEligibility.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
 import { enforceClipboardMarkdownCap } from '../electron/ipc/bugReport/clipboardCap.js';
+import { buildFilterSummaryMarkdown } from '../electron/ipc/bugReport/filterSummary.js';
+import { buildSellHubPriceDropRollup } from '../electron/ipc/bugReport/sellHubPriceDropRollup.js';
 import { createJobSearchTestMode, parseJobSearchEnvBoolean } from '../src/utils/jobSourceScope.js';
 import { createMarketplaceTestMode, parseMarketplaceEnvBoolean, getScopedCompSourceIds, isCompSourceEnabledInScope, normalizeCompWarnings } from '../src/utils/compSourceScope.js';
 import { getJobAuthPreflightSourceIds, JOB_AUTH_PREFLIGHT_SOURCE_IDS } from '../src/utils/jobAuthPreflight.js';
@@ -194,6 +198,8 @@ import {
   parseNativeReadOutput,
   nativeReadToFetchResult,
   nativeReadLoginState,
+  withAppleEventsJsEnabled,
+  ensureAppleEventsJsEnabled,
 } from '../electron/ipc/browser/nativeChromeReader.js';
 import { shouldUseNativeTextUndo } from '../src/utils/nativeTextUndo.js';
 import { matchesRedoShortcut } from '../src/utils/keyboardShortcuts.js';
@@ -496,7 +502,13 @@ const tests = [
             // Summary carries a literal pipe (a quoted buyer offer "$50 | OBO")
             // that must be escaped so it doesn't break the markdown table row.
             summary: 'Buyer offered $50 | OBO on the microphone',
-            attention: [{ urgency: 'high', category: 'question', headline: 'Buyer message about price', evidence: 'Thanks. If change price let me know that. Thanks' }],
+            attention: [
+              // No sourceUrl → the rollup must flag the dead jump-to-source link (the
+              // reported "link did not take me to source").
+              { urgency: 'high', category: 'question', headline: 'Buyer message about price', evidence: 'Thanks. If change price let me know that. Thanks' },
+              // Has a sourceUrl → the rollup shows WHICH watch URL the flag came from.
+              { urgency: 'low', category: 'engagement', headline: 'New watcher', evidence: '1 watcher', sourceUrl: 'https://www.ebay.com/sh/lst/active' },
+            ],
             sources: [{ status: 'ok' }],
             readState: { read: 4, unread: 1 },
             lastChecked: new Date().toISOString(),
@@ -507,6 +519,10 @@ const tests = [
       assert(md.includes('Flagged items'), 'renders a flagged-items detail section');
       assert(md.includes('Thanks. If change price'), 'includes the verbatim evidence the model quoted');
       assert(md.includes('Buyer message about price'), 'includes the item headline');
+      // Per-flagged-item source URL: shows which watch URL each flag came from, and
+      // explicitly flags a dead jump-to-source link (the "link did not take me to source").
+      assert(md.includes('src: https://www.ebay.com/sh/lst/active'), 'a flagged item with a sourceUrl shows which hub URL it came from');
+      assert(md.includes('jump-to-source link is dead'), 'a flagged item with NO sourceUrl is marked as a dead jump-to-source link');
       assert(/\b4r\/1u\b/.test(md), 'read/unread column shows 4r/1u');
       assert(md.includes('read-state'), 'notes that read-state was detected');
       assert(md.includes('$50 \\| OBO'), 'literal pipe in summary is escaped so the table row keeps its 7 cells');
@@ -533,12 +549,12 @@ const tests = [
           swappa: { status: 'unknown', summary: 'Could not read this platform’s hub pages.', attention: [],
             sources: [
               { url: 'https://swappa.com/account/listings', status: 'unknown', message: 'Anti-bot challenge (HTTP 403 → cf wall); session is still logged in. Retry later.' },
-              { url: 'https://swappa.com/inbox', status: 'unknown', message: 'Anti-bot challenge (HTTP 403 → cf wall); session is still logged in. Retry later.' },
+              { url: 'https://swappa.com/inbox', status: 'unknown', message: 'Anti-bot challenge (HTTP 403 → cf wall); session is still logged in. Retry later.', title: 'Just a moment...', finalUrl: 'https://swappa.com/my/swappa', challenged: true },
             ],
             lastChecked: new Date().toISOString() },
           mercari: { status: 'unknown', summary: 'Could not read this platform’s hub pages.', attention: [],
             sources: [
-              { url: 'https://www.mercari.com/mypage/listings/active/', status: 'unknown', message: 'Empty or near-empty response (412 bytes).' },
+              { url: 'https://www.mercari.com/mypage/listings/active/', status: 'unknown', message: 'Empty or near-empty response (412 bytes).', title: 'https://www.mercari.com/mypage/listings/active/', finalUrl: 'https://www.mercari.com/mypage/listings/active/', appleEventsDisabled: true },
             ],
             lastChecked: new Date().toISOString() },
         } },
@@ -547,10 +563,81 @@ const tests = [
       assert(/Anti-bot challenge.*session is still logged in/.test(blockedMd), 'surfaces the Cloudflare/anti-bot block reason (retry, not logout)');
       assert(/`unknown` ×2/.test(blockedMd), 'identical block reasons are deduped with a ×N tally');
       assert(/Empty or near-empty response/.test(blockedMd), 'surfaces the empty client-rendered shell reason distinctly from the anti-bot one');
+      assert(/title="Just a moment\.\.\."/.test(blockedMd), 'blocked native read source surfaces captured title');
+      assert(/apple-events-off/.test(blockedMd), 'blocked native read source surfaces Apple Events disabled flag');
+      assert(/ · challenge/.test(blockedMd), 'blocked native read source surfaces anti-bot challenge flag');
       // A fully-clean platform (all sources ok) must NOT appear in the blocked section.
       assert(!/Blocked \/ unreadable hub sources/.test(md), 'no blocked section when every source read ok');
       // No marketplacestatus node → empty (unchanged behavior).
       assert(buildMarketplaceModuleRollup([{ id: 'x', type: 'sellhub', data: {} }]) === '', 'no module node → empty string');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'buildSellHubPriceDropRollup: surfaces zero target plans compactly',
+    run: () => {
+      const md = buildSellHubPriceDropRollup([
+        {
+          id: 'hub-free-target',
+          type: 'sellhub',
+          data: {
+            hubState: 'priced',
+            product: { generated_title: 'Table Lamp | Blue' },
+            priceDropReminderWeeks: 0.5,
+            priceDropMustSellDate: '2026-07-31',
+            priceDropTargetPrice: 0,
+            priceDropStartingTier: 'best',
+            priceDropPlanStartingPrice: 55,
+          },
+        },
+        { id: 'card-1', type: 'marketplacecard', data: { hubId: 'hub-free-target', priceDropReminderDue: true } },
+        { id: 'card-2', type: 'marketplacecard', data: { hubId: 'hub-free-target' } },
+      ]);
+      assert(md.includes('SellHub Price-Drop Plans'), 'renders the compact SellHub price-drop section');
+      assert(md.includes('**$0**') && /\| \$0 \|/.test(md), 'zero target is rendered as $0, not omitted as empty/off');
+      assert(md.includes('Table Lamp \\| Blue'), 'markdown table delimiters in item titles are escaped');
+      assert(/\| 2 \(1 due\) \|/.test(md), 'connected marketplace cards and due reminders are summarized');
+      assert(buildSellHubPriceDropRollup([{ id: 'hub-empty', type: 'sellhub', data: { hubState: 'priced' } }]) === '',
+        'unplanned sellhubs do not add a noisy report section');
+      // A planned sellhub nested inside a CanvasNode group must still be found —
+      // exercises the shared visitCanvasNodes recursion the rollup relies on.
+      const nested = buildSellHubPriceDropRollup([
+        {
+          id: 'group-1',
+          type: 'group',
+          data: {
+            canvasData: {
+              nodes: [
+                { id: 'nested-hub', type: 'sellhub', data: { hubState: 'priced', product: { generated_title: 'Buried Lamp' }, priceDropTargetPrice: 12 } },
+              ],
+            },
+          },
+        },
+      ]);
+      assert(nested.includes('Buried Lamp'), 'rollup descends into grouped sub-canvases (shared visitCanvasNodes recursion)');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'visitCanvasNodes: depth-first walk descends into grouped sub-canvases; non-array is a no-op',
+    run: () => {
+      const seen = [];
+      visitCanvasNodes([
+        { id: 'a', type: 'sellhub' },
+        {
+          id: 'g', type: 'group',
+          data: { canvasData: { nodes: [
+            { id: 'b', type: 'marketplacecard' },
+            { id: 'g2', type: 'group', data: { canvasData: { nodes: [{ id: 'c', type: 'sellhub' }] } } },
+          ] } },
+        },
+      ], (n) => seen.push(n.id));
+      assert(seen.join(',') === 'a,g,b,g2,c', `visits every node depth-first incl. nested (got ${seen.join(',')})`);
+      let calls = 0;
+      visitCanvasNodes(null, () => { calls += 1; });
+      visitCanvasNodes(undefined, () => { calls += 1; });
+      visitCanvasNodes([null, undefined], () => { calls += 1; });
+      assert(calls === 0, 'non-array input and null entries are skipped without calling fn');
       return { ok: true };
     },
   },
@@ -587,10 +674,8 @@ const tests = [
   {
     name: 'Gemini registry: supports every compatible current model with safe routing metadata',
     run: () => {
-      assert(GEMINI_MODEL_FALLBACKS.length === 7, `expected 7 compatible Gemini models, got ${GEMINI_MODEL_FALLBACKS.length}`);
+      assert(GEMINI_MODEL_FALLBACKS.length === 5, `expected 5 free-tier compatible Gemini models, got ${GEMINI_MODEL_FALLBACKS.length}`);
       for (const model of [
-        'gemini-3.1-pro-preview',
-        'gemini-2.5-pro',
         'gemini-3.5-flash',
         'gemini-3-flash-preview',
         'gemini-2.5-flash',
@@ -601,27 +686,25 @@ const tests = [
       }
       assert(!GEMINI_MODEL_FALLBACKS.some(model => /image|tts|live|embedding|robotics|gemma/i.test(model)),
         'special-purpose Gemini/Gemma models must not enter the universal generateContent fallback chain');
+      assert(!GEMINI_MODEL_FALLBACKS.some(model => /\bpro\b/i.test(model)),
+        'free-tier no-quota Pro models must stay out of the API-key fallback chain');
 
-      assert(getGeminiDefaultThinkingConfig('gemini-2.5-pro').thinkingBudget === 128,
-        '2.5 Pro uses its documented minimum thinking budget because thinking cannot be disabled');
       assert(getGeminiDefaultThinkingConfig('gemini-2.5-flash').thinkingBudget === 0,
         '2.5 Flash disables thinking for short structured workflows');
-      assert(getGeminiDefaultThinkingConfig('gemini-3.1-pro-preview').thinkingLevel === 'low',
-        '3.1 Pro uses low because it does not support minimal/full thinking-off');
       assert(getGeminiDefaultThinkingConfig('gemini-3.5-flash').thinkingLevel === 'minimal',
         'Gemini 3 Flash family uses the current thinkingLevel control');
 
-      const preferredPro = orderGeminiModels('gemini-3.1-pro-preview');
-      assert(preferredPro[0] === 'gemini-3.1-pro-preview' && preferredPro[1] === 'gemini-2.5-pro',
-        'quality tasks use 2.5 Pro before falling back to Flash');
+      const preferredFlash = orderGeminiModels('gemini-3.5-flash');
+      assert(preferredFlash[0] === 'gemini-3.5-flash' && preferredFlash[1] === 'gemini-3-flash-preview',
+        'quality tasks start with Flash models, not no-quota Pro models');
       const preferredLite = orderGeminiModels('gemini-3.1-flash-lite');
       assert(preferredLite[0] === 'gemini-3.1-flash-lite' && preferredLite[1] === 'gemini-2.5-flash-lite',
         'lightweight tasks exhaust Lite models before stronger/costlier fallbacks');
-      assert(preferredLite.indexOf('gemini-3.5-flash') < preferredLite.indexOf('gemini-3.1-pro-preview'),
-        'lightweight tasks try Flash before Pro');
+      assert(preferredLite.includes('gemini-3.5-flash') && !preferredLite.some(model => /\bpro\b/i.test(model)),
+        'lightweight tasks include Flash fallback but never no-quota Pro');
       const now = Date.now();
-      const deferred = orderGeminiModels('gemini-3.1-pro-preview', new Map([['gemini-3.1-pro-preview', now + 1000]]), now);
-      assert(deferred[0] === 'gemini-2.5-pro' && deferred.at(-1) === 'gemini-3.1-pro-preview',
+      const deferred = orderGeminiModels('gemini-3.5-flash', new Map([['gemini-3.5-flash', now + 1000]]), now);
+      assert(deferred[0] === 'gemini-3-flash-preview' && deferred.at(-1) === 'gemini-3.5-flash',
         'known-suppressed preferred model moves to the tail without being removed');
       return { models: GEMINI_MODEL_FALLBACKS.length };
     },
@@ -631,10 +714,10 @@ const tests = [
     run: () => {
       const beforeShutdown = Date.parse('2026-06-13T00:00:00Z');
       const afterShutdown = Date.parse('2026-10-17T00:00:00Z');
-      const scheduled = getGeminiLifecycleWarning('gemini-2.5-pro', beforeShutdown);
-      assert(/October 16, 2026/.test(scheduled) && /gemini-3.1-pro-preview/.test(scheduled),
-        `2.5 Pro warning includes shutdown and replacement -> ${scheduled}`);
-      assert(/may no longer be reachable/.test(getGeminiLifecycleWarning('gemini-2.5-pro', afterShutdown)),
+      const scheduled = getGeminiLifecycleWarning('gemini-2.5-flash', beforeShutdown);
+      assert(/October 16, 2026/.test(scheduled) && /gemini-3.5-flash/.test(scheduled),
+        `2.5 Flash warning includes shutdown and replacement -> ${scheduled}`);
+      assert(/may no longer be reachable/.test(getGeminiLifecycleWarning('gemini-2.5-flash', afterShutdown)),
         'a passed shutdown date warns that the endpoint may be unreachable');
       assert(getGeminiLifecycleWarning('gemini-3.5-flash', beforeShutdown) === null,
         'models without an announced shutdown do not get fabricated lifecycle warnings');
@@ -651,10 +734,10 @@ const tests = [
       assert(classifyGeminiFailure(429, 'Quota exceeded per API key for this project') === 'rate-limit',
         'a quota message that mentions "API key" is still rate-limit, not auth');
       // Finding 1: a bare per-model 403 must NOT abort the chain (it is model-access,
-      // not credential auth) so a denied Pro model still falls through to Flash.
+      // not credential auth) so a denied model still falls through to the next fallback.
       assert(classifyGeminiFailure(403, 'permission denied') === 'model-access',
         'a per-model 403 is model-access (cascade), not chain-aborting auth');
-      assert(classifyGeminiFailure(403, 'Permission denied on resource model gemini-3.1-pro-preview') === 'model-access',
+      assert(classifyGeminiFailure(403, 'Permission denied on resource model gemini-3.5-flash') === 'model-access',
         'PERMISSION_DENIED on a specific model is model-access');
       // ...but a CREDENTIAL/project-level 403 IS auth (every model fails identically).
       assert(classifyGeminiFailure(403, 'API key not valid. Please pass a valid API key.') === 'auth',
@@ -694,9 +777,9 @@ const tests = [
       assert(contextWindowForModel('claude-opus-4-8') === 1000000, 'Opus 4.8 window should be 1M');
       assert(contextWindowForModel('claude-haiku-4-5-20251001') === 200000, 'Haiku 4.5 window should be 200K');
       assert(contextWindowForModel('gemini-3.5-flash') === 1048576, 'Gemini 3.5 flash window should be 1,048,576');
-      assert(contextWindowForModel('gemini-3.1-pro-preview') === 1048576, 'Gemini 3.1 Pro window should be 1,048,576');
+      assert(contextWindowForModel('gemini-3-flash-preview') === 1048576, 'Gemini 3 Flash Preview window should be 1,048,576');
       assert(maxOutputForModel('claude-opus-4-8') === 128000, 'Opus 4.8 max output should be 128K');
-      assert(maxOutputForModel('gemini-2.5-pro') === 65536, 'Gemini 2.5 Pro max output should be 65,536');
+      assert(maxOutputForModel('gemini-2.5-flash') === 65536, 'Gemini 2.5 Flash max output should be 65,536');
       assert(maxOutputForModel('gemini-2.5-flash-lite') === 65536, 'Gemini flash-lite max output should be 65,536');
       // Family fallbacks: unknown gemini → 1M; unknown claude → conservative 200K.
       assert(contextWindowForModel('gemini-99-ultra-flash') === 1048576, 'unknown gemini → 1M family default');
@@ -1460,8 +1543,10 @@ const tests = [
         'reminder plan: day-end cutoff is the start of the day after the must-sell date');
       assert(normalizePriceDropTargetPrice('42.50') === 42.5 && normalizePriceDropTargetPrice('19.99') === 19.99,
         'reminder plan: target price accepts positive currency');
-      assert(normalizePriceDropTargetPrice('0') === null && normalizePriceDropTargetPrice(-5) === null && normalizePriceDropTargetPrice('abc') === null,
-        'reminder plan: non-positive or malformed target price is rejected');
+      assert(normalizePriceDropTargetPrice('0') === 0 && normalizePriceDropTargetPrice(0) === 0,
+        'reminder plan: target price accepts zero as a free-listing target');
+      assert(normalizePriceDropTargetPrice(-5) === null && normalizePriceDropTargetPrice('abc') === null,
+        'reminder plan: negative or malformed target price is rejected');
       assert(normalizePriceDropStartingTier('quick') === 'quick' && normalizePriceDropStartingTier('other') === 'best',
         'reminder plan: starting tier is constrained with Best as default');
       assert(normalizePriceDropStartingPrice('42.50') === 42.5 && normalizePriceDropStartingPrice(0) === null,
@@ -1516,6 +1601,10 @@ const tests = [
         'reminder plan: the final on-day reminder reaches the exact target');
       assert(calculatePriceDropSuggestion({ ...scheduleArgs, nowMs: scheduleStartMs + 10 * MS_PER_WEEK }) === 10,
         'reminder plan: overdue reminder catches up without dropping below target');
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, targetPrice: 0, nowMs: scheduleStartMs + 4 * MS_PER_WEEK }) === 0,
+        'reminder plan: the final reminder can reach a free target');
+      assert(calculatePriceDropSuggestion({ ...scheduleArgs, targetPrice: 0, nowMs: scheduleStartMs + 10 * MS_PER_WEEK }) === 0,
+        'reminder plan: overdue reminder stays at a free target');
       assert(priceDropReminderCountThroughMustSell({ ...scheduleArgs, mustSellDate: '2026-01-22' }) === 3,
         'reminder plan: an earlier must-sell day includes its own on-day reminder');
       assert(priceDropReminderCountThroughMustSell({ ...scheduleArgs, mustSellDate: '2026-01-08' }) === 1,
@@ -2178,6 +2267,11 @@ const tests = [
       const render = applyBugReportCode([...logs, '[RenderStorm] sellhub 8e27f3ce: 24 renders in 1000ms'], {}, 'RENDER');
       assert(render.filteredLogs.some(line => line.includes('[RenderStorm]')) && render.matchedCodes.includes('RENDER'),
         'Bug report code filtering: RENDER should retain render-storm diagnostics');
+      const sell = applyBugReportCode([...logs, '[SellHub][8e27f3ce] Price-drop plan updated: target=$0'], {}, 'SELL');
+      assert(sell.filteredLogs.some(line => line.includes('target=$0')) && sell.matchedCodes.includes('SELL'),
+        'Bug report code filtering: SELL should retain SellHub price-drop commits');
+      assert(!sell.sectionExclusions.has('nodes') && sell.sectionExclusions.has('nodeInternals'),
+        'Bug report code filtering: SELL should keep lightweight nodes for the SellHub rollup but drop node internals');
       const preview = previewBugReportCode(logs, 'ERR+NOPE');
       assert(preview.unknownCodes.includes('NOPE') && preview.valid, 'Bug report code filtering: preview should report unknown codes while keeping valid matches');
 
@@ -2193,6 +2287,20 @@ const tests = [
       const xsess = applyBugReportCode(logs, {}, 'XSESS');
       assert(xsess.sectionExclusions.has('sessionTraces') && xsess.matchedCodes.includes('XSESS'),
         'Bug report code filtering: XSESS should exclude sessionTraces');
+      const fullSummary = buildFilterSummaryMarkdown({
+        filterCode: 'FULL',
+        filterStats: { eventsShown: 69, eventsTotal: 69, omittedSections: [] },
+      });
+      assert(fullSummary.includes('event log kept all 69 line(s)'),
+        'Bug report filter summary: FULL should say the event log was kept, not trimmed');
+      assert(fullSummary.includes('Full report requested') && !fullSummary.includes('This is a filtered view'),
+        'Bug report filter summary: plain FULL should not claim the report is filtered');
+      const fullXnodesSummary = buildFilterSummaryMarkdown({
+        filterCode: 'FULL+XNODES',
+        filterStats: { eventsShown: 10, eventsTotal: 10, omittedSections: ['nodeInternals'] },
+      });
+      assert(fullXnodesSummary.includes('FULL was combined with section exclusions') && fullXnodesSummary.includes('sections omitted: nodeInternals'),
+        'Bug report filter summary: FULL+exclusion explains unfiltered events and omitted sections');
       return { filtered: filtered.filteredLogs.length, unknown: preview.unknownCodes };
     },
   },
@@ -2598,6 +2706,46 @@ const tests = [
       assert(brandLead.data.originHubId === 'search-A', 'hierarchy: card carries its origin module id');
       assert(cards.every(c => !('resumeProfile' in c.data)), 'hierarchy: no per-card resumeProfile copies');
       return { cards: cards.length, bands: bands.length, salary: salary.length, roles: roles.length };
+    },
+  },
+  {
+    name: 'Job tree: parseable low salary does not land in Unspecified',
+    run: () => {
+      const displayedJobs = [
+        {
+          title: 'Coordinator', company: 'Acme', location: 'Remote',
+          salary: '$45,000 a year', snippet: 'x', matchScore: 80,
+          reasoning: 'r', careerDirection: 'Operations', source: 'lever',
+          url: 'https://jobs/low', posted: 'today',
+        },
+        {
+          title: 'Mystery Role', company: 'Acme', location: 'Remote',
+          salary: '', snippet: 'x', matchScore: 78,
+          reasoning: 'r', careerDirection: 'Operations', source: 'lever',
+          url: 'https://jobs/none', posted: 'today',
+        },
+      ];
+      const result = buildJobTreeNodes({
+        displayedJobs,
+        bucketTree: {
+          likelihoodBands: [{ label: 'Strong (0-100%)', minScore: 0, maxScore: 100 }],
+          // Malformed-but-plausible model output: it forgot a low-end catch-all.
+          salaryRanges: [
+            { label: '$80k+', minSalary: 80000, maxSalary: 0 },
+            { label: 'Unspecified', minSalary: 0, maxSalary: 0 },
+          ],
+          roles: [{ name: 'Operations', jobIndices: [0, 1] }],
+        },
+        originalPos: { x: 0, y: 0 }, hubId: 'hub-1', baseNodeId: 'job-low',
+      });
+      const salaryGroups = result.newNodes.filter(n => n.data?.kind === 'salary');
+      const lowRange = salaryGroups.find(n => n.data.label === 'Below $80k');
+      const unspecified = salaryGroups.find(n => n.data.label === 'Unspecified');
+      assert(lowRange, 'salary fallback: expected synthetic low-end range');
+      assert(unspecified, 'salary fallback: expected Unspecified range for missing salary');
+      assert(lowRange.data.count === 1, `salary fallback: low salary should be in Below $80k (got ${lowRange.data.count})`);
+      assert(unspecified.data.count === 1, `salary fallback: only missing salary should be Unspecified (got ${unspecified.data.count})`);
+      return { salaryGroups: salaryGroups.map(g => g.data.label) };
     },
   },
   {
@@ -3371,6 +3519,8 @@ const tests = [
       // URL is sanitized (backticks stripped) and bounded so it can't break the md table.
       const longUrl = buildAuthAttemptRecord({ loginUrl: 'https://x.com/`' + 'a'.repeat(400) });
       assert(!longUrl.url.includes('`') && longUrl.url.length <= 180, 'url is backtick-stripped and length-capped');
+      const titled = buildAuthAttemptRecord({ title: 'My Listings | Mercari `x`' });
+      assert(titled.title === "My Listings \\| Mercari 'x'", `title is preserved and markdown-safe → ${titled.title}`);
       return { ok: true };
     },
   },
@@ -3410,8 +3560,12 @@ const tests = [
     run: () => {
       assert(NATIVE_LOGIN_PLATFORMS.has('mercari'), 'mercari must be a native (non-CDP) login platform (Google SSO loops under CDP)');
       assert(NATIVE_LOGIN_PLATFORMS.has('swappa') && NATIVE_LOGIN_PLATFORMS.has('indeed'), 'swappa + indeed native login must remain (regression guard)');
-      // Login URL is the auth-gated seller hub so the post-login landing carries the marker.
-      assert(/mercari\.com\/mypage/i.test(PLATFORM_LOGIN_URLS.mercari), `mercari login URL → ${PLATFORM_LOGIN_URLS.mercari}`);
+      // Login URL must be Mercari's DEDICATED /login/ page (the auth-gated hub renders
+      // a blank grey screen in the raw --app window — "mercari log in is grey screen"),
+      // AND must carry a login_callback back to /mypage so the post-login landing still
+      // hits the mercari.com/mypage success marker. Guards both regressions at once.
+      assert(/mercari\.com\/login\b/i.test(PLATFORM_LOGIN_URLS.mercari), `mercari login URL must be the dedicated /login page (not the grey-screen hub) → ${PLATFORM_LOGIN_URLS.mercari}`);
+      assert(/login_callback=.*mypage/i.test(PLATFORM_LOGIN_URLS.mercari), `mercari login URL must carry a login_callback returning to /mypage → ${PLATFORM_LOGIN_URLS.mercari}`);
       assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/mypage/listings/', 'My Listings - Mercari') === true, 'landed on /mypage → logged in');
       assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/login/', 'Log in to Mercari') === false, 'still on the login page → not yet');
       // Logged-out inline login form served AT the /mypage success URL (HTTP 200,
@@ -3420,10 +3574,50 @@ const tests = [
       // before the user can sign in ("keeps refreshing / can't verify human").
       assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/mypage/listings/active/', 'Your Go-to Marketplace for Deals on Used & Secondhand Items | Mercari') === false, 'logged-out inline form at /mypage → not a success');
       assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/us/selling/dashboard/', 'Your Go-to Marketplace for Deals on Used & Secondhand Items | Mercari') === false, 'logged-out inline form at selling dashboard → not a success');
+      assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/mypage/listings/', 'Log in | Mercari') === false, 'pipe-separated mercari login title at /mypage → not a success');
+      assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/mypage/listings/', 'Sign in | Mercari') === false, 'pipe-separated mercari sign-in title at /mypage → not a success');
       // The Google-OAuth callback step must not be mistaken for success.
       assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/account/googleauth?code=abc', 'Mercari') === false, 'OAuth callback is not the success marker');
       assert(isNativeLoginSuccess('mercari', 'https://accounts.google.com/o/oauth2/v2/auth?...', 'Sign in - Google Accounts') === false, 'on Google sign-in → not yet');
       assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/', 'Mercari') === false, 'homepage is not the success marker');
+      // Empty/loading <title> at the marker URL must NOT auto-succeed — the
+      // title-render race that false-closed the window mid-login (session cached
+      // connected:true while the user was still on the login page). Inline-login
+      // platforms require a settled, non-empty title.
+      assert(isInlineLoginPlatform('mercari') === true, 'mercari serves login inline at its success URL');
+      assert(isInlineLoginPlatform('swappa') === false && isInlineLoginPlatform('indeed') === false, 'swappa/indeed login URLs are distinct from the success marker');
+      assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/mypage/listings/', '') === false, 'mercari /mypage with EMPTY (loading) title → not a success (title-render race)');
+      assert(isNativeLoginSuccess('mercari', 'https://www.mercari.com/mypage/listings/', 'Just a moment...') === false, 'mercari /mypage showing a CF interstitial title → not a success');
+      // swappa is NOT inline-login, so an empty title at its success marker still
+      // succeeds (its login lives at a distinct /login URL — no ambiguity).
+      assert(isNativeLoginSuccess('swappa', 'https://swappa.com/my/swappa', '') === true, 'swappa /my/swappa with empty title still succeeds (distinct login URL, no inline ambiguity)');
+      assert(isNativeLoginSuccess('swappa', 'https://swappa.com/my/swappa', 'Sign in | Swappa') === false, 'swappa hub showing a pipe-separated login title → not yet');
+      assert(isNativeLoginSuccess('swappa', 'https://swappa.com/my/swappa', 'Just a moment...') === false, 'swappa hub showing a CF challenge title → not yet (wait for the challenge to clear)');
+      return { ok: true };
+    },
+  },
+  {
+    // isLoginUrlPath is the SINGLE shared login-URL predicate (authWindows.js),
+    // replacing 5 drifted near-copies across the login window, HTTP verify, native
+    // read, and hub-scan auth-wall. Guard the union coverage + the /author non-match
+    // (accounts.js once used bare `auth`, which wrongly matched /author).
+    name: 'isLoginUrlPath: unified login-URL detection, no /author false-match',
+    run: () => {
+      for (const u of [
+        'https://www.mercari.com/login/?login_callback=%2Fmypage',
+        'https://signin.ebay.com/ws/eBayISAPI.dll?SignIn',
+        'https://reverb.com/signin?redirect_to=%2Fmy',
+        'https://www.depop.com/login/?redirect=%2Fproducts',
+        'https://example.com/account/login',
+        'https://example.com/log-in',
+        'https://example.com/authenticate?next=/x',
+        'https://example.com/auth/start',
+      ]) assert(isLoginUrlPath(u) === true, `login URL detected → ${u}`);
+      // Must NOT match: /author (the bare-`auth` bug), and non-login hub pages.
+      assert(isLoginUrlPath('https://example.com/author/jane') === false, '/author is NOT a login URL (auth(?!or) guard)');
+      assert(isLoginUrlPath('https://www.mercari.com/mypage/listings/active/') === false, 'a real seller hub is not a login URL');
+      assert(isLoginUrlPath('https://www.ebay.com/mys/active') === false, 'eBay seller hub is not a login URL');
+      assert(isLoginUrlPath('') === false && isLoginUrlPath(null) === false && isLoginUrlPath(undefined) === false, 'empty/null/undefined → false (null-safe)');
       return { ok: true };
     },
   },
@@ -3609,16 +3803,34 @@ const tests = [
     name: 'nativeChromeReader: platform gate + read-result classification',
     run: () => {
       // Only the CDP-walled platforms route through native reads; the headless ones must NOT.
-      assert(NATIVE_READ_PLATFORMS.has('swappa') && NATIVE_READ_PLATFORMS.has('mercari'), 'swappa+mercari are native-read platforms');
-      for (const p of ['ebay', 'facebook', 'reverb', 'poshmark']) {
+      // eBay was promoted (its hub reads get the /splashui/captcha anti-bot wall under
+      // headless CDP even with valid cookies — see the "ebay still unknown" reports).
+      assert(NATIVE_READ_PLATFORMS.has('swappa') && NATIVE_READ_PLATFORMS.has('mercari') && NATIVE_READ_PLATFORMS.has('ebay'), 'swappa+mercari+ebay are native-read platforms');
+      for (const p of ['facebook', 'reverb', 'poshmark']) {
         assert(!NATIVE_READ_PLATFORMS.has(p), `${p} reads fine headless and must NOT be a native-read platform`);
       }
       // shouldUseNativeRead is darwin-gated; the test runner runs on darwin here.
       if (process.platform === 'darwin') {
         assert(shouldUseNativeRead('swappa') === true, 'swappa uses native read on macOS');
-        assert(shouldUseNativeRead('ebay') === false, 'ebay never uses native read');
+        assert(shouldUseNativeRead('ebay') === true, 'ebay uses native read on macOS (CDP /splashui wall)');
+        assert(shouldUseNativeRead('facebook') === false, 'facebook still reads headless');
       } else {
         assert(shouldUseNativeRead('swappa') === false, 'native read is macOS-only');
+        assert(shouldUseNativeRead('ebay') === false, 'native read is macOS-only');
+      }
+
+      // Startup-verify skip set (accounts.js verifyOne): platforms CDP-walled on BOTH
+      // axes — native LOGIN (Google-SSO/Turnstile loop) AND native READ (403/wedge) —
+      // skip the doomed CDP startup verify (the mercari 35s anti-bot wedge that made
+      // startup the long pole); the native read owns their login state during Check All.
+      // The predicate must resolve to EXACTLY {swappa, mercari} on macOS: eBay is
+      // native-read only (its login verify works) and indeed is native-login only.
+      if (process.platform === 'darwin') {
+        const skipsStartupVerify = (id) => NATIVE_LOGIN_PLATFORMS.has(id) && shouldUseNativeRead(id);
+        assert(skipsStartupVerify('mercari') === true && skipsStartupVerify('swappa') === true, 'mercari+swappa skip the CDP startup verify (native-login AND native-read)');
+        assert(skipsStartupVerify('ebay') === false, 'ebay does NOT skip startup verify (native-read only; its login verify works, does not wedge)');
+        assert(skipsStartupVerify('indeed') === false, 'indeed does NOT skip startup verify (native-login only; not native-read)');
+        assert(skipsStartupVerify('facebook') === false, 'facebook does NOT skip startup verify (neither native-login nor native-read)');
       }
 
       // The one manual prerequisite — detect the Apple-Events toggle being off so
@@ -3634,6 +3846,8 @@ const tests = [
       // Output parsing: finalUrl <SEP> html, and the no-window sentinel.
       const parsed = parseNativeReadOutput('https://swappa.com/account###NRSEP_8f3a2c###<html>hi</html>');
       assert(parsed.finalUrl === 'https://swappa.com/account' && parsed.html === '<html>hi</html>', 'splits finalUrl from html');
+      const parsedWithTitle = parseNativeReadOutput('https://swappa.com/my/swappa###NRSEP_8f3a2c###Just a moment...###NRSEP_8f3a2c###NRERR:JS:Executing JavaScript through AppleScript is turned off.');
+      assert(parsedWithTitle.finalUrl === 'https://swappa.com/my/swappa' && parsedWithTitle.title === 'Just a moment...' && /AppleScript/.test(parsedWithTitle.error), 'splits finalUrl + title + JavaScript error');
       assert(parseNativeReadOutput('NRERR:NOWINDOW').sentinel === 'NRERR:NOWINDOW', 'surfaces the no-window sentinel');
 
       // Result classification → the scanSellerHubPages fetcher contract.
@@ -3642,42 +3856,84 @@ const tests = [
 
       const bounced = nativeReadToFetchResult({ requestedUrl: 'https://www.mercari.com/mypage/listings/', finalUrl: 'https://www.mercari.com/login/?login_callback=%2Fmypage', html: '<html>login</html>' });
       assert(bounced.ok === false && /login page/i.test(bounced.error), 'login bounce → terminal error, not a false-ok');
+      // The /login bounce must carry loginBounce:true so the read loop STOPS instead
+      // of driving the remaining hub URLs (each re-bouncing) — the swappa thrash.
+      assert(bounced.loginBounce === true, 'login bounce sets loginBounce:true so the read loop breaks (no thrash through the rest)');
 
       const challenged = nativeReadToFetchResult({ requestedUrl: 'https://swappa.com/my/swappa', finalUrl: 'https://swappa.com/my/swappa', html: 'Just a moment... checking your browser' });
-      assert(challenged.ok === false && /challenge/i.test(challenged.error), 'native CF challenge → terminal error');
+      assert(challenged.ok === false && challenged.challenged === true && /challenge/i.test(challenged.error), 'native CF challenge → terminal error and stop flag');
+
+      // eBay's anti-bot splash/captcha is served ON-host (ebay.com/splashui/…), so it
+      // slips past BOTH the login-bounce regex and the CF-content sniff — it must still
+      // be classified as a challenge (blocked source, never scanned as hub content). This
+      // is the safety net for the "ebay still unknown" promotion to native read.
+      const ebaySplash = nativeReadToFetchResult({ requestedUrl: 'https://www.ebay.com/mye/myebay/summary', finalUrl: 'https://www.ebay.com/splashui/captcha?ap=1&appName=orch&ru=https%3A%2F%2Fsignin.ebay.com%2Fsignin', html: '<html><body>Please verify yourself</body></html>'.padEnd(500, ' ') });
+      assert(ebaySplash.ok === false && ebaySplash.challenged === true && /splash|captcha/i.test(ebaySplash.error), 'eBay on-host /splashui captcha → challenged (not a false-ok scanned as hub content)');
+      const ebayHub = nativeReadToFetchResult({ requestedUrl: 'https://www.ebay.com/mye/myebay/summary', finalUrl: 'https://www.ebay.com/mye/myebay/summary', html: '<html>'.padEnd(800, 'x') + 'Active listings</html>' });
+      assert(ebayHub.ok === true && ebayHub.status === 200, 'eBay real seller-hub HTML (native read past the wall) → ok:200');
 
       const empty = nativeReadToFetchResult({ requestedUrl: 'https://swappa.com/x', finalUrl: 'https://swappa.com/x', html: '' });
       assert(empty.ok === false && /empty/i.test(empty.error), 'empty page → terminal error');
 
-      const toggleOff = nativeReadToFetchResult({ requestedUrl: 'https://swappa.com/x', error: 'Executing JavaScript through AppleScript is turned off' });
-      assert(toggleOff.ok === false && /Allow JavaScript from Apple Events/i.test(toggleOff.error), 'toggle-off error names the exact Chrome setting');
+      const toggleOff = nativeReadToFetchResult({ requestedUrl: 'https://swappa.com/x', finalUrl: 'https://swappa.com/x', title: 'My Swappa - Swappa', error: 'Executing JavaScript through AppleScript is turned off' });
+      assert(toggleOff.ok === false && toggleOff.appleEventsDisabled === true && toggleOff.title === 'My Swappa - Swappa' && /Allow JavaScript from Apple Events/i.test(toggleOff.error), 'toggle-off error names the exact Chrome setting and carries title for reports');
 
       // Login-state classifier: drives the "detect the login screen → WAIT for the
       // human to sign in → then read" flow. A logged-out hub must be detected so we
       // wait (not fail); a settled hub host must read as logged-in.
-      assert(nativeReadLoginState('https://www.mercari.com/us/selling/dashboard/', 'www.mercari.com') === 'logged-in', 'settled mercari hub → logged-in');
+      assert(nativeReadLoginState('https://www.mercari.com/us/selling/dashboard/', 'www.mercari.com') === 'unknown', 'on-host but EMPTY title (2-arg) → keep polling, never a false logged-in (first-poll race fix)');
       assert(nativeReadLoginState('https://www.mercari.com/login/?login_callback=%2Fmypage', 'www.mercari.com') === 'logged-out', 'mercari /login bounce → logged-out (wait for human)');
       assert(nativeReadLoginState('https://accounts.google.com/v3/signin/challenge/pwd', 'swappa.com') === 'logged-out', 'swappa Google-OAuth bounce → logged-out');
       assert(nativeReadLoginState('https://www.facebook.com/two_step_verification/authentication/?x=1', 'www.facebook.com') === 'logged-out', '2FA screen → logged-out');
-      assert(nativeReadLoginState('https://swappa.com/my/swappa', 'swappa.com') === 'logged-in', 'settled swappa hub → logged-in');
+      assert(nativeReadLoginState('https://swappa.com/my/swappa', 'swappa.com') === 'unknown', 'swappa on-host + EMPTY title → keep polling (was a false logged-in that drove all 3 hub URLs while the CF "Performing security verification" loaded — the reported thrash)');
       assert(nativeReadLoginState('NRERR:NOWINDOW', 'swappa.com') === 'no-window', 'no-window sentinel → no-window');
       assert(nativeReadLoginState('about:blank', 'swappa.com') === 'no-window', 'about:blank (window still spawning) → no-window');
       assert(nativeReadLoginState('https://example.com/x', 'swappa.com') === 'unknown', 'off-host non-login URL → unknown (keep polling)');
+      // eBay native-read login states. /splashui is ON-host but is the anti-bot captcha
+      // wall → WAIT (human clears it in the visible window, like Swappa's CF); a settled
+      // seller hub → read; a signin redirect → wait.
+      assert(nativeReadLoginState('https://www.ebay.com/splashui/captcha?ap=1&appName=orch&ru=x', 'ebay.com', 'Security Measure', 'ebay') === 'logged-out', 'eBay /splashui anti-bot wall → logged-out (WAIT, do not scan the captcha as a hub)');
+      assert(nativeReadLoginState('https://www.ebay.com/mye/myebay/summary', 'ebay.com', 'My eBay Summary', 'ebay') === 'logged-in', 'eBay settled seller hub → logged-in (read now)');
+      assert(nativeReadLoginState('https://signin.ebay.com/ws/eBayISAPI.dll?SignIn', 'ebay.com', 'Sign in | eBay', 'ebay') === 'logged-out', 'eBay signin redirect → logged-out (wait for the human)');
 
       // Inline login form served AT the auth-gated URL (Mercari: HTTP 200, no /login
       // redirect, generic SEO <title>). URL is on-host but the title is the marketing
       // shell → must classify logged-out (WAIT) so the read doesn't thrash the tab.
       // The title is the ONLY discriminator (read toggle-free) for this case.
       assert(nativeReadLoginState('https://www.mercari.com/mypage/listings/active/', 'www.mercari.com', 'Your Go-to Marketplace for Deals on Used & Secondhand Items | Mercari', 'mercari') === 'logged-out', 'mercari inline login form (generic title) → logged-out (wait, do not thrash)');
+      assert(nativeReadLoginState('https://www.mercari.com/mypage/listings/active/', 'www.mercari.com', 'Log in | Mercari', 'mercari') === 'logged-out', 'mercari pipe-separated login title → logged-out (wait, do not thrash)');
       assert(nativeReadLoginState('https://www.mercari.com/mypage/listings/active/', 'www.mercari.com', 'My Listings | Mercari', 'mercari') === 'logged-in', 'mercari real hub title → logged-in');
-      assert(nativeReadLoginState('https://www.mercari.com/us/selling/dashboard/', 'www.mercari.com', '', 'mercari') === 'logged-in', 'empty title (toggle-free poll gave none) → falls through to URL logic → logged-in');
-      assert(nativeReadLoginState('https://www.mercari.com/us/selling/dashboard/', 'www.mercari.com') === 'logged-in', 'back-compat: 2-arg call (no title) unchanged → logged-in');
+      assert(nativeReadLoginState('https://www.mercari.com/us/selling/dashboard/', 'www.mercari.com', '', 'mercari') === 'unknown', 'mercari empty/loading title at inline success URL → keep polling, not logged-in');
+      assert(nativeReadLoginState('https://www.mercari.com/us/selling/dashboard/', 'www.mercari.com', 'https://www.mercari.com/us/selling/dashboard/', 'mercari') === 'unknown', 'mercari URL-as-title at inline success URL → keep polling, not logged-in');
+      assert(nativeReadLoginState('https://www.mercari.com/us/selling/dashboard/', 'www.mercari.com') === 'unknown', 'back-compat: 2-arg call (no title) on-host → keep polling until the title settles');
+      // Swappa hub bounced to a Cloudflare human-verification ("Just a moment…") at
+      // its OWN host: title-aware classify must read logged-out so the read WAITS for
+      // the user to solve it, instead of host-only 'logged-in' that drove the tab
+      // through all 3 hub URLs (the reported "swappa lands on human verification,
+      // keeps refreshing"). Title is read toggle-free, so this works with the
+      // Apple-Events toggle OFF.
+      assert(nativeReadLoginState('https://swappa.com/my/swappa', 'swappa.com', 'Just a moment...', 'swappa') === 'logged-out', 'swappa CF human-verification (title) → logged-out (wait, do not thrash)');
+      assert(nativeReadLoginState('https://swappa.com/my/swappa', 'swappa.com', 'My Swappa - Swappa', 'swappa') === 'logged-in', 'swappa real hub title → logged-in');
+      // First-poll race regression guard (NON-inline platform): an empty/loading or
+      // URL-as-title at swappa's on-host hub must NOT classify logged-in — the guard
+      // was previously gated on isInlineLoginPlatform (mercari-only), leaving swappa
+      // exposed; it drove all 3 hub URLs (each /login-bounced) before the CF
+      // verification could load. Now ALL native-read platforms keep polling.
+      assert(nativeReadLoginState('https://swappa.com/my/swappa', 'swappa.com', '', 'swappa') === 'unknown', 'swappa empty title + platformId → keep polling (not logged-in)');
+      assert(nativeReadLoginState('https://swappa.com/my/swappa', 'swappa.com', 'https://swappa.com/my/swappa', 'swappa') === 'unknown', 'swappa URL-as-title → keep polling (not logged-in)');
 
       // Shared logged-out-title helper (one source for native LOGIN + native READ).
       assert(isLoggedOutTitleForPlatform('mercari', 'Your Go-to Marketplace for Deals on Used & Secondhand Items | Mercari') === true, 'mercari SEO/marketing title → logged-out');
       assert(isLoggedOutTitleForPlatform('mercari', 'My Listings | Mercari') === false, 'mercari real hub title → not logged-out');
       assert(isLoggedOutTitleForPlatform('mercari', '') === false, 'empty title → no signal');
-      assert(isLoggedOutTitleForPlatform('swappa', 'anything') === false, 'no markers configured for swappa → never flags (unverified title not fabricated)');
+      // GENERIC markers apply to ALL platforms (restores the pre-refactor 'just a
+      // moment'/'sign in' rejection + covers Swappa CF without a fabricated title).
+      assert(isLoggedOutTitleForPlatform('swappa', 'Just a moment...') === true, 'CF interstitial title → logged-out on any platform');
+      assert(isLoggedOutTitleForPlatform('swappa', 'Sign in to Swappa') === true, 'login title → logged-out on any platform');
+      assert(isLoggedOutTitleForPlatform('swappa', 'Sign in | Swappa') === true, 'pipe-separated sign-in title → logged-out on any platform');
+      assert(isLoggedOutTitleForPlatform('mercari', 'Log in | Mercari') === true, 'pipe-separated log-in title → logged-out on any platform');
+      assert(isLoggedOutTitleForPlatform('mercari', 'Sign in & security | Mercari') === false, 'bare "sign in" inside a logged-in account/security title is not enough to reject');
+      assert(isLoggedOutTitleForPlatform('swappa', 'My Swappa - Swappa') === false, 'real swappa hub title → not logged-out (no fabricated marker false-trips it)');
 
       // Content-level inline-login detector (toggle-on net): a read that returns the
       // login form HTML → ok:false loggedOut, and the read loop stops driving the tab.
@@ -3688,6 +3944,69 @@ const tests = [
       const loggedOutRead = nativeReadToFetchResult({ requestedUrl: 'https://www.mercari.com/mypage/listings/', finalUrl: 'https://www.mercari.com/mypage/listings/active/', html: '<html><body><h1>Log in to Mercari</h1></body></html>' });
       assert(loggedOutRead.ok === false && loggedOutRead.loggedOut === true && /LOGIN FORM/i.test(loggedOutRead.error), 'on-host inline login form read → ok:false loggedOut (surfaces in Blocked-sources, stops thrash)');
       return { ok: true };
+    },
+  },
+  {
+    // Auto-enable "Allow JavaScript from Apple Events" on OUR profile so the native
+    // read works without the user flipping the menu toggle each session. The pure
+    // decision must be SAFE: it merges the bool into browser{} without clobbering
+    // other keys, returns null (no write) when already on or when the Preferences
+    // shape is unexpected (a malformed write would make Chrome reset the profile →
+    // lost logins).
+    name: 'withAppleEventsJsEnabled: safe Preferences merge for the Apple-Events JS toggle',
+    run: () => {
+      // Fresh / missing profile → seed the pref.
+      assert(withAppleEventsJsEnabled(undefined)?.browser?.allow_javascript_apple_events === true, 'missing Preferences (ENOENT) → seed { browser:{ allow_javascript_apple_events:true } }');
+      assert(withAppleEventsJsEnabled({})?.browser?.allow_javascript_apple_events === true, 'empty prefs → adds the pref');
+      // Already enabled → null (skip the write entirely).
+      assert(withAppleEventsJsEnabled({ browser: { allow_javascript_apple_events: true } }) === null, 'already enabled → no write');
+      // Preserve other keys + sibling browser keys.
+      const merged = withAppleEventsJsEnabled({ foo: 1, browser: { window_placement: { x: 2 }, allow_javascript_apple_events: false } });
+      assert(merged?.foo === 1 && merged.browser.window_placement.x === 2 && merged.browser.allow_javascript_apple_events === true, 'preserves other top-level + browser sub-keys while flipping the pref to true');
+      // Unexpected shapes must NOT be written (never clobber a corrupt/odd file).
+      assert(withAppleEventsJsEnabled(null) === null, 'null → no write');
+      assert(withAppleEventsJsEnabled([1, 2]) === null, 'array → no write');
+      assert(withAppleEventsJsEnabled('garbage') === null, 'non-object → no write');
+      assert(withAppleEventsJsEnabled({ browser: 'not-an-object' })?.browser?.allow_javascript_apple_events === true, 'a non-object browser value is replaced with a clean { allow_javascript_apple_events:true }');
+      return { ok: true };
+    },
+  },
+  {
+    // IO wrapper: the actual file write. The load-bearing safety property is that a
+    // CORRUPT/unreadable Preferences must NEVER be overwritten (a malformed write
+    // would make Chrome reset the profile → lost logins). darwin-gated (the function
+    // and the native-read path both are); skip elsewhere.
+    name: 'ensureAppleEventsJsEnabled: seeds/merges the pref, never clobbers a corrupt Preferences',
+    run: async () => {
+      if (process.platform !== 'darwin') return { ok: true, skipped: 'darwin-only' };
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ae-prefs-'));
+      const prefsPath = path.join(base, 'Default', 'Preferences');
+      try {
+        // 1. Missing Preferences (ENOENT) → file created with the pref enabled.
+        await ensureAppleEventsJsEnabled(base);
+        const seeded = JSON.parse(await fs.promises.readFile(prefsPath, 'utf8'));
+        assert(seeded.browser.allow_javascript_apple_events === true, 'ENOENT → seeds a valid Preferences with the pref on');
+
+        // 2. Valid Preferences, pref absent → pref added, other keys preserved.
+        await fs.promises.writeFile(prefsPath, JSON.stringify({ profile: { name: 'keep-me' }, browser: { x: 1 } }), 'utf8');
+        await ensureAppleEventsJsEnabled(base);
+        const merged = JSON.parse(await fs.promises.readFile(prefsPath, 'utf8'));
+        assert(merged.browser.allow_javascript_apple_events === true && merged.browser.x === 1 && merged.profile.name === 'keep-me', 'merges the pref while preserving other keys');
+
+        // 3. CORRUPT Preferences (malformed JSON) → MUST be left exactly as-is.
+        const corrupt = '{ this is not json ';
+        await fs.promises.writeFile(prefsPath, corrupt, 'utf8');
+        await ensureAppleEventsJsEnabled(base);
+        const after = await fs.promises.readFile(prefsPath, 'utf8');
+        assert(after === corrupt, 'corrupt Preferences is NEVER overwritten (no profile reset / lost logins)');
+
+        // 4. No orphaned temp file left behind.
+        const leftovers = (await fs.promises.readdir(path.dirname(prefsPath))).filter(f => f.includes('.tmp-'));
+        assert(leftovers.length === 0, `no orphaned .tmp- files (found ${JSON.stringify(leftovers)})`);
+        return { ok: true };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true }).catch(() => {});
+      }
     },
   },
   {
@@ -4153,6 +4472,21 @@ const tests = [
     },
   },
   {
+    name: 'listing-card check-and-login uses the shared post-login verifier',
+    run: () => {
+      const src = fs.readFileSync(path.join(process.cwd(), 'electron/ipc/accounts.js'), 'utf8');
+      const start = src.indexOf("handleSafe('check-and-login'");
+      const end = src.indexOf('// ── Sell Monitor Auth', start);
+      const handler = src.slice(start, end);
+      assert(start !== -1 && end !== -1, 'check-and-login handler must be present');
+      assert(/completeLoginWindowVerification\(platformId,\s*loginResult\)/.test(handler),
+        'check-and-login must use the same post-window verifier as open-login-window');
+      assert(!/verifySellMonitorLogin\(platformId\)/.test(handler),
+        'check-and-login must not bypass retry/inconclusive-preserve with a raw verify call');
+      return { ok: true };
+    },
+  },
+  {
     // Session-cache persistence (fixes "have to log in every restart"): only RECENT
     // connected statuses are restored across launches, so the existing inconclusive-
     // preserve logic survives a restart. Stale/not-connected/garbage entries must NOT
@@ -4174,6 +4508,38 @@ const tests = [
       assert(out.ebay.ts === now - 2 * day, 'restored entry preserves the original confirmation timestamp (so its age shows it is a prior-session status)');
       assert(Object.keys(selectRestorableStatuses(null, now)).length === 0, 'no persisted blob → nothing restored');
       assert(Object.keys(selectRestorableStatuses({}, now)).length === 0, 'empty blob → nothing restored');
+      return { ok: true };
+    },
+  },
+  {
+    // The reported "mercari shows not logged in even after logging in": its native
+    // login auto-detected /mypage with a real title, but the post-login CDP verify
+    // WEDGED (anti-bot reload loop) → inconclusive → kept prior not-connected. The fix:
+    // trust the title-validated native login for CDP-walled platforms (mercari) instead
+    // of routing them to a doomed HTTP verify.
+    name: 'login trust: CDP-walled inline-login (mercari) trusts the title-validated native auto-detect',
+    run: () => {
+      const native = (currentUrl, title) => ({ nativeChrome: true, result: 'auto-detected', currentUrl, title });
+      if (process.platform === 'darwin') {
+        // Real post-login landing: /mypage with a settled hub title → TRUSTED (skip the
+        // doomed CDP verify that was telling the just-logged-in user they're logged out).
+        assert(isTrustedNativeLoginResult('mercari', native('https://www.mercari.com/mypage/listings/active/', 'My listings | Mercari')) === true,
+          'mercari native login on /mypage with a real hub title → trusted (no doomed CDP re-verify)');
+        // The title guard still holds: an empty/loading or logged-out title is NOT trusted
+        // (isNativeLoginSuccess rejects it), so a render-race can't cache a false connected.
+        assert(isTrustedNativeLoginResult('mercari', native('https://www.mercari.com/mypage/listings/active/', '')) === false,
+          'mercari native auto-detect with EMPTY title → NOT trusted (title-render race guard intact)');
+        assert(isTrustedNativeLoginResult('mercari', native('https://www.mercari.com/mypage/listings/active/', 'Log in | Mercari')) === false,
+          'mercari native auto-detect with a logged-out title → NOT trusted');
+      }
+      // swappa (native-login, NOT inline) was already trusted — must remain so.
+      assert(isTrustedNativeLoginResult('swappa', native('https://swappa.com/my/swappa', 'My Swappa - Swappa')) === true,
+        'swappa native login on /my/swappa → trusted (regression guard)');
+      // Non-native results are never trusted (must go through the normal verify).
+      assert(isTrustedNativeLoginResult('mercari', { nativeChrome: false, result: 'auto-detected', currentUrl: 'https://www.mercari.com/mypage/listings/active/', title: 'My listings | Mercari' }) === false,
+        'a non-native (puppeteer) result is not a trusted NATIVE login');
+      assert(isTrustedNativeLoginResult('mercari', native('https://www.mercari.com/login/', 'Login to Your Account | Mercari')) === false,
+        'still ON the /login page (not yet redirected to /mypage) → not trusted');
       return { ok: true };
     },
   },
@@ -4406,6 +4772,76 @@ const tests = [
         telemetry.scrape = { ...baseScrape, browserContention: null };
         const clean = buildMarketplacePipelineSnapshot(new Set(['contention-hub']), 4);
         assert(!clean.includes('**Browser contention**'), 'no flag line when browserContention is null');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'marketplace pipeline report: overlapping price checks are attributed per-stage, not under one headline node',
+    run: () => {
+      const telemetry = getMarketplaceTelemetry();
+      const saved = { ...telemetry };
+      const now = Date.now();
+      // Two price checks overlap: check B (node-B) started its scrape — and
+      // re-stamped the singleton headline nodeId — while check A (node-A) was
+      // still in its post-scrape (unlocked) synthesis/fit phase. So at report
+      // time the scrape belongs to node-B but the synthesis + fit belong to
+      // node-A. Without per-stage nodeId the whole funnel reads as node-B's.
+      Object.assign(telemetry, {
+        nodeId: 'node-B', windowId: 9, analyze: null,
+        scrape: {
+          ts: now - 30000, nodeId: 'node-B', sources: 9, items: 2, sold: 0, active: 0,
+          warnings: 0, blocked: 0, errored: 0, timedOut: 0, loginRequired: 0,
+          bySource: {}, sourceWarnings: {},
+          itemDetails: [
+            { index: 0, query: 'Rode NT4', label: 'Rode NT4', sold: 0, active: 0, warnings: [] },
+            { index: 1, query: 'Rycote Windshield', label: 'Rycote Windshield', sold: 0, active: 0, warnings: [] },
+          ],
+        },
+        resolves: {},
+        synthesis: { ts: now - 60000, nodeId: 'node-A', soldFound: 10, activeFound: 5, soldUsed: 10, activeUsed: 5, recommendedPrice: 200, matchQuality: 'good' },
+        syntheses: [{ ts: now - 60000, nodeId: 'node-A', soldFound: 10, activeFound: 5, soldUsed: 10, activeUsed: 5, recommendedPrice: 200, matchQuality: 'good' }],
+        bundle: null,
+        fit: { ts: now - 27000, nodeId: 'node-A', platforms: 8, good: 5, unfit: 3 },
+      });
+      try {
+        const report = buildMarketplacePipelineSnapshot(new Set(['node-A', 'node-B']), 9);
+        // Top-of-section warning fires and names the foreign node.
+        assert(/Overlapping price checks/.test(report), 'overlap warning is rendered when stages span >1 node');
+        assert(/node-A/.test(report), 'overlap note names the foreign stage node');
+        // The scrape (headline node) carries NO foreign tag; synthesis + fit DO.
+        const scrapeHdr = report.split('\n').find(l => l.startsWith('### Comp scrape')) || '';
+        const synthHdr = report.split('\n').find(l => l.startsWith('### Price synthesis')) || '';
+        const fitHdr = report.split('\n').find(l => l.startsWith('### Platform fit')) || '';
+        assert(scrapeHdr && !/from node/.test(scrapeHdr), 'headline-node scrape header is NOT tagged foreign');
+        assert(/from node `node-A`/.test(synthHdr), 'synthesis header is tagged with its owning foreign node');
+        assert(/from node `node-A`/.test(fitHdr), 'fit header is tagged with its owning foreign node');
+
+        // Control: a clean single-node run (every stage = headline node) renders
+        // NO overlap warning and NO per-stage tag (don't cry wolf).
+        Object.assign(telemetry, {
+          nodeId: 'node-A',
+          scrape: { ...telemetry.scrape, nodeId: 'node-A' },
+        });
+        const clean = buildMarketplacePipelineSnapshot(new Set(['node-A']), 9);
+        assert(!/Overlapping price checks/.test(clean), 'no overlap warning when every stage shares the headline node');
+        assert(!/from node/.test(clean), 'no per-stage foreign tag on a clean single-node run');
+
+        // A foreign ANALYZE alone (stale photo analysis from a Refresh-Prices on a
+        // different node) must NOT trip the concurrency warning — but it is still
+        // tagged honestly. Pricing stages here all share the headline node.
+        Object.assign(telemetry, {
+          nodeId: 'node-A',
+          analyze: { ts: now - 90000, nodeId: 'node-Z', photos: 3, title: 'Old item' },
+          scrape: { ...telemetry.scrape, nodeId: 'node-A' },
+          synthesis: null, syntheses: [], fit: null,
+        });
+        const staleAnalyze = buildMarketplacePipelineSnapshot(new Set(['node-A']), 9);
+        assert(!/Overlapping price checks/.test(staleAnalyze), 'a foreign analyze alone does NOT trigger the concurrency warning');
+        const analyzeHdr = staleAnalyze.split('\n').find(l => l.startsWith('### Product analysis')) || '';
+        assert(/from node `node-Z`/.test(analyzeHdr), 'a stale foreign analyze is still tagged with its owning node');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -4668,7 +5104,7 @@ const tests = [
       // No model recorded → empty (older telemetry).
       assert(modelTag(null) === '', 'modelTag: null model is empty');
       // Top model, no fallback → bare model, no flags.
-      assert(modelTag('gemini-3.1-pro-preview') === ' · model: `gemini-3.1-pro-preview`', 'modelTag: top model bare');
+      assert(modelTag('gemini-3.5-flash') === ' · model: `gemini-3.5-flash`', 'modelTag: top model bare');
       // Lite model with no recorded reason → legacy bare weak-fallback flag.
       assert(modelTag('gemini-3.1-flash-lite') === ' · model: `gemini-3.1-flash-lite` ⚠️ weak fallback', 'modelTag: lite without reason');
       // Lite model WITH reason → reason is surfaced (the gap this closes): a
@@ -5698,6 +6134,27 @@ const tests = [
       return { ok: true };
     },
     name: 'detectAntiBotSignal: eBay /splashui/captcha at HTTP 200 is a challenge; plain login form is not',
+  },
+  {
+    // Anti-bot "verify you are human" walls served INLINE (HTTP 200, no challenge-URL
+    // redirect) to the app's CDP browser while the user's normal browser is clean.
+    // These were laundered into phantom "account blocked" AI summaries because the
+    // hub-scan content path never ran detectAntiBotSignal and the markers were absent.
+    name: 'detectAntiBotSignal: verify-human walls (eBay inline / AptDeco title-405 / Swappa CF) are blocks; clean hub is not',
+    run: () => {
+      const ebayInline = detectAntiBotSignal({ status: 200, finalUrl: 'https://www.ebay.com/sh/lst/active', html: 'Please verify yourself to continue. To keep eBay a safe place to buy and sell, we will occasionally ask you to verify yourself.', sourceLabel: 'ebay' });
+      assert(ebayInline?.severity === 'block' && ebayInline.code === 'verify-human-wall', `eBay inline verify wall → block (got ${JSON.stringify(ebayInline)})`);
+      // AptDeco wall whose ONLY marker is the <title> (HTTP 405) — caught by the title scan.
+      const aptdeco = detectAntiBotSignal({ status: 405, finalUrl: 'https://www.aptdeco.com/sell/new', html: '<body>Temporary error. Please try again.</body>', title: 'Human Verification', sourceLabel: 'aptdeco' });
+      assert(aptdeco?.severity === 'block' && aptdeco.code === 'verify-human-wall', `AptDeco title-borne Human Verification → block (got ${JSON.stringify(aptdeco)})`);
+      // Swappa Cloudflare managed-challenge wrapper copy.
+      const swappaCf = detectAntiBotSignal({ status: 200, finalUrl: 'https://swappa.com/my/swappa', html: 'swappa.com Performing security verification This website uses a security service to protect against malicious bots. This page is displayed while the website verifies you are not a bot.', sourceLabel: 'swappa' });
+      assert(swappaCf?.severity === 'block', `Swappa "Performing security verification" → block (got ${JSON.stringify(swappaCf)})`);
+      // A clean logged-in hub page must NOT trip the new markers.
+      const cleanHub = detectAntiBotSignal({ status: 200, finalUrl: 'https://www.ebay.com/sh/lst/active', html: 'My eBay Active listings. Hi Xiao! Sell, Watchlist, My eBay. Revise, Promote, End listing.', title: 'Active Listings | eBay', sourceLabel: 'ebay' });
+      assert(cleanHub === null, `a clean logged-in hub must NOT be flagged (got ${JSON.stringify(cleanHub)})`);
+      return { ok: true };
+    },
   },
   {
     // Layer 3.6: a sub-floor item count must NOT be a block when the scrape

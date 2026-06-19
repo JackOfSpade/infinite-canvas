@@ -95,6 +95,20 @@ const KEYWORD_SIGNALS = [
     severity: 'block',
     suggestion: 'eBay anti-bot interstitial. Slow request rate per session, or rotate to a fresh stealth profile.' },
 
+  // Generic "verify you're human" / security-check interstitials served INLINE at a
+  // 200 (NO challenge-path redirect) to the app's CDP/stealth browser while the
+  // user's NORMAL browser is unaffected — i.e. an anti-bot fingerprint block on the
+  // automated session, NOT an account/auth requirement. eBay ("Please verify
+  // yourself to continue"), AptDeco ("Human Verification … solve a puzzle", often
+  // HTTP 405), and Cloudflare's managed-challenge wrapper ("Performing security
+  // verification … verifies you are not a bot"). Kept whole-phrase and in sync with
+  // authWindows.js detectAuthChallengeDomSignal so a 200-served wall can't be
+  // laundered into a phantom "account blocked" AI summary.
+  { pat: /please verify yourself|performing security verification|human verification|(?:verify|confirm) (?:that )?you are (?:a )?human|you are not a bot/i,
+    code: 'verify-human-wall',
+    severity: 'block',
+    suggestion: 'A "verify you are human" / security-verification wall was served to the app browser (your normal browser is unaffected) — an anti-bot fingerprint block on the automated session, not an account issue. Try a fresh stealth profile, slow the request rate, or solve it once in a visible window.' },
+
   // Akamai bot manager
   { pat: /reference&nbsp;#|akamai|bot manager has detected/i,
     code: 'akamai-block',
@@ -230,7 +244,7 @@ export function htmlTextSnippet(html, maxChars = 220) {
  * @returns {null | {code, severity, evidence, suggestion}}
  */
 export function detectAntiBotSignal(ctx = {}) {
-  const { status = 0, finalUrl = '', html = '', itemsExtracted = null, expectedMinItems = 0, expectedBodySize = 0, sourceLabel = '', yieldStats = null } = ctx;
+  const { status = 0, finalUrl = '', html = '', title = '', itemsExtracted = null, expectedMinItems = 0, expectedBodySize = 0, sourceLabel = '', yieldStats = null } = ctx;
   const label = sourceLabel ? `[${sourceLabel}] ` : '';
 
   // Layer 1 — HTTP status
@@ -314,6 +328,24 @@ export function detectAntiBotSignal(ctx = {}) {
           code: s.code,
           severity: s.severity,
           evidence: `${label}body contained "${(m[0] || '').slice(0, 80)}" (${s.code})`,
+          suggestion: s.suggestion,
+        };
+      }
+    }
+  }
+
+  // Layer 3.1 — explicit <title> sniff. A challenge page often carries its only
+  // marker in the <title> (AptDeco's wall is titled "Human Verification"), which can
+  // sit past HTML_SCAN_CHARS in a large SSR shell or be passed separately by a caller
+  // that extracted it (the verify trace's pageTitle). Same content-served gate.
+  if (title && !contentServed) {
+    for (const s of KEYWORD_SIGNALS) {
+      const m = String(title).match(s.pat);
+      if (m) {
+        return {
+          code: s.code,
+          severity: s.severity,
+          evidence: `${label}page title "${String(title).slice(0, 80)}" matched ${s.code}`,
           suggestion: s.suggestion,
         };
       }

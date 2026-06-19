@@ -6,7 +6,7 @@ import { logger } from '../../logger.js';
 import { closeStealthBrowser, getUserDataDir, findSystemChromePath, findChromePath } from '../stealthBrowser.js';
 import { pauseBrowserPool } from '../browserPool.js';
 import { withMarketplaceBrowserLock } from '../marketplaceBrowserLock.js';
-import { findGoogleSafeChromePath, isLoggedOutTitleForPlatform } from './authWindows.js';
+import { findGoogleSafeChromePath, isLoggedOutTitleForPlatform, isLoginUrlPath } from './authWindows.js';
 
 const execFile = promisify(execFileCb);
 
@@ -32,9 +32,13 @@ const execFile = promisify(execFileCb);
 
 // Platforms whose hub reads must go through native (non-CDP) Chrome. Keep this
 // tight — a visible/off-screen Chrome spawn is heavier than a headless fetch, so
-// only platforms that genuinely 403/wedge under CDP belong here. eBay/Facebook/
-// Reverb read fine headless and must NOT be added.
-export const NATIVE_READ_PLATFORMS = new Set(['swappa', 'mercari']);
+// only platforms that genuinely 403/wedge under CDP belong here. eBay serves the
+// headless/CDP browser an anti-bot /splashui/captcha wall (bounced toward signin)
+// EVEN WITH valid logged-in cookies — the user's own Chrome on the same machine/IP
+// sees no wall, so it is the automation fingerprint, not the account or the IP (user
+// confirmed via screenshot; reported "ebay still unknown" repeatedly). Facebook/Reverb
+// still read fine headless and must NOT be added.
+export const NATIVE_READ_PLATFORMS = new Set(['swappa', 'mercari', 'ebay']);
 
 export function shouldUseNativeRead(platformId) {
   return process.platform === 'darwin' && NATIVE_READ_PLATFORMS.has(platformId);
@@ -106,9 +110,24 @@ export function parseNativeReadOutput(stdout) {
     // No separator — either the NOWINDOW sentinel or an unexpected shape.
     return { finalUrl: '', html: '', sentinel: raw.trim() || null };
   }
+  const rest = raw.slice(idx + NR_SEP.length);
+  const idx2 = rest.indexOf(NR_SEP);
+  if (idx2 !== -1) {
+    const htmlOrError = rest.slice(idx2 + NR_SEP.length);
+    const jsErrorPrefix = 'NRERR:JS:';
+    return {
+      finalUrl: raw.slice(0, idx).trim(),
+      title: rest.slice(0, idx2).trim(),
+      html: htmlOrError.startsWith(jsErrorPrefix) ? '' : htmlOrError,
+      error: htmlOrError.startsWith(jsErrorPrefix) ? htmlOrError.slice(jsErrorPrefix.length).trim() : null,
+      sentinel: null,
+    };
+  }
   return {
     finalUrl: raw.slice(0, idx).trim(),
-    html: raw.slice(idx + NR_SEP.length),
+    title: '',
+    html: rest,
+    error: null,
     sentinel: null,
   };
 }
@@ -121,31 +140,42 @@ export function parseNativeReadOutput(stdout) {
  * sources" section WITHOUT triggering scanSellerHubPages's headless disambiguate
  * (which would relaunch the very CDP browser this path exists to avoid).
  */
-export function nativeReadToFetchResult({ requestedUrl, finalUrl, html, error, sentinel } = {}) {
+export function nativeReadToFetchResult({ requestedUrl, finalUrl, title, html, error, sentinel } = {}) {
+  const base = {
+    ...(finalUrl ? { finalUrl } : {}),
+    ...(title ? { title: String(title).slice(0, 160) } : {}),
+  };
   if (error) {
     if (isAppleEventsJsDisabledError(error)) {
-      return { ok: false, error: 'Native read needs Chrome → View → Developer → “Allow JavaScript from Apple Events” (it is currently OFF).' };
+      return { ...base, ok: false, appleEventsDisabled: true, error: 'Native read needs Chrome → View → Developer → “Allow JavaScript from Apple Events” (it is currently OFF).' };
     }
-    return { ok: false, error: `Native Chrome read failed: ${error}` };
+    return { ...base, ok: false, error: `Native Chrome read failed: ${error}` };
   }
   if (sentinel === NR_ERR_NOWINDOW) {
-    return { ok: false, error: 'Native Chrome window never appeared (spawn failed or was closed).' };
+    return { ...base, ok: false, error: 'Native Chrome window never appeared (spawn failed or was closed).' };
   }
   const landed = String(finalUrl || requestedUrl || '');
   const landedLower = landed.toLowerCase();
-  if (/\/(login|signin|sign-in|account\/login|auth(?!or))/.test(landedLower)) {
-    return { ok: false, error: `Native Chrome was redirected to a login page (${landed}) — even without CDP the session is logged out or anti-bot bounced it; log in via Settings → Marketplace Login.` };
+  // eBay's anti-bot splash/captcha (/splashui/…) is served ON-host (ebay.com), so it
+  // would otherwise slip past the login-bounce + CF-content checks and get scanned as
+  // hub content. Treat it as a challenge (blocked source, not scanned): the user can
+  // solve it once in the visible Chrome window, then re-run.
+  if (/\/splashui\b/.test(landedLower)) {
+    return { ...base, ok: false, challenged: true, error: `Native Chrome hit eBay's anti-bot splash/captcha at ${landed} — solve it once in the visible Chrome window for eBay, then re-run Check All.` };
+  }
+  if (isLoginUrlPath(landedLower)) {
+    return { ...base, ok: false, loginBounce: true, error: `Native Chrome was redirected to a login page (${landed}) — even without CDP the session is logged out or anti-bot bounced it; log in via Settings → Marketplace Login.` };
   }
   if (nativeReadLooksChallenged(html)) {
-    return { ok: false, error: `Native Chrome still hit an anti-bot challenge at ${landed} — solve it once in a visible Chrome window for this site, then retry.` };
+    return { ...base, ok: false, challenged: true, error: `Native Chrome still hit an anti-bot challenge at ${landed} — solve it once in a visible Chrome window for this site, then retry.` };
   }
   if (nativeReadLooksLoggedOut(html)) {
-    return { ok: false, loggedOut: true, error: `Native Chrome landed on ${landed} (HTTP 200) but the page is a client-rendered LOGIN FORM — logged out despite the auth-gated hub URL; sign in via the open Chrome window, then re-run Check All.` };
+    return { ...base, ok: false, loggedOut: true, error: `Native Chrome landed on ${landed} (HTTP 200) but the page is a client-rendered LOGIN FORM — logged out despite the auth-gated hub URL; sign in via the open Chrome window, then re-run Check All.` };
   }
   if (!html || html.length < 200) {
-    return { ok: false, error: `Native Chrome returned an empty page (${html ? html.length : 0} bytes) at ${landed}.` };
+    return { ...base, ok: false, error: `Native Chrome returned an empty page (${html ? html.length : 0} bytes) at ${landed}.` };
   }
-  return { ok: true, status: 200, finalUrl: landed, html };
+  return { ...base, ok: true, status: 200, finalUrl: landed, html };
 }
 
 // ── AppleScript: find OUR window by URL and drive its tab ──────────────────────
@@ -208,9 +238,23 @@ function buildNavigateReadScript() {
     end repeat
     delay 0.7
     set finalUrl to (URL of theTab) as string
-    set theHtml to (execute theTab javascript "document.documentElement.outerHTML")
+    set pageTitle to (title of theTab) as string
+    -- Strip the field separator from the title so a page that titles itself with the
+    -- (private, random) NR_SEP token can't corrupt the finalUrl<SEP>title<SEP>html
+    -- split. finalUrl is a URL (sep-free); html is the greedy remainder (sep-safe).
+    set oldDelims to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to "${NR_SEP}"
+    set pageTitle to text items of pageTitle
+    set AppleScript's text item delimiters to " "
+    set pageTitle to pageTitle as text
+    set AppleScript's text item delimiters to oldDelims
+    try
+      set theHtml to (execute theTab javascript "document.documentElement.outerHTML")
+    on error errMsg
+      return finalUrl & "${NR_SEP}" & pageTitle & "${NR_SEP}" & "NRERR:JS:" & errMsg
+    end try
     if theHtml is missing value then set theHtml to ""
-    return finalUrl & "${NR_SEP}" & theHtml
+    return finalUrl & "${NR_SEP}" & pageTitle & "${NR_SEP}" & theHtml
   end tell
 end run`;
 }
@@ -224,15 +268,35 @@ end run`;
  */
 export function nativeReadLoginState(url, platformHost, title = '', platformId = '') {
   const u = String(url || '').toLowerCase();
+  const host = String(platformHost || '').toLowerCase();
+  const titleText = String(title || '').trim();
+  const titleLower = titleText.toLowerCase();
   if (!u || u === NR_ERR_NOWINDOW.toLowerCase() || u === 'about:blank') return 'no-window';
-  if (/accounts\.google\.com|\/login|\/signin|\/sign-in|\/auth\b|two_step_verification|\/challenge/.test(u)) return 'logged-out';
+  // Login / SSO / 2FA screens, AND eBay's /splashui anti-bot captcha wall (served
+  // on-host and bounced toward signin) — all are "WAIT for the human to clear it in
+  // the visible window" (same treatment as Swappa's CF "Just a moment" interstitial).
+  if (/accounts\.google\.com|\/login|\/signin|\/sign-in|\/auth\b|two_step_verification|\/challenge|\/splashui\b/.test(u)) return 'logged-out';
   // Inline login form served AT the auth-gated URL (HTTP 200, no redirect): the URL
   // is on-host but the <title> is the generic marketing/login shell. Read toggle-free
   // from the dictionary, the title is the ONLY discriminator in that case → classify
   // 'logged-out' (WAIT for the human to sign in) instead of a false 'logged-in' that
   // would drive the tab through the hub URLs and thrash the form's reCAPTCHA.
   if (isLoggedOutTitleForPlatform(platformId, title)) return 'logged-out';
-  if (platformHost && u.includes(String(platformHost).toLowerCase())) return 'logged-in';
+  if (host && u.includes(host)) {
+    // On-host, but an empty/loading title (or a transient URL-as-title) is NOT
+    // positive evidence of a real hub: the page may still be painting a login form
+    // (Mercari's inline /mypage form) or a Cloudflare "Performing security
+    // verification" challenge (Swappa) whose <title> hasn't settled. Returning
+    // 'logged-in' on that first poll drove the tab through every hub URL before the
+    // challenge could load — the reported "refreshing / going to same url repeatedly
+    // without giving time for human verification to load" thrash. Keep polling until
+    // the title settles to a real hub title (→ logged-in) or a logged-out/challenge
+    // marker (→ logged-out, caught above). Toggle-FREE (title via the AppleScript
+    // dictionary), so it works with Apple-Events JavaScript OFF. Applies to ALL
+    // native-read platforms (was mercari-only and left swappa exposed).
+    if (!titleLower || /^https?:\/\//.test(titleLower) || titleLower === u) return 'unknown';
+    return 'logged-in';
+  }
   return 'unknown';
 }
 
@@ -287,6 +351,75 @@ async function waitForProfileUnlocked(userDataDir, timeoutMs = 5000) {
   }
 }
 
+/**
+ * PURE decision for ensureAppleEventsJsEnabled — given the parsed Preferences value
+ * (or `undefined` for a missing file), return the object to WRITE, or `null` to
+ * leave the file untouched. Returns null when: already enabled (no-op), or the value
+ * is an unexpected shape (array / non-object / null) we must not clobber. Preserves
+ * every other key + a pre-existing `browser` sub-object. Exported for tests.
+ */
+export function withAppleEventsJsEnabled(prefs) {
+  if (prefs === undefined) prefs = {}; // missing file (ENOENT) → safe to seed
+  if (!prefs || typeof prefs !== 'object' || Array.isArray(prefs)) return null;
+  if (prefs.browser && typeof prefs.browser === 'object' && !Array.isArray(prefs.browser)
+      && prefs.browser.allow_javascript_apple_events === true) return null; // already on
+  const browser = (prefs.browser && typeof prefs.browser === 'object' && !Array.isArray(prefs.browser)) ? prefs.browser : {};
+  return { ...prefs, browser: { ...browser, allow_javascript_apple_events: true } };
+}
+
+/**
+ * Pre-enable Chrome's "Allow JavaScript from Apple Events" on OUR app-managed
+ * profile so the native read's `execute … javascript` works WITHOUT the user
+ * flipping View → Developer → "Allow JavaScript from Apple Events" every session
+ * (the recurring "logged in but still error" complaint — the menu toggle is macOS-
+ * only, OFF by default, and an in-session menu flip isn't reliably persisted because
+ * we kill the read window before Chrome flushes it).
+ *
+ * The toggle maps to the boolean pref `browser.allow_javascript_apple_events` in
+ * <profile>/Default/Preferences. Verified UNPROTECTED — it is NOT in Secure
+ * Preferences' `protection.macs` index, so Chrome honours an externally-written
+ * value instead of resetting it. We only ever touch OUR OWN browser-data profile.
+ *
+ * SAFETY: a malformed Preferences makes Chrome reset the whole profile (lost
+ * logins), so this is strictly best-effort and ABORTS on any parse/shape problem —
+ * it only writes a clean merge, atomically (temp + rename), and never overwrites an
+ * unreadable/corrupt file. On any failure the native read just falls back to the
+ * existing precise toggle-off message. Call ONLY while the profile is unlocked
+ * (after closeStealthBrowser + waitForProfileUnlocked), before the native spawn.
+ */
+export async function ensureAppleEventsJsEnabled(userDataDir) {
+  if (process.platform !== 'darwin') return;
+  const prefsPath = path.join(userDataDir, 'Default', 'Preferences');
+  let tmp = null;
+  try {
+    let parsed;
+    try {
+      parsed = JSON.parse(await fs.promises.readFile(prefsPath, 'utf8'));
+    } catch (e) {
+      if (e?.code !== 'ENOENT') {
+        // Unreadable / corrupt → do NOT overwrite (a malformed Preferences makes
+        // Chrome reset the profile → lost logins). Log it so a "toggle keeps showing
+        // off" report points at the real cause instead of looking like the toggle.
+        logger.warn(`[NativeRead] Preferences unreadable at ${prefsPath} (${e?.message || String(e)}) — leaving it untouched; native read falls back to the manual toggle.`);
+        return;
+      }
+      parsed = undefined; // fresh profile (ENOENT) → safe to seed
+    }
+    const next = withAppleEventsJsEnabled(parsed);
+    if (!next) return; // already on, or an unexpected shape we won't touch
+    await fs.promises.mkdir(path.dirname(prefsPath), { recursive: true });
+    tmp = `${prefsPath}.tmp-${process.pid}`;
+    await fs.promises.writeFile(tmp, JSON.stringify(next), 'utf8');
+    await fs.promises.rename(tmp, prefsPath);
+    tmp = null; // renamed away — nothing left to clean up
+    logger.info('[NativeRead] Pre-enabled "Allow JavaScript from Apple Events" on the app Chrome profile (no manual toggle needed).');
+  } catch (e) {
+    logger.warn(`[NativeRead] Could not pre-enable the Apple-Events JS pref (${e?.message || String(e)}); native read falls back to the manual toggle.`);
+  } finally {
+    if (tmp) await fs.promises.unlink(tmp).catch(() => {}); // clean an orphaned temp if the rename failed
+  }
+}
+
 /** Resolve once the spawned Chrome process has fully exited (or after timeout). */
 function waitForChildExit(child, timeoutMs = 3000) {
   if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
@@ -321,13 +454,22 @@ async function pollMatchedTabUrl(matchHost) {
  * A transient osascript miss / brief off-host login redirect is debounced (3
  * consecutive no-window reads) so it isn't mistaken for the user closing the window
  * mid-login; a real close that quits Chrome is caught instantly by getBailed. Returns:
- *   'logged-in' | 'window-closed' | 'no-window' | 'aborted'
+ *   'logged-in' | 'window-closed' | 'no-window' | 'aborted' | 'stuck'
  */
 async function waitForHubLogin(matchHost, platformId, signal, getBailed) {
   const appearDeadline = Date.now() + NATIVE_WINDOW_APPEAR_MS;
   let seen = false;
   let announced = false;
   let misses = 0;
+  // Once the window is visible, a page that resolves to NEITHER a login/challenge
+  // screen NOR a real hub — its title never settles (wedged load / unreadable
+  // title), or it sits on a transient off-host redirect — now yields 'unknown'
+  // (an empty/loading title is no longer trusted as 'logged-in'). Bound continuous
+  // 'unknown' time so such a page surfaces as a stuck error instead of polling
+  // forever. A 'logged-out' (login/challenge = human present) RESETS this deadline,
+  // so the indefinite human-wait invariant is preserved.
+  const UNKNOWN_SETTLE_MS = 30000;
+  let unknownDeadline = 0;
   for (;;) {
     if (signal?.aborted) return 'aborted';
     // getBailed = spawn error OR the Chrome process exited. Before the window is
@@ -348,9 +490,16 @@ async function waitForHubLogin(matchHost, platformId, signal, getBailed) {
     } else {
       seen = true;
       misses = 0;
-      if (state === 'logged-out' && !announced) {
-        announced = true;
-        logger.info(`[NativeRead] ${platformId} is at a login screen — waiting (indefinitely) for you to sign in; CLOSE the window to skip this platform.`);
+      if (state === 'logged-out') {
+        unknownDeadline = 0; // human-actionable screen → wait indefinitely
+        if (!announced) {
+          announced = true;
+          logger.info(`[NativeRead] ${platformId} is at a login or human-verification screen — waiting (indefinitely) for you to sign in / solve it; CLOSE the window to skip this platform.`);
+        }
+      } else {
+        // 'unknown' — title not settled / off-host transient. Bound it.
+        if (!unknownDeadline) unknownDeadline = Date.now() + UNKNOWN_SETTLE_MS;
+        else if (Date.now() >= unknownDeadline) return 'stuck';
       }
     }
     await new Promise(r => setTimeout(r, seen ? 1500 : 500));
@@ -364,8 +513,8 @@ async function navigateAndRead(targetUrl, matchHost) {
       ['-e', buildNavigateReadScript(), targetUrl, matchHost],
       { timeout: 40000, maxBuffer: OSA_MAX_BUFFER },
     );
-    const { finalUrl, html, sentinel } = parseNativeReadOutput(stdout);
-    return nativeReadToFetchResult({ requestedUrl: targetUrl, finalUrl, html, sentinel });
+    const { finalUrl, title, html, error, sentinel } = parseNativeReadOutput(stdout);
+    return nativeReadToFetchResult({ requestedUrl: targetUrl, finalUrl, title, html, error, sentinel });
   } catch (err) {
     // osascript exits non-zero on AppleScript errors (incl. the Apple-Events
     // toggle being off) — the message is on stderr/err.message.
@@ -433,7 +582,14 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
       // running (-600)". Wait for the SingletonLock to clear so we get a real,
       // surviving process. (closeStealthBrowser already waits ~2s for puppeteer's
       // OWN exit; this also covers a sibling native read's Chrome.)
-      await waitForProfileUnlocked(userDataDir);
+      const profileFree = await waitForProfileUnlocked(userDataDir);
+      // Profile confirmed free — write the Apple-Events-JS pref BEFORE launch so
+      // Chrome reads it as enabled and the user never has to flip the menu toggle.
+      // Only when the lock is actually gone: the atomic write can't corrupt the file,
+      // but a still-running Chrome could overwrite our value, so skip rather than
+      // race; the read self-heals on the next clean run. (We still spawn either way,
+      // matching the existing stale-lock behavior.)
+      if (profileFree) await ensureAppleEventsJsEnabled(userDataDir);
       logger.info(`[NativeRead] Spawning non-CDP Chrome for ${platformId} (${urls.length} hub URL(s))`);
       // Args identical to the PROVEN native LOGIN spawn (openNativeLoginWindow).
       // The window is VISIBLE and stays open: if the hub is logged out it bounces
@@ -474,6 +630,8 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
           error = 'Aborted.';
         } else if (loginState === 'window-closed') {
           error = `Native Chrome window was closed before ${platformId} sign-in completed — skipped. Re-run Check All and sign in (or stay logged in) to read this hub.`;
+        } else if (loginState === 'stuck') {
+          error = `Native Chrome window for ${platformId} never settled on a hub or a login/verification screen within ${Math.round(30000 / 1000)}s (page may be wedged or its title unreadable). osascript sees: ${seen}`;
         } else if (childExited) {
           error = `Native Chrome exited right after spawn — it handed off to another Chrome already holding the profile (profile not free). osascript sees: ${seen}`;
         } else {
@@ -492,15 +650,19 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
         results.set(url, r);
         const ok = r.ok ? `ok (${r.html?.length || 0} bytes)` : `blocked — ${r.error}`;
         logger.info(`[NativeRead] ${platformId} ${url} → ${ok}`);
-        // The hub served an inline login form despite the on-host URL → logged out.
-        // STOP driving the tab: each further navigateAndRead reloads the form and
-        // resets its reCAPTCHA (the reported "keeps refreshing / can't complete human
-        // verification"). Mark the remaining URLs and leave the window open so the
-        // user can sign in, then re-run Check All. (The title guard in waitForHubLogin
-        // normally catches this first; this is the toggle-on / hub-specific-title net.)
-        if (r.loggedOut) {
-          for (const rest of urls) if (!results.has(rest)) results.set(rest, { ok: false, loggedOut: true, error: r.error });
-          logger.info(`[NativeRead] ${platformId} stopping read — inline login form (logged out); awaiting sign-in`);
+        // STOP driving the tab the moment the hub REJECTS the session mid-read — a
+        // /login bounce (loginBounce), a CF / anti-bot challenge (challenged), an
+        // inline login form (loggedOut), or the Apple-Events toggle OFF
+        // (appleEventsDisabled). Each further navigateAndRead just reloads the same
+        // wall and resets its challenge/reCAPTCHA (the reported "going to same url
+        // repeatedly without giving time for human verification to load"). Mark the
+        // rest and leave the window open so the user can sign in / solve it, then
+        // re-run Check All. (waitForHubLogin's title guard normally catches a
+        // logged-out/challenge state first; this stops a session that drops mid-read.)
+        if (r.loggedOut || r.appleEventsDisabled || r.challenged || r.loginBounce) {
+          const restFlags = r.loggedOut ? { loggedOut: true } : r.appleEventsDisabled ? { appleEventsDisabled: true } : r.challenged ? { challenged: true } : { loginBounce: true };
+          for (const rest of urls) if (!results.has(rest)) results.set(rest, { ok: false, ...restFlags, error: r.error, ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}), ...(r.title ? { title: r.title } : {}) });
+          logger.info(`[NativeRead] ${platformId} stopping read — ${r.loggedOut ? 'inline login form (logged out); awaiting sign-in' : r.appleEventsDisabled ? 'Apple Events JavaScript is disabled; remaining URLs would fail the same way' : r.challenged ? 'anti-bot challenge is showing; remaining URLs would keep refreshing it' : 'session bounced to a login page; remaining URLs would keep refreshing it — sign in, then re-run Check All'}`);
           break;
         }
       }

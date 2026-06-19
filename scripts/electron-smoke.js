@@ -393,6 +393,11 @@ try {
   await targetPriceInput.fill('abc');
   await targetPriceInput.press('Tab');
   assert.equal(await targetPriceInput.inputValue(), '5', 'malformed target price should restore the last valid value');
+  // A zero target means the user wants the item to become free by the deadline.
+  await targetPriceInput.fill('0');
+  await targetPriceInput.press('Tab');
+  assert.equal(await targetPriceInput.inputValue(), '0', 'zero target price should persist as a free-listing target');
+  await sellHub.getByText(/^Steps from \$55 down to \$0 across \d+ reminder/).waitFor();
   // Clearing the date falls back to a generic reminder (no suggested price).
   await mustSellInput.fill('');
   await expectVisible(page, 'Still listed — consider lowering the price.');
@@ -437,7 +442,7 @@ try {
     fixturePath,
     'sellhub',
     data => data?.priceDropStartingTier === 'max'
-      && data?.priceDropTargetPrice === 5
+      && data?.priceDropTargetPrice === 0
       && data?.priceDropPlanStartingPrice === 55,
     'save should persist the must-sell reminder plan',
   );

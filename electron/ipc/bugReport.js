@@ -20,10 +20,12 @@ import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { getKnownTaskIds } from './llm.js';
 import { shortId, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildFencedTextBlock, buildMainProcessLogsMarkdown, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
+import { buildFilterSummaryMarkdown } from './bugReport/filterSummary.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
+import { buildSellHubPriceDropRollup } from './bugReport/sellHubPriceDropRollup.js';
 import { getMissingPreviewRelinkDiagnostics } from './missingPreviewRelink.js';
 import { getAuthWindowDiagnostics, NATIVE_LOGIN_PLATFORMS } from './browser/authWindows.js';
 import { NATIVE_READ_PLATFORMS } from './browser/nativeChromeReader.js';
@@ -1186,7 +1188,8 @@ ${rows}
         .map(h => {
           const age = h.finishedAt ? `${Math.round((Date.now() - new Date(h.finishedAt).getTime()) / 1000)}s ago` : '—';
           const detected = h.loginDetected ? `✅ detected${h.loginSignal ? ` (${h.loginSignal})` : ''}` : '❌ NOT detected';
-          return `- \`${h.platformId || '?'}\` — ${h.result || '—'}, ${detected}, ${h.mode || '—'}, ${age}${h.url ? ` — \`${h.url}\`` : ''}`;
+          const title = h.title ? `, title="${String(h.title).replace(/\s+/g, ' ').slice(0, 100)}"` : '';
+          return `- \`${h.platformId || '?'}\` — ${h.result || '—'}, ${detected}, ${h.mode || '—'}, ${age}${title}${h.url ? ` — \`${h.url}\`` : ''}`;
         });
       const historySection = historyRows.length > 0
         ? `\n### Recent login attempts (this session)\n> Every completed login/captcha window + whether it CONFIRMED login. Survives the Recent Logs ring buffer. A platform you "just logged into" that still shows needs-login should appear here: **detected** ⇒ the window confirmed login (so a later logged-out state means the session didn't persist or the re-verify rejected it); **NOT detected** ⇒ the login never completed in the window.\n${historyRows.join('\n')}\n`
@@ -1398,6 +1401,10 @@ ${(aiConfig.geminiWarnings || []).length > 0
   try { marketplaceModuleRollupMarkdown = buildMarketplaceModuleRollup(nodes); }
   catch { /* never break the report on diagnostic failure */ }
 
+  let sellHubPriceDropRollupMarkdown = '';
+  if (hasSellNodes) try { sellHubPriceDropRollupMarkdown = buildSellHubPriceDropRollup(nodes); }
+    catch { /* never break the report on diagnostic failure */ }
+
   let scraperAdaptationMarkdown = '';
   if (hasJobNodes || hasSellNodes) try { scraperAdaptationMarkdown = buildScraperAdaptationSnapshot(); }
     catch { /* never break the report on diagnostic failure */ }
@@ -1426,6 +1433,7 @@ ${(aiConfig.geminiWarnings || []).length > 0
   // ── Viewport section ───────────────────────────────────────────────────────
   const vp = frontEndState?.viewport;
   const viewportLine = vp ? `- Viewport: zoom=${vp.zoom} x=${vp.x} y=${vp.y}` : '';
+  const filterSummaryMarkdown = buildFilterSummaryMarkdown(payload);
 
 
   let baseMarkdown = `At the end of your debug, assess whether new bug reporting filter codes need to be implemented (which will all be included in the "FULL" filter code). This occurs when even if the user used the "FULL" filter code, it would not have been enough reporting data to debug this issue smoothly.
@@ -1434,7 +1442,7 @@ ${(aiConfig.geminiWarnings || []).length > 0
 
 ## Issue Description
 ${description}
-${payload.filterCode ? `\n**Filter code applied:** \`${payload.filterCode}\`${payload.filterStats ? ` — event log trimmed to ${payload.filterStats.eventsShown} of ${payload.filterStats.eventsTotal} line(s) (matched categories + nearby context)${payload.filterStats.omittedSections?.length ? `; sections omitted: ${payload.filterStats.omittedSections.join(', ')}` : ''}.` : '.'}\n*This is a filtered view — events outside the matched categories were dropped. Ask the user to re-export with code \`FULL\` if the timeline looks incomplete.*` : ''}
+${filterSummaryMarkdown}
 
 ## Application State Summary
 - Nodes: ${sectionOmitted('nodes') ? '*(omitted by filter code)*' : (nodes ? nodes.length : 0)}
@@ -1443,7 +1451,7 @@ ${payload.filterCode ? `\n**Filter code applied:** \`${payload.filterCode}\`${pa
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   // Static safety bound (not adaptive): keeps the assembled bug-report payload

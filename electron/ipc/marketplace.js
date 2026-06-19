@@ -92,13 +92,19 @@ export function getMarketplaceTelemetry() {
 }
 
 function recordSynthesisTelemetry(entry) {
-  marketplaceTelemetry.synthesis = entry;
+  // Stamp the owning node onto the entry itself. Synthesis runs UNLOCKED (no
+  // marketplaceBrowserLock), so a second price check's scrape can begin — and
+  // re-stamp the singleton's headline nodeId — while this one is still pricing.
+  // Without a per-stage nodeId the report attributes this synthesis to whichever
+  // node most recently touched the singleton (see buildMarketplacePipelineSnapshot).
+  const stamped = entry?.nodeId ? entry : { ...entry, nodeId: marketplaceTelemetry.nodeId };
+  marketplaceTelemetry.synthesis = stamped;
   const entries = Array.isArray(marketplaceTelemetry.syntheses) ? marketplaceTelemetry.syntheses : [];
-  const key = entry?.itemKey || entry?.query || 'primary';
+  const key = stamped?.itemKey || stamped?.query || 'primary';
   const index = entries.findIndex(s => (s?.itemKey || s?.query || 'primary') === key);
   marketplaceTelemetry.syntheses = index >= 0
-    ? entries.map((s, i) => (i === index ? entry : s))
-    : [...entries, entry];
+    ? entries.map((s, i) => (i === index ? stamped : s))
+    : [...entries, stamped];
 }
 
 /**
@@ -729,6 +735,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
     logger.info(`[Marketplace][${nodeId}] Product identified:`, product?.generated_title || 'Unknown', `(model: ${aiMeta.model || '?'})`);
     marketplaceTelemetry.analyze = {
       ts: Date.now(),
+      nodeId,
       photos: Array.isArray(imagePaths) ? imagePaths.length : 0,
       title: product?.generated_title || '(unknown)',
       rawTitle: titleCleaned ? rawTitle : null,
@@ -832,6 +839,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
       logger.info(`[Marketplace][${nodeId}] Price check blocked by login preflight — missing: ${missingLogins.join(', ')}`);
       marketplaceTelemetry.scrape = {
         ts: Date.now(),
+        nodeId,
         sold: 0, active: 0,
         sources: allTasks.length + ['reverb', 'pricecharting'].filter(isCompSourceEnabledInScope).length,
         warnings: allTasks.length,
@@ -924,6 +932,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
       : null;
     marketplaceTelemetry.scrape = {
       ts: Date.now(),
+      nodeId,
       sold: totalSold,
       active: totalActive,
       sources: sourceCount,
@@ -1393,6 +1402,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
 
     marketplaceTelemetry.bundle = {
       ts: Date.now(),
+      nodeId,
       items: priced.length,
       unpriced: list.length - priced.length,
       sum,
@@ -1682,6 +1692,7 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
     const verdicts = Object.values(verdict || {});
     marketplaceTelemetry.fit = {
       ts: Date.now(),
+      nodeId,
       platforms: platforms.length,
       good: verdicts.filter(v => v?.fit === 'good').length,
       unfit: verdicts.filter(v => v?.fit === 'unfit').length,

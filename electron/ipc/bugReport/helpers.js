@@ -20,6 +20,22 @@ export function formatAge(ts) {
   return h ? `${h}h${mn}m ago` : `${mn}m ago`;
 }
 
+// Depth-first walk over a canvas node tree, descending into every node's nested
+// `data.canvasData.nodes` (grouped sub-canvases) — the same type-agnostic
+// recursion the navigation/serialization layers use. Invokes `fn(node)` for each
+// node. Shared by the marketplace-module and sell-hub price-drop rollups so the
+// "find every node of type X anywhere on the canvas" traversal can't drift between
+// report sections. Non-array input is a no-op.
+export function visitCanvasNodes(nodes, fn) {
+  if (!Array.isArray(nodes)) return;
+  for (const node of nodes) {
+    if (!node) continue;
+    fn(node);
+    const inner = node.data?.canvasData?.nodes;
+    if (Array.isArray(inner) && inner.length) visitCanvasNodes(inner, fn);
+  }
+}
+
 // Renders the model that actually served an AI stage (recorded per stage via the
 // LLM layer's `meta` out-param). Flags a degraded run: a `*-lite` model is weak
 // only when the task preferred a non-lite model (or older telemetry did not

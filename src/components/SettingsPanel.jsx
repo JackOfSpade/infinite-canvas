@@ -240,6 +240,10 @@ function PlatformWatchUrlsRow({ platform, urls, connected, pending, onLogin, onC
 // endpoints and handle guest rate limits on the source card.
 const JOB_LOGIN_IDS = ['linkedin', 'google', 'indeed', 'glassdoor', 'ziprecruiter'];
 const JOB_LOGIN_PLATFORMS = JOB_SOURCES.filter(s => JOB_LOGIN_IDS.includes(s.id));
+const NATIVE_READ_MARKETPLACE_NAMES = SELL_PLATFORMS
+  .filter(p => ['mercari', 'swappa'].includes(p.id))
+  .map(p => p.name)
+  .join(' and ');
 
 function JobPlatformLoginsSection() {
   const [authByPlatform, setAuthByPlatform] = useState({});
@@ -697,7 +701,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                 {aiSettings.provider === 'gemini' && (
                   <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
                     <div className="text-white/40 text-[10px] leading-snug">
-                      Model is picked automatically per task — Pro preferred for quality-sensitive work, Flash-Lite preferred for status checks and light edits, with every compatible current model available as fallback.
+                      Model is picked automatically per task — Flash preferred for quality-sensitive work, Flash-Lite preferred for status checks and light edits, with free-tier no-quota models excluded from the fallback chain.
                     </div>
                     <div>
                       <div className="flex justify-between items-end mb-1">
@@ -874,6 +878,9 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
             </div>
             <div className="text-white/40 text-[11px] mb-3 leading-relaxed">
               Log in once per marketplace, then add the dashboard, notification, message, or activity pages Marketplace Status should scan for account-wide updates.
+            </div>
+            <div className="mb-3 rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[10px] leading-relaxed text-amber-100/75">
+              {NATIVE_READ_MARKETPLACE_NAMES || 'Mercari and Swappa'} hub reads use your normal Google Chrome window. In Chrome, turn on View → Developer → Allow JavaScript from Apple Events before running Marketplace Status.
             </div>
             <MarketplaceMonitorSection
               watchUrlsByPlatform={watchUrlsByPlatform}

@@ -2,28 +2,12 @@
  * General-purpose Gemini models that can serve every workflow used by this app:
  * text/JSON, structured outputs, image/PDF understanding, and search grounding.
  *
- * Keep scheduled-for-shutdown models here while their endpoints remain live.
- * Runtime probes/calls report availability separately, so a deprecation notice
- * never removes usable quota early.
+ * Keep scheduled-for-shutdown models here while their endpoints remain live and
+ * usable on the API-key/free-tier path. Models that report a persistent 0/0
+ * allocation in AI Studio are intentionally excluded so the app does not spend
+ * every fallback chain probing guaranteed no-quota endpoints.
  */
 export const GEMINI_MODEL_REGISTRY = Object.freeze([
-  {
-    id: 'gemini-3.1-pro-preview',
-    tier: 'pro',
-    lifecycle: 'preview',
-    shutdownDate: null,
-    replacement: null,
-    thinkingConfig: { thinkingLevel: 'low' },
-  },
-  {
-    id: 'gemini-2.5-pro',
-    tier: 'pro',
-    lifecycle: 'stable',
-    shutdownDate: '2026-10-16',
-    replacement: 'gemini-3.1-pro-preview',
-    // 2.5 Pro cannot disable thinking; 128 is its documented minimum.
-    thinkingConfig: { thinkingBudget: 128 },
-  },
   {
     id: 'gemini-3.5-flash',
     tier: 'flash',
@@ -205,16 +189,16 @@ export function describeGeminiFailure(classification, message = '') {
 
 /**
  * Put the task's preferred model first, then preserve its cost/quality intent:
- * quality tasks exhaust Pro first; lightweight tasks exhaust Lite/Flash first.
+ * quality tasks exhaust Flash first; lightweight tasks exhaust Lite/Flash first.
  * Suppressed models remain at the tail as a last resort instead of being removed.
  */
 export function orderGeminiModels(preferredModel, suppressedUntil = new Map(), now = Date.now()) {
   const preferred = getGeminiModelInfo(preferredModel);
   const tierOrder = preferred?.tier === 'lite'
-    ? ['lite', 'flash', 'pro']
+    ? ['lite', 'flash']
     : preferred?.tier === 'flash'
-      ? ['flash', 'pro', 'lite']
-      : ['pro', 'flash', 'lite'];
+      ? ['flash', 'lite']
+      : ['flash', 'lite'];
   const tiered = tierOrder.flatMap((tier) => (
     GEMINI_MODEL_REGISTRY.filter((entry) => entry.tier === tier).map((entry) => entry.id)
   ));

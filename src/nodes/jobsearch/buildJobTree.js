@@ -56,6 +56,12 @@ const DEFAULT_RANGES = [
   { label: 'Unspecified', minSalary: 0,     maxSalary: 0 },
 ];
 
+function formatSalaryShort(value) {
+  const n = Math.round(Number(value) || 0);
+  if (n >= 1000 && n % 1000 === 0) return `$${Math.round(n / 1000)}k`;
+  return `$${n.toLocaleString('en-US')}`;
+}
+
 /**
  * Salary text → approximate annual USD. Takes the first number in a range and
  * annualizes hourly/daily rates. Used by buildJobTreeNodes (and the re-layout in
@@ -97,6 +103,16 @@ export function normalizeRanges(ranges) {
   let unspecified = mapped.find(r => r.minSalary === 0 && r.maxSalary === 0);
   const real = mapped.filter(r => r !== unspecified).sort((a, b) => b.minSalary - a.minSalary);
   if (!unspecified) unspecified = { label: 'Unspecified', minSalary: 0, maxSalary: 0 };
+  const lowest = real[real.length - 1];
+  if (lowest && lowest.minSalary > 1) {
+    // Keep parseable low salaries out of the "Unspecified" bucket when the AI
+    // forgets to include a bottom catch-all range.
+    real.push({
+      label: `Below ${formatSalaryShort(lowest.minSalary)}`,
+      minSalary: 1,
+      maxSalary: lowest.minSalary,
+    });
+  }
   return { real, unspecified };
 }
 

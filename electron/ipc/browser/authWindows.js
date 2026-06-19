@@ -73,7 +73,16 @@ export function isPostLoginInterstitialUrl(url) {
   return AUTH_POST_LOGIN_INTERSTITIAL_PATTERN.test(String(url || ''));
 }
 
-const AUTH_LOGIN_URL_PATTERN = /\/(signin|sign-in|login|log-in|authenticate|auth(?!or))/i;
+// A URL whose PATH is a login / sign-in / auth screen — i.e. a logged-out bounce.
+// `auth(?!or)` matches /auth but not /author; `account/login` covers nested login
+// routes. This is the SINGLE source of login-URL detection, shared by the login-
+// window auto-close (below), the HTTP verify (accounts.js), the native hub read
+// (nativeChromeReader.js), and the hub-scan auth-wall (listingStatusCheck.js) — they
+// had drifted into 5 near-copies (one even used bare `auth`, matching /author). PURE.
+const AUTH_LOGIN_URL_PATTERN = /\/(signin|sign-in|login|log-in|authenticate|account\/login|auth(?!or))/i;
+export function isLoginUrlPath(url) {
+  return AUTH_LOGIN_URL_PATTERN.test(String(url || ''));
+}
 const AUTH_COOKIE_LOGIN_URL_BYPASS_PLATFORMS = new Set(['glassdoor']);
 
 export function canAuthCookieBypassLoginUrl(platformId) {
@@ -91,7 +100,7 @@ export function getLoginAutoCloseWaitReason({
   if (isAuthChallengeUrl(url)) return 'challenge-url';
   if (challengeDomSignal) return 'challenge-dom';
   if (isPostLoginInterstitialUrl(url)) return 'post-login-interstitial';
-  if (AUTH_LOGIN_URL_PATTERN.test(url) && !(cookieSignal && canAuthCookieBypassLoginUrl(platformId))) {
+  if (isLoginUrlPath(url) && !(cookieSignal && canAuthCookieBypassLoginUrl(platformId))) {
     return cookieSignal ? 'login-url-cookie-not-trusted' : 'login-url';
   }
   return null;
@@ -177,12 +186,13 @@ const NATIVE_LOGIN_SUCCESS_URLS = {
   swappa: [
     'swappa.com/my/swappa',
   ],
-  // Login URL IS the auth-gated seller hub (mercari.com/mypage/listings/): an
-  // anonymous load bounces to the login page (with the Google button), and a
-  // completed login returns to /mypage — the same marker mercari's verifyUrl
-  // checks (connectedFinalUrlMustContain: 'mercari.com/mypage'). The Google-OAuth
-  // callback (mercari.com/account/googleauth) is explicitly rejected in
-  // isNativeLoginSuccess so the poll doesn't false-succeed mid-redirect.
+  // Login URL is Mercari's dedicated /login/ page carrying login_callback=/mypage/
+  // listings/active/ (PLATFORM_LOGIN_URLS.mercari), so a completed login returns to
+  // /mypage — the same marker mercari's verifyUrl checks (connectedFinalUrlMustContain:
+  // 'mercari.com/mypage'). While still ON /login/ isNativeLoginSuccess returns false
+  // (the URL carries /login), so the poll waits for the human; the Google-OAuth
+  // callback (mercari.com/account/googleauth) is also explicitly rejected so the poll
+  // doesn't false-succeed mid-redirect.
   mercari: [
     'mercari.com/mypage',
   ],
@@ -206,17 +216,60 @@ const NATIVE_LOGIN_LOGGED_OUT_TITLE_MARKERS = {
   ],
 };
 
+// Generic <title>s that mean logged-OUT / mid-challenge on ANY platform — a login
+// screen ("Sign in", "Log in to …", "Sign up") or a Cloudflare interstitial / human
+// verification ("Just a moment…", "Verify you are human", the Swappa challenge the
+// user hit at swappa.com/my/swappa). Kept whole-phrase so a logged-in hub title
+// can't match. Restores login-shaped title / "just a moment" rejection without a
+// bare "sign in" substring that would catch logged-in account/security pages, AND
+// gives the native hub-READ classifier a TOGGLE-FREE challenge signal (Swappa's CF
+// page reads 'logged-out' → WAIT for the human to solve it, instead of thrashing
+// the tab through the hub URLs).
+const GENERIC_LOGGED_OUT_TITLE_MARKERS = [
+  'just a moment',          // Cloudflare interstitial / Turnstile (Swappa human verification)
+  'verify you are human',
+  'checking your browser',
+  'sign in to',
+  'sign in -',
+  'sign in |',
+  'sign in:',
+  'log in to',
+  'log in -',
+  'log in |',
+  'log in:',
+  'login |',
+  'login:',
+  'sign up',
+];
+const GENERIC_LOGGED_OUT_TITLE_EXACT = new Set(['sign in', 'log in', 'login', 'sign up']);
+
 // True when a page <title> is one a platform serves ONLY when logged OUT at an
 // auth-gated URL that still carries the success/host marker (Mercari's inline,
-// client-rendered login form over a generic SSR shell). The SINGLE source of that
-// judgment, shared by both the native LOGIN success check (isNativeLoginSuccess)
-// and the native hub-READ login-state classifier (nativeChromeReader's
-// nativeReadLoginState) so the two can never drift. Empty/absent title → false (no
-// signal; never override the URL/host logic). PURE for tests.
+// client-rendered login form over a generic SSR shell) OR a generic login/challenge
+// shell on any platform. The SINGLE source of that judgment, shared by both the
+// native LOGIN success check (isNativeLoginSuccess) and the native hub-READ
+// login-state classifier (nativeChromeReader's nativeReadLoginState) so the two can
+// never drift. Empty/absent title → false (no signal; never override the URL/host
+// logic). PURE for tests.
 export function isLoggedOutTitleForPlatform(platformId, title) {
   const t = String(title || '').toLowerCase();
   if (!t) return false;
+  if (GENERIC_LOGGED_OUT_TITLE_EXACT.has(t.trim())) return true;
+  if (GENERIC_LOGGED_OUT_TITLE_MARKERS.some(marker => t.includes(marker))) return true;
   return (NATIVE_LOGIN_LOGGED_OUT_TITLE_MARKERS[platformId] || []).some(marker => t.includes(marker));
+}
+
+// Platforms that serve their LOGIN FORM inline at the SAME URL as their post-login
+// success marker (Mercari: /mypage/listings/ shows the login form when logged out —
+// HTTP 200, no /login redirect). For these the native URL marker is ambiguous, so
+// native auto-detect must require a SETTLED, non-empty title (an empty/loading title
+// at the marker URL must NOT auto-succeed and close the window mid-login — the
+// reported "Mercari lands on login page / keeps refreshing"), AND the result is
+// re-confirmed by the HTTP verify (render-wait) before caching connected — see
+// isTrustedNativeLoginResult in accounts.js.
+const NATIVE_LOGIN_INLINE_PLATFORMS = new Set(['mercari']);
+export function isInlineLoginPlatform(platformId) {
+  return NATIVE_LOGIN_INLINE_PLATFORMS.has(platformId);
 }
 
 const activeAuthWindows = new Map();
@@ -234,6 +287,7 @@ const authWindowHistory = [];
  * discriminate "login confirmed" from "login never completed". PURE for tests.
  */
 export function buildAuthAttemptRecord(diag = {}) {
+  const title = String(diag.title || '').replace(/\|/g, '\\|').replace(/`/g, "'").slice(0, 120);
   return {
     platformId: diag.platformId || null,
     result: diag.result || null, // auto-detected | closed | timeout | launch-error | …
@@ -241,6 +295,7 @@ export function buildAuthAttemptRecord(diag = {}) {
     loginDetected: diag.loginDetected ?? (diag.result === 'auto-detected'),
     mode: diag.mode || null, // puppeteer-visible | native-chrome
     url: (String(diag.currentUrl || diag.loginUrl || '').replace(/`/g, "'").slice(0, 180)) || null,
+    title: title || null,
     finishedAt: diag.finishedAt || new Date().toISOString(),
   };
 }
@@ -339,13 +394,19 @@ export function isNativeLoginSuccess(platformId, url, title = '') {
   const titleLower = String(title || '').toLowerCase();
   if (/\/account\/googleauth\b/i.test(lower)) return false;
   if (!lower || /accounts\.google\.com|\/auth\b|\/login\b|\/signin\b|sign-in/i.test(lower)) return false;
-  if (titleLower.includes('just a moment') || titleLower.includes('sign in')) return false;
   // Reject the logged-out inline login form that some platforms (Mercari) serve
   // AT the auth-gated success URL with HTTP 200 and no redirect: the URL marker
   // matches but the <title> is the generic marketing/SEO string (or the login
   // heading), not a logged-in page. Without this, clicking Login while logged
   // out auto-"succeeds" and the window is killed before the user can sign in.
   if (isLoggedOutTitleForPlatform(platformId, titleLower)) return false;
+  // Inline-login platforms: the success URL ALSO serves the login form, so an empty/
+  // loading title at that URL must NOT count as success — otherwise the very first
+  // poll (before the page's <title> settles) auto-closes the window before the user
+  // can sign in. A real logged-in hub renders a non-empty title; the logged-out shell
+  // renders a generic title already rejected above. (accounts.js additionally
+  // re-confirms inline-login auto-detects via the HTTP verify.)
+  if (isInlineLoginPlatform(platformId) && !titleLower.trim()) return false;
   return (NATIVE_LOGIN_SUCCESS_URLS[platformId] || []).some(marker => lower.includes(marker));
 }
 
@@ -364,12 +425,19 @@ export const PLATFORM_LOGIN_URLS = {
   // Marketplace — selling destinations
   ebay:          'https://signin.ebay.com/ws/eBayISAPI.dll?SignIn',
   facebook:      'https://www.facebook.com/login',
-  // Mercari is a NATIVE_LOGIN_PLATFORMS member (Google SSO loops under CDP). Open
-  // the auth-gated seller hub directly rather than /login/: logged out it bounces
-  // to the login page (Google button included) and returns here post-login, giving
-  // the precise mercari.com/mypage marker (NATIVE_LOGIN_SUCCESS_URLS.mercari);
-  // already logged in it lands straight on /mypage and auto-confirms immediately.
-  mercari:       'https://www.mercari.com/mypage/listings/',
+  // Mercari is a NATIVE_LOGIN_PLATFORMS member (Google SSO loops under CDP). Point at
+  // Mercari's OWN dedicated login page (the exact URL it redirects a logged-out
+  // /mypage/listings/ request to) rather than the auth-gated hub: in a raw `--app`
+  // window the hub's client-side bounce / inline form-render leaves a BLANK grey
+  // screen the user can't sign into (the reported "mercari log in is grey screen" —
+  // observed landing on chrome://newtab with an empty <title>), whereas the dedicated
+  // /login/ page server-renders the form reliably. This mirrors the WORKING swappa
+  // config (dedicated /login with a return param), the one native-login URL that has
+  // never gone grey in the same `--app` window. login_callback returns to
+  // /mypage/listings/active/ post-login, so the precise mercari.com/mypage success
+  // marker (NATIVE_LOGIN_SUCCESS_URLS.mercari) still fires; an already-logged-in user
+  // is redirected straight through to /mypage and auto-confirms immediately.
+  mercari:       'https://www.mercari.com/login/?login_callback=%2Fmypage%2Flistings%2Factive%2F',
   poshmark:      'https://poshmark.com/login',
   depop:         'https://www.depop.com/login/',
   // ?next=%2Fmy%2Fswappa so a completed login redirects to the seller hub — a precise

@@ -21,7 +21,8 @@ import {
   isNativeLoginSuccess,
 } from './stealthBrowser.js';
 import { detectAntiBotSignal } from './antiBotDetector.js';
-import { PLATFORM_AUTH_COOKIES } from './browser/authWindows.js';
+import { PLATFORM_AUTH_COOKIES, isInlineLoginPlatform, NATIVE_LOGIN_PLATFORMS, isLoginUrlPath } from './browser/authWindows.js';
+import { shouldUseNativeRead } from './browser/nativeChromeReader.js';
 import { tryGetStore } from './settings.js';
 
 // Timeout for a session-verify page fetch. Not a freshness/density signal —
@@ -240,6 +241,7 @@ export async function verifySellMonitorLogin(platformId) {
         status: r.status,
         finalUrl: r.finalUrl,
         html: r.html,
+        title: pageTitle,
         sourceLabel: config?.name || platformId,
       });
 
@@ -273,7 +275,16 @@ export async function verifySellMonitorLogin(platformId) {
       if (r.status === 404) {
         return { connected: false, reason: `Verify URL returned 404 at ${target} — the URL may have changed on the platform's side. Update verifyUrl in JOB_LOGIN_PLATFORMS / SELL_MONITOR_PLATFORMS.`, trace: { target, checks: traces } };
       }
-      if (/\/(login|signin|sign-in|account\/login|auth)/i.test(finalUrlLower)) {
+      // Any OTHER ≥400 (401/403/404 handled above) is NOT a confirmable logged-in
+      // response — e.g. AptDeco serves its "Human Verification" anti-bot wall as HTTP
+      // 405. Without this, a 405 falls through to the connected:true DEFAULT below
+      // (the reported false positive). Treat as INCONCLUSIVE (keep prior) so a
+      // transient wall / error response can't flip a live session, and never assert
+      // connected off an error page. (A recognized bot wall already returned above.)
+      if (r.status >= 400) {
+        return { connected: false, inconclusive: true, reason: `Verify URL returned HTTP ${r.status} at ${target} — not a confirmable logged-in response (often an anti-bot wall, e.g. "${pageTitle || 'no title'}"); keeping prior status.`, trace: { target, checks: traces } };
+      }
+      if (isLoginUrlPath(finalUrlLower)) {
         return await annotateCookieSurvival({ connected: false, reason: `Redirected to ${r.finalUrl} — login not completed.`, trace: { target, checks: traces } });
       }
 
@@ -358,8 +369,25 @@ export async function writeStatusCache(platformId, connected, extras = {}) {
   persistStatusCache();
 }
 
-function isTrustedNativeLoginResult(platformId, result) {
+export function isTrustedNativeLoginResult(platformId, result) {
   if (!result?.nativeChrome || result?.result !== 'auto-detected') return false;
+  // Inline-login platforms (mercari) serve the login FORM at the same URL as the
+  // success marker, so historically a native auto-detect couldn't be trusted (a
+  // title-render race could fire 'auto-detected' on the logged-out inline form) and we
+  // routed to the HTTP verify. That no longer holds for a CDP-WALLED platform:
+  //   (a) the login window now opens at the DEDICATED /login/ page (not the auth-gated
+  //       hub), so auto-detect fires only AFTER a real post-login redirect to /mypage
+  //       with a SETTLED, non-logged-out title — which isNativeLoginSuccess re-confirms
+  //       below (it rejects an empty/loading title and any logged-out title), and
+  //   (b) the HTTP verify WEDGES in mercari's anti-bot reload loop (page.content() times
+  //       out) → inconclusive → "keep prior (not connected)", so a user who JUST
+  //       completed Google-SSO + 2FA and landed on /mypage is told they're still logged
+  //       out (the reported "mercari shows not logged in even after logging in").
+  // So trust the title-validated native result when the HTTP verify can't help
+  // (shouldUseNativeRead = CDP-walled); a hypothetical inline-login platform whose CDP
+  // verify actually works still routes to it. The native READ during Check All is the
+  // backstop that catches any rare false-positive (it waits at a login screen).
+  if (isInlineLoginPlatform(platformId) && !shouldUseNativeRead(platformId)) return false;
   // Re-validate the landed URL against the platform's success markers (generic —
   // was hardcoded to indeed). `auto-detected` is only emitted after the native
   // poll already matched isNativeLoginSuccess, so this is a belt-and-suspenders
@@ -368,9 +396,10 @@ function isTrustedNativeLoginResult(platformId, result) {
 }
 
 function buildTrustedNativeLoginVerdict(platformId, result) {
+  const pageKind = getSellMonitorConfig(platformId) ? 'marketplace account page' : 'job-search page';
   return {
     connected: true,
-    reason: `Native Chrome reached logged-in ${platformId} job-search page at ${result.currentUrl}.`,
+    reason: `Native Chrome reached logged-in ${platformId} ${pageKind} at ${result.currentUrl}.`,
     trace: {
       target: result.currentUrl,
       nativeChrome: true,
@@ -388,6 +417,65 @@ function buildTrustedNativeLoginVerdict(platformId, result) {
       }],
     },
   };
+}
+
+async function verifySellMonitorLoginWithPostLoginRetry(platformId, { nativeResult = null } = {}) {
+  let verdict = await verifySellMonitorLogin(platformId);
+  const shouldRetry = isInlineLoginPlatform(platformId)
+    && nativeResult?.nativeChrome
+    && nativeResult?.result === 'auto-detected'
+    && !verdict.connected
+    && verdict.inconclusive;
+  if (!shouldRetry) return verdict;
+
+  logger.warn(`[Accounts] ${platformId} post-login verify inconclusive after native auto-detect (${verdict.reason}) — retrying once after cookies/render settle`);
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  const retry = await verifySellMonitorLogin(platformId);
+  retry.trace = {
+    ...(retry.trace || {}),
+    postLoginRetry: true,
+    firstAttempt: {
+      connected: verdict.connected,
+      inconclusive: verdict.inconclusive,
+      reason: verdict.reason,
+      trace: verdict.trace,
+    },
+  };
+  return retry;
+}
+
+async function completeLoginWindowVerification(platformId, result) {
+  if (isTrustedNativeLoginResult(platformId, result)) {
+    const verdict = buildTrustedNativeLoginVerdict(platformId, result);
+    await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
+    logger.info(`[Accounts] ${platformId} native login verified: ${verdict.reason}`);
+    return { ...(result || {}), connected: true, reason: verdict.reason };
+  }
+  if (isTrustedPuppeteerLoginResult(platformId, result)) {
+    const verdict = buildTrustedPuppeteerLoginVerdict(platformId, result);
+    await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
+    logger.info(`[Accounts] ${platformId} login auto-detected: ${verdict.reason}`);
+    return { ...(result || {}), connected: true, reason: verdict.reason };
+  }
+
+  const verdict = await verifySellMonitorLoginWithPostLoginRetry(platformId, { nativeResult: result });
+  // An inconclusive verify (timed out / errored before reading the page)
+  // right after the window closed is NOT proof the login failed — caching
+  // not-connected here would bounce a just-logged-in user straight back to
+  // "Log in". Keep the prior cached status instead (same rule as startup
+  // verify) rather than overwriting a good session with a transient false.
+  if (!verdict.connected && verdict.inconclusive) {
+    const prior = _statusCache[platformId]?.connected ?? false;
+    logger.warn(`[Accounts] ${platformId} post-login verify inconclusive (${verdict.reason}) — keeping prior status (${prior ? 'connected' : 'not connected'})`);
+    return { ...(result || {}), connected: prior, reason: verdict.reason, inconclusive: true };
+  }
+  await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
+  if (!verdict.connected) {
+    logger.info(`[Accounts] ${platformId} login window closed without successful login: ${verdict.reason}`);
+  } else {
+    logger.info(`[Accounts] ${platformId} login verified: ${verdict.reason}`);
+  }
+  return { ...(result || {}), connected: verdict.connected, reason: verdict.reason };
 }
 
 // Puppeteer login window confirmed login via DOM/cookie/auth-gated-URL signal.
@@ -488,6 +576,25 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
       _verifyingPlatforms.delete(platformId);
       notify('accounts:verify-update', { platformId, connected: _statusCache[platformId]?.connected ?? false });
       durations.push({ platformId, ms: 0, connected: _statusCache[platformId]?.connected ?? false, skipped: true });
+      return;
+    }
+    // CDP-walled on BOTH axes (native LOGIN + native READ) = swappa, mercari: their
+    // login delegates to Google SSO / CF Turnstile (loops under CDP) AND their hub
+    // reads 403/wedge under CDP. A CDP startup verify can therefore only WEDGE (the
+    // reported mercari 35s anti-bot reload-loop that made startup verify the long pole
+    // and stalled the first Check All) or return an unreliable verdict — it tells us
+    // nothing the native read won't establish authoritatively during Check All. Skip it
+    // and keep the prior disk-cached status (loadPersistedStatusCache already restored
+    // last session's connected state). Gated on shouldUseNativeRead (darwin) so a
+    // non-macOS host — where there is no native read to own login state — still verifies.
+    // eBay is deliberately NOT skipped: it is native-READ but its login verify works
+    // (auto-detects via DOM signal, doesn't wedge), so its startup verify stays useful.
+    if (NATIVE_LOGIN_PLATFORMS.has(platformId) && shouldUseNativeRead(platformId)) {
+      const connected = _statusCache[platformId]?.connected ?? false;
+      logger.info(`[Accounts] Startup verify skipping ${platformId} — CDP-walled native-login+native-read platform; native read owns login state during Check All (kept prior: ${connected ? 'connected' : 'not connected'})`);
+      _verifyingPlatforms.delete(platformId);
+      notify('accounts:verify-update', { platformId, connected });
+      durations.push({ platformId, ms: 0, connected, skipped: true });
       return;
     }
     const startedAt = Date.now();
@@ -675,37 +782,7 @@ export function registerAccountsHandlers() {
     const flow = (async () => {
       try {
         const result = await openLoginWindow(platformId, _event.sender);
-        if (isTrustedNativeLoginResult(platformId, result)) {
-          const verdict = buildTrustedNativeLoginVerdict(platformId, result);
-          await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
-          logger.info(`[Accounts] ${platformId} native login verified: ${verdict.reason}`);
-          return { ...(result || {}), connected: true, reason: verdict.reason };
-        }
-        if (isTrustedPuppeteerLoginResult(platformId, result)) {
-          const verdict = buildTrustedPuppeteerLoginVerdict(platformId, result);
-          await writeStatusCache(platformId, true, { lastReason: verdict.reason, lastTrace: verdict.trace });
-          logger.info(`[Accounts] ${platformId} login auto-detected: ${verdict.reason}`);
-          return { ...(result || {}), connected: true, reason: verdict.reason };
-        }
-
-        const verdict = await verifySellMonitorLogin(platformId);
-        // An inconclusive verify (timed out / errored before reading the page)
-        // right after the window closed is NOT proof the login failed — caching
-        // not-connected here would bounce a just-logged-in user straight back to
-        // "Log in". Keep the prior cached status instead (same rule as startup
-        // verify) rather than overwriting a good session with a transient false.
-        if (!verdict.connected && verdict.inconclusive) {
-          const prior = _statusCache[platformId]?.connected ?? false;
-          logger.warn(`[Accounts] ${platformId} post-login verify inconclusive (${verdict.reason}) — keeping prior status (${prior ? 'connected' : 'not connected'})`);
-          return { ...(result || {}), connected: prior, reason: verdict.reason, inconclusive: true };
-        }
-        await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
-        if (!verdict.connected) {
-          logger.info(`[Accounts] ${platformId} login window closed without successful login: ${verdict.reason}`);
-        } else {
-          logger.info(`[Accounts] ${platformId} login verified: ${verdict.reason}`);
-        }
-        return { ...(result || {}), connected: verdict.connected, reason: verdict.reason };
+        return await completeLoginWindowVerification(platformId, result);
       } catch (error) {
         // Catch path: openLoginWindow itself blew up (Chrome failed to launch,
         // platform unknown, etc.). Persist the failure into the cache and
@@ -759,17 +836,13 @@ export function registerAccountsHandlers() {
     try {
       // Step 2: Not in cache — open login window (blocks until user closes it).
       logger.info(`[Accounts] ${platformId} not in verified-login cache — opening login window`);
-      await openLoginWindow(platformId, _event.sender);
-
-      // Step 3: Verify by hitting the seller URL via the same persistent
-      // session. Cache the verdict either way so the next call short-circuits.
-      const verdict = await verifySellMonitorLogin(platformId);
-      await writeStatusCache(platformId, verdict.connected, { lastReason: verdict.reason, lastTrace: verdict.trace });
+      const loginResult = await openLoginWindow(platformId, _event.sender);
+      const verified = await completeLoginWindowVerification(platformId, loginResult);
 
       if (_event.sender.isDestroyed()) {
-        return { platform: platformId, connected: verdict.connected, loginOpened: true };
+        return { platform: platformId, connected: !!verified.connected, loginOpened: true };
       }
-      return { platform: platformId, connected: verdict.connected, loginOpened: true, reason: verdict.reason };
+      return { platform: platformId, connected: !!verified.connected, loginOpened: true, reason: verified.reason, ...(verified.inconclusive ? { inconclusive: true } : {}) };
     } catch (error) {
       logger.error(`[Accounts] Check-and-login failed for ${platformId}:`, error?.message || String(error));
       return { platform: platformId, connected: false, loginOpened: false, error: error?.message || String(error) };

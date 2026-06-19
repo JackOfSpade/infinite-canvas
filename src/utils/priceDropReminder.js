@@ -121,12 +121,12 @@ function normalizeNonNegativeCurrency(raw) {
 
 /**
  * The absolute price the listing should reach BY the must-sell date — entered
- * directly by the user. Positive currency or null (null = no target, so the
- * cards fall back to generic cadence reminders without a suggested price).
+ * directly by the user. Non-negative currency or null (null = no target, so
+ * the cards fall back to generic cadence reminders without a suggested price).
  */
 export function normalizePriceDropTargetPrice(raw) {
   const price = normalizeNonNegativeCurrency(raw);
-  return price != null && price > 0 ? price : null;
+  return price != null ? price : null;
 }
 
 export function normalizePriceDropStartingTier(raw) {

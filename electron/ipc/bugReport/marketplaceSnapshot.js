@@ -1,6 +1,6 @@
 import { getMarketplaceTelemetry } from '../marketplace.js';
 import { MARKETPLACE_TEST_MODE } from '../../../src/utils/compSourceScope.js';
-import { ago, modelTag, pipelineScope, overPricedSoldFlag } from './helpers.js';
+import { ago, modelTag, pipelineScope, overPricedSoldFlag, shortId } from './helpers.js';
 
 // Verdict for what the token-budget comp ceiling actually dropped — does it skew the
 // price? Two facts matter. (1) Compare the TYPICAL dropped comp (its median) to
@@ -97,6 +97,39 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
 
   const lines = [];
 
+  // Cross-run attribution guard. Only the browser SCRAPE serializes
+  // (marketplaceBrowserLock); synthesis, bundle-combine and platform-fit run
+  // unlocked, so a second price check's scrape can start — re-stamping the
+  // singleton's headline `nodeId` — while the first is still pricing. Each stage
+  // now carries its OWN `nodeId`; when a stage's node differs from the headline
+  // node, the funnel below is a SPLICE of two overlapping runs. Detect that and
+  // (a) warn once up top, (b) tag each foreign stage so a reader never reads one
+  // node's scrape as another node's. Without this the report silently shows e.g.
+  // headline node B with node A's scrape — exactly the "Source node X but the
+  // wrong item's comps" confusion.
+  const headlineNode = t.nodeId || null;
+  const stageNode = (stageNodeId) => (stageNodeId && headlineNode && stageNodeId !== headlineNode ? stageNodeId : null);
+  const nodeTag = (stageNodeId) => {
+    const foreign = stageNode(stageNodeId);
+    return foreign ? ` ⚠️ from node \`${shortId(foreign)}\` — not the headline node \`${shortId(headlineNode)}\`` : '';
+  };
+  // Drive the concurrency WARNING off the pricing stages only. scrape, synthesis,
+  // bundle and fit are all reset to null at each scrape start, so a foreign one of
+  // those can ONLY mean a genuinely overlapping run still finishing. analyze is
+  // deliberately EXCLUDED: photo analysis is not reset by a scrape, so a
+  // Refresh-Prices re-run (which skips re-analysis) legitimately carries a stale
+  // analyze from a different node — that's not concurrency, just an old stage. It
+  // still gets a per-stage nodeTag below (honest) but must not trip the warning.
+  const overlapNodes = new Set();
+  for (const sn of [t.scrape?.nodeId, ...synthesisEntries.map(s => s?.nodeId), t.bundle?.nodeId, t.fit?.nodeId]) {
+    if (stageNode(sn)) overlapNodes.add(sn);
+  }
+  if (overlapNodes.size > 0) {
+    lines.push(
+      `> ⚠️ **Overlapping price checks** — the stages below span MORE THAN ONE run. Headline node \`${shortId(headlineNode)}\` is the most recent to touch the pipeline, but stage(s) tagged below belong to other node(s) (${[...overlapNodes].map(n => `\`${shortId(n)}\``).join(', ')}) whose run was still finishing when this one started. This is expected: only the browser scrape serializes (marketplaceBrowserLock); synthesis/bundle/fit run unlocked, so a second check's scrape begins as soon as the first releases the browser — while the first finishes pricing. Read each stage as belonging to its TAGGED node, not the headline.`,
+    );
+  }
+
   // Surface test mode so a deliberately-narrowed run isn't misread as a bug
   // ("why did only one comp source scrape?").
   if (MARKETPLACE_TEST_MODE.enabled && MARKETPLACE_TEST_MODE.sourceId) {
@@ -105,7 +138,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
 
   if (t.analyze) {
     const a = t.analyze;
-    lines.push(`### Product analysis${ago(a.ts)}`);
+    lines.push(`### Product analysis${ago(a.ts)}${nodeTag(a.nodeId)}`);
     const condition = a.condition ? ` · condition: \`${a.condition}\`` : '';
     const cleanup = a.titleCleaned && a.rawTitle
       ? ` · cleaned from raw title "${a.rawTitle}"`
@@ -118,7 +151,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
     const errored = s.errored ?? 0;
     const timedOut = s.timedOut ?? 0;
     const loginRequired = s.loginRequired ?? 0;
-    lines.push(`\n### Comp scrape${ago(s.ts)}`);
+    lines.push(`\n### Comp scrape${ago(s.ts)}${nodeTag(s.nodeId)}`);
     if (s.preflightBlocked) {
       // The run never scraped — the hard login preflight blocked it. Surface this
       // FIRST so a "0 comps" run isn't misread as empty results or a scrape bug.
@@ -341,7 +374,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
     const itemTag = synthesisEntries.length > 1
       ? ` — ${s.itemLabel || s.query || s.itemKey || 'item'}`
       : '';
-    lines.push(`\n### Price synthesis${itemTag}${ago(s.ts)}`);
+    lines.push(`\n### Price synthesis${itemTag}${ago(s.ts)}${nodeTag(s.nodeId)}`);
     if (s.junkRejected > 0) {
       // Non-genuine listings dropped before pricing — reported so the rejection
       // is transparent (and so a spike signals a new junk pattern to filter).
@@ -509,7 +542,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
   // a bad factor judgment from an aggregation/arithmetic bug.
   if (t.bundle) {
     const b = t.bundle;
-    lines.push(`\n### Bundle pricing${ago(b.ts)}`);
+    lines.push(`\n### Bundle pricing${ago(b.ts)}${nodeTag(b.nodeId)}`);
     const delta = (b.bundlePrice != null && b.sum != null) ? b.bundlePrice - b.sum : null;
     const deltaTxt = delta == null ? ''
       : delta === 0 ? ' (= sum)'
@@ -535,7 +568,7 @@ export function buildMarketplacePipelineSnapshot(currentNodeIds, reportWindowId)
 
   if (t.fit) {
     const f = t.fit;
-    lines.push(`\n### Platform fit${ago(f.ts)}`);
+    lines.push(`\n### Platform fit${ago(f.ts)}${nodeTag(f.nodeId)}`);
     lines.push(`- ${f.platforms} platform(s) → ${f.good} good / ${f.unfit} unfit${modelTag(f.model, f.fallback)}`);
   }
 

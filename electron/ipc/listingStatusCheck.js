@@ -22,9 +22,11 @@
 import { callLLMText } from './llm.js';
 import { getSoftLoginWallMatch, verifySellMonitorLogin, writeStatusCache } from './accounts.js';
 import { getSellMonitorConfig } from './stealthBrowser.js';
+import { isLoginUrlPath } from './browser/authWindows.js';
 import { logger } from '../logger.js';
 import { PAGE_STATUS_SINGLE_SCHEMA, PAGE_STATUS_MULTI_SCHEMA, MARKETPLACE_HUB_SCAN_SCHEMA } from './aiSchemas.js';
 import { isFacebookShareUrl } from '../../src/utils/platformUrlMatch.js';
+import { detectAntiBotSignal } from './antiBotDetector.js';
 
 // Structural thresholds (absolute by design — not page-baseline candidates):
 //   - MIN_CONTENT_CHARS: below this, a fetched page is treated as empty/blocked
@@ -68,7 +70,7 @@ function verifyPlatformOnce(platformId) {
  */
 async function disambiguateAuthFailure({ platformId, status, finalUrl, url, urlLabel }) {
   const finalLower = String(finalUrl || url).toLowerCase();
-  const onLoginUrl = /\/(login|signin|sign-in|account\/login|auth(?!or))/i.test(finalLower);
+  const onLoginUrl = isLoginUrlPath(finalLower);
 
   const needsLogin = () => ({
     status: 'needs-login',
@@ -191,7 +193,7 @@ function isFacebookMarketplaceItemUrl(url) {
 
 function getAuthWallSignal({ status, finalUrl, url, html, platformId }) {
   const finalLower = String(finalUrl || url).toLowerCase();
-  if (status === 401 || status === 403 || /\/(login|signin|sign-in|account\/login)/i.test(finalLower)) {
+  if (status === 401 || status === 403 || isLoginUrlPath(finalLower)) {
     return 'transport';
   }
   const config = getSellMonitorConfig(platformId);
@@ -1109,27 +1111,96 @@ export async function scanSellerHubPages({ urlSpecs, platformId, signal, llmText
     }
     if (!r.ok) {
       const detail = r.error || (r.status ? `HTTP ${r.status}` : 'unknown error');
-      return { spec, terminal: { url, urlLabel, status: 'error', message: `Fetch failed: ${detail}` } };
+      return {
+        spec,
+        terminal: {
+          url,
+          urlLabel,
+          status: 'error',
+          message: `Fetch failed: ${detail}`,
+          ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}),
+          ...(r.title ? { title: r.title } : {}),
+          ...(r.appleEventsDisabled ? { appleEventsDisabled: true } : {}),
+          ...(r.loggedOut ? { loggedOut: true } : {}),
+          ...(r.challenged ? { challenged: true } : {}),
+        },
+      };
     }
     const authWallSignal = getAuthWallSignal({ status: r.status, finalUrl: r.finalUrl, url, html: r.html, platformId });
     if (authWallSignal) {
       const verdict = await disambiguateAuthFailure({ platformId, status: r.status, finalUrl: r.finalUrl, url, urlLabel });
-      return { spec, terminal: { url, urlLabel, ...verdict } };
+      return {
+        spec,
+        terminal: {
+          url,
+          urlLabel,
+          ...verdict,
+          ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}),
+          ...(r.title ? { title: r.title } : {}),
+        },
+      };
+    }
+    // Anti-bot wall served as HUB CONTENT to the app's CDP/stealth browser (eBay's
+    // "Please verify yourself to continue" at HTTP 200, a Cloudflare "Performing
+    // security verification", an AptDeco-style "Human Verification" 405) while the
+    // user's NORMAL browser is unaffected. getAuthWallSignal does NOT catch these —
+    // they're not 401/403, not a /login URL, and not in the soft-wall list — so
+    // without this the wall HTML is stripped and sent to the AI summarizer, which
+    // reads the verify-wall copy and reports a phantom high-urgency "account blocked"
+    // (the reported eBay mis-classification). Classify it as a BLOCKED / unreadable
+    // hub source instead: the marketplace SESSION may still be connected (this is an
+    // anti-bot fingerprint block on the automated session, not an account/logout),
+    // and we skip the misleading AI summary for this URL. 'unknown' buckets it under
+    // the `blk` count + the "Blocked / unreadable hub sources" section.
+    const antiBot = detectAntiBotSignal({ status: r.status, finalUrl: r.finalUrl, html: r.html, title: r.title, sourceLabel: platformId });
+    if (antiBot && antiBot.severity === 'block') {
+      return {
+        spec,
+        terminal: {
+          url,
+          urlLabel,
+          status: 'unknown',
+          antiBot: antiBot.code,
+          message: `Anti-bot wall served to the app browser (${antiBot.code}) — NOT an account block; your normal browser is unaffected and the ${platformId} session may still be connected. ${antiBot.suggestion}`,
+          ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}),
+          ...(r.title ? { title: r.title } : {}),
+        },
+      };
     }
     // Any other 4xx/5xx (auth walls were handled just above) means a broken or
     // changed watch URL, not readable hub content. Surface it as a terminal error
     // instead of stripping the error-page body and paying for a token-heavy
     // hub-scan LLM call that could only return a misleading "unknown".
     if (r.status >= 400) {
-      return { spec, terminal: { url, urlLabel, status: 'error', message: `Hub page returned HTTP ${r.status} — the watch URL is broken or changed.` } };
+      return {
+        spec,
+        terminal: {
+          url,
+          urlLabel,
+          status: 'error',
+          message: `Hub page returned HTTP ${r.status} — the watch URL is broken or changed.`,
+          ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}),
+          ...(r.title ? { title: r.title } : {}),
+        },
+      };
     }
     if (!r.html || r.html.length < MIN_CONTENT_CHARS) {
-      return { spec, terminal: { url, urlLabel, status: 'unknown', message: `Empty or near-empty response (${r.html?.length || 0} bytes).` } };
+      return {
+        spec,
+        terminal: {
+          url,
+          urlLabel,
+          status: 'unknown',
+          message: `Empty or near-empty response (${r.html?.length || 0} bytes).`,
+          ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}),
+          ...(r.title ? { title: r.title } : {}),
+        },
+      };
     }
     // Preserve message read/unread state (CSS-class-only) BEFORE stripping wipes
     // it, so the model can tell an already-read message from a new one.
     const snippet = stripHtmlForAnalysis(annotateReadState(r.html)).slice(0, HUB_HEAD_CHARS);
-    return { spec, status: r.status, finalUrl: r.finalUrl, snippet, readState: summarizeReadState(r.html) };
+    return { spec, status: r.status, finalUrl: r.finalUrl, title: r.title, snippet, readState: summarizeReadState(r.html) };
   }));
 
   const sources = [];
@@ -1196,6 +1267,9 @@ Return ONLY a JSON object:
 Rules:
 - Be selective and specific — only what a busy seller would actually act on or want to know. Skip static chrome (menu labels, a generic "0 notifications", boilerplate help text).
 - A message/conversation marked ${READ_STATE_READ_TOKEN} has already been opened by the seller — do NOT raise it as ACTION NEEDED. Treat it as already-handled: omit it, or — if its latest message is from the BUYER and is an explicit question/request the seller has not yet answered — include it ONLY as a low-urgency FYI (never high). Only ${READ_STATE_UNREAD_TOKEN} / unmarked-but-clearly-new messages awaiting a reply are ACTION NEEDED.
+- A NOTIFICATIONS/ACTIVITY-FEED entry such as "<name> sent you a message about your Marketplace listing …" is a persistent NOTIFICATION, NOT proof of a pending message — it stays in the feed after the seller has already read and replied to that message. Do NOT raise it as ACTION NEEDED on its own. Treat a message as ACTION NEEDED only when the page itself shows it is genuinely awaiting a reply (a ${READ_STATE_UNREAD_TOKEN} marker, a bold/"new"/unread badge, or an inbox unread count > 0).
+- TRUST EXPLICIT COUNTERS over the feed: when the hub shows an authoritative actionable count — e.g. "Chats to answer: N", "Needs attention: N", "Orders to fill: N", "N unread" — that count is the source of truth. Never surface more high-urgency items of that kind than the counter says; when such a counter reads 0, the matching feed entries are already-handled (omit them, or at most a low-urgency FYI). A "Chats to answer: 0" with old "sent you a message" notifications means NO unread messages.
+- IGNORE account-security noise: "new login from a device or location you don't usually use", "review your recent login", "we noticed a login", and password / 2FA / security-checkup prompts are NOT marketplace-actionable, and are routinely triggered by this very tool's OWN automated logins. Never raise them as high urgency — omit them (at most ONE low-urgency FYI).
 - Every item must be grounded in the page text above — quote it in "evidence". Do NOT invent items.
 - "sourceUrl" must be one of the HUB PAGE urls listed above, copied character-for-character — it's the page the seller will be taken to. Do not shorten, guess, or combine urls.
 - If nothing notable is present, return an empty attention array.`;
@@ -1216,7 +1290,15 @@ Rules:
       // model can leak a ⟦READ⟧/⟦UNREAD⟧ token into it — strip before it reaches
       // the card and the bug report.
       summary = cleanMessage(stripReadStateTokens(parsed?.summary));
-      for (const p of llmInputs) sources.push({ url: p.spec.url, urlLabel: p.spec.urlLabel, status: 'ok' });
+      for (const p of llmInputs) {
+        sources.push({
+          url: p.spec.url,
+          urlLabel: p.spec.urlLabel,
+          status: 'ok',
+          ...(p.finalUrl ? { finalUrl: p.finalUrl } : {}),
+          ...(p.title ? { title: p.title } : {}),
+        });
+      }
     } catch (err) {
       if (signal?.aborted || err?.name === 'AbortError') throw err;
       for (const p of llmInputs) {

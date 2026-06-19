@@ -226,6 +226,14 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  SELL: {
+    label: 'SellHub State & Price Drops',
+    description: 'SellHub UI/state audit — price-drop plan fields, target price commits (including $0/free targets), listing cards, and focused sell-form controls. Keeps lightweight node data so the compact SellHub Price-Drop Plans section can render, but drops the heavy node diagnostics table and media/image dumps.',
+    logFilter: line =>
+      /sell.?hub|price.?drop|target price|must sell|listing card|marketplacecard|\[Focus\].*(target price|must sell|price-drop|sell)/i.test(line),
+    excludeSections: ['edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   STATUS: {
     label: 'Listing Status Checks',
     description: 'Listing status-check audit — per-card "Check" / "Check All" runs: the per-URL verdict trace, whether the identity anchor matched each page, and sold/ended/needs-login/unknown outcomes. Use for "Check All said X but the listing is Y", "my deletion was not detected", or "card stuck on unknown" reports. The per-URL trace + listing-URL shape live in Node Diagnostics (`listing:` and `checkTrace[…]`); this also narrows the event log to status-check lines.',
