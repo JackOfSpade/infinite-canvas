@@ -1,5 +1,5 @@
 import { logger } from '../../logger.js';
-import { getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath, launchWithProfileLockRetry } from '../stealthBrowser.js';
+import { getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath, launchWithProfileLockRetry, reserveSharedProfile } from '../stealthBrowser.js';
 import { pauseBrowserPool } from '../browserPool.js';
 import { READINESS } from '../scrapeBudget.js';
 import { matchesNoResultsSentinel } from '../antiBotDetector.js';
@@ -600,35 +600,37 @@ async function closeLoginBrowserSafely(browser, label) {
 export async function openLoginWindow(platformId, sender = null) {
   const url = PLATFORM_LOGIN_URLS[platformId];
   if (!url) throw new Error(`Unknown platform: ${platformId}`);
+  const releaseProfileReservation = reserveSharedProfile(`login-window:${platformId}`);
 
-  // For native-login platforms (e.g. Indeed) the login window and the scraper
-  // MUST use the same Chrome executable. On macOS, Chrome derives its cookie
-  // encryption key from the app's bundle ID via the system Keychain. Playwright's
-  // "Google Chrome for Testing" (com.google.Chrome.for.Testing) and system Google
-  // Chrome (com.google.Chrome) have different bundle IDs → different Keychain
-  // entries → cookies written by one cannot be decrypted by the other. Always
-  // use system Chrome for native-login platforms so the encryption key matches
-  // the scraper (which uses findSystemChromePath). Fall back to findChromePath
-  // for Puppeteer-login platforms where both login and scraper share the same
-  // executable through the normal path.
-  const executablePath = process.env.CHROME_PATH ||
-    (NATIVE_LOGIN_PLATFORMS.has(platformId)
-      ? (await findSystemChromePath() ?? await findChromePath())
-      : await findChromePath());
-  logger.info(`[StealthBrowser] Opening login window for ${platformId} (executable: ${executablePath})`);
+  try {
+    // For native-login platforms (e.g. Indeed) the login window and the scraper
+    // MUST use the same Chrome executable. On macOS, Chrome derives its cookie
+    // encryption key from the app's bundle ID via the system Keychain. Playwright's
+    // "Google Chrome for Testing" (com.google.Chrome.for.Testing) and system Google
+    // Chrome (com.google.Chrome) have different bundle IDs → different Keychain
+    // entries → cookies written by one cannot be decrypted by the other. Always
+    // use system Chrome for native-login platforms so the encryption key matches
+    // the scraper (which uses findSystemChromePath). Fall back to findChromePath
+    // for Puppeteer-login platforms where both login and scraper share the same
+    // executable through the normal path.
+    const executablePath = process.env.CHROME_PATH ||
+      (NATIVE_LOGIN_PLATFORMS.has(platformId)
+        ? (await findSystemChromePath() ?? await findChromePath())
+        : await findChromePath());
+    logger.info(`[StealthBrowser] Opening login window for ${platformId} (executable: ${executablePath})`);
 
-  // Close the headless scraping browser FIRST. Chrome locks userDataDir per
-  // process — if the singleton is still running when we try to launch the
-  // login window on the same dir, the login window's launch either races,
-  // silently uses an empty profile, or fails outright. The previous order
-  // (launch login → then close singleton) produced a window that looked
-  // logged-out even after a successful prior login, and post-login cookies
-  // didn't always reach disk in time for verifySellMonitorLogin.
-  await closeStealthBrowser();
+    // Close the headless scraping browser FIRST. Chrome locks userDataDir per
+    // process — if the singleton is still running when we try to launch the
+    // login window on the same dir, the login window's launch either races,
+    // silently uses an empty profile, or fails outright. The previous order
+    // (launch login → then close singleton) produced a window that looked
+    // logged-out even after a successful prior login, and post-login cookies
+    // didn't always reach disk in time for verifySellMonitorLogin.
+    await closeStealthBrowser();
 
-  if (NATIVE_LOGIN_PLATFORMS.has(platformId)) {
-    return openNativeLoginWindow({ platformId, url, executablePath, sender });
-  }
+    if (NATIVE_LOGIN_PLATFORMS.has(platformId)) {
+      return await openNativeLoginWindow({ platformId, url, executablePath, sender });
+    }
 
   // Launch a SEPARATE visible browser for login (now has exclusive access to userDataDir).
   // ignoreDefaultArgs removes --enable-automation which puppeteer adds by default —
@@ -707,7 +709,7 @@ export async function openLoginWindow(platformId, sender = null) {
   });
 
   // Wait for the user to close the browser window or the app window to be destroyed
-  return new Promise((resolve) => {
+  return await new Promise((resolve) => {
     let isTerminated = false;
     let autoClosePoll = null;
     let autoCloseTimeout = null;
@@ -926,6 +928,9 @@ export async function openLoginWindow(platformId, sender = null) {
 
     loginBrowser.on('disconnected', cleanup);
   });
+  } finally {
+    releaseProfileReservation();
+  }
 }
 
 async function openNativeLoginWindow({ platformId, url, executablePath, sender = null }) {
@@ -1140,6 +1145,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
   // trace). Keyed by host so it doesn't collide with platform login entries.
   const diagKey = `captcha:${(() => { try { return new URL(url).host; } catch { return 'unknown'; } })()}`;
   updateAuthWindowDiagnostic(diagKey, { mode: 'captcha-resolve', loginUrl: url, currentUrl: url, title: '', result: 'launching' });
+  const releaseProfileReservation = reserveSharedProfile(`captcha-resolve:${diagKey}`);
 
   // Same userDataDir-lock dance as openLoginWindow — Chrome won't let the
   // visible browser launch on a dir the headless scraper still holds. Bracketed
@@ -1172,6 +1178,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       ignoreHTTPSErrors: true,
     });
   } catch (err) {
+    releaseProfileReservation();
     releaseBrowserPoolPause();
     finishAuthWindowDiagnostic(diagKey, { result: 'launch-error', error: err?.message || String(err) });
     throw err;
@@ -1250,6 +1257,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       await tab2.evaluate((u) => { window.location.href = u; }, secondTabUrl).catch(() => {});
     }
   } catch (err) {
+    releaseProfileReservation();
     releaseBrowserPoolPause();
     finishAuthWindowDiagnostic(diagKey, { result: 'setup-error', error: err?.message || String(err) });
     try { await captchaBrowser?.close(); } catch { /* ignored */ }
@@ -1656,6 +1664,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       if (signal) signal.removeEventListener?.('abort', onAbort);
       if (sender) sender.removeListener('destroyed', cleanup);
       try { await captchaBrowser.close(); } catch { /* ignored */ }
+      releaseProfileReservation();
       releaseBrowserPoolPause();
       // `items` is the inline-extracted comp data captured from the visible
       // session before close — when present, caller skips the headless rescrape

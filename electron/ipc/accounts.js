@@ -524,16 +524,11 @@ function buildTrustedPuppeteerLoginVerdict(platformId, result) {
 // the renderer via the notify callback so hub nodes can block drops until their
 // relevant platforms are confirmed.
 //
-// Runs with a bounded-concurrency pool, NOT sequentially. The earlier sequential
-// loop existed to "avoid racing Chrome instances on the shared userDataDir" — but
-// that hazard doesn't apply here: verifySellMonitorLogin → fetchHtmlClean opens a
-// TAB in the one shared stealth browser (browser.newPage()), not a new Chrome
-// process, so there's no second process to race the profile lock. And every
-// platform is a DISTINCT domain, so concurrency never makes a single site see two
-// simultaneous hits — the per-site anti-bot concern is nil. Concurrency therefore
-// only costs local CPU/RAM/network, which the pool size below bounds. This cuts a
-// ~10-platform startup verify from ~66s (sum of per-platform nav times) to roughly
-// the slowest-few-in-a-lane wall time (~15-20s).
+// Runs with a bounded-concurrency pool. verifySellMonitorLogin opens tabs in the
+// one shared stealth browser, so verifier workers can run concurrently with each
+// other. A visible login flow is different: it must close the headless browser and
+// take exclusive ownership of the shared userDataDir, so queued verifier workers
+// skip while any login flow is active.
 const VERIFY_CONCURRENCY = 4;
 // Hard per-platform backstop for the startup verify. A normal verify is already
 // bounded by SESSION_VERIFY_TIMEOUT_MS inside fetchHtmlClean, but if anything in
@@ -571,11 +566,13 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
   const durations = [];
 
   const verifyOne = async (platformId) => {
-    if (activeLoginFlows.has(platformId)) {
-      logger.info(`[Accounts] Startup verify skipping ${platformId} — login flow in flight`);
+    if (activeLoginFlows.size > 0) {
+      const activePlatforms = [...activeLoginFlows.keys()];
+      const connected = _statusCache[platformId]?.connected ?? false;
+      logger.info(`[Accounts] Startup verify skipping ${platformId} — login flow in flight for ${activePlatforms.join(', ')}`);
       _verifyingPlatforms.delete(platformId);
-      notify('accounts:verify-update', { platformId, connected: _statusCache[platformId]?.connected ?? false });
-      durations.push({ platformId, ms: 0, connected: _statusCache[platformId]?.connected ?? false, skipped: true });
+      notify('accounts:verify-update', { platformId, connected });
+      durations.push({ platformId, ms: 0, connected, skipped: true, skipReason: `login flow in flight (${activePlatforms.join(', ')})` });
       return;
     }
     // CDP-walled on BOTH axes (native LOGIN + native READ) = swappa, mercari: their
@@ -594,7 +591,7 @@ export async function verifyAllPlatforms({ notify = () => {} } = {}) {
       logger.info(`[Accounts] Startup verify skipping ${platformId} — CDP-walled native-login+native-read platform; native read owns login state during Check All (kept prior: ${connected ? 'connected' : 'not connected'})`);
       _verifyingPlatforms.delete(platformId);
       notify('accounts:verify-update', { platformId, connected });
-      durations.push({ platformId, ms: 0, connected, skipped: true });
+      durations.push({ platformId, ms: 0, connected, skipped: true, skipReason: 'native read owns login state' });
       return;
     }
     const startedAt = Date.now();

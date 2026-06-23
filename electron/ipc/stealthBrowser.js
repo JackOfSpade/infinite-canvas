@@ -134,6 +134,40 @@ let isShuttingDown = false;
 let browserGeneration = 0;
 let browserLaunchedAt = 0;
 
+let sharedProfileReservation = null;
+
+export function reserveSharedProfile(reason = 'visible-window') {
+  const token = Symbol(reason);
+  sharedProfileReservation = {
+    token,
+    reason,
+    since: Date.now(),
+  };
+  logger.info(`[StealthBrowser] Shared profile reserved for ${reason}`);
+  return () => {
+    if (sharedProfileReservation?.token !== token) return;
+    const heldMs = Date.now() - sharedProfileReservation.since;
+    logger.info(`[StealthBrowser] Shared profile reservation released for ${reason} (${heldMs}ms)`);
+    sharedProfileReservation = null;
+  };
+}
+
+export function getSharedProfileReservationInfo() {
+  if (!sharedProfileReservation) return null;
+  return {
+    reason: sharedProfileReservation.reason,
+    since: sharedProfileReservation.since,
+  };
+}
+
+function assertSharedProfileAvailable(context) {
+  if (!sharedProfileReservation) return;
+  throw new Error(
+    `Shared browser profile is reserved for ${sharedProfileReservation.reason}; ` +
+    `${context} cannot start until that visible browser closes.`
+  );
+}
+
 // Identity of the current stealth-browser process. generation increments each
 // launch; launchedAt is the epoch ms of that launch (0 if never launched).
 export function getStealthBrowserInfo() {
@@ -189,6 +223,7 @@ export async function launchWithProfileLockRetry(launchOpts, context, url = null
 
 export async function getStealthBrowser() {
   if (isShuttingDown) throw new Error('[StealthBrowser] Cannot get browser during shutdown');
+  assertSharedProfileAvailable('headless stealth browser');
   if (browserInstance?.isConnected?.()) return browserInstance;
 
   // Clear a dead/crashed instance. Killing the orphaned Chrome process releases
@@ -205,6 +240,7 @@ export async function getStealthBrowser() {
   if (browserLaunchPromise) return browserLaunchPromise;
 
   browserLaunchPromise = (async () => {
+    assertSharedProfileAvailable('headless stealth browser launch');
     const executablePath = process.env.CHROME_PATH || await findChromePath();
     // Include whether this is the prompt-free Playwright path so the log line
     // is enough to diagnose "why am I getting the macOS App Management prompt?"
@@ -440,7 +476,17 @@ export async function closeStealthBrowser(forShutdown = false) {
   if (forShutdown) {
     isShuttingDown = true;
   }
-  browserLaunchPromise = null; // Prevent anyone from waiting on a pending launch
+  const pendingLaunch = browserLaunchPromise;
+  if (pendingLaunch) {
+    logger.info('[StealthBrowser] Waiting for in-flight browser launch before closing shared profile');
+    try {
+      const launchedBrowser = await pendingLaunch;
+      if (launchedBrowser?.isConnected?.()) browserInstance = launchedBrowser;
+    } catch (err) {
+      logger.warn(`[StealthBrowser] In-flight browser launch settled before close with error: ${err?.message || String(err)}`);
+    }
+  }
+  browserLaunchPromise = null; // Prevent anyone from waiting on a completed/failed launch
   if (browserInstance) {
     const proc = browserInstance.process();
     try {

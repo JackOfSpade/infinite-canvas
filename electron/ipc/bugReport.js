@@ -1101,7 +1101,8 @@ ${sectionOmitted('sessionTraces') ? '_(per-platform verify traces omitted by fil
       const sumMs = run.durations.reduce((a, d) => a + (d.ms || 0), 0);
       const slowest = run.durations[0]; // durations are pre-sorted slowest-first
       const rows = run.durations.map(d => {
-        const result = d.skipped ? 'skipped (login in flight)'
+        const skipReason = d.skipReason ? String(d.skipReason).replace(/\|/g, '\\|').slice(0, 100) : 'not run';
+        const result = d.skipped ? `skipped (${skipReason})`
           : d.error ? `error: ${String(d.error).replace(/\|/g, '\\|').slice(0, 80)}`
             : d.connected ? 'connected' : 'not connected';
         return `| \`${d.platformId}\` | ${d.ms} | ${result} |`;
