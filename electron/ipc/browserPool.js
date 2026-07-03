@@ -170,7 +170,9 @@ function processQueue() {
         else activeDomains.set(domain, count - 1);
 
         // A slot freed — re-check soon (cooldowns may also have moved on).
-        setTimeout(processQueue, REQUEUE_DELAY_MS);
+        // Skip entirely when nothing is waiting; scheduling a pointless
+        // macrotask on every single task completion adds up under load.
+        if (queue.length > 0) setTimeout(processQueue, REQUEUE_DELAY_MS);
       });
   }
 

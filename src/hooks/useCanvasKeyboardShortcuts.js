@@ -35,6 +35,12 @@ export function useCanvasKeyboardShortcuts({
         return matched;
       };
 
+      // Prevent OS key-repeat from re-firing any shortcut below while a key is
+      // held — Duplicate in particular would otherwise rapid-clone nodes for
+      // as long as Cmd+D stays pressed. Applied before the hardcoded D/C/V
+      // branches, not just the tool-selection ones further down.
+      if (e.repeat) return;
+
       // Duplicate / Copy / Paste are intentionally hardcoded to Ctrl/Cmd+D/C/V
       // rather than going through the configurable `shortcuts` map — they mirror
       // OS conventions users expect and aren't meant to be rebindable.
@@ -71,9 +77,6 @@ export function useCanvasKeyboardShortcuts({
         if (placementMode) { setPlacementMode(null); return; }
         if (activeTool)    { setActiveTool(null);    return; }
       }
-
-      // Tool shortcuts (Select, Text, Link) - Prevent repeat toggling
-      if (e.repeat) return;
 
       if (isMatch(s.selectTool)) {
         e.preventDefault();

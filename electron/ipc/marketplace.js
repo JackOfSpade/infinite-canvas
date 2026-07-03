@@ -267,10 +267,12 @@ function priceStats(items) {
   if (!Array.isArray(items)) return null;
   const prices = items.map(i => Number(i?.price) || 0).filter(p => p > 0).sort((a, b) => a - b);
   if (prices.length === 0) return null;
+  const mid = Math.floor(prices.length / 2);
+  const median = prices.length % 2 === 0 ? (prices[mid - 1] + prices[mid]) / 2 : prices[mid];
   return {
     n: prices.length,
     min: prices[0],
-    median: prices[Math.floor(prices.length / 2)],
+    median,
     max: prices[prices.length - 1],
   };
 }
