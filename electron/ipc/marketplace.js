@@ -507,7 +507,7 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
   if (sourceId === 'reverb') {
     send('searching', 0);
     try {
-      const result = await fetchReverbListings(query, true, signal);
+      const result = await fetchReverbListings(query, signal);
       const items = Array.isArray(result) ? result : (result?.items || []);
       const warning = Array.isArray(result) ? null : (result?.warning || null);
       send('done', items.length, warning);
@@ -566,7 +566,7 @@ async function fetchApiMarketplaceSources(query, signal = null, emit = null, cat
   // the caller routes results by this field instead of assuming all API sources
   // are sold. AptDeco skips itself for non-furniture (isAptDecoApplicable).
   const apiTasks = [
-    { sourceId: 'reverb', category: 'sold', effectiveQuery: query, fn: (s) => fetchReverbListings(query, true, s) },
+    { sourceId: 'reverb', category: 'sold', effectiveQuery: query, fn: (s) => fetchReverbListings(query, s) },
     { sourceId: 'pricecharting', category: 'sold', effectiveQuery: pcQuery, fn: (s) => fetchPriceChartingComps(pcQuery, s, { category }) },
     { sourceId: 'aptdeco-active', category: 'active', effectiveQuery: query, fn: (s) => fetchAptDecoComps(query, s, { category }) },
   ].filter(task => isCompSourceEnabledInScope(task.sourceId));

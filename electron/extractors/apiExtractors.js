@@ -1062,43 +1062,13 @@ async function fetchReverbSoldComps(query, signal, safeApiFetch) {
 }
 
 /**
- * Fetch marketplace comps from Reverb. soldOnly=true uses the Price Guide
- * (completed sales); soldOnly=false uses /api/listings/all (live ACTIVE asks).
+ * Fetch sold-comp marketplace data from Reverb's Price Guide (completed sales).
+ * An earlier live-listings mode (/api/listings/all) was removed — both call
+ * sites always wanted sold comps, and the live path was unreachable, dead
+ * code with no `price > 0` guard (unlike every other extractor in this file).
  */
-export async function fetchReverbListings(query, soldOnly = false, signal = null) {
-
-  if (soldOnly) {
-    return fetchReverbSoldComps(query, signal, safeApiFetch);
-  }
-
-  // Active (live) listings — asking prices, not sold.
-  const r = await safeApiFetch(`https://api.reverb.com/api/listings/all?${new URLSearchParams({ query })}`, {
-    headers: REVERB_HEADERS,
-    signal: createTimeoutSignal(signal, apiTimeout('reverb-api')),
-  }, 'reverb');
-
-  if (!r.ok) {
-    if (r.warning) logger.warn(`[Reverb API] ${r.warning.code}: ${r.warning.evidence}`);
-    else logger.warn(`[Reverb API] Returned ${r.status}`);
-    return { items: [], warning: r.warning };
-  }
-
-  const data = r.json;
-  const listings = data?.listings || data?._embedded?.listings || [];
-  const items = listings.map(listing => {
-    const price = listing.price?.amount ? parseFloat(listing.price.amount) : 0;
-    return {
-      title: listing.title || listing.make_model || '',
-      price,
-      priceText: price > 0 ? `$${price.toFixed(2)}` : '',
-      condition: listing.condition?.display_name || listing.condition?.slug || '',
-      soldDate: '',
-      seller: listing.seller?.feedback_percentage ? `${listing.seller.feedback_percentage}%` : '',
-      url: listing._links?.web?.href || listing.web_url || '',
-      source: 'reverb',
-    };
-  });
-  return { items, warning: r.warning };
+export async function fetchReverbListings(query, signal = null) {
+  return fetchReverbSoldComps(query, signal, safeApiFetch);
 }
 
 // ── PriceCharting (direct HTTP, NOT the stealth browser) ────────────────────
