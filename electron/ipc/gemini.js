@@ -831,6 +831,19 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   }
 
   const data = await response.json();
+  // A prompt that trips a safety filter BEFORE any candidate is generated
+  // (plausible here — untrusted scraped job/listing text flows into these
+  // prompts) leaves `candidates` empty/absent and `finishReason` undefined,
+  // so without this check every failure mode below falls through to the
+  // generic "no content" message, losing the one piece of evidence
+  // (blockReason / category) that would actually explain what happened.
+  const promptBlockReason = data?.promptFeedback?.blockReason;
+  if (promptBlockReason && !data?.candidates?.length) {
+    const categories = (data.promptFeedback?.safetyRatings || [])
+      .filter(r => r?.blocked || (r?.probability && r.probability !== 'NEGLIGIBLE'))
+      .map(r => r.category).filter(Boolean).join(', ');
+    throw new Error(`Gemini blocked the prompt before generating a response: blockReason=${promptBlockReason}${categories ? ` (${categories})` : ''}.`);
+  }
   const candidate = data?.candidates?.[0];
   // Join ALL text parts, not just [0]. Plain JSON answers arrive as a single
   // part, but a grounded (Google Search) response can split its answer across
