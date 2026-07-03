@@ -348,6 +348,15 @@ async function executeScrape(url, extractorJS, options = {}) {
         let stableReads = 0;
         let zeroReads = 0;
         let settledPositively = false;  // true only when we break on a stable, >0 count
+        // A non-SITE_CHANGED evaluate() throw is usually a genuine transient
+        // (the page navigated mid-evaluate) and self-resolves next tick — but
+        // if it keeps happening it's a real bug in the extractor, and without
+        // this it's indistinguishable from a genuinely empty page: the loop
+        // just falls through to "0 results, success" with no diagnostic
+        // trail, exactly the failure mode antiBotDetector exists to catch
+        // (bypassed here, upstream of it).
+        let evalErrStreak = 0;
+        let lastEvalErrMsg = null;
         while (true) {
           // isShuttingDown: closeAllPages() force-closes tracked pages during
           // shutdown, but without this check a readiness loop already polling
@@ -363,9 +372,14 @@ async function executeScrape(url, extractorJS, options = {}) {
               await new Promise(res => setTimeout(res, READINESS.POLL_MS));
               continue;
             }
+            lastEvalErrMsg = evalErr?.message || String(evalErr);
+            if (++evalErrStreak === READINESS.STABLE_READS) {
+              logger.warn(`[BrowserPool] ${sourceKey}: extractor threw ${evalErrStreak}x in a row (non-SITE_CHANGED) — "${lastEvalErrMsg}". If this persists, the extractor itself may have a bug, not just a transient mid-navigation eval.`);
+            }
             /* navigated mid-evaluate — retry next tick */
           }
           if (r != null) {
+            evalErrStreak = 0;
             siteChangedError = null;
             extractorResult = r;                 // always keep the freshest result
             const count = countItems(r);
@@ -676,13 +690,23 @@ async function executeScrapePaginated(extractorJS, options = {}) {
       // previous accumulated total so we don't settle before new items arrive.
       if (!useLoadMore) await new Promise(r => setTimeout(r, firstBeatMs));
       let extractorResult = null, lastCount = useLoadMore ? loadMorePrevCount : -2, stableReads = 0, zeroReads = 0, settledPositively = false;
+      // See executeScrape's matching evalErrStreak — a persistently-throwing
+      // extractor otherwise silently masquerades as "zero results, success."
+      let evalErrStreak = 0, lastEvalErrMsg = null;
       while (true) {
         // See executeScrape's matching check — a force-closed page during
         // shutdown would otherwise keep getting polled until the deadline.
         if (isShuttingDown || options.signal?.aborted) break;
         let r = null;
-        try { r = await page.evaluate(extractorJS); } catch { /* navigated mid-evaluate */ }
+        try { r = await page.evaluate(extractorJS); }
+        catch (evalErr) {
+          lastEvalErrMsg = evalErr?.message || String(evalErr);
+          if (++evalErrStreak === READINESS.STABLE_READS) {
+            logger.warn(`[BrowserPool] ${sourceKey} (paginated p${p}): extractor threw ${evalErrStreak}x in a row — "${lastEvalErrMsg}". If this persists, the extractor itself may have a bug, not just a transient mid-navigation eval.`);
+          }
+        }
         if (r != null) {
+          evalErrStreak = 0;
           extractorResult = r;
           const count = countItems(r);
           if (count === -1) break;
