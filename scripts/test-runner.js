@@ -145,7 +145,7 @@ import {
   rememberMissingPreviewSearchRoot,
   resolveMissingPreviewPath,
 } from '../electron/ipc/missingPreviewRelink.js';
-import { resolvePortableFilePaths, resolvePortableImagePath } from '../electron/ipc/filesystem.js';
+import { resolvePortableFilePaths, resolvePortableImagePath, isAllowedOpenFileExt } from '../electron/ipc/filesystem.js';
 import { decodeLocalFileRequestPath } from '../electron/localFileProtocol.js';
 import { getBrowserPoolQueueState, pauseBrowserPool, queueScrape } from '../electron/ipc/browserPool.js';
 import { getSoftLoginWallMatch, getStatusCacheSync, isConfirmedDisconnectedVerdict, writeStatusCache, selectRestorableStatuses, isTrustedNativeLoginResult } from '../electron/ipc/accounts.js';
@@ -6872,6 +6872,34 @@ const tests = [
       assert(isSensitivePath('/Users/x/Pictures/product.jpg') === false, 'a normal photo passes');
       assert(isSensitivePath('') === false, 'empty path → false (no throw)');
       assert(isSensitivePath(null) === false, 'null path → false (no throw)');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'filesystem: isAllowedOpenFileExt is an allowlist, not a denylist',
+    run: () => {
+      assert(isAllowedOpenFileExt('/x/resume.pdf') === true, 'pdf allowed');
+      assert(isAllowedOpenFileExt('/x/photo.JPG') === true, 'allowlist is case-insensitive');
+      assert(isAllowedOpenFileExt('/x/notes.docx') === true, 'docx allowed');
+      assert(isAllowedOpenFileExt('/x/video.mp4') === true, 'mp4 allowed');
+      assert(isAllowedOpenFileExt('/x/archive.zip') === true, 'zip allowed');
+      // Denylist-style entries the old blocklist covered — must still be blocked.
+      assert(isAllowedOpenFileExt('/x/script.sh') === false, 'sh blocked');
+      assert(isAllowedOpenFileExt('/x/installer.exe') === false, 'exe blocked');
+      assert(isAllowedOpenFileExt('/x/Mac.app') === false, 'app bundle blocked');
+      assert(isAllowedOpenFileExt('/x/run.ps1') === false, 'ps1 blocked');
+      // The whole point of switching to an allowlist: formats the old
+      // denylist never anticipated are blocked too, not silently allowed.
+      assert(isAllowedOpenFileExt('/x/installer.dmg') === false, 'dmg blocked (missed by the old denylist)');
+      assert(isAllowedOpenFileExt('/x/installer.pkg') === false, 'pkg blocked (missed by the old denylist)');
+      assert(isAllowedOpenFileExt('/x/package.deb') === false, 'deb blocked (missed by the old denylist)');
+      assert(isAllowedOpenFileExt('/x/app.appimage') === false, 'appimage blocked (missed by the old denylist)');
+      assert(isAllowedOpenFileExt('/x/run.command') === false, 'command blocked (missed by the old denylist)');
+      assert(isAllowedOpenFileExt('/x/flow.workflow') === false, 'workflow blocked (missed by the old denylist)');
+      assert(isAllowedOpenFileExt('/x/script.scpt') === false, 'scpt blocked (missed by the old denylist)');
+      assert(isAllowedOpenFileExt('/x/launcher.desktop') === false, 'desktop blocked (missed by the old denylist)');
+      assert(isAllowedOpenFileExt('/x/lib.jar') === false, 'jar blocked (missed by the old denylist)');
+      assert(isAllowedOpenFileExt('/x/no-extension') === false, 'no extension → blocked, not allowed');
       return { ok: true };
     },
   },
