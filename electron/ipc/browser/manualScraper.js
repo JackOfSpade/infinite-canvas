@@ -194,9 +194,6 @@ const NEXT_PAGE_SELECTORS = {
 // render is ~10 cards; scrolling reveals the rest before we run the extractor.
 const SCROLL_SOURCES = new Set(['ziprecruiter', 'google']);
 
-// Sources that load more jobs via a "load more" button.
-const LOAD_MORE_SELECTORS = {};
-
 // Per-source config for clicking cards to expand full job descriptions.
 // null = source doesn't support card-click description expansion.
 //
@@ -706,14 +703,21 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
 }
 
 // ── Extractor runner ──────────────────────────────────────────────────────────
-// Returns { jobs: Array, siteChangedError: Error|null }.
+// Returns { jobs: Array, siteChangedError: Error|null, evalError: Error|null }.
+// evalError is any OTHER thrown error (not SITE_CHANGED) — usually a genuine
+// transient (context destroyed by a mid-evaluate navigation) that resolves on
+// its own next tick, but a real bug in the extractor throws the exact same
+// shape. Without surfacing it distinctly, a persistently-failing extractor is
+// indistinguishable from "the page briefly navigated" and silently degrades
+// to "0 jobs, done" with no diagnostic trail. The caller tracks a consecutive
+// streak (mirroring siteChangedStreak) and only warns once it persists.
 async function runExtractor(page, extractorJS) {
   try {
     const raw = await page.evaluate(extractorJS);
-    return { jobs: Array.isArray(raw) ? raw : [], siteChangedError: null };
+    return { jobs: Array.isArray(raw) ? raw : [], siteChangedError: null, evalError: null };
   } catch (err) {
-    if (/SITE_CHANGED/i.test(err?.message)) return { jobs: [], siteChangedError: err };
-    return { jobs: [], siteChangedError: null }; // context destroyed / transient — retry next tick
+    if (/SITE_CHANGED/i.test(err?.message)) return { jobs: [], siteChangedError: err, evalError: null };
+    return { jobs: [], siteChangedError: null, evalError: err }; // context destroyed / transient — retry next tick, unless it persists
   }
 }
 
@@ -1352,20 +1356,38 @@ async function clickNextPage(page, sourceId) {
   }
 }
 
-// ── Pre-loader for scroll / load-more sources ─────────────────────────────────
-// Scrolls or clicks "load more" until JOB_PER_PAGE_CAP jobs are visible on the
-// page — used for sources without traditional pagination. Must be called BEFORE
-// runExtractor so extraction sees the full loaded set in one pass.
+// ── Pre-loader for scroll sources ─────────────────────────────────────────────
+// Scrolls until JOB_PER_PAGE_CAP jobs are visible on the page — used for
+// sources without traditional pagination. Must be called BEFORE runExtractor
+// so extraction sees the full loaded set in one pass.
 // Breaks as soon as a reveal action stops increasing the extractor-visible job
 // count; otherwise keeps going until the per-query target is reached.
+//
+// A parallel "click a Load More button" strategy existed here as dead code:
+// it was gated on a LOAD_MORE_SELECTORS map that was always `{}` (no source
+// was ever configured), meaning any source actually needing that strategy
+// silently got NO preload at all rather than a working fallback — worse than
+// having no such feature, since it looked supported. Removed rather than
+// guessing a selector for a source we can't verify; add it back with a real,
+// verified selector if a specific source needs it.
 async function preloadContent(page, sourceId, extractorJS, overlayBase, signal) {
-  const isScroll    = SCROLL_SOURCES.has(sourceId);
-  const loadMoreSel = LOAD_MORE_SELECTORS[sourceId];
-  if (!isScroll && !loadMoreSel) return;
+  const isScroll = SCROLL_SOURCES.has(sourceId);
+  if (!isScroll) return;
 
   let prevCount = -1;
+  let iterations = 0;
   while (true) {
     if (signal?.aborted) break;
+    // Ceiling on top of the "count stopped increasing" exit below — mirrors
+    // click-pagination's JOB_MAX_PAGES guard (added there for the identical
+    // reason: "a source whose 'next' re-serves content could loop
+    // unbounded"). A source that trickles in one marginally-new item per
+    // reveal action forever would otherwise never plateau exactly and never
+    // hit JOB_PER_PAGE_CAP either.
+    if (++iterations > JOB_MAX_PAGES) {
+      logger.info(`[BrowserScraper] preloadContent(${sourceId}) hit the ${JOB_MAX_PAGES}-iteration ceiling — stopping reveal actions`);
+      break;
+    }
     const raw   = await page.evaluate(extractorJS).catch(() => []);
     const count = countDistinctJobs(raw);
     await updateOverlay(page, { ...overlayBase, status: `Loading jobs… ${count}/${JOB_PER_PAGE_CAP}` });
@@ -1421,25 +1443,6 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal) 
           }
         });
       }
-    } else {
-      const clicked = await page.evaluate(async sel => {
-        const btn = document.querySelector(sel);
-        if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
-        const rect = btn.getBoundingClientRect();
-        if (rect.top < 0 || rect.bottom > window.innerHeight) {
-          const dest = window.scrollY + rect.top - window.innerHeight * 0.35;
-          const start = window.scrollY;
-          const delta = dest - start;
-          const steps = 3 + Math.floor(Math.random() * 3);
-          for (let s = 1; s <= steps; s++) {
-            window.scrollTo(0, start + delta * s / steps);
-            await new Promise(r => setTimeout(r, 30 + Math.random() * 40));
-          }
-        }
-        btn.click();
-        return true;
-      }, loadMoreSel);
-      if (!clicked) break;
     }
     await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
   }
@@ -1825,9 +1828,9 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         await injectOverlay(page); // re-inject after challenge resolution may have navigated
         await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: 'Extracting jobs…' });
 
-        // For scroll / load-more sources, pre-load content up to the per-query
-        // target before running the extractor. Paginated sources skip this.
-        if (SCROLL_SOURCES.has(sourceId) || LOAD_MORE_SELECTORS[sourceId]) {
+        // For scroll sources, pre-load content up to the per-query target
+        // before running the extractor. Paginated sources skip this.
+        if (SCROLL_SOURCES.has(sourceId)) {
           await preloadContent(page, sourceId, task.extractorJS, overlayBase, signal);
           if (signal?.aborted) { earlyExit = true; break; }
           await injectOverlay(page);
@@ -1841,6 +1844,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         let siteChangedStreak    = 0;
         let siteChangedWarning   = null;
         let paginationRecoveries = 0; // times recoverFromChallengeHomeLanding fired on a paginated page
+        let evalErrStreak        = 0; // consecutive non-SITE_CHANGED runExtractor throws — see runExtractor's doc comment
 
         while (!earlyExit && !sourceSkipped && !signal?.aborted) {
           const pauseResult = await waitIfPaused(page, signal);
@@ -1870,7 +1874,29 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             url: page.url(),
           });
 
-          const { jobs: extracted, siteChangedError } = await runExtractor(page, task.extractorJS);
+          const { jobs: extracted, siteChangedError, evalError } = await runExtractor(page, task.extractorJS);
+
+          // A non-SITE_CHANGED throw (e.g. "context destroyed" from a
+          // mid-evaluate navigation) is usually transient and should retry,
+          // exactly like runExtractor's doc comment says — but extracted is
+          // always [] in this case, so without this check the code below
+          // (`if (extracted.length === 0) break`) silently treated ANY
+          // eval hiccup as "genuinely reached end of results" and ended the
+          // source's pagination outright, contradicting that comment. Mirror
+          // siteChangedError's bounded-retry pattern so a real transient
+          // gets a retry, and a persistently-throwing extractor (a real bug)
+          // still stops instead of looping forever, with a log trail either way.
+          if (evalError) {
+            evalErrStreak++;
+            logger.warn(`[BrowserScraper] ${srcName} extractor threw (non-SITE_CHANGED, ${evalErrStreak}/${SITE_CHANGED_ABORT_THRESHOLD}): ${evalError.message}`);
+            if (evalErrStreak >= SITE_CHANGED_ABORT_THRESHOLD) {
+              logger.warn(`[BrowserScraper] ${srcName} extractor threw ${evalErrStreak}x in a row (non-SITE_CHANGED) — stopping this source's pagination rather than retrying indefinitely.`);
+              break;
+            }
+            await new Promise(r => setTimeout(r, humanDelay(1000)));
+            continue;
+          }
+          evalErrStreak = 0;
 
           if (siteChangedError) {
             siteChangedStreak++;
