@@ -105,9 +105,13 @@ export const ipcRenderer = {
   removeListener: () => {},
 };
 
+// Not real encryption (this is a plain-Node test stub — no OS keychain to
+// hook into) — a functional round-trip so callers exercising the real
+// safeStorage.isEncryptionAvailable()===true code path get meaningful
+// coverage, rather than only ever hitting the "unavailable" fallback branch.
 export const safeStorage = {
-  isEncryptionAvailable: () => false,
-  encryptString: (s) => Buffer.from(s, 'utf8'),
+  isEncryptionAvailable: () => true,
+  encryptString: (s) => Buffer.from(String(s), 'utf8'),
   decryptString: (buf) => Buffer.from(buf).toString('utf8'),
 };
 

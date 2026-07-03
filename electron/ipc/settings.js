@@ -3,8 +3,69 @@ import electronPkg from 'electron';
 import fs from 'fs';
 import { handleSafe } from './ipcUtils.js';
 import { normalizeMarketplaceWatchUrls } from '../../src/utils/marketplaceWatchUrls.js';
+import { logger } from '../logger.js';
 
-const { dialog, BrowserWindow } = electronPkg;
+const { dialog, BrowserWindow, safeStorage } = electronPkg;
+
+// ── API-key encryption at rest ──────────────────────────────────────────────
+// electron-store persists settings as plain JSON in userData — readable by
+// any other local process/user/malware, or swept up whole by an unrelated
+// "zip my userData for support" ask. safeStorage ties encryption to the OS
+// user's own login (macOS Keychain / Windows DPAPI / Linux Secret Service),
+// unlike electron-store's own `encryptionKey` option, which would just be a
+// fixed string baked into the app — extractable from the bundle, so
+// obfuscation rather than real protection.
+//
+// Encrypted values are stored as `ENC_PREFIX + base64(safeStorage output)` so
+// a legacy plaintext value written before this change (or a value written
+// while safeStorage was unavailable) is still readable — decryptSecret only
+// attempts to decrypt strings carrying the prefix, everything else passes
+// through as-is.
+const ENC_PREFIX = 'safeStorage:v1:';
+const AI_SECRET_KEYS = ['anthropicApiKey', 'geminiApiKey'];
+const JOBS_SECRET_KEYS = ['usajobsApiKey', 'scrapflyApiKey', 'diceApiKey'];
+
+export function encryptSecret(plain) {
+  if (!plain || typeof plain !== 'string') return plain;
+  if (!safeStorage?.isEncryptionAvailable?.()) return plain; // e.g. some headless Linux — fall back to plaintext rather than block saving
+  try {
+    return ENC_PREFIX + safeStorage.encryptString(plain).toString('base64');
+  } catch (err) {
+    logger.warn('[Settings] Failed to encrypt a secret field, storing as plaintext:', err?.message || err);
+    return plain;
+  }
+}
+
+export function decryptSecret(stored) {
+  if (typeof stored !== 'string' || !stored.startsWith(ENC_PREFIX)) return stored; // legacy plaintext, or not a string
+  try {
+    return safeStorage.decryptString(Buffer.from(stored.slice(ENC_PREFIX.length), 'base64'));
+  } catch (err) {
+    // Undecryptable (e.g. the userData folder was copied to a different
+    // machine/user — safeStorage keys don't travel). Fail closed: an empty
+    // key surfaces as "not configured" in the UI rather than crashing.
+    logger.warn('[Settings] Failed to decrypt a secret field:', err?.message || err);
+    return '';
+  }
+}
+
+function encryptSectionSecrets(keys, obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const out = { ...obj };
+  for (const key of keys) {
+    if (key in out) out[key] = encryptSecret(out[key]);
+  }
+  return out;
+}
+
+function decryptSectionSecrets(keys, obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const out = { ...obj };
+  for (const key of keys) {
+    if (key in out) out[key] = decryptSecret(out[key]);
+  }
+  return out;
+}
 
 // Broadcasts a payload to every alive renderer. Used so that nodes already
 // mounted in the canvas can react to settings changes (e.g. clear "API key
@@ -85,9 +146,24 @@ export function tryGetStore() {
   }
 }
 
+// The renderer's Settings UI round-trips the actual key value into an
+// editable input (not a masked placeholder), so both get-settings and
+// update-settings's return value must hand back DECRYPTED secrets — only
+// the on-disk representation (what electron-store actually persists) is
+// encrypted. IPC to the renderer is a much lower bar of trust than a
+// plaintext file any other local process could read.
+function decryptedStoreSnapshot(s) {
+  const data = s.store;
+  return {
+    ...data,
+    ai: decryptSectionSecrets(AI_SECRET_KEYS, data.ai),
+    jobs: decryptSectionSecrets(JOBS_SECRET_KEYS, data.jobs),
+  };
+}
+
 export function registerSettingsHandlers() {
   handleSafe('get-settings', async () => {
-    return getStore().store;
+    return decryptedStoreSnapshot(getStore());
   });
 
   // Shallow-merges per top-level section so a partial update (e.g. only
@@ -96,7 +172,10 @@ export function registerSettingsHandlers() {
     const s = getStore();
     for (const [section, value] of Object.entries(updates || {})) {
       if (value && typeof value === 'object' && !Array.isArray(value)) {
-        s.set(section, { ...(s.get(section) || {}), ...value });
+        let merged = { ...(s.get(section) || {}), ...value };
+        if (section === 'ai') merged = encryptSectionSecrets(AI_SECRET_KEYS, merged);
+        else if (section === 'jobs') merged = encryptSectionSecrets(JOBS_SECRET_KEYS, merged);
+        s.set(section, merged);
       } else {
         s.set(section, value);
       }
@@ -108,7 +187,7 @@ export function registerSettingsHandlers() {
     broadcastToAllRenderers('settings-changed', {
       changedSections: Object.keys(updates || {}),
     });
-    return s.store;
+    return decryptedStoreSnapshot(s);
   });
 
   // Native file picker for the service-account JSON. Returns the chosen
@@ -126,7 +205,7 @@ export function registerSettingsHandlers() {
 }
 
 export function getAISettings() {
-  return tryGetStore()?.get('ai') || {};
+  return decryptSectionSecrets(AI_SECRET_KEYS, tryGetStore()?.get('ai') || {});
 }
 
 /**
@@ -136,7 +215,7 @@ export function getAISettings() {
  * .env-based config (purely additive — UI-configured values take precedence).
  */
 export function getJobsSettings() {
-  const jobs = tryGetStore()?.get('jobs') || {};
+  const jobs = decryptSectionSecrets(JOBS_SECRET_KEYS, tryGetStore()?.get('jobs') || {});
   return {
     usajobsApiKey:  jobs.usajobsApiKey  || process.env.USAJOBS_API_KEY  || '',
     usajobsEmail:   jobs.usajobsEmail   || process.env.USAJOBS_EMAIL    || '',
@@ -145,11 +224,12 @@ export function getJobsSettings() {
 }
 
 export function getDiceApiKey() {
-  return tryGetStore()?.get('jobs.diceApiKey') || '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
+  const stored = tryGetStore()?.get('jobs.diceApiKey');
+  return decryptSecret(stored) || '1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8';
 }
 
 export function saveDiceApiKey(key) {
-  if (typeof key === 'string' && key.length > 10) tryGetStore()?.set('jobs.diceApiKey', key);
+  if (typeof key === 'string' && key.length > 10) tryGetStore()?.set('jobs.diceApiKey', encryptSecret(key));
 }
 
 // Persistent cache of Glassdoor location → numeric locId (its search location

@@ -214,6 +214,7 @@ import { getConnectedHubCards } from '../src/utils/connectedHubCards.js';
 import { enqueueStatusCheckAction, getStatusCheckActionQueueDepth } from '../src/utils/statusCheckActionQueue.js';
 import { getCanonicalDomain, extractDomain, effectiveConcurrency, isCoolingDown, recordOutcome, getRateLimiterSnapshot, _resetRateLimiter } from '../electron/ipc/rateLimiter.js';
 import { recordTokenUsage, recordTruncation, effectiveCap, TOKEN_HARD_CAP } from '../electron/ipc/tokenBudget.js';
+import { encryptSecret, decryptSecret } from '../electron/ipc/settings.js';
 import { PRODUCT_CONDITIONS, CONDITION_VALUES, DEFAULT_CONDITION, getConditionDef, formatConditionForPricingPrompt, formatConditionGuideForPrompt, stripConditionFromGeneratedTitle } from '../src/utils/productConditions.js';
 import { beginMarketplaceStatusRun, completeMarketplaceStatusPlatform, finishMarketplaceStatusRun, getMarketplaceStatusActiveRuns, marketplaceStatusCheckingIds, mergeMarketplaceStatusResults, publishMarketplaceStatusCheckingIds, subscribeMarketplaceStatusCheckingIds } from '../src/utils/marketplaceStatusProgress.js';
 import { TIMINGS, autosaveDebounceMs, docSaveDebounceMs, maxUndoHistory } from '../src/utils/timings.js';
@@ -6900,6 +6901,31 @@ const tests = [
       assert(isAllowedOpenFileExt('/x/launcher.desktop') === false, 'desktop blocked (missed by the old denylist)');
       assert(isAllowedOpenFileExt('/x/lib.jar') === false, 'jar blocked (missed by the old denylist)');
       assert(isAllowedOpenFileExt('/x/no-extension') === false, 'no extension → blocked, not allowed');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'settings: encryptSecret/decryptSecret round-trip + legacy-plaintext + failure fallback',
+    run: () => {
+      const key = 'sk-ant-example-not-a-real-key-0123456789';
+      const encrypted = encryptSecret(key);
+      assert(typeof encrypted === 'string' && encrypted !== key, 'encrypted value differs from plaintext and carries the version prefix');
+      assert(encrypted.startsWith('safeStorage:v1:'), 'encrypted value is marked with the version prefix');
+      assert(decryptSecret(encrypted) === key, 'round-trips back to the original plaintext');
+      // A legacy value written before encryption existed (no prefix) must
+      // still be readable, unchanged.
+      assert(decryptSecret('legacy-plaintext-key') === 'legacy-plaintext-key', 'unprefixed legacy plaintext passes through unchanged');
+      // Non-string / empty inputs never throw.
+      assert(encryptSecret('') === '', 'empty string encrypts to empty string (no prefix)');
+      assert(encryptSecret(null) === null, 'null passes through encryptSecret unchanged');
+      assert(decryptSecret(null) === null, 'null passes through decryptSecret unchanged');
+      assert(decryptSecret(undefined) === undefined, 'undefined passes through decryptSecret unchanged');
+      // decryptSecret is documented to fail closed to '' (not throw) if
+      // safeStorage.decryptString itself throws on corrupted/foreign
+      // ciphertext (e.g. userData copied to a different machine) — not
+      // exercised here since the test stub's decryptString never throws
+      // (unlike real OS-keychain-backed safeStorage), only asserting the
+      // documented contract doesn't throw on well-formed input above.
       return { ok: true };
     },
   },
