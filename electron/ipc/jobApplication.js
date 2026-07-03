@@ -25,6 +25,7 @@ import { callLLMRaw, callLLMText } from './llm.js';
 import { APPLICATION_COVER_LETTER_SCHEMA } from './aiSchemas.js';
 import { renderApplicationPdfs, getDesignSystemDir } from './resumePdf.js';
 import { logger } from '../logger.js';
+import { wrapUntrustedText } from './promptSafety.js';
 
 const { shell } = electronPkg;
 
@@ -48,7 +49,9 @@ function jobBlock(job = {}) {
     `Company: ${job.company || 'Unknown'}`,
     job.location ? `Location: ${job.location}` : null,
     job.salary ? `Salary: ${job.salary}` : null,
-    `Description:\n${job.snippet || '(no description scraped)'}`,
+    // job.snippet is scraper-sourced (whoever posted the listing controls
+    // it) — wrapped as untrusted data, not a plain fence. See promptSafety.js.
+    `Description:\n${wrapUntrustedText('job-description', job.snippet)}`,
   ].filter(Boolean).join('\n');
 }
 
@@ -79,9 +82,7 @@ Then decide about the ROLE by reading the scraped job description below:
 - If it is thin, vague, or empty, ALSO research the role: the typical responsibilities and requirements for a "${title}" at this company (or closely comparable companies if this exact posting isn't findable), the skills/tools/outcomes emphasized, and seniority expectations. Note when you're inferring from comparable roles vs. citing a posting you actually found.
 
 Scraped job description (may be full, partial, or empty):
-"""
-${job.snippet || '(none captured)'}
-"""
+${wrapUntrustedText('job-description', job.snippet)}
 
 Prefer concrete, recent, verifiable facts with rough dates. If you cannot find reliable information about the specific company or role, say so explicitly rather than inventing. Output plain prose only — no headers, no bullet markdown.`;
 
