@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react';
-import { sanitizeNodesForSave, sanitizeEdgesForSave, CURRENT_SCHEMA_VERSION } from '../utils/serializationUtils';
 import { EventLogger } from '../utils/EventLogger';
 import { TIMINGS, autosaveDebounceMs } from '../utils/timings';
 import { useIsMountedRef } from './useIsMountedRef';
+import { buildSaveData } from './canvasSaveData';
 
 export function useCanvasInitialization({
   nodes,
@@ -59,7 +59,7 @@ export function useCanvasInitialization({
     if (!currentFile || !window.electronAPI) return;
 
     let timer;
-    const attemptSave = () => {
+    const attemptSave = async () => {
       // Safety guard 1: never auto-save while navigation animations are active
       // as the stack/nodes state may be transient or intermediate.
       if (isAnimatingRef?.current) {
@@ -78,15 +78,16 @@ export function useCanvasInitialization({
       // This specifically avoids redundant saves immediately after a workspace load.
       if (!hasUnsavedChangesRef.current) return;
 
-      const rawData = flushRef.current ? flushRef.current() : stateRef.current;
-      if (!rawData.nodes || !Array.isArray(rawData.nodes)) return;
-
-      // Strip transient visual properties (e.g. source-filter opacity on job cards)
-      // and drop orphan edges (refs to nodes that were deleted outside the
-      // normal cascade path — accumulate forever otherwise and bloat the file).
-      const sanitizedNodes = sanitizeNodesForSave(rawData.nodes);
-      const sanitizedEdges = sanitizeEdgesForSave(rawData.edges, sanitizedNodes);
-      const data = { ...rawData, nodes: sanitizedNodes, edges: sanitizedEdges, schemaVersion: CURRENT_SCHEMA_VERSION };
+      // Shared with the manual save in useCanvasPersistence — flushes any
+      // in-progress contenteditable edit (a text node the user is still
+      // typing into) before serializing, so a debounce window landing
+      // mid-edit can't silently persist stale pre-edit text.
+      const data = await buildSaveData({
+        flushStack: flushRef.current,
+        fallbackState: stateRef.current,
+      });
+      if (!isMountedRef.current) return;
+      if (!data.nodes || !Array.isArray(data.nodes)) return;
 
       window.electronAPI.saveWorkspace({ data, filePath: currentFile }).then(res => {
         if (!isMountedRef.current) return;
