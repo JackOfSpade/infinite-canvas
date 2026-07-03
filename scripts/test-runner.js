@@ -5659,6 +5659,63 @@ const tests = [
     },
   },
   {
+    name: 'browser pool: queueScrape dedup keys on signal identity, not just url+extractor',
+    run: async () => {
+      const release = pauseBrowserPool('test-dedup-signal');
+      const controllerA = new AbortController();
+      const controllerB = new AbortController();
+      const url = 'https://example.com/browser-pool-dedup-test';
+      const extractor = '() => []';
+      let taskA, taskB, taskC;
+      try {
+        // Two independent callers targeting the identical url+extractor, but
+        // with DIFFERENT AbortSignals — must NOT be coupled: each gets its
+        // own queue entry, and aborting one must not affect the other.
+        taskA = queueScrape(url, extractor, { signal: controllerA.signal, sourceLabel: 'dedup-test', timeoutMs: 1000 })
+          .then(() => 'resolved', (err) => err?.message || String(err));
+        taskB = queueScrape(url, extractor, { signal: controllerB.signal, sourceLabel: 'dedup-test', timeoutMs: 1000 })
+          .then(() => 'resolved', (err) => err?.message || String(err));
+        // A third call sharing controllerA's signal (and every other field)
+        // SHOULD dedupe with taskA — same-signal callers are the case this
+        // cache exists to optimize (e.g. every task in one scrapeMultiple()
+        // batch shares one signal).
+        const taskARepeat = queueScrape(url, extractor, { signal: controllerA.signal, sourceLabel: 'dedup-test', timeoutMs: 1000 });
+        taskC = taskARepeat.then(() => 'resolved', (err) => err?.message || String(err));
+
+        await new Promise(r => setTimeout(r, 0));
+        const state = getBrowserPoolQueueState();
+        // 2 distinct queue entries (A/B), not 1 — proves signal identity is part of the key.
+        assert(state.queued === 2, `two independent signals → two distinct queue entries (got ${state.queued})`);
+
+        controllerA.abort();
+        const resultA = await taskA;
+        assert(resultA === 'Aborted', `taskA aborts on its own signal (got ${resultA})`);
+        const resultC = await taskC;
+        assert(resultC === 'Aborted', `the same-signal repeat call also aborts (proves it deduped onto taskA, got ${resultC})`);
+
+        // taskB must be UNAFFECTED by controllerA's abort — this is the actual bug:
+        // before the fix, aborting the "leader" caller's signal would reject
+        // every deduped caller, even ones (like B) that never asked to cancel.
+        const stillPending = await Promise.race([
+          taskB.then(() => 'settled'),
+          new Promise(r => setTimeout(() => r('still-pending'), 20)),
+        ]);
+        assert(stillPending === 'still-pending', 'taskB (different signal) must still be pending after controllerA aborted — not coupled to it');
+
+        controllerB.abort();
+        const resultB = await taskB;
+        assert(resultB === 'Aborted', `taskB aborts independently on its own signal (got ${resultB})`);
+
+        return { ok: true };
+      } finally {
+        controllerA.abort();
+        controllerB.abort();
+        await Promise.allSettled([taskA, taskB, taskC].filter(Boolean));
+        release();
+      }
+    },
+  },
+  {
     name: 'job run staging: per-page ledger + resumable detection + cleanup',
     run: async () => {
       const dir = path.join(os.tmpdir(), `ic-jobstaging-${process.pid}`);
