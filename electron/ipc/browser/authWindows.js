@@ -1260,7 +1260,10 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     releaseProfileReservation();
     releaseBrowserPoolPause();
     finishAuthWindowDiagnostic(diagKey, { result: 'setup-error', error: err?.message || String(err) });
-    try { await captchaBrowser?.close(); } catch { /* ignored */ }
+    // Same robust close as openLoginWindow — a beforeunload prompt or hung
+    // renderer on this early failure path shouldn't leave a stuck visible
+    // Chrome window behind (the same "wheel of death" login windows hit).
+    if (captchaBrowser) await closeLoginBrowserSafely(captchaBrowser, 'Captcha-resolve window').catch(() => {});
     throw err;
   }
 
@@ -1269,6 +1272,18 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     let autoClosePoll = null;
     let autoCloseTimeout = null;
     let resolved = false; // true = challenge auto-detected as cleared
+    // Dedup guard so the several auto-detect/abort/cleanup paths below that
+    // all want to close the window share ONE closeLoginBrowserSafely() call
+    // (beforeunload-prompt neutralize + process-exit wait + SIGKILL fallback)
+    // instead of racing plain .close() calls that can leave a stuck visible
+    // Chrome window the same way un-hardened login-window closes used to.
+    let captchaBrowserClosePromise = null;
+    const requestCaptchaBrowserClose = () => {
+      if (!captchaBrowserClosePromise) {
+        captchaBrowserClosePromise = closeLoginBrowserSafely(captchaBrowser, 'Captcha-resolve window');
+      }
+      return captchaBrowserClosePromise;
+    };
     // ── Resolve diagnostics — answer "Solve opened, I saw the page, but the card
     // still failed: why?" The resolve telemetry otherwise records only a count, so
     // a 0 can't be told apart from a stale-selector miss, a thrown extractor, or a
@@ -1442,7 +1457,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
           resolved = true;
           if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
           if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
-          await captchaBrowser.close().catch(() => {});
+          await requestCaptchaBrowserClose();
         };
 
         if (inlineExtractorJS) {
@@ -1497,7 +1512,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
                 siteChangedError = e?.message || String(e);
                 if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
                 if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
-                await captchaBrowser.close().catch(() => {});
+                await requestCaptchaBrowserClose();
                 return;
               }
             }
@@ -1612,7 +1627,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       try {
         const remaining = await captchaBrowser.pages();
         if (remaining.length === 0) {
-          await captchaBrowser.close().catch(() => {});
+          await requestCaptchaBrowserClose();
         }
       } catch { /* tearing down */ }
     });
@@ -1624,7 +1639,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     // process tied to no in-canvas state.
     const onAbort = () => {
       logger.info(`[StealthBrowser] Captcha resolve window aborted externally — closing`);
-      captchaBrowser.close().catch(() => {});
+      requestCaptchaBrowserClose().catch(() => {});
     };
     if (signal) {
       if (signal.aborted) onAbort();
@@ -1663,7 +1678,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
       if (signal) signal.removeEventListener?.('abort', onAbort);
       if (sender) sender.removeListener('destroyed', cleanup);
-      try { await captchaBrowser.close(); } catch { /* ignored */ }
+      await requestCaptchaBrowserClose().catch(() => {});
       releaseProfileReservation();
       releaseBrowserPoolPause();
       // `items` is the inline-extracted comp data captured from the visible
