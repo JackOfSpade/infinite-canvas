@@ -134,7 +134,7 @@ import { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
 import { withStatusCheckLock, getStatusCheckQueueDepth } from '../electron/ipc/statusCheckLock.js';
 import { withMarketplaceBrowserLock, getMarketplaceBrowserQueueDepth } from '../electron/ipc/marketplaceBrowserLock.js';
 import { createAggregatingProgress } from '../electron/ipc/compProgressAggregator.js';
-import { buildFinalListingTitle, buildRefreshResearchItems, buildResearchItems, computeBundleTotal, selectBundleHeadline, selectListingPriceTiers, buildItemQuery, bundleSynergyForPrices, deriveBundlePricingResult, normalizeBundlePricingResult } from '../src/utils/bundlePricing.js';
+import { buildFinalListingTitle, buildRefreshResearchItems, buildResearchItems, computeBundleTotal, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, buildItemQuery, bundleSynergyForPrices, deriveBundlePricingResult, normalizeBundlePricingResult } from '../src/utils/bundlePricing.js';
 import {
   clearMissingPreviewRelinkCache,
   clearMissingPreviewRelinkDiagnostics,
@@ -182,6 +182,7 @@ import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReport
 import { enforceClipboardMarkdownCap } from '../electron/ipc/bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown } from '../electron/ipc/bugReport/filterSummary.js';
 import { buildSellHubPriceDropRollup } from '../electron/ipc/bugReport/sellHubPriceDropRollup.js';
+import { buildSellHubResolveRollup, buildSellHubResolveSnapshot } from '../src/utils/sellHubResolveSnapshot.js';
 import { createJobSearchTestMode, parseJobSearchEnvBoolean } from '../src/utils/jobSourceScope.js';
 import { createMarketplaceTestMode, parseMarketplaceEnvBoolean, getScopedCompSourceIds, isCompSourceEnabledInScope, normalizeCompWarnings } from '../src/utils/compSourceScope.js';
 import { getJobAuthPreflightSourceIds, JOB_AUTH_PREFLIGHT_SOURCE_IDS } from '../src/utils/jobAuthPreflight.js';
@@ -623,6 +624,43 @@ const tests = [
         },
       ]);
       assert(nested.includes('Buried Lamp'), 'rollup descends into grouped sub-canvases (shared visitCanvasNodes recursion)');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'buildSellHubResolveRollup: surfaces active resolve queue compactly',
+    run: () => {
+      const snapshot = buildSellHubResolveSnapshot(
+        [{
+          id: 'hub-resolve-1',
+          type: 'sellhub',
+          data: {
+            hubState: 'researching',
+            product: { generated_title: 'Camera Slider | Bundle' },
+          },
+        }],
+        [{
+          id: 'hub-resolve-1',
+          hubState: 'researching',
+          isApplyingResolves: true,
+          queuedResolvesCount: 2,
+          resolveQueueWait: 1,
+          activeResolveSourceIds: ['ebay-sold'],
+          queuedResolveSourceIds: ['swappa-sold'],
+          compProgress: {
+            'ebay-sold': { status: 'done', count: 60 },
+            'swappa-sold': { status: 'error', count: 0, warning: { code: 'scrape-timeout' } },
+          },
+        }],
+      );
+      assert(snapshot.length === 1 && snapshot[0].workCount === 2,
+        'resolve snapshot should keep hubs with active resolved-source work');
+      const md = buildSellHubResolveRollup(snapshot);
+      assert(md.includes('SellHub Source Resolve Queue'), 'resolve rollup should render a compact section');
+      assert(md.includes('Camera Slider \\| Bundle'), 'resolve rollup should escape markdown table delimiters');
+      assert(md.includes('behind 1 browser op'), 'resolve rollup should show source-rescrape browser queue wait');
+      assert(md.includes('ebay-sold') && md.includes('swappa-sold'), 'resolve rollup should show active and queued source ids');
+      assert(md.includes('scrape-timeout'), 'resolve rollup should preserve warning codes in source progress');
       return { ok: true };
     },
   },
@@ -2280,6 +2318,11 @@ const tests = [
         'Bug report code filtering: SELL should retain SellHub price-drop commits');
       assert(!sell.sectionExclusions.has('nodes') && sell.sectionExclusions.has('nodeInternals'),
         'Bug report code filtering: SELL should keep lightweight nodes for the SellHub rollup but drop node internals');
+      const resolve = applyBugReportCode([...logs, '[SellHub][8e27f3ce] queued swappa-sold resolve for active resolve drain'], {}, 'RESOLVE');
+      assert(resolve.filteredLogs.some(line => line.includes('active resolve drain')) && resolve.matchedCodes.includes('RESOLVE'),
+        'Bug report code filtering: RESOLVE should retain source-resolve queue diagnostics');
+      assert(resolve.sectionExclusions.has('nodes') && resolve.sectionExclusions.has('nodeComponentStates'),
+        'Bug report code filtering: RESOLVE should rely on compact resolve state and drop heavy node payloads/diagnostics');
       const preview = previewBugReportCode(logs, 'ERR+NOPE');
       assert(preview.unknownCodes.includes('NOPE') && preview.valid, 'Bug report code filtering: preview should report unknown codes while keeping valid matches');
 
@@ -3155,6 +3198,34 @@ const tests = [
       assert(/card0=\[/.test(renamedMsg), `expected card0 skeleton → ${renamedMsg}`);
       assert(/tile__v2-title/.test(renamedMsg) && /tile__v2-price/.test(renamedMsg),
         `skeleton should expose the new class names → ${renamedMsg}`);
+
+      // (d) eBay served a FOREIGN listing layout (A/B bucket / rollback / redesign):
+      //     the page is fully loaded with real listing links, but NONE of the
+      //     .s-card / .srp-results selectors — nor any known alt-container — match,
+      //     so cards[0] is null and the OLD diag emitted no card0 skeleton, leaving
+      //     the bug report unable to tell a layout change from a wall (the actual
+      //     "eBay retries still fail" report). The upgraded diag must still be
+      //     self-diagnosing: a bodyHead visible-text snippet + alt-layout counts
+      //     (sItem/brw/itmLinks) + a card0 skeleton auto-discovered from the LI/DIV
+      //     ancestor of the first /itm/ link.
+      const foreignEbay =
+        '<html><head><title>shark slider nano</title></head><body>' +
+        '<h1>Results for shark slider nano</h1>' +
+        '<ul class="brand-new-results">' +
+        '<li class="nu-card"><a class="nu-card__link" href="/itm/123456">Shark Slider Nano II</a>' +
+        '<span class="nu-card__cost">$500.00</span></li>' +
+        '</ul></body></html>';
+      for (const [label, ex] of [['ebay-sold', EBAY_SOLD_EXTRACTOR], ['ebay-active', EBAY_ACTIVE_EXTRACTOR]]) {
+        const m = evalThrow(ex, foreignEbay, 'https://www.ebay.com/sch/i.html?_nkw=shark+slider');
+        assert(m && /SITE_CHANGED/.test(m), `${label} foreign layout should throw SITE_CHANGED → ${m}`);
+        assert(/cards=0/.test(m) && /anySCard=0/.test(m), `${label} expected 0 known cards → ${m}`);
+        // The three fields that make a 0-known-selector page diagnosable:
+        assert(/itmLinks=1/.test(m), `${label} should count the real /itm/ listing link → ${m}`);
+        assert(/sItem=0/.test(m) && /brw=0/.test(m), `${label} alt-layout counts should be present → ${m}`);
+        assert(/bodyHead="[^"]*results for shark slider/i.test(m), `${label} bodyHead must carry visible page text → ${m}`);
+        assert(/card0=\[[^\]]*nu-card/.test(m), `${label} skeleton must auto-discover the foreign card class → ${m}`);
+        assert(!/LOGIN-WALL/.test(m), `${label} a real results page must NOT flag login → ${m}`);
+      }
 
       // The other throwing extractors also carry the diag block.
       for (const [label, ex] of [['ebay-sold', EBAY_SOLD_EXTRACTOR], ['ebay-active', EBAY_ACTIVE_EXTRACTOR], ['mercari', MERCARI_SOLD_EXTRACTOR]]) {
@@ -5412,6 +5483,18 @@ const tests = [
       ], 'cracked back glass');
       assert(recoveredRefreshItems.length === 2 && recoveredRefreshItems[1].query === 'Otterbox Defender case',
         `Refresh Prices recovers legacy saved bundle items when extraItems are missing — got ${JSON.stringify(recoveredRefreshItems)}`);
+      const recoveredExtrasForDraft = recoverRefreshExtraItems(product, [], [
+        { key: 'primary', label: 'iPhone XS', query: 'Apple iPhone XS 256GB', condition: 'Used - Good' },
+        { key: 'legacy-case', label: 'Otterbox Defender case', query: 'Otterbox Defender case', condition: 'New', pricingNotes: 'sealed' },
+      ]);
+      assert(recoveredExtrasForDraft.length === 1 && recoveredExtrasForDraft[0].generated_title === 'Otterbox Defender case' && recoveredExtrasForDraft[0].pricingNotes === 'sealed',
+        `Refresh Prices draft recovery exposes legacy bundle extras for editing — got ${JSON.stringify(recoveredExtrasForDraft)}`);
+      const explicitExtrasForDraft = recoverRefreshExtraItems(product, extras, [
+        { key: 'primary', query: 'stale primary' },
+        { key: 'stale-extra', query: 'stale extra' },
+      ]);
+      assert(explicitExtrasForDraft === extras,
+        'Refresh Prices draft recovery preserves current editable extraItems, including blank rows, when they already exist');
       const explicitRefreshItems = buildRefreshResearchItems(product, extras, [
         { key: 'primary', query: 'stale primary' },
         { key: 'stale-extra', query: 'stale extra' },

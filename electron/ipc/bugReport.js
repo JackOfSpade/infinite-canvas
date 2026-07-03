@@ -26,6 +26,7 @@ import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
 import { buildSellHubPriceDropRollup } from './bugReport/sellHubPriceDropRollup.js';
+import { buildSellHubResolveRollup } from '../../src/utils/sellHubResolveSnapshot.js';
 import { getMissingPreviewRelinkDiagnostics } from './missingPreviewRelink.js';
 import { getAuthWindowDiagnostics, NATIVE_LOGIN_PLATFORMS } from './browser/authWindows.js';
 import { NATIVE_READ_PLATFORMS } from './browser/nativeChromeReader.js';
@@ -428,7 +429,7 @@ ${rows}
 }
 
 export function generateMarkdown(payload, reportWindowId = null, options = {}) {
-  const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, imageState, lastSaveError, activeEditableText } = payload;
+  const { description, nodes, edges, drawings, frontEndState, nodeInternals, nodeComponentStates, mediaState, imageState, lastSaveError, activeEditableText, sellHubResolveStates } = payload;
 
   // A filter code (e.g. LEAN) may have dropped whole sections before the payload
   // reached us. Track that so the summary can say "omitted by filter" rather than
@@ -952,6 +953,8 @@ ${statusQueueLine}
     }
   } catch { /* never break the report on diagnostic failure */ }
 
+  const sellHubResolveMarkdown = buildSellHubResolveRollup(sellHubResolveStates || []);
+
   // ── Build freshness ───────────────────────────────────────────────────────
   // Catches the "I edited a file but the running app still does the old thing"
   // failure mode. Vite hot-reloads the renderer, but Electron main-process
@@ -1171,7 +1174,7 @@ ${rows}
           if (d.extractOutcome) bits.push(`extractor=${d.extractOutcome}`);
           if (typeof d.textLen === 'number') bits.push(`textLen=${d.textLen}`);
           bits.push(`saw captcha=${d.sawChallenge ? 'yes' : 'no'} / consent=${d.sawConsent ? 'yes' : 'no'}`);
-          if (d.siteChangedError) bits.push(`SITE_CHANGED: ${String(d.siteChangedError).replace(/`/g, "'").replace(/\s+/g, ' ').slice(0, 200)}`);
+          if (d.siteChangedError) bits.push(`SITE_CHANGED: ${String(d.siteChangedError).replace(/`/g, "'").replace(/\s+/g, ' ').slice(0, 400)}`);
           return `- **${d.platformId ?? '?'} (${d.state})**: ${bits.join(' · ')}`;
         });
       const resolveDiagSection = resolveDiagRows.length > 0
@@ -1452,7 +1455,7 @@ ${filterSummaryMarkdown}
 - Active Tool: ${frontEndState?.activeTool || 'None'}
 - OS: ${systemInfo.platform} ${systemInfo.arch}
 ${viewportLine}
-${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildFreshnessMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobsPipelineMarkdown}${issueReporterDraftMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   // Static safety bound (not adaptive): keeps the assembled bug-report payload

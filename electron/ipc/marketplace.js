@@ -484,7 +484,7 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
         items: [],
         warning: isSiteChanged ? {
           code: 'stale-selectors', severity: 'warn',
-          evidence: String(r?.error || '').slice(0, 240),
+          evidence: String(r?.error || '').slice(0, 700), // wide enough to keep the [diag … bodyHead=… card0=[…]] tail (matches the multi-source path)
           suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.',
         } : {
           code: 'task-failed', severity: 'block',
@@ -1574,7 +1574,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
     // (stale-selectors/warn) so the user knows to fix the extractor, not solve a
     // captcha. Don't trigger a headless rescrape — it would fail identically.
     if (result.siteChangedError && !event.sender.isDestroyed()) {
-      const evidence = String(result.siteChangedError).slice(0, 240);
+      const evidence = String(result.siteChangedError).slice(0, 700); // keep the [diag … bodyHead=… card0=[…]] tail
       event.sender.send('price-source-progress', {
         nodeId, sourceId, status: 'error',
         warning: {

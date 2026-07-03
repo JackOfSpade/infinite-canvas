@@ -23,7 +23,7 @@ import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { filesToProductImagePaths, summarizeFileExtensions } from '../utils/fileDropUtils';
 import { mergeSourceIntoComps, retryWarningRequiringAction, updateResolvedSourceWarning } from '../utils/compsMerge';
-import { buildFinalListingTitle, buildRefreshResearchItems, computeBundleTotal, selectBundleHeadline, selectListingPriceTiers } from '../utils/bundlePricing';
+import { buildFinalListingTitle, buildRefreshResearchItems, computeBundleTotal, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers } from '../utils/bundlePricing';
 import { generateId } from '../utils/idGenerator';
 import { canSellHubReplaceFailedInitialPhotos, getHubDropLockReason } from '../utils/hubDropEligibility';
 import { appendPhotoPaths, normalizePhotoPathList, removePhotoPathAt } from '../utils/photoPathList';
@@ -210,10 +210,27 @@ export function SellHubNode({ id, data }) {
   // ops (marketplaceBrowserLock); a queued op emits queuedBehind>0, then 0 once
   // it acquires the shared browser.
   const [queueWait, setQueueWait] = useState(0);
+  const [resolveQueueWait, setResolveQueueWait] = useState(0);
 
   const syncResolveWorkCount = useCallback(() => {
     setQueuedResolvesCount(pendingMergesRef.current.length + activeResolveSourceIdsRef.current.size);
-  }, []);
+    // Broadcast per-source resolve state to the comp-source cards so a Retry that
+    // is queued behind another source's active drain greys out + reads "Queued…"
+    // (and "Retrying…" once it's picked up) instead of staying a live, re-clickable
+    // Retry button. This is the single choke point for every mutation of the resolve
+    // queue (queueSourceResolve + the drain loop + the reset sites all call it), so
+    // the cards see every transition. Each event carries the FULL authoritative
+    // snapshot (active[] + queued[]) — the card just takes the last event, no
+    // per-card coalescing/dedup needed. Reset sites clear the refs then call this,
+    // so the empty-arrays broadcast un-greys a card on Cancel/Refresh (no hang).
+    document.dispatchEvent(new CustomEvent('comp-source-resolve-state', {
+      detail: {
+        hubId: id,
+        active: Array.from(activeResolveSourceIdsRef.current),
+        queued: pendingMergesRef.current.map(q => q?.sourceId).filter(Boolean),
+      },
+    }));
+  }, [id]);
 
   const queueSourceResolve = useCallback((entry) => {
     const result = enqueueUniqueSourceResolve(
@@ -272,10 +289,14 @@ export function SellHubNode({ id, data }) {
     if (!sub) return undefined;
     const cleanup = sub((payload) => {
       if (payload?.nodeId && payload.nodeId !== id) return;
-      // Hub banner is for the hub-level price-check SCRAPE (no sourceId). A
-      // per-source resolve/rescrape wait (carries sourceId) surfaces on that
-      // card's Solve button instead, so ignore it here.
-      if (payload?.sourceId) return;
+      // Hub banner is for the hub-level price-check scrape. Resolved-source
+      // rescrapes carry sourceId; mirror their browser wait while the hub is in
+      // the "applying resolved sources" state because the card may have already
+      // auto-dismissed or be offscreen.
+      if (payload?.sourceId) {
+        setResolveQueueWait(payload?.queuedBehind || 0);
+        return;
+      }
       setQueueWait(payload?.queuedBehind || 0);
     });
     return () => cleanup?.();
@@ -285,9 +306,18 @@ export function SellHubNode({ id, data }) {
   // "old comps circle is still showing" can be diagnosed from the report alone
   // (otherwise compProgress is only visible to the user's eyes).
   useEffect(() => {
-    EventLogger.registerNodeState(id, { hubState, compProgress, queuedResolvesCount, isApplyingResolves, queueWait });
+    EventLogger.registerNodeState(id, {
+      hubState,
+      compProgress,
+      queuedResolvesCount,
+      isApplyingResolves,
+      queueWait,
+      resolveQueueWait,
+      queuedResolveSourceIds: pendingMergesRef.current.map(q => q?.sourceId).filter(Boolean),
+      activeResolveSourceIds: Array.from(activeResolveSourceIdsRef.current),
+    });
     return () => EventLogger.unregisterNodeState(id);
-  }, [id, hubState, compProgress, queuedResolvesCount, isApplyingResolves, queueWait]);
+  }, [id, hubState, compProgress, queuedResolvesCount, isApplyingResolves, queueWait, resolveQueueWait]);
 
   // ── Coordinated comp-card dismissal (mirrors Job Search Module) ───────────
   // Keep every comp-source card visible as a set while the price check runs,
@@ -319,6 +349,13 @@ export function SellHubNode({ id, data }) {
       cancelCleanCompCardDismiss();
       return;
     }
+    // Do not dismiss the source cards while the hub is still applying solved
+    // source updates. In that state the visible captcha windows may be gone, but
+    // the bundle-wide refetches are still the reason the hub is busy.
+    if (isApplyingResolves || queuedResolvesCount > 0) {
+      cancelCleanCompCardDismiss();
+      return;
+    }
     // All cards terminal (done/error/skipped) → start the grace timer. A card
     // still 'searching' (e.g. a live re-fetch after Solve) cancels it. Falls back
     // to persistedProgress so a save-quit-reopen in 'comps-ready' is handled too.
@@ -338,7 +375,7 @@ export function SellHubNode({ id, data }) {
     } else {
       cancelCleanCompCardDismiss();
     }
-  }, [compProgress, id, getNodes, scheduleCleanCompCardDismiss, cancelCleanCompCardDismiss]);
+  }, [compProgress, id, getNodes, scheduleCleanCompCardDismiss, cancelCleanCompCardDismiss, isApplyingResolves, queuedResolvesCount]);
 
 
   const startAnalysis = useCallback(async (imagePaths) => {
@@ -584,7 +621,8 @@ export function SellHubNode({ id, data }) {
       pendingMergesRef.current.splice(0);
       activeResolveSourceIdsRef.current.clear();
       setIsApplyingResolves(false);
-      setQueuedResolvesCount(0);
+      syncResolveWorkCount();   // -> count 0 + broadcast empty snapshot so any card queued on this run un-greys
+      setResolveQueueWait(0);
       cleanupCompSourceCards();
 
       // Price each item independently (its own comps / query / condition), then
@@ -758,7 +796,7 @@ export function SellHubNode({ id, data }) {
       });
       addToast({ title: 'Pricing Error', description: err?.message || String(err), type: 'error' });
     }
-  }, [id, updateGlobal, synthesizePrice, synthesizeBundlePrice, addToast, data.product, cleanupCompSourceCards, getNodes]);
+  }, [id, updateGlobal, synthesizePrice, synthesizeBundlePrice, addToast, data.product, cleanupCompSourceCards, getNodes, syncResolveWorkCount]);
 
   const queueSynthesizeAndPrice = useCallback(async (items, scrapeWarnings, cancelled) => {
     let lease = null;
@@ -867,8 +905,10 @@ export function SellHubNode({ id, data }) {
       return { items: mergedItems, warnings: effectiveWarnings };
     }
 
+    cancelCleanCompCardDismiss();
     resolveDrainInFlightRef.current = true;
     setIsApplyingResolves(true);
+    setResolveQueueWait(0);
     syncResolveWorkCount();
     try {
       // New Solve results can arrive while a bundle source is being retried.
@@ -895,9 +935,10 @@ export function SellHubNode({ id, data }) {
     } finally {
       resolveDrainInFlightRef.current = false;
       setIsApplyingResolves(false);
+      setResolveQueueWait(0);
       syncResolveWorkCount();
     }
-  }, [id, mergeResolvedSource, syncResolveWorkCount]);
+  }, [id, mergeResolvedSource, syncResolveWorkCount, cancelCleanCompCardDismiss]);
 
   // ── Additional items packaged into this one listing (bundle research) ─────
   // The primary item comes from the AI photo analysis (data.product); these are
@@ -907,7 +948,15 @@ export function SellHubNode({ id, data }) {
     updateGlobal(id, { extraItems: [...(data.extraItems || []), { id: generateId(), generated_title: '', brand: '', model: '', condition: data.product?.condition || 'Used - Good', pricingNotes: '' }] });
   }, [id, data.extraItems, data.product, updateGlobal]);
   const handleEditExtraItem = useCallback((itemId, patch) => {
-    updateGlobal(id, { extraItems: (data.extraItems || []).map(it => (it.id === itemId ? { ...it, ...patch } : it)) });
+    const clearsGeneratedQuery = ['generated_title', 'brand', 'model'].some(field => Object.prototype.hasOwnProperty.call(patch || {}, field))
+      && !Object.prototype.hasOwnProperty.call(patch || {}, 'search_query');
+    updateGlobal(id, {
+      extraItems: (data.extraItems || []).map(it => (
+        it.id === itemId
+          ? { ...it, ...patch, ...(clearsGeneratedQuery ? { search_query: '' } : {}) }
+          : it
+      )),
+    });
   }, [id, data.extraItems, updateGlobal]);
   const handleRemoveExtraItem = useCallback((itemId) => {
     updateGlobal(id, { extraItems: (data.extraItems || []).filter(it => it.id !== itemId) });
@@ -975,6 +1024,7 @@ export function SellHubNode({ id, data }) {
           pendingItemsRef.current = null;
           scrapeWarningsRef.current = [];
           setIsApplyingResolves(false);
+          setResolveQueueWait(0);
           syncResolveWorkCount();
           resetCompProgress();
           spawnCompSourceCards();
@@ -1574,13 +1624,14 @@ export function SellHubNode({ id, data }) {
     // would otherwise leak into the next scrape's drain pass.
     pendingMergesRef.current.splice(0);
     activeResolveSourceIdsRef.current.clear();
-    setQueuedResolvesCount(0);
+    syncResolveWorkCount();   // -> count 0 + broadcast empty snapshot so queued cards un-grey on reset
+    setResolveQueueWait(0);
     scrapeInFlightRef.current = false;
     resolveDrainInFlightRef.current = false;
     setIsApplyingResolves(false);
     processingRef.current = false;
     processingPriceRef.current = false;
-  }, [data.locked, data.product, hubState, id, updateGlobal, cleanupCompSourceCards, epoch, resetCompProgress, moduleRunQueue]);
+  }, [data.locked, data.product, hubState, id, updateGlobal, cleanupCompSourceCards, epoch, resetCompProgress, moduleRunQueue, syncResolveWorkCount]);
 
   const nodeWidth = 280;
   const nodeHeight = hubState === 'empty'
@@ -1593,6 +1644,15 @@ export function SellHubNode({ id, data }) {
 
   // Running total from comp progress
   const totalComps = Object.values(compProgress).reduce((sum, p) => sum + (p.count || 0), 0);
+  const resolveWorkSubline = isApplyingResolves
+    ? (queuedResolvesCount > 0
+        ? `${queuedResolvesCount} resolved source update${queuedResolvesCount === 1 ? '' : 's'} ${
+            resolveQueueWait > 0
+              ? `waiting behind ${resolveQueueWait} browser op${resolveQueueWait === 1 ? '' : 's'}`
+              : 'in progress'
+          }`
+        : 'Finishing resolved source updates')
+    : null;
 
   const handleDismissError = useCallback(() => {
     EventLogger.log(`[SellHub][${id}] User clicked Dismiss Error`);
@@ -1622,6 +1682,62 @@ export function SellHubNode({ id, data }) {
   const retryFailedAvailable = !isOversizedImageError(data.errorMessage) && (
     !!data.product || data.imagePaths?.length > 0
   );
+
+  const handleReresearchFromPriced = useCallback(() => {
+    if (data.locked || !data.product) return;
+
+    EventLogger.log(`[SellHub][${id}] Refresh Prices clicked from priced state — returning to draft before re-research`);
+    epoch.bump();
+    moduleRunQueue.cancelQueuedRunsForNode(id, 'Price refresh returned to draft');
+
+    const nextExtraItems = recoverRefreshExtraItems(data.product, data.extraItems, data.itemPricings);
+    hubStateRef.current = 'draft';
+    pendingItemsRef.current = null;
+    scrapeWarningsRef.current = [];
+    pendingMergesRef.current.splice(0);
+    activeResolveSourceIdsRef.current.clear();
+    scrapeInFlightRef.current = false;
+    resolveDrainInFlightRef.current = false;
+    processingPriceRef.current = false;
+    setEditing(null);
+    setQueueWait(0);
+    syncResolveWorkCount();   // -> count 0 + broadcast empty snapshot so queued cards un-grey on re-research-from-priced
+    setResolveQueueWait(0);
+    setIsApplyingResolves(false);
+    resetCompProgress();
+    cleanupCompSourceCards();
+
+    updateGlobal(id, {
+      hubState: 'draft',
+      queuedModuleRun: null,
+      pricing: null,
+      comps: null,
+      itemPricings: null,
+      bundleTotal: null,
+      bundlePricing: null,
+      pendingItems: null,
+      scrapeWarnings: [],
+      platformFit: null,
+      platformFitPending: false,
+      errorMessage: null,
+      isRateLimit: false,
+      extraItems: nextExtraItems,
+    });
+  }, [
+    data.locked,
+    data.product,
+    data.extraItems,
+    data.itemPricings,
+    id,
+    epoch,
+    moduleRunQueue,
+    setEditing,
+    resetCompProgress,
+    cleanupCompSourceCards,
+    updateGlobal,
+    syncResolveWorkCount,
+  ]);
+
   const banner = data.errorMessage ? (
     <HubErrorBanner
       errorMessage={data.errorMessage}
@@ -1730,7 +1846,7 @@ export function SellHubNode({ id, data }) {
             theme="amber"
             label={isApplyingResolves ? 'Applying resolved sources...' : 'Researching market prices...'}
             subline={isApplyingResolves
-              ? `${Math.max(1, queuedResolvesCount)} source retr${Math.max(1, queuedResolvesCount) === 1 ? 'y' : 'ies'} in progress`
+              ? resolveWorkSubline
               : (totalComps > 0 ? `${totalComps} similar listing${totalComps === 1 ? '' : 's'} found` : null)}
             onReset={resetHandler}
           />
@@ -1763,7 +1879,7 @@ export function SellHubNode({ id, data }) {
             editablePhotos={!data.locked}
             onRemovePhoto={handleRemoveDisplayPhoto}
             onAddPhotos={handleAddDisplayPhotos}
-            onReresearch={handleConfirmDraft}
+            onReresearch={handleReresearchFromPriced}
             spawnedMarketplaceIds={spawnedMarketplaceIds}
             onSpawnMarketplaceCard={handleSpawnMarketplaceCard}
             platformFit={data.platformFit || null}

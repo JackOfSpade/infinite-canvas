@@ -332,7 +332,10 @@ async function executeScrape(url, extractorJS, options = {}) {
         // (Cloudflare "Just a moment…", a 403/503 interstitial) rather than real
         // selector drift, and an immediate throw skips the anti-bot detector below
         // — mislabeling a hard block as `stale-selectors` (warn) all the way to the
-        // source card. Capture it, break, and let detection have first look.
+        // source card. Keep polling after the first throw as well: slow SRP pages
+        // can legitimately have a huge body/title before their listing nodes are
+        // attached, and breaking on the first throw turns that timing gap into a
+        // false selector-drift warning.
         let siteChangedError = null;
         let lastCount = -2;   // sentinel so the first real read always "changes"
         let stableReads = 0;
@@ -343,10 +346,16 @@ async function executeScrape(url, extractorJS, options = {}) {
           let r = null;
           try { r = await page.evaluate(extractorJS); }
           catch (evalErr) {
-            if (/SITE_CHANGED/i.test(evalErr?.message || '')) { siteChangedError = evalErr; break; }
+            if (/SITE_CHANGED/i.test(evalErr?.message || '')) {
+              siteChangedError = evalErr;
+              if (Date.now() >= readinessDeadline) break;
+              await new Promise(res => setTimeout(res, READINESS.POLL_MS));
+              continue;
+            }
             /* navigated mid-evaluate — retry next tick */
           }
           if (r != null) {
+            siteChangedError = null;
             extractorResult = r;                 // always keep the freshest result
             const count = countItems(r);
             if (count === -1) break;             // opaque shape — done

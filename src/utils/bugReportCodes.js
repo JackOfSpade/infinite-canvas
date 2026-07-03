@@ -226,6 +226,14 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  RESOLVE: {
+    label: 'Source Resolve Queue',
+    description: 'SellHub source-resolve/retry diagnostics — captcha Solve windows, resolved-source drains, rescrape-source IPC tasks, source card progress, and marketplace browser-queue waits. Use for “source retries stuck/in progress after solving” reports. Keeps the compact SellHub Source Resolve Queue section but drops heavy node payloads/diagnostics.',
+    logFilter: line =>
+      /resolved source|source resolve|resolve\/rescrape|queued .*resolve|applying queued source resolve|source retr|rescrape-source|Rescrap(?:e|ing)|captcha-resolve|price-source-progress|BrowserPool|marketplace browser|queued behind/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   SELL: {
     label: 'SellHub State & Price Drops',
     description: 'SellHub UI/state audit — price-drop plan fields, target price commits (including $0/free targets), listing cards, and focused sell-form controls. Keeps lightweight node data so the compact SellHub Price-Drop Plans section can render, but drops the heavy node diagnostics table and media/image dumps.',

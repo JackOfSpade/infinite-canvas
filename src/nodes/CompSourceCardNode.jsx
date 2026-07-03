@@ -38,7 +38,12 @@ export function CompSourceCardNode({ id, data }) {
   // How many sell-side browser ops are ahead of this card's Solve while it waits
   // for the shared-browser lock (marketplaceBrowserLock). 0 = not waiting.
   const [queuedAhead, setQueuedAhead] = useState(0);
-  const [retrying, setRetrying] = useState(false);
+  // This source's position in the hub's resolve/retry queue, broadcast by the
+  // owning SellHub on every queue mutation: 'queued' (waiting behind another
+  // source's active drain), 'active' (being rescraped now), or 'idle'. Drives the
+  // warn-severity Retry button so a second Retry greys out + reads "Queued…"
+  // instead of firing a duplicate rescrape.
+  const [resolveState, setResolveState] = useState('idle');
   const { deleteElements, updateNodeData, getNode } = useReactFlow();
 
   // The card can be dismissed by the hub's grace timer while a Solve/Retry IPC
@@ -82,6 +87,26 @@ export function CompSourceCardNode({ id, data }) {
     });
     return () => cleanup?.();
   }, [data.hubId, data.sourceId]);
+
+  // The owning SellHub broadcasts the FULL resolve-queue snapshot on every
+  // mutation (queue/drain/reset). Take the last event authoritatively — no
+  // coalescing needed. Guarded by isMountedRef so a card dismissed mid-drain
+  // (comp-source-dismiss-clean grace timer) never setState after unmount.
+  useEffect(() => {
+    const onResolveState = (event) => {
+      if (event.detail?.hubId !== data.hubId) return;
+      if (!isMountedRef.current) return;
+      const active = Array.isArray(event.detail?.active) ? event.detail.active : [];
+      const queued = Array.isArray(event.detail?.queued) ? event.detail.queued : [];
+      setResolveState(
+        active.includes(data.sourceId) ? 'active'
+          : queued.includes(data.sourceId) ? 'queued'
+            : 'idle',
+      );
+    };
+    document.addEventListener('comp-source-resolve-state', onResolveState);
+    return () => document.removeEventListener('comp-source-resolve-state', onResolveState);
+  }, [data.hubId, data.sourceId, isMountedRef]);
 
   // Mirror progress into node data ONLY on terminal states (done / error).
   // The sanitizer keeps comp-source cards only when persistedProgress carries
@@ -219,42 +244,42 @@ export function CompSourceCardNode({ id, data }) {
         <div className="flex border-t border-white/10">
           {(hasWarn || !progress?.url) ? (
             <button
-              onClick={async (e) => {
+              onClick={(e) => {
                 e.stopPropagation();
-                if (retrying || hubLocked) return;
-                const hubProduct = getNode(data.hubId)?.data?.product || {};
-                const query = hubProduct.search_query?.trim()
-                  || `${hubProduct.brand || ''} ${hubProduct.model || ''} ${hubProduct.generated_title || ''}`.trim();
-                if (!query || !window.electronAPI?.rescrapeSource) return;
-                setRetrying(true);
-                try {
-                  const result = await window.electronAPI.rescrapeSource({ sourceId: data.sourceId, query, nodeId: data.hubId });
-                  if (result?.items?.length > 0) {
-                    document.dispatchEvent(new CustomEvent('comp-captcha-resolved', {
-                      detail: {
-                        hubId: data.hubId,
-                        sourceId: data.sourceId,
-                        items: result.items,
-                        category: result.category || 'sold',
-                        warning: result.warning || null,
-                      },
-                    }));
-                  }
-                } finally {
-                  if (isMountedRef.current) setRetrying(false);
-                }
+                // No-op while this source's retry is already queued/active so a
+                // second click can't fire a duplicate rescrape. The hub broadcast
+                // (fired synchronously by queueSourceResolve) greys the button on
+                // the FIRST click, so there is no optimistic-flag hang on the
+                // discard paths that never queue.
+                if (hubLocked || resolveState !== 'idle') return;
+                document.dispatchEvent(new CustomEvent('comp-captcha-resolved', {
+                  detail: {
+                    hubId: data.hubId,
+                    sourceId: data.sourceId,
+                    items: null,
+                    category: null,
+                    warning: null,
+                    noChallengeConfirmed: false,
+                  },
+                }));
               }}
               onPointerDown={(e) => e.stopPropagation()}
-              disabled={retrying || hubLocked}
+              disabled={hubLocked || resolveState !== 'idle'}
               className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
               title={hubLocked
                 ? 'Hub is locked'
-                : hasWarn
-                  ? 'Re-run the extractor — update the scraper code and rebuild first'
-                  : 'Retry this source'}
+                : resolveState === 'active'
+                  ? 'Retrying this source now…'
+                  : resolveState === 'queued'
+                    ? 'Queued behind another source’s retry — it will run automatically'
+                    : hasWarn
+                      ? 'Re-run the extractor — update the scraper code and rebuild first'
+                      : 'Retry this source'}
             >
-              <ExternalLink size={9} />
-              {retrying ? 'Retrying…' : 'Retry'}
+              {resolveState === 'idle'
+                ? <ExternalLink size={9} />
+                : <Loader2 size={9} className="animate-spin" />}
+              {resolveState === 'active' ? 'Retrying…' : resolveState === 'queued' ? 'Queued…' : 'Retry'}
             </button>
           ) : progress?.url && (
             <button

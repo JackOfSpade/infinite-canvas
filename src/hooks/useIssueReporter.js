@@ -3,6 +3,7 @@ import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { applyBugReportCode } from '../utils/bugReportCodes';
 import { isJobNodeType, isSellNodeType } from '../utils/nodePresence';
+import { buildSellHubResolveSnapshot } from '../utils/sellHubResolveSnapshot';
 import { useIsMountedRef } from './useIsMountedRef';
 
 export function useIssueReporter({
@@ -178,6 +179,7 @@ export function useIssueReporter({
         }
         return n;
       });
+      const nodeComponentStates = EventLogger.getNodeStates();
 
       // Build the full payload, then drop sections excluded by the filter code.
       const fullPayload = {
@@ -218,7 +220,8 @@ export function useIssueReporter({
           },
         },
         nodeInternals,
-        nodeComponentStates: EventLogger.getNodeStates(),
+        nodeComponentStates,
+        sellHubResolveStates: buildSellHubResolveSnapshot(reportNodes, nodeComponentStates),
         eventLogs: filteredLogs,
         lastSaveError: EventLogger.getLastSaveError(),
         activeEditableText,

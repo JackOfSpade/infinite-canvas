@@ -113,9 +113,14 @@ export function buildResearchItems(product = {}, extraItems = [], primaryNotes =
  * collapse an existing bundle into a single-item run.
  */
 export function buildRefreshResearchItems(product = {}, extraItems = [], itemPricings = [], primaryNotes = '') {
-  const explicitExtras = Array.isArray(extraItems) ? extraItems.filter(it => buildItemQuery(it)) : [];
+  return buildResearchItems(product, recoverRefreshExtraItems(product, extraItems, itemPricings), primaryNotes);
+}
+
+export function recoverRefreshExtraItems(product = {}, extraItems = [], itemPricings = []) {
+  const existingExtras = Array.isArray(extraItems) ? extraItems : [];
+  const explicitExtras = existingExtras.filter(it => buildItemQuery(it));
   if (explicitExtras.length > 0 || !Array.isArray(itemPricings) || itemPricings.length <= 1) {
-    return buildResearchItems(product, extraItems, primaryNotes);
+    return existingExtras;
   }
   const recoveredExtras = itemPricings.slice(1).map((it, index) => ({
     id: it?.key || `recovered-extra-${index + 1}`,
@@ -124,7 +129,7 @@ export function buildRefreshResearchItems(product = {}, extraItems = [], itemPri
     condition: it?.condition || product.condition || DEFAULT_CONDITION,
     pricingNotes: it?.pricingNotes || '',
   }));
-  return buildResearchItems(product, recoveredExtras, primaryNotes);
+  return recoveredExtras;
 }
 
 /**

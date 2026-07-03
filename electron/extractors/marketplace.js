@@ -42,6 +42,19 @@ const SITE_CHANGED_DIAG = `(function(extra, sampleEl){
     var path = location.pathname || '';
     var title = (document.title || '').replace(/\\s+/g, ' ').slice(0, 40);
     var bodyLen = ((document.body && document.body.textContent) || '').length;
+    // Visible-text HEAD snippet — the single highest-value field when 0 known
+    // selectors match: it reveals whether the page is a real (but re-laid-out)
+    // results page, an anti-bot / "verify you're human" wall, a logged-out
+    // prompt, or a model-picker, NONE of which the selector COUNTS can tell apart.
+    // innerText (not textContent) so a site's huge inline <style>/<script> head
+    // (eBay SRPs carry a >100KB inline <style>) doesn't drown out the visible copy.
+    // ES5-safe (stringified into page.evaluate); bounded slice-then-collapse so it
+    // can't stall on a pathological body, and " → ' so the bodyHead="..." wrapper stays readable.
+    var bodyHead = '';
+    try {
+      var __bt = (document.body && (document.body.innerText || document.body.textContent)) || '';
+      bodyHead = __bt.slice(0, 8000).replace(/\\s+/g, ' ').replace(/"/g, "'").trim().slice(0, 200);
+    } catch (e2) {}
     var loginWall = /login|signin|sign-in/i.test(path)
       || !!document.querySelector('input[type=password]')
       || /\\b(log ?in|sign ?in)\\b/i.test(document.title || '');
@@ -61,6 +74,7 @@ const SITE_CHANGED_DIAG = `(function(extra, sampleEl){
     }
     return ' [diag ' + (extra ? extra + ' ' : '') + 'path=' + path
       + ' title="' + title + '" bodyLen=' + bodyLen
+      + (bodyHead ? ' bodyHead="' + bodyHead + '"' : '')
       + (loginWall ? ' LOGIN-WALL/anon-page' : '') + skel + ']';
   } catch (e) { return ' [diag-failed]'; }
 })`;
@@ -273,7 +287,33 @@ export const EBAY_SOLD_EXTRACTOR = `
     if (__claimedTotal === 0 || document.querySelector('.srp-save-null-search')) {
       return { items: [], yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: 0 } };
     }
-    throw new Error('SITE_CHANGED: ebay-sold su-styled-text extractor returned 0 — eBay design system may have changed' + __diag('cards=' + cards.length + ' titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length, cards[0]));
+    // Widen the diagnostic sample to the KNOWN alternate eBay card families so a
+    // 0-.s-card page still yields a card0=[…] class skeleton to rewrite against.
+    // Purely for the SITE_CHANGED diag — NOT an extraction fallback (a blind
+    // alternate-container extract would let ghost/promo/watchlist tiles poison the
+    // comp set → wrong FMV, with no live test to catch it). Last resort: the LI/DIV
+    // ancestor of the first real listing link, so even a foreign container is fingerprinted.
+    const diagSample = cards[0]
+      || document.querySelector('li.s-card, .s-card, .srp-results li, [data-testid="item-card"], .s-item, .brwrvr__item-card, .su-card-container, ul.srp-results > li')
+      || (document.querySelector('a[href*="/itm/"]') && document.querySelector('a[href*="/itm/"]').closest('li, div'));
+    const diagCounts = [
+      'cards=' + cards.length,
+      'srp=' + document.querySelectorAll('.srp-results').length,
+      'srpLi=' + document.querySelectorAll('.srp-results li').length,
+      'liSCard=' + document.querySelectorAll('li.s-card').length,
+      'anySCard=' + document.querySelectorAll('.s-card').length,
+      'titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length,
+      'sCardTitle=' + document.querySelectorAll('.s-card__title').length,
+      'priceSel=' + document.querySelectorAll('.s-card__price').length,
+      // Alternate-layout markers: is eBay serving the OLD .s-item cards, the
+      // browse-redesign .brwrvr card, or (itmLinks=0) NO listings at all
+      // (→ a wall / logged-out / empty page, read bodyHead) vs listings present
+      // in an unknown container (itmLinks>0 → targeted selector rewrite).
+      'sItem=' + document.querySelectorAll('.s-item').length,
+      'brw=' + document.querySelectorAll('.brwrvr__item-card').length,
+      'itmLinks=' + document.querySelectorAll('a[href*="/itm/"]').length,
+    ].join(' ');
+    throw new Error('SITE_CHANGED: ebay-sold su-styled-text extractor returned 0 — eBay design system may have changed' + __diag(diagCounts, diagSample));
   }
   return { items, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: __claimedTotal } };
 })()
@@ -321,7 +361,33 @@ export const EBAY_ACTIVE_EXTRACTOR = `
     if (__claimedTotal === 0 || document.querySelector('.srp-save-null-search')) {
       return { items: [], yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: 0 } };
     }
-    throw new Error('SITE_CHANGED: ebay-active su-styled-text extractor returned 0 — eBay design system may have changed' + __diag('cards=' + cards.length + ' titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length, cards[0]));
+    // Widen the diagnostic sample to the KNOWN alternate eBay card families so a
+    // 0-.s-card page still yields a card0=[…] class skeleton to rewrite against.
+    // Purely for the SITE_CHANGED diag — NOT an extraction fallback (a blind
+    // alternate-container extract would let ghost/promo/watchlist tiles poison the
+    // comp set → wrong FMV, with no live test to catch it). Last resort: the LI/DIV
+    // ancestor of the first real listing link, so even a foreign container is fingerprinted.
+    const diagSample = cards[0]
+      || document.querySelector('li.s-card, .s-card, .srp-results li, [data-testid="item-card"], .s-item, .brwrvr__item-card, .su-card-container, ul.srp-results > li')
+      || (document.querySelector('a[href*="/itm/"]') && document.querySelector('a[href*="/itm/"]').closest('li, div'));
+    const diagCounts = [
+      'cards=' + cards.length,
+      'srp=' + document.querySelectorAll('.srp-results').length,
+      'srpLi=' + document.querySelectorAll('.srp-results li').length,
+      'liSCard=' + document.querySelectorAll('li.s-card').length,
+      'anySCard=' + document.querySelectorAll('.s-card').length,
+      'titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length,
+      'sCardTitle=' + document.querySelectorAll('.s-card__title').length,
+      'priceSel=' + document.querySelectorAll('.s-card__price').length,
+      // Alternate-layout markers: is eBay serving the OLD .s-item cards, the
+      // browse-redesign .brwrvr card, or (itmLinks=0) NO listings at all
+      // (→ a wall / logged-out / empty page, read bodyHead) vs listings present
+      // in an unknown container (itmLinks>0 → targeted selector rewrite).
+      'sItem=' + document.querySelectorAll('.s-item').length,
+      'brw=' + document.querySelectorAll('.brwrvr__item-card').length,
+      'itmLinks=' + document.querySelectorAll('a[href*="/itm/"]').length,
+    ].join(' ');
+    throw new Error('SITE_CHANGED: ebay-active su-styled-text extractor returned 0 — eBay design system may have changed' + __diag(diagCounts, diagSample));
   }
   return { items, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: __claimedTotal } };
 })()
