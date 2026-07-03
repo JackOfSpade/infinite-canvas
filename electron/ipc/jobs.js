@@ -1345,9 +1345,13 @@ Be creative with suggestedRoleQueries — think about what career directions the
       recordSourcePage(canvasFilePath, { sourceId, query, page, jobs, now: Date.now() });
 
     // 1. Run browser collection (manual) and API sources concurrently.
-    // pipelineAbort allows a future unrecoverable failure to abort both halves.
     // Individual API source failures (e.g. Dice 500) are source-level errors —
     // they return 0 jobs with a warning and do NOT abort the pipeline.
+    // combinedSignal only ever reflects the caller's own `signal` (when
+    // provided) — pipelineAbort's own signal is never triggered by anything
+    // in this pipeline; it exists purely so combinedSignal is guaranteed to
+    // be a real AbortSignal (never undefined) even when the caller passes
+    // none, since several downstream calls read `.aborted` on it directly.
     const pipelineAbort = new AbortController();
     const combinedSignal = AbortSignal.any([pipelineAbort.signal, signal].filter(s => s instanceof AbortSignal));
 

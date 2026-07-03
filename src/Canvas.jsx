@@ -16,7 +16,6 @@ import { TextNode } from './nodes/TextNode';
 import { CanvasNode } from './nodes/CanvasNode';
 import { ResizeCorrection } from './utils/canvasInteractions';
 import { LinkNode } from './nodes/LinkNode';
-import { ListingNode } from './nodes/ListingNode';
 import { JobCardNode } from './nodes/JobCardNode';
 import { JobSearchNode } from './nodes/JobSearchNode';
 import { JobBoardNode } from './nodes/JobBoardNode';
@@ -84,7 +83,6 @@ const nodeTypes = {
   text: TextNode,
   group: CanvasNode, // Keep 'group' key for backward compatibility of saved nodes, but map it to CanvasNode
   link: LinkNode,
-  listing: ListingNode,
   jobcard: JobCardNode,
   jobhub: JobSearchNode, // 'jobhub' is the legacy persisted type key for the Job Search Module (kept for saved-canvas compat, like 'group')
   jobboard: JobBoardNode,
