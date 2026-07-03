@@ -1754,10 +1754,14 @@ export async function fetchDiceListings(query, location = '', signal = null, max
         if (retryR.ok) {
           r = retryR; // use the successful retry response going forward
         } else {
-          throw new Error(`Dice API unavailable — returned HTTP ${r.status} after ${DICE_MAX_RETRIES + 1} attempts + 1 key-refresh retry.`);
+          const evidence = `Dice API unavailable — returned HTTP ${r.status} after ${DICE_MAX_RETRIES + 1} attempts + 1 key-refresh retry.`;
+          logger.warn(`[Dice API] ${evidence}`);
+          return { items: [], warning: { code: 'task-failed', severity: 'block', evidence } };
         }
       } else {
-        throw new Error(`Dice API unavailable — returned HTTP ${r.status} after ${DICE_MAX_RETRIES + 1} attempt(s). Key refresh also failed — try again later.`);
+        const evidence = `Dice API unavailable — returned HTTP ${r.status} after ${DICE_MAX_RETRIES + 1} attempt(s). Key refresh also failed — try again later.`;
+        logger.warn(`[Dice API] ${evidence}`);
+        return { items: [], warning: { code: 'task-failed', severity: 'block', evidence } };
       }
     } else {
       if (r.warning) logger.warn(`[Dice API] ${r.warning.code}: ${r.warning.evidence}`);

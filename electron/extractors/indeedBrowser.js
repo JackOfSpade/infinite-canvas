@@ -338,7 +338,10 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // run during this window, so actual elapsed time may be longer.
     // Index = retryCount of the entry that just failed.
     // retryCount ≥ CF_ESCALATION_MS.length → all retries exhausted, give up.
-    const CF_ESCALATION_MS = [5_000, 30_000, 60_000, 0];
+    // No trailing 0: a zero-cooldown entry here would fire one immediate
+    // retry right before giving up, into a still-active block — the
+    // opposite of escalation, and likely to harden it further.
+    const CF_ESCALATION_MS = [5_000, 30_000, 60_000];
 
     const allJobs = [];
     const seenKeys = new Set();

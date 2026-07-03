@@ -47,11 +47,11 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 // from the SAME constants and can never drift apart. 200 tok/comp is the
 // heavy-fallback-model calibration (the binding constraint — the preferred Flash
 // model uses ~87/comp); see llm.js for the real-world telemetry behind it.
-const TOKEN_HARD_CAP        = 24576;
-const PRICE_BASE_TOKENS     = 3000;
-const PRICE_TOKENS_PER_COMP = 200;
-const JOB_BASE_TOKENS       = 2500;
-const JOB_TOKENS_PER_JOB    = 300;
+const PRICE_SYNTH_TOKEN_HARD_CAP = 24576;
+const PRICE_BASE_TOKENS          = 3000;
+const PRICE_TOKENS_PER_COMP      = 200;
+const JOB_BASE_TOKENS            = 2500;
+const JOB_TOKENS_PER_JOB          = 300;
 // Headroom factor for the job-scoring batch budget (jobScoringBatchSize below).
 // The comp ceiling no longer applies a safety factor — it's derived exactly from
 // priceSynthesisMaxTokens so the count fed and the budget granted stay in lockstep.
@@ -112,7 +112,7 @@ export const JOB_MAX_PAGES = FAST_TEST ? FAST_PAGES : 10;
  */
 export function priceSynthesisMaxTokens(itemCount = 40) {
   const n = Math.max(0, Number(itemCount) || 0);
-  return Math.min(TOKEN_HARD_CAP, PRICE_BASE_TOKENS + n * PRICE_TOKENS_PER_COMP);
+  return Math.min(PRICE_SYNTH_TOKEN_HARD_CAP, PRICE_BASE_TOKENS + n * PRICE_TOKENS_PER_COMP);
 }
 
 // ── LLM-input cap (unbounded: feed all comps, limited only by the token budget) ─
@@ -120,7 +120,7 @@ export function priceSynthesisMaxTokens(itemCount = 40) {
 // priceSynthesisMaxTokens() clamps and the synthesis could truncate. Derived from
 // the same constants as the budget formula, so the count fed and the budget
 // granted stay in lockstep no matter how either is tuned.
-const MAX_COMPS_BY_BUDGET = Math.floor((TOKEN_HARD_CAP - PRICE_BASE_TOKENS) / PRICE_TOKENS_PER_COMP);
+const MAX_COMPS_BY_BUDGET = Math.floor((PRICE_SYNTH_TOKEN_HARD_CAP - PRICE_BASE_TOKENS) / PRICE_TOKENS_PER_COMP);
 
 /**
  * How many sold/active comps to feed the price-synthesis LLM. UNBOUNDED: feeds
@@ -188,7 +188,7 @@ export function jobScoringBatchSize(model) {
   const ceiling = SCORING_BATCH_CEILING[lane]  ?? SCORING_BATCH_CEILING.default;
   // Cap output at min(model max, billing hard cap) so big-output models can't
   // request runaway billing; the per-provider ceiling is what binds in practice.
-  const outputCap = Math.min(meta.maxOutput || TOKEN_HARD_CAP, TOKEN_HARD_CAP);
+  const outputCap = Math.min(meta.maxOutput || PRICE_SYNTH_TOKEN_HARD_CAP, PRICE_SYNTH_TOKEN_HARD_CAP);
   const byOutput  = Math.floor((outputCap * BUDGET_SAFETY - JOB_BASE_TOKENS) / perJob);
   return clamp(Math.min(byOutput, ceiling), MIN_SCORING_BATCH, ceiling);
 }

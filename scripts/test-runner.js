@@ -22,6 +22,7 @@ import {
   sourceJobKey,
   dedupeJobsByKey,
   uniqueJobsNotIn,
+  dedupJobsAcrossSources,
 } from '../src/utils/jobIdentity.js';
 import { mergeSourceProgress } from '../src/utils/sourceProgress.js';
 import { isJobCardVisible } from '../src/utils/jobCardFilters.js';
@@ -2425,6 +2426,33 @@ const tests = [
       assert(dedupeJobsByKey([sf, nyc], sourceJobKey).length === 2,
         'sourceJobKey: nationwide distinct-location reqs both survive within-source dedup');
       return { deduped: deduped.length, fresh: fresh.length };
+    },
+  },
+  {
+    name: 'dedupJobsAcrossSources: location-aware cross-source dedup',
+    run: () => {
+      // Same posting scraped from two boards: different URL/source, one board
+      // omits location — must still collapse (this is the whole point of
+      // cross-source dedup: two boards showing the same job under two URLs).
+      const linkedin = { title: 'SWE', company: 'Google', source: 'LinkedIn', url: 'https://linkedin.com/a' };
+      const indeed = { title: 'swe', company: 'google', source: 'Indeed', url: 'https://indeed.com/b', location: 'New York, NY' };
+      const crossSource = dedupJobsAcrossSources([linkedin, indeed]);
+      assert(crossSource.length === 1, `dedupJobsAcrossSources: same posting missing location on one side should collapse, got ${crossSource.length}`);
+
+      // Nationwide search: same title+company, both sides HAVE a location, and
+      // the locations genuinely differ — must stay distinct (the bug being
+      // fixed: title+company alone silently dropped the second city's req).
+      const nycReq = { title: 'Software Engineer', company: 'Google', location: 'New York, NY' };
+      const sfReq = { title: 'Software Engineer', company: 'Google', location: 'San Francisco, CA' };
+      const distinctCities = dedupJobsAcrossSources([nycReq, sfReq]);
+      assert(distinctCities.length === 2, `dedupJobsAcrossSources: distinct-location same-title/company reqs must both survive, got ${distinctCities.length}`);
+
+      // Same title+company+location (from two boards, identical location text) → collapses.
+      const nycAgain = { title: 'software engineer', company: 'google', location: 'new york, ny' };
+      const sameCity = dedupJobsAcrossSources([nycReq, nycAgain, sfReq]);
+      assert(sameCity.length === 2, `dedupJobsAcrossSources: matching-location duplicate should collapse, distinct city should survive, got ${sameCity.length}`);
+
+      return { crossSource: crossSource.length, distinctCities: distinctCities.length, sameCity: sameCity.length };
     },
   },
   {

@@ -6,11 +6,14 @@
  *   jobTitleCompanyKey (title|company)
  *     "Same posting, any board." The SAME job scraped from two boards has two
  *     different URLs, so this is the only key that collapses cross-source
- *     copies. It is the backend's cross-source dedup (jobs.js
- *     dedupByTitleCompany) and therefore the key for every SAME-RUN merge in
- *     the renderer too (post-Solve resolve items, the late USAJobs append) —
- *     anything the backend would have collapsed had it arrived in the main
- *     gather must collapse the same way when it arrives late.
+ *     copies. It is the key for every SAME-RUN merge in the renderer
+ *     (post-Solve resolve items, the late USAJobs append) — anything the
+ *     backend would have collapsed had it arrived in the main gather must
+ *     collapse the same way when it arrives late. The backend's own
+ *     cross-source dedup (jobs.js dedupJobsAcrossSources, below) additionally
+ *     considers location — see dedupJobsAcrossSources for why title+company
+ *     alone over-collapses distinct same-title/company reqs in different
+ *     cities.
  *
  *   jobTitleCompanyUrlKey (title|company|url)
  *     "Same listing." Used by the Job Board union across SEVERAL search
@@ -79,4 +82,48 @@ export function uniqueJobsNotIn(existingJobs, candidateJobs, keyFn) {
     unique.push(job);
   }
   return unique;
+}
+
+function normalizedLocationOrNull(job) {
+  const loc = keyPart(job?.location);
+  return loc ? loc : null;
+}
+
+/**
+ * Cross-source dedup: collapses the SAME posting scraped from two different
+ * boards (which necessarily have two different URLs) while still keeping
+ * genuinely distinct same-title/same-company reqs in different cities apart
+ * (e.g. a nationwide search legitimately turning up "Software Engineer" at
+ * Google in both NYC and SF).
+ *
+ * Grouped by title+company, then within each group two jobs are treated as
+ * the same posting only when their locations match OR at least one side's
+ * location couldn't be read — plain title+company alone can't express this
+ * (it always collapses), and a strict title+company+location key can't
+ * either (it would fail to collapse the same posting when one source omits
+ * location and the other doesn't). First-seen order within each source's
+ * gather is preserved, matching the old dedupByTitleCompany's semantics.
+ */
+export function dedupJobsAcrossSources(jobs) {
+  const arr = Array.isArray(jobs) ? jobs : [];
+  const groups = new Map(); // titleCompanyKey -> kept jobs in that group
+  const result = [];
+  for (const job of arr) {
+    const groupKey = jobTitleCompanyKey(job);
+    const kept = groups.get(groupKey);
+    if (!kept) {
+      groups.set(groupKey, [job]);
+      result.push(job);
+      continue;
+    }
+    const loc = normalizedLocationOrNull(job);
+    const isDuplicate = kept.some((other) => {
+      const otherLoc = normalizedLocationOrNull(other);
+      return loc === null || otherLoc === null || loc === otherLoc;
+    });
+    if (isDuplicate) continue;
+    kept.push(job);
+    result.push(job);
+  }
+  return result;
 }
