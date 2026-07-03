@@ -229,7 +229,7 @@ import { getKnownTaskIds, modelForTask } from '../electron/ipc/llm.js';
 import { CLAUDE_MODELS_IN_USE } from '../electron/ipc/claude.js';
 import { deriveTimeoutBudget } from '../electron/ipc/scrapeBudget.js';
 import { FINGERPRINT_PROFILES, getSessionProfile, getRandomUA } from '../electron/ipc/browser/antiDetectProfiles.js';
-import { isWithinDirectory, isExistingFile } from '../electron/utils/pathSafety.js';
+import { isWithinDirectory, isExistingFile, isSensitivePath } from '../electron/utils/pathSafety.js';
 import {
   resetManualSolveTracking,
   markManualSolveRequired,
@@ -6851,6 +6851,27 @@ const tests = [
       // isExistingFile never throws on bad input.
       assert(isExistingFile('/no/such/file/anywhere.xyz') === false, 'missing file → false');
       assert(isExistingFile(null) === false, 'null path → false (no throw)');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'pathSafety: isSensitivePath blocks credential/config roots, passes ordinary attachments',
+    run: () => {
+      assert(isSensitivePath('/Users/x/.ssh/id_rsa') === true, 'blocks .ssh');
+      assert(isSensitivePath('/Users/x/.aws/credentials') === true, 'blocks .aws');
+      assert(isSensitivePath('/Users/x/.env') === true, 'blocks .env');
+      assert(isSensitivePath('/Users/x/.netrc') === true, 'blocks .netrc');
+      assert(isSensitivePath('/Users/x/.npmrc') === true, 'blocks .npmrc');
+      assert(isSensitivePath('/Users/x/.docker/config.json') === true, 'blocks .docker config');
+      assert(isSensitivePath('/Users/x/.bash_history') === true, 'blocks bash history');
+      assert(isSensitivePath('/Users/x/Library/Keychains/login.keychain-db') === true, 'blocks macOS keychain');
+      assert(isSensitivePath('/etc/passwd') === true, 'blocks /etc');
+      assert(isSensitivePath('/') === true, 'blocks unix root');
+      assert(isSensitivePath('C:\\') === true, 'blocks windows root');
+      assert(isSensitivePath('/Users/x/Downloads/resume.pdf') === false, 'a normal downloaded attachment passes');
+      assert(isSensitivePath('/Users/x/Pictures/product.jpg') === false, 'a normal photo passes');
+      assert(isSensitivePath('') === false, 'empty path → false (no throw)');
+      assert(isSensitivePath(null) === false, 'null path → false (no throw)');
       return { ok: true };
     },
   },

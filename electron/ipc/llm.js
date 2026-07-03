@@ -2,6 +2,7 @@ import { getAISettings } from './settings.js';
 import { callGeminiText, callGeminiTextRaw, callGeminiVision, callGeminiDocument, parseGeminiJSON, countGeminiInputTokens, GEMINI_MODEL_FALLBACKS } from './gemini.js';
 import { callClaudeText, callClaudeVision, callClaudeDocument, createClaudeBatch, getClaudeBatch, getClaudeBatchResults, cancelClaudeBatch, countClaudeInputTokens } from './claude.js';
 import { isWordDoc, extractWordText } from './docUtils.js';
+import { isSensitivePath } from '../utils/pathSafety.js';
 import { effectiveCap } from './tokenBudget.js';
 import path from 'path';
 import { priceSynthesisMaxTokens } from './resultCaps.js';
@@ -490,6 +491,14 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
 }
 
 export async function callLLMDocument(filePath, prompt, opts = {}) {
+  // A document node's filePath is sourced from loaded canvas JSON — an
+  // untrusted/shared canvas could point a node at a sensitive system/
+  // credential path. callClaudeDocument/callGeminiDocument re-check this
+  // too, but the Word-doc branch below bypasses both (it shells out to
+  // textutil directly), so gate here as the single shared entry point.
+  if (isSensitivePath(path.resolve(String(filePath || '')))) {
+    throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
+  }
   const { signal, task, hints, responseSchema, cachedPrefix } = normalizeOpts(opts);
   // Word docs (.docx / legacy .doc) can't be sent as inline data — Gemini 400s on
   // the OOXML MIME and Claude reads the ZIP bytes as garbage. Extract the text via

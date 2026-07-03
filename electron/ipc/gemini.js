@@ -21,8 +21,19 @@ import {
   isGeminiProviderAvailable,
   orderGeminiModels,
 } from './geminiModels.js';
+import { isSensitivePath } from '../utils/pathSafety.js';
 
 export { GEMINI_MODEL_FALLBACKS } from './geminiModels.js';
+
+// A document/image node's filePath is sourced from loaded canvas JSON, which
+// (unlike the local-file:// preview protocol) had NO path check at all before
+// being read and uploaded to the Gemini API — see the matching guard in
+// claude.js for the full rationale.
+function assertAttachmentPathSafe(filePath) {
+  if (isSensitivePath(path.resolve(String(filePath || '')))) {
+    throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
+  }
+}
 
 // Determinism for structured/JSON output (not a telemetry-learning candidate —
 // temperature is a quality knob, not a budget).
@@ -1185,6 +1196,7 @@ export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal
   const tempFiles = [];
   try {
     const imageParts = await Promise.all(imagePaths.map(async (imgPath) => {
+      assertAttachmentPathSafe(imgPath);
       let finalPath = await ensureVisionSafeImage(imgPath);
       if (finalPath !== imgPath) tempFiles.push(finalPath);
 
@@ -1227,6 +1239,7 @@ export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal
  * @returns {Promise<object>} — Parsed JSON response
  */
 export async function callGeminiDocument(filePath, prompt, apiKey, model, signal = null, opts = {}) {
+  assertAttachmentPathSafe(filePath);
   const ext = path.extname(filePath).toLowerCase();
   const mimeType = DOCUMENT_MIME_MAP[ext];
 
