@@ -25,7 +25,7 @@ function getLinkDisplay(data) {
  * - link nodes: muted blue background + domain/label text
  * - all others: solid-color rectangle (minimap palette)
  */
-export function ThumbnailNode({ r }) {
+function ThumbnailNodeImpl({ r }) {
   const { x, y, w, h, type, data } = r;
 
   if (type === 'text') {
@@ -224,3 +224,16 @@ export function ThumbnailNode({ r }) {
     </g>
   );
 }
+
+// The caller (CustomMiniMap) constructs a fresh `r` object literal on every
+// render of its own memoized parent, so a default React.memo (which compares
+// `r` by reference) would never actually skip a re-render. Compare the
+// individual fields instead — this is the whole point of memoizing here:
+// CustomMiniMap's renderedContent recomputes whenever ANY node changes, so
+// without a field-level comparator every ThumbnailNode re-executes its
+// markdown-stripping/regex/truncation work on every qualifying update, not
+// just the one node that actually changed.
+export const ThumbnailNode = React.memo(ThumbnailNodeImpl, (prev, next) => {
+  const a = prev.r, b = next.r;
+  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h && a.type === b.type && a.data === b.data;
+});
