@@ -169,69 +169,6 @@ export function buildPlatformFitSchema(platformIds) {
   };
 }
 
-// ── Page-status classify (single URL) ──────────────────────────────────────
-export const PAGE_STATUS_SINGLE_SCHEMA = {
-  type: 'object',
-  required: ['status', 'message'],
-  properties: {
-    status: {
-      type: 'string',
-      enum: ['live', 'sold', 'ended', 'needs-login', 'unknown'],
-      description: 'Listing/posting state on this page',
-    },
-    message: { type: 'string', description: 'One sentence quoting the evidence' },
-    attention: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['urgency', 'category', 'headline', 'evidence'],
-        properties: {
-          urgency:  { type: 'string', enum: ['high', 'low'] },
-          category: { type: 'string', enum: ['engagement', 'offer', 'question', 'policy', 'payout', 'pricing', 'time-sensitive', 'other'] },
-          headline: { type: 'string' },
-          evidence: { type: 'string' },
-        },
-      },
-    },
-  },
-};
-
-// ── Page-status classify (multi-URL) ───────────────────────────────────────
-export const PAGE_STATUS_MULTI_SCHEMA = {
-  type: 'object',
-  required: ['results'],
-  properties: {
-    results: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['pageIndex', 'status', 'message'],
-        properties: {
-          pageIndex: { type: 'integer' },
-          status: {
-            type: 'string',
-            enum: ['live', 'sold', 'ended', 'needs-login', 'unknown'],
-          },
-          message: { type: 'string' },
-          attention: {
-            type: 'array',
-            items: {
-              type: 'object',
-              required: ['urgency', 'category', 'headline', 'evidence'],
-              properties: {
-                urgency:  { type: 'string', enum: ['high', 'low'] },
-                category: { type: 'string', enum: ['engagement', 'offer', 'question', 'policy', 'payout', 'pricing', 'time-sensitive', 'other'] },
-                headline: { type: 'string' },
-                evidence: { type: 'string' },
-              },
-            },
-          },
-        },
-      },
-    },
-  },
-};
-
 // ── Marketplace hub scan (Marketplace Status Module) ───────────────────────
 // NOT listing-specific. Fed the seller's aggregate hub page(s) for ONE platform
 // (dashboard / notifications / activity center) and asked to surface anything
