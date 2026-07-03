@@ -374,18 +374,27 @@ function createWindow(initSpec = { mode: 'auto' }) {
 
   win.on('close', async (event) => {
     if (isQuitting) return; // Let before-quit handle it
+    // A rapid double-close (e.g. two quick clicks on the OS close button
+    // before the first handshake resolves) would otherwise register two
+    // concurrent quit-response/save-response IPC listeners against the same
+    // window, letting a single renderer response trigger both handlers.
+    if (win.__closeHandshakeInFlight) return;
 
     event.preventDefault();
+    win.__closeHandshakeInFlight = true;
+    try {
+      const result = await checkUnsavedChanges(win, 'close');
+      if (result.action === 'cancel') return;
 
-    const result = await checkUnsavedChanges(win, 'close');
-    if (result.action === 'cancel') return;
+      if (result.action === 'save') {
+        const saved = await requestSaveAndWait(win);
+        if (!saved) return;
+      }
 
-    if (result.action === 'save') {
-      const saved = await requestSaveAndWait(win);
-      if (!saved) return;
+      win.destroy(); // Safe to destroy now
+    } finally {
+      win.__closeHandshakeInFlight = false;
     }
-
-    win.destroy(); // Safe to destroy now
   });
 
   win.on('closed', () => {
@@ -824,7 +833,10 @@ if (!gotTheLock) {
               if (!win.isDestroyed()) win.webContents.send(event, data);
             }
           },
-        }).catch(() => {});
+          // Per-platform failures are already logged inside verifyAllPlatforms
+          // itself — anything reaching this outer catch is an unexpected bug
+          // (e.g. in pool setup), so it should never vanish silently.
+        }).catch((err) => logger.error('[Main] verifyAllPlatforms failed:', err));
       }, 2500);
     }
 
