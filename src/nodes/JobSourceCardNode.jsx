@@ -31,7 +31,7 @@ import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
  *     hubId,                          // owning JobSearchNode id (multi-hub safety)
  *   }
  */
-export function JobSourceCardNode({ id, data }) {
+export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, data }) {
   const { getNode, deleteElements, updateNodeData } = useReactFlow();
   // Same nav context the owning Job Search Module reads currentFile from — needed so a
   // captcha-resolve can history-dedup against this project's jobs-history CSV
@@ -446,4 +446,4 @@ export function JobSourceCardNode({ id, data }) {
       )}
     </div>
   );
-}
+});

@@ -1,4 +1,4 @@
-import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { ExternalLink, X, Sparkles } from 'lucide-react';
@@ -35,7 +35,7 @@ function scoreColor(score) {
  *   originHubId, // the Job Search Module whose search found it (owns careerData)
  *   language (optional 2-letter code, set only when non-English → shows a chip)
  */
-export function JobCardNode({ id, data }) {
+export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const { deleteElements, getNode, setNodes } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const { addToast } = useToast();
@@ -51,6 +51,10 @@ export function JobCardNode({ id, data }) {
 
   const score = data.matchScore || 0;
   const accentColor = scoreColor(score);
+  // NodeHandles is React.memo'd; an inline object literal here would create a
+  // new reference every render and defeat that memoization, unlike every
+  // other caller of NodeHandles, which pass only a stable className.
+  const handleStyle = useMemo(() => ({ backgroundColor: accentColor }), [accentColor]);
 
   const openJobUrl = useCallback(() => {
     if (data.url && window.electronAPI?.openExternal) {
@@ -157,7 +161,7 @@ export function JobCardNode({ id, data }) {
       className="w-[280px] rounded-2xl bg-neutral-900/95 border-2 shadow-lg overflow-hidden group"
       style={{ borderColor: accentColor + '55' }}
     >
-      <NodeHandles className="w-2 h-2" style={{ backgroundColor: accentColor }} />
+      <NodeHandles className="w-2 h-2" style={handleStyle} />
 
       {/* Header */}
       <div className="px-3 py-2 flex items-start gap-2 border-b border-white/5">
@@ -242,4 +246,4 @@ export function JobCardNode({ id, data }) {
       </div>
     </div>
   );
-}
+});

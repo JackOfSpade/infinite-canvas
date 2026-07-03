@@ -29,7 +29,7 @@ import { useIsMountedRef } from '../hooks/useIsMountedRef';
  *     ephemeral: true,                 // marker so the hub knows to clean it up
  *   }
  */
-export function CompSourceCardNode({ id, data }) {
+export const CompSourceCardNode = React.memo(function CompSourceCardNode({ id, data }) {
   // Prime from persistedProgress so a save-quit-reopen during 'comps-ready'
   // restores Solve/Skip buttons without waiting for a fresh progress event
   // (none will arrive — the scrape isn't running on reload).
@@ -315,4 +315,4 @@ export function CompSourceCardNode({ id, data }) {
       )}
     </div>
   );
-}
+});

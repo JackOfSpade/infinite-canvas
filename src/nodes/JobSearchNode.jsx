@@ -123,7 +123,7 @@ function getSavedAnalysisWarning(meta, currentHubId, currentCanvasFilePath) {
  * data.resumeSummary: string
  * data.sourceFilter: string | null — if set, only show jobs from this source
  */
-export function JobSearchNode({ id, data }) {
+export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   // id is stable for this component's lifetime — ReactFlow never reuses
   // instances with different ids, so we can safely close over it in callbacks.
@@ -2238,4 +2238,4 @@ export function JobSearchNode({ id, data }) {
         )}
       </HubContainer>
   );
-}
+});
