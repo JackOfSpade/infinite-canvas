@@ -10,9 +10,9 @@
     "dev": "vite",
     "build": "vite build && electron-builder",
     "lint": "eslint .",
-    "test": "node scripts/test-runner.js",
+    "test": "node --import ./scripts/test-stubs/register.mjs scripts/test-runner.js",
     "test:e2e": "vite build && node scripts/electron-smoke.js",
-    "test:job-apis": "node scripts/run-api-tests.js",
+    "test:job-apis": "node --import ./scripts/test-stubs/register.mjs scripts/run-api-tests.js",
     "preview": "vite preview"
   },
   "build": {
