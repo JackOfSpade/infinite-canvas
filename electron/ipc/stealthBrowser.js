@@ -133,6 +133,12 @@ let isShuttingDown = false;
 // "is a limit browser/session-based (resets on relaunch) or IP-based?".
 let browserGeneration = 0;
 let browserLaunchedAt = 0;
+// Set while closeStealthBrowser() is tearing down the shared instance (e.g.
+// handing the profile off to a captcha/login window). getStealthBrowser()
+// awaits this before touching browserInstance so it can't reuse/relaunch on
+// top of a close that's still in progress — the same dedup discipline
+// browserLaunchPromise already gives launches, now given to closes.
+let browserClosePromise = null;
 
 let sharedProfileReservation = null;
 
@@ -224,6 +230,21 @@ export async function launchWithProfileLockRetry(launchOpts, context, url = null
 export async function getStealthBrowser() {
   if (isShuttingDown) throw new Error('[StealthBrowser] Cannot get browser during shutdown');
   assertSharedProfileAvailable('headless stealth browser');
+
+  // A close is currently tearing down the shared instance (e.g. handing the
+  // profile off to a captcha/login window, see closeStealthBrowser). Without
+  // this wait, browserInstance.isConnected() reads a moment before close()
+  // actually severs the CDP connection could still return true — handing this
+  // caller a browser mid-teardown — or, if it already reads false, this
+  // caller would redundantly SIGTERM/null the SAME instance closeStealthBrowser
+  // is already closing and race it into a fresh launch while the old Chrome
+  // process (and its userDataDir OS lock) may not have exited yet.
+  if (browserClosePromise) {
+    await browserClosePromise.catch(() => {});
+    if (isShuttingDown) throw new Error('[StealthBrowser] Cannot get browser during shutdown');
+    assertSharedProfileAvailable('headless stealth browser');
+  }
+
   if (browserInstance?.isConnected?.()) return browserInstance;
 
   // Clear a dead/crashed instance. Killing the orphaned Chrome process releases
@@ -235,6 +256,11 @@ export async function getStealthBrowser() {
     browserInstance = null;
     // Give the OS a moment to release the profile lock.
     await new Promise(r => setTimeout(r, 500));
+    // A concurrent caller may have already relaunched (and even fully
+    // connected) while we were waiting — re-check before starting a SECOND,
+    // redundant launch on top of one that already finished and cleared
+    // browserLaunchPromise (the check below would otherwise miss it).
+    if (browserInstance?.isConnected?.()) return browserInstance;
   }
 
   if (browserLaunchPromise) return browserLaunchPromise;
@@ -476,35 +502,50 @@ export async function closeStealthBrowser(forShutdown = false) {
   if (forShutdown) {
     isShuttingDown = true;
   }
-  const pendingLaunch = browserLaunchPromise;
-  if (pendingLaunch) {
-    logger.info('[StealthBrowser] Waiting for in-flight browser launch before closing shared profile');
-    try {
-      const launchedBrowser = await pendingLaunch;
-      if (launchedBrowser?.isConnected?.()) browserInstance = launchedBrowser;
-    } catch (err) {
-      logger.warn(`[StealthBrowser] In-flight browser launch settled before close with error: ${err?.message || String(err)}`);
+
+  // Dedup: if a close is already in flight (e.g. a captcha handoff and a
+  // status-check hub scan both decided to release the profile around the
+  // same time), piggyback on that single close instead of two callers racing
+  // browserInstance.close()/kill() against the same process.
+  if (browserClosePromise) return browserClosePromise;
+
+  browserClosePromise = (async () => {
+    const pendingLaunch = browserLaunchPromise;
+    if (pendingLaunch) {
+      logger.info('[StealthBrowser] Waiting for in-flight browser launch before closing shared profile');
+      try {
+        const launchedBrowser = await pendingLaunch;
+        if (launchedBrowser?.isConnected?.()) browserInstance = launchedBrowser;
+      } catch (err) {
+        logger.warn(`[StealthBrowser] In-flight browser launch settled before close with error: ${err?.message || String(err)}`);
+      }
     }
-  }
-  browserLaunchPromise = null; // Prevent anyone from waiting on a completed/failed launch
-  if (browserInstance) {
-    const proc = browserInstance.process();
-    try {
-      await browserInstance.close();
-    } catch { /* already closed */ }
-    browserInstance = null;
-    // Wait for the Chrome process to fully exit and release the userDataDir
-    // lock. Browser.close() only sends the exit signal — the process takes
-    // a moment to die. Without this wait, the next puppeteer.launch() on the
-    // same profile races the dying process and Chrome falls back to a temp
-    // empty profile, causing page.goto() to silently land on about:blank.
-    if (proc && !proc.killed) {
-      await new Promise(resolve => {
-        const done = () => resolve();
-        proc.once('exit', done);
-        setTimeout(() => { proc.removeListener('exit', done); resolve(); }, 2000);
-      });
+    browserLaunchPromise = null; // Prevent anyone from waiting on a completed/failed launch
+    if (browserInstance) {
+      const proc = browserInstance.process();
+      try {
+        await browserInstance.close();
+      } catch { /* already closed */ }
+      browserInstance = null;
+      // Wait for the Chrome process to fully exit and release the userDataDir
+      // lock. Browser.close() only sends the exit signal — the process takes
+      // a moment to die. Without this wait, the next puppeteer.launch() on the
+      // same profile races the dying process and Chrome falls back to a temp
+      // empty profile, causing page.goto() to silently land on about:blank.
+      if (proc && !proc.killed) {
+        await new Promise(resolve => {
+          const done = () => resolve();
+          proc.once('exit', done);
+          setTimeout(() => { proc.removeListener('exit', done); resolve(); }, 2000);
+        });
+      }
     }
+  })();
+
+  try {
+    await browserClosePromise;
+  } finally {
+    browserClosePromise = null;
   }
 }
 
