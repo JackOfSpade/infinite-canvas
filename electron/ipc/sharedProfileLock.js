@@ -23,9 +23,12 @@
 //
 // Kept dependency-free (no electron / puppeteer imports) so it is unit-testable
 // in the plain-node test runner.
+//
+// Implementation shared with marketplaceBrowserLock.js / statusCheckLock.js —
+// see asyncMutex.js for the FIFO + reentrancy-guard mechanics.
+import { createFifoLock } from './asyncMutex.js';
 
-// FIFO chain: each acquirer queues behind the previous one's completion.
-let _tail = Promise.resolve();
+const lock = createFifoLock({ name: 'sharedProfileLock' });
 
 /**
  * Run `fn` exclusively with respect to all other withSharedProfileLock callers,
@@ -41,9 +44,5 @@ let _tail = Promise.resolve();
  * @returns {Promise<T>}
  */
 export function withSharedProfileLock(fn) {
-  const result = _tail.then(() => fn());
-  // Advance the tail regardless of outcome so one failure doesn't wedge the
-  // queue; the caller still observes `result`'s resolution/rejection.
-  _tail = result.then(() => {}, () => {});
-  return result;
+  return lock.withLock(fn);
 }

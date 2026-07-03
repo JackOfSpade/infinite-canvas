@@ -5239,6 +5239,37 @@ const tests = [
     },
   },
   {
+    name: 'lock factory: reentrant withLock call throws instead of deadlocking, and does not wedge the queue',
+    run: async () => {
+      // A caller invoking the SAME lock again from inside its own critical
+      // section used to deadlock forever (jobs.js hit this once and worked
+      // around it only via a "don't nest this call" comment). It must now
+      // throw immediately instead of hanging.
+      let innerErrName = null;
+      const outerResult = await withSharedProfileLock(async () => {
+        try {
+          await withSharedProfileLock(async () => 'should-not-run');
+        } catch (err) {
+          innerErrName = err.message;
+        }
+        return 'outer-done';
+      });
+      assert(outerResult === 'outer-done', 'the outer critical section still completes normally');
+      assert(typeof innerErrName === 'string' && innerErrName.includes('reentrant'),
+        `nested call rejects with a reentrancy error — got ${innerErrName}`);
+      // The guard must not leak across unrelated, non-nested calls afterward.
+      const afterNested = await withSharedProfileLock(async () => 'after-nested');
+      assert(afterNested === 'after-nested', 'the lock keeps working normally for later, non-nested callers');
+      // Different lock instances (e.g. marketplaceBrowserLock vs statusCheckLock)
+      // are independent — calling one from inside the other is NOT reentrancy.
+      const crossLockResult = await withMarketplaceBrowserLock(async () => {
+        return withStatusCheckLock(async () => 'cross-lock-ok');
+      });
+      assert(crossLockResult === 'cross-lock-ok', 'nesting a DIFFERENT lock inside another is not treated as reentrant');
+      return { ok: true };
+    },
+  },
+  {
     name: 'comp progress aggregator: a source releases its terminal only after the LAST item (bundle)',
     run: () => {
       const events = [];
