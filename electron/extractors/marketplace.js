@@ -315,7 +315,13 @@ export const EBAY_SOLD_EXTRACTOR = `
     ].join(' ');
     throw new Error('SITE_CHANGED: ebay-sold su-styled-text extractor returned 0 — eBay design system may have changed' + __diag(diagCounts, diagSample));
   }
-  return { items, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: __claimedTotal } };
+  // A promoted/related-item card can re-surface the same listing elsewhere on
+  // the same results page (see poshmark/mercari/swappa-sold, which already
+  // guard this) — without dedup, a duplicate silently doubles that listing's
+  // weight in the price the AI recommends.
+  const __seen = new Set();
+  const deduped = items.filter(i => { if (__seen.has(i.url)) return false; __seen.add(i.url); return true; });
+  return { items: deduped, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: __claimedTotal } };
 })()
 `;
 
@@ -389,7 +395,10 @@ export const EBAY_ACTIVE_EXTRACTOR = `
     ].join(' ');
     throw new Error('SITE_CHANGED: ebay-active su-styled-text extractor returned 0 — eBay design system may have changed' + __diag(diagCounts, diagSample));
   }
-  return { items, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: __claimedTotal } };
+  // See ebay-sold — same promoted/related-item re-insertion risk.
+  const __seen = new Set();
+  const deduped = items.filter(i => { if (__seen.has(i.url)) return false; __seen.add(i.url); return true; });
+  return { items: deduped, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: __claimedTotal } };
 })()
 `;
 
@@ -477,8 +486,13 @@ export const SWAPPA_EXTRACTOR = `
   }
 
   // Read comps from any document carrying schema.org Offer microdata.
+  // Deduped by url — a featured offer can also appear in the main grid on
+  // the same page (see SWAPPA_SOLD_EXTRACTOR below, which guards the same
+  // failure mode); without it a duplicate silently doubles that listing's
+  // weight in the price the AI recommends.
   function extractOffers(doc) {
     var out = [];
+    var seenUrls = {};
     var cards = doc.querySelectorAll('[itemprop="offers"][itemscope], [itemtype*="schema.org/Offer"]');
     cards.forEach(function(card) {
       try {
@@ -491,11 +505,13 @@ export const SWAPPA_EXTRACTOR = `
         var title = (descEl && (descEl.getAttribute('content') || descEl.textContent) || '').trim();
         if (!title) return;
         var linkEl = card.querySelector('a[href*="/listing/"]');
+        var url = linkEl ? abs(linkEl.getAttribute('href')) : '';
+        if (url) { if (seenUrls[url]) return; seenUrls[url] = 1; }
         out.push({
           title: title,
           price: price,
           priceText: '$' + price,
-          url: linkEl ? abs(linkEl.getAttribute('href')) : '',
+          url: url,
           source: 'swappa',
         });
       } catch (e) {}
