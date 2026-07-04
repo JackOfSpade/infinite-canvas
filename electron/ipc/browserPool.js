@@ -160,9 +160,16 @@ function processQueue() {
       : executeScrape(url, extractorJS, options);
     run
       .then(resolve)
-      .catch((err) => {
-        if (!isShuttingDown) reject(err);
-      })
+      // Always reject — never swallow. This task was already spliced out of
+      // `queue` above, so it is NOT one of the tasks closeAllPages() drains
+      // and rejects directly (that path only covers tasks still sitting in
+      // `queue`, never yet dispatched). A task already active/dispatched when
+      // shutdown starts settles its `run` promise exactly once (async
+      // functions can't double-settle), so there is no double-reject risk —
+      // suppressing the reject here previously left THIS task's caller (e.g.
+      // scrapeMultiple) awaiting a promise that would never resolve or
+      // reject, hanging forever instead of surfacing the shutdown/cancel.
+      .catch(reject)
       .finally(() => {
         activeCount--;
         const count = activeDomains.get(domain) || 1;
