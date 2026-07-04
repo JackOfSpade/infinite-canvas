@@ -374,13 +374,22 @@ function createWindow(initSpec = { mode: 'auto' }) {
 
   win.on('close', async (event) => {
     if (isQuitting) return; // Let before-quit handle it
+    // preventDefault() unconditionally, on EVERY close event — including a
+    // rapid second one below. It must run before the reentrancy check: if
+    // the guard branch below returns first, an in-flight handshake's second
+    // 'close' event falls through to Electron's default action and destroys
+    // the window immediately, skipping the unsaved-changes prompt entirely
+    // (exactly what this guard was meant to prevent, not cause).
+    event.preventDefault();
+
     // A rapid double-close (e.g. two quick clicks on the OS close button
     // before the first handshake resolves) would otherwise register two
     // concurrent quit-response/save-response IPC listeners against the same
     // window, letting a single renderer response trigger both handlers.
+    // The default action is already prevented above, so this second event
+    // safely no-ops and lets the in-flight handshake finish on its own.
     if (win.__closeHandshakeInFlight) return;
 
-    event.preventDefault();
     win.__closeHandshakeInFlight = true;
     try {
       const result = await checkUnsavedChanges(win, 'close');
