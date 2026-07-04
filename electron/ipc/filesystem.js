@@ -31,7 +31,14 @@ const ALLOWED_OPEN_FILE_EXTS = new Set([
   // Spreadsheets / presentations
   '.csv', '.xls', '.xlsx', '.xlsm', '.numbers', '.ppt', '.pptx', '.key',
   // Data / plain-text formats safe to view (never executed by double-click)
-  '.json', '.yaml', '.yml', '.xml', '.ini', '.log',
+  '.json', '.yaml', '.yml', '.xml', '.ini', '.log', '.toml', '.env',
+  // Source/code files the canvas' own CODE_EXT_RE (src/utils/fileExtensions.js)
+  // treats as valid document-node content, dropped in and viewed/edited like
+  // any other text — none of these auto-execute on double-click on any
+  // mainstream OS (unlike .js, which Windows Script Host runs directly, and
+  // .sh, which a Unix shell association can execute — both stay excluded).
+  '.ts', '.tsx', '.jsx', '.py', '.rb', '.go', '.rs', '.java',
+  '.c', '.cpp', '.h', '.cs', '.php', '.swift', '.kt',
   // Audio
   '.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a',
   // Video
