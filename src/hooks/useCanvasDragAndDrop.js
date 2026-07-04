@@ -79,9 +79,17 @@ export function useCanvasDragAndDrop({
     const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
     const nodeType = event.dataTransfer.getData('app/node-type');
 
-    // Capture hover target before clearing it
-    const targetId = hoveredGroupIdRef.current;
+    // Don't trust hoveredGroupIdRef here — handleDragOver's intersection scan
+    // is rAF-throttled, so a scan can still be scheduled-but-not-yet-run at the
+    // instant `drop` fires (the browser doesn't guarantee a frame boundary
+    // between the last dragover and drop). Reading the ref would risk a stale
+    // group from an earlier frame. handleDragLeave cancels that pending scan
+    // and clears whatever highlight IS currently set; re-scan fresh at the
+    // exact drop position for the actual target instead.
     handleDragLeave();
+    const dropIntersections = getIntersectingNodes({ x: position.x, y: position.y, width: 1, height: 1 });
+    const dropTargetGroup = dropIntersections.find(n => n.type === 'group' && !n.data?.locked);
+    const targetId = dropTargetGroup ? dropTargetGroup.id : null;
 
     const insertNodes = (nodesToInsert) => {
       if (targetId) {
@@ -169,7 +177,7 @@ export function useCanvasDragAndDrop({
         insertNodes([newNode]);
       }
     }
-  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode, handleDragLeave, getNode, addElementsGlobally, isMountedRef]);
+  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode, handleDragLeave, getIntersectingNodes, getNode, addElementsGlobally, isMountedRef]);
 
   return { handleDrop, handleDragOver, handleDragLeave };
 }
