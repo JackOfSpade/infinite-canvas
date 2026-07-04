@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { useModalStackCount } from '../components/modalStack';
+import { isTextEditingTarget } from '../utils/nativeTextUndo';
 
 export function useCanvasKeyboardShortcuts({
   placementMode, setPlacementMode, 
@@ -22,9 +23,11 @@ export function useCanvasKeyboardShortcuts({
       if (modalCount > 0) return;
       if (isAnimatingRef?.current) return;
 
-      const tag = e.target.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
-      
+      // Was an inline tag==='INPUT' check, which treats ANY input as text-editing
+      // regardless of type — a focused checkbox/radio would incorrectly block
+      // these shortcuts. isTextEditingTarget checks the input's actual type.
+      if (isTextEditingTarget(e.target)) return;
+
       const k = e.key.toLowerCase();
       const s = shortcuts || {};
 

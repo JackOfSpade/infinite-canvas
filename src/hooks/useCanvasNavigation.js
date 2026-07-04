@@ -4,6 +4,7 @@ import { getNodeDims, getNodesBounds } from '../utils/constants';
 
 import { safeClone, syncStackUpward, getCanvasData, deepUpdateNode, deepAddElements } from '../utils/navigationUtils';
 import { EventLogger } from '../utils/EventLogger';
+import { getReactFlowContainerSize } from '../utils/reactFlowDom';
 
 /**
  * Navigation stack for nested canvas dive-in / dive-out.
@@ -134,10 +135,7 @@ export function useCanvasNavigation({
           });
           const cx = sumX / childNodes.length;
           const cy = sumY / childNodes.length;
-          const viewportNode = document.querySelector('.react-flow__viewport');
-          const container = viewportNode?.parentElement;
-          const flowWidth  = container ? container.clientWidth  : window.innerWidth;
-          const flowHeight = container ? container.clientHeight : window.innerHeight;
+          const { width: flowWidth, height: flowHeight } = getReactFlowContainerSize();
           reactFlow.setViewport({
             x: flowWidth / 2 - cx * currentVp.zoom,
             y: flowHeight / 2 - cy * currentVp.zoom,

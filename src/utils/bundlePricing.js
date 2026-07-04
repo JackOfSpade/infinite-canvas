@@ -197,7 +197,7 @@ function boundedNonNegativePercent(value, maximum) {
   return percent == null ? 0 : Math.min(maximum, Math.max(0, percent));
 }
 
-function roundToCents(value) {
+export function roundToCents(value) {
   return Math.round(Number(value) * 100) / 100;
 }
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { SessionStatusContext } from './sessionStatusShared';
 
 export function SessionStatusProvider({ children }) {
@@ -43,8 +43,10 @@ export function SessionStatusProvider({ children }) {
     return () => { unsubStart?.(); unsubUpdate?.(); unsubDone?.(); };
   }, []);
 
+  const value = useMemo(() => ({ verifying }), [verifying]);
+
   return (
-    <SessionStatusContext.Provider value={{ verifying }}>
+    <SessionStatusContext.Provider value={value}>
       {children}
     </SessionStatusContext.Provider>
   );

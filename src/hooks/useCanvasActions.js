@@ -6,6 +6,7 @@ import { cloneNode, reassignCanvasDataIDs } from '../utils/nodeFactory';
 import { EventLogger } from '../utils/EventLogger';
 import { generateId } from '../utils/idGenerator';
 import { cancelNodeTasksRecursively } from '../utils/canvasInteractions';
+import { getReactFlowContainerSize } from '../utils/reactFlowDom';
 
 const CLIPBOARD_KEY = 'infinite-canvas-clipboard';
 let applicationClipboardFallback = null;
@@ -136,10 +137,9 @@ export function useCanvasActions({
     takeSnapshot?.();
 
     const { x: vpx, y: vpy, zoom } = getViewport();
-    const viewportNode = document.querySelector('.react-flow__viewport');
-    const container = viewportNode?.parentElement;
-    const flowWidth  = container ? container.clientWidth / zoom  : window.innerWidth / zoom;
-    const flowHeight = container ? container.clientHeight / zoom : window.innerHeight / zoom;
+    const { width: containerW, height: containerH } = getReactFlowContainerSize();
+    const flowWidth  = containerW / zoom;
+    const flowHeight = containerH / zoom;
     
     // Compute center of current viewport in flow coordinates
     const centerX = -vpx / zoom + flowWidth / 2;

@@ -45,7 +45,6 @@ const GEMINI_TEMPERATURE = 0.1;
 // below is unrelated: a hard ~20MB API limit on inline image/document bytes.)
 const MAX_AI_FILE_BYTES  = 15 * 1024 * 1024; // 15MB
 
-const GEMINI_MODEL = 'gemini-3.5-flash';
 const LOCATION = 'us-central1';
 
 /**
@@ -747,12 +746,12 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   let headers = { 'Content-Type': 'application/json' };
   
   if (apiKey) {
-    endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-3.5-flash'}:generateContent?key=${apiKey}`;
+    endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || GEMINI_MODEL_FALLBACKS[0]}:generateContent?key=${apiKey}`;
   } else {
     // No API key → Vertex AI via service-account.json. getToken() (→ getAuthClient)
     // throws a clear "no credential" error if neither is configured.
     const token = await getToken();
-    endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${model || GEMINI_MODEL}:generateContent`;
+    endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${model || GEMINI_MODEL_FALLBACKS[0]}:generateContent`;
     headers['Authorization'] = `Bearer ${token}`;
   }
 
@@ -1175,7 +1174,7 @@ export async function callGeminiTextRaw(prompt, apiKey, model, signal = null, op
  */
 export async function countGeminiInputTokens(text, apiKey, model, { signal = null } = {}) {
   if (!apiKey) throw new Error('Gemini countTokens requires an AI Studio API key');
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || GEMINI_MODEL}:countTokens?key=${apiKey}`;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || GEMINI_MODEL_FALLBACKS[0]}:countTokens?key=${apiKey}`;
   const timeoutSignal = AbortSignal.timeout(15000);
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const res = await fetch(endpoint, {
