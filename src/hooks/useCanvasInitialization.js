@@ -34,6 +34,13 @@ export function useCanvasInitialization({
   const hasUnsavedChangesRef = useRef(hasUnsavedChanges);
   useEffect(() => { hasUnsavedChangesRef.current = hasUnsavedChanges; }, [hasUnsavedChanges]);
 
+  // Mirror currentFile into a ref for the in-flight-file-switch guard below —
+  // an already-fired attemptSave keeps running to completion even after the
+  // effect re-runs (clearTimeout only stops a timer that hasn't fired yet), so
+  // it needs a way to notice the live file changed out from under it.
+  const currentFileRef = useRef(currentFile);
+  useEffect(() => { currentFileRef.current = currentFile; }, [currentFile]);
+
   // Mark the canvas dirty whenever content changes.
   // Skip the very first render where all collections are empty — that's the clean
   // initial mount before any workspace is loaded, not an actual user edit.
@@ -78,6 +85,19 @@ export function useCanvasInitialization({
       // This specifically avoids redundant saves immediately after a workspace load.
       if (!hasUnsavedChangesRef.current) return;
 
+      // Safety guard 4: don't force-commit an in-progress contenteditable edit.
+      // buildSaveData's flush calls document.activeElement.blur(), which fires the
+      // node's real onBlur handler — for TextNode/StickyNode that exits edit mode
+      // AND deletes the node outright if it's still empty (useNodeAutoEdit's
+      // auto-delete-if-empty convenience, meant for a deliberate blur, not a timer).
+      // A silent background autosave must not do either of those to a user who is
+      // still mid-sentence. Defer and retry; the manual save / quit-time flush
+      // still force-commits, since those are deliberate user actions.
+      if (document.activeElement?.isContentEditable) {
+        timer = setTimeout(attemptSave, TIMINGS.AUTOSAVE_RETRY_EDITING_MS);
+        return;
+      }
+
       // Shared with the manual save in useCanvasPersistence — flushes any
       // in-progress contenteditable edit (a text node the user is still
       // typing into) before serializing, so a debounce window landing
@@ -88,6 +108,18 @@ export function useCanvasInitialization({
       });
       if (!isMountedRef.current) return;
       if (!data.nodes || !Array.isArray(data.nodes)) return;
+
+      // Safety guard 5: the open workspace may have been swapped to a
+      // different file while this attempt was mid-flight (buildSaveData has
+      // an await point above). `currentFile` in this closure is whatever was
+      // current when this attemptSave was scheduled — if the live file has
+      // since changed, `data` was just built from stateRef/flushStack, which
+      // may already reflect the NEW file's content (loading a workspace
+      // replaces nodes/edges/drawings in the same React state this hook
+      // reads). Writing that under the OLD path would silently overwrite it
+      // with an unrelated file's data. The new file gets its own correct
+      // autosave once its content settles, so just drop this stale attempt.
+      if (currentFileRef.current !== currentFile) return;
 
       window.electronAPI.saveWorkspace({ data, filePath: currentFile }).then(res => {
         if (!isMountedRef.current) return;
