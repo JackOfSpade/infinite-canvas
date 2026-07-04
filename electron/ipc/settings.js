@@ -27,6 +27,14 @@ const JOBS_SECRET_KEYS = ['usajobsApiKey', 'scrapflyApiKey', 'diceApiKey'];
 
 export function encryptSecret(plain) {
   if (!plain || typeof plain !== 'string') return plain;
+  // Already encrypted — return unchanged. Without this, update-settings'
+  // shallow-merge (below) re-runs this over the RAW on-disk value for every
+  // secret key in a section on EVERY save, even one that didn't touch the key
+  // at all — double-encrypting it. decryptSecret only strips one ENC_PREFIX
+  // layer, so a double-encrypted value "decrypts" to the literal
+  // ENC_PREFIX-tagged ciphertext string instead of the real secret, silently
+  // breaking the credential on the next unrelated settings change.
+  if (plain.startsWith(ENC_PREFIX)) return plain;
   if (!safeStorage?.isEncryptionAvailable?.()) return plain; // e.g. some headless Linux — fall back to plaintext rather than block saving
   try {
     return ENC_PREFIX + safeStorage.encryptString(plain).toString('base64');
