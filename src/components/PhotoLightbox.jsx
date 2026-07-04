@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { X, ChevronLeft, ChevronRight } from 'lucide-react';
 import { toLocalFilePreviewUrl } from '../utils/fileDisplayUtils';
 import { updateModalCount } from './modalStack';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /**
  * Full-viewport image viewer rendered via a portal so it escapes ReactFlow's
@@ -42,15 +43,15 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
 
   // Keyboard nav. Capture-phase so ReactFlow's deleteKeyCode (Backspace/Delete)
   // and Cmd+S handlers don't fire while the lightbox is open.
+  useEscapeToClose((e) => { e.preventDefault(); onClose(); }, { capture: true });
   useEffect(() => {
     const handler = (e) => {
-      if (e.key === 'Escape')         { e.preventDefault(); onClose(); }
-      else if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
-      else if (e.key === 'ArrowRight'){ e.preventDefault(); next(); }
+      if (e.key === 'ArrowLeft')       { e.preventDefault(); prev(); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
     };
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
-  }, [onClose, prev, next]);
+  }, [prev, next]);
 
   if (total === 0) return null;
   const currentPath = imagePaths[index];

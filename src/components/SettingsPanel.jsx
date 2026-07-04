@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { ANIMATION_DURATIONS, DEFAULT_SHORTCUTS } from '../hooks/useSettings';
 import { useSyncWhileFocused } from '../hooks/useSyncWhileFocused';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useToast } from './ToastProvider';
 import { SELL_PLATFORMS, SELL_PLATFORM_BY_ID, JOB_SOURCES, JOB_SOURCE_BY_ID } from '../utils/constants';
 import { normalizeMarketplaceWatchUrls } from '../utils/marketplaceWatchUrls';
@@ -626,18 +627,11 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   }, []);
 
   // Close on Escape (also cancels capturing)
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKey = (e) => {
-      if (e.key === 'Escape') {
-        if (capturingId) { setCapturingId(null); return; }
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [isOpen, onClose, capturingId]);
+  useEscapeToClose((e) => {
+    if (capturingId) { setCapturingId(null); return; }
+    e.preventDefault();
+    onClose();
+  }, { enabled: isOpen });
 
   // Reset capturing when panel closes
   useEffect(() => {

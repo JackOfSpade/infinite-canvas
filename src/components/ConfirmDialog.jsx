@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { AlertTriangle, X } from 'lucide-react';
 import { updateModalCount } from './modalStack';
 import { TIMINGS } from '../utils/timings';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /**
  * Styled confirmation dialog — replaces the browser-native `confirm()`.
@@ -63,13 +64,10 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
 
   // Close on Escape — Escape always means "no further action", which cancels
   // the dialog (triggers onAbort to undo if available, else falls back to onCancel).
-  useEffect(() => {
-    const handleKey = (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); resolveOnce(onAbort || onCancel); }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [onCancel, onAbort, resolveOnce]);
+  useEscapeToClose((e) => {
+    e.preventDefault();
+    resolveOnce(onAbort || onCancel);
+  });
 
   useEffect(() => () => {
     if (resolveTimerRef.current) clearTimeout(resolveTimerRef.current);

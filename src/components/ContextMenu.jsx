@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { TIMINGS } from '../utils/timings';
 import { updateModalCount } from './modalStack';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /**
  * Reusable context menu component.
@@ -34,16 +35,10 @@ export function ContextMenu({ x, y, items, onClose }) {
     const handlePointerDown = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) onClose();
     };
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); onClose(); }
-    };
     window.addEventListener('pointerdown', handlePointerDown);
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('pointerdown', handlePointerDown);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
+    return () => window.removeEventListener('pointerdown', handlePointerDown);
   }, [onClose]);
+  useEscapeToClose((e) => { e.preventDefault(); onClose(); });
 
   // ── Viewport clamping ─────────────────────────────────────────────────────
   const [adjustedPos, setAdjustedPos] = useState({ left: x, top: y });
