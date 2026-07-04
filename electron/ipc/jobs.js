@@ -41,6 +41,7 @@ import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage a
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory, filterHistoryForResume } from './jobsHistory.js';
 import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
 import { getJobsSettings, getAISettings } from './settings.js';
+import { wrapUntrustedText } from './promptSafety.js';
 import { readStatusCache } from './accounts.js';
 import { getScopedJobSourceIds, JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
 import { jobTitleCompanyKey, dedupJobsAcrossSources } from '../../src/utils/jobIdentity.js';
@@ -2512,8 +2513,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
       result = await callLLMText(`
 You are a career data analyst. Design the labels for a 3-level results tree for these scored jobs. Each job has a matchScore (0-100 = the candidate's chance of getting an interview), a salary string, and a "suggestedDirection" (the scorer's rough per-job guess at the role family).
 
-JOBS:
-${JSON.stringify(compact, null, 2)}
+JOBS (title/salary/suggestedDirection all trace back to scraper-sourced listing
+text — see the boundary notice below):
+${wrapUntrustedText('scored-jobs', JSON.stringify(compact, null, 2))}
 
 Return a JSON object of the shape:
 {
