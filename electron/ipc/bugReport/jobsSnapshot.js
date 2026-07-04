@@ -9,6 +9,7 @@ import { getJobsSettings } from '../settings.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_RESULT_CAP, JOB_PER_PAGE_CAP, JOB_MAX_PAGES, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from '../resultCaps.js';
 import { ago, modelTag, pipelineScope } from './helpers.js';
+import { looksLikeMoney, hasMojibake, mojibakeExcerpt } from './jobQualityChecks.js';
 
 export function buildJobsConfigSnapshot() {
   let jobs = {};
@@ -355,13 +356,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // back to the listing-card excerpt. Per-query `X/Y expanded` log
         // lines otherwise need to be eyeballed to notice.
         // Fields like title/company/location are too free-form to validate here.
-        // A bare comma-grouped thousands range ("70,000 - 95,000") is a salary that
-        // merely lost its currency symbol — accept it as monetary so a source that
-        // serves numeric-only pay isn't flagged "garbage". Truly ambiguous tiny
-        // values ("40 - 50") still don't match (no thousands grouping), which is
-        // the right call — they're uninformative in a salary field.
-        const looksLikeMoney = (s) =>
-          /\$|\d+\s*k\b|\d{1,3}(?:,\d{3})+|per (?:hour|year|week|month)|\/h(?:r|our)|\/yr|\/year|hourly|annually|\ba year\b|\ban hour\b/i.test(s);
+        // looksLikeMoney / MOJIBAKE_RE moved to jobQualityChecks.js (extracted
+        // pure functions, unit-testable directly instead of only via a full
+        // bug-report payload) — see that file for the salary/mojibake rationale.
         const SHORT_DESC_THRESHOLD = 400; // listing snippets are typically <300 chars
         // Per-source salary expectation — gates the "0 salaries at all" alarm so it
         // never cries wolf on sources that structurally omit salary. Grounded in
@@ -377,13 +374,6 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const SALARY_NEVER = new Set(['linkedin', 'greenhouse', 'lever']);
         const SALARY_ALWAYS = new Set(['usajobs']);
         const ZERO_SALARY_MIN_SAMPLE = 20;
-        // Mojibake / encoding corruption: C1 control chars (U+0080–U+009F) never
-        // appear in legitimate text — they're the continuation bytes of a UTF-8
-        // sequence mis-decoded as Latin-1 (e.g. "'" = E2 80 99 → "â"+U+0080+U+0099,
-        // or a 𝗯𝗼𝗹𝗱-Unicode title). Distinct from LEGIT accents (é, à, ç =
-        // U+00E0–U+00FF), so a real French/Portuguese JD is NOT flagged. This
-        // corruption flows into scoring AND the generated résumé, so surface it.
-        const MOJIBAKE_RE = /[\u0080-\u009f]/;
 
         const qualBySource = {};
         for (const j of snapJobs) {
@@ -401,11 +391,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           q.total++;
           // Encoding corruption (C1 controls) in any user-facing field.
           const blob = `${j.title || ''} ${j.company || ''} ${j.snippet || ''}`;
-          if (MOJIBAKE_RE.test(blob)) {
+          if (hasMojibake(blob)) {
             q.mojibake++;
             if (q.mojibakeEx.length < 1) {
-              const i = blob.search(MOJIBAKE_RE);
-              q.mojibakeEx.push(blob.slice(Math.max(0, i - 18), i + 18).replace(/[\u0080-\u009f]/g, '\uFFFD').replace(/\s+/g, ' '));
+              const excerpt = mojibakeExcerpt(blob);
+              if (excerpt) q.mojibakeEx.push(excerpt);
             }
           }
           const sal = (j.salary || '').trim();

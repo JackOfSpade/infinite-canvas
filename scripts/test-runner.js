@@ -155,6 +155,7 @@ import os from 'node:os';
 import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, computeResumeStartPage, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
 import { dedupAgainstHistory, filterHistoryForResume } from '../electron/ipc/jobsHistory.js';
 import { modelTag, overPricedSoldFlag, renderSessionTraceBlocks, visitCanvasNodes } from '../electron/ipc/bugReport/helpers.js';
+import { looksLikeMoney, mojibakeExcerpt } from '../electron/ipc/bugReport/jobQualityChecks.js';
 import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
 import { classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
 import { deriveHubScanStatus, resolveAttentionSourceUrls, scanSellerHubPages, annotateReadState, summarizeReadState, stripHtmlForAnalysis, stripReadStateTokens, READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN } from '../electron/ipc/listingStatusCheck.js';
@@ -5086,6 +5087,25 @@ const tests = [
       assert(single.includes('(rate-limit: 3 earlier model(s) failed)'), `modelTag: single-cause stays plain → ${single}`);
       assert(modelTag('gemini-3.1-flash-lite', { attempts: 0, preferredModel: 'gemini-3.1-flash-lite' })
         === ' · model: `gemini-3.1-flash-lite`', 'a preferred Lite model is not mislabeled as weak fallback');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'jobQualityChecks: looksLikeMoney/hasMojibake/mojibakeExcerpt — previously only reachable via a full bug-report payload',
+    run: () => {
+      assert(looksLikeMoney('$50,000'), 'looksLikeMoney: dollar sign');
+      assert(looksLikeMoney('70,000 - 95,000'), 'looksLikeMoney: comma-grouped thousands range, no currency symbol');
+      assert(looksLikeMoney('$45/hr'), 'looksLikeMoney: hourly rate');
+      assert(looksLikeMoney('120k'), 'looksLikeMoney: k-suffix');
+      assert(!looksLikeMoney('40 - 50'), 'looksLikeMoney: ambiguous tiny range (no grouping) is NOT monetary');
+      assert(!looksLikeMoney('Full-time, remote'), 'looksLikeMoney: schedule text is NOT monetary');
+
+      assert(!hasMojibake('Ingénieur logiciel — Paris, France'), 'hasMojibake: legit accented text is not flagged');
+      const corrupted = 'na' + String.fromCharCode(0x80) + String.fromCharCode(0x99) + 've';
+      assert(hasMojibake(corrupted), 'hasMojibake: C1 control chars are flagged');
+      assert(mojibakeExcerpt('clean text') === null, 'mojibakeExcerpt: no corruption → null');
+      const excerpt = mojibakeExcerpt(corrupted);
+      assert(typeof excerpt === 'string' && excerpt.includes('�'), `mojibakeExcerpt: replaces bad bytes with U+FFFD — got ${JSON.stringify(excerpt)}`);
       return { ok: true };
     },
   },
