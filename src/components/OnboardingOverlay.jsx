@@ -1,7 +1,8 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Briefcase, Camera, ArrowRight, Sparkles, MousePointerClick } from 'lucide-react';
 import { ACTIVE_JOB_SOURCES } from '../utils/constants';
+import { updateModalCount } from './modalStack';
 
 const activeJobSourceLabel = `${ACTIVE_JOB_SOURCES.length} source${ACTIVE_JOB_SOURCES.length === 1 ? '' : 's'}`;
 
@@ -138,6 +139,19 @@ export function OnboardingOverlay() {
       setStep(s => s - 1);
     }
   }, [step]);
+
+  // Like every other full-screen modal (Dialog, ConfirmDialog, PhotoLightbox),
+  // this must suppress global keyboard shortcuts (undo/redo, WASD panning,
+  // node delete) while it's covering the canvas — otherwise e.g. Cmd+Z during
+  // the walkthrough mutates canvas state underneath it. Gated on `visible`,
+  // not mount: the component stays mounted (returning null) after dismiss, so
+  // an unconditional mount-effect would register a phantom open modal even
+  // for a returning user who never sees this overlay at all.
+  useEffect(() => {
+    if (!visible) return;
+    updateModalCount(1);
+    return () => updateModalCount(-1);
+  }, [visible]);
 
   if (!visible) return null;
 
