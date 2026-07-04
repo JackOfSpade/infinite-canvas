@@ -265,8 +265,8 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
 
   // Tool-use response: pull the tool_use block's `input`, repair any nested
   // object the model mis-emitted (leaked fields / tool-call XML in a string),
-  // then re-stringify so the shared parseGeminiJSON downstream can JSON.parse it
-  // like any other JSON.
+  // then re-stringify so the shared parseAiJson (jsonRepair.js) downstream can
+  // JSON.parse it like any other JSON.
   if (responseSchema) {
     const toolBlock = response.content.find(b => b.type === 'tool_use');
     if (!toolBlock) {

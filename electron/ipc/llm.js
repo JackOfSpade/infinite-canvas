@@ -1,6 +1,7 @@
 import { getAISettings } from './settings.js';
-import { callGeminiText, callGeminiTextRaw, callGeminiVision, callGeminiDocument, parseGeminiJSON, countGeminiInputTokens, GEMINI_MODEL_FALLBACKS } from './gemini.js';
+import { callGeminiText, callGeminiTextRaw, callGeminiVision, callGeminiDocument, countGeminiInputTokens, GEMINI_MODEL_FALLBACKS } from './gemini.js';
 import { callClaudeText, callClaudeVision, callClaudeDocument, createClaudeBatch, getClaudeBatch, getClaudeBatchResults, cancelClaudeBatch, countClaudeInputTokens } from './claude.js';
+import { parseAiJson } from './jsonRepair.js';
 import { isWordDoc, extractWordText } from './docUtils.js';
 import { isSensitivePath } from '../utils/pathSafety.js';
 import { effectiveCap } from './tokenBudget.js';
@@ -370,7 +371,7 @@ export async function callLLMText(prompt, opts = {}) {
     if (settings.provider === 'claude') {
       const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, cachedPrefix, task });
       if (meta) meta.model = model;
-      return parseGeminiJSON(raw);
+      return parseAiJson(raw);
     }
     // Gemini: prepend prefix into the prompt; implicit prefix caching on 2.5
     // models picks up the repeated content automatically.
@@ -419,7 +420,7 @@ export async function getLLMTextBatchResults(batchId) {
   const parsed = {};
   for (const [customId, r] of Object.entries(raw)) {
     if (!r.ok || !r.text) { parsed[customId] = null; continue; }
-    try { parsed[customId] = parseGeminiJSON(r.text); }
+    try { parsed[customId] = parseAiJson(r.text); }
     catch { parsed[customId] = null; }
   }
   return parsed;
@@ -483,7 +484,7 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
     if (settings.provider === 'claude') {
       const raw = await callClaudeVision(imagePaths, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });
       if (meta) meta.model = model;
-      return parseGeminiJSON(raw);
+      return parseAiJson(raw);
     }
     return await callGeminiVision(imagePaths, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, meta });
   } catch (err) {
@@ -521,7 +522,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   try {
     if (settings.provider === 'claude') {
       const raw = await callClaudeDocument(filePath, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });
-      return parseGeminiJSON(raw);
+      return parseAiJson(raw);
     }
     return await callGeminiDocument(filePath, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task });
   } catch (err) {

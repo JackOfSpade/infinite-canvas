@@ -130,7 +130,7 @@ import {
   isGeminiZeroOrDailyQuota,
   orderGeminiModels,
 } from '../electron/ipc/geminiModels.js';
-import { parseGeminiJSON } from '../electron/ipc/gemini.js';
+import { parseAiJson } from '../electron/ipc/jsonRepair.js';
 import { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
 import { withStatusCheckLock, getStatusCheckQueueDepth } from '../electron/ipc/statusCheckLock.js';
 import { isSessionExpired } from '../electron/ipc/browserViewMonitor.js';
@@ -3192,19 +3192,19 @@ const tests = [
     },
   },
   {
-    name: 'Gemini JSON parsing',
+    name: 'parseAiJson: repairs markdown fences, trailing commas, top-level arrays, stray-bracket prose',
     run: () => {
       const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
       // Plain object, markdown-fenced, and trailing-comma cleanup.
-      assert(eq(parseGeminiJSON('{"a":1}'), { a: 1 }), 'parseGeminiJSON: plain object');
-      assert(eq(parseGeminiJSON('```json\n{"a":1}\n```'), { a: 1 }), 'parseGeminiJSON: fenced object');
-      assert(eq(parseGeminiJSON('{"a":1,}'), { a: 1 }), 'parseGeminiJSON: trailing comma');
+      assert(eq(parseAiJson('{"a":1}'), { a: 1 }), 'parseAiJson: plain object');
+      assert(eq(parseAiJson('```json\n{"a":1}\n```'), { a: 1 }), 'parseAiJson: fenced object');
+      assert(eq(parseAiJson('{"a":1,}'), { a: 1 }), 'parseAiJson: trailing comma');
       // Top-level arrays must NOT be mangled (guards the fallback against
       // starting the span at the first inner brace).
-      assert(eq(parseGeminiJSON('[{"a":1},{"b":2}]'), [{ a: 1 }, { b: 2 }]), 'parseGeminiJSON: top-level array');
+      assert(eq(parseAiJson('[{"a":1},{"b":2}]'), [{ a: 1 }, { b: 2 }]), 'parseAiJson: top-level array');
       // Regression: prose containing a stray bracket before the JSON object used
       // to make the first-open/last-close span start at the stray '[' and throw.
-      assert(eq(parseGeminiJSON('Use [ ] for arrays: {"status":"ok"}'), { status: 'ok' }), 'parseGeminiJSON: stray bracket in prose');
+      assert(eq(parseAiJson('Use [ ] for arrays: {"status":"ok"}'), { status: 'ok' }), 'parseAiJson: stray bracket in prose');
       return { ok: true };
     },
   },
@@ -6100,16 +6100,16 @@ const tests = [
     // Regression: the prose-recovery fallback must not silently return a stray
     // empty literal ("[ ]") scraped from prose when the real value didn't parse —
     // that masked failures and violated the fail-loud contract.
-    name: 'parseGeminiJSON: stray empty "[ ]" in prose does not silently win → throws',
+    name: 'parseAiJson: stray empty "[ ]" in prose does not silently win → throws',
     run: () => {
       const raw = 'Use { } for objects and [ ] for arrays. Result: {"score": 9}';
       let threw = false;
-      try { parseGeminiJSON(raw); } catch { threw = true; }
+      try { parseAiJson(raw); } catch { threw = true; }
       assert(threw, 'prose with a stray "[ ]" + unparseable brace span must throw, not return []');
       // Sanity: a clean object after prose still recovers (no regression).
-      assert(parseGeminiJSON('Here is the answer: {"score": 9}').score === 9, 'object-after-prose still recovers');
+      assert(parseAiJson('Here is the answer: {"score": 9}').score === 9, 'object-after-prose still recovers');
       // A genuine empty array as the whole clean response still parses to [].
-      assert(Array.isArray(parseGeminiJSON('[]')) && parseGeminiJSON('[]').length === 0, 'clean "[]" still parses to []');
+      assert(Array.isArray(parseAiJson('[]')) && parseAiJson('[]').length === 0, 'clean "[]" still parses to []');
       return { ok: true };
     },
   },
