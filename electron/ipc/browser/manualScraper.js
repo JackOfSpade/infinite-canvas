@@ -1891,6 +1891,22 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             logger.warn(`[BrowserScraper] ${srcName} extractor threw (non-SITE_CHANGED, ${evalErrStreak}/${SITE_CHANGED_ABORT_THRESHOLD}): ${evalError.message}`);
             if (evalErrStreak >= SITE_CHANGED_ABORT_THRESHOLD) {
               logger.warn(`[BrowserScraper] ${srcName} extractor threw ${evalErrStreak}x in a row (non-SITE_CHANGED) — stopping this source's pagination rather than retrying indefinitely.`);
+              // Mirror siteChangedError's give-up path below: surface this to the
+              // caller instead of silently ending pagination. Without a warning +
+              // earlyExit, this source's result looked identical to a clean
+              // "reached the end of results" (stopReason: 'completed', warning:
+              // null) even though it stopped early because the extractor is
+              // persistently broken — the user had no signal their job count for
+              // this source is incomplete.
+              if (!sourceSiteChangedWarning) {
+                sourceSiteChangedWarning = {
+                  code:       'extractor-error',
+                  severity:   'block',
+                  evidence:   `${srcName} extractor threw ${evalErrStreak} times in a row on page ${pageNum}: ${evalError.message.slice(0, 280)}`,
+                  suggestion: `The ${srcName} extractor kept failing while reading this page, so results for this source stopped early and may be incomplete. Try running the search again — if it keeps happening, the extractor may need updating.`,
+                };
+              }
+              earlyExit = true;
               break;
             }
             await new Promise(r => setTimeout(r, humanDelay(1000)));
