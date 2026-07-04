@@ -7,11 +7,13 @@ import { HubContainer } from '../components/HubContainer';
 import { Briefcase, Clock } from 'lucide-react';
 import { JOB_SOURCE_BY_ID, ACTIVE_JOB_SOURCES } from '../utils/constants';
 import { isJobSourceEnabledInScope, JOB_SEARCH_TEST_MODE } from '../utils/jobSourceScope';
-// Same-run merges use jobTitleCompanyKey — the backend's cross-source dedup
-// key — so a posting that arrives late (post-Solve resolve, background USAJobs)
-// collapses against the copy another board already returned, exactly as it
-// would have in the main gather. See the policy note in jobIdentity.js.
-import { dedupeJobsByKey, jobTitleCompanyKey, uniqueJobsNotIn } from '../utils/jobIdentity';
+// Same-run merges use dedupJobsAcrossSources/uniqueJobsAcrossSources — the
+// backend's location-aware cross-source dedup — so a posting that arrives
+// late (post-Solve resolve, background USAJobs) collapses against the copy
+// another board already returned, exactly as it would have in the main
+// gather, without over-collapsing distinct same-title/company reqs in
+// different cities. See the policy note in jobIdentity.js.
+import { dedupJobsAcrossSources, uniqueJobsAcrossSources } from '../utils/jobIdentity';
 import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
 import { mergeResolvedSourceItems } from '../utils/jobSourceResolveMerge';
 import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
@@ -285,7 +287,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const appendJobsToDoneCanvas = useCallback(({ scoredJobs, filteredWarnings, gatheredDelta = 0 }) => {
     const fresh = Array.isArray(scoredJobs) ? scoredJobs : [];
     const existing = Array.isArray(data.scoredJobs) ? data.scoredJobs : [];
-    const added = uniqueJobsNotIn(existing, fresh, jobTitleCompanyKey);
+    const added = uniqueJobsAcrossSources(existing, fresh);
     const nextScored = added.length ? [...existing, ...added] : existing;
 
     const finalSourceCounts = { ...data.finalSourceCounts };
@@ -365,7 +367,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
       if (currentState === 'sources-ready') {
         const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
-        const fresh = uniqueJobsNotIn(prevPending, freshJobs, jobTitleCompanyKey);
+        const fresh = uniqueJobsAcrossSources(prevPending, freshJobs);
         const mergedPending = [...prevPending, ...fresh];
         pendingJobsRef.current = mergedPending;
         scrapeWarningsRef.current = filteredWarnings;
@@ -1198,7 +1200,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
         const resolvedItems = prevPending.filter(j => alreadyResolved.has(j?.source));
         if (resolvedItems.length > 0) {
-          foundJobs = dedupeJobsByKey([...resolvedItems, ...foundJobs], jobTitleCompanyKey);
+          foundJobs = dedupJobsAcrossSources([...resolvedItems, ...foundJobs]);
         }
       }
 

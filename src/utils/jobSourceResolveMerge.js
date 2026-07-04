@@ -1,4 +1,4 @@
-import { jobTitleCompanyKey, uniqueJobsNotIn } from './jobIdentity.js';
+import { uniqueJobsAcrossSources } from './jobIdentity.js';
 
 export function mergeResolvedSourceItems(prevPending, incomingItems, sourceId, {
   replaceSourceItems = false,
@@ -13,12 +13,14 @@ export function mergeResolvedSourceItems(prevPending, incomingItems, sourceId, {
   const keep = replaceSourceItems
     ? previous.filter(job => job?.source !== sourceId)
     : previous;
-  // Dedup with the SAME-RUN key (title|company — see jobIdentity.js policy):
-  // had this source not blocked, the backend's cross-source dedup would have
-  // collapsed its copy of a posting another source already returned. The
-  // URL key used here previously let those cross-source copies through, so a
-  // Solve could send the same posting to the scorer (and the board) twice.
-  const fresh = uniqueJobsNotIn(keep, incoming, jobTitleCompanyKey);
+  // Dedup with the SAME location-aware logic the backend's cross-source dedup
+  // uses (jobIdentity.js's dedupJobsAcrossSources): had this source not
+  // blocked, the backend would have collapsed its copy of a posting another
+  // source already returned, INCLUDING keeping distinct same-title/company
+  // reqs in different cities apart. A plain title+company key (or the URL key
+  // used here previously) either lets cross-source copies through twice or
+  // over-collapses distinct cities onto each other.
+  const fresh = uniqueJobsAcrossSources(keep, incoming);
 
   return {
     keep,

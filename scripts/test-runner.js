@@ -23,6 +23,7 @@ import {
   dedupeJobsByKey,
   uniqueJobsNotIn,
   dedupJobsAcrossSources,
+  uniqueJobsAcrossSources,
 } from '../src/utils/jobIdentity.js';
 import { mergeSourceProgress } from '../src/utils/sourceProgress.js';
 import { isJobCardVisible } from '../src/utils/jobCardFilters.js';
@@ -2456,7 +2457,49 @@ const tests = [
       const sameCity = dedupJobsAcrossSources([nycReq, nycAgain, sfReq]);
       assert(sameCity.length === 2, `dedupJobsAcrossSources: matching-location duplicate should collapse, distinct city should survive, got ${sameCity.length}`);
 
-      return { crossSource: crossSource.length, distinctCities: distinctCities.length, sameCity: sameCity.length };
+      // Regression: a group's FIRST entry landing with an unknown location
+      // used to match (and swallow) EVERY later job via the "either side
+      // unknown" leniency, regardless of the later jobs' own distinct real
+      // locations — collapsing NYC and SF onto the one unresolved entry
+      // instead of onto each other. The unresolved entry must only absorb
+      // the FIRST location-bearing match, then behave like a normal
+      // exact-match city for anything after that.
+      const noLocationFirst = { title: 'Software Engineer', company: 'Google', source: 'USAJobs' };
+      const orderDependent = dedupJobsAcrossSources([noLocationFirst, nycReq, sfReq]);
+      assert(orderDependent.length === 2,
+        `dedupJobsAcrossSources: an unknown-location entry seen FIRST must not swallow two distinct later cities, got ${orderDependent.length}`);
+
+      return { crossSource: crossSource.length, distinctCities: distinctCities.length, sameCity: sameCity.length, orderDependent: orderDependent.length };
+    },
+  },
+  {
+    name: 'uniqueJobsAcrossSources: location-aware "new vs existing" merge (renderer resolve/append paths)',
+    run: () => {
+      const nycExisting = { title: 'Software Engineer', company: 'Google', location: 'New York, NY', source: 'Indeed' };
+      const sfFresh = { title: 'Software Engineer', company: 'Google', location: 'San Francisco, CA', source: 'LinkedIn' };
+      const dup = { title: 'software engineer', company: 'google', location: 'new york, ny', source: 'USAJobs' };
+
+      // A genuinely distinct-city fresh job must be added, not swallowed.
+      const added1 = uniqueJobsAcrossSources([nycExisting], [sfFresh]);
+      assert(added1.length === 1 && added1[0] === sfFresh, 'uniqueJobsAcrossSources: distinct city is added');
+
+      // A same-city duplicate must NOT be added again.
+      const added2 = uniqueJobsAcrossSources([nycExisting], [dup]);
+      assert(added2.length === 0, 'uniqueJobsAcrossSources: matching-location duplicate is not re-added');
+
+      // The exact bug this replaces uniqueJobsNotIn(..., jobTitleCompanyKey)
+      // for: with the old location-blind key, BOTH nycExisting and sfFresh
+      // share the null-location existing entry's title+company, so NEITHER
+      // would ever be added — a genuinely new posting in a second city could
+      // never surface. The location-aware version lets the ambiguous
+      // existing entry absorb (at most) the FIRST candidate it plausibly
+      // matches, so the clearly-distinct second city still gets through.
+      const noLocationExisting = { title: 'Software Engineer', company: 'Google', source: 'USAJobs' };
+      const added3 = uniqueJobsAcrossSources([noLocationExisting], [nycExisting, sfFresh]);
+      assert(added3.length === 1 && added3[0] === sfFresh,
+        `uniqueJobsAcrossSources: an unknown-location existing entry absorbs one candidate but still lets a second, distinct city through, got ${added3.length}`);
+
+      return { added1: added1.length, added2: added2.length, added3: added3.length };
     },
   },
   {
@@ -6878,6 +6921,15 @@ const tests = [
       assert(isAllowedOpenFileExt('/x/launcher.desktop') === false, 'desktop blocked (missed by the old denylist)');
       assert(isAllowedOpenFileExt('/x/lib.jar') === false, 'jar blocked (missed by the old denylist)');
       assert(isAllowedOpenFileExt('/x/no-extension') === false, 'no extension → blocked, not allowed');
+      // Regression: every extension CODE_EXT_RE (src/utils/fileExtensions.js)
+      // treats as valid code/text DocumentNode content must be openable here
+      // too, or dropping one of these onto the canvas creates a node whose
+      // own double-click-to-open silently fails. .js/.sh are the deliberate
+      // exceptions (Windows Script Host / shell can execute them directly).
+      for (const ext of ['.ts', '.tsx', '.jsx', '.py', '.rb', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.cs', '.php', '.swift', '.kt', '.toml', '.env']) {
+        assert(isAllowedOpenFileExt(`/x/file${ext}`) === true, `${ext} must be openable — CODE_EXT_RE treats it as valid document content`);
+      }
+      assert(isAllowedOpenFileExt('/x/script.js') === false, 'js still blocked — Windows Script Host executes it directly');
       return { ok: true };
     },
   },
@@ -6903,6 +6955,17 @@ const tests = [
       // exercised here since the test stub's decryptString never throws
       // (unlike real OS-keychain-backed safeStorage), only asserting the
       // documented contract doesn't throw on well-formed input above.
+
+      // Regression: encryptSecret must be idempotent on an already-encrypted
+      // value. update-settings' shallow-merge re-runs encryptSecret over
+      // EVERY secret key in a section on every save, including keys the
+      // caller didn't touch (already-encrypted from a prior save) — without
+      // this guard, the second save double-encrypts, and decryptSecret (which
+      // only strips ONE ENC_PREFIX layer) then returns the literal
+      // ENC_PREFIX-tagged ciphertext string instead of the real key.
+      const reEncrypted = encryptSecret(encrypted);
+      assert(reEncrypted === encrypted, 'encryptSecret is idempotent — re-encrypting an already-encrypted value is a no-op');
+      assert(decryptSecret(reEncrypted) === key, 'a value that already went through encryptSecret twice still decrypts to the real secret');
       return { ok: true };
     },
   },
