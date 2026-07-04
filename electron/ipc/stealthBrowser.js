@@ -252,10 +252,27 @@ export async function getStealthBrowser() {
   // "The browser is already running for [userDataDir]."
   if (browserInstance) {
     logger.warn('[StealthBrowser] Browser connection lost (crashed?) — killing orphaned process before relaunch');
-    try { browserInstance.process()?.kill('SIGTERM'); } catch { /* already dead */ }
+    const deadInstance = browserInstance;
     browserInstance = null;
-    // Give the OS a moment to release the profile lock.
-    await new Promise(r => setTimeout(r, 500));
+    // Register this teardown as the shared close-in-flight guard (same variable
+    // closeStealthBrowser() dedups on). Without this, a closeStealthBrowser()
+    // call landing in this window sees browserInstance already null and
+    // returns immediately, thinking there's nothing to close — while the
+    // SIGTERM'd process may not have exited yet. clearBrowserSession() in
+    // particular deletes the userDataDir right after closeStealthBrowser()
+    // resolves, which would then race an OS lock the dying process still
+    // holds. Setting browserClosePromise makes a concurrent close piggyback
+    // on (i.e. actually wait for) this kill instead of racing past it.
+    browserClosePromise = (async () => {
+      try { deadInstance.process()?.kill('SIGTERM'); } catch { /* already dead */ }
+      // Give the OS a moment to release the profile lock.
+      await new Promise(r => setTimeout(r, 500));
+    })();
+    try {
+      await browserClosePromise;
+    } finally {
+      browserClosePromise = null;
+    }
     // A concurrent caller may have already relaunched (and even fully
     // connected) while we were waiting — re-check before starting a SECOND,
     // redundant launch on top of one that already finished and cleared

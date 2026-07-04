@@ -44,17 +44,32 @@ export function encryptSecret(plain) {
   }
 }
 
+// Memoized on the raw ciphertext string. getAISettings/getJobsSettings/
+// getDiceApiKey are called from every LLM helper and API-source fetch — often
+// several times per job search/scoring batch — and each miss hit the OS
+// keychain/DPAPI/Secret Service (safeStorage.decryptString), not free
+// in-process work. Safe with zero explicit invalidation: safeStorage encrypts
+// with a fresh IV each call, so an actual credential change (re-encrypted by
+// update-settings) always produces a NEW ciphertext string — a different Map
+// key — while an untouched secret's ciphertext (preserved as-is by
+// encryptSecret's idempotency guard) keeps hitting the same cached entry.
+const decryptCache = new Map();
+
 export function decryptSecret(stored) {
   if (typeof stored !== 'string' || !stored.startsWith(ENC_PREFIX)) return stored; // legacy plaintext, or not a string
+  if (decryptCache.has(stored)) return decryptCache.get(stored);
+  let result;
   try {
-    return safeStorage.decryptString(Buffer.from(stored.slice(ENC_PREFIX.length), 'base64'));
+    result = safeStorage.decryptString(Buffer.from(stored.slice(ENC_PREFIX.length), 'base64'));
   } catch (err) {
     // Undecryptable (e.g. the userData folder was copied to a different
     // machine/user — safeStorage keys don't travel). Fail closed: an empty
     // key surfaces as "not configured" in the UI rather than crashing.
     logger.warn('[Settings] Failed to decrypt a secret field:', err?.message || err);
-    return '';
+    result = '';
   }
+  decryptCache.set(stored, result);
+  return result;
 }
 
 function encryptSectionSecrets(keys, obj) {

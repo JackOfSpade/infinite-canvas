@@ -218,6 +218,7 @@ import { enqueueStatusCheckAction, getStatusCheckActionQueueDepth } from '../src
 import { getCanonicalDomain, extractDomain, effectiveConcurrency, isCoolingDown, recordOutcome, getRateLimiterSnapshot, _resetRateLimiter } from '../electron/ipc/rateLimiter.js';
 import { recordTokenUsage, recordTruncation, effectiveCap, TOKEN_HARD_CAP } from '../electron/ipc/tokenBudget.js';
 import { encryptSecret, decryptSecret } from '../electron/ipc/settings.js';
+import electronPkg from 'electron';
 import { wrapUntrustedText } from '../electron/ipc/promptSafety.js';
 import { PRODUCT_CONDITIONS, CONDITION_VALUES, DEFAULT_CONDITION, getConditionDef, formatConditionForPricingPrompt, formatConditionGuideForPrompt, stripConditionFromGeneratedTitle } from '../src/utils/productConditions.js';
 import { beginMarketplaceStatusRun, completeMarketplaceStatusPlatform, finishMarketplaceStatusRun, getMarketplaceStatusActiveRuns, marketplaceStatusCheckingIds, mergeMarketplaceStatusResults, publishMarketplaceStatusCheckingIds, subscribeMarketplaceStatusCheckingIds } from '../src/utils/marketplaceStatusProgress.js';
@@ -3419,6 +3420,33 @@ const tests = [
       const eout = edom.window.eval(EBAY_ACTIVE_EXTRACTOR);
       assert(eout.items[0].price === 10, `eBay range should parse the low end 10 (not 10.002), got ${eout.items[0]?.price}`);
       return { ok: true, mercari: mprices, ebayRange: eout.items[0].price };
+    },
+  },
+  {
+    name: 'eBay extractors: dedup-by-url never collapses distinct no-url cards onto each other',
+    run: () => {
+      // Cards with NO a.s-card__link get url: '' (see EBAY_ACTIVE_EXTRACTOR). Two
+      // real duplicates of the SAME url must still collapse to one, but two
+      // otherwise-distinct no-link cards must NOT collapse onto each other just
+      // because they share the empty-string url.
+      const card = (title, price, href) =>
+        `<li class="s-card"><span class="su-styled-text primary">${title}</span>` +
+        `<div class="s-card__price">$${price}</div>` +
+        (href ? `<a class="s-card__link" href="${href}"></a>` : '') +
+        '</li>';
+      const html = '<html><head><title>eBay</title></head><body><ul class="srp-results">' +
+        card('Widget A', 10, 'https://www.ebay.com/itm/1') +
+        card('Widget A duplicate', 10, 'https://www.ebay.com/itm/1') + // same url → real dup, collapse
+        card('Widget B (no link)', 20, null) +
+        card('Widget C (no link)', 30, null) +   // different listing, also no link → must survive
+        '</ul></body></html>';
+      const dom = new JSDOM(html, { url: 'https://www.ebay.com/sch/i.html?_nkw=x&_sop=15', runScripts: 'outside-only' });
+      const out = dom.window.eval(EBAY_ACTIVE_EXTRACTOR);
+      const titles = out.items.map(i => i.title);
+      assert(out.items.length === 3, `expected 3 items (1 real dup collapsed, 2 no-url cards both kept), got ${out.items.length}: ${titles.join(', ')}`);
+      assert(titles.includes('Widget B (no link)') && titles.includes('Widget C (no link)'),
+        `both no-url cards must survive independently, got ${titles.join(', ')}`);
+      return { ok: true, titles };
     },
   },
   {
@@ -6967,6 +6995,31 @@ const tests = [
       assert(reEncrypted === encrypted, 'encryptSecret is idempotent — re-encrypting an already-encrypted value is a no-op');
       assert(decryptSecret(reEncrypted) === key, 'a value that already went through encryptSecret twice still decrypts to the real secret');
       return { ok: true };
+    },
+  },
+  {
+    name: 'settings: decryptSecret memoizes on ciphertext, sparing a repeat OS-keychain call',
+    run: () => {
+      // getAISettings/getJobsSettings/getDiceApiKey are called repeatedly (every
+      // LLM helper, every API-source fetch) — decryptSecret must not hit
+      // safeStorage.decryptString again for a ciphertext it already decrypted.
+      const realDecrypt = electronPkg.safeStorage.decryptString;
+      let calls = 0;
+      electronPkg.safeStorage.decryptString = (...args) => { calls++; return realDecrypt(...args); };
+      try {
+        const encryptedA = encryptSecret('sk-cache-test-aaaaaaaaaaaaaaaaaaaaaaaa');
+        const encryptedB = encryptSecret('sk-cache-test-bbbbbbbbbbbbbbbbbbbbbbbb');
+        assert(decryptSecret(encryptedA) === 'sk-cache-test-aaaaaaaaaaaaaaaaaaaaaaaa', 'first decrypt of A is correct');
+        assert(calls === 1, `first decrypt of A hits safeStorage once (got ${calls})`);
+        decryptSecret(encryptedA);
+        decryptSecret(encryptedA);
+        assert(calls === 1, `repeat decrypts of the SAME ciphertext A must not re-hit safeStorage (got ${calls} calls)`);
+        assert(decryptSecret(encryptedB) === 'sk-cache-test-bbbbbbbbbbbbbbbbbbbbbbbb', 'a DIFFERENT ciphertext (B) still decrypts correctly');
+        assert(calls === 2, `a genuinely different ciphertext still hits safeStorage (got ${calls} calls)`);
+        return { ok: true };
+      } finally {
+        electronPkg.safeStorage.decryptString = realDecrypt;
+      }
     },
   },
   {

@@ -62,6 +62,11 @@ const MONITOR_SETTLE_MS = 3000; // beat after a reload for the page to hydrate b
 // consecutiveErrors backoff/pause path instead.
 const REFRESH_TIMEOUT_MS = 45_000;
 
+// Bounded wait for reopenMonitor() to let an in-flight refreshMonitor() finish
+// before it touches the same webContents/monitor record (see reopenMonitor).
+const REOPEN_WAIT_STEP_MS = 100;
+const REOPEN_MAX_WAIT_MS  = 5000;
+
 // Concurrency cap derived from system RAM (each monitor is a hidden
 // BrowserWindow, ~50–150MB + a page reload per cycle): ~1 per 8GB, clamped so a
 // small box keeps ≥2 and a large one caps at 5. A 24GB machine resolves to 3
@@ -460,7 +465,7 @@ function stopMonitor(id) {
 /**
  * Re-open the monitor window for the user to re-authenticate.
  */
-function reopenMonitor(id) {
+async function reopenMonitor(id) {
   const monitor = monitors.get(id);
   if (!monitor) throw new Error(`Monitor ${id} not found`);
 
@@ -468,6 +473,22 @@ function reopenMonitor(id) {
   if (monitor.timer) {
     clearTimeout(monitor.timer);
     monitor.timer = null;
+  }
+
+  // Wait out a refresh already in flight — refreshMonitor() drives the SAME
+  // webContents (loadURL/executeJavaScript) this function is about to touch.
+  // Without this, reopenMonitor's loadURL(re-auth page) can race refreshMonitor's
+  // own navigation, and a stale refresh that resolves afterward would run the
+  // extractor against the login page and treat whatever it scrapes as a real
+  // data change. Bounded — never block the user's re-auth request indefinitely
+  // on a slow/hung refresh cycle.
+  let waited = 0;
+  while (monitor.refreshing && waited < REOPEN_MAX_WAIT_MS) {
+    await new Promise(r => setTimeout(r, REOPEN_WAIT_STEP_MS));
+    waited += REOPEN_WAIT_STEP_MS;
+  }
+  if (monitor.refreshing) {
+    logger.warn(`[Monitor ${id}] Reopen proceeding after ${REOPEN_MAX_WAIT_MS}ms — a refresh is still in flight`);
   }
 
   monitor.status = 'setup';
@@ -548,7 +569,7 @@ export function registerMonitorHandlers() {
 
   // Reopen for re-authentication
   handleSafe('reopen-monitor', async (_event, { id }) => {
-    reopenMonitor(id);
+    await reopenMonitor(id);
     return { success: true };
   });
 

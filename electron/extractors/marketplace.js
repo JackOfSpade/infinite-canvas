@@ -156,6 +156,12 @@ const EBAY_EMPTY_GUARD_FN = `(function(label, cards, items, diagFn){
 const DEDUP_BY_URL_FN = `(function(items){
   var seen = new Set();
   return items.filter(function(i){
+    // A card with no extractable link (malformed/edge-case markup) must never
+    // be deduped against another such card — without this guard every item
+    // missing a url collapses onto the empty-string/undefined "seen" entry
+    // and all but the first are silently dropped, even though they're
+    // unrelated listings that just happen to share "no url".
+    if (!i.url) return true;
     if (seen.has(i.url)) return false;
     seen.add(i.url);
     return true;
