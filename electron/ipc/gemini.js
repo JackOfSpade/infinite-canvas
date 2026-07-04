@@ -9,6 +9,7 @@ import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { resolveServiceAccountPath, getAISettings } from './settings.js';
 import { callClaudeText, probeClaude, CLAUDE_MODELS_IN_USE } from './claude.js';
+import { CLAUDE_HAIKU } from './claudeModels.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP, DOCUMENT_MIME_MAP } from '../utils/mimeTypes.js';
 import {
@@ -1296,7 +1297,7 @@ export function registerGeminiHandlers() {
     // If user picked Claude, polish via Claude Haiku 4.5 directly. Avoids
     // forcing them onto Gemini just for this one helper.
     if (settings.provider === 'claude') {
-      const raw = await callClaudeText(prompt, 'claude-haiku-4-5-20251001', settings.anthropicApiKey, signal, { maxTokens: 1024, expectJson: false });
+      const raw = await callClaudeText(prompt, CLAUDE_HAIKU, settings.anthropicApiKey, signal, { maxTokens: 1024, expectJson: false });
       return { text: raw.trim() };
     }
     const config = { responseMimeType: 'text/plain', signal, maxOutputTokens: 1024 };

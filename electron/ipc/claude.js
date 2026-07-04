@@ -6,6 +6,7 @@ import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP } from '../utils/mimeTypes.js';
 import { buildCachedUserContent, buildAnthropicMessageParams } from './anthropicRequest.js';
 import { isSensitivePath } from '../utils/pathSafety.js';
+import { CLAUDE_MODEL_IDS, CLAUDE_SONNET } from './claudeModels.js';
 
 // A document/image node's filePath is sourced from loaded canvas JSON, which
 // (unlike the local-file:// preview protocol) had NO path check at all before
@@ -69,17 +70,12 @@ function parseAnthropicRateLimit(headers) {
   return Object.keys(out).length ? out : null;
 }
 
-// Distinct Claude models the app actually uses across tasks — KEEP IN SYNC with
-// TASK_MODELS in llm.js (declared here, not imported, to avoid a circular import:
-// llm.js imports gemini.js which owns the availability handler). Ordered
-// workhorse → app-gen → light. The availability probe checks EACH, because
-// Anthropic rate limits are PER-MODEL: Haiku having headroom says nothing about
-// whether a Sonnet scoring run or an Opus application-generation will hit limits.
-export const CLAUDE_MODELS_IN_USE = [
-  'claude-sonnet-4-6',          // job scoring/bucketing, resume-parse, query-gen, vision, price-synthesis, company-research
-  'claude-opus-4-8',            // application résumé + cover-letter generation
-  'claude-haiku-4-5-20251001',  // platform-fit, page-status, text-polish
-];
+// Distinct Claude models the app actually uses across tasks, sourced from the
+// shared registry (claudeModels.js) rather than a second hardcoded list. The
+// availability probe checks EACH, because Anthropic rate limits are PER-MODEL:
+// Haiku having headroom says nothing about whether a Sonnet scoring run or an
+// Opus application-generation will hit limits.
+export const CLAUDE_MODELS_IN_USE = CLAUDE_MODEL_IDS;
 
 /**
  * Lightweight availability probe: a 1-token ping to ONE model that reads the
@@ -89,7 +85,7 @@ export const CLAUDE_MODELS_IN_USE = [
  * {ok,status,model,rateLimit,error} so the Settings panel can render a verdict
  * (the rate-limit numbers are straight from the response headers).
  */
-export async function probeClaude(apiKey, model = 'claude-sonnet-4-6') {
+export async function probeClaude(apiKey, model = CLAUDE_SONNET) {
   if (!apiKey) return { ok: false, status: null, model, error: 'No Anthropic API key set.' };
   try {
     const anthropic = getAnthropicClient(apiKey);

@@ -1,3 +1,6 @@
+import { CLAUDE_MODEL_REGISTRY } from './claudeModels.js';
+import { GEMINI_MODEL_REGISTRY } from './geminiModels.js';
+
 /**
  * Context-window math + per-model metadata for LLM calls — pure and
  * dependency-free so the budget logic is unit-testable without booting Electron
@@ -12,27 +15,22 @@
  * this module owns the model table, the local estimate, and the split planning.
  */
 
-// Per-model context window (input+output budget) and max output tokens.
-// Verified against the providers' official docs (May 2026):
-//   • Anthropic — Sonnet 4.6 and Opus 4.8 are NATIVELY 1M on the Claude API (no
-//     beta header); Haiku 4.5 is 200K. "maxOutput" is the synchronous Messages
-//     API ceiling. (Claude 4.5+ overflow is graceful: input+max_tokens over the
-//     window doesn't 400 — generation stops with `model_context_window_exceeded`.)
-//   • Google — every general-purpose model in our cascade is 1,048,576 input /
-//     65,536 output. (Gemini's input and output limits are technically separate,
-//     not one shared budget; we still subtract output from the window, which is
-//     safely conservative — it costs ~2% of a 1M window.)
-// Keep ids in sync with llm.js TASK_MODELS and gemini.js GEMINI_MODEL_FALLBACKS.
-const MODEL_METADATA = {
-  'claude-opus-4-8':           { contextWindow: 1000000, maxOutput: 128000, provider: 'claude' },
-  'claude-sonnet-4-6':         { contextWindow: 1000000, maxOutput: 64000,  provider: 'claude' },
-  'claude-haiku-4-5-20251001': { contextWindow: 200000,  maxOutput: 64000,  provider: 'claude' },
-  'gemini-3.5-flash':          { contextWindow: 1048576, maxOutput: 65536,  provider: 'gemini' },
-  'gemini-3-flash-preview':    { contextWindow: 1048576, maxOutput: 65536,  provider: 'gemini' },
-  'gemini-3.1-flash-lite':     { contextWindow: 1048576, maxOutput: 65536,  provider: 'gemini' },
-  'gemini-2.5-flash':          { contextWindow: 1048576, maxOutput: 65536,  provider: 'gemini' },
-  'gemini-2.5-flash-lite':     { contextWindow: 1048576, maxOutput: 65536,  provider: 'gemini' },
-};
+// Per-model context window (input+output budget) and max output tokens,
+// derived from the two provider registries (claudeModels.js / geminiModels.js)
+// instead of a third hand-maintained copy of the same ids.
+// Google — every general-purpose model in our cascade is 1,048,576 input /
+// 65,536 output. (Gemini's input and output limits are technically separate,
+// not one shared budget; we still subtract output from the window, which is
+// safely conservative — it costs ~2% of a 1M window.) Claude 4.5+ overflow is
+// graceful: input+max_tokens over the window doesn't 400 — generation stops
+// with `model_context_window_exceeded`.
+const GEMINI_OUTPUT_TOKENS = 65536;
+const MODEL_METADATA = Object.fromEntries([
+  ...CLAUDE_MODEL_REGISTRY.map(({ id, contextWindow, maxOutput }) =>
+    [id, { contextWindow, maxOutput, provider: 'claude' }]),
+  ...GEMINI_MODEL_REGISTRY.map(({ id }) =>
+    [id, { contextWindow: 1048576, maxOutput: GEMINI_OUTPUT_TOKENS, provider: 'gemini' }]),
+]);
 
 // Conservative family fallbacks for a model id not (yet) in the table. Claude
 // falls back to the SMALLER 200K default (a new Claude model might not be 1M, so
