@@ -30,7 +30,7 @@ import {CustomizeDialog} from './components/CustomizeDialog';
 
 import { createTextNode } from './utils/nodeFactory';
 import { Sidebar } from './components/Sidebar';
-import { getStats } from './utils/dashboardStats';
+import { getStats, getStatsSignature } from './utils/dashboardStats';
 import { ContextMenu } from './components/ContextMenu';
 import { CanvasToolbar } from './components/CanvasToolbar';
 import { CanvasCursors } from './components/CanvasCursors';
@@ -705,7 +705,15 @@ export function Canvas() {
 
   // Dashboard stats: computed once per node change here so <Sidebar> can be a
   // plain shallow-memo on primitive counts (no per-frame rescans in a comparator).
-  const sidebarStats = useMemo(() => getStats(nodes), [nodes]);
+  // Memoized on a cheap signature rather than `nodes` directly — `nodes`'
+  // reference changes on every drag/pan frame, which used to re-run getStats'
+  // full rescan (incl. re-pricing every sellhub) on every frame of any drag.
+  const statsSignature = useMemo(() => getStatsSignature(nodes), [nodes]);
+  // Intentionally keyed on statsSignature, not nodes: nodes' reference changes
+  // on every drag frame, and re-running getStats() then would defeat the
+  // whole point of the signature.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const sidebarStats = useMemo(() => getStats(nodes), [statsSignature]);
 
   return (
     <div className="w-screen h-screen bg-neutral-950 flex" ref={reactFlowWrapper}>

@@ -25,28 +25,52 @@ export function useCanvasDragAndDrop({
   const isMountedRef = useIsMountedRef();
   const { screenToFlowPosition, getIntersectingNodes, updateNodeData, getNode } = useReactFlow();
   const hoveredGroupIdRef = useRef(null);
+  // Native `dragover` can fire faster than the display refresh rate; coalesce
+  // to at most one intersection scan (screenToFlowPosition + an O(n) node scan)
+  // per animation frame instead of running it on every single event.
+  const dragOverRafRef = useRef(null);
+  const pendingClientPosRef = useRef(null);
+
+  const cancelPendingDragOverScan = useCallback(() => {
+    if (dragOverRafRef.current != null) {
+      cancelAnimationFrame(dragOverRafRef.current);
+      dragOverRafRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => cancelPendingDragOverScan, [cancelPendingDragOverScan]);
 
   const handleDragLeave = useCallback(() => {
+    cancelPendingDragOverScan();
     if (hoveredGroupIdRef.current) {
       updateNodeData(hoveredGroupIdRef.current, { isDropTarget: false });
       hoveredGroupIdRef.current = null;
     }
-  }, [updateNodeData]);
+  }, [updateNodeData, cancelPendingDragOverScan]);
 
   const handleDragOver = useCallback((event) => {
+    // preventDefault()/dropEffect must run synchronously on EVERY dragover per
+    // the HTML5 DnD spec — only the (expensive) intersection scan is throttled.
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
 
-    const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-    const intersections = getIntersectingNodes({ x: position.x, y: position.y, width: 1, height: 1 });
-    const targetGroup = intersections.find(n => n.type === 'group' && !n.data?.locked);
-    const newTargetId = targetGroup ? targetGroup.id : null;
+    pendingClientPosRef.current = { x: event.clientX, y: event.clientY };
+    if (dragOverRafRef.current != null) return; // a scan is already scheduled this frame
 
-    if (newTargetId !== hoveredGroupIdRef.current) {
-      if (hoveredGroupIdRef.current) updateNodeData(hoveredGroupIdRef.current, { isDropTarget: false });
-      if (newTargetId) updateNodeData(newTargetId, { isDropTarget: true });
-      hoveredGroupIdRef.current = newTargetId;
-    }
+    dragOverRafRef.current = requestAnimationFrame(() => {
+      dragOverRafRef.current = null;
+      const { x: clientX, y: clientY } = pendingClientPosRef.current;
+      const position = screenToFlowPosition({ x: clientX, y: clientY });
+      const intersections = getIntersectingNodes({ x: position.x, y: position.y, width: 1, height: 1 });
+      const targetGroup = intersections.find(n => n.type === 'group' && !n.data?.locked);
+      const newTargetId = targetGroup ? targetGroup.id : null;
+
+      if (newTargetId !== hoveredGroupIdRef.current) {
+        if (hoveredGroupIdRef.current) updateNodeData(hoveredGroupIdRef.current, { isDropTarget: false });
+        if (newTargetId) updateNodeData(newTargetId, { isDropTarget: true });
+        hoveredGroupIdRef.current = newTargetId;
+      }
+    });
   }, [screenToFlowPosition, getIntersectingNodes, updateNodeData]);
 
   const handleDrop = useCallback(async (event) => {

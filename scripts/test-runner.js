@@ -35,7 +35,7 @@ import {
   _resetLaunchCollisions,
 } from '../electron/ipc/browserLaunchTelemetry.js';
 import { detectAntiBotSignal, matchesNoResultsSentinel } from '../electron/ipc/antiBotDetector.js';
-import { getStats } from '../src/utils/dashboardStats.js';
+import { getStats, getStatsSignature } from '../src/utils/dashboardStats.js';
 import { resolveNodePresence } from '../src/utils/nodePresence.js';
 import { ALL_COMP_SOURCE_IDS, CANVAS_ZOOM_LIMITS, getNodeDims, getNodesBounds, SELL_PLATFORMS, SELL_PLATFORM_BY_ID } from '../src/utils/constants.js';
 import { listingUrlMatchesPlatform, isFacebookShareUrl } from '../src/utils/platformUrlMatch.js';
@@ -2591,6 +2591,36 @@ const tests = [
       assert(sellHubsCount === 6, `getStats: sellHubsCount should be 6, got ${sellHubsCount}`);
       assert(totalValue === 389.5, `getStats: totalValue should include the $40 combined bundle price, got ${totalValue}`);
       return { totalValue };
+    },
+  },
+  {
+    name: 'dashboardStats: getStatsSignature is stable across position-only changes, changes with priced fields',
+    run: () => {
+      const base = [
+        { id: 'a', type: 'jobcard', position: { x: 0, y: 0 }, data: {} },
+        { id: 'b', type: 'sellhub', position: { x: 0, y: 0 }, data: { hubState: 'priced', pricing: { recommended_price: 100 } } },
+        { id: 'c', type: 'text', position: { x: 0, y: 0 }, data: {} },
+      ];
+      const moved = [
+        { ...base[0], position: { x: 50, y: 30 } },  // dragged — position changed, nothing stats-relevant
+        base[1],
+        { ...base[2], position: { x: 10, y: 10 } },
+      ];
+      assert(getStatsSignature(base) === getStatsSignature(moved),
+        'a pure position-only change (drag) must not change the signature');
+
+      const rePriced = [base[0], { ...base[1], data: { hubState: 'priced', pricing: { recommended_price: 200 } } }, base[2]];
+      assert(getStatsSignature(base) !== getStatsSignature(rePriced),
+        'a changed recommended_price must change the signature');
+
+      const stateChanged = [base[0], { ...base[1], data: { ...base[1].data, hubState: 'draft' } }, base[2]];
+      assert(getStatsSignature(base) !== getStatsSignature(stateChanged),
+        'a changed hubState must change the signature');
+
+      const added = [...base, { id: 'd', type: 'jobcard', position: { x: 0, y: 0 }, data: {} }];
+      assert(getStatsSignature(base) !== getStatsSignature(added),
+        'adding a jobcard must change the signature');
+      return { ok: true };
     },
   },
   {

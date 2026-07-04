@@ -24,3 +24,27 @@ export function getStats(nodes) {
   }
   return { jobCardsCount, sellHubsCount, totalValue };
 }
+
+/**
+ * Cheap per-render fingerprint of exactly the fields getStats() reads, built
+ * from plain property reads (no selectBundleHeadline call, no parseFloat).
+ * `nodes`' array reference changes on every drag/pan frame (ReactFlow rebuilds
+ * it for any position change), which used to make a plain `useMemo(() =>
+ * getStats(nodes), [nodes])` rescan + re-price every sellhub on every frame of
+ * ANY drag, anywhere on the canvas. Callers instead memoize on THIS signature
+ * — identical during a pure position-only drag, so getStats() only actually
+ * re-runs when a jobcard/sellhub is added/removed or a hub's price/state changes.
+ */
+export function getStatsSignature(nodes) {
+  let sig = '';
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    if (n.type === 'jobcard') {
+      sig += 'j;';
+    } else if (n.type === 'sellhub') {
+      const d = n.data || {};
+      sig += `s:${d.hubState || ''}:${d.bundleTotal ?? ''}:${d.bundlePricing?.bundle_price ?? ''}:${d.bundlePricing?.synergy ?? ''}:${d.pricing?.recommended_price ?? ''};`;
+    }
+  }
+  return sig;
+}
