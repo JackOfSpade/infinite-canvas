@@ -95,6 +95,73 @@ const MONEY_PARSE_FN = `(function(txt){
   return m ? (parseFloat(m[1]) || 0) : 0;
 })`;
 
+// Shared empty-guard for EBAY_SOLD_EXTRACTOR / EBAY_ACTIVE_EXTRACTOR: both were
+// hand-duplicating this ~40-line block verbatim (only the throw message's
+// label differed). Reads eBay's own "N results" count-heading BEFORE deciding
+// 0 extracted is real drift vs a genuinely-thin/empty query (see SITE_CHANGED_DIAG
+// for why), widens the diagnostic sample to every known alternate eBay card
+// family, and throws SITE_CHANGED with the full diag on a non-empty-query 0.
+// Returns { empty: true, claimedTotal: 0 } for a genuine empty result so the
+// caller can return its own yieldStats shape; on a non-empty extract it
+// returns { empty: false, claimedTotal } for the caller to include in its stats.
+const EBAY_EMPTY_GUARD_FN = `(function(label, cards, items, diagFn){
+  var claimedTotal = null;
+  try {
+    var ch = document.querySelector('.srp-controls__count-heading');
+    var m = ch && (ch.textContent || '').match(/([\\d,]+)\\s*\\+?\\s*results?\\b/i);
+    if (m) { var n = parseInt(m[1].replace(/,/g, ''), 10); if (isFinite(n)) claimedTotal = n; }
+  } catch (e) {}
+  if (items.length > 0) return { empty: false, claimedTotal: claimedTotal };
+  // eBay itself reports 0 results (rare/obscure query, no exact matches) → a
+  // GENUINE empty, not a site change. Two independent signals, either decisive:
+  //   • count heading reads 0 ("<b>0</b> results for X"), OR
+  //   • eBay rendered its dedicated null-search block (.srp-save-null-search →
+  //     "No exact matches found") — robust when the count-heading regex misses.
+  if (claimedTotal === 0 || document.querySelector('.srp-save-null-search')) {
+    return { empty: true, claimedTotal: 0 };
+  }
+  // Widen the diagnostic sample to the KNOWN alternate eBay card families so a
+  // 0-.s-card page still yields a card0=[…] class skeleton to rewrite against.
+  // Purely for the SITE_CHANGED diag — NOT an extraction fallback (a blind
+  // alternate-container extract would let ghost/promo/watchlist tiles poison the
+  // comp set → wrong FMV, with no live test to catch it). Last resort: the LI/DIV
+  // ancestor of the first real listing link, so even a foreign container is fingerprinted.
+  var diagSample = cards[0]
+    || document.querySelector('li.s-card, .s-card, .srp-results li, [data-testid="item-card"], .s-item, .brwrvr__item-card, .su-card-container, ul.srp-results > li')
+    || (document.querySelector('a[href*="/itm/"]') && document.querySelector('a[href*="/itm/"]').closest('li, div'));
+  var diagCounts = [
+    'cards=' + cards.length,
+    'srp=' + document.querySelectorAll('.srp-results').length,
+    'srpLi=' + document.querySelectorAll('.srp-results li').length,
+    'liSCard=' + document.querySelectorAll('li.s-card').length,
+    'anySCard=' + document.querySelectorAll('.s-card').length,
+    'titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length,
+    'sCardTitle=' + document.querySelectorAll('.s-card__title').length,
+    'priceSel=' + document.querySelectorAll('.s-card__price').length,
+    // Alternate-layout markers: is eBay serving the OLD .s-item cards, the
+    // browse-redesign .brwrvr card, or (itmLinks=0) NO listings at all
+    // (→ a wall / logged-out / empty page, read bodyHead) vs listings present
+    // in an unknown container (itmLinks>0 → targeted selector rewrite).
+    'sItem=' + document.querySelectorAll('.s-item').length,
+    'brw=' + document.querySelectorAll('.brwrvr__item-card').length,
+    'itmLinks=' + document.querySelectorAll('a[href*="/itm/"]').length,
+  ].join(' ');
+  throw new Error('SITE_CHANGED: ' + label + ' su-styled-text extractor returned 0 — eBay design system may have changed' + diagFn(diagCounts, diagSample));
+})`;
+
+// Shared dedup-by-url for EBAY_SOLD_EXTRACTOR / EBAY_ACTIVE_EXTRACTOR — a
+// promoted/related-item card can re-surface the same listing elsewhere on the
+// same results page; without this, a duplicate silently doubles that
+// listing's weight in the price the AI recommends.
+const DEDUP_BY_URL_FN = `(function(items){
+  var seen = new Set();
+  return items.filter(function(i){
+    if (seen.has(i.url)) return false;
+    seen.add(i.url);
+    return true;
+  });
+})`;
+
 // ── Site Configurations ─────────────────────────────────────────────────────
 // `timeoutMs` is a SEED / safety ceiling, not a fixed budget: scrapeBudget
 // learns each source's typical time-to-ready and derives a tighter working
@@ -224,6 +291,8 @@ export const EBAY_SOLD_EXTRACTOR = `
 (function() {
   const __diag = ${SITE_CHANGED_DIAG};
   const __money = ${MONEY_PARSE_FN};
+  const __emptyGuard = ${EBAY_EMPTY_GUARD_FN};
+  const __dedupByUrl = ${DEDUP_BY_URL_FN};
   const items = [];
   // Per-card "looked like a listing but yielded no usable price/title" counter.
   // Surfaced as yieldStats.noFields so a PARTIAL sub-selector drift (some cards
@@ -266,62 +335,19 @@ export const EBAY_SOLD_EXTRACTOR = `
   // eBay's own "N result(s) for <query>" header. The anti-bot detector uses this
   // to tell a genuinely-thin query (eBay says "1 result", we got 1) apart from
   // selector drift (eBay says "50 results", we got 1) — so a 1-result page never
-  // raises a false zero-extracted block + unclearable Solve. Leading int only
-  // (the query itself can contain digits, e.g. "(1 gallon)"), so anchor on " result".
-  // Read BEFORE the empty-guard so a genuine 0-results page is told apart from drift.
-  var __claimedTotal = null;
-  try {
-    var __ch = document.querySelector('.srp-controls__count-heading');
-    var __m = __ch && (__ch.textContent || '').match(/([\\d,]+)\\s*\\+?\\s*results?\\b/i);
-    if (__m) { var __n = parseInt(__m[1].replace(/,/g, ''), 10); if (isFinite(__n)) __claimedTotal = __n; }
-  } catch (e) {}
-  if (items.length === 0) {
-    // eBay itself reports 0 results (rare/obscure query, no exact matches) → a
-    // GENUINE empty, not a site change. Two independent signals, either decisive:
-    //   • count heading reads 0 ("<b>0</b> results for X"), OR
-    //   • eBay rendered its dedicated null-search block (.srp-save-null-search →
-    //     "No exact matches found") — robust when the count-heading regex misses.
-    // Return [] so the source records "0 comps" instead of a false stale-selectors
-    // error + unclearable Retry. Only when eBay claims results exist (or NEITHER
-    // signal is present) does 0 extracted = real drift.
-    if (__claimedTotal === 0 || document.querySelector('.srp-save-null-search')) {
-      return { items: [], yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: 0 } };
-    }
-    // Widen the diagnostic sample to the KNOWN alternate eBay card families so a
-    // 0-.s-card page still yields a card0=[…] class skeleton to rewrite against.
-    // Purely for the SITE_CHANGED diag — NOT an extraction fallback (a blind
-    // alternate-container extract would let ghost/promo/watchlist tiles poison the
-    // comp set → wrong FMV, with no live test to catch it). Last resort: the LI/DIV
-    // ancestor of the first real listing link, so even a foreign container is fingerprinted.
-    const diagSample = cards[0]
-      || document.querySelector('li.s-card, .s-card, .srp-results li, [data-testid="item-card"], .s-item, .brwrvr__item-card, .su-card-container, ul.srp-results > li')
-      || (document.querySelector('a[href*="/itm/"]') && document.querySelector('a[href*="/itm/"]').closest('li, div'));
-    const diagCounts = [
-      'cards=' + cards.length,
-      'srp=' + document.querySelectorAll('.srp-results').length,
-      'srpLi=' + document.querySelectorAll('.srp-results li').length,
-      'liSCard=' + document.querySelectorAll('li.s-card').length,
-      'anySCard=' + document.querySelectorAll('.s-card').length,
-      'titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length,
-      'sCardTitle=' + document.querySelectorAll('.s-card__title').length,
-      'priceSel=' + document.querySelectorAll('.s-card__price').length,
-      // Alternate-layout markers: is eBay serving the OLD .s-item cards, the
-      // browse-redesign .brwrvr card, or (itmLinks=0) NO listings at all
-      // (→ a wall / logged-out / empty page, read bodyHead) vs listings present
-      // in an unknown container (itmLinks>0 → targeted selector rewrite).
-      'sItem=' + document.querySelectorAll('.s-item').length,
-      'brw=' + document.querySelectorAll('.brwrvr__item-card').length,
-      'itmLinks=' + document.querySelectorAll('a[href*="/itm/"]').length,
-    ].join(' ');
-    throw new Error('SITE_CHANGED: ebay-sold su-styled-text extractor returned 0 — eBay design system may have changed' + __diag(diagCounts, diagSample));
+  // raises a false zero-extracted block + unclearable Solve. See
+  // EBAY_EMPTY_GUARD_FN for the full genuine-empty-vs-drift decision + the
+  // SITE_CHANGED diagnostic (shared with ebay-active — only the label differs).
+  const __guardResult = __emptyGuard('ebay-sold', cards, items, __diag);
+  if (__guardResult.empty) {
+    return { items: [], yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: 0 } };
   }
   // A promoted/related-item card can re-surface the same listing elsewhere on
   // the same results page (see poshmark/mercari/swappa-sold, which already
   // guard this) — without dedup, a duplicate silently doubles that listing's
   // weight in the price the AI recommends.
-  const __seen = new Set();
-  const deduped = items.filter(i => { if (__seen.has(i.url)) return false; __seen.add(i.url); return true; });
-  return { items: deduped, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: __claimedTotal } };
+  const deduped = __dedupByUrl(items);
+  return { items: deduped, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: __guardResult.claimedTotal } };
 })()
 `;
 
@@ -331,6 +357,8 @@ export const EBAY_ACTIVE_EXTRACTOR = `
 (function() {
   const __diag = ${SITE_CHANGED_DIAG};
   const __money = ${MONEY_PARSE_FN};
+  const __emptyGuard = ${EBAY_EMPTY_GUARD_FN};
+  const __dedupByUrl = ${DEDUP_BY_URL_FN};
   const items = [];
   let __noFields = 0, __noTitle = 0, __noPrice = 0;   // field-miss total + per-field attribution (see ebay-sold)
 
@@ -353,52 +381,15 @@ export const EBAY_ACTIVE_EXTRACTOR = `
     } catch {}
   });
 
-  // eBay's own "N result(s) for <query>" header — see EBAY_SOLD_EXTRACTOR. Read
-  // BEFORE the empty-guard so a genuine 0-results page is told apart from drift.
-  var __claimedTotal = null;
-  try {
-    var __ch = document.querySelector('.srp-controls__count-heading');
-    var __m = __ch && (__ch.textContent || '').match(/([\\d,]+)\\s*\\+?\\s*results?\\b/i);
-    if (__m) { var __n = parseInt(__m[1].replace(/,/g, ''), 10); if (isFinite(__n)) __claimedTotal = __n; }
-  } catch (e) {}
-  if (items.length === 0) {
-    // eBay reports 0 results — count heading 0 OR the null-search block — → genuine
-    // empty, not a site change (see ebay-sold).
-    if (__claimedTotal === 0 || document.querySelector('.srp-save-null-search')) {
-      return { items: [], yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: 0 } };
-    }
-    // Widen the diagnostic sample to the KNOWN alternate eBay card families so a
-    // 0-.s-card page still yields a card0=[…] class skeleton to rewrite against.
-    // Purely for the SITE_CHANGED diag — NOT an extraction fallback (a blind
-    // alternate-container extract would let ghost/promo/watchlist tiles poison the
-    // comp set → wrong FMV, with no live test to catch it). Last resort: the LI/DIV
-    // ancestor of the first real listing link, so even a foreign container is fingerprinted.
-    const diagSample = cards[0]
-      || document.querySelector('li.s-card, .s-card, .srp-results li, [data-testid="item-card"], .s-item, .brwrvr__item-card, .su-card-container, ul.srp-results > li')
-      || (document.querySelector('a[href*="/itm/"]') && document.querySelector('a[href*="/itm/"]').closest('li, div'));
-    const diagCounts = [
-      'cards=' + cards.length,
-      'srp=' + document.querySelectorAll('.srp-results').length,
-      'srpLi=' + document.querySelectorAll('.srp-results li').length,
-      'liSCard=' + document.querySelectorAll('li.s-card').length,
-      'anySCard=' + document.querySelectorAll('.s-card').length,
-      'titleSel=' + document.querySelectorAll('.srp-results li.s-card span.su-styled-text.primary').length,
-      'sCardTitle=' + document.querySelectorAll('.s-card__title').length,
-      'priceSel=' + document.querySelectorAll('.s-card__price').length,
-      // Alternate-layout markers: is eBay serving the OLD .s-item cards, the
-      // browse-redesign .brwrvr card, or (itmLinks=0) NO listings at all
-      // (→ a wall / logged-out / empty page, read bodyHead) vs listings present
-      // in an unknown container (itmLinks>0 → targeted selector rewrite).
-      'sItem=' + document.querySelectorAll('.s-item').length,
-      'brw=' + document.querySelectorAll('.brwrvr__item-card').length,
-      'itmLinks=' + document.querySelectorAll('a[href*="/itm/"]').length,
-    ].join(' ');
-    throw new Error('SITE_CHANGED: ebay-active su-styled-text extractor returned 0 — eBay design system may have changed' + __diag(diagCounts, diagSample));
+  // eBay's own "N result(s) for <query>" header — see EBAY_SOLD_EXTRACTOR /
+  // EBAY_EMPTY_GUARD_FN for the full genuine-empty-vs-drift decision + diag.
+  const __guardResult = __emptyGuard('ebay-active', cards, items, __diag);
+  if (__guardResult.empty) {
+    return { items: [], yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: 0 } };
   }
   // See ebay-sold — same promoted/related-item re-insertion risk.
-  const __seen = new Set();
-  const deduped = items.filter(i => { if (__seen.has(i.url)) return false; __seen.add(i.url); return true; });
-  return { items: deduped, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: __claimedTotal } };
+  const deduped = __dedupByUrl(items);
+  return { items: deduped, yieldStats: { seen: cards.length, noFields: __noFields, noTitle: __noTitle, noPrice: __noPrice, claimedTotal: __guardResult.claimedTotal } };
 })()
 `;
 
