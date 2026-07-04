@@ -49,6 +49,7 @@ import { EventLogger } from './utils/EventLogger';
 
 import { CanvasNavigationContext } from './contexts/CanvasNavigationContext';
 import { CANVAS_ZOOM_LIMITS, DEFAULT_EDGE_OPTIONS } from './utils/constants';
+import { useModalStackCount } from './components/modalStack';
 
 import { useUndoRedo } from './hooks/useUndoRedo';
 import { useCustomFitView } from './hooks/useCustomFitView';
@@ -500,7 +501,10 @@ export function Canvas() {
   // Drawing/placement tools fully disable node interaction; the select tool does not.
   const isDrawingTool = activeTool === 'pen' || activeTool === 'eraser';
   const isSelectTool  = activeTool === 'select';
-  const interactiveDisabled = isDrawingTool || !!placementMode || navigation.isAnimating;
+  const modalCount = useModalStackCount();
+  // A dialog/menu/lightbox is open — canvas delete-key/pan/zoom/selection must
+  // not leak through to the content underneath it (see modalStack.js).
+  const interactiveDisabled = isDrawingTool || !!placementMode || navigation.isAnimating || modalCount > 0;
 
   const handleWheelZoom = useCallback((e) => {
     if (interactiveDisabled || e.target?.closest?.('.nowheel')) return;

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { TIMINGS } from '../utils/timings';
+import { updateModalCount } from './modalStack';
 
 /**
  * Reusable context menu component.
@@ -18,6 +19,15 @@ export function ContextMenu({ x, y, items, onClose }) {
   const [activeSubmenu, setActiveSubmenu] = useState(null);
   const menuRef = useRef(null);
   const closeTimerRef = useRef(null);
+
+  // Register with the global modal stack for as long as this menu is mounted
+  // (the parent only mounts it while open — see Canvas.jsx's `{menu && ...}`).
+  // Without this, e.g. Backspace to dismiss a context menu could simultaneously
+  // delete the canvas selection underneath it.
+  useEffect(() => {
+    updateModalCount(1);
+    return () => updateModalCount(-1);
+  }, []);
 
   // ── Global dismissal ──────────────────────────────────────────────────────
   useEffect(() => {

@@ -11,6 +11,7 @@ import { useToast } from './ToastProvider';
 import { SELL_PLATFORMS, SELL_PLATFORM_BY_ID, JOB_SOURCES, JOB_SOURCE_BY_ID } from '../utils/constants';
 import { normalizeMarketplaceWatchUrls } from '../utils/marketplaceWatchUrls';
 import { PlatformBadge } from './PlatformBadge';
+import { updateModalCount } from './modalStack';
 
 const SPEED_OPTIONS = [
   { key: 'snappy',   label: 'Snappy',   desc: `${ANIMATION_DURATIONS.snappy}ms`,   icon: Zap,      color: 'text-amber-400' },
@@ -542,6 +543,18 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   const [watchUrlsByPlatform, setWatchUrlsByPlatform] = useState({});
   const [aiStatus, setAiStatus] = useState({ gemini: null, claude: null });
   const [checkingProvider, setCheckingProvider] = useState(null);
+
+  // Register with the global modal stack while open — unlike Dialog/ConfirmDialog,
+  // this component stays mounted at all times (returns null when !isOpen further
+  // below), so registration must track the isOpen prop rather than mount/unmount.
+  // Without this, undo/redo and canvas keyboard shortcuts stayed live underneath
+  // an open Settings panel (Cmd+Z while adjusting a setting silently undid canvas
+  // edits behind the dialog).
+  useEffect(() => {
+    if (!isOpen) return;
+    updateModalCount(1);
+    return () => updateModalCount(-1);
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen || !window.electronAPI?.getSettings) return;

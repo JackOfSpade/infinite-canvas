@@ -6,6 +6,7 @@ import { TIMINGS, maxUndoHistory } from '../utils/timings';
 import { mergeNonRestorableNodeDataFromLive } from '../utils/undoNonRestorableState';
 import { isTextEditingTarget, shouldUseNativeTextUndo } from '../utils/nativeTextUndo';
 import { matchesRedoShortcut, matchesShortcut, matchesStandardRedoShortcut } from '../utils/keyboardShortcuts';
+import { useModalStackCount } from '../components/modalStack';
 
 // Resolved once at module load — each snapshot is a full canvas clone, so this
 // scales down on low-memory devices (see maxUndoHistory).
@@ -181,13 +182,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     requestAnimationFrame(() => { isRestoringRef.current = false; });
   }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef]);
 
-  const [modalCount, setModalCount] = useState(0);
-
-  useEffect(() => {
-    const handler = (e) => setModalCount(e.detail.count || 0);
-    window.addEventListener('modal-stack-changed', handler);
-    return () => window.removeEventListener('modal-stack-changed', handler);
-  }, []);
+  const modalCount = useModalStackCount();
 
   useEffect(() => {
     const handleKeyDown = (e) => {

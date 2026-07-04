@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { X, ChevronLeft, ChevronRight } from 'lucide-react';
 import { toLocalFilePreviewUrl } from '../utils/fileDisplayUtils';
+import { updateModalCount } from './modalStack';
 
 /**
  * Full-viewport image viewer rendered via a portal so it escapes ReactFlow's
@@ -18,6 +19,16 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
     Math.max(0, Math.min(initialIndex, total - 1))
   );
   const [loading, setLoading] = useState(true);
+
+  // Register with the global modal stack (the parent only mounts this while
+  // open — see PhotoStrip.jsx's `{lightboxIndex !== null && ...}`). The capture-
+  // phase keydown handler below calls preventDefault(), not stopPropagation(),
+  // so canvas-level bubble-phase listeners (undo/redo, WASD, tool shortcuts)
+  // still receive the same event afterward — this is what actually silences them.
+  useEffect(() => {
+    updateModalCount(1);
+    return () => updateModalCount(-1);
+  }, []);
 
   const prev = useCallback(() => {
     setLoading(true);

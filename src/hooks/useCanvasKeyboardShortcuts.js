@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
+import { useModalStackCount } from '../components/modalStack';
 
 export function useCanvasKeyboardShortcuts({
   placementMode, setPlacementMode, 
@@ -11,11 +12,16 @@ export function useCanvasKeyboardShortcuts({
   shortcuts
 }) {
   const { getNodes } = useReactFlow();
+  const modalCount = useModalStackCount();
 
   useEffect(() => {
     const handleKey = (e) => {
+      // A dialog/menu/lightbox is open — its own Escape handling owns the
+      // keyboard; without this, e.g. Cmd+D on a dialog button duplicated the
+      // canvas selection underneath it.
+      if (modalCount > 0) return;
       if (isAnimatingRef?.current) return;
-      
+
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
       
@@ -107,5 +113,5 @@ export function useCanvasKeyboardShortcuts({
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [placementMode, activeTool, setPlacementMode, setActiveTool, setIsSettingsOpen, isAnimatingRef, getNodes, duplicateNodes, copyNodes, pasteNodes, shortcuts]);
+  }, [placementMode, activeTool, setPlacementMode, setActiveTool, setIsSettingsOpen, isAnimatingRef, getNodes, duplicateNodes, copyNodes, pasteNodes, shortcuts, modalCount]);
 }
