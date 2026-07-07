@@ -121,16 +121,25 @@ const EBAY_EMPTY_GUARD_FN = `(function(label, cards, items, diagFn){
     return { empty: true, claimedTotal: 0 };
   }
   // Widen the diagnostic sample to the KNOWN alternate eBay card families so a
-  // 0-.s-card page still yields a card0=[…] class skeleton to rewrite against.
+  // 0-card page still yields a card0=[…] class skeleton to rewrite against.
   // Purely for the SITE_CHANGED diag — NOT an extraction fallback (a blind
   // alternate-container extract would let ghost/promo/watchlist tiles poison the
   // comp set → wrong FMV, with no live test to catch it). Last resort: the LI/DIV
   // ancestor of the first real listing link, so even a foreign container is fingerprinted.
   var diagSample = cards[0]
-    || document.querySelector('li.s-card, .s-card, .srp-results li, [data-testid="item-card"], .s-item, .brwrvr__item-card, .su-card-container, ul.srp-results > li')
+    || document.querySelector('.su-item-card, li.s-card, .s-card, .srp-results li, [data-testid="item-card"], .s-item, .brwrvr__item-card, .su-card-container, ul.srp-results > li')
     || (document.querySelector('a[href*="/itm/"]') && document.querySelector('a[href*="/itm/"]').closest('li, div'));
   var diagCounts = [
     'cards=' + cards.length,
+    // Current (2026-07) div-based card + its two differently-shaped result
+    // containers (sold = div.srp-river-main, active = ul.su-grid--is-list).
+    'suItemCard=' + document.querySelectorAll('.su-item-card').length,
+    'srpRiverMain=' + document.querySelectorAll('.srp-river-main').length,
+    'suGridList=' + document.querySelectorAll('.su-grid--is-list').length,
+    'titleSel2=' + document.querySelectorAll('.su-item-card__title').length,
+    'priceSel2=' + document.querySelectorAll('.su-item-card__price').length,
+    // Pre-2026-07 (li.s-card) markers — kept so a report can tell which
+    // generation of redesign it's looking at instead of just "still 0".
     'srp=' + document.querySelectorAll('.srp-results').length,
     'srpLi=' + document.querySelectorAll('.srp-results li').length,
     'liSCard=' + document.querySelectorAll('li.s-card').length,
@@ -282,17 +291,18 @@ export function priceChartingQuery(query) {
 
 
 // ── eBay Sold Listings Extractor ────────────────────────────────────────────
-// eBay migrated to the "su-*" design system (2025). Old selectors (.s-item__title,
-// .s-item__price, .SECONDARY_INFO, .POSITIVE) are dead. The inline JSON strategy
-// (itemSummaries/listingItems) is also dead — replaced by single-letter obfuscated
-// keys in a $M_* global that aren't reliably parseable.
-// Current structure (as of 2026-05):
-//   .srp-results li.s-card           — card root (old .s-item matches ghost nodes)
-//   span.su-styled-text.primary.default — title
-//   span.s-card__price               — price (kept s-card__ namespace)
-//   span.su-styled-text.positive.default — sold date ("Sold May 23, 2026")
-//   span.su-styled-text.secondary.default — condition (first match; strips trailing " ·")
-//   a.s-card__link                   — listing URL
+// eBay redesigned again (2026-07): the "su-*"/li.s-card generation (2025) is
+// now ALSO dead — .srp-results/li.s-card/su-styled-text.primary/.s-card__price
+// all match 0. Current structure (verified live 2026-07 — see the diag's
+// suItemCard/srpRiverMain/suGridList counters for the next time this drifts):
+//   div.srp-river-main (sold) — the results river; card root is div.su-item-card
+//   a.su-item-card__title            — title text AND the listing URL (href has /itm/)
+//   span.su-item-card__price         — price
+//   span.signal.signal--recent       — sold date ("Sold Jul 7, 2026") — sold-only
+//   .su-item-card__subtitle .su-styled-text.secondary — condition (strips trailing " ·")
+// The first 1-2 cards on both sold/active pages are sponsored placeholders
+// whose title starts with "Shop on eBay" (sometimes with mangled trailing
+// text from a visually-hidden reversed "Sponsored" badge) — filtered below.
 export const EBAY_SOLD_EXTRACTOR = `
 (function() {
   const __diag = ${SITE_CHANGED_DIAG};
@@ -308,24 +318,24 @@ export const EBAY_SOLD_EXTRACTOR = `
   // (a drop concentrated in one field = that sub-selector moved).
   let __noFields = 0, __noTitle = 0, __noPrice = 0;
 
-  const cards = document.querySelectorAll('.srp-results li.s-card');
+  const cards = document.querySelectorAll('.su-item-card');
 
   cards.forEach(card => {
     try {
-      const titleEl = card.querySelector('span.su-styled-text.primary');
+      const titleEl = card.querySelector('a.su-item-card__title');
       const title = (titleEl?.innerText || titleEl?.textContent || '').trim();
-      if (title === 'Shop on eBay') return;   // promo tile, not a real listing → benign
+      if (/^Shop on eBay\\b/i.test(title)) return;   // sponsored placeholder tile, not a real listing → benign
       if (!title) { __noFields++; __noTitle++; return; }
 
-      const priceEl = card.querySelector('.s-card__price');
+      const priceEl = card.querySelector('.su-item-card__price');
       const priceText = (priceEl?.innerText || priceEl?.textContent || '').trim();
       const price = __money(priceText);
       if (price === 0) { __noFields++; __noPrice++; return; }
 
-      const dateEl = card.querySelector('span.su-styled-text.positive.default');
-      const linkEl = card.querySelector('a.s-card__link');
-      // First secondary.default span is condition; later ones are specs (model, storage, carrier)
-      const condEl = card.querySelector('span.su-styled-text.secondary.default');
+      const dateEl = card.querySelector('.signal--recent');
+      // Title element doubles as the listing link (href has /itm/).
+      const linkEl = titleEl;
+      const condEl = card.querySelector('.su-item-card__subtitle .su-styled-text.secondary');
       const condition = ((condEl?.innerText || condEl?.textContent || '').trim()).replace(/\\s*·\\s*$/, '');
 
       items.push({
@@ -358,7 +368,10 @@ export const EBAY_SOLD_EXTRACTOR = `
 `;
 
 // ── eBay Active Listings Extractor ──────────────────────────────────────────
-// Same su-* design system migration as EBAY_SOLD — identical selectors, no soldDate.
+// Same 2026-07 redesign as EBAY_SOLD — identical card/title/price selectors,
+// no soldDate/signal badge. Active listings render inside ul.su-grid--is-list
+// (li.su-grid__item wrapping the same div.su-item-card) rather than sold's
+// div.srp-river-main, but the card class itself is unchanged across both.
 export const EBAY_ACTIVE_EXTRACTOR = `
 (function() {
   const __diag = ${SITE_CHANGED_DIAG};
@@ -368,22 +381,22 @@ export const EBAY_ACTIVE_EXTRACTOR = `
   const items = [];
   let __noFields = 0, __noTitle = 0, __noPrice = 0;   // field-miss total + per-field attribution (see ebay-sold)
 
-  const cards = document.querySelectorAll('.srp-results li.s-card');
+  const cards = document.querySelectorAll('.su-item-card');
 
   cards.forEach(card => {
     try {
-      const titleEl = card.querySelector('span.su-styled-text.primary');
+      const titleEl = card.querySelector('a.su-item-card__title');
       const title = (titleEl?.innerText || titleEl?.textContent || '').trim();
-      if (title === 'Shop on eBay') return;   // promo tile, not a real listing → benign
+      if (/^Shop on eBay\\b/i.test(title)) return;   // sponsored placeholder tile, not a real listing → benign
       if (!title) { __noFields++; __noTitle++; return; }
 
-      const priceEl = card.querySelector('.s-card__price');
+      const priceEl = card.querySelector('.su-item-card__price');
       const priceText = (priceEl?.innerText || priceEl?.textContent || '').trim();
       const price = __money(priceText);
       if (price === 0) { __noFields++; __noPrice++; return; }
 
-      const linkEl = card.querySelector('a.s-card__link');
-      items.push({ title, price, priceText, url: linkEl?.href || '', source: 'ebay-active' });
+      // Title element doubles as the listing link (href has /itm/).
+      items.push({ title, price, priceText, url: titleEl?.href || '', source: 'ebay-active' });
     } catch {}
   });
 
