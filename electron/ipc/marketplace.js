@@ -429,7 +429,12 @@ export function classifyCompScrapeFailure(error, sourceId, sessionCache = {}) {
   }
   return {
     sourceId, severity: 'warn', code: 'stale-selectors',
-    evidence: msg.slice(0, 700), // wide enough to keep the [diag … card0=[…]] class skeleton
+    // 1400, not 700: the diag payload alone (bodyHead≤200 + card0≤240 + prefix/
+    // counts/path/title) commonly runs 750-900 chars, so 700 silently cut the
+    // card0=[…] class skeleton off mid-token — exactly the new title/price
+    // sub-selector names a redesign fix needs, discarded before any bug-report
+    // filter code (even FULL) ever sees the report.
+    evidence: msg.slice(0, 1400),
     suggestion: notConnected
       ? `Extractor returned 0 and ${platform} is not logged in — log in and retry FIRST. If it still returns 0 after login, the site HTML changed (the diag shows candidate cards>0 with the sub-selector at 0 = a real redesign); then update electron/extractors/marketplace.js.`
       : 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.',
@@ -469,7 +474,7 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
         // ran). Without this, the card receives warning:null → hasWarn:false →
         // Solve button reappears even though the extractor needs a code fix.
         const cbWarning = res.warning || (!res.success && /SITE_CHANGED/i.test(res.error || '')
-          ? { code: 'stale-selectors', severity: 'warn', evidence: String(res.error || '').slice(0, 700), suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.' }
+          ? { code: 'stale-selectors', severity: 'warn', evidence: String(res.error || '').slice(0, 1400), suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.' }
           : null);
         send(res.success ? 'done' : 'error', items.length, cbWarning, task.url);
       }
@@ -482,7 +487,7 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
         items: [],
         warning: isSiteChanged ? {
           code: 'stale-selectors', severity: 'warn',
-          evidence: String(r?.error || '').slice(0, 700), // wide enough to keep the [diag … bodyHead=… card0=[…]] tail (matches the multi-source path)
+          evidence: String(r?.error || '').slice(0, 1400), // see classifyCompScrapeFailure — 700 clipped the card0=[…] skeleton mid-token
           suggestion: 'Extractor returned 0 results — site HTML may have changed. Update the scraper in electron/extractors/marketplace.js, rebuild, and retry.',
         } : {
           code: 'task-failed', severity: 'block',
@@ -1572,7 +1577,7 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
     // (stale-selectors/warn) so the user knows to fix the extractor, not solve a
     // captcha. Don't trigger a headless rescrape — it would fail identically.
     if (result.siteChangedError && !event.sender.isDestroyed()) {
-      const evidence = String(result.siteChangedError).slice(0, 700); // keep the [diag … bodyHead=… card0=[…]] tail
+      const evidence = String(result.siteChangedError).slice(0, 1400); // see classifyCompScrapeFailure — 700 clipped the card0=[…] skeleton mid-token
       event.sender.send('price-source-progress', {
         nodeId, sourceId, status: 'error',
         warning: {

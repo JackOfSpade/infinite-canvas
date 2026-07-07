@@ -1174,7 +1174,12 @@ ${rows}
           if (d.extractOutcome) bits.push(`extractor=${d.extractOutcome}`);
           if (typeof d.textLen === 'number') bits.push(`textLen=${d.textLen}`);
           bits.push(`saw captcha=${d.sawChallenge ? 'yes' : 'no'} / consent=${d.sawConsent ? 'yes' : 'no'}`);
-          if (d.siteChangedError) bits.push(`SITE_CHANGED: ${String(d.siteChangedError).replace(/`/g, "'").replace(/\s+/g, ' ').slice(0, 400)}`);
+          // 1400, not 400: matches the cap in marketplace.js's classifyCompScrapeFailure —
+          // 400 was clipping the diag's card0=[…] class skeleton (the new markup's
+          // title/price sub-selector names) before a bug report ever showed it, even
+          // under FULL. This is a bounded, per-window field (not a log ring buffer),
+          // so the wider cap can't blow the report's size budget.
+          if (d.siteChangedError) bits.push(`SITE_CHANGED: ${String(d.siteChangedError).replace(/`/g, "'").replace(/\s+/g, ' ').slice(0, 1400)}`);
           return `- **${d.platformId ?? '?'} (${d.state})**: ${bits.join(' · ')}`;
         });
       const resolveDiagSection = resolveDiagRows.length > 0
@@ -1276,8 +1281,17 @@ ${stealthLine}${launchCollisionLine}${argsSection}${resolveDiagSection}${history
         const t = new Date(l.ts).toISOString().slice(11, 23); // HH:MM:SS.mmm
         const lvl = l.level.toUpperCase().padEnd(5, ' ');
         // Trim each line to a reasonable max so a single fat error doesn't
-        // blow the section past the JSON payload's byte budget.
-        const msg = (l.message || '').replace(/\r?\n/g, ' ⏎ ').slice(0, 500);
+        // blow the section past the JSON payload's byte budget. SITE_CHANGED /
+        // [diag …] lines get a wider cap: the generic 500 was cutting the
+        // card0=[…] class skeleton off mid-token — the one payload that lets a
+        // stale-selector fix be written without re-fetching the live page (which
+        // may itself be behind anti-bot walls). These lines are rare (a handful
+        // of ERROR entries, not the whole 60-line buffer), so raising just their
+        // cap can't blow the section's overall byte budget the way raising the
+        // default for all 60 lines would.
+        const raw = (l.message || '').replace(/\r?\n/g, ' ⏎ ');
+        const cap = /SITE_CHANGED|\[diag /i.test(raw) ? 1400 : 500;
+        const msg = raw.slice(0, cap);
         return `[${t}] ${lvl} ${msg}`;
       });
     }
