@@ -1,11 +1,14 @@
 import { getAISettings } from './settings.js';
-import { callGeminiText, callGeminiTextRaw, callGeminiVision, callGeminiDocument, parseGeminiJSON, countGeminiInputTokens, GEMINI_MODEL_FALLBACKS } from './gemini.js';
+import { callGeminiText, callGeminiTextRaw, callGeminiVision, callGeminiDocument, countGeminiInputTokens, GEMINI_MODEL_FALLBACKS } from './gemini.js';
 import { callClaudeText, callClaudeVision, callClaudeDocument, createClaudeBatch, getClaudeBatch, getClaudeBatchResults, cancelClaudeBatch, countClaudeInputTokens } from './claude.js';
+import { parseAiJson } from './jsonRepair.js';
 import { isWordDoc, extractWordText } from './docUtils.js';
+import { isSensitivePath } from '../utils/pathSafety.js';
 import { effectiveCap } from './tokenBudget.js';
 import path from 'path';
 import { priceSynthesisMaxTokens } from './resultCaps.js';
 import { modelMeta, maxOutputForModel, assessPromptFit, estimateTokensFromChars } from './tokenWindow.js';
+import { CLAUDE_SONNET, CLAUDE_OPUS, CLAUDE_HAIKU } from './claudeModels.js';
 import { logger } from '../logger.js';
 
 /**
@@ -40,23 +43,23 @@ import { logger } from '../logger.js';
  *     Sonnet/Haiku. Don't blanket-promote — add a row only with a real reason.
  */
 const TASK_MODELS = {
-  'vision-product-analysis':   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash' },
-  'price-synthesis':           { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash' },
+  'vision-product-analysis':   { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
+  'price-synthesis':           { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
   // Bundle pricing is a pricing JUDGMENT (synergy reasoning across items), so it
   // gets the same Sonnet tier as price-synthesis — not the cheaper Haiku used for
   // mechanical classification (per the quality-over-cost preference on pricing).
-  'bundle-price-synthesis':    { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash' },
-  'platform-fit-assessment':   { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
-  'page-status-classify':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
+  'bundle-price-synthesis':    { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
+  'platform-fit-assessment':   { claude: CLAUDE_HAIKU,  gemini: 'gemini-3.1-flash-lite' },
+  'page-status-classify':      { claude: CLAUDE_HAIKU,  gemini: 'gemini-3.1-flash-lite' },
   // Marketplace Status Module hub scan — mechanical extraction of action items
   // from a seller dashboard / notification feed, same tier as page-status-classify
   // (scanning, not pricing judgment, so Haiku per the quality-over-cost split).
-  'marketplace-hub-scan':      { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
-  'resume-parse':              { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash' },
-  'career-file-extract':       { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash' },
-  'job-query-generation':      { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash' },
-  'job-scoring':               { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash' },
-  'job-bucketing':             { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash' },
+  'marketplace-hub-scan':      { claude: CLAUDE_HAIKU,  gemini: 'gemini-3.1-flash-lite' },
+  'resume-parse':              { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
+  'career-file-extract':       { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
+  'job-query-generation':      { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
+  'job-scoring':               { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
+  'job-bucketing':             { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
   // Application generation (résumé + cover letter from the design system).
   // Quality compounds here — the output is a polished PDF a human sends to a
   // recruiter, where writing nuance + judgment convert to interviews — so the two
@@ -64,13 +67,13 @@ const TASK_MODELS = {
   // Opus delta clearly pays off (and at Opus 4.8 = 1.67x Sonnet, vs the old 5x,
   // it's an easy trade). company-research stays on Sonnet: it's grounded
   // summarization that FEEDS the generation, not the employer-facing artifact.
-  'company-research':          { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash' },
-  'application-resume':        { claude: 'claude-opus-4-8',           gemini: 'gemini-3.5-flash' },
-  'application-cover-letter':  { claude: 'claude-opus-4-8',           gemini: 'gemini-3.5-flash' },
-  'text-polish':               { claude: 'claude-haiku-4-5-20251001', gemini: 'gemini-3.1-flash-lite' },
+  'company-research':          { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
+  'application-resume':        { claude: CLAUDE_OPUS,   gemini: 'gemini-3.5-flash' },
+  'application-cover-letter':  { claude: CLAUDE_OPUS,   gemini: 'gemini-3.5-flash' },
+  'text-polish':               { claude: CLAUDE_HAIKU,  gemini: 'gemini-3.1-flash-lite' },
   // Default — used when a caller forgets to pass `task`. Logged as a warning
   // below so we notice unmapped sites; tuned to a safe-middle.
-  'default':                   { claude: 'claude-sonnet-4-6',         gemini: 'gemini-3.5-flash' },
+  'default':                   { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
 };
 
 /**
@@ -368,7 +371,7 @@ export async function callLLMText(prompt, opts = {}) {
     if (settings.provider === 'claude') {
       const raw = await callClaudeText(prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, cachedPrefix, task });
       if (meta) meta.model = model;
-      return parseGeminiJSON(raw);
+      return parseAiJson(raw);
     }
     // Gemini: prepend prefix into the prompt; implicit prefix caching on 2.5
     // models picks up the repeated content automatically.
@@ -417,7 +420,7 @@ export async function getLLMTextBatchResults(batchId) {
   const parsed = {};
   for (const [customId, r] of Object.entries(raw)) {
     if (!r.ok || !r.text) { parsed[customId] = null; continue; }
-    try { parsed[customId] = parseGeminiJSON(r.text); }
+    try { parsed[customId] = parseAiJson(r.text); }
     catch { parsed[customId] = null; }
   }
   return parsed;
@@ -481,7 +484,7 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
     if (settings.provider === 'claude') {
       const raw = await callClaudeVision(imagePaths, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });
       if (meta) meta.model = model;
-      return parseGeminiJSON(raw);
+      return parseAiJson(raw);
     }
     return await callGeminiVision(imagePaths, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task, meta });
   } catch (err) {
@@ -490,6 +493,14 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
 }
 
 export async function callLLMDocument(filePath, prompt, opts = {}) {
+  // A document node's filePath is sourced from loaded canvas JSON — an
+  // untrusted/shared canvas could point a node at a sensitive system/
+  // credential path. callClaudeDocument/callGeminiDocument re-check this
+  // too, but the Word-doc branch below bypasses both (it shells out to
+  // textutil directly), so gate here as the single shared entry point.
+  if (isSensitivePath(path.resolve(String(filePath || '')))) {
+    throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
+  }
   const { signal, task, hints, responseSchema, cachedPrefix } = normalizeOpts(opts);
   // Word docs (.docx / legacy .doc) can't be sent as inline data — Gemini 400s on
   // the OOXML MIME and Claude reads the ZIP bytes as garbage. Extract the text via
@@ -511,7 +522,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   try {
     if (settings.provider === 'claude') {
       const raw = await callClaudeDocument(filePath, prompt, model, settings.anthropicApiKey, signal, { maxTokens: maxTok, formulaSeed, expectJson: true, responseSchema, task });
-      return parseGeminiJSON(raw);
+      return parseAiJson(raw);
     }
     return await callGeminiDocument(filePath, prompt, settings.geminiApiKey, model, signal, { maxOutputTokens: maxTok, formulaSeed, responseSchema, task });
   } catch (err) {

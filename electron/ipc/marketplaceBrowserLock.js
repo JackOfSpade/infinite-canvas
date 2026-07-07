@@ -33,12 +33,12 @@
 //
 // Kept dependency-free (no electron / puppeteer imports) so it is unit-testable
 // in the plain-node test runner.
+//
+// Implementation shared with sharedProfileLock.js / statusCheckLock.js — see
+// asyncMutex.js for the FIFO + reentrancy-guard mechanics.
+import { createFifoLock } from './asyncMutex.js';
 
-// FIFO chain: each acquirer queues behind the previous one's completion.
-let _tail = Promise.resolve();
-// Acquirers that have enqueued but whose critical section hasn't settled yet
-// (the one running + everyone waiting). Surfaced for a "queued behind N" banner.
-let _pending = 0;
+const lock = createFifoLock({ name: 'marketplaceBrowserLock', supportsAbort: true });
 
 /**
  * Run `fn` exclusively with respect to all other withMarketplaceBrowserLock
@@ -54,21 +54,7 @@ let _pending = 0;
  * @returns {Promise<T>}
  */
 export function withMarketplaceBrowserLock(fn, signal = null) {
-  _pending++;
-  const result = _tail.then(() => {
-    if (signal?.aborted) {
-      const err = new Error('Aborted before acquiring the marketplace browser lock');
-      err.name = 'AbortError';
-      throw err;
-    }
-    return fn();
-  });
-  // Advance the tail regardless of outcome so one failure/abort doesn't wedge the
-  // queue; the caller still observes `result`'s resolution/rejection.
-  _tail = result.then(() => {}, () => {});
-  const settle = () => { _pending--; };
-  result.then(settle, settle);
-  return result;
+  return lock.withLock(fn, signal);
 }
 
 /**
@@ -78,5 +64,5 @@ export function withMarketplaceBrowserLock(fn, signal = null) {
  * @returns {number}
  */
 export function getMarketplaceBrowserQueueDepth() {
-  return _pending;
+  return lock.getQueueDepth();
 }

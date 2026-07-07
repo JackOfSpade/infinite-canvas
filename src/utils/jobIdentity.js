@@ -6,11 +6,14 @@
  *   jobTitleCompanyKey (title|company)
  *     "Same posting, any board." The SAME job scraped from two boards has two
  *     different URLs, so this is the only key that collapses cross-source
- *     copies. It is the backend's cross-source dedup (jobs.js
- *     dedupByTitleCompany) and therefore the key for every SAME-RUN merge in
- *     the renderer too (post-Solve resolve items, the late USAJobs append) —
- *     anything the backend would have collapsed had it arrived in the main
- *     gather must collapse the same way when it arrives late.
+ *     copies. It is the key for every SAME-RUN merge in the renderer
+ *     (post-Solve resolve items, the late USAJobs append) — anything the
+ *     backend would have collapsed had it arrived in the main gather must
+ *     collapse the same way when it arrives late. The backend's own
+ *     cross-source dedup (jobs.js dedupJobsAcrossSources, below) additionally
+ *     considers location — see dedupJobsAcrossSources for why title+company
+ *     alone over-collapses distinct same-title/company reqs in different
+ *     cities.
  *
  *   jobTitleCompanyUrlKey (title|company|url)
  *     "Same listing." Used by the Job Board union across SEVERAL search
@@ -79,4 +82,84 @@ export function uniqueJobsNotIn(existingJobs, candidateJobs, keyFn) {
     unique.push(job);
   }
   return unique;
+}
+
+function normalizedLocationOrNull(job) {
+  const loc = keyPart(job?.location);
+  return loc ? loc : null;
+}
+
+/**
+ * Cross-source dedup: collapses the SAME posting scraped from two different
+ * boards (which necessarily have two different URLs) while still keeping
+ * genuinely distinct same-title/same-company reqs in different cities apart
+ * (e.g. a nationwide search legitimately turning up "Software Engineer" at
+ * Google in both NYC and SF).
+ *
+ * Grouped by title+company, then within each group two jobs are treated as
+ * the same posting only when their locations match OR at least one side's
+ * location couldn't be read — plain title+company alone can't express this
+ * (it always collapses), and a strict title+company+location key can't
+ * either (it would fail to collapse the same posting when one source omits
+ * location and the other doesn't). First-seen order within each source's
+ * gather is preserved, matching the old dedupByTitleCompany's semantics.
+ *
+ * Each kept representative tracks its OWN best-known location (`rep.loc`),
+ * upgraded the first time it absorbs a job that has a real location. Without
+ * this, a group's first entry landing with an unknown location would match
+ * (and swallow) every later job via the "either side unknown" leniency
+ * regardless of THAT job's own known location — collapsing two genuinely
+ * different cities onto the one unresolved entry instead of onto each other.
+ * Upgrading means only the FIRST location-bearing job merges into it; from
+ * then on the representative has a real location and behaves like any other
+ * exact-match comparison, so a second, different city still starts its own
+ * group entry instead of being swallowed too.
+ */
+export function dedupJobsAcrossSources(jobs) {
+  const arr = Array.isArray(jobs) ? jobs : [];
+  const groups = new Map(); // titleCompanyKey -> [{ job, loc }] kept representatives, in first-seen order
+  const result = [];
+  for (const job of arr) {
+    const groupKey = jobTitleCompanyKey(job);
+    const loc = normalizedLocationOrNull(job);
+    const kept = groups.get(groupKey);
+    if (!kept) {
+      groups.set(groupKey, [{ job, loc }]);
+      result.push(job);
+      continue;
+    }
+    const match = kept.find((rep) => loc === null || rep.loc === null || loc === rep.loc);
+    if (!match) {
+      kept.push({ job, loc });
+      result.push(job);
+      continue;
+    }
+    // Matched an ambiguous (unknown-location) representative via a
+    // known-location job — adopt that location so later jobs compare against
+    // the real city, not "anything goes" forever.
+    if (match.loc === null && loc !== null) match.loc = loc;
+  }
+  return result;
+}
+
+/**
+ * Location-aware sibling of uniqueJobsNotIn, for the same "candidate is unique
+ * against an existing set" shape but using dedupJobsAcrossSources's
+ * title+company+location-tolerant matching instead of a location-blind
+ * keyFn. Every current caller wants exactly this: "mirror the backend's
+ * cross-source dedup for a job arriving outside the main gather" (a late
+ * USAJobs append, a captcha/paste-resolved item) — a location-blind key
+ * would over-collapse a genuinely distinct same-title/company job in a
+ * different city onto an existing one, the same bug dedupJobsAcrossSources
+ * exists to prevent.
+ *
+ * Implemented by deduping the concatenation (existing first, so existing
+ * entries always win any group) and returning only the candidates that
+ * survived and aren't reference-identical to an original existing job.
+ */
+export function uniqueJobsAcrossSources(existingJobs, candidateJobs) {
+  const existing = Array.isArray(existingJobs) ? existingJobs : [];
+  const existingSet = new Set(existing);
+  const deduped = dedupJobsAcrossSources([...existing, ...(Array.isArray(candidateJobs) ? candidateJobs : [])]);
+  return deduped.filter((job) => !existingSet.has(job));
 }

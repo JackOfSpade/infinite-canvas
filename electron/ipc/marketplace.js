@@ -22,7 +22,7 @@ import { compsForPricing } from './resultCaps.js';
 import { isCompSourceEnabledInScope } from '../../src/utils/compSourceScope.js';
 import { COMP_SOURCE_LOGIN_PLATFORM, getRequiredCompLoginPlatformIds } from '../../src/utils/marketplaceLoginPreflight.js';
 import { retryWarningRequiringAction } from '../../src/utils/compsMerge.js';
-import { deriveBundlePricingResult } from '../../src/utils/bundlePricing.js';
+import { deriveBundlePricingResult, roundToCents } from '../../src/utils/bundlePricing.js';
 import { CONDITION_VALUES, formatConditionGuideForPrompt, formatConditionForPricingPrompt, stripConditionFromGeneratedTitle } from '../../src/utils/productConditions.js';
 import { logger } from '../logger.js';
 import { VISION_PRODUCT_ANALYSIS_SCHEMA, PRICE_SYNTHESIS_SCHEMA, BUNDLE_PRICE_SCHEMA, buildPlatformFitSchema } from './aiSchemas.js';
@@ -81,10 +81,6 @@ export function formatPricingNotesForPrompt(notes) {
   return normalized
     ? `\nUSER NOTES FROM SELLER:\n${normalized}\n`
     : '';
-}
-
-function currencyAmount(value) {
-  return Math.round(Number(value) * 100) / 100;
 }
 
 export function getMarketplaceTelemetry() {
@@ -267,10 +263,12 @@ function priceStats(items) {
   if (!Array.isArray(items)) return null;
   const prices = items.map(i => Number(i?.price) || 0).filter(p => p > 0).sort((a, b) => a - b);
   if (prices.length === 0) return null;
+  const mid = Math.floor(prices.length / 2);
+  const median = prices.length % 2 === 0 ? (prices[mid - 1] + prices[mid]) / 2 : prices[mid];
   return {
     n: prices.length,
     min: prices[0],
-    median: prices[Math.floor(prices.length / 2)],
+    median,
     max: prices[prices.length - 1],
   };
 }
@@ -505,7 +503,7 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
   if (sourceId === 'reverb') {
     send('searching', 0);
     try {
-      const result = await fetchReverbListings(query, true, signal);
+      const result = await fetchReverbListings(query, signal);
       const items = Array.isArray(result) ? result : (result?.items || []);
       const warning = Array.isArray(result) ? null : (result?.warning || null);
       send('done', items.length, warning);
@@ -564,7 +562,7 @@ async function fetchApiMarketplaceSources(query, signal = null, emit = null, cat
   // the caller routes results by this field instead of assuming all API sources
   // are sold. AptDeco skips itself for non-furniture (isAptDecoApplicable).
   const apiTasks = [
-    { sourceId: 'reverb', category: 'sold', effectiveQuery: query, fn: (s) => fetchReverbListings(query, true, s) },
+    { sourceId: 'reverb', category: 'sold', effectiveQuery: query, fn: (s) => fetchReverbListings(query, s) },
     { sourceId: 'pricecharting', category: 'sold', effectiveQuery: pcQuery, fn: (s) => fetchPriceChartingComps(pcQuery, s, { category }) },
     { sourceId: 'aptdeco-active', category: 'active', effectiveQuery: query, fn: (s) => fetchAptDecoComps(query, s, { category }) },
   ].filter(task => isCompSourceEnabledInScope(task.sourceId));
@@ -1316,12 +1314,12 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, aptd
       && it.recommended_price !== undefined
       && it.recommended_price !== ''
       && Number.isFinite(Number(it.recommended_price))
-      && currencyAmount(it.recommended_price) > 0
+      && roundToCents(it.recommended_price) > 0
     ));
     if (priced.length < 2) {
       return { bundlePricing: null };
     }
-    const sum = currencyAmount(priced.reduce((n, it) => n + currencyAmount(it.recommended_price), 0));
+    const sum = roundToCents(priced.reduce((n, it) => n + roundToCents(it.recommended_price), 0));
     const suppliedSum = sumOfPrices !== null && sumOfPrices !== undefined && sumOfPrices !== '' && Number.isFinite(Number(sumOfPrices))
       ? Number(sumOfPrices)
       : null;
@@ -1341,16 +1339,16 @@ Use platform IDs: ebay, facebook, mercari, poshmark, depop, swappa, reverb, aptd
       item: i + 1,
       label: it.label,
       condition: it.condition,
-      individual_price: currencyAmount(it.recommended_price),
+      individual_price: roundToCents(it.recommended_price),
       individual_quick_sell_price: it.quick_sell_price != null
         && Number.isFinite(Number(it.quick_sell_price))
-        && currencyAmount(it.quick_sell_price) > 0
-        ? currencyAmount(it.quick_sell_price)
+        && roundToCents(it.quick_sell_price) > 0
+        ? roundToCents(it.quick_sell_price)
         : undefined,
       individual_max_profit_price: it.max_profit_price != null
         && Number.isFinite(Number(it.max_profit_price))
-        && currencyAmount(it.max_profit_price) > 0
-        ? currencyAmount(it.max_profit_price)
+        && roundToCents(it.max_profit_price) > 0
+        ? roundToCents(it.max_profit_price)
         : undefined,
       match_quality: it.match_quality || undefined,
       seller_notes: (it.notes || '').trim() || undefined,

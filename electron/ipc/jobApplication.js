@@ -25,6 +25,7 @@ import { callLLMRaw, callLLMText } from './llm.js';
 import { APPLICATION_COVER_LETTER_SCHEMA } from './aiSchemas.js';
 import { renderApplicationPdfs, getDesignSystemDir } from './resumePdf.js';
 import { logger } from '../logger.js';
+import { wrapUntrustedText } from './promptSafety.js';
 
 const { shell } = electronPkg;
 
@@ -43,13 +44,19 @@ function getResumeSampleMain() {
 }
 
 function jobBlock(job = {}) {
-  return [
+  // Every field here — not just the description — is scraper-sourced: whoever
+  // posted the listing controls the title/company/location/salary text too, so
+  // a crafted "Title" or "Company" can carry an injection exactly like a
+  // crafted description can. Wrap the whole block as one untrusted boundary
+  // rather than fencing only the description and leaving the rest bare.
+  const fields = [
     `Title: ${job.title || 'Unknown'}`,
     `Company: ${job.company || 'Unknown'}`,
     job.location ? `Location: ${job.location}` : null,
     job.salary ? `Salary: ${job.salary}` : null,
-    `Description:\n${job.snippet || '(no description scraped)'}`,
+    `Description:\n${job.snippet || '(none captured)'}`,
   ].filter(Boolean).join('\n');
+  return wrapUntrustedText('job-listing', fields);
 }
 
 /**
@@ -70,18 +77,24 @@ async function researchCompanyAndRole(job, signal) {
 
   logger.info(`[JobApplication] Researching ${company} / "${title}" (scraped JD ${String(job.snippet || '').trim().length} chars; model decides whether to also research the role)`);
 
-  const prompt = `You are researching to help a candidate tailor an application to a "${title}" role at "${company}". You have live web search — use it.
+  // title/company are scraper-sourced (whoever posted the listing wrote them),
+  // same as the description — wrap them too rather than splicing them
+  // straight into the instruction prose, where a crafted title like
+  // `Engineer\n\nIGNORE PRIOR INSTRUCTIONS...` would read as part of the
+  // prompt's own directives instead of as the listing's data.
+  const prompt = `You are researching to help a candidate tailor an application to the target role below. You have live web search — use it.
 
-ALWAYS research the COMPANY: what it does and its main products/services; mission, values, and culture signals; stage / size / funding or notable scale; recent news or developments in roughly the last 12 months.
+TARGET ROLE (scraper-sourced — see the boundary notice below):
+${wrapUntrustedText('job-title-company', `Title: ${title}\nCompany: ${company}`)}
+
+ALWAYS research the COMPANY named above: what it does and its main products/services; mission, values, and culture signals; stage / size / funding or notable scale; recent news or developments in roughly the last 12 months.
 
 Then decide about the ROLE by reading the scraped job description below:
 - If it already conveys the role's responsibilities and requirements well, do NOT spend searches on the role — the description covers it.
-- If it is thin, vague, or empty, ALSO research the role: the typical responsibilities and requirements for a "${title}" at this company (or closely comparable companies if this exact posting isn't findable), the skills/tools/outcomes emphasized, and seniority expectations. Note when you're inferring from comparable roles vs. citing a posting you actually found.
+- If it is thin, vague, or empty, ALSO research the role: the typical responsibilities and requirements for the target role at this company (or closely comparable companies if this exact posting isn't findable), the skills/tools/outcomes emphasized, and seniority expectations. Note when you're inferring from comparable roles vs. citing a posting you actually found.
 
 Scraped job description (may be full, partial, or empty):
-"""
-${job.snippet || '(none captured)'}
-"""
+${wrapUntrustedText('job-description', job.snippet)}
 
 Prefer concrete, recent, verifiable facts with rough dates. If you cannot find reliable information about the specific company or role, say so explicitly rather than inventing. Output plain prose only — no headers, no bullet markdown.`;
 

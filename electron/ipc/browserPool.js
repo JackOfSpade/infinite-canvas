@@ -160,9 +160,16 @@ function processQueue() {
       : executeScrape(url, extractorJS, options);
     run
       .then(resolve)
-      .catch((err) => {
-        if (!isShuttingDown) reject(err);
-      })
+      // Always reject — never swallow. This task was already spliced out of
+      // `queue` above, so it is NOT one of the tasks closeAllPages() drains
+      // and rejects directly (that path only covers tasks still sitting in
+      // `queue`, never yet dispatched). A task already active/dispatched when
+      // shutdown starts settles its `run` promise exactly once (async
+      // functions can't double-settle), so there is no double-reject risk —
+      // suppressing the reject here previously left THIS task's caller (e.g.
+      // scrapeMultiple) awaiting a promise that would never resolve or
+      // reject, hanging forever instead of surfacing the shutdown/cancel.
+      .catch(reject)
       .finally(() => {
         activeCount--;
         const count = activeDomains.get(domain) || 1;
@@ -170,7 +177,9 @@ function processQueue() {
         else activeDomains.set(domain, count - 1);
 
         // A slot freed — re-check soon (cooldowns may also have moved on).
-        setTimeout(processQueue, REQUEUE_DELAY_MS);
+        // Skip entirely when nothing is waiting; scheduling a pointless
+        // macrotask on every single task completion adds up under load.
+        if (queue.length > 0) setTimeout(processQueue, REQUEUE_DELAY_MS);
       });
   }
 
@@ -237,6 +246,11 @@ async function executeScrape(url, extractorJS, options = {}) {
             await page.close().catch(() => {});
           }
           if (options.signal?.aborted) throw new Error('Aborted');
+          // Match the pre-launch check below (which throws), not a silent
+          // null — a caller watching progress during the shutdown window
+          // would otherwise see a false "successful scrape, no data"
+          // instead of a clear cancellation.
+          if (isShuttingDown) throw new Error('Browser pool is shutting down');
           return null;
         }
         pageHandles.set(pageId, { page, startTime: Date.now() });
@@ -341,8 +355,21 @@ async function executeScrape(url, extractorJS, options = {}) {
         let stableReads = 0;
         let zeroReads = 0;
         let settledPositively = false;  // true only when we break on a stable, >0 count
+        // A non-SITE_CHANGED evaluate() throw is usually a genuine transient
+        // (the page navigated mid-evaluate) and self-resolves next tick — but
+        // if it keeps happening it's a real bug in the extractor, and without
+        // this it's indistinguishable from a genuinely empty page: the loop
+        // just falls through to "0 results, success" with no diagnostic
+        // trail, exactly the failure mode antiBotDetector exists to catch
+        // (bypassed here, upstream of it).
+        let evalErrStreak = 0;
+        let lastEvalErrMsg = null;
         while (true) {
-          if (isSettled || options.signal?.aborted) break;
+          // isShuttingDown: closeAllPages() force-closes tracked pages during
+          // shutdown, but without this check a readiness loop already polling
+          // one keeps retrying page.evaluate against the closed target until
+          // its own readinessDeadline (up to the full scrape budget) elapses.
+          if (isSettled || isShuttingDown || options.signal?.aborted) break;
           let r = null;
           try { r = await page.evaluate(extractorJS); }
           catch (evalErr) {
@@ -352,9 +379,14 @@ async function executeScrape(url, extractorJS, options = {}) {
               await new Promise(res => setTimeout(res, READINESS.POLL_MS));
               continue;
             }
+            lastEvalErrMsg = evalErr?.message || String(evalErr);
+            if (++evalErrStreak === READINESS.STABLE_READS) {
+              logger.warn(`[BrowserPool] ${sourceKey}: extractor threw ${evalErrStreak}x in a row (non-SITE_CHANGED) — "${lastEvalErrMsg}". If this persists, the extractor itself may have a bug, not just a transient mid-navigation eval.`);
+            }
             /* navigated mid-evaluate — retry next tick */
           }
           if (r != null) {
+            evalErrStreak = 0;
             siteChangedError = null;
             extractorResult = r;                 // always keep the freshest result
             const count = countItems(r);
@@ -665,11 +697,23 @@ async function executeScrapePaginated(extractorJS, options = {}) {
       // previous accumulated total so we don't settle before new items arrive.
       if (!useLoadMore) await new Promise(r => setTimeout(r, firstBeatMs));
       let extractorResult = null, lastCount = useLoadMore ? loadMorePrevCount : -2, stableReads = 0, zeroReads = 0, settledPositively = false;
+      // See executeScrape's matching evalErrStreak — a persistently-throwing
+      // extractor otherwise silently masquerades as "zero results, success."
+      let evalErrStreak = 0, lastEvalErrMsg = null;
       while (true) {
-        if (options.signal?.aborted) break;
+        // See executeScrape's matching check — a force-closed page during
+        // shutdown would otherwise keep getting polled until the deadline.
+        if (isShuttingDown || options.signal?.aborted) break;
         let r = null;
-        try { r = await page.evaluate(extractorJS); } catch { /* navigated mid-evaluate */ }
+        try { r = await page.evaluate(extractorJS); }
+        catch (evalErr) {
+          lastEvalErrMsg = evalErr?.message || String(evalErr);
+          if (++evalErrStreak === READINESS.STABLE_READS) {
+            logger.warn(`[BrowserPool] ${sourceKey} (paginated p${p}): extractor threw ${evalErrStreak}x in a row — "${lastEvalErrMsg}". If this persists, the extractor itself may have a bug, not just a transient mid-navigation eval.`);
+          }
+        }
         if (r != null) {
+          evalErrStreak = 0;
           extractorResult = r;
           const count = countItems(r);
           if (count === -1) break;
@@ -789,26 +833,57 @@ export async function closeAllPages() {
     clearTimeout(queuePoller);
     queuePoller = null;
   }
+
+  // Reject every task still waiting in the queue — closeAllPages previously
+  // only closed pages already tracked in pageHandles. A queued-but-never-
+  // dispatched task's promise was never settled: if a lingering
+  // scheduleQueueWake/REQUEUE_DELAY_MS timer later called processQueue()
+  // and dispatched it, executeScrape's pre-launch isShuttingDown throw was
+  // silently swallowed by the `if (!isShuttingDown) reject(err)` guard in
+  // processQueue's catch — leaving the caller's promise hanging forever.
+  const queued = queue.splice(0, queue.length);
+  for (const task of queued) {
+    task.reject(new Error('Browser pool is shutting down'));
+  }
+
   const handles = Array.from(pageHandles.values());
   pageHandles.clear();
 
-  logger.info(`[BrowserPool] Closing ${handles.length} active pages during shutdown...`);
+  logger.info(`[BrowserPool] Closing ${handles.length} active pages (${queued.length} queued task(s) cancelled) during shutdown...`);
 
   await Promise.allSettled(handles.map(async ({ page }) => {
     await safeClose(page, 1000);
   }));
 }
 
-// Backup cleanup for orphaned browsers or pages on crash/exit.
+// Diagnostic-only: Node's synchronous 'exit' event can't await page.close()
+// (a Promise), so this can log an orphaned page but can't actually clean one
+// up — real cleanup depends entirely on closeAllPages() being called from
+// main.js's before-quit handler before the process exits.
 process.on('exit', () => {
   for (const { page } of pageHandles.values()) {
-    try { 
+    try {
       if (!page.isClosed()) {
-        logger.info('[BrowserPool] Orphaned page detected on exit');
+        logger.info('[BrowserPool] Orphaned page detected on exit (not closed — see comment above)');
       }
     } catch { /* ignore */ }
   }
 });
+
+// Stable per-AbortSignal id for cache-key purposes (see queueScrape below) —
+// AbortSignal has no natural string identity, and two callers sharing a
+// cache key must NOT be coupled unless they're also sharing the same signal.
+const signalIds = new WeakMap();
+let nextSignalId = 1;
+function idFor(signal) {
+  if (!signal) return 'none';
+  let id = signalIds.get(signal);
+  if (!id) {
+    id = nextSignalId++;
+    signalIds.set(signal, id);
+  }
+  return id;
+}
 
 /**
  * Queue a single scrape task. Respects the (adaptive) global concurrency cap.
@@ -818,9 +893,28 @@ process.on('exit', () => {
  * @returns {Promise<any>}
  */
 export function queueScrape(url, extractorJS, options = {}) {
-  // Deduplication: if an identical task is already processing (queued OR active), reuse its promise.
-  const cacheKey = `${url}|${extractorJS}|${options.waitMs || 0}|${options.scrollFirst || false}`;
-  
+  // Deduplication: if an identical task is already processing (queued OR
+  // active), reuse its promise. Must cover every field that changes the
+  // task's behavior or result shape — omitting sourceLabel/paginate/timeoutMs/
+  // referer/signal previously let two calls that only differed in one of
+  // those get incorrectly coupled: the SECOND caller's own options (including
+  // its AbortSignal) were silently discarded in favor of the FIRST caller's,
+  // so the second caller's abort did nothing, while the first caller's abort
+  // would reject every deduped caller — even ones that never asked to
+  // cancel. Including the signal's identity means two callers only dedupe
+  // when they're also sharing the same signal (e.g. all tasks in one
+  // scrapeMultiple() batch, which do), not just coincidentally targeting the
+  // same URL from unrelated call sites.
+  const cacheKey = [
+    url, extractorJS,
+    options.sourceLabel || '',
+    options.paginate ? 1 : 0,
+    options.timeoutMs || 0,
+    options.referer || '',
+    options.scrollFirst || false,
+    idFor(options.signal),
+  ].join('|');
+
   if (activeTasks.has(cacheKey)) {
     return activeTasks.get(cacheKey);
   }

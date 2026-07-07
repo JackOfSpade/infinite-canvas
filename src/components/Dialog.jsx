@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { updateModalCount } from './modalStack';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /**
  * Reusable floating dialog.
@@ -26,17 +27,11 @@ export function Dialog({ title, children, onClose }) {
     return () => updateModalCount(-1);
   }, []);
 
-  useEffect(() => {
-    const handleKey = (e) => { 
-      if (e.key === 'Escape') {
-        if (closingRef.current) return;
-        closingRef.current = true;
-        onClose(); 
-      }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [onClose]);
+  useEscapeToClose(() => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    onClose();
+  });
 
   // ── Drag-to-move, clamped to window ──────────────────────────────────────
   const dragListenersRef = useRef(null);

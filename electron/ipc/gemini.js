@@ -9,6 +9,7 @@ import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { resolveServiceAccountPath, getAISettings } from './settings.js';
 import { callClaudeText, probeClaude, CLAUDE_MODELS_IN_USE } from './claude.js';
+import { CLAUDE_HAIKU } from './claudeModels.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP, DOCUMENT_MIME_MAP } from '../utils/mimeTypes.js';
 import {
@@ -21,8 +22,20 @@ import {
   isGeminiProviderAvailable,
   orderGeminiModels,
 } from './geminiModels.js';
+import { isSensitivePath } from '../utils/pathSafety.js';
+import { parseAiJson } from './jsonRepair.js';
 
 export { GEMINI_MODEL_FALLBACKS } from './geminiModels.js';
+
+// A document/image node's filePath is sourced from loaded canvas JSON, which
+// (unlike the local-file:// preview protocol) had NO path check at all before
+// being read and uploaded to the Gemini API — see the matching guard in
+// claude.js for the full rationale.
+function assertAttachmentPathSafe(filePath) {
+  if (isSensitivePath(path.resolve(String(filePath || '')))) {
+    throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
+  }
+}
 
 // Determinism for structured/JSON output (not a telemetry-learning candidate —
 // temperature is a quality knob, not a budget).
@@ -34,7 +47,6 @@ const GEMINI_TEMPERATURE = 0.1;
 // below is unrelated: a hard ~20MB API limit on inline image/document bytes.)
 const MAX_AI_FILE_BYTES  = 15 * 1024 * 1024; // 15MB
 
-const GEMINI_MODEL = 'gemini-3.5-flash';
 const LOCATION = 'us-central1';
 
 /**
@@ -736,12 +748,12 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   let headers = { 'Content-Type': 'application/json' };
   
   if (apiKey) {
-    endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-3.5-flash'}:generateContent?key=${apiKey}`;
+    endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || GEMINI_MODEL_FALLBACKS[0]}:generateContent?key=${apiKey}`;
   } else {
     // No API key → Vertex AI via service-account.json. getToken() (→ getAuthClient)
     // throws a clear "no credential" error if neither is configured.
     const token = await getToken();
-    endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${model || GEMINI_MODEL}:generateContent`;
+    endpoint = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${model || GEMINI_MODEL_FALLBACKS[0]}:generateContent`;
     headers['Authorization'] = `Bearer ${token}`;
   }
 
@@ -820,6 +832,19 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   }
 
   const data = await response.json();
+  // A prompt that trips a safety filter BEFORE any candidate is generated
+  // (plausible here — untrusted scraped job/listing text flows into these
+  // prompts) leaves `candidates` empty/absent and `finishReason` undefined,
+  // so without this check every failure mode below falls through to the
+  // generic "no content" message, losing the one piece of evidence
+  // (blockReason / category) that would actually explain what happened.
+  const promptBlockReason = data?.promptFeedback?.blockReason;
+  if (promptBlockReason && !data?.candidates?.length) {
+    const categories = (data.promptFeedback?.safetyRatings || [])
+      .filter(r => r?.blocked || (r?.probability && r.probability !== 'NEGLIGIBLE'))
+      .map(r => r.category).filter(Boolean).join(', ');
+    throw new Error(`Gemini blocked the prompt before generating a response: blockReason=${promptBlockReason}${categories ? ` (${categories})` : ''}.`);
+  }
   const candidate = data?.candidates?.[0];
   // Join ALL text parts, not just [0]. Plain JSON answers arrive as a single
   // part, but a grounded (Google Search) response can split its answer across
@@ -1018,103 +1043,6 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
   throw finalError;
 }
 
-/**
- * Parse raw Gemini response text into JSON, stripping markdown fences if present.
- * Handles both ```json and bare ``` wrappers.
- */
-export function parseGeminiJSON(raw) {
-  if (!raw) return null;
-
-  // Resilient JSON extraction: Find the first code block or the outer-most { } pair.
-  // This handles instances where Gemini adds markdown fences OR conversational text.
-  let jsonStr = raw;
-  const match = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-  if (match) {
-    jsonStr = match[1];
-  } else {
-    // If no markdown block, try to find the first { or [ and the last } or ]
-    const firstBrace = raw.indexOf('{');
-    const firstBracket = raw.indexOf('[');
-    const lastBrace = raw.lastIndexOf('}');
-    const lastBracket = raw.lastIndexOf(']');
-    
-    let start = -1;
-    let end = -1;
-    
-    if (firstBrace !== -1 && firstBracket !== -1) {
-      start = Math.min(firstBrace, firstBracket);
-    } else if (firstBrace !== -1) {
-      start = firstBrace;
-    } else if (firstBracket !== -1) {
-      start = firstBracket;
-    }
-    
-    if (lastBrace !== -1 && lastBracket !== -1) {
-      end = Math.max(lastBrace, lastBracket);
-    } else if (lastBrace !== -1) {
-      end = lastBrace;
-    } else if (lastBracket !== -1) {
-      end = lastBracket;
-    }
-
-    if (start !== -1 && end !== -1 && end > start) {
-      jsonStr = raw.substring(start, end + 1);
-    }
-  }
-
-  // Clean trailing commas that V8's JSON.parse chokes on
-  jsonStr = jsonStr.replace(/,\s*([}\]])/g, '$1');
-
-  try {
-    const parsed = JSON.parse(jsonStr.trim());
-    return parsed;
-  } catch (error) {
-    // Strictly-additive fallback: the first-open/last-close span above can
-    // mis-bracket when the model prefixes the JSON with prose that contains a
-    // stray '{', '[', '}' or ']' (e.g. "use [ ] for arrays: {…}"), so it starts
-    // the span at the stray delimiter and JSON.parse fails. Retry with a
-    // brace-only then bracket-only span. This runs ONLY after the primary parse
-    // already threw, so it can never regress a response that parsed cleanly.
-    for (const [open, close] of [['{', '}'], ['[', ']']]) {
-      const s = raw.indexOf(open);
-      const e = raw.lastIndexOf(close);
-      if (s !== -1 && e > s) {
-        try {
-          const recovered = JSON.parse(raw.substring(s, e + 1).replace(/,\s*([}\]])/g, '$1').trim());
-          // Reject a trivially-empty literal here. This loop runs ONLY after the
-          // primary parse already failed (mis-bracketed prose), so an empty {}/[]
-          // almost always came from a STRAY delimiter pair in the prose — e.g.
-          // "use [ ] for arrays: {…}", where the bracket span grabs the prose's
-          // "[ ]" and parses it to []. Returning that would silently fabricate an
-          // empty result and mask the failure; fall through to the fail-loud throw.
-          const isEmptyLiteral = recovered && typeof recovered === 'object'
-            && (Array.isArray(recovered) ? recovered.length === 0 : Object.keys(recovered).length === 0);
-          if (!isEmptyLiteral) return recovered;
-        } catch { /* try the next delimiter pair, then fall through to the throw */ }
-      }
-    }
-    // Log a window AROUND the failure position, not the head of the doc.
-    // V8's JSON.parse error messages include "at position N" — pull that
-    // out and dump ±200 chars so bug reports show the actual malformed
-    // syntax instead of valid prelude that gets truncated by the ring
-    // buffer before the error site is reached.
-    const posMatch = String(error.message || '').match(/at position (\d+)/);
-    let context = '';
-    if (posMatch) {
-      const pos = Number(posMatch[1]);
-      const start = Math.max(0, pos - 200);
-      const end = Math.min(jsonStr.length, pos + 200);
-      const before = jsonStr.slice(start, pos);
-      const after = jsonStr.slice(pos, end);
-      context = `\nContext (±200 chars around pos ${pos}, length=${jsonStr.length}):\n${before}«ERROR HERE»${after}`;
-    } else {
-      context = `\nRaw (length=${jsonStr.length}):\n${jsonStr.slice(0, 1000)}${jsonStr.length > 1000 ? '\n…[truncated]' : ''}`;
-    }
-    logger.error('[Gemini] Failed to parse JSON response:', error.message, context);
-    throw new Error(`AI returned invalid JSON: ${error.message}`);
-  }
-}
-
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /**
@@ -1126,7 +1054,7 @@ export function parseGeminiJSON(raw) {
  */
 export async function callGeminiText(prompt, apiKey, model, signal = null, opts = {}) {
   const raw = await callGemini([{ text: prompt }], apiKey, model, { signal, ...opts });
-  return parseGeminiJSON(raw);
+  return parseAiJson(raw);
 }
 
 /**
@@ -1151,7 +1079,7 @@ export async function callGeminiTextRaw(prompt, apiKey, model, signal = null, op
  */
 export async function countGeminiInputTokens(text, apiKey, model, { signal = null } = {}) {
   if (!apiKey) throw new Error('Gemini countTokens requires an AI Studio API key');
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || GEMINI_MODEL}:countTokens?key=${apiKey}`;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model || GEMINI_MODEL_FALLBACKS[0]}:countTokens?key=${apiKey}`;
   const timeoutSignal = AbortSignal.timeout(15000);
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const res = await fetch(endpoint, {
@@ -1185,6 +1113,7 @@ export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal
   const tempFiles = [];
   try {
     const imageParts = await Promise.all(imagePaths.map(async (imgPath) => {
+      assertAttachmentPathSafe(imgPath);
       let finalPath = await ensureVisionSafeImage(imgPath);
       if (finalPath !== imgPath) tempFiles.push(finalPath);
 
@@ -1212,7 +1141,7 @@ export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal
 
     const parts = [...imageParts, { text: prompt }];
     const raw = await callGemini(parts, apiKey, model, { signal, ...opts });
-    return parseGeminiJSON(raw);
+    return parseAiJson(raw);
   } finally {
     if (tempFiles.length > 0) await Promise.all(tempFiles.map(f => cleanupTempFile(f)));
   }
@@ -1227,6 +1156,7 @@ export async function callGeminiVision(imagePaths, prompt, apiKey, model, signal
  * @returns {Promise<object>} — Parsed JSON response
  */
 export async function callGeminiDocument(filePath, prompt, apiKey, model, signal = null, opts = {}) {
+  assertAttachmentPathSafe(filePath);
   const ext = path.extname(filePath).toLowerCase();
   const mimeType = DOCUMENT_MIME_MAP[ext];
 
@@ -1255,7 +1185,7 @@ export async function callGeminiDocument(filePath, prompt, apiKey, model, signal
   ];
 
   const raw = await callGemini(parts, apiKey, model, { signal, ...opts });
-  return parseGeminiJSON(raw);
+  return parseAiJson(raw);
 }
 
 export function registerGeminiHandlers() {
@@ -1271,7 +1201,7 @@ export function registerGeminiHandlers() {
     // If user picked Claude, polish via Claude Haiku 4.5 directly. Avoids
     // forcing them onto Gemini just for this one helper.
     if (settings.provider === 'claude') {
-      const raw = await callClaudeText(prompt, 'claude-haiku-4-5-20251001', settings.anthropicApiKey, signal, { maxTokens: 1024, expectJson: false });
+      const raw = await callClaudeText(prompt, CLAUDE_HAIKU, settings.anthropicApiKey, signal, { maxTokens: 1024, expectJson: false });
       return { text: raw.trim() };
     }
     const config = { responseMimeType: 'text/plain', signal, maxOutputTokens: 1024 };

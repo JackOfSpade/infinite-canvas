@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { useReactFlow } from '@xyflow/react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { useReactFlow, useStore } from '@xyflow/react';
 import { Loader2, CheckCircle2, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
@@ -29,7 +29,7 @@ import { useIsMountedRef } from '../hooks/useIsMountedRef';
  *     ephemeral: true,                 // marker so the hub knows to clean it up
  *   }
  */
-export function CompSourceCardNode({ id, data }) {
+export const CompSourceCardNode = React.memo(function CompSourceCardNode({ id, data }) {
   // Prime from persistedProgress so a save-quit-reopen during 'comps-ready'
   // restores Solve/Skip buttons without waiting for a fresh progress event
   // (none will arrive — the scrape isn't running on reload).
@@ -44,7 +44,7 @@ export function CompSourceCardNode({ id, data }) {
   // warn-severity Retry button so a second Retry greys out + reads "Queued…"
   // instead of firing a duplicate rescrape.
   const [resolveState, setResolveState] = useState('idle');
-  const { deleteElements, updateNodeData, getNode } = useReactFlow();
+  const { deleteElements, updateNodeData } = useReactFlow();
 
   // The card can be dismissed by the hub's grace timer while a Solve/Retry IPC
   // is still in flight; guard the finally setState so it doesn't run after
@@ -52,9 +52,17 @@ export function CompSourceCardNode({ id, data }) {
   const isMountedRef = useIsMountedRef();
 
   // Hub-cascading lock: when the owning SellHub is locked, Solve/Skip
-  // become no-ops. Card stays visible and informational.
-  const hubData = getNode(data.hubId)?.data || {};
-  const hubLocked = !!hubData.locked || hubData.hubState === 'queued';
+  // become no-ops. Card stays visible and informational. A reactive store
+  // selector, not a plain getNode() snapshot — this card (wrapped in
+  // React.memo) has no other reason to re-render on a hub-only lock/state
+  // change, since that doesn't touch this card's own `data` prop (mirrors
+  // JobGroupNode.jsx / JobSourceCardNode.jsx).
+  const hubLocked = useStore(
+    useCallback((s) => {
+      const hubData = s.nodeLookup.get(data.hubId)?.data;
+      return !!hubData?.locked || hubData?.hubState === 'queued';
+    }, [data.hubId])
+  );
 
   useEffect(() => {
     if (!window.electronAPI?.onPriceSourceProgress) return;
@@ -315,4 +323,4 @@ export function CompSourceCardNode({ id, data }) {
       )}
     </div>
   );
-}
+});

@@ -39,7 +39,7 @@ import { computeJobTreeView, countMatchingDescendantCards } from './jobsearch/bu
  *     visibleCount?: number, // role only — how many matching cards are revealed
  *   }
  */
-export function JobGroupNode({ id, data }) {
+export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
   const { setNodes, getNode } = useReactFlow();
 
   const expanded = !!data.expanded;
@@ -189,4 +189,4 @@ export function JobGroupNode({ id, data }) {
       )}
     </div>
   );
-}
+});

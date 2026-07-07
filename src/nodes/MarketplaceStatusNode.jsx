@@ -81,7 +81,7 @@ function StatusPill({ result, checking }) {
   );
 }
 
-export function MarketplaceStatusNode({ id, data }) {
+export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({ id, data }) {
   const { updateNodeData } = useReactFlow();
   const navigation = useContext(CanvasNavigationContext);
   const updateGlobal = navigation?.updateNodeDataGlobally || updateNodeData;
@@ -377,7 +377,7 @@ export function MarketplaceStatusNode({ id, data }) {
       </div>
     </div>
   );
-}
+});
 
 function PlatformRow({ row, checking, onCheck }) {
   const { platform, listingCount, watchCount, eligible, result } = row;

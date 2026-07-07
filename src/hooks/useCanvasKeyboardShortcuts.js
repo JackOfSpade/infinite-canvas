@@ -1,6 +1,8 @@
 import { useEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
+import { useModalStackCount } from '../components/modalStack';
+import { isTextEditingTarget } from '../utils/nativeTextUndo';
 
 export function useCanvasKeyboardShortcuts({
   placementMode, setPlacementMode, 
@@ -11,14 +13,21 @@ export function useCanvasKeyboardShortcuts({
   shortcuts
 }) {
   const { getNodes } = useReactFlow();
+  const modalCount = useModalStackCount();
 
   useEffect(() => {
     const handleKey = (e) => {
+      // A dialog/menu/lightbox is open — its own Escape handling owns the
+      // keyboard; without this, e.g. Cmd+D on a dialog button duplicated the
+      // canvas selection underneath it.
+      if (modalCount > 0) return;
       if (isAnimatingRef?.current) return;
-      
-      const tag = e.target.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
-      
+
+      // Was an inline tag==='INPUT' check, which treats ANY input as text-editing
+      // regardless of type — a focused checkbox/radio would incorrectly block
+      // these shortcuts. isTextEditingTarget checks the input's actual type.
+      if (isTextEditingTarget(e.target)) return;
+
       const k = e.key.toLowerCase();
       const s = shortcuts || {};
 
@@ -34,6 +43,12 @@ export function useCanvasKeyboardShortcuts({
         }
         return matched;
       };
+
+      // Prevent OS key-repeat from re-firing any shortcut below while a key is
+      // held — Duplicate in particular would otherwise rapid-clone nodes for
+      // as long as Cmd+D stays pressed. Applied before the hardcoded D/C/V
+      // branches, not just the tool-selection ones further down.
+      if (e.repeat) return;
 
       // Duplicate / Copy / Paste are intentionally hardcoded to Ctrl/Cmd+D/C/V
       // rather than going through the configurable `shortcuts` map — they mirror
@@ -72,9 +87,6 @@ export function useCanvasKeyboardShortcuts({
         if (activeTool)    { setActiveTool(null);    return; }
       }
 
-      // Tool shortcuts (Select, Text, Link) - Prevent repeat toggling
-      if (e.repeat) return;
-
       if (isMatch(s.selectTool)) {
         e.preventDefault();
         setActiveTool(prev => prev === 'select' ? null : 'select');
@@ -104,5 +116,5 @@ export function useCanvasKeyboardShortcuts({
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [placementMode, activeTool, setPlacementMode, setActiveTool, setIsSettingsOpen, isAnimatingRef, getNodes, duplicateNodes, copyNodes, pasteNodes, shortcuts]);
+  }, [placementMode, activeTool, setPlacementMode, setActiveTool, setIsSettingsOpen, isAnimatingRef, getNodes, duplicateNodes, copyNodes, pasteNodes, shortcuts, modalCount]);
 }

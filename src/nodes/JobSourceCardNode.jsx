@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useContext } from 'react';
-import { useReactFlow } from '@xyflow/react';
+import React, { useCallback, useEffect, useState, useContext } from 'react';
+import { useReactFlow, useStore } from '@xyflow/react';
 import { Loader2, CheckCircle2, Filter, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
@@ -31,7 +31,7 @@ import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
  *     hubId,                          // owning JobSearchNode id (multi-hub safety)
  *   }
  */
-export function JobSourceCardNode({ id, data }) {
+export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, data }) {
   const { getNode, deleteElements, updateNodeData } = useReactFlow();
   // Same nav context the owning Job Search Module reads currentFile from — needed so a
   // captcha-resolve can history-dedup against this project's jobs-history CSV
@@ -234,25 +234,39 @@ export function JobSourceCardNode({ id, data }) {
     }
   };
 
-  // Hub state is read fresh on every render so changes (filter, finalCounts,
-  // hubState) flow through without a separate subscription on this card.
-  const hub = getNode(data.hubId);
-  const hubData = hub?.data || {};
-  const isFiltered = hubData.sourceFilter === data.sourceId;
-  const hubBusy = ['queued', 'parsing', 'querying', 'searching', 'scoring'].includes(hubData.hubState);
+  // Hub state via reactive store selectors, not a plain getNode() snapshot —
+  // getNode() only reflects the hub's CURRENT data when read, and this card
+  // has no other reason to re-render on a hub-only change (filter toggle,
+  // lock, hubState) since that doesn't touch this card's own `data` prop.
+  // Wrapped in React.memo, a plain snapshot would go stale until some
+  // unrelated re-render happened to refresh it (mirrors JobGroupNode.jsx).
+  const isFiltered = useStore(
+    useCallback((s) => s.nodeLookup.get(data.hubId)?.data?.sourceFilter === data.sourceId, [data.hubId, data.sourceId])
+  );
+  const hubBusy = useStore(
+    useCallback((s) => ['queued', 'parsing', 'querying', 'searching', 'scoring'].includes(s.nodeLookup.get(data.hubId)?.data?.hubState), [data.hubId])
+  );
   // Hub-cascading lock: when the owning Job Search Module is locked, the source card's
   // interactive controls (filter toggle, Solve, Skip) become no-ops. The
   // card itself stays visible and informational.
-  const hubLocked = !!hubData.locked;
-  const fallbackCount = hubData.finalSourceCounts?.[data.sourceId];
-
+  const hubLocked = useStore(
+    useCallback((s) => !!s.nodeLookup.get(data.hubId)?.data?.locked, [data.hubId])
+  );
+  const fallbackCount = useStore(
+    useCallback((s) => s.nodeLookup.get(data.hubId)?.data?.finalSourceCounts?.[data.sourceId], [data.hubId, data.sourceId])
+  );
   // A fresh run begins in 'parsing'/'querying' (the "Reading resume…" phase),
   // BEFORE the search phase emits any per-source progress — so any `progress`
   // still held here is necessarily from the PREVIOUS run. Treat it as stale in
   // those phases (derive, don't setState — clearing state in an effect causes
   // cascading renders) so the card flips straight to "Searching…" instead of
   // lingering on the old count through the whole resume-read/query phase.
-  const preSearch = hubData.hubState === 'parsing' || hubData.hubState === 'querying';
+  const preSearch = useStore(
+    useCallback((s) => {
+      const hubState = s.nodeLookup.get(data.hubId)?.data?.hubState;
+      return hubState === 'parsing' || hubState === 'querying';
+    }, [data.hubId])
+  );
   const liveProgress = preSearch ? null : progress;
 
   // Pick what to display. Live progress wins; otherwise show the last-known
@@ -446,4 +460,4 @@ export function JobSourceCardNode({ id, data }) {
       )}
     </div>
   );
-}
+});

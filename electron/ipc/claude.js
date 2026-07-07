@@ -5,6 +5,19 @@ import { logger } from '../logger.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP } from '../utils/mimeTypes.js';
 import { buildCachedUserContent, buildAnthropicMessageParams } from './anthropicRequest.js';
+import { isSensitivePath } from '../utils/pathSafety.js';
+import { CLAUDE_MODEL_IDS, CLAUDE_SONNET } from './claudeModels.js';
+
+// A document/image node's filePath is sourced from loaded canvas JSON, which
+// (unlike the local-file:// preview protocol) had NO path check at all before
+// being read and uploaded to the Anthropic API — an untrusted/shared canvas
+// could point a node at e.g. ~/.aws/credentials and have it previewed AND,
+// via a normal "AI polish/analyze" action, exfiltrated to a third-party API.
+function assertAttachmentPathSafe(filePath) {
+  if (isSensitivePath(path.resolve(String(filePath || '')))) {
+    throw new Error(`Refusing to read a sensitive system/credential path as an AI attachment: ${filePath}`);
+  }
+}
 
 // Hard ceiling on the Anthropic SDK's built-in retries. The SDK already does
 // exactly what we'd hand-roll for Gemini: auto-retries 408/409/429/500/503/529
@@ -57,17 +70,12 @@ function parseAnthropicRateLimit(headers) {
   return Object.keys(out).length ? out : null;
 }
 
-// Distinct Claude models the app actually uses across tasks — KEEP IN SYNC with
-// TASK_MODELS in llm.js (declared here, not imported, to avoid a circular import:
-// llm.js imports gemini.js which owns the availability handler). Ordered
-// workhorse → app-gen → light. The availability probe checks EACH, because
-// Anthropic rate limits are PER-MODEL: Haiku having headroom says nothing about
-// whether a Sonnet scoring run or an Opus application-generation will hit limits.
-export const CLAUDE_MODELS_IN_USE = [
-  'claude-sonnet-4-6',          // job scoring/bucketing, resume-parse, query-gen, vision, price-synthesis, company-research
-  'claude-opus-4-8',            // application résumé + cover-letter generation
-  'claude-haiku-4-5-20251001',  // platform-fit, page-status, text-polish
-];
+// Distinct Claude models the app actually uses across tasks, sourced from the
+// shared registry (claudeModels.js) rather than a second hardcoded list. The
+// availability probe checks EACH, because Anthropic rate limits are PER-MODEL:
+// Haiku having headroom says nothing about whether a Sonnet scoring run or an
+// Opus application-generation will hit limits.
+export const CLAUDE_MODELS_IN_USE = CLAUDE_MODEL_IDS;
 
 /**
  * Lightweight availability probe: a 1-token ping to ONE model that reads the
@@ -77,7 +85,7 @@ export const CLAUDE_MODELS_IN_USE = [
  * {ok,status,model,rateLimit,error} so the Settings panel can render a verdict
  * (the rate-limit numbers are straight from the response headers).
  */
-export async function probeClaude(apiKey, model = 'claude-sonnet-4-6') {
+export async function probeClaude(apiKey, model = CLAUDE_SONNET) {
   if (!apiKey) return { ok: false, status: null, model, error: 'No Anthropic API key set.' };
   try {
     const anthropic = getAnthropicClient(apiKey);
@@ -257,8 +265,8 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
 
   // Tool-use response: pull the tool_use block's `input`, repair any nested
   // object the model mis-emitted (leaked fields / tool-call XML in a string),
-  // then re-stringify so the shared parseGeminiJSON downstream can JSON.parse it
-  // like any other JSON.
+  // then re-stringify so the shared parseAiJson (jsonRepair.js) downstream can
+  // JSON.parse it like any other JSON.
   if (responseSchema) {
     const toolBlock = response.content.find(b => b.type === 'tool_use');
     if (!toolBlock) {
@@ -319,6 +327,7 @@ export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal
   // files instead of leaking until the OS clears /var/folders.
   try {
     const contentParts = await Promise.all(imagePaths.map(async (imgPath) => {
+      assertAttachmentPathSafe(imgPath);
       let finalPath = imgPath;
 
       // Normalize any non-vision-safe format (HEIC/HEIF/TIFF/JXL/AVIF/BMP/SVG/…)
@@ -368,6 +377,7 @@ export async function callClaudeVision(imagePaths, prompt, model, apiKey, signal
 }
 
 export async function callClaudeDocument(filePath, prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, expectJson = false, responseSchema = null, task = null } = {}) {
+  assertAttachmentPathSafe(filePath);
   const ext = path.extname(filePath).toLowerCase();
 
   if (IMAGE_MIME_MAP[ext]) {

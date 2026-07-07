@@ -24,6 +24,7 @@ export const TIMINGS = {
   SEARCH_RECOUNT_DEBOUNCE_MS:  200,  // recompute match count after the query stops changing
   AUTOSAVE_RETRY_ANIMATING_MS: 1000, // re-poll autosave while a nav animation is mid-flight
   AUTOSAVE_RETRY_SAVING_MS:    500,  // re-poll autosave while a manual save is in-flight
+  AUTOSAVE_RETRY_EDITING_MS:   1500, // re-poll autosave while the user is mid-edit in a contenteditable
 
   // ── Transient confirmation feedback: show → auto-clear ────────────────────
   // One value for every "it worked, here's a brief badge" cue: the "Saved" dot,

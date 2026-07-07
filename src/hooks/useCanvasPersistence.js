@@ -4,6 +4,7 @@ import { EventLogger } from '../utils/EventLogger';
 import { runNodeMigrations, CURRENT_SCHEMA_VERSION, sanitizeNodesForSave, sanitizeEdgesForSave } from '../utils/serializationUtils';
 import { TIMINGS } from '../utils/timings';
 import { useIsMountedRef } from './useIsMountedRef';
+import { buildSaveData } from './canvasSaveData';
 
 
 /**
@@ -70,28 +71,14 @@ export function useCanvasPersistence({
     if (!window.electronAPI || saveStateRef.current !== 'idle' || isAnimatingRef?.current) return;
     setSaveState('saving');
     try {
-      // Commit any in-progress contenteditable edit (e.g. text node being typed
-      // into when the user pressed Cmd+S). Without this, the save reads stale
-      // data.text because TextNode only flushes its DOM content into React
-      // state on blur. Two ticks let React process the blur-triggered setState
-      // and run the useEffect that mirrors `nodes` into `nodesRef`.
-      const active = document.activeElement;
-      if (active && active.isContentEditable) {
-        active.blur();
-        EventLogger.log('save: committed in-progress contenteditable edit');
-        await new Promise(r => setTimeout(r, 0));
-        await new Promise(r => setTimeout(r, 0));
-      }
-      // Flush the navigation stack to get complete root-level data
-      const rawData = flushStack ? flushStack() : { nodes: nodesRef.current, edges: edgesRef.current, drawings: drawingsRef.current };
-      // Strip transient visual properties (e.g. source-filter opacity on job cards)
-      // and drop ephemeral nodes (e.g. price-research comp-source cards).
-      const sanitizedNodes = sanitizeNodesForSave(rawData.nodes);
-      // Drop orphan edges — refs to nodes that were removed (whether via the
-      // ephemeral filter just above, or via a delete that bypassed the
-      // normal cascade-cleanup path). Recursive across group sub-canvases.
-      const sanitizedEdges = sanitizeEdgesForSave(rawData.edges, sanitizedNodes);
-      const data = { ...rawData, nodes: sanitizedNodes, edges: sanitizedEdges, schemaVersion: CURRENT_SCHEMA_VERSION };
+      // Shared with the debounced auto-save in useCanvasInitialization (flush
+      // any in-progress contenteditable edit, e.g. a text node being typed
+      // into when the user pressed Cmd+S, then sanitize) so the two save
+      // paths can't drift out of sync with each other.
+      const data = await buildSaveData({
+        flushStack,
+        fallbackState: { nodes: nodesRef.current, edges: edgesRef.current, drawings: drawingsRef.current },
+      });
       // Read currentFile via ref to avoid this callback being recreated on every file-path change
       const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFileRef.current });
       if (res?.success && res.filePath) {
@@ -211,6 +198,11 @@ export function useCanvasPersistence({
 
       const loadOpts = typeof targetFilePath === 'string' ? { filePath: targetFilePath } : undefined;
       const res = await window.electronAPI.loadWorkspace(loadOpts);
+      // The window can close (or this hook's owner unmount) while the load is
+      // in flight — loadWorkspace involves a file read plus migrations and
+      // can be slow. Bail before touching any state, matching saveCanvas's
+      // guard on every post-await write below.
+      if (!isMountedRef.current) return;
       setLoading(0.35, 'Reading workspace...');
       if (res?.success && res.data) {
         // Reset navigation stack to root — prevents stale breadcrumbs/stack corruption
@@ -284,6 +276,7 @@ export function useCanvasPersistence({
       }
     } catch (err) {
       EventLogger.error('Failed to load canvas:', err);
+      if (!isMountedRef.current) return;
       setLoadState({ active: false, progress: 0, label: '' });
       if (!isSilent) addToast({ title: 'Load Error', description: err?.message || String(err) || 'An error occurred while loading.', type: 'error' });
       // Clear auto-load config if it fails completely (deleted or broken) so we don't boot loop into it

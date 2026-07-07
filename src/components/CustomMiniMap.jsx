@@ -123,8 +123,8 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
         mxX = Math.max(mxX, p.x); mxY = Math.max(mxY, p.y);
       });
     });
-    if (!isFinite(mnX)) return { cMinX: -200, cMinY: -200, cMaxX: 200, cMaxY: 200, isEmpty: true };
-    return { cMinX: mnX - CONTENT_PAD, cMinY: mnY - CONTENT_PAD, cMaxX: mxX + CONTENT_PAD, cMaxY: mxY + CONTENT_PAD, isEmpty: false };
+    if (!isFinite(mnX)) return { cMinX: -200, cMinY: -200, cMaxX: 200, cMaxY: 200 };
+    return { cMinX: mnX - CONTENT_PAD, cMinY: mnY - CONTENT_PAD, cMaxX: mxX + CONTENT_PAD, cMaxY: mxY + CONTENT_PAD };
   }, [visibleNodes, drawings]);
 
   const nodeById = useMemo(() => {
@@ -222,6 +222,14 @@ export const CustomMiniMap = React.memo(function CustomMiniMap({ nodes, edges, d
   if (prev.isAnimating !== next.isAnimating) return false;
   if (prev.nodes.length !== next.nodes.length) return false;
   if (prev.edges.length !== next.edges.length) return false;
+  // A rewired edge (removed + a different one added, same total count — e.g.
+  // during a reconnect gesture) must still trigger a re-render; length alone
+  // would treat it as unchanged and leave the minimap drawing a stale connector.
+  for (let i = 0; i < prev.edges.length; i++) {
+    const pe = prev.edges[i];
+    const ne = next.edges[i];
+    if (pe.id !== ne.id || pe.source !== ne.source || pe.target !== ne.target) return false;
+  }
   if ((prev.drawings || []).length !== (next.drawings || []).length) return false;
   
   const prevDrawings = prev.drawings || [];

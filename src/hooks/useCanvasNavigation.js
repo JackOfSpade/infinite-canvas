@@ -1,9 +1,10 @@
-import { useState, useCallback, useRef, useEffect, useLayoutEffect } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { getNodeDims, getNodesBounds } from '../utils/constants';
 
 import { safeClone, syncStackUpward, getCanvasData, deepUpdateNode, deepAddElements } from '../utils/navigationUtils';
 import { EventLogger } from '../utils/EventLogger';
+import { getReactFlowContainerSize } from '../utils/reactFlowDom';
 
 /**
  * Navigation stack for nested canvas dive-in / dive-out.
@@ -59,10 +60,12 @@ export function useCanvasNavigation({
 
   // Build breadcrumbs: [Root, ...each level we navigated into]
   // Last entry = current level (not clickable)
-  const breadcrumbs = [
+  // Memoized on `stack` so its identity is stable across renders that don't
+  // touch navigation — see the useMemo around this hook's return value below.
+  const breadcrumbs = useMemo(() => [
     { id: 'root', title: 'Main Canvas' },
     ...stack.map(s => ({ id: s.nodeId, title: s.childTitle })),
-  ];
+  ], [stack]);
 
   /**
    * Dive into a nested canvas node.
@@ -132,10 +135,7 @@ export function useCanvasNavigation({
           });
           const cx = sumX / childNodes.length;
           const cy = sumY / childNodes.length;
-          const viewportNode = document.querySelector('.react-flow__viewport');
-          const container = viewportNode?.parentElement;
-          const flowWidth  = container ? container.clientWidth  : window.innerWidth;
-          const flowHeight = container ? container.clientHeight : window.innerHeight;
+          const { width: flowWidth, height: flowHeight } = getReactFlowContainerSize();
           reactFlow.setViewport({
             x: flowWidth / 2 - cx * currentVp.zoom,
             y: flowHeight / 2 - cy * currentVp.zoom,
@@ -378,7 +378,15 @@ export function useCanvasNavigation({
     setStack([]);
   }, []);
 
-  return {
+  // Memoize the returned object itself. Every piece here is already stable
+  // (useCallback-memoized functions, a ref, or primitives/breadcrumbs that only
+  // change when navigation actually happens) — without this, Canvas.jsx's own
+  // useMemo around CanvasNavigationContext's value is defeated by a brand-new
+  // object literal on every call, which re-renders every context consumer
+  // (JobCardNode, MarketplaceCardNode, BreadcrumbBar, ...) in lockstep with
+  // Canvas.jsx's continuous re-renders during any drag/pan — the render-storm
+  // useRenderStorm.js was added to diagnose, not fix.
+  return useMemo(() => ({
     diveIn,
     diveOut,
     jumpTo,
@@ -392,5 +400,9 @@ export function useCanvasNavigation({
     isAnimating,
     animPhase,
     stateSwapRef,
-  };
+  }), [
+    diveIn, diveOut, jumpTo, flushStack, extractToLevel,
+    updateNodeDataGlobally, addElementsGlobally, resetStack,
+    breadcrumbs, depth, isAnimating, animPhase, stateSwapRef,
+  ]);
 }

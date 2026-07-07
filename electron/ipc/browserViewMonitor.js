@@ -52,6 +52,21 @@ const JITTER_RATIO    = 0.1;   // ±10% so monitors don't refresh in lockstep
 const MAX_LOAD_FACTOR = 2.5;   // cap on how far system load can stretch cadence
 const MONITOR_SETTLE_MS = 3000; // beat after a reload for the page to hydrate before extracting
 
+// Hard ceiling on one refresh cycle (reload + settle + extract). Without this,
+// a hung page (dead network, a captcha wall that never resolves, an infinite
+// extractor loop) leaves wc.loadURL/executeJavaScript pending forever —
+// refreshMonitor() never resolves, so scheduleNextRefresh() (only called
+// AFTER refreshMonitor settles, see below) never fires again. The monitor
+// silently stops updating for good, with no error and no backoff. Treating a
+// timeout as a normal refresh error routes it through the existing
+// consecutiveErrors backoff/pause path instead.
+const REFRESH_TIMEOUT_MS = 45_000;
+
+// Bounded wait for reopenMonitor() to let an in-flight refreshMonitor() finish
+// before it touches the same webContents/monitor record (see reopenMonitor).
+const REOPEN_WAIT_STEP_MS = 100;
+const REOPEN_MAX_WAIT_MS  = 5000;
+
 // Concurrency cap derived from system RAM (each monitor is a hidden
 // BrowserWindow, ~50–150MB + a page reload per cycle): ~1 per 8GB, clamped so a
 // small box keeps ≥2 and a large one caps at 5. A 24GB machine resolves to 3
@@ -64,6 +79,19 @@ const MAX_CONCURRENT_MONITORS = (() => {
 
 /** Clamp any interval to the hard safety bounds. */
 const clampInterval = (ms) => Math.max(MIN_REFRESH_INTERVAL_MS, Math.min(MAX_REFRESH_INTERVAL_MS, ms));
+
+/**
+ * Race `promise` against a `ms`-timeout that rejects with a clear message
+ * naming what hung. Does not cancel `promise` itself (loadURL/executeJavaScript
+ * have no cancellation hook) — it only stops US from waiting on it forever.
+ */
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 /** Count monitors currently in the active refresh loop. */
 function countActiveMonitors() {
@@ -110,30 +138,36 @@ const monitors = new Map();
  * @property {number} lastRefreshTime     — Timestamp of last successful refresh
  * @property {any[]} lastData             — Most recent extracted data
  * @property {number} dataVersion         — Increments on each data change (for diffing)
+ * @property {boolean} refreshing         — True while a refreshMonitor() call is in flight, for reentrancy
  */
 
 let monitorIdCounter = 0;
 
 // ── Notification Helpers ────────────────────────────────────────────────────
 
-function getMainWindow() {
+function getMainWindows() {
   const monitorWinIds = new Set();
   for (const m of monitors.values()) {
     if (m.window?.id != null) monitorWinIds.add(m.window.id);
   }
-  return BrowserWindow.getAllWindows().find(
+  return BrowserWindow.getAllWindows().filter(
     w => !w.isDestroyed() && !monitorWinIds.has(w.id)
   );
 }
 
 /**
- * Send an IPC event to the main renderer window if it is alive.
- * Silently no-ops if no main window is found or its webContents is destroyed.
+ * Send an IPC event to every non-monitor renderer window that is alive — not
+ * just the first one found. A user with more than one app window open (e.g. a
+ * second canvas) previously had monitor notifications silently delivered to
+ * only whichever window happened to be first in getAllWindows(), leaving
+ * every other window's UI unaware a monitor changed/expired/paused.
+ * Silently no-ops if no window is found or a given webContents is destroyed.
  */
 function sendToMain(channel, payload) {
-  const mainWin = getMainWindow();
-  if (mainWin && mainWin.webContents && !mainWin.webContents.isDestroyed()) {
-    mainWin.webContents.send(channel, payload);
+  for (const win of getMainWindows()) {
+    if (win.webContents && !win.webContents.isDestroyed()) {
+      win.webContents.send(channel, payload);
+    }
   }
 }
 
@@ -219,6 +253,7 @@ function openMonitor({ platform, url, extractorJS, refreshMs = DEFAULT_REFRESH_I
     lastRefreshTime: 0,
     lastData: [],
     dataVersion: 0,
+    refreshing: false,
   };
 
   monitors.set(id, monitor);
@@ -270,6 +305,19 @@ async function refreshMonitor(id) {
   const monitor = monitors.get(id);
   if (!monitor || monitor.status === 'paused') return;
 
+  // Reentrancy guard: startMonitoring() fires the first refresh WITHOUT
+  // awaiting it, then immediately schedules the next one on a timer that can
+  // elapse (as little as MIN_REFRESH_INTERVAL_MS × (1 - JITTER_RATIO)) before
+  // that first call finishes on a slow page. Without this guard, both calls
+  // would run concurrently against the SAME webContents (racing loadURL /
+  // executeJavaScript) and mutate the same monitor record (double-counted
+  // errors, garbled diffs, duplicate notifications).
+  if (monitor.refreshing) {
+    logger.warn(`[Monitor ${id}] Skipping refresh — previous refresh still in flight`);
+    return;
+  }
+  monitor.refreshing = true;
+
   try {
     // Guard: the window may have been destroyed externally between the status check above
     // and this point (e.g. OS force-quit during a scheduled refresh).
@@ -285,7 +333,7 @@ async function refreshMonitor(id) {
       return;
     }
 
-    await wc.loadURL(monitor.url);
+    await withTimeout(wc.loadURL(monitor.url), REFRESH_TIMEOUT_MS, `[Monitor ${id}] loadURL`);
     if (!monitors.has(id)) return;
 
     // Wait for page to settle (network idle equivalent)
@@ -303,7 +351,7 @@ async function refreshMonitor(id) {
     }
 
     // Execute extractor JS in the page context
-    const data = await wc.executeJavaScript(liveMonitor.extractorJS);
+    const data = await withTimeout(wc.executeJavaScript(liveMonitor.extractorJS), REFRESH_TIMEOUT_MS, `[Monitor ${id}] executeJavaScript`);
     if (!monitors.has(id)) return;
 
     liveMonitor.consecutiveErrors = 0;
@@ -368,6 +416,8 @@ async function refreshMonitor(id) {
       logger.error(`[Monitor ${id}] Paused after ${MAX_CONSECUTIVE_ERRORS} consecutive errors`);
       notifyMonitorPaused(m);
     }
+  } finally {
+    monitor.refreshing = false;
   }
 }
 
@@ -415,7 +465,7 @@ function stopMonitor(id) {
 /**
  * Re-open the monitor window for the user to re-authenticate.
  */
-function reopenMonitor(id) {
+async function reopenMonitor(id) {
   const monitor = monitors.get(id);
   if (!monitor) throw new Error(`Monitor ${id} not found`);
 
@@ -423,6 +473,22 @@ function reopenMonitor(id) {
   if (monitor.timer) {
     clearTimeout(monitor.timer);
     monitor.timer = null;
+  }
+
+  // Wait out a refresh already in flight — refreshMonitor() drives the SAME
+  // webContents (loadURL/executeJavaScript) this function is about to touch.
+  // Without this, reopenMonitor's loadURL(re-auth page) can race refreshMonitor's
+  // own navigation, and a stale refresh that resolves afterward would run the
+  // extractor against the login page and treat whatever it scrapes as a real
+  // data change. Bounded — never block the user's re-auth request indefinitely
+  // on a slow/hung refresh cycle.
+  let waited = 0;
+  while (monitor.refreshing && waited < REOPEN_MAX_WAIT_MS) {
+    await new Promise(r => setTimeout(r, REOPEN_WAIT_STEP_MS));
+    waited += REOPEN_WAIT_STEP_MS;
+  }
+  if (monitor.refreshing) {
+    logger.warn(`[Monitor ${id}] Reopen proceeding after ${REOPEN_MAX_WAIT_MS}ms — a refresh is still in flight`);
   }
 
   monitor.status = 'setup';
@@ -465,7 +531,7 @@ function getActiveMonitors() {
  * Check if the current page URL indicates a session has expired.
  * Each platform redirects to different login pages when auth drops.
  */
-function isSessionExpired(platform, currentUrl) {
+export function isSessionExpired(platform, currentUrl) {
   const url = currentUrl.toLowerCase();
   const patterns = {
     facebook: ['/login', '/checkpoint', '/recover'],
@@ -503,7 +569,7 @@ export function registerMonitorHandlers() {
 
   // Reopen for re-authentication
   handleSafe('reopen-monitor', async (_event, { id }) => {
-    reopenMonitor(id);
+    await reopenMonitor(id);
     return { success: true };
   });
 

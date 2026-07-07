@@ -5,7 +5,7 @@ import { registerFilesystemHandlers } from './ipc/filesystem.js';
 import { resolveMissingPreviewPath } from './ipc/missingPreviewRelink.js';
 import { decodeLocalFileRequestPath } from './localFileProtocol.js';
 import { isProductImageExtension } from '../src/utils/fileExtensions.js';
-import { isExistingFile } from './utils/pathSafety.js';
+import { isExistingFile, isSensitivePath } from './utils/pathSafety.js';
 import { logger } from './logger.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
@@ -374,18 +374,36 @@ function createWindow(initSpec = { mode: 'auto' }) {
 
   win.on('close', async (event) => {
     if (isQuitting) return; // Let before-quit handle it
-
+    // preventDefault() unconditionally, on EVERY close event — including a
+    // rapid second one below. It must run before the reentrancy check: if
+    // the guard branch below returns first, an in-flight handshake's second
+    // 'close' event falls through to Electron's default action and destroys
+    // the window immediately, skipping the unsaved-changes prompt entirely
+    // (exactly what this guard was meant to prevent, not cause).
     event.preventDefault();
 
-    const result = await checkUnsavedChanges(win, 'close');
-    if (result.action === 'cancel') return;
+    // A rapid double-close (e.g. two quick clicks on the OS close button
+    // before the first handshake resolves) would otherwise register two
+    // concurrent quit-response/save-response IPC listeners against the same
+    // window, letting a single renderer response trigger both handlers.
+    // The default action is already prevented above, so this second event
+    // safely no-ops and lets the in-flight handshake finish on its own.
+    if (win.__closeHandshakeInFlight) return;
 
-    if (result.action === 'save') {
-      const saved = await requestSaveAndWait(win);
-      if (!saved) return;
+    win.__closeHandshakeInFlight = true;
+    try {
+      const result = await checkUnsavedChanges(win, 'close');
+      if (result.action === 'cancel') return;
+
+      if (result.action === 'save') {
+        const saved = await requestSaveAndWait(win);
+        if (!saved) return;
+      }
+
+      win.destroy(); // Safe to destroy now
+    } finally {
+      win.__closeHandshakeInFlight = false;
     }
-
-    win.destroy(); // Safe to destroy now
   });
 
   win.on('closed', () => {
@@ -591,30 +609,12 @@ if (!gotTheLock) {
           }
         }
         
-        // Convert to Unix-style separators for consistent verification across platforms
-        const verificationPath = targetPath.split(path.sep).join('/').toLowerCase();
-        
-        // Block sensitive system roots and configuration files
-        const sensitivePatterns = [
-          '/etc/', '/var/', '/proc/', '/sys/', '/dev/', 
-          '/.ssh/', '/.aws/', '/.config/', '/.env',
-          'ntuser.dat', 'system32', 'windows/debug',
-          '/users/shared/', '/volumes/'
-        ];
-
-        // Explicitly block accessing the root directory directly
-        const isUnixRoot = targetPath === '/';
-        const isWindowsRoot = !!targetPath.match(/^[a-zA-Z]:\\?$/);
-        
-        if (isUnixRoot || isWindowsRoot) {
-          console.warn(`[Security] Blocked direct root access via local-file: ${targetPath}`);
-          return new Response('Access Denied', { status: 403 });
-        }
-        
-        // Recursive/Inclusive blocklist check:
-        // We block if the sensitive pattern exists ANYWHERE in the resolved path.
-        if (sensitivePatterns.some(p => verificationPath.includes(p))) {
-          console.warn(`[Security] Blocked access to sensitive path via local-file: ${targetPath}`);
+        // Block sensitive system roots, config, and credential-store files
+        // (shared with the AI-attachment read gate in claude.js/gemini.js —
+        // see isSensitivePath's doc comment for why this is a blocklist, not
+        // an allowlist).
+        if (isSensitivePath(targetPath)) {
+          logger.warn(`[Security] Blocked access to sensitive path via local-file: ${targetPath}`);
           return new Response('Access Denied', { status: 403 });
         }
 
@@ -824,7 +824,10 @@ if (!gotTheLock) {
               if (!win.isDestroyed()) win.webContents.send(event, data);
             }
           },
-        }).catch(() => {});
+          // Per-platform failures are already logged inside verifyAllPlatforms
+          // itself — anything reaching this outer catch is an unexpected bug
+          // (e.g. in pool setup), so it should never vanish silently.
+        }).catch((err) => logger.error('[Main] verifyAllPlatforms failed:', err));
       }, 2500);
     }
 

@@ -75,7 +75,7 @@ function formatPriceDropLogPrice(value) {
   return `$${Number.isInteger(rounded) ? rounded : rounded.toFixed(2)}`;
 }
 
-export function SellHubNode({ id, data }) {
+export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
 
   // Surface runaway re-render bursts (effect/state loops, unstable props) in bug
   // reports — otherwise re-render churn is invisible.
@@ -1901,4 +1901,4 @@ export function SellHubNode({ id, data }) {
         )}
       </HubContainer>
   );
-}
+});

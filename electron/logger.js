@@ -8,11 +8,15 @@
  * actually shows the [Accounts] / [StealthBrowser] / etc. lines that
  * normally only land in the terminal stdout (which the user almost never
  * has open). Each entry is { ts, level, message }.
+ *
+ * Deliberately electron-free: `process.defaultApp` is true only when running
+ * unpackaged from source (set directly by Electron on the global `process`,
+ * no import needed) and is otherwise equivalent to `app.isPackaged` being
+ * false. Avoiding the `electron` import here keeps this module — and every
+ * file that only needs it for logging — usable from plain Node (e.g. the
+ * unit test runner) without requiring a real Electron binary.
  */
-import electronPkg from 'electron';
-const { app } = electronPkg;
-
-const isProd = app?.isPackaged;
+const isProd = typeof process !== 'undefined' && !process.defaultApp;
 
 const RING_BUFFER_SIZE = 200;
 const ringBuffer = [];

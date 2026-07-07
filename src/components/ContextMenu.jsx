@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { TIMINGS } from '../utils/timings';
+import { updateModalCount } from './modalStack';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /**
  * Reusable context menu component.
@@ -19,21 +21,24 @@ export function ContextMenu({ x, y, items, onClose }) {
   const menuRef = useRef(null);
   const closeTimerRef = useRef(null);
 
+  // Register with the global modal stack for as long as this menu is mounted
+  // (the parent only mounts it while open — see Canvas.jsx's `{menu && ...}`).
+  // Without this, e.g. Backspace to dismiss a context menu could simultaneously
+  // delete the canvas selection underneath it.
+  useEffect(() => {
+    updateModalCount(1);
+    return () => updateModalCount(-1);
+  }, []);
+
   // ── Global dismissal ──────────────────────────────────────────────────────
   useEffect(() => {
     const handlePointerDown = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) onClose();
     };
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); onClose(); }
-    };
     window.addEventListener('pointerdown', handlePointerDown);
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('pointerdown', handlePointerDown);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
+    return () => window.removeEventListener('pointerdown', handlePointerDown);
   }, [onClose]);
+  useEscapeToClose((e) => { e.preventDefault(); onClose(); });
 
   // ── Viewport clamping ─────────────────────────────────────────────────────
   const [adjustedPos, setAdjustedPos] = useState({ left: x, top: y });

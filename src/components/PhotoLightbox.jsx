@@ -2,6 +2,8 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { X, ChevronLeft, ChevronRight } from 'lucide-react';
 import { toLocalFilePreviewUrl } from '../utils/fileDisplayUtils';
+import { updateModalCount } from './modalStack';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /**
  * Full-viewport image viewer rendered via a portal so it escapes ReactFlow's
@@ -19,6 +21,16 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
   );
   const [loading, setLoading] = useState(true);
 
+  // Register with the global modal stack (the parent only mounts this while
+  // open — see PhotoStrip.jsx's `{lightboxIndex !== null && ...}`). The capture-
+  // phase keydown handler below calls preventDefault(), not stopPropagation(),
+  // so canvas-level bubble-phase listeners (undo/redo, WASD, tool shortcuts)
+  // still receive the same event afterward — this is what actually silences them.
+  useEffect(() => {
+    updateModalCount(1);
+    return () => updateModalCount(-1);
+  }, []);
+
   const prev = useCallback(() => {
     setLoading(true);
     setIndex(i => (i - 1 + total) % total);
@@ -31,15 +43,15 @@ export function PhotoLightbox({ imagePaths, initialIndex = 0, onClose }) {
 
   // Keyboard nav. Capture-phase so ReactFlow's deleteKeyCode (Backspace/Delete)
   // and Cmd+S handlers don't fire while the lightbox is open.
+  useEscapeToClose((e) => { e.preventDefault(); onClose(); }, { capture: true });
   useEffect(() => {
     const handler = (e) => {
-      if (e.key === 'Escape')         { e.preventDefault(); onClose(); }
-      else if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
-      else if (e.key === 'ArrowRight'){ e.preventDefault(); next(); }
+      if (e.key === 'ArrowLeft')       { e.preventDefault(); prev(); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
     };
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
-  }, [onClose, prev, next]);
+  }, [prev, next]);
 
   if (total === 0) return null;
   const currentPath = imagePaths[index];

@@ -84,10 +84,14 @@ export const perDomainLimit = MAX_PER_DOMAIN;
 /** Canonicalize a raw hostname against known policy keys (e.g. 'm.ebay.com' → 'ebay.com'). */
 export function getCanonicalDomain(rawDomain) {
   // Coerce up front: this is exported and called directly, so a null/undefined
-  // (or non-string) domain must not throw on `.includes`.
+  // (or non-string) domain must not throw below.
   const domain = String(rawDomain || '');
   for (const [key] of DOMAIN_POLICY_ENTRIES) {
-    if (domain.includes(key)) return key;
+    // Hostname-boundary match, not substring containment — a plain
+    // `.includes(key)` would match e.g. "notlinkedin.com.example.org"
+    // against the "linkedin.com" policy. User-pasted marketplace watch
+    // URLs (not just hardcoded platform configs) can reach this.
+    if (domain === key || domain.endsWith('.' + key)) return key;
   }
   return domain;
 }

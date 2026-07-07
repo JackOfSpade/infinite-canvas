@@ -25,28 +25,52 @@ export function useCanvasDragAndDrop({
   const isMountedRef = useIsMountedRef();
   const { screenToFlowPosition, getIntersectingNodes, updateNodeData, getNode } = useReactFlow();
   const hoveredGroupIdRef = useRef(null);
+  // Native `dragover` can fire faster than the display refresh rate; coalesce
+  // to at most one intersection scan (screenToFlowPosition + an O(n) node scan)
+  // per animation frame instead of running it on every single event.
+  const dragOverRafRef = useRef(null);
+  const pendingClientPosRef = useRef(null);
+
+  const cancelPendingDragOverScan = useCallback(() => {
+    if (dragOverRafRef.current != null) {
+      cancelAnimationFrame(dragOverRafRef.current);
+      dragOverRafRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => cancelPendingDragOverScan, [cancelPendingDragOverScan]);
 
   const handleDragLeave = useCallback(() => {
+    cancelPendingDragOverScan();
     if (hoveredGroupIdRef.current) {
       updateNodeData(hoveredGroupIdRef.current, { isDropTarget: false });
       hoveredGroupIdRef.current = null;
     }
-  }, [updateNodeData]);
+  }, [updateNodeData, cancelPendingDragOverScan]);
 
   const handleDragOver = useCallback((event) => {
+    // preventDefault()/dropEffect must run synchronously on EVERY dragover per
+    // the HTML5 DnD spec — only the (expensive) intersection scan is throttled.
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
 
-    const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-    const intersections = getIntersectingNodes({ x: position.x, y: position.y, width: 1, height: 1 });
-    const targetGroup = intersections.find(n => n.type === 'group' && !n.data?.locked);
-    const newTargetId = targetGroup ? targetGroup.id : null;
+    pendingClientPosRef.current = { x: event.clientX, y: event.clientY };
+    if (dragOverRafRef.current != null) return; // a scan is already scheduled this frame
 
-    if (newTargetId !== hoveredGroupIdRef.current) {
-      if (hoveredGroupIdRef.current) updateNodeData(hoveredGroupIdRef.current, { isDropTarget: false });
-      if (newTargetId) updateNodeData(newTargetId, { isDropTarget: true });
-      hoveredGroupIdRef.current = newTargetId;
-    }
+    dragOverRafRef.current = requestAnimationFrame(() => {
+      dragOverRafRef.current = null;
+      const { x: clientX, y: clientY } = pendingClientPosRef.current;
+      const position = screenToFlowPosition({ x: clientX, y: clientY });
+      const intersections = getIntersectingNodes({ x: position.x, y: position.y, width: 1, height: 1 });
+      const targetGroup = intersections.find(n => n.type === 'group' && !n.data?.locked);
+      const newTargetId = targetGroup ? targetGroup.id : null;
+
+      if (newTargetId !== hoveredGroupIdRef.current) {
+        if (hoveredGroupIdRef.current) updateNodeData(hoveredGroupIdRef.current, { isDropTarget: false });
+        if (newTargetId) updateNodeData(newTargetId, { isDropTarget: true });
+        hoveredGroupIdRef.current = newTargetId;
+      }
+    });
   }, [screenToFlowPosition, getIntersectingNodes, updateNodeData]);
 
   const handleDrop = useCallback(async (event) => {
@@ -55,9 +79,17 @@ export function useCanvasDragAndDrop({
     const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
     const nodeType = event.dataTransfer.getData('app/node-type');
 
-    // Capture hover target before clearing it
-    const targetId = hoveredGroupIdRef.current;
+    // Don't trust hoveredGroupIdRef here — handleDragOver's intersection scan
+    // is rAF-throttled, so a scan can still be scheduled-but-not-yet-run at the
+    // instant `drop` fires (the browser doesn't guarantee a frame boundary
+    // between the last dragover and drop). Reading the ref would risk a stale
+    // group from an earlier frame. handleDragLeave cancels that pending scan
+    // and clears whatever highlight IS currently set; re-scan fresh at the
+    // exact drop position for the actual target instead.
     handleDragLeave();
+    const dropIntersections = getIntersectingNodes({ x: position.x, y: position.y, width: 1, height: 1 });
+    const dropTargetGroup = dropIntersections.find(n => n.type === 'group' && !n.data?.locked);
+    const targetId = dropTargetGroup ? dropTargetGroup.id : null;
 
     const insertNodes = (nodesToInsert) => {
       if (targetId) {
@@ -145,7 +177,7 @@ export function useCanvasDragAndDrop({
         insertNodes([newNode]);
       }
     }
-  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode, handleDragLeave, getNode, addElementsGlobally, isMountedRef]);
+  }, [screenToFlowPosition, setNodes, takeSnapshot, setIsDrawingMode, handleDragLeave, getIntersectingNodes, getNode, addElementsGlobally, isMountedRef]);
 
   return { handleDrop, handleDragOver, handleDragLeave };
 }

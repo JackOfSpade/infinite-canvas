@@ -2,10 +2,13 @@ import { useEffect, useRef } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
 import { WASD_BASE_SPEED_PX_PER_SEC, WASD_SHIFT_MULTIPLIER } from '../utils/layoutGeometry';
+import { useModalStackCount } from '../components/modalStack';
+import { isTextEditingTarget } from '../utils/nativeTextUndo';
 
 export function useCanvasWASD({ isAnimatingRef }) {
   const { getViewport, setViewport } = useReactFlow();
   const movingRef = useRef(false);
+  const modalCount = useModalStackCount();
 
   useEffect(() => {
     const keys = { w: false, a: false, s: false, d: false, arrowup: false, arrowleft: false, arrowdown: false, arrowright: false, shift: false };
@@ -59,8 +62,14 @@ export function useCanvasWASD({ isAnimatingRef }) {
     };
 
     const onKeyDown = (e) => {
-      const tag = e.target.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+      // A dialog/menu/lightbox is open — don't let WASD/arrow keys typed into
+      // it (or just held from before it opened) pan the canvas underneath.
+      if (modalCount > 0) return;
+      // Was an inline tag==='INPUT' check, which treats ANY input as
+      // text-editing regardless of type — a focused checkbox/radio would
+      // incorrectly block WASD panning. isTextEditingTarget checks the
+      // input's actual type.
+      if (isTextEditingTarget(e.target)) return;
       // Ignore arrow/WASD pans when Ctrl/Cmd/Alt are held — those are OS/app
       // shortcuts (e.g. macOS Ctrl+Arrow switches Spaces) that steal the matching
       // keyup, which would otherwise leave the key stuck "down" and pan forever.
@@ -93,5 +102,5 @@ export function useCanvasWASD({ isAnimatingRef }) {
       window.removeEventListener('blur',    onBlur);
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [getViewport, setViewport, isAnimatingRef]);
+  }, [getViewport, setViewport, isAnimatingRef, modalCount]);
 }

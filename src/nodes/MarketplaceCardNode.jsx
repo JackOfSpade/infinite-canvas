@@ -93,7 +93,7 @@ function MarketplaceNotesTextarea({ value, onChange, locked }) {
   );
 }
 
-export function MarketplaceCardNode({ id, data }) {
+export const MarketplaceCardNode = React.memo(function MarketplaceCardNode({ id, data }) {
   // Surface runaway re-render bursts in bug reports (see useRenderStorm).
   useRenderStorm(`marketplacecard ${String(id).slice(0, 8)}`);
   const { updateNodeData } = useReactFlow();
@@ -386,4 +386,4 @@ export function MarketplaceCardNode({ id, data }) {
       </div>
     </div>
   );
-}
+});

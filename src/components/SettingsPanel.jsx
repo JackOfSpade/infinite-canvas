@@ -7,10 +7,12 @@ import {
 } from 'lucide-react';
 import { ANIMATION_DURATIONS, DEFAULT_SHORTCUTS } from '../hooks/useSettings';
 import { useSyncWhileFocused } from '../hooks/useSyncWhileFocused';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useToast } from './ToastProvider';
 import { SELL_PLATFORMS, SELL_PLATFORM_BY_ID, JOB_SOURCES, JOB_SOURCE_BY_ID } from '../utils/constants';
 import { normalizeMarketplaceWatchUrls } from '../utils/marketplaceWatchUrls';
 import { PlatformBadge } from './PlatformBadge';
+import { updateModalCount } from './modalStack';
 
 const SPEED_OPTIONS = [
   { key: 'snappy',   label: 'Snappy',   desc: `${ANIMATION_DURATIONS.snappy}ms`,   icon: Zap,      color: 'text-amber-400' },
@@ -543,6 +545,18 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   const [aiStatus, setAiStatus] = useState({ gemini: null, claude: null });
   const [checkingProvider, setCheckingProvider] = useState(null);
 
+  // Register with the global modal stack while open — unlike Dialog/ConfirmDialog,
+  // this component stays mounted at all times (returns null when !isOpen further
+  // below), so registration must track the isOpen prop rather than mount/unmount.
+  // Without this, undo/redo and canvas keyboard shortcuts stayed live underneath
+  // an open Settings panel (Cmd+Z while adjusting a setting silently undid canvas
+  // edits behind the dialog).
+  useEffect(() => {
+    if (!isOpen) return;
+    updateModalCount(1);
+    return () => updateModalCount(-1);
+  }, [isOpen]);
+
   useEffect(() => {
     if (!isOpen || !window.electronAPI?.getSettings) return;
     let cancelled = false;
@@ -613,18 +627,11 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   }, []);
 
   // Close on Escape (also cancels capturing)
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKey = (e) => {
-      if (e.key === 'Escape') {
-        if (capturingId) { setCapturingId(null); return; }
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [isOpen, onClose, capturingId]);
+  useEscapeToClose((e) => {
+    if (capturingId) { setCapturingId(null); return; }
+    e.preventDefault();
+    onClose();
+  }, { enabled: isOpen });
 
   // Reset capturing when panel closes
   useEffect(() => {

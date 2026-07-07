@@ -16,7 +16,6 @@ import { TextNode } from './nodes/TextNode';
 import { CanvasNode } from './nodes/CanvasNode';
 import { ResizeCorrection } from './utils/canvasInteractions';
 import { LinkNode } from './nodes/LinkNode';
-import { ListingNode } from './nodes/ListingNode';
 import { JobCardNode } from './nodes/JobCardNode';
 import { JobSearchNode } from './nodes/JobSearchNode';
 import { JobBoardNode } from './nodes/JobBoardNode';
@@ -31,7 +30,7 @@ import {CustomizeDialog} from './components/CustomizeDialog';
 
 import { createTextNode } from './utils/nodeFactory';
 import { Sidebar } from './components/Sidebar';
-import { getStats } from './utils/dashboardStats';
+import { getStats, getStatsSignature } from './utils/dashboardStats';
 import { ContextMenu } from './components/ContextMenu';
 import { CanvasToolbar } from './components/CanvasToolbar';
 import { CanvasCursors } from './components/CanvasCursors';
@@ -50,6 +49,7 @@ import { EventLogger } from './utils/EventLogger';
 
 import { CanvasNavigationContext } from './contexts/CanvasNavigationContext';
 import { CANVAS_ZOOM_LIMITS, DEFAULT_EDGE_OPTIONS } from './utils/constants';
+import { useModalStackCount } from './components/modalStack';
 
 import { useUndoRedo } from './hooks/useUndoRedo';
 import { useCustomFitView } from './hooks/useCustomFitView';
@@ -84,7 +84,6 @@ const nodeTypes = {
   text: TextNode,
   group: CanvasNode, // Keep 'group' key for backward compatibility of saved nodes, but map it to CanvasNode
   link: LinkNode,
-  listing: ListingNode,
   jobcard: JobCardNode,
   jobhub: JobSearchNode, // 'jobhub' is the legacy persisted type key for the Job Search Module (kept for saved-canvas compat, like 'group')
   jobboard: JobBoardNode,
@@ -502,7 +501,10 @@ export function Canvas() {
   // Drawing/placement tools fully disable node interaction; the select tool does not.
   const isDrawingTool = activeTool === 'pen' || activeTool === 'eraser';
   const isSelectTool  = activeTool === 'select';
-  const interactiveDisabled = isDrawingTool || !!placementMode || navigation.isAnimating;
+  const modalCount = useModalStackCount();
+  // A dialog/menu/lightbox is open — canvas delete-key/pan/zoom/selection must
+  // not leak through to the content underneath it (see modalStack.js).
+  const interactiveDisabled = isDrawingTool || !!placementMode || navigation.isAnimating || modalCount > 0;
 
   const handleWheelZoom = useCallback((e) => {
     if (interactiveDisabled || e.target?.closest?.('.nowheel')) return;
@@ -703,7 +705,15 @@ export function Canvas() {
 
   // Dashboard stats: computed once per node change here so <Sidebar> can be a
   // plain shallow-memo on primitive counts (no per-frame rescans in a comparator).
-  const sidebarStats = useMemo(() => getStats(nodes), [nodes]);
+  // Memoized on a cheap signature rather than `nodes` directly — `nodes`'
+  // reference changes on every drag/pan frame, which used to re-run getStats'
+  // full rescan (incl. re-pricing every sellhub) on every frame of any drag.
+  const statsSignature = useMemo(() => getStatsSignature(nodes), [nodes]);
+  // Intentionally keyed on statsSignature, not nodes: nodes' reference changes
+  // on every drag frame, and re-running getStats() then would defeat the
+  // whole point of the signature.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const sidebarStats = useMemo(() => getStats(nodes), [statsSignature]);
 
   return (
     <div className="w-screen h-screen bg-neutral-950 flex" ref={reactFlowWrapper}>

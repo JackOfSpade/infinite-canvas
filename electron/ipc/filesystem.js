@@ -15,6 +15,43 @@ import {
 import { isProductImageExtension } from '../../src/utils/fileExtensions.js';
 import { isWithinDirectory, isExistingFile } from '../utils/pathSafety.js';
 
+// Extensions the 'open-file' handler will hand to the OS shell. Covers the
+// image/document/media/archive types this app's own drop/preview handling
+// already deals in (see src/utils/fileExtensions.js, fileDisplayUtils.js),
+// plus common office formats — deliberately excludes anything executable or
+// installer-shaped (.exe/.app/.dmg/.pkg/.deb/.appimage/.sh/.command/
+// .workflow/.scpt/.jar/etc.) and script formats a canvas document node could
+// otherwise be used to launch.
+const ALLOWED_OPEN_FILE_EXTS = new Set([
+  // Images
+  '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.bmp', '.ico',
+  '.heic', '.heif', '.tiff', '.tif', '.avif', '.jxl',
+  // Documents
+  '.pdf', '.doc', '.docx', '.rtf', '.txt', '.md', '.odt', '.pages',
+  // Spreadsheets / presentations
+  '.csv', '.xls', '.xlsx', '.xlsm', '.numbers', '.ppt', '.pptx', '.key',
+  // Data / plain-text formats safe to view (never executed by double-click)
+  '.json', '.yaml', '.yml', '.xml', '.ini', '.log', '.toml', '.env',
+  // Source/code files the canvas' own CODE_EXT_RE (src/utils/fileExtensions.js)
+  // treats as valid document-node content, dropped in and viewed/edited like
+  // any other text — none of these auto-execute on double-click on any
+  // mainstream OS (unlike .js, which Windows Script Host runs directly, and
+  // .sh, which a Unix shell association can execute — both stay excluded).
+  '.ts', '.tsx', '.jsx', '.py', '.rb', '.go', '.rs', '.java',
+  '.c', '.cpp', '.h', '.cs', '.php', '.swift', '.kt',
+  // Audio
+  '.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a',
+  // Video
+  '.mp4', '.mov', '.webm', '.avi', '.mkv', '.wmv',
+  // Archives (opening these launches an archive viewer, not their contents)
+  '.zip', '.tar', '.gz', '.rar', '.7z',
+]);
+
+/** True when `filePath`'s extension is on the open-file allowlist. Pure/exported for testability. */
+export function isAllowedOpenFileExt(filePath) {
+  return ALLOWED_OPEN_FILE_EXTS.has(path.extname(String(filePath || '')).toLowerCase());
+}
+
 /**
  * Global registry of active file watchers.
  * key: filePath
@@ -478,16 +515,23 @@ export function registerFilesystemHandlers() {
   });
 
   handleSafe('open-file', async (_event, filePath) => {
-    // Security Guard: Prevent opening executable or sensitive system files via the OS shell
-    const ext = path.extname(filePath).toLowerCase();
-    const blockedExts = ['.exe', '.sh', '.bat', '.cmd', '.msi', '.app', '.com', '.vbs', '.js', '.jse', '.wsf', '.wsh', '.ps1'];
-    if (blockedExts.includes(ext)) {
-      throw new Error('Opening executable files is restricted for security reasons.');
+    // Security Guard: allowlist of expected document/media extensions rather
+    // than a denylist of known-executable ones. A denylist is inherently
+    // incomplete (the old one missed .jar/.dmg/.pkg/.deb/.appimage/.command/
+    // .workflow/.scpt/.desktop, any of which shell.openPath would happily
+    // launch) — and since a filePath here can originate from a loaded canvas
+    // node (untrusted JSON, not just files the user explicitly picked), the
+    // set of things this app will hand to the OS shell should be the
+    // documents/media it actually deals in, not "everything that isn't on a
+    // list of known-bad extensions."
+    if (!isAllowedOpenFileExt(filePath)) {
+      const ext = path.extname(filePath).toLowerCase();
+      throw new Error(`Opening "${ext || '(no extension)'}" files is restricted for security reasons.`);
     }
-    
+
     // Additional Guard: Ensure the file actually exists before asking the shell to handle it
     if (!fs.existsSync(filePath)) throw new Error('File not found: ' + filePath);
-    
+
     const err = await shell.openPath(filePath);
     if (err) throw new Error(err);
   });
