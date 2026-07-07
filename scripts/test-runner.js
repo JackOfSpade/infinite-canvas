@@ -3411,11 +3411,10 @@ const tests = [
       assert(mprices.every(p => p < 1000), `no fused price should survive, got ${mprices.join(',')}`);
 
       // eBay price ranges ("$10.00 to $20.00") are the same hazard — take the low end.
-      const ehtml = '<html><head><title>eBay</title></head><body><ul class="srp-results">' +
-        '<li class="s-card"><span class="su-styled-text primary">Apple iPhone XS</span>' +
-        '<div class="s-card__price">$10.00 to $20.00</div>' +
-        '<a class="s-card__link" href="https://www.ebay.com/itm/123"></a></li>' +
-        '</ul></body></html>';
+      const ehtml = '<html><head><title>eBay</title></head><body><div class="srp-river-main">' +
+        '<div class="su-item-card"><a class="su-item-card__title" href="https://www.ebay.com/itm/123">Apple iPhone XS</a>' +
+        '<span class="su-item-card__price">$10.00 to $20.00</span></div>' +
+        '</div></body></html>';
       const edom = new JSDOM(ehtml, { url: 'https://www.ebay.com/sch/i.html?_nkw=x&_sop=15', runScripts: 'outside-only' });
       const eout = edom.window.eval(EBAY_ACTIVE_EXTRACTOR);
       assert(eout.items[0].price === 10, `eBay range should parse the low end 10 (not 10.002), got ${eout.items[0]?.price}`);
@@ -3425,21 +3424,22 @@ const tests = [
   {
     name: 'eBay extractors: dedup-by-url never collapses distinct no-url cards onto each other',
     run: () => {
-      // Cards with NO a.s-card__link get url: '' (see EBAY_ACTIVE_EXTRACTOR). Two
-      // real duplicates of the SAME url must still collapse to one, but two
+      // Title and link are now the SAME element (a.su-item-card__title) — a
+      // card with no href attribute gets url: '' (see EBAY_ACTIVE_EXTRACTOR).
+      // Two real duplicates of the SAME url must still collapse to one, but two
       // otherwise-distinct no-link cards must NOT collapse onto each other just
       // because they share the empty-string url.
       const card = (title, price, href) =>
-        `<li class="s-card"><span class="su-styled-text primary">${title}</span>` +
-        `<div class="s-card__price">$${price}</div>` +
-        (href ? `<a class="s-card__link" href="${href}"></a>` : '') +
-        '</li>';
-      const html = '<html><head><title>eBay</title></head><body><ul class="srp-results">' +
+        `<div class="su-item-card">` +
+        `<a class="su-item-card__title"${href ? ` href="${href}"` : ''}>${title}</a>` +
+        `<span class="su-item-card__price">$${price}</span>` +
+        '</div>';
+      const html = '<html><head><title>eBay</title></head><body><div class="srp-river-main">' +
         card('Widget A', 10, 'https://www.ebay.com/itm/1') +
         card('Widget A duplicate', 10, 'https://www.ebay.com/itm/1') + // same url → real dup, collapse
         card('Widget B (no link)', 20, null) +
         card('Widget C (no link)', 30, null) +   // different listing, also no link → must survive
-        '</ul></body></html>';
+        '</div></body></html>';
       const dom = new JSDOM(html, { url: 'https://www.ebay.com/sch/i.html?_nkw=x&_sop=15', runScripts: 'outside-only' });
       const out = dom.window.eval(EBAY_ACTIVE_EXTRACTOR);
       const titles = out.items.map(i => i.title);
