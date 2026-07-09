@@ -1,0 +1,48 @@
+name: CI
+
+# Gates the auto-merge-to-main workflow (.github/workflows/auto-merge-to-main.yml),
+# which only merges a branch once its exact tip SHA has a successful run of the
+# workflow literally named "CI" (this one). Must trigger on every branch (no
+# `branches:` filter on push) so a run always exists for the auto-merge gate to find.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Lint, test, build
+    runs-on: ubuntu-latest
+    env:
+      # Skip heavy browser-binary postinstalls; not needed for lint/unit tests/build.
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      PUPPETEER_SKIP_DOWNLOAD: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # Real deterministic test suite (scripts/test-runner.js): 107 test() cases /
+      # 1603 assert() calls covering extractors, dedup, pricing, anti-bot detection,
+      # rate limiting, settings encryption, LLM routing, canvas geometry, etc.
+      # Electron/electron-store are stubbed via scripts/test-stubs, so this runs in
+      # plain Node with no network access and sets a non-zero exit code on failure.
+      - name: Test
+        run: npm test
+
+      # Compile smoke test: builds the Vite client + electron main/preload bundles.
+      # (Full electron-builder packaging is intentionally skipped — it needs
+      # platform codesigning/DMG tooling unrelated to code correctness.)
+      - name: Build (compile smoke test)
+        run: npx vite build
