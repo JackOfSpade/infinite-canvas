@@ -579,7 +579,17 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
         const breakdown = srcIds.map(s => bySource[s] > 1 ? `${s}×${bySource[s]}` : s).join(',');
         previewParts.push(`warnings: ${d.scrapeWarnings.length} (${blocks.length} block / ${srcIds.length} src${breakdown ? `: ${breakdown}` : ''})`);
       }
-      if (Array.isArray(d.imagePaths)) previewParts.push(`imagePaths: ${d.imagePaths.length}`);
+      // sellhub explicitly nulls imagePaths (vs. never setting it) when a
+      // cancel/dismiss clears dropped photos — same ambiguity as jobhub's
+      // scoredJobs above. Without this, `null` and "field never touched"
+      // both render as an absent line, so a wiped item hub is
+      // indistinguishable from one that never had photos.
+      if (n.type === 'sellhub') {
+        if (Array.isArray(d.imagePaths)) previewParts.push(`imagePaths: ${d.imagePaths.length}`);
+        else if (d.imagePaths === null) previewParts.push(`imagePaths: ∅ cleared`);
+      } else if (Array.isArray(d.imagePaths)) {
+        previewParts.push(`imagePaths: ${d.imagePaths.length}`);
+      }
       if (Array.isArray(d.images)) previewParts.push(`images: ${d.images.length}`);
       if (d.file) previewParts.push(`file: ${d.file.name || d.file}`);
       if (d.filePath) previewParts.push(`filePath: ${path.basename(String(d.filePath))}`);
@@ -1290,7 +1300,7 @@ ${stealthLine}${launchCollisionLine}${argsSection}${resolveDiagSection}${history
         // cap can't blow the section's overall byte budget the way raising the
         // default for all 60 lines would.
         const raw = (l.message || '').replace(/\r?\n/g, ' ⏎ ');
-        const cap = /SITE_CHANGED|\[diag /i.test(raw) ? 1400 : 500;
+        const cap = /SITE_CHANGED|\[diag |\[timeout-state /i.test(raw) ? 1400 : 500;
         const msg = raw.slice(0, cap);
         return `[${t}] ${lvl} ${msg}`;
       });

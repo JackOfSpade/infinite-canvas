@@ -1604,19 +1604,27 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     // product yet, so that one goes all the way back to 'empty'.
     const revertTo = (hubState === 'researching' || hubState === 'comps-ready') && data.product ? 'draft' : 'empty';
 
-    // When reverting all the way to 'empty', also drop imagePaths. Otherwise
-    // the auto-start effect would re-fire startAnalysis immediately on the
-    // next render — `imagePaths > 0 && hubState === 'empty' && !errorMessage`
-    // all still match, defeating the cancel and looping the backend task.
+    // Reverting to 'empty' while photos are already attached (cancelling the
+    // ANALYZING step, before a product exists) used to null out imagePaths so
+    // the auto-start effect wouldn't immediately re-fire startAnalysis on the
+    // next render. That wiped the user's dropped photos outright — cancelling
+    // an auto-resumed analysis (e.g. after quitting mid-run and reopening)
+    // lost the whole item hub, not just the in-flight call. Instead, keep the
+    // photos and set a cancellation errorMessage: the auto-start effect
+    // already skips while errorMessage is set, and
+    // canSellHubReplaceFailedInitialPhotos already treats hubState:'empty' +
+    // errorMessage + no product as "Try Again or drop new photos to replace"
+    // — the same recovery path a failed analysis already gets.
+    const hadImages = revertTo === 'empty' && data.imagePaths?.length > 0;
     const updates = {
       hubState: revertTo,
       queuedModuleRun: null,
-      errorMessage: null,
+      errorMessage: hadImages ? 'Analysis canceled.' : null,
       isRateLimit: false,
       pendingItems: null,
       bundlePricing: null,
     };
-    if (revertTo === 'empty') updates.imagePaths = null;
+    if (revertTo === 'empty' && !hadImages) updates.imagePaths = null;
     updateGlobal(id, updates);
     resetCompProgress();
     cleanupCompSourceCards();
@@ -1631,7 +1639,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     setIsApplyingResolves(false);
     processingRef.current = false;
     processingPriceRef.current = false;
-  }, [data.locked, data.product, hubState, id, updateGlobal, cleanupCompSourceCards, epoch, resetCompProgress, moduleRunQueue, syncResolveWorkCount]);
+  }, [data.locked, data.product, data.imagePaths, hubState, id, updateGlobal, cleanupCompSourceCards, epoch, resetCompProgress, moduleRunQueue, syncResolveWorkCount]);
 
   const nodeWidth = 280;
   const nodeHeight = hubState === 'empty'
