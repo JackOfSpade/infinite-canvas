@@ -928,17 +928,25 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
 }
 
 
-// ── Reverb Internal REST API ────────────────────────────────────────────────
-// Two distinct datasets, two endpoints (both keyless; Accept-Version: 3.0 +
-// Accept: application/hal+json):
-//   • ACTIVE listings → /api/listings/all (live for-sale inventory). CRITICAL:
-//     this endpoint ONLY ever returns state=live listings — `state=ended` /
-//     `state=sold` are SILENTLY IGNORED (verified against the live API: a "sold"
-//     query returns brand-new dealer listings at full retail). It can NOT yield
-//     sold data; using it as a sold source overprices by ~2x (new vs used).
-//   • SOLD prices → the Price Guide: /api/priceguide?query= resolves the model
-//     guide(s); /api/priceguide/<id>/transactions lists individual COMPLETED
-//     sales (date, condition, price_final). This is the real "what buyers paid".
+// ── Reverb Internal REST API (ACTIVE listings) ──────────────────────────────
+// Reverb PERMANENTLY retired its public Price Guide (sold-transaction) API in
+// mid-2026: /api/priceguide AND /api/priceguide/<id>/transactions now return
+// HTTP 403 `{"Error":"This endpoint is no longer publicly available."}` on every
+// path probed (verified live 2026-07-09 — this is the api-endpoint-deprecated
+// signal in antiBotDetector.js). Sold prices survive ONLY on the Cloudflare-
+// walled Price Guide *web* pages, which can't be fetched reliably or unit-tested,
+// so Reverb was reclassified from a SOLD source to an ACTIVE one:
+//   • /api/listings/all (keyless; Accept-Version: 3.0 + Accept: application/hal+json)
+//     is still live and returns for-sale inventory (asking prices). CRITICAL:
+//     it ONLY ever returns state=live — `state=sold`/`state=ended` AND the
+//     `condition` filter are SILENTLY IGNORED (verified live: identical result
+//     set with/without either param; a "sold" query returns brand-new dealer
+//     listings at full retail). So it is an ACTIVE asking-price source only —
+//     category:active in constants.js + marketplace.js, mirroring swappa /
+//     ebay-active. Each listing keeps its `condition` so synthesis can discount
+//     new-retail vs used; no client-side filter is applied because Reverb
+//     ignores it (adding one would be a silent no-op, the exact bug class that
+//     hid the priceguide deprecation).
 const REVERB_HEADERS = {
   'Accept': 'application/hal+json',
   'Accept-Version': '3.0',
@@ -946,66 +954,33 @@ const REVERB_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
 };
 
-function reverbTokens(s) {
-  return String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-}
-
 /**
- * Rank Reverb price-guide results by token overlap of make+model+title+finish
- * against the query, returning the best `limit` matches. A min-hit gate drops
- * loosely-related guides so a vague query never prices against the wrong
- * instrument. Pure (no I/O) for testability.
+ * Map Reverb /api/listings/all live listings to the standard ACTIVE-comp shape.
+ * Guards price > 0 (like every other extractor here) and dedups by listing id
+ * (falling back to the web URL). Pure (no I/O) for testability.
  */
-export function selectReverbPriceGuides(query, guides, limit = 2) {
-  const qt = reverbTokens(query);
-  if (qt.length === 0) return [];
-  const minHits = Math.min(2, qt.length);
-  // Model-number tokens (those containing a digit: "a3r", "ls6", "xm4"). When the
-  // query names one, the guide MUST share it — otherwise a generic brand/tech
-  // token (e.g. "yamaha", or Yamaha's "are" acoustic-resonance acronym) matches
-  // the WRONG model (a "Yamaha LS6M ARE" guide for an "A3R ARE" query).
-  const modelToks = qt.filter(t => /\d/.test(t));
-  return (Array.isArray(guides) ? guides : [])
-    .map(g => {
-      const gt = reverbTokens(`${g?.make || ''} ${g?.model || ''} ${g?.title || ''} ${g?.finish || ''}`);
-      const hits = qt.reduce((n, t) => n + (gt.includes(t) ? 1 : 0), 0);
-      return { guide: g, gt, hits };
-    })
-    .filter(s => s.hits >= minHits && (modelToks.length === 0 || modelToks.some(m => s.gt.includes(m))))
-    .sort((a, b) => b.hits - a.hits)
-    .slice(0, limit)
-    .map(s => s.guide);
-}
-
-/**
- * Map a price guide's completed transactions to the standard sold-comp shape,
- * using price_final (the actual sale price; falls back to price_ask). Dedups by
- * order_id. Pure (no I/O) for testability.
- */
-export function reverbTransactionsToComps(guide, transactions) {
+export function reverbListingsToComps(listings) {
   const out = [];
   const seen = new Set();
-  const title = guide?.title || `${guide?.make || ''} ${guide?.model || ''}`.trim();
-  const baseUrl = guide?._links?.web?.href || '';
-  for (const t of (Array.isArray(transactions) ? transactions : [])) {
-    const final = t?.price_final?.amount ?? t?.price_ask?.amount;
-    const price = final != null ? parseFloat(final) : 0;
+  for (const l of (Array.isArray(listings) ? listings : [])) {
+    const amount = l?.price?.amount;
+    const price = amount != null ? parseFloat(amount) : 0;
     if (!(price > 0)) continue;
-    const key = String(t?.order_id || `${t?.date || ''}:${price}`);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const web = l?._links?.web?.href || '';
+    const key = l?.id != null ? String(l.id) : web;
+    if (key) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    const condition = typeof l?.condition === 'string'
+      ? l.condition
+      : (l?.condition?.display_name || '');
     out.push({
-      title,
+      title: l?.title || `${l?.make || ''} ${l?.model || ''}`.trim(),
       price,
-      priceText: t?.price_final?.display || t?.price_ask?.display || `$${price}`,
-      condition: typeof t?.condition === 'string' ? t.condition : (t?.condition?.display_name || ''),
-      soldDate: t?.date || '',
-      // Each transaction is a DISTINCT completed sale, but Reverb exposes no
-      // per-sale URL — they all share the guide page. Append the transaction key
-      // as a fragment so the pipeline's url-keyed dedup (uniqueCompCount) counts
-      // them as the distinct sales they are, instead of collapsing to 1-per-guide
-      // (which surfaced as a bogus "2 unique of 48" double-count warning).
-      url: baseUrl ? `${baseUrl}#tx-${key}` : '',
+      priceText: l?.price?.display || `$${price}`,
+      condition,
+      url: web,
       source: 'reverb',
     });
   }
@@ -1013,62 +988,33 @@ export function reverbTransactionsToComps(guide, transactions) {
 }
 
 /**
- * Reverb SOLD comps via the Price Guide (real completed-sale prices). Two-step:
- * resolve the best-matching guide(s) from /api/priceguide, then fetch each
- * guide's /transactions — up to 2 guides so a model split by finish/year still
- * yields a usable comp set.
+ * Reverb ACTIVE comps via the live-listings API (asking prices — the sold Price
+ * Guide API was retired; see the section header). Returns the standard
+ * { items, warning } envelope so a block/throttle surfaces in the UI.
  */
-async function fetchReverbSoldComps(query, signal, safeApiFetch) {
-  const guideRes = await safeApiFetch(
-    `https://api.reverb.com/api/priceguide?query=${encodeURIComponent(query)}`,
+async function fetchReverbActiveListings(query, signal, safeApiFetch) {
+  const res = await safeApiFetch(
+    `https://api.reverb.com/api/listings/all?query=${encodeURIComponent(query)}&per_page=40`,
     { headers: REVERB_HEADERS, signal: createTimeoutSignal(signal, apiTimeout('reverb-api')) },
     'reverb',
   );
-  if (!guideRes.ok) {
-    if (guideRes.warning) logger.warn(`[Reverb PriceGuide] ${guideRes.warning.code}: ${guideRes.warning.evidence}`);
-    else logger.warn(`[Reverb PriceGuide] Returned ${guideRes.status}`);
-    return { items: [], warning: guideRes.warning };
+  if (!res.ok) {
+    if (res.warning) logger.warn(`[Reverb] ${res.warning.code}: ${res.warning.evidence}`);
+    else logger.warn(`[Reverb] listings API returned ${res.status}`);
+    return { items: [], warning: res.warning };
   }
-  const guides = selectReverbPriceGuides(query, guideRes.json?.price_guides || []);
-  if (guides.length === 0) {
-    logger.info(`[Reverb PriceGuide] no matching price guide for "${query}"`);
-    return { items: [], warning: null };
-  }
-
-  const items = [];
-  let warning = null;
-  const seenKeys = new Set();
-  for (const g of guides) {
-    if (signal?.aborted) break;
-    const txRes = await safeApiFetch(
-      `https://api.reverb.com/api/priceguide/${g.id}/transactions`,
-      { headers: REVERB_HEADERS, signal: createTimeoutSignal(signal, apiTimeout('reverb-api')) },
-      'reverb',
-    );
-    if (!txRes.ok) { warning = warning || txRes.warning; continue; }
-    for (const comp of reverbTransactionsToComps(g, txRes.json?.transactions || [])) {
-      // Per-transaction url (embeds the guide href + #tx-<order_id>) is globally
-      // unique per distinct sale; key on it so genuinely distinct same-day/
-      // same-price sales (common at the modal price points) aren't collapsed.
-      // Fall back to date+price only when a guide lacks a web href.
-      const key = comp.url || `${g.id}:${comp.soldDate}:${comp.price}`;
-      if (seenKeys.has(key)) continue;
-      seenKeys.add(key);
-      items.push(comp);
-    }
-  }
-  logger.info(`[Reverb PriceGuide] "${query}" → ${guides.length} guide(s), ${items.length} sold transaction(s)`);
-  return { items, warning };
+  const items = reverbListingsToComps(res.json?.listings || []);
+  logger.info(`[Reverb] "${query}" → ${items.length} active listing(s)`);
+  return { items, warning: null };
 }
 
 /**
- * Fetch sold-comp marketplace data from Reverb's Price Guide (completed sales).
- * An earlier live-listings mode (/api/listings/all) was removed — both call
- * sites always wanted sold comps, and the live path was unreachable, dead
- * code with no `price > 0` guard (unlike every other extractor in this file).
+ * Fetch ACTIVE-comp marketplace data from Reverb's live-listings API. (The prior
+ * Price Guide sold path was permanently deprecated by Reverb — see the section
+ * header; this is the honest, still-working replacement, reclassified as active.)
  */
 export async function fetchReverbListings(query, signal = null) {
-  return fetchReverbSoldComps(query, signal, safeApiFetch);
+  return fetchReverbActiveListings(query, signal, safeApiFetch);
 }
 
 // ── PriceCharting (direct HTTP, NOT the stealth browser) ────────────────────

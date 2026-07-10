@@ -130,16 +130,20 @@ const EBAY_EMPTY_GUARD_FN = `(function(label, cards, items, diagFn){
     || document.querySelector('.su-item-card, li.s-card, .s-card, .srp-results li, [data-testid="item-card"], .s-item, .brwrvr__item-card, .su-card-container, ul.srp-results > li')
     || (document.querySelector('a[href*="/itm/"]') && document.querySelector('a[href*="/itm/"]').closest('li, div'));
   var diagCounts = [
+    // NOTE: both card families below are LIVE-SUPPORTED generations (see
+    // EBAY_CARD_GEN_FN) — this throw only fires when BOTH are 0. The counts
+    // are kept split by generation so a report shows which one (if either)
+    // eBay actually served, plus the raw sub-selector counts for a THIRD,
+    // still-unknown generation should eBay redesign again.
     'cards=' + cards.length,
-    // Current (2026-07) div-based card + its two differently-shaped result
+    // "su" generation — div-based card + its two differently-shaped result
     // containers (sold = div.srp-river-main, active = ul.su-grid--is-list).
     'suItemCard=' + document.querySelectorAll('.su-item-card').length,
     'srpRiverMain=' + document.querySelectorAll('.srp-river-main').length,
     'suGridList=' + document.querySelectorAll('.su-grid--is-list').length,
     'titleSel2=' + document.querySelectorAll('.su-item-card__title').length,
     'priceSel2=' + document.querySelectorAll('.su-item-card__price').length,
-    // Pre-2026-07 (li.s-card) markers — kept so a report can tell which
-    // generation of redesign it's looking at instead of just "still 0".
+    // "legacy" generation markers.
     'srp=' + document.querySelectorAll('.srp-results').length,
     'srpLi=' + document.querySelectorAll('.srp-results li').length,
     'liSCard=' + document.querySelectorAll('li.s-card').length,
@@ -155,7 +159,26 @@ const EBAY_EMPTY_GUARD_FN = `(function(label, cards, items, diagFn){
     'brw=' + document.querySelectorAll('.brwrvr__item-card').length,
     'itmLinks=' + document.querySelectorAll('a[href*="/itm/"]').length,
   ].join(' ');
-  throw new Error('SITE_CHANGED: ' + label + ' su-styled-text extractor returned 0 — eBay design system may have changed' + diagFn(diagCounts, diagSample));
+  throw new Error('SITE_CHANGED: ' + label + ' — neither known eBay card generation (su-item-card / li.s-card) matched — eBay design system may have changed again' + diagFn(diagCounts, diagSample));
+})`;
+
+// Shared card-generation detector for EBAY_SOLD_EXTRACTOR / EBAY_ACTIVE_EXTRACTOR.
+// eBay has been flip-flopping between two card markups within the same week —
+// div.su-item-card ("2026-07" redesign) vs the older li.s-card/su-styled-text
+// generation it supposedly replaced on 2026-07-07. A production bug report two
+// days later caught the "dead" li.s-card generation very much alive (liSCard/
+// sCardTitle/priceSel all non-zero, suItemCard=0) across every eBay scrape in
+// the run — almost certainly an A/B test or gradual rollout rather than a clean
+// one-time migration, so hard-coding to whichever generation was "verified live"
+// most recently will keep breaking. Detect and support BOTH by exact selector
+// (not a blind alternate-container scan): every field selector below was
+// independently verified live at some point, so this can't pick up ghost/promo
+// tiles the way a generic fallback selector could.
+const EBAY_CARD_GEN_FN = `(function(){
+  var suCards = document.querySelectorAll('.su-item-card');
+  if (suCards.length > 0) return { generation: 'su', cards: suCards };
+  var legacyCards = document.querySelectorAll('.srp-results li.s-card');
+  return { generation: 'legacy', cards: legacyCards };
 })`;
 
 // Shared dedup-by-url for EBAY_SOLD_EXTRACTOR / EBAY_ACTIVE_EXTRACTOR — a
@@ -196,7 +219,8 @@ const DEDUP_BY_URL_FN = `(function(items){
 export const EBAY_SOLD_CONFIG = {
   waitMs: 2500,
   timeoutMs: 40000,
-  waitFor: '.srp-results li.s-card',
+  // Either card generation (see EBAY_CARD_GEN_FN) — eBay serves both.
+  waitFor: '.su-item-card, .srp-results li.s-card',
   scrollFirst: true,
   dismissCookies: true,
   referer: 'https://www.google.com/',
@@ -206,7 +230,8 @@ export const EBAY_SOLD_CONFIG = {
 export const EBAY_ACTIVE_CONFIG = {
   waitMs: 2500,
   timeoutMs: 40000,
-  waitFor: '.srp-results li.s-card',
+  // Either card generation (see EBAY_CARD_GEN_FN) — eBay serves both.
+  waitFor: '.su-item-card, .srp-results li.s-card',
   scrollFirst: true,
   dismissCookies: true,
   referer: 'https://www.google.com/',
@@ -291,15 +316,21 @@ export function priceChartingQuery(query) {
 
 
 // ── eBay Sold Listings Extractor ────────────────────────────────────────────
-// eBay redesigned again (2026-07): the "su-*"/li.s-card generation (2025) is
-// now ALSO dead — .srp-results/li.s-card/su-styled-text.primary/.s-card__price
-// all match 0. Current structure (verified live 2026-07 — see the diag's
-// suItemCard/srpRiverMain/suGridList counters for the next time this drifts):
-//   div.srp-river-main (sold) — the results river; card root is div.su-item-card
-//   a.su-item-card__title            — title text AND the listing URL (href has /itm/)
-//   span.su-item-card__price         — price
-//   span.signal.signal--recent       — sold date ("Sold Jul 7, 2026") — sold-only
-//   .su-item-card__subtitle .su-styled-text.secondary — condition (strips trailing " ·")
+// eBay serves (at least) two card generations, and a live bug report on
+// 2026-07-09 — two days after the su-item-card cutover below shipped — caught
+// the OLDER generation back in production (see EBAY_CARD_GEN_FN). Both are
+// supported explicitly:
+//   "su" (div.su-item-card):
+//     a.su-item-card__title            — title text AND the listing URL (href has /itm/)
+//     span.su-item-card__price         — price
+//     span.signal.signal--recent       — sold date ("Sold Jul 7, 2026") — sold-only
+//     .su-item-card__subtitle .su-styled-text.secondary — condition (strips trailing " ·")
+//   "legacy" (.srp-results li.s-card):
+//     span.su-styled-text.primary          — title
+//     .s-card__price                       — price
+//     span.su-styled-text.positive.default — sold date — sold-only
+//     a.s-card__link                       — listing URL
+//     span.su-styled-text.secondary.default — condition (first match; strips trailing " ·")
 // The first 1-2 cards on both sold/active pages are sponsored placeholders
 // whose title starts with "Shop on eBay" (sometimes with mangled trailing
 // text from a visually-hidden reversed "Sponsored" badge) — filtered below.
@@ -309,6 +340,7 @@ export const EBAY_SOLD_EXTRACTOR = `
   const __money = ${MONEY_PARSE_FN};
   const __emptyGuard = ${EBAY_EMPTY_GUARD_FN};
   const __dedupByUrl = ${DEDUP_BY_URL_FN};
+  const __cardGen = ${EBAY_CARD_GEN_FN};
   const items = [];
   // Per-card "looked like a listing but yielded no usable price/title" counter.
   // Surfaced as yieldStats.noFields so a PARTIAL sub-selector drift (some cards
@@ -318,24 +350,35 @@ export const EBAY_SOLD_EXTRACTOR = `
   // (a drop concentrated in one field = that sub-selector moved).
   let __noFields = 0, __noTitle = 0, __noPrice = 0;
 
-  const cards = document.querySelectorAll('.su-item-card');
+  const { generation, cards } = __cardGen();
 
   cards.forEach(card => {
     try {
-      const titleEl = card.querySelector('a.su-item-card__title');
+      const titleEl = generation === 'su'
+        ? card.querySelector('a.su-item-card__title')
+        : card.querySelector('span.su-styled-text.primary');
       const title = (titleEl?.innerText || titleEl?.textContent || '').trim();
       if (/^Shop on eBay\\b/i.test(title)) return;   // sponsored placeholder tile, not a real listing → benign
       if (!title) { __noFields++; __noTitle++; return; }
 
-      const priceEl = card.querySelector('.su-item-card__price');
+      const priceEl = generation === 'su'
+        ? card.querySelector('.su-item-card__price')
+        : card.querySelector('.s-card__price');
       const priceText = (priceEl?.innerText || priceEl?.textContent || '').trim();
       const price = __money(priceText);
       if (price === 0) { __noFields++; __noPrice++; return; }
 
-      const dateEl = card.querySelector('.signal--recent');
-      // Title element doubles as the listing link (href has /itm/).
-      const linkEl = titleEl;
-      const condEl = card.querySelector('.su-item-card__subtitle .su-styled-text.secondary');
+      let dateEl, linkEl, condEl;
+      if (generation === 'su') {
+        dateEl = card.querySelector('.signal--recent');
+        linkEl = titleEl;   // title element doubles as the listing link (href has /itm/)
+        condEl = card.querySelector('.su-item-card__subtitle .su-styled-text.secondary');
+      } else {
+        dateEl = card.querySelector('span.su-styled-text.positive.default');
+        linkEl = card.querySelector('a.s-card__link');
+        // First secondary.default span is condition; later ones are specs (model, storage, carrier)
+        condEl = card.querySelector('span.su-styled-text.secondary.default');
+      }
       const condition = ((condEl?.innerText || condEl?.textContent || '').trim()).replace(/\\s*·\\s*$/, '');
 
       items.push({
@@ -368,35 +411,43 @@ export const EBAY_SOLD_EXTRACTOR = `
 `;
 
 // ── eBay Active Listings Extractor ──────────────────────────────────────────
-// Same 2026-07 redesign as EBAY_SOLD — identical card/title/price selectors,
-// no soldDate/signal badge. Active listings render inside ul.su-grid--is-list
-// (li.su-grid__item wrapping the same div.su-item-card) rather than sold's
-// div.srp-river-main, but the card class itself is unchanged across both.
+// Same dual-generation support as EBAY_SOLD (see its header + EBAY_CARD_GEN_FN)
+// — identical card/title/price selectors per generation, no soldDate/signal
+// badge. "su" active listings render inside ul.su-grid--is-list (li.su-grid__item
+// wrapping the same div.su-item-card) rather than sold's div.srp-river-main, but
+// the card class itself is unchanged across both; "legacy" active/sold share the
+// same .srp-results li.s-card container.
 export const EBAY_ACTIVE_EXTRACTOR = `
 (function() {
   const __diag = ${SITE_CHANGED_DIAG};
   const __money = ${MONEY_PARSE_FN};
   const __emptyGuard = ${EBAY_EMPTY_GUARD_FN};
   const __dedupByUrl = ${DEDUP_BY_URL_FN};
+  const __cardGen = ${EBAY_CARD_GEN_FN};
   const items = [];
   let __noFields = 0, __noTitle = 0, __noPrice = 0;   // field-miss total + per-field attribution (see ebay-sold)
 
-  const cards = document.querySelectorAll('.su-item-card');
+  const { generation, cards } = __cardGen();
 
   cards.forEach(card => {
     try {
-      const titleEl = card.querySelector('a.su-item-card__title');
+      const titleEl = generation === 'su'
+        ? card.querySelector('a.su-item-card__title')
+        : card.querySelector('span.su-styled-text.primary');
       const title = (titleEl?.innerText || titleEl?.textContent || '').trim();
       if (/^Shop on eBay\\b/i.test(title)) return;   // sponsored placeholder tile, not a real listing → benign
       if (!title) { __noFields++; __noTitle++; return; }
 
-      const priceEl = card.querySelector('.su-item-card__price');
+      const priceEl = generation === 'su'
+        ? card.querySelector('.su-item-card__price')
+        : card.querySelector('.s-card__price');
       const priceText = (priceEl?.innerText || priceEl?.textContent || '').trim();
       const price = __money(priceText);
       if (price === 0) { __noFields++; __noPrice++; return; }
 
-      // Title element doubles as the listing link (href has /itm/).
-      items.push({ title, price, priceText, url: titleEl?.href || '', source: 'ebay-active' });
+      // "su": title element doubles as the listing link (href has /itm/).
+      const linkEl = generation === 'su' ? titleEl : card.querySelector('a.s-card__link');
+      items.push({ title, price, priceText, url: linkEl?.href || '', source: 'ebay-active' });
     } catch {}
   });
 

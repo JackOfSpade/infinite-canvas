@@ -35,7 +35,7 @@ import {
   getLaunchCollisions,
   _resetLaunchCollisions,
 } from '../electron/ipc/browserLaunchTelemetry.js';
-import { detectAntiBotSignal, matchesNoResultsSentinel } from '../electron/ipc/antiBotDetector.js';
+import { detectAntiBotSignal, matchesNoResultsSentinel, detectApiAntiBotSignal } from '../electron/ipc/antiBotDetector.js';
 import { getStats, getStatsSignature } from '../src/utils/dashboardStats.js';
 import { resolveNodePresence } from '../src/utils/nodePresence.js';
 import { ALL_COMP_SOURCE_IDS, CANVAS_ZOOM_LIMITS, getNodeDims, getNodesBounds, SELL_PLATFORMS, SELL_PLATFORM_BY_ID } from '../src/utils/constants.js';
@@ -63,7 +63,7 @@ import {
   COL_X,
 } from '../src/nodes/jobsearch/buildJobTree.js';
 import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature } from '../src/nodes/jobboard/mergeJobs.js';
-import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, selectReverbPriceGuides, reverbTransactionsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, parseAptDecoComps, extractAlgoliaHits } from '../electron/extractors/apiExtractors.js';
+import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, parseAptDecoComps, extractAlgoliaHits } from '../electron/extractors/apiExtractors.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
 import {
@@ -149,7 +149,7 @@ import {
 } from '../electron/ipc/missingPreviewRelink.js';
 import { resolvePortableFilePaths, resolvePortableImagePath, isAllowedOpenFileExt } from '../electron/ipc/filesystem.js';
 import { decodeLocalFileRequestPath } from '../electron/localFileProtocol.js';
-import { getBrowserPoolQueueState, pauseBrowserPool, queueScrape } from '../electron/ipc/browserPool.js';
+import { getBrowserPoolQueueState, pauseBrowserPool, queueScrape, readPageContentBounded } from '../electron/ipc/browserPool.js';
 import { getSoftLoginWallMatch, getStatusCacheSync, isConfirmedDisconnectedVerdict, writeStatusCache, selectRestorableStatuses, isTrustedNativeLoginResult } from '../electron/ipc/accounts.js';
 import { getSellMonitorConfig } from '../electron/ipc/stealthBrowser.js';
 import os from 'node:os';
@@ -1068,6 +1068,54 @@ const tests = [
         assert(sample.title && sample.price > 0, 'eBay active fixture: incomplete sample payload');
       },
     }),
+  },
+  {
+    // A live bug report (2026-07-09) caught eBay serving the OLDER li.s-card/
+    // su-styled-text generation two days after the extractor was switched to
+    // ONLY read the newer div.su-item-card generation (commit 1834233) — every
+    // scrape returned suItemCard=0 while liSCard/sCardTitle/priceSel were all
+    // healthy. eBay is evidently flip-flopping generations (A/B test / gradual
+    // rollout), so the extractor must recognize both by name. This fixture has
+    // NO su-item-card markup at all — it locks in that the "legacy" branch
+    // (EBAY_CARD_GEN_FN) still extracts real comps instead of throwing
+    // SITE_CHANGED just because the newer generation isn't present.
+    name: 'eBay extractor: legacy (pre-2026-07) li.s-card generation still extracts',
+    run: () => {
+      const legacyHtml = '<html><head><title>shark slider nano for sale</title></head><body>' +
+        '<div class="srp-controls__count-heading">2 results for shark slider nano</div>' +
+        '<ul class="srp-results">' +
+        '<li class="s-card"><a class="s-card__link" href="https://www.ebay.com/itm/2000000001">' +
+        '<span class="su-styled-text primary default">IFOOTAGE Shark Slider Nano II 660</span></a>' +
+        '<span class="s-card__price">$120.00</span>' +
+        '<span class="su-styled-text positive default">Sold Jul 5, 2026</span>' +
+        '<span class="su-styled-text secondary default">Pre-Owned ·</span></li>' +
+        '<li class="s-card"><a class="s-card__link" href="https://www.ebay.com/itm/2000000002">' +
+        '<span class="su-styled-text primary default">IFOOTAGE Shark Slider Nano II 660 v2</span></a>' +
+        '<span class="s-card__price">$135.50</span>' +
+        '<span class="su-styled-text positive default">Sold Jul 6, 2026</span>' +
+        '<span class="su-styled-text secondary default">Used ·</span></li>' +
+        '</ul></body></html>';
+
+      const soldDom = new JSDOM(legacyHtml, { url: 'https://www.ebay.com/sch/i.html?_nkw=shark+slider&LH_Sold=1', runScripts: 'outside-only' });
+      const soldRaw = soldDom.window.eval(EBAY_SOLD_EXTRACTOR);
+      assert(soldRaw && Array.isArray(soldRaw.items), 'legacy eBay sold: extractor did not return { items }');
+      assert(soldRaw.items.length === 2, `legacy eBay sold: expected 2 items, got ${soldRaw.items.length}`);
+      const soldSample = soldRaw.items[0];
+      assert(soldSample.source === 'ebay-sold', 'legacy eBay sold: wrong source id');
+      assert(soldSample.title === 'IFOOTAGE Shark Slider Nano II 660', `legacy eBay sold: wrong title → ${soldSample.title}`);
+      assert(soldSample.price === 120, `legacy eBay sold: wrong price → ${soldSample.price}`);
+      assert(soldSample.url === 'https://www.ebay.com/itm/2000000001', `legacy eBay sold: wrong url → ${soldSample.url}`);
+      assert(soldSample.soldDate === 'Sold Jul 5, 2026', `legacy eBay sold: wrong soldDate → ${soldSample.soldDate}`);
+      assert(soldSample.condition === 'Pre-Owned', `legacy eBay sold: wrong condition → ${soldSample.condition}`);
+
+      const activeDom = new JSDOM(legacyHtml, { url: 'https://www.ebay.com/sch/i.html?_nkw=shark+slider', runScripts: 'outside-only' });
+      const activeRaw = activeDom.window.eval(EBAY_ACTIVE_EXTRACTOR);
+      assert(activeRaw && Array.isArray(activeRaw.items), 'legacy eBay active: extractor did not return { items }');
+      assert(activeRaw.items.length === 2, `legacy eBay active: expected 2 items, got ${activeRaw.items.length}`);
+      assert(activeRaw.items[0].source === 'ebay-active', 'legacy eBay active: wrong source id');
+      assert(activeRaw.items[0].url === 'https://www.ebay.com/itm/2000000001', `legacy eBay active: wrong url → ${activeRaw.items[0].url}`);
+      return { ok: true, soldCount: soldRaw.items.length, activeCount: activeRaw.items.length };
+    },
   },
   {
     name: 'Mercari sold fixture',
@@ -3903,52 +3951,33 @@ const tests = [
     },
   },
   {
-    name: 'Reverb SOLD price-guide mapping (real sales, not live retail)',
+    name: 'Reverb ACTIVE listings mapping (sold Price Guide API retired → live listings)',
     run: () => {
-      // Reverb's /listings/all only returns LIVE listings (state=sold/ended are
-      // silently ignored → brand-new retail prices). Real sold data is the Price
-      // Guide: selectReverbPriceGuides picks the matching guide; then
-      // reverbTransactionsToComps maps its completed transactions (price_final).
-      const guides = [
-        { id: 81477, title: 'Yamaha A3R-VN Dreadnought with Electronics 2010s Vintage Natural', make: 'Yamaha', model: 'A3R-VN Dreadnought with Electronics', finish: 'Vintage Natural', _links: { web: { href: 'https://reverb.com/price-guide/guide/81477-yamaha-a3r-vn' } } },
-        { id: 100299, title: 'Yamaha LS6M ARE 2020s Natural', make: 'Yamaha', model: 'LS6M ARE', finish: 'Natural' }, // shares yamaha+are but WRONG model
-        { id: 999, title: 'Fender Stratocaster American Pro', make: 'Fender', model: 'Stratocaster', finish: 'Sunburst' },
+      // Reverb PERMANENTLY retired its public Price Guide (sold) API in mid-2026
+      // — /api/priceguide now 403s "no longer publicly available" (verified live
+      // 2026-07-09). The still-working /api/listings/all returns LIVE for-sale
+      // inventory (asking prices), so Reverb is now an ACTIVE comp source and
+      // reverbListingsToComps maps that API's listings[] into the comp shape.
+      const listings = [
+        { id: 94534350, title: 'Rode NT4 Stereo X/Y Condenser Microphone Mic', make: 'RODE', model: 'Rode NT4', condition: { display_name: 'Very Good' }, price: { amount: '455.00', display: '$455' }, _links: { web: { href: 'https://reverb.com/item/94534350-rode-nt4' } } },
+        { id: 77235041, title: 'Rode NT4', make: 'RODE', model: 'Rode NT4', condition: { display_name: 'Brand New' }, price: { amount: '580.36', display: '$580.36' }, _links: { web: { href: 'https://reverb.com/item/77235041-rode-nt4' } } },
+        { id: 77235041, title: 'Rode NT4 (dup id)', condition: { display_name: 'Brand New' }, price: { amount: '580.36', display: '$580.36' }, _links: { web: { href: 'https://reverb.com/item/77235041-rode-nt4' } } }, // dup id → deduped
+        { id: 5, title: 'Broken freebie', condition: 'Poor', price: { amount: '0.00', display: '$0' }, _links: { web: { href: 'https://reverb.com/item/5' } } },                                        // zero price → dropped
+        { id: 6, title: 'No price object' },                                                                                                                                                            // no price → dropped
       ];
-      const picked = selectReverbPriceGuides('Yamaha A3R ARE', guides);
-      assert(picked.length === 1 && picked[0].id === 81477,
-        `should pick only the A3R guide — NOT the LS6M ARE on the generic 'yamaha'/'are' tokens, got ${picked.map(g => g.id).join(',')}`);
-      assert(selectReverbPriceGuides('Gibson Les Paul', guides).length === 0, 'unrelated query should match no guide (no pricing the wrong instrument)');
-
-      const txs = [
-        { date: '2025-07-31', condition: 'Excellent', order_id: 23592701, price_ask: { amount: '575.00', display: '$575' }, price_final: { amount: '575.00', display: '$575' } },
-        { date: '2025-05-13', condition: 'Mint', order_id: 23010111, price_final: { amount: '620.00', display: '$620' } },
-        { date: '2025-05-13', condition: 'Mint', order_id: 23010111, price_final: { amount: '620.00', display: '$620' } }, // dup order_id → deduped
-        { date: '2024-01-01', condition: 'Good', order_id: 1, price_final: { amount: '0.00', display: '$0' } },           // zero price → dropped
-      ];
-      const comps = reverbTransactionsToComps(picked[0], txs);
-      assert(comps.length === 2, `expected 2 comps (dup + zero-price dropped), got ${comps.length}`);
+      const comps = reverbListingsToComps(listings);
+      assert(comps.length === 2, `expected 2 comps (dup id + zero-price + no-price dropped), got ${comps.length}`);
       assert(comps.every(c => c.source === 'reverb'), 'source should be reverb');
-      assert(comps[0].price === 575 && comps[0].condition === 'Excellent' && comps[0].soldDate === '2025-07-31', `wrong first comp ${JSON.stringify(comps[0])}`);
-      assert(comps[0].title === 'Yamaha A3R-VN Dreadnought with Electronics 2010s Vintage Natural', `title should be the guide title → ${comps[0].title}`);
-      // Each distinct sale gets the guide link + a unique #tx fragment, so the
-      // pipeline's url-keyed dedup counts them as distinct (not "1 unique of N").
-      assert(comps[0].url === 'https://reverb.com/price-guide/guide/81477-yamaha-a3r-vn#tx-23592701', `url should be guide link + tx fragment → ${comps[0].url}`);
-      assert(comps[0].url !== comps[1].url, 'distinct sales must get distinct urls so uniqueCompCount does not collapse them');
-      // The real sold figures ($575–620) are ~half the live-retail price (~$1180)
-      // the broken /listings path returned — the whole point of this fix.
-      assert(Math.max(...comps.map(c => c.price)) <= 620, 'sold comps should reflect used-market price, not new retail');
-      // Outer-dedup contract (fetchReverbSoldComps now keys on comp.url): two
-      // DISTINCT sales sharing date AND price must get distinct urls (via order_id)
-      // so both survive — the old date+price key collapsed them at modal prices.
-      const sameDayPrice = reverbTransactionsToComps(picked[0], [
-        { date: '2025-06-01', condition: 'Good', order_id: 111, price_final: { amount: '500.00', display: '$500' } },
-        { date: '2025-06-01', condition: 'Good', order_id: 222, price_final: { amount: '500.00', display: '$500' } },
-      ]);
-      assert(sameDayPrice.length === 2, `distinct same-day same-price sales should both map, got ${sameDayPrice.length}`);
-      assert(sameDayPrice[0].url !== sameDayPrice[1].url, 'distinct order_ids → distinct urls (so the url-keyed outer dedup keeps both)');
-      const oldKey = (c) => `${picked[0].id}:${c.soldDate}:${c.price}`;
-      assert(oldKey(sameDayPrice[0]) === oldKey(sameDayPrice[1]), 'regression witness: the OLD date+price key would have collapsed these two distinct sales');
-      return { ok: true, picked: picked[0].id, comps: comps.length, prices: comps.map(c => c.price) };
+      assert(comps[0].price === 455 && comps[0].condition === 'Very Good', `wrong first comp → ${JSON.stringify(comps[0])}`);
+      assert(comps[0].url === 'https://reverb.com/item/94534350-rode-nt4', `url should be the listing web href → ${comps[0].url}`);
+      assert(!comps.some(c => 'soldDate' in c), 'active comps carry NO soldDate (they are asking prices, not completed sales)');
+      // A string condition (some listings serve condition as a bare string) maps through too.
+      const strCond = reverbListingsToComps([{ id: 9, title: 'X', condition: 'Mint', price: { amount: '10.00', display: '$10' }, _links: { web: { href: 'https://reverb.com/item/9' } } }]);
+      assert(strCond[0].condition === 'Mint', `string condition should pass through → ${JSON.stringify(strCond[0])}`);
+      // Falls back to make+model when a listing has no title.
+      const noTitle = reverbListingsToComps([{ id: 10, make: 'RODE', model: 'NT5', price: { amount: '200.00', display: '$200' }, _links: { web: { href: 'https://reverb.com/item/10' } } }]);
+      assert(noTitle[0].title === 'RODE NT5', `title should fall back to make+model → ${noTitle[0].title}`);
+      return { ok: true, comps: comps.length, prices: comps.map(c => c.price) };
     },
   },
   {
@@ -5125,6 +5154,23 @@ const tests = [
       assert(/tarpit/i.test(timeout.suggestion) && !/profile-lock conflict\.?$/i.test(timeout.suggestion), `timeout suggestion should say tarpit, not profile-lock → ${timeout.suggestion}`);
       assert(/not logged in/i.test(timeout.suggestion), `logged-out timeout should mention login → ${timeout.suggestion}`);
 
+      // (d') When the browser pool folded a [timeout-state …] diag into the error
+      //      (finalUrl/bodyLen/title/bodyHead — see enrichTimeoutError), the whole
+      //      snippet must survive into evidence, not get chopped by the default
+      //      300-char cap. This is the field that tells page-never-loaded
+      //      (bodyLen=0) apart from a slow/tarpitting site (real body) — the gap
+      //      that let the poshmark/swappa timeout root-cause hide as generic tarpit.
+      const longBody = 'x'.repeat(260);
+      const enriched = classifyCompScrapeFailure(
+        `Scrape timed out after 39107ms for https://poshmark.com/search [timeout-state finalUrl=https://poshmark.com/search bodyLen=0 title="Just a moment..." bodyHead="${longBody}"]`,
+        'poshmark', loggedOut,
+      );
+      assert(enriched.code === 'scrape-timeout', `enriched timeout still → scrape-timeout, got ${enriched.code}`);
+      assert(/\[timeout-state /.test(enriched.evidence), `evidence must retain the timeout-state marker → ${enriched.evidence}`);
+      assert(/bodyLen=0/.test(enriched.evidence), 'evidence must retain bodyLen (the page-never-loaded tell)');
+      assert(/Just a moment/.test(enriched.evidence), 'evidence must retain the captured title');
+      assert(enriched.evidence.length > 300, `enriched evidence should exceed the default 300-char cap → len ${enriched.evidence.length}`);
+
       // (e) A genuine internal throw (no "timeout" wording) → task-failed.
       const failed = classifyCompScrapeFailure('Protocol error: Target closed', 'poshmark', loggedOut);
       assert(failed.code === 'task-failed', `internal throw → task-failed, got ${failed.code}`);
@@ -5885,6 +5931,38 @@ const tests = [
     },
   },
   {
+    // Regression test for the "Scrape timed out after Nms" bug: an anti-bot
+    // reload loop can leave page.content() hanging forever (it never resolves
+    // NOR rejects), and the bare `.catch(() => '')` browserPool used to call it
+    // with only guards a rejection — so a stuck page silently burned the WHOLE
+    // remaining scrape budget before the outer hard timeout fired, mislabeling
+    // a page.content() hang as an opaque scrape-timeout instead of letting the
+    // caller reach its normal empty/blocked classification. readPageContentBounded
+    // fixes this with a Promise.race against a clamped deadline.
+    name: 'readPageContentBounded: bounds a hung page.content() instead of waiting forever, passes through real results/errors',
+    run: async () => {
+      const fastPage = { content: async () => '<html>ok</html>' };
+      const fast = await readPageContentBounded(fastPage, 5000);
+      assert(fast === '<html>ok</html>', `a fast, resolving page.content() passes through unchanged (got ${JSON.stringify(fast)})`);
+
+      const rejectingPage = { content: async () => { throw new Error('Protocol error'); } };
+      const rejected = await readPageContentBounded(rejectingPage, 5000);
+      assert(rejected === '', `a rejecting page.content() falls back to '' (got ${JSON.stringify(rejected)})`);
+
+      // Simulates the reload-loop hang: content() never settles either way.
+      const hungPage = { content: () => new Promise(() => {}) };
+      const start = Date.now();
+      const hungResult = await readPageContentBounded(hungPage, 50);
+      const elapsed = Date.now() - start;
+      assert(hungResult === '', `a hung page.content() falls back to '' instead of propagating undefined/hanging (got ${JSON.stringify(hungResult)})`);
+      // The 1000ms floor (Math.max(1000, maxMs)) is a deliberate safety floor
+      // against a 0/negative deadline — assert it bounds the wait, not that it
+      // honors the requested 50ms exactly.
+      assert(elapsed < 2000, `a hung page.content() must resolve within the bounded floor, not hang indefinitely (elapsed=${elapsed}ms)`);
+      return { ok: true, elapsed };
+    },
+  },
+  {
     name: 'job run staging: per-page ledger + resumable detection + cleanup',
     run: async () => {
       const dir = path.join(os.tmpdir(), `ic-jobstaging-${process.pid}`);
@@ -6353,6 +6431,42 @@ const tests = [
       // (c) No yieldStats at all → unchanged legacy behavior (still flags).
       assert(detectAntiBotSignal({ ...base, itemsExtracted: 1 })?.code === 'zero-extracted',
         'no yieldStats → legacy zero-extracted preserved');
+      return { ok: true };
+    },
+  },
+  {
+    // Regression for a live bug report (2026-07-09): Reverb's public
+    // /api/priceguide endpoint now returns HTTP 403 with body
+    // `{"Error": "This endpoint is no longer publicly available."}` —
+    // captured live via a direct curl during that investigation. Before this
+    // fix, detectApiAntiBotSignal short-circuited on the raw status code
+    // BEFORE ever looking at the body, so this decisive "permanently retired"
+    // message was discarded and the bug report showed an indistinguishable
+    // generic "API returned HTTP 403" — identical to what a transient IP/token
+    // block looks like, which sends debugging down an unclearable retry loop
+    // for something only a code change (new endpoint/strategy) can fix.
+    name: 'detectApiAntiBotSignal: a deprecated-endpoint body wins over the generic HTTP-403 classification',
+    run: () => {
+      const deprecated = detectApiAntiBotSignal({
+        status: 403,
+        bodyText: '{ "Error": "This endpoint is no longer publicly available." }',
+        bodyJson: { Error: 'This endpoint is no longer publicly available.' },
+        sourceLabel: 'reverb',
+      });
+      assert(deprecated?.code === 'api-endpoint-deprecated', `expected api-endpoint-deprecated, got ${JSON.stringify(deprecated)}`);
+      assert(deprecated.severity === 'block', 'deprecated endpoint must still be a block (stop retrying), not throttle');
+      assert(/no longer publicly available/i.test(deprecated.evidence), `evidence must carry the body message → ${deprecated.evidence}`);
+      assert(/code change/i.test(deprecated.suggestion), `suggestion must say retry/login won't help → ${deprecated.suggestion}`);
+
+      // Capitalized "Error" key alone (no lowercase "error") must still be read —
+      // this is the exact shape that was silently missed before the fix.
+      const capOnly = detectApiAntiBotSignal({ status: 200, bodyText: '', bodyJson: { Error: 'This endpoint is no longer publicly available.' }, sourceLabel: 'reverb' });
+      assert(capOnly?.code === 'api-endpoint-deprecated', `capitalized-only Error key must still classify → ${JSON.stringify(capOnly)}`);
+
+      // A 403 with NO decisive body (or no body at all) still falls back to the
+      // generic classification — this is not a regression for the common case.
+      const generic = detectApiAntiBotSignal({ status: 403, bodyText: '', bodyJson: null, sourceLabel: 'someapi' });
+      assert(generic?.code === 'http-403', `plain 403 with no body must still classify generically → ${JSON.stringify(generic)}`);
       return { ok: true };
     },
   },

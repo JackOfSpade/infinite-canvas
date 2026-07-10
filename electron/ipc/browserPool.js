@@ -188,6 +188,80 @@ function processQueue() {
 }
 
 /**
+ * Bounded page.content() read. A Cloudflare/DataDome-style anti-bot reload
+ * loop can leave the page's execution context perpetually unstable, and
+ * page.content() then blocks INDEFINITELY waiting for a stable context —
+ * sailing past the scrape's own hard timeout instead of letting the caller
+ * reach a graceful classification (SITE_CHANGED reclassification, anti-bot
+ * detection, etc.). The bare `page.content().catch(() => '')` this replaces
+ * only guards against a *rejection*, not a hang — a stuck page never resolves
+ * NOR rejects, so `.catch()` never runs and the whole readiness pipeline sits
+ * there until the OUTER race's hard timeout fires, surfacing as an opaque
+ * "Scrape timed out after Nms" instead of a normal empty/blocked result. This
+ * mirrors the identical fix already shipped in stealthBrowser.js's
+ * fetchHtmlAuthed/fetchHtmlClean for the same underlying Puppeteer behavior.
+ * Falls back to '' on either a rejection or a timeout, same as the code it
+ * replaces — callers already treat an empty body as "couldn't confirm
+ * anti-bot signal", not a hard failure.
+ */
+export async function readPageContentBounded(page, maxMs) {
+  const bound = Math.max(1000, maxMs);
+  try {
+    return await Promise.race([
+      page.content(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('page.content() timed out — page may be stuck in an anti-bot reload loop')), bound)),
+    ]);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * On a scrape hard-timeout, capture the page's state (final URL, body size,
+ * title, a visible-text snippet) and FOLD it into the thrown error's message,
+ * behind a `[timeout-state …]` marker, so it survives into the caller's
+ * persisted warning.evidence and the bug report — not ONLY the ephemeral
+ * ~60-line main-process log ring buffer where it used to live. That buffer
+ * rotates within minutes, so a report generated even an hour after the scrape
+ * had already lost this, leaving a genuine page-never-loaded failure
+ * indistinguishable from an anti-bot tarpit (exactly what masked the
+ * poshmark/swappa timeout root-cause). Mirrors the eBay SITE_CHANGED
+ * extractor's inline `[diag …]` self-diagnosis convention; the `[timeout-state`
+ * marker is recognized by the marketplace/job warning classifiers (which widen
+ * their evidence slice for it) and the Recent-Logs cap in bugReport.js.
+ *
+ * Best-effort and BOUNDED: the diag read is itself raced against a short timer
+ * because page.evaluate() on a page stuck in a reload loop can hang the same way
+ * page.content() does (see readPageContentBounded) — a diagnostic must never
+ * mask, delay, or replace the real failure. Returns the (possibly mutated) same
+ * error so callers can `throw await enrichTimeoutError(page, error)`.
+ */
+export async function enrichTimeoutError(page, error) {
+  if (!page || !error || !/timed?\s*out|timeout/i.test(error.message || '')) return error;
+  // Don't double-append if this error already carries the marker.
+  if (/\[timeout-state /.test(error.message || '')) return error;
+  try {
+    const failUrl = (typeof page.url === 'function' ? page.url() : '') || 'unknown';
+    const diag = await Promise.race([
+      page.evaluate(() => ({
+        bodyLen: document.body?.innerText?.length ?? 0,
+        bodyHead: (document.body?.innerText ?? '').substring(0, 300),
+        title: document.title ?? '',
+      })),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('diag-timeout')), 3000)),
+    ]).catch(() => null);
+    const clean = (s, n) => String(s ?? '').replace(/\s+/g, ' ').replace(/"/g, "'").trim().slice(0, n);
+    const state = `[timeout-state finalUrl=${failUrl} bodyLen=${diag?.bodyLen ?? 0}`
+      + ` title="${clean(diag?.title, 60)}" bodyHead="${clean(diag?.bodyHead, 200)}"]`;
+    logger.info(`[BrowserPool] Timeout state — ${state}`);
+    // Append rather than replace: the classifiers match the original "timed out"
+    // copy to route this to the scrape-timeout code.
+    try { error.message = `${error.message} ${state}`; } catch { /* frozen msg — logged above regardless */ }
+  } catch { /* ignored — diagnostics must never mask the real error */ }
+  return error;
+}
+
+/**
  * Internal — creates a stealth page, navigates, extracts data.
  *
  * Options:
@@ -439,7 +513,11 @@ async function executeScrape(url, extractorJS, options = {}) {
         // render a visible signal instead of silently accepting a blocked page.
         let warning = null;
         try {
-          const html       = await page.content().catch(() => '');
+          // Clamp to what's left of THIS scrape's budget (minus a small margin)
+          // so a stuck page still yields a graceful classification instead of
+          // burning the remainder and tripping the outer hard timeout — see
+          // readPageContentBounded.
+          const html       = await readPageContentBounded(page, (scrapeStart + budgetMs) - Date.now() - 1500);
           const finalUrl   = page.url() || url;
           const status     = pageResponse?.status?.() ?? 0;
           const itemCount  = __wrapped
@@ -530,24 +608,11 @@ async function executeScrape(url, extractorJS, options = {}) {
     } else {
       logger.error(`[BrowserPool] Scrape failed for ${url}:`, error);
       recordOutcome(domain, 'error');  // network/nav-timeout/hard-timeout → tighten
-      // Capture page state at the moment of failure so timeouts aren't opaque.
-      // Only for non-abort failures — page may still be open while scrapePromise
-      // tears down. Best-effort: don't let diagnostic errors mask the real one.
-      if (page && error?.message?.includes('timed out')) {
-        try {
-          const failUrl = page.url?.() || 'unknown';
-          const diag = await page.evaluate(() => ({
-            bodyLen: document.body?.innerText?.length ?? 0,
-            bodyHead: (document.body?.innerText ?? '').substring(0, 300),
-            title: document.title ?? '',
-          })).catch(() => null);
-          logger.info(
-            `[BrowserPool] Timeout state — finalUrl=${failUrl} ` +
-            `bodyLen=${diag?.bodyLen ?? 0} title="${diag?.title ?? ''}" ` +
-            `bodyHead="${(diag?.bodyHead ?? '').replace(/\s+/g, ' ').substring(0, 200)}"`
-          );
-        } catch { /* ignored */ }
-      }
+      // Capture page state at the moment of a timeout and FOLD it into the error
+      // so it survives into the persisted warning + bug report (not just the log
+      // ring buffer). Best-effort + bounded — see enrichTimeoutError. Must run
+      // while the page is still open (before safeClose below).
+      await enrichTimeoutError(page, error);
     }
 
     // Clean up handle
@@ -753,7 +818,9 @@ async function executeScrapePaginated(extractorJS, options = {}) {
       let warning = null;
       if (!useLoadMore) {
         try {
-          const html = await page.content().catch(() => '');
+          // See readPageContentBounded — clamp to this page's remaining budget
+          // so an anti-bot reload loop can't hang past the outer hard timeout.
+          const html = await readPageContentBounded(page, (pageStart + budgetMs) - Date.now() - 1500);
           const finalUrl = page.url() || url;
           const status = pageResponse?.status?.() ?? 0;
           warning = detectAntiBotSignal({
@@ -807,6 +874,9 @@ async function executeScrapePaginated(extractorJS, options = {}) {
       recordOutcome(domain, 'error');
     }
     if (all.length === 0) {
+      // Fold timeout page-state into the error before we close the page, so a
+      // 0-gather paginated timeout is as diagnosable as the single-page path.
+      if (!isAborted) await enrichTimeoutError(page, error);
       pageHandles.delete(pageId);
       if (options.signal && abortHandler) options.signal.removeEventListener('abort', abortHandler);
       await safeClose(page, 2000);

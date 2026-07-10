@@ -450,6 +450,18 @@ export function detectAntiBotSignal(ctx = {}) {
 // bodies. detectApiAntiBotSignal is the parallel detector for those.
 
 const API_JSON_ERROR_PATTERNS = [
+  // Checked BEFORE the generic access-denied pattern below — a permanently
+  // retired endpoint (Reverb's public /api/priceguide returning `{"Error":
+  // "This endpoint is no longer publicly available."}` under HTTP 403, found
+  // live 2026-07-09) reads identically to a transient block by status code
+  // alone, but "retry later" / "check auth" advice is actively wrong: no
+  // login, Solve, or backoff will ever recover it — only a code change
+  // (different endpoint/strategy) can. Distinct code so callers/bug reports
+  // don't send the user into an unclearable Solve loop over it.
+  { pat: /no longer (?:publicly )?available|(?:endpoint|api)\s+(?:has been\s+)?(?:deprecated|discontinued|retired|sunset)/i,
+    code: 'api-endpoint-deprecated',
+    severity: 'block',
+    suggestion: 'The API endpoint itself has been shut down/retired by the provider — this is not a transient block. Retrying or logging in will not help; the extractor needs a code change (new endpoint or strategy).' },
   { pat: /rate.?limit|too many requests|quota.{0,10}(exceed|reach)|throttl/i,
     code: 'api-rate-limit',
     severity: 'throttle',
@@ -477,7 +489,60 @@ export function detectApiAntiBotSignal(ctx = {}) {
   const { status = 0, bodyText = '', bodyJson = null, sourceLabel = '' } = ctx;
   const label = sourceLabel ? `[${sourceLabel}] ` : '';
 
-  // HTTP status first — APIs are very clear with these codes.
+  // JSON error body inspection FIRST — many APIs (including ones returning a
+  // 401/403/429/503) explain themselves in the body, and that explanation can
+  // be decisively MORE specific than the raw status code (e.g. "this endpoint
+  // is no longer publicly available" vs a generic "API returned HTTP 403" that
+  // reads identically to a transient IP/token block and sends the user down an
+  // unclearable retry/Solve loop for something only a code change can fix — see
+  // the api-endpoint-deprecated pattern above). Walk a few common body
+  // locations: top-level error, message, detail, or a nested errors[].
+  const candidateStrings = [];
+  if (bodyJson && typeof bodyJson === 'object') {
+    const push = (v) => { if (typeof v === 'string') candidateStrings.push(v); };
+    push(bodyJson.error);
+    push(bodyJson.message);
+    push(bodyJson.detail);
+    push(bodyJson.error_description);
+    if (typeof bodyJson.error === 'object' && bodyJson.error) {
+      push(bodyJson.error.message);
+      push(bodyJson.error.code);
+    }
+    if (Array.isArray(bodyJson.errors)) {
+      for (const e of bodyJson.errors) {
+        if (typeof e === 'string') push(e);
+        else if (e && typeof e === 'object') { push(e.message); push(e.code); push(e.detail); }
+      }
+    }
+    // Case-insensitive fallback: some APIs capitalize their error key (Reverb's
+    // priceguide 403 body is `{"Error": "..."}`, not `{"error": "..."}`) — the
+    // exact-cased lookups above silently miss it, which is exactly what let the
+    // deprecated-endpoint message get discarded in favor of a bare "HTTP 403"
+    // until this was caught live 2026-07-09.
+    for (const [k, v] of Object.entries(bodyJson)) {
+      if (typeof v === 'string' && /^(error|message|detail)$/i.test(k)) push(v);
+    }
+  }
+  // Also sniff the raw body — useful when an API responds with HTML on block
+  // (Cloudflare interstitial returned with text/html instead of JSON).
+  if (bodyText) candidateStrings.push(String(bodyText).slice(0, API_SCAN_CHARS));
+
+  for (const s of candidateStrings) {
+    for (const p of API_JSON_ERROR_PATTERNS) {
+      const m = s.match(p.pat);
+      if (m) {
+        return {
+          code: p.code,
+          severity: p.severity,
+          evidence: `${label}body matched "${(m[0] || '').slice(0, 80)}" (${p.code})`,
+          suggestion: p.suggestion,
+        };
+      }
+    }
+  }
+
+  // Fall back to the raw HTTP status — no decisive body message, but the
+  // status code alone is still a clear signal for these.
   if (status === 429) {
     return { code: 'http-429', severity: 'throttle',
       evidence: `${label}API returned HTTP 429`,
@@ -497,45 +562,6 @@ export function detectApiAntiBotSignal(ctx = {}) {
     return { code: 'http-401', severity: 'block',
       evidence: `${label}API returned HTTP 401`,
       suggestion: 'Auth failed. The configured API key is missing, expired, or revoked.' };
-  }
-
-  // JSON error body inspection — many APIs return 200 with { error: "..." }
-  // for soft errors. Walk a few common locations: top-level error, message,
-  // detail, or a nested errors[].
-  const candidateStrings = [];
-  if (bodyJson) {
-    const push = (v) => { if (typeof v === 'string') candidateStrings.push(v); };
-    push(bodyJson.error);
-    push(bodyJson.message);
-    push(bodyJson.detail);
-    push(bodyJson.error_description);
-    if (typeof bodyJson.error === 'object' && bodyJson.error) {
-      push(bodyJson.error.message);
-      push(bodyJson.error.code);
-    }
-    if (Array.isArray(bodyJson.errors)) {
-      for (const e of bodyJson.errors) {
-        if (typeof e === 'string') push(e);
-        else if (e && typeof e === 'object') { push(e.message); push(e.code); push(e.detail); }
-      }
-    }
-  }
-  // Also sniff the raw body — useful when an API responds with HTML on block
-  // (Cloudflare interstitial returned with text/html instead of JSON).
-  if (bodyText) candidateStrings.push(String(bodyText).slice(0, API_SCAN_CHARS));
-
-  for (const s of candidateStrings) {
-    for (const p of API_JSON_ERROR_PATTERNS) {
-      const m = s.match(p.pat);
-      if (m) {
-        return {
-          code: p.code,
-          severity: p.severity,
-          evidence: `${label}body matched "${(m[0] || '').slice(0, 80)}" (${p.code})`,
-          suggestion: p.suggestion,
-        };
-      }
-    }
   }
 
   return null;

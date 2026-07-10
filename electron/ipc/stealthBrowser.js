@@ -426,7 +426,7 @@ export async function fetchHtmlAuthed(url, { timeoutMs = 25000, signal } = {}) {
     if (signal?.aborted) throw new Error('Aborted');
 
     const status   = response?.status() ?? 0;
-    const finalUrl = page.url() || url;
+    let finalUrl   = page.url() || url;
     // Bound page.content(). When an anti-bot challenge (e.g. Cloudflare) keeps the
     // page in a reload loop, content() blocks indefinitely waiting for a stable
     // execution context — sailing past the navigation timeout above. Without this
@@ -434,12 +434,30 @@ export async function fetchHtmlAuthed(url, { timeoutMs = 25000, signal } = {}) {
     // login verify on Glassdoor (the whole "checking connections" step never
     // returned). On timeout we fall through to the catch → { ok:false } and the
     // finally still closes the page.
-    const html     = await Promise.race([
+    const readContent = () => Promise.race([
       page.content(),
       new Promise((_, reject) => setTimeout(
         () => reject(new Error('page.content() timed out — page may be stuck in an anti-bot reload loop')),
         Math.max(3000, Math.min(8000, timeoutMs - 2000)))),
     ]);
+    let html;
+    try {
+      html = await readContent();
+    } catch (err) {
+      // A client-side (SPA) redirect firing AFTER page.goto's wait condition already
+      // resolved — e.g. an auth wall bouncing an unauthenticated hub URL to a /login
+      // route — can destroy the execution context mid-read, throwing Puppeteer's
+      // "Execution context was destroyed, most likely because of a navigation."
+      // manualScraper.js's runExtractor treats this exact error class as a transient
+      // race (not a terminal failure) and retries; mirror that here with a single
+      // bounded retry once the new page settles, instead of surfacing a bare "Fetch
+      // failed" for a page that a moment later reads fine (and classifies normally —
+      // e.g. as needs-login instead of an opaque error).
+      if (!/Execution context was destroyed/i.test(err?.message || '')) throw err;
+      await new Promise((r) => setTimeout(r, 500));
+      finalUrl = page.url() || finalUrl;
+      html = await readContent();
+    }
     return { ok: true, status, finalUrl, html };
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
@@ -493,7 +511,7 @@ export async function fetchHtmlClean(url, { timeoutMs = 25000, signal, waitForRe
     }
 
     const status   = response?.status() ?? 0;
-    const finalUrl = page.url() || url;
+    let finalUrl   = page.url() || url;
     // Bound page.content(). When an anti-bot challenge (e.g. Cloudflare) keeps the
     // page in a reload loop, content() blocks indefinitely waiting for a stable
     // execution context — sailing past the navigation timeout above. Without this
@@ -501,12 +519,30 @@ export async function fetchHtmlClean(url, { timeoutMs = 25000, signal, waitForRe
     // login verify on Glassdoor (the whole "checking connections" step never
     // returned). On timeout we fall through to the catch → { ok:false } and the
     // finally still closes the page.
-    const html     = await Promise.race([
+    const readContent = () => Promise.race([
       page.content(),
       new Promise((_, reject) => setTimeout(
         () => reject(new Error('page.content() timed out — page may be stuck in an anti-bot reload loop')),
         Math.max(3000, Math.min(8000, timeoutMs - 2000)))),
     ]);
+    let html;
+    try {
+      html = await readContent();
+    } catch (err) {
+      // A client-side (SPA) redirect firing AFTER page.goto's wait condition already
+      // resolved — e.g. an auth wall bouncing an unauthenticated hub URL to a /login
+      // route — can destroy the execution context mid-read, throwing Puppeteer's
+      // "Execution context was destroyed, most likely because of a navigation."
+      // manualScraper.js's runExtractor treats this exact error class as a transient
+      // race (not a terminal failure) and retries; mirror that here with a single
+      // bounded retry once the new page settles, instead of surfacing a bare "Fetch
+      // failed" for a page that a moment later reads fine (and classifies normally —
+      // e.g. as needs-login instead of an opaque error).
+      if (!/Execution context was destroyed/i.test(err?.message || '')) throw err;
+      await new Promise((r) => setTimeout(r, 500));
+      finalUrl = page.url() || finalUrl;
+      html = await readContent();
+    }
     return { ok: true, status, finalUrl, html };
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };

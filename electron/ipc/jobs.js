@@ -636,10 +636,15 @@ function synthScrapeWarning(errorMsg) {
     };
   }
   const isTimeout = /timed?\s*out|timeout/i.test(msg);
+  // Widen when the browser pool folded a `[timeout-state …]` diag into the
+  // message (finalUrl/bodyLen/title/bodyHead) — see enrichTimeoutError; that
+  // snippet distinguishes page-never-loaded from a slow/tarpitting site and
+  // would otherwise be truncated away by the tight default cap.
+  const cap = /\[timeout-state /.test(msg) ? 700 : 240;
   return {
     code: isTimeout ? 'scrape-timeout' : 'scrape-failed',
     severity: 'block',
-    evidence: msg.slice(0, 240),
+    evidence: msg.slice(0, cap),
     suggestion: isTimeout
       ? 'Site was unreachable or too slow within the budget. Often a soft block — try a fresh stealth profile or come back later.'
       : 'Scrape failed before extracting jobs. Check logs for the full stack trace.',

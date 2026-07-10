@@ -53,10 +53,12 @@ export const PRICE_COMP_SOURCES = [
   { id: 'ebay-sold',    name: 'eBay Sold',     letter: 'eB', color: '#e53238',   domain: 'ebay.com' },
   { id: 'poshmark',     name: 'Poshmark Sold', letter: 'PM', color: '#731a4b',   domain: 'poshmark.com' },
   { id: 'swappa-sold',  name: 'Swappa Sold',   letter: 'Sw', color: '#27ae60',   domain: 'swappa.com' },
-  { id: 'reverb',       name: 'Reverb Sold',   letter: 'Rv', color: '#f04d23',   domain: 'reverb.com' },
   // Tier 1 — Active competition
   { id: 'ebay-active',  name: 'eBay Active',   letter: 'eB', color: '#e5323880', domain: 'ebay.com' },
   { id: 'swappa',       name: 'Swappa Active', letter: 'Sw', color: '#27ae6080', domain: 'swappa.com' },
+  // Reverb: sold Price Guide API retired by Reverb (mid-2026) → now the live
+  // listings API = ACTIVE asking prices (musical gear). See fetchReverbListings.
+  { id: 'reverb',       name: 'Reverb Active', letter: 'Rv', color: '#f04d2380', domain: 'reverb.com' },
   // Tier 2 — Supplementary sold
   { id: 'mercari',      name: 'Mercari Sold',  letter: 'M',  color: '#6357ff',   domain: 'mercari.com' },
   // Niche specialist: AptDeco indexes secondhand FURNITURE / home furnishings

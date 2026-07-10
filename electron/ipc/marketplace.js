@@ -1,10 +1,10 @@
 /**
  * Marketplace IPC handlers — photo analysis, multi-source FMV research, listing prep.
  *
- * Pricing Data Sources (7 total):
- *   Tier 1 Sold:  eBay Sold, Poshmark Sold, Swappa, Reverb
- *   Tier 1 Active: eBay Active
- *   Tier 2 Sold:  Mercari Sold
+ * Pricing Data Sources (see PRICE_COMP_SOURCES in constants.js for the canonical list):
+ *   Sold:   eBay Sold, Poshmark Sold, Swappa Sold, Mercari Sold, PriceCharting (games)
+ *   Active: eBay Active, Swappa Active, Reverb Active (its sold Price Guide API
+ *           was retired — see fetchReverbListings), AptDeco (furniture)
  */
 import { callLLMVision, callLLMText } from './llm.js';
 import { handleSafe } from './ipcUtils.js';
@@ -396,10 +396,15 @@ export function classifyCompScrapeFailure(error, sourceId, sessionCache = {}) {
     // two sends the reader to chase a profile-lock bug that isn't there (this
     // report mislabeled a 45s Poshmark hang exactly that way).
     if (/timed?\s*out|timeout/i.test(msg)) {
+      // Widen the slice when the browser pool folded a `[timeout-state …]` diag
+      // (finalUrl/bodyLen/title/bodyHead) into the message — that snippet is the
+      // decisive tell of page-never-loaded vs. anti-bot tarpit, and it's now IN
+      // the evidence rather than a since-rotated log line. See enrichTimeoutError.
+      const cap = /\[timeout-state /.test(msg) ? 700 : 300;
       return {
         sourceId, severity: 'block', code: 'scrape-timeout',
-        evidence: msg.slice(0, 300),
-        suggestion: `Navigation didn't finish within the timeout — usually the page never loaded at all (check "Timeout state … bodyLen=0" in Recent Logs). That's a slow/hung site or an anti-bot tarpit, NOT a browser-launch/profile-lock conflict.${notConnected ? ` ${platform} is also not logged in — an anonymous request is likelier to be tarpitted; log in and retry.` : ''}`,
+        evidence: msg.slice(0, cap),
+        suggestion: `Navigation didn't finish within the timeout — usually the page never loaded at all (the folded-in [timeout-state …] shows bodyLen: 0 = nothing loaded; a real page body + title = a slow/tarpitting site). A slow/hung site or an anti-bot tarpit, NOT a browser-launch/profile-lock conflict.${notConnected ? ` ${platform} is also not logged in — an anonymous request is likelier to be tarpitted; log in and retry.` : ''}`,
       };
     }
     // Genuine internal throw before completing. "Navigating frame was detached"
@@ -512,14 +517,16 @@ async function scrapeOneSource(sourceId, query, sender, signal, nodeId) {
       const items = Array.isArray(result) ? result : (result?.items || []);
       const warning = Array.isArray(result) ? null : (result?.warning || null);
       send('done', items.length, warning);
-      return { sourceId, items, warning, category: 'sold' };
+      // ACTIVE (asking prices): Reverb's sold Price Guide API was retired — see
+      // fetchReverbListings. Must match the category in buildApiTasks below.
+      return { sourceId, items, warning, category: 'active' };
     } catch (error) {
       send('error', 0);
       return {
         sourceId,
         items: [],
         warning: { code: 'fetch-error', severity: 'block', evidence: error?.message || String(error), suggestion: 'API call failed during single-source rescrape.' },
-        category: 'sold',
+        category: 'active',
       };
     }
   }
@@ -562,12 +569,13 @@ async function fetchApiMarketplaceSources(query, signal = null, emit = null, cat
   // `category` (the item's vision category) lets PriceCharting skip the request
   // for a clearly-non-collectible item — see fetchPriceChartingComps.
   const pcQuery = priceChartingQuery(query);
-  // `category` is the comp bucket each source's results belong to. Reverb +
-  // PriceCharting are SOLD comps; AptDeco is ACTIVE asking prices (furniture) —
-  // the caller routes results by this field instead of assuming all API sources
-  // are sold. AptDeco skips itself for non-furniture (isAptDecoApplicable).
+  // `category` is the comp bucket each source's results belong to. PriceCharting
+  // is a SOLD comp; Reverb (live-listings API — its sold Price Guide API was
+  // retired) and AptDeco (furniture) are ACTIVE asking prices — the caller
+  // routes results by this field instead of assuming all API sources are sold.
+  // AptDeco skips itself for non-furniture (isAptDecoApplicable).
   const apiTasks = [
-    { sourceId: 'reverb', category: 'sold', effectiveQuery: query, fn: (s) => fetchReverbListings(query, s) },
+    { sourceId: 'reverb', category: 'active', effectiveQuery: query, fn: (s) => fetchReverbListings(query, s) },
     { sourceId: 'pricecharting', category: 'sold', effectiveQuery: pcQuery, fn: (s) => fetchPriceChartingComps(pcQuery, s, { category }) },
     { sourceId: 'aptdeco-active', category: 'active', effectiveQuery: query, fn: (s) => fetchAptDecoComps(query, s, { category }) },
   ].filter(task => isCompSourceEnabledInScope(task.sourceId));
@@ -668,8 +676,8 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache, category
     // the report's per-source provenance.
     provenanceBySource[res.sourceId] = { url: res.url || null, category: res.category || 'sold' };
     if (Array.isArray(res.items) && res.items.length > 0) samplesBySource[res.sourceId] = sampleOf(res.items);
-    // Route by the source's bucket — most API sources are sold (reverb,
-    // pricecharting) but AptDeco is active asking prices. Default sold for safety.
+    // Route by the source's bucket — pricecharting is sold; reverb (live
+    // listings) and AptDeco are active asking prices. Default sold for safety.
     if (res.items.length > 0) comps[res.category === 'active' ? 'active' : 'sold'].push(...res.items);
   }
 
