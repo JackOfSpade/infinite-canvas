@@ -97,15 +97,17 @@ async function assertReadableResumeFile(filePath) {
     // to the app's code signature: TCC (Desktop / Documents / Downloads are
     // privacy-protected) and the per-file sandbox ACL `com.apple.macl`, stamped
     // when a file is first granted to an app via drag-drop / open-dialog. This app
-    // is AD-HOC signed, so EVERY rebuild changes its identity — a resume granted to
-    // an earlier build silently loses access after a rebuild (re-dropping does NOT
-    // re-grant it; a file the app created itself, like canvas.json, is unaffected).
+    // is signed with a stable local code-signing identity, so these grants persist
+    // across rebuilds — a denial here means the app was never granted this
+    // particular file/folder (or the signing identity changed, e.g. the signing
+    // certificate was regenerated; a file the app created itself, like canvas.json,
+    // is unaffected either way).
     // Surface the errno + the real remedy instead of the misleading "locked" guess.
     if (process.platform === 'darwin' && (code === 'EACCES' || code === 'EPERM')) {
       const rel = path.relative(os.homedir(), filePath);
       const inProtected = !rel.startsWith('..') && /^(Desktop|Documents|Downloads)[/\\]/.test(rel);
       const where = inProtected ? ' in a macOS privacy-protected folder (Desktop/Documents/Downloads)' : '';
-      throw new Error(`macOS denied this app read access to ${displayName} (${code})${where}. The file is fine — the app lost the OS's per-file grant, typically after being rebuilt. Fix: move the file out of ~/Desktop, ~/Documents and ~/Downloads, or grant the app Full Disk Access (System Settings → Privacy & Security → Full Disk Access). Clearing the file's extended attributes — \`xattr -c "${filePath}"\` — also works.`);
+      throw new Error(`macOS denied this app read access to ${displayName} (${code})${where}. The file is fine — the app doesn't have the OS's grant for this file. Fix: move the file out of ~/Desktop, ~/Documents and ~/Downloads, or grant the app Full Disk Access (System Settings → Privacy & Security → Full Disk Access). Clearing the file's extended attributes — \`xattr -c "${filePath}"\` — also works.`);
     }
     throw new Error(`${displayName} exists but can't be read (${code}) — it may be locked or have restrictive permissions. Try again, or drop a different resume.`);
   }

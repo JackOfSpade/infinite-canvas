@@ -18,7 +18,9 @@
   "build": {
     "appId": "com.antigravity.infinitecanvas",
     "mac": {
-      "target": "dir"
+      "target": "dir",
+      "identity": "AI Chalkboard Local Code Signing",
+      "forceCodeSigning": true
     },
     "directories": {
       "buildResources": "build",
