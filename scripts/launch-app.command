@@ -23,6 +23,10 @@ LOG="$STATE_DIR/last-build.log"
 
 ticker_pid=""
 lock_held=0
+stale_pid=""
+# Matches only the app's MAIN process: the helpers live under
+# Contents/Frameworks/... so they can't collide with this path fragment.
+APP_PROC_PATTERN="infinite-canvas.app/Contents/MacOS/infinite-canvas"
 
 # ---- functions (defined up front; execution starts after this block) ----
 
@@ -52,6 +56,15 @@ source_manifest() {
                  -o -path './dist' -o -path './dist-electron' -o -path './out' \) -prune \
              -o -type f ! -name '.DS_Store' -print0
     fi
+    # .env is deliberately gitignored (secrets), so the listing above never
+    # sees it — but Vite INLINES the VITE_-prefixed vars at BUILD time into
+    # both the renderer and the bundled main process, and .env is not shipped
+    # inside the .app. An .env edit therefore needs a rebuild to take effect,
+    # and without this it would silently never get one. Only name|mtime|size
+    # is hashed here, never file contents, so no secret reaches the stamp.
+    for envfile in .env .env.*(N); do
+      [[ -f "$envfile" ]] && printf '%s\0' "$envfile"
+    done
     # NUL-delimited list is piped straight into xargs below, never captured
     # into a variable/command-substitution — zsh mangles embedded NULs.
   } | xargs -0 stat -f '%N|%m|%z' 2>/dev/null | sort | shasum -a 256 | awk '{print $1}'
@@ -194,6 +207,13 @@ if [[ "$need_build" -eq 1 ]]; then
   acquire_lock
   sync_dependencies
 
+  # Remember any instance that predates this build. open(1) ACTIVATES an
+  # already-running app rather than relaunching it (verified: same pid before
+  # and after), so if this process survives the rebuild it would keep showing
+  # the OLD code while the new bundle sits unused on disk. Deliberately not
+  # force-quit: this is a canvas editor and unsaved work would be lost.
+  stale_pid="$(pgrep -f "$APP_PROC_PATTERN" 2>/dev/null | head -1)"
+
   # npm install can rewrite package-lock.json, which IS a tracked file and so
   # is part of the manifest. Recompute after the install, otherwise we'd record
   # the pre-install hash and every subsequent launch would see a mismatch and
@@ -237,7 +257,7 @@ open "$RELEASE_APP" || fail "open(1) refused to launch the app."
 launched=0
 attempt=0
 while (( attempt < 20 )); do
-  if pgrep -f "infinite-canvas.app/Contents/MacOS/infinite-canvas" >/dev/null 2>&1; then
+  if pgrep -f "$APP_PROC_PATTERN" >/dev/null 2>&1; then
     launched=1
     break
   fi
@@ -247,6 +267,20 @@ done
 
 if [[ "$launched" -ne 1 ]]; then
   fail "App did not start within 10 seconds of open (LaunchServices accepted the request but the process never appeared)."
+fi
+
+# The pre-build instance outlived the rebuild, so what's on screen is the
+# previous build - open(1) just brought it to the front. Say so loudly rather
+# than let the user believe their change shipped.
+if [[ -n "$stale_pid" ]] && kill -0 "$stale_pid" 2>/dev/null; then
+  echo
+  echo "!! WARNING: Infinite Canvas was ALREADY RUNNING (pid $stale_pid) when this"
+  echo "!! rebuild finished, and macOS only brought that existing window forward."
+  echo "!! You are looking at the PREVIOUS build - your changes are NOT live."
+  echo "!! Quit Infinite Canvas (Cmd-Q), then launch it again to pick them up."
+  echo
+  notify "Rebuilt, but the old instance is still running - quit and relaunch." "Basso"
+  exit 0
 fi
 
 echo "> Infinite Canvas is running."
