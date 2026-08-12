@@ -175,7 +175,15 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // its ScrapeWarningsPanel: clear it on a clean success, or re-show it
           // when the source comes back still-warned (LinkedIn re-walled / same
           // warm IP). Captcha/resume paths don't return a warning → stays null.
-          detail: { hubId: data.hubId, sourceId: data.sourceId, items, replaceSourceItems, warning: result.warning || null },
+          // hiddenApplied is resolve-job-source/resume-job-source's OWN
+          // filterOutApplied count (electron/ipc/jobs.js) — jobs this Solve/
+          // Continue extracted that turned out to already be applied. Without
+          // forwarding it, the hub's onResolved listener has no way to know
+          // this resolve suppressed anything, and the funnel undercounts.
+          detail: {
+            hubId: data.hubId, sourceId: data.sourceId, items, replaceSourceItems,
+            warning: result.warning || null, hiddenApplied: result.hiddenApplied || 0,
+          },
         }));
         if (result.nextBlockedUrl) {
           // Another query for this source was also blocked. Keep the card visible

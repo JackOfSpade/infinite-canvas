@@ -6,7 +6,7 @@ import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP } from '../utils/mimeTypes.js';
 import { buildCachedUserContent, buildAnthropicMessageParams } from './anthropicRequest.js';
 import { isSensitivePath } from '../utils/pathSafety.js';
-import { CLAUDE_MODEL_IDS, CLAUDE_SONNET } from './claudeModels.js';
+import { claudeModelFor, claudeModelsInUse, CLAUDE_FAMILY } from './modelResolver.js';
 
 // A document/image node's filePath is sourced from loaded canvas JSON, which
 // (unlike the local-file:// preview protocol) had NO path check at all before
@@ -70,22 +70,26 @@ function parseAnthropicRateLimit(headers) {
   return Object.keys(out).length ? out : null;
 }
 
-// Distinct Claude models the app actually uses across tasks, sourced from the
-// shared registry (claudeModels.js) rather than a second hardcoded list. The
-// availability probe checks EACH, because Anthropic rate limits are PER-MODEL:
-// Haiku having headroom says nothing about whether a Sonnet scoring run or an
-// Opus application-generation will hit limits.
-export const CLAUDE_MODELS_IN_USE = CLAUDE_MODEL_IDS;
+// Distinct Claude models the app actually uses across tasks — re-exported
+// from modelResolver.js (the resolver-driven replacement for the old literal
+// CLAUDE_MODEL_IDS list) so every existing importer of "the models in use"
+// has one place to go. The availability probe checks EACH, because Anthropic
+// rate limits are PER-MODEL: Haiku having headroom says nothing about whether
+// a Sonnet scoring run or an Opus application-generation will hit limits.
+export { claudeModelsInUse };
 
 /**
  * Lightweight availability probe: a 1-token ping to ONE model that reads the
- * live rate-limit headers Anthropic returns. Defaults to the Sonnet workhorse;
- * the availability handler calls it once per CLAUDE_MODELS_IN_USE entry so each
- * model's per-model limits are surfaced. NEVER throws — returns a structured
+ * live rate-limit headers Anthropic returns. Defaults to the resolved Sonnet
+ * workhorse (evaluated fresh per call — a default parameter expression runs
+ * on every invocation that omits the arg, so this always reads the CURRENT
+ * snapshot rather than a value captured at import time); the availability
+ * handler calls it once per claudeModelsInUse() entry so each model's
+ * per-model limits are surfaced. NEVER throws — returns a structured
  * {ok,status,model,rateLimit,error} so the Settings panel can render a verdict
  * (the rate-limit numbers are straight from the response headers).
  */
-export async function probeClaude(apiKey, model = CLAUDE_SONNET) {
+export async function probeClaude(apiKey, model = claudeModelFor(CLAUDE_FAMILY.SONNET)) {
   if (!apiKey) return { ok: false, status: null, model, error: 'No Anthropic API key set.' };
   try {
     const anthropic = getAnthropicClient(apiKey);

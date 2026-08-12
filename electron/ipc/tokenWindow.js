@@ -1,5 +1,6 @@
 import { CLAUDE_MODEL_REGISTRY } from './claudeModels.js';
 import { GEMINI_MODEL_REGISTRY } from './geminiModels.js';
+import { claudeModelMetaFor } from './modelResolver.js';
 
 /**
  * Context-window math + per-model metadata for LLM calls — pure and
@@ -42,8 +43,25 @@ const FAMILY_FALLBACK = {
 };
 const DEFAULT_META = { contextWindow: 200000, maxOutput: 64000 };
 
-/** Resolve a model id to { contextWindow, maxOutput, provider }. Never throws. */
+/**
+ * Resolve a model id to { contextWindow, maxOutput, provider }. Never throws.
+ *
+ * Order: (1) the live Models API response (modelResolver.js), when this
+ * process has ever primed and the id was in it — this is what makes a
+ * freshly-resolved Claude generation the static registry below has never
+ * seen size correctly instead of silently under-budgeting on the
+ * conservative family fallback; (2) the static per-provider registry (the
+ * MODEL_FLOOR shape, plus every Gemini id); (3) the conservative family
+ * fallback for an id in neither. claudeModelMetaFor() itself never throws and
+ * returns null before anything has been primed, so this stays correct (just
+ * less precise) even when modelResolver.js hasn't run yet — e.g. the plain
+ * Node unit-test runner, which never boots the Electron/Anthropic-key path.
+ */
 export function modelMeta(model) {
+  if (typeof model === 'string' && /^claude/i.test(model)) {
+    const live = claudeModelMetaFor(model);
+    if (live) return { ...live, provider: 'claude' };
+  }
   if (model && MODEL_METADATA[model]) return MODEL_METADATA[model];
   if (typeof model === 'string') {
     if (/^gemini/i.test(model)) return { ...FAMILY_FALLBACK.gemini, provider: 'gemini' };

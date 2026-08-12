@@ -61,6 +61,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   parseCareerData: (args) => ipcRenderer.invoke('parse-career-data', args),
   generateApplication: (args) => ipcRenderer.invoke('generate-application', args),
   saveApplication: (args) => ipcRenderer.invoke('save-application', args),
+  markJobApplied:   (args) => ipcRenderer.invoke('mark-job-applied', args),
+  unmarkJobApplied: (args) => ipcRenderer.invoke('unmark-job-applied', args),
+  loadAppliedJobs:  (args) => ipcRenderer.invoke('load-applied-jobs', args),
+  isJobApplied:     (args) => ipcRenderer.invoke('is-job-applied', args),
   loadJobsHistory: (args) => ipcRenderer.invoke('load-jobs-history', args),
   appendJobsHistory: (args) => ipcRenderer.invoke('append-jobs-history', args),
 

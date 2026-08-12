@@ -9,6 +9,9 @@ import { isExistingFile, isSensitivePath } from './utils/pathSafety.js';
 import { logger } from './logger.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
+import { registerAppliedJobsHandlers } from './ipc/appliedJobs.js';
+import { primeClaudeModels } from './ipc/modelResolver.js';
+import { assertDesignSystemIntact } from './ipc/resumeHtml.js';
 import { registerMarketplaceHandlers } from './ipc/marketplace.js';
 import { registerAccountsHandlers, verifyAllPlatforms } from './ipc/accounts.js';
 import { registerMonitorHandlers, closeAllMonitors } from './ipc/browserViewMonitor.js';
@@ -788,6 +791,7 @@ if (!gotTheLock) {
     registerFilesystemHandlers();
     registerJobsHandlers();
     registerJobApplicationHandlers();
+    registerAppliedJobsHandlers();
     registerMarketplaceHandlers();
     registerAccountsHandlers();
     registerMonitorHandlers();
@@ -795,6 +799,27 @@ if (!gotTheLock) {
     registerBugReportHandlers();
     registerNetworkHandlers();
     registerSettingsHandlers();
+
+    // Warm the Claude model resolver before anything can call an LLM. It
+    // never throws (falls back to MODEL_FLOOR on any failure — see
+    // modelResolver.js's own doc) and this call is fire-and-forget so it
+    // can't delay window creation. Priming matters because prompt caches are
+    // MODEL-SCOPED: if resolution happened lazily on the first LLM call
+    // instead, a resolution that flipped mid-run (e.g. a second window
+    // priming concurrently) would silently invalidate every cached prefix
+    // and re-bill it at full rate (design doc §8.3 guard 2).
+    primeClaudeModels().catch((err) => {
+      logger.warn(`[main] primeClaudeModels() rejected unexpectedly (should be impossible — it catches internally): ${err?.message || err}`);
+    });
+
+    // Startup assertion for the résumé design-system coupling surface (design
+    // doc §9). resume_design_system/ is owned by Claude design and replaced
+    // wholesale from time to time; this never throws or blocks startup — its
+    // only job is to log "a reconnect is needed" instead of letting the app
+    // silently generate résumés/cover letters against a stale contract.
+    Promise.resolve(assertDesignSystemIntact()).catch((err) => {
+      logger.warn(`[main] assertDesignSystemIntact() rejected unexpectedly (should be impossible — it must log and return, not throw): ${err?.message || err}`);
+    });
 
     electronPkg.ipcMain.handle('prompt-unsaved-changes', async (event, actionName) => {
       const win = BrowserWindow.fromWebContents(event.sender);

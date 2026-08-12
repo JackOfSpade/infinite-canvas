@@ -35,6 +35,12 @@ export function JobSearchDoneState({
   setTargetRole,
   // Anti-bot signals collected during the search pipeline
   scrapeWarnings = [],
+  // Jobs dropped from this search because they matched an existing entry in
+  // the permanent applied-jobs store (docs/resume-achievement-mining-design.md
+  // §6.2) — surfaced by electron/ipc/jobs.js's filterOutApplied at every
+  // gather site. Filtering must never be silent: a job vanishing with no
+  // explanation is indistinguishable from a scraper bug.
+  hiddenApplied = 0,
 }) {
   const { addToast } = useToast();
   const count = testMode ? (scrapedCount ?? 0) : (resultCount || 0);
@@ -52,6 +58,17 @@ export function JobSearchDoneState({
           {gatheredCount > 0 && scrapedCount != null && gatheredCount !== scrapedCount
             ? `${gatheredCount} scraped → ${scrapedCount} kept`
             : `${gatheredCount || scrapedCount} scraped`}
+        </p>
+      )}
+
+      {/* Already-applied jobs dropped from this search — never silent, same
+          style as the scraped→kept line above. */}
+      {hiddenApplied > 0 && (
+        <p
+          className="text-white/25 text-[10px]"
+          title="Jobs matching a posting you already marked applied are dropped from these results so they don't resurface"
+        >
+          {hiddenApplied} hidden (already applied)
         </p>
       )}
 

@@ -8,8 +8,8 @@ import { GoogleAuth } from 'google-auth-library';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { resolveServiceAccountPath, getAISettings } from './settings.js';
-import { callClaudeText, probeClaude, CLAUDE_MODELS_IN_USE } from './claude.js';
-import { CLAUDE_HAIKU } from './claudeModels.js';
+import { callClaudeText, probeClaude, claudeModelsInUse } from './claude.js';
+import { claudeModelFor, CLAUDE_FAMILY } from './modelResolver.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP, DOCUMENT_MIME_MAP } from '../utils/mimeTypes.js';
 import {
@@ -1201,7 +1201,7 @@ export function registerGeminiHandlers() {
     // If user picked Claude, polish via Claude Haiku 4.5 directly. Avoids
     // forcing them onto Gemini just for this one helper.
     if (settings.provider === 'claude') {
-      const raw = await callClaudeText(prompt, CLAUDE_HAIKU, settings.anthropicApiKey, signal, { maxTokens: 1024, expectJson: false });
+      const raw = await callClaudeText(prompt, claudeModelFor(CLAUDE_FAMILY.HAIKU), settings.anthropicApiKey, signal, { maxTokens: 1024, expectJson: false });
       return { text: raw.trim() };
     }
     const config = { responseMimeType: 'text/plain', signal, maxOutputTokens: 1024 };
@@ -1211,7 +1211,7 @@ export function registerGeminiHandlers() {
 
   // Live "Check availability" — pings the requested provider (or the active one)
   // and returns a structured verdict. For Claude this probes EVERY model the app
-  // uses (CLAUDE_MODELS_IN_USE) — Anthropic limits are per-model, so checking one
+  // uses (claudeModelsInUse()) — Anthropic limits are per-model, so checking one
   // model (esp. the lightest) misrepresents whether a real run will hit limits —
   // and returns per-model {ok,status,rateLimit} from the response headers. For
   // Gemini also probes every compatible model so partial quota/access is visible
@@ -1226,7 +1226,7 @@ export function registerGeminiHandlers() {
       } else {
         // Probe all models in parallel — each is a 1-token ping (~free).
         const models = await Promise.all(
-          CLAUDE_MODELS_IN_USE.map((m) => probeClaude(settings.anthropicApiKey, m)),
+          claudeModelsInUse().map((m) => probeClaude(settings.anthropicApiKey, m)),
         );
         result = { ok: models.length > 0 && models.every((m) => m.ok), models };
       }

@@ -8,7 +8,7 @@ import { effectiveCap } from './tokenBudget.js';
 import path from 'path';
 import { priceSynthesisMaxTokens } from './resultCaps.js';
 import { modelMeta, maxOutputForModel, assessPromptFit, estimateTokensFromChars } from './tokenWindow.js';
-import { CLAUDE_SONNET, CLAUDE_OPUS, CLAUDE_HAIKU } from './claudeModels.js';
+import { CLAUDE_FAMILY, isClaudeFamilyToken, claudeModelFor } from './modelResolver.js';
 import { logger } from '../logger.js';
 
 /**
@@ -19,15 +19,26 @@ import { logger } from '../logger.js';
  * UX — quality+cost decisions belong with whoever wrote the prompt, not
  * with the user, who has no signal about which model fits which task.
  *
+ * Claude entries below are FAMILY TOKENS (CLAUDE_FAMILY.OPUS/.SONNET/.HAIKU),
+ * not literal model ids — pickModel resolves each against the live Models API
+ * snapshot (modelResolver.js's claudeModelFor), falling back to the pinned
+ * MODEL_FLOOR when discovery hasn't run yet or the API is unreachable. This
+ * is what keeps the app on the CURRENT Claude generation automatically
+ * instead of a literal id silently going stale — the table used to pin
+ * claude-opus-4-8 / claude-sonnet-4-6, two whole generations behind the live
+ * claude-opus-5 / claude-sonnet-5, at identical or lower price (see
+ * modelResolver.js and docs/resume-achievement-mining-design.md §8). The
+ * Gemini column stays literal — it isn't resolver-driven.
+ *
  * Model choices, in short:
- *   - Sonnet 4.6: vision identification, price synthesis, resume parse,
- *     job scoring, query generation, bucketing, cover letters, interview
- *     prep, application generation — anywhere quality compounds or the
- *     output is user-facing. Query gen and bucketing are on Sonnet
- *     deliberately: query quality gates which jobs are ever DISCOVERED, and
- *     the bucketing role-consolidation IS the user-facing results hierarchy.
- *     Both run once per search (not per-job), so the quality win is cheap.
- *   - Haiku 4.5: page status classify, text polish, platform-fit — short
+ *   - Sonnet tier: vision identification, price synthesis, resume parse,
+ *     job scoring, query generation, bucketing, company research, the
+ *     achievement REFUTER — anywhere quality compounds or the output is
+ *     user-facing. Query gen and bucketing are on Sonnet deliberately: query
+ *     quality gates which jobs are ever DISCOVERED, and the bucketing
+ *     role-consolidation IS the user-facing results hierarchy. Both run once
+ *     per search (not per-job), so the quality win is cheap.
+ *   - Haiku tier: page status classify, text polish, platform-fit — short
  *     structured outputs (enum + a sentence) where Sonnet adds no real
  *     quality (3x cheaper, no user-visible difference).
  *   - Gemini 3.5 Flash: preferred for Sonnet/Opus-quality tasks on the API-key
@@ -35,45 +46,63 @@ import { logger } from '../logger.js';
  *     they are excluded from the fallback chain until quota exists.
  *   - Gemini 3.1 Flash-Lite: matches Haiku's tasks while avoiding the 2.5
  *     Flash-Lite access restriction for new/inactive projects.
- *   - Opus 4.8: used ONLY for the two application-GENERATION tasks
- *     (application-resume, application-cover-letter) — the employer-facing PDFs
- *     where writing quality converts to interviews. At 1.67x Sonnet input/output
- *     (Opus 4.8 $5/$25 vs Sonnet $3/$15 — far below the old Opus-4.1 5x) the
- *     delta is worth it THERE and nowhere else; everything else stays on
- *     Sonnet/Haiku. Don't blanket-promote — add a row only with a real reason.
+ *   - Opus tier: used for the two application-GENERATION tasks
+ *     (application-resume, application-cover-letter) — the employer-facing
+ *     documents where writing quality converts to interviews — and for
+ *     career-achievement-mining, the highest-leverage reasoning pass in the
+ *     whole pipeline. Mining runs ONCE PER HUB (cached on the jobhub node),
+ *     not per application, so its Opus premium is amortized across every job
+ *     generated from that hub rather than paid per application the way the
+ *     two generation tasks pay it. At Opus's ~1.67x Sonnet input/output (far
+ *     below the old Opus-4.1 5x) the delta is worth it on these three tasks
+ *     and nowhere else; everything else stays on Sonnet/Haiku. Don't
+ *     blanket-promote — add a row only with a real reason.
  */
 const TASK_MODELS = {
-  'vision-product-analysis':   { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
-  'price-synthesis':           { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
+  'vision-product-analysis':   { claude: CLAUDE_FAMILY.SONNET, gemini: 'gemini-3.5-flash' },
+  'price-synthesis':           { claude: CLAUDE_FAMILY.SONNET, gemini: 'gemini-3.5-flash' },
   // Bundle pricing is a pricing JUDGMENT (synergy reasoning across items), so it
   // gets the same Sonnet tier as price-synthesis — not the cheaper Haiku used for
   // mechanical classification (per the quality-over-cost preference on pricing).
-  'bundle-price-synthesis':    { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
-  'platform-fit-assessment':   { claude: CLAUDE_HAIKU,  gemini: 'gemini-3.1-flash-lite' },
-  'page-status-classify':      { claude: CLAUDE_HAIKU,  gemini: 'gemini-3.1-flash-lite' },
+  'bundle-price-synthesis':    { claude: CLAUDE_FAMILY.SONNET, gemini: 'gemini-3.5-flash' },
+  'platform-fit-assessment':   { claude: CLAUDE_FAMILY.HAIKU,  gemini: 'gemini-3.1-flash-lite' },
+  'page-status-classify':      { claude: CLAUDE_FAMILY.HAIKU,  gemini: 'gemini-3.1-flash-lite' },
   // Marketplace Status Module hub scan — mechanical extraction of action items
   // from a seller dashboard / notification feed, same tier as page-status-classify
   // (scanning, not pricing judgment, so Haiku per the quality-over-cost split).
-  'marketplace-hub-scan':      { claude: CLAUDE_HAIKU,  gemini: 'gemini-3.1-flash-lite' },
-  'resume-parse':              { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
-  'career-file-extract':       { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
-  'job-query-generation':      { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
-  'job-scoring':               { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
-  'job-bucketing':             { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
+  'marketplace-hub-scan':      { claude: CLAUDE_FAMILY.HAIKU,  gemini: 'gemini-3.1-flash-lite' },
+  'resume-parse':              { claude: CLAUDE_FAMILY.SONNET, gemini: 'gemini-3.5-flash' },
+  'career-file-extract':       { claude: CLAUDE_FAMILY.SONNET, gemini: 'gemini-3.5-flash' },
+  'job-query-generation':      { claude: CLAUDE_FAMILY.SONNET, gemini: 'gemini-3.5-flash' },
+  'job-scoring':               { claude: CLAUDE_FAMILY.SONNET, gemini: 'gemini-3.5-flash' },
+  'job-bucketing':             { claude: CLAUDE_FAMILY.SONNET, gemini: 'gemini-3.5-flash' },
   // Application generation (résumé + cover letter from the design system).
-  // Quality compounds here — the output is a polished PDF a human sends to a
-  // recruiter, where writing nuance + judgment convert to interviews — so the two
-  // GENERATION tasks get Opus 4.8 on the Claude path. This is the one place the
-  // Opus delta clearly pays off (and at Opus 4.8 = 1.67x Sonnet, vs the old 5x,
-  // it's an easy trade). company-research stays on Sonnet: it's grounded
-  // summarization that FEEDS the generation, not the employer-facing artifact.
-  'company-research':          { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
-  'application-resume':        { claude: CLAUDE_OPUS,   gemini: 'gemini-3.5-flash' },
-  'application-cover-letter':  { claude: CLAUDE_OPUS,   gemini: 'gemini-3.5-flash' },
-  'text-polish':               { claude: CLAUDE_HAIKU,  gemini: 'gemini-3.1-flash-lite' },
+  // Quality compounds here — the output is a polished document a human sends
+  // to a recruiter, where writing nuance + judgment convert to interviews —
+  // so the two GENERATION tasks get the Opus tier on the Claude path. This is
+  // one of the few places the Opus delta clearly pays off. company-research
+  // stays on Sonnet: it's grounded summarization that FEEDS the generation,
+  // not the employer-facing artifact.
+  'company-research':          { claude: CLAUDE_FAMILY.SONNET, gemini: 'gemini-3.5-flash' },
+  'application-resume':        { claude: CLAUDE_FAMILY.OPUS,   gemini: 'gemini-3.5-flash' },
+  'application-cover-letter':  { claude: CLAUDE_FAMILY.OPUS,   gemini: 'gemini-3.5-flash' },
+  // Achievement mining (résumé design doc §3.1) derives accomplishments by
+  // JOINING facts scattered across the corpus — e.g. two balance sheets + a
+  // tenure date → "cut debt 74%" — which no other task attempts. It's the
+  // highest-leverage reasoning pass in the whole pipeline, and it runs ONCE
+  // PER HUB (cached on the jobhub node, reused by every application generated
+  // from it), not per application — so Opus's premium is amortized rather
+  // than paid on every Generate click the way application-resume pays it.
+  'career-achievement-mining': { claude: CLAUDE_FAMILY.OPUS,   gemini: 'gemini-3.5-flash' },
+  // The refute pass uses a DIFFERENT model from the miner ON PURPOSE — that
+  // difference is what buys real independence (a model re-checking its own
+  // reasoning tends to just re-confirm it). Sonnet is also cheaper, which is
+  // a welcome side effect but not the reason for the choice.
+  'career-achievement-refute': { claude: CLAUDE_FAMILY.SONNET, gemini: 'gemini-3.5-flash' },
+  'text-polish':               { claude: CLAUDE_FAMILY.HAIKU,  gemini: 'gemini-3.1-flash-lite' },
   // Default — used when a caller forgets to pass `task`. Logged as a warning
   // below so we notice unmapped sites; tuned to a safe-middle.
-  'default':                   { claude: CLAUDE_SONNET, gemini: 'gemini-3.5-flash' },
+  'default':                   { claude: CLAUDE_FAMILY.SONNET, gemini: 'gemini-3.5-flash' },
 };
 
 /**
@@ -177,13 +206,24 @@ const TASK_MAX_TOKENS = {
   // 2-page senior résumé. Unused cap is free (billed on actual output).
   'application-resume':        12288,
   'application-cover-letter':  3072,  // structured letterhead + 3-4 paragraphs
+  // A ledger of ~40 items, each carrying a verbatim evidence quote AND a
+  // human-readable derivation string, is a larger output than a single file's
+  // transcription — deliberately set above career-file-extract's 16384 for
+  // the same reason that cap is generous: a truncated ledger silently DROPS
+  // achievements rather than erroring, which is worse than an oversized cap.
+  // Caps bill on actual output, so the headroom is free.
+  'career-achievement-mining': 24576,
+  // The refuter returns one verdict per ledger item (id + verdict enum + a
+  // short reason + suggested attribution/caveat) — far smaller than the
+  // ledger it's attacking.
+  'career-achievement-refute': 8192,
   'text-polish':               1024,  // light edit
   'default':                   2048,
 };
 
 function resolveTask(task) {
   if (!task || !TASK_MODELS[task]) {
-    logger.warn(`[LLM] Unmapped task='${task}', using 'default' (Sonnet 4.6 / Gemini 3.5 Flash, 2048 max_tokens). Add it to TASK_MODELS.`);
+    logger.warn(`[LLM] Unmapped task='${task}', using 'default' (Sonnet tier / Gemini 3.5 Flash, 2048 max_tokens). Add it to TASK_MODELS.`);
     return 'default';
   }
   return task;
@@ -202,7 +242,12 @@ export function getKnownTaskIds() {
 
 function pickModel(provider, task) {
   const t = resolveTask(task);
-  return TASK_MODELS[t][provider] || TASK_MODELS['default'][provider];
+  const raw = TASK_MODELS[t][provider] || TASK_MODELS['default'][provider];
+  // TASK_MODELS' claude column holds FAMILY TOKENS, not literal ids — resolve
+  // against the live snapshot (modelResolver.js). A Gemini id (or, in
+  // principle, any literal Claude id a future call site hardcodes) is already
+  // a real model id and passes through unchanged.
+  return provider === 'claude' && isClaudeFamilyToken(raw) ? claudeModelFor(raw) : raw;
 }
 
 /**

@@ -8,6 +8,7 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { callLLMDocument, callLLMText, checkPromptFits, submitLLMTextBatch, getLLMTextBatchStatus, getLLMTextBatchResults, cancelLLMTextBatch, modelForTask } from './llm.js';
+import { primeClaudeModels } from './modelResolver.js';
 import { reconcileBatchScores, buildScoredJob } from './jobBatchReconcile.js';
 import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, CAREER_FILE_EXTRACT_SCHEMA, JOB_QUERY_GENERATION_SCHEMA } from './aiSchemas.js';
 import electronPkg from 'electron';
@@ -39,6 +40,7 @@ import { fetchIndeedListingsBrowser } from '../extractors/indeedBrowser.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
 import { startRun as startJobRun, recordSourcePage, markSourceStatus, setStage as setJobRunStage, readRunState, clearRun, computeResumeStartPage } from './jobRunStaging.js';
 import { loadJobsHistory, appendJobsHistory, dedupAgainstHistory, filterHistoryForResume } from './jobsHistory.js';
+import { filterOutApplied, appliedStoreErrorWarning } from './appliedJobs.js';
 import { filterJobsByAge, parsePostedDate } from './jobDateFilter.js';
 import { getJobsSettings, getAISettings } from './settings.js';
 import { wrapUntrustedText } from './promptSafety.js';
@@ -428,8 +430,8 @@ const jobsTelemetry = {
   // singleton shared by every open window/canvas, so without it a job search in
   // one canvas leaks into another canvas's report.
   nodeId:    null,
-  search:    null, // { ts, queries, raw, deduped, ageDropped, historyDropped, kept }
-  resolves:  {},   // { [sourceId]: { ts, extracted, ageDropped, historyDropped, kept } }
+  search:    null, // { ts, queries, raw, deduped, ageDropped, historyDropped, hiddenApplied, kept }
+  resolves:  {},   // { [sourceId]: { ts, extracted, ageDropped, historyDropped, hiddenApplied, kept } }
                    // keyed so a multi-source recovery (e.g. Indeed then LinkedIn)
                    // keeps every resolve; re-resolving a source replaces its
                    // entry. Reset when a fresh search stamps so it's scoped to it.
@@ -1060,9 +1062,18 @@ Extract everything you can find. Be thorough.`, { signal, task: 'resume-parse', 
     for (const fp of paths) {
       if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
       const name = path.basename(fp);
+      // Broadened per docs/resume-achievement-mining-design.md §7: this corpus is not
+      // just résumés — a dropped balance sheet, dashboard export, or performance review
+      // is where a derived accomplishment's raw endpoints live (the CFO's debt figures
+      // in the motivating example never appear as prose anywhere). A transcriber scoped
+      // to "résumé material" drops exactly the numbers the achievement miner needs to
+      // join, and it fails silently — the file still "transcribes fine," it just has
+      // nothing left to derive from. So the content list below is deliberately not
+      // résumé-shaped, and figures/units/table structure are called out explicitly
+      // rather than folded into "every fact."
       const extracted = await callLLMDocument(
         fp,
-        'Transcribe this document into a faithful, complete plain-text representation of its career-relevant content (roles, employers, dates, bullet points, projects, skills, education, certifications, contact info). Preserve every fact, number, and the original structure using simple line breaks and "- " bullets. Do not summarize away detail and do not invent anything.',
+        'Transcribe this document into a faithful, complete plain-text representation of its career-relevant content — roles, employers, dates, bullet points, projects, skills, education, certifications, contact info, AND (just as important) financial statements, metrics/dashboard exports, performance reviews, and project retrospectives. Preserve every figure, date, unit, and table structure exactly as given, even when the content is not obviously "résumé material" — a balance sheet line item or a KPI table row is career data too. Preserve every fact and the original structure using simple line breaks, "- " bullets, and plain-text tables (rows/columns kept intact) where the source has them. Do not summarize away detail and do not invent anything.',
         { signal, task: 'career-file-extract', responseSchema: CAREER_FILE_EXTRACT_SCHEMA }
       );
       sections.push(`===== FILE: ${name} =====\n${String(extracted.text || '').trim()}`);
@@ -1182,6 +1193,17 @@ Be creative with suggestedRoleQueries — think about what career directions the
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
   handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, profileLocations, preferredLocation, rawLocation, resume = false }, signal) => {
+    // Resolve Claude family tokens ONCE at the start of this hub run (design
+    // doc §8.3 guard 2 / modelResolver.js's own doc-comment) — jobs.js was the
+    // one place a hub run begins that never called this, relying entirely on
+    // main.js's fire-and-forget boot prime (first-ever-launch / >24h-stale
+    // race) or jobApplication.js's own call (a DIFFERENT logical run). Without
+    // it, score-jobs' sequential scoringBatches loop below can have the
+    // resolved model id flip BETWEEN batches — silently missing the shared
+    // cachedPrefix and re-billing it at full rate. Never throws (falls back to
+    // MODEL_FLOOR) and no-ops when already resolved within TTL, so this is
+    // cheap to call unconditionally.
+    await primeClaudeModels({ signal });
     if (ACTIVE_SOURCE_IDS.length === 0) {
       return { success: false, error: 'No active job sources configured for job search test mode.' };
     }
@@ -1725,6 +1747,22 @@ Be creative with suggestedRoleQueries — think about what career directions the
       logger.info(`[Jobs][${nodeId}] History: skipped (no canvas path)`);
     }
 
+    // Drop anything the user has explicitly marked applied — a SEPARATE,
+    // never-expiring store from the 60-day history above (design doc §6.2/§6.3).
+    // Runs after the history append (not before): an applied job was never
+    // actually "shown" this run, so it shouldn't be recorded into the seen-CSV
+    // either — it's already permanently suppressed by the applied store.
+    const { jobs: appliedFiltered, hiddenApplied, error: appliedStoreError } = filterOutApplied(kept);
+    kept = appliedFiltered;
+    if (appliedStoreError) {
+      // Surfaced non-blocking (severity 'warn') in the same Scrape Warnings
+      // panel every other source warning renders in — a corrupt applied-jobs
+      // store must never fail the whole search, but it must not be silent
+      // either (see filterOutApplied's own doc-comment for the failure this
+      // prevents).
+      scrapeWarnings.push({ sourceId: 'applied-store', url: null, ...appliedStoreErrorWarning(appliedStoreError) });
+    }
+
     // Enrich Dice jobs with full descriptions — runs after all filtering so we
     // only fetch detail pages for jobs that will actually be scored/shown.
     const diceKept = kept.filter(j => j.source === 'dice');
@@ -1965,7 +2003,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     tagJobLanguages(kept);
 
     logger.info(
-      `[Jobs] ${kept.length} new jobs (raw=${allJobs.length}, dedup=${deduped.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped})`
+      `[Jobs] ${kept.length} new jobs (raw=${allJobs.length}, dedup=${deduped.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, hiddenApplied=${hiddenApplied})`
     );
     // Per-source raw gathered counts (+ strongest warning), for active sources so a
     // 0 is visible — answers "was this source silently not gathered?" the way the
@@ -2032,6 +2070,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       ageBySource, // per-source: { dropped, kept, oldestKeptDays, oldestKeptRaw, unparseableKept }
       diceDateBound,
       historyDropped,
+      hiddenApplied,
       kept: kept.length,
       bySource,
       location: locationTelemetry,
@@ -2046,7 +2085,10 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // gathered jobs are recovered from staging) rather than re-scraping.
     await setJobRunStage(canvasFilePath, 'gathered', Date.now());
 
-    return { jobs: kept, rawCount: allJobs.length, sourceResults, scrapeWarnings };
+    // hiddenApplied travels on the top-level result (not just jobsTelemetry.search)
+    // because the renderer's funnel line reads the search-jobs return value directly
+    // — see JobSearchNode.jsx's use of searchResult.rawCount for the same reason.
+    return { jobs: kept, rawCount: allJobs.length, hiddenApplied, sourceResults, scrapeWarnings };
   });
 
   // ── Resume-from-incomplete-run IPC ──────────────────────────────────────────
@@ -2194,6 +2236,14 @@ Be creative with suggestedRoleQueries — think about what career directions the
       const result = dedupAgainstHistory(ageFiltered, history);
       kept = result.kept;
     }
+    // Applied jobs never resurface via a single-source (re)search either —
+    // same permanent store as the search-jobs gather path (design §6.2/§6.3).
+    const { jobs: appliedFiltered, hiddenApplied, error: appliedStoreError } = filterOutApplied(kept);
+    kept = appliedFiltered;
+    // Only fill `warning` when nothing more specific already claimed it — a
+    // real scrape-level warning (block/info) is more actionable than "the
+    // applied store is corrupt" and must not be clobbered by it.
+    if (appliedStoreError && !warning) warning = appliedStoreErrorWarning(appliedStoreError);
 
     let status = 'done';
     if (warning && warning.severity === 'block') status = 'error';
@@ -2214,6 +2264,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     return {
       success: true,
       jobs: kept,
+      hiddenApplied,
       warning,
     };
   });
@@ -2230,6 +2281,14 @@ Be creative with suggestedRoleQueries — think about what career directions the
 
   // ── Score Jobs Against Resume ─────────────────────────────────────────────
   handleSafe('score-jobs', async (event, { jobs, profile, nodeId, targetRole, snapshotContext, batchScoring } = {}, signal) => {
+    // Same guard-2 concern as search-jobs above, called again here on purpose:
+    // score-jobs can also be invoked directly (a re-score without a fresh
+    // search — see JobSearchNode.jsx's other scoreJobs call sites), so it
+    // can't assume search-jobs already primed this run. Cheap no-op when
+    // already resolved within TTL — this is exactly the sequential
+    // scoringBatches loop below whose shared cachedPrefix a mid-run flip
+    // would silently break.
+    await primeClaudeModels({ signal });
     const { role, gathered, toScore, cappedForBudget, scoringBatches, slimBatch, cachedPrefix, snapshot } =
       buildJobAnalysisSnapshot({ jobs, profile, nodeId, targetRole, snapshotContext });
     logger.info(`[Jobs][${nodeId}] Scoring`, gathered.length, 'jobs', role ? `(target: ${role})` : '');
@@ -2882,10 +2941,15 @@ RULES:
       items = deduped.kept;
       historyDropped = deduped.removed;
     }
+    // Same permanent applied-store filter the headless search path applies —
+    // a re-solved captcha must not resurrect a job the user already applied to.
+    const { jobs: appliedFiltered, hiddenApplied, error: appliedStoreError } = filterOutApplied(items);
+    items = appliedFiltered;
+    const appliedStoreWarning = appliedStoreError ? appliedStoreErrorWarning(appliedStoreError) : null;
 
     logger.info(
       `[Jobs][${nodeId}] Resolve window closed for ${sourceId}; auto-detected=${result.resolved}; ` +
-      `inline-extracted=${extracted.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, new=${items.length}`
+      `inline-extracted=${extracted.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, hiddenApplied=${hiddenApplied}, new=${items.length}`
     );
     // Keyed by sourceId so a multi-source recovery keeps every resolve;
     // re-resolving the same source replaces its entry (latest wins).
@@ -2894,6 +2958,7 @@ RULES:
       extracted: extracted.length,
       ageDropped,
       historyDropped,
+      hiddenApplied,
       kept: items.length,
       // Why a 0-extract happened: how the window closed, what the extractor saw,
       // and the page state — so "inline-extracted 0 → new 0" stops being an
@@ -2907,7 +2972,11 @@ RULES:
     if (jobsTelemetry.sourceBlockedUrls) jobsTelemetry.sourceBlockedUrls[sourceId] = remaining;
     const nextBlockedUrl = remaining[0] || null;
     if (nextBlockedUrl) logger.info(`[Jobs][${nodeId}] Next blocked URL for ${sourceId}: ${nextBlockedUrl}`);
-    return { resolved: !!result.resolved, items, nextBlockedUrl };
+    // appliedStoreWarning only fires when the store itself was unreadable;
+    // JobSourceCardNode's onResolved handler already reads `warning` off this
+    // return to re-derive the hub's ScrapeWarningsPanel (see its own comment),
+    // so this reuses that exact channel instead of adding a new one.
+    return { resolved: !!result.resolved, items, hiddenApplied, warning: appliedStoreWarning, nextBlockedUrl };
   });
 
   // Resume an Indeed scrape that was interrupted by a login-wall mid-pagination.
@@ -2937,9 +3006,16 @@ RULES:
       items = deduped.kept;
       historyDropped = deduped.removed;
     }
-    logger.info(`[Jobs][${nodeId}] Indeed resume complete: extracted=${extracted.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, new=${items.length}`);
+    // Same permanent applied-store filter the headless search path applies —
+    // a resumed Indeed walk must not resurrect a job the user already applied to.
+    const { jobs: appliedFiltered, hiddenApplied, error: appliedStoreError } = filterOutApplied(items);
+    items = appliedFiltered;
+    logger.info(`[Jobs][${nodeId}] Indeed resume complete: extracted=${extracted.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, hiddenApplied=${hiddenApplied}, new=${items.length}`);
     const resolved = items.length > 0 || !result?.warning;
-    return { resolved, items };
+    // Prefer a real scrape-level warning (result.warning) when both are
+    // present — it's more actionable than "the applied store is corrupt".
+    const warning = result?.warning || (appliedStoreError ? appliedStoreErrorWarning(appliedStoreError) : null);
+    return { resolved, items, hiddenApplied, warning };
   });
 
   // Renderer calls this after it merges captcha-resolve items into pendingJobs.

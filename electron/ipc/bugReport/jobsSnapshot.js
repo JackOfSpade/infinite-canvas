@@ -6,9 +6,11 @@ import { getJobsTelemetry } from '../jobs.js';
 import { getApplicationTelemetry } from '../jobApplication.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { getJobsSettings } from '../settings.js';
+import { modelResolutionSnapshot } from '../modelResolver.js';
+import { appliedJobsSnapshot } from '../appliedJobs.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_RESULT_CAP, JOB_PER_PAGE_CAP, JOB_MAX_PAGES, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from '../resultCaps.js';
-import { ago, modelTag, pipelineScope } from './helpers.js';
+import { ago, modelTag, pipelineScope, formatAge } from './helpers.js';
 import { looksLikeMoney, hasMojibake, mojibakeExcerpt } from './jobQualityChecks.js';
 
 export function buildJobsConfigSnapshot() {
@@ -69,7 +71,18 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   const hasBrowserScrape = !!browserScrape?.active || (browserScrape?.events || []).length > 0;
   let appGen = null;
   try { appGen = getApplicationTelemetry(); } catch { /* generator may not be loaded */ }
-  if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing && !hasBrowserScrape && !appGen)) return '';
+  // Model resolution (§8) and the applied-jobs store (§6) are both app-global —
+  // neither is scoped to a job run, so they can carry signal even on a report
+  // with no fresh search this session (e.g. "why did this posting never come
+  // back" or "which model actually served the last mining pass"). Pulled here
+  // (not gated behind appGen) so they still surface on that kind of report.
+  let modelRes = null;
+  try { modelRes = modelResolutionSnapshot(); } catch { /* resolver may not be loaded */ }
+  let appliedSnap = null;
+  try { appliedSnap = appliedJobsSnapshot(); } catch { /* store may not be loaded */ }
+  const hasModelRes = !!(modelRes && (modelRes.fetchedAt > 0 || (modelRes.skipped || []).length > 0));
+  const hasAppliedJobs = !!(appliedSnap && appliedSnap.count > 0);
+  if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing && !hasBrowserScrape && !appGen && !hasModelRes && !hasAppliedJobs)) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId);
   if (scope.foreign) return `\n## Job Search Pipeline\n${scope.note}`;
@@ -1028,6 +1041,28 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const escScan = (s) => /\\[a-z]/.test(String(s ?? '')) ? ' ⚠️ literal backslash-escape present' : '';
     lines.push(`\n### Application Generation (last)${ago(a.ts)}`);
     lines.push(`- Job: ${a.jobTitle || '(untitled)'} @ ${a.company || '(no company)'}${a.nodeId ? ` · node ${a.nodeId}` : ''}`);
+    // Achievement ledger (résumé design §3.6) — reused-vs-mined tells apart the
+    // amortized-cost case from the pay-once-per-hub case; the stats line is the
+    // only place a silent refute-drop or evidence-miss is visible at all.
+    const ach = a.achievements || {};
+    const achSourceLabel = {
+      reused: 'reused from hub cache', mined: 'freshly mined this generation',
+      unavailable: 'unavailable — careerData-only fallback', none: 'not passed by renderer',
+    }[ach.source] || ach.source || 'unknown';
+    lines.push(`- Achievement ledger: ${achSourceLabel} · kept ${ach.kept ?? 0} item(s)${ach.minedBy ? ` · miner \`${ach.minedBy.miner || '?'}\` refuter \`${ach.minedBy.refuter || '?'}\`` : ''}`);
+    if (ach.stats) {
+      const s = ach.stats;
+      lines.push(`  - mined ${s.mined ?? 0} → dropped-by-refute ${s.droppedByRefute ?? 0}, demoted-by-check ${s.demotedByCheck ?? 0}, evidence-misses ${s.evidenceMisses ?? 0}`);
+      // claim-figure-leaks (§3.2 telemetry, achievementLedger.js) never demotes
+      // confidence and touches no other counter above — without its own line
+      // a miner that leaked a self-computed figure into `claim` text would be
+      // invisible in every report despite the check running and catching it.
+      // date/direction misses surfaced alongside it for the same reason: both
+      // are advisory-only (never gate, per computeLedger's doc-comment) so
+      // neither shows up anywhere else either.
+      lines.push(`  - claim-figure-leaks ${s.claimFigureLeaks ?? 0}, date-misses ${s.dateMisses ?? 0}, direction-misses ${s.directionMisses ?? 0}`);
+    }
+    if (ach.skipped) lines.push(`  - ⚠️ ${ach.skipped}`);
     lines.push(`- Résumé markup: ${a.resumeHtmlLen || 0} chars${escScan(a.resumeHtmlSample)}`);
     lines.push('- Cover-letter fields (JSON.stringify — whitespace/escapes shown literally):');
     lines.push(`  - salutation: ${JSON.stringify(cl.salutation || '')}`);
@@ -1043,6 +1078,31 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(a.resumeHtmlSample);
       lines.push('```');
     }
+  }
+
+  // ── Model resolution (§8) ───────────────────────────────────────────────────
+  // Kept to a line or two on purpose (clipboard-cap discipline — see
+  // clipboardCap.js's logs+events tail floor; this section sits ahead of that
+  // floor so it must stay cheap). The skip list is the whole point: a model
+  // that silently failed the capability gate and fell to next-newest looks
+  // IDENTICAL to "no new generation happened" unless it's named here.
+  if (modelRes) {
+    const r = modelRes.resolved || {};
+    const age = modelRes.fetchedAt ? formatAge(modelRes.fetchedAt) : 'never resolved this run — pinned floor in use';
+    lines.push(`\n### Model Resolution (Claude family tokens)`);
+    lines.push(`- OPUS \`${r.OPUS || '?'}\` · SONNET \`${r.SONNET || '?'}\` · HAIKU \`${r.HAIKU || '?'}\` · source: ${modelRes.source || 'floor'} · resolved ${age} · epoch ${modelRes.epoch ?? 0}`);
+    if (Array.isArray(modelRes.skipped) && modelRes.skipped.length > 0) {
+      lines.push(`  - ⚠️ Skipped: ${modelRes.skipped.map(s => `\`${s.id}\` (${s.family}: ${s.reason})`).join('; ')}`);
+    }
+  }
+
+  // ── Applied jobs store (§6) ─────────────────────────────────────────────────
+  // Global and permanent — the only way to answer "why did this job never come
+  // back in search" (it's silently filtered at every gather site once marked).
+  if (appliedSnap) {
+    const last = appliedSnap.lastAppliedAt ? `${appliedSnap.lastAppliedAt} (${formatAge(Date.parse(appliedSnap.lastAppliedAt))})` : 'never';
+    lines.push(`\n### Applied Jobs Store`);
+    lines.push(`- ${appliedSnap.count} job(s) marked applied · store: \`${appliedSnap.path || '?'}\` · last applied: ${last}`);
   }
 
   return `

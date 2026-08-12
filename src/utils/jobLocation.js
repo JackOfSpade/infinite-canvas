@@ -179,7 +179,11 @@ export function pickGlassdoorLocation(results, canonical) {
 // often than they use the 2-letter code ("Golden, Colorado, USA") — so we resolve
 // the token to its code and match BOTH spellings, else an in-state suburb reads as
 // out-of-area. Keys are codes; values keep their spaces for the word-boundary regex.
-const US_STATES = {
+// Exported so src/utils/locationIdentity.js can fold state/province names <->
+// codes for applied-job identity matching without duplicating this table —
+// see that module for why a second copy would be a correctness hazard (two
+// tables drifting apart silently breaks the "same state" match).
+export const US_STATES = {
   al: 'alabama', ak: 'alaska', az: 'arizona', ar: 'arkansas', ca: 'california',
   co: 'colorado', ct: 'connecticut', de: 'delaware', fl: 'florida', ga: 'georgia',
   hi: 'hawaii', id: 'idaho', il: 'illinois', in: 'indiana', ia: 'iowa',
@@ -196,7 +200,7 @@ const US_STATES = {
 // Canadian provinces/territories — same code↔name shape as US_STATES, so a search
 // for "Whitby, Ontario" counts a same-province job that lists only the code
 // ("Toronto, ON") as in-area instead of off-target.
-const CA_PROVINCES = {
+export const CA_PROVINCES = {
   ab: 'alberta', bc: 'british columbia', mb: 'manitoba', nb: 'new brunswick',
   nl: 'newfoundland and labrador', ns: 'nova scotia', nt: 'northwest territories',
   nu: 'nunavut', on: 'ontario', pe: 'prince edward island', qc: 'quebec',

@@ -141,6 +141,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const scrapeWarningsRef = useRef(data.scrapeWarnings);
   const hubStateRef = useRef(data.hubState);
   const pendingJobsRef = useRef(data.pendingJobs);
+  // Running total of applied-jobs suppressed for this hub's current run.
+  // Captured once at initial search completion (search-jobs/resume-job-search),
+  // then ADDED to by each job-source-resolved event (resolve/resume-job-source
+  // also filter through filterOutApplied — see electron/ipc/jobs.js) so a
+  // Solve/Continue mid-run doesn't silently drop its own hiddenApplied count on
+  // the floor. Read synchronously (like pendingJobsRef) by resumeScoring, which
+  // can fire before the next render lands.
+  const hiddenAppliedRef = useRef(data.hiddenApplied || 0);
   // Sources resolved via paste/captcha WHILE the search was running (cleared at
   // each run start). The backend doesn't know about these; we use this to skip
   // re-blocking them when the search result comes back with stale warnings.
@@ -200,7 +208,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     scrapeWarningsRef.current = data.scrapeWarnings;
     hubStateRef.current = data.hubState;
     pendingJobsRef.current = data.pendingJobs;
-  }, [data.scrapeWarnings, data.hubState, data.pendingJobs]);
+    hiddenAppliedRef.current = data.hiddenApplied || 0;
+  }, [data.scrapeWarnings, data.hubState, data.pendingJobs, data.hiddenApplied]);
 
   // Per-source progress state populated by backend `job-source-progress`
   // events. Reset via `resetSourceProgress` before each fresh run so stale
@@ -737,7 +746,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // needed here.)
   const finishScoringAndSpawn = useCallback(async ({
     scoredJobs, gatheredCount, scrapedCount, scrapeWarnings = [],
-    testMode = false, cancelled = () => false,
+    testMode = false, hiddenApplied = 0, cancelled = () => false,
   }) => {
     if (cancelled()) return;
     const displayed = Array.isArray(scoredJobs) ? scoredJobs : [];
@@ -765,6 +774,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       scrapedCount: scrapedCount ?? displayed.length,
       gatheredCount: gatheredCount ?? scrapedCount ?? displayed.length,
       testMode: !!testMode,
+      hiddenApplied,
       finalSourceCounts,
       scoreRangeMin,
       scoreRangeMax,
@@ -777,7 +787,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [id, updateGlobal, canvasFilePath]);
 
   const runScoringAndSpawn = useCallback(async ({
-    profile, jobs, gatheredCount, scrapeWarnings, activeTargetRole, originalPos, cancelled,
+    profile, jobs, gatheredCount, scrapeWarnings, activeTargetRole, originalPos, hiddenApplied = 0, cancelled,
   }) => {
     const currentId = id;
 
@@ -816,6 +826,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           startedAt: Date.now(),
           count: scoreResult.batchCount,
           selectedForScoring: scoreResult.selectedForScoring,
+          // Carried through the async park so pollBatchOnce can still surface
+          // it once results land — hiddenApplied is known at search time, long
+          // before the batch resolves, and would otherwise be lost.
+          hiddenApplied,
         },
       });
       return;
@@ -830,6 +844,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       activeTargetRole,
       originalPos,
       testMode: scoreResult.testMode,
+      hiddenApplied,
       cancelled,
     });
   }, [id, updateGlobal, canvasFilePath, finishScoringAndSpawn, data.batchScoring]);
@@ -881,13 +896,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           activeTargetRole: (res.targetRole || data.targetRole || '').trim(),
           originalPos: getNode(id)?.position || { x: 0, y: 0 },
           testMode: false,
+          // Carried on pendingBatch since search time (runScoringAndSpawn) —
+          // the batch result itself has no notion of applied-jobs filtering.
+          hiddenApplied: data.pendingBatch?.hiddenApplied || 0,
           cancelled,
         });
       } finally {
         batchCompletingRef.current = false;
       }
     }
-  }, [id, canvasFilePath, updateGlobal, finishScoringAndSpawn, getNode, data.resumeProfile, data.scrapeWarnings, data.targetRole, epoch]);
+  }, [id, canvasFilePath, updateGlobal, finishScoringAndSpawn, getNode, data.resumeProfile, data.scrapeWarnings, data.targetRole, data.pendingBatch, epoch]);
 
   useEffect(() => {
     if (hubState !== 'scoring-batch' || !data.pendingBatch?.batchId) return undefined;
@@ -921,7 +939,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
    */
   const handlePostSearchResult = useCallback(({
     currentId, foundJobs, warnings, blockingWarnings, profile, activeTargetRole, canvasFilePath: cfp,
+    hiddenApplied = 0,
   }) => {
+    // Persisted here (not just at the final 'done' write in finishScoringAndSpawn)
+    // because a run that pauses on a blocking warning goes through THIS branch
+    // instead — without writing it here, a search that hid N applied jobs but
+    // also hit a captcha/rate-limit would show 0 hidden until Solve is clicked,
+    // and resumeScoring's own hidden-applied reads (hiddenAppliedRef, synced
+    // from data.hiddenApplied) would start from a false 0 instead of N.
+    hiddenAppliedRef.current = hiddenApplied;
     if (blockingWarnings.length > 0 && !SKIP_AI_FOR_TESTING) {
       updateGlobal(currentId, {
         hubState: 'sources-ready',
@@ -929,6 +955,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         pendingTargetRole: activeTargetRole,
         jobCount: foundJobs.length,
         scrapeWarnings: warnings,
+        hiddenApplied,
       });
       // Guarantee a Solve/Skip card for every blocked source — a card can be lost
       // during the long run, stranding the user with "blocked but nothing to resolve".
@@ -959,6 +986,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         scoreRangeMax: 100,
         scoreThreshold: 0,
         scrapeWarnings: warnings,
+        hiddenApplied,
       });
       window.electronAPI?.completeJobRun?.({ canvasFilePath: cfp }).catch(() => {});
       return false;
@@ -1196,6 +1224,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // same posting is the pre-enrichment one.
       let foundJobs = (searchResult.success && Array.isArray(searchResult.jobs)) ? searchResult.jobs : [];
       const rawGatheredCount = searchResult.rawCount ?? foundJobs.length;
+      const hiddenApplied = searchResult.hiddenApplied || 0;
       if (alreadyResolved.size > 0) {
         const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
         const resolvedItems = prevPending.filter(j => alreadyResolved.has(j?.source));
@@ -1209,7 +1238,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // see handlePostSearchResult). Only proceed to score when neither fires.
       const shouldScore = handlePostSearchResult({
         currentId, foundJobs, warnings: effectiveWarnings, blockingWarnings,
-        profile, activeTargetRole, canvasFilePath,
+        profile, activeTargetRole, canvasFilePath, hiddenApplied,
       });
       if (!shouldScore) return;
 
@@ -1241,6 +1270,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           scoreRangeMax: 100,
           scoreThreshold: 0,
           scrapeWarnings: effectiveWarnings,
+          hiddenApplied,
           testModeNote: `[Test mode] ${foundJobs.length} jobs collected — AI scoring disabled`,
         });
         window.electronAPI?.completeJobRun?.({ canvasFilePath }).catch(() => {});
@@ -1254,6 +1284,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         scrapeWarnings: effectiveWarnings,
         activeTargetRole,
         originalPos,
+        hiddenApplied,
         cancelled,
       });
     } catch (error) {
@@ -1332,6 +1363,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0,
         pendingJobs: null,
         scrapeWarnings: Array.isArray(scrapeWarningsRef.current) ? scrapeWarningsRef.current : [],
+        // Carry forward whatever was hidden during the original search/resolves
+        // even though nothing survived to score — a run that hid every result
+        // as already-applied should say so, not read as "0 jobs found" with no
+        // explanation (design §6.2: filtering must never be silent).
+        hiddenApplied: hiddenAppliedRef.current || 0,
       });
       return;
     }
@@ -1368,6 +1404,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         scrapeWarnings: Array.isArray(scrapeWarningsRef.current) ? scrapeWarningsRef.current : [],
         activeTargetRole: data.pendingTargetRole || data.targetRole || '',
         originalPos,
+        // Without this, a run that paused in 'sources-ready' (hiddenApplied
+        // written by handlePostSearchResult) or picked up more via a mid-pause
+        // Solve (added by the job-source-resolved handler below) would report
+        // hiddenApplied:0 at the final 'done' write — runScoringAndSpawn
+        // defaults it to 0 when omitted, which this call was doing until now.
+        hiddenApplied: hiddenAppliedRef.current || 0,
         cancelled,
       });
     } catch (error) {
@@ -1472,15 +1514,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const foundJobs = (searchResult?.success && Array.isArray(searchResult.jobs)) ? searchResult.jobs : [];
       const warnings = Array.isArray(searchResult?.scrapeWarnings) ? searchResult.scrapeWarnings : [];
       const blockingWarnings = warnings.filter(isGatingWarning);
+      const hiddenApplied = searchResult?.hiddenApplied || 0;
       // Same post-search disposition as runPipeline (block-gate pause / empty terminal).
       const shouldScore = handlePostSearchResult({
         currentId, foundJobs, warnings, blockingWarnings,
-        profile, activeTargetRole, canvasFilePath: cfp,
+        profile, activeTargetRole, canvasFilePath: cfp, hiddenApplied,
       });
       if (!shouldScore) return;
       await runScoringAndSpawn({
         profile, jobs: foundJobs, gatheredCount: searchResult.rawCount ?? foundJobs.length,
-        scrapeWarnings: warnings, activeTargetRole, originalPos, cancelled,
+        scrapeWarnings: warnings, activeTargetRole, originalPos,
+        hiddenApplied, cancelled,
       });
     } catch (error) {
       if (cancelled() || isNodeDeletedAbort(error)) return;
@@ -1573,7 +1617,22 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         remaining.push({ sourceId: resolvedSourceId, ...resolveWarning });
       }
       scrapeWarningsRef.current = remaining;
-      updateGlobal(id, { pendingJobs: mergedPending, jobCount: mergedPending.length, scrapeWarnings: remaining });
+      // resolve-job-source/resume-job-source run the SAME filterOutApplied pass
+      // as the initial search (electron/ipc/jobs.js) and return their own
+      // hiddenApplied count on the result — JobSourceCardNode forwards it here
+      // as e.detail.hiddenApplied. Without adding it in, a captcha Solve or an
+      // Indeed pagination resume that itself suppressed already-applied jobs
+      // would leave the hub's hiddenApplied stuck at whatever the initial
+      // (pre-Solve) search saw, silently undercounting the funnel.
+      const resolvedHiddenApplied = Number(e.detail?.hiddenApplied) || 0;
+      const nextHiddenApplied = (hiddenAppliedRef.current || 0) + resolvedHiddenApplied;
+      hiddenAppliedRef.current = nextHiddenApplied;
+      updateGlobal(id, {
+        pendingJobs: mergedPending,
+        jobCount: mergedPending.length,
+        scrapeWarnings: remaining,
+        hiddenApplied: nextHiddenApplied,
+      });
       // Auto-resume on no remaining GATING warnings (info / non-LinkedIn throttle stays).
       const remainingBlocks = remaining.filter(isGatingWarning);
       // Report the actual merge outcome back to the main process so the bug
@@ -2230,6 +2289,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               targetRole={targetRole}
               setTargetRole={setTargetRole}
               scrapeWarnings={data.scrapeWarnings || []}
+              hiddenApplied={data.hiddenApplied || 0}
             />
             {savedAnalysisPanel && (
               <div className="w-full px-3 pb-3" onPointerDown={(e) => e.stopPropagation()}>

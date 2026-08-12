@@ -66,6 +66,27 @@ import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLe
 import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, parseAptDecoComps, extractAlgoliaHits } from '../electron/extractors/apiExtractors.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
+import { filterOutApplied, markJobApplied } from '../electron/ipc/appliedJobs.js';
+import {
+  LEDGER_CAP,
+  MINING_TARGET,
+  splitCareerDataByFile,
+  normalizeQuoteText,
+  computeLedger,
+  applyRefuteVerdicts,
+  ledgerById,
+  derivationTooltip,
+  serializeLedgerForPrompt,
+} from '../src/utils/achievementLedger.js';
+import {
+  canonicalizeLocation,
+  canonicalizeTitle,
+  canonicalizeCompany,
+  canonicalizeJobUrl,
+  appliedKeysFor,
+  appliedRecordMatches,
+} from '../src/utils/locationIdentity.js';
+import { pickFamilyModel, CLAUDE_FAMILY } from '../electron/ipc/modelResolver.js';
 import {
   fingerprint,
   migrateGroupNodes,
@@ -232,7 +253,8 @@ import { WORD_DOC_EXT, isWordDoc } from '../electron/ipc/docUtils.js';
 import { CODE_EXT_RE, PRODUCT_IMAGE_EXT_RE } from '../src/utils/fileExtensions.js';
 import { cancelNodeTasksRecursively } from '../src/utils/canvasInteractions.js';
 import { getKnownTaskIds, modelForTask } from '../electron/ipc/llm.js';
-import { CLAUDE_MODELS_IN_USE } from '../electron/ipc/claude.js';
+import { claudeModelsInUse } from '../electron/ipc/claude.js';
+import { MODEL_FLOOR } from '../electron/ipc/claudeModels.js';
 import { deriveTimeoutBudget } from '../electron/ipc/scrapeBudget.js';
 import { FINGERPRINT_PROFILES, getSessionProfile, getRandomUA } from '../electron/ipc/browser/antiDetectProfiles.js';
 import { isWithinDirectory, isExistingFile, isSensitivePath } from '../electron/utils/pathSafety.js';
@@ -824,14 +846,16 @@ const tests = [
   {
     name: 'tokenWindow: per-model context windows + max output (verified registry)',
     run: () => {
-      // Verified against provider docs (May 2026): Sonnet 4.6 & Opus 4.8 are 1M
-      // natively; Haiku 4.5 is 200K; every compatible Gemini is 1,048,576 / 65,536.
-      assert(contextWindowForModel('claude-sonnet-4-6') === 1000000, 'Sonnet 4.6 window should be 1M');
-      assert(contextWindowForModel('claude-opus-4-8') === 1000000, 'Opus 4.8 window should be 1M');
-      assert(contextWindowForModel('claude-haiku-4-5-20251001') === 200000, 'Haiku 4.5 window should be 200K');
+      // Verified against provider docs (Aug 2026): the MODEL_FLOOR generation —
+      // Opus 5 & Sonnet 5 — are 1M natively; Haiku 4.5 is 200K; every compatible
+      // Gemini is 1,048,576 / 65,536. Sourced from MODEL_FLOOR (claudeModels.js)
+      // rather than a hardcoded literal so a floor bump updates this test for free.
+      assert(contextWindowForModel(MODEL_FLOOR.SONNET) === 1000000, 'Sonnet floor window should be 1M');
+      assert(contextWindowForModel(MODEL_FLOOR.OPUS) === 1000000, 'Opus floor window should be 1M');
+      assert(contextWindowForModel(MODEL_FLOOR.HAIKU) === 200000, 'Haiku floor window should be 200K');
       assert(contextWindowForModel('gemini-3.5-flash') === 1048576, 'Gemini 3.5 flash window should be 1,048,576');
       assert(contextWindowForModel('gemini-3-flash-preview') === 1048576, 'Gemini 3 Flash Preview window should be 1,048,576');
-      assert(maxOutputForModel('claude-opus-4-8') === 128000, 'Opus 4.8 max output should be 128K');
+      assert(maxOutputForModel(MODEL_FLOOR.OPUS) === 128000, 'Opus floor max output should be 128K');
       assert(maxOutputForModel('gemini-2.5-flash') === 65536, 'Gemini 2.5 Flash max output should be 65,536');
       assert(maxOutputForModel('gemini-2.5-flash-lite') === 65536, 'Gemini flash-lite max output should be 65,536');
       // Family fallbacks: unknown gemini → 1M; unknown claude → conservative 200K.
@@ -1003,26 +1027,42 @@ const tests = [
 
       // Cover letter: a recipient with a LITERAL backslash-n splits into rows
       // (recipient-name + recipient-line), and no verbatim "\n" leaks through.
+      // buildCoverLetterDocument takes { letter, variantAttrs, docId } — fields
+      // nest under `letter`, they are not top-level (signature changed under
+      // the HTML-first rewrite, design doc §5.2).
       const cl = buildCoverLetterDocument({
-        name: 'Maya Chen',
-        recipient: 'Hiring Team\\nMonster Brewing Company',
-        salutation: 'Dear Monster Team,',
-        paragraphs: ['I have led growth\\nin brand marketing for 6 years.', 'Second\\tindented bit.'],
-        closing: 'Sincerely,',
+        letter: {
+          name: 'Maya Chen',
+          recipient: 'Hiring Team\\nMonster Brewing Company',
+          salutation: 'Dear Monster Team,',
+          paragraphs: ['I have led growth\\nin brand marketing for 6 years.', 'Second\\tindented bit.'],
+          closing: 'Sincerely,',
+        },
       });
-      assert(!/\\n|\\t/.test(cl), 'cover letter must contain NO literal backslash-n/t');
-      assert(cl.includes('<span class="recipient-name">Hiring Team</span>'), 'recipient first line → recipient-name');
-      assert(cl.includes('<span class="recipient-line">Monster Brewing Company</span>'), 'recipient second line → recipient-line');
+      // Scoped past the inlined <style> AND the injected chrome's own <script>
+      // — that script legitimately contains a real "\n" as JS SOURCE (the
+      // download-a-copy button builds a Blob with '<!doctype html>\n' + …),
+      // which is correct JS, not a leaked model escape. Only the rendered
+      // document content (past </style>, minus the toolbar script) must be
+      // free of a literal two-character backslash-n/t.
+      const clContent = cl.split('</style>').pop().replace(/<script[\s\S]*?<\/script>/g, '');
+      assert(!/\\n|\\t/.test(clContent), 'cover letter must contain NO literal backslash-n/t');
+      assert(clContent.includes('<span class="recipient-name">Hiring Team</span>'), 'recipient first line → recipient-name');
+      assert(clContent.includes('<span class="recipient-line">Monster Brewing Company</span>'), 'recipient second line → recipient-line');
       // An in-paragraph newline must COLLAPSE (flowing prose), NOT become a hard
       // <br> — a stray model newline mid-sentence (around a title's en-dash) would
       // otherwise render as a bad break. Both halves still present, no <br>.
-      assert(!/<br\s*\/?>/.test(cl), 'no hard <br> break inserted inside a paragraph');
-      assert(/led growth\s+in brand marketing/.test(cl), 'in-paragraph newline collapses to whitespace (prose flows)');
+      assert(!/<br\s*\/?>/.test(clContent), 'no hard <br> break inserted inside a paragraph');
+      assert(/led growth\s+in brand marketing/.test(clContent), 'in-paragraph newline collapses to whitespace (prose flows)');
 
       // Résumé: literal escapes in the raw model HTML decode to whitespace.
-      const rz = buildResumeDocument('<main class="page"><h1 class="name">Maya\\nChen</h1><p>Led\\tgrowth</p></main>');
-      assert(!/\\n|\\t/.test(rz), 'résumé must contain NO literal backslash-n/t');
-      assert(/Maya\s+Chen/.test(rz), 'résumé literal \\n became collapsing whitespace');
+      // buildResumeDocument now takes { resumeMainHtml, variantAttrs, ledger,
+      // docId } — no longer a bare positional string (design doc §4.3 needs
+      // somewhere to pass the ledger through for receipt resolution).
+      const rz = buildResumeDocument({ resumeMainHtml: '<main class="page"><h1 class="name">Maya\\nChen</h1><p>Led\\tgrowth</p></main>' });
+      const rzContent = rz.split('</style>').pop().replace(/<script[\s\S]*?<\/script>/g, '');
+      assert(!/\\n|\\t/.test(rzContent), 'résumé must contain NO literal backslash-n/t');
+      assert(/Maya\s+Chen/.test(rzContent), 'résumé literal \\n became collapsing whitespace');
       return { ok: true };
     },
   },
@@ -3210,16 +3250,32 @@ const tests = [
   {
     name: 'Application: résumé document scaffold',
     run: () => {
-      const doc = buildResumeDocument('<main class="page" data-print="ink-only"><h1 class="name">Jane</h1></main>');
+      // buildResumeDocument now INLINES the design-system CSS into one <style>
+      // block (design doc §5.2) instead of emitting <link> tags pointing at
+      // files copied next to the HTML — that whole temp-dir-of-siblings setup
+      // is exactly what HTML-first retires, so the doc must be openable with
+      // zero sibling assets.
+      const doc = buildResumeDocument({ resumeMainHtml: '<main class="page" data-print="ink-only"><h1 class="name">Jane</h1></main>' });
       assert(/^<!doctype html>/i.test(doc.trim()), 'resume doc: missing doctype');
-      assert(doc.includes('<link rel="stylesheet" href="colors_and_type.css">'), 'resume doc: missing tokens stylesheet');
-      assert(doc.includes('<link rel="stylesheet" href="resume.css">'), 'resume doc: missing component stylesheet');
+      assert(!doc.includes('<link rel="stylesheet"'), 'resume doc: must not link external stylesheets (HTML-first is self-contained)');
+      assert((doc.match(/<style>/g) || []).length === 1, 'resume doc: exactly one inlined <style> block');
+      // Content proof the two design-system files were actually inlined, not
+      // just an empty <style> tag — .resume-header/.name come from resume.css,
+      // --ff-display from colors_and_type.css.
+      assert(doc.includes('.resume-header') && doc.includes('.name'), 'resume doc: resume.css was not inlined');
+      assert(doc.includes('--ff-display'), 'resume doc: colors_and_type.css was not inlined');
       assert(doc.includes('data-print="ink-only"') && doc.includes('Jane'), 'resume doc: lost the <main> block');
       // A model that mistakenly returns a full fenced document is normalized to
-      // exactly one <main> inside our scaffold.
-      const fenced = buildResumeDocument('```html\n<html><body><main class="page">X</main></body></html>\n```');
-      const mainCount = (fenced.match(/<main/gi) || []).length;
-      assert(mainCount === 1 && fenced.includes('>X</main>'), 'resume doc: should extract a single <main> from a fenced full doc');
+      // exactly one <main> inside our scaffold. Counted only AFTER the inlined
+      // <style> block — colors_and_type.css's own comments literally contain
+      // the text "<main class=\"page\" …>" as documentation of where a variant
+      // attribute may be placed, which would otherwise inflate this count now
+      // that the CSS lives in the same document (see the cover-letter test's
+      // `body` split for the same hazard).
+      const fenced = buildResumeDocument({ resumeMainHtml: '```html\n<html><body><main class="page">X</main></body></html>\n```' });
+      const fencedBody = fenced.split('</style>').pop();
+      const mainCount = (fencedBody.match(/<main/gi) || []).length;
+      assert(mainCount === 1 && fencedBody.includes('>X</main>'), 'resume doc: should extract a single <main> from a fenced full doc');
       return { ok: true };
     },
   },
@@ -3241,43 +3297,61 @@ const tests = [
   {
     name: 'Application: cover letter builder (design-system native surface)',
     run: () => {
+      // buildCoverLetterDocument takes { letter, variantAttrs, docId } — see
+      // the résumé scaffold test above for why fields now nest under `letter`
+      // and CSS is inlined rather than linked (design doc §5.2).
       const html = buildCoverLetterDocument({
-        name: 'Jane Doe',
-        tagline: 'Product Marketer',
-        contact: ['Austin, TX', 'jane@x.com'],
-        date: 'May 31, 2026',
-        recipient: 'Hiring Team\nAcme\nProduct Marketing',
-        salutation: 'Dear Acme Team,',
-        paragraphs: ['I love <Acme> & your work.', 'Second para.', '   '],
-        closing: 'Sincerely,',
-        signatureTitle: 'Senior Product Marketer · candidate',
-      }, 'data-print="ink-only"');
-      // Uses the design system's NATIVE cover-letter surface — all three
-      // stylesheets, not a guessed inline <style>.
-      assert(!html.includes('<style'), 'cover: must not inline guessed styles');
-      assert(html.includes('href="colors_and_type.css"') && html.includes('href="resume.css"') && html.includes('href="cover-letter.css"'),
-        'cover: must link colors_and_type.css + resume.css + cover-letter.css');
+        letter: {
+          name: 'Jane Doe',
+          tagline: 'Product Marketer',
+          contact: ['Austin, TX', 'jane@x.com'],
+          date: 'May 31, 2026',
+          recipient: 'Hiring Team\nAcme\nProduct Marketing',
+          salutation: 'Dear Acme Team,',
+          paragraphs: ['I love <Acme> & your work.', 'Second para.', '   '],
+          closing: 'Sincerely,',
+          signatureTitle: 'Senior Product Marketer · candidate',
+        },
+        variantAttrs: 'data-print="ink-only"',
+      });
+      // Uses the design system's NATIVE cover-letter surface, inlined — all
+      // three stylesheets' content present in one <style> block, not a <link>
+      // pointing at sibling files (HTML-first is self-contained, §5.2).
+      assert(!html.includes('<link rel="stylesheet"'), 'cover: must not link external stylesheets');
+      assert((html.match(/<style>/g) || []).length === 1, 'cover: exactly one inlined <style> block');
+      assert(html.includes('.letter-body') && html.includes('.resume-header') && html.includes('--ff-display'),
+        'cover: colors_and_type.css + resume.css + cover-letter.css must all be inlined');
+      // Every "does the MARKUP use this class/text" check below is scoped to
+      // the content AFTER the inlined <style> block, never to the raw `html`
+      // string as a whole — the design-system CSS is now inlined into the
+      // same document (§5.2), and it names its own selectors in plain text
+      // ('.letter-recipient', '.signature-title', …), so a whole-document
+      // substring search would pass even when the builder emitted NEITHER
+      // markup element. `</style>` is a reliable split point: it can only
+      // close the one real <style> tag (asserted singular just above).
+      const body = html.split('</style>').pop();
       // Native structure classes (cover-letter.html / cover-letter.css).
       for (const cls of ['resume-header letter-letterhead', 'letterhead-rule', 'letter-meta', 'letter-date', 'letter-recipient', 'letter-body', 'salutation', 'letter-close', 'valediction', 'signature']) {
-        assert(html.includes(cls), `cover: missing native class "${cls}"`);
+        assert(body.includes(cls), `cover: missing native class "${cls}"`);
       }
-      assert(html.includes('Jane Doe') && html.includes('Product Marketer'), 'cover: letterhead missing');
+      assert(body.includes('Jane Doe') && body.includes('Product Marketer'), 'cover: letterhead missing');
       assert(html.includes('data-print="ink-only"'), 'cover: variant not mirrored onto <html>');
       // Recipient block split: first line is the bolded .recipient-name, the rest .recipient-line.
-      assert(html.includes('<span class="recipient-name">Hiring Team</span>'), 'cover: recipient-name (first line) missing');
-      assert((html.match(/<span class="recipient-line">/g) || []).length === 2, 'cover: expected 2 recipient-line rows');
+      assert(body.includes('<span class="recipient-name">Hiring Team</span>'), 'cover: recipient-name (first line) missing');
+      assert((body.match(/<span class="recipient-line">/g) || []).length === 2, 'cover: expected 2 recipient-line rows');
       // signatureTitle renders under the signature.
-      assert(html.includes('<p class="signature-title">Senior Product Marketer · candidate</p>'), 'cover: signature-title missing');
+      assert(body.includes('<p class="signature-title">Senior Product Marketer · candidate</p>'), 'cover: signature-title missing');
       // User text is HTML-escaped (no markup injection from model output).
-      assert(html.includes('I love &lt;Acme&gt; &amp; your work.'), 'cover: body not HTML-escaped');
+      assert(body.includes('I love &lt;Acme&gt; &amp; your work.'), 'cover: body not HTML-escaped');
       // Blank/whitespace paragraphs dropped; body uses bare <p> (every other
       // paragraph is classed, so this count isolates the body).
-      const bodyParas = (html.match(/<p>/g) || []).length;
+      const bodyParas = (body.match(/<p>/g) || []).length;
       assert(bodyParas === 2, `cover: expected 2 body paragraphs, got ${bodyParas}`);
-      assert(html.includes('jane@x.com') && html.includes('class="sep"'), 'cover: contact line missing separators');
+      assert(body.includes('jane@x.com') && body.includes('class="sep"'), 'cover: contact line missing separators');
       // Sensible fallbacks when optional fields are omitted: salutation/closing
       // default; no recipient → no <address>; no signatureTitle → no signature-title.
-      const bare = buildCoverLetterDocument({ name: 'X' });
+      const bareFull = buildCoverLetterDocument({ letter: { name: 'X' } });
+      const bare = bareFull.split('</style>').pop();
       assert(bare.includes('Dear Hiring Team,') && bare.includes('Sincerely,'), 'cover: missing salutation/closing fallback');
       assert(!bare.includes('letter-recipient') && !bare.includes('signature-title'), 'cover: optional blocks must be omitted when empty');
       assert(bare.includes('<p class="signature"'), 'cover: signature (name) always present');
@@ -6957,9 +7031,16 @@ const tests = [
   {
     name: 'llm/claude: every known task maps to a real model; Claude catalog is current',
     run: () => {
-      const catalog = new Set(['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001']);
-      assert(CLAUDE_MODELS_IN_USE.length === 3, `three Claude models in use (got ${CLAUDE_MODELS_IN_USE.length})`);
-      assert(CLAUDE_MODELS_IN_USE.every(m => catalog.has(m)), 'CLAUDE_MODELS_IN_USE are current catalog ids');
+      // The catalog is now the resolver's pinned MODEL_FLOOR (claudeModels.js),
+      // not a hand-copied literal list — a version bump there updates this test
+      // for free instead of needing a second manual sync. The test runner never
+      // primes the resolver (no Anthropic key in the stubbed settings store), so
+      // every Claude task resolves to exactly its floor id here — this is the
+      // resolver-aware equivalent of the old "catalog is current" assertion.
+      const catalog = new Set(Object.values(MODEL_FLOOR));
+      const modelsInUse = claudeModelsInUse();
+      assert(modelsInUse.length === 3, `three Claude models in use (got ${modelsInUse.length})`);
+      assert(modelsInUse.every(m => catalog.has(m)), 'claudeModelsInUse() are current floor ids');
       const tasks = getKnownTaskIds();
       assert(tasks.size > 0 && !tasks.has('default'), 'known task set is non-empty and excludes "default"');
       // Every task must resolve to a real Gemini fallback OR a current Claude id —
@@ -7202,6 +7283,537 @@ const tests = [
       assert(wasManualSolveRequired('indeed') === false, 'unmarked source stays false');
       resetManualSolveTracking();
       assert(wasManualSolveRequired('ebay') === false, 'reset clears prior-run marks');
+      return { ok: true };
+    },
+  },
+  {
+    // Achievement-mining design doc §6.3's format-variance table, case by
+    // case. This module is "the piece most likely to be quietly wrong" per
+    // the doc — a false negative just re-shows a job (annoying), a false
+    // positive permanently disappears a real opening (not recoverable), so
+    // every case below is a real source shape, not a synthetic one.
+    name: 'locationIdentity: format-variance table (§6.3) folds every source shape to one key; unknown location is always ""',
+    run: () => {
+      // ZipRecruiter reconstructs from a URL slug (every '-' -> ' '), so a
+      // genuinely hyphenated place name from ANY other source must fold to
+      // the identical token or the two never match.
+      assert(canonicalizeLocation('Winston-Salem, NC') === 'winston salem, nc', 'ZipRecruiter hyphen-slug: "Winston-Salem" folds to the space-joined form');
+      assert(canonicalizeLocation('Winston-Salem, NC') === canonicalizeLocation('Winston Salem, NC'), 'hyphenated and space-joined spellings of the same city produce the SAME key');
+
+      // Indeed's addressLocality fallback is sometimes a bare city with no
+      // state anywhere in the record. Must NOT guess a state — a bare city
+      // canonicalizes to itself and only matches another bare "austin".
+      assert(canonicalizeLocation('Austin') === 'austin', 'Indeed bare-city-no-state: no state is fabricated');
+      assert(canonicalizeLocation('Austin') !== canonicalizeLocation('Austin, TX'), 'a bare city must NOT match a located version of the same city (no guessing)');
+
+      // USAJobs's PositionLocationDisplay embeds the state INSIDE the city
+      // segment too ("Washington DC, District of Columbia") — must collapse
+      // onto the same key as a plain "Washington, DC" from another source.
+      assert(canonicalizeLocation('Washington DC, District of Columbia') === 'washington, dc', 'USAJobs embedded-state city segment de-duplicates against its own state segment');
+      assert(canonicalizeLocation('Washington DC, District of Columbia') === canonicalizeLocation('Washington, DC'), 'USAJobs shape collapses onto the same key as a plain "city, ST" source');
+
+      // Remote variants: leading-"remote" shapes AND the short exact-token
+      // list (WWR/RemoteOK free-text fields) all fold to one 'remote' token.
+      for (const raw of ['Remote', 'Remote - US', 'Remote (US)', 'Remote, United States', 'Fully Remote', 'Anywhere', 'WFH', 'Distributed', 'Work From Home']) {
+        assert(canonicalizeLocation(raw) === 'remote', `remote variant "${raw}" folds to the single 'remote' token`);
+      }
+
+      // Country-token stripping, both comma-separated and paren-merged shapes.
+      assert(canonicalizeLocation('Denver, CO, United States') === 'denver, co', 'trailing "United States" (comma-separated) is stripped');
+      assert(canonicalizeLocation('Denver, CO (US)') === 'denver, co', 'trailing "(US)" (paren-merged onto the state segment) is stripped');
+
+      // State full-name <-> 2-letter code fold, either direction — Glassdoor's
+      // two extraction strategies (Apollo cache vs DOM) are exactly the kind
+      // of same-listing/two-formats case this exists for.
+      assert(canonicalizeLocation('Denver, Colorado') === 'denver, co', 'full state name folds to its 2-letter code');
+      assert(canonicalizeLocation('Denver, CO') === canonicalizeLocation('Denver, Colorado'), 'code and full-name spellings of the same state produce the SAME key');
+
+      // A lone segment that IS a full subdivision name (no city at all) reads
+      // as the state, not as a city literally named "California".
+      assert(canonicalizeLocation('California') === 'ca', 'a bare state name with no city resolves as the state');
+
+      // Diacritic folding (Google/LinkedIn scraped card text).
+      assert(canonicalizeLocation('Montréal, QC') === 'montreal, qc', 'diacritics are NFD-stripped ("Montréal" -> "montreal")');
+
+      // UNKNOWN LOCATION NEVER MATCHES — canonicalizeLocation itself always
+      // returns '' for every flavor of "no location", which is what makes the
+      // tupleKey-level invariant (tested below) hold.
+      for (const raw of ['', '   ', null, undefined, 42, {}]) {
+        assert(canonicalizeLocation(raw) === '', `canonicalizeLocation(${JSON.stringify(raw)}) is the empty "unknown" string, never a guess`);
+      }
+
+      // Whitespace-collapsing disagreement the two legacy modules had
+      // (jobIdentity's keyPart doesn't collapse, jobsHistory's normText does)
+      // — this module always collapses, for BOTH title and company.
+      assert(canonicalizeTitle('Senior   Accountant') === canonicalizeTitle('Senior Accountant'), 'canonicalizeTitle collapses internal whitespace');
+      assert(canonicalizeCompany('Acme   Corp') === canonicalizeCompany('Acme Corp'), 'canonicalizeCompany collapses internal whitespace');
+      return { ok: true };
+    },
+  },
+  {
+    // Applied-jobs identity (design doc §6.2/§6.3): urlKey match OR tupleKey
+    // match, with the "unknown location never matches" invariant enforced at
+    // THIS layer (appliedRecordMatches), not just in canonicalizeLocation.
+    name: 'Applied-jobs identity: urlKey vs tupleKey branches, same title+company across two cities never collides, unknown location never matches',
+    run: () => {
+      // Same title + same company, DIFFERENT city = a DIFFERENT job (§6.3's
+      // stated product decision) — must not collide even with no URL at all.
+      const jobDenver = { title: 'Senior Accountant', company: 'Acme Corp', location: 'Denver, CO', url: '' };
+      const recordAustin = { title: 'Senior Accountant', company: 'Acme Corp', location: 'Austin, TX', url: '' };
+      assert(appliedRecordMatches(jobDenver, recordAustin) === false, 'same title+company, different city → NOT a match');
+
+      // Tuple branch: same title+company+location matches despite case/
+      // whitespace/state-spelling differences and a completely different (or
+      // absent) URL — identity here is the tuple, not the link.
+      const jobT1 = { title: 'Data Analyst', company: 'Beta LLC', location: 'Denver, CO', url: '' };
+      const jobT2 = { title: 'data   analyst', company: 'BETA LLC', location: 'Denver, Colorado', url: 'https://different.example.com/x' };
+      assert(appliedRecordMatches(jobT1, jobT2) === true, 'tuple branch matches on title+company+location regardless of URL/case/state-spelling');
+
+      // URL branch: a tracking-param query string must not defeat the match —
+      // dropped query params (utm_source, session tokens) are exactly what
+      // canonicalizeJobUrl's "drop query except jk" rule is for.
+      const jobA = { title: 'Senior Accountant', company: 'Acme Corp', location: 'Denver, CO', url: 'https://boards.greenhouse.io/acme/jobs/111?utm_source=indeed&utm_campaign=x' };
+      const recordA = { title: 'Senior Accountant', company: 'Acme Corp', location: 'Denver, CO', url: 'https://boards.greenhouse.io/acme/jobs/111' };
+      assert(appliedRecordMatches(jobA, recordA) === true, 'tracking-param query string does not defeat the URL match');
+
+      // Indeed jk-stub: the redirect PATH is identical across every listing —
+      // identity lives in the `jk` param, which must survive even though every
+      // OTHER query param (a per-scrape session token) differs.
+      const jobJk1 = { title: 'X', company: 'Y', location: '', url: 'https://www.indeed.com/rc/clk?jk=abc123&other=1' };
+      const recordJk1 = { title: 'X', company: 'Y', location: '', url: 'https://www.indeed.com/rc/clk?jk=abc123&other=999' };
+      assert(appliedRecordMatches(jobJk1, recordJk1) === true, 'Indeed jk-stub: same jk, different session token → matches on jk alone');
+      assert(canonicalizeJobUrl('https://www.indeed.com/rc/clk?jk=abc123') !== canonicalizeJobUrl('https://www.indeed.com/rc/clk?jk=xyz789'), 'Indeed jk-stub: DIFFERENT jk never matches');
+
+      // A redirect stub with NO jk carries no usable identity at all —
+      // canonicalizeJobUrl returns '' rather than treating the shared path as
+      // an identity (that would collapse every different listing onto one key).
+      assert(canonicalizeJobUrl('https://www.indeed.com/pagead/clk?other=1') === '', 'a redirect stub with no jk canonicalizes to "" (no usable URL identity)');
+      const jobNoJk = { title: 'Bare Title', company: 'Bare Co', location: '', url: 'https://www.indeed.com/pagead/clk?other=1' };
+      const recordNoJk = { title: 'Bare Title', company: 'Bare Co', location: '', url: 'https://www.indeed.com/pagead/clk?other=2' };
+      assert(appliedRecordMatches(jobNoJk, recordNoJk) === false, 'a jk-less redirect stub falls through to the tuple branch, which then correctly fails on unknown location');
+
+      // UNKNOWN LOCATION NEVER MATCHES — not even two unknown-location records
+      // for the exact same title+company. This is the enforcement point: an
+      // empty tupleKey must never leak through as a wildcard on EITHER side.
+      const jobU1 = { title: 'Support Engineer', company: 'Widgets Inc', location: '', url: '' };
+      const jobU2 = { title: 'Support Engineer', company: 'Widgets Inc', location: '', url: '' };
+      assert(appliedRecordMatches(jobU1, jobU2) === false, 'two unknown-location records, same title+company, no url → still NOT a match');
+      assert(appliedKeysFor(jobU1).tupleKey === '', 'appliedKeysFor: an unknown location produces an empty tupleKey, never a partial key');
+      return { ok: true };
+    },
+  },
+  {
+    // A corrupt applied-jobs.json (readStoreSync deliberately throws — see its
+    // own doc-comment) must not propagate out of filterOutApplied and discard
+    // an entire already-gathered batch of jobs from search-jobs/resolve-job-
+    // source/resume-job-source. It must degrade: skip the filter for this run
+    // only, report why via `error`, and self-heal the moment the file is fixed
+    // (no stale in-memory cache from the failed read).
+    name: 'filterOutApplied: a corrupt applied-jobs.json degrades to skip-the-filter instead of throwing away the whole gathered batch, and recovers once the file is fixed',
+    run: () => {
+      // scripts/test-stubs/electron.mjs's app.getPath(name) returns
+      // path.join(userDataDir, name) — so app.getPath('userData') is
+      // <tmp>/infinite-canvas-test-stub/userData, not the stub dir itself.
+      const dir = path.join(os.tmpdir(), 'infinite-canvas-test-stub', 'userData');
+      fs.mkdirSync(dir, { recursive: true });
+      const filePath = path.join(dir, 'applied-jobs.json');
+      fs.writeFileSync(filePath, '{ this is not valid json,', 'utf8');
+
+      const jobs = [{ title: 'VP Finance', company: 'Acme Corp', location: 'Denver, CO', url: 'https://example.com/jobs/vp-finance-1' }];
+      const result = filterOutApplied(jobs);
+      assert(Array.isArray(result.jobs) && result.jobs.length === 1, 'a corrupt store must not discard the already-gathered jobs array');
+      assert(result.hiddenApplied === 0, 'nothing can be confirmed hidden when the store itself could not be read');
+      assert(typeof result.error === 'string' && result.error.length > 0, 'the failure is reported via `error`, not swallowed entirely (so callers can surface a visible warning)');
+
+      // Recovery: fixing the file on disk (the store's own documented recovery
+      // path — "the user can open it and delete one line") must be picked up on
+      // the very next call, no stale-cache stickiness from the failed read.
+      fs.writeFileSync(filePath, JSON.stringify({ version: 1, records: [] }, null, 2), 'utf8');
+      const record = markJobApplied(jobs[0], {});
+      assert(record && record.title === 'VP Finance', 'once the file is fixed, the store is usable again');
+      const after = filterOutApplied(jobs);
+      assert(after.jobs.length === 0 && after.hiddenApplied === 1, 'the just-marked job is now correctly filtered out');
+
+      fs.rmSync(filePath, { force: true });
+      return { ok: true };
+    },
+  },
+  {
+    // achievementLedger's deterministic checks (design doc §3.4). Real
+    // fixture data throughout — not synthetic numbers — because the arithmetic
+    // here is what the résumé is legally allowed to print verbatim.
+    name: 'achievementLedger: arithmetic edge cases (isNumeric:false, baselineValue:0, direction mismatch) + evidence scoped to the named file with whitespace normalization',
+    run: () => {
+      const careerData = [
+        '===== FILE: balance-sheet-2019.txt =====',
+        'Total debt outstanding: $4.2M as of Mar 2019.',
+        'CFO tenure began Mar 2019.',
+        '===== FILE: balance-sheet-2023.txt =====',
+        'Total debt outstanding: $1.1M as of Dec 2023.',
+        'Customer count grew from 0 to 40 in the same period.',
+      ].join('\n');
+
+      // splitCareerDataByFile / normalizeQuoteText are the two primitives the
+      // evidence check is built on — assert their contract directly before
+      // trusting computeLedger's use of them.
+      const sections = splitCareerDataByFile(careerData);
+      assert(sections.get('balance-sheet-2019.txt').includes('Total debt outstanding: $4.2M as of Mar 2019.'), 'splitCareerDataByFile: correctly scopes text under its own FILE delimiter');
+      assert(!sections.get('balance-sheet-2019.txt').includes('Customer count grew'), 'splitCareerDataByFile: does NOT leak the next file\'s content into this section');
+      assert(normalizeQuoteText('Total   debt\noutstanding') === 'Total debt outstanding', 'normalizeQuoteText: collapses whitespace/newlines, preserves case (verbatim-quote discipline)');
+
+      const raw = {
+        achievements: [
+          { // isNumeric:false — no figure, no NaN/0.
+            id: 'a1', kind: 'breadth', roleAnchor: 'CFO, Acme', strength: 40, attribution: 'context', confidence: 'high', caveats: '',
+            claim: 'Championed a culture initiative', derivation: 'not a numeric metric',
+            metric: { isNumeric: false, baselineValue: 0, baselineLabel: '', endpointValue: 0, endpointLabel: '', unit: '', direction: 'flat' },
+            evidence: [{ file: 'balance-sheet-2019.txt', quote: 'CFO tenure began Mar 2019.' }],
+          },
+          { // baselineValue:0 — pct undefined, display is the absolute delta only.
+            id: 'a2', kind: 'scale', roleAnchor: 'CFO, Acme', strength: 70, attribution: 'contributed', confidence: 'medium', caveats: '',
+            claim: 'Grew the customer base from nothing', derivation: 'customers 0 -> 40',
+            metric: { isNumeric: true, baselineValue: 0, baselineLabel: '2019', endpointValue: 40, endpointLabel: '2023', unit: 'people', direction: 'increase' },
+            evidence: [{ file: 'balance-sheet-2023.txt', quote: 'Customer count grew from 0 to 40 in the same period.' }],
+          },
+          { // direction disagrees with the sign of the derived delta.
+            id: 'a3', kind: 'delta', roleAnchor: 'CFO, Acme', strength: 50, attribution: 'led', confidence: 'high', caveats: '',
+            claim: 'Direction mismatch case', derivation: 'mislabelled direction',
+            metric: { isNumeric: true, baselineValue: 100, baselineLabel: '2019', endpointValue: 50, endpointLabel: '2023', unit: 'USD', direction: 'increase' },
+            evidence: [{ file: 'balance-sheet-2019.txt', quote: 'Total debt outstanding: $4.2M as of Mar 2019.' }],
+          },
+          { // Real quote, but the file it's attributed to is the WRONG one.
+            id: 'a4', kind: 'delta', roleAnchor: 'CFO, Acme', strength: 30, attribution: 'led', confidence: 'high', caveats: '',
+            claim: 'Wrong-file evidence case', derivation: 'quote real but wrong file named',
+            metric: { isNumeric: true, baselineValue: 10, baselineLabel: '2019', endpointValue: 20, endpointLabel: '2023', unit: 'USD', direction: 'increase' },
+            evidence: [{ file: 'balance-sheet-2023.txt', quote: 'Total debt outstanding: $4.2M as of Mar 2019.' }],
+          },
+          { // Quote appears nowhere in the corpus at all.
+            id: 'a5', kind: 'delta', roleAnchor: 'CFO, Acme', strength: 20, attribution: 'led', confidence: 'high', caveats: '',
+            claim: 'Quote found nowhere', derivation: 'fabricated quote',
+            metric: { isNumeric: true, baselineValue: 5, baselineLabel: '2019', endpointValue: 6, endpointLabel: '2023', unit: 'USD', direction: 'increase' },
+            evidence: [{ file: 'balance-sheet-2019.txt', quote: 'This sentence does not exist anywhere in the corpus.' }],
+          },
+          { // Same quote as a1's "$4.2M" figure but with extra internal
+            // whitespace — must still match via normalizeQuoteText.
+            id: 'a6', kind: 'delta', roleAnchor: 'CFO, Acme', strength: 25, attribution: 'led', confidence: 'high', caveats: '',
+            claim: 'Whitespace-normalized quote', derivation: 'quote has different whitespace than source',
+            metric: { isNumeric: true, baselineValue: 1, baselineLabel: '2019', endpointValue: 2, endpointLabel: '2023', unit: 'USD', direction: 'increase' },
+            evidence: [{ file: 'balance-sheet-2019.txt', quote: 'Total   debt outstanding:  $4.2M   as of Mar 2019.' }],
+          },
+        ],
+        gaps: [{ roleAnchor: 'CFO, Acme', note: 'No evidence of headcount growth found.' }],
+      };
+
+      const { ledger, gaps, stats } = computeLedger(raw, careerData);
+      const byId = Object.fromEntries(ledger.map((item) => [item.id, item]));
+
+      // isNumeric:false — no figure, delta/pct null rather than 0/NaN.
+      assert(byId.a1.computed.isNumeric === false, 'isNumeric:false → computed.isNumeric stays false');
+      assert(byId.a1.computed.delta === null && byId.a1.computed.pct === null, 'isNumeric:false → delta/pct are null, never 0/NaN');
+      assert(byId.a1.computed.display === '', 'isNumeric:false → no display figure, no receipt');
+
+      // baselineValue:0 — pct null, display is the absolute delta only.
+      assert(byId.a2.computed.pct === null, 'baselineValue:0 → pct is null (percentage change is undefined)');
+      assert(byId.a2.computed.delta === 40, 'baselineValue:0 → delta is still the plain endpoint-minus-baseline');
+      assert(!/%/.test(byId.a2.computed.display), 'baselineValue:0 → display carries no "%" (absolute delta only)');
+      assert(byId.a2.computed.display.includes('40'), 'baselineValue:0 → display shows the absolute delta value');
+
+      // Direction/sign disagreement demotes, does not silently "fix" the sign.
+      assert(byId.a3.computed.delta === -50, 'direction mismatch → the numbers are trusted (delta reflects the real sign)');
+      assert(byId.a3.flags.includes('direction-mismatch'), 'direction mismatch → flagged');
+      assert(byId.a3.confidence === 'low', 'direction mismatch → confidence demoted to low');
+
+      // Evidence scoped to the NAMED file: wrong-file is a distinct, weaker
+      // finding than truly-missing, and (per §3.4) wrong-file alone does NOT
+      // demote confidence — only a genuine miss does.
+      assert(byId.a4.computed.checks.evidenceOk === false, 'wrong-file evidence → evidenceOk is false');
+      assert(byId.a4.flags.includes('evidence-wrong-file'), 'a quote real elsewhere but attributed to the wrong file is flagged evidence-wrong-file, not evidence-miss');
+      assert(byId.a4.confidence === 'high', 'evidence-wrong-file alone does not demote confidence (only a genuine miss does)');
+
+      assert(byId.a5.flags.includes('evidence-miss'), 'a quote found nowhere in the corpus is flagged evidence-miss');
+      assert(byId.a5.confidence === 'low', 'a genuine evidence miss demotes confidence to low');
+
+      // Whitespace-normalized match: extra internal whitespace in the quote
+      // must not register as a miss.
+      assert(byId.a6.computed.checks.evidenceOk === true, 'whitespace-only difference between quote and source still matches (normalizeQuoteText)');
+      assert(!byId.a6.flags.includes('evidence-miss') && !byId.a6.flags.includes('evidence-wrong-file'), 'whitespace-normalized match carries no evidence flag');
+
+      assert(stats.mined === 6, 'stats.mined counts every item that survived (nothing gates, nothing is deleted)');
+      assert(stats.directionMisses === 1 && stats.evidenceMisses === 1, 'stats tally exactly the direction mismatch and the one genuine evidence miss (not the wrong-file case)');
+      assert(gaps.length === 1 && gaps[0].note.includes('headcount'), 'gaps pass through untouched (advisory, never gating)');
+      return { ok: true, stats };
+    },
+  },
+  {
+    // Hardening pass: §3.4's four checks never verify §3.2's central
+    // guarantee (model writes prose, code writes every number). If the miner
+    // disobeys and writes the derived figure straight into `claim`, that
+    // number reaches the résumé with no data-achievement-id and so no
+    // receipt — invisible under a light wording glance. This telemetry-only
+    // check (checkClaimFigureLeak) is what's supposed to catch that, WITHOUT
+    // gating: same real fixture shape as the arithmetic test above (a $ debt
+    // paydown), not synthetic numbers.
+    name: 'achievementLedger: claim-contains-figure telemetry flags a claim that embeds the derived figure, leaves a clean claim alone, never fires for isNumeric:false, and never touches confidence/claim/item-count',
+    run: () => {
+      const careerData = [
+        '===== FILE: debt.txt =====',
+        'Total debt outstanding: $4.2M as of Mar 2019.',
+        'Total debt outstanding: $1.1M as of Dec 2023.',
+      ].join('\n');
+      const evidence = [{ file: 'debt.txt', quote: 'Total debt outstanding: $4.2M as of Mar 2019.' }];
+      const metric = {
+        isNumeric: true, baselineValue: 4200000, baselineLabel: 'Mar 2019',
+        endpointValue: 1100000, endpointLabel: 'Dec 2023', unit: 'USD', direction: 'decrease',
+      };
+
+      const raw = {
+        achievements: [
+          { // Model wrote the derived percent AND the compact-currency figures
+            // straight into the claim — exactly the drift §3.2 forbids.
+            id: 'leak1', kind: 'delta', roleAnchor: 'CFO, Acme', strength: 60, attribution: 'led', confidence: 'high', caveats: '',
+            claim: 'Cut total debt by 74%, from $4.2M to $1.1M', derivation: 'debt reduction', metric, evidence,
+          },
+          { // Same underlying metric, but the claim stays figure-free prose —
+            // the number lives only in computed.display, as designed.
+            id: 'clean1', kind: 'delta', roleAnchor: 'CFO, Acme', strength: 55, attribution: 'led', confidence: 'high', caveats: '',
+            claim: 'Reduced long-term debt through refinancing and renegotiated terms', derivation: 'debt reduction', metric, evidence,
+          },
+          { // isNumeric:false — no derived figure exists, so even a claim
+            // that happens to contain "74%" text must never be flagged.
+            id: 'nonnumeric1', kind: 'breadth', roleAnchor: 'CFO, Acme', strength: 40, attribution: 'context', confidence: 'high', caveats: '',
+            claim: 'Championed a 74% culture initiative', derivation: 'not a numeric metric',
+            metric: { isNumeric: false, baselineValue: 0, baselineLabel: '', endpointValue: 0, endpointLabel: '', unit: '', direction: 'flat' },
+            evidence: [],
+          },
+        ],
+        gaps: [],
+      };
+
+      const { ledger, stats } = computeLedger(raw, careerData);
+      const byId = Object.fromEntries(ledger.map((item) => [item.id, item]));
+
+      assert(byId.leak1.flags.includes('claim-contains-figure'), 'a claim embedding the derived percentage/currency IS flagged claim-contains-figure');
+      assert(!byId.clean1.flags.includes('claim-contains-figure'), 'a clean claim (figure only in computed.display) is NOT flagged');
+      assert(!byId.nonnumeric1.flags.includes('claim-contains-figure'), 'isNumeric:false items are never flagged, even when the claim text happens to contain a matching digit string');
+      assert(stats.claimFigureLeaks === 1, `stats.claimFigureLeaks counts exactly the one real leak, got ${stats.claimFigureLeaks}`);
+
+      // Telemetry-only: the flag must not gate anything (design's "nothing
+      // gates" rule applies here too — see the doc comment on
+      // checkClaimFigureLeak).
+      assert(byId.leak1.confidence === 'high', 'claim-contains-figure does NOT demote confidence');
+      assert(byId.leak1.claim === 'Cut total debt by 74%, from $4.2M to $1.1M', 'claim-contains-figure does NOT rewrite/strip the claim text');
+      assert(ledger.length === 3, 'claim-contains-figure does NOT drop the item — all 3 achievements survive');
+      return { ok: true, stats };
+    },
+  },
+  {
+    name: 'achievementLedger: refute-verdict application (drop/weaken/stands/unmatched-id) and the ~30 cap applied AFTER refutation, not at mining time',
+    run: () => {
+      // Mining is asked for MINING_TARGET (~40); the cap (LEDGER_CAP, ~30) is
+      // enforced only by applyRefuteVerdicts, never by computeLedger — build
+      // a ledger bigger than the cap and confirm computeLedger itself does
+      // not trim it.
+      const bigRaw = { achievements: [], gaps: [] };
+      for (let i = 0; i < MINING_TARGET; i += 1) {
+        bigRaw.achievements.push({
+          id: `x${i}`, kind: 'delta', roleAnchor: 'Role', strength: i, attribution: 'led', confidence: 'high', caveats: '',
+          claim: `Achievement ${i}`, derivation: 'd',
+          metric: { isNumeric: false, baselineValue: 0, baselineLabel: '', endpointValue: 0, endpointLabel: '', unit: '', direction: 'flat' },
+          evidence: [],
+        });
+      }
+      const { ledger: uncapped } = computeLedger(bigRaw, '');
+      assert(uncapped.length === MINING_TARGET, 'computeLedger does NOT truncate — the cap is not applied at mining/check time');
+
+      const { ledger: capped, stats: capStats } = applyRefuteVerdicts(uncapped, []);
+      assert(capped.length === LEDGER_CAP, `applyRefuteVerdicts truncates to LEDGER_CAP (${LEDGER_CAP}), got ${capped.length}`);
+      assert(capped[0].strength === MINING_TARGET - 1, 'kept items are the HIGHEST-strength ones (sorted desc before truncation)');
+      assert(capStats.droppedByRefute === 0 && capStats.weakened === 0, 'an empty verdicts array treats every item as "stands" — no drops/weakens from silence');
+
+      // drop / weaken / stands / an id the refuter never mentioned.
+      const ledger = [
+        { id: 'd1', strength: 50, attribution: 'sole', confidence: 'high', caveats: '', flags: [] },
+        { id: 'w1', strength: 60, attribution: 'sole', confidence: 'high', caveats: 'preexisting caveat.', flags: [] },
+        { id: 's1', strength: 70, attribution: 'led', confidence: 'medium', caveats: '', flags: [] },
+        { id: 'u1', strength: 80, attribution: 'led', confidence: 'high', caveats: '', flags: [] }, // no verdict emitted at all
+      ];
+      const verdicts = [
+        { id: 'd1', verdict: 'drop', reason: 'weak join' },
+        { id: 'w1', verdict: 'weaken', reason: 'overstated', suggestedAttribution: 'context', suggestedCaveat: 'market tailwind explains most of this.' },
+        { id: 's1', verdict: 'stands', reason: 'solid' },
+      ];
+      const { ledger: out, stats } = applyRefuteVerdicts(ledger, verdicts, { cap: 10 });
+      const outIds = out.map((i) => i.id);
+      assert(!outIds.includes('d1'), 'verdict "drop" removes the item entirely');
+      assert(outIds.includes('u1'), 'an id the refuter never mentioned is treated as "stands" (best-effort attack, not a contract — silently-missing must not read as silently-dropped)');
+      const w1 = out.find((i) => i.id === 'w1');
+      assert(w1.attribution === 'context', 'verdict "weaken" applies suggestedAttribution');
+      assert(w1.confidence === 'medium', 'verdict "weaken" demotes confidence one step (high -> medium)');
+      assert(w1.caveats === 'preexisting caveat. market tailwind explains most of this.', 'verdict "weaken" APPENDS suggestedCaveat to any existing caveat, does not overwrite it');
+      assert(w1.flags.includes('refute-weakened'), 'verdict "weaken" is flagged for downstream telemetry');
+      const s1 = out.find((i) => i.id === 's1');
+      assert(s1.attribution === 'led' && s1.confidence === 'medium', 'verdict "stands" passes the item through unchanged');
+      assert(stats.droppedByRefute === 1 && stats.weakened === 1, 'stats tally exactly one drop and one weaken');
+      return { ok: true };
+    },
+  },
+  {
+    // Cache correctness, not cosmetics (design doc §11): a JSON.stringify over
+    // an object whose key order varies between calls would silently miss the
+    // Anthropic prompt cache on the ledger prefix, and the entire cost
+    // argument for hub-level mining rests on that cache hit landing every time.
+    name: 'achievementLedger: serializeLedgerForPrompt is byte-stable across repeated calls and independent of the input object\'s key insertion order',
+    run: () => {
+      const itemA = {
+        id: 'a1', kind: 'delta', roleAnchor: 'CFO, Acme', strength: 90, attribution: 'led', confidence: 'high',
+        claim: 'Cut debt', derivation: 'x -> y', caveats: '',
+        computed: { isNumeric: true, display: '74% ($4.2M → $1.1M)' },
+        evidence: [{ file: 'f1.txt', quote: 'q1' }],
+      };
+      // Same logical item — every key reinserted in a different order,
+      // mimicking object-spread order after applyRefuteVerdicts or however
+      // the model happened to emit its JSON.
+      const itemB = {
+        evidence: [{ quote: 'q1', file: 'f1.txt' }],
+        computed: { display: '74% ($4.2M → $1.1M)', isNumeric: true },
+        caveats: '', derivation: 'x -> y', claim: 'Cut debt', confidence: 'high',
+        attribution: 'led', strength: 90, roleAnchor: 'CFO, Acme', kind: 'delta', id: 'a1',
+      };
+      const s1 = serializeLedgerForPrompt([itemA]);
+      const s2 = serializeLedgerForPrompt([itemB]);
+      assert(s1 === s2, 'serialization is INDEPENDENT of the source object\'s key insertion order (explicit field-order list, not Object.keys/JSON.stringify)');
+      const s3 = serializeLedgerForPrompt([itemA]);
+      assert(s1 === s3, 'serializing the SAME ledger twice is byte-identical (repeat-call stability)');
+      assert(s1 === `[a1] kind=delta roleAnchor=CFO, Acme strength=90 attribution=led confidence=high claim=Cut debt derivation=x -> y figure=74% ($4.2M → $1.1M) caveats=\n  evidence file=f1.txt quote="q1"`,
+        'serialized line matches the exact PROMPT_FIELD_ORDER shape');
+
+      // The receipt-lookup primitives the résumé post-process (resumeHtml.js)
+      // depends on: ledgerById is a plain id->item map, derivationTooltip
+      // joins figure/derivation/caveats with " — ", dropping empty parts.
+      const map = ledgerById([itemA]);
+      assert(map.get('a1') === itemA, 'ledgerById: exact-id lookup returns the same item reference');
+      assert(map.get('missing') === undefined, 'ledgerById: an id not in the ledger is undefined, not a thrown error');
+      const tooltip = derivationTooltip({ ...itemA, caveats: 'a divestiture explains part of this.' });
+      assert(tooltip === '74% ($4.2M → $1.1M) — x -> y — a divestiture explains part of this.', 'derivationTooltip: figure — derivation — caveats, joined in that order');
+      assert(derivationTooltip({ ...itemA, caveats: '' }) === '74% ($4.2M → $1.1M) — x -> y', 'derivationTooltip: an empty caveat is dropped, not rendered as a trailing " — "');
+      assert(derivationTooltip({ derivation: 'unsupported claim, no figure', caveats: '', computed: { isNumeric: false, display: '' } }) === 'unsupported claim, no figure', 'derivationTooltip: a non-numeric item (no figure) still produces a tooltip from derivation alone');
+      return { ok: true };
+    },
+  },
+  {
+    // Model resolution (design doc §8) — pure selection logic, fixture model
+    // lists, no network. This is what makes it safe to run in this suite.
+    name: 'modelResolver.pickFamilyModel: family match excludes Fable/Mythos, newest-created_at wins, capability gate skips to next-newest, version floor rejects older candidates, empty API list falls to MODEL_FLOOR',
+    run: () => {
+      const FLOOR = MODEL_FLOOR;
+
+      // Family match on id substring, but Fable/Mythos are excluded from
+      // auto-tracking ENTIRELY, even when the id also contains the family
+      // token — they're a different price tier + API contract, matched only
+      // on their own exact family tokens, never "newest Claude model".
+      const r1 = pickFamilyModel(CLAUDE_FAMILY.OPUS, [
+        { id: 'claude-opus-5', created_at: '2026-06-01T00:00:00Z' },
+        { id: 'claude-opus-fable-1', created_at: '2026-08-01T00:00:00Z' },
+        { id: 'claude-mythos-opus-1', created_at: '2026-08-05T00:00:00Z' },
+      ], FLOOR.OPUS);
+      assert(r1.id === 'claude-opus-5', 'Fable/Mythos ids are excluded even though they are newer and contain the family token');
+
+      // Newest-by-created_at wins among real family candidates.
+      const r2 = pickFamilyModel(CLAUDE_FAMILY.SONNET, [
+        { id: 'claude-sonnet-5', created_at: '2026-01-01T00:00:00Z' },
+        { id: 'claude-sonnet-5-1', created_at: '2026-07-01T00:00:00Z' },
+      ], FLOOR.SONNET);
+      assert(r2.id === 'claude-sonnet-5-1', 'newest created_at wins among family candidates');
+
+      // A candidate reporting structured_outputs.supported === false is
+      // skipped in favour of the next-newest (which has no capabilities tree
+      // at all, and is accepted — absence means "not reported", not "unsupported").
+      const r3 = pickFamilyModel(CLAUDE_FAMILY.OPUS, [
+        { id: 'claude-opus-5', created_at: '2026-01-01T00:00:00Z' },
+        { id: 'claude-opus-5-2', created_at: '2026-07-01T00:00:00Z', capabilities: { structured_outputs: { supported: false } } },
+      ], FLOOR.OPUS);
+      assert(r3.id === 'claude-opus-5', 'the newer candidate failing the capability gate is skipped, falling to the next-newest');
+      assert(r3.skipped.length === 1 && r3.skipped[0].id === 'claude-opus-5-2', 'the skipped candidate is recorded (not silently dropped) so a bug report can show it');
+
+      // Version floor: a candidate older than the floor's own created_at
+      // (when the floor id itself appears in the API list) is rejected even
+      // though it is the only OTHER candidate available.
+      const r4 = pickFamilyModel(CLAUDE_FAMILY.OPUS, [
+        { id: FLOOR.OPUS, created_at: '2026-06-01T00:00:00Z' },
+        { id: 'claude-opus-4-8', created_at: '2025-01-01T00:00:00Z' },
+      ], FLOOR.OPUS);
+      assert(r4.id === FLOOR.OPUS, 'a candidate older than the pinned floor is rejected, even with nothing newer to fall to');
+
+      // Empty / unreachable API list -> MODEL_FLOOR, never a throw.
+      const r5 = pickFamilyModel(CLAUDE_FAMILY.OPUS, [], FLOOR.OPUS);
+      assert(r5.id === FLOOR.OPUS && r5.skipped.length === 0, 'an empty API model list resolves to MODEL_FLOOR, not a throw');
+      const r6 = pickFamilyModel(CLAUDE_FAMILY.OPUS, null, FLOOR.OPUS);
+      assert(r6.id === FLOOR.OPUS, 'a null/unreachable API model list resolves to MODEL_FLOOR, not a throw');
+      return { ok: true };
+    },
+  },
+  {
+    // HTML self-containment (design doc §5, §4.3) — the artifact must be
+    // double-click-openable with zero sibling files, and receipts must be a
+    // trust boundary the model cannot author its own way past.
+    name: 'Résumé/cover-letter HTML self-containment: no external refs besides the design system\'s own font @import; injected chrome is print-hidden; receipts resolve from the ledger or strip cleanly',
+    run: () => {
+      const ledger = [
+        {
+          id: 'a1', claim: 'Cut debt', caveats: '',
+          derivation: 'debt $4.2M (2019 balance sheet) -> $1.1M (2023 balance sheet)',
+          computed: { isNumeric: true, display: '74% ($4.2M → $1.1M)' },
+        },
+      ];
+      const mainHtml = '<main class="page"><p>Cut debt <strong data-achievement-id="a1">74%</strong> and grew <strong data-achievement-id="ghost-id">40%</strong> revenue.</p></main>';
+      const doc = buildResumeDocument({ resumeMainHtml: mainHtml, ledger });
+
+      // Self-containment: the ONLY external reference anywhere in the document
+      // is the design system's own Google Fonts @import — no <link>, no
+      // <script src>, no remote <img>.
+      assert(!/<link[^>]/i.test(doc), 'no <link> tags — the CSS is inlined, not referenced');
+      assert(!/<script[^>]+\ssrc=/i.test(doc), 'no external <script src="…"> — the toolbar behavior is inlined');
+      assert(!/<img[^>]+src=["']https?:/i.test(doc), 'no remote <img src="http…"> anywhere in the document');
+      const externalUrlRefs = [...doc.matchAll(/url\(\s*["']?(https?:[^"')]+)/gi)].map((m) => m[1]);
+      assert(externalUrlRefs.length === 1 && externalUrlRefs[0].startsWith('https://fonts.googleapis.com/'),
+        `the only external url() reference is the design system's own Google Fonts @import, got: ${JSON.stringify(externalUrlRefs)}`);
+
+      // Injected chrome is print-hidden — the printed artifact (still what
+      // gets uploaded to employer portals, §5.4) must be byte-identical in
+      // appearance to what the design system produces on its own.
+      assert(doc.includes('.ic-toolbar, .ic-banner { display: none !important; }'), 'the toolbar/banner chrome is hidden under @media print');
+      assert(/@media print \{\s*\[data-achievement-id\] \{ border-bottom: none; cursor: auto; \}/.test(doc), 'the receipt underline hook is also neutralized under @media print');
+
+      // Receipt resolution — the ENTIRE trust boundary for §4.3: the model
+      // names an id, code injects the tooltip text, and an id that doesn't
+      // resolve is stripped along with its underline hook (not left dangling
+      // with an empty tooltip, which would print a mysterious dotted line).
+      const resolvedMatch = doc.match(/data-achievement-id="a1" data-derivation="([^"]+)"/);
+      assert(resolvedMatch, 'a resolving data-achievement-id gets a data-derivation attribute written next to it');
+      assert(resolvedMatch[1].includes('74%') && resolvedMatch[1].includes('debt $4.2M'), 'the injected tooltip text is the CODE-COMPUTED figure + derivation, not anything the model wrote itself');
+      assert(!doc.includes('data-achievement-id="ghost-id"'), 'an id absent from the ledger is stripped ENTIRELY — no bare data-achievement-id left behind (that would keep the CSS underline hook alive with nothing to show on hover)');
+      assert(doc.includes('<strong >40%</strong>') || doc.includes('<strong>40%</strong>'), 'the figure text itself survives even when its receipt is stripped — only the attribute (and its underline) is removed, not the number');
+      return { ok: true };
+    },
+  },
+  {
+    // Font-load check (design doc §5.3) — resume.css only ever renders
+    // Source Serif 4 (--ff-display) at font-weight 600 (.name), never at the
+    // implicit 400 document.fonts.check()'s shorthand defaults to. An
+    // unweighted check always returns false for the résumé regardless of
+    // network conditions, firing the "fonts didn't load" banner on every
+    // single export. The fix reads the ACTUAL computed weight off a real
+    // on-page element instead of assuming one.
+    name: 'Font-load check derives its weight from a real --ff-display element\'s computed style, not an implicit/hardcoded 400',
+    run: () => {
+      const resumeDoc = buildResumeDocument({ resumeMainHtml: '<main class="page"><h1 class="name">Jane Doe</h1></main>' });
+      const coverDoc = buildCoverLetterDocument({ letter: { name: 'Jane Doe', paragraphs: ['Hello.'] } });
+      for (const [label, doc] of [['résumé', resumeDoc], ['cover letter', coverDoc]]) {
+        assert(!/document\.fonts\.check\('12px "'/.test(doc), `${label}: no hardcoded-400 (unweighted) document.fonts.check() call survives`);
+        assert(/getComputedStyle\(ffEl\)\.fontWeight/.test(doc), `${label}: the injected check reads the computed font-weight off a real element`);
+        assert(/document\.querySelector\('\.name'\) \|\| document\.querySelector\('\.letter-body'\)/.test(doc), `${label}: falls back from .name (résumé, weight 600) to .letter-body (cover letter, weight 400)`);
+        assert(/document\.fonts\.check\(ffWeight \+ ' 12px "' \+ firstFamily \+ '"'\)/.test(doc), `${label}: the actual check call is weight-qualified`);
+      }
       return { ok: true };
     },
   },

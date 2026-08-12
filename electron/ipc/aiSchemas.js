@@ -340,6 +340,117 @@ export const APPLICATION_COVER_LETTER_SCHEMA = {
   },
 };
 
+// ── Achievement ledger: derive accomplishments by joining career-data facts ──
+// career-achievement-mining, run once per jobhub (job-independent, see
+// docs/resume-achievement-mining-design.md §3.2). The model's job is to FIND
+// the join (e.g. a 2019 balance sheet + a 2023 balance sheet + a tenure span)
+// and describe it in prose — it never authors the derived number. `claim` is
+// deliberately figure-less; code computes `computed.display` from `metric`
+// (src/utils/achievementLedger.js) and the résumé call weaves the two
+// together. This is what makes an arithmetic slip structurally unable to
+// reach the output: the model that reasons about the join is never the model
+// that emits the digits.
+export const ACHIEVEMENT_LEDGER_SCHEMA = {
+  type: 'object',
+  required: ['achievements', 'gaps'],
+  properties: {
+    achievements: {
+      type: 'array',
+      description: 'At most ~40, ranked by strength. Weak joins are dropped here, not filtered — the post-refute ~30 cap is applied by code after the refute pass, not by this call.',
+      items: {
+        type: 'object',
+        required: ['id', 'claim', 'kind', 'roleAnchor', 'strength', 'attribution', 'confidence', 'caveats', 'derivation', 'metric', 'evidence'],
+        properties: {
+          id:         { type: 'string', description: 'Stable id within this ledger, e.g. "a1", "a2" — referenced later by the refute pass and by résumé receipts.' },
+          claim:      { type: 'string', description: 'Résumé-voice prose stating the accomplishment. MUST NOT contain the derived figure (no percentages, no dollar amounts, no computed numbers) — code authors the number from `metric` and the résumé call inserts it. Writing the figure here would let an arithmetic slip reach the final document.' },
+          kind:       { type: 'string', enum: ['delta', 'scale', 'scope', 'first', 'turnaround', 'efficiency', 'recognition', 'breadth'], description: 'Shape of the accomplishment: delta = before/after change, scale = size/volume, scope = breadth of responsibility, first = novel/pioneering, turnaround = recovered a bad situation, efficiency = did more with less, recognition = external validation, breadth = range of skills/domains.' },
+          roleAnchor: { type: 'string', description: 'The employer / role this achievement belongs under, matching how it appears in the career data.' },
+          strength:   { type: 'integer', description: '1-100. Used to rank achievements and, after the refute pass, to truncate the ledger to the top ~30.' },
+          attribution: {
+            type: 'string',
+            enum: ['sole', 'led', 'contributed', 'context'],
+            description: 'The load-bearing honesty field. The dominant risk in achievement mining is not inventing a number, it is stealing credit — "revenue grew 40% while I was there" is NOT "I grew revenue 40%". sole = the candidate alone drove it; led = the candidate directed a team/effort that drove it; contributed = the candidate was one of several drivers; context = the change happened during the candidate\'s tenure but their causal role is uncertain — declare this honestly rather than inflating to sole/led. When uncertain, prefer contributed or context and explain why in caveats.',
+          },
+          confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'Confidence in the join itself (evidence quality, date alignment) — independent of attribution.' },
+          caveats:    { type: 'string', description: 'Confounders that could explain the change other than the candidate\'s work (e.g. a divestiture, a market tailwind, a headcount change). Empty string when none — do not omit the field.' },
+          derivation: { type: 'string', description: 'Human-readable account of the join, e.g. "debt $4.2M (2019 balance sheet) -> $1.1M (2023 balance sheet); CFO tenure Mar 2019-present". Kept separate from `claim` so it can be audited and shown as a receipt without being résumé prose.' },
+          metric: {
+            type: 'object',
+            required: ['isNumeric', 'baselineValue', 'baselineLabel', 'endpointValue', 'endpointLabel', 'unit', 'direction'],
+            description: 'Raw endpoints only — never a computed delta or percentage. Code performs all arithmetic from these fields.',
+            properties: {
+              isNumeric:     { type: 'boolean', description: 'False when this achievement has no numeric endpoints to join (e.g. a qualitative "first" or "scope" claim). When false, baselineValue/endpointValue are ignored by code and must be set to 0.' },
+              baselineValue: { type: 'number', description: 'The "before" numeric value. 0 when isNumeric is false.' },
+              baselineLabel: { type: 'string', description: 'Human label for the baseline, e.g. "2019 balance sheet".' },
+              endpointValue: { type: 'number', description: 'The "after" numeric value. 0 when isNumeric is false.' },
+              endpointLabel: { type: 'string', description: 'Human label for the endpoint, e.g. "2023 balance sheet".' },
+              unit:          { type: 'string', enum: ['USD', '%', 'ms', 'people', ''], description: 'Unit of baselineValue/endpointValue. Empty string when isNumeric is false or the unit does not fit these categories.' },
+              direction:     { type: 'string', enum: ['increase', 'decrease', 'flat'], description: 'Whether the change from baseline to endpoint is an increase, decrease, or flat — must agree with the sign of endpointValue minus baselineValue; code demotes confidence when it does not.' },
+            },
+          },
+          evidence: {
+            type: 'array',
+            description: 'One or more source spans supporting this achievement. Must be verbatim so code can substring-match them against the career data.',
+            items: {
+              type: 'object',
+              required: ['file', 'quote'],
+              properties: {
+                file:  { type: 'string', description: 'MUST name one of the "===== FILE: <name> =====" section headers the quote was taken from, exactly as it appears in the career data.' },
+                quote: { type: 'string', description: 'A VERBATIM span copied from that file\'s section of the career data — not a paraphrase. Enables a free substring check; a quote that cannot be found is demoted, never deleted.' },
+              },
+            },
+          },
+        },
+      },
+    },
+    gaps: {
+      type: 'array',
+      description: 'Non-blocking suggestions/tips only — places the miner suspects an accomplishment exists but could not find a real join for. Never gates mining or generation.',
+      items: {
+        type: 'object',
+        required: ['roleAnchor', 'note'],
+        properties: {
+          roleAnchor: { type: 'string', description: 'The employer / role the gap relates to.' },
+          note:       { type: 'string', description: 'What might be missing and what evidence would close the gap, e.g. "no headcount figures found for the 2021 reorg mentioned in the brag doc".' },
+        },
+      },
+    },
+  },
+};
+
+// ── Achievement refute: independent adversarial pass over the ledger ───────
+// career-achievement-refute, run by a DIFFERENT model than the miner
+// (independence is the point — see design doc §3.5). Given the checked
+// ledger, attacks each item: is the join real, is attribution overstated, is
+// there a confounder that explains the delta better than the candidate's own
+// work? This is the one failure class neither deterministic code nor a light
+// human wording glance can catch.
+export const ACHIEVEMENT_REFUTE_SCHEMA = {
+  type: 'object',
+  required: ['verdicts'],
+  properties: {
+    verdicts: {
+      type: 'array',
+      description: 'One verdict per achievement id in the ledger passed in.',
+      items: {
+        type: 'object',
+        required: ['id', 'verdict', 'reason', 'suggestedAttribution', 'suggestedCaveat'],
+        properties: {
+          id:      { type: 'string', description: 'Must match an achievement id from the ledger passed in.' },
+          verdict: { type: 'string', enum: ['stands', 'weaken', 'drop'], description: 'stands = the join and attribution hold up; weaken = the claim survives but attribution/caveat should change (apply suggestedAttribution/suggestedCaveat); drop = the join is not real or the claim is not defensible and the item is removed entirely.' },
+          reason:  { type: 'string', description: 'Why this verdict — the specific confounder, overstatement, or weak join identified. Empty prose is not useful here; be concrete.' },
+          suggestedAttribution: {
+            type: 'string',
+            enum: ['sole', 'led', 'contributed', 'context', 'unchanged'],
+            description: 'What attribution the item should carry after this verdict. "unchanged" when the original attribution is correct as-is (used for stands, and for weaken verdicts that only add a caveat without changing attribution).',
+          },
+          suggestedCaveat: { type: 'string', description: 'A confounder or qualifier to add/replace on the item\'s caveats field. Empty string when none is needed.' },
+        },
+      },
+    },
+  },
+};
+
 // ── Job scoring: per-job match + categorization ────────────────────────────
 // Wrapped in an object envelope because Claude's tool input_schema requires
 // type: 'object' at the top level. Consumer reads parsed.scores.
