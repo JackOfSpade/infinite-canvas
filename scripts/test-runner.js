@@ -1,6 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
+// Used only by the dual-mode-pdf.js loader regression test below (real PDF
+// bytes in/out) — not related to any app import chain.
+import * as PDFLib from 'pdf-lib';
+import { PDFDocument } from 'pdf-lib';
 import {
   EBAY_ACTIVE_EXTRACTOR,
   EBAY_SOLD_EXTRACTOR,
@@ -28,7 +32,7 @@ import {
 import { mergeSourceProgress } from '../src/utils/sourceProgress.js';
 import { isJobCardVisible } from '../src/utils/jobCardFilters.js';
 import { reconcileBatchScores, buildScoredJob } from '../electron/ipc/jobBatchReconcile.js';
-import { buildCachedUserContent, buildAnthropicMessageParams } from '../electron/ipc/anthropicRequest.js';
+import { buildCachedUserContent, buildAnthropicMessageParams, buildAnthropicTokenCountParams } from '../electron/ipc/anthropicRequest.js';
 import {
   isProfileLockCollision,
   recordLaunchCollision,
@@ -66,6 +70,7 @@ import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLe
 import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, parseAptDecoComps, extractAlgoliaHits } from '../electron/extractors/apiExtractors.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
+import { targetPageCountForJob, decideFitStep } from '../electron/ipc/jobApplication.js';
 import { filterOutApplied, markJobApplied } from '../electron/ipc/appliedJobs.js';
 import {
   LEDGER_CAP,
@@ -86,7 +91,7 @@ import {
   appliedKeysFor,
   appliedRecordMatches,
 } from '../src/utils/locationIdentity.js';
-import { pickFamilyModel, CLAUDE_FAMILY } from '../electron/ipc/modelResolver.js';
+import { pickFamilyModel, claudeModelFor, claudeModelMetaFor, modelResolutionSnapshot, primeClaudeModels, resolvedClaudeModels, CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER } from '../electron/ipc/modelResolver.js';
 import {
   fingerprint,
   migrateGroupNodes,
@@ -142,6 +147,9 @@ import { compsForPricing, priceSynthesisMaxTokens, jobScoringBatchSize, JOB_MAX_
 import { modelMeta, contextWindowForModel, maxOutputForModel, estimateTokensFromChars, assessPromptFit, planSplits, LOCAL_CHARS_PER_TOKEN } from '../electron/ipc/tokenWindow.js';
 import {
   GEMINI_MODEL_FALLBACKS,
+  GEMINI_TIER_LADDER,
+  GEMINI_ALL_MODEL_IDS,
+  geminiModelsInTier,
   classifyGeminiFailure,
   describeGeminiFailure,
   getGeminiDefaultThinkingConfig,
@@ -152,6 +160,16 @@ import {
   isGeminiZeroOrDailyQuota,
   orderGeminiModels,
 } from '../electron/ipc/geminiModels.js';
+import {
+  entitledTiersFor,
+  recordEntitlement,
+  gatedTiers,
+  probeModelForTier,
+  refreshEntitlementInBackground,
+  settleEntitlementProbes,
+  resetEntitlement,
+  entitlementSnapshot,
+} from '../electron/ipc/geminiEntitlement.js';
 import { parseAiJson } from '../electron/ipc/jsonRepair.js';
 import { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
 import { withStatusCheckLock, getStatusCheckQueueDepth } from '../electron/ipc/statusCheckLock.js';
@@ -238,7 +256,7 @@ import { getConnectedHubCards } from '../src/utils/connectedHubCards.js';
 import { enqueueStatusCheckAction, getStatusCheckActionQueueDepth } from '../src/utils/statusCheckActionQueue.js';
 import { getCanonicalDomain, extractDomain, effectiveConcurrency, isCoolingDown, recordOutcome, getRateLimiterSnapshot, _resetRateLimiter } from '../electron/ipc/rateLimiter.js';
 import { recordTokenUsage, recordTruncation, effectiveCap, TOKEN_HARD_CAP } from '../electron/ipc/tokenBudget.js';
-import { encryptSecret, decryptSecret } from '../electron/ipc/settings.js';
+import { encryptSecret, decryptSecret, normalizeClaudeModels, mergeSettingsSection, getAISettings } from '../electron/ipc/settings.js';
 import electronPkg from 'electron';
 import { wrapUntrustedText } from '../electron/ipc/promptSafety.js';
 import { PRODUCT_CONDITIONS, CONDITION_VALUES, DEFAULT_CONDITION, getConditionDef, formatConditionForPricingPrompt, formatConditionGuideForPrompt, stripConditionFromGeneratedTitle } from '../src/utils/productConditions.js';
@@ -252,8 +270,8 @@ import { pickEdgeHandles, structuralEdge } from '../src/nodes/_shared/edgeHelper
 import { WORD_DOC_EXT, isWordDoc } from '../electron/ipc/docUtils.js';
 import { CODE_EXT_RE, PRODUCT_IMAGE_EXT_RE } from '../src/utils/fileExtensions.js';
 import { cancelNodeTasksRecursively } from '../src/utils/canvasInteractions.js';
-import { getKnownTaskIds, modelForTask } from '../electron/ipc/llm.js';
-import { claudeModelsInUse } from '../electron/ipc/claude.js';
+import { getKnownTaskIds, modelForTask, providerForTask, taskModelRoutingSnapshot } from '../electron/ipc/llm.js';
+import { claudeModelsInUse, webSearchToolType } from '../electron/ipc/claude.js';
 import { MODEL_FLOOR } from '../electron/ipc/claudeModels.js';
 import { deriveTimeoutBudget } from '../electron/ipc/scrapeBudget.js';
 import { FINGERPRINT_PROFILES, getSessionProfile, getRandomUA } from '../electron/ipc/browser/antiDetectProfiles.js';
@@ -749,11 +767,16 @@ const tests = [
   {
     name: 'Gemini registry: supports every compatible current model with safe routing metadata',
     run: () => {
-      assert(GEMINI_MODEL_FALLBACKS.length === 5, `expected 5 free-tier compatible Gemini models, got ${GEMINI_MODEL_FALLBACKS.length}`);
+      // 7 ungated ids: the 3 non-gated tiers (flash x4, lite x3) — Pro is
+      // listed in the registry but carries requiresEntitlement:true, so it is
+      // filtered out of GEMINI_MODEL_FALLBACKS by construction (see next assert).
+      assert(GEMINI_MODEL_FALLBACKS.length === 7, `expected 7 ungated Gemini fallback models, got ${GEMINI_MODEL_FALLBACKS.length}`);
       for (const model of [
+        'gemini-3.6-flash',
         'gemini-3.5-flash',
         'gemini-3-flash-preview',
         'gemini-2.5-flash',
+        'gemini-3.5-flash-lite',
         'gemini-3.1-flash-lite',
         'gemini-2.5-flash-lite',
       ]) {
@@ -761,25 +784,33 @@ const tests = [
       }
       assert(!GEMINI_MODEL_FALLBACKS.some(model => /image|tts|live|embedding|robotics|gemma/i.test(model)),
         'special-purpose Gemini/Gemma models must not enter the universal generateContent fallback chain');
+      // Pro is gated on a PROVEN entitlement, not permanently banned — an
+      // unentitled credential 429s ("limit: 0") on every Pro call, so it must
+      // stay out of the ungated chain every caller relies on by default.
+      // orderGeminiModels' opts.entitledTiers is what re-admits it once a live
+      // probe proves the credential can actually call it (geminiEntitlement.js);
+      // this assertion guards the DEFAULT (no entitledTiers) chain only.
       assert(!GEMINI_MODEL_FALLBACKS.some(model => /\bpro\b/i.test(model)),
-        'free-tier no-quota Pro models must stay out of the API-key fallback chain');
+        'entitlement-gated Pro models must stay out of the ungated fallback chain until a probe proves the credential can call them');
 
       assert(getGeminiDefaultThinkingConfig('gemini-2.5-flash').thinkingBudget === 0,
         '2.5 Flash disables thinking for short structured workflows');
-      assert(getGeminiDefaultThinkingConfig('gemini-3.5-flash').thinkingLevel === 'minimal',
-        'Gemini 3 Flash family uses the current thinkingLevel control');
+      assert(getGeminiDefaultThinkingConfig('gemini-3.6-flash').thinkingLevel === 'minimal',
+        'the current Flash generation (3.6) uses the thinkingLevel control, not the retired thinkingBudget one');
+      assert(getGeminiDefaultThinkingConfig('gemini-3.5-flash-lite').thinkingLevel === 'minimal',
+        'the current Lite generation (3.5) uses the thinkingLevel control too');
 
-      const preferredFlash = orderGeminiModels('gemini-3.5-flash');
-      assert(preferredFlash[0] === 'gemini-3.5-flash' && preferredFlash[1] === 'gemini-3-flash-preview',
-        'quality tasks start with Flash models, not no-quota Pro models');
-      const preferredLite = orderGeminiModels('gemini-3.1-flash-lite');
-      assert(preferredLite[0] === 'gemini-3.1-flash-lite' && preferredLite[1] === 'gemini-2.5-flash-lite',
+      const preferredFlash = orderGeminiModels('gemini-3.6-flash');
+      assert(preferredFlash[0] === 'gemini-3.6-flash' && preferredFlash[1] === 'gemini-3.5-flash',
+        'quality tasks start with the current Flash generation, not a stale/no-quota model');
+      const preferredLite = orderGeminiModels('gemini-3.5-flash-lite');
+      assert(preferredLite[0] === 'gemini-3.5-flash-lite' && preferredLite[1] === 'gemini-3.1-flash-lite',
         'lightweight tasks exhaust Lite models before stronger/costlier fallbacks');
-      assert(preferredLite.includes('gemini-3.5-flash') && !preferredLite.some(model => /\bpro\b/i.test(model)),
-        'lightweight tasks include Flash fallback but never no-quota Pro');
+      assert(preferredLite.includes('gemini-3.6-flash') && !preferredLite.some(model => /\bpro\b/i.test(model)),
+        'lightweight tasks include Flash fallback but never Pro (ungated by default)');
       const now = Date.now();
-      const deferred = orderGeminiModels('gemini-3.5-flash', new Map([['gemini-3.5-flash', now + 1000]]), now);
-      assert(deferred[0] === 'gemini-3-flash-preview' && deferred.at(-1) === 'gemini-3.5-flash',
+      const deferred = orderGeminiModels('gemini-3.6-flash', new Map([['gemini-3.6-flash', now + 1000]]), now);
+      assert(deferred[0] === 'gemini-3.5-flash' && deferred.at(-1) === 'gemini-3.6-flash',
         'known-suppressed preferred model moves to the tail without being removed');
       return { models: GEMINI_MODEL_FALLBACKS.length };
     },
@@ -790,11 +821,14 @@ const tests = [
       const beforeShutdown = Date.parse('2026-06-13T00:00:00Z');
       const afterShutdown = Date.parse('2026-10-17T00:00:00Z');
       const scheduled = getGeminiLifecycleWarning('gemini-2.5-flash', beforeShutdown);
-      assert(/October 16, 2026/.test(scheduled) && /gemini-3.5-flash/.test(scheduled),
+      // Replacement bumped from gemini-3.5-flash to gemini-3.6-flash — the
+      // registry's replacement field, not a hand-copied literal, is what this
+      // guards, so the NEXT bump only needs the registry edited, not this test.
+      assert(/October 16, 2026/.test(scheduled) && /gemini-3.6-flash/.test(scheduled),
         `2.5 Flash warning includes shutdown and replacement -> ${scheduled}`);
       assert(/may no longer be reachable/.test(getGeminiLifecycleWarning('gemini-2.5-flash', afterShutdown)),
         'a passed shutdown date warns that the endpoint may be unreachable');
-      assert(getGeminiLifecycleWarning('gemini-3.5-flash', beforeShutdown) === null,
+      assert(getGeminiLifecycleWarning('gemini-3.6-flash', beforeShutdown) === null,
         'models without an announced shutdown do not get fabricated lifecycle warnings');
 
       assert(classifyGeminiFailure(404, 'model not found') === 'unavailable', '404 model endpoint is unavailable');
@@ -840,6 +874,447 @@ const tests = [
       assert(isGeminiZeroOrDailyQuota('rate limit exceeded, retry in 5s') === false, 'a generic per-minute rate limit is not long-window');
       assert(describeGeminiFailure('no-quota', 'generic provider prelude').includes('0 / 0'),
         'no-quota diagnostic explains the dashboard 0 / 0 state');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Gemini registry: capability ladder walks pro -> flash -> lite, gated on opts.entitledTiers',
+    run: () => {
+      assert(GEMINI_TIER_LADDER.join(',') === 'pro,flash,lite', 'the capability ladder is most-to-least capable, unconditionally');
+      assert(GEMINI_ALL_MODEL_IDS.includes('gemini-3.1-pro-preview'), 'GEMINI_ALL_MODEL_IDS includes gated ids too (metadata lookups need Pro\'s token window)');
+      assert(geminiModelsInTier('pro').join(',') === 'gemini-3.1-pro-preview', 'pro tier holds exactly the one gated model');
+      assert(geminiModelsInTier('flash').length === 4 && geminiModelsInTier('lite').length === 3,
+        'flash/lite tier membership matches the registry (4 flash-generation ids, 3 lite-generation ids)');
+
+      const now = Date.now();
+      // Default (no entitledTiers) — Pro must NEVER appear. An unentitled Pro
+      // 429s ("limit: 0") on every single call, so silently trying it would
+      // burn a guaranteed-wasted round-trip on every LLM call forever.
+      const ungated = orderGeminiModels('gemini-3.6-flash', new Map(), now);
+      assert(!ungated.includes('gemini-3.1-pro-preview'), 'no entitledTiers -> Pro never enters the chain');
+
+      // Entitled: Pro leads a QUALITY task's chain ahead of even the task's
+      // OWN preferred model — "most advanced to least", per the module doc.
+      const entitledSet = orderGeminiModels('gemini-3.6-flash', new Map(), now, { entitledTiers: new Set(['pro']) });
+      assert(entitledSet[0] === 'gemini-3.1-pro-preview', `entitled Pro heads a quality-task chain (got ${entitledSet[0]})`);
+      assert(entitledSet.indexOf('gemini-3.1-pro-preview') < entitledSet.indexOf('gemini-3.6-flash'),
+        'entitled Pro is ordered strictly ahead of the preferred Flash model, not merely present somewhere');
+
+      // opts.entitledTiers is documented as Set|Array — both must behave identically.
+      const entitledArray = orderGeminiModels('gemini-3.6-flash', new Map(), now, { entitledTiers: ['pro'] });
+      assert(entitledArray[0] === 'gemini-3.1-pro-preview', 'entitledTiers accepts a plain Array, not only a Set');
+
+      // Lite-preferred (cost-conscious) tasks deliberately never climb to Pro,
+      // even when the credential IS entitled — the task author chose the cheap
+      // tier on purpose, and entitlement must not silently override that intent.
+      const litePreferredEntitled = orderGeminiModels('gemini-3.5-flash-lite', new Map(), now, { entitledTiers: new Set(['pro']) });
+      assert(!litePreferredEntitled.includes('gemini-3.1-pro-preview'),
+        'a Lite-preferred task stays Pro-free even when the credential is entitled (cost intent preserved)');
+
+      // A stale/removed id lingering in TASK_MODELS must be DROPPED, not
+      // hoisted to the front as a guaranteed-404 first attempt.
+      const retired = orderGeminiModels('gemini-retired-9', new Map(), now);
+      assert(!retired.includes('gemini-retired-9'), 'an unregistered preferred model is dropped, not hoisted to the front');
+      assert(retired.length > 0, 'the chain is still non-empty after dropping an unrecognized preferred model');
+
+      // The per-tier hoist-to-front logic must never emit a duplicate id.
+      for (const chain of [ungated, entitledSet, entitledArray, litePreferredEntitled, retired]) {
+        assert(new Set(chain).size === chain.length, `orderGeminiModels chain has no duplicate ids (got ${chain.join(',')})`);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'geminiEntitlement: scoped cache with asymmetric TTLs, fails closed on a throwing probe',
+    run: async () => {
+      // lazyStore falls back to no persisted state under the plain-node test
+      // runner, so cached verdicts live only in the module's in-memory memo —
+      // resetEntitlement() normalizes that memo so this test doesn't depend on
+      // run order (a prior test's recordEntitlement call would otherwise leak in).
+      resetEntitlement();
+      assert(gatedTiers().length === 1 && gatedTiers()[0] === 'pro', `pro is the only gated tier (got ${gatedTiers().join(',')})`);
+      assert(probeModelForTier('pro') === 'gemini-3.1-pro-preview', 'pro is probed with its own (most capable) entry');
+
+      const scopeA = 'test-scope-A';
+      const scopeB = 'test-scope-B';
+      recordEntitlement(scopeA, 'pro', false, 'HTTP 429 limit:0');
+      assert(entitledTiersFor(scopeA).size === 0, 'a denied verdict grants nothing');
+
+      recordEntitlement(scopeA, 'pro', true, 'HTTP 200');
+      assert(entitledTiersFor(scopeA).has('pro'), 'a granted verdict is readable back for the same scope');
+      // Scoping: granting on scope A must not leak into scope B — swapping in a
+      // billing-enabled key must not silently entitle every OTHER credential.
+      assert(entitledTiersFor(scopeB).size === 0, 'entitlement is scoped per credential, not global');
+
+      // Staleness: a granted entry expires after its 24h TTL — a lapsed billing
+      // card must degrade back to Flash within a day, not 429 for a week.
+      const farFuture = Date.now() + 25 * 60 * 60 * 1000;
+      assert(entitledTiersFor(scopeA, farFuture).size === 0, 'a granted verdict older than its 24h TTL is no longer returned');
+      // A backwards system clock must not extend a positive entitlement past
+      // its TTL. Fail closed and let the background probe establish a current
+      // result instead of moving a formerly-valid Pro entry back to the head
+      // of the chain indefinitely after the clock is corrected.
+      const recordedAt = Date.now();
+      recordEntitlement(scopeA, 'pro', true, 'HTTP 200', recordedAt);
+      assert(entitledTiersFor(scopeA, recordedAt - 1).size === 0,
+        'a granted verdict from the apparent future is stale (backwards clock fails closed)');
+
+      // Background refresh: a successful probe grants the tier once settled.
+      resetEntitlement();
+      const scopeC = 'test-scope-C';
+      refreshEntitlementInBackground(scopeC, async () => ({ ok: true, status: 200 }));
+      await settleEntitlementProbes();
+      assert(entitledTiersFor(scopeC).has('pro'), 'a successful background probe grants the tier after settling');
+
+      // Fail-closed: a probe that THROWS (a local/network fault, not evidence
+      // about the credential) must NOT cache a denial — the next call should get
+      // a fresh chance instead of sitting on a week-long "denied" (DENIED_TTL_MS).
+      resetEntitlement();
+      const scopeD = 'test-scope-D';
+      // This must be a *synchronous* throw, not an `async` rejection. An async
+      // IIFE used to run its finally before it had inserted its promise into
+      // inFlight, leaving a resolved stale entry that blocked all later probes.
+      let syncProbeCalls = 0;
+      refreshEntitlementInBackground(scopeD, () => {
+        syncProbeCalls += 1;
+        throw new Error('network blip');
+      });
+      await settleEntitlementProbes();
+      assert(!entitledTiersFor(scopeD).has('pro'), 'a throwing probe leaves the tier ungated');
+      assert(entitlementSnapshot(scopeD)[0].known === false, 'a throwing probe caches NO verdict at all (known stays false, not "known and denied")');
+      // ...and a LATER successful probe can still grant it — proof the throw
+      // didn't poison the scope with a cached denial OR leave its in-flight
+      // marker stuck after a synchronous exception.
+      refreshEntitlementInBackground(scopeD, () => {
+        syncProbeCalls += 1;
+        return { ok: true, status: 200 };
+      });
+      await settleEntitlementProbes();
+      assert(syncProbeCalls === 2, 'a synchronous throwing probe does not leave the in-flight marker stuck');
+      assert(entitledTiersFor(scopeD).has('pro'), 'a later successful probe still grants after an earlier throw');
+
+      const snap = entitlementSnapshot(scopeD)[0];
+      assert(snap.tier === 'pro' && snap.model === 'gemini-3.1-pro-preview' && snap.allowed === true && snap.known === true,
+        `entitlementSnapshot reports a sensible {tier,model,allowed,known} (got ${JSON.stringify(snap)})`);
+
+      resetEntitlement();
+      return { ok: true };
+    },
+  },
+  {
+    name: 'llm: providerForTask purely follows Settings — the old application-generation Claude pin is gone',
+    run: () => {
+      // Fake settings objects, NOT the real store — providerForTask takes an
+      // explicit 2nd arg precisely so callers (and tests) can probe routing
+      // without mutating global settings.
+      const geminiSettings = { provider: 'gemini', anthropicApiKey: 'x' };
+      const claudeSettings = { provider: 'claude', anthropicApiKey: 'x' };
+
+      // Jack reversed the earlier "application-generation always runs on
+      // Claude" decision — EVERY known task (including the former pin set)
+      // must now follow the user's Settings provider with no exceptions.
+      for (const task of [...getKnownTaskIds(), 'default']) {
+        assert(providerForTask(task, geminiSettings) === 'gemini', `'${task}' follows the Gemini Settings pick (no more Claude pin)`);
+        assert(providerForTask(task, claudeSettings) === 'claude', `'${task}' follows the Claude Settings pick`);
+      }
+      // Callers that pass an explicit malformed/missing settings snapshot must
+      // fail safely to the default provider instead of crashing on
+      // `settings.provider` while handling a real task.
+      assert(providerForTask('application-resume', null) === 'gemini', 'an explicit null settings snapshot safely falls back to Gemini');
+      assert(modelForTask('application-resume', null) === 'gemini-3.6-flash', 'model routing remains usable with an explicit null settings snapshot');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'llm: default claudeModels settings reproduce the OLD hard-coded TASK_MODELS table exactly',
+    run: () => {
+      // The safety net for the whole task-group refactor: an install with no
+      // `claudeModels` configured (settings.js backfills GROUP_DEFAULT_FAMILY)
+      // must resolve every task to the exact same model the old literal
+      // per-task Claude column did — generation=OPUS, analysis=SONNET,
+      // light=HAIKU, with company-research/career-achievement-refute one
+      // step below generation (i.e. SONNET, same as before).
+      const settings = { provider: 'claude', anthropicApiKey: 'x' }; // no claudeModels key — defaults apply
+      const { OPUS, SONNET, HAIKU } = MODEL_FLOOR;
+      const expected = {
+        'application-resume':        OPUS,
+        'application-cover-letter':  OPUS,
+        'career-achievement-mining': OPUS,
+        'career-achievement-refute': SONNET, // generation stepped down 1 (independence — load-bearing)
+        'company-research':          SONNET, // generation stepped down 1 (feeds generation, isn't the artifact)
+        'vision-product-analysis':   SONNET,
+        'price-synthesis':           SONNET,
+        'bundle-price-synthesis':    SONNET,
+        'resume-parse':              SONNET,
+        'career-file-extract':       SONNET,
+        'job-query-generation':      SONNET,
+        'job-scoring':               SONNET,
+        'job-bucketing':             SONNET,
+        'default':                   SONNET,
+        'platform-fit-assessment':   HAIKU,
+        'page-status-classify':      HAIKU,
+        'marketplace-hub-scan':      HAIKU,
+        'text-polish':               HAIKU,
+      };
+      for (const [task, expectedModel] of Object.entries(expected)) {
+        const got = modelForTask(task, settings);
+        assert(got === expectedModel, `default claudeModels: '${task}' should resolve to ${expectedModel} (the old TASK_MODELS value), got ${got}`);
+      }
+      // Every known task (+ the 'default' fallback) is covered above — a task
+      // added to TASK_GROUPS without a row here would silently go unverified.
+      assert(new Set([...getKnownTaskIds(), 'default']).size === Object.keys(expected).length,
+        'the expectation table above covers every known task, including the default fallback');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'llm: career-achievement-refute independence survives a non-default generation family, clamps at the ladder floor',
+    run: () => {
+      // The refuter deliberately runs a DIFFERENT model from the miner — an
+      // adversarial check re-run on the SAME model tends to just re-confirm its
+      // own reasoning, which would silently turn "independent verification"
+      // into self-confirmation. This must hold for ANY family the user picks
+      // for Generation, not just the OPUS default.
+      const fableGen = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: 'FABLE', analysis: 'SONNET', light: 'HAIKU' } };
+      const minerModel = modelForTask('career-achievement-mining', fableGen);
+      const refuterModel = modelForTask('career-achievement-refute', fableGen);
+      assert(minerModel !== refuterModel, `miner (Fable) and refuter (one step down) must resolve to different models (both got ${minerModel})`);
+      assert(refuterModel === MODEL_FLOOR.OPUS, `refuter one step below FABLE on the ladder should be OPUS (got ${refuterModel})`);
+
+      // Clamp: Generation set to the BOTTOM of the ladder (Haiku) leaves the
+      // step-1 refuter with nowhere lower to go — it must clamp at Haiku
+      // (same as the miner) rather than throw or wrap around the ladder.
+      // This is the documented "independence silently lost" case; it must
+      // not crash, just land flat.
+      const haikuGen = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: 'HAIKU', analysis: 'SONNET', light: 'HAIKU' } };
+      const clampedMiner = modelForTask('career-achievement-mining', haikuGen);
+      const clampedRefuter = modelForTask('career-achievement-refute', haikuGen);
+      assert(clampedMiner === MODEL_FLOOR.HAIKU && clampedRefuter === MODEL_FLOOR.HAIKU,
+        `generation=HAIKU clamps the step-1 refuter at HAIKU too (got miner=${clampedMiner}, refuter=${clampedRefuter})`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'llm: an unrecognized/missing claudeModels family token falls back to the group default, never throws',
+    run: () => {
+      // Defensive re-validation inside llm.js itself (belt-and-suspenders on
+      // top of settings.js's own normalizeClaudeModels()) — llm.js is
+      // reachable with a hand-built settings object that never went through
+      // that layer (tests, or a future caller).
+      const badToken = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: 'MYTHOS', analysis: 'nope', light: null } };
+      assert(modelForTask('application-resume', badToken) === MODEL_FLOOR.OPUS, 'an unrecognized generation token falls back to OPUS (the group default)');
+      assert(modelForTask('job-scoring', badToken) === MODEL_FLOOR.SONNET, 'an unrecognized analysis token falls back to SONNET (the group default)');
+      assert(modelForTask('text-polish', badToken) === MODEL_FLOOR.HAIKU, 'a null light token falls back to HAIKU (the group default)');
+
+      const noClaudeModelsAtAll = { provider: 'claude', anthropicApiKey: 'x' };
+      assert(modelForTask('application-resume', noClaudeModelsAtAll) === MODEL_FLOOR.OPUS, 'a settings object with no claudeModels key at all still resolves via the group default');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'llm: a non-default claudeModels family choice for one group actually moves that group\'s resolved model, and only that group',
+    run: () => {
+      // The whole point of the group/step refactor is that the FAMILY is a
+      // per-group Settings choice, not a hard-code — prove picking a
+      // non-default family actually changes the resolved model id, not just
+      // that the plumbing accepts the value without erroring. Only
+      // `generation` is set below; analysis/light are left unset so they
+      // fall through to their own defaults, which also proves the choice is
+      // scoped to the group it names rather than a global override.
+      const sonnetGen = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: 'SONNET' } };
+      assert(modelForTask('application-resume', sonnetGen) === MODEL_FLOOR.SONNET, 'generation=SONNET moves application-resume off its OPUS default to the Sonnet floor');
+      assert(modelForTask('application-cover-letter', sonnetGen) === MODEL_FLOOR.SONNET, 'generation=SONNET moves application-cover-letter too');
+      assert(modelForTask('career-achievement-mining', sonnetGen) === MODEL_FLOOR.SONNET, 'generation=SONNET moves career-achievement-mining too');
+      // Unrelated groups, left unset, resolve via THEIR OWN defaults — the
+      // pick above is scoped to `generation`, not applied everywhere.
+      assert(modelForTask('job-scoring', sonnetGen) === MODEL_FLOOR.SONNET, 'job-scoring (analysis, unset) still resolves via its own default (which happens to also be Sonnet)');
+      assert(modelForTask('text-polish', sonnetGen) === MODEL_FLOOR.HAIKU, 'text-polish (light, unset) is untouched by the generation change');
+
+      const haikuAnalysis = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { analysis: 'HAIKU' } };
+      assert(modelForTask('application-resume', haikuAnalysis) === MODEL_FLOOR.OPUS, 'generation (unset) is untouched by an analysis-only change');
+      assert(modelForTask('job-scoring', haikuAnalysis) === MODEL_FLOOR.HAIKU, 'analysis=HAIKU moves job-scoring off its SONNET default');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'llm: career-achievement-mining vs -refute independence holds for EVERY generation family, except the ladder floor',
+    run: () => {
+      // Load-bearing invariant (TASK_GROUPS doc, llm.js): the refuter must
+      // resolve to a DIFFERENT model from the miner for any Settings pick, or
+      // the "independent verification" the step exists for silently
+      // degenerates into self-confirmation. Walk the WHOLE ladder — not just
+      // a couple of hand-picked samples — so a future ladder change (a family
+      // inserted, removed, or reordered) is caught here instead of discovered
+      // live. At the ladder floor there is nowhere lower to step, so that one
+      // entry is the sole documented exception: assert the boundary
+      // explicitly rather than skip it.
+      const floorFamily = CLAUDE_FAMILY_LADDER[CLAUDE_FAMILY_LADDER.length - 1];
+      for (const family of CLAUDE_FAMILY_LADDER) {
+        const settings = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: family } };
+        const miner = modelForTask('career-achievement-mining', settings);
+        const refuter = modelForTask('career-achievement-refute', settings);
+        if (family === floorFamily) {
+          assert(miner === refuter, `at the ladder floor (${family}) the refuter has nowhere lower to step, so it lands on the SAME model as the miner (got miner=${miner}, refuter=${refuter})`);
+        } else {
+          assert(miner !== refuter, `generation=${family}: miner and refuter must resolve to DIFFERENT models for independence (both got ${miner})`);
+        }
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'llm: taskModelRoutingSnapshot returns a complete {provider, groups, tasks} diagnostic, one row per known task',
+    run: () => {
+      // Replaces the old providerPinnedTasks/applicationGenerationBlocked
+      // bug-report fields (which described a pin that no longer exists) — a
+      // task missing from this snapshot would be invisible to a "why did
+      // this task use a weaker/stronger model than I picked" bug report.
+      const settings = { provider: 'claude', anthropicApiKey: 'x' }; // defaults apply
+      const snap = taskModelRoutingSnapshot(settings);
+      assert(snap.provider === 'claude', 'snapshot.provider reflects the Settings provider');
+      assert(Object.keys(snap.groups).sort().join(',') === 'analysis,generation,light', 'snapshot.groups covers exactly the three task groups');
+      assert(snap.groups.generation.family === 'OPUS' && snap.groups.generation.model === MODEL_FLOOR.OPUS, 'generation group summary resolves to its default family + model');
+      assert(snap.groups.analysis.family === 'SONNET' && snap.groups.light.family === 'HAIKU', 'analysis/light group summaries resolve to their own defaults');
+
+      const known = getKnownTaskIds();
+      assert(known.size > 0, 'sanity: getKnownTaskIds is non-empty');
+      for (const task of known) {
+        assert(snap.tasks[task], `taskModelRoutingSnapshot is missing a row for known task '${task}'`);
+        assert(snap.tasks[task].provider === 'claude', `'${task}' row reports the active provider`);
+        assert(typeof snap.tasks[task].model === 'string' && snap.tasks[task].model.length > 0, `'${task}' row carries a real model id, not undefined/empty`);
+      }
+      // Step-offset detail is visible per-task, not just inferable from the
+      // group summary — the whole reason the per-task half of this
+      // diagnostic exists alongside the per-group half.
+      assert(snap.tasks['career-achievement-refute'].step === 1, 'career-achievement-refute row reports its step offset');
+      assert(snap.tasks['career-achievement-refute'].model === MODEL_FLOOR.SONNET, 'career-achievement-refute resolves one step below generation (SONNET) by default');
+
+      // provider is task-independent (providerForTask doc) — every row
+      // shares the one provider even under a Gemini settings object.
+      const geminiSnap = taskModelRoutingSnapshot({ provider: 'gemini', anthropicApiKey: 'x' });
+      assert(geminiSnap.provider === 'gemini', 'snapshot.provider follows Settings for Gemini too');
+      for (const task of known) {
+        assert(geminiSnap.tasks[task].provider === 'gemini', `'${task}' row follows the Gemini provider — no per-task pin survives`);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'modelResolver: pickFamilyModel always resolves to the latest OPUS, never a Fable/Mythos upsell',
+    run: () => {
+      // Shape verified live against Anthropic's Models API (2026-08-12): id,
+      // created_at, max_input_tokens, max_tokens, capabilities.structured_outputs.supported.
+      const today = [
+        { id: 'claude-opus-5', created_at: '2026-05-01T00:00:00Z', max_input_tokens: 1000000, max_tokens: 128000, capabilities: { structured_outputs: { supported: true } } },
+        { id: 'claude-sonnet-5', created_at: '2026-05-01T00:00:00Z', max_input_tokens: 1000000, max_tokens: 64000, capabilities: { structured_outputs: { supported: true } } },
+        { id: 'claude-haiku-4-5', created_at: '2025-10-01T00:00:00Z', max_input_tokens: 200000, max_tokens: 64000, capabilities: { structured_outputs: { supported: true } } },
+      ];
+      assert(pickFamilyModel('OPUS', today, 'claude-opus-5').id === 'claude-opus-5', 'resolves to the current floor on today\'s real catalog');
+
+      // A newer Opus generation ships — must be adopted automatically. This is
+      // the regression this whole resolver exists to prevent: TASK_MODELS used
+      // to pin a literal id and silently drift two generations stale.
+      const withOpus6 = [...today, { id: 'claude-opus-6', created_at: '2026-09-01T00:00:00Z', max_input_tokens: 1000000, max_tokens: 128000, capabilities: { structured_outputs: { supported: true } } }];
+      assert(pickFamilyModel('OPUS', withOpus6, 'claude-opus-5').id === 'claude-opus-6', 'a newer Opus generation is adopted automatically');
+
+      // A newer AND pricier Fable/Mythos entry must NEVER win, even though it
+      // postdates every real Opus candidate — the explicit user requirement is
+      // "auto-use the latest OPUS", not "auto-use the latest model of any kind".
+      const withUpsells = [...withOpus6,
+        { id: 'claude-fable-6', created_at: '2026-10-01T00:00:00Z', max_input_tokens: 1000000, max_tokens: 128000, capabilities: { structured_outputs: { supported: true } } },
+        { id: 'claude-mythos-6', created_at: '2026-11-01T00:00:00Z', max_input_tokens: 1000000, max_tokens: 128000, capabilities: { structured_outputs: { supported: true } } },
+      ];
+      const upsellResult = pickFamilyModel('OPUS', withUpsells, 'claude-opus-5');
+      assert(upsellResult.id === 'claude-opus-6', `Fable/Mythos must never win over Opus regardless of recency (got ${upsellResult.id})`);
+
+      // A capability-gated newer candidate is skipped in favour of the
+      // next-newest AND surfaces in \`skipped\` — a SILENT skip would be
+      // indistinguishable from no new generation ever having been available.
+      const withUnsupported = [...withOpus6,
+        { id: 'claude-opus-7', created_at: '2026-12-01T00:00:00Z', max_input_tokens: 1000000, max_tokens: 128000, capabilities: { structured_outputs: { supported: false } } },
+      ];
+      const gated = pickFamilyModel('OPUS', withUnsupported, 'claude-opus-5');
+      assert(gated.id === 'claude-opus-6', 'a candidate reporting structured_outputs unsupported is skipped for the next-newest');
+      assert(gated.skipped.some((s) => s.id === 'claude-opus-7'), 'the skipped candidate is reported in `skipped`, not silently dropped');
+
+      // No capabilities tree at all -> accepted (absence means "the API didn't
+      // report it", not "the model lacks it" — module doc guard 3).
+      const withNoCapabilities = [...withOpus6,
+        { id: 'claude-opus-8', created_at: '2027-01-01T00:00:00Z', max_input_tokens: 1000000, max_tokens: 128000 },
+      ];
+      assert(pickFamilyModel('OPUS', withNoCapabilities, 'claude-opus-5').id === 'claude-opus-8',
+        'a candidate with no capabilities key at all is accepted (unknown, not unsupported)');
+
+      // An older Opus id must never win over the pinned floor.
+      const withOlder = [...today,
+        { id: 'claude-opus-4-1', created_at: '2025-01-01T00:00:00Z', max_input_tokens: 200000, max_tokens: 32000, capabilities: { structured_outputs: { supported: true } } },
+      ];
+      assert(pickFamilyModel('OPUS', withOlder, 'claude-opus-5').id === 'claude-opus-5', 'an older Opus candidate never displaces the floor');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'modelResolver: synchronous reads never reuse a resolved model after an API-key switch',
+    run: async () => {
+      // Prime a deliberately newer catalog for account A without any network.
+      // The important assertion is the NEXT synchronous read: callers such as
+      // callLLMText select a model before the next async prime has necessarily
+      // started, so account B must get the universal floor rather than A's
+      // newer/account-specific id.
+      const priorFetch = globalThis.fetch;
+      const catalog = [
+        { id: 'claude-opus-5', created_at: '2026-05-01T00:00:00Z', max_input_tokens: 1000000, max_tokens: 128000 },
+        { id: 'claude-opus-6', created_at: '2026-09-01T00:00:00Z', max_input_tokens: 1000000, max_tokens: 128000 },
+        { id: 'claude-sonnet-5', created_at: '2026-05-01T00:00:00Z', max_input_tokens: 1000000, max_tokens: 64000 },
+        { id: 'claude-haiku-4-5', created_at: '2025-10-01T00:00:00Z', max_input_tokens: 200000, max_tokens: 64000 },
+      ];
+      globalThis.fetch = async () => new Response(JSON.stringify({ data: catalog, has_more: false }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+      try {
+        await primeClaudeModels({ apiKey: 'test-account-a-key', force: true });
+        assert(claudeModelFor(CLAUDE_FAMILY.OPUS, 'test-account-a-key') === 'claude-opus-6',
+          'the account that primed the snapshot may use its resolved newer model');
+        assert(claudeModelFor(CLAUDE_FAMILY.OPUS, 'test-account-b-key') === MODEL_FLOOR.OPUS,
+          'a different key synchronously receives the safe floor before it is primed, never account A\'s model');
+        assert(claudeModelFor(CLAUDE_FAMILY.OPUS, null) === MODEL_FLOOR.OPUS,
+          'removing the key also rejects the old API snapshot synchronously');
+        assert(resolvedClaudeModels('test-account-b-key').OPUS === MODEL_FLOOR.OPUS,
+          'the synchronous resolved-model map also refuses account A\'s stale id');
+        assert(claudeModelMetaFor('claude-opus-6', 'test-account-b-key') === null,
+          'token-window metadata for account A\'s newer model is unavailable to account B');
+        const bSnapshot = modelResolutionSnapshot('test-account-b-key');
+        assert(bSnapshot.source === 'floor' && bSnapshot.staleForCurrentKey === true && bSnapshot.resolved.OPUS === MODEL_FLOOR.OPUS,
+          'diagnostics report the safe floor plus a key-agnostic stale marker, never account A\'s catalog as current');
+      } finally {
+        globalThis.fetch = priorFetch;
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'claude: webSearchToolType picks the search-tool variant each Claude generation actually accepts',
+    run: () => {
+      // Verified live (module doc): Haiku 400s on the new `_20260209` variant,
+      // so guessing wrong here breaks the ONE grounded call the app makes
+      // (company-research) rather than just under-using a feature.
+      for (const modern of ['claude-opus-5', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6']) {
+        assert(webSearchToolType(modern) === 'web_search_20260209', `${modern} (Opus/Sonnet 4.6+) gets the dynamic-filtering search tool`);
+      }
+      for (const legacy of ['claude-haiku-4-5-20251001', 'claude-opus-4-5-20251101', 'claude-sonnet-4-5-20250929']) {
+        assert(webSearchToolType(legacy) === 'web_search_20250305', `${legacy} gets the basic search tool (the new variant 400s on it)`);
+      }
+      // The id comes from the live resolver and changes generation on its own —
+      // a hard-coded id list would silently stop matching. Future generations
+      // must resolve via the regex, including double-digit ones (not string-sorted).
+      assert(webSearchToolType('claude-opus-6') === 'web_search_20260209', 'a hypothetical future Opus 6 gets the new variant');
+      assert(webSearchToolType('claude-opus-10') === 'web_search_20260209', 'double-digit future generations parse correctly (not string-sorted)');
+      // Guessing wrong upward is a hard 400 on the user's résumé research, so
+      // anything unidentifiable must fall back to the variant every model accepts.
+      assert(webSearchToolType(null) === 'web_search_20250305', 'null input falls back to the safe variant without throwing');
+      assert(webSearchToolType(undefined) === 'web_search_20250305', 'undefined input falls back to the safe variant without throwing');
+      assert(webSearchToolType('garbage-model-xyz') === 'web_search_20250305', 'an unrecognized id falls back to the safe variant');
       return { ok: true };
     },
   },
@@ -2654,9 +3129,21 @@ const tests = [
       assert(p1.tool_choice?.type === 'tool' && p1.tool_choice?.name === 'submit_response', 'responseSchema → forced tool_choice');
       assert(p1.messages.length === 1, 'tool-use mode adds no assistant prefill');
       assert(p1.messages[0].content[0].cache_control?.type === 'ephemeral', 'cached prefix carried into params');
-      // expectJson (no schema) → assistant "{" prefill, no tools.
+      const count = buildAnthropicTokenCountParams('JOBS', { ...base, responseSchema: schema });
+      const { max_tokens: _maxTokens, ...liveWithoutOutputCap } = p1;
+      assert(JSON.stringify(count) === JSON.stringify(liveWithoutOutputCap),
+        'token-count params are derived from the live request shape and differ only by max_tokens (including forced tool_choice)');
+      // expectJson (no schema) → NO assistant prefill. Current models 400 on
+      // an assistant-role prefill turn ("This model does not support
+      // assistant message prefill" — verified live against claude-opus-5 /
+      // claude-sonnet-5 / claude-fable-5), so the old `{ role: 'assistant',
+      // content: '{' }` branch was removed; expectJson is now a no-op on the
+      // request shape (parseAiJson handles the resulting prose/fence slop
+      // instead). This must resolve IDENTICALLY to the plain (no-schema,
+      // no-expectJson) case below.
       const p2 = buildAnthropicMessageParams('X', { model: 'm', maxTokens: 100, expectJson: true });
-      assert(!p2.tools && p2.messages.length === 2 && p2.messages[1].role === 'assistant' && p2.messages[1].content === '{', 'expectJson → "{" prefill');
+      assert(!p2.tools && !p2.tool_choice && p2.messages.length === 1 && p2.messages[0].role === 'user',
+        'expectJson no longer adds an assistant prefill turn — single user message, no envelope');
       // plain → single user turn, no envelope.
       const p3 = buildAnthropicMessageParams('X', { model: 'm', maxTokens: 100 });
       assert(!p3.tools && !p3.tool_choice && p3.messages.length === 1, 'plain → single user message, no envelope');
@@ -3255,7 +3742,7 @@ const tests = [
       // files copied next to the HTML — that whole temp-dir-of-siblings setup
       // is exactly what HTML-first retires, so the doc must be openable with
       // zero sibling assets.
-      const doc = buildResumeDocument({ resumeMainHtml: '<main class="page" data-print="ink-only"><h1 class="name">Jane</h1></main>' });
+      const doc = buildResumeDocument({ resumeMainHtml: '<main class="page" data-print="ink-only" data-mono data-page="a4" data-density="compact"><h1 class="name">Jane</h1></main>' });
       assert(/^<!doctype html>/i.test(doc.trim()), 'resume doc: missing doctype');
       assert(!doc.includes('<link rel="stylesheet"'), 'resume doc: must not link external stylesheets (HTML-first is self-contained)');
       assert((doc.match(/<style>/g) || []).length === 1, 'resume doc: exactly one inlined <style> block');
@@ -3265,6 +3752,8 @@ const tests = [
       assert(doc.includes('.resume-header') && doc.includes('.name'), 'resume doc: resume.css was not inlined');
       assert(doc.includes('--ff-display'), 'resume doc: colors_and_type.css was not inlined');
       assert(doc.includes('data-print="ink-only"') && doc.includes('Jane'), 'resume doc: lost the <main> block');
+      const renderedMain = doc.split('</style>').pop().match(/<main\b[^>]*>/i)?.[0] || '';
+      assert(!/\sdata-(?:print|mono|page|density)\b/i.test(renderedMain), 'resume doc: root variants must not be shadowed by model-level main attributes');
       // A model that mistakenly returns a full fenced document is normalized to
       // exactly one <main> inside our scaffold. Counted only AFTER the inlined
       // <style> block — colors_and_type.css's own comments literally contain
@@ -3288,9 +3777,93 @@ const tests = [
       assert(extractVariantAttrs('<main class="page" data-page="a4">') === 'data-print="dual-pdf" data-page="a4"', 'variant: a4 defaults to dual-pdf');
       assert(extractVariantAttrs('<main class="page" data-print="dual-pdf">') === 'data-print="dual-pdf"', 'variant: dual-pdf preserved');
       assert(extractVariantAttrs('<main class="page">') === 'data-print="dual-pdf"', 'variant: plain → dual-pdf default');
+      assert(extractVariantAttrs("<main class='page' data-print='ink-only' data-page='a4' data-density='compact'>") === 'data-print="ink-only" data-page="a4" data-density="compact"', 'variant: single-quoted model attributes are preserved');
       // isDualMode gates the OCG cream post-process.
       assert(isDualMode('data-print="dual-pdf"') === true, 'isDualMode: dual-pdf → true');
       assert(isDualMode('data-print="ink-only" data-mono') === false, 'isDualMode: ink-only → false');
+      return { ok: true };
+    },
+  },
+  {
+    // extractVariantAttrs used to recognize only data-print/data-mono/
+    // data-page and silently DROP data-density — the fit loop's one lever
+    // (jobApplication.js's renderResumeWithFit) was structurally unreachable.
+    name: 'Application: extractVariantAttrs carries data-density (was silently dropped) and the caller can force it',
+    run: () => {
+      // No density anywhere → absent, not a false "compact".
+      assert(extractVariantAttrs('<main class="page" data-print="ink-only">') === 'data-print="ink-only"', 'no density: attribute absent entirely');
+      // The model emitted it on its own (defensive recognition, not the normal
+      // path — the model is never instructed to set this).
+      assert(extractVariantAttrs('<main class="page" data-density="compact">') === 'data-print="dual-pdf" data-density="compact"', 'density read from the model markup when present');
+      // The fit loop forcing it ON, regardless of what the markup says.
+      assert(extractVariantAttrs('<main class="page">', { density: 'compact' }) === 'data-print="dual-pdf" data-density="compact"', 'caller-forced density: compact wins over absent markup');
+      assert(extractVariantAttrs('<main class="page" data-density="compact">', { density: null }) === 'data-print="dual-pdf"', 'caller-forced density: null wins over a model-emitted compact (fit loop resetting to the un-compact state)');
+      // Composes with the other variants, per SKILL.md's "pairs cleanly with" note.
+      assert(extractVariantAttrs('<main class="page" data-print="ink-only" data-mono data-page="a4">', { density: 'compact' }) === 'data-print="ink-only" data-mono data-page="a4" data-density="compact"', 'density composes with ink-only + mono + a4');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Application: target page count heuristic (SKILL.md §5 — "1 for IC roles up to staff, 2 for principal+")',
+    run: () => {
+      assert(targetPageCountForJob('Senior Software Engineer') === 1, 'senior IC → 1 page');
+      assert(targetPageCountForJob('Staff Software Engineer') === 1, 'bare "staff" is still an IC role under SKILL.md — 1 page, NOT 2');
+      assert(targetPageCountForJob('Software Engineer, Staff+') === 2, '"Staff+" (literal plus) is the ladder shorthand for staff-and-above → 2 pages');
+      assert(targetPageCountForJob('Senior Staff Engineer') === 2, 'senior staff is above the Staff ceiling → 2 pages');
+      assert(targetPageCountForJob('Sr. Staff Engineer') === 2, 'abbreviated senior staff is above the Staff ceiling → 2 pages');
+      assert(targetPageCountForJob('Principal Engineer') === 2, 'principal → 2 pages');
+      assert(targetPageCountForJob('Director of Engineering') === 2, 'director → 2 pages');
+      assert(targetPageCountForJob('VP of Engineering') === 2, 'VP → 2 pages');
+      assert(targetPageCountForJob('Head of Platform') === 2, '"head of" → 2 pages');
+      assert(targetPageCountForJob('Chief Technology Officer') === 2, 'chief → 2 pages');
+      assert(targetPageCountForJob('Chief of Staff') === 1, 'Chief of Staff is an administrative/advisory title, not a principal+ IC title');
+      assert(targetPageCountForJob('Chief-of-Staff') === 1, 'hyphenated Chief-of-Staff is the same administrative/advisory title');
+      assert(targetPageCountForJob('') === 1, 'empty/missing title defaults to 1 page, not a throw');
+      assert(targetPageCountForJob(null) === 1, 'null title defaults to 1 page, not a throw');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Application: decideFitStep — the render → page-count → fit loop\'s pure decision function',
+    run: () => {
+      // Fits already → ship, no compact ever applied pre-emptively (SKILL.md:
+      // "do not apply pre-emptively").
+      const fits = decideFitStep({ pageCount: 1, target: 1, compactTried: false, revisionTried: false });
+      assert(fits.action === 'ship', 'fits target → ship');
+      const underTarget = decideFitStep({ pageCount: 1, target: 2, compactTried: false, revisionTried: false });
+      assert(underTarget.action === 'ship', 'under target → ship (never pads to fill the target)');
+
+      // Over target, nothing tried yet → the FREE lever first, never straight to an LLM call.
+      const first = decideFitStep({ pageCount: 2, target: 1, compactTried: false, revisionTried: false });
+      assert(first.action === 'compact', 'over target, compact not yet tried → compact (free, no LLM)');
+
+      // Page count cannot tell whether a 2-page/1-page-target result is a
+      // one-line or almost-full-page overflow, but 3 pages against a 1-page
+      // target is conclusively large. That case must not waste a compact pass.
+      const clearlyLarge = decideFitStep({ pageCount: 3, target: 1, compactTried: false, revisionTried: false });
+      assert(clearlyLarge.action === 'revise', 'more than one full page beyond target → revise content before compact');
+
+      // Over target, compact already tried → the one paid revision call.
+      const second = decideFitStep({ pageCount: 2, target: 1, compactTried: true, revisionTried: false });
+      assert(second.action === 'revise', 'still over after compact → revise (one LLM call)');
+
+      // Over target, BOTH levers exhausted → ship best-effort, never loop.
+      const exhausted = decideFitStep({ pageCount: 2, target: 1, compactTried: true, revisionTried: true });
+      assert(exhausted.action === 'ship', 'both levers exhausted → ship best-effort, no third attempt');
+
+      // A page count measured against fallback typefaces (fonts didn't load)
+      // must never drive a fit decision — could compact a résumé that already
+      // fits, or worse, spend an LLM call cutting real content over a phantom
+      // overflow. Ships regardless of how far "over" the fallback count looks,
+      // and regardless of what's already been tried.
+      const noFonts = decideFitStep({ pageCount: 5, target: 1, compactTried: false, revisionTried: false, fontsLoaded: false });
+      assert(noFonts.action === 'ship', 'fonts not loaded → ship without acting on a page count that isn\'t trustworthy');
+      // fontsLoaded defaults to true (the common case) when the caller omits it.
+      const defaultsTrue = decideFitStep({ pageCount: 2, target: 1, compactTried: false, revisionTried: false });
+      assert(defaultsTrue.action === 'compact', 'fontsLoaded omitted defaults to true — normal fit logic still runs');
+
+      // Every decision carries a human-readable reason (bug-report / log line).
+      assert(typeof first.reason === 'string' && first.reason.length > 0, 'decision carries a non-empty reason');
       return { ok: true };
     },
   },
@@ -7218,6 +7791,68 @@ const tests = [
     },
   },
   {
+    name: 'settings: normalizeClaudeModels backfills missing/invalid per-group family tokens, never throws',
+    run: () => {
+      assert(JSON.stringify(normalizeClaudeModels(undefined)) === JSON.stringify({ generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' }),
+        'an older config with no claudeModels key at all gets the full default set');
+      assert(JSON.stringify(normalizeClaudeModels(null)) === JSON.stringify({ generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' }),
+        'null input is treated the same as absent');
+      assert(JSON.stringify(normalizeClaudeModels({})) === JSON.stringify({ generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' }),
+        'an empty object still backfills every group');
+
+      // A valid non-default pick is preserved verbatim...
+      const partiallyValid = normalizeClaudeModels({ generation: 'FABLE', analysis: 'nonsense-typo', light: null });
+      assert(partiallyValid.generation === 'FABLE', 'a recognized, non-default token is preserved as-is');
+      // ...while an unrecognized token in a SIBLING group falls back to ONLY
+      // that group's default, not the whole object.
+      assert(partiallyValid.analysis === 'SONNET', 'an unrecognized token in one group falls back to that group\'s own default');
+      assert(partiallyValid.light === 'HAIKU', 'a null token falls back to that group\'s default');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'settings: getAISettings() always returns a fully-populated, validated claudeModels',
+    run: () => {
+      const ai = getAISettings();
+      assert(ai.claudeModels && typeof ai.claudeModels === 'object', 'getAISettings() always includes a claudeModels object');
+      for (const group of ['generation', 'analysis', 'light']) {
+        assert(typeof ai.claudeModels[group] === 'string' && ai.claudeModels[group].length > 0,
+          `getAISettings().claudeModels.${group} is a non-empty string (got ${JSON.stringify(ai.claudeModels[group])})`);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'settings: mergeSettingsSection deep-merges ai.claudeModels instead of replacing it wholesale',
+    run: () => {
+      const current = { provider: 'claude', anthropicApiKey: 'x', claudeModels: { generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' } };
+
+      // Regression: a single-family update (exactly what SettingsPanel's
+      // updateClaudeModelGroup sends) must NOT wipe the other two groups —
+      // a naive top-level `{ ...current, ...value }` shallow merge would
+      // replace `claudeModels` wholesale with `{ generation: 'FABLE' }`,
+      // silently dropping analysis/light back to undefined.
+      const afterOneFamilyChange = mergeSettingsSection('ai', current, { claudeModels: { generation: 'FABLE' } });
+      assert(afterOneFamilyChange.claudeModels.generation === 'FABLE', 'the changed group is applied');
+      assert(afterOneFamilyChange.claudeModels.analysis === 'SONNET', 'a sibling group (analysis) survives an unrelated single-group update');
+      assert(afterOneFamilyChange.claudeModels.light === 'HAIKU', 'a sibling group (light) survives an unrelated single-group update');
+
+      // A normal top-level key (e.g. serviceAccountPath) still shallow-merges
+      // as before — the nested-merge exception is scoped to claudeModels only.
+      const afterUnrelatedKey = mergeSettingsSection('ai', current, { serviceAccountPath: '/tmp/sa.json' });
+      assert(afterUnrelatedKey.serviceAccountPath === '/tmp/sa.json', 'an unrelated ai key merges normally');
+      assert(afterUnrelatedKey.claudeModels.generation === 'OPUS', 'claudeModels is untouched when the update carries no claudeModels key at all');
+
+      // A non-'ai' section never applies the nested-merge special case, even
+      // if it happens to carry a key named claudeModels (defensive: the
+      // special case is keyed on section === 'ai', not the key's mere presence).
+      const nonAiSection = mergeSettingsSection('jobs', { claudeModels: { generation: 'OPUS' } }, { claudeModels: { generation: 'FABLE' } });
+      assert(JSON.stringify(nonAiSection.claudeModels) === JSON.stringify({ generation: 'FABLE' }),
+        'a non-ai section shallow-merges claudeModels like any other key (no special nested handling)');
+      return { ok: true };
+    },
+  },
+  {
     name: 'promptSafety: wrapUntrustedText nonce-tags untrusted content and cannot be spoofed from inside',
     run: () => {
       const wrapped = wrapUntrustedText('job-description', 'Senior Engineer role at Acme.');
@@ -7815,6 +8450,76 @@ const tests = [
         assert(/document\.fonts\.check\(ffWeight \+ ' 12px "' \+ firstFamily \+ '"'\)/.test(doc), `${label}: the actual check call is weight-qualified`);
       }
       return { ok: true };
+    },
+  },
+  {
+    // Packaging regression guard for getDualModePdf() in
+    // electron/ipc/resumeRender.js. NOT imported from there (that module
+    // imports `electron`, which this plain-Node test runner can't load) —
+    // the loader is replicated inline below, deliberately the SAME way
+    // getDualModePdf() does it, so a regression there is caught here too.
+    //
+    // getDualModePdf() does NOT `require()` dual-mode-pdf.js — that's the
+    // UMD's own Node branch, and it was CONFIRMED BROKEN in a packaged
+    // build: the UMD's Node branch runs `require('pdf-lib')` from its OWN
+    // location, but electron-builder ships resume_design_system/ via
+    // `extraResources` to Contents/Resources/, a SIBLING of app.asar, while
+    // pdf-lib lives inside app.asar/node_modules. Node's resolver only
+    // walks UPWARD through ancestors, so the inner require throws
+    // MODULE_NOT_FOUND in the packaged app. Instead, getDualModePdf() reads
+    // the module's source and evaluates it with `new Function`, seeding a
+    // `self.PDFLib` with our own already-imported pdf-lib and reading
+    // `self.DualModePdf` back off it — the UMD's BROWSER branch.
+    //
+    // That break is invisible from a dev checkout — and from this very
+    // test's own process — because this repo's root node_modules genuinely
+    // IS an ancestor of resume_design_system/build/, so a plain
+    // `require('pdf-lib')` would resolve fine right here too. So this test
+    // does NOT assert anything about `require()` succeeding (that would
+    // pass identically before and after the fix, proving nothing about the
+    // packaged-build failure). It instead locks in the injected-PDFLib
+    // evaluation path itself — the part that actually changed — and
+    // exercises the transform it produces end-to-end, so a "simplification"
+    // back to `require()` fails here instead of surfacing only inside a
+    // signed .app on someone else's machine.
+    name: 'dual-mode-pdf.js loader: evaluated with an injected self.PDFLib (the packaged-build-safe path getDualModePdf() uses, not require())',
+    run: async () => {
+      const modulePath = path.resolve('resume_design_system/build/dual-mode-pdf.js');
+      const moduleSrc = fs.readFileSync(modulePath, 'utf8');
+      const root = { PDFLib };
+      const DualModePdf = new Function('self', `${moduleSrc}\n;return self.DualModePdf;`)(root);
+      assert(typeof DualModePdf?.addOcgBackground === 'function', 'evaluating the UMD with an injected self.PDFLib yields a DualModePdf.addOcgBackground function');
+
+      // End-to-end: build a real 2-page PDF with pdf-lib and run the
+      // transform over it, checking the properties the module's own
+      // doc-comment promises.
+      const builtPdf = await PDFDocument.create();
+      builtPdf.addPage([612, 792]);
+      builtPdf.addPage([612, 792]);
+      const inputBytes = await builtPdf.save();
+
+      const outputBytes = await DualModePdf.addOcgBackground(inputBytes);
+      assert(outputBytes.length > inputBytes.length, `the OCG registration + per-page cream content stream must grow the file (in ${inputBytes.length} -> out ${outputBytes.length})`);
+
+      const outDoc = await PDFDocument.load(outputBytes);
+      assert(outDoc.getPageCount() === 2, `the transform must not drop or duplicate pages, got ${outDoc.getPageCount()}`);
+
+      // The idempotency guard (module doc-comment: "running twice on the
+      // same PDF throws rather than stacking layers") doubles as the only
+      // practical proof the OCG layer actually landed in the output — the
+      // /OCProperties name lives inside a compressed object stream, so a
+      // raw byte search for it would misleadingly report absent even on a
+      // correctly-transformed PDF (deliberately not asserted that way here).
+      // Re-running over the ALREADY-transformed bytes must throw.
+      let threw = false;
+      try {
+        await DualModePdf.addOcgBackground(outputBytes);
+      } catch {
+        threw = true;
+      }
+      assert(threw, 'running addOcgBackground a second time on already-transformed bytes must throw (idempotency guard) — also the only practical proof the OCG layer was really embedded');
+
+      return { ok: true, inputBytes: inputBytes.length, outputBytes: outputBytes.length };
     },
   },
 ];

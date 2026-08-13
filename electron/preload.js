@@ -182,6 +182,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // last-known passive status for the Settings panel.
   checkAIAvailability: (args) => ipcRenderer.invoke('check-ai-availability', args),
   getAIStatus: () => ipcRenderer.invoke('get-ai-status'),
+  // Live Claude family -> resolved model id map, for the Settings panel's
+  // per-group (generation/analysis/light) family dropdowns — see llm.js
+  // registerLlmHandlers().
+  getClaudeModelMap: () => ipcRenderer.invoke('get-claude-model-map'),
   exportBugReport:             (payload) => ipcRenderer.invoke('export-bug-report', payload),
   generateBugReportMarkdown:   (payload) => ipcRenderer.invoke('generate-bug-report-markdown', payload),
 

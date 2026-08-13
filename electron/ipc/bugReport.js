@@ -17,7 +17,7 @@ import { getStatusCheckQueueDepth } from './statusCheckLock.js';
 import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
-import { getKnownTaskIds } from './llm.js';
+import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
 import { shortId, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildFencedTextBlock, buildMainProcessLogsMarkdown, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown } from './bugReport/filterSummary.js';
@@ -190,9 +190,36 @@ function buildAIConfigSnapshot() {
 
   const telemetry = getGeminiTelemetry();
 
+  // Résumé/cover-letter generation is no longer pinned to Claude — every task
+  // now follows the same `provider` setting above. What's still worth
+  // reporting explicitly is which MODEL each Claude task GROUP resolves to
+  // (llm.js TASK_GROUPS): the per-group family is a Settings pick
+  // (ai.claudeModels), independent of whether Claude is even the active
+  // provider right now, so a "the résumé used the wrong model" report needs
+  // this spelled out rather than inferred from the family name alone.
+  let taskRouting = null;
+  try { taskRouting = taskModelRoutingSnapshot(ai); } catch { /* keep the rest of the report */ }
+  // The two step-1 tasks (career-achievement-refute, company-research) run
+  // ONE FAMILY BELOW `generation`'s pick — surfaced separately because a
+  // reader skimming only the 3-row group table would otherwise assume the
+  // refuter shares the miner's model, which is exactly the independence
+  // property the step exists to prevent (see llm.js TASK_GROUPS doc).
+  const steppedTaskRouting = taskRouting
+    ? Object.entries(taskRouting.tasks)
+        .filter(([, t]) => t.step > 0)
+        .map(([task, t]) => `${task} (${t.group}, step ${t.step}) → ${t.provider}/${t.model}`)
+    : [];
+
   return {
     provider,
-    modelSelection: provider === 'gemini' ? 'auto per-task preference + all compatible Gemini fallbacks' : 'auto (per-task; see llm.js TASK_MODELS)',
+    modelSelection: provider === 'gemini'
+      ? 'auto per-task preference + Gemini capability-ladder fallbacks (pro→flash→lite)'
+      : 'auto within the user-picked per-group Claude family (see llm.js TASK_GROUPS / Settings → AI)',
+    // Present regardless of the active provider (a no-op display when
+    // provider === 'gemini') — these picks persist independently, so the
+    // report should never leave the reader guessing what Claude WOULD serve.
+    claudeGroupRouting: taskRouting?.groups || '(unresolved)',
+    claudeSteppedTaskRouting: steppedTaskRouting.length ? steppedTaskRouting : '(none)',
     hasGeminiKey: !!geminiKey,
     hasAnthropicKey: !!claudeKey,
     activeKeyPrefix: keyPrefix,
@@ -1372,6 +1399,19 @@ ${tokenBudgetLines.join('\n')}`
 - service-account.json resolved path: \`${aiConfig.resolvedSAPath}\`
 - service-account.json usable: ${aiConfig.serviceAccountUsable ? '✅' : '❌'}
 - **Effectively configured for active provider**: ${aiConfig.effectivelyConfigured ? '✅' : '❌ — AI calls will fail until a key is added in Settings'}
+
+### Claude Model Routing (per-group family → resolved model)
+> Which model serves each task GROUP on the Claude provider (llm.js
+> TASK_GROUPS) — shown regardless of the active provider above, since the
+> per-group family is a Settings pick (ai.claudeModels) that persists
+> independent of which provider is currently active.
+${typeof aiConfig.claudeGroupRouting === 'string'
+  ? `- ${aiConfig.claudeGroupRouting}`
+  : Object.entries(aiConfig.claudeGroupRouting).map(([group, r]) => `- **${group}**: \`${r.family}\` → \`${r.model}\``).join('\n')}
+- Step-offset tasks (resolve BELOW their group's family on purpose — see the load-bearing independence note in llm.js TASK_GROUPS):
+${Array.isArray(aiConfig.claudeSteppedTaskRouting)
+  ? aiConfig.claudeSteppedTaskRouting.map((line) => `  - ${line}`).join('\n')
+  : `  - ${aiConfig.claudeSteppedTaskRouting}`}
 ${aiConfig.provider === 'gemini' ? `
 ### Gemini Telemetry
 - Last attempted model: \`${aiConfig.geminiLastAttemptedModel}\`

@@ -35,23 +35,59 @@ export function buildCachedUserContent(userContent, cachedPrefix) {
  * Build the base Messages request params shared by the live + batch paths:
  * `{ model, max_tokens, messages }`, plus the tool-use envelope when a
  * responseSchema is given (force the `submit_response` tool so the model returns
- * structured JSON with the right top-level keys), OR the JSON-prefill assistant
- * `{` turn when expectJson is set (and no schema) so the model continues straight
- * into JSON. Grounding / web-search is live-only (streamed) and is intentionally
- * NOT handled here — createMessage layers it on after calling this.
+ * structured JSON with the right top-level keys). Grounding / web-search is
+ * live-only (streamed) and is intentionally NOT handled here — createMessage
+ * layers it on after calling this.
+ *
+ * ── Why there is no assistant-prefill branch ───────────────────────────────
+ * This used to push a `{ role: 'assistant', content: '{' }` turn when
+ * `expectJson` was set without a schema, so the model would continue straight
+ * into JSON. **Current models reject that outright.** Verified live against the
+ * API on 2026-08-12:
+ *
+ *   claude-opus-5    400  "This model does not support assistant message
+ *   claude-sonnet-5  400   prefill. The conversation must end with a user
+ *   claude-fable-5   400   message."
+ *   claude-haiku-4-5 200  (older model — still accepts it)
+ *
+ * Anthropic removed prefill across the 4.6+ family. Every current call site
+ * happens to pass a responseSchema, so the dead branch never fired in practice
+ * — but it was a live landmine: the moment any caller omitted `responseSchema`
+ * while leaving `callLLMText`'s default `expectJson: true`, that task would
+ * hard-400 on Opus and Sonnet while continuing to work on Haiku, which is an
+ * unpleasant thing to debug.
+ *
+ * The replacement is nothing: `expectJson` now only signals intent to the
+ * prompt layer, and the response is parsed by parseAiJson (jsonRepair.js),
+ * which already tolerates fences, preamble, and trailing prose — the exact
+ * slop the prefill existed to prevent. `expectJson` is kept in the signature
+ * because callers still pass it and it stays meaningful for non-Anthropic
+ * paths; it simply no longer changes the Anthropic request shape.
  *
  * @param {string|Array|*} userContent
  * @param {{model:string, maxTokens:number, responseSchema?:object|null, cachedPrefix?:string|null, expectJson?:boolean}} opts
  * @returns {{model:string, max_tokens:number, messages:object[], tools?:object[], tool_choice?:object}}
  */
 export function buildAnthropicMessageParams(userContent, { model, maxTokens, responseSchema = null, cachedPrefix = null, expectJson = false }) {
+  void expectJson;  // retained in the signature; no longer shapes the request (see doc above)
   const messages = [{ role: 'user', content: buildCachedUserContent(userContent, cachedPrefix) }];
   const params = { model, max_tokens: maxTokens, messages };
   if (responseSchema) {
     params.tools = [{ name: 'submit_response', description: 'Submit the structured response.', input_schema: responseSchema }];
     params.tool_choice = { type: 'tool', name: 'submit_response' };
-  } else if (expectJson) {
-    messages.push({ role: 'assistant', content: '{' });
   }
+  return params;
+}
+
+/**
+ * Build the corresponding free `messages.count_tokens` payload.
+ *
+ * The count endpoint deliberately has no `max_tokens`, but it accepts the
+ * same messages, tools, and tool_choice fields as a real Messages request.
+ * Deriving this from the live/batch builder keeps a future schema or cache
+ * envelope change from silently making the preflight count a different prompt.
+ */
+export function buildAnthropicTokenCountParams(userContent, opts) {
+  const { max_tokens: _maxTokens, ...params } = buildAnthropicMessageParams(userContent, opts);
   return params;
 }

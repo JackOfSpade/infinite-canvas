@@ -1050,6 +1050,34 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       unavailable: 'unavailable — careerData-only fallback', none: 'not passed by renderer',
     }[ach.source] || ach.source || 'unknown';
     lines.push(`- Achievement ledger: ${achSourceLabel} · kept ${ach.kept ?? 0} item(s)${ach.minedBy ? ` · miner \`${ach.minedBy.miner || '?'}\` refuter \`${ach.minedBy.refuter || '?'}\`` : ''}`);
+    // Local render → page-count → fit loop (jobApplication.js's
+    // renderResumeWithFit / resumeRender.js, SKILL.md §5) — the only place a
+    // "why did I get a 2-page résumé" or "why is there no PDF" question is
+    // answerable: attempts shows exactly what was tried (density per attempt,
+    // measured page count or the error that aborted it) in generation order.
+    if (a.render) {
+      const r = a.render;
+      // fontsLoaded is per-attempt (renderPdf's document.fonts.ready-plus-
+      // display-family check, resumeRender.js) and absent on error-path
+      // entries (never got far enough to check) — folded into each attempt so
+      // a "#1=3p" that actually rendered in fallback fonts doesn't look
+      // identical to a genuine good render.
+      const attemptsStr = (Array.isArray(r.attempts) ? r.attempts : [])
+        .map((att) => `#${att.attempt}${att.density ? `[${att.density}]` : ''}=${att.error ? `error(${att.error})` : `${att.pageCount}p${att.fontsLoaded === false ? '[fonts-unloaded]' : ''}`}`)
+        .join(', ');
+      lines.push(`- Résumé render/fit: target ${r.targetPageCount ?? '?'}p · ${r.initialPageCount ?? '?'}→${r.finalPageCount ?? '?'}p${r.compactApplied ? ' · compact applied' : ''}${r.revisionApplied ? ' · 1 length-revision call' : ''} · ${r.pdfProduced ? 'PDF produced' : '⚠️ no PDF (HTML-only)'}`);
+      if (attemptsStr) lines.push(`  - attempts: ${attemptsStr}`);
+      if (!r.pdfProduced && r.error) lines.push(`  - ⚠️ ${r.error}`);
+      // The single most important line in this section: without it, "no PDF
+      // because fonts never loaded" renders identically to "no PDF because
+      // rendering broke" (both show pdfProduced:false, error:null) — a reader
+      // would go hunting for a render bug that doesn't exist instead of
+      // recognizing a network condition that resolves itself the next time
+      // the machine has a clean path to fonts.googleapis.com.
+      if (r.fontsLoaded === false) {
+        lines.push('  - ⚠️ Web fonts failed to load (fonts.googleapis.com unreachable) — likely offline, a corporate proxy, or an ad-blocker blocking Google Fonts. Any PDF from this run was discarded (fallback-typeface PDFs never ship) and the fit loop skipped straight to ship (a page count measured in fallback fonts is meaningless). This is a network condition, not a render bug.');
+      }
+    }
     if (ach.stats) {
       const s = ach.stats;
       lines.push(`  - mined ${s.mined ?? 0} → dropped-by-refute ${s.droppedByRefute ?? 0}, demoted-by-check ${s.demotedByCheck ?? 0}, evidence-misses ${s.evidenceMisses ?? 0}`);

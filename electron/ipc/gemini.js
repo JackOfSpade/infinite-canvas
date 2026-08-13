@@ -8,8 +8,7 @@ import { GoogleAuth } from 'google-auth-library';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { resolveServiceAccountPath, getAISettings } from './settings.js';
-import { callClaudeText, probeClaude, claudeModelsInUse } from './claude.js';
-import { claudeModelFor, CLAUDE_FAMILY } from './modelResolver.js';
+import { probeClaude, claudeModelsInUse } from './claude.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP, DOCUMENT_MIME_MAP } from '../utils/mimeTypes.js';
 import {
@@ -22,6 +21,14 @@ import {
   isGeminiProviderAvailable,
   orderGeminiModels,
 } from './geminiModels.js';
+import {
+  entitledTiersFor,
+  entitlementSnapshot,
+  recordEntitlement,
+  refreshEntitlementInBackground,
+  gatedTiers,
+  probeModelForTier,
+} from './geminiEntitlement.js';
 import { isSensitivePath } from '../utils/pathSafety.js';
 import { parseAiJson } from './jsonRepair.js';
 
@@ -359,6 +366,10 @@ export function getGeminiTelemetry() {
     lastSuccessfulModel,
     lastAttemptedError,
     compatibleModels: [...GEMINI_MODEL_FALLBACKS],
+    // Why the chain starts where it does. Without this a report showing
+    // "started at Flash" is indistinguishable from "Pro was skipped due to a
+    // bug" — the entitlement verdict is the difference.
+    tierEntitlement: lastActiveScope ? entitlementSnapshot(lastActiveScope) : [],
     warnings: geminiWarnings(),
   };
 }
@@ -707,8 +718,21 @@ async function runGeminiAvailabilityCheck(settings) {
   const probeOne = apiKey
     ? (m) => probeGemini(apiKey, m, null)
     : (m) => probeGeminiVertex(m, null);
-  const [quotaStatsMap, ...probeResults] = await Promise.all([
+
+  // "Check availability" is the user explicitly asking for a FRESH answer, so
+  // it re-probes the entitlement-gated tiers too (Pro) rather than reading the
+  // week-old cache — this is how a key that just got billing enabled starts
+  // using Pro immediately instead of on the next background refresh. These
+  // extra probes are why the gated ids are excluded from GEMINI_MODEL_FALLBACKS:
+  // they're worth one request here, on demand, not on every sweep of the
+  // routine chain.
+  const gated = gatedTiers()
+    .map((tier) => ({ tier, model: probeModelForTier(tier) }))
+    .filter((g) => !!g.model);
+
+  const [quotaStatsMap, gatedResults, ...probeResults] = await Promise.all([
     fetchGeminiQuotaStats(),
+    Promise.all(gated.map((g) => probeOne(g.model).then((r) => ({ ...g, result: r })))),
     ...GEMINI_MODEL_FALLBACKS.map((m) => probeOne(m)),
   ]);
 
@@ -721,6 +745,16 @@ async function runGeminiAvailabilityCheck(settings) {
   // same suppression state the live fallback loop reads (and clears recovered ones).
   const scope = credentialScope(apiKey);
   lastActiveScope = scope;
+
+  // Record the gated-tier verdicts against this scope. Their probe results are
+  // reported alongside the routine models (so the Settings panel shows WHY Pro
+  // isn't being used) but deliberately excluded from the `ok` rollup below — a
+  // denied Pro tier is the expected free-tier state, not a provider outage.
+  for (const g of gatedResults) {
+    recordEntitlement(scope, g.tier, !!g.result?.ok,
+      g.result?.ok ? `HTTP ${g.result.status}` : `HTTP ${g.result?.status ?? '?'} ${g.result?.error || ''}`.trim());
+  }
+
   for (const modelResult of models) {
     if (!modelResult.model) continue;
     if (modelResult.ok) { clearGeminiModelFailure(scope, modelResult.model); continue; }
@@ -733,6 +767,9 @@ async function runGeminiAvailabilityCheck(settings) {
   return {
     ok: isGeminiProviderAvailable(models),
     models,
+    // Surfaced separately from `models` so a denied Pro tier reads as "not
+    // entitled on this plan" rather than as a failing model in the chain.
+    tierEntitlement: entitlementSnapshot(scope),
     hasQuotaStats: quotaStatsMap !== null,
     endpoint: apiKey ? 'ai-studio' : 'vertex',
   };
@@ -921,11 +958,26 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     genConfig.meta.fallback = { attempts: 0, preferredModel: model };
   }
 
-  // Honor the per-task preference, then cascade through every compatible model.
-  // Known rate-limited/unreachable endpoints move to the tail as a last resort.
+  // Honor the per-task preference, then cascade down the capability ladder
+  // (pro → flash → lite) through every compatible model. Known
+  // rate-limited/unreachable endpoints move to the tail as a last resort.
+  //
+  // `entitledTiersFor` is a pure cache read — it never blocks this call. The
+  // refresh below fires a single minimal probe in the BACKGROUND when a gated
+  // tier's verdict is missing or stale, so the answer is ready for the next
+  // call rather than adding latency to this one. Each endpoint uses its own
+  // probe: a Vertex project can also lack access to a Pro model, and without
+  // its background probe it would never enter the Pro tier unless the user
+  // happened to click Settings → Check availability first.
   const _now = Date.now();
+  const entitledTiers = entitledTiersFor(scope, _now);
+  refreshEntitlementInBackground(
+    scope,
+    apiKey ? (m) => probeGemini(apiKey, m) : (m) => probeGeminiVertex(m),
+    _now,
+  );
   const scopeSuppression = suppressionMapForScope(scope, _now);
-  const modelOrder = orderGeminiModels(model, scopeSuppression, _now);
+  const modelOrder = orderGeminiModels(model, scopeSuppression, _now, { entitledTiers });
   const _cooling = modelOrder.filter(m => scopeSuppression.has(m));
   if (_cooling.length > 0 && _cooling.length < modelOrder.length) {
     logger.info(`[Gemini] Deferring ${_cooling.length} suppressed model(s): ${_cooling.join(', ')}`);
@@ -1189,25 +1241,10 @@ export async function callGeminiDocument(filePath, prompt, apiKey, model, signal
 }
 
 export function registerGeminiHandlers() {
-  handleSafe('ai-polish-text', async (event, text, signal) => {
-    const prompt = `You are an AI assistant in a visual workspace app. Polish the following text. Make it clear, concise, and professional. Output ONLY the improved text, without quotes or conversational filler. Keep original markdown formatting if any. The text is:\n\n${text}`;
-    // Text polish always returns plain text (not JSON), so it can't share
-    // callLLMText (which parses JSON). Look up the same per-task model the
-    // rest of the app uses, then call Gemini directly with text/plain mime.
-    const settings = getAISettings();
-    const model = settings.provider === 'gemini'
-      ? 'gemini-3.1-flash-lite'   // matches TASK_MODELS['text-polish'].gemini
-      : null;
-    // If user picked Claude, polish via Claude Haiku 4.5 directly. Avoids
-    // forcing them onto Gemini just for this one helper.
-    if (settings.provider === 'claude') {
-      const raw = await callClaudeText(prompt, claudeModelFor(CLAUDE_FAMILY.HAIKU), settings.anthropicApiKey, signal, { maxTokens: 1024, expectJson: false });
-      return { text: raw.trim() };
-    }
-    const config = { responseMimeType: 'text/plain', signal, maxOutputTokens: 1024 };
-    const raw = await callGemini([{ text: prompt }], settings.geminiApiKey, model, config);
-    return { text: raw.trim() };
-  });
+  // NOTE: `ai-polish-text` used to live here. It moved to registerLlmHandlers()
+  // in llm.js — it was never a Gemini feature, and keeping it here forced a
+  // hand-rolled copy of the provider/model routing that had already drifted out
+  // of sync with TASK_MODELS. See that handler's comment for the full story.
 
   // Live "Check availability" — pings the requested provider (or the active one)
   // and returns a structured verdict. For Claude this probes EVERY model the app
@@ -1225,8 +1262,19 @@ export function registerGeminiHandlers() {
         result = { ok: false, models: [{ ok: false, status: null, model: null, error: 'No Anthropic API key set.' }] };
       } else {
         // Probe all models in parallel — each is a 1-token ping (~free).
+        //
+        // Pass the user's per-group family picks so a NON-DEFAULT choice is
+        // actually probed. Without this the check only ever covers the three
+        // auto-tracked families (Opus/Sonnet/Haiku), so a user who selects
+        // Fable for the generation group — a choice Settings now offers — gets
+        // a green "available" verdict that never touched the model which will
+        // actually write their résumé. Fable is the case that matters: it's the
+        // one family whose access can differ (higher tier, and it 400s outright
+        // for orgs below 30-day data retention), so "it worked for Sonnet"
+        // proves nothing about it.
+        const selectedFamilies = Object.values(settings.claudeModels || {});
         const models = await Promise.all(
-          claudeModelsInUse().map((m) => probeClaude(settings.anthropicApiKey, m)),
+          claudeModelsInUse(selectedFamilies, settings.anthropicApiKey).map((m) => probeClaude(settings.anthropicApiKey, m)),
         );
         result = { ok: models.length > 0 && models.every((m) => m.ok), models };
       }

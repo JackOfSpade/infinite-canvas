@@ -4,7 +4,7 @@ import path from 'path';
 import { logger } from '../logger.js';
 import { recordTokenUsage, recordTruncation } from './tokenBudget.js';
 import { IMAGE_MIME_MAP } from '../utils/mimeTypes.js';
-import { buildCachedUserContent, buildAnthropicMessageParams } from './anthropicRequest.js';
+import { buildAnthropicMessageParams, buildAnthropicTokenCountParams } from './anthropicRequest.js';
 import { isSensitivePath } from '../utils/pathSafety.js';
 import { claudeModelFor, claudeModelsInUse, CLAUDE_FAMILY } from './modelResolver.js';
 
@@ -89,7 +89,7 @@ export { claudeModelsInUse };
  * {ok,status,model,rateLimit,error} so the Settings panel can render a verdict
  * (the rate-limit numbers are straight from the response headers).
  */
-export async function probeClaude(apiKey, model = claudeModelFor(CLAUDE_FAMILY.SONNET)) {
+export async function probeClaude(apiKey, model = claudeModelFor(CLAUDE_FAMILY.SONNET, apiKey)) {
   if (!apiKey) return { ok: false, status: null, model, error: 'No Anthropic API key set.' };
   try {
     const anthropic = getAnthropicClient(apiKey);
@@ -174,22 +174,38 @@ function repairToolInput(value, schema, repaired = { count: 0 }) {
 }
 
 /**
- * Send a request and, if `expectJson` is true, pre-fill the assistant turn
- * with `{` so Claude continues straight into JSON instead of preambling
- * ("Sure, here's the JSON…"). Pre-prepends `{` to the returned text so the
- * caller still gets a valid JSON string.
+ * Which `web_search` tool version to send for `model`.
  *
- * Saves a handful of output tokens per call and makes downstream parsing
- * more reliable (no `Sure!`-style chatter to strip).
+ * The `_20260209` variant adds DYNAMIC FILTERING — Anthropic runs code
+ * server-side to filter search results before they reach the context window,
+ * which is a straight accuracy + token-efficiency win for company-research
+ * (the only grounded call we make). It is supported on Opus 4.6+ and Sonnet
+ * 4.6+ ONLY; sending it to an older model — or to Haiku, which never got it —
+ * is a 400.
+ *
+ * We can't hard-code either one: the model id here comes from the live family
+ * resolver (modelResolver.js), so it changes generation on its own. Hence a
+ * capability check rather than a constant. Anything we can't positively
+ * identify as new enough falls back to the basic `_20250305` variant, which
+ * every model still accepts — the safe direction, since the cost of guessing
+ * wrong upward is a hard 400 on the user's résumé research.
  */
+export function webSearchToolType(model) {
+  const id = String(model || '');
+  // Opus/Sonnet at generation 4.6 or newer, in either the `4-6`/`4-7`/`4-8`
+  // form or the bare-major `5`/`6`/... form the current ids use.
+  const modern = /^claude-(opus|sonnet)-(?:4-(?:[6-9]|\d\d)|[5-9]|\d\d)/.test(id);
+  return modern ? 'web_search_20260209' : 'web_search_20250305';
+}
+
 async function createMessage(anthropic, userContent, { model, maxTokens, formulaSeed, signal, expectJson, responseSchema, cachedPrefix, task, grounding }) {
   // Build the shared Anthropic request shape — cache_control prefix block +
-  // tool-use schema (forces the submit_response tool) or JSON-prefill ('{').
-  // Extracted to anthropicRequest.js so the async Message Batches path and the
-  // free token-count preflight build the IDENTICAL request (see its doc).
-  // `expectJson && !grounding` so a grounding call (layered on below) keeps
-  // priority over the JSON-prefill — preserving the original branch precedence
-  // responseSchema > grounding > expectJson.
+  // the tool-use schema that forces the submit_response tool. Extracted to
+  // anthropicRequest.js so the async Message Batches path and the free
+  // token-count preflight build the IDENTICAL request (see its doc).
+  // `expectJson && !grounding` is preserved so grounding keeps priority in the
+  // branch below, even though expectJson no longer alters the request shape
+  // (the JSON prefill it used to add now 400s — see anthropicRequest.js).
   const params = buildAnthropicMessageParams(userContent, {
     model, maxTokens, responseSchema, cachedPrefix, expectJson: expectJson && !grounding,
   });
@@ -201,7 +217,7 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
     // news + role context) rather than stopping at a shallow first hit; this is
     // a deliberate, user-triggered action where research depth IS the value.
     // Carries its own per-search billing.
-    params.tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }];
+    params.tools = [{ type: webSearchToolType(model), name: 'web_search', max_uses: 8 }];
   }
   // Stream rather than the one-shot `.create()`. With our high per-task caps
   // (job-bucketing provisions up to ~24576 output tokens) a single non-streaming
@@ -285,14 +301,31 @@ async function createMessage(anthropic, userContent, { model, maxTokens, formula
     return JSON.stringify(toolBlock.input);
   }
 
-  const text = response.content[0]?.text;
+  // Thinking-enabled models commonly put a thinking block before their text
+  // block. Reading only content[0] therefore turns a valid answer into a
+  // misleading "No content" error. Concatenate all text blocks, as the
+  // grounding branch above already does; this also handles an empty refusal
+  // safely and preserves multi-part text responses.
+  const text = (response.content || [])
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+    .trim();
   if (!text) throw new Error(`No content returned from Claude (stop_reason=${stopReason || 'unknown'}).`);
-  if (!expectJson) return text;
-  // We prefilled the assistant turn with '{', so Claude's continuation omits
-  // the leading brace — prepend it back. Guard the rare case where the model
-  // echoes the brace anyway: a naive '{' + text would yield invalid '{{…' that
-  // the downstream JSON parser (indexOf('{') based) can't repair.
-  return text.trimStart().startsWith('{') ? text : '{' + text;
+  // Return the model's text verbatim, whatever `expectJson` says.
+  //
+  // This used to prepend a '{' when the text didn't already start with one,
+  // because the request had prefilled the assistant turn with '{' and the
+  // continuation therefore omitted it. That prefill is gone (current models
+  // 400 on it — see anthropicRequest.js), so the model now emits the WHOLE
+  // object. Keeping the prepend would actively corrupt the common slop case:
+  // "Here is the JSON:\n{...}" doesn't start with '{', so it would become
+  // "{Here is the JSON:\n{...}" — turning output that parseAiJson recovers
+  // trivially into something it cannot.
+  //
+  // parseAiJson (jsonRepair.js) already locates the object inside surrounding
+  // prose or fences, which is exactly what this branch was guarding against.
+  return text;
 }
 
 export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens = 2048, formulaSeed = null, expectJson = false, responseSchema = null, cachedPrefix = null, task = null, grounding = false } = {}) {
@@ -310,14 +343,15 @@ export async function callClaudeText(prompt, model, apiKey, signal, { maxTokens 
  */
 export async function countClaudeInputTokens(prompt, model, apiKey, { cachedPrefix = null, responseSchema = null, signal = null } = {}) {
   const anthropic = getAnthropicClient(apiKey);
-  // Same content + tool envelope the real call sends (shared builder) so the
-  // count is exact. count_tokens ignores max_tokens/tool_choice and the
-  // cache_control marker doesn't change the token count, so we pass only the
-  // pieces the endpoint accepts.
-  const params = { model, messages: [{ role: 'user', content: buildCachedUserContent(prompt, cachedPrefix) }] };
-  if (responseSchema) {
-    params.tools = [{ name: 'submit_response', description: 'Submit the structured response.', input_schema: responseSchema }];
-  }
+  // Build from the exact same source as live + batch calls. The count endpoint
+  // omits only max_tokens; tool_choice is part of its accepted request shape
+  // and must stay in sync with the real forced-tool request.
+  const params = buildAnthropicTokenCountParams(prompt, {
+    model,
+    maxTokens: 1,
+    responseSchema,
+    cachedPrefix,
+  });
   const res = await anthropic.messages.countTokens(params, { signal });
   return res?.input_tokens ?? 0;
 }

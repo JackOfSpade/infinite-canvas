@@ -26,6 +26,35 @@ const BG_OPTIONS = [
   { key: 'none',  label: 'None' },
 ];
 
+// Claude family tiers, most-to-least capable — mirrors electron/ipc/
+// modelResolver.js's CLAUDE_FAMILY_LADDER. Duplicated as plain strings
+// (renderer code can't import the main-process module), so keep this in
+// sync by hand if a family is ever added/removed there.
+const CLAUDE_FAMILY_OPTIONS = [
+  { token: 'FABLE',  label: 'Fable',  desc: 'highest tier · ~2x Opus price' },
+  { token: 'OPUS',   label: 'Opus',   desc: 'most capable' },
+  { token: 'SONNET', label: 'Sonnet', desc: 'balanced' },
+  { token: 'HAIKU',  label: 'Haiku',  desc: 'fastest & cheapest' },
+];
+
+// The three task GROUPS a Claude family is picked for (llm.js TASK_GROUPS) —
+// `defaultToken` mirrors llm.js's GROUP_DEFAULT_FAMILY so the "(default)"
+// hint in each dropdown stays accurate without an extra IPC round trip.
+const CLAUDE_MODEL_GROUPS = [
+  {
+    key: 'generation', label: 'Generation', defaultToken: 'OPUS',
+    note: 'Governs résumé + cover-letter generation, and the achievement mining/refute passes that feed them.',
+  },
+  {
+    key: 'analysis', label: 'Analysis', defaultToken: 'SONNET',
+    note: 'Vision identification, pricing judgment, résumé parsing, job scoring/query-gen/bucketing.',
+  },
+  {
+    key: 'light', label: 'Light', defaultToken: 'HAIKU',
+    note: 'Status checks, platform-fit checks, light text edits — short structured outputs.',
+  },
+];
+
 const isMac = (() => {
   const p = navigator.userAgentData?.platform ?? navigator.platform ?? '';
   return p.toLowerCase().includes('mac');
@@ -500,6 +529,20 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
           {Array.isArray(tele?.compatibleModels) && tele.compatibleModels.length > 0 && (
             <div>Compatible fallback catalog: <span className="text-white/55">{tele.compatibleModels.length}</span></div>
           )}
+          {/* Entitlement-gated tiers (Pro). Reported from a live minimal probe,
+              not a hard-coded assumption — so "why isn't it using Pro?" has a
+              visible, checkable answer instead of being invisible app policy.
+              `lastProbe.tierEntitlement` is the fresh Check-availability result;
+              `tele.tierEntitlement` is the cached verdict the cascade is using. */}
+          {(probe?.tierEntitlement || tele?.tierEntitlement || []).map((t) => (
+            <div key={t.tier}>
+              <span className="capitalize">{t.tier}</span> tier:{' '}
+              {t.allowed
+                ? <span className="text-emerald-400/70">available — leads the quality chain</span>
+                : <span className="text-white/45">{t.known ? 'not available on this key (no quota) — chain starts at Flash' : 'not checked yet'}</span>}
+              {t.model && <span className="text-white/30 font-mono"> ({t.model})</span>}
+            </div>
+          ))}
           {tele?.lastSuccessfulModel && tele.lastSuccessfulModel !== '(none)' && (
             <div>Last success: <span className="text-white/55">{tele.lastSuccessfulModel}</span></div>
           )}
@@ -544,6 +587,11 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
   const [watchUrlsByPlatform, setWatchUrlsByPlatform] = useState({});
   const [aiStatus, setAiStatus] = useState({ gemini: null, claude: null });
   const [checkingProvider, setCheckingProvider] = useState(null);
+  // Live Claude family -> resolved model id (e.g. { OPUS: 'claude-opus-5', ... }),
+  // so each family dropdown option can show proof the always-latest resolver is
+  // actually working, not just a static family name. Empty until the IPC round
+  // trip resolves — dropdown options render without the id suffix until then.
+  const [claudeModelIds, setClaudeModelIds] = useState({});
 
   // Register with the global modal stack while open — unlike Dialog/ConfirmDialog,
   // this component stays mounted at all times (returns null when !isOpen further
@@ -572,6 +620,10 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
     window.electronAPI.getAIStatus?.()
       .then((res) => { if (!cancelled && res?.success) setAiStatus({ gemini: res.gemini || null, claude: res.claude || null }); })
       .catch(() => { /* ignore — card falls back to "click to check" */ });
+    // Resolved Claude model ids for the family dropdowns below.
+    window.electronAPI.getClaudeModelMap?.()
+      .then((res) => { if (!cancelled && res?.success) setClaudeModelIds(res.resolved || {}); })
+      .catch(() => { /* ignore — dropdowns still show family names, just without the resolved id */ });
     return () => { cancelled = true; };
   }, [isOpen]);
 
@@ -604,6 +656,27 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
     // the setState updater so it fires exactly once (strict/concurrent mode may
     // invoke updaters twice, which would double-write).
     window.electronAPI.updateSettings({ ai: { [key]: value } });
+  }, [aiSettings]);
+
+  // Sets ONE group's Claude family (Generation/Analysis/Light — llm.js
+  // TASK_GROUPS). Persist only the changed group. Sending the entire local
+  // object looks harmless, but two quick picker changes can have stale React
+  // closures and the second request would overwrite the first group's new
+  // value. settings.js owns the deep merge, so this payload preserves changes
+  // from another picker (or another renderer) while the local UI updates
+  // optimistically.
+  const updateClaudeModelGroup = useCallback((group, token) => {
+    if (!window.electronAPI?.updateSettings || !aiSettings) return;
+    // Merge against React's latest state as well as persisting only this group.
+    // Two selections can land before this callback is recreated; using the
+    // captured aiSettings object here would leave the panel displaying the
+    // second change with the first one visually reverted even though the
+    // backend deep-merge correctly saved both.
+    setAiSettings(prev => ({
+      ...prev,
+      claudeModels: { ...(prev?.claudeModels || {}), [group]: token },
+    }));
+    window.electronAPI.updateSettings({ ai: { claudeModels: { [group]: token } } });
   }, [aiSettings]);
 
   const updateJobsSetting = useCallback((key, value) => {
@@ -708,7 +781,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                 {aiSettings.provider === 'gemini' && (
                   <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
                     <div className="text-white/40 text-[10px] leading-snug">
-                      Model is picked automatically per task — Flash preferred for quality-sensitive work, Flash-Lite preferred for status checks and light edits, with free-tier no-quota models excluded from the fallback chain.
+                      Model is picked automatically per task and falls back down a capability ladder — Pro, then Flash, then Flash-Lite — with Flash preferred for quality-sensitive work and Flash-Lite for status checks and light edits. Pro is used only if a live check confirms your key is entitled to it; free-tier keys report no Pro quota, so the chain starts at Flash. Run Check availability after upgrading a key.
                     </div>
                     <div>
                       <div className="flex justify-between items-end mb-1">
@@ -766,29 +839,81 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                   </div>
                 )}
 
-                {/* Claude Settings */}
-                {aiSettings.provider === 'claude' && (
-                  <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
-                    <div className="text-white/40 text-[10px] leading-snug">
-                      Model is picked automatically per task — Sonnet 4.6 for vision &amp; pricing, Haiku 4.5 for status checks &amp; light edits.
-                    </div>
-                    <div>
-                      <div className="flex justify-between items-end mb-1">
-                        <div className="text-white/50 text-[11px]">API Key</div>
-                        <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-[9px] text-blue-400 hover:underline">Get Key</a>
-                      </div>
-                      <input 
-                        type="password"
-                        placeholder="sk-ant-api..."
-                        value={aiSettings.anthropicApiKey || ''}
-                        onChange={(e) => updateAISetting('anthropicApiKey', e.target.value)}
-                        className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
-                      />
-                    </div>
-
-                    <AIProviderStatus provider="claude" status={aiStatus.claude} checking={checkingProvider === 'claude'} onCheck={checkAvailability} />
+                {/* Claude Settings — ALWAYS rendered, even when Gemini is the
+                    primary provider. Two reasons: (1) the per-group family
+                    picks below persist independent of which provider is
+                    currently active, so flipping Primary AI Provider back to
+                    Claude later restores whatever tiers were already
+                    configured instead of resetting them; (2) hiding the
+                    Anthropic key field behind provider === 'claude' would
+                    leave a Gemini user with nowhere to preconfigure Claude
+                    before switching. (This block used to justify itself by
+                    "résumé generation is pinned to Claude regardless of the
+                    toggle" — that pin is gone; Jack reversed the decision so
+                    résumé/cover-letter generation follows the provider
+                    toggle like every other task. See llm.js TASK_GROUPS.) */}
+                <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
+                  <div className="text-white/40 text-[10px] leading-snug">
+                    {aiSettings.provider === 'claude' ? (
+                      <>Within whichever tier you pick below for each work group, the app always resolves to the latest model in that family automatically — never a pinned id.</>
+                    ) : (
+                      <>Optional — only used if you switch Primary AI Provider to Claude above. Nothing below takes effect while Gemini is active.</>
+                    )}
                   </div>
-                )}
+
+                  {/* Per-group Claude family — replaces the old hard-coded
+                      per-task tier assignment. Each option shows the id it
+                      currently resolves to (claudeModelIds, fetched via
+                      getClaudeModelMap) as live proof the always-latest
+                      resolver is working, not just a static family name. */}
+                  <div className="space-y-2.5">
+                    {CLAUDE_MODEL_GROUPS.map(({ key, label, defaultToken, note }) => {
+                      const selected = aiSettings.claudeModels?.[key] || defaultToken;
+                      return (
+                        <div key={key}>
+                          <div className="text-white/50 text-[11px] mb-1">{label}</div>
+                          <select
+                            value={selected}
+                            onChange={(e) => updateClaudeModelGroup(key, e.target.value)}
+                            className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-[11px] text-white/80 focus:outline-none focus:border-blue-500/50"
+                          >
+                            {CLAUDE_FAMILY_OPTIONS.map(({ token, label: familyLabel, desc }) => {
+                              const modelId = claudeModelIds[token];
+                              const isDefault = defaultToken === token;
+                              return (
+                                <option key={token} value={token}>
+                                  {familyLabel}{modelId ? ` — ${modelId}` : ''} ({desc}{isDefault ? ', default' : ''})
+                                </option>
+                              );
+                            })}
+                          </select>
+                          <p className="text-white/30 text-[9px] mt-1">{note}</p>
+                        </div>
+                      );
+                    })}
+                    <p className="text-white/30 text-[9px] leading-snug">
+                      These tiers apply only on the Claude provider — while Gemini is Primary AI Provider above, every task (including résumé + cover letters) runs on Gemini's own capability-ladder cascade instead.
+                    </p>
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between items-end mb-1">
+                      <div className="text-white/50 text-[11px]">
+                        {aiSettings.provider === 'claude' ? 'API Key' : 'Anthropic API Key'}
+                      </div>
+                      <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-[9px] text-blue-400 hover:underline">Get Key</a>
+                    </div>
+                    <input
+                      type="password"
+                      placeholder="sk-ant-api..."
+                      value={aiSettings.anthropicApiKey || ''}
+                      onChange={(e) => updateAISetting('anthropicApiKey', e.target.value)}
+                      className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
+                    />
+                  </div>
+
+                  <AIProviderStatus provider="claude" status={aiStatus.claude} checking={checkingProvider === 'claude'} onCheck={checkAvailability} />
+                </div>
               </div>
             ) : (
               <div className="text-white/30 text-xs text-center py-2">Loading settings...</div>

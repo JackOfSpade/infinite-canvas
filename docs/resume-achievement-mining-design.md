@@ -8,6 +8,13 @@ Revised: 2026-08-11, after a review pass that verified every code citation again
 found five design defects (receipt matching, arithmetic edge cases, the missing `computed` field,
 the cover-letter gap, and the mining race) — all folded in below.
 
+UPDATE — this design has since been **built** (achievement ledger, applied-jobs store, model
+resolver, HTML generation, receipts). Two things below drifted from this original plan during
+implementation and are corrected in place rather than left to mislead a future reader: §3.1's
+Claude pin (reverted — see the note under the task table) and §5's "PDF generation goes away
+entirely" (reversed — a PDF companion came back, see the note under §5.1). Everything else in
+this document remains an accurate record of what was decided and why.
+
 ---
 
 ## Executive Summary
@@ -27,8 +34,10 @@ Six changes, in dependency order:
    resolved against the Models API. Smallest change here, immediate payoff.
 1. **Applied-jobs store** — an explicit "Mark applied" action with app-global, never-expiring
    memory; applied jobs never resurface in future searches. Independent of everything else.
-2. **HTML-first output** — stop generating PDFs. Ship self-contained HTML the user opens in
-   Chrome, edits in place, and exports to PDF via the browser. Deletes a whole subsystem.
+2. **HTML-first output** — stop generating PDFs *the old way*. Ship self-contained HTML the user
+   opens in Chrome, edits in place, and can export to PDF via the browser. (As built, a PDF
+   companion later came back as an automated, in-app render — see the note under §5.1 — but the
+   HTML stays primary and editable exactly as designed here.)
 3. **Broadened transcription** — so financial statements, metrics docs and performance reviews
    survive `career-file-extract` with their numbers intact. Without this the miner has nothing.
 4. **Achievement Ledger** — a job-independent mining pass (+ an independent refute pass) run
@@ -146,13 +155,36 @@ Register in `electron/ipc/llm.js` — **both** `TASK_MODELS` (`:45-77`) and `TAS
 (`:96-182`). A missing `TASK_MODELS` entry silently falls back to `'default'`
 (`resolveTask`, `:184-190`) — a quality regression with no crash, so do not skip it.
 
-| task | claude | gemini | max tokens | rationale |
-|---|---|---|---|---|
-| `career-achievement-mining` | `OPUS` | `gemini-3.5-flash` | 24576 | highest-leverage reasoning in the pipeline; runs **once per hub**, not per application |
-| `career-achievement-refute` | `SONNET` | `gemini-3.5-flash` | 8192 | a *different* model from the miner buys real independence, and is cheaper |
+| task | claude | gemini | pin | max tokens | rationale |
+|---|---|---|---|---|---|
+| `career-achievement-mining` | `OPUS` | `gemini-3.6-flash` | `claude` | 24576 | highest-leverage reasoning in the pipeline; runs **once per hub**, not per application |
+| `career-achievement-refute` | `SONNET` | `gemini-3.5-flash` | `claude` | 8192 | a *different* model from the miner buys real independence, and is cheaper |
 
 `OPUS` / `SONNET` are **family tokens**, not literal IDs — see §8, Model selection. Add a
 doc-comment justifying the Opus row, per the convention at `llm.js:14-44`.
+
+UPDATE — **the `pin: 'claude'` column above was REVERTED and does not reflect the shipped
+behavior.** As originally designed, these tasks (and the rest of the application-generation
+pipeline) ran on Claude regardless of the user's provider setting. Jack later reversed that
+call: résumé/cover-letter generation now follows the same provider+model routing as every
+other task (`providerForTask`, `electron/ipc/llm.js`) — a Gemini-provider user gets ledger
+mining, refuting, and generation on Gemini too. Nothing in this pipeline is pinned to a
+provider anymore.
+
+What replaced the pin, on the Claude side: every task belongs to one of three GROUPS
+(`generation` / `analysis` / `light`, `TASK_GROUPS` in `llm.js`), and each group's Claude
+family (Fable/Opus/Sonnet/Haiku) is a **Settings choice** (`ai.claudeModels`, `settings.js`),
+not a hard-code — `GROUP_DEFAULT_FAMILY` reproduces this table's original `OPUS`/`SONNET`
+picks as the out-of-the-box default only. `career-achievement-mining` and
+`career-achievement-refute` both live in the `generation` group. The miner/refuter
+independence this section originally bought with a Claude-only pin + two different literal
+ids is now bought with a `step: 1` offset on the refute task — one family rung down
+`CLAUDE_FAMILY_LADDER` from whatever the user picked for `generation` — on the Claude path,
+and by keeping two different literal Gemini ids (`gemini-3.6-flash` miner /
+`gemini-3.5-flash` refuter, unchanged from the table above) on the Gemini path, where `step`
+has no effect. See the "Task groups" doc-comment above `TASK_GROUPS` in `llm.js` for the
+full mechanism, including the warning it logs if a step ever lands flat (same family as its
+group) and silently loses the independence property.
 
 The mining cap is deliberately above the 16384 used by `career-file-extract`: a ledger of ~40
 items each carrying verbatim evidence quotes is a larger output than a single file's
@@ -453,17 +485,41 @@ serialized through the same deterministic helper.
 
 ### 5.1 What retires
 
-PDF generation goes away entirely. `electron/ipc/resumePdf.js` currently launches puppeteer-core
-against system Chrome (`:152-156`), renders with `printBackground` + `preferCSSPageSize`
-(`:114-130`), then post-processes the PDF bytes through `build/dual-mode-pdf.js`'s
-`addOcgBackground` — loaded via a hand-rolled CJS `Function(...)` eval to dodge ESM/asar issues
-(`:46-61`) — to inject an OCG layer painting cream behind every page.
+UPDATE — **PDF generation did NOT go away entirely, as originally planned here.** This
+subsection is preserved as a record of the original plan and rationale, but the outcome
+changed: `electron/ipc/resumePdf.js` (the puppeteer-core-against-system-Chrome path
+described just below) was indeed deleted, and stayed deleted. But a PDF companion later came
+back via a different route — `electron/ipc/resumeRender.js` — driven by
+`jobApplication.js`'s render → page-count → fit loop (SKILL.md §5's "compact-density
+algorithm"). It renders through Electron's OWN `webContents.printToPDF` (no puppeteer, no
+extra Chromium download) against the exact same self-contained HTML `resumeHtml.js` builds,
+then — for the `dual-pdf` variant — still runs the bytes through `build/dual-mode-pdf.js`'s
+`addOcgBackground`, exactly as described below, just loaded differently: not a CJS
+`Function(...)` eval of the Node branch (confirmed broken in a packaged build — `pdf-lib`
+lives in `app.asar/node_modules`, a non-ancestor of the sibling-of-asar
+`resume_design_system/` the UMD would try to `require()` from), but an in-realm eval of the
+UMD's *browser* branch with our own already-imported `pdf-lib` injected as `self.PDFLib`. The
+HTML remains primary and editable exactly as this section intended; the PDF is a generated
+companion written next to it, not a replacement for it, and never blocks generation if
+rendering fails. The rest of this section (§5.1's puppeteer/Chrome-launch description, §5.2
+onward) still accurately describes the HTML document itself and is unchanged.
+
+PDF generation was originally meant to go away entirely. `electron/ipc/resumePdf.js` used to
+launch puppeteer-core against system Chrome (`:152-156`), render with `printBackground` +
+`preferCSSPageSize` (`:114-130`), then post-process the PDF bytes through
+`build/dual-mode-pdf.js`'s `addOcgBackground` — loaded via a hand-rolled CJS `Function(...)`
+eval to dodge ESM/asar issues (`:46-61`) — to inject an OCG layer painting cream behind every
+page.
 
 **All of that exists only because one PDF had to be both the screen artifact and the print
 artifact.** Once the browser tab *is* the screen view, the design system's existing
 `@media print` rule (`colors_and_type.css:394-409`) already flips `--bg` to transparent on print,
-for free. Retire: the puppeteer launch, Chrome-path discovery, the eval hack, and the OCG rewrite.
+for free. Retire: the puppeteer launch, Chrome-path discovery, and the CJS-eval hack.
 `puppeteer-core` stays as a dependency — the scraper uses it.
+
+(As built — see the UPDATE note under §5.1 — the OCG rewrite did NOT retire along with the
+above. It came back scoped to `resumeRender.js`'s PDF-companion path, evaluating the UMD's
+browser branch instead of its Node branch, rather than being deleted outright.)
 
 The `data-print="dual-pdf"` / `ink-only` / `data-mono` / `data-page="a4"` variant system stays
 exactly as the design system defines it; `extractVariantAttrs` (`resumeHtml.js:48-55`) is unchanged.
@@ -537,6 +593,12 @@ goes into the `job` object passed to `generateApplication`), so this is one adde
     <candidate> - Resume.html
     <candidate> - Cover Letter.html
 ```
+
+UPDATE — as built, `save-application` copies a THIRD file when the render → fit loop (§5.1's
+UPDATE note) succeeded: `<candidate> - Resume.pdf`, the rendered PDF companion
+(`resumePdfPath` on the `generate-application` result). Rendering failure degrades to
+HTML-only rather than blocking the save. The cover letter has no PDF companion — only the
+résumé goes through the fit loop.
 
 `copyUnique` collision handling (`:189-201`) is unchanged.
 
@@ -743,8 +805,8 @@ Rules:
 
 | # | Location | Coupling |
 |---|---|---|
-| 1 | `resumePdf.js:70` | `CSS_FILES` filename list (migrates to `resumeHtml.js` when the PDF path retires) |
-| 2 | `resumePdf.js:78-93` | `getDesignSystemDir()` folder resolution |
+| 1 | `resumeHtml.js` (`CSS_FILES` const) | `CSS_FILES` filename list — migrated here from the now-deleted `resumePdf.js:70`, per plan |
+| 2 | `resumeHtml.js` (`getDesignSystemDir()`) | folder resolution — migrated here from the now-deleted `resumePdf.js:78-93`, per plan. `resumeRender.js`'s `getDualModePdf()` (the PDF-companion loader — see §5.1's UPDATE note) reuses this same resolved dir, so it's a coupling point for that path too now |
 | 3 | `jobApplication.js:36-44` | `getResumeSampleMain()` — regex-extracts `<main class="page">` from `resume.html`; depends on that filename and wrapper |
 | 4 | `jobApplication.js:127-134` | prompt's class enumeration + policy rules |
 | 5 | `resumeHtml.js:112-189` | **cover-letter markup — the largest surface** |
@@ -758,7 +820,12 @@ design-system class names (`.letter-letterhead`, `.letterhead-rule`, `.letter-me
 rewrite, and it fails **quietly** — the page still renders, just unstyled. This is the strongest
 argument for the startup assertion covering both documents.
 
-The HTML pivot *removes* one reconnect point: the OCG post-process and its `CREAM` constant.
+The HTML pivot was expected to *remove* one reconnect point: the OCG post-process and its
+`CREAM` constant. UPDATE — that did not happen; see §5.1's UPDATE note. The OCG post-process
+(`build/dual-mode-pdf.js`'s `addOcgBackground`, and `DEFAULT_CREAM_RGB` in it — the design
+system's own module, not a constant this repo owns) came back as part of `resumeRender.js`'s
+PDF-companion path and remains a live reconnect point: `DEFAULT_CREAM_RGB` must still track
+`--bg` in `colors_and_type.css` on any design-system swap.
 
 ---
 

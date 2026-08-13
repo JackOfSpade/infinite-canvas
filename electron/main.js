@@ -21,6 +21,7 @@ import { registerGeminiHandlers } from './ipc/gemini.js';
 import { registerBugReportHandlers } from './ipc/bugReport.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
+import { registerLlmHandlers } from './ipc/llm.js';
 import fs from 'fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -799,6 +800,7 @@ if (!gotTheLock) {
     registerBugReportHandlers();
     registerNetworkHandlers();
     registerSettingsHandlers();
+    registerLlmHandlers();
 
     // Warm the Claude model resolver before anything can call an LLM. It
     // never throws (falls back to MODEL_FLOOR on any failure — see

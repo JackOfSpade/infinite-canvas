@@ -60,13 +60,48 @@
  * on-disk cache) is within the TTL, unless `force: true`.
  */
 import Anthropic from '@anthropic-ai/sdk';
+import crypto from 'node:crypto';
 import { getAISettings } from './settings.js';
 import { lazyStore } from '../utils/lazyStore.js';
 import { logger } from '../logger.js';
 import { MODEL_FLOOR } from './claudeModels.js';
 
-export const CLAUDE_FAMILY = Object.freeze({ OPUS: 'OPUS', SONNET: 'SONNET', HAIKU: 'HAIKU' });
+export const CLAUDE_FAMILY = Object.freeze({ FABLE: 'FABLE', OPUS: 'OPUS', SONNET: 'SONNET', HAIKU: 'HAIKU' });
 const FAMILY_VALUES = new Set(Object.values(CLAUDE_FAMILY));
+
+/**
+ * Capability ladder, most capable first. Drives the Settings model picker and
+ * the per-task `step` offsets in llm.js (a task declared one step below its
+ * group's choice walks down this list).
+ *
+ * FABLE is on the ladder but is NEVER auto-adopted — see AUTO_TRACKED_FAMILIES.
+ */
+export const CLAUDE_FAMILY_LADDER = Object.freeze([
+  CLAUDE_FAMILY.FABLE, CLAUDE_FAMILY.OPUS, CLAUDE_FAMILY.SONNET, CLAUDE_FAMILY.HAIKU,
+]);
+
+/**
+ * Families resolved on every prime. FABLE is excluded deliberately: resolving
+ * it costs nothing, but including it here would put a ~2x-price model into
+ * claudeModelsInUse() — which drives the per-model availability probe — for
+ * every user, including the ones who never select it. It resolves on demand
+ * instead (claudeModelFor(FABLE) still works and still tracks the latest
+ * Fable), so selecting it in Settings gets the current generation without
+ * making everyone pay for a probe they don't need.
+ */
+export const AUTO_TRACKED_FAMILIES = Object.freeze([
+  CLAUDE_FAMILY.OPUS, CLAUDE_FAMILY.SONNET, CLAUDE_FAMILY.HAIKU,
+]);
+
+/**
+ * Family tokens that must be kept OUT of another family's candidate list.
+ * Matching on `-{family}-` alone is not enough: without this, a new
+ * `claude-fable-6` released after the current Opus would be a plausible
+ * "newest Claude model" for anyone doing loose matching, and the whole point
+ * of family tokens is that OPUS means Opus. Mythos is excluded for the same
+ * reason plus a different API contract (30-day-retention requirement).
+ */
+const PREMIUM_TOKENS = Object.freeze({ FABLE: 'fable', MYTHOS: 'mythos' });
 
 /** Is `v` one of the CLAUDE_FAMILY tokens (as opposed to a literal model id)? */
 export function isClaudeFamilyToken(v) {
@@ -74,7 +109,7 @@ export function isClaudeFamilyToken(v) {
 }
 
 const store = lazyStore('model-resolution');
-const CACHE_KEY = 'snapshot';
+const CACHE_KEY_PREFIX = 'snapshot:';
 // A resolver ping is background housekeeping, not a per-request cost — once a
 // day is plenty freshness for a model catalog that changes on the order of
 // months, and it keeps the free-but-not-instant Models API call off the hot
@@ -90,6 +125,7 @@ let snapshot = {
   resolved: { ...MODEL_FLOOR },
   meta: {},          // { [modelId]: { contextWindow, maxOutput } } — live API numbers
   source: 'floor',    // 'floor' | 'api'
+  scope: null,        // digest of the credential that supplied an API snapshot
   fetchedAt: 0,
   skipped: [],
   epoch: epochCounter,
@@ -98,6 +134,24 @@ let snapshot = {
 function applySnapshot(next) {
   epochCounter += 1;
   snapshot = { ...next, epoch: epochCounter };
+}
+
+// The Models API is credential-scoped: an organization with access to a
+// premium/preview family can legitimately return a different catalog from a
+// replacement key. Never retain the raw API key, but key both memory and disk
+// cache entries by a stable one-way digest so a just-replaced key cannot reuse
+// the previous account's fresh 24-hour resolution.
+function resolutionScope(apiKey) {
+  return crypto.createHash('sha256').update(String(apiKey)).digest('hex');
+}
+
+function cacheKeyForScope(scope) {
+  return `${CACHE_KEY_PREFIX}${scope}`;
+}
+
+function snapshotMatchesApiKey(apiKey) {
+  return snapshot.source !== 'api'
+    || (Boolean(apiKey) && snapshot.scope === resolutionScope(apiKey));
 }
 
 // Constructed directly rather than reusing claude.js's getAnthropicClient
@@ -135,11 +189,20 @@ export function pickFamilyModel(family, apiModels, floorId) {
   const token = `-${String(family || '').toLowerCase()}-`;
   const skipped = [];
 
+  // Exclude the premium lines from every family EXCEPT the one being asked
+  // for. `claude-fable-5` contains '-fable-', so FABLE resolves normally when
+  // explicitly requested, while OPUS/SONNET/HAIKU can never pick one up — an
+  // auto-adopted Fable would be an unrequested ~2x cost change.
+  const wanted = String(family || '').toUpperCase();
+  const excluded = Object.entries(PREMIUM_TOKENS)
+    .filter(([fam]) => fam !== wanted)
+    .map(([, tok]) => tok);
+
   const familyCandidates = list.filter((m) => {
     const id = String(m?.id || '');
     if (!id.includes(token)) return false;
     const lower = id.toLowerCase();
-    return !lower.includes('fable') && !lower.includes('mythos');
+    return !excluded.some((tok) => lower.includes(tok));
   });
 
   const floorEntry = list.find((m) => m?.id === floorId);
@@ -170,7 +233,14 @@ export function pickFamilyModel(family, apiModels, floorId) {
   return { id: floorId, skipped };
 }
 
-/** Run pickFamilyModel for all three families against one Models API response. */
+/**
+ * Run pickFamilyModel for EVERY family against one Models API response —
+ * including FABLE. Resolving is pure computation over a list we already
+ * fetched, so tracking Fable's latest generation is free; what FABLE is kept
+ * out of is the per-model availability PROBE (claudeModelsInUse), which costs a
+ * real request per model. That way selecting Fable in Settings gets the current
+ * Fable, while users who never select it never pay to probe it.
+ */
 function resolveFromApiModels(apiModels) {
   const resolved = {};
   const meta = {};
@@ -193,7 +263,7 @@ function resolveFromApiModels(apiModels) {
   return { resolved, meta, skipped };
 }
 
-async function resolveViaApi(apiKey, signal) {
+async function resolveViaApi(apiKey, signal, scope) {
   const client = buildAnthropicClient(apiKey);
   const apiModels = [];
   // PagePromise's async iterator auto-pages (walks has_more/next cursor
@@ -205,15 +275,19 @@ async function resolveViaApi(apiKey, signal) {
   for (const s of skipped) {
     logger.warn(`[modelResolver] Skipped '${s.id}' for ${s.family}: ${s.reason} — falling to next-newest.`);
   }
-  const next = { resolved, meta, source: 'api', fetchedAt: Date.now(), skipped };
-  applySnapshot(next);
-  store.set(CACHE_KEY, next);
+  const next = { resolved, meta, source: 'api', scope, fetchedAt: Date.now(), skipped };
+  // A previous credential's request may finish after a newer key was entered.
+  // Keep its harmless scoped cache, but do not let that late result replace the
+  // live snapshot used by the new key.
+  if (scope === requestedScope) applySnapshot(next);
+  store.set(cacheKeyForScope(scope), next);
   logger.info(`[modelResolver] Resolved Claude models: OPUS=${resolved.OPUS} SONNET=${resolved.SONNET} HAIKU=${resolved.HAIKU}`);
 }
 
 // Coalesce concurrent primes (e.g. two hub runs starting at once) into one
 // in-flight API call rather than firing the Models API request twice.
-let primeInFlight = null;
+const primesInFlight = new Map();
+let requestedScope = null;
 
 /**
  * Resolve (or refresh) the Claude family → model-id snapshot. Never throws —
@@ -230,65 +304,100 @@ export async function primeClaudeModels(opts = {}) {
   try {
     const apiKey = apiKeyOpt || getAISettings().anthropicApiKey;
     if (!apiKey) {
+      requestedScope = null;
       // No key anywhere — resolve to the floor without an API call and
       // without an error (guard 1). Deliberately NOT cached as a durable
       // 24h-fresh result: checking for a key costs nothing, so re-check every
       // call rather than risk pinning the floor for a stale day after a key
       // is added mid-session.
-      if (snapshot.source !== 'floor') {
-        applySnapshot({ resolved: { ...MODEL_FLOOR }, meta: {}, source: 'floor', fetchedAt: Date.now(), skipped: [] });
+      if (snapshot.source !== 'floor' || snapshot.scope !== null) {
+        applySnapshot({ resolved: { ...MODEL_FLOOR }, meta: {}, source: 'floor', scope: null, fetchedAt: Date.now(), skipped: [] });
       }
       return;
     }
 
-    if (!force && snapshot.source === 'api' && Date.now() - snapshot.fetchedAt < CACHE_TTL_MS) {
+    const scope = resolutionScope(apiKey);
+    requestedScope = scope;
+
+    // Never leave a previous account's model IDs live while this account is
+    // resolving. The floor works with every configured key, whereas a cached
+    // preview/Fable model from the old key can produce a confusing 404/403.
+    if (snapshot.scope !== scope) {
+      applySnapshot({ resolved: { ...MODEL_FLOOR }, meta: {}, source: 'floor', scope, fetchedAt: Date.now(), skipped: [] });
+    }
+
+    if (!force && snapshot.source === 'api' && snapshot.scope === scope && Date.now() - snapshot.fetchedAt < CACHE_TTL_MS) {
       return; // already resolved this run, within TTL — don't flip mid-run (guard 2).
     }
 
     if (!force) {
-      const cached = store.get(CACHE_KEY);
-      if (cached?.source === 'api' && cached.fetchedAt && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+      const cached = store.get(cacheKeyForScope(scope));
+      if (cached?.source === 'api' && cached.scope === scope && cached.fetchedAt && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
         applySnapshot(cached);
         return;
       }
     }
 
-    if (primeInFlight) { await primeInFlight; return; }
-    primeInFlight = resolveViaApi(apiKey, signal);
-    try { await primeInFlight; }
-    finally { primeInFlight = null; }
+    const existing = primesInFlight.get(scope);
+    if (existing) { await existing; return; }
+    const work = resolveViaApi(apiKey, signal, scope);
+    primesInFlight.set(scope, work);
+    try { await work; }
+    finally {
+      if (primesInFlight.get(scope) === work) primesInFlight.delete(scope);
+    }
   } catch (err) {
     logger.warn(`[modelResolver] Claude model resolution failed, staying on the current snapshot (source=${snapshot.source}): ${err?.message || err}`);
   }
 }
 
 /**
- * Sync read of the currently-resolved model id for a family. Pure — never
- * throws, never touches the network. Falls back to MODEL_FLOOR[family] if
- * nothing has been resolved yet, and to the Sonnet floor for an unrecognized
- * family token (which should never happen from llm.js's pickModel, which
- * only calls this after isClaudeFamilyToken()).
+ * Sync read of the currently-resolved model id for a family. Never touches the
+ * network. A live API snapshot is valid ONLY for the key that fetched it: when
+ * the key passed by the hot path differs, return the universal floor until a
+ * later prime resolves the replacement account. This check closes the brief
+ * window between a Settings key update and that next async prime.
+ *
+ * `apiKey` is optional for direct consumers; the LLM hot path passes its
+ * already-read Settings key to avoid another settings/keychain read.
  */
-export function claudeModelFor(family) {
+export function claudeModelFor(family, apiKey = undefined) {
   if (!isClaudeFamilyToken(family)) {
     logger.warn(`[modelResolver] claudeModelFor() called with an unrecognized family '${family}' — falling back to the Sonnet floor.`);
     return MODEL_FLOOR.SONNET;
+  }
+  const currentApiKey = apiKey === undefined ? getAISettings().anthropicApiKey : apiKey;
+  if (!snapshotMatchesApiKey(currentApiKey)) {
+    return MODEL_FLOOR[family];
   }
   return snapshot.resolved[family] || MODEL_FLOOR[family];
 }
 
 /** { OPUS, SONNET, HAIKU } → currently-resolved model ids. */
-export function resolvedClaudeModels() {
-  return { ...snapshot.resolved };
+export function resolvedClaudeModels(apiKey = undefined) {
+  return Object.fromEntries(Object.values(CLAUDE_FAMILY).map((family) => [family, claudeModelFor(family, apiKey)]));
 }
 
 /**
- * The resolved id list, registry order opus/sonnet/haiku — replaces the old
- * literal CLAUDE_MODELS_IN_USE const (claude.js re-exports this) so the
- * per-model availability probe follows the resolver automatically.
+ * The resolved id list the per-model availability probe iterates — replaces the
+ * old literal CLAUDE_MODELS_IN_USE const (claude.js re-exports this) so the
+ * probe follows the resolver automatically.
+ *
+ * AUTO_TRACKED_FAMILIES only, so Fable is absent unless the user actually
+ * selected it: each entry costs one real API request per availability check,
+ * and probing a ~2x-price tier nobody chose is pure waste. `selected` lets the
+ * caller add back exactly the families in play (llm.js passes the user's
+ * Settings choices), so a Fable user does get it probed.
+ * @param {string[]} [selected] extra family tokens to include, de-duped
  */
-export function claudeModelsInUse() {
-  return [CLAUDE_FAMILY.OPUS, CLAUDE_FAMILY.SONNET, CLAUDE_FAMILY.HAIKU].map((f) => claudeModelFor(f));
+export function claudeModelsInUse(selected = [], apiKey = undefined) {
+  const families = [...AUTO_TRACKED_FAMILIES];
+  for (const f of selected) {
+    if (isClaudeFamilyToken(f) && !families.includes(f)) families.push(f);
+  }
+  // Ladder order (most → least capable) for consistent Settings-panel display.
+  families.sort((a, b) => CLAUDE_FAMILY_LADDER.indexOf(a) - CLAUDE_FAMILY_LADDER.indexOf(b));
+  return families.map((f) => claudeModelFor(f, apiKey));
 }
 
 /**
@@ -299,19 +408,26 @@ export function claudeModelsInUse() {
  * registry, so a freshly-resolved generation the static table has never seen
  * still sizes correctly instead of falling through to a conservative fallback.
  */
-export function claudeModelMetaFor(id) {
+export function claudeModelMetaFor(id, apiKey = undefined) {
   if (!id) return null;
+  const currentApiKey = apiKey === undefined ? getAISettings().anthropicApiKey : apiKey;
+  if (!snapshotMatchesApiKey(currentApiKey)) return null;
   const meta = snapshot.meta[id];
   return meta ? { ...meta } : null;
 }
 
 /** Diagnostic snapshot for bug reports: what's resolved, from where, when, and what got skipped. */
-export function modelResolutionSnapshot() {
+export function modelResolutionSnapshot(apiKey = undefined) {
+  const currentApiKey = apiKey === undefined ? getAISettings().anthropicApiKey : apiKey;
+  const current = snapshotMatchesApiKey(currentApiKey);
   return {
-    resolved: { ...snapshot.resolved },
-    source: snapshot.source,
-    fetchedAt: snapshot.fetchedAt,
-    skipped: snapshot.skipped.map((s) => ({ ...s })),
+    // Do not report another account's IDs as current. `staleForCurrentKey`
+    // makes the downgrade diagnosable without storing or exposing either key.
+    resolved: current ? { ...snapshot.resolved } : { ...MODEL_FLOOR },
+    source: current ? snapshot.source : 'floor',
+    fetchedAt: current ? snapshot.fetchedAt : 0,
+    skipped: current ? snapshot.skipped.map((s) => ({ ...s })) : [],
+    staleForCurrentKey: !current,
     epoch: snapshot.epoch,
   };
 }

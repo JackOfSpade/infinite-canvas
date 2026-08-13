@@ -48,6 +48,12 @@
 // opportunistically as Anthropic ships new generations — it's a floor, not
 // the source of truth (the resolver is).
 export const MODEL_FLOOR = Object.freeze({
+  // FABLE is Anthropic's top tier and is NEVER auto-adopted — it only ever
+  // serves when the user explicitly selects it in Settings. It costs ~2x Opus
+  // ($10/$50 vs $5/$25 per MTok), which is exactly why it must stay opt-in: the
+  // resolver's family matching excludes fable/mythos from OPUS/SONNET/HAIKU so
+  // a new Fable generation can never silently become "the latest Opus".
+  FABLE: 'claude-fable-5',
   OPUS: 'claude-opus-5',
   SONNET: 'claude-sonnet-5',
   HAIKU: 'claude-haiku-4-5',

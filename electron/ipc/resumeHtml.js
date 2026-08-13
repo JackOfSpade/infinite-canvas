@@ -2,21 +2,28 @@
  * Self-contained HTML builders for the job-application generator (résumé +
  * cover letter). Design doc: docs/resume-achievement-mining-design.md §5.
  *
- * HTML-FIRST, NOT PDF-FIRST (§5.1). PDF generation retired entirely — there
- * used to be a `resumePdf.js` that launched puppeteer-core against system
- * Chrome and post-processed the bytes with the design system's OCG cream
- * layer, because one PDF had to serve as both the screen artifact and the
- * print artifact. Now the browser tab IS the screen artifact: the design
- * system's own `@media print` rule (resume_design_system/colors_and_type.css
- * ~:394-409) already flips `--bg` to transparent on print, for free. The user
- * opens the file this module returns directly in Chrome and exports to PDF
- * via `window.print()` — see the injected chrome below. `resumePdf.js` is
- * DELETED; nothing in it survived the retirement (see this file's git log /
- * the phase report for the full accounting).
+ * HTML-FIRST, NOT PDF-ONLY (§5.1). The browser tab is still the primary,
+ * editable screen artifact — the design system's own `@media print` rule
+ * (resume_design_system/colors_and_type.css ~:394-409) already flips `--bg`
+ * to transparent on print, for free, and the user can always open the file
+ * this module returns directly in Chrome and export via `window.print()`
+ * (see the injected chrome below).
  *
- * Because the PDF path is gone, this module now owns the two coupling points
- * that used to live in resumePdf.js (design doc §9 reconnect-checklist rows
- * 1-2, migrated here): the `CSS_FILES` filename list and `getDesignSystemDir()`.
+ * UPDATE — PDF generation is back, but NOT as a revival of the old
+ * `resumePdf.js` (that file launched puppeteer-core against system Chrome;
+ * it stays deleted). `electron/ipc/resumeRender.js` renders a PDF companion
+ * from the exact HTML this module builds using Electron's OWN
+ * `webContents.printToPDF` — no extra browser binary — and
+ * `jobApplication.js` drives a local render → page-count → fit loop (SKILL.md
+ * §5's compact-density algorithm) around it before shipping. The PDF is a
+ * companion written NEXT TO the HTML, not a replacement for it: this module's
+ * own job (HTML scaffold, inlined CSS, injected chrome) is unchanged by that —
+ * resumeRender.js only ever consumes the HTML string this file already
+ * produces, it doesn't feed back into how that HTML is built.
+ *
+ * This module still owns the two coupling points that used to live in
+ * resumePdf.js (design doc §9 reconnect-checklist rows 1-2, migrated here):
+ * the `CSS_FILES` filename list and `getDesignSystemDir()`.
  * That pulls in `fs`/`path`/`electron` — this file is no longer dependency-
  * free the way it was when it only built HTML strings. That's fine under
  * `scripts/test-runner.js`: `getDesignSystemDir()` never actually needs a real
@@ -77,23 +84,83 @@ export function decodeTextEscapes(s) {
  * the PDF-era version (design doc §5.1: "extractVariantAttrs is unchanged") —
  * only this doc comment was updated to drop the stale OCG reference.
  */
-export function extractVariantAttrs(resumeMainHtml) {
+/**
+ * @param {string} resumeMainHtml
+ * @param {object} [opts]
+ * @param {'compact'|null} [opts.density]  Force `data-density="compact"` on
+ *   (or, when explicitly `null`, force it OFF) regardless of what the
+ *   model's markup contains. Omit to fall through to whatever the model
+ *   wrote (see the data-density block below).
+ */
+export function extractVariantAttrs(resumeMainHtml, { density } = {}) {
   const html = String(resumeMainHtml || '');
-  const mode = /data-print\s*=\s*"ink-only"/i.test(html) ? 'ink-only' : 'dual-pdf';
+  // Only read the opening <main> tag. Searching body copy can accidentally
+  // select a variant, and HTML permits single-quoted or unquoted attributes
+  // just as much as the double-quoted examples in the design system.
+  const mainTag = /<main\b[^>]*>/i.exec(html)?.[0] || html;
+  const attrValue = (name) => {
+    const match = new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>"'=]+))`, 'i').exec(mainTag);
+    return match ? (match[1] ?? match[2] ?? match[3] ?? '') : null;
+  };
+  const mode = String(attrValue('data-print') || '').toLowerCase() === 'ink-only' ? 'ink-only' : 'dual-pdf';
   const out = [`data-print="${mode}"`];
-  if (/\bdata-mono\b/i.test(html)) out.push('data-mono');
-  if (/data-page\s*=\s*"a4"/i.test(html)) out.push('data-page="a4"');
+  if (/(?:\s|<)data-mono(?:\s|=|>|\/)/i.test(mainTag)) out.push('data-mono');
+  if (String(attrValue('data-page') || '').toLowerCase() === 'a4') out.push('data-page="a4"');
+
+  // data-density — the design system's ONE deterministic page-fit lever
+  // (SKILL.md §5's "compact-density algorithm"; colors_and_type.css ~:300
+  // cascades it into ~10 tokens: body type −5%, tighter leading, spacing
+  // −25%, margins in). THIS FUNCTION REBUILDS THE ATTRIBUTE STRING FROM
+  // SCRATCH — it was previously missing entirely from the recognized-attrs
+  // list above (only data-print/data-mono/data-page were), which meant any
+  // data-density the model happened to emit was silently DROPPED on every
+  // call, with no error and no signal that it had been lost. That made the
+  // one lever a page-count fit loop needs to pull unreachable: nothing
+  // downstream of this function ever saw it, no matter who tried to set it.
+  //
+  // `density` lets the CALLER force the value — this is how jobApplication.js's
+  // fit loop applies compact density after measuring a rendered page count
+  // (a decision the MODEL can't make, since it never sees a page count; per
+  // SKILL.md's own rule, "apply only after a first render shows overflow" /
+  // "do not apply pre-emptively"). An explicit `density` argument always wins
+  // over the model's markup. When omitted, we still recognize a
+  // model-emitted `data-density="compact"` (rather than silently dropping it,
+  // the exact bug this comment documents) — the full SKILL.md text is
+  // injected into the résumé prompt as the editorial rubric
+  // (jobApplication.js's `getEditorialRubric`), so the model has read the
+  // literal `data-density="compact"` example markup and could plausibly copy
+  // it even though it isn't instructed to.
+  const resolvedDensity = density !== undefined
+    ? density
+    : (String(attrValue('data-density') || '').toLowerCase() === 'compact' ? 'compact' : null);
+  if (resolvedDensity === 'compact') out.push('data-density="compact"');
+
   return out.join(' ');
 }
 
+// The builder owns the final root-level variants. Once their values have been
+// resolved, discard copies on <main>: a length-revision response could
+// otherwise leave a conflicting local attribute that overrides the root and
+// makes page size/OCG mode disagree with the fit-loop's decision.
+function stripMainVariantAttrs(mainHtml) {
+  return String(mainHtml || '').replace(/<main\b[^>]*>/ig, tag =>
+    tag.replace(/\sdata-(?:print|mono|page|density)(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?/ig, ''),
+  );
+}
+
 /**
- * True when the variant is dual-pdf. Used to no longer gate an OCG
- * post-process (that pipeline retired with resumePdf.js) — instead it tailors
- * the injected print-hint copy (§5.4): the dual-pdf variant can truthfully
- * tell the user the warm background disappears automatically on print,
- * ink-only has no such background to explain away. Kept as an exported pure
- * function (unchanged logic) because scripts/test-runner.js already exercises
- * it directly.
+ * True when the variant is dual-pdf. Two consumers:
+ *   1. Tailors the injected print-hint copy (§5.4): the dual-pdf variant can
+ *      truthfully tell the user the warm background disappears automatically
+ *      on print, ink-only has no such background to explain away.
+ *   2. (Restored) gates the OCG cream post-process again — jobApplication.js
+ *      calls `resumeRender.js`'s `applyDualPdf()` only when this returns true,
+ *      mirroring SKILL.md §5 step 6 ("if the variant is ink-only or unset,
+ *      skip this step — never run addOcgBackground() on an ink-only PDF").
+ *      This is exactly the gating role the function's name always implied;
+ *      it briefly had no PDF consumer while PDF generation was retired.
+ * Kept as an exported pure function (unchanged logic) because
+ * scripts/test-runner.js already exercises it directly.
  */
 export function isDualMode(variantAttrs) {
   return /data-print="dual-pdf"/.test(String(variantAttrs || ''));
@@ -546,6 +613,7 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   // Decode any literal "\n"/"\t" the model left in the markup so they collapse as
   // HTML whitespace instead of printing verbatim (real newlines are untouched).
   main = decodeTextEscapes(main);
+  main = stripMainVariantAttrs(main);
   // Resolve/strip receipts BEFORE anything else touches the markup (§4.3 step 3).
   main = injectReceipts(main, ledger);
 

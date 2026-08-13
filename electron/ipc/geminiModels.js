@@ -3,11 +3,63 @@
  * text/JSON, structured outputs, image/PDF understanding, and search grounding.
  *
  * Keep scheduled-for-shutdown models here while their endpoints remain live and
- * usable on the API-key/free-tier path. Models that report a persistent 0/0
- * allocation in AI Studio are intentionally excluded so the app does not spend
- * every fallback chain probing guaranteed no-quota endpoints.
+ * usable on the API-key/free-tier path.
+ *
+ * ── Ordering is a CAPABILITY LADDER: pro → flash → lite ────────────────────
+ * Within a tier, entries are newest-generation first, so a quality task walks
+ * the most capable model it is entitled to down to the cheapest that still
+ * works. `orderGeminiModels` builds the per-call chain from this order.
+ *
+ * ── The Pro tier is ENTITLEMENT-GATED, not hard-coded out ──────────────────
+ * Pro models are listed here but carry `requiresEntitlement: true`, which keeps
+ * them out of every fallback chain until a live probe proves this credential can
+ * actually call them. This replaces an older hand-written "Pro has 0/0 free-tier
+ * quota, so it is excluded" comment — a claim that was true when written, but
+ * silently unverifiable afterwards and wrong the moment a key gets upgraded.
+ *
+ * Verified live against the configured AI Studio key on 2026-08-12 (one minimal
+ * generateContent call per model — the same probe `probeGemini` sends):
+ *
+ *   gemini-3.1-pro-preview   429  "limit: 0" on generate_content_free_tier_input_token_count
+ *   gemini-pro-latest        429  "limit: 0" on generate_content_free_tier_requests
+ *   gemini-2.5-pro           404  "no longer available to new users"
+ *   gemini-3.6-flash         200  ✓   gemini-3.5-flash-lite     200  ✓
+ *   gemini-3.5-flash         200  ✓   gemini-3.1-flash-lite     200  ✓
+ *   gemini-3-flash-preview   200  ✓   gemini-2.5-flash-lite     200  ✓
+ *   gemini-2.5-flash         200  ✓
+ *
+ * So on TODAY's free-tier key the effective chain is flash → lite, exactly as
+ * before — but the exclusion is now a measured fact with a 7-day TTL
+ * (`geminiEntitlement.js`) instead of a comment. Put a billing-enabled key in
+ * Settings and Pro joins the front of the quality chain on the next probe, with
+ * no code change. Never re-add a blanket "Pro is excluded" constant: the whole
+ * point is that entitlement is a property of the credential, not of the app.
+ *
+ * All ids below were confirmed present in this key's ListModels response, and
+ * every one honors `responseSchema` + `thinkingLevel: 'minimal'` (probed
+ * directly — a model that cannot do structured output would break every
+ * schema-forced task in aiSchemas.js).
  */
 export const GEMINI_MODEL_REGISTRY = Object.freeze([
+  // ── Pro tier — capability ceiling, gated on a verified entitlement ────────
+  {
+    id: 'gemini-3.1-pro-preview',
+    tier: 'pro',
+    lifecycle: 'preview',
+    shutdownDate: null,
+    replacement: null,
+    thinkingConfig: { thinkingLevel: 'minimal' },
+    requiresEntitlement: true,
+  },
+  // ── Flash tier — the quality workhorses ───────────────────────────────────
+  {
+    id: 'gemini-3.6-flash',
+    tier: 'flash',
+    lifecycle: 'stable',
+    shutdownDate: null,
+    replacement: null,
+    thinkingConfig: { thinkingLevel: 'minimal' },
+  },
   {
     id: 'gemini-3.5-flash',
     tier: 'flash',
@@ -21,7 +73,7 @@ export const GEMINI_MODEL_REGISTRY = Object.freeze([
     tier: 'flash',
     lifecycle: 'preview',
     shutdownDate: null,
-    replacement: 'gemini-3.5-flash',
+    replacement: 'gemini-3.6-flash',
     thinkingConfig: { thinkingLevel: 'minimal' },
   },
   {
@@ -29,15 +81,24 @@ export const GEMINI_MODEL_REGISTRY = Object.freeze([
     tier: 'flash',
     lifecycle: 'stable',
     shutdownDate: '2026-10-16',
-    replacement: 'gemini-3.5-flash',
+    replacement: 'gemini-3.6-flash',
     thinkingConfig: { thinkingBudget: 0 },
+  },
+  // ── Lite tier — mechanical/short structured work ──────────────────────────
+  {
+    id: 'gemini-3.5-flash-lite',
+    tier: 'lite',
+    lifecycle: 'stable',
+    shutdownDate: null,
+    replacement: null,
+    thinkingConfig: { thinkingLevel: 'minimal' },
   },
   {
     id: 'gemini-3.1-flash-lite',
     tier: 'lite',
     lifecycle: 'stable',
     shutdownDate: '2027-05-07',
-    replacement: null,
+    replacement: 'gemini-3.5-flash-lite',
     thinkingConfig: { thinkingLevel: 'minimal' },
   },
   {
@@ -45,14 +106,33 @@ export const GEMINI_MODEL_REGISTRY = Object.freeze([
     tier: 'lite',
     lifecycle: 'stable',
     shutdownDate: '2026-10-16',
-    replacement: 'gemini-3.1-flash-lite',
+    replacement: 'gemini-3.5-flash-lite',
     thinkingConfig: { thinkingBudget: 0 },
   },
 ]);
 
+/** Capability ladder, most capable first. Drives orderGeminiModels' tier walk. */
+export const GEMINI_TIER_LADDER = Object.freeze(['pro', 'flash', 'lite']);
+
+/**
+ * Ids that are usable WITHOUT a proven entitlement — i.e. the chain every
+ * credential can rely on. This is what the availability sweep probes, what
+ * checkPromptFits budgets the smallest context window across, and what the
+ * bug report lists as "compatible models". Entitlement-gated ids are
+ * deliberately absent: probing a model we know we cannot call burns a request
+ * from the shared RPD pool to learn nothing.
+ */
 export const GEMINI_MODEL_FALLBACKS = Object.freeze(
-  GEMINI_MODEL_REGISTRY.map(({ id }) => id),
+  GEMINI_MODEL_REGISTRY.filter((entry) => !entry.requiresEntitlement).map(({ id }) => id),
 );
+
+/** Every id in the registry, gated or not — for metadata lookups (token windows). */
+export const GEMINI_ALL_MODEL_IDS = Object.freeze(GEMINI_MODEL_REGISTRY.map(({ id }) => id));
+
+/** The ids in `tier`, registry order (newest generation first). */
+export function geminiModelsInTier(tier) {
+  return GEMINI_MODEL_REGISTRY.filter((entry) => entry.tier === tier).map(({ id }) => id);
+}
 
 const MODEL_BY_ID = new Map(GEMINI_MODEL_REGISTRY.map((entry) => [entry.id, entry]));
 
@@ -188,23 +268,55 @@ export function describeGeminiFailure(classification, message = '') {
 }
 
 /**
- * Put the task's preferred model first, then preserve its cost/quality intent:
- * quality tasks exhaust Flash first; lightweight tasks exhaust Lite/Flash first.
- * Suppressed models remain at the tail as a last resort instead of being removed.
+ * Build the fallback chain for one call: walk the capability ladder from the
+ * most capable tier this credential may use down to the cheapest.
+ *
+ * Tier walk, by the preferred model's own tier:
+ *   - `lite`  (lightweight tasks) → ['lite', 'flash'].  Deliberately never
+ *     climbs to Pro: a task whose author chose Lite wants the cheap tier, and
+ *     silently promoting it to the most expensive model would invert that.
+ *   - anything else (quality tasks, or an unrecognized preferred model)
+ *     → ['pro', 'flash', 'lite'], i.e. most advanced first.
+ *
+ * Within a tier the registry order (newest generation first) holds, except
+ * that the task's own preferred model is hoisted to the front of ITS tier —
+ * so a task keeps the exact model its author picked as the first thing tried
+ * inside that tier, while still getting a more capable tier ahead of it when
+ * one is available.
+ *
+ * `opts.entitledTiers` (Set|Array of tier names) admits `requiresEntitlement`
+ * models. Omit it and Pro is absent — the correct default, because an
+ * unentitled Pro model 429s on every single call and would cost one wasted
+ * round-trip per request forever. gemini.js supplies this from the cached
+ * live probe (see geminiEntitlement.js).
+ *
+ * A preferred model that is not in the registry is DROPPED rather than
+ * prepended — that's what keeps a stale/removed id in TASK_MODELS from
+ * poisoning the chain with a guaranteed-404 first attempt.
+ *
+ * Suppressed models move to the tail as a last resort instead of being
+ * removed, so a fully-suppressed chain still attempts something.
  */
-export function orderGeminiModels(preferredModel, suppressedUntil = new Map(), now = Date.now()) {
+export function orderGeminiModels(preferredModel, suppressedUntil = new Map(), now = Date.now(), opts = {}) {
   const preferred = getGeminiModelInfo(preferredModel);
+  const entitled = opts.entitledTiers instanceof Set
+    ? opts.entitledTiers
+    : new Set(Array.isArray(opts.entitledTiers) ? opts.entitledTiers : []);
+
   const tierOrder = preferred?.tier === 'lite'
     ? ['lite', 'flash']
-    : preferred?.tier === 'flash'
-      ? ['flash', 'lite']
-      : ['flash', 'lite'];
-  const tiered = tierOrder.flatMap((tier) => (
-    GEMINI_MODEL_REGISTRY.filter((entry) => entry.tier === tier).map((entry) => entry.id)
-  ));
-  const base = preferred
-    ? [preferredModel, ...tiered.filter((id) => id !== preferredModel)]
-    : tiered;
+    : GEMINI_TIER_LADDER;
+
+  const base = tierOrder.flatMap((tier) => {
+    const ids = GEMINI_MODEL_REGISTRY
+      .filter((entry) => entry.tier === tier && (!entry.requiresEntitlement || entitled.has(tier)))
+      .map((entry) => entry.id);
+    // Hoist the task's own pick to the front of its tier.
+    return preferred?.tier === tier && ids.includes(preferredModel)
+      ? [preferredModel, ...ids.filter((id) => id !== preferredModel)]
+      : ids;
+  });
+
   const ready = base.filter((id) => (suppressedUntil.get(id) || 0) <= now);
   const suppressed = base.filter((id) => (suppressedUntil.get(id) || 0) > now);
   return [...ready, ...suppressed];

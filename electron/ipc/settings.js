@@ -25,6 +25,37 @@ const ENC_PREFIX = 'safeStorage:v1:';
 const AI_SECRET_KEYS = ['anthropicApiKey', 'geminiApiKey'];
 const JOBS_SECRET_KEYS = ['usajobsApiKey', 'scrapflyApiKey', 'diceApiKey'];
 
+// ── Claude per-group family selection ───────────────────────────────────────
+// Mirrors llm.js's GROUP_DEFAULT_FAMILY / CLAUDE_FAMILY_LADDER tokens —
+// duplicated here (not imported) rather than reused, to avoid a settings.js
+// <-> llm.js import cycle: llm.js already imports getAISettings FROM this
+// module to resolve which model serves each task, and modelResolver.js (the
+// other place these tokens live) already imports getAISettings too. Family
+// tokens are extremely low-churn (four tiers, added on the order of once a
+// year), so the duplication cost is small next to the cycle it would create.
+const CLAUDE_MODEL_GROUP_DEFAULTS = Object.freeze({ generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' });
+const VALID_CLAUDE_FAMILY_TOKENS = new Set(['FABLE', 'OPUS', 'SONNET', 'HAIKU']);
+
+/**
+ * Validate + backfill the persisted `ai.claudeModels` (per-group Claude
+ * family selection: which of Fable/Opus/Sonnet/Haiku serves generation vs.
+ * analysis vs. light tasks — see llm.js's TASK_GROUPS doc). An older config
+ * written before this feature existed has no `claudeModels` key at all; a
+ * corrupted/hand-edited one could carry an unrecognized token (a retired
+ * family name, a typo, `null`). Either case falls back to that GROUP's
+ * default rather than throwing or handing llm.js a token it can't resolve —
+ * getAISettings() is on the hot path of every LLM call, so a throw here
+ * would break every task, not just the misconfigured group.
+ */
+export function normalizeClaudeModels(raw) {
+  const out = {};
+  for (const [group, def] of Object.entries(CLAUDE_MODEL_GROUP_DEFAULTS)) {
+    const v = raw?.[group];
+    out[group] = VALID_CLAUDE_FAMILY_TOKENS.has(v) ? v : def;
+  }
+  return out;
+}
+
 export function encryptSecret(plain) {
   if (!plain || typeof plain !== 'string') return plain;
   // Already encrypted — return unchanged. Without this, update-settings'
@@ -120,6 +151,15 @@ function getStore() {
         // lookup, so the user can keep the file anywhere on disk and reuse
         // it across canvases without copying.
         serviceAccountPath: '',
+        // Per-GROUP Claude family (llm.js TASK_GROUPS): which of
+        // Fable/Opus/Sonnet/Haiku serves application-generation tasks vs.
+        // analysis tasks vs. light/status tasks. These defaults reproduce
+        // the OLD hard-coded per-task TASK_MODELS table exactly (see llm.js's
+        // GROUP_DEFAULT_FAMILY doc) — electron-store only applies top-level
+        // `defaults`, so an on-disk config from BEFORE this key existed
+        // still needs getAISettings()'s normalizeClaudeModels() to backfill
+        // it; this entry only covers a genuinely fresh install.
+        claudeModels: { generation: 'OPUS', analysis: 'SONNET', light: 'HAIKU' },
       },
       // Aggregate seller pages scanned by the Marketplace Status Module, keyed
       // by platformId: dashboards, notification centers, messages, sold-items
@@ -179,9 +219,39 @@ function decryptedStoreSnapshot(s) {
   const data = s.store;
   return {
     ...data,
-    ai: decryptSectionSecrets(AI_SECRET_KEYS, data.ai),
+    // claudeModels goes through the same normalizeClaudeModels() as
+    // getAISettings() — the renderer must never see a missing/invalid
+    // per-group token either (a blank/unmatched dropdown in Settings), not
+    // just the internal LLM-call path.
+    ai: { ...decryptSectionSecrets(AI_SECRET_KEYS, data.ai), claudeModels: normalizeClaudeModels(data.ai?.claudeModels) },
     jobs: decryptSectionSecrets(JOBS_SECRET_KEYS, data.jobs),
   };
+}
+
+/**
+ * Merge one `updates[section]` object onto the section's current stored
+ * value — the core of update-settings' "shallow-merge per top-level section"
+ * contract (a partial update, e.g. only `ai.serviceAccountPath`, must not
+ * wipe sibling keys). Exported (pure, no store/encryption side effects) so
+ * the nested-merge behavior below is directly unit-testable.
+ *
+ * `ai.claudeModels` is itself a {generation,analysis,light} object.
+ * SettingsPanel's updateAISetting/updateClaudeModelGroup send ONE changed
+ * top-level `ai` key per call, so a single family-dropdown change arrives as
+ * `{ claudeModels: { generation: 'FABLE' } }`. A bare top-level shallow merge
+ * (`{ ...current, ...value }`) would REPLACE `claudeModels` wholesale with
+ * that partial object, silently dropping `analysis`/`light` back to
+ * undefined — getAISettings() papers over it with defaults on the next read,
+ * but the user's OTHER two picks would be gone, not just the one they
+ * changed. Deep-merge this one nested key instead of trusting the top-level
+ * shallow merge to handle it.
+ */
+export function mergeSettingsSection(section, current, value) {
+  const merged = { ...(current || {}), ...value };
+  if (section === 'ai' && value?.claudeModels && typeof value.claudeModels === 'object') {
+    merged.claudeModels = { ...(current?.claudeModels || {}), ...value.claudeModels };
+  }
+  return merged;
 }
 
 export function registerSettingsHandlers() {
@@ -190,12 +260,13 @@ export function registerSettingsHandlers() {
   });
 
   // Shallow-merges per top-level section so a partial update (e.g. only
-  // changing `ai.serviceAccountPath`) doesn't wipe sibling keys.
+  // changing `ai.serviceAccountPath`) doesn't wipe sibling keys — see
+  // mergeSettingsSection() for the one nested exception (ai.claudeModels).
   handleSafe('update-settings', async (_event, updates) => {
     const s = getStore();
     for (const [section, value] of Object.entries(updates || {})) {
       if (value && typeof value === 'object' && !Array.isArray(value)) {
-        let merged = { ...(s.get(section) || {}), ...value };
+        let merged = mergeSettingsSection(section, s.get(section), value);
         if (section === 'ai') merged = encryptSectionSecrets(AI_SECRET_KEYS, merged);
         else if (section === 'jobs') merged = encryptSectionSecrets(JOBS_SECRET_KEYS, merged);
         s.set(section, merged);
@@ -228,7 +299,11 @@ export function registerSettingsHandlers() {
 }
 
 export function getAISettings() {
-  return decryptSectionSecrets(AI_SECRET_KEYS, tryGetStore()?.get('ai') || {});
+  const ai = decryptSectionSecrets(AI_SECRET_KEYS, tryGetStore()?.get('ai') || {});
+  // Every caller (every LLM call in the app) needs a fully-populated,
+  // validated claudeModels — see normalizeClaudeModels()'s doc for why a
+  // raw/missing/corrupted value can't just pass through here.
+  return { ...ai, claudeModels: normalizeClaudeModels(ai.claudeModels) };
 }
 
 /**

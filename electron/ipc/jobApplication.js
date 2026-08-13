@@ -20,14 +20,23 @@
  *      verified accomplishments.
  *   3. cover letter       — structured fields the renderer lays out on-brand.
  *   4. document build     — buildResumeDocument / buildCoverLetterDocument
- *      (resumeHtml.js) turn those into two self-contained HTML files. No PDF
- *      rendering, no headless Chromium here — HTML-first output (design §5).
+ *      (resumeHtml.js) turn those into two self-contained HTML files.
+ *      HTML-first output (design §5) — the HTML is still the primary,
+ *      editable artifact.
+ *   5. render → fit loop  — a LOCAL render → page-count → fit loop
+ *      (resumeRender.js, Electron's own `webContents.printToPDF` — no
+ *      puppeteer, no headless Chromium download) implements SKILL.md §5's
+ *      "compact-density algorithm": render, and if the page count is over
+ *      target, retry with `data-density="compact"` (free, deterministic); if
+ *      STILL over, make one targeted LLM revision call to cut content and
+ *      render once more. Produces a PDF companion next to the HTML. This step
+ *      can never block generation — any render failure degrades to
+ *      HTML-only, logged, never thrown (see renderResumeWithFit below).
  *
  * generate-application returns the temp HTML paths as resumeHtmlPath /
- * coverHtmlPath (renamed from the PDF-era *PdfPath* names when §5 retired PDF
- * generation — a PdfPath field holding an HTML path is exactly what invites a
- * future reader to "restore" the puppeteer step); save-application then writes
- * both files into an
+ * coverHtmlPath, plus resumePdfPath (the fit-loop's PDF companion — null
+ * when rendering failed for any reason). save-application then writes those
+ * files into an
  * "Applied Jobs/<company>/<location>/<job>" folder next to the saved canvas
  * and opens that folder in Finder — no picker.
  */
@@ -39,7 +48,8 @@ import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { callLLMRaw, callLLMText } from './llm.js';
 import { APPLICATION_COVER_LETTER_SCHEMA, ACHIEVEMENT_LEDGER_SCHEMA, ACHIEVEMENT_REFUTE_SCHEMA } from './aiSchemas.js';
-import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, getDesignSystemDir } from './resumeHtml.js';
+import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, getDesignSystemDir } from './resumeHtml.js';
+import { renderPdf, applyDualPdf } from './resumeRender.js';
 import { primeClaudeModels } from './modelResolver.js';
 import {
   LEDGER_VERSION, MINING_TARGET, computeLedger, applyRefuteVerdicts, serializeLedgerForPrompt,
@@ -83,6 +93,100 @@ function getEditorialRubric() {
     _editorialRubric = '';
   }
   return _editorialRubric;
+}
+
+// ---------------------------------------------------------------------------
+// Render → page-count → fit loop (SKILL.md §5's "compact-density algorithm").
+// The two functions below are PURE (no I/O, no LLM, no Electron) so they're
+// directly unit-testable under plain Node (scripts/test-runner.js) without
+// standing up a BrowserWindow — the orchestration that calls renderPdf/
+// callLLMRaw around them lives in renderResumeWithFit, further down.
+// ---------------------------------------------------------------------------
+
+// "Staff+" (with the literal plus) — NOT bare "Staff" — is the 2-page trigger.
+// SKILL.md is explicit that target page count is "1 for IC roles up to staff
+// and 2 for principal+": a plain "Staff Engineer" title is still a 1-page
+// résumé under that rule. "Staff+" is the industry-ladder shorthand some
+// postings use for "staff and above" (Staff, Senior Staff, Principal,
+// Distinguished, collectively) — matching it but not bare "staff" is
+// deliberate, not an oversight; a naive `/staff/i` here would 2-page every
+// staff-level IC posting SKILL.md's own guidance says should stay 1 page.
+// "staff\+" is deliberately its OWN alternative outside the \b(...)\b group
+// (not folded in alongside "principal" etc.) — "+" is not a word character,
+// so a trailing \b right after it never matches (there's no \w↔\W transition
+// at that position when "+" is followed by a space or end-of-string, which is
+// how a title actually ends: "...Staff+"). A leading \b is enough since '+'
+// itself unambiguously terminates the token.
+// "Chief of Staff" is an administrative/advisory title, not an IC level at
+// principal+; treating every "chief" as an executive misclassifies it and
+// gives it an unnecessarily long default target. Senior Staff is above Staff,
+// so it belongs with principal+ even when a posting does not use "Staff+".
+const SENIOR_TITLE_RE = /\b(?:principal|director|vice president|vp|head of)\b|\bchief\b(?![\s-]+of[\s-]+staff\b)|\b(?:senior|sr\.?)\s+staff\b|\bstaff\+/i;
+
+/**
+ * Target page count for a job title (SKILL.md §5: "conventionally 1 for IC
+ * roles up to staff and 2 for principal+"). Callers may override this
+ * heuristic entirely (generate-application accepts an optional
+ * `targetPageCount` argument, below) — this is only the default when no
+ * override is supplied.
+ */
+export function targetPageCountForJob(jobTitle) {
+  return SENIOR_TITLE_RE.test(String(jobTitle || '')) ? 2 : 1;
+}
+
+/**
+ * One step of SKILL.md §5's page-count algorithm, as a pure state → action
+ * decision — no rendering, no LLM call, just "given what's already been
+ * tried, what should happen next."
+ *
+ * SKILL.md gates compact density on overflow SIZE ("~1-9 lines, or the final
+ * page <30% full"). `pdf-lib` gives a page count, not final-page occupancy,
+ * so a one-page overrun remains genuinely ambiguous: it can be one line or an
+ * almost-full second page. We use compact first in that ambiguous case because
+ * it is deterministic and free. More than one whole page beyond target is
+ * unambiguously large from the count alone, so it skips straight to the one
+ * content revision instead of wasting a compact render that cannot close it.
+ *
+ * @param {object} args
+ * @param {number} args.pageCount     the just-rendered page count
+ * @param {number} args.target        target page count (targetPageCountForJob or an override)
+ * @param {boolean} args.compactTried    whether data-density="compact" has already been applied+rendered
+ * @param {boolean} args.revisionTried   whether the one LLM length-revision call has already run
+ * @param {boolean} [args.fontsLoaded=true] whether the render window actually loaded the design
+ *   system's web fonts (renderPdf reports this)
+ * @returns {{action: 'ship'|'compact'|'revise', reason: string}}
+ */
+export function decideFitStep({ pageCount, target, compactTried, revisionTried, fontsLoaded = true }) {
+  // A page count measured with fallback typefaces describes a document nobody
+  // will ever see: the design system's fonts come from the Google Fonts CDN, so
+  // offline (or with the CDN blocked) the render window lays the résumé out in
+  // system serif/sans at different metrics. Acting on that number could compact
+  // a résumé that already fits, or — far worse — spend an LLM revision call
+  // CUTTING REAL CONTENT to solve an overflow that doesn't exist. Ship what the
+  // model wrote and leave the layout alone.
+  if (!fontsLoaded) {
+    return { action: 'ship', reason: `web fonts unavailable in the render window — page count ${pageCount} reflects fallback typefaces, not the real document, so no fit action is taken` };
+  }
+  if (!(pageCount > target)) {
+    return { action: 'ship', reason: `page count ${pageCount} already fits target ${target}` };
+  }
+  // `target + 2` pages means at least one *complete* page beyond the target,
+  // regardless of how full the final page is. That is the one large-overflow
+  // verdict a page count can make honestly without PDF layout geometry.
+  if (pageCount > target + 1 && !revisionTried) {
+    return { action: 'revise', reason: `${pageCount} pages exceeds target ${target} by more than one full page — skipping compact density and revising content` };
+  }
+  if (!compactTried) {
+    return { action: 'compact', reason: `${pageCount} pages exceeds target ${target} — trying data-density="compact" first (free, deterministic, no LLM call)` };
+  }
+  if (!revisionTried) {
+    return { action: 'revise', reason: `still ${pageCount} pages after compact density (target ${target}) — the content itself is too long; one targeted LLM revision call` };
+  }
+  // Both levers exhausted. Never loop indefinitely (§4) — ship the best
+  // result produced rather than making a second revision call or retrying
+  // forever; a résumé slightly over the conventional target still beats no
+  // résumé at all.
+  return { action: 'ship', reason: `exhausted both fit levers (compact density + one revision) at ${pageCount} pages vs target ${target} — shipping best effort` };
 }
 
 function jobBlock(job = {}) {
@@ -247,7 +351,24 @@ Return one verdict per id. Reach for 'drop' only when the join genuinely doesn't
 }
 
 /** Fill the design system's résumé markup, tailored to the job + research. */
-async function generateResumeMain({ careerData, job, research, ledger }, signal) {
+/**
+ * The static, job-independent prefix of the résumé prompt → CACHED PREFIX.
+ * The candidate's careerData, the design-system instructions/markup, the
+ * ledger, and the rubric are all byte-identical across every application
+ * generated this session from this hub (and across the initial generation +
+ * any later length-revision call for the SAME application, below), so every
+ * call after the first reads this from cache (~10% of input cost) instead of
+ * re-billing it. Pulled out of generateResumeMain (rather than inlined there)
+ * specifically so reviseResumeForLength can call it a second time with the
+ * SAME arguments and get the byte-identical string back — Anthropic's prompt
+ * cache keys on exact prefix bytes, so re-deriving this block with even
+ * slightly different interpolation at the call site would silently miss the
+ * cache on the revision call. Only the per-job job/research (and, for the
+ * revision call, the in-progress résumé + how much to cut) live in each
+ * call's DYNAMIC prompt, appended after this. Keep this function's output
+ * byte-stable for a given (careerData, ledger) pair.
+ */
+function buildResumeCachedPrefix({ careerData, ledger }) {
   // The ledger — serialized through serializeLedgerForPrompt(), NEVER a raw
   // JSON.stringify (whose key order can vary call to call and would silently
   // miss the cache marker below — see that function's own doc-comment and
@@ -272,13 +393,7 @@ ${rubricText}
 """`
     : '';
 
-  // Static, job-independent block → CACHED PREFIX. The candidate's careerData,
-  // the design-system instructions/markup, the ledger, and the rubric are all
-  // byte-identical across every application generated this session from this
-  // hub, so résumé call 2..N read this from cache (~10% of input cost) instead
-  // of re-billing it. Only the per-job job/research live in the dynamic prompt
-  // below. Keep this whole block byte-stable.
-  const cachedPrefix = `You are an elite résumé writer using the "Editorial" design system. Produce ONE \`<main class="page">…</main>\` HTML block that fills the design system's EXACT markup, tailored to the TARGET JOB and company research provided at the end.
+  return `You are an elite résumé writer using the "Editorial" design system. Produce ONE \`<main class="page">…</main>\` HTML block that fills the design system's EXACT markup, tailored to the TARGET JOB and company research provided at the end.
 
 CAREER DATA (the candidate — every claim must be grounded in this; see TRUTHFULNESS & FRAMING below):
 """
@@ -309,7 +424,11 @@ RULES:
   • Design-conscious / startup / craft-oriented company → \`data-print="dual-pdf"\` (the design system default — warm cream on screen, background automatically removed when printed).
   • Big-company ATS / enterprise / regulated / finance back-office → \`data-print="ink-only"\` (flat white; also add \`data-mono\` for very conservative fields: defense, big-law, traditional banking IT).
   • Non-US recipient → also add \`data-page="a4"\`.${ledgerSection}${rubricSection}`;
+}
 
+/** Fill the design system's résumé markup, tailored to the job + research. */
+async function generateResumeMain({ careerData, job, research, ledger }, signal) {
+  const cachedPrefix = buildResumeCachedPrefix({ careerData, ledger });
   const prompt = `TARGET JOB (the "Description" is what we scraped — it may be full, partial, or empty):
 ${jobBlock(job)}
 
@@ -320,6 +439,162 @@ ${research}
 
 Now produce the single \`<main class="page">…</main>\` block for THIS job, grounded in the CAREER DATA and following the markup + rules above.`;
   return await callLLMRaw(prompt, { signal, task: 'application-resume', cachedPrefix });
+}
+
+// Rough estimate only — the revision prompt needs a DIRECTION and a rough
+// MAGNITUDE ("cut about N lines"), not a precise target. This is a generic
+// single-column résumé page at the design system's default body type
+// (colors_and_type.css: ~10.25pt / 1.45 leading over a ~9in content height)
+// and doesn't need to be exact for that purpose — it only steers how
+// aggressively the model trims, and the fit loop re-measures with a real
+// render afterward regardless of how close this guess was.
+const LINES_PER_PAGE_ESTIMATE = 45;
+
+/**
+ * ONE targeted revision pass — SKILL.md §5's "overflow is large" case.
+ * Ambiguous one-page overflow reaches here after compact density proved
+ * insufficient; a count that is more than one whole page over target reaches
+ * here directly. Reuses buildResumeCachedPrefix with the SAME (careerData,
+ * ledger) the initial résumé call used, so this call still hits the Anthropic
+ * prompt cache instead of re-billing the whole prefix.
+ */
+async function reviseResumeForLength({ careerData, ledger, mainHtml, pageCount, targetPageCount, compactApplied }, signal) {
+  const cachedPrefix = buildResumeCachedPrefix({ careerData, ledger });
+  const overflowPages = pageCount - targetPageCount;
+  const estimatedLinesToCut = Math.max(4, Math.round(overflowPages * LINES_PER_PAGE_ESTIMATE));
+  const fitContext = compactApplied
+    ? 'even WITH data-density="compact" applied'
+    : 'without trying data-density="compact", because the page count is more than one whole page beyond the target';
+
+  const prompt = `The résumé <main> block below renders to ${pageCount} page(s) ${fitContext}, but the target for this job is ${targetPageCount} page(s). Per the editorial rubric above (SKILL.md §5), the content needs a focused length edit.
+
+Revise it to cut roughly ${estimatedLinesToCut} line(s) of content. Cut or merge the WEAKEST bullets first — the ones leaning on adjectives instead of a number or trade-off, per the rubric's content rules — before touching anything with a strong metric or receipt. Keep the exact same markup structure, classes, and attributes (including whatever data-print/data-mono/data-page/data-density the block already has). Do not change any candidate fact, employer, date, or figure — this is a LENGTH edit, not a rewrite. Output ONLY the revised \`<main class="page" …>…</main>\` block: no <html>, no markdown fences, no commentary before or after.
+
+CURRENT <main> BLOCK TO REVISE:
+${mainHtml}`;
+
+  return await callLLMRaw(prompt, { signal, task: 'application-resume', cachedPrefix });
+}
+
+// Absolute safety net on the render → fit loop (SKILL.md §5 / decideFitStep
+// above) — the deterministic path (initial render, compact retry, one
+// post-revision render) only ever needs 3, but a future change to
+// decideFitStep that adds a step must not be able to loop this forever; a
+// résumé PDF is worth retrying for, not worth hanging a Generate click over.
+const MAX_RENDER_ATTEMPTS = 4;
+
+function throwIfAbortedApp(signal) {
+  if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+}
+
+/**
+ * Drives SKILL.md §5's render → page-count → fit loop end to end for one
+ * résumé: render, apply compact density if it's over target, make one
+ * targeted revision call if compact still isn't enough, ship whatever the
+ * last successful render produced. See decideFitStep for the per-step
+ * decision and MAX_RENDER_ATTEMPTS for the hard cap.
+ *
+ * ROBUSTNESS (design item 4): a render failure at ANY attempt (no display,
+ * printToPDF throwing, pdf-lib rejecting malformed bytes) breaks out of the
+ * loop and returns with `pdfBytes: null` rather than throwing — the caller
+ * ships the HTML regardless (a layout nicety must never cost the user their
+ * résumé). AbortError is the one exception: a real cancellation propagates
+ * so the caller can stop the whole generation, not just this loop.
+ *
+ * @param {object} args
+ * @param {object|null} args.ledger  the WRAPPED `{ ledger, gaps }` shape (or
+ *   null) — the SAME shape/value `generateResumeMain` was called with
+ *   (`ledgerForPrompt`), NOT the bare achievement array. Both
+ *   `buildResumeCachedPrefix`/`reviseResumeForLength` (need the wrapped shape
+ *   to reproduce the byte-identical cached prefix) and `buildResumeDocument`
+ *   (needs the bare array, for `injectReceipts`) are called from inside this
+ *   loop — passing the wrong shape to either would either silently drop the
+ *   ledger from the revision prompt (breaking the prompt-cache reuse this
+ *   whole plumbing exists for) or crash the receipt resolver.
+ * @returns {Promise<{
+ *   mainHtml: string, variantAttrs: string, pdfBytes: Uint8Array|null,
+ *   pageCount: number|null, attempts: Array<object>,
+ *   compactApplied: boolean, revisionApplied: boolean, renderError: string|null,
+ * }>}
+ */
+async function renderResumeWithFit({ careerData, ledger, resumeMainHtml, docId, targetPageCount }, signal) {
+  const attempts = [];
+  let mainHtml = resumeMainHtml;
+  // The length-revision model may cut copy but must not silently change the
+  // initial document's ATS/ink-only choice or its paper size. Keep the root
+  // variant immutable across retries; buildResumeDocument removes conflicting
+  // model-level copies before rendering.
+  const baseVariantAttrs = extractVariantAttrs(resumeMainHtml, { density: null });
+  const variantAttrsForDensity = (nextDensity) => nextDensity === 'compact'
+    ? `${baseVariantAttrs} data-density="compact"`
+    : baseVariantAttrs;
+  let density = null;   // null | 'compact'
+  let compactTried = false;
+  let revisionTried = false;
+  let pdfBytes = null;  // valid ONLY for the (mainHtml, density) pair currently in scope
+  let pageCount = null;
+  let renderError = null;
+  let fontsLoaded = true; // renderPdf's own fonts-actually-loaded check (not just fonts.ready resolving) — assume good until a render says otherwise
+  const ledgerArray = ledger?.ledger || null; // buildResumeDocument/injectReceipts want the bare array — see the @param note above
+
+  for (let attempt = 1; attempt <= MAX_RENDER_ATTEMPTS; attempt++) {
+    throwIfAbortedApp(signal);
+    const variantAttrs = variantAttrsForDensity(density);
+    const doc = buildResumeDocument({ resumeMainHtml: mainHtml, variantAttrs, ledger: ledgerArray, docId });
+
+    try {
+      const rendered = await renderPdf(doc, { signal });
+      pageCount = rendered.pageCount;
+      fontsLoaded = rendered.fontsLoaded !== false;
+      renderError = null;
+      // Keep the bytes ONLY when the fonts they were laid out with are the
+      // real ones. A fallback-typeface PDF looks subtly wrong and would sit in
+      // "Applied Jobs" indistinguishable from a good one — the exact artifact a
+      // user could send to an employer without noticing. The HTML still ships
+      // and renders correctly the moment they're back online.
+      pdfBytes = fontsLoaded ? rendered.bytes : null;
+      attempts.push({ attempt, density, pageCount, fontsLoaded });
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+      pdfBytes = null;
+      pageCount = null;
+      renderError = e?.message || String(e);
+      attempts.push({ attempt, density, pageCount: null, error: renderError });
+      logger.warn(`[JobApplication] Résumé PDF render failed (attempt ${attempt}/${MAX_RENDER_ATTEMPTS}, density=${density || 'default'}) — shipping the HTML without a PDF: ${renderError}`);
+      break; // rendering infrastructure is broken this call — further attempts would fail the same way (§4)
+    }
+
+    const step = decideFitStep({ pageCount, target: targetPageCount, compactTried, revisionTried, fontsLoaded });
+    if (step.action === 'ship') break;
+
+    if (step.action === 'compact') {
+      density = 'compact';
+      compactTried = true;
+      continue;
+    }
+
+    // step.action === 'revise'
+    revisionTried = true;
+    try {
+      mainHtml = await reviseResumeForLength({
+        careerData, ledger, mainHtml, pageCount, targetPageCount, compactApplied: compactTried,
+      }, signal);
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+      logger.warn(`[JobApplication] Length-revision call failed — shipping the last successful render as-is (${pageCount} page(s) vs target ${targetPageCount}): ${e?.message || e}`);
+      break; // keep the current mainHtml/pdfBytes/pageCount — best effort, per §4
+    }
+    // Content changed — the PDF/pageCount just measured no longer describes
+    // it; the next loop iteration re-renders before deciding anything else.
+    pdfBytes = null;
+    pageCount = null;
+  }
+
+  const finalVariantAttrs = variantAttrsForDensity(density);
+  return {
+    mainHtml, variantAttrs: finalVariantAttrs, pdfBytes, pageCount, attempts,
+    compactApplied: compactTried, revisionApplied: revisionTried, renderError, fontsLoaded,
+  };
 }
 
 /** Structured cover letter the renderer lays out on the design-system letterhead. */
@@ -413,7 +688,7 @@ function recordApplicationTelemetry(data) {
 export function registerJobApplicationHandlers() {
   // Generate the tailored résumé + cover letter HTML documents. Returns temp
   // paths; save-application then copies them to a user-chosen folder.
-  handleSafe('generate-application', async (event, { job, careerData, nodeId, achievements, mineAllowed }, signal) => {
+  handleSafe('generate-application', async (event, { job, careerData, nodeId, achievements, mineAllowed, targetPageCount: targetPageCountOverride }, signal) => {
     const company = job?.company || 'this company';
     logger.info(`[JobApplication][${nodeId || '?'}] Generating application for ${job?.title} @ ${company}`);
 
@@ -479,12 +754,65 @@ export function registerJobApplicationHandlers() {
     const coverLetter = await generateCoverLetterFields({ careerData, job, research, ledger: ledgerForPrompt }, signal);
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
 
-    // Capture the raw model output BEFORE building the documents, so a build
-    // failure still leaves the LLM fields visible in a bug report (the prose is
-    // where newline / escape bugs live). Stored verbatim — the reporter
-    // stringifies for inspection. Ledger stats are recorded regardless of
-    // outcome (reused/mined/unavailable) so a report shows whether the feature
-    // ran at all.
+    // 4. Local render → page-count → fit loop (SKILL.md §5). Runs on the
+    //    RAW model markup — docId is generated now (not after the loop) since
+    //    it's baked into the rendered document at every attempt (keys the
+    //    contenteditable autosave, §5.5) and must stay the same across
+    //    attempts for the same application. This can NEVER block generation:
+    //    renderResumeWithFit itself already degrades render failures to
+    //    `pdfBytes: null` internally (§4), and this try/catch is a second,
+    //    outer safety net for anything unexpected in the loop's own
+    //    orchestration (a bug here must still ship the HTML the model wrote).
+    const resumeDocId = crypto.randomUUID();
+    const coverDocId = crypto.randomUUID();
+    const targetPageCount = Number.isFinite(targetPageCountOverride) && targetPageCountOverride > 0
+      ? targetPageCountOverride
+      : targetPageCountForJob(job?.title);
+
+    let fitResult = null;
+    try {
+      fitResult = await renderResumeWithFit({
+        // The WRAPPED { ledger, gaps } shape — same value generateResumeMain
+        // was called with — NOT the bare array (see renderResumeWithFit's
+        // @param note: it needs the wrapped shape to reproduce the
+        // byte-identical cached prefix on a length-revision call).
+        careerData, ledger: ledgerForPrompt, resumeMainHtml,
+        docId: resumeDocId, targetPageCount,
+      }, signal);
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e; // a real cancellation must actually cancel, not degrade
+      logger.warn(`[JobApplication][${nodeId || '?'}] Résumé render/fit loop failed unexpectedly — shipping the HTML without a PDF: ${e?.message || e}`);
+    }
+    if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+
+    // The fit loop may have applied compact density and/or a length revision
+    // — finalMainHtml/variantAttrs are what actually get shipped as BOTH the
+    // HTML and the PDF (the whole point of a shared source: they must never
+    // diverge). Falls back to the original, unfit markup when the loop threw
+    // before producing anything at all.
+    const finalMainHtml = fitResult?.mainHtml || resumeMainHtml;
+    const variantAttrs = fitResult?.variantAttrs || extractVariantAttrs(resumeMainHtml);
+
+    // 5. Dual-mode OCG post-process (SKILL.md §5 step 6) — ONLY for the
+    //    dual-pdf variant, and only when a PDF actually rendered. A failure
+    //    here degrades to shipping the PLAIN rendered PDF (no cream layer,
+    //    same as the ink-only variant's output) rather than no PDF at all —
+    //    the cosmetic dual-state layer is not worth losing the whole PDF over.
+    let resumePdfBytes = fitResult?.pdfBytes || null;
+    if (resumePdfBytes && isDualMode(variantAttrs)) {
+      try {
+        resumePdfBytes = await applyDualPdf(resumePdfBytes);
+      } catch (e) {
+        logger.warn(`[JobApplication][${nodeId || '?'}] OCG dual-mode post-process failed — shipping the plain (non-dual) PDF instead: ${e?.message || e}`);
+      }
+    }
+
+    // Capture the raw model output + render telemetry BEFORE building the
+    // documents, so a build failure still leaves them visible in a bug report
+    // (the prose is where newline/escape bugs live; the render attempts are
+    // where page-fit bugs live). Stored verbatim — the reporter stringifies
+    // for inspection. Ledger stats are recorded regardless of outcome
+    // (reused/mined/unavailable) so a report shows whether the feature ran at all.
     const ledgerStats = freshlyMined?.stats || achievements?.stats || null;
     const minedBy = freshlyMined?.minedBy || achievements?.minedBy || null;
     recordApplicationTelemetry({
@@ -499,8 +827,8 @@ export function registerJobApplicationHandlers() {
         signatureTitle: coverLetter?.signatureTitle || '',
         contact:        Array.isArray(coverLetter?.contact) ? coverLetter.contact : [],
       },
-      resumeHtmlSample: String(resumeMainHtml || '').slice(0, 1500),
-      resumeHtmlLen:    String(resumeMainHtml || '').length,
+      resumeHtmlSample: String(finalMainHtml || '').slice(0, 1500),
+      resumeHtmlLen:    String(finalMainHtml || '').length,
       achievements: {
         source: ledgerSource,
         skipped: achievementsSkipped,
@@ -508,20 +836,34 @@ export function registerJobApplicationHandlers() {
         stats: ledgerStats,
         minedBy,
       },
+      render: {
+        targetPageCount,
+        attempts: fitResult?.attempts || [],
+        initialPageCount: fitResult?.attempts?.[0]?.pageCount ?? null,
+        finalPageCount: fitResult?.pageCount ?? null,
+        compactApplied: !!fitResult?.compactApplied,
+        revisionApplied: !!fitResult?.revisionApplied,
+        pdfProduced: !!resumePdfBytes,
+        error: fitResult ? (fitResult.renderError || null) : 'render/fit loop threw before producing any attempts',
+        // Distinguishes "no PDF because rendering broke" from "no PDF because
+        // the design system's Google Fonts CDN import was unreachable" — the
+        // two share the same pdfProduced:false/error:null shape otherwise, so
+        // without this a bug report can't tell a render bug from a network
+        // condition (offline/proxy/ad-blocker) that resolved on its own.
+        fontsLoaded: fitResult ? fitResult.fontsLoaded !== false : null,
+      },
     });
 
-    // 4. Build the two self-contained HTML documents. HTML-first output (design
-    //    §5) — no puppeteer, no PDF, no OCG post-process here; buildResumeDocument
-    //    / buildCoverLetterDocument (resumeHtml.js) own the scaffold, inlined
-    //    CSS, and injected chrome. `ledger` is passed to the résumé builder so
-    //    its post-process can resolve each `data-achievement-id` receipt against
-    //    the SAME ledger the model was shown (§4.3) — the cover letter carries
-    //    no ledger since it emits no receipts (§4.4). `docId` keys the
-    //    contenteditable autosave (§5.5) and is generated fresh per document.
-    const variantAttrs = extractVariantAttrs(resumeMainHtml);
-    const resumeDocId = crypto.randomUUID();
-    const coverDocId = crypto.randomUUID();
-    const resumeDoc = buildResumeDocument({ resumeMainHtml, variantAttrs, ledger: ledgerForPrompt?.ledger || null, docId: resumeDocId });
+    // 6. Build the two self-contained HTML documents. HTML-first output
+    //    (design §5) — buildResumeDocument / buildCoverLetterDocument
+    //    (resumeHtml.js) own the scaffold, inlined CSS, and injected chrome.
+    //    `ledger` is passed to the résumé builder so its post-process can
+    //    resolve each `data-achievement-id` receipt against the SAME ledger
+    //    the model was shown (§4.3) — the cover letter carries no ledger
+    //    since it emits no receipts (§4.4). `docId` keys the contenteditable
+    //    autosave (§5.5) — the SAME id used in the render loop above, so the
+    //    shipped HTML and the measured PDF are the same document.
+    const resumeDoc = buildResumeDocument({ resumeMainHtml: finalMainHtml, variantAttrs, ledger: ledgerForPrompt?.ledger || null, docId: resumeDocId });
     const coverDoc = buildCoverLetterDocument({ letter: coverLetter, variantAttrs, docId: coverDocId });
 
     const outDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jobapp-out-'));
@@ -530,11 +872,28 @@ export function registerJobApplicationHandlers() {
     await fs.promises.writeFile(resumeHtmlPath, resumeDoc, 'utf8');
     await fs.promises.writeFile(coverHtmlPath, coverDoc, 'utf8');
 
+    // PDF companion — written next to the HTML, never in place of it (§5.1
+    // still stands: HTML is the primary, editable artifact). null when
+    // rendering failed for any reason; the caller (JobCardNode.jsx / the
+    // renderer) must treat it as optional the same way it already treats a
+    // failed résumé PDF as "generation still succeeded."
+    let resumePdfPath = null;
+    if (resumePdfBytes) {
+      const candidatePath = path.join(outDir, `resume-${resumeDocId}.pdf`);
+      try {
+        await fs.promises.writeFile(candidatePath, resumePdfBytes);
+        resumePdfPath = candidatePath;
+      } catch (e) {
+        logger.warn(`[JobApplication][${nodeId || '?'}] Could not write résumé PDF to disk — continuing with HTML only: ${e?.message || e}`);
+      }
+    }
+
     const candidateName = coverLetter?.name || '';
-    logger.info(`[JobApplication][${nodeId || '?'}] Built application HTML for ${company}`);
+    logger.info(`[JobApplication][${nodeId || '?'}] Built application HTML for ${company}${resumePdfPath ? ' (+ PDF)' : ' (PDF unavailable — see log above)'}`);
     return {
       resumeHtmlPath,
       coverHtmlPath,
+      resumePdfPath,
       workDir: outDir,
       company: job?.company || '',
       candidateName,
@@ -543,12 +902,12 @@ export function registerJobApplicationHandlers() {
     };
   });
 
-  // Write both generated HTML documents into
+  // Write the generated documents into
   // "Applied Jobs/<company>/<location>/<job>" next to the SAVED canvas file,
   // then open that folder in Finder. No picker — the location is deterministic
   // so the user's applications stay organized with the project. Cleans up the
   // temp working directory afterward.
-  handleSafe('save-application', async (event, { resumeHtmlPath, coverHtmlPath, workDir, company, candidateName, jobTitle, location, canvasFilePath }) => {
+  handleSafe('save-application', async (event, { resumeHtmlPath, coverHtmlPath, resumePdfPath, workDir, company, candidateName, jobTitle, location, canvasFilePath }) => {
     if (!resumeHtmlPath || !coverHtmlPath) throw new Error('Missing generated application file paths.');
     if (!fs.existsSync(resumeHtmlPath) || !fs.existsSync(coverHtmlPath)) {
       throw new Error('Generated application files are no longer available — please regenerate.');
@@ -573,6 +932,19 @@ export function registerJobApplicationHandlers() {
     const resumeFile = await copyUnique(resumeHtmlPath, dir, `${who} - Resume.html`);
     const coverFile  = await copyUnique(coverHtmlPath, dir, `${who} - Cover Letter.html`);
 
+    // The PDF companion (electron/ipc/resumeRender.js + jobApplication.js's
+    // render/fit loop) is OPTIONAL — rendering can fail for reasons that never
+    // touch the HTML (no display, printToPDF throwing, pdf-lib rejecting), and
+    // per that loop's robustness rule a missing PDF must never block saving
+    // the HTML the user actually needs. fs.existsSync also guards the rarer
+    // case of workDir having been cleaned up by something else between
+    // generate and save (save-application is a separate IPC call — nothing
+    // enforces it runs before another cleanup path could touch the same dir).
+    let resumePdfFile = null;
+    if (resumePdfPath && fs.existsSync(resumePdfPath)) {
+      resumePdfFile = await copyUnique(resumePdfPath, dir, `${who} - Resume.pdf`);
+    }
+
     // Clean up the temp output dir now that the files are safely copied out.
     if (workDir) {
       await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {});
@@ -582,7 +954,7 @@ export function registerJobApplicationHandlers() {
     const openErr = await shell.openPath(dir);
     if (openErr) logger.warn(`[JobApplication] Could not open ${dir}: ${openErr}`);
 
-    logger.info(`[JobApplication] Saved application to ${dir}`);
-    return { saved: true, dir, resumeFile, coverFile };
+    logger.info(`[JobApplication] Saved application to ${dir}${resumePdfFile ? ' (+ PDF)' : ''}`);
+    return { saved: true, dir, resumeFile, coverFile, resumePdfFile };
   });
 }
