@@ -260,6 +260,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           matchScore: typeof j.matchScore === 'number' ? j.matchScore : 0,
           salary: j.salary || '',
           title: j.title || '',
+          source: j.source || '',
         }));
         const res = await window.electronAPI.bucketJobs({ jobs: compactJobs, nodeId: id });
         if (res?.success && Array.isArray(res.roles)) {

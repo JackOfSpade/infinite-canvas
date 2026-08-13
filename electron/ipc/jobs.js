@@ -809,6 +809,14 @@ function googleKeywordWithLocation(query, location) {
   return `${keyword} ${loc}`;
 }
 
+const GLASSDOOR_POSTED_BUCKETS = Object.freeze([1, 3, 7, 14, 30]);
+
+/** Smallest supported Glassdoor fromAge bucket that does not narrow the request. */
+export function glassdoorPostedBucket(days) {
+  const wanted = Math.max(1, Math.floor(Number(days) || DEFAULT_MAX_AGE_DAYS));
+  return GLASSDOOR_POSTED_BUCKETS.find((bucket) => bucket >= wanted) || null;
+}
+
 // `opts` (resume only): { onlySources: Set, startPageBySource: { [id]: 1-based page } }.
 // onlySources restricts which manual sources get tasks (skip already-'done' ones on
 // resume). startPageBySource resumes a URL-paginated source mid-pagination by building
@@ -819,6 +827,7 @@ function googleKeywordWithLocation(query, location) {
 export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
   const { onlySources = null, startPageBySource = null } = opts;
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+  const glassdoorDays = glassdoorPostedBucket(days);
   // Board-ready location filter (already flattened from the structured canonical
   // by deriveLocationParam). Appended as each board's REAL location param so a
   // location-free query no longer searches nationwide. Empty → omitted (nationwide,
@@ -855,7 +864,11 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
     // the old ?p=N URL param is silently ignored (every "page" returns page 1).
     // One URL load + JOB_MAX_PAGES-1 button clicks replaces the old N-page walk.
     glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,    config: GLASSDOOR_CONFIG,    maxPages: JOB_MAX_PAGES,
-                       urlFn: (q) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}${locParam('locKeyword')}&fromAge=${days}`,
+                       // Glassdoor accepts only its UI buckets. Round UP so the
+                       // source never under-fetches the requested window; the
+                       // global client filter trims the extra tail. Above its
+                       // largest bucket, omit fromAge and rely on the client.
+                       urlFn: (q) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}${locParam('locKeyword')}${glassdoorDays ? `&fromAge=${glassdoorDays}` : ''}`,
                        loadMoreSelector: '[data-test="load-more"]' },
     // Google Jobs: single-page scroll-loaded panel (ibp=htl;jobs). No pagination —
     // scroll logic is handled by SCROLL_SOURCES in manualScraper.js. Does not throw
@@ -1032,7 +1045,13 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
   }
   const items = dedupJobsAcrossSources(results.flatMap(r => r?.items || []));
   const warning = [...results].reverse().find(r => r?.warning)?.warning ?? null;
-  return { items, warning };
+  // Preserve provider-vs-app relevance accounting across query fan-out. This is
+  // especially important for USAJobs: its Keyword parameter searches the full
+  // announcement, then the app rejects rows whose position title is unrelated.
+  const gathered = results.reduce((sum, r) => sum + Number(r?.gathered ?? r?.items?.length ?? 0), 0);
+  const providerGathered = results.reduce((sum, r) => sum + Number(r?.providerGathered ?? r?.gathered ?? r?.items?.length ?? 0), 0);
+  const relevanceDropped = results.reduce((sum, r) => sum + Number(r?.relevanceDropped ?? 0), 0);
+  return { items, warning, gathered, providerGathered, relevanceDropped };
 }
 
 async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], preferredLocation = '', onlySources = null, emit = null, stageSource = null) {
@@ -1106,6 +1125,8 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // surfaced in the funnel so an over-the-cap API source isn't a silent miss
       // (mirrors the browser ceiling).
       const gathered = Array.isArray(result) ? rawJobs.length : (result?.gathered ?? rawJobs.length);
+      const providerGathered = Array.isArray(result) ? rawJobs.length : (result?.providerGathered ?? gathered);
+      const relevanceDropped = Array.isArray(result) ? 0 : (result?.relevanceDropped ?? 0);
       // FAST test mode: trim each source to a small per-source aggregate
       // (FAST_QUERY_CAP × FAST_API_PER_QUERY ≈ 2 queries × 5). Enforced here — one
       // slice per source — because the fetchers apply JOB_RESULT_CAP inconsistently
@@ -1135,7 +1156,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       if (stageSource && jobs.length > 0) {
         await stageSource({ sourceId, jobs });
       }
-      return { sourceId, jobs, warning, gathered, relevanceTrace };
+      return { sourceId, jobs, warning, gathered, providerGathered, relevanceDropped, relevanceTrace };
     } catch (error) {
       send({ nodeId, sourceId, status: 'error', count: 0, completed: queryTotal, total: queryTotal });
       return { sourceId, jobs: [], error: error?.message || String(error) };
@@ -1727,6 +1748,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
       // Pre-cap match count (one fetch per API source). > jobs gathered = the
       // JOB_RESULT_CAP slice dropped in-window jobs the funnel should flag.
       if (res.gathered != null) sourceResults[res.sourceId].gathered = res.gathered;
+      if (res.providerGathered != null) sourceResults[res.sourceId].providerGathered = res.providerGathered;
+      if (res.relevanceDropped != null) sourceResults[res.sourceId].relevanceDropped = res.relevanceDropped;
       if (Array.isArray(res.relevanceTrace) && res.relevanceTrace.length > 0) {
         sourceResults[res.sourceId].relevanceTrace = res.relevanceTrace;
       }
@@ -2251,18 +2274,30 @@ Be creative with suggestedRoleQueries — think about what career directions the
             : { type: 'result', limit: JOB_RESULT_CAP };
         }
       }
+      if (data.providerGathered != null) bySource[sid].providerGathered = data.providerGathered;
+      if (data.relevanceDropped > 0) bySource[sid].relevanceDropped = data.relevanceDropped;
     }
-    // Dice is the only source whose date bound is CONDITIONAL (server-side
-    // `filters.postedDate` only when the window matches a 1/3/7-day bucket, else
-    // client-side) AND whose request URL never reaches a log a bug report can see
-    // (browser sources log theirs; HTTP sources don't). Compute the bound from the
-    // same dicePostedBucket the extractor uses (drift-free) so "did the Dice
-    // server-side filter fire?" is answerable from the report, not inferred.
-    const diceDateBound = ACTIVE_SOURCE_ID_SET.has('dice')
-      ? (dicePostedBucket(ageDays)
-          ? `filters.postedDate=${dicePostedBucket(ageDays)} (server-side; pageSize 400)`
-          : `client-side only (${ageDays}d ∉ Dice's 1/3/7-day buckets; pageSize 1000)`)
-      : null;
+    // Per-source date-bound truth. Bucketed APIs round up rather than silently
+    // narrowing the requested window; sources without a usable server filter
+    // say so explicitly. The merged client filter remains the final backstop.
+    const diceBucket = dicePostedBucket(ageDays);
+    const glassdoorBucket = glassdoorPostedBucket(ageDays);
+    const dateBounds = Object.fromEntries(ACTIVE_SOURCE_IDS.map((id) => {
+      let detail = 'client-side only';
+      if (id === 'dice') detail = diceBucket
+        ? `filters.postedDate=${diceBucket} (server-side; pageSize 400)`
+        : `client-side only (${ageDays}d ∉ Dice's 1/3/7-day buckets; pageSize 1000)`;
+      else if (id === 'glassdoor') detail = glassdoorBucket
+        ? `fromAge=${glassdoorBucket} (server bucket rounded up; client trims to ${ageDays}d)`
+        : `client-side only (${ageDays}d exceeds Glassdoor's 30-day server bucket)`;
+      else if (id === 'ziprecruiter') detail = `days=${ageDays} (server-side + client backstop)`;
+      else if (id === 'indeed') detail = `fromage=${ageDays} (server-side + client backstop)`;
+      else if (id === 'linkedin') detail = `f_TPR=r${ageDays * 86400} (server-side + client backstop)`;
+      else if (id === 'usajobs') detail = ageDays <= 60
+        ? `DatePosted=${ageDays} (server-side + client backstop)`
+        : `client-side only (${ageDays}d exceeds USAJobs' 60-day DatePosted limit)`;
+      return [id, detail];
+    }));
     // Location observability: the raw user input ("denvr"), the corrected param
     // actually sent ("Denver, CO"), how each active source applied it, and an
     // adherence tally over the KEPT jobs — so "did the typo get corrected?" and
@@ -2310,7 +2345,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       maxAgeDays: ageDays, // the configured look-back window this run actually used
       ageDropped,
       ageBySource, // per-source: { dropped, kept, oldestKeptDays, oldestKeptRaw, unparseableKept }
-      diceDateBound,
+      dateBounds,
       historyDropped,
       hiddenApplied,
       kept: kept.length,

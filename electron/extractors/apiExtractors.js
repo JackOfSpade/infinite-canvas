@@ -20,6 +20,7 @@ import { JOB_RESULT_CAP } from '../ipc/resultCaps.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../../src/utils/compSourceScope.js';
+import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js';
 
 // Per-source API fetch timeouts. These are SEEDS / ceilings, read through the
 // shared scrapeBudget store so they live in one place and share the budget
@@ -762,9 +763,71 @@ export function jobRelevanceMatch(roleText, query, geoTerms = EMPTY_GEO) {
   return !!jobRelevanceEvidence(roleText, query, geoTerms);
 }
 
+/** USAJobs Keyword searches the whole announcement; the app needs role-title relevance. */
+export function filterUSAJobsByTitleRelevance(jobs, query) {
+  return (Array.isArray(jobs) ? jobs : []).filter((job) =>
+    jobRelevanceEvidence(job?.title, query),
+  );
+}
+
 // ── USAJobs API ─────────────────────────────────────────────────────────────
 // Official API: data.usajobs.gov/api/search
 // Requires free API key from developer.usajobs.gov
+
+// USAJobs' PositionRemuneration.RateIntervalCode is an internal pay-interval
+// CODE (source: USAJobs' documented rate-interval-code list), not a cadence
+// WORD — the shared annualizer (parseSalaryToNumeric, imported above from
+// src/nodes/jobsearch/buildJobTree.js) only recognizes cadence words/slash
+// forms like "hour"/"/hr" or the literal phrase "bi-weekly". A raw "/ PH"
+// suffix matched none of those, so every hourly USAJobs listing silently
+// annualized to 0 ("Unspecified") even though real pay was present — and the
+// raw code was shown to the user verbatim on the card. Map each code to a
+// suffix the annualizer already understands instead. PB has no recognized
+// slash form, so it uses the literal word "bi-weekly".
+const USAJOBS_RATE_SUFFIX = {
+  PA: '/ yr',       // per annum
+  PH: '/ hr',       // per hour
+  PD: '/ day',      // per day
+  PW: '/ wk',       // per week
+  PM: '/ mo',       // per month
+  PB: 'bi-weekly',  // per bi-week
+  FY: '/ yr',       // fee basis, paid per year
+  // PS (per piece) and SY (per school year) are intentionally NOT mapped —
+  // the annualizer has no multiplier for either, and guessing one would
+  // misreport pay. WC (without compensation) is handled separately below:
+  // there is no pay at all, so no salary string is emitted for it.
+};
+
+/**
+ * Format a USAJobs PositionRemuneration entry into a display string the
+ * shared annualizer can read. Returns '' when there's no amount to show
+ * (no entry, no range, or RateIntervalCode === 'WC' — "without
+ * compensation", i.e. no pay at all). For a code with no defined multiplier
+ * (PS, SY) or an unrecognized/future code, keeps the amount but appends the
+ * raw code in parens rather than fabricating a cadence the annualizer would
+ * misread — the amount still shows, and an unmapped code stays diagnosable.
+ * Collapses a degenerate "$X - $X" range into a single "$X".
+ * Exported for unit testing.
+ * @param {{MinimumRange?: string|number, MaximumRange?: string|number, RateIntervalCode?: string}} salary
+ * @returns {string}
+ */
+export function formatUSAJobsSalary(salary) {
+  if (!salary) return '';
+  const code = salary.RateIntervalCode || '';
+  if (code === 'WC') return ''; // without compensation — no pay at all
+  const { MinimumRange: min, MaximumRange: max } = salary;
+  if (min == null && max == null) return '';
+  // Comma-group like formatDiceBaseSalary does — USAJobs ships bare integers, and
+  // "$106437" on a card is hard to read at a glance. Non-numeric values pass
+  // through untouched rather than being silently zeroed.
+  const amt = (x) => (Number.isFinite(Number(x)) ? Number(x).toLocaleString('en-US') : String(x));
+  const amount = (min != null && max != null && String(min) === String(max))
+    ? `$${amt(min)}`
+    : `$${amt(min ?? max)} - $${amt(max ?? min)}`;
+  const suffix = USAJOBS_RATE_SUFFIX[code];
+  if (suffix) return `${amount} ${suffix}`;
+  return code ? `${amount} (${code})` : amount;
+}
 
 /**
  * Fetch federal jobs from USAJobs.
@@ -790,10 +853,13 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
     };
   }
 
+  const requestedAgeDays = Math.max(1, Math.floor(maxAgeDays || 30));
   const params = new URLSearchParams({
     Keyword: query,
     ResultsPerPage: '150', // uncapped breadth; USAJobs DatePosted below already keeps these in-window
-    DatePosted: String(Math.max(1, Math.floor(maxAgeDays || 30))),
+    // USAJobs accepts only 0–60. Omitting it above 60 preserves breadth; the
+    // shared client age filter applies the user's larger requested window.
+    ...(requestedAgeDays <= 60 ? { DatePosted: String(requestedAgeDays) } : {}),
     ...(location ? { LocationName: location } : {}),
   });
 
@@ -815,12 +881,10 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
   const data = r.json;
   const resultItems = data?.SearchResult?.SearchResultItems || [];
 
-  const items = resultItems.slice(0, JOB_RESULT_CAP).map(item => {
+  const mapped = resultItems.map(item => {
     const pos = item.MatchedObjectDescriptor || {};
     const salary = pos.PositionRemuneration?.[0];
-    const salaryStr = salary
-      ? `$${salary.MinimumRange} - $${salary.MaximumRange} / ${salary.RateIntervalCode}`
-      : '';
+    const salaryStr = formatUSAJobsSalary(salary);
 
     return {
       title: pos.PositionTitle || '',
@@ -841,7 +905,21 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
       source: 'usajobs',
     };
   });
-  return { items, warning: r.warning, gathered: resultItems.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
+  // Keyword searches look throughout the full announcement and include
+  // synonyms, which let a single generic word (e.g. "Assistant") admit an
+  // unrelated title. The app is searching for roles, so require the returned
+  // position title to carry the same conservative relevance evidence used for
+  // remote feeds. This mirrors USAJobs' documented PositionTitle semantics
+  // without issuing a second request or silently inventing phrase syntax.
+  const relevant = filterUSAJobsByTitleRelevance(mapped, query);
+  const items = relevant.slice(0, JOB_RESULT_CAP);
+  return {
+    items,
+    warning: r.warning,
+    gathered: relevant.length,
+    providerGathered: resultItems.length,
+    relevanceDropped: resultItems.length - relevant.length,
+  }; // gathered: relevant pre-cap matches (see fetchLinkedInJobs)
 }
 
 
@@ -1922,14 +2000,21 @@ export async function warmDiceApiKey() {
 }
 
 /**
- * Extract JobPosting.description from a page's JSON-LD (handles @graph wrappers
- * and array `@type`). Node-side analogue of the browser scrapers' JSON-LD
- * harvest. Returns '' when no JobPosting description is present, and never throws
- * on malformed JSON-LD. Exported for unit testing.
- * @param {string} html — raw page HTML
- * @returns {string} — the description HTML (caller strips tags), or ''
+ * Walk every JSON-LD `<script>` block in a page's HTML looking for
+ * `JobPosting` nodes (handles `@graph` wrappers and array `@type`), calling
+ * `visit(node)` for each one found. The first call whose return value is not
+ * `undefined` short-circuits the walk and becomes the return value. Never
+ * throws on malformed JSON-LD — a bad block is just skipped.
+ *
+ * Shared by extractJobPostingDescription (harvests `.description`) and
+ * extractJobPostingBaseSalary (harvests `.baseSalary`) so the traversal
+ * itself — the actual source of truth for "how do we find a JobPosting node
+ * in this page" — lives in exactly one place.
+ * @param {string} html
+ * @param {(node: object) => any} visit
+ * @returns {any} — visit's first non-undefined return, or undefined
  */
-export function extractJobPostingDescription(html) {
+function walkJsonLdJobPostings(html, visit) {
   const re = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   let m;
   while ((m = re.exec(html || ''))) {
@@ -1942,10 +2027,87 @@ export function extractJobPostingDescription(html) {
       if (Array.isArray(node)) { stack.push(...node); continue; }
       const type = node['@type'];
       const isJob = type === 'JobPosting' || (Array.isArray(type) && type.includes('JobPosting'));
-      if (isJob && typeof node.description === 'string' && node.description.trim()) return node.description;
+      if (isJob) {
+        const result = visit(node);
+        if (result !== undefined) return result;
+      }
       if (Array.isArray(node['@graph'])) stack.push(...node['@graph']);
     }
   }
+  return undefined;
+}
+
+/**
+ * Extract JobPosting.description from a page's JSON-LD (handles @graph wrappers
+ * and array `@type`). Node-side analogue of the browser scrapers' JSON-LD
+ * harvest. Returns '' when no JobPosting description is present, and never throws
+ * on malformed JSON-LD. Exported for unit testing.
+ * @param {string} html — raw page HTML
+ * @returns {string} — the description HTML (caller strips tags), or ''
+ */
+export function extractJobPostingDescription(html) {
+  const desc = walkJsonLdJobPostings(html, (node) => {
+    if (typeof node.description === 'string' && node.description.trim()) return node.description;
+    return undefined;
+  });
+  return desc || '';
+}
+
+/**
+ * Extract JobPosting.baseSalary from a page's JSON-LD (same @graph / array
+ * `@type` walk as extractJobPostingDescription — see walkJsonLdJobPostings).
+ * `baseSalary` is a schema.org MonetaryAmount: `{ currency, value: {
+ * minValue, maxValue, value, unitText } }`, `unitText` being one of
+ * HOUR/DAY/WEEK/MONTH/YEAR. Returns the raw object as-is (unformatted) so
+ * callers/tests can inspect it directly, or `null` when absent/malformed.
+ * Never throws. Exported for unit testing.
+ * @param {string} html — raw page HTML
+ * @returns {object|null}
+ */
+export function extractJobPostingBaseSalary(html) {
+  const bs = walkJsonLdJobPostings(html, (node) => {
+    if (node.baseSalary && typeof node.baseSalary === 'object') return node.baseSalary;
+    return undefined;
+  });
+  return bs || null;
+}
+
+// unitText → a cadence suffix parseSalaryToNumeric (src/nodes/jobsearch/
+// buildJobTree.js) already recognizes. Deliberately re-implemented locally
+// (rather than importing the browser-side formatJsonLdSalary from
+// electron/ipc/browser/manualScraper.js) so this HTTP-only extractor file —
+// which exists specifically to bypass Puppeteer — doesn't pull in that
+// Puppeteer-based module as a dependency.
+const JSONLD_SALARY_UNIT_SUFFIX = { YEAR: '/yr', HOUR: '/hr', MONTH: '/mo', WEEK: '/wk', DAY: '/day' };
+
+/**
+ * Format a schema.org JobPosting.baseSalary object (see
+ * extractJobPostingBaseSalary) into a display string the shared annualizer
+ * can read, e.g. "$90,000 - $125,000/yr" or "$24/hr". Returns '' for
+ * anything with no recognized `unitText` or no numeric value — an unrecognized
+ * unit could be hourly or annual and guessing wrong is worse than leaving the
+ * existing (possibly cadence-less) salary text alone. Exported for unit
+ * testing.
+ * @param {object|null} baseSalary
+ * @returns {string}
+ */
+export function formatDiceBaseSalary(baseSalary) {
+  if (!baseSalary || typeof baseSalary !== 'object') return '';
+  const v = baseSalary.value && typeof baseSalary.value === 'object' ? baseSalary.value : baseSalary;
+  const suffix = JSONLD_SALARY_UNIT_SUFFIX[String(v.unitText || '').toUpperCase()] || '';
+  if (!suffix) return '';
+  const cur = String(baseSalary.currency || baseSalary.salaryCurrency || '').toUpperCase();
+  const sym = (cur === '' || cur === 'USD') ? '$' : `${cur} `;
+  const num = (x) => (x == null || Number.isNaN(Number(x))) ? null : Number(x).toLocaleString('en-US');
+  const min = num(v.minValue), max = num(v.maxValue), val = num(v.value);
+  if (min != null && max != null) return `${sym}${min} - ${sym}${max}${suffix}`;
+  if (val != null) return `${sym}${val}${suffix}`;
+  // schema.org allows a QuantitativeValue with only one bound, and open-ended
+  // postings ("From $19/hr", "Up to $24/hr") do use it. Returning '' here would
+  // throw away a cadence we came to recover, leaving the job Unspecified for
+  // want of a bound we never needed — the annualizer reads the first number.
+  if (min != null) return `From ${sym}${min}${suffix}`;
+  if (max != null) return `Up to ${sym}${max}${suffix}`;
   return '';
 }
 
@@ -1978,6 +2140,10 @@ export async function enrichDiceDescriptions(jobs, signal) {
   // summary? The old "N/N have descriptions" (>300 chars) log hid this — the
   // uniform ~500-char Dice snippets seen in bug reports trace straight to here.
   let lengthened = 0;
+  // Telemetry: how many salaries were upgraded from cadence-less Dice text
+  // (e.g. "25", "$20 - $24" — see cleanDiceSalary above) to a real cadenced
+  // value recovered from the detail page's JSON-LD baseSalary.
+  let salaryUpgraded = 0;
   const fallbackReasons = {}; // reason -> count
   let sampleFail = '';
   const note = (reason, ref) => {
@@ -2004,12 +2170,32 @@ export async function enrichDiceDescriptions(jobs, signal) {
           signal: createTimeoutSignal(signal, apiTimeout('dice-api')),
         }, 'dice-detail');
         if (!r.ok) { note(`http-${r.status}`, url); return job; }
-        const descHtml = extractJobPostingDescription(r.text || '');
-        if (!descHtml) { note('no-jsonld-desc', url); return job; }
+        const html = r.text || '';
+        // Salary cadence recovery: Dice's free-text `salary` field sometimes
+        // loses its cadence in cleanup ("25", "$20 - $24") and annualizes to
+        // 0/Unspecified even though the job has real pay. Reuse the SAME
+        // page HTML already fetched above (no extra request) and pull the
+        // cadence from its JSON-LD baseSalary — but only to UPGRADE a salary
+        // the shared annualizer can't already read; Dice's own text stays
+        // authoritative whenever it already parses to a real number.
+        let salaryPatch = null;
+        if (parseSalaryToNumeric(job.salary) === 0) {
+          const formatted = formatDiceBaseSalary(extractJobPostingBaseSalary(html));
+          if (formatted) { salaryPatch = formatted; salaryUpgraded += 1; }
+        }
+        const descHtml = extractJobPostingDescription(html);
+        if (!descHtml) {
+          note('no-jsonld-desc', url);
+          return salaryPatch ? { ...job, salary: salaryPatch } : job;
+        }
         const descText = descHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-        if (!descText) { note('empty-after-strip', url); return job; }
+        if (!descText) {
+          note('empty-after-strip', url);
+          return salaryPatch ? { ...job, salary: salaryPatch } : job;
+        }
         const rest = { ...job };
         delete rest._diceId;
+        if (salaryPatch) rest.salary = salaryPatch;
         // Keep whichever is longer — guards against a stub JSON-LD shorter than
         // the list summary we already had.
         if (descText.length > summaryLen) {
@@ -2036,6 +2222,6 @@ export async function enrichDiceDescriptions(jobs, signal) {
 
   const reasonStr = Object.entries(fallbackReasons).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(', ');
   const fellBack = cleaned.length - lengthened;
-  logger.info(`[Dice API] Enriched ${cleaned.length} jobs — ${lengthened} genuinely lengthened from detail endpoint${fellBack > 0 ? `; ${fellBack} kept list summary [${reasonStr}${sampleFail ? ` — e.g. ${sampleFail}` : ''}]` : ''}`);
+  logger.info(`[Dice API] Enriched ${cleaned.length} jobs — ${lengthened} genuinely lengthened from detail endpoint, ${salaryUpgraded} salaries cadence-upgraded from JSON-LD${fellBack > 0 ? `; ${fellBack} kept list summary [${reasonStr}${sampleFail ? ` — e.g. ${sampleFail}` : ''}]` : ''}`);
   return cleaned;
 }

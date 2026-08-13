@@ -145,6 +145,20 @@ export const REMOTE_BOARD_SOURCES = new Set(
   Object.entries(LOCATION_TREATMENT).filter(([, t]) => /remote board/i.test(t)).map(([id]) => id)
 );
 
+// Sources that can ONLY ever return US positions, by construction rather than by
+// query — USAJobs is the US federal government's own board. Used solely to resolve
+// a PLACELESS location on a United-States country search (see
+// summarizeLocationAdherence); it never overrides a stated place.
+export const US_ONLY_SOURCES = new Set(['usajobs']);
+
+// Administrative placeholders that occupy a location field while naming no place:
+// USAJobs' own "Location Negotiable After Selection" / "Multiple Locations" values.
+// These carry no geography to classify, which is what makes it safe to resolve them
+// from the source's country instead — unlike an unrecognized real place name, which
+// must stay `unclear`. ("Anywhere in the U.S. (remote job)" never reaches this test;
+// the remote check upstream claims it first.)
+const PLACELESS_LOCATION_RE = /negotiable after selection|(?:multiple|various)\s+locations?/i;
+
 /**
  * Pick the right Glassdoor location from its autocomplete results
  * (findPopularLocationAjax.htm). Glassdoor's location FILTER is keyed by a numeric
@@ -355,6 +369,23 @@ export function summarizeLocationAdherence(jobs, canonical) {
         counts.offTarget++;
         counts.offBySource[src] = (counts.offBySource[src] || 0) + 1;
         if (counts.offSamples.length < 6) counts.offSamples.push(`${sample} → ${foreign.country}`);
+      } else if (US_ONLY_SOURCES.has(src) && countryTarget === 'United States' && PLACELESS_LOCATION_RE.test(jl)) {
+        // USAJobs is the US federal government's own board, so a posting there
+        // that names NO PLACE AT ALL ("Location Negotiable After Selection") is
+        // a US job we merely can't pin to a state — not a job whose country is
+        // unknowable. Four of those per run were diluting the adherence figure
+        // as `unclear`.
+        //
+        // Deliberately gated on the placeless-string test rather than on "the
+        // country checks came up empty," which is the trap here: the foreign
+        // check can only enumerate Canada, so a genuinely OCONUS federal
+        // posting ("Ramstein, Germany", "Yokosuka, Japan") reaches this branch
+        // too and must NOT be claimed as in-area. It names a place we simply
+        // can't classify, so it stays `unclear` — the honest bucket.
+        // Also only runs in country-membership mode (countryRe is set only when
+        // the whole target is a lone country), so a city- or state-level target
+        // still judges USAJobs on real location tokens.
+        counts.matched++;
       } else {
         counts.unclear++;
         counts.unclearBySource[src] = (counts.unclearBySource[src] || 0) + 1;

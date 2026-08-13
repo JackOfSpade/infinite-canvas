@@ -14,7 +14,7 @@ import {
   priceChartingQuery,
 } from '../electron/extractors/marketplace.js';
 import { GOOGLE_JOBS_EXTRACTOR } from '../electron/extractors/jobs.js';
-import { buildJobTasks, getJobsTelemetry, linkedInBrowserUnavailableWarning, refreshManualSourceUrlIndex } from '../electron/ipc/jobs.js';
+import { buildJobTasks, getJobsTelemetry, glassdoorPostedBucket, linkedInBrowserUnavailableWarning, refreshManualSourceUrlIndex } from '../electron/ipc/jobs.js';
 import {
   getJobSearchTransientKeysForSave,
   SELLHUB_TRANSIENT_KEYS,
@@ -74,7 +74,7 @@ import {
   sanitizeJobTaxonomy,
 } from '../src/nodes/jobsearch/buildJobTree.js';
 import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature, deriveBoardCardStats } from '../src/nodes/jobboard/mergeJobs.js';
-import { buildGeoTermSet, extractIndeedJobsFromHtml, extractSalaryFromText, jobRelevanceMatch, jobRelevanceEvidence, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult, isRemoteOkSponsoredPlacement } from '../electron/extractors/apiExtractors.js';
+import { buildGeoTermSet, extractIndeedJobsFromHtml, extractSalaryFromText, filterUSAJobsByTitleRelevance, jobRelevanceMatch, jobRelevanceEvidence, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, extractJobPostingBaseSalary, formatDiceBaseSalary, formatUSAJobsSalary, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult, isRemoteOkSponsoredPlacement } from '../electron/extractors/apiExtractors.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
 import { targetPageCountForJob, decideFitStep } from '../electron/ipc/jobApplication.js';
@@ -189,6 +189,15 @@ import {
   resetEntitlement,
   entitlementSnapshot,
 } from '../electron/ipc/geminiEntitlement.js';
+import {
+  ANTIGRAVITY_AGENT_ID,
+  antigravityPartsSupported,
+  buildAntigravityRequest,
+  callAntigravityAgent,
+  canUseAntigravityFallback,
+  extractAntigravityOutputText,
+} from '../electron/ipc/geminiAgent.js';
+import { callGeminiTextRaw } from '../electron/ipc/gemini.js';
 import { parseAiJson } from '../electron/ipc/jsonRepair.js';
 import { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
 import { withStatusCheckLock, getStatusCheckQueueDepth } from '../electron/ipc/statusCheckLock.js';
@@ -214,7 +223,7 @@ import os from 'node:os';
 import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, computeResumeStartPage, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
 import { dedupAgainstHistory, dedupKeysFor, filterHistoryForResume, appendJobsHistory, loadJobsHistory } from '../electron/ipc/jobsHistory.js';
 import { modelTag, overPricedSoldFlag, renderSessionTraceBlocks, visitCanvasNodes } from '../electron/ipc/bugReport/helpers.js';
-import { looksLikeMoney, mojibakeExcerpt } from '../electron/ipc/bugReport/jobQualityChecks.js';
+import { looksLikeMoney, classifyUnparseableSalary, mojibakeExcerpt } from '../electron/ipc/bugReport/jobQualityChecks.js';
 import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
 import { buildJobsPipelineSnapshot } from '../electron/ipc/bugReport/jobsSnapshot.js';
 import { formatJsonLdSalary, reconcileZipRecruiterDomSalary, resolveManualSourceStopReason } from '../electron/ipc/browser/manualScraper.js';
@@ -837,6 +846,133 @@ const tests = [
       assert(deferred[0] === 'gemini-3.5-flash' && deferred.at(-1) === 'gemini-3.6-flash',
         'known-suppressed preferred model moves to the tail without being removed');
       return { models: GEMINI_MODEL_FALLBACKS.length };
+    },
+  },
+  {
+    name: 'Antigravity API: separate managed-agent bucket stays a guarded final raw fallback',
+    run: async () => {
+      const textParts = [{ text: 'Write a concise summary.' }];
+      const imageParts = [
+        ...textParts,
+        { inlineData: { mimeType: 'image/jpeg', data: 'aW1hZ2U=' } },
+      ];
+      assert(antigravityPartsSupported(textParts), 'plain text is supported');
+      assert(antigravityPartsSupported(imageParts), 'inline images are supported');
+      assert(!antigravityPartsSupported([{ inlineData: { mimeType: 'application/pdf', data: 'cGRm' } }]),
+        'documents stay out of the preview agent fallback');
+      assert(canUseAntigravityFallback(textParts, 'key', { responseMimeType: 'text/plain' }),
+        'AI Studio raw-text calls are eligible');
+      assert(!canUseAntigravityFallback(textParts, '', { responseMimeType: 'text/plain' }),
+        'Vertex/no-key calls do not pretend the Gemini API agent endpoint is available');
+      assert(!canUseAntigravityFallback(textParts, 'key', { responseMimeType: 'application/json' }),
+        'JSON generation stays on transports that support structured output');
+      assert(!canUseAntigravityFallback(textParts, 'key', { responseMimeType: 'text/plain', responseSchema: { type: 'object' } }),
+        'a response schema always excludes the agent fallback');
+
+      const request = buildAntigravityRequest(textParts, 'gemini-3.6-flash', {
+        maxOutputTokens: 2_000,
+        grounding: false,
+      });
+      assert(request.agent === ANTIGRAVITY_AGENT_ID, 'request uses the documented managed-agent id');
+      assert(request.environment === 'remote', 'request provisions the documented remote agent environment');
+      assert(request.store === false && request.background === false,
+        'stateless fallback does not retain prompts/responses or leave background work running');
+      assert(request.agent_config.model === 'gemini-3.6-flash', 'quality work keeps the current Flash backing model');
+      assert(request.agent_config.max_total_tokens >= 8_192 && request.agent_config.max_total_tokens <= 90_000,
+        'agent uses a bounded total-token budget, not unsupported max_output_tokens');
+      assert(!('max_output_tokens' in request.agent_config), 'unsupported generation option never leaks into agent_config');
+      assert(Array.isArray(request.tools) && request.tools.length === 0,
+        'ordinary fallback disables autonomous tools');
+      const grounded = buildAntigravityRequest(textParts, 'gemini-3.5-flash-lite', { grounding: true });
+      assert(grounded.agent_config.model === 'gemini-3.5-flash-lite', 'light work maps to the supported Lite backing model');
+      assert(grounded.tools.map((tool) => tool.type).join(',') === 'google_search,url_context',
+        'grounded raw research opts into web-read tools only');
+
+      const originalFetch = globalThis.fetch;
+      let observed = null;
+      globalThis.fetch = async (url, init) => {
+        observed = { url, init, body: JSON.parse(init.body) };
+        return new Response(JSON.stringify({
+          status: 'completed',
+          model: 'gemini-3.6-flash',
+          steps: [{
+            type: 'model_output',
+            status: 'done',
+            content: [{ type: 'text', text: 'fallback ' }, { type: 'text', text: 'result' }],
+          }],
+          usage: { total_output_tokens: 42 },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      };
+      try {
+        const result = await callAntigravityAgent(textParts, 'test-key', 'gemini-3.6-flash', {
+          responseMimeType: 'text/plain',
+        });
+        assert(result.text === 'fallback result' && result.usage.total_output_tokens === 42,
+          'completed raw REST interaction joins model-output text and returns usage');
+        assert(observed.url.endsWith('/v1beta/interactions'), 'uses the official Interactions API endpoint');
+        assert(observed.init.headers['x-goog-api-key'] === 'test-key', 'authenticates with the AI Studio key header');
+        assert(!observed.url.includes('test-key'), 'API key is never placed in the Interactions URL');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+      assert(extractAntigravityOutputText({
+        steps: [
+          { type: 'model_output', content: [{ type: 'text', text: 'old' }] },
+          { type: 'model_output', content: [{ type: 'text', text: 'latest' }] },
+        ],
+      }) === 'latest', 'only the last model-output step is the current interaction answer');
+      assert(extractAntigravityOutputText({ status: 'completed', steps: [] }) === '',
+        'a completed REST interaction without a model-output step cannot masquerade as a result');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Gemini cascade: direct-model quota exhaustion reaches Antigravity exactly as the final transport',
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let directCalls = 0;
+      let agentCalls = 0;
+      globalThis.fetch = async (url, init) => {
+        const target = String(url);
+        if (target.endsWith('/v1beta/interactions')) {
+          agentCalls++;
+          return new Response(JSON.stringify({
+            status: 'completed',
+            model: 'gemini-3.6-flash',
+            steps: [{ type: 'model_output', content: [{ type: 'text', text: 'managed capacity' }] }],
+            usage: { total_output_tokens: 2 },
+          }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (target.includes(':generateContent')) {
+          directCalls++;
+          return new Response(JSON.stringify({
+            error: {
+              code: 429,
+              message: 'Quota exceeded for generate_requests_per_model_per_day, limit: 20',
+            },
+          }), { status: 429, headers: { 'Content-Type': 'application/json' } });
+        }
+        throw new Error(`Unexpected Gemini cascade test URL: ${target}`);
+      };
+      try {
+        const meta = {};
+        const text = await callGeminiTextRaw(
+          'Use the separate managed-agent capacity.',
+          'cascade-antigravity-test-key',
+          'gemini-3.6-flash',
+          null,
+          { meta, maxOutputTokens: 128 },
+        );
+        assert(text === 'managed capacity', 'managed-agent text is returned after direct quota exhaustion');
+        assert(directCalls >= GEMINI_MODEL_FALLBACKS.length,
+          'every eligible direct model is attempted before the managed agent');
+        assert(agentCalls === 1 && meta.model === ANTIGRAVITY_AGENT_ID && meta.agentModel === 'gemini-3.6-flash',
+          'the cascade makes one final Interactions call and records both the agent and its backing model');
+      } finally {
+        await settleEntitlementProbes();
+        globalThis.fetch = originalFetch;
+      }
+      return { directCalls, agentCalls };
     },
   },
   {
@@ -1467,6 +1603,90 @@ const tests = [
       assert(extractJobPostingDescription(mk({ '@type': 'Organization', name: 'Acme' })) === '', 'no JobPosting → empty');
       assert(extractJobPostingDescription('<html>no ld</html>') === '', 'no JSON-LD → empty');
       assert(extractJobPostingDescription('<script type="application/ld+json">{bad json</script>') === '', 'malformed → empty (no throw)');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Dice salary cadence recovery: extractJobPostingBaseSalary + formatDiceBaseSalary from JSON-LD',
+    run: () => {
+      // Same JSON-LD shapes as the description harvester test above — the walk
+      // (@graph wrapper, array @type, malformed/absent) is shared, so cover it
+      // again through the baseSalary path specifically.
+      const mk = (ld) => `<html><head><script type="application/ld+json">${JSON.stringify(ld)}</script></head><body>x</body></html>`;
+      const yearBS = { currency: 'USD', value: { '@type': 'QuantitativeValue', minValue: 90000, maxValue: 125000, unitText: 'YEAR' } };
+      assert(JSON.stringify(extractJobPostingBaseSalary(mk({ '@type': 'JobPosting', baseSalary: yearBS }))) === JSON.stringify(yearBS),
+        'plain JobPosting baseSalary');
+      assert(JSON.stringify(extractJobPostingBaseSalary(mk({ '@context': 'https://schema.org', '@graph': [{ '@type': 'Organization' }, { '@type': 'JobPosting', baseSalary: yearBS }] }))) === JSON.stringify(yearBS),
+        '@graph wrapper baseSalary');
+      assert(JSON.stringify(extractJobPostingBaseSalary(mk({ '@type': ['JobPosting', 'Thing'], baseSalary: yearBS }))) === JSON.stringify(yearBS),
+        'array @type baseSalary');
+      assert(extractJobPostingBaseSalary(mk({ '@type': 'JobPosting' })) === null, 'JobPosting with no baseSalary field → null');
+      assert(extractJobPostingBaseSalary(mk({ '@type': 'Organization', name: 'Acme' })) === null, 'no JobPosting → null');
+      assert(extractJobPostingBaseSalary('<html>no ld</html>') === null, 'no JSON-LD → null');
+      assert(extractJobPostingBaseSalary('<script type="application/ld+json">{bad json</script>') === null, 'malformed → null (no throw)');
+
+      // formatDiceBaseSalary: one recognized unitText per schema.org cadence,
+      // each producing a suffix parseSalaryToNumeric already understands.
+      const unitCases = [
+        ['HOUR', { minValue: 24, maxValue: 25, unitText: 'HOUR' }, '$24 - $25/hr'],
+        ['DAY', { minValue: 400, maxValue: 450, unitText: 'DAY' }, '$400 - $450/day'],
+        ['WEEK', { minValue: 1500, maxValue: 1600, unitText: 'WEEK' }, '$1,500 - $1,600/wk'],
+        ['MONTH', { minValue: 5000, maxValue: 5500, unitText: 'MONTH' }, '$5,000 - $5,500/mo'],
+        ['YEAR', { minValue: 90000, maxValue: 125000, unitText: 'YEAR' }, '$90,000 - $125,000/yr'],
+      ];
+      for (const [unit, value, expected] of unitCases) {
+        const bs = extractJobPostingBaseSalary(mk({ '@type': 'JobPosting', baseSalary: { currency: 'USD', value } }));
+        assert(bs?.value?.unitText === unit, `Dice baseSalary extraction: ${unit} unit round-trips through JSON-LD`);
+        const formatted = formatDiceBaseSalary(bs);
+        assert(formatted === expected, `Dice baseSalary formatting: ${unit} → "${expected}" (got "${formatted}")`);
+        assert(parseSalaryToNumeric(formatted) > 0, `Dice baseSalary formatting: ${unit} cadence annualizes through the shared parser`);
+      }
+      assert(formatDiceBaseSalary({ currency: 'CAD', value: { value: 30, unitText: 'HOUR' } }) === 'CAD 30/hr',
+        'Dice baseSalary formatting: non-USD currency keeps its code prefix');
+      assert(formatDiceBaseSalary({ value: { value: 55000, unitText: 'YEAR' } }) === '$55,000/yr',
+        'Dice baseSalary formatting: single value (no min/max range) formats correctly');
+      assert(formatDiceBaseSalary({ value: { minValue: 5, maxValue: 6 } }) === '',
+        'Dice baseSalary formatting: no unitText → never guessed as hourly, stays empty');
+      // A one-sided QuantitativeValue is valid schema.org and real ("From $19/hr").
+      // Dropping it would discard the very cadence this recovery path exists to find.
+      const fromOnly = formatDiceBaseSalary({ value: { minValue: 19, unitText: 'HOUR' } });
+      assert(fromOnly === 'From $19/hr' && parseSalaryToNumeric(fromOnly) === 39520,
+        `Dice baseSalary formatting: minValue-only keeps the cadence and annualizes, got ${JSON.stringify(fromOnly)}`);
+      const upToOnly = formatDiceBaseSalary({ value: { maxValue: 24, unitText: 'HOUR' } });
+      assert(upToOnly === 'Up to $24/hr' && parseSalaryToNumeric(upToOnly) === 49920,
+        `Dice baseSalary formatting: maxValue-only keeps the cadence and annualizes, got ${JSON.stringify(upToOnly)}`);
+      assert(formatDiceBaseSalary(null) === '', 'Dice baseSalary formatting: null input → empty');
+      assert(formatDiceBaseSalary('nonsense') === '', 'Dice baseSalary formatting: non-object input → empty');
+
+      // End-to-end regression: the real cadence-lost Dice values from the bug
+      // report annualize to 0 as-is, but recover once "upgraded" with a
+      // JSON-LD baseSalary — mirroring enrichDiceDescriptions' actual gate
+      // (parseSalaryToNumeric(job.salary) === 0) and its recovery path.
+      const cadenceLost = ['25', '19', '$20 - $24', '$20 - $21'];
+      for (const raw of cadenceLost) {
+        assert(parseSalaryToNumeric(raw) === 0, `Dice salary regression: "${raw}" has no readable cadence pre-fix`);
+      }
+      const recoveredHtml = mk({ '@type': 'JobPosting', description: 'JD', baseSalary: { value: { minValue: 20, maxValue: 24, unitText: 'HOUR' } } });
+      const upgraded = formatDiceBaseSalary(extractJobPostingBaseSalary(recoveredHtml));
+      assert(upgraded === '$20 - $24/hr', 'Dice salary upgrade: recovered baseSalary formats with a readable cadence');
+      assert(parseSalaryToNumeric(upgraded) === 20 * 40 * 52,
+        'Dice salary upgrade: upgraded text now annualizes end-to-end through the shared parser instead of 0');
+
+      // Salaries that already annualize (Dice's own text is complete) must
+      // never be overwritten by the JSON-LD upgrade — enrichDiceDescriptions
+      // only patches when parseSalaryToNumeric(job.salary) === 0.
+      const alreadyGood = ['USD 90,000.00 - 125,000.00 per year', 'USD 24.00 - 25.00 per hour', 'USD 23.21 - 23.21 per hour', '38000 - 40000'];
+      for (const raw of alreadyGood) {
+        assert(parseSalaryToNumeric(raw) > 0, `Dice salary: "${raw}" already annualizes and must not trigger a JSON-LD upgrade`);
+      }
+      assert(parseSalaryToNumeric('38000 - 40000') === 38000,
+        'Dice salary: bare range without a cadence word but above the credibility floor still parses to $38,000/yr');
+
+      // No usable baseSalary in the JSON-LD → caller leaves job.salary exactly
+      // as-is (correctly → Unspecified), never guesses a small bare number is hourly.
+      const noBaseSalaryHtml = mk({ '@type': 'JobPosting', description: 'JD' });
+      assert(formatDiceBaseSalary(extractJobPostingBaseSalary(noBaseSalaryHtml)) === '',
+        'Dice salary upgrade: absent baseSalary in JSON-LD → no upgrade, salary text is left untouched by the caller');
       return { ok: true };
     },
   },
@@ -2925,6 +3145,14 @@ const tests = [
       'Job board relevance filtering: telemetry labels the exact adjacent role synonym that admitted a row');
       assert(jobRelevanceEvidence('Coffee Roaster Campos Coffee', 'Customer Service Coordinator', new Set()) === null,
         'Job board relevance filtering: rejected rows produce no misleading match evidence');
+      const usaJobsRows = [
+        { title: 'Shipping and Receiving Assistant' },
+        { title: 'Dental Assistant - Expanded Function' },
+        { title: 'Traffic Management Specialist' },
+      ];
+      const usaJobsRelevant = filterUSAJobsByTitleRelevance(usaJobsRows, 'Shipping and Receiving Assistant');
+      assert(usaJobsRelevant.length === 1 && usaJobsRelevant[0].title === 'Shipping and Receiving Assistant',
+        'USAJobs: broad Keyword matches are narrowed to position-title relevance before they enter the cascade');
       return { geoTerms: [...geoTerms].sort(), fallback: true };
     },
   },
@@ -3013,6 +3241,28 @@ const tests = [
         'a query that already names the location city is not awkwardly duplicated with the canonical suffix');
       assert(googleTask('Camera Operator', '') === 'Camera Operator jobs',
         'location-free searches preserve the existing Google keyword query');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'buildJobTasks: Glassdoor look-back uses supported non-narrowing buckets',
+    run: () => {
+      assert(glassdoorPostedBucket(1) === 1 && glassdoorPostedBucket(2) === 3,
+        'Glassdoor bucket helper keeps exact values and rounds up in-between values');
+      assert(glassdoorPostedBucket(21) === 30,
+        'the default 21-day window rounds up to the supported 30-day bucket');
+      assert(glassdoorPostedBucket(31) === null,
+        'windows above the largest server bucket fall back to client-side filtering');
+      const urlFor = (days) => {
+        const task = buildJobTasks(['Camera Operator'], days, { onlySources: new Set(['glassdoor']) }, 'Toronto, ON')
+          .find((candidate) => candidate.sourceId === 'glassdoor');
+        assert(task, 'Glassdoor task should be built when requested');
+        return new URL(task.url);
+      };
+      assert(urlFor(21).searchParams.get('fromAge') === '30',
+        'generated URL never sends the unsupported fromAge=21 value');
+      assert(!urlFor(61).searchParams.has('fromAge'),
+        'generated URL omits fromAge when the requested window exceeds 30 days');
       return { ok: true };
     },
   },
@@ -3419,6 +3669,92 @@ const tests = [
         'job pipeline report makes raw salary, annualization, deterministic range, and repair evidence visible');
       } finally {
         Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    // End-to-end regression for the salary field-quality rewrite: renders the
+    // real markdown through buildJobsPipelineSnapshot (backed by a real saved
+    // snapshot file on disk, same as the app writes) rather than re-testing the
+    // classifier in isolation, so the exact rendered lines are pinned down.
+    //
+    // (1) False alarm this closes: a bare thousands-scale numeric range like
+    //     Dice's "38000 - 40000" used to fail looksLikeMoney (no $/k/comma) and
+    //     got reported "salary garbage" even though the real annualizer parses
+    //     it fine as $38,000/yr.
+    // (2) Missed defect this closes: a source whose present salaries all "look
+    //     like money" (pass looksLikeMoney) could still have some annualize to
+    //     0 and get reported "all monetary ✅" while real pay data was silently
+    //     dropped into the "Unspecified" bucket (the real USAJobs run: 10/10
+    //     present, 4 of them "/ PH" rates the annualizer couldn't read).
+    //
+    // Fixture salaries are NOT the two exact strings another agent is making
+    // parseable at the extractor level ('$22.31 - $22.31 / PH', '$20 - $24') —
+    // different digits, same shape, and their unparseability is asserted
+    // directly via parseSalaryToNumeric below so this test stays honest either
+    // way even if that extractor-level fix broadens further.
+    name: 'job pipeline report: salary field-quality reports the annualizer-measured unparseable count, not a lookalike-regex verdict',
+    run: () => {
+      const lostCadenceSamples = ['$19.75 - $19.75 / PH', '$24.10 - $24.10 / PH', '$31.40 - $31.40 / PH', '$27.85 - $27.85 / PH'];
+      for (const s of lostCadenceSamples) {
+        assert(parseSalaryToNumeric(s) === 0, `precondition: "${s}" must be unparseable for this regression fixture to be meaningful`);
+        assert(looksLikeMoney(s), `precondition: "${s}" must still look monetary (lands in the cadence-lost bucket, not prose)`);
+      }
+      assert(parseSalaryToNumeric('38000 - 40000') > 0,
+        'precondition: the Dice false-alarm value must still parse fine for the "must not be flagged" assertion below to be meaningful');
+
+      const dir = path.join(os.tmpdir(), 'infinite-canvas-test-stub', 'userData', 'job-search');
+      fs.mkdirSync(dir, { recursive: true });
+      const filePath = path.join(dir, 'job-search-last-scrape.json');
+      const longSnippet = 'Full job description text goes here. '.repeat(20);
+      const parseableSalaries = ['$60,000 - $75,000', '$82,000 - $95,000', '$71,500 - $88,000', '$64,000 - $79,000', '$90,000 - $110,000', '$58,000 - $66,000'];
+      const usajobsJobs = [...lostCadenceSamples, ...parseableSalaries].map((salary, i) => ({
+        title: `Analyst ${i}`, company: 'Agency', location: 'Remote', source: 'usajobs-regression-test',
+        salary, posted: '2026-08-01', url: `https://example.com/usajobs/${i}`, snippet: longSnippet,
+      }));
+      const diceJobs = [{
+        title: 'Engineer', company: 'Acme', location: 'Remote', source: 'dice-regression-test',
+        salary: '38000 - 40000', posted: '2026-08-01', url: 'https://example.com/dice/1', snippet: longSnippet,
+      }];
+      fs.writeFileSync(filePath, JSON.stringify({ jobs: [...usajobsJobs, ...diceJobs] }), 'utf8');
+
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search, resolves: telemetry.resolves,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'salary-quality-regression-test', windowId: null, resolves: {},
+        search: { ts: Date.now(), queries: 1, raw: 11, deduped: 11, ageDropped: 0, historyDropped: 0, kept: 11 },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['salary-quality-regression-test']), null, null);
+
+        // (2) A source that's 100% "looks like money" must never be summarized
+        // "all monetary" / "all annualized ✅" when 4/10 of its values actually
+        // annualize to 0 — this is the exact USAJobs regression from the bug
+        // report. The coverage note is mutually exclusive (if/else), so pinning
+        // down the exact "N unparseable ⚠" string for this source (not present
+        // anywhere else — the string embeds the source name) already proves the
+        // healthy strings were never chosen for it.
+        assert(report.includes('`usajobs-regression-test`: 10/10 present (100%) — 4 unparseable ⚠'),
+          'salary coverage line reports the annualizer-measured unparseable count instead of "all monetary ✅"');
+        assert(report.includes('salary unparseable: 4/10 (40%)'),
+          'field-quality warning reports the annualizer-measured unparseable count/pct, not a looksLikeMoney count');
+        assert(report.includes("4 money-shaped but cadence-lost (our extractor's bug, fixable)"),
+          'field-quality warning labels money-shaped-but-unparseable salaries as our fixable bug, distinct from prose');
+        assert(lostCadenceSamples.some(s => report.includes(`"${s}"`)),
+          'field-quality warning includes a real offending sample value, as the old garbage warning did');
+
+        // (1) A bare numeric range the real annualizer parses fine must never be
+        // flagged, and its source must be reported healthy.
+        assert(!report.includes('"38000 - 40000"'),
+          'a salary the real annualizer parses successfully must never appear as an offending sample');
+        assert(report.includes('`dice-regression-test`: 1/1 present (100%) — all annualized ✅'),
+          'a source whose only salary the annualizer parses fine must be reported healthy, not flagged as garbage (the old looksLikeMoney-based check misflagged this exact shape)');
+      } finally {
+        Object.assign(telemetry, saved);
+        fs.rmSync(filePath, { force: true });
       }
       return { ok: true };
     },
@@ -4031,6 +4367,96 @@ const tests = [
     },
   },
   {
+    name: 'USAJobs salary: RateIntervalCode maps to a cadence the shared annualizer can read',
+    run: () => {
+      // Real captured values from a live run (bug report): "/ PH" (per hour)
+      // matched no cadence token the shared parser recognizes, so every
+      // hourly USAJobs listing silently annualized to 0/Unspecified even
+      // though real pay was present.
+      const phRates = ['22.31', '18.98', '18.23', '19.59'];
+      for (const rate of phRates) {
+        const formatted = formatUSAJobsSalary({ MinimumRange: rate, MaximumRange: rate, RateIntervalCode: 'PH' });
+        assert(formatted === `$${rate} / hr`,
+          `USAJobs salary: "$${rate} - $${rate} / PH" collapses to "$${rate} / hr" (got "${formatted}")`);
+        assert(parseSalaryToNumeric(formatted) === Math.round(Number(rate) * 40 * 52),
+          `USAJobs salary regression: "$${rate} - $${rate} / PH" now annualizes instead of staying 0/Unspecified`);
+      }
+      // The "/ PA" (per annum) listings only survived pre-fix by luck — the
+      // number itself already cleared the credibility floor. Confirm they
+      // still annualize correctly (to the lower endpoint) now that "/ yr" is
+      // an explicit, recognized annual cadence rather than an unmatched code.
+      // USAJobs ships bare integers; amounts are comma-grouped for display (as
+      // formatDiceBaseSalary does) and must still annualize through the parser.
+      const paRanges = [['106437', '138370'], ['52727', '68549'], ['63795', '82938'], ['109137', '141880']];
+      const grouped = (n) => Number(n).toLocaleString('en-US');
+      for (const [min, max] of paRanges) {
+        const formatted = formatUSAJobsSalary({ MinimumRange: min, MaximumRange: max, RateIntervalCode: 'PA' });
+        assert(formatted === `$${grouped(min)} - $${grouped(max)} / yr`,
+          `USAJobs salary: "$${min} - $${max} / PA" maps to comma-grouped "/ yr" (got "${formatted}")`);
+        assert(parseSalaryToNumeric(formatted) === Number(min),
+          `USAJobs salary: "${formatted}" annualizes to the lower endpoint`);
+      }
+      assert(formatUSAJobsSalary({ MinimumRange: 'Negotiable', RateIntervalCode: 'PA' }) === '$Negotiable - $Negotiable / yr',
+        'USAJobs salary: a non-numeric range value passes through rather than becoming $0');
+
+      assert(formatUSAJobsSalary({ MinimumRange: '200', MaximumRange: '250', RateIntervalCode: 'PD' }) === '$200 - $250 / day',
+        'USAJobs salary: PD (per day) maps to "/ day"');
+      assert(parseSalaryToNumeric('$200 - $250 / day') === 200 * 5 * 52, 'USAJobs salary: daily cadence annualizes');
+
+      assert(formatUSAJobsSalary({ MinimumRange: '800', MaximumRange: '900', RateIntervalCode: 'PW' }) === '$800 - $900 / wk',
+        'USAJobs salary: PW (per week) maps to "/ wk"');
+      assert(parseSalaryToNumeric('$800 - $900 / wk') === 800 * 52, 'USAJobs salary: weekly cadence annualizes');
+
+      assert(formatUSAJobsSalary({ MinimumRange: '1500', MaximumRange: '1600', RateIntervalCode: 'PB' }) === '$1,500 - $1,600 bi-weekly',
+        'USAJobs salary: PB (per bi-week) maps to the literal "bi-weekly" phrase');
+      assert(parseSalaryToNumeric('$1,500 - $1,600 bi-weekly') === 1500 * 26, 'USAJobs salary: bi-weekly cadence annualizes');
+
+      assert(formatUSAJobsSalary({ MinimumRange: '4000', MaximumRange: '4500', RateIntervalCode: 'PM' }) === '$4,000 - $4,500 / mo',
+        'USAJobs salary: PM (per month) maps to "/ mo"');
+      assert(parseSalaryToNumeric('$4,000 - $4,500 / mo') === 4000 * 12, 'USAJobs salary: monthly cadence annualizes');
+
+      assert(formatUSAJobsSalary({ MinimumRange: '90000', MaximumRange: '95000', RateIntervalCode: 'FY' }) === '$90,000 - $95,000 / yr',
+        'USAJobs salary: FY (fee basis, per year) maps to "/ yr"');
+      assert(parseSalaryToNumeric('$90,000 - $95,000 / yr') === 90000, 'USAJobs salary: fee-basis annual range annualizes');
+
+      // PS (per piece) and SY (per school year) have no defined multiplier in
+      // the shared annualizer — keep the amount, never fabricate a cadence.
+      assert(formatUSAJobsSalary({ MinimumRange: '50000', MaximumRange: '55000', RateIntervalCode: 'PS' }) === '$50,000 - $55,000 (PS)',
+        'USAJobs salary: PS (piece rate) keeps the raw code instead of guessing a cadence');
+      assert(parseSalaryToNumeric('$50,000 - $55,000 (PS)') === 50000, 'USAJobs salary: PS amount still annualizes on magnitude alone');
+      assert(formatUSAJobsSalary({ MinimumRange: '5', MaximumRange: '5', RateIntervalCode: 'PS' }) === '$5 (PS)',
+        'USAJobs salary: degenerate low-magnitude PS range collapses to a single amount');
+      assert(parseSalaryToNumeric('$5 (PS)') === 0,
+        'USAJobs salary: low-magnitude PS never gets a fabricated cadence — correctly stays Unspecified');
+
+      assert(formatUSAJobsSalary({ MinimumRange: '45000', MaximumRange: '50000', RateIntervalCode: 'SY' }) === '$45,000 - $50,000 (SY)',
+        'USAJobs salary: SY (school year) keeps the raw code instead of guessing a cadence');
+      assert(parseSalaryToNumeric('$45,000 - $50,000 (SY)') === 45000, 'USAJobs salary: SY amount still annualizes on magnitude alone');
+
+      // WC = "without compensation" — there is no pay at all, so no salary string.
+      assert(formatUSAJobsSalary({ MinimumRange: '0', MaximumRange: '0', RateIntervalCode: 'WC' }) === '',
+        'USAJobs salary: WC emits no salary string');
+      assert(formatUSAJobsSalary({ RateIntervalCode: 'WC' }) === '',
+        'USAJobs salary: WC with no range at all still emits nothing');
+
+      // Unknown/future code — never invent a cadence; keep the raw code
+      // visible so an undocumented code stays diagnosable.
+      assert(formatUSAJobsSalary({ MinimumRange: '40000', MaximumRange: '45000', RateIntervalCode: 'XX' }) === '$40,000 - $45,000 (XX)',
+        'USAJobs salary: unknown RateIntervalCode keeps the amount + raw code, no fabricated cadence');
+      assert(parseSalaryToNumeric('$40,000 - $45,000 (XX)') === 40000, 'USAJobs salary: unknown-code amount still annualizes on magnitude alone');
+
+      // Missing code entirely.
+      assert(formatUSAJobsSalary({ MinimumRange: '40000', MaximumRange: '45000' }) === '$40,000 - $45,000',
+        'USAJobs salary: absent RateIntervalCode emits the amount with no suffix and no parens');
+
+      // Guards preserved from before the fix.
+      assert(formatUSAJobsSalary(null) === '', 'USAJobs salary: no PositionRemuneration entry → empty string');
+      assert(formatUSAJobsSalary({ RateIntervalCode: 'PH' }) === '',
+        'USAJobs salary: entry present but MinimumRange/MaximumRange both absent → empty string');
+      return { ok: true };
+    },
+  },
+  {
     name: 'Job taxonomy: salary cadence parser and canonical range repairs',
     run: () => {
       assert(parseSalaryToNumeric('$1.6K - $2.0K/wk') === 83200, 'salary parser: decimal weekly salary annualizes');
@@ -4040,6 +4466,10 @@ const tests = [
       assert(parseSalaryToNumeric('$22/hour') === 45760, 'salary parser: hourly salary annualizes');
       for (const raw of ['$19', '$20', '$18.15', '$1.0K', '$2,500', '3 years experience', '401k matching']) {
         assert(parseSalaryToNumeric(raw) === 0, `salary parser: ${raw} without an annual/pay cadence is unspecified`);
+      }
+      for (const raw of ['19 - 21', '$21 - $22', '$24 - $24', 'USD49 - USD54']) {
+        assert(parseSalaryToNumeric(raw) === 0,
+          `salary parser: cadence-less low range ${raw} stays Unspecified instead of becoming dollars per year`);
       }
       const annualized = {
         '$19 Hourly': 39520,
@@ -4072,6 +4502,25 @@ const tests = [
         'salary anomaly: implausibly wide hourly range exposes both annualized endpoints without changing placement');
       assert(salaryRangeAnomaly('$15.68–$26.61 an hour') === null,
         'salary anomaly: ordinary compensation ranges stay quiet');
+      // Regression: Google and Glassdoor both prefix USD amounts with a country
+      // code ("US$50K–US$250K a year"). The endpoint pattern used to require a
+      // bare `$` or digit right after the separator, so the letters in `US$250K`
+      // failed the whole match and the anomaly check silently went dark for those
+      // two sources at ANY ratio. Compare against the identical bare-$ string.
+      const prefixedWide = salaryRangeAnomaly('US$50K–US$250K a year');
+      const bareWide = salaryRangeAnomaly('$50K–$250K a year');
+      assert(prefixedWide?.lowerAnnual === 50000 && prefixedWide?.upperAnnual === 250000,
+        'salary anomaly: a US$-prefixed range annualizes both endpoints (was silently unmatched)');
+      assert(bareWide?.ratio === prefixedWide?.ratio,
+        'salary anomaly: country-code currency prefix does not change the reported ratio');
+      assert(salaryRangeAnomaly('CA$20K–CA$150K a year')?.ratio === 7.5,
+        'salary anomaly: the prefix fix is not hard-coded to US$');
+      assert(salaryRangeAnomaly('US$17.00–US$18.50 an hour') === null,
+        'salary anomaly: an ordinary US$-prefixed hourly band still stays quiet');
+      assert(salaryRangeAnomaly('$20 to $30 an hour') === null,
+        'salary anomaly: a "to" separator is not mistaken for a currency-code prefix');
+      assert(salaryRangeAnomaly('USD 90,000.00 - 125,000.00 per year') === null,
+        'salary anomaly: symbol-less currency-code ranges (Dice) stay quiet at a normal ratio');
       const wwrCadenceCases = {
         'Starting base compensation: $2,500 USD per month': ['$2,500 USD per month', 30000],
         'Compensation: $1,600 CAD/week.': ['$1,600 CAD/week', 83200],
@@ -5893,6 +6342,45 @@ const tests = [
     },
   },
   {
+    name: 'summarizeLocationAdherence: USAJobs postings with an undecidable location are US by construction',
+    run: () => {
+      // A live run reported "4 unclear · by source: usajobs=4" — all four were
+      // federal postings reading "Location Negotiable After Selection", i.e. US
+      // jobs with no pinnable state, not jobs of unknowable country.
+      const negotiable = { location: 'Location Negotiable After Selection', source: 'usajobs' };
+      const us = summarizeLocationAdherence([
+        { title: 'CSR', ...negotiable },
+        { title: 'Lead CSR', ...negotiable },
+        { title: 'Bare city elsewhere', location: 'Newmarket', source: 'glassdoor' },
+      ], 'United States');
+      assert(us.matched === 2 && us.unclear === 1,
+        `USAJobs undecidable locations count in-area for a US target, got matched=${us.matched} unclear=${us.unclear}`);
+      assert(!us.unclearBySource.usajobs, 'usajobs no longer contributes to the unclear tally on a US search');
+      // Must NOT swallow a genuine OCONUS posting. Only Canada's subdivisions are
+      // enumerable, so "Ramstein, Germany" can't be PROVEN foreign — but it names a
+      // real place, so the shortcut must not claim it as in-area either.
+      const oconus = summarizeLocationAdherence([
+        { title: 'Germany role', location: 'Ramstein, Germany', source: 'usajobs' },
+        { title: 'Japan role', location: 'Yokosuka, Japan', source: 'usajobs' },
+      ], 'United States');
+      assert(oconus.unclear === 2 && oconus.matched === 0,
+        `a USAJobs posting that names a real non-US place stays unclear, got ${JSON.stringify(oconus)}`);
+      const canadaLeak = summarizeLocationAdherence([
+        { title: 'CA role', location: 'Toronto, Ontario, Canada', source: 'usajobs' },
+      ], 'United States');
+      assert(canadaLeak.offTarget === 1,
+        'a USAJobs posting naming an enumerable foreign country is still reported off-target');
+      // Must NOT apply to a city/state-level target, or to a non-US country target.
+      const city = summarizeLocationAdherence([{ title: 'CSR', ...negotiable }], 'Denver, CO');
+      assert(city.offTarget === 1 && city.matched === 0,
+        'a city-level target still judges USAJobs on real location tokens');
+      const canada = summarizeLocationAdherence([{ title: 'CSR', ...negotiable }], 'Canada');
+      assert(canada.unclear === 1 && canada.matched === 0,
+        'the US-by-construction shortcut does not fire for a non-US country target');
+      return { ok: true, us, oconus };
+    },
+  },
+  {
     name: 'summarizeLocationAdherence: subdivision codes require a structured location slot',
     run: () => {
       const a = summarizeLocationAdherence([
@@ -6080,6 +6568,12 @@ const tests = [
     run: () => {
       const en = 'Senior Data Engineer. We are looking for an engineer to join our team. You will work on data pipelines and build scalable systems. Requirements: 5 years of experience with SQL and Python.';
       assert(detectLanguage(en) === 'en', `English JD should be en, got ${detectLanguage(en)}`);
+      const sparseWarehouse = 'WAREHOUSE ASSOCIATE 3rd Shift - $3 Shift Differential!!! Responsibilities: · Contribute to facility operations · Unload and load trailers · Verify product stacking · Follow safety standards';
+      assert(detectLanguage(sparseWarehouse) === 'en',
+        'sparse bulleted English with middle-dot separators is not mislabeled as Greek or Berber');
+      const telegraphic = 'Build pipelines. Own dashboards. Partner with sales. Ship reliable data. Improve quality.';
+      assert(detectLanguage(telegraphic) === 'en',
+        'short telegraphic English stays inside the job-market language whitelist');
       // A single accented loanword in an otherwise-English title must NOT flip it.
       assert(detectLanguage('Café Operations Manager') === 'en', 'one accent (café) is not a language signal');
       assert(detectLanguage('') === 'en' && detectLanguage(null) === 'en', 'empty/null default to en');
@@ -6112,7 +6606,9 @@ const tests = [
       assert(jobs[1].language === 'fr', `French job tagged fr, got ${jobs[1].language}`);
       const sum = summarizeJobLanguages(jobs);
       assert(sum.total === 2 && sum.nonEnglish === 1 && sum.byLang.fr === 1, `summary: 2 total, 1 fr → ${JSON.stringify(sum)}`);
-      assert(/Montréal/.test(sum.samples.fr || ''), `fr sample names the listing → ${sum.samples.fr}`);
+      assert(/Montréal/.test(sum.samples.fr?.label || ''), `fr sample names the listing → ${JSON.stringify(sum.samples.fr)}`);
+      assert(/Nous recherchons/.test(sum.samples.fr?.evidence || ''),
+        `fr sample carries bounded language evidence → ${JSON.stringify(sum.samples.fr)}`);
       return { ok: true, summary: sum };
     },
   },
@@ -6707,6 +7203,12 @@ const tests = [
       assert(looksLikeMoney('120k'), 'looksLikeMoney: k-suffix');
       assert(!looksLikeMoney('40 - 50'), 'looksLikeMoney: ambiguous tiny range (no grouping) is NOT monetary');
       assert(!looksLikeMoney('Full-time, remote'), 'looksLikeMoney: schedule text is NOT monetary');
+      // A bare "401k" (no "$") is a retirement-plan term, not salary shorthand —
+      // parseSalaryToNumeric already special-cases it as "never pay". Without the
+      // matching exclusion here, classifyUnparseableSalary below would call this
+      // benefits blurb a fixable cadence-lost extractor bug instead of prose.
+      assert(!looksLikeMoney('401k matching'), 'looksLikeMoney: bare "401k" benefits term is NOT monetary');
+      assert(looksLikeMoney('$401k matching'), 'looksLikeMoney: an explicit "$" still makes a 401k-shaped figure monetary');
 
       assert(!hasMojibake('Ingénieur logiciel — Paris, France'), 'hasMojibake: legit accented text is not flagged');
       const corrupted = 'na' + String.fromCharCode(0x80) + String.fromCharCode(0x99) + 've';
@@ -6714,6 +7216,63 @@ const tests = [
       assert(mojibakeExcerpt('clean text') === null, 'mojibakeExcerpt: no corruption → null');
       const excerpt = mojibakeExcerpt(corrupted);
       assert(typeof excerpt === 'string' && excerpt.includes('�'), `mojibakeExcerpt: replaces bad bytes with U+FFFD — got ${JSON.stringify(excerpt)}`);
+      return { ok: true };
+    },
+  },
+  {
+    // classifyUnparseableSalary is the helper that replaced looksLikeMoney as the
+    // bug report's salary-health arbiter (see jobQualityChecks.js). It only makes
+    // sense to call on a salary the REAL annualizer (parseSalaryToNumeric)
+    // couldn't turn into a usable figure — callers gate on `=== 0` first, exactly
+    // like the field-quality loop in jobsSnapshot.js does — so every fixture here
+    // is checked against parseSalaryToNumeric directly rather than assumed.
+    name: 'jobQualityChecks: classifyUnparseableSalary splits unparseable salaries into prose vs money-with-lost-cadence',
+    run: () => {
+      // Prose: nothing resembling pay, present but genuinely nothing to extract —
+      // not our bug. "401k matching" is the case looksLikeMoney used to get wrong
+      // (see the k-suffix regression test above) — worth asserting through the
+      // classifier too, since that's the function jobsSnapshot.js actually calls.
+      for (const s of ['Competitive salary', 'DOE', '401k matching']) {
+        assert(parseSalaryToNumeric(s) === 0, `precondition: "${s}" must be unparseable for this to be a meaningful prose case`);
+        assert(classifyUnparseableSalary(s) === 'prose', `classifyUnparseableSalary: "${s}" → prose (nothing to extract, not our bug)`);
+      }
+
+      // Money-with-cadence: a fully healthy salary. Never reaches
+      // classifyUnparseableSalary in jobsSnapshot.js's real gate (it only calls the
+      // classifier when parseSalaryToNumeric returns 0) — asserted here so the
+      // "healthy" half of the split is pinned down alongside the unparseable half.
+      assert(parseSalaryToNumeric('$22/hour') > 0, 'money-with-cadence: annualizes to a real figure, never reaches the classifier');
+
+      // Money-with-lost-cadence: still reads as an attempt at money (looksLikeMoney)
+      // but the annualizer can't recover a usable figure — OUR bug, fixable.
+      // Deliberately NOT the two exact strings ('$22.31 - $22.31 / PH', '$20 - $24')
+      // another agent is concurrently making parseable at the extractor level —
+      // different digits, same shape, so this test doesn't rot when that lands.
+      for (const s of ['$18 - $19', '$24.10 - $24.10 / PH']) {
+        assert(parseSalaryToNumeric(s) === 0, `precondition: "${s}" must be unparseable for this to be a meaningful lost-cadence case`);
+        assert(looksLikeMoney(s), `precondition: "${s}" must still look monetary for this to land in the lost-cadence bucket`);
+        assert(classifyUnparseableSalary(s) === 'lost-cadence', `classifyUnparseableSalary: "${s}" → lost-cadence (money-shaped, our extractor's bug, fixable)`);
+      }
+
+      // Comma-grouped bare numbers ("70,000 - 95,000") and large bare ranges
+      // ("38000 - 40000", the real Dice false-alarm) both annualize successfully —
+      // they must never reach the unparseable/classifier path at all, regardless
+      // of looksLikeMoney's verdict (looksLikeMoney is false for "38000 - 40000",
+      // which is exactly the false alarm this fix closes: the old code used
+      // looksLikeMoney itself as the health check, so this used to get flagged
+      // "salary garbage" despite parsing correctly).
+      assert(parseSalaryToNumeric('70,000 - 95,000') > 0, 'comma-grouped bare range parses fine, never reaches the classifier');
+      assert(parseSalaryToNumeric('38000 - 40000') > 0, 'Dice false-alarm regression: bare 5-digit range parses fine despite looksLikeMoney being false for it');
+      assert(!looksLikeMoney('38000 - 40000'), 'sanity: this is exactly the shape the OLD looksLikeMoney-as-arbiter check used to misflag');
+
+      // Empty/absent: jobsSnapshot.js only enters the present-salary branch when
+      // `(j.salary || '').trim()` is truthy, so empty/whitespace-only/absent
+      // salaries never reach either parseSalaryToNumeric or the classifier —
+      // pin that down directly since it's the gate the real report loop relies on.
+      for (const s of ['', '   ', undefined, null]) {
+        assert(!(s || '').trim(), `precondition: "${s}" must be treated as absent by the field-quality presence gate`);
+        assert(parseSalaryToNumeric(s) === 0, `parseSalaryToNumeric("${s}") is 0 for empty/absent input (never counted as present, so this value is informational only)`);
+      }
       return { ok: true };
     },
   },

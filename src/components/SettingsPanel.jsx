@@ -529,6 +529,9 @@ function AIProviderStatus({ provider, status, checking, onCheck }) {
           {Array.isArray(tele?.compatibleModels) && tele.compatibleModels.length > 0 && (
             <div>Compatible fallback catalog: <span className="text-white/55">{tele.compatibleModels.length}</span></div>
           )}
+          {Array.isArray(tele?.compatibleAgents) && tele.compatibleAgents.length > 0 && (
+            <div>Managed-agent final fallback: <span className="text-white/55 font-mono">{tele.compatibleAgents[0].id}</span> (attempted when eligible; separate availability is not probed)</div>
+          )}
           {/* Entitlement-gated tiers (Pro). Reported from a live minimal probe,
               not a hard-coded assumption — so "why isn't it using Pro?" has a
               visible, checkable answer instead of being invisible app policy.
@@ -781,7 +784,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                 {aiSettings.provider === 'gemini' && (
                   <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
                     <div className="text-white/40 text-[10px] leading-snug">
-                      Model is picked automatically per task and falls back down a capability ladder — Pro, then Flash, then Flash-Lite — with Flash preferred for quality-sensitive work and Flash-Lite for status checks and light edits. Pro is used only if a live check confirms your key is entitled to it; free-tier keys report no Pro quota, so the chain starts at Flash. Run Check availability after upgrading a key.
+                      Model is picked automatically per task and falls back down a capability ladder — Pro, then Flash, then Flash-Lite — with Flash preferred for quality-sensitive work and Flash-Lite for status checks and light edits. Pro is used only if a live check confirms your key is entitled to it; free-tier keys report no Pro quota, so the chain starts at Flash. With an AI Studio key, compatible plain-text work can make one final attempt through Google's preview Antigravity managed-agent API when direct models exhaust their capacity. These stateless fallback requests are not stored. Run Check availability after upgrading a key.
                     </div>
                     <div>
                       <div className="flex justify-between items-end mb-1">
@@ -831,7 +834,7 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                         )}
                       </div>
                       <p className="text-white/30 text-[9px] mt-1">
-                        Either an API key or a service-account file works. The file is preferred when both are set.
+                        Either credential works. When both are set, the AI Studio API key is used; clear it to use the Vertex service account.
                       </p>
                     </div>
 

@@ -31,6 +31,11 @@ import {
 } from './geminiEntitlement.js';
 import { isSensitivePath } from '../utils/pathSafety.js';
 import { parseAiJson } from './jsonRepair.js';
+import {
+  ANTIGRAVITY_AGENT_ID,
+  callAntigravityAgent,
+  canUseAntigravityFallback,
+} from './geminiAgent.js';
 
 export { GEMINI_MODEL_FALLBACKS } from './geminiModels.js';
 
@@ -284,7 +289,7 @@ function scopedKey(scope, model) {
 /** Build a model→suppressedUntil view for the given scope (only cooling entries). */
 function suppressionMapForScope(scope, now) {
   const m = new Map();
-  for (const { id } of GEMINI_MODEL_REGISTRY) {
+  for (const id of [...GEMINI_MODEL_REGISTRY.map((entry) => entry.id), ANTIGRAVITY_AGENT_ID]) {
     const until = modelSuppressedUntil.get(scopedKey(scope, id)) || 0;
     if (until > now) m.set(id, until);
   }
@@ -327,6 +332,14 @@ function geminiWarnings(scope = lastActiveScope) {
     }
     warnings.push({ model: id, type: runtime.classification, message: runtime.message });
   }
+  if (scope) {
+    const runtime = modelRuntimeState.get(scopedKey(scope, ANTIGRAVITY_AGENT_ID));
+    if (runtime?.warnUntil && runtime.warnUntil <= now) {
+      modelRuntimeState.delete(scopedKey(scope, ANTIGRAVITY_AGENT_ID));
+    } else if (runtime) {
+      warnings.push({ model: ANTIGRAVITY_AGENT_ID, type: runtime.classification, message: runtime.message });
+    }
+  }
   return warnings;
 }
 
@@ -366,6 +379,11 @@ export function getGeminiTelemetry() {
     lastSuccessfulModel,
     lastAttemptedError,
     compatibleModels: [...GEMINI_MODEL_FALLBACKS],
+    compatibleAgents: [{
+      id: ANTIGRAVITY_AGENT_ID,
+      underlyingModel: 'gemini-3.6-flash',
+      position: 'final-compatible-raw-fallback',
+    }],
     // Why the chain starts where it does. Without this a report showing
     // "started at Flash" is indistinguishable from "Pro was skipped due to a
     // bug" — the entitlement verdict is the difference.
@@ -1070,7 +1088,75 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     }
   }
 
-  // If we reach here, all models have failed!
+  // The Interactions API exposes a separate Antigravity-agent quota bucket for
+  // AI Studio keys. It is powered by Gemini 3.6 Flash, but it is NOT another
+  // generateContent model: it cannot enforce responseSchema and supports only
+  // text/images. Use it strictly as the final fallback for compatible raw-text
+  // work, after every direct model pool has failed. That adds real capacity
+  // without weakening structured JSON/document contracts or spending the much
+  // heavier agent quota while any ordinary model still works.
+  const agentSuppressedUntil = modelSuppressedUntil.get(scopedKey(scope, ANTIGRAVITY_AGENT_ID)) || 0;
+  const agentEligibleFailures = new Set([
+    'rate-limit', 'no-quota', 'daily-quota', 'unavailable', 'model-access', 'server',
+  ]);
+  const exhaustedByCapacity = attemptedErrors.length > 0
+    && attemptedErrors.every((attempt) => agentEligibleFailures.has(attempt.classification));
+  if (
+    canUseAntigravityFallback(parts, apiKey, genConfig)
+    && exhaustedByCapacity
+    && agentSuppressedUntil <= Date.now()
+    && !genConfig.signal?.aborted
+  ) {
+    try {
+      logger.info(`[Gemini] Direct model ladder exhausted; attempting managed-agent fallback: ${ANTIGRAVITY_AGENT_ID}`);
+      lastAttemptedModel = ANTIGRAVITY_AGENT_ID;
+      const result = await callAntigravityAgent(parts, apiKey, model, genConfig);
+      lastSuccessfulModel = ANTIGRAVITY_AGENT_ID;
+      lastAttemptedError = '(none)';
+      clearGeminiModelFailure(scope, ANTIGRAVITY_AGENT_ID);
+      const outputTokens = Number(
+        result.usage?.total_output_tokens
+        ?? result.usage?.totalOutputTokens
+        ?? result.usage?.output_tokens
+        ?? result.usage?.outputTokens
+        ?? 0,
+      );
+      // An agent interaction can include multiple internal model/tool turns, so
+      // its total is not an output-cap sample for a single generateContent call.
+      // Keep it in logs/meta without teaching the direct-model cap learner from
+      // an incomparable measurement.
+      logger.info(`[Gemini] Managed-agent usage output:${outputTokens || '?'} model:${result.model || '?'}`);
+      if (genConfig.meta && typeof genConfig.meta === 'object') {
+        genConfig.meta.model = ANTIGRAVITY_AGENT_ID;
+        genConfig.meta.agentModel = result.model;
+        genConfig.meta.agentUsage = result.usage;
+        genConfig.meta.fallback = {
+          attempts: attemptedErrors.length,
+          reason: 'direct-models-exhausted',
+          preferredModel: model,
+        };
+      }
+      return result.text;
+    } catch (err) {
+      if (genConfig.signal?.aborted) throw err;
+      const errMsg = err?.message || String(err);
+      const failureText = err.details ? `${errMsg}\n${err.details}` : errMsg;
+      const classification = classifyGeminiFailure(err.status, failureText);
+      lastAttemptedError = `${ANTIGRAVITY_AGENT_ID}: ${errMsg}`;
+      attemptedErrors.push({ model: ANTIGRAVITY_AGENT_ID, error: errMsg, classification });
+      rememberGeminiModelFailure(
+        scope,
+        ANTIGRAVITY_AGENT_ID,
+        classification,
+        errMsg,
+        suppressionUntilForFailure(classification, err.retryAfterMs),
+      );
+      logger.warn(`[Gemini] Managed-agent fallback failed: ${errMsg}`);
+    }
+  }
+
+  // If we reach here, all compatible direct models (and the agent fallback,
+  // when eligible) have failed.
   const errorDetails = attemptedErrors.map(e => `* ${e.model}: ${e.error}`).join('\n');
   const noQuotaCount = attemptedErrors.filter((e) => e.classification === 'no-quota').length;
   const dailyQuotaCount = attemptedErrors.filter((e) => e.classification === 'daily-quota').length;

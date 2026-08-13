@@ -114,14 +114,27 @@ export function parseSalaryToNumeric(salaryStr) {
   // listing never stated, so it goes to Unspecified and the raw text still shows
   // on the card. The extractor-side fixes (MONEY_SRC word forms,
   // formatJsonLdSalary's unit guard) are what recover the real value.
-  if (val < 10000 && !hasCadence && !hasAnnualCadence && !hasRange && !hasPayContext) return 0;
+  const MIN_CREDIBLE_ANNUAL_SALARY = 10000;
+  if (val < MIN_CREDIBLE_ANNUAL_SALARY && !hasCadence && !hasAnnualCadence && !hasRange && !hasPayContext) return 0;
   // Cadence wins over magnitude: "$1.6K/wk" is $83,200/year, while
   // "$22/hour" is $45,760/year. Match biweekly before weekly.
+  let cadenceApplied = true;
   if (/\bbi[-\s]?weekly\b|\bbiweekly\b|\/\s*bi[-\s]?wk\b/.test(clean)) val *= 26;
   else if (/\b(?:week|wk|weekly)s?\b|\/\s*wk\b/.test(clean)) val *= 52;
   else if (/\b(?:month|mo|monthly)s?\b|\/\s*mo\b/.test(clean)) val *= 12;
   else if (/\b(?:day|daily)\b|\/\s*day\b/.test(clean)) val *= 5 * 52;
   else if (/\b(?:hour|hr|hourly)s?\b|\/\s*hr\b/.test(clean)) val *= 40 * 52;
+  else cadenceApplied = false;
+  // `hasRange` and `hasPayContext` prove the number is PAY. Neither proves it is
+  // ANNUAL pay — only `hasAnnualCadence` does that. Dice serves bare rate ranges
+  // ("19 - 21", "$21 - $22", "$24 - $24") whose cadence lives nowhere in the
+  // string; the range shape alone used to lift the magnitude guard above, and
+  // with no cadence token left to match, the raw rate fell through as a literal
+  // annual figure — a twenty-one-dollar-a-year salary that then bucketed as real
+  // pay, one range too low. Same lost cadence as the bare "$19" case, so it gets
+  // the same answer: Unspecified. Inferring "small means hourly" would invent a
+  // cadence the listing never stated; the card still shows the raw text.
+  if (!cadenceApplied && !hasAnnualCadence && val < MIN_CREDIBLE_ANNUAL_SALARY) return 0;
   // Keep malformed/ad-network pay chips out of the real salary buckets. One
   // observed ZipRecruiter chip read "$65K/hr": treating its `K` suffix and
   // hourly cadence literally produces $135.2M/year, an implausible result that
@@ -133,6 +146,21 @@ export function parseSalaryToNumeric(salaryStr) {
   return Number.isFinite(val) && val > 0 && val <= MAX_CREDIBLE_ANNUAL_SALARY ? Math.round(val) : 0;
 }
 
+// One endpoint of a pay range. The leading `[A-Za-z]{1,3}(?=[$€£])` is
+// load-bearing, not defensive padding: Google and Glassdoor both write their
+// USD amounts with a country-code prefix ("US$50K–US$250K a year"), and a
+// currency SYMBOL preceded by letters used to break the match outright. The
+// engine would anchor group 1 on the bare `$50K` (skipping `US`), then require
+// group 2 to start at `US$250K` — where `\$?\s*\d` cannot consume the `U`. The
+// whole regex failed, so salaryRangeAnomaly returned null and every US$-prefixed
+// range silently escaped anomaly detection at ANY ratio, for the two sources
+// that use that format. The lookahead keeps the prefix unambiguous: letters are
+// consumed only when a currency symbol immediately follows, so a "20 to 30"
+// separator can never be mistaken for a prefix. Dice's symbol-less "USD 90,000.00
+// - 125,000.00" shape already worked (nothing to anchor on but the digits).
+const SALARY_ENDPOINT = '(?:[A-Za-z]{1,3}(?=[$€£]))?[$€£]?\\s*\\d[\\d,]*(?:\\.\\d+)?\\s*[km]?';
+const SALARY_RANGE_RE = new RegExp(`(${SALARY_ENDPOINT})(?:\\s*(?:[-–—]|to)\\s*)(${SALARY_ENDPOINT})`, 'i');
+
 /**
  * Surface obviously malformed source pay ranges without changing placement.
  * Salary buckets intentionally use the lower endpoint (the conservative floor
@@ -142,7 +170,7 @@ export function parseSalaryToNumeric(salaryStr) {
 export function salaryRangeAnomaly(salaryStr) {
   const raw = String(salaryStr || '').trim();
   if (!raw) return null;
-  const match = raw.match(/(\$?\s*\d[\d,]*(?:\.\d+)?\s*[km]?)(?:\s*(?:[-–—]|to)\s*)(\$?\s*\d[\d,]*(?:\.\d+)?\s*[km]?)/i);
+  const match = raw.match(SALARY_RANGE_RE);
   if (!match) return null;
   const lowerAnnual = parseSalaryToNumeric(raw);
   // Preserve the cadence that follows the range ("$20–$25 an hour") while

@@ -11,7 +11,14 @@ import { appliedJobsSnapshot } from '../appliedJobs.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_RESULT_CAP, JOB_PER_PAGE_CAP, JOB_PER_SOURCE_CAP, JOB_MAX_PAGES, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from '../resultCaps.js';
 import { ago, modelTag, pipelineScope, formatAge } from './helpers.js';
-import { looksLikeMoney, hasMojibake, mojibakeExcerpt } from './jobQualityChecks.js';
+import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQualityChecks.js';
+// The real annualizer the app buckets jobs with (JobSearchNode's Job Tree +
+// electron/ipc/jobs.js both use it) — imported directly rather than
+// reimplemented so the bug report's salary field-quality signal can never
+// drift from what the app actually does with a salary string. Cross-boundary
+// import into electron/ from src/ is an established pattern (electron/ipc/
+// jobs.js line ~50 already does the same for this exact module).
+import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
 
 export function buildJobsConfigSnapshot() {
   let jobs = {};
@@ -149,10 +156,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         } else {
           flag = ' ✅';
         }
-        // Dice's date bound is conditional + its request URL isn't logged anywhere,
-        // so annotate it inline: this is the only way to confirm the server-side
-        // `filters.postedDate` actually fired (vs. falling back to client-side).
-        const bound = (k === 'dice' && s.diceDateBound) ? ` · bound: ${s.diceDateBound}` : '';
+        const boundDetail = s.dateBounds?.[k]
+          || (k === 'dice' ? s.diceDateBound : null); // old-report compatibility
+        const bound = boundDetail ? ` · bound: ${boundDetail}` : '';
         lines.push(`  - \`${k}\`: ${a.dropped} dropped → ${a.kept} kept · oldest kept ${oldest}${bound}${flag}`);
       }
     }
@@ -263,7 +269,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (langs.nonEnglish > 0) {
         const parts = Object.entries(langs.byLang).map(([l, n]) => `${l}=${n}`).join(', ');
         lines.push(`- Listing language: ${langs.nonEnglish}/${langs.total} non-English (${parts}) — kept & scored as-is (the AI reads them; applying is the user's call)`);
-        for (const l of Object.keys(langs.samples || {})) lines.push(`  - ${l}: ${langs.samples[l]}`);
+        for (const l of Object.keys(langs.samples || {})) {
+          const sample = langs.samples[l];
+          if (sample && typeof sample === 'object') {
+            lines.push(`  - ${l}: ${sample.label || '(unknown listing)'}${sample.evidence ? ` · evidence: “${sample.evidence}”` : ''}`);
+          } else {
+            lines.push(`  - ${l}: ${sample}`);
+          }
+        }
       } else {
         lines.push(`- Listing language: all ${langs.total} kept job(s) English`);
       }
@@ -344,6 +357,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           : 'raise JOB_RESULT_CAP to widen';
         lines.push(`  - \`${k}\`: surfaced ${v.count} of ${v.gathered} in-window matches ⚠️ (${fastCap ? 'fast aggregate cap' : 'result cap'}${capLabel} — ${overflow} more matched but not gathered; ${nextStep})`);
       }
+      const relevanceFiltered = entries.filter(([, v]) => v.relevanceDropped > 0);
+      for (const [k, v] of relevanceFiltered) {
+        lines.push(`  - \`${k}\`: provider returned ${v.providerGathered ?? v.count}; app rejected ${v.relevanceDropped} title-irrelevant row(s) before the result cap.`);
+      }
       const zeroWarn = entries
         .filter(([, v]) => v.count === 0 && v.warning)
         .map(([k, v]) => {
@@ -423,8 +440,18 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         }
 
         // ── Field-quality checks ───────────────────────────────────────────
-        // Salary: non-empty values that don't look monetary are selector
-        // regressions (the DOM node picked up schedule/benefit text instead).
+        // Salary: judged against the REAL annualizer (parseSalaryToNumeric —
+        // the same function the app uses to bucket jobs into salary ranges),
+        // not a lookalike regex. A present value that annualizes to 0 silently
+        // dropped the job into the "Unspecified" bucket — that's the number
+        // that matters, regardless of whether the raw string "looks monetary".
+        // looksLikeMoney (via classifyUnparseableSalary) only comes in AFTER
+        // that to split the unparseable ones into two different remedies:
+        // still money-shaped but the extractor lost the cadence (fixable, our
+        // bug) vs pure prose/benefit text with nothing to extract (not our
+        // bug). See jobQualityChecks.js for the full rationale — a source can
+        // pass looksLikeMoney on every value it carries and still be quietly
+        // dropping a quarter of its pay data (USAJobs' "X / PH" rates).
         // Posted: 100% empty on a source means the date selector broke.
         // URL: any missing URLs means jobs can't be opened or deduped properly.
         // Description: the full JD is stored in `snippet` on the saved
@@ -434,9 +461,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // back to the listing-card excerpt. Per-query `X/Y expanded` log
         // lines otherwise need to be eyeballed to notice.
         // Fields like title/company/location are too free-form to validate here.
-        // looksLikeMoney / MOJIBAKE_RE moved to jobQualityChecks.js (extracted
-        // pure functions, unit-testable directly instead of only via a full
-        // bug-report payload) — see that file for the salary/mojibake rationale.
+        // looksLikeMoney / classifyUnparseableSalary / MOJIBAKE_RE live in
+        // jobQualityChecks.js (extracted pure functions, unit-testable
+        // directly instead of only via a full bug-report payload).
         const SHORT_DESC_THRESHOLD = 400; // listing snippets are typically <300 chars
         // Per-source salary expectation — gates the "0 salaries at all" alarm so it
         // never cries wolf on sources that structurally omit salary. Grounded in
@@ -458,7 +485,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const src = j.source || 'unknown';
           const q = qualBySource[src] || (qualBySource[src] = {
             total: 0,
-            salaryPresent: 0, salaryGarbage: 0, salaryGarbageEx: [],
+            salaryPresent: 0,
+            salaryUnparseable: 0,
+            salaryLostCadence: 0, salaryLostCadenceEx: [],
+            salaryProse: 0, salaryProseEx: [],
             postedEmpty: 0,
             urlMissing: 0,
             companyEmpty: 0,
@@ -479,9 +509,18 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const sal = (j.salary || '').trim();
           if (sal) {
             q.salaryPresent++;
-            if (!looksLikeMoney(sal)) {
-              q.salaryGarbage++;
-              if (q.salaryGarbageEx.length < 3) q.salaryGarbageEx.push(`"${sal.slice(0, 50)}"`);
+            // The annualizer, not looksLikeMoney, decides pass/fail: a value can
+            // look perfectly monetary and still fail to become usable pay (see
+            // the field-quality comment block above for the USAJobs example).
+            if (parseSalaryToNumeric(sal) === 0) {
+              q.salaryUnparseable++;
+              if (classifyUnparseableSalary(sal) === 'lost-cadence') {
+                q.salaryLostCadence++;
+                if (q.salaryLostCadenceEx.length < 3) q.salaryLostCadenceEx.push(`"${sal.slice(0, 50)}"`);
+              } else {
+                q.salaryProse++;
+                if (q.salaryProseEx.length < 3) q.salaryProseEx.push(`"${sal.slice(0, 50)}"`);
+              }
             }
           }
           if (!(j.posted || '').trim())  q.postedEmpty++;
@@ -506,16 +545,27 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         let anyQualityIssue = false;
         for (const [src, q] of Object.entries(qualBySource)) {
           const issues = [];
-          // Salary: reported against POPULATED count, not total — 158/158 garbage
-          // is the alarming signal; 158/686 of total dilutes it. A source where
-          // salary is legitimately rare (e.g. LinkedIn API) lights up correctly
-          // only when the values it DOES carry are garbage.
-          if (q.salaryGarbage > 0) {
-            const pct = Math.round((q.salaryGarbage / q.salaryPresent) * 100);
+          // Salary: reported against POPULATED count, not total — 158/158
+          // unparseable is the alarming signal; 158/686 of total dilutes it. A
+          // source where salary is legitimately rare (e.g. LinkedIn API) lights
+          // up correctly only when the values it DOES carry fail to annualize.
+          // Split into the two remedies (see jobQualityChecks.js): cadence-lost
+          // values are OUR bug (extractor dropped the rate's unit, fixable);
+          // prose values mean there was never anything to extract. A source can
+          // have both at once, so both counts + samples are always shown when
+          // present rather than collapsing into one bucket.
+          if (q.salaryUnparseable > 0) {
+            const pct = Math.round((q.salaryUnparseable / q.salaryPresent) * 100);
             const sev = pct >= 80 ? '🔥' : '⚠';
+            const breakdown = [];
+            if (q.salaryLostCadence > 0) {
+              breakdown.push(`${q.salaryLostCadence} money-shaped but cadence-lost (our extractor's bug, fixable) — e.g. ${q.salaryLostCadenceEx.join(', ')}`);
+            }
+            if (q.salaryProse > 0) {
+              breakdown.push(`${q.salaryProse} pure prose, nothing to extract (not our bug) — e.g. ${q.salaryProseEx.join(', ')}`);
+            }
             issues.push(
-              `${sev} salary garbage: ${q.salaryGarbage}/${q.salaryPresent} (${pct}%) of present salaries are non-monetary` +
-              ` — e.g. ${q.salaryGarbageEx.join(', ')} — check salary selector`,
+              `${sev} salary unparseable: ${q.salaryUnparseable}/${q.salaryPresent} (${pct}%) of present salaries never became a usable annual figure (parseSalaryToNumeric → 0, job lands in "Unspecified") — ${breakdown.join(' · ')}`,
             );
           }
           // Zero-salary alarm — scoped to what THIS source is expected to carry.
@@ -592,13 +642,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             }
           }
         }
-        // Salary coverage — always surfaced, NOT gated on a garbage warning. The
-        // garbage check only fires on PRESENT salaries that fail looksLikeMoney,
+        // Salary coverage — always surfaced, NOT gated on an unparseable warning.
+        // That check only fires on PRESENT salaries the real annualizer rejects,
         // so "no warning" is vacuous when a source carries no salary at all (e.g.
         // LinkedIn's guest API never returns salary — fetch hardcodes salary='',
         // and enrichment extracts only the description, not baseSalary). Printing
         // present/total makes "selector fine, source just omits salary" distinct
-        // from "we're silently dropping salaries we should have".
+        // from "we're silently dropping salaries we should have". "All monetary"
+        // used to mean "passed a regex" and could be true while a quarter of a
+        // source's salaries silently annualized to 0 (USAJobs) — this now means
+        // every present salary actually turned into a usable annual figure.
         const covParts = [];
         for (const [src, q] of Object.entries(qualBySource)) {
           const pct = q.total ? Math.round((q.salaryPresent / q.total) * 100) : 0;
@@ -613,8 +666,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
               ? 'none carried — our extractor doesn’t capture pay for this source yet (known gap, not a regression)'
               : 'none carried — no salary values to validate';
           }
-          else if (q.salaryGarbage === 0) note = 'all monetary ✅';
-          else note = `${q.salaryGarbage} non-monetary ⚠ (see field-quality issue above)`;
+          else if (q.salaryUnparseable === 0) note = 'all annualized ✅';
+          else note = `${q.salaryUnparseable} unparseable ⚠ (see field-quality issue above)`;
           covParts.push(`\`${src}\`: ${q.salaryPresent}/${q.total} present (${pct}%) — ${note}`);
         }
         if (covParts.length === 1) {

@@ -25,6 +25,34 @@ import { detectAll } from 'tinyld';
 // Latin letters + the diacritics our fallback recognizes.
 const TOKEN_RE = /[a-zà-öø-ÿ]+/g;
 
+// Job boards in this app target English-speaking North American users. Keep a
+// conservative set of languages plausibly encountered in localized listings;
+// sparse profiles such as Berber/Klingon/Volapük otherwise win telegraphic
+// English strings simply because tinyld normalizes confidence across all 62
+// bundled profiles.
+const JOB_LANGUAGE_CANDIDATES = Object.freeze([
+  'en', 'fr', 'es', 'pt', 'de', 'it', 'nl',
+  'pl', 'uk', 'ru', 'tr', 'ar', 'he', 'hi',
+  'zh', 'ja', 'ko', 'vi', 'tl', 'el',
+]);
+
+const SCRIPT_TESTS = Object.freeze({
+  ar: /\p{Script=Arabic}/u,
+  el: /\p{Script=Greek}/u,
+  he: /\p{Script=Hebrew}/u,
+  hi: /\p{Script=Devanagari}/u,
+  ja: /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u,
+  ko: /\p{Script=Hangul}/u,
+  ru: /\p{Script=Cyrillic}/u,
+  uk: /\p{Script=Cyrillic}/u,
+  zh: /\p{Script=Han}/u,
+});
+
+function scriptConsistent(lang, raw) {
+  const re = SCRIPT_TESTS[lang];
+  return !re || re.test(raw);
+}
+
 // Short-text fallback: when there's too little text for tinyld to be reliable
 // (it returns near-zero-accuracy guesses on a 2-3 word title), lean on script
 // hints. Requires ≥2 diacritics so a single accented loanword in an English
@@ -52,9 +80,11 @@ export function detectLanguage(text) {
   // title-only case). tinyld returns garbage below ~6 words, so don't trust it.
   if (tokens.length < 6) return diacriticGuess(lower) || 'en';
 
-  const ranked = detectAll(raw.slice(0, 2000)); // first ~2k chars is plenty + cheap
+  const ranked = detectAll(raw.slice(0, 2000), { only: JOB_LANGUAGE_CANDIDATES }); // first ~2k chars is plenty + cheap
   const top = ranked[0];
+  // detectAll's `only` filter and result rows both use two-letter ids.
   const enAcc = ranked.find((r) => r.lang === 'en')?.accuracy || 0;
+  const topLang = top?.lang;
 
   // Trust tinyld on 6+ words. Tag non-English only when it's BOTH confident
   // (≥0.5) AND clearly ahead of English (≥0.2 margin) — the margin rejects
@@ -66,8 +96,13 @@ export function detectLanguage(text) {
   // scan here: scraped JDs are riddled with mojibake ("—"→"â€"", "'"→"â€™") whose
   // stray à/â/ç bytes would mis-flag a clearly-English post as fr/es. The
   // diacritic hint is only for the short title-only path above (no body to read).
-  if (top && top.lang && top.lang !== 'en' && top.accuracy >= 0.5 && (top.accuracy - enAcc) >= 0.2) {
-    return top.lang;
+  if (
+    top && topLang && topLang !== 'en'
+    && top.accuracy >= 0.5
+    && (top.accuracy - enAcc) >= 0.2
+    && scriptConsistent(topLang, raw)
+  ) {
+    return topLang;
   }
   return 'en';
 }
@@ -101,7 +136,14 @@ export function summarizeJobLanguages(jobs) {
     byLang[l] = (byLang[l] || 0) + 1;
     if (!samples[l]) {
       const where = j.location ? ` — ${j.location}` : '';
-      samples[l] = `${j.title || 'Untitled'}${where} [${j.source || '?'}]`;
+      const evidence = String(j.description || j.snippet || j.title || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 160);
+      samples[l] = {
+        label: `${j.title || 'Untitled'}${where} [${j.source || '?'}]`,
+        evidence,
+      };
     }
   }
   return { total: list.length, nonEnglish, byLang, samples };
