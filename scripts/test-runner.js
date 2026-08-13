@@ -211,7 +211,7 @@ import { getSoftLoginWallMatch, getStatusCacheSync, isConfirmedDisconnectedVerdi
 import { getSellMonitorConfig } from '../electron/ipc/stealthBrowser.js';
 import os from 'node:os';
 import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, computeResumeStartPage, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
-import { dedupAgainstHistory, dedupKeysFor, filterHistoryForResume } from '../electron/ipc/jobsHistory.js';
+import { dedupAgainstHistory, dedupKeysFor, filterHistoryForResume, appendJobsHistory, loadJobsHistory } from '../electron/ipc/jobsHistory.js';
 import { modelTag, overPricedSoldFlag, renderSessionTraceBlocks, visitCanvasNodes } from '../electron/ipc/bugReport/helpers.js';
 import { looksLikeMoney, mojibakeExcerpt } from '../electron/ipc/bugReport/jobQualityChecks.js';
 import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
@@ -241,7 +241,7 @@ import {
 import { PRICE_SYNTHESIS_SCHEMA } from '../electron/ipc/aiSchemas.js';
 import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation, LOCATION_TREATMENT } from '../src/utils/jobLocation.js';
 import { detectLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
-import { repairMojibake, hasMojibake, repairJobsMojibake, normalizeJobMarkup } from '../src/utils/textEncoding.js';
+import { repairMojibake, hasMojibake, repairJobsMojibake, normalizeJobMarkup, normalizeJobsMarkup, decodeHtmlEntities, stripHtmlToText } from '../src/utils/textEncoding.js';
 import { foldVerificationSample, orderByVerification, verificationScore } from '../src/utils/scrapeOrder.js';
 import { canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, getHubDropRejectLabel, getHubFileDropMode } from '../src/utils/hubDropEligibility.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
@@ -3855,6 +3855,30 @@ const tests = [
       assert(parseSalaryToNumeric('$5,000/month') === 60000, 'salary parser: monthly salary annualizes');
       assert(parseSalaryToNumeric('$300/day') === 78000, 'salary parser: daily salary annualizes');
       assert(parseSalaryToNumeric('$22/hour') === 45760, 'salary parser: hourly salary annualizes');
+      for (const raw of ['$19', '$20', '$18.15', '$1.0K', '$2,500', '3 years experience', '401k matching']) {
+        assert(parseSalaryToNumeric(raw) === 0, `salary parser: ${raw} without an annual/pay cadence is unspecified`);
+      }
+      const annualized = {
+        '$19 Hourly': 39520,
+        '$71K Annually': 71000,
+        '$18.15 an hour': 37752,
+        '$1.6K Weekly': 83200,
+        '$1.0K Weekly': 52000,
+        '$2,500 Monthly': 30000,
+        '$71K': 71000,
+        '$1.5M a year': 1500000,
+        '$147,000-$175,000': 147000,
+        '$80,000': 80000,
+        '$172,333/year': 172333,
+        '$8,000 a year': 8000,
+        '$22/hour': 45760,
+        '$5,000/month': 60000,
+        '$2,000 bi-weekly': 52000,
+        '$300/day': 78000,
+      };
+      for (const [raw, expected] of Object.entries(annualized)) {
+        assert(parseSalaryToNumeric(raw) === expected, `salary parser: ${raw} → ${expected}`);
+      }
       assert(parseSalaryToNumeric('401k matching') === 0, 'salary parser: benefit prose is not salary');
       assert(parseSalaryToNumeric('3 years experience') === 0, 'salary parser: incidental numeric prose is not salary');
       assert(canonicalSalaryRangeLabel(120000, 0) === '$120k+/yr', 'salary labels derive from numeric open-ended bound');
@@ -3913,6 +3937,13 @@ const tests = [
         'RemoteOK: exact sponsored pseudo-employer is excluded');
       assert(!isRemoteOkSponsoredPlacement({ company: 'A Supermarket' }),
         'RemoteOK: similarly named real employers remain eligible');
+      const apiRows = [
+        { company: 'AI Supermarket', position: 'Promoted Product' },
+        { company: 'Acme', position: 'Customer Support Specialist' },
+      ];
+      const eligible = apiRows.filter(row => !isRemoteOkSponsoredPlacement(row));
+      assert(eligible.length === 1 && eligible[0].company === 'Acme',
+        'RemoteOK: sponsored rows are excluded by the predicate before any relevance matching; ordinary rows survive');
       return { jsonLd: 'cadence-preserved', remoteok: 'sponsored-filtered' };
     },
   },
@@ -5490,6 +5521,12 @@ const tests = [
         'country-only Canadian search uses ca.indeed.com');
       assert(indeedHostForLocation('Denver, CO') === 'www.indeed.com',
         'US/default search keeps the global Indeed host');
+      assert(indeedHostForLocation('London, United Kingdom') === 'uk.indeed.com',
+        'UK city search uses the UK Indeed host');
+      assert(indeedHostForLocation('') === 'www.indeed.com' && indeedHostForLocation(null) === 'www.indeed.com',
+        'blank/missing locations retain the global Indeed host');
+      assert(indeedHostForLocation('Ontario, CA') === 'www.indeed.com',
+        'CA state abbreviation means California here, never Canada');
       return { canada: 'ca.indeed.com', us: 'www.indeed.com' };
     },
   },
@@ -5593,6 +5630,28 @@ const tests = [
     },
   },
   {
+    name: 'summarizeLocationAdherence: Canada keeps ambiguous cities unclear and labels confirmed US leaks',
+    run: () => {
+      const a = summarizeLocationAdherence([
+        { title: 'Toronto role', location: 'Toronto, ON', source: 'glassdoor' },
+        { title: 'Calgary role', location: 'Calgary, Alberta, Canada', source: 'linkedin' },
+        { title: 'US role', location: 'Haysi, VA 24256', source: 'indeed' },
+        { title: 'Bare city', location: 'Newmarket', source: 'glassdoor' },
+        { title: 'Metro region', location: 'Greater Montreal Metropolitan Area', source: 'linkedin' },
+        { title: 'Remote board role', location: 'Austin, TX', source: 'weworkremotely' },
+        { title: 'No location', location: '', source: 'google' },
+      ], 'Canada');
+      assert(a.matched === 2, `Canadian province/country evidence matches both jobs, got ${a.matched}`);
+      assert(a.offTarget === 1 && /United States/.test(a.offSamples[0] || ''),
+        `Haysi, VA is a confirmed US leak, got ${JSON.stringify(a.offSamples)}`);
+      assert(a.unclear === 2 && a.unclearSamples.some(sample => /Newmarket/.test(sample))
+        && a.unclearSamples.some(sample => /Greater Montreal/.test(sample)),
+      'bare Canadian-looking cities/metros remain unclear rather than falsely off-target');
+      assert(a.remote === 1 && a.unknown === 1, 'remote board and missing location retain their own buckets');
+      return { ok: true, adherence: a };
+    },
+  },
+  {
     name: 'summarizeLocationAdherence: a single-word CITY is not mistaken for a country',
     run: () => {
       // "Toronto" alone (no province/country) must stay a city match, not flip
@@ -5688,6 +5747,29 @@ const tests = [
       assert(job.description.includes('Headquarters: Denver') && job.description.includes('<safe>'),
         'normalization strips real tags after decoding escaped markup as inert text');
       return { normalized: true };
+    },
+  },
+  {
+    name: 'text encoding: entity decoding and markup normalization preserve inert text and stay idempotent',
+    run: () => {
+      assert(decodeHtmlEntities('Customer Support &amp; Product Demo Specialist') === 'Customer Support & Product Demo Specialist',
+        'named HTML entities decode');
+      assert(decodeHtmlEntities('&#39;&#x27;') === "''", 'decimal and hexadecimal numeric entities decode');
+      assert(decodeHtmlEntities('a &foo; b') === 'a &foo; b', 'unknown entities stay verbatim');
+      const stripped = stripHtmlToText('<p>One</p><ul><li>Two</li><li>Three</li></ul><style>.x { color:red }</style><script>alert(1)</script>');
+      assert(!stripped.includes('<') && /Two\s*• Three/.test(stripped),
+        `HTML strips while list items keep separate lines, got ${JSON.stringify(stripped)}`);
+      assert(!stripped.includes('alert(1)') && !stripped.includes('color:red'), 'script and style contents are removed');
+      assert(stripHtmlToText('&lt;script&gt;alert(1)&lt;/script&gt;') === '<script>alert(1)</script>',
+        'escaped script tags are decoded only after stripping, so they survive as inert text');
+      const jobs = [{ title: 'Clean title', snippet: '<p>One &amp; Two</p>', description: '<div>Three</div>' }];
+      normalizeJobsMarkup(jobs);
+      const once = JSON.stringify(jobs);
+      normalizeJobsMarkup(jobs);
+      assert(jobs[0].title === 'Clean title' && jobs[0].snippet === 'One & Two' && jobs[0].description === 'Three',
+        'markup normalization leaves clean titles clean and strips snippet markup');
+      assert(JSON.stringify(jobs) === once, 'markup normalization is idempotent');
+      return { ok: true };
     },
   },
   {
@@ -7265,7 +7347,67 @@ const tests = [
         'same Google listing ignores session params but retains stable htidocid');
       assert(!a.some(k => different.includes(k)),
         'different Google htidocid values never collapse through the shared /search path');
+      const replayGoogleA = dedupKeysFor({
+        url: 'https://www.google.com/search?ibp=htl;jobs&q=Retail+Sales+Associate+Canada+jobs&htidocid=nWUdn9oqgrfIvDvYAAAAAA%3D%3D&hl=en-CA',
+      });
+      const replayGoogleB = dedupKeysFor({
+        url: 'https://www.google.com/search?ibp=htl;jobs&q=Customer+Service+Associate+Canada+jobs&htidocid=ZMarQLnfvtRm5rkhAAAAAA%3D%3D&hl=en-CA',
+      });
+      assert(!replayGoogleA.some(key => replayGoogleB.includes(key)),
+        'replayed Google cards with distinct htidocid values remain distinct');
+      const indeedA = dedupKeysFor({ url: 'https://ca.indeed.com/rc/clk?jk=abc123&bb=xyz' });
+      const indeedB = dedupKeysFor({ url: 'https://ca.indeed.com/rc/clk?jk=abc123&bb=OTHER' });
+      assert(indeedA.length === 1 && indeedA[0] === indeedB[0], 'Indeed redirect stubs key only on jk, never session parameters');
+      assert(!dedupKeysFor({ url: 'https://ca.indeed.com/rc/clk?bb=xyz' }).some(key => key.startsWith('u:')),
+        'Indeed redirect stubs without jk do not produce a misleading URL key');
+      const glassdoorA = dedupKeysFor({ url: 'https://www.glassdoor.ca/job-listing/first-role-JV_IC123.htm?jl=111' });
+      const glassdoorB = dedupKeysFor({ url: 'https://www.glassdoor.ca/job-listing/second-role-JV_IC123.htm?jl=222' });
+      assert(glassdoorA.length === 1 && glassdoorB.length === 1 && glassdoorA[0] !== glassdoorB[0]
+        && !glassdoorA[0].includes('jl=') && !glassdoorB[0].includes('jl='),
+      'different Glassdoor listing paths stay distinct; jl is never elevated over the path identity');
       return { ok: true };
+    },
+  },
+  {
+    name: 'jobs history: newline-safe writes round-trip and do not re-append on the next run',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-jobs-history-'));
+      const canvasPath = path.join(base, 'job-search.json');
+      const jobs = [
+        { source: 'glassdoor', company: 'Marshalls\n3.4', title: 'Retail Associate', location: 'Toronto, ON', url: 'https://www.glassdoor.ca/job-listing/retail-associate-JV_IC1.htm' },
+        { source: 'indeed', company: 'Acme', title: 'Support Specialist', location: 'Toronto, ON', url: 'https://ca.indeed.com/rc/clk?jk=history-abc' },
+      ];
+      try {
+        const first = await appendJobsHistory(canvasPath, jobs);
+        const readBack = await loadJobsHistory(canvasPath);
+        const second = await appendJobsHistory(canvasPath, jobs);
+        assert(first.written === jobs.length, `first history write persists all jobs, got ${first.written}`);
+        assert(readBack.length === jobs.length && readBack[0].company === 'Marshalls 3.4',
+          `newlines collapse inside one recoverable CSV row, got ${JSON.stringify(readBack)}`);
+        assert(second.written === 0, `already-written rows must not append forever, got ${second.written}`);
+        return { ok: true, written: first.written };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'jobs history: skip diagnostics attribute in-batch URL collisions to their source',
+    run: async () => {
+      const base = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-jobs-history-skips-'));
+      const canvasPath = path.join(base, 'job-search.json');
+      try {
+        const result = await appendJobsHistory(canvasPath, [
+          { source: 'google', company: 'Acme', title: 'First role', location: 'Canada', url: 'https://google.com/search?htidocid=collision' },
+          { source: 'google', company: 'Beta', title: 'Second role', location: 'Canada', url: 'https://google.com/search?htidocid=collision' },
+        ]);
+        assert(result.written === 1, `only the first URL-colliding job writes, got ${result.written}`);
+        assert(result.skips?.url === 1 && result.skips?.inBatch === 1 && result.skips?.bySource?.google === 1,
+          `skip diagnostics classify and attribute the collision, got ${JSON.stringify(result.skips)}`);
+        return { ok: true, skips: result.skips };
+      } finally {
+        await fs.promises.rm(base, { recursive: true, force: true });
+      }
     },
   },
   {

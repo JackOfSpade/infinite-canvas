@@ -1044,7 +1044,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             // salary of nineteen dollars. Word forms are alternated in here; the
             // suffix stays optional so a genuinely unit-less chip still yields the
             // amount (parseSalaryToNumeric then refuses to annualize it).
-            const MONEY_SRC = String.raw`\$\s?\d[\d.,]*\s?[KkMm]?(?:\s?(?:[-–—]|to)\s?\$?\s?\d[\d.,]*\s?[KkMm]?)?(?:\s?(?:\/\s?(?:yr|year|hr|hour|mo|month|wk|week)|(?:hour|year|month|week|annual|bi[-\s]?week)ly|an hour|a year|a month|a week|per (?:hour|year|month|week)))?`;
+            const MONEY_SRC = String.raw`\$\s?\d[\d.,]*\s?(?:[KkMm](?![A-Za-z]))?(?:\s?(?:[-–—]|to)\s?\$?\s?\d[\d.,]*\s?(?:[KkMm](?![A-Za-z]))?)?(?:\s?(?:\/\s?(?:yr|year|hr|hour|mo|month|wk|week)|(?:hour|year|month|week|annual|bi[-\s]?week)ly|an hour|a year|a month|a week|per (?:hour|year|month|week)))?`;
             await fetchPage.waitForFunction((src) => {
               const re = new RegExp(src, 'i');
               return [...document.querySelectorAll('p')].some(p => re.test(p.textContent || ''));

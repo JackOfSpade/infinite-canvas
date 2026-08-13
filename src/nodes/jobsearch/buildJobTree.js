@@ -85,10 +85,11 @@ export function parseSalaryToNumeric(salaryStr) {
   // A benefits blurb such as "401k matching" is common in descriptions and is
   // never pay. Keep legitimate bare "$95k" / "95k" salary values intact.
   if (!/\$/.test(raw) && /\b401\s*k\b/i.test(raw)) return 0;
-  const m = clean.match(/(\d+(?:\.\d+)?)\s*(k)?/);
+  const m = clean.match(/(\d+(?:\.\d+)?)\s*([km](?![a-z]))?/);
   if (!m) return 0;
   let val = parseFloat(m[1]);
   if (m[2] === 'k') val *= 1000;
+  if (m[2] === 'm') val *= 1000000;
   // SUB-ANNUAL cadences — the ones that drive a multiplier below. Word forms
   // ("$19 Hourly", "$1.6K Weekly") are as common on a pay chip as slash forms,
   // and `\bhour\b` does not match "hourly", so both spellings are listed.
