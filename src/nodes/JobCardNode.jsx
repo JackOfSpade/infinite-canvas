@@ -1,5 +1,5 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { useReactFlow } from '@xyflow/react';
+import { useReactFlow, useStore } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { ExternalLink, X, Sparkles, Check } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
@@ -8,6 +8,7 @@ import { languageLabel } from '../utils/jobLanguageLabels';
 import { NodeHandles } from './_shared/NodeHandles';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { computeJobTreeView } from './jobsearch/buildJobTree';
+import { deriveBoardCardStats } from './jobboard/mergeJobs';
 
 // Accent color encodes the match score (interview-likelihood) band, so the
 // card's color reinforces the single metric: greener = better odds. Bands match
@@ -42,7 +43,7 @@ const MINING_MARKER_STALE_MS = 5 * 60 * 1000;
  *   language (optional 2-letter code, set only when non-English → shows a chip)
  */
 export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
-  const { deleteElements, getNode, setNodes, updateNodeData } = useReactFlow();
+  const { deleteElements, getNode, getNodes, setNodes, updateNodeData } = useReactFlow();
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const { addToast } = useToast();
@@ -51,12 +52,42 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const [generatingApp, setGeneratingApp] = useState(false);
   const [applied, setApplied] = useState(false);
   const [markingApplied, setMarkingApplied] = useState(false);
+  const pendingReasoningReflowRef = useRef(false);
+  const measuredHeight = useStore(
+    useCallback((store) => store.nodeLookup.get(id)?.measured?.height ?? null, [id])
+  );
+  const previousMeasuredHeightRef = useRef(measuredHeight);
 
   // Cache id for closure safety + a mounted flag so async settlements after
   // unmount don't setState.
   const idRef = useRef(id);
   useEffect(() => { idRef.current = id; }, [id]);
   const isMountedRef = useIsMountedRef();
+
+  // Reasoning disclosure changes the card's DOM height asynchronously through
+  // ResizeObserver. Re-run the tree layout only after that measured height lands
+  // in ReactFlow, otherwise a tall card can overlap the card below it.
+  useEffect(() => {
+    const changed = previousMeasuredHeightRef.current !== measuredHeight;
+    previousMeasuredHeightRef.current = measuredHeight;
+    if (!pendingReasoningReflowRef.current || !changed) return;
+    const frame = requestAnimationFrame(() => {
+      pendingReasoningReflowRef.current = false;
+      const hubData = getNode(data.hubId)?.data || {};
+      setNodes((nodes) => computeJobTreeView(nodes, data.hubId, {
+        scoreThreshold: hubData.scoreThreshold ?? 0,
+        sourceFilter: hubData.sourceFilter ?? null,
+      }));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [measuredHeight, data.hubId, getNode, setNodes]);
+
+  // Local disclosure state is intentionally non-persistent, but report it while
+  // mounted so a bug report can explain a measured-height/layout discrepancy.
+  useEffect(() => {
+    EventLogger.registerNodeState(id, { reasoningExpanded: showFullReasoning });
+  }, [id, showFullReasoning]);
+  useEffect(() => () => EventLogger.unregisterNodeState(id), [id]);
 
   // Folder the last successful generation actually wrote artifacts to, so
   // "Mark applied" can record where the résumé/cover letter live. Not part of
@@ -114,7 +145,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     const hubData = getNode(data.hubId)?.data || {};
     const filter = { scoreThreshold: hubData.scoreThreshold ?? 0, sourceFilter: hubData.sourceFilter ?? null };
     setNodes((nodes) => computeJobTreeView(nodes, data.hubId, filter));
-  }, [id, data.locked, data.hubId, deleteElements, getNode, setNodes]);
+    const stats = deriveBoardCardStats(getNodes().filter((node) => node.id !== id), data.hubId, hubData);
+    updateGlobal(data.hubId, stats);
+    EventLogger.log(`[JobCard] dismissed id=${id} board=${data.hubId} remaining=${stats.resultCount}`);
+  }, [id, data.locked, data.hubId, deleteElements, getNode, getNodes, setNodes, updateGlobal]);
 
   // ── Full application (tailored résumé + cover letter HTML) ─────────────────
   // Reads the merged career data from the ORIGIN Job Search Module — the
@@ -400,7 +434,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         <div
           className={`px-3 py-1.5 text-white/45 text-xs leading-relaxed border-t border-white/5 cursor-pointer hover:text-white/60 transition-colors ${showFullReasoning ? '' : 'line-clamp-3'}`}
           onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => { e.stopPropagation(); setShowFullReasoning(v => !v); }}
+          onClick={(e) => {
+            e.stopPropagation();
+            const nextExpanded = !showFullReasoning;
+            pendingReasoningReflowRef.current = true;
+            setShowFullReasoning(nextExpanded);
+            EventLogger.log(`[JobCard] reasoning ${nextExpanded ? 'expanded' : 'collapsed'} id=${id}`);
+          }}
           title={showFullReasoning ? 'Show less' : 'Show full reasoning'}
         >
           {data.reasoning}

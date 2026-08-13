@@ -223,9 +223,12 @@ function buildStateRegex(stateToken) {
       if (name.replace(/\s/g, '') === stateToken) { code = c; break; }
     }
   }
-  const alts = code ? [code, SUBDIVISIONS[code]] : [stateToken];
-  const pattern = alts.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-  return new RegExp(`\\b(?:${pattern})\\b`);
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!code) return new RegExp(`\\b${esc(stateToken)}\\b`, 'i');
+  // Two-letter codes such as ON/IN/OR are ordinary English words. A code is
+  // location evidence only when it occupies a structured subdivision slot
+  // (", ON" / "(ON)"), not merely any word in the field.
+  return new RegExp(`(?:\\b${esc(SUBDIVISIONS[code])}\\b|(?:^|[,(/])\\s*${esc(code)}(?=$|[, )]))`, 'i');
 }
 
 // If a target SEGMENT is a US state or Canadian province — by 2-letter code
@@ -258,11 +261,11 @@ function buildCountryRegex(country) {
   const c = String(country || '').trim();
   if (!c) return null;
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const parts = [esc(c.toLowerCase())];
+  const parts = [`\\b${esc(c.toLowerCase())}\\b`];
   const subs = COUNTRY_SUBDIVISIONS[c];
   if (subs) {
-    for (const code of Object.keys(subs)) parts.push(`\\b${esc(code)}\\b`);
-    for (const name of Object.values(subs)) parts.push(esc(name));
+    for (const code of Object.keys(subs)) parts.push(`(?:^|[,(/])\\s*${esc(code)}(?=$|[, )])`);
+    for (const name of Object.values(subs)) parts.push(`\\b${esc(name)}\\b`);
   }
   return new RegExp(`(?:${parts.join('|')})`, 'i');
 }
@@ -276,7 +279,7 @@ function buildForeignRegexes(targetCountry) {
     if (country === targetCountry) continue;
     const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const parts = [`\\b${esc(country.toLowerCase())}\\b`];
-    for (const code of Object.keys(subs)) parts.push(`\\b${esc(code)}\\b`);
+    for (const code of Object.keys(subs)) parts.push(`(?:^|[,(/])\\s*${esc(code)}(?=$|[, )])`);
     for (const name of Object.values(subs)) parts.push(`\\b${esc(name)}\\b`);
     out.push({ country, re: new RegExp(`(?:${parts.join('|')})`, 'i') });
   }

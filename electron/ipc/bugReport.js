@@ -553,6 +553,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
         cs.isEditing ? 'editing' : null,
         cs.isResizing ? 'resizing' : null,
         cs.hasEdgeCursor ? 'edgeCursor' : null,
+        cs.reasoningExpanded ? 'reasoningExpanded' : null,
         n.selected ? 'selected' : null,
       ].filter(Boolean).join(', ') || '—';
       // Hub-aware preview: include hubState plus whichever payload keys this
@@ -800,8 +801,11 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
         `| ${n.textColor ?? '—'} ` +
         `| ${n.backgroundColor ?? '—'} ` +
         `| ${n.width_prop ?? '—'} ` +
+        `| ${n.height_prop ?? '—'} ` +
         `| ${n.style_width ?? '—'} ` +
+        `| ${n.style_height ?? '—'} ` +
         `| ${n.measured_width ?? '—'} ` +
+        `| ${n.measured_height ?? '—'} ` +
         `| ${cs.size ?? '—'} ` +
         `| ${flags} ` +
         `| ${dataPreview || '—'} |`
@@ -812,8 +816,8 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
 > **Size columns**: mismatches reveal ResizeObserver/setNodes race conditions.
 > **Component state**: React state at the moment the report was generated.
 
-| ID | Type | Selected | Position | Font | T-Color | B-Color | width (prop) | style.width | measured.width | currentSize | state flags | data preview |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ID | Type | Selected | Position | Font | T-Color | B-Color | width (prop) | height (prop) | style.width | style.height | measured.width | measured.height | currentSize | state flags | data preview |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 ${rows}
 ${(cardOmitted > 0 || groupOmitted > 0) ? `\n_+ ${[cardOmitted > 0 ? `${cardOmitted} routine jobcard` : null, groupOmitted > 0 ? `${groupOmitted} routine jobgroup` : null].filter(Boolean).join(' and ')} row(s) omitted to preserve the clipboard budget — collapsed-cascade nodes (hidden by default) with no anomaly. The hubs, board (merge stats), and a sample are shown; the full score/taxonomy breakdown is in the Job Search Pipeline section. Anomalous nodes (selected/editing/resizing/error) are always shown._\n` : ''}`;
   }

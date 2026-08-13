@@ -121,11 +121,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const newFilter = (data.sourceFilter || null) === sourceId ? null : sourceId;
     updateGlobal(id, { sourceFilter: newFilter });
     applyCardFilters({ sourceFilter: newFilter });
+    EventLogger.log(`[JobBoard] source filter ${newFilter || 'cleared'} id=${id}`);
   }, [data.sourceFilter, id, updateGlobal, applyCardFilters]);
 
   const setScoreThreshold = useCallback((val) => {
     updateGlobal(id, { scoreThreshold: val });
     applyCardFilters({ scoreThreshold: val });
+    EventLogger.log(`[JobBoard] score filter ≥${val}% id=${id}`);
   }, [id, updateGlobal, applyCardFilters]);
 
   // Re-apply filters on mount — card opacities are stripped from save files.
@@ -182,9 +184,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const nextStale = liveSignature !== data.combineSignature;
     if (nextStale === !!data.stale) return;
     updateGlobal(id, { stale: nextStale });
-    if (nextStale) hideBoardChildren();
-    else showBoardChildren();
-  }, [hubState, data.locked, liveSignature, data.combineSignature, data.stale, id, updateGlobal, hideBoardChildren, showBoardChildren]);
+    if (nextStale) {
+      hideBoardChildren();
+      EventLogger.log(`[JobBoard] results hidden as stale id=${id} reason=${staleReasonText}`);
+    } else {
+      showBoardChildren();
+      EventLogger.log(`[JobBoard] results restored after stale state cleared id=${id}`);
+    }
+  }, [hubState, data.locked, liveSignature, data.combineSignature, data.stale, staleReasonText, id, updateGlobal, hideBoardChildren, showBoardChildren]);
 
   // Cascade-delete the board's spawned cards/groups (re-combine, clear, unmount).
   const clearBoardChildren = useCallback(() => {
@@ -203,6 +210,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       sourceFilter: null, jobTaxonomy: null, finalSourceCounts: {}, mergeStats: null,
       combineSignature: null, stale: false,
     });
+    EventLogger.log(`[JobBoard] cleared id=${id}`);
   }, [id, clearBoardChildren, updateGlobal]);
 
   const handleCombine = useCallback(async () => {

@@ -122,7 +122,44 @@ export function parseSalaryToNumeric(salaryStr) {
   else if (/\b(?:month|mo|monthly)s?\b|\/\s*mo\b/.test(clean)) val *= 12;
   else if (/\b(?:day|daily)\b|\/\s*day\b/.test(clean)) val *= 5 * 52;
   else if (/\b(?:hour|hr|hourly)s?\b|\/\s*hr\b/.test(clean)) val *= 40 * 52;
-  return Number.isFinite(val) && val > 0 ? Math.round(val) : 0;
+  // Keep malformed/ad-network pay chips out of the real salary buckets. One
+  // observed ZipRecruiter chip read "$65K/hr": treating its `K` suffix and
+  // hourly cadence literally produces $135.2M/year, an implausible result that
+  // overwhelms auto-generated ranges. Preserve the raw chip for the card, but
+  // mark a value outside any credible job-compensation range as Unspecified.
+  // The ceiling still permits unusually highly paid executive and contractor
+  // work (up to roughly $4.8K/hour) without silently rewriting the source.
+  const MAX_CREDIBLE_ANNUAL_SALARY = 10_000_000;
+  return Number.isFinite(val) && val > 0 && val <= MAX_CREDIBLE_ANNUAL_SALARY ? Math.round(val) : 0;
+}
+
+/**
+ * Surface obviously malformed source pay ranges without changing placement.
+ * Salary buckets intentionally use the lower endpoint (the conservative floor
+ * a candidate can actually expect), but a chip such as "$23.50–$250/hr" is
+ * useful scraper-quality evidence and must not disappear behind that floor.
+ */
+export function salaryRangeAnomaly(salaryStr) {
+  const raw = String(salaryStr || '').trim();
+  if (!raw) return null;
+  const match = raw.match(/(\$?\s*\d[\d,]*(?:\.\d+)?\s*[km]?)(?:\s*(?:[-–—]|to)\s*)(\$?\s*\d[\d,]*(?:\.\d+)?\s*[km]?)/i);
+  if (!match) return null;
+  const lowerAnnual = parseSalaryToNumeric(raw);
+  // Preserve the cadence that follows the range ("$20–$25 an hour") while
+  // asking the existing parser to annualize the upper endpoint.
+  const upperAnnual = parseSalaryToNumeric(`${match[2]}${raw.slice((match.index || 0) + match[0].length)}`);
+  if (!(lowerAnnual > 0) || !(upperAnnual > 0) || upperAnnual < lowerAnnual) return null;
+  const ratio = upperAnnual / lowerAnnual;
+  // A fivefold compensation spread is rare enough to be diagnostic while still
+  // avoiding noise from normal hourly/annual bands. We report it; never rewrite
+  // source data or change the lower-bound bucket.
+  if (ratio < 5) return null;
+  return {
+    lowerAnnual,
+    upperAnnual,
+    ratio: Math.round(ratio * 10) / 10,
+    reason: `upper endpoint is ${Math.round(ratio * 10) / 10}× the lower endpoint`,
+  };
 }
 
 // ── Deterministic placement ────────────────────────────────────────────────
@@ -313,8 +350,14 @@ export function computeLayoutPositions(nodes, hubId, COL_X_, hubPos) {
     .sort((a, b) => (a.position?.y ?? 0) - (b.position?.y ?? 0));
 
   const positions = {};
+  const laidOut = new Set();
 
   function layoutNode(nodeId, startY) {
+    // Persisted graphs should be trees, but a malformed childIds cycle must not
+    // turn a filter/reflow into an unbounded recursive layout. A first visit is
+    // sufficient because a node has one visual position in this cascade.
+    if (laidOut.has(nodeId)) return startY;
+    laidOut.add(nodeId);
     const node = nodeById.get(nodeId);
     if (!node) return startY;
     // Hidden nodes (collapsed OR filtered out) take no layout space, so the tree
@@ -441,7 +484,14 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X) {
   // sat beyond the window. Layout positions whatever is revealed (it walks all
   // children and skips hidden), so window math lives only here.
   const visible = new Set();
+  const walked = new Set();
   const walk = (id) => {
+    // `countMatches` above is cycle-safe, but it only guards the count phase.
+    // A malformed persisted childIds graph with a matching card in a cycle used
+    // to recurse forever here while deriving visibility. Keep the first reached
+    // node visible and skip repeated edges, which is both safe and recoverable.
+    if (walked.has(id)) return;
+    walked.add(id);
     const node = byId.get(id);
     if (!node) return;
     if (node.type === 'jobcard') { if (cardMatch(node.data)) visible.add(id); return; }

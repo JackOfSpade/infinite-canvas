@@ -70,10 +70,11 @@ import {
   normalizeBandsWithRepairs,
   normalizeRangesWithRepairs,
   parseSalaryToNumeric,
+  salaryRangeAnomaly,
   sanitizeJobTaxonomy,
 } from '../src/nodes/jobsearch/buildJobTree.js';
-import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature } from '../src/nodes/jobboard/mergeJobs.js';
-import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult, isRemoteOkSponsoredPlacement } from '../electron/extractors/apiExtractors.js';
+import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature, deriveBoardCardStats } from '../src/nodes/jobboard/mergeJobs.js';
+import { buildGeoTermSet, extractIndeedJobsFromHtml, extractSalaryFromText, jobRelevanceMatch, jobRelevanceEvidence, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult, isRemoteOkSponsoredPlacement } from '../electron/extractors/apiExtractors.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
 import { targetPageCountForJob, decideFitStep } from '../electron/ipc/jobApplication.js';
@@ -216,7 +217,7 @@ import { modelTag, overPricedSoldFlag, renderSessionTraceBlocks, visitCanvasNode
 import { looksLikeMoney, mojibakeExcerpt } from '../electron/ipc/bugReport/jobQualityChecks.js';
 import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
 import { buildJobsPipelineSnapshot } from '../electron/ipc/bugReport/jobsSnapshot.js';
-import { formatJsonLdSalary, resolveManualSourceStopReason } from '../electron/ipc/browser/manualScraper.js';
+import { formatJsonLdSalary, reconcileZipRecruiterDomSalary, resolveManualSourceStopReason } from '../electron/ipc/browser/manualScraper.js';
 import { indeedHostForLocation } from '../electron/extractors/indeedBrowser.js';
 import { classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
 import { deriveHubScanStatus, resolveAttentionSourceUrls, scanSellerHubPages, annotateReadState, summarizeReadState, stripHtmlForAnalysis, stripReadStateTokens, READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN } from '../electron/ipc/listingStatusCheck.js';
@@ -2751,6 +2752,14 @@ const tests = [
         { title: 'unknown', posted: 'some weird source text' },
       ], 30);
       assert(filtered.map(j => j.title).join(',') === 'keep,unknown', 'Job date and cap helpers: age filter should keep recent and unknown dates');
+      const fixedNow = new Date('2026-08-13T12:00:00Z');
+      assert(parsePostedDate('Aug 12', fixedNow)?.getFullYear() === 2026,
+        'Job date parser: yearless past month-day resolves in the current year, not V8\'s 2001 default');
+      assert(parsePostedDate('Aug 20', fixedNow)?.toISOString().startsWith('2025-08-20'),
+        'Job date parser: future yearless month-day resolves to the most recent occurrence');
+      assert(filterJobsByAge([{ title: 'recent-yearless', posted: 'Aug 12' }, { title: 'old-yearless', posted: 'May 29' }], 21, fixedNow)
+        .map(job => job.title).join(',') === 'recent-yearless',
+      'Job date filter: yearless dates honor the injected look-back clock');
       // compsForPricing is unbounded — a small set passes through in full...
       const cSmall = compsForPricing(8, 4);
       assert(cSmall.sold === 8 && cSmall.active === 4, 'Job date and cap helpers: small comp set should pass through unbounded');
@@ -2844,6 +2853,78 @@ const tests = [
         jobRelevanceMatch('Engineering Manager', 'Senior Manager', new Set()),
         'Job board relevance filtering: all-generic role query should still fall back rather than match nothing',
       );
+      // Snapshot regressions: RemoteOK/WWR fetch whole feeds and used to admit
+      // rows on one ambient/sub-string query term. A multi-noun role query now
+      // needs two role concepts, with a deliberately narrow adjacent-role map.
+      assert(
+        jobRelevanceMatch('Customer Support Systems & Analytics Architect', 'Customer Service Coordinator', new Set()),
+        'Job board relevance filtering: a customer-support title is retained through the service/support concept',
+      );
+      assert(
+        !jobRelevanceMatch('Hanson Professional Services: Electrical Engineer - Substation Design', 'Customer Service Coordinator', new Set()),
+        'Job board relevance filtering: "service" must not substring-match unrelated "Services"',
+      );
+      assert(
+        !jobRelevanceMatch('Coffee Roaster Campos Coffee', 'Customer Service Coordinator', new Set()),
+        'Job board relevance filtering: unrelated RemoteOK titles are not admitted by a broad query term',
+      );
+      assert(
+        jobRelevanceMatch('Customer-Service Representative', 'Customer Service Coordinator', new Set()),
+        'Job board relevance filtering: close customer-service variants retain two-term relevance',
+      );
+      assert(
+        jobRelevanceMatch('Administrative Assistant', 'Administrative Assistant', new Set()),
+        'Job board relevance filtering: exact multi-word role remains eligible',
+      );
+      assert(
+        jobRelevanceMatch('Customer Support Systems & Analytics Architect', 'Customer Service Coordinator', new Set()),
+        'Job board relevance filtering: customer support is an adjacent customer-service role',
+      );
+      assert(
+        jobRelevanceMatch('Customer Success Manager, EMEA', 'Customer Service Coordinator', new Set()),
+        'Job board relevance filtering: customer success is an adjacent customer-service role',
+      );
+      assert(
+        jobRelevanceMatch('Customer Advocate Lead', 'Customer Service Coordinator', new Set()),
+        'Job board relevance filtering: customer advocate is an adjacent customer-service role',
+      );
+      assert(
+        jobRelevanceMatch('Back Office support', 'Administrative Assistant', new Set()),
+        'Job board relevance filtering: back-office support is an adjacent administrative-assistant role',
+      );
+      assert(
+        !jobRelevanceMatch('Part-Time Brand & Outreach Assistant - B2B SaaS VC', 'Administrative Assistant', new Set()),
+        'Job board relevance filtering: an assistant title without an administrative concept stays rejected',
+      );
+      assert(
+        !jobRelevanceMatch('Area Vice President - Financial Services', 'Customer Service Coordinator', new Set()),
+        'Job board relevance filtering: financial-services executive title stays rejected',
+      );
+      const remoteOkJunk = [
+        'Coffee Roaster Campos Coffee', 'Ganger', 'Artificial Intelligence Specialist',
+        'Loss Prevention Specialist', 'Maintenance Technician', 'barber',
+        'Talk us here if you can’t find the job that you’re looking for', 'Estimator',
+        'Senior Software QA Engineer', 'Group leader',
+      ];
+      assert(remoteOkJunk.every(title => !jobRelevanceMatch(title, 'Customer Service Coordinator', new Set())
+        && !jobRelevanceMatch(title, 'Administrative Assistant', new Set())),
+      'Job board relevance filtering: all ten snapshot RemoteOK junk titles remain rejected');
+      assert(
+        jobRelevanceMatch('Service Coordinator', 'Coordinator', new Set()),
+        'Job board relevance filtering: a reasonable single-noun query remains eligible',
+      );
+      const evidence = jobRelevanceEvidence('Customer-Service Representative', 'Customer Service Coordinator', new Set());
+      assert(evidence?.query === 'Customer Service Coordinator'
+        && evidence.requiredMatches === 2
+        && evidence.matchedTerms.includes('customer')
+        && evidence.matchedTerms.includes('service'),
+      'Job board relevance filtering: a kept remote-feed row exposes its exact query/title match evidence');
+      const synonymEvidence = jobRelevanceEvidence('Customer Support Systems & Analytics Architect', 'Customer Service Coordinator', new Set());
+      assert(synonymEvidence?.matchedConcepts?.some(match => match.queryTerm === 'service'
+        && match.matched === 'support' && match.kind === 'synonym'),
+      'Job board relevance filtering: telemetry labels the exact adjacent role synonym that admitted a row');
+      assert(jobRelevanceEvidence('Coffee Roaster Campos Coffee', 'Customer Service Coordinator', new Set()) === null,
+        'Job board relevance filtering: rejected rows produce no misleading match evidence');
       return { geoTerms: [...geoTerms].sort(), fallback: true };
     },
   },
@@ -3044,6 +3125,10 @@ const tests = [
     run: () => {
       const events = Array.from({ length: 200 }, (_, i) => `EVT ${i} something happened on the canvas`);
       const logs = Array.from({ length: 60 }, (_, i) => `[Marketplace] LOG ${i} scrape/resolve detail line`);
+      const fullFilterSummary = buildFilterSummaryMarkdown({
+        filterCode: 'FULL',
+        filterStats: { eventsShown: events.length, eventsTotal: events.length, omittedSections: [] },
+      });
 
       // Small base, tiny cap unreachable: nothing truncated, everything present.
       const roomy = enforceClipboardMarkdownCap('# Bug Report\nbody\n', events, logs, 1_000_000);
@@ -3055,7 +3140,7 @@ const tests = [
       // Phase 1: base fits but full tail doesn't — oldest events trimmed first,
       // newest events + the logs survive.
       const cap = 8_000;
-      const smallBase = '# Bug Report\n' + 'x'.repeat(2_000) + '\n';
+      const smallBase = '# Bug Report\n' + fullFilterSummary + '\n' + 'x'.repeat(2_000) + '\n';
       const phase1 = enforceClipboardMarkdownCap(smallBase, events, logs, cap);
       assert(phase1.markdown.length <= cap, `Clipboard cap: phase-1 output must respect the cap (${phase1.markdown.length} <= ${cap})`);
       assert(phase1.trimmedEventCount > 0 && !phase1.hardTruncated, 'Clipboard cap: phase-1 should trim oldest events, not hard-truncate');
@@ -3063,10 +3148,16 @@ const tests = [
         'Clipboard cap: phase-1 keeps the NEWEST events and sheds the oldest');
       assert(phase1.markdown.includes('## Recent Main-Process Logs') && phase1.markdown.includes('LOG 59'),
         'Clipboard cap: phase-1 must not sacrifice the main-process logs');
+      assert(phase1.markdown.includes(`clipboard retained ${events.length - phase1.trimmedEventCount} of ${events.length} event line(s)`)
+        && !phase1.markdown.includes(`event log kept all ${events.length} line(s)`),
+      'Clipboard cap: phase-1 FULL summary reports final retained events, not the pre-cap selection');
+      assert(phase1.markdown.includes(`retained ${events.length - phase1.trimmedEventCount} of ${events.length} most-recent event line(s)`)
+        && phase1.markdown.includes(`${logs.length - phase1.trimmedLogCount} of ${logs.length} most-recent main-process log line(s)`),
+      'Clipboard cap: phase-1 banner quantifies retained event and log lines');
 
       // Phase 2: the static base ALONE exceeds the cap (the bug from this report).
       // The logs + most-recent events MUST survive; the base tail is what gets cut.
-      const giantBase = '# Bug Report\nNARRATIVE TOP\n' + 'Z'.repeat(40_000) + '\n## Node Diagnostics\nNODE TAIL\n';
+      const giantBase = '# Bug Report\n' + fullFilterSummary + '\nNARRATIVE TOP\n' + 'Z'.repeat(40_000) + '\n## Node Diagnostics\nNODE TAIL\n';
       const phase2 = enforceClipboardMarkdownCap(giantBase, events, logs, cap);
       assert(phase2.markdown.length <= cap, `Clipboard cap: phase-2 output must respect the cap (${phase2.markdown.length} <= ${cap})`);
       assert(phase2.hardTruncated, 'Clipboard cap: phase-2 should flag a hard truncation');
@@ -3076,6 +3167,12 @@ const tests = [
         'Clipboard cap: phase-2 MUST preserve the main-process logs (regression guard)');
       assert(phase2.markdown.includes('NARRATIVE TOP') && !phase2.markdown.includes('NODE TAIL'),
         'Clipboard cap: phase-2 keeps the curated top of the base and sheds its low-value tail');
+      assert(phase2.markdown.includes(`clipboard retained ${events.length - phase2.trimmedEventCount} of ${events.length} event line(s)`)
+        && !phase2.markdown.includes(`event log kept all ${events.length} line(s)`),
+      'Clipboard cap: hard-capped FULL summary reports final retained events, not the pre-cap selection');
+      assert(phase2.markdown.includes(`retained ${events.length - phase2.trimmedEventCount} of ${events.length} most-recent event line(s)`)
+        && phase2.markdown.includes(`${logs.length - phase2.trimmedLogCount} of ${logs.length} most-recent main-process log line(s)`),
+      'Clipboard cap: hard-cap banner quantifies retained event and log lines');
       return { phase1Len: phase1.markdown.length, phase2Len: phase2.markdown.length, phase1Trimmed: phase1.trimmedEventCount };
     },
   },
@@ -3214,6 +3311,42 @@ const tests = [
           && report.includes('`Camera Operator Toronto, ON jobs`')
           && report.includes('`Film Editor Toronto jobs`'),
         'report renders the actual Google keyword queries, including the deduplicated canonical-location expansion');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'job pipeline report: remote-feed relevance trace shows title evidence, not tags',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = { nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search, resolves: telemetry.resolves };
+      Object.assign(telemetry, {
+        nodeId: 'remote-relevance-diagnostics', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 1, raw: 1, deduped: 1, ageDropped: 0, historyDropped: 0, kept: 1,
+          remoteRelevance: {
+            remoteok: [{
+              url: 'https://remoteok.com/l/customer-support', title: 'Customer Support Specialist', company: 'Acme',
+              matched: [{
+                query: 'Customer Service Coordinator', matchedTerms: ['customer', 'service'], requiredMatches: 2,
+                matchedConcepts: [
+                  { queryTerm: 'customer', matched: 'customer', kind: 'exact' },
+                  { queryTerm: 'service', matched: 'support', kind: 'synonym' },
+                ],
+              }],
+              tags: ['customer-service', 'support'],
+            }],
+          },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['remote-relevance-diagnostics']), null, null);
+        assert(report.includes('Remote-feed relevance trace')
+          && report.includes('`Customer Service Coordinator` → [customer, service→support]/2 required')
+          && report.includes('tags: customer-service, support'),
+        'report records exact and synonym title evidence separately from RemoteOK tags');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -3399,6 +3532,37 @@ const tests = [
       const orderDependent = dedupJobsAcrossSources([noLocationFirst, nycReq, sfReq]);
       assert(orderDependent.length === 2,
         `dedupJobsAcrossSources: an unknown-location entry seen FIRST must not swallow two distinct later cities, got ${orderDependent.length}`);
+
+      // Same source + same title/company/location is NOT enough evidence to
+      // collapse two concurrent requisitions. Native IDs are authoritative.
+      const sameSourceA = { title: 'Front Desk Agent', company: 'Acme Hotels', location: 'Toronto, ON', source: 'indeed', jobkey: 'a', url: 'https://indeed.test/a' };
+      const sameSourceB = { ...sameSourceA, jobkey: 'b', url: 'https://indeed.test/b' };
+      assert(dedupJobsAcrossSources([sameSourceA, sameSourceB]).length === 2,
+        'dedupJobsAcrossSources: same-source distinct listing IDs survive even with identical title/company/location');
+      assert(dedupJobsAcrossSources([sameSourceA, { ...sameSourceA }]).length === 1,
+        'dedupJobsAcrossSources: exact same-source listing ID still collapses query/page overlap');
+
+      // Real cross-board shape: one source decorates the company/location while
+      // both carry the same full JD. The substantial content fingerprint is a
+      // safe secondary identity; city remains part of the guard so templated
+      // multi-location requisitions do not collapse.
+      const fullJdA = 'Requisition 2026-107. ' + 'Customer service communications responsibilities and requirements. '.repeat(12);
+      const fullJdB = 'Requisition 2026-107! ' + 'Customer service communications responsibilities and requirements.'.repeat(12);
+      const glassdoorCopy = {
+        title: 'Customer Service Coordinator, Communications',
+        company: 'Town of Saugeen Shores, Ontario', location: 'Port Elgin',
+        source: 'glassdoor', snippet: fullJdA,
+      };
+      const indeedCopy = {
+        title: 'Customer Service Coordinator, Communications',
+        company: 'Town of Saugeen Shores', location: 'Port Elgin, ON',
+        source: 'indeed', snippet: fullJdB,
+      };
+      const otherCityCopy = { ...indeedCopy, location: 'Southampton, ON', source: 'linkedin' };
+      assert(dedupJobsAcrossSources([glassdoorCopy, indeedCopy]).length === 1,
+        'cross-source copies with the same title/city/full JD collapse despite company and location decoration');
+      assert(dedupJobsAcrossSources([glassdoorCopy, otherCityCopy]).length === 2,
+        'same title/full JD in a different city remains a distinct requisition');
 
       return { crossSource: crossSource.length, distinctCities: distinctCities.length, sameCity: sameCity.length, orderDependent: orderDependent.length };
     },
@@ -3738,6 +3902,25 @@ const tests = [
     },
   },
   {
+    name: 'computeJobTreeView: malformed reachable childIds cycle remains renderable',
+    run: () => {
+      // A hand-edited/legacy canvas can contain a loop beneath an otherwise
+      // valid root. The count pass was guarded, but the visibility walk used to
+      // recurse forever as soon as the cycle had a matching card.
+      const nodes = [
+        { id: 'hub', type: 'jobboard', position: { x: 0, y: 0 }, data: {} },
+        { id: 'root', type: 'jobgroup', hidden: false, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'likelihood', expanded: true, childIds: ['loop'] } },
+        { id: 'loop', type: 'jobgroup', hidden: true, position: { x: 0, y: 0 }, data: { hubId: 'hub', kind: 'salary', expanded: true, childIds: ['loop', 'card'] } },
+        { id: 'card', type: 'jobcard', hidden: true, position: { x: 0, y: 0 }, data: { hubId: 'hub', matchScore: 90, source: 'indeed' } },
+      ];
+      const out = computeJobTreeView(nodes, 'hub', {});
+      assert(out.find(n => n.id === 'root')?.hidden === false, 'cycle: reachable root remains visible');
+      assert(out.find(n => n.id === 'loop')?.hidden === false, 'cycle: first loop group remains visible');
+      assert(out.find(n => n.id === 'card')?.hidden === false, 'cycle: matching card remains visible');
+      return { ok: true };
+    },
+  },
+  {
     name: 'Job tree: likelihood → salary → role hierarchy',
     run: () => {
       const mk = (title, score, salary, url) => ({
@@ -3867,6 +4050,7 @@ const tests = [
         '$2,500 Monthly': 30000,
         '$71K': 71000,
         '$1.5M a year': 1500000,
+        '$65K/yr': 65000,
         '$147,000-$175,000': 147000,
         '$80,000': 80000,
         '$172,333/year': 172333,
@@ -3878,6 +4062,26 @@ const tests = [
       };
       for (const [raw, expected] of Object.entries(annualized)) {
         assert(parseSalaryToNumeric(raw) === expected, `salary parser: ${raw} → ${expected}`);
+      }
+      assert(parseSalaryToNumeric('$65K/hr') === 0,
+        'salary parser: implausible abbreviated hourly rate stays Unspecified instead of overflowing annual salary ranges');
+      const malformedRange = salaryRangeAnomaly('$23.50–$250.00 an hour');
+      assert(parseSalaryToNumeric('$23.50–$250.00 an hour') === 48880,
+        'salary parser: range placement remains lower-endpoint based');
+      assert(malformedRange?.lowerAnnual === 48880 && malformedRange?.upperAnnual === 520000 && malformedRange?.ratio > 10,
+        'salary anomaly: implausibly wide hourly range exposes both annualized endpoints without changing placement');
+      assert(salaryRangeAnomaly('$15.68–$26.61 an hour') === null,
+        'salary anomaly: ordinary compensation ranges stay quiet');
+      const wwrCadenceCases = {
+        'Starting base compensation: $2,500 USD per month': ['$2,500 USD per month', 30000],
+        'Compensation: $1,600 CAD/week.': ['$1,600 CAD/week', 83200],
+        'Base pay is $1,000 per day.': ['$1,000 per day', 260000],
+        'Salary: $80,000 USD annually.': ['$80,000 USD annually', 80000],
+      };
+      for (const [text, [rawSalary, annualSalary]] of Object.entries(wwrCadenceCases)) {
+        const extracted = extractSalaryFromText(text);
+        assert(extracted === rawSalary, `WWR salary extractor: preserves currency + cadence for ${text}`);
+        assert(parseSalaryToNumeric(extracted) === annualSalary, `WWR salary extractor: ${extracted} → ${annualSalary}`);
       }
       assert(parseSalaryToNumeric('401k matching') === 0, 'salary parser: benefit prose is not salary');
       assert(parseSalaryToNumeric('3 years experience') === 0, 'salary parser: incidental numeric prose is not salary');
@@ -3927,6 +4131,12 @@ const tests = [
         'JSON-LD salary: unitless small values defer to the visible salary chip');
       assert(formatJsonLdSalary({ value: { minValue: 80000, maxValue: 120000 } }) === '$80,000 - $120,000',
         'JSON-LD salary: unitless annual-scale ranges remain useful');
+      assert(reconcileZipRecruiterDomSalary('$65K/hr', 'Base Salary: Starting at $65,000 annually') === '$65,000 annually',
+        'ZipRecruiter: malformed abbreviated hourly chip is replaced by explicit annual pay from the JD');
+      assert(reconcileZipRecruiterDomSalary('$65K/hr', 'Responsibilities and qualifications only.') === '',
+        'ZipRecruiter: malformed abbreviated hourly chip is blanked when the JD cannot correct it');
+      assert(reconcileZipRecruiterDomSalary('$29/hr', 'Base Salary: Starting at $65,000 annually') === '$29/hr',
+        'ZipRecruiter: plausible hourly chips remain authoritative over a separate annual JD figure');
       assert(parseSalaryToNumeric('$19 Hourly') === 39520,
         'salary parser: capitalized word-form hourly cadence annualizes');
       assert(parseSalaryToNumeric('$19') === 0,
@@ -4061,13 +4271,44 @@ const tests = [
         'fingerprint: equal-sum rescore ([80,90] vs [85,85]) → different fp');
       assert(moduleFingerprint(a) !== moduleFingerprint([{ matchScore: 90, title: 'Lead' }, { matchScore: 80, title: 'PM' }]),
         'fingerprint: same scores, different jobs → different fp');
-      assert(moduleFingerprint(null) === '2:0:0', 'fingerprint: nullish → versioned empty');
+      assert(moduleFingerprint([{ matchScore: 90, title: 'Manager A', url: 'https://jobs/old', source: 'indeed' }])
+          !== moduleFingerprint([{ matchScore: 90, title: 'Manager B', url: 'https://jobs/new', source: 'linkedin' }]),
+        'fingerprint: same score/title initial/title length but different job identity → different fp');
+      assert(moduleFingerprint([{ matchScore: 90, title: 'Manager A', url: 'https://jobs/old', reasoning: 'old reason' }])
+          !== moduleFingerprint([{ matchScore: 90, title: 'Manager A', url: 'https://jobs/old', reasoning: 'new reason' }]),
+        'fingerprint: card-visible reasoning changes invalidate a board');
+      assert(moduleFingerprint(null).startsWith('3:0:'), 'fingerprint: nullish → v3 empty fingerprint');
       // Legacy detection: pre-versioned signatures adopt-as-baseline, not stale.
       assert(isLegacyCombineSignature('hub-1=5.10|hub-2=3.7'), 'legacy count.sum signature detected');
+      assert(isLegacyCombineSignature('hub-1=2:1:123'), 'v2 fingerprints adopt as a safe v3 baseline');
       assert(!isLegacyCombineSignature(combineSignature([{ id: 'A', fingerprint: moduleFingerprint(a) }])),
         'current-format signature is not legacy');
       assert(!isLegacyCombineSignature('') && !isLegacyCombineSignature(null),
         'empty/null signature is not legacy (handled by the null-adopt path)');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'Job Board: deriveBoardCardStats reconciles dismissed cards and clamps filters',
+    run: () => {
+      const nodes = [
+        { id: 'board', type: 'jobboard', data: {} },
+        { id: 'a', type: 'jobcard', data: { hubId: 'board', source: 'indeed', matchScore: 82 } },
+        { id: 'b', type: 'jobcard', data: { hubId: 'board', source: 'linkedin', matchScore: 90 } },
+        { id: 'other', type: 'jobcard', data: { hubId: 'other-board', source: 'indeed', matchScore: 100 } },
+      ];
+      const afterDismiss = deriveBoardCardStats(nodes.filter(n => n.id !== 'b'), 'board', {
+        scoreThreshold: 90,
+        sourceFilter: 'linkedin',
+      });
+      assert(afterDismiss.resultCount === 1, 'board stats: only live board-owned cards count');
+      assert(JSON.stringify(afterDismiss.finalSourceCounts) === JSON.stringify({ indeed: 1 }), 'board stats: source counts remove dismissed card');
+      assert(afterDismiss.scoreRangeMin === 82 && afterDismiss.scoreRangeMax === 82, 'board stats: score range follows live cards');
+      assert(afterDismiss.scoreThreshold === 82, 'board stats: out-of-range active threshold clamps to remaining score');
+      assert(afterDismiss.sourceFilter === null, 'board stats: dismissed active source filter clears');
+      const empty = deriveBoardCardStats([], 'board', { scoreThreshold: 80, sourceFilter: 'indeed' });
+      assert(empty.resultCount === 0 && empty.scoreRangeMin === 0 && empty.scoreRangeMax === 100 && empty.scoreThreshold === 0,
+        'board stats: empty board returns stable default score bounds');
       return { ok: true };
     },
   },
@@ -5648,6 +5889,22 @@ const tests = [
         && a.unclearSamples.some(sample => /Greater Montreal/.test(sample)),
       'bare Canadian-looking cities/metros remain unclear rather than falsely off-target');
       assert(a.remote === 1 && a.unknown === 1, 'remote board and missing location retain their own buckets');
+      return { ok: true, adherence: a };
+    },
+  },
+  {
+    name: 'summarizeLocationAdherence: subdivision codes require a structured location slot',
+    run: () => {
+      const a = summarizeLocationAdherence([
+        { title: 'French role', location: 'Office in Paris', source: 'google' },
+        { title: 'French role 2', location: 'On-site, Paris', source: 'google' },
+        { title: 'Ontario role', location: 'Toronto, ON', source: 'google' },
+        { title: 'US role', location: 'Haysi, VA 24256', source: 'indeed' },
+      ], 'Canada');
+      assert(a.matched === 1, `only structured Toronto, ON should count Canadian, got ${a.matched}`);
+      assert(a.offTarget === 1 && /Haysi/.test(a.offSamples[0] || ''),
+        `only structured VA should be a confirmed US leak, got ${JSON.stringify(a.offSamples)}`);
+      assert(a.unclear === 2, `plain English in/on must not become IN/ON state/province evidence, got ${a.unclear}`);
       return { ok: true, adherence: a };
     },
   },
@@ -7376,6 +7633,8 @@ const tests = [
       const jobs = [
         { source: 'glassdoor', company: 'Marshalls\n3.4', title: 'Retail Associate', location: 'Toronto, ON', url: 'https://www.glassdoor.ca/job-listing/retail-associate-JV_IC1.htm' },
         { source: 'indeed', company: 'Acme', title: 'Support Specialist', location: 'Toronto, ON', url: 'https://ca.indeed.com/rc/clk?jk=history-abc' },
+        { source: 'indeed', company: 'Acme Hotels', title: 'Front Desk Agent', location: 'Toronto, ON', url: 'https://ca.indeed.com/rc/clk?jk=front-desk-a' },
+        { source: 'indeed', company: 'Acme Hotels', title: 'Front Desk Agent', location: 'Toronto, ON', url: 'https://ca.indeed.com/rc/clk?jk=front-desk-b' },
       ];
       try {
         const first = await appendJobsHistory(canvasPath, jobs);
@@ -7385,6 +7644,11 @@ const tests = [
         assert(readBack.length === jobs.length && readBack[0].company === 'Marshalls 3.4',
           `newlines collapse inside one recoverable CSV row, got ${JSON.stringify(readBack)}`);
         assert(second.written === 0, `already-written rows must not append forever, got ${second.written}`);
+        const freshSameTuple = dedupAgainstHistory([
+          { source: 'indeed', company: 'Acme Hotels', title: 'Front Desk Agent', location: 'Toronto, ON', url: 'https://ca.indeed.com/rc/clk?jk=front-desk-c' },
+        ], readBack);
+        assert(freshSameTuple.kept.length === 1,
+          'history identity: a new stable URL survives despite an existing same-title/company/location requisition');
         return { ok: true, written: first.written };
       } finally {
         await fs.promises.rm(base, { recursive: true, force: true });

@@ -89,6 +89,57 @@ function normalizedLocationOrNull(job) {
   return loc ? loc : null;
 }
 
+function normalizedUrlOrNull(job) {
+  const url = keyPart(job?.url);
+  return url || null;
+}
+
+function normalizedNativeIdOrNull(job) {
+  const id = keyPart(job?.jobkey || job?.jobKey || job?.jobId || job?.id);
+  return id || null;
+}
+
+// Query overlap can make one source return the same card twice. That narrow,
+// exact listing check must stay distinct from the title/company cross-board
+// heuristic: two concurrent requisitions can legitimately share title,
+// employer, and location while carrying different IDs / URLs.
+function sameSourceListingIdentity(a, b) {
+  const aNative = normalizedNativeIdOrNull(a);
+  const bNative = normalizedNativeIdOrNull(b);
+  if (aNative && bNative) return aNative === bNative;
+  const aUrl = normalizedUrlOrNull(a);
+  const bUrl = normalizedUrlOrNull(b);
+  return !!aUrl && aUrl === bUrl;
+}
+
+// A secondary, deliberately high-confidence cross-board identity signal. Some
+// boards decorate the employer ("Town of …, Ontario") or location ("Surrey"
+// vs "Surrey, BC V4N 4C5") differently, so the ordinary title+company+location
+// key cannot recognize the same posting. When two DIFFERENT sources carry the
+// same substantial full JD, title, and city, they are the same listing despite
+// that metadata decoration. Strip punctuation/whitespace because HTML-to-text
+// paths differ there; keep letters+digits so dates, requisition ids, and pay
+// still distinguish otherwise templated postings. Short snippets are excluded
+// because a shared boilerplate teaser is not strong enough evidence.
+function descriptionFingerprint(job) {
+  const text = String(job?.snippet || job?.description || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  return text.length >= 500 ? text : '';
+}
+
+function locationCityOrNull(job) {
+  const raw = String(job?.location || '').split(',')[0];
+  const city = raw.normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  return city || null;
+}
+
 /**
  * Cross-source dedup: collapses the SAME posting scraped from two different
  * boards (which necessarily have two different URLs) while still keeping
@@ -115,22 +166,49 @@ function normalizedLocationOrNull(job) {
  * exact-match comparison, so a second, different city still starts its own
  * group entry instead of being swallowed too.
  */
-export function dedupJobsAcrossSources(jobs) {
+export function dedupJobsAcrossSources(jobs, { onDuplicate } = {}) {
   const arr = Array.isArray(jobs) ? jobs : [];
-  const groups = new Map(); // titleCompanyKey -> [{ job, loc }] kept representatives, in first-seen order
+  const groups = new Map(); // titleCompanyKey -> [{ job, loc, source }] kept representatives, in first-seen order
+  const contentGroups = new Map(); // title|full-JD fingerprint -> [{ source, city, job }]
   const result = [];
   for (const job of arr) {
+    const content = descriptionFingerprint(job);
+    const source = keyPart(job?.source);
+    const city = locationCityOrNull(job);
+    if (content) {
+      const contentKey = `${keyPart(job?.title)}|${content}`;
+      const contentReps = contentGroups.get(contentKey) || [];
+      const contentMatch = contentReps.find(rep =>
+        rep.source !== source && (city === null || rep.city === null || city === rep.city));
+      if (contentMatch) {
+        onDuplicate?.({ reason: 'cross-source-full-description', kept: contentMatch.job, dropped: job });
+        continue;
+      }
+      contentReps.push({ source, city, job });
+      contentGroups.set(contentKey, contentReps);
+    }
     const groupKey = jobTitleCompanyKey(job);
     const loc = normalizedLocationOrNull(job);
     const kept = groups.get(groupKey);
     if (!kept) {
-      groups.set(groupKey, [{ job, loc }]);
+      groups.set(groupKey, [{ job, loc, source }]);
       result.push(job);
       continue;
     }
-    const match = kept.find((rep) => loc === null || rep.loc === null || loc === rep.loc);
+    // Legacy/unit-test rows may omit source entirely. In that ambiguous case
+    // retain the historic cross-board heuristic; only a known shared source
+    // switches us to the stricter native-id/URL comparison.
+    const isKnownSameSource = (rep) => !!source && !!rep.source && rep.source === source;
+    const sameSourceMatch = kept.find(rep => isKnownSameSource(rep) && sameSourceListingIdentity(rep.job, job));
+    if (sameSourceMatch) {
+      onDuplicate?.({ reason: 'same-source-listing-id', kept: sameSourceMatch.job, dropped: job });
+      continue;
+    }
+    // This deliberately excludes same-source rows. The title/company/location
+    // heuristic is only reliable for copies from DIFFERENT boards.
+    const match = kept.find(rep => !isKnownSameSource(rep) && (loc === null || rep.loc === null || loc === rep.loc));
     if (!match) {
-      kept.push({ job, loc });
+      kept.push({ job, loc, source });
       result.push(job);
       continue;
     }
@@ -138,6 +216,7 @@ export function dedupJobsAcrossSources(jobs) {
     // known-location job — adopt that location so later jobs compare against
     // the real city, not "anything goes" forever.
     if (match.loc === null && loc !== null) match.loc = loc;
+    onDuplicate?.({ reason: 'cross-source-title-company-location', kept: match.job, dropped: job });
   }
   return result;
 }

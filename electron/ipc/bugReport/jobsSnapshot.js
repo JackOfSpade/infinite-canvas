@@ -107,6 +107,19 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       `already-seen/history ${s.historyDropped} → **new: ${s.kept}**`,
     );
     lines.push('- _(dedup / age / history drops are by-design — not jobs we failed to analyze)_');
+    const dedup = s.dedupProvenance;
+    if (dedup?.total > 0) {
+      const summary = Object.entries(dedup.counts || {}).map(([reason, count]) => `${reason}=${count}`).join(', ');
+      lines.push(`- Dedup provenance: ${dedup.total} drop(s)${summary ? ` · ${summary}` : ''}.`);
+      for (const item of Array.isArray(dedup.entries) ? dedup.entries : []) {
+        const kept = item.kept || {};
+        const dropped = item.dropped || {};
+        const keptId = kept.nativeId || kept.url || '(no listing ID)';
+        const droppedId = dropped.nativeId || dropped.url || '(no listing ID)';
+        lines.push(`  - \`${item.reason || 'unknown'}\`: kept ${kept.source || '?'} "${kept.title || '?'}" — ${kept.location || '(no location)'} [${keptId}] · dropped ${dropped.source || '?'} [${droppedId}]`);
+      }
+      if (dedup.omitted > 0) lines.push(`  - _${dedup.omitted} additional dedup drop(s) omitted from this bounded trace._`);
+    }
     // Look-back window the run actually used + a per-platform verdict on whether
     // it bound each source. The window is enforced two ways: a server-side date
     // param (the source never serves out-of-window rows) AND a global client-side
@@ -216,6 +229,29 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (Array.isArray(s.googleQueryStrings) && s.googleQueryStrings.length > 0) {
         lines.push('- Google keyword queries sent (canonical location appended when absent):');
         for (const q of s.googleQueryStrings) lines.push(`  - \`${q}\``);
+      }
+    }
+    // RemoteOK and WWR are whole-feed sources with no server-side role query.
+    // Show the exact title role concepts that admitted each surviving remote row, plus
+    // RemoteOK's non-authoritative tags, so a report can distinguish a matcher
+    // defect from a confusing board metadata field without dumping the whole feed.
+    if (s.remoteRelevance && Object.keys(s.remoteRelevance).length > 0) {
+      lines.push('- Remote-feed relevance trace (surviving jobs only; title matching — `service→support` denotes an adjacent role synonym, and RemoteOK tags are context, not match evidence):');
+      for (const [sourceId, rows] of Object.entries(s.remoteRelevance)) {
+        for (const row of rows) {
+          const title = row?.title ? `"${row.title}"` : '(untitled)';
+          const company = row?.company ? ` — ${row.company}` : '';
+          const matches = Array.isArray(row?.matched) ? row.matched : [];
+          const why = matches.map(m => {
+            const terms = Array.isArray(m?.matchedConcepts)
+              ? m.matchedConcepts.map(concept => `${concept?.queryTerm || '?'}${concept?.kind === 'synonym' ? `→${concept.matched || '?'}` : ''}`).join(', ')
+              : (Array.isArray(m?.matchedTerms) ? m.matchedTerms.join(', ') : '—');
+            const required = m?.requiredMatches ? `/${m.requiredMatches} required` : '';
+            return `\`${m?.query || '?'}\` → [${terms}]${required}`;
+          }).join('; ') || '(no match evidence recorded)';
+          const tags = Array.isArray(row?.tags) && row.tags.length ? ` · tags: ${row.tags.join(', ')}` : '';
+          lines.push(`  - [${sourceId}] ${title}${company}: ${why}${tags}`);
+        }
       }
     }
     // Listing language: how many kept jobs came through in a non-English language
@@ -1111,6 +1147,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const raw = item.rawSalary ? `"${item.rawSalary}"` : '(none)';
           const annual = item.annualSalary > 0 ? `$${Number(item.annualSalary).toLocaleString('en-US')}/yr` : 'unparseable';
           lines.push(`  - #${item.index} ${title}${source} — ${raw} → ${annual} → **${item.salaryRange || 'Unspecified'}**; ${item.likelihood || 'Match'}; ${item.role || 'Other'}`);
+          if (item.salaryAnomaly) {
+            const lo = Number(item.salaryAnomaly.lowerAnnual || 0).toLocaleString('en-US');
+            const hi = Number(item.salaryAnomaly.upperAnnual || 0).toLocaleString('en-US');
+            lines.push(`    - ⚠️ salary-range anomaly: $${lo}–$${hi}/yr (${item.salaryAnomaly.reason || 'implausibly wide range'}). Kept the lower endpoint for deterministic placement; verify the source chip.`);
+          }
           // Only for values mined out of the description body: shows whether the
           // figure was actually the role's pay or a bonus/equity/revenue number
           // that happened to sit next to a cadence word.

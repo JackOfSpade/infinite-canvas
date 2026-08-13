@@ -134,7 +134,7 @@ export const CODE_DEFINITIONS = {
     label: 'Results Tree & Minimap',
     description: 'Job/results cascade expand/collapse/show-more events (and minimap). Use for "minimap or canvas not reflecting collapsed/expanded cards" or node visibility/culling bugs — these interactions go through setNodes, so they would NOT appear in the log without this category.',
     logFilter: line =>
-      /\[JobTree\]|minimap/i.test(line),
+      /\[JobTree\]|\[JobBoard\]|\[JobCard\]|minimap/i.test(line),
   },
 
   TAXONOMY: {

@@ -91,10 +91,11 @@ function normText(s) {
 }
 
 /**
- * A job is considered a duplicate if it shares ANY of these keys with a
- * history row:
- *   - canonical URL (catches the same URL surfaced from different aggregators)
- *   - (title + company + location) (catches reposts with a new URL)
+ * A job with a stable listing URL is considered a duplicate only when that URL
+ * repeats. A title/company/location tuple is a FALLBACK for records without a
+ * usable URL. Treating both as simultaneous keys silently merged distinct,
+ * same-employer requisitions in the same city merely because they shared a
+ * generic title ("Front Desk Agent" is a common real-world example).
  *
  * Location is part of the key on purpose: a "Software Engineer" req at
  * Google NYC and one at Google SF are separate opportunities — the user
@@ -103,9 +104,9 @@ function normText(s) {
  * the worst case is one extra over-show against legacy CSV rows.
  */
 export function dedupKeysFor(item) {
-  const keys = [];
   const url = normUrl(item?.url);
-  if (url) keys.push(`u:${url}`);
+  if (url) return [`u:${url}`];
+  const keys = [];
   const title = normText(item?.title);
   const company = normText(item?.company);
   const location = normText(item?.location);

@@ -53,19 +53,10 @@ export const POSTED_DATE_PATTERN =
 // unit is present.
 const RELATIVE_MATCHER = new RegExp(`(\\d+)\\+?\\s*(${UNIT_ALTERNATION})\\b`);
 
-export function parsePostedDate(raw) {
+export function parsePostedDate(raw, now = new Date()) {
   if (!raw) return null;
   const s = String(raw).trim();
   if (!s) return null;
-
-  // Skip the lenient Date.parse for a bare number ('5' → V8 reads it as a
-  // year/month, '2024' → a year). Those aren't real posted dates; let them
-  // fall through to the relative-unit matcher (which won't match) → null,
-  // rather than fabricating a date decades off.
-  if (!/^\d+$/.test(s)) {
-    const iso = Date.parse(s);
-    if (!isNaN(iso)) return new Date(iso);
-  }
 
   const lower = s.toLowerCase();
   // 'active today' arrives embedded in longer Indeed strings → substring match;
@@ -74,10 +65,10 @@ export function parsePostedDate(raw) {
   // doubled spaces ("posted  today") verbatim.
   const norm = lower.replace(/\s+/g, ' ');
   if (TODAY_PHRASES.includes(norm) || lower.includes('active today')) {
-    return new Date();
+    return new Date(now);
   }
   if (lower === 'yesterday') {
-    const d = new Date();
+    const d = new Date(now);
     d.setDate(d.getDate() - 1);
     return d;
   }
@@ -90,18 +81,41 @@ export function parsePostedDate(raw) {
     const n = parseInt(m[1], 10);
     const unit = m[2];
     const mult = UNIT_TO_DAYS.find(([re]) => re.test(unit))?.[1] ?? 0;
-    const d = new Date();
+    const d = new Date(now);
     d.setDate(d.getDate() - n * mult);
     return d;
+  }
+
+  // Board cards often render an absolute date without a year ("May 29").
+  // V8's Date.parse assigns those to 2001, causing a current posting to be
+  // dropped by the look-back filter. Resolve this format to the most recent
+  // occurrence instead: current year unless that calendar day is still ahead.
+  const monthDay = lower.match(/^(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?$/i);
+  if (monthDay) {
+    const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    const month = monthNames.indexOf(monthDay[1].slice(0, 3).toLowerCase());
+    const day = Number(monthDay[2]);
+    const candidate = new Date(now.getFullYear(), month, day);
+    if (candidate.getMonth() !== month || candidate.getDate() !== day) return null;
+    if (candidate.getTime() > now.getTime()) candidate.setFullYear(candidate.getFullYear() - 1);
+    return candidate;
+  }
+
+  // Delegate only dates carrying an explicit year to Date.parse. Its handling
+  // of bare/partial dates is intentionally unsuitable for a posting timestamp.
+  if (/^\d+$/.test(s)) return null;
+  if (/(?:^|\D)(?:19|20)\d{2}(?:\D|$)/.test(s)) {
+    const absolute = Date.parse(s);
+    if (!isNaN(absolute)) return new Date(absolute);
   }
   return null;
 }
 
-export function filterJobsByAge(jobs, maxAgeDays) {
+export function filterJobsByAge(jobs, maxAgeDays, now = new Date()) {
   if (!maxAgeDays || maxAgeDays <= 0) return jobs;
-  const cutoff = Date.now() - maxAgeDays * 86400000;
+  const cutoff = now.getTime() - maxAgeDays * 86400000;
   return jobs.filter(j => {
-    const d = parsePostedDate(j.posted);
+    const d = parsePostedDate(j.posted, now);
     if (!d) return true;
     return d.getTime() >= cutoff;
   });

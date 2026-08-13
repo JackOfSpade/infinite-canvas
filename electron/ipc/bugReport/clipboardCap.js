@@ -34,6 +34,27 @@ ${lines.join('\n')}
 
 const EVENT_HISTORY_HEADING = '## Event History\n';
 
+// The filter summary is assembled before the clipboard cap runs. When a FULL
+// report subsequently sheds old events, its otherwise-accurate selection
+// summary ("event log kept all N line(s)") would describe data that is no
+// longer present in the copied markdown. Make that distinction explicit in the
+// final artifact: FULL selected every event, while the clipboard retained only
+// the newest subset.
+function clarifyCappedFilterSummary(baseMarkdown, retainedEvents, totalEvents) {
+  if (retainedEvents >= totalEvents) return baseMarkdown;
+  return baseMarkdown.replace(
+    /event log kept all (\d+) line\(s\)/g,
+    (_, selected) =>
+      `event log selected all ${selected} line(s) before clipboard capping; ` +
+      `clipboard retained ${retainedEvents} of ${totalEvents} event line(s)`
+  );
+}
+
+function clipboardRetentionDetail(retainedEvents, totalEvents, retainedLogs, totalLogs) {
+  return `retained ${retainedEvents} of ${totalEvents} most-recent event line(s) and ` +
+    `${retainedLogs} of ${totalLogs} most-recent main-process log line(s)`;
+}
+
 // A "floor" tail: a guaranteed minimum of the MOST-RECENT logs + events, balanced
 // so neither fully crowds out the other. The main-process logs (a bounded ~60-line
 // ring buffer holding swallowed-error detail) get up to ~45% of the floor; the
@@ -82,15 +103,50 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
       logs.shift();
       trimmedLogCount++;
     }
-    let notice = '';
-    if (trimmedEventCount > 0 || trimmedLogCount > 0) {
+    // Replacing the pre-cap FULL summary adds a little text. Continue trimming
+    // against that final wording so an accurate explanation never pushes the
+    // copied report over its size limit.
+    let cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.length, allEvents.length);
+    while (cappedBase.length + tailOf(logs, events).length > maxChars && events.length > floor.events.length) {
+      events.shift();
+      trimmedEventCount++;
+      cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.length, allEvents.length);
+    }
+    while (cappedBase.length + tailOf(logs, events).length > maxChars && logs.length > floor.logs.length) {
+      logs.shift();
+      trimmedLogCount++;
+      cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.length, allEvents.length);
+    }
+
+    const buildNotice = () => {
       const parts = [];
       if (trimmedEventCount > 0) parts.push(`${trimmedEventCount} oldest event history line(s)`);
       if (trimmedLogCount > 0) parts.push(`${trimmedLogCount} oldest main-process log line(s)`);
-      notice = `> Clipboard export truncated to ${maxChars} chars by dropping ${parts.join(' and ')} first. Use "Save to file" for the full uncapped report.\n\n`;
+      return `> Clipboard export truncated to ${maxChars} chars: ${clipboardRetentionDetail(events.length, allEvents.length, logs.length, allLogs.length)}; dropped ${parts.join(' and ')}. Use "Save to file" for the full uncapped report.\n\n`;
+    };
+    let notice = buildNotice();
+    while (notice.length + cappedBase.length + tailOf(logs, events).length > maxChars && events.length > floor.events.length) {
+      events.shift();
+      trimmedEventCount++;
+      cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.length, allEvents.length);
+      notice = buildNotice();
     }
-    let out = notice + baseMarkdown + tailOf(logs, events);
-    if (out.length > maxChars) out = baseMarkdown + tailOf(logs, events); // banner didn't fit; data wins
+    while (notice.length + cappedBase.length + tailOf(logs, events).length > maxChars && logs.length > floor.logs.length) {
+      logs.shift();
+      trimmedLogCount++;
+      notice = buildNotice();
+    }
+    let out = notice + cappedBase + tailOf(logs, events);
+    if (out.length > maxChars) {
+      // The explanatory banner itself can be larger than the slack above the
+      // tail floor. Preserve its exact retention counts by shedding the same
+      // low-value static tail used by the hard-cap path, never the banner.
+      const baseNote = '\n\n> ⚠️ Static node/session sections truncated here (low-value tail) — see the logs + event timeline below.\n';
+      const room = maxChars - notice.length - baseNote.length - tailOf(logs, events).length;
+      const cutBase = room > 0 ? cappedBase.slice(0, room) + baseNote : baseNote;
+      out = notice + cutBase + tailOf(logs, events);
+      return { markdown: out, truncated: true, trimmedEventCount, trimmedLogCount, hardTruncated: true };
+    }
     return { markdown: out, truncated: trimmedEventCount > 0 || trimmedLogCount > 0, trimmedEventCount, trimmedLogCount, hardTruncated: false };
   }
 
@@ -103,10 +159,11 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
   const tailMd = tailOf(floor.logs, floor.events);
   const trimmedEventCount = allEvents.length - floor.events.length;
   const trimmedLogCount = allLogs.length - floor.logs.length;
-  const banner = `> Clipboard export hit the ${maxChars}-char cap; the static node/session tail was truncated to keep the most recent main-process logs + event timeline. Use "Save to file" for the full uncapped report.\n\n`;
+  const banner = `> Clipboard export hit the ${maxChars}-char cap; the static node/session tail was truncated to keep the most recent logs + event timeline (${clipboardRetentionDetail(floor.events.length, allEvents.length, floor.logs.length, allLogs.length)}). Use "Save to file" for the full uncapped report.\n\n`;
   const baseNote = '\n\n> ⚠️ Static node/session sections truncated here (low-value tail) — see the logs + event timeline below.\n';
   const room = maxChars - banner.length - baseNote.length - tailMd.length;
-  const cutBase = room > 0 ? baseMarkdown.slice(0, room) + baseNote : baseNote;
+  const cappedBase = clarifyCappedFilterSummary(baseMarkdown, floor.events.length, allEvents.length);
+  const cutBase = room > 0 ? cappedBase.slice(0, room) + baseNote : baseNote;
   let out = banner + cutBase + tailMd;
   if (out.length > maxChars) out = out.slice(0, maxChars); // absolute backstop if the floor tail itself overran
   return { markdown: out, truncated: true, trimmedEventCount, trimmedLogCount, hardTruncated: true };

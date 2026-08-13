@@ -333,6 +333,38 @@ export function formatJsonLdSalary(bs) {
   return '';
 }
 
+/**
+ * ZipRecruiter's client-rendered estimate occasionally combines an annual K
+ * amount with an hourly cadence (for example "$65K/hr"). Prefer an explicit,
+ * pay-anchored annual amount from that listing's own description; if there is
+ * no such correction, omit the corrupt chip rather than presenting false pay.
+ * This deliberately has no dependency on renderer taxonomy helpers.
+ */
+export function reconcileZipRecruiterDomSalary(rawSalary, description) {
+  const raw = String(rawSalary || '').trim();
+  if (!raw) return '';
+  const amount = raw.match(/\$\s?(\d+(?:\.\d+)?)\s*([km])\b/i);
+  const cadence = raw.match(/\b(?:bi[-\s]?weekly|week(?:ly)?|wk|month(?:ly)?|mo|day|daily|hour(?:ly)?|hr)\b|\/\s*(?:bi[-\s]?wk|wk|mo|day|hr)\b/i);
+  if (!amount || !cadence) return raw;
+
+  const base = Number(amount[1]) * (amount[2].toLowerCase() === 'm' ? 1_000_000 : 1_000);
+  const token = cadence[0].toLowerCase();
+  const multiplier = /bi[-\s]?(?:weekly|wk)/.test(token) ? 26
+    : /week|wk/.test(token) ? 52
+      : /month|mo/.test(token) ? 12
+        : /day/.test(token) ? 260
+          : 2080;
+  if (!Number.isFinite(base) || base * multiplier <= 10_000_000) return raw;
+
+  const money = String.raw`\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?`;
+  const annual = String.raw`(?:\s*(?:USD|CAD|AUD|EUR|GBP)\b)?\s*(?:(?:per|a)\s+(?:year|annum)|\/\s*(?:yr|year)|annually|annual|yearly)`;
+  const explicitPay = new RegExp(
+    String.raw`\b(?:base\s+)?(?:salary|compensation|pay)\b[^$]{0,80}(${money}${annual})`,
+    'i',
+  ).exec(String(description || '').replace(/\s+/g, ' '));
+  return explicitPay?.[1]?.trim() || '';
+}
+
 // ── Challenge detection ───────────────────────────────────────────────────────
 async function getChallengeSignals(page) {
   return page.evaluate(() => {
@@ -1087,7 +1119,17 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               logger.info(`[BrowserScraper] ${overlayBase.srcName} desc-miss diag (job ${i + 1}/${enhanced.length}): url="${diag.url}" title="${diag.title}" ldTypes=[${diag.ldTypes.join(',')}] nextData=${diag.hasNextData} ndKeys="${diag.ndPagePropKeys}" body="${diag.bodyHead}"`);
             }
           }
-          if (text || jsonLdSalary) {
+          // A ZipRecruiter estimated-pay chip can be internally contradictory
+          // ("$65K/hr") even when the detail JD states the actual annual base
+          // salary. Reconcile that at the source boundary, before the raw value
+          // reaches scoring/cards/taxonomy. Other sources keep their original
+          // stated/list salary untouched.
+          const sourceSalary = job.salary || jsonLdSalary;
+          const reconciledSalary = cfg.salaryFromDom
+            ? reconcileZipRecruiterDomSalary(sourceSalary, text)
+            : sourceSalary;
+          const salaryChanged = cfg.salaryFromDom && reconciledSalary !== sourceSalary;
+          if (text || jsonLdSalary || salaryChanged) {
             // Backfill description, posted date, and salary — each only when the list
             // extractor didn't already capture it (don't clobber a good relative date
             // like "3 days ago" with an ISO timestamp, or a stated salary with an
@@ -1097,7 +1139,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               ...job,
               ...(text ? { snippet: text } : {}),
               ...(jsonLdDate && !job.posted ? { posted: jsonLdDate } : {}),
-              ...(jsonLdSalary && !job.salary ? { salary: jsonLdSalary } : {}),
+              ...(salaryChanged ? { salary: reconciledSalary } : {}),
+              ...(jsonLdSalary && !job.salary && !salaryChanged ? { salary: jsonLdSalary } : {}),
             };
           }
           // Date-miss diagnostic (once per batch): a description was recovered but

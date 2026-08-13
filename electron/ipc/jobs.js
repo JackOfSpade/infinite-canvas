@@ -47,7 +47,7 @@ import { wrapUntrustedText } from './promptSafety.js';
 import { readStatusCache } from './accounts.js';
 import { getScopedJobSourceIds, JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
 import { jobTitleCompanyKey, dedupJobsAcrossSources } from '../../src/utils/jobIdentity.js';
-import { normalizeBands, normalizeRanges, parseSalaryToNumeric, placeBand, placeRange, sanitizeJobTaxonomy } from '../../src/nodes/jobsearch/buildJobTree.js';
+import { normalizeBands, normalizeRanges, parseSalaryToNumeric, salaryRangeAnomaly, placeBand, placeRange, sanitizeJobTaxonomy } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { deriveLocationParam, summarizeLocationAdherence, LOCATION_TREATMENT } from '../../src/utils/jobLocation.js';
 import { tagJobLanguages, summarizeJobLanguages } from '../../src/utils/jobLanguage.js';
 import { repairJobsMojibake, normalizeJobsMarkup } from '../../src/utils/textEncoding.js';
@@ -915,11 +915,32 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
  * instead of letting whichever source returned most monopolize the scoring
  * budget. Returns all jobs unchanged when there are <= n.
  */
-function dedupByTitleCompany(arr) {
+function dedupByTitleCompany(arr, options) {
   // Location-aware: title+company alone would silently collapse legitimately
   // distinct same-title/company reqs in different cities (see
   // dedupJobsAcrossSources's doc comment in jobIdentity.js).
-  return dedupJobsAcrossSources(arr);
+  return dedupJobsAcrossSources(arr, options);
+}
+
+function boundedDedupProvenance(entries) {
+  const MAX = 20;
+  const out = [];
+  const counts = {};
+  for (const entry of entries) {
+    const reason = entry?.reason || 'unknown';
+    counts[reason] = (counts[reason] || 0) + 1;
+    if (out.length >= MAX) continue;
+    const brief = (job) => ({
+      source: String(job?.source || '?').slice(0, 40),
+      title: String(job?.title || '').slice(0, 120),
+      company: String(job?.company || '').slice(0, 120),
+      location: String(job?.location || '').slice(0, 120),
+      url: String(job?.url || '').slice(0, 240),
+      nativeId: String(job?.jobkey || job?.jobKey || job?.jobId || job?.id || '').slice(0, 120),
+    });
+    out.push({ reason, kept: brief(entry.kept), dropped: brief(entry.dropped) });
+  }
+  return { total: entries.length, counts, entries: out, omitted: Math.max(0, entries.length - out.length) };
 }
 
 function selectTopAcrossSources(jobs, n) {
@@ -1075,6 +1096,11 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       const result = await fn(signal);
       const rawJobs = Array.isArray(result) ? result : (result?.items || []);
       const warning = Array.isArray(result) ? null : (result?.warning || null);
+      // Keyword-less remote feeds return a small explanation of each relevance
+      // admission (query terms + title match; RemoteOK also preserves its tags).
+      // Keep it separate from jobs so it cannot pollute cards, scoring prompts,
+      // saved snapshots, or history rows.
+      const allRelevanceTrace = Array.isArray(result) ? [] : (result?.relevanceTrace || []);
       // Pre-cap match count: when it exceeds `jobs.length` the fetcher's
       // JOB_RESULT_CAP slice (or the FAST cap below) dropped in-window jobs —
       // surfaced in the funnel so an over-the-cap API source isn't a silent miss
@@ -1086,6 +1112,8 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // (per-query vs whole-feed). No-op (Infinity) outside fast mode; `gathered`
       // keeps the true pre-cap count.
       const jobs = Number.isFinite(JOB_API_PER_SOURCE_CAP) ? rawJobs.slice(0, JOB_API_PER_SOURCE_CAP) : rawJobs;
+      const returnedUrls = new Set(jobs.map(job => job?.url).filter(Boolean));
+      const relevanceTrace = allRelevanceTrace.filter(row => returnedUrls.has(row?.url));
       // Emit live completion so the source card updates as soon as this source
       // finishes — without this, all API cards stay "Searching..." until the
       // browser scraper finishes too (the final per-source loop runs post-Promise.all).
@@ -1107,7 +1135,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       if (stageSource && jobs.length > 0) {
         await stageSource({ sourceId, jobs });
       }
-      return { sourceId, jobs, warning, gathered };
+      return { sourceId, jobs, warning, gathered, relevanceTrace };
     } catch (error) {
       send({ nodeId, sourceId, status: 'error', count: 0, completed: queryTotal, total: queryTotal });
       return { sourceId, jobs: [], error: error?.message || String(error) };
@@ -1699,6 +1727,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
       // Pre-cap match count (one fetch per API source). > jobs gathered = the
       // JOB_RESULT_CAP slice dropped in-window jobs the funnel should flag.
       if (res.gathered != null) sourceResults[res.sourceId].gathered = res.gathered;
+      if (Array.isArray(res.relevanceTrace) && res.relevanceTrace.length > 0) {
+        sourceResults[res.sourceId].relevanceTrace = res.relevanceTrace;
+      }
       // Each API fetcher now returns { items, warning }; the wrapper above
       // also passes warning through. Capture it so blocks/throttles on
       // API-based sources surface in the same UI panel as scraped sources.
@@ -1792,8 +1823,14 @@ Be creative with suggestedRoleQueries — think about what career directions the
       }
     }
 
-    // Deduplicate by normalized company + title
-    const deduped = dedupByTitleCompany(allJobs);
+    // Cross-source de-dup provenance is bounded but durable in the funnel: a
+    // raw→dedup count alone cannot tell a legitimate board copy from an
+    // over-broad identity rule after the original cards have gone away.
+    const dedupDrops = [];
+    const deduped = dedupByTitleCompany(allJobs, {
+      onDuplicate: (entry) => { dedupDrops.push(entry); },
+    });
+    const dedupProvenance = boundedDedupProvenance(dedupDrops);
     // Per-source unique survivors of the dedup — lets the funnel tell a genuine
     // page-ceiling ("50 gathered, 50 unique → may be more") apart from a CLAMPING
     // source that re-served the same page across the walk ("50 gathered, 5 unique
@@ -2240,6 +2277,18 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Listing-language tally over the kept jobs — answers "did any non-English
     // postings come through, and from where?" (kept & scored as-is; see tagJobLanguages).
     const languageTelemetry = summarizeJobLanguages(kept);
+    // Keep relevance evidence only for remote-feed jobs that survived every
+    // downstream filter (dedup, age, history, applied). A bounded trace makes a
+    // FULL/JOBS report answer "why did this remote role get through?" without
+    // dumping an entire feed or retaining discarded rows.
+    const remoteRelevance = {};
+    for (const sourceId of ['remoteok', 'weworkremotely']) {
+      const trace = sourceResults[sourceId]?.relevanceTrace;
+      if (!Array.isArray(trace) || trace.length === 0) continue;
+      const keptUrls = new Set(kept.filter(job => job.source === sourceId).map(job => job.url).filter(Boolean));
+      const rows = trace.filter(row => keptUrls.has(row?.url)).slice(0, 20);
+      if (rows.length > 0) remoteRelevance[sourceId] = rows;
+    }
     jobsTelemetry.search = {
       ts: Date.now(),
       queries: queries.length,
@@ -2257,6 +2306,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
         .slice(0, 12),
       raw: allJobs.length,
       deduped: deduped.length,
+      dedupProvenance,
       maxAgeDays: ageDays, // the configured look-back window this run actually used
       ageDropped,
       ageBySource, // per-source: { dropped, kept, oldestKeptDays, oldestKeptRaw, unparseableKept }
@@ -2267,6 +2317,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       bySource,
       location: locationTelemetry,
       languages: languageTelemetry,
+      remoteRelevance,
       // Data-driven browser-scrape order this run + the per-source manual-solve
       // history that produced it — so "why did Google scrape first?" is answerable.
       browserOrder,
@@ -2906,6 +2957,7 @@ RULES:
     // from a FULL report without reopening a local scrape snapshot.
     const taxonomyAudit = jobs.slice(0, 50).map((job, index) => {
       const annualSalary = parseSalaryToNumeric(job.salary);
+      const salaryAnomaly = salaryRangeAnomaly(job.salary);
       const band = placeBand(job.matchScore, bands);
       const range = placeRange(annualSalary, realRanges, unspecified);
       return {
@@ -2914,6 +2966,7 @@ RULES:
         source: String(job.source || '').slice(0, 40),
         rawSalary: String(job.salary || '').slice(0, 160),
         annualSalary,
+        salaryAnomaly,
         // Where in the description that salary text came from. A raw value can be
         // perfectly well-formed and still be the WRONG NUMBER — one run recorded
         // "$346,104.00 per year" for a support role because that was an equity

@@ -644,14 +644,29 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
 // tokens — seniority/role-modifiers, work-mode, and structural filler — that
 // match everything, and (b) match against the role text (title/company/team),
 // NOT the location field or the long JD body, so a city/"remote"/ambient-keyword
-// token can't pull in an off-target role. Falls back to any-term if the query is
-// entirely generic, so a weird query is never over-filtered to zero.
+// token can't pull in an off-target role. A multi-noun query also needs at least
+// two of its role terms: accepting one term from "Customer Service Coordinator"
+// admitted every unrelated remote-board listing with an incidental "service"
+// tag. Single-noun and entirely-generic queries retain their deliberately broad
+// fallback so a query such as "Coordinator" or "Senior Manager" still works.
 const JOB_MATCH_STOPWORDS = new Set([
   'junior', 'senior', 'jr', 'sr', 'entry', 'mid', 'midlevel', 'principal', 'staff',
   'lead', 'associate', 'head', 'chief', 'director', 'manager', 'mgr', 'vp', 'svp',
   'intern', 'internship', 'remote', 'hybrid', 'onsite', 'remotefirst',
   'the', 'a', 'an', 'and', 'or', 'for', 'of', 'in', 'at', 'on', 'with', 'to',
   'jobs', 'job', 'position', 'role', 'opening', 'opportunity', 'careers',
+]);
+
+// Narrow title-level role concepts for whole-feed remote boards. These are not
+// a fuzzy taxonomy: they deliberately cover only adjacent terms that a job
+// seeker commonly uses interchangeably in a search title. Each alias still
+// occupies ONE query concept, so a lone "support" cannot satisfy both
+// "Administrative" and "Assistant" and reopen the old one-word leak.
+const JOB_ROLE_CONCEPT_ALIASES = new Map([
+  ['customer', [['client']]],
+  ['service', [['services'], ['support'], ['success'], ['advocate'], ['care']]],
+  ['administrative', [['admin'], ['back', 'office']]],
+  ['assistant', [['support'], ['coordinator']]],
 ]);
 
 const EMPTY_GEO = new Set();
@@ -672,7 +687,11 @@ export function buildGeoTermSet(locations = []) {
   return set;
 }
 
-export function jobRelevanceMatch(roleText, query, geoTerms = EMPTY_GEO) {
+/**
+ * Compact evidence for a keyword-less remote-feed match. This is kept out of
+ * the job object itself: it is report telemetry, not prompt/card payload.
+ */
+export function jobRelevanceEvidence(roleText, query, geoTerms = EMPTY_GEO) {
   const text = String(roleText || '').toLowerCase();
   const terms = String(query || '').toLowerCase().split(/\s+/).filter(t => t.length >= 2);
   // Meaningful = role/skill nouns. Three filters, each dropping a class of token
@@ -703,8 +722,44 @@ export function jobRelevanceMatch(roleText, query, geoTerms = EMPTY_GEO) {
   const useTerms = meaningful.length > 0
     ? meaningful
     : terms.filter(t => norm(t).length >= 3 && !geoTerms.has(norm(t)));
-  if (useTerms.length === 0) return false;
-  return useTerms.some(t => text.includes(t));
+  if (useTerms.length === 0) return null;
+  // Match whole words, never substrings: "service" must not match the
+  // unrelated company name "Professional Services". Tokenizing also makes
+  // punctuation variants such as "Customer-Service Coordinator" equivalent
+  // to the query's separate words.
+  const roleTokens = new Set(text.match(/[a-z0-9]+/g) || []);
+  const matchConcept = (term) => {
+    if (roleTokens.has(term)) return { queryTerm: term, matched: term, kind: 'exact' };
+    for (const alias of JOB_ROLE_CONCEPT_ALIASES.get(term) || []) {
+      if (alias.every(token => roleTokens.has(token))) {
+        return { queryTerm: term, matched: alias.join(' '), kind: 'synonym' };
+      }
+    }
+    return null;
+  };
+  const matchedConcepts = [...new Set(useTerms.map(norm))].map(matchConcept).filter(Boolean);
+  // A query with two or more actual role/skill nouns has enough signal to
+  // require corroboration. Two-of-three intentionally keeps close variants
+  // such as "Customer Service Representative" for a "Customer Service
+  // Coordinator" search, while excluding a job that only happens to mention
+  // "customer" or "service" in a tag. Do not tighten a single-noun query or
+  // the all-generic fallback; those have no second role signal to require.
+  const minMatches = meaningful.length >= 2 ? 2 : 1;
+  if (matchedConcepts.length < minMatches) return null;
+  return {
+    query: String(query || '').slice(0, 120),
+    terms: useTerms.map(norm).slice(0, 12),
+    // `matchedTerms` is kept for compact/backward-compatible report output;
+    // `matchedConcepts` records exact versus synonym evidence for diagnosis.
+    matchedTerms: matchedConcepts.map(match => match.queryTerm).slice(0, 12),
+    matchedConcepts: matchedConcepts.slice(0, 12),
+    requiredMatches: minMatches,
+    fallbackTerms: meaningful.length === 0,
+  };
+}
+
+export function jobRelevanceMatch(roleText, query, geoTerms = EMPTY_GEO) {
+  return !!jobRelevanceEvidence(roleText, query, geoTerms);
 }
 
 // ── USAJobs API ─────────────────────────────────────────────────────────────
@@ -840,22 +895,37 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
   // scored and shown to the user as if they were jobs.
   const qs = Array.isArray(queries) ? queries : [queries];
   const sponsored = [];
-  const matched = jobs.filter(job => {
+  const matched = jobs.flatMap(job => {
     if (isRemoteOkSponsoredPlacement(job)) {
       sponsored.push(String(job.position || '?'));
-      return false;
+      return [];
     }
-    const roleText = `${job.position || ''} ${job.company || ''} ${(job.tags || []).join(' ')}`;
-    return qs.some(q => jobRelevanceMatch(roleText, q, geoTerms));
+    // RemoteOK tags are broad, user-supplied metadata rather than the job's
+    // actual role (a coffee-roaster row can carry customer-service tags). Keep
+    // whole-feed relevance anchored to the position; company names are likewise
+    // not role evidence (e.g. "Professional Services").
+    const evidence = qs.map(q => jobRelevanceEvidence(job.position, q, geoTerms)).filter(Boolean);
+    return evidence.length > 0 ? [{ job, evidence }] : [];
   });
   if (sponsored.length > 0) {
     logger.info(`[RemoteOK API] dropped ${sponsored.length} sponsored ad placement(s): ${sponsored.slice(0, 6).join(', ')}`);
   }
 
-  const items = matched.slice(0, JOB_RESULT_CAP).map(job => {
+  const relevanceTrace = [];
+  const items = matched.slice(0, JOB_RESULT_CAP).map(({ job, evidence }) => {
     // RemoteOK's API returns description as raw HTML — strip tags to plain text.
     const descText = job.description ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
     const tags = (job.tags || []).join(', ');
+    const url = job.url ? (String(job.url).startsWith('http') ? job.url : `https://remoteok.com${job.url}`) : '';
+    relevanceTrace.push({
+      url,
+      title: String(job.position || '').slice(0, 160),
+      company: String(job.company || '').slice(0, 120),
+      matched: evidence,
+      // Included specifically to prove they were NOT relevance evidence: the
+      // matcher intentionally reads the position only.
+      tags: Array.isArray(job.tags) ? job.tags.map(t => String(t).slice(0, 50)).slice(0, 20) : [],
+    });
     return {
       title: job.position || '',
       company: job.company || '',
@@ -873,14 +943,14 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
       // RemoteOK's `url` is sometimes already absolute ("https://remoteOK.com/…")
       // and sometimes a relative path; only prefix the relative form, else we get
       // a doubled "https://remoteok.comhttps://remoteOK.com/…" broken link.
-      url: job.url ? (String(job.url).startsWith('http') ? job.url : `https://remoteok.com${job.url}`) : '',
+      url,
       posted: job.date || '',
       source: 'remoteok',
     };
   });
   const withDesc = items.filter(j => j.description).length;
   logger.info(`[RemoteOK API] ${items.length} jobs matched, ${withDesc}/${items.length} have descriptions`);
-  return { items, warning: r.warning, gathered: matched.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
+  return { items, warning: r.warning, gathered: matched.length, relevanceTrace }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
 
 
@@ -889,7 +959,7 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
 
 // WWR's RSS carries NO structured salary field, but ~40% of postings state pay in
 // the description body. Pull the first $ amount/range that is either (a) followed by
-// an explicit pay unit (/yr, per year, annually, a year/hour) — a strong standalone
+// an explicit pay unit (/yr, per year, per month, annually, a year/hour) — a strong standalone
 // signal — or (b) anchored to a salary keyword within ~40 chars. Requiring comma-
 // grouped thousands ($80,000, not $80) avoids matching funding/revenue figures like
 // "$100M in bookings". Returns '' when no confident salary is present.
@@ -903,19 +973,26 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
 // on either side of a candidate match.
 const NON_PAY_CONTEXT = /\b(?:equity|share unit|psus?|rsus?|stock|option|grant|token|vest|bonus|signing|referral|revenue|funding|raised|valuation|budget of|arr|mrr)\b/i;
 
-function extractSalaryFromText(text) {
+export function extractSalaryFromText(text) {
   if (!text) return '';
   const s = String(text).replace(/\s+/g, ' ');
   const AMOUNT = String.raw`\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?`;
-  const UNIT = new RegExp(`${AMOUNT}\\s?(?:\\/\\s?(?:yr|year|hr|hour)|per (?:year|hour|annum)|annually|a year|an hour)`, 'gi');
+  // Keep a currency code and cadence with the amount. Returning only "$2,500"
+  // from "$2,500 USD per month" loses the signal required to annualize the pay.
+  const CADENCE = String.raw`(?:\/\s?(?:yr|year|hr|hour|mo|month|wk|week|day)|per\s+(?:year|hour|month|week|day|annum)|a\s+(?:year|hour|month|week|day)|(?:annually|annual|yearly|monthly|weekly|daily|hourly))`;
+  const CURRENCY_AND_CADENCE = String.raw`(?:\s*(?:USD|CAD|AUD|EUR|GBP)\b)?\s*${CADENCE}`;
+  const UNIT = new RegExp(`${AMOUNT}${CURRENCY_AND_CADENCE}`, 'gi');
   // "budget for this role" is how remote-first JDs (Hospitable, GitLab…) phrase
   // the pay band; a BARE "budget" is not on this list on purpose — that matches
   // marketing/infra spend far more often than compensation.
-  const KEYWORD = /\b(?:salary|salaries|compensation|base pay|pay range|pay rate|pay|budget for this (?:role|position)|total budget for this (?:role|position))\b[^$]{0,40}(\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?)/i;
+  const KEYWORD = new RegExp(
+    String.raw`\b(?:salary|salaries|compensation|base pay|pay range|pay rate|pay|budget for this (?:role|position)|total budget for this (?:role|position))\b[^$]{0,40}(${AMOUNT})(${CURRENCY_AND_CADENCE})?`,
+    'i',
+  );
   // Pay-anchored wins over free-floating: a figure the JD itself labels as pay is
   // better evidence than one that merely carries a cadence somewhere in the body.
   const m2 = s.match(KEYWORD);
-  if (m2 && !NON_PAY_CONTEXT.test(contextAround(s, m2.index, m2[0].length))) return m2[1].trim();
+  if (m2 && !NON_PAY_CONTEXT.test(contextAround(s, m2.index, m2[0].length))) return `${m2[1]}${m2[2] || ''}`.trim();
   for (const m of s.matchAll(UNIT)) {
     if (!NON_PAY_CONTEXT.test(contextAround(s, m.index, m[0].length))) return m[0].trim();
   }
@@ -952,6 +1029,7 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
   const itemPattern = /<item>([\s\S]*?)<\/item>/gi;
   const rssItems = xml.match(itemPattern) || [];
   const jobs = [];
+  const relevanceTrace = [];
 
   for (const item of rssItems) {
     const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/i) ||
@@ -972,11 +1050,16 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
     const jobTitle = titleParts.length > 1 ? titleParts.slice(1).join(':').trim() : title;
 
     // Filter: job matches if relevant to ANY query (OR logic across all queries).
-    if (!qs.some(q => jobRelevanceMatch(title, q, geoTerms))) continue;
+    // RSS titles are "Company: Job title". A company such as "Customer.io" or
+    // "Professional Services" must not make an unrelated vacancy relevant, so
+    // match only the parsed job-title portion.
+    const evidence = qs.map(q => jobRelevanceEvidence(jobTitle, q, geoTerms)).filter(Boolean);
+    if (evidence.length === 0) continue;
 
     // WWR RSS <description> CDATA is the full job HTML — strip tags to plain text.
     const descText = stripHtml(descMatch?.[1] || '').trim();
 
+    const url = linkMatch?.[1]?.trim() || '';
     jobs.push({
       title: jobTitle,
       company,
@@ -984,16 +1067,25 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
       salary: extractSalaryFromText(descText),
       snippet: descText,
       description: descText,
-      url: linkMatch?.[1]?.trim() || '',
+      url,
       posted: pubDateMatch?.[1] ? new Date(pubDateMatch[1]).toLocaleDateString() : '',
       source: 'weworkremotely',
+    });
+    relevanceTrace.push({
+      url,
+      title: String(jobTitle).slice(0, 160),
+      company: String(company).slice(0, 120),
+      matched: evidence,
+      tags: [],
     });
   }
 
   const withDesc = jobs.filter(j => j.description).length;
   logger.info(`[WWR RSS] ${jobs.length} jobs matched, ${withDesc}/${jobs.length} have descriptions`);
 
-  return { items: jobs.slice(0, JOB_RESULT_CAP), warning: r.warning, gathered: jobs.length }; // gathered: pre-cap matches (see fetchLinkedInJobs)
+  const items = jobs.slice(0, JOB_RESULT_CAP);
+  const returnedUrls = new Set(items.map(job => job.url));
+  return { items, warning: r.warning, gathered: jobs.length, relevanceTrace: relevanceTrace.filter(row => returnedUrls.has(row.url)) }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
 
 

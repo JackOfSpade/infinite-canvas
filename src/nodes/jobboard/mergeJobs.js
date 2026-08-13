@@ -68,32 +68,57 @@ export function unionScoredJobs(jobArrays, stats) {
 /**
  * Cheap content fingerprint of one module's scored jobs. Changes when the set
  * changes size (re-scrape), any score changes (re-score), the order changes,
- * or the jobs themselves change (folds each title's length + first character),
+ * or any card-visible/origin-sensitive job field changes,
  * so it tells whether a connection carries the SAME data it did at the last
  * Combine. Deliberately O(n) + allocation-free so it can run inside the
  * reactive store selector on every frame; not a cryptographic hash, but unlike
  * the old count+score-sum format it can't be fooled by a re-run whose score
  * deltas cancel out ([80,90] → [85,85]).
  *
- * The "2:" prefix versions the format: combineSignatures saved by the old
+ * The "3:" prefix versions the format: combineSignatures saved by the old
  * fingerprint can't be recomputed, so the board treats a signature without the
  * marker as a legacy baseline to adopt rather than a staleness mismatch (see
  * isLegacyCombineSignature).
  *
  * @param {object[]} scoredJobs
- * @returns {string} e.g. "2:191:-1240318" (version:length:fold)
+ * @returns {string} e.g. "3:191:123456789" (version:length:fold)
  */
 export function moduleFingerprint(scoredJobs) {
   const arr = Array.isArray(scoredJobs) ? scoredJobs : [];
-  let h = 0;
+  // FNV-1a is cheap enough to run in the ReactFlow store selector while making
+  // every field that can alter a spawned card (or its origin-hub lookup) part
+  // of staleness. The old fold used score + title length + title initial only,
+  // so two different "Manager ?" jobs with equal scores could leave a board
+  // falsely current after a re-run.
+  let h = 0x811c9dc5;
+  const fold = (value) => {
+    const text = value == null ? '' : String(value);
+    for (let i = 0; i < text.length; i++) {
+      h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
+    }
+    // Field delimiter prevents e.g. ["ab", "c"] colliding with ["a", "bc"].
+    h = Math.imul(h ^ 0xff, 0x01000193);
+  };
   for (const j of arr) {
-    const s = (j && typeof j.matchScore === 'number') ? j.matchScore : -1;
-    const t = (j && typeof j.title === 'string') ? j.title : '';
-    h = (h * 33 + s + 1) | 0;
-    h = (h * 33 + t.length) | 0;
-    h = (h * 33 + (t.charCodeAt(0) || 0)) | 0;
+    if (!j || typeof j !== 'object') {
+      fold('__non-job__');
+      continue;
+    }
+    fold(j.matchScore);
+    fold(j.title);
+    fold(j.company);
+    fold(j.location);
+    fold(j.salary);
+    fold(j.snippet);
+    fold(j.reasoning);
+    fold(j.careerDirection);
+    fold(j.source);
+    fold(j.url);
+    fold(j.posted);
+    fold(j.language);
+    fold(j.originHubId);
   }
-  return `2:${arr.length}:${h}`;
+  return `3:${arr.length}:${h >>> 0}`;
 }
 
 /**
@@ -104,7 +129,46 @@ export function moduleFingerprint(scoredJobs) {
  */
 export function isLegacyCombineSignature(signature) {
   const s = String(signature || '');
-  return !!s && !s.includes('=2:');
+  return !!s && !s.includes('=3:');
+}
+
+/**
+ * Reconcile the summary/filter metadata stored on a Job Board after a user
+ * dismisses a disposable card. The cascade nodes are the authoritative live
+ * result set; leaving this metadata at its original Combine values made the
+ * board claim jobs/sources that no longer existed.
+ */
+export function deriveBoardCardStats(nodes, hubId, currentData = {}) {
+  const cards = (Array.isArray(nodes) ? nodes : []).filter((node) =>
+    node?.type === 'jobcard' && node.data?.hubId === hubId
+  );
+  const finalSourceCounts = {};
+  const scores = [];
+  for (const card of cards) {
+    const source = String(card.data?.source || '').trim();
+    if (source) finalSourceCounts[source] = (finalSourceCounts[source] || 0) + 1;
+    const score = Number(card.data?.matchScore);
+    if (Number.isFinite(score)) scores.push(score);
+  }
+  const scoreRangeMin = scores.length ? Math.min(...scores) : 0;
+  const scoreRangeMax = scores.length ? Math.max(...scores) : 100;
+  const previousThreshold = Number(currentData.scoreThreshold);
+  const unclampedThreshold = Number.isFinite(previousThreshold) ? previousThreshold : scoreRangeMin;
+  const scoreThreshold = scores.length
+    ? Math.min(scoreRangeMax, Math.max(scoreRangeMin, unclampedThreshold))
+    : 0;
+  const activeSource = currentData.sourceFilter || null;
+  return {
+    resultCount: cards.length,
+    finalSourceCounts,
+    scoreRangeMin,
+    scoreRangeMax,
+    scoreThreshold,
+    // Do not strand the user behind an active filter whose last card was just
+    // dismissed. This also prevents a source pill from disappearing while its
+    // invisible filter remains selected.
+    sourceFilter: activeSource && !finalSourceCounts[activeSource] ? null : activeSource,
+  };
 }
 
 /**
