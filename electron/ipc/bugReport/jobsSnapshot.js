@@ -9,7 +9,7 @@ import { getJobsSettings } from '../settings.js';
 import { modelResolutionSnapshot } from '../modelResolver.js';
 import { appliedJobsSnapshot } from '../appliedJobs.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
-import { MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_RESULT_CAP, JOB_PER_PAGE_CAP, JOB_MAX_PAGES, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from '../resultCaps.js';
+import { MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_RESULT_CAP, JOB_PER_PAGE_CAP, JOB_PER_SOURCE_CAP, JOB_MAX_PAGES, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from '../resultCaps.js';
 import { ago, modelTag, pipelineScope, formatAge } from './helpers.js';
 import { looksLikeMoney, hasMojibake, mojibakeExcerpt } from './jobQualityChecks.js';
 
@@ -36,6 +36,7 @@ export function buildJobsConfigSnapshot() {
       skipAI: JOB_SEARCH_TEST_MODE.skipAI || false,
       jobResultCap: JOB_RESULT_CAP,
       jobPerPageCap: JOB_PER_PAGE_CAP,
+      jobPerSourceCap: JOB_PER_SOURCE_CAP,
       // FAST-mode breadth knobs (Infinity in other modes) so the report shows the
       // exact bound a fast run scraped under.
       jobMaxPages: JOB_MAX_PAGES,
@@ -68,6 +69,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   let browserScrape = null;
   try { browserScrape = getManualScraperTelemetry(); } catch { /* scraper may not be loaded */ }
   const hasResolves = t && t.resolves && Object.keys(t.resolves).length > 0;
+  const hasLinkedInEnrich = Array.isArray(t?.linkedinEnrich) && t.linkedinEnrich.length > 0;
   const hasBrowserScrape = !!browserScrape?.active || (browserScrape?.events || []).length > 0;
   let appGen = null;
   try { appGen = getApplicationTelemetry(); } catch { /* generator may not be loaded */ }
@@ -82,7 +84,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   try { appliedSnap = appliedJobsSnapshot(); } catch { /* store may not be loaded */ }
   const hasModelRes = !!(modelRes && (modelRes.fetchedAt > 0 || (modelRes.skipped || []).length > 0));
   const hasAppliedJobs = !!(appliedSnap && appliedSnap.count > 0);
-  if (!t || (!t.search && !hasResolves && !t.scoring && !t.bucketing && !hasBrowserScrape && !appGen && !hasModelRes && !hasAppliedJobs)) return '';
+  if (!t || (!t.search && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.bucketing && !hasBrowserScrape && !appGen && !hasModelRes && !hasAppliedJobs)) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId);
   if (scope.foreign) return `\n## Job Search Pipeline\n${scope.note}`;
@@ -193,8 +195,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         }
       }
       if (Array.isArray(s.queryStrings) && s.queryStrings.length > 0) {
-        lines.push('- Query strings sent (shows which variants carried the location token):');
+        lines.push('- Raw role queries (shared across sources):');
         for (const q of s.queryStrings) lines.push(`  - \`${q}\``);
+      }
+      if (Array.isArray(s.googleQueryStrings) && s.googleQueryStrings.length > 0) {
+        lines.push('- Google keyword queries sent (canonical location appended when absent):');
+        for (const q of s.googleQueryStrings) lines.push(`  - \`${q}\``);
       }
     }
     // Listing language: how many kept jobs came through in a non-English language
@@ -680,6 +686,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         const rot = r.contextRotations != null ? `, ${r.contextRotations} ctx-rotation(s)` : '';
         if (r.skippedSameIp) {
           lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → **skipped, IP unchanged**${r.warmIp ? ` (still ${r.warmIp})` : ''} — the VPN switch hadn't taken effect, so re-fetch was not re-attempted on the same rate-limited IP.`);
+        } else if (r.browserUnavailable) {
+          lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → **browser/profile contention — retryable**${r.stillEmpty != null ? ` (${r.stillEmpty} still empty)` : ''}. Close the other captcha/login window, then Solve again; no LinkedIn descriptions were fetched in this pass.`);
         } else if (r.walled) {
           lines.push(`- \`${sourceId}\`${ago(r.ts)}: Solve → re-fetch **hit IP ceiling** after +${r.enrichSuccess ?? 0}/${r.needEnrich ?? '?'}${rot}${r.stillEmpty != null ? `, ${r.stillEmpty} still empty` : ''}${r.warmIp ? `, IP ${r.warmIp} now warm` : ''}. _Anonymous guest rate-limit, not a login issue — switch VPN to a fresh IP, then Solve to fetch more._`);
         } else if (r.needEnrich != null) {
@@ -725,6 +733,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         if (d.sawChallenge) bits.push('challenge seen');
         if (d.sawConsent) bits.push('consent wall seen');
         if (d.finalHost) bits.push(`host ${d.finalHost}`);
+        // The host alone cannot distinguish a user who successfully reached
+        // Glassdoor's results/home page from one who closed on the login or
+        // challenge URL. These are captured by the visible resolve window
+        // immediately before close (when available), and make a manual close
+        // actionable instead of the ambiguous "never-extracted, textLen 0".
+        if (d.finalUrl) bits.push(`final URL: \`${String(d.finalUrl).replace(/`/g, "'").slice(0, 500)}\``);
+        if (d.finalTitle) bits.push(`final title: "${String(d.finalTitle).replace(/[\r\n]+/g, ' ').replace(/"/g, "'").slice(0, 180)}"`);
+        if (d.hostMismatch) bits.push(`probe skipped: ${d.probeSkippedReason || 'host-mismatch'}`);
         lines.push(`  - resolve detail: ${bits.join(' · ')}`);
         // Stale-selector / changed-layout fingerprint: the extractor matched 0
         // on a page that had real text and no challenge/consent that would have
@@ -777,6 +793,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : '';
       let outcome;
       if (e.skippedSameIp) outcome = 'skipped — same warm IP, not re-attempted';
+      else if (e.browserUnavailable) outcome = `**browser/profile contention — retryable**${e.stillEmpty != null ? `, ${e.stillEmpty} still empty` : ''} · close the other captcha/login window, then Solve`;
       // Dead egress (VPN landed on a server with no internet) — distinct from a
       // rate-limit wall: every fetch failed at the transport layer. The remedy is
       // a DIFFERENT (working) VPN server, not waiting out a cooldown.
@@ -872,6 +889,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push(`- ⏳ **Cooldown probe in progress** — ${cd.attempts} attempt(s) so far${cd.aborted ? ' (aborted)' : ''}.`);
       } else if (cd.foundMs != null) {
         lines.push(`- ✅ **Cooldown confirmed: ~${fmtGap2(cd.foundMs)}** — initial probe + confirmations all clean after ${fmtGap2(cd.foundMs)} idle on the same IP/browser (${cd.attempts} attempt(s) total). Wait ≥ that between enrichment batches to keep going without switching anything.`);
+      } else if (cd.browserUnavailable) {
+        lines.push(`- ⏸️ **Cooldown probe paused — browser/profile contention.** A visible captcha/login window held the shared browser profile at attempt ${cd.attempts}; close it and retry. This result says nothing about LinkedIn's cooldown.`);
       } else if (cd.aborted) {
         lines.push(`- ⏹️ **Cooldown probe aborted** after ${cd.attempts} attempt(s) — no clearing wait found yet.`);
       } else {
@@ -890,8 +909,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // declared "complete" on any clean finish; that was wrong — soft-blocks don't
     // trip the URL wall, so a "clean finish" can still be strangling recoverable
     // jobs. evalErrors is NOT used (it counts failed ATTEMPTS, not empty jobs).
-    const lastReal = [...enrichTrail].reverse().find(e => e.browserGen != null);
-    if (lastReal && lastReal.stillEmpty != null) {
+    const lastAttempt = enrichTrail[enrichTrail.length - 1];
+    if (lastAttempt?.browserUnavailable) {
+      lines.push(`- ⚠️ **Residual: ${lastAttempt.stillEmpty ?? '?'} still empty — retryable browser/profile contention.** The final enrichment pass could not start because another visible captcha/login window held the shared browser profile. Close that window, then Solve; this was not a clean finish or an IP-rate-limit result.`);
+    } else {
+      const lastReal = [...enrichTrail].reverse().find(e => e.browserGen != null);
+      if (lastReal && lastReal.stillEmpty != null) {
       const empty = lastReal.stillEmpty;
       if (empty === 0) {
         lines.push('- ✅ **Residual: 0 still empty** — every job that has a description got one.');
@@ -915,6 +938,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       } else {
         // No no-desc telemetry at all — fall back to the wall flag.
         lines.push(`- ${lastReal.walled ? '⚠️' : '✅'} **Residual: ${empty} still empty** (final pass ${lastReal.walled ? 'walled — stopped early, some jobs unreached' : 'clean finish — every job attempted'}).`);
+      }
       }
     }
   }

@@ -14,6 +14,7 @@ import {
   priceChartingQuery,
 } from '../electron/extractors/marketplace.js';
 import { GOOGLE_JOBS_EXTRACTOR } from '../electron/extractors/jobs.js';
+import { buildJobTasks, getJobsTelemetry, linkedInBrowserUnavailableWarning, refreshManualSourceUrlIndex } from '../electron/ipc/jobs.js';
 import {
   getJobSearchTransientKeysForSave,
   SELLHUB_TRANSIENT_KEYS,
@@ -67,7 +68,7 @@ import {
   COL_X,
 } from '../src/nodes/jobsearch/buildJobTree.js';
 import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature } from '../src/nodes/jobboard/mergeJobs.js';
-import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, parseAptDecoComps, extractAlgoliaHits } from '../electron/extractors/apiExtractors.js';
+import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult } from '../electron/extractors/apiExtractors.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
 import { targetPageCountForJob, decideFitStep } from '../electron/ipc/jobApplication.js';
@@ -143,7 +144,19 @@ import { computeTidiedNodes, findNonOverlappingPlacement } from '../src/utils/la
 import { FILE_CATEGORIES, getFileCategoryInfo, toLocalFileUrl } from '../src/utils/fileDisplayUtils.js';
 import { isProductImageExtension } from '../src/utils/fileExtensions.js';
 import { parsePostedDate, filterJobsByAge, POSTED_DATE_PATTERN } from '../electron/ipc/jobDateFilter.js';
-import { compsForPricing, priceSynthesisMaxTokens, jobScoringBatchSize, JOB_MAX_PAGES, JOB_PER_PAGE_CAP } from '../electron/ipc/resultCaps.js';
+import {
+  compsForPricing,
+  priceSynthesisMaxTokens,
+  jobScoringBatchSize,
+  FAST_TEST,
+  MEDIUM_TEST,
+  FULL_TEST,
+  JOB_MAX_PAGES,
+  JOB_PER_PAGE_CAP,
+  JOB_PER_SOURCE_CAP,
+  JOB_TEST_QUERY_CAP,
+  JOB_API_PER_SOURCE_CAP,
+} from '../electron/ipc/resultCaps.js';
 import { modelMeta, contextWindowForModel, maxOutputForModel, estimateTokensFromChars, assessPromptFit, planSplits, LOCAL_CHARS_PER_TOKEN } from '../electron/ipc/tokenWindow.js';
 import {
   GEMINI_MODEL_FALLBACKS,
@@ -197,6 +210,7 @@ import { dedupAgainstHistory, filterHistoryForResume } from '../electron/ipc/job
 import { modelTag, overPricedSoldFlag, renderSessionTraceBlocks, visitCanvasNodes } from '../electron/ipc/bugReport/helpers.js';
 import { looksLikeMoney, mojibakeExcerpt } from '../electron/ipc/bugReport/jobQualityChecks.js';
 import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
+import { buildJobsPipelineSnapshot } from '../electron/ipc/bugReport/jobsSnapshot.js';
 import { classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
 import { deriveHubScanStatus, resolveAttentionSourceUrls, scanSellerHubPages, annotateReadState, summarizeReadState, stripHtmlForAnalysis, stripReadStateTokens, READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN } from '../electron/ipc/listingStatusCheck.js';
 import {
@@ -212,11 +226,13 @@ import {
   isInlineLoginPlatform,
   NATIVE_LOGIN_PLATFORMS,
   unwrapInlineExtractorItems,
+  areCaptchaResolveHostsEquivalent,
+  captchaResolveHostMismatchDiagnostic,
   buildAuthAttemptRecord,
   isLoginUrlPath,
 } from '../electron/ipc/browser/authWindows.js';
 import { PRICE_SYNTHESIS_SCHEMA } from '../electron/ipc/aiSchemas.js';
-import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation } from '../src/utils/jobLocation.js';
+import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation, LOCATION_TREATMENT } from '../src/utils/jobLocation.js';
 import { detectLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
 import { repairMojibake, hasMojibake, repairJobsMojibake } from '../src/utils/textEncoding.js';
 import { foldVerificationSample, orderByVerification, verificationScore } from '../src/utils/scrapeOrder.js';
@@ -2738,8 +2754,24 @@ const tests = [
       assert(cBig.sold === cBig.active && cBig.sold > 15, 'Job date and cap helpers: large comp set should scale proportionally above the old caps');
       assert(priceSynthesisMaxTokens(cBig.sold + cBig.active) < 24576, 'Job date and cap helpers: fed comp count must fit the synthesis token budget (no clamp/truncate)');
       assert(jobScoringBatchSize() >= 5 && jobScoringBatchSize() <= 15, 'Job date and cap helpers: scoring batch out of bounds');
-      assert(JOB_MAX_PAGES === 10 && JOB_PER_PAGE_CAP > 0, 'Job date and cap helpers: job caps unexpected');
-      return { filtered: filtered.length, scoringBatch: jobScoringBatchSize() };
+      // This runner is also executed by act, which can forward the developer's
+      // VITE_JOB_SEARCH_TEST_* settings into the container. Do not hard-code
+      // production's 10-page cap here: assert the internally coherent cap set
+      // selected by the active mode instead.
+      const activeModes = [FAST_TEST, MEDIUM_TEST, FULL_TEST].filter(Boolean).length;
+      assert(activeModes <= 1, `Job date and cap helpers: mode flags must be mutually exclusive (got ${activeModes})`);
+      if (FAST_TEST) {
+        assert(JOB_MAX_PAGES === 2 && JOB_PER_PAGE_CAP === 5,
+          `Job date and cap helpers: fast browser bounds should be 2 pages × 5 jobs (got ${JOB_MAX_PAGES} × ${JOB_PER_PAGE_CAP})`);
+        assert(JOB_PER_SOURCE_CAP === 10 && JOB_TEST_QUERY_CAP === 2 && JOB_API_PER_SOURCE_CAP === 10,
+          'Job date and cap helpers: fast aggregate source/API/query bounds should remain 10/2/10');
+      } else {
+        assert(JOB_MAX_PAGES === 10 && JOB_PER_PAGE_CAP > 0,
+          `Job date and cap helpers: non-fast browser bounds should retain the 10-page ceiling (got ${JOB_MAX_PAGES} pages)`);
+        assert(JOB_PER_SOURCE_CAP === Infinity && JOB_TEST_QUERY_CAP === Infinity && JOB_API_PER_SOURCE_CAP === Infinity,
+          'Job date and cap helpers: non-fast mode must not apply FAST aggregate caps');
+      }
+      return { filtered: filtered.length, scoringBatch: jobScoringBatchSize(), fast: FAST_TEST };
     },
   },
   {
@@ -2857,6 +2889,46 @@ const tests = [
     },
   },
   {
+    name: 'buildJobTasks: Google keyword query carries canonical location once',
+    run: () => {
+      const googleTask = (query, location) => {
+        const tasks = buildJobTasks([query], 21, { onlySources: new Set(['google']) }, location);
+        const task = tasks.find(t => t.sourceId === 'google');
+        assert(task, 'Google task should be built when it is the requested source');
+        return new URL(task.url).searchParams.get('q');
+      };
+
+      assert(googleTask('Camera Operator', 'Toronto, ON') === 'Camera Operator Toronto, ON jobs',
+        'canonical location is appended to Google’s keyword-only search');
+      assert(googleTask('Camera Operator Toronto, ON', 'Toronto, ON') === 'Camera Operator Toronto, ON jobs',
+        'an exact canonical location already in the query is not repeated');
+      assert(googleTask('Camera Operator Toronto', 'Toronto, ON') === 'Camera Operator Toronto jobs',
+        'a query that already names the location city is not awkwardly duplicated with the canonical suffix');
+      assert(googleTask('Camera Operator', '') === 'Camera Operator jobs',
+        'location-free searches preserve the existing Google keyword query');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'job Solve URL index: Glassdoor locId/locT mutation replaces the pre-resolution target',
+    run: () => {
+      const before = 'https://www.glassdoor.com/Job/jobs.htm?sc.keyword=Camera%20Operator&locKeyword=United%20States&fromAge=21';
+      const actual = `${before}&locId=1&locT=N`;
+      const tasks = [
+        { id: 'glassdoor-0', sourceId: 'glassdoor', url: actual },
+        { id: 'glassdoor-1', sourceId: 'glassdoor', url: `${before}&sc.keyword=Videographer&locId=1&locT=N` },
+      ];
+      const sourceFirstUrl = { glassdoor: before };
+      const taskUrlById = { 'glassdoor-0': before, 'glassdoor-1': before };
+      const solveUrl = refreshManualSourceUrlIndex(tasks, 'glassdoor', sourceFirstUrl, taskUrlById, 'glassdoor-0');
+      assert(solveUrl === actual, `Solve must use the in-browser-resolved URL (got ${solveUrl})`);
+      assert(sourceFirstUrl.glassdoor === actual, 'source progress and behavioral-gate warnings retain locId/locT');
+      assert(taskUrlById['glassdoor-0'] === actual && /locId=1/.test(taskUrlById['glassdoor-1']),
+        'every task URL is refreshed for sequential Solve telemetry');
+      return { ok: true };
+    },
+  },
+  {
     name: 'Bug report code filtering',
     run: () => {
       const logs = [
@@ -2963,6 +3035,147 @@ const tests = [
       assert(phase2.markdown.includes('NARRATIVE TOP') && !phase2.markdown.includes('NODE TAIL'),
         'Clipboard cap: phase-2 keeps the curated top of the base and sheds its low-value tail');
       return { phase1Len: phase1.markdown.length, phase2Len: phase2.markdown.length, phase1Trimmed: phase1.trimmedEventCount };
+    },
+  },
+  {
+    name: 'LinkedIn shared-profile reservation is explicit and retryable',
+    run: () => {
+      const jobs = [{ url: 'https://www.linkedin.com/jobs/view/1', snippet: '' }];
+      const reserved = linkedInBrowserUnavailableResult(
+        jobs,
+        new Error('Shared browser profile is reserved for captcha-resolve:captcha:www.glassdoor.com; headless stealth browser cannot start until that visible browser closes.'),
+      );
+      assert(reserved.browserUnavailable === true && reserved.profileReserved === true && reserved.retryable === true,
+        'shared-profile collision must be explicit and retryable, never a clean LinkedIn pass');
+      assert(reserved.successCount === 0 && reserved.jobs === jobs,
+        'collision preserves un-enriched jobs and reports zero enrichment');
+      const warning = linkedInBrowserUnavailableWarning(reserved);
+      assert(warning.code === 'browser-profile-reserved' && warning.severity === 'throttle' && warning.shortLabel === 'Browser busy',
+        'collision renders an actionable retryable source warning');
+      assert(/close the other captcha\/login window/i.test(warning.suggestion),
+        'retry guidance explains how to release the shared profile');
+
+      const unavailable = linkedInBrowserUnavailableResult(jobs, new Error('Chrome failed to launch'));
+      assert(unavailable.browserUnavailable === true && unavailable.profileReserved === false && unavailable.retryable === true,
+        'non-reservation browser startup failures also cannot be laundered into clean completion');
+      return { code: warning.code, profileReserved: reserved.profileReserved };
+    },
+  },
+  {
+    name: 'job pipeline report: LinkedIn browser contention is retryable, not clean',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        linkedinEnrich: telemetry.linkedinEnrich,
+        linkedinCooldown: telemetry.linkedinCooldown,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'linkedin-browser-contention',
+        linkedinEnrich: [{
+          ts: Date.now(),
+          startedAt: Date.now() - 1000,
+          kind: 'search',
+          browserUnavailable: true,
+          stillEmpty: 3,
+          enriched: 0,
+        }],
+        linkedinCooldown: { running: false, attempts: 2, foundMs: null, waitsMs: [60000], browserUnavailable: true },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['linkedin-browser-contention']), null, null);
+        assert(report.includes('browser/profile contention — retryable'),
+          'profile reservation renders as a retryable browser contention outcome');
+        assert(report.includes('not a clean finish or an IP-rate-limit result'),
+          'residual explains that contention did not prove LinkedIn recovered');
+        assert(report.includes('Cooldown probe paused — browser/profile contention'),
+          'a contention-paused cooldown probe is not reported as exhausted');
+        assert(!report.includes('**clean finish (cold)**'),
+          'contention-only trail must never be labelled clean');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'job pipeline report: manually closed Glassdoor Solve retains final page identity',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        resolves: telemetry.resolves,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'glassdoor-resolve-diagnostics',
+        windowId: null,
+        resolves: {
+          glassdoor: {
+            ts: Date.now(),
+            extracted: 0,
+            ageDropped: 0,
+            historyDropped: 0,
+            hiddenApplied: 0,
+            kept: 0,
+            diag: {
+              closeReason: 'user-closed',
+              extractOutcome: 'never-extracted',
+              textLen: 0,
+              finalHost: 'www.glassdoor.com',
+              finalUrl: 'https://www.glassdoor.com/Job/jobs.htm?sc.keyword=Camera%20Operator',
+              finalTitle: 'Jobs in United States | Glassdoor',
+            },
+          },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['glassdoor-resolve-diagnostics']), null, null);
+        assert(report.includes('closed: user-closed') && report.includes('extractor: never-extracted'),
+          'job pipeline report retains the manual-close/extractor outcome');
+        assert(report.includes('final URL: `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=Camera%20Operator`'),
+          'job pipeline report identifies whether Solve reached the expected Glassdoor results URL');
+        assert(report.includes('final title: "Jobs in United States | Glassdoor"'),
+          'job pipeline report retains the final page title to distinguish a results page from login/challenge pages');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'job pipeline report: distinguishes raw role queries from Google-expanded keywords',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        search: telemetry.search,
+        resolves: telemetry.resolves,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'google-query-diagnostics',
+        windowId: null,
+        resolves: {},
+        search: {
+          ts: Date.now(), queries: 2, raw: 0, deduped: 0, ageDropped: 0, historyDropped: 0, kept: 0,
+          location: { rawInput: 'Toronto, ON', canonical: 'Toronto, ON', perSource: { google: 'keyword-only: canonical location appended to the query (no location param available)' } },
+          queryStrings: ['Camera Operator', 'Film Editor Toronto'],
+          googleQueryStrings: ['Camera Operator Toronto, ON jobs', 'Film Editor Toronto jobs'],
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['google-query-diagnostics']), null, null);
+        assert(report.includes('Raw role queries (shared across sources):') && report.includes('`Camera Operator`'),
+          'report labels shared role queries as raw input, not exact per-source request strings');
+        assert(report.includes('Google keyword queries sent (canonical location appended when absent):')
+          && report.includes('`Camera Operator Toronto, ON jobs`')
+          && report.includes('`Film Editor Toronto jobs`'),
+        'report renders the actual Google keyword queries, including the deduplicated canonical-location expansion');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
     },
   },
   {
@@ -4504,6 +4717,37 @@ const tests = [
     },
   },
   {
+    name: 'captcha resolve host equivalence: Glassdoor regional redirect remains in the first-party solve flow',
+    run: () => {
+      assert(areCaptchaResolveHostsEquivalent('www.glassdoor.com', 'www.glassdoor.ca'),
+        'Glassdoor .com → .ca authenticated redirect must keep the resolve probe alive');
+      assert(areCaptchaResolveHostsEquivalent('glassdoor.co.uk', 'www.glassdoor.com.au'),
+        'allowlisted Glassdoor regional domains are mutually first-party-equivalent');
+      assert(areCaptchaResolveHostsEquivalent('www.glassdoor.com', 'fr.glassdoor.ca'),
+        'Glassdoor locale subdomains remain in the first-party resolve flow');
+      assert(areCaptchaResolveHostsEquivalent('www.glassdoor.com', 'www.glassdoor.com'),
+        'the normal same-host resolve path remains equivalent');
+      assert(!areCaptchaResolveHostsEquivalent('www.glassdoor.com', 'glassdoor.example'),
+        'lookalike domains must not be accepted into the auto-extract flow');
+      assert(!areCaptchaResolveHostsEquivalent('www.glassdoor.com', 'evilglassdoor.ca'),
+        'a suffix lookalike without a dot boundary must be rejected');
+      assert(!areCaptchaResolveHostsEquivalent('www.glassdoor.com', 'glassdoor.ca.evil'),
+        'an allowlisted host embedded inside an attacker domain must be rejected');
+      assert(!areCaptchaResolveHostsEquivalent('www.glassdoor.com', 'www.linkedin.com'),
+        'an unrelated destination remains a hard stop');
+      assert(!areCaptchaResolveHostsEquivalent('', 'www.glassdoor.ca'),
+        'missing origin never grants cross-host equivalence');
+      const mismatch = captchaResolveHostMismatchDiagnostic(
+        'www.glassdoor.com', 'https://www.linkedin.com/feed', 'LinkedIn Feed',
+      );
+      assert(mismatch.allowed === false && mismatch.hostMismatch === true && mismatch.probeSkippedReason === 'host-mismatch',
+        `unrelated host remains rejected with an explicit reportable reason (${JSON.stringify(mismatch)})`);
+      assert(mismatch.currentHost === 'www.linkedin.com' && mismatch.finalTitle === 'LinkedIn Feed',
+        'host mismatch diagnostics retain the landing URL/host/title without evaluating the page body');
+      return { ok: true };
+    },
+  },
+  {
     // isLoginUrlPath is the SINGLE shared login-URL predicate (authWindows.js),
     // replacing 5 drifted near-copies across the login window, HTTP verify, native
     // read, and hub-scan auth-wall. Guard the union coverage + the /author non-match
@@ -5009,6 +5253,8 @@ const tests = [
       assert(deriveLocationParam({ city: '', stateCode: '', region: '', display: 'anywhere near the coast' }, '') === '', 'prose display + no fallback → "" (never sends prose)');
       // A genuine place-shaped display (no structured fields) is still accepted.
       assert(deriveLocationParam({ city: '', stateCode: '', region: '', display: 'San Francisco, CA' }) === 'San Francisco, CA', 'place-shaped display accepted');
+      assert(LOCATION_TREATMENT.google === 'keyword-only: canonical location appended to the query (no location param available)',
+        'Google diagnostics state that the canonical location is appended to its keyword query, not only LLM-baked');
       return { ok: true };
     },
   },
@@ -8041,10 +8287,9 @@ const tests = [
     // A corrupt applied-jobs.json (readStoreSync deliberately throws — see its
     // own doc-comment) must not propagate out of filterOutApplied and discard
     // an entire already-gathered batch of jobs from search-jobs/resolve-job-
-    // source/resume-job-source. It must degrade: skip the filter for this run
-    // only, report why via `error`, and self-heal the moment the file is fixed
-    // (no stale in-memory cache from the failed read).
-    name: 'filterOutApplied: a corrupt applied-jobs.json degrades to skip-the-filter instead of throwing away the whole gathered batch, and recovers once the file is fixed',
+    // source/resume-job-source. It must also invalidate a previously-valid
+    // cache immediately when a user externally hand-edits the safety-valve file.
+    name: 'filterOutApplied: detects external corruption after a valid cached read, skips safely, and recovers once fixed',
     run: () => {
       // scripts/test-stubs/electron.mjs's app.getPath(name) returns
       // path.join(userDataDir, name) — so app.getPath('userData') is
@@ -8052,9 +8297,14 @@ const tests = [
       const dir = path.join(os.tmpdir(), 'infinite-canvas-test-stub', 'userData');
       fs.mkdirSync(dir, { recursive: true });
       const filePath = path.join(dir, 'applied-jobs.json');
-      fs.writeFileSync(filePath, '{ this is not valid json,', 'utf8');
-
       const jobs = [{ title: 'VP Finance', company: 'Acme Corp', location: 'Denver, CO', url: 'https://example.com/jobs/vp-finance-1' }];
+      // Prime a known-good cache first. The external corrupt write below must
+      // not be masked by stale in-memory records from this valid read.
+      fs.writeFileSync(filePath, JSON.stringify({ version: 1, records: [] }, null, 2), 'utf8');
+      const primed = filterOutApplied(jobs);
+      assert(primed.jobs.length === 1 && !primed.error, 'valid empty store primes the cache cleanly');
+
+      fs.writeFileSync(filePath, '{ this is not valid json,', 'utf8');
       const result = filterOutApplied(jobs);
       assert(Array.isArray(result.jobs) && result.jobs.length === 1, 'a corrupt store must not discard the already-gathered jobs array');
       assert(result.hiddenApplied === 0, 'nothing can be confirmed hidden when the store itself could not be read');

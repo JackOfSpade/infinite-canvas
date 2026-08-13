@@ -91,6 +91,47 @@ function readStoreSync(filePath) {
   return Array.isArray(parsed?.records) ? parsed.records : [];
 }
 
+function fileSignatureSync(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    // inode catches our atomic rename, while ctime/mtime/size catch ordinary
+    // hand-edits. This is metadata-only: an unchanged cache pays one stat, not
+    // another JSON file read on every search.
+    return {
+      exists: true,
+      ino: stat.ino,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
+    };
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { exists: false };
+    throw new Error(`Applied-jobs store at ${filePath} could not be statted: ${err.message}`);
+  }
+}
+
+function sameFileSignature(a, b) {
+  return !!a && !!b
+    && a.exists === b.exists
+    && (!a.exists || (a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs));
+}
+
+function readStoreSnapshotSync(filePath) {
+  // A manual editor can save while we are reading. Re-read once if the file's
+  // metadata moved underneath us so the cache never advertises a signature for
+  // content from an older revision. Normal use takes one stat + one JSON read.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const before = fileSignatureSync(filePath);
+    const records = readStoreSync(filePath);
+    const after = fileSignatureSync(filePath);
+    if (sameFileSignature(before, after)) return { records, signature: after };
+  }
+  // A continuously-changing hand edit is exceptional. Do not cache content
+  // whose signature cannot be proven; filterOutApplied will safely leave this
+  // run unfiltered and surface a repair/retry warning instead.
+  throw new Error(`Applied-jobs store at ${filePath} changed repeatedly while being read. Finish the external edit and retry.`);
+}
+
 function writeStoreAtomic(filePath, records) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const payload = { version: STORE_VERSION, records };
@@ -100,18 +141,22 @@ function writeStoreAtomic(filePath, records) {
   const tmp = `${filePath}.__ic_atomic_${randomUUID()}.tmp`;
   fs.writeFileSync(tmp, content, 'utf8');
   fs.renameSync(tmp, filePath); // atomic — a crash here leaves the OLD file intact, never a half-written one.
+  return fileSignatureSync(filePath);
 }
 
-// In-memory cache so `filterOutApplied` (called once per search) doesn't hit
-// disk every time. Every write below replaces this directly with the records
-// it just wrote, rather than nulling it and forcing a re-read — we already
-// hold the exact post-write state in hand.
+// In-memory cache so `filterOutApplied` (called once per search) does not re-read
+// JSON every time. We do stat the file on each lookup, because this deliberately
+// hand-editable safety valve must notice an external edit/corruption immediately.
+// Every write below replaces the cache directly with the records and the
+// post-rename signature it just wrote.
 let _cache = null;
 
 export function loadAppliedJobs() {
   const filePath = appliedJobsFilePath();
-  if (!_cache || _cache.path !== filePath) {
-    _cache = { records: readStoreSync(filePath), path: filePath };
+  const signature = fileSignatureSync(filePath);
+  if (!_cache || _cache.path !== filePath || !sameFileSignature(_cache.signature, signature)) {
+    const snapshot = readStoreSnapshotSync(filePath);
+    _cache = { records: snapshot.records, path: filePath, signature: snapshot.signature };
   }
   return _cache;
 }
@@ -146,8 +191,8 @@ export function markJobApplied(job, opts = {}) {
     folder: String(opts?.folder || ''),
   };
   const next = [...kept, record];
-  writeStoreAtomic(filePath, next);
-  _cache = { records: next, path: filePath };
+  const signature = writeStoreAtomic(filePath, next);
+  _cache = { records: next, path: filePath, signature };
   logger.info(`[AppliedJobs] Marked applied: ${record.title} @ ${record.company}${record.location ? ` (${record.location})` : ''}`);
   return record;
 }
@@ -162,8 +207,8 @@ export function unmarkJobApplied(job) {
   const { records, path: filePath } = loadAppliedJobs();
   const next = records.filter(r => !appliedRecordMatches(job, r));
   if (next.length === records.length) return false;
-  writeStoreAtomic(filePath, next);
-  _cache = { records: next, path: filePath };
+  const signature = writeStoreAtomic(filePath, next);
+  _cache = { records: next, path: filePath, signature };
   logger.info(`[AppliedJobs] Unmarked applied: ${job.title || ''} @ ${job.company || ''}`);
   return true;
 }

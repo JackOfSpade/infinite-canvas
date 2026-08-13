@@ -5,10 +5,11 @@
 // Context: the query-generation LLM returns a STRUCTURED canonicalLocation
 // object (city/stateCode/region/country/isRemote/display) rather than free-form
 // prose, because job-board location FILTERS reject prose. `deriveLocationParam`
-// flattens that object into the single board-ready string we pass as each
-// platform's location param; `summarizeLocationAdherence` audits how many of the
-// kept jobs actually sit in the target area (a Denver search that surfaces a
-// Miami role should be visible, not hidden).
+// flattens that object into the single board-ready string we pass as a location
+// parameter where supported, or append to Google for Jobs' keyword query (which
+// has no reliable location param); `summarizeLocationAdherence` audits how many
+// of the kept jobs actually sit in the target area (a Denver search that surfaces
+// a Miami role should be visible, not hidden).
 
 // Canonical, board-friendly country names. The query-gen model infers a country
 // as FREE TEXT — "US" / "USA" / "U.S." / "America" / "United States of America"
@@ -131,7 +132,7 @@ export const LOCATION_TREATMENT = {
   ziprecruiter:   'param: location=',
   glassdoor:      'param: locId= (resolved in-browser from the location; locKeyword text alone is ignored by Glassdoor)',
   linkedin:       'param: location=',
-  google:         'keyword-only (no location param available; relies on the LLM baking the place into the query)',
+  google:         'keyword-only: canonical location appended to the query (no location param available)',
   remoteok:       'remote board — location N/A (candidate-city tokens geo-stripped from relevance)',
   weworkremotely: 'remote board — location N/A (candidate-city tokens geo-stripped from relevance)',
 };

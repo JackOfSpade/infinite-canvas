@@ -280,6 +280,27 @@ export async function probeInternet(signal, timeoutMs = 5000) {
   return false;
 }
 
+// getStealthBrowser deliberately rejects while a visible login/captcha window owns
+// the one shared Chrome profile.  This is not a LinkedIn clean pass: the caller
+// must keep the source retryable instead of interpreting the unchanged jobs as
+// fully enriched.
+export function linkedInBrowserUnavailableResult(jobs, error) {
+  const browserError = error?.message || String(error || 'Unknown shared-browser error');
+  const profileReserved = /shared browser profile is reserved/i.test(browserError);
+  return {
+    jobs,
+    loginWall: false,
+    loginWallUrl: null,
+    browserUnavailable: true,
+    profileReserved,
+    retryable: true,
+    browserError,
+    successCount: 0,
+    attempted: 0,
+    contextRotations: 0,
+  };
+}
+
 export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
   if (!jobs?.length) return { jobs, loginWall: false, loginWallUrl: null };
 
@@ -305,7 +326,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal) {
     browser = await getStealthBrowser();
   } catch (err) {
     logger.warn(`[LinkedIn/Browser] Cannot get shared browser for enrichment: ${err.message}`);
-    return { jobs, loginWall: false, loginWallUrl: null };
+    return linkedInBrowserUnavailableResult(jobs, err);
   }
   // Browser-process identity for this pass. Returned to the caller so the bug
   // report's egress-IP trail can show whether consecutive passes ran on the SAME
@@ -1878,4 +1899,3 @@ export async function enrichDiceDescriptions(jobs, signal) {
   logger.info(`[Dice API] Enriched ${cleaned.length} jobs — ${lengthened} genuinely lengthened from detail endpoint${fellBack > 0 ? `; ${fellBack} kept list summary [${reasonStr}${sampleFail ? ` — e.g. ${sampleFail}` : ''}]` : ''}`);
   return cleaned;
 }
-

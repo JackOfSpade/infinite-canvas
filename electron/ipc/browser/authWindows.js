@@ -160,6 +160,61 @@ export function unwrapInlineExtractorItems(result) {
   return null;
 }
 
+// Glassdoor redirects an authenticated session to its country-specific domain
+// (for example www.glassdoor.com → www.glassdoor.ca). A captcha-resolve starts
+// on the scrape URL, so treating that safe first-party redirect as the user
+// wandering to another site stops every probe before it can extract or resume.
+// Keep the exception deliberately allowlisted: unlike a same-host redirect, a
+// broad "contains glassdoor" check would let an unrelated destination drive the
+// auto-close/extractor path.
+const GLASSDOOR_REGIONAL_HOSTS = new Set([
+  'glassdoor.com', 'glassdoor.ca', 'glassdoor.co.uk', 'glassdoor.ie',
+  'glassdoor.de', 'glassdoor.fr', 'glassdoor.es', 'glassdoor.it',
+  'glassdoor.nl', 'glassdoor.pt', 'glassdoor.com.au', 'glassdoor.co.nz',
+  'glassdoor.co.in', 'glassdoor.co.jp', 'glassdoor.com.mx',
+  'glassdoor.com.br', 'glassdoor.co.za', 'glassdoor.com.sg',
+  'glassdoor.com.hk',
+]);
+
+/**
+ * Whether a captcha-resolve may keep polling after a first-party regional
+ * redirect. Pure/exported so the country-domain safety boundary is regression
+ * tested independently of Puppeteer.
+ */
+export function areCaptchaResolveHostsEquivalent(originalHost, currentHost) {
+  const normalize = (host) => String(host || '').toLowerCase()
+    .replace(/:\d+$/, '').replace(/^www\./, '').replace(/\.$/, '');
+  const original = normalize(originalHost);
+  const current = normalize(currentHost);
+  if (!original || !current) return false;
+  if (original === current) return true;
+  // Glassdoor also uses locale subdomains (e.g. fr.glassdoor.ca). Match only
+  // the exact allowlisted base or a dot-bound child of it: this accepts that
+  // first-party shape while rejecting evilglassdoor.ca and glassdoor.ca.evil.
+  const isGlassdoorRegionalHost = (host) =>
+    [...GLASSDOOR_REGIONAL_HOSTS].some(base => host === base || host.endsWith(`.${base}`));
+  return isGlassdoorRegionalHost(original) && isGlassdoorRegionalHost(current);
+}
+
+/**
+ * Records an off-origin resolve landing without permitting extraction there.
+ * Kept pure so tests can lock down both halves of the contract: strict reject,
+ * but enough evidence for the bug report to explain why polling was skipped.
+ */
+export function captchaResolveHostMismatchDiagnostic(originalHost, currentUrl, currentTitle = '') {
+  let currentHost = null;
+  try { currentHost = new URL(String(currentUrl || '')).host || null; } catch { /* invalid URL */ }
+  const allowed = areCaptchaResolveHostsEquivalent(originalHost, currentHost);
+  return {
+    allowed,
+    currentHost,
+    hostMismatch: !allowed,
+    probeSkippedReason: allowed ? null : 'host-mismatch',
+    finalUrl: currentUrl || null,
+    finalTitle: currentTitle || null,
+  };
+}
+
 // Platforms whose login must run in a plain, hand-operated Chrome process — NO
 // Puppeteer/CDP attached. Two distinct reasons:
 //   • Google rejects CDP-controlled Chrome for sign-in. The platform delegates to
@@ -1293,6 +1348,8 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     let everSawConsent = false;   // a cookie/consent wall was visible at some tick
     let lastTextLen = 0;          // body innerText length on the last probe
     let lastHost = null;          // host on the last probe (catches "wandered off")
+    let lastUrl = null;           // actual page URL before close (incl. regional redirects)
+    let lastTitle = '';           // actual page title before close
     let extractOutcome = null;    // inline-extract result: 'matched N' / 'matched 0' / 'threw' / 'non-array' / 'no-extractor'
     let autoCloseReason = null;   // why finishCleared fired (set at each call site)
     let siteChangedError = null;  // non-null when inline extract threw SITE_CHANGED (code fix needed, not captcha)
@@ -1375,10 +1432,27 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
 
         // Bail out of the auto-close check if the user wandered off the
         // original host (we can't infer "challenge cleared" from an
-        // unrelated domain's content).
-        let currentHost = null;
-        try { currentHost = new URL(currentUrl).host; } catch { /* ignored */ }
-        if (originalHost && currentHost && currentHost !== originalHost) return;
+        // unrelated domain's content). Glassdoor's authenticated regional
+        // redirect is explicitly first-party-equivalent (e.g. .com → .ca).
+        const currentTitle = await page.title().catch(() => '');
+        const hostState = captchaResolveHostMismatchDiagnostic(originalHost, currentUrl, currentTitle);
+        const currentHost = hostState.currentHost;
+        // Always capture the current landing before a possible security return:
+        // an unrelated redirect must never run the body/extractor probe, but a
+        // later bug report needs its URL/title and explicit mismatch reason.
+        lastUrl = currentUrl;
+        lastTitle = currentTitle;
+        lastHost = currentHost;
+        updateAuthWindowDiagnostic(diagKey, {
+          mode: 'captcha-resolve',
+          currentUrl,
+          finalUrl: currentUrl,
+          finalHost: currentHost,
+          title: currentTitle,
+          hostMismatch: hostState.hostMismatch,
+          probeSkippedReason: hostState.probeSkippedReason,
+        });
+        if (!hostState.allowed) return;
 
         const probe = await page.evaluate((selectors, consentSel) => {
           // Visibility check — an element exists in the DOM but is hidden
@@ -1663,6 +1737,10 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
         closeReason,
         extractOutcome: extractOutcome || (inlineExtractorJS ? 'never-extracted' : 'no-extractor'),
         finalHost: lastHost,
+        finalUrl: lastUrl,
+        finalTitle: lastTitle || null,
+        hostMismatch: lastUrl ? !areCaptchaResolveHostsEquivalent(originalHost, lastHost) : false,
+        probeSkippedReason: lastUrl && !areCaptchaResolveHostsEquivalent(originalHost, lastHost) ? 'host-mismatch' : null,
         sawChallenge: everSawChallenge,
         sawConsent: everSawConsent,
         textLen: lastTextLen,
@@ -1673,7 +1751,12 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       // self-explaining without the 60-line main-log ring buffer — which is where
       // the SITE_CHANGED close reason lived in the "Glassdoor stuck" report, one
       // long-running window away from scrolling out entirely.
-      finishAuthWindowDiagnostic(diagKey, { result: resolved ? 'cleared' : 'closed', ...diag });
+      finishAuthWindowDiagnostic(diagKey, {
+        result: resolved ? 'cleared' : 'closed',
+        ...(lastUrl ? { currentUrl: lastUrl } : {}),
+        ...(lastTitle ? { title: lastTitle } : {}),
+        ...diag,
+      });
       if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
       if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
       if (signal) signal.removeEventListener?.('abort', onAbort);

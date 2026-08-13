@@ -10,7 +10,7 @@ const STUBS = {
   'electron-store': pathToFileURL(path.join(here, 'electron-store.mjs')).href,
 };
 
-export async function resolve(specifier, context, nextResolve) {
+export function resolve(specifier, context, nextResolve) {
   if (Object.prototype.hasOwnProperty.call(STUBS, specifier)) {
     return { url: STUBS[specifier], shortCircuit: true };
   }

@@ -498,6 +498,24 @@ function recordLinkedinEnrichPass(entry) {
   if (jobsTelemetry.linkedinEnrich.length > 12) jobsTelemetry.linkedinEnrich.shift();
 }
 
+// A visible captcha/login window owns the single Chrome userDataDir while it is
+// open. LinkedIn enrichment cannot use that profile concurrently, but this is a
+// temporary scheduling conflict—not a clean enrichment result or a LinkedIn
+// rate-limit. Keep an actionable Solve card so the user can retry after the
+// other window closes.
+export function linkedInBrowserUnavailableWarning(result = {}) {
+  const detail = result.profileReserved
+    ? 'A visible captcha or login window is using the shared browser profile.'
+    : 'The shared browser could not be started for this enrichment pass.';
+  return {
+    code: 'browser-profile-reserved',
+    severity: 'throttle',
+    shortLabel: 'Browser busy',
+    evidence: `LinkedIn descriptions were not fetched: ${detail}${result.browserError ? ` (${result.browserError})` : ''}`,
+    suggestion: 'Finish and close the other captcha/login window, then click Solve to retry LinkedIn enrichment.',
+  };
+}
+
 // Automated cooldown probe: idle escalating waits on the SAME IP/browser,
 // probing a small job batch after each wait, stop at the first interval whose
 // wall is clear AND confirmed by 2 additional probes. Diagnostic only — gated
@@ -533,7 +551,12 @@ async function runCooldownProbe(nodeId, waitsMs, initialPool, signal, progressFn
       pool = pool.map(j => byUrl.get(j.url) || j);
       probeTotalEnriched += pr.successCount || 0;
       const stillEmptyAfter = pool.filter(j => !j.snippet || j.snippet.length < 100).length;
-      recordLinkedinEnrichPass({ kind: 'probe', ip: probeIp, ipOk: !!probeIp, walled: pr.loginWall, enriched: pr.successCount || 0, stillEmpty: stillEmptyAfter, contextRotations: pr.contextRotations || 0, browserGen: pr.browserGen ?? null, browserAgeMs: pr.browserAgeMs ?? null, startedAt: probeStartedAt });
+      recordLinkedinEnrichPass({ kind: 'probe', ip: probeIp, ipOk: !!probeIp, walled: pr.loginWall, browserUnavailable: !!pr.browserUnavailable, enriched: pr.successCount || 0, stillEmpty: stillEmptyAfter, contextRotations: pr.contextRotations || 0, browserGen: pr.browserGen ?? null, browserAgeMs: pr.browserAgeMs ?? null, startedAt: probeStartedAt });
+      if (pr.browserUnavailable) {
+        jobsTelemetry.linkedinCooldown = { running: false, attempts: attempt, foundMs: null, waitsMs, ts: Date.now(), browserUnavailable: true };
+        logger.info(`[Jobs][${nodeId}] Cooldown probe paused: shared browser unavailable (${pr.browserError || 'unknown error'})`);
+        return { pool, foundMs: null, attempt, probeTotalEnriched, aborted: false, browserUnavailable: true, profileReserved: !!pr.profileReserved, browserError: pr.browserError || null };
+      }
       jobsTelemetry.linkedinCooldown = { running: true, attempts: attempt, foundMs: null, waitsMs, ts: Date.now() };
       if ((pr.successCount || 0) > 0 && saveMidProbe) {
         try { await saveMidProbe(pool); } catch (e) { logger.warn(`[Jobs][${nodeId}] Cooldown probe: snapshot persist failed — ${e.message}`); }
@@ -560,7 +583,12 @@ async function runCooldownProbe(nodeId, waitsMs, initialPool, signal, progressFn
         pool = pool.map(j => cByUrl.get(j.url) || j);
         probeTotalEnriched += cr.successCount || 0;
         const cStillEmpty = pool.filter(j => !j.snippet || j.snippet.length < 100).length;
-        recordLinkedinEnrichPass({ kind: 'probe', ip: confirmIp, ipOk: !!confirmIp, walled: cr.loginWall, enriched: cr.successCount || 0, stillEmpty: cStillEmpty, contextRotations: cr.contextRotations || 0, browserGen: cr.browserGen ?? null, browserAgeMs: cr.browserAgeMs ?? null, startedAt: confirmStartedAt });
+        recordLinkedinEnrichPass({ kind: 'probe', ip: confirmIp, ipOk: !!confirmIp, walled: cr.loginWall, browserUnavailable: !!cr.browserUnavailable, enriched: cr.successCount || 0, stillEmpty: cStillEmpty, contextRotations: cr.contextRotations || 0, browserGen: cr.browserGen ?? null, browserAgeMs: cr.browserAgeMs ?? null, startedAt: confirmStartedAt });
+        if (cr.browserUnavailable) {
+          jobsTelemetry.linkedinCooldown = { running: false, attempts: attempt, foundMs: null, waitsMs, ts: Date.now(), browserUnavailable: true };
+          logger.info(`[Jobs][${nodeId}] Cooldown confirmation paused: shared browser unavailable (${cr.browserError || 'unknown error'})`);
+          return { pool, foundMs: null, attempt, probeTotalEnriched, aborted: false, browserUnavailable: true, profileReserved: !!cr.profileReserved, browserError: cr.browserError || null };
+        }
         if ((cr.successCount || 0) > 0 && saveMidProbe) {
           try { await saveMidProbe(pool); } catch (e) { logger.warn(`[Jobs][${nodeId}] Cooldown confirm: snapshot persist failed — ${e.message}`); }
         }
@@ -685,6 +713,18 @@ function makeEmptyPageStop() {
   };
 }
 
+// Glassdoor's in-browser location resolver mutates task.url immediately before
+// navigation. Keep the pre-search source URL indexes synchronized with that
+// actual task URL before we emit a Solve target or persist it for telemetry.
+// Exported as a small pure seam for the regression test below.
+export function refreshManualSourceUrlIndex(tasks, sourceId, sourceFirstUrl, taskUrlById, resultId = null) {
+  const liveSourceTasks = (Array.isArray(tasks) ? tasks : []).filter(task => task?.sourceId === sourceId);
+  for (const task of liveSourceTasks) taskUrlById[task.id] = task.url;
+  const liveFirstUrl = liveSourceTasks[0]?.url || (resultId ? taskUrlById[resultId] : null) || sourceFirstUrl[sourceId] || null;
+  if (liveFirstUrl) sourceFirstUrl[sourceId] = liveFirstUrl;
+  return liveFirstUrl;
+}
+
 // ── Source → URL + Extractor + Config mapping (DOM scrape sources only) ──────
 // LinkedIn has been moved to the API pool (fetchLinkedInJobs) — no Puppeteer needed.
 function getLocationTerms(profileLocations = [], preferredLocation = '') {
@@ -697,6 +737,32 @@ function getLocationTerms(profileLocations = [], preferredLocation = '') {
 // LOCATION_TREATMENT) live in src/utils/jobLocation.js — dependency-free + unit-
 // tested there; imported at the top of this file.
 
+// Google for Jobs accepts no reliable location parameter. Put the canonical
+// location into its keyword query instead, but do not repeat a place the query
+// generator already supplied. Comparison is punctuation/case-insensitive, and a
+// matching first location component (e.g. "Toronto" for "Toronto, ON") counts
+// as present so we don't produce "Toronto Toronto, ON".
+function googleKeywordWithLocation(query, location) {
+  const keyword = String(query || '').trim().replace(/\s+/g, ' ');
+  const loc = String(location || '').trim().replace(/\s+/g, ' ');
+  if (!keyword || !loc) return keyword;
+
+  const words = (value) => String(value || '')
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+  const keywordWords = words(keyword);
+  const locationWords = words(loc);
+  const firstComponentWords = words(loc.split(',')[0]);
+  const hasPhrase = (phrase) => !!phrase && (` ${keywordWords} `).includes(` ${phrase} `);
+
+  if (hasPhrase(locationWords) || hasPhrase(firstComponentWords)) return keyword;
+  return `${keyword} ${loc}`;
+}
+
 // `opts` (resume only): { onlySources: Set, startPageBySource: { [id]: 1-based page } }.
 // onlySources restricts which manual sources get tasks (skip already-'done' ones on
 // resume). startPageBySource resumes a URL-paginated source mid-pagination by building
@@ -704,14 +770,14 @@ function getLocationTerms(profileLocations = [], preferredLocation = '') {
 // page counter + the staging ledger continue from there. Sources whose URL doesn't vary
 // by page (Glassdoor infinite-scroll, single-page Google) ignore startPage and re-scrape
 // from page 1 (the cross-source dedup absorbs the re-yielded earlier pages).
-function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
+export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
   const { onlySources = null, startPageBySource = null } = opts;
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
   // Board-ready location filter (already flattened from the structured canonical
   // by deriveLocationParam). Appended as each board's REAL location param so a
   // location-free query no longer searches nationwide. Empty → omitted (nationwide,
   // the correct default for a remote / no-location search). Google for Jobs has no
-  // clean location param, so it relies on the LLM baking the place into the query.
+  // clean location param, so we append the canonical place to its keyword query.
   const loc = String(location || '').trim();
   const locParam = (name) => loc ? `&${name}=${encodeURIComponent(loc)}` : '';
   // Browser pool extractors — only platforms that REQUIRE local browser rendering.
@@ -752,7 +818,7 @@ function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
     google:          { extractor: GOOGLE_JOBS_EXTRACTOR,  config: GOOGLE_JOBS_CONFIG,  maxPages: 1,
                        // Google deprecated ibp=htl;jobs → it 302s to ?q=…&udm=8 (the new
                        // Jobs layout). Build udm=8 directly to skip the redirect hop.
-                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(q + ' jobs')}&udm=8` },
+                       urlFn: (q) => `https://www.google.com/search?q=${encodeURIComponent(googleKeywordWithLocation(q, loc) + ' jobs')}&udm=8` },
   };
 
   const tasks = [];
@@ -1443,12 +1509,19 @@ Be creative with suggestedRoleQueries — think about what career directions the
       const count = Array.isArray(res.data) ? res.data.length : 0;
       const total = sourceTaskIds[sourceId]?.length || 1;
       const blocked = res.warning?.severity === 'block';
+      // manualScraper resolves Glassdoor's textual location in-browser and
+      // mutates task.url to append locId/locT immediately before navigation.
+      // sourceFirstUrl/taskUrlById were initially copied before that mutation,
+      // so a later Solve reopened the locKeyword-only (effectively nationwide)
+      // URL rather than the exact page that was scraped. Refresh this small
+      // telemetry/index from the live task objects before emitting the warning.
+      const liveFirstUrl = refreshManualSourceUrlIndex(tasks, sourceId, sourceFirstUrl, taskUrlById, res.id);
       if (blocked) {
         // Record THIS query's blocked URL (in task order) so a source blocked on
         // multiple query variants can be Solved sequentially — the resolve handler
         // pops each and returns the next. Without this the map stayed empty and
         // only the FIRST blocked query was ever recoverable (sans a full re-run).
-        const u = taskUrlById[res.id];
+        const u = liveFirstUrl;
         if (u) {
           const list = sourceBlockedUrls[sourceId] || (sourceBlockedUrls[sourceId] = []);
           if (!list.includes(u)) list.push(u);
@@ -1797,6 +1870,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
         // NOTHING even after a cooldown wait means the limit isn't clearing — stop
         // spinning rather than burn all MAX_PASSES on 0-yield retries.
         let noProgressStreak = 0;
+        let lkBrowserUnavailableResult = null;
 
         for (let pass = 0; pass < MAX_PASSES; pass++) {
           const remaining = lkPool.filter(j => !j.snippet || j.snippet.length < 100);
@@ -1807,7 +1881,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
           }
 
           const passStartedAt = Date.now();
-          const { jobs: enriched, loginWall, successCount = 0, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0 } =
+          const { jobs: enriched, loginWall, successCount = 0, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, browserUnavailable = false, profileReserved = false, browserError = null } =
             await enrichLinkedInDescriptionsBrowser(remaining, combinedSignal);
 
           const byUrl = new Map(enriched.map(j => [j.url, j]));
@@ -1823,10 +1897,16 @@ Be creative with suggestedRoleQueries — think about what career directions the
           const ip = rateLimited ? await getEgressIp() : null;
           recordLinkedinEnrichPass({
             kind: 'search', ip, ipOk: rateLimited ? !!ip : null,
-            walled: loginWall, enriched: successCount, stillEmpty,
+            walled: loginWall, browserUnavailable, enriched: successCount, stillEmpty,
             noDesc, noDescSoftBlock, noDescGenuine, evalErrors, navErrors,
             contextRotations, browserGen, browserAgeMs, startedAt: passStartedAt,
           });
+
+          if (browserUnavailable) {
+            lkBrowserUnavailableResult = { profileReserved, browserError };
+            logger.info(`[Jobs][${nodeId}] LinkedIn enrichment paused: shared browser unavailable (${browserError || 'unknown error'})`);
+            break;
+          }
 
           noProgressStreak = successCount > 0 ? 0 : noProgressStreak + 1;
 
@@ -1849,13 +1929,19 @@ Be creative with suggestedRoleQueries — think about what career directions the
         const lkByUrl = new Map(lkPool.map(j => [j.url, j]));
         kept = kept.map(j => j.source === 'linkedin' ? (lkByUrl.get(j.url) || j) : j);
         linkedinLastCeilingIp = null;
-        emitProgress({ nodeId, sourceId: 'linkedin', count: lkPool.length, status: 'done', completed: 1, total: 1 });
+        if (lkBrowserUnavailableResult) {
+          const warning = linkedInBrowserUnavailableWarning(lkBrowserUnavailableResult);
+          emitProgress({ nodeId, sourceId: 'linkedin', count: lkPool.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning, completed: 1, total: 1 });
+          scrapeWarnings.push({ sourceId: 'linkedin', url: 'https://www.linkedin.com/jobs', ...warning });
+        } else {
+          emitProgress({ nodeId, sourceId: 'linkedin', count: lkPool.length, status: 'done', completed: 1, total: 1 });
+        }
 
       } else {
         // Single-pass enrichment. In probe mode: arms the cooldown probe on wall.
         // In production: emits error and waits for the user to switch VPN and click Solve.
         const lkPassStartedAt = Date.now();
-        const { jobs: enriched, loginWall, successCount: lkSuccess = 0, contextRotations: lkRotations = 0, browserGen: lkBrowserGen = null, browserAgeMs: lkBrowserAgeMs = null, noDesc: lkNoDesc = 0, noDescSoftBlock: lkNoDescSoft = 0, noDescGenuine: lkNoDescGenuine = 0, evalErrors: lkEvalErrors = 0, navErrors: lkNavErrors = 0, noInternet: lkNoInternet = false } = await enrichLinkedInDescriptionsBrowser(linkedinKept, combinedSignal);
+        const { jobs: enriched, loginWall, successCount: lkSuccess = 0, contextRotations: lkRotations = 0, browserGen: lkBrowserGen = null, browserAgeMs: lkBrowserAgeMs = null, noDesc: lkNoDesc = 0, noDescSoftBlock: lkNoDescSoft = 0, noDescGenuine: lkNoDescGenuine = 0, evalErrors: lkEvalErrors = 0, navErrors: lkNavErrors = 0, noInternet: lkNoInternet = false, browserUnavailable: lkBrowserUnavailable = false, profileReserved: lkProfileReserved = false, browserError: lkBrowserError = null } = await enrichLinkedInDescriptionsBrowser(linkedinKept, combinedSignal);
         const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
         kept = kept.map(j => j.source === 'linkedin' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
 
@@ -1869,7 +1955,18 @@ Be creative with suggestedRoleQueries — think about what career directions the
         // scoring empties. (Mirrors the test-mode continuous loop above; a
         // soft-block-only pass used to fall through to a clean 'done' and score
         // the gutted residual.)
-        if (lkNoInternet) {
+        if (lkBrowserUnavailable) {
+          linkedinLastCeilingIp = null;
+          const browserWarning = linkedInBrowserUnavailableWarning({ profileReserved: lkProfileReserved, browserError: lkBrowserError });
+          recordLinkedinEnrichPass({
+            kind: 'search', ip: null, ipOk: null, walled: false, browserUnavailable: true,
+            enriched: lkSuccess, stillEmpty: lkStillEmpty, contextRotations: lkRotations,
+            noDesc: lkNoDesc, noDescSoftBlock: lkNoDescSoft, noDescGenuine: lkNoDescGenuine, evalErrors: lkEvalErrors, navErrors: lkNavErrors,
+            browserGen: lkBrowserGen, browserAgeMs: lkBrowserAgeMs, startedAt: lkPassStartedAt,
+          });
+          emitProgress({ nodeId, sourceId: 'linkedin', count: linkedinKept.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: browserWarning, completed: 1, total: 1 });
+          scrapeWarnings.push({ sourceId: 'linkedin', url: 'https://www.linkedin.com/jobs', ...browserWarning });
+        } else if (lkNoInternet) {
           // Dead VPN egress during the initial search — descriptions failed at the
           // network layer (not a wall). Gate the pipeline with a "switch to a
           // working VPN server" prompt instead of scoring empty jobs. Reuses the
@@ -1905,12 +2002,16 @@ Be creative with suggestedRoleQueries — think about what career directions the
             // Probe mode: auto-run the cooldown measurement without a Solve click.
             const waitsMs = JOB_SEARCH_TEST_MODE.probeCooldownWaitsMin.map(m => Math.round(m * 60_000));
             const lkPool = kept.filter(j => j.source === 'linkedin');
-            const { pool: probedPool, foundMs, attempt } =
+            const { pool: probedPool, foundMs, attempt, browserUnavailable, profileReserved, browserError } =
               await runCooldownProbe(nodeId, waitsMs, lkPool, combinedSignal, emitProgress, null);
             const probedByUrl = new Map(probedPool.map(j => [j.url, j]));
             kept = kept.map(j => j.source === 'linkedin' ? (probedByUrl.get(j.url) || j) : j);
             const probeStillEmpty = probedPool.filter(j => !j.snippet || j.snippet.length < 100).length;
-            if (foundMs != null && probeStillEmpty === 0) {
+            if (browserUnavailable) {
+              const browserWarning = linkedInBrowserUnavailableWarning({ profileReserved, browserError });
+              emitProgress({ nodeId, sourceId: 'linkedin', count: probedPool.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: browserWarning, completed: 1, total: 1 });
+              scrapeWarnings.push({ sourceId: 'linkedin', url: 'https://www.linkedin.com/jobs', ...browserWarning });
+            } else if (foundMs != null && probeStillEmpty === 0) {
               linkedinLastCeilingIp = null;
               emitProgress({ nodeId, sourceId: 'linkedin', count: probedPool.length, status: 'done', completed: 1, total: 1 });
             } else {
@@ -2064,7 +2165,18 @@ Be creative with suggestedRoleQueries — think about what career directions the
     jobsTelemetry.search = {
       ts: Date.now(),
       queries: queries.length,
-      queryStrings: Array.isArray(queries) ? queries.slice(0, 12) : [], // exact query text sent (FAST keeps ≤2) — shows which variants carried location
+      // Role queries are shared raw input for every source. Google has no location
+      // param, so its actual keyword query may append the canonical location; keep
+      // that expanded form separately so a bug report never claims the raw string
+      // was sent unchanged to Google.
+      queryStrings: Array.isArray(queries) ? queries.slice(0, 12) : [],
+      googleQueryStrings: tasks
+        .filter(task => task.sourceId === 'google')
+        .map((task) => {
+          try { return new URL(task.url).searchParams.get('q') || ''; } catch { return ''; }
+        })
+        .filter(Boolean)
+        .slice(0, 12),
       raw: allJobs.length,
       deduped: deduped.length,
       maxAgeDays: ageDays, // the configured look-back window this run actually used
@@ -2228,6 +2340,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
       return { success: false, error: `Unsupported single source: ${sourceId}` };
     }
 
+    // Keep background re-fetches inside the same aggregate FAST-mode ceiling as
+    // the main multi-source pipeline.
+    if (Number.isFinite(JOB_API_PER_SOURCE_CAP)) jobs = jobs.slice(0, JOB_API_PER_SOURCE_CAP);
     const tagged = jobs.map(j => ({ ...j, source: sourceId }));
     const deduped = dedupByTitleCompany(tagged);
 
@@ -2777,10 +2892,16 @@ RULES:
               const mj = (snapshot.jobs || []).map(j => j.source === 'linkedin' ? (m.get(j.url) || j) : j);
               await saveJobAnalysisSnapshot({ ...snapshot, jobs: mj, canvasFilePath });
             };
-            const { pool: merged, foundMs, attempt, probeTotalEnriched, aborted } =
+            const { pool: merged, foundMs, attempt, probeTotalEnriched, aborted, browserUnavailable, profileReserved, browserError } =
               await runCooldownProbe(nodeId, waitsMs, allLinkedIn, signal, sendProgress, saveMidProbe);
             if (aborted) return { resolved: true, items: merged, replaceSourceItems: true, nextBlockedUrl: null };
             const stillEmpty = merged.filter(j => !j.snippet || j.snippet.length < 100).length;
+            if (browserUnavailable) {
+              const browserWarning = linkedInBrowserUnavailableWarning({ profileReserved, browserError });
+              recordResolve({ needEnrich: needEnrich.length, enrichSuccess: probeTotalEnriched, walled: false, stillEmpty, cooldownProbe: true, browserUnavailable: true });
+              sendProgress({ nodeId, sourceId: 'linkedin', count: merged.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: browserWarning });
+              return { resolved: true, items: merged, warning: browserWarning, replaceSourceItems: true, nextBlockedUrl: null };
+            }
             recordResolve({ needEnrich: needEnrich.length, enrichSuccess: probeTotalEnriched, walled: foundMs == null, stillEmpty, cooldownProbe: true, cooldownFoundMs: foundMs });
             if (foundMs != null) {
               linkedinLastCeilingIp = null;
@@ -2821,7 +2942,7 @@ RULES:
           }
 
           sendProgress({ nodeId, sourceId: 'linkedin', status: 'searching', count: needEnrich.length, detail: 're-fetching descriptions', warning: null });
-          const { jobs: enriched, loginWall: walled, successCount = 0, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, noInternet = false } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal);
+          const { jobs: enriched, loginWall: walled, successCount = 0, contextRotations = 0, browserGen = null, browserAgeMs = null, noDesc = 0, noDescSoftBlock = 0, noDescGenuine = 0, evalErrors = 0, navErrors = 0, noInternet = false, browserUnavailable = false, profileReserved = false, browserError = null } = await enrichLinkedInDescriptionsBrowser(needEnrich, signal);
           // Merge whatever we got this pass back into the full set (keeps prior
           // descriptions for jobs enriched before the ceiling was hit).
           const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
@@ -2831,7 +2952,7 @@ RULES:
           // Egress-IP trail entry for this Solve. `walled` distinguishes the
           // re-walled outcome from a clean finish; comparing `ip` to the prior
           // pass's is what answers "did the VPN switch actually change the IP?".
-          recordLinkedinEnrichPass({ kind: 'solve', ip: currentIp, ipOk: !!currentIp, walled, noInternet, enriched: successCount, stillEmpty, noDesc, noDescSoftBlock, noDescGenuine, evalErrors, navErrors, contextRotations, browserGen, browserAgeMs, startedAt: passStartedAt });
+          recordLinkedinEnrichPass({ kind: 'solve', ip: currentIp, ipOk: !!currentIp, walled, noInternet, browserUnavailable, enriched: successCount, stillEmpty, noDesc, noDescSoftBlock, noDescGenuine, evalErrors, navErrors, contextRotations, browserGen, browserAgeMs, startedAt: passStartedAt });
           logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch: +${successCount} description(s), ${stillEmpty} still empty (${contextRotations} ctx-rotation(s)${walled ? ', hit IP ceiling' : ''})`);
 
           // Persist this pass's descriptions back to the snapshot. Without this,
@@ -2851,6 +2972,12 @@ RULES:
             }
           }
 
+          if (browserUnavailable) {
+            const browserWarning = linkedInBrowserUnavailableWarning({ profileReserved, browserError });
+            recordResolve({ needEnrich: needEnrich.length, enrichSuccess: successCount, contextRotations, walled: false, stillEmpty, browserUnavailable: true });
+            sendProgress({ nodeId, sourceId: 'linkedin', count: items.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: browserWarning });
+            return { resolved: true, items, warning: browserWarning, replaceSourceItems: true, nextBlockedUrl: null };
+          }
           if (noInternet) {
             // The VPN IP went offline mid-pass — every fetch failed at the network
             // layer (not a LinkedIn wall). Same remediation as a rate-limit (switch

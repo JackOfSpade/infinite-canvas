@@ -180,7 +180,7 @@ export function getStealthBrowserInfo() {
   return {
     generation: browserGeneration,
     launchedAt: browserLaunchedAt,
-    connected: !!browserInstance?.isConnected?.(),
+    connected: !!browserInstance?.connected,
   };
 }
 
@@ -233,7 +233,7 @@ export async function getStealthBrowser() {
 
   // A close is currently tearing down the shared instance (e.g. handing the
   // profile off to a captcha/login window, see closeStealthBrowser). Without
-  // this wait, browserInstance.isConnected() reads a moment before close()
+  // this wait, browserInstance.connected reads a moment before close()
   // actually severs the CDP connection could still return true — handing this
   // caller a browser mid-teardown — or, if it already reads false, this
   // caller would redundantly SIGTERM/null the SAME instance closeStealthBrowser
@@ -245,7 +245,7 @@ export async function getStealthBrowser() {
     assertSharedProfileAvailable('headless stealth browser');
   }
 
-  if (browserInstance?.isConnected?.()) return browserInstance;
+  if (browserInstance?.connected) return browserInstance;
 
   // Clear a dead/crashed instance. Killing the orphaned Chrome process releases
   // the userDataDir lock — without this, the next puppeteer.launch() fails with
@@ -277,7 +277,7 @@ export async function getStealthBrowser() {
     // connected) while we were waiting — re-check before starting a SECOND,
     // redundant launch on top of one that already finished and cleared
     // browserLaunchPromise (the check below would otherwise miss it).
-    if (browserInstance?.isConnected?.()) return browserInstance;
+    if (browserInstance?.connected) return browserInstance;
   }
 
   if (browserLaunchPromise) return browserLaunchPromise;
@@ -568,7 +568,7 @@ export async function closeStealthBrowser(forShutdown = false) {
       logger.info('[StealthBrowser] Waiting for in-flight browser launch before closing shared profile');
       try {
         const launchedBrowser = await pendingLaunch;
-        if (launchedBrowser?.isConnected?.()) browserInstance = launchedBrowser;
+        if (launchedBrowser?.connected) browserInstance = launchedBrowser;
       } catch (err) {
         logger.warn(`[StealthBrowser] In-flight browser launch settled before close with error: ${err?.message || String(err)}`);
       }

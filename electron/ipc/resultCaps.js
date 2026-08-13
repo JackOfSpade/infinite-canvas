@@ -23,7 +23,7 @@ import { modelMeta } from './tokenWindow.js';
 
 // Four named modes — exactly one is true at runtime (fast takes precedence over
 // the fullRun medium/full split):
-//   FAST_TEST   : 2 queries; browser 2 pages × 5 jobs (=10); API ≤10/source; AI per skipAI
+//   FAST_TEST   : 2 queries; every source contributes ≤10 jobs; AI per skipAI
 //   MEDIUM_TEST : 5 jobs/page,   10 pages, AI skipped  (quick smoke test)
 //   FULL_TEST   : 150 jobs/page, 10 pages, AI per skipAI flag (full pipeline, scoped source)
 //   production  : 150 jobs/page, 10 pages, full AI     (all sources)
@@ -32,8 +32,8 @@ export const MEDIUM_TEST = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE
 export const FULL_TEST   = JOB_SEARCH_TEST_MODE.enabled && !JOB_SEARCH_TEST_MODE.fast &&  JOB_SEARCH_TEST_MODE.fullRun;
 
 // FAST_TEST breadth knobs — kept as named constants so the 10-per-source target
-// is traceable: browser 2 pages × 5 jobs, API 2 queries × 5 results. Both types
-// land at the same 10/source ceiling.
+// is traceable. Browser sources may span multiple queries/pages, so the aggregate
+// cap is enforced separately from the per-page extraction cap.
 const FAST_QUERY_CAP     = 2;  // first N generated queries kept (both browser + API)
 const FAST_PAGES         = 2;  // browser pages walked per query
 const FAST_JOBS_PER_PAGE = 5;  // browser jobs kept per page
@@ -69,6 +69,11 @@ export const JOB_RESULT_CAP = Infinity;
 // (which have ~10 jobs/page in practice, so 150 is effectively unlimited in prod).
 export const JOB_PER_PAGE_CAP = FAST_TEST ? FAST_JOBS_PER_PAGE : MEDIUM_TEST ? 5 : 150;
 
+// Aggregate ceiling for a source across every query and page. This is distinct
+// from JOB_PER_PAGE_CAP: without it, two queries × two pages × five jobs could
+// let a paginated browser source contribute 20 jobs in FAST mode.
+export const JOB_PER_SOURCE_CAP = FAST_TEST ? FAST_QUERY_CAP * FAST_API_PER_QUERY : Infinity;
+
 // ── Query cap (FAST mode only) ────────────────────────────────────────────────
 // First N generated queries kept, applied once in the search-jobs handler so it
 // bounds BOTH the browser scrape tasks and the API fan-out. Infinity = no cap.
@@ -80,7 +85,7 @@ export const JOB_TEST_QUERY_CAP = FAST_TEST ? FAST_QUERY_CAP : Infinity;
 // inconsistently (per-query for the fan-out sources usajobs/dice, whole-feed for
 // remoteok/weworkremotely/linkedin/indeed). 10 = FAST_QUERY_CAP × FAST_API_PER_QUERY,
 // i.e. "2 queries × 5 each" as a per-source aggregate. Infinity = no cap.
-export const JOB_API_PER_SOURCE_CAP = FAST_TEST ? FAST_QUERY_CAP * FAST_API_PER_QUERY : Infinity;
+export const JOB_API_PER_SOURCE_CAP = JOB_PER_SOURCE_CAP;
 
 // ── LLM scoring budget (how many gathered jobs actually get LLM-scored) ───────
 // UNCAPPED (Infinity): score EVERY gathered job. selectTopAcrossSources(_, Infinity)

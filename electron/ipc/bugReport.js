@@ -1210,6 +1210,7 @@ ${rows}
           if (d.closeReason) bits.push(`closed=${d.closeReason}`);
           if (d.extractOutcome) bits.push(`extractor=${d.extractOutcome}`);
           if (typeof d.textLen === 'number') bits.push(`textLen=${d.textLen}`);
+          if (d.hostMismatch) bits.push(`probe skipped=${d.probeSkippedReason || 'host-mismatch'}`);
           bits.push(`saw captcha=${d.sawChallenge ? 'yes' : 'no'} / consent=${d.sawConsent ? 'yes' : 'no'}`);
           // 1400, not 400: matches the cap in marketplace.js's classifyCompScrapeFailure —
           // 400 was clipping the diag's card0=[…] class skeleton (the new markup's

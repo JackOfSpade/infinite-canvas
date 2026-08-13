@@ -21,7 +21,7 @@ import {
   closeStealthBrowser, getUserDataDir, findChromePath,
 } from '../stealthBrowser.js';
 import { logger } from '../../logger.js';
-import { JOB_PER_PAGE_CAP, JOB_MAX_PAGES } from '../resultCaps.js';
+import { JOB_PER_PAGE_CAP, JOB_PER_SOURCE_CAP, JOB_MAX_PAGES } from '../resultCaps.js';
 import { POSTED_DATE_PATTERN } from '../jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from './scraperOverlay.js';
 import { humanDelay } from '../../utils/humanDelay.js';
@@ -1970,7 +1970,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // Expand descriptions for up to JOB_PER_PAGE_CAP jobs; drop any beyond
           // the cap rather than keeping them without descriptions (a job with no
           // description is less useful than not having the job at all).
-          const jobsToExpand = newJobs.slice(0, JOB_PER_PAGE_CAP);
+          const remainingSourceSlots = Number.isFinite(JOB_PER_SOURCE_CAP)
+            ? Math.max(0, JOB_PER_SOURCE_CAP - allJobs.length)
+            : Infinity;
+          const jobsToExpand = newJobs.slice(0, Math.min(JOB_PER_PAGE_CAP, remainingSourceSlots));
           const { jobs: enhanced, descError } = await expandDescriptions(page, jobsToExpand, sourceId, overlayBase, allJobs.length + newJobs.length, signal);
 
           const withSnippet = enhanced.filter(j => j.snippet?.length > 0).length;
@@ -2007,6 +2010,11 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           });
 
           logger.info(`[BrowserScraper] ${srcName} page ${pageNum}: ${enhanced.length} new jobs (${allJobs.length} total)`);
+
+          if (allJobs.length >= JOB_PER_SOURCE_CAP) {
+            logger.info(`[BrowserScraper] ${srcName} hit JOB_PER_SOURCE_CAP (${JOB_PER_SOURCE_CAP}) — stopping source`);
+            break;
+          }
 
           const didPage = await clickNextPage(page, sourceId);
           if (!didPage) break;
@@ -2053,6 +2061,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           sourceSiteChangedWarning = siteChangedWarning;
         }
         sourcePagesWalked = Math.max(sourcePagesWalked, pageNum);
+        if (allJobs.length >= JOB_PER_SOURCE_CAP) break;
       }
 
       const result = {

@@ -839,81 +839,67 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
                   </div>
                 )}
 
-                {/* Claude Settings — ALWAYS rendered, even when Gemini is the
-                    primary provider. Two reasons: (1) the per-group family
-                    picks below persist independent of which provider is
-                    currently active, so flipping Primary AI Provider back to
-                    Claude later restores whatever tiers were already
-                    configured instead of resetting them; (2) hiding the
-                    Anthropic key field behind provider === 'claude' would
-                    leave a Gemini user with nowhere to preconfigure Claude
-                    before switching. (This block used to justify itself by
-                    "résumé generation is pinned to Claude regardless of the
-                    toggle" — that pin is gone; Jack reversed the decision so
-                    résumé/cover-letter generation follows the provider
-                    toggle like every other task. See llm.js TASK_GROUPS.) */}
-                <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
-                  <div className="text-white/40 text-[10px] leading-snug">
-                    {aiSettings.provider === 'claude' ? (
-                      <>Within whichever tier you pick below for each work group, the app always resolves to the latest model in that family automatically — never a pinned id.</>
-                    ) : (
-                      <>Optional — only used if you switch Primary AI Provider to Claude above. Nothing below takes effect while Gemini is active.</>
-                    )}
-                  </div>
-
-                  {/* Per-group Claude family — replaces the old hard-coded
-                      per-task tier assignment. Each option shows the id it
-                      currently resolves to (claudeModelIds, fetched via
-                      getClaudeModelMap) as live proof the always-latest
-                      resolver is working, not just a static family name. */}
-                  <div className="space-y-2.5">
-                    {CLAUDE_MODEL_GROUPS.map(({ key, label, defaultToken, note }) => {
-                      const selected = aiSettings.claudeModels?.[key] || defaultToken;
-                      return (
-                        <div key={key}>
-                          <div className="text-white/50 text-[11px] mb-1">{label}</div>
-                          <select
-                            value={selected}
-                            onChange={(e) => updateClaudeModelGroup(key, e.target.value)}
-                            className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-[11px] text-white/80 focus:outline-none focus:border-blue-500/50"
-                          >
-                            {CLAUDE_FAMILY_OPTIONS.map(({ token, label: familyLabel, desc }) => {
-                              const modelId = claudeModelIds[token];
-                              const isDefault = defaultToken === token;
-                              return (
-                                <option key={token} value={token}>
-                                  {familyLabel}{modelId ? ` — ${modelId}` : ''} ({desc}{isDefault ? ', default' : ''})
-                                </option>
-                              );
-                            })}
-                          </select>
-                          <p className="text-white/30 text-[9px] mt-1">{note}</p>
-                        </div>
-                      );
-                    })}
-                    <p className="text-white/30 text-[9px] leading-snug">
-                      These tiers apply only on the Claude provider — while Gemini is Primary AI Provider above, every task (including résumé + cover letters) runs on Gemini's own capability-ladder cascade instead.
-                    </p>
-                  </div>
-
-                  <div>
-                    <div className="flex justify-between items-end mb-1">
-                      <div className="text-white/50 text-[11px]">
-                        {aiSettings.provider === 'claude' ? 'API Key' : 'Anthropic API Key'}
-                      </div>
-                      <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-[9px] text-blue-400 hover:underline">Get Key</a>
+                {/* Claude-only configuration. It is intentionally absent until
+                    Claude is the active provider: none of these controls
+                    affect Gemini's capability-ladder path. Values persist, so
+                    switching back to Claude restores prior selections. */}
+                {aiSettings.provider === 'claude' && (
+                  <div className="space-y-3 bg-white/[0.02] border border-white/5 p-3 rounded-lg">
+                    <div className="text-white/40 text-[10px] leading-snug">
+                      Within whichever tier you pick below for each work group, the app always resolves to the latest model in that family automatically — never a pinned id.
                     </div>
-                    <input
-                      type="password"
-                      placeholder="sk-ant-api..."
-                      value={aiSettings.anthropicApiKey || ''}
-                      onChange={(e) => updateAISetting('anthropicApiKey', e.target.value)}
-                      className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
-                    />
-                  </div>
 
-                  <AIProviderStatus provider="claude" status={aiStatus.claude} checking={checkingProvider === 'claude'} onCheck={checkAvailability} />
-                </div>
+                    {/* Per-group Claude family — replaces the old hard-coded
+                        per-task tier assignment. Each option shows the id it
+                        currently resolves to (claudeModelIds, fetched via
+                        getClaudeModelMap) as live proof the always-latest
+                        resolver is working, not just a static family name. */}
+                    <div className="space-y-2.5">
+                      {CLAUDE_MODEL_GROUPS.map(({ key, label, defaultToken, note }) => {
+                        const selected = aiSettings.claudeModels?.[key] || defaultToken;
+                        return (
+                          <div key={key}>
+                            <div className="text-white/50 text-[11px] mb-1">{label}</div>
+                            <select
+                              value={selected}
+                              onChange={(e) => updateClaudeModelGroup(key, e.target.value)}
+                              className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-[11px] text-white/80 focus:outline-none focus:border-blue-500/50"
+                            >
+                              {CLAUDE_FAMILY_OPTIONS.map(({ token, label: familyLabel, desc }) => {
+                                const modelId = claudeModelIds[token];
+                                const isDefault = defaultToken === token;
+                                return (
+                                  <option key={token} value={token}>
+                                    {familyLabel}{modelId ? ` — ${modelId}` : ''} ({desc}{isDefault ? ', default' : ''})
+                                  </option>
+                                );
+                              })}
+                            </select>
+                            <p className="text-white/30 text-[9px] mt-1">{note}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between items-end mb-1">
+                        <div className="text-white/50 text-[11px]">
+                          API Key
+                        </div>
+                        <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-[9px] text-blue-400 hover:underline">Get Key</a>
+                      </div>
+                      <input
+                        type="password"
+                        placeholder="sk-ant-api..."
+                        value={aiSettings.anthropicApiKey || ''}
+                        onChange={(e) => updateAISetting('anthropicApiKey', e.target.value)}
+                        className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white/80 focus:outline-none focus:border-blue-500/50"
+                      />
+                    </div>
+
+                    <AIProviderStatus provider="claude" status={aiStatus.claude} checking={checkingProvider === 'claude'} onCheck={checkAvailability} />
+                  </div>
+                )}
               </div>
             ) : (
               <div className="text-white/30 text-xs text-center py-2">Loading settings...</div>

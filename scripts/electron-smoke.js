@@ -676,6 +676,32 @@ try {
 
   await clickToolbar(page, 'Settings');
   await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
+  const settingsPanel = page.locator('.onboarding-panel').filter({
+    has: page.getByRole('heading', { name: 'Settings', exact: true }),
+  });
+  const claudeKey = settingsPanel.getByPlaceholder('sk-ant-api...');
+  const claudeOnlyLabels = ['Generation', 'Analysis', 'Light'];
+
+  // A Gemini-first install must not expose controls that have no effect on its
+  // capability ladder. Do not click availability: this only verifies render
+  // state and must not issue live provider probes during the smoke test.
+  assert.equal(await claudeKey.count(), 0, 'Gemini settings should hide the Anthropic API key');
+  for (const label of claudeOnlyLabels) {
+    assert.equal(await settingsPanel.getByText(label, { exact: true }).count(), 0, `Gemini settings should hide Claude ${label} controls`);
+  }
+
+  await settingsPanel.getByRole('button', { name: 'claude', exact: true }).click();
+  await claudeKey.waitFor();
+  for (const label of claudeOnlyLabels) {
+    await settingsPanel.getByText(label, { exact: true }).waitFor();
+  }
+  assert.equal(await settingsPanel.getByRole('button', { name: 'Check availability', exact: true }).count(), 1, 'Claude settings should show its availability control');
+
+  await settingsPanel.getByRole('button', { name: 'gemini', exact: true }).click();
+  await claudeKey.waitFor({ state: 'detached' });
+  for (const label of claudeOnlyLabels) {
+    await settingsPanel.getByText(label, { exact: true }).waitFor({ state: 'detached' });
+  }
   await page.keyboard.press('Escape');
   await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor({ state: 'hidden' });
 

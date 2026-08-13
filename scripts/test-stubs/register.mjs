@@ -1,5 +1,10 @@
 // Entry point for `node --import`: registers the electron/electron-store
 // stub loader before scripts/test-runner.js's own imports resolve.
-import { register } from 'node:module';
+import * as nodeModule from 'node:module';
+import { resolve } from './loader.mjs';
 
-register('./loader.mjs', import.meta.url);
+if (typeof nodeModule.registerHooks === 'function') {
+  nodeModule.registerHooks({ resolve });
+} else {
+  nodeModule.register('./loader.mjs', import.meta.url);
+}

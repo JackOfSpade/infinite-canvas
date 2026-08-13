@@ -817,6 +817,7 @@ export function Canvas() {
             selectionKeyCode={interactiveDisabled ? null : ['Shift']}
             multiSelectionKeyCode={interactiveDisabled ? null : ['Control', 'Meta']}
             defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
+            proOptions={{ hideAttribution: true }}
           >
             <DrawingLayer ref={drawingLayerRef} drawings={drawings} activeColor={activeColor} penSize={penSize} />
             <EmptyCanvasHint nodeCount={nodes.length} drawingCount={drawings.length} />

@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import electron from 'vite-plugin-electron'
-import renderer from 'vite-plugin-electron-renderer'
 import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
@@ -28,6 +27,9 @@ export default defineConfig({
         entry: 'electron/main.js',
         vite: {
           build: {
+            // Main-process dependencies are intentionally bundled into a few
+            // desktop-only chunks; they are not downloaded by the renderer.
+            chunkSizeWarningLimit: 3000,
             // Electron v41 + Node.js v24: ESM `import electronPkg from 'electron'` gives
             // an empty object — Electron only intercepts CJS `require('electron')`.
             // vite-plugin-electron auto-sets formats: ['es'] when package.json has
@@ -82,6 +84,5 @@ export default defineConfig({
         },
       },
     ]),
-    renderer(),
   ],
 })
