@@ -84,7 +84,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   try { appliedSnap = appliedJobsSnapshot(); } catch { /* store may not be loaded */ }
   const hasModelRes = !!(modelRes && (modelRes.fetchedAt > 0 || (modelRes.skipped || []).length > 0));
   const hasAppliedJobs = !!(appliedSnap && appliedSnap.count > 0);
-  if (!t || (!t.search && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.bucketing && !hasBrowserScrape && !appGen && !hasModelRes && !hasAppliedJobs)) return '';
+  if (!t || (!t.search && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.bucketing && !t.history && !hasBrowserScrape && !appGen && !hasModelRes && !hasAppliedJobs)) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId);
   if (scope.foreign) return `\n## Job Search Pipeline\n${scope.note}`;
@@ -170,10 +170,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         let offFlag = '';
         if (ad.offTarget > 0) {
           if (ad.country) {
-            // Country-level target: an off-target is genuinely OUTSIDE the
-            // country (a cross-border leak, e.g. a US role on a "Canada" search)
-            // — not a within-country radius spill, so don't hand-wave it as one.
-            offFlag = ` — ⚠️ ${ad.offTarget} OUTSIDE ${ad.country} (cross-border leak — genuinely out of the target country; check the samples below)`;
+            // Country-level target: an off-target is now only counted when the
+            // listing names a DIFFERENT country's subdivision, so this figure is
+            // a real cross-border leak and safe to state plainly. Locations with
+            // no country signal at all land in `unclear` below instead.
+            offFlag = ` — ⚠️ ${ad.offTarget} provably OUTSIDE ${ad.country} (cross-border leak; check the samples below)`;
           } else {
             const isSoft = (id) => /keyword-only|remote board/.test(loc.perSource?.[id] || '');
             const hard = Object.keys(ad.offBySource || {}).filter(id => !isSoft(id));
@@ -185,9 +186,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         // For a country target, "in-area" only means inside that country — say so,
         // so the reader doesn't read 50% as a city-level miss (it isn't).
         const scopeNote = ad.country ? ` (in-area = anywhere in ${ad.country})` : '';
-        lines.push(`- Location adherence over ${ad.total} kept job(s)${scopeNote}: ${ad.matched} in-area (${pct}%), ${ad.remote} remote, ${ad.offTarget} off-target, ${ad.unknown} no-location${offFlag}`);
+        const unclearPart = ad.unclear > 0 ? `, ${ad.unclear} unclear` : '';
+        lines.push(`- Location adherence over ${ad.total} kept job(s)${scopeNote}: ${ad.matched} in-area (${pct}%), ${ad.remote} remote, ${ad.offTarget} off-target${unclearPart}, ${ad.unknown} no-location${offFlag}`);
         if (ad.country) {
           lines.push(`  - ℹ️ Country-level target — "in-area" just means inside ${ad.country}. Search a city/province (e.g. "Toronto, Ontario") to tighten results and get city-level adherence.`);
+        }
+        if (ad.unclear > 0) {
+          // Deliberately NOT counted as a leak. We can enumerate a country's
+          // provinces/states but not its cities, so a bare city name ("Nanaimo")
+          // is unclassifiable rather than foreign — calling it a leak sent a past
+          // investigation after a bug that wasn't there. A HIGH unclear count
+          // concentrated in one source is still worth a look: that source is
+          // returning locations too bare to verify.
+          const bySrc = Object.entries(ad.unclearBySource || {}).map(([k, v]) => `${k}=${v}`).join(', ');
+          lines.push(`  - ℹ️ ${ad.unclear} unclear: the listing names a place with no ${ad.country} or foreign region token (usually a bare city name), so membership can't be decided either way — NOT counted as a leak${bySrc ? ` · by source: ${bySrc}` : ''}`);
+          if (Array.isArray(ad.unclearSamples) && ad.unclearSamples.length > 0) {
+            for (const ex of ad.unclearSamples) lines.push(`    - ${ex}`);
+          }
         }
         if (Array.isArray(ad.offSamples) && ad.offSamples.length > 0) {
           lines.push('  - Off-target sample(s):');
@@ -241,18 +256,21 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const got = entries.filter(([, v]) => v.count > 0).map(([k, v]) => `${k}=${v.count}`);
       lines.push(`- Per source (raw gathered): ${got.length ? got.join(', ') : '(none)'}`);
       // Date-bounded deep pagination: how deep each paginating source walked and
-      // why it stopped. `date-cutoff`/`empty-page`/`duplicate-page` = the source
-      // ran out of in-window jobs (the healthy, intended stop). `blocked` = an
-      // anti-bot wall cut it short (the page count is where to start walking the
-      // ceiling DOWN). `ceiling` = hit JOB_MAX_PAGES with jobs still coming (the
-      // window may hold more — consider raising the cap). One-shot/API sources
-      // have no walk and don't appear here.
+      // why it stopped. `empty-page` = the source ran out of results. `blocked`
+      // = an anti-bot wall cut it short. `page-cap` = hit JOB_MAX_PAGES with jobs
+      // still coming. `per-source-cap` = an intentional aggregate result ceiling
+      // (not an exhausted source). One-shot/API sources have no walk and don't
+      // appear here.
       const walked = entries.filter(([, v]) => v.pagesWalked > 0);
       for (const [k, v] of walked) {
         let flag = '';
         if (v.stopReason === 'blocked') {
           flag = ' ⚠️';
-        } else if (v.stopReason === 'ceiling') {
+        } else if (v.stopReason === 'per-source-cap') {
+          const limit = v.cap?.limit;
+          const capLabel = Number.isFinite(limit) ? ` (${limit})` : '';
+          flag = ` ⚠️ (stopped by the per-source cap${capLabel} — this source may have additional in-window jobs; ${v.cap?.type === 'per-source' ? 'disable fast mode to widen' : 'raise the configured source cap to widen'}.)`;
+        } else if (v.stopReason === 'page-cap') {
           // A page-ceiling where most rows deduped away means the page param
           // re-served the same page (clamping) — NOT genuine depth, so "may be
           // more" would mislead. The raw↔unique gap is the tell.
@@ -275,15 +293,20 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         }
         lines.push(`  - \`${k}\`: walked ${v.pagesWalked} page${v.pagesWalked === 1 ? '' : 's'}${v.stopReason ? ` → stopped: ${v.stopReason}` : ''}${flag}`);
       }
-      // API/feed sources don't paginate — they grab matches in document order and
-      // keep the top JOB_RESULT_CAP with no quality signal. When a source MATCHED
-      // more than it surfaced, that overflow was never gathered: the API analogue
-      // of the browser `ceiling` stop, and the one "silently not gathered" path the
-      // per-source counts above couldn't reveal (a capped source looks identical to
-      // an exhausted one). gathered is set only for API sources; > count = truncated.
+      // API/feed sources don't paginate. When a source MATCHED more than it
+      // surfaced, that overflow was never gathered: in FAST mode it is the
+      // aggregate per-source cap; otherwise it is the extractor result cap.
+      // gathered is set only for API sources; > count = truncated.
       const apiCapped = entries.filter(([, v]) => v.gathered != null && v.gathered > v.count);
       for (const [k, v] of apiCapped) {
-        lines.push(`  - \`${k}\`: surfaced ${v.count} of ${v.gathered} in-window matches ⚠️ (per-source cap — ${v.gathered - v.count} more matched but not gathered; raise JOB_RESULT_CAP to widen)`);
+        const overflow = v.gathered - v.count;
+        const fastCap = v.cap?.type === 'fast-aggregate';
+        const limit = v.cap?.limit;
+        const capLabel = Number.isFinite(limit) ? ` (${limit})` : '';
+        const nextStep = fastCap
+          ? 'disable fast mode to widen'
+          : 'raise JOB_RESULT_CAP to widen';
+        lines.push(`  - \`${k}\`: surfaced ${v.count} of ${v.gathered} in-window matches ⚠️ (${fastCap ? 'fast aggregate cap' : 'result cap'}${capLabel} — ${overflow} more matched but not gathered; ${nextStep})`);
       }
       const zeroWarn = entries
         .filter(([, v]) => v.count === 0 && v.warning)
@@ -992,6 +1015,48 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     lines.push('\n### Scoring\n- (no scoring recorded this session)');
   }
 
+  if (t.history && typeof t.history === 'object') {
+    lines.push('\n### Seen-history persistence');
+    const stages = [
+      ['preScoring', 'Authoritative search write'],
+      ['postScoring', 'Post-scoring resolve reconciliation'],
+    ];
+    for (const [key, label] of stages) {
+      const h = t.history[key];
+      if (!h) continue;
+      const age = ago(h.ts);
+      if (h.error) {
+        lines.push(`- ❌ ${label}${age}: ${h.input} job(s) → history write failed: \`${h.error}\``);
+      } else if (h.skipped) {
+        lines.push(`- ℹ️ ${label}${age}: ${h.input} job(s) → skipped (${h.skipped})`);
+      } else {
+        lines.push(`- ✅ ${label}${age}: ${h.input} job(s) → ${h.written || 0} new history row(s)${h.pruned ? `, ${h.pruned} expired row(s) pruned` : ''}`);
+        // WHY the rest produced no row. "59 jobs → 50 rows" on an EMPTY history
+        // is the shape of a dedup key that can't tell two listings apart, and
+        // without this breakdown it reads as ordinary dedup: it took replaying a
+        // saved run to find that all 10 Google jobs shared one normalized URL.
+        // `in-batch` is the tell — a collision with an earlier job in the SAME
+        // write, i.e. over-collapsing, not a genuine already-seen repost.
+        const sk = h.skips;
+        if (sk && (sk.url || sk.titleCompany || sk.noKey)) {
+          const parts = [];
+          if (sk.url) parts.push(`${sk.url} by url-key`);
+          if (sk.titleCompany) parts.push(`${sk.titleCompany} by title+company[+location]`);
+          if (sk.noKey) parts.push(`${sk.noKey} with no usable key`);
+          const bySrc = Object.entries(sk.bySource || {}).map(([k, v]) => `${k}=${v}`).join(', ');
+          const total = (sk.url || 0) + (sk.titleCompany || 0) + (sk.noKey || 0);
+          lines.push(`  - ${total} job(s) wrote no row: ${parts.join(', ')}${bySrc ? ` · by source: ${bySrc}` : ''}`);
+          if (sk.inBatch > 0) {
+            lines.push(`    - ⚠️ ${sk.inBatch} of those collided with ANOTHER JOB IN THIS SAME WRITE, not with prior history — that is a dedup key too coarse to separate two distinct listings, and those jobs will also be wrongly suppressed as "already seen" on the next run.`);
+          }
+        }
+        if (h.unreadable > 0) {
+          lines.push(`  - ⚠️ ${h.unreadable} row(s) already in the CSV could not be parsed back (a legacy row containing a newline, e.g. a Glassdoor company captured as "Marshalls\\n3.4"). They are invisible to dedup and are dropped by this rewrite; the jobs re-append cleanly, so the file self-heals from here.`);
+        }
+      }
+    }
+  }
+
   if (t.bucketing) {
     const b = t.bucketing;
     // The taxonomy = the labels for the 3-level results tree (likelihood band →
@@ -1034,6 +1099,24 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // Salary ranges (second level) — just the labels the AI chose.
       if (Array.isArray(b.salaryRangeLabels) && b.salaryRangeLabels.length > 0) {
         lines.push(`- Salary ranges (second level): ${b.salaryRangeLabels.map(s => `"${s}"`).join(', ')}`);
+      }
+      if (Array.isArray(b.taxonomyRepairs) && b.taxonomyRepairs.length > 0) {
+        lines.push(`- ⚠️ Taxonomy validation repaired: ${b.taxonomyRepairs.join('; ')}.`);
+      }
+      if (Array.isArray(b.taxonomyAudit) && b.taxonomyAudit.length > 0) {
+        lines.push('- Taxonomy placement audit (raw salary → annualized pay → deterministic buckets):');
+        for (const item of b.taxonomyAudit) {
+          const title = item.title ? `"${item.title}"` : '(untitled)';
+          const source = item.source ? ` [${item.source}]` : '';
+          const raw = item.rawSalary ? `"${item.rawSalary}"` : '(none)';
+          const annual = item.annualSalary > 0 ? `$${Number(item.annualSalary).toLocaleString('en-US')}/yr` : 'unparseable';
+          lines.push(`  - #${item.index} ${title}${source} — ${raw} → ${annual} → **${item.salaryRange || 'Unspecified'}**; ${item.likelihood || 'Match'}; ${item.role || 'Other'}`);
+          // Only for values mined out of the description body: shows whether the
+          // figure was actually the role's pay or a bonus/equity/revenue number
+          // that happened to sit next to a cadence word.
+          if (item.salaryContext) lines.push(`    - in-JD context: …${item.salaryContext}…`);
+        }
+        if (b.taxonomyAuditOmitted > 0) lines.push(`  - _${b.taxonomyAuditOmitted} additional job(s) omitted from this compact audit._`);
       }
       // Roles (third level) — the AI's creative partition; the part most worth
       // auditing ("are these the right labels, with the right jobs?").

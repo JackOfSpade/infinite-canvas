@@ -137,6 +137,14 @@ export const CODE_DEFINITIONS = {
       /\[JobTree\]|minimap/i.test(line),
   },
 
+  TAXONOMY: {
+    label: 'Job Taxonomy & Salary Buckets',
+    description: 'Job-board likelihood/salary/role bucketing diagnostics, including taxonomy validation repairs and raw salary → annualized-pay placement audits. Use for malformed salary bands, unexpected job buckets, or role grouping questions. Keeps the compact Job Search Pipeline section while omitting heavy canvas/media dumps.',
+    logFilter: line =>
+      /taxonomy|bucket(?:ing)?|salary|\[JobTree\]|\[JobBoard\]/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   // ── Exclusion Modifiers ───────────────────────────────────────────────────
   // Prefix with X to mean "exclude these from the log"
 
@@ -322,6 +330,11 @@ export function applyBugReportCode(logs, payload, codeString) {
   }
 
   const codes = normalised.split(/[+\s,]+/).filter(Boolean);
+  // FULL is an explicit request to preserve the entire reproduction timeline.
+  // It may be combined with section-only modifiers such as XNODES/XSESS, but
+  // never with a log reducer: `FULL+ERR`, `FULL+QUICK`, and `FULL+XDRAG` all
+  // keep every event. This also keeps the UI summary's "unfiltered" claim true.
+  const hasFull = codes.includes('FULL');
 
   const logFilters = [];       // functions: line → true = INCLUDE
   const logExclusions = [];    // functions: line → true = EXCLUDE
@@ -337,9 +350,9 @@ export function applyBugReportCode(logs, payload, codeString) {
       continue;
     }
     matchedCodes.push(code);
-    if (def.logFilter) logFilters.push(def.logFilter);
-    if (def.logExclude) logExclusions.push(def.logExclude);
-    if (def.logSlice != null) {
+    if (!hasFull && def.logFilter) logFilters.push(def.logFilter);
+    if (!hasFull && def.logExclude) logExclusions.push(def.logExclude);
+    if (!hasFull && def.logSlice != null) {
       // Take the smallest slice if multiple slice codes given
       logSlice = logSlice === null ? def.logSlice : Math.min(logSlice, def.logSlice);
     }

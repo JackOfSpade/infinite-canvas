@@ -66,9 +66,14 @@ import {
   computeJobTreeView,
   countMatchingDescendantCards,
   COL_X,
+  canonicalSalaryRangeLabel,
+  normalizeBandsWithRepairs,
+  normalizeRangesWithRepairs,
+  parseSalaryToNumeric,
+  sanitizeJobTaxonomy,
 } from '../src/nodes/jobsearch/buildJobTree.js';
 import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature } from '../src/nodes/jobboard/mergeJobs.js';
-import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult } from '../electron/extractors/apiExtractors.js';
+import { buildGeoTermSet, extractIndeedJobsFromHtml, jobRelevanceMatch, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult, isRemoteOkSponsoredPlacement } from '../electron/extractors/apiExtractors.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
 import { targetPageCountForJob, decideFitStep } from '../electron/ipc/jobApplication.js';
@@ -206,11 +211,13 @@ import { getSoftLoginWallMatch, getStatusCacheSync, isConfirmedDisconnectedVerdi
 import { getSellMonitorConfig } from '../electron/ipc/stealthBrowser.js';
 import os from 'node:os';
 import { startRun, recordSourcePage, markSourceStatus, setStage, readStagedJobs, readRunState, clearRun, computeResumeStartPage, RESUMABLE_MAX_AGE_MS } from '../electron/ipc/jobRunStaging.js';
-import { dedupAgainstHistory, filterHistoryForResume } from '../electron/ipc/jobsHistory.js';
+import { dedupAgainstHistory, dedupKeysFor, filterHistoryForResume } from '../electron/ipc/jobsHistory.js';
 import { modelTag, overPricedSoldFlag, renderSessionTraceBlocks, visitCanvasNodes } from '../electron/ipc/bugReport/helpers.js';
 import { looksLikeMoney, mojibakeExcerpt } from '../electron/ipc/bugReport/jobQualityChecks.js';
 import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
 import { buildJobsPipelineSnapshot } from '../electron/ipc/bugReport/jobsSnapshot.js';
+import { formatJsonLdSalary, resolveManualSourceStopReason } from '../electron/ipc/browser/manualScraper.js';
+import { indeedHostForLocation } from '../electron/extractors/indeedBrowser.js';
 import { classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
 import { deriveHubScanStatus, resolveAttentionSourceUrls, scanSellerHubPages, annotateReadState, summarizeReadState, stripHtmlForAnalysis, stripReadStateTokens, READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN } from '../electron/ipc/listingStatusCheck.js';
 import {
@@ -234,7 +241,7 @@ import {
 import { PRICE_SYNTHESIS_SCHEMA } from '../electron/ipc/aiSchemas.js';
 import { deriveLocationParam, summarizeLocationAdherence, pickGlassdoorLocation, LOCATION_TREATMENT } from '../src/utils/jobLocation.js';
 import { detectLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
-import { repairMojibake, hasMojibake, repairJobsMojibake } from '../src/utils/textEncoding.js';
+import { repairMojibake, hasMojibake, repairJobsMojibake, normalizeJobMarkup } from '../src/utils/textEncoding.js';
 import { foldVerificationSample, orderByVerification, verificationScore } from '../src/utils/scrapeOrder.js';
 import { canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, getHubDropRejectLabel, getHubFileDropMode } from '../src/utils/hubDropEligibility.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
@@ -2797,6 +2804,25 @@ const tests = [
     },
   },
   {
+    name: 'manual job scraper: terminal cap reasons remain distinct from completion',
+    run: () => {
+      assert(resolveManualSourceStopReason({ hitPerSourceCap: true }) === 'per-source-cap',
+        'manual scraper must report its aggregate source cap rather than a clean completion');
+      assert(resolveManualSourceStopReason({ hitPageCap: true }) === 'page-cap',
+        'manual scraper must distinguish a pagination ceiling from a clean completion');
+      assert(resolveManualSourceStopReason({ hitEmptyPage: true }) === 'empty-page',
+        'manual scraper must retain an exhausted-results terminal reason');
+      assert(resolveManualSourceStopReason({ sourceSkipped: true }) === 'blocked',
+        'manual scraper must retain a blocked terminal reason');
+      assert(resolveManualSourceStopReason({ earlyExit: true }) === 'user-done'
+        && resolveManualSourceStopReason({ earlyExit: true, sourceSkipped: true }) === 'blocked',
+      'manual scraper must preserve user-done semantics while prioritizing a concrete block');
+      assert(resolveManualSourceStopReason({}) === 'completed',
+        'manual scraper must reserve completed for a normal non-capped finish');
+      return { perSource: 'per-source-cap', page: 'page-cap' };
+    },
+  },
+  {
     name: 'Job board relevance filtering',
     run: () => {
       const geoTerms = buildGeoTermSet(['Denver, CO', 'hybrid in Chicago']);
@@ -2955,6 +2981,11 @@ const tests = [
       const render = applyBugReportCode([...logs, '[RenderStorm] sellhub 8e27f3ce: 24 renders in 1000ms'], {}, 'RENDER');
       assert(render.filteredLogs.some(line => line.includes('[RenderStorm]')) && render.matchedCodes.includes('RENDER'),
         'Bug report code filtering: RENDER should retain render-storm diagnostics');
+      const taxonomy = applyBugReportCode([...logs, '[Jobs][hub] Taxonomy repairs: canonicalized salary range', '[JobTree] expanded salary "$80k–$120k/yr"'], {}, 'TAXONOMY');
+      assert(taxonomy.filteredLogs.some(line => line.includes('Taxonomy repairs')) && taxonomy.matchedCodes.includes('TAXONOMY'),
+        'Bug report code filtering: TAXONOMY should retain taxonomy validation diagnostics');
+      assert(taxonomy.sectionExclusions.has('nodes') && taxonomy.sectionExclusions.has('nodeInternals'),
+        'Bug report code filtering: TAXONOMY should keep the compact pipeline while omitting heavy canvas payloads');
       const sell = applyBugReportCode([...logs, '[SellHub][8e27f3ce] Price-drop plan updated: target=$0'], {}, 'SELL');
       assert(sell.filteredLogs.some(line => line.includes('target=$0')) && sell.matchedCodes.includes('SELL'),
         'Bug report code filtering: SELL should retain SellHub price-drop commits');
@@ -2976,6 +3007,17 @@ const tests = [
         'Bug report code filtering: XNODES should exclude nodeInternals + nodeComponentStates');
       assert(xnodes.filteredLogs.length === logs.length,
         'Bug report code filtering: FULL+XNODES should keep all log lines (no log filtering)');
+      for (const code of ['FULL+ERR', 'FULL+QUICK', 'FULL+XDRAG']) {
+        const fullCombination = applyBugReportCode(logs, {}, code);
+        assert(fullCombination.filteredLogs.length === logs.length,
+          `Bug report code filtering: ${code} must preserve the full event timeline`);
+      }
+      const fullErrSummary = buildFilterSummaryMarkdown({
+        filterCode: 'FULL+ERR',
+        filterStats: { eventsShown: logs.length, eventsTotal: logs.length, omittedSections: [] },
+      });
+      assert(fullErrSummary.includes('Full report requested') && fullErrSummary.includes(`event log kept all ${logs.length} line(s)`),
+        'Bug report filter summary: FULL+ERR remains a truthful full event timeline');
       // XSESS drops the verbose per-platform verify-trace blocks (bodyHead dumps).
       const xsess = applyBugReportCode(logs, {}, 'XSESS');
       assert(xsess.sectionExclusions.has('sessionTraces') && xsess.matchedCodes.includes('XSESS'),
@@ -3176,6 +3218,118 @@ const tests = [
         Object.assign(telemetry, saved);
       }
       return { ok: true };
+    },
+  },
+  {
+    name: 'job pipeline report: durable seen-history writes expose success and failure',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        search: telemetry.search,
+        resolves: telemetry.resolves,
+        scoring: telemetry.scoring,
+        history: telemetry.history,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'history-diagnostics',
+        windowId: null,
+        search: null,
+        resolves: {},
+        scoring: null,
+        history: {
+          preScoring: { ts: Date.now(), input: 5, written: 5, pruned: 2, skipped: null, error: null },
+          postScoring: { ts: Date.now(), input: 6, written: 1, pruned: 0, skipped: null, error: null },
+        },
+      });
+      try {
+        let report = buildJobsPipelineSnapshot(new Set(['history-diagnostics']), null, null);
+        assert(report.includes('Seen-history persistence') && report.includes('Authoritative search write') && report.includes('5 new history row(s), 2 expired row(s) pruned'),
+          'report renders the authoritative pre-scoring durable-write outcome');
+        assert(report.includes('Post-scoring resolve reconciliation') && report.includes('1 new history row(s)'),
+          'report renders the awaited late-resolve reconciliation outcome');
+
+        telemetry.history.postScoring = { ts: Date.now(), input: 1, written: 0, pruned: 0, skipped: null, error: 'EACCES' };
+        report = buildJobsPipelineSnapshot(new Set(['history-diagnostics']), null, null);
+        assert(report.includes('history write failed: `EACCES`'),
+          'report makes a durable-history failure explicit rather than silently claiming dedup is healthy');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'job pipeline report: taxonomy audit exposes salary placement and repairs',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        resolves: telemetry.resolves, scoring: telemetry.scoring, bucketing: telemetry.bucketing,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'taxonomy-audit-diagnostics', windowId: null, search: null, resolves: {}, scoring: null,
+        bucketing: {
+          ts: Date.now(), input: 1, roleCount: 1, placed: 1, missing: 0, duplicated: 0,
+          bandSummary: [{ label: 'Low fit (0–79%)', count: 1 }], salaryRangeLabels: ['$80k–$120k/yr'],
+          roleSummary: [{ name: 'Creative', count: 1, sampleTitles: ['Weekly role'] }],
+          taxonomyRepairs: ['canonicalized salary label "$120k process/yr"'],
+          taxonomyAudit: [{ index: 0, title: 'Weekly role', source: 'dice', rawSalary: '$1.6K - $2.0K/wk', annualSalary: 83200, likelihood: 'Low fit (0–79%)', salaryRange: '$80k–$120k/yr', role: 'Creative' }],
+          taxonomyAuditOmitted: 0, error: null,
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['taxonomy-audit-diagnostics']), null, null);
+        assert(report.includes('Taxonomy validation repaired: canonicalized salary label "$120k process/yr"')
+          && report.includes('"$1.6K - $2.0K/wk" → $83,200/yr → **$80k–$120k/yr**'),
+        'job pipeline report makes raw salary, annualization, deterministic range, and repair evidence visible');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'job pipeline report: names fast aggregate caps instead of recommending an infinite result cap',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        search: telemetry.search,
+        resolves: telemetry.resolves,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'fast-cap-diagnostics',
+        windowId: null,
+        resolves: {},
+        search: {
+          ts: Date.now(), queries: 2, raw: 28, deduped: 28, ageDropped: 0, historyDropped: 0, kept: 20,
+          bySource: {
+            indeed: {
+              count: 10, unique: 10, gathered: 18,
+              cap: { type: 'fast-aggregate', limit: 10 },
+            },
+            ziprecruiter: {
+              count: 10, unique: 10, pagesWalked: 2, stopReason: 'per-source-cap',
+              cap: { type: 'per-source', limit: 10 },
+            },
+          },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['fast-cap-diagnostics']), null, null);
+        assert(report.includes('fast aggregate cap (10)') && report.includes('disable fast mode to widen'),
+          'fast API overflow must name the fast aggregate cap and its real widening action');
+        assert(report.includes('stopped: per-source-cap') && report.includes('stopped by the per-source cap (10)'),
+          'browser source cap must remain a terminal cap rather than look completed');
+        assert(!report.includes('raise JOB_RESULT_CAP to widen'),
+          'a fast aggregate cap must never recommend changing JOB_RESULT_CAP');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { api: 10, browser: 10 };
     },
   },
   {
@@ -3636,8 +3790,8 @@ const tests = [
       // Highest salary range ordered first WITHIN the band — checked via
       // childIds order, since nothing auto-expands at analysis end so the salary
       // nodes (hidden under the collapsed band) have no laid-out position.
-      const hi = strongRanges.find(s => s.data.label === '$100k+');
-      const lo = strongRanges.find(s => s.data.label === '$50-100k');
+      const hi = strongRanges.find(s => s.data.label === '$100k+/yr');
+      const lo = strongRanges.find(s => s.data.label === '$50k–$100k/yr');
       assert(strong.data.childIds[0] === hi.id && strong.data.childIds[1] === lo.id, 'hierarchy: higher salary range should be ordered first within the band');
       // idx2 (no salary, weak) lands in the Long shot band's Unspecified range.
       const lsRange = salary.find(s => (longshot.data.childIds || []).includes(s.id));
@@ -3684,13 +3838,82 @@ const tests = [
         originalPos: { x: 0, y: 0 }, hubId: 'hub-1', baseNodeId: 'job-low',
       });
       const salaryGroups = result.newNodes.filter(n => n.data?.kind === 'salary');
-      const lowRange = salaryGroups.find(n => n.data.label === 'Below $80k');
+      const lowRange = salaryGroups.find(n => n.data.label === 'Under $80k/yr');
       const unspecified = salaryGroups.find(n => n.data.label === 'Unspecified');
       assert(lowRange, 'salary fallback: expected synthetic low-end range');
       assert(unspecified, 'salary fallback: expected Unspecified range for missing salary');
       assert(lowRange.data.count === 1, `salary fallback: low salary should be in Below $80k (got ${lowRange.data.count})`);
       assert(unspecified.data.count === 1, `salary fallback: only missing salary should be Unspecified (got ${unspecified.data.count})`);
       return { salaryGroups: salaryGroups.map(g => g.data.label) };
+    },
+  },
+  {
+    name: 'Job taxonomy: salary cadence parser and canonical range repairs',
+    run: () => {
+      assert(parseSalaryToNumeric('$1.6K - $2.0K/wk') === 83200, 'salary parser: decimal weekly salary annualizes');
+      assert(parseSalaryToNumeric('$2,000 bi-weekly') === 52000, 'salary parser: biweekly salary annualizes');
+      assert(parseSalaryToNumeric('$5,000/month') === 60000, 'salary parser: monthly salary annualizes');
+      assert(parseSalaryToNumeric('$300/day') === 78000, 'salary parser: daily salary annualizes');
+      assert(parseSalaryToNumeric('$22/hour') === 45760, 'salary parser: hourly salary annualizes');
+      assert(parseSalaryToNumeric('401k matching') === 0, 'salary parser: benefit prose is not salary');
+      assert(parseSalaryToNumeric('3 years experience') === 0, 'salary parser: incidental numeric prose is not salary');
+      assert(canonicalSalaryRangeLabel(120000, 0) === '$120k+/yr', 'salary labels derive from numeric open-ended bound');
+      assert(canonicalSalaryRangeLabel(80000, 120000) === '$80k–$120k/yr', 'salary labels derive from numeric closed bounds');
+
+      const ranges = normalizeRangesWithRepairs([
+        { label: '$120k process/yr', minSalary: 120000, maxSalary: 0 },
+        { label: 'bad prose', minSalary: 80000, maxSalary: 100000 },
+        { label: 'Unspecified', minSalary: 0, maxSalary: 0 },
+      ]);
+      assert(ranges.real[0].label === '$120k+/yr' && ranges.real[1].label === '$80k–$120k/yr',
+        'salary ranges: labels and maxima canonicalize from contiguous thresholds');
+      assert(ranges.repairs.some(repair => repair.includes('canonicalized salary label "$120k process/yr"')),
+        'salary ranges: malformed model labels are preserved in validation repairs');
+      const bands = normalizeBandsWithRepairs([{ label: 'Strong fit', minScore: 80, maxScore: 99 }]);
+      assert(bands.bands.map(b => `${b.minScore}-${b.maxScore}`).join('|') === '80-100|0-79',
+        'likelihood bands: malformed gaps normalize to contiguous 0-100 coverage');
+      const taxonomy = sanitizeJobTaxonomy({
+        likelihoodBands: [{ label: 'Strong', minScore: 80, maxScore: 100 }],
+        salaryRanges: [
+          { label: '$120k process/yr', minSalary: 120000, maxSalary: 0 },
+          { label: 'bad $80–$100k prose', minSalary: 80000, maxSalary: 100000 },
+        ],
+        roles: [{ name: 'Creative', jobIndices: [0, 0, 99] }],
+      }, 2, ['$123K - $130K/yr', '$1.6K - $2.0K/wk']);
+      assert(taxonomy.salaryRanges.some(r => r.label === '$80k–$120k/yr'),
+        'taxonomy sanitization: adds a low-end range for parseable weekly salary');
+      assert(taxonomy.roles[0].jobIndices.join(',') === '0', 'taxonomy sanitization: drops duplicate/out-of-range role indexes');
+
+      const result = buildJobTreeNodes({
+        displayedJobs: [{ title: 'Weekly', company: 'Acme', location: 'Remote', salary: '$1.6K - $2.0K/wk', snippet: '', matchScore: 50, source: 'dice', url: 'https://jobs/weekly' }],
+        bucketTree: taxonomy,
+        originalPos: { x: 0, y: 0 }, hubId: 'hub-salary', baseNodeId: 'job-salary',
+      });
+      assert(result.newNodes.some(n => n.data?.kind === 'salary' && n.data.label === '$80k–$120k/yr' && n.data.count === 1),
+        'tree placement: decimal weekly salary lands in its annualized range');
+      return { repairs: taxonomy.repairs.length };
+    },
+  },
+  {
+    name: 'Job search extractors: retain salary cadence and reject known RemoteOK ads',
+    run: () => {
+      assert(formatJsonLdSalary({ value: { value: 19, unitText: 'HOUR' } }) === '$19/hr',
+        'JSON-LD salary: hourly values retain their cadence');
+      assert(formatJsonLdSalary({ value: { value: 19 } }) === '',
+        'JSON-LD salary: unitless small values defer to the visible salary chip');
+      assert(formatJsonLdSalary({ value: { minValue: 80000, maxValue: 120000 } }) === '$80,000 - $120,000',
+        'JSON-LD salary: unitless annual-scale ranges remain useful');
+      assert(parseSalaryToNumeric('$19 Hourly') === 39520,
+        'salary parser: capitalized word-form hourly cadence annualizes');
+      assert(parseSalaryToNumeric('$19') === 0,
+        'salary parser: unitless low dollar values are not invented as annual salary');
+      assert(parseSalaryToNumeric('$8,000 a year') === 8000,
+        'salary parser: explicit annual cadence permits legitimate low annual pay');
+      assert(isRemoteOkSponsoredPlacement({ company: ' AI Supermarket ' }),
+        'RemoteOK: exact sponsored pseudo-employer is excluded');
+      assert(!isRemoteOkSponsoredPlacement({ company: 'A Supermarket' }),
+        'RemoteOK: similarly named real employers remain eligible');
+      return { jsonLd: 'cadence-preserved', remoteok: 'sponsored-filtered' };
     },
   },
   {
@@ -5259,6 +5482,18 @@ const tests = [
     },
   },
   {
+    name: 'Indeed host: country-qualified locations choose their country board',
+    run: () => {
+      assert(indeedHostForLocation('Whitby, Ontario, Canada') === 'ca.indeed.com',
+        'Canadian city search uses ca.indeed.com rather than the US board');
+      assert(indeedHostForLocation('Canada') === 'ca.indeed.com',
+        'country-only Canadian search uses ca.indeed.com');
+      assert(indeedHostForLocation('Denver, CO') === 'www.indeed.com',
+        'US/default search keeps the global Indeed host');
+      return { canada: 'ca.indeed.com', us: 'www.indeed.com' };
+    },
+  },
+  {
     // Glassdoor's location filter is keyed by a numeric locId (locKeyword text is
     // ignored — confirmed empirically). This is the real findPopularLocationAjax
     // payload for "Denver": pickGlassdoorLocation must choose Denver, CO (1148170),
@@ -5346,11 +5581,14 @@ const tests = [
         { title: 'Architect', location: 'Halifax, Nova Scotia', source: 'glassdoor' },    // full name → in Canada
         { title: 'Analyst', location: 'Vancouver, BC', source: 'indeed' },                // BC code → in Canada
         { title: 'Sales Mgr', location: 'Houston, TX', source: 'indeed' },                // US → cross-border leak
+        { title: 'Coordinator', location: 'Newmarket', source: 'google' },                // no country evidence
       ];
       const a = summarizeLocationAdherence(jobs, 'Canada');
       assert(a.country === 'Canada', `country target detected, got ${a.country}`);
       assert(a.matched === 4, `all 4 Canadian jobs in-area, got ${a.matched}`);
       assert(a.offTarget === 1 && /Houston/.test(a.offSamples[0] || ''), `only Houston TX is off, got ${a.offTarget}`);
+      assert(a.unclear === 1 && /Newmarket/.test(a.unclearSamples[0] || ''),
+        'country-only target leaves an unqualified city as unclear instead of falsely off-target');
       return { ok: true, adherence: a };
     },
   },
@@ -5429,6 +5667,27 @@ const tests = [
       repairJobsMojibake(jobs);
       assert(jobs[0].snippet === 'we’d hire you' && !hasMojibake(jobs[0].snippet), `job repaired → ${jobs[0].snippet}`);
       return { ok: true };
+    },
+  },
+  {
+    name: 'job text normalization: decodes entities, preserves block structure, and removes unsafe markup',
+    run: () => {
+      const job = {
+        title: 'Customer Support &amp; Demo Specialist',
+        company: 'Acme&nbsp;Co',
+        location: 'Remote',
+        salary: '&#36;22/hour',
+        snippet: '<p>Help &amp; support</p><ul><li>First duty</li><li>Second duty</li></ul><script>alert(1)</script>',
+        description: '<div>Headquarters: <strong>Denver</strong></div><p>Use &lt;safe&gt; text</p>',
+      };
+      normalizeJobMarkup(job);
+      assert(job.title === 'Customer Support & Demo Specialist' && job.company === 'Acme Co' && job.salary === '$22/hour',
+        'normalization decodes short-field entities and collapses non-breaking whitespace');
+      assert(job.snippet.includes('Help & support') && job.snippet.includes('• First duty') && job.snippet.includes('• Second duty') && !job.snippet.includes('alert(1)'),
+        'normalization preserves paragraphs/lists while dropping script content');
+      assert(job.description.includes('Headquarters: Denver') && job.description.includes('<safe>'),
+        'normalization strips real tags after decoding escaped markup as inert text');
+      return { normalized: true };
     },
   },
   {
@@ -6987,6 +7246,25 @@ const tests = [
       // Guards: no recovery / no timestamp → untouched.
       assert(filterHistoryForResume(history, [], T_RUN).length === history.length, 'no recovered jobs → no exemption');
       assert(filterHistoryForResume(history, recovered, NaN).length === history.length, 'no run timestamp → no exemption');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'jobs history: Google-for-Jobs keeps htidocid so distinct shared-path listings remain distinct',
+    run: () => {
+      const a = dedupKeysFor({
+        url: 'https://www.google.com/search?htidocid=ABC123&foo=session-a',
+      });
+      const same = dedupKeysFor({
+        url: 'https://google.com/search?foo=session-b&htidocid=abc123',
+      });
+      const different = dedupKeysFor({
+        url: 'https://google.com/search?htidocid=DEF456',
+      });
+      assert(a.includes('u:https://google.com/search?htidocid=abc123') && a.some(k => same.includes(k)),
+        'same Google listing ignores session params but retains stable htidocid');
+      assert(!a.some(k => different.includes(k)),
+        'different Google htidocid values never collapse through the shared /search path');
       return { ok: true };
     },
   },

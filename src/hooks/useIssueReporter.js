@@ -158,14 +158,26 @@ export function useIssueReporter({
 
       // Apply the AI-issued filter code: selects which log lines and payload
       // sections to include. This keeps reports focused and short.
-      const rawLogs = EventLogger.getLogs();
-      const { filteredLogs, sectionExclusions, label: filterLabel, unknownCodes } =
-        applyBugReportCode(rawLogs, {}, filterCode);
+      // Validate before taking the event snapshot. The warning must be part of
+      // THIS report (not merely visible in the next one), so it is recorded
+      // before rawLogs/filteredLogs are captured below.
+      const requestedFilter = applyBugReportCode(EventLogger.getLogs(), {}, filterCode);
 
-      if (unknownCodes?.length > 0) {
-        // Surface unknown codes as a warning in the log so they appear in the report.
-        EventLogger.error(`Bug report filter: unknown code(s): ${unknownCodes.join(', ')}`);
+      const unknownFilterWarning = requestedFilter.unknownCodes?.length > 0
+        ? `ERROR: Bug report filter: unknown code(s): ${requestedFilter.unknownCodes.join(', ')}`
+        : null;
+      if (unknownFilterWarning) {
+        EventLogger.error(`Bug report filter: unknown code(s): ${requestedFilter.unknownCodes.join(', ')}`);
       }
+      const rawLogs = EventLogger.getLogs();
+      const { filteredLogs: selectedLogs, sectionExclusions, label: filterLabel } =
+        applyBugReportCode(rawLogs, {}, filterCode);
+      // A narrow code such as UI+NOPE would otherwise omit the unknown-code
+      // warning it just created. Attach the exact last event explicitly so the
+      // malformed filter is self-evident in every report mode, even QUICK.
+      const filteredLogs = unknownFilterWarning && !selectedLogs.some(line => line.includes(unknownFilterWarning))
+        ? [...selectedLogs, rawLogs[rawLogs.length - 1]]
+        : selectedLogs;
 
       // Strip heavy per-node payloads before the report crosses IPC. A done Job
       // Search Module stores its full scored-jobs array in data.scoredJobs (each

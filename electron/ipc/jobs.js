@@ -17,7 +17,7 @@ import { clearBrowserSession } from './stealthBrowser.js';
 import { scrapeManualSources, resetManualScraperDiagnostics } from './browser/manualScraper.js';
 import { orderBrowserSources, resetManualSolveTracking, recordVerificationOutcome, wasManualSolveRequired, getVerificationSnapshot } from './scrapeVerification.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
-import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_MAX_PAGES, JOB_PER_PAGE_CAP, MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from './resultCaps.js';
+import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_RESULT_CAP, JOB_MAX_PAGES, JOB_PER_PAGE_CAP, JOB_PER_SOURCE_CAP, MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
   ZIPRECRUITER_EXTRACTOR, ZIPRECRUITER_CONFIG,
@@ -47,10 +47,10 @@ import { wrapUntrustedText } from './promptSafety.js';
 import { readStatusCache } from './accounts.js';
 import { getScopedJobSourceIds, JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
 import { jobTitleCompanyKey, dedupJobsAcrossSources } from '../../src/utils/jobIdentity.js';
-import { normalizeBands, placeBand } from '../../src/nodes/jobsearch/buildJobTree.js';
+import { normalizeBands, normalizeRanges, parseSalaryToNumeric, placeBand, placeRange, sanitizeJobTaxonomy } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { deriveLocationParam, summarizeLocationAdherence, LOCATION_TREATMENT } from '../../src/utils/jobLocation.js';
 import { tagJobLanguages, summarizeJobLanguages } from '../../src/utils/jobLanguage.js';
-import { repairJobsMojibake } from '../../src/utils/textEncoding.js';
+import { repairJobsMojibake, normalizeJobsMarkup } from '../../src/utils/textEncoding.js';
 
 const { ipcMain, app, shell } = electronPkg;
 const DEFAULT_MAX_AGE_DAYS = 21;
@@ -461,7 +461,53 @@ const jobsTelemetry = {
   // idle wait that cleared the guest wall, or exhausted. { running, attempts,
   // foundMs, waitsMs, ts }
   linkedinCooldown: null,
+  // The seen-history CSV is the durable "do not re-show" record. Both writes
+  // are captured: the authoritative search write, and the post-score renderer
+  // write that can add jobs recovered through Solve while scoring was pending.
+  // { preScoring?: { ts, input, written, pruned, skipped, error }, postScoring?: ... }
+  history: null,
 };
+
+function historyWriteTelemetry(input, result = {}) {
+  return {
+    ts: Date.now(),
+    input: Array.isArray(input) ? input.length : Number(input) || 0,
+    written: Number(result.written) || 0,
+    pruned: Number(result.pruned) || 0,
+    skipped: result.skipped || null,
+    // Why the input jobs that produced no row produced no row (per key kind and
+    // per source), plus rows already in the CSV that couldn't be parsed back.
+    // Without these a bare written-count can't distinguish ordinary dedup from a
+    // key that collapses distinct listings — see appendJobsHistoryLocked.
+    skips: result.skips || null,
+    unreadable: Number(result.unreadable) || 0,
+    error: result.error || null,
+  };
+}
+
+/**
+ * The prose surrounding a job's salary text inside its own description, for the
+ * taxonomy audit. Returns '' when the salary came from a structured field rather
+ * than the body (nothing to quote) — which is itself the useful signal, since a
+ * structured value can't have been mined out of the wrong sentence.
+ */
+function salaryContextFor(job) {
+  const sal = String(job?.salary || '').trim();
+  const body = String(job?.snippet || job?.description || '').replace(/\s+/g, ' ');
+  if (!sal || !body) return '';
+  // Anchor on the first NUMBER in the salary text — the surrounding text is
+  // formatted differently ("$346,104.00 per year" vs "USD$346,104.00 per year"),
+  // so matching the whole string verbatim usually misses.
+  const num = sal.match(/\d[\d,]*(?:\.\d+)?/)?.[0];
+  const at = num ? body.indexOf(num) : -1;
+  if (at < 0) return '';
+  return body.slice(Math.max(0, at - 90), Math.min(body.length, at + num.length + 90)).trim();
+}
+
+function recordHistoryWrite(stage, input, result) {
+  if (!jobsTelemetry.history) jobsTelemetry.history = {};
+  jobsTelemetry.history[stage] = historyWriteTelemetry(input, result);
+}
 
 export function getJobsTelemetry() {
   return jobsTelemetry;
@@ -1312,6 +1358,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     jobsTelemetry.sourceEventsT0 = Date.now();
     jobsTelemetry.linkedinEnrich = []; // fresh egress-IP trail per run (see definition)
     jobsTelemetry.linkedinCooldown = null; // fresh cooldown-probe result per run
+    jobsTelemetry.history = null;
     // Record every job-source-progress we send, then send it. The trail is what
     // lets the bug report explain a "blocked source lost its resolve card" — it
     // shows whether the source ever emitted a clean 'done' (which auto-dismisses
@@ -1808,25 +1855,13 @@ Be creative with suggestedRoleQueries — think about what career directions the
       const result = dedupAgainstHistory(ageFiltered, history);
       kept = result.kept;
       historyDropped = result.removed;
-      // Record pre-scoring so test-mode runs and aborted/crashed runs still
-      // mark these jobs as seen. appendJobsHistory deduplicates internally,
-      // so the renderer-side write after scoring is a safe no-op for these rows.
-      // Never throws (see its own doc comment) — it resolves with {error} on
-      // failure instead, so log that rather than silently discarding it: a
-      // persistent write failure here would otherwise silently defeat the
-      // "never re-show a job" dedup with no diagnostic trail.
-      appendJobsHistory(canvasFilePath, kept).then(res => {
-        if (res?.error) logger.warn(`[Jobs][${nodeId}] History: pre-scoring append failed: ${res.error}`);
-      });
-    } else {
-      logger.info(`[Jobs][${nodeId}] History: skipped (no canvas path)`);
     }
 
     // Drop anything the user has explicitly marked applied — a SEPARATE,
     // never-expiring store from the 60-day history above (design doc §6.2/§6.3).
-    // Runs after the history append (not before): an applied job was never
-    // actually "shown" this run, so it shouldn't be recorded into the seen-CSV
-    // either — it's already permanently suppressed by the applied store.
+    // Runs before the history append: an applied job was never actually shown
+    // this run, so it must not be recorded into the seen-CSV either — it is
+    // already permanently suppressed by the applied store.
     const { jobs: appliedFiltered, hiddenApplied, error: appliedStoreError } = filterOutApplied(kept);
     kept = appliedFiltered;
     if (appliedStoreError) {
@@ -1836,6 +1871,23 @@ Be creative with suggestedRoleQueries — think about what career directions the
       // either (see filterOutApplied's own doc-comment for the failure this
       // prevents).
       scrapeWarnings.push({ sourceId: 'applied-store', url: null, ...appliedStoreErrorWarning(appliedStoreError) });
+    }
+
+    // Persist only the jobs that can actually reach the user. This remains
+    // pre-scoring so an abort/crash does not make the same gathered postings
+    // reappear on a later fresh run, but it now happens AFTER the permanent
+    // applied-job filter (applied jobs were never shown and must not pollute
+    // the seen-history CSV). Await it to establish an authoritative outcome
+    // before search-jobs returns; the renderer's post-score write below is a
+    // serialized follow-up for late Solve/paste additions, not a racing peer.
+    if (canvasFilePath) {
+      const historyResult = await appendJobsHistory(canvasFilePath, kept);
+      recordHistoryWrite('preScoring', kept, historyResult);
+      if (historyResult?.error) logger.warn(`[Jobs][${nodeId}] History: pre-scoring append failed: ${historyResult.error}`);
+    } else {
+      const historyResult = { written: 0, pruned: 0, skipped: 'no-canvas-path' };
+      recordHistoryWrite('preScoring', kept, historyResult);
+      logger.info(`[Jobs][${nodeId}] History: skipped (no canvas path)`);
     }
 
     // Enrich Dice jobs with full descriptions — runs after all filtering so we
@@ -2098,6 +2150,16 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // and the generated résumé alike. No-op on clean text and real accents.
     repairJobsMojibake(kept);
 
+    // Strip HTML markup / decode entities the non-DOM extraction paths leave in.
+    // WeWorkRemotely (regex over raw RSS XML) and LinkedIn (raw `description`
+    // HTML) shipped "<p> <strong>Headquarters:</strong> …" bodies and
+    // "Customer Support &amp; Product Demo Specialist" titles straight into the
+    // scoring prompt, the cards and the résumé generator. Runs right after the
+    // mojibake repair and before language tagging/scoring for the same reason
+    // that one does: one chokepoint on the final kept set, so every consumer
+    // sees the cleaned text and a new source inherits the fix.
+    normalizeJobsMarkup(kept);
+
     // Tag non-English listings (e.g. fr.glassdoor.ca / Québec / EU postings). Runs
     // here — after enrichment, on the final kept set — so the language sniff sees
     // full descriptions and the tag rides through scoring → staging → card. We do
@@ -2132,10 +2194,26 @@ Be creative with suggestedRoleQueries — think about what career directions the
       if (data.pagesWalked > 0) {
         bySource[sid].pagesWalked = data.pagesWalked;
         bySource[sid].stopReason = [...(data.stopReasons || [])].join('/') || null;
+        if ((data.stopReasons || new Set()).has('per-source-cap')) {
+          // Browser sources cannot know how many additional matches exist without
+          // issuing more pages. Preserve the actual enforced aggregate cap so the
+          // report never calls this a clean/exhausted search.
+          bySource[sid].cap = { type: 'per-source', limit: JOB_PER_SOURCE_CAP };
+        }
       }
       // Pre-cap match count for API sources — the funnel flags when it exceeds
       // `count` (the JOB_RESULT_CAP slice silently dropped in-window jobs).
-      if (data.gathered != null) bySource[sid].gathered = data.gathered;
+      if (data.gathered != null) {
+        bySource[sid].gathered = data.gathered;
+        if (data.gathered > data.jobs.length) {
+          // In FAST mode the aggregate source slice is the limiting operation;
+          // JOB_RESULT_CAP is intentionally Infinity. Outside FAST, the extractor
+          // result cap is the only source-wide slice represented by this telemetry.
+          bySource[sid].cap = FAST_TEST
+            ? { type: 'fast-aggregate', limit: JOB_API_PER_SOURCE_CAP }
+            : { type: 'result', limit: JOB_RESULT_CAP };
+        }
+      }
     }
     // Dice is the only source whose date bound is CONDITIONAL (server-side
     // `filters.postedDate` only when the window matches a 1/3/7-day bucket, else
@@ -2387,8 +2465,15 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // ── Jobs history (60-day rolling CSV next to the canvas JSON) ─────────────
-  handleSafe('append-jobs-history', async (_event, { canvasFilePath, jobs }) => {
-    return appendJobsHistory(canvasFilePath, jobs);
+  handleSafe('append-jobs-history', async (_event, { canvasFilePath, jobs, nodeId, historyStage } = {}) => {
+    const result = await appendJobsHistory(canvasFilePath, jobs);
+    // The post-score caller is deliberately awaited by the renderer. Restrict
+    // this report-facing slot to the owning hub so a different canvas/window
+    // cannot overwrite its run's history evidence.
+    if (nodeId && nodeId === jobsTelemetry.nodeId && historyStage === 'postScoring') {
+      recordHistoryWrite('postScoring', jobs, result);
+    }
+    return result;
   });
 
   handleSafe('load-jobs-history', async (_event, { canvasFilePath }) => {
@@ -2409,6 +2494,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const { role, gathered, toScore, cappedForBudget, scoringBatches, slimBatch, cachedPrefix, snapshot } =
       buildJobAnalysisSnapshot({ jobs, profile, nodeId, targetRole, snapshotContext });
     logger.info(`[Jobs][${nodeId}] Scoring`, gathered.length, 'jobs', role ? `(target: ${role})` : '');
+    // A direct re-score can enter without a fresh search-jobs call. Do not let
+    // another hub's durable-history outcome ride along with that new telemetry.
+    if (nodeId && jobsTelemetry.nodeId && jobsTelemetry.nodeId !== nodeId) jobsTelemetry.history = null;
     jobsTelemetry.nodeId = nodeId;
     jobsTelemetry.windowId = event.sender?.id ?? null;
     if (cappedForBudget > 0) {
@@ -2618,7 +2706,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
       models: [...scoringModels],
     };
 
-    return { scoredJobs, clusters, testMode: MEDIUM_TEST || FULL_TEST || FAST_TEST };
+    // Test breadth (FAST/FULL) does not mean AI was skipped. Keep the legacy
+    // testMode field false for new callers and expose the actual semantic flag.
+    return { scoredJobs, clusters, aiSkipped: false, collectionOnly: false, testMode: false };
   });
 
   // ── Batch-scoring poll/discard (opt-in async path) ─────────────────────────
@@ -2707,8 +2797,8 @@ Return a JSON object of the shape:
     { "label": "Long shot (0–39%)",        "minScore": 0,  "maxScore": 39 }
   ],
   "salaryRanges": [
-    { "label": "$120k+",      "minSalary": 120000, "maxSalary": 0 },
-    { "label": "$80-120k",    "minSalary": 80000,  "maxSalary": 120000 },
+    { "label": "$120k+/yr",       "minSalary": 120000, "maxSalary": 0 },
+    { "label": "$80k–$120k/yr",   "minSalary": 80000,  "maxSalary": 120000 },
     { "label": "Unspecified", "minSalary": 0,      "maxSalary": 0 }
   ],
   "roles": [
@@ -2719,7 +2809,7 @@ Return a JSON object of the shape:
 
 RULES:
 - likelihoodBands: 3–5 bands fitted to the actual matchScore spread. They MUST be contiguous and together cover 0–100 with no gaps or overlaps; order them highest→lowest. Each label includes its % range.
-- salaryRanges: 2–5 ranges fitted to the actual salary spread, ordered highest→lowest. ALWAYS include exactly one "Unspecified" range with minSalary=0 and maxSalary=0 (for jobs with no parseable salary). "$X+" (open-ended top) uses minSalary=X, maxSalary=0. These are GLOBAL ranges (not per-band).
+- salaryRanges: 2–5 ranges fitted to the actual salary spread, ordered highest→lowest. ALWAYS include exactly one "Unspecified" range with minSalary=0 and maxSalary=0 (for jobs with no parseable salary). Use canonical annual labels exactly: "$Xk+/yr" for open-ended ranges, "$Xk–$Yk/yr" for closed ranges, and "Under $Xk/yr" for a low-end catch-all. These are GLOBAL ranges (not per-band).
 - roles: CONSOLIDATE the suggestedDirections into clean, non-overlapping role names that fit the candidate's field — merge synonyms/near-duplicates into ONE role ("Brand" / "Brand Marketing" / "Marketing" → a single "Brand Marketing"); rename anything vague. Invent the names; there is no fixed list. Aim for 3–7 roles; fold tiny leftovers into the closest fit (or a single "Other").
 - Every input job index MUST appear in exactly one role's jobIndices — the union across roles must be the complete 0..${jobs.length - 1} set, no duplicates.`, {
       signal,
@@ -2749,9 +2839,17 @@ RULES:
       throw err;
     }
 
-    const bandCount = result?.likelihoodBands?.length || 0;
-    const rangeCount = result?.salaryRanges?.length || 0;
-    const roleCount = result?.roles?.length || 0;
+    // Schema validation guarantees JSON shape, not semantic validity. Canonicalize
+    // numeric bounds and derived salary labels here so malformed model prose never
+    // becomes persisted UI state or misleading telemetry.
+    const sanitized = sanitizeJobTaxonomy(result, jobs.length, jobs.map(j => j.salary));
+    result = sanitized;
+    if (sanitized.repairs.length > 0) {
+      logger.warn(`[Jobs][${nodeId}] Taxonomy repairs: ${sanitized.repairs.join('; ')}`);
+    }
+    const bandCount = result.likelihoodBands.length;
+    const rangeCount = result.salaryRanges.length;
+    const roleCount = result.roles.length;
     logger.info(`[Jobs][${nodeId}] Taxonomy: ${bandCount} likelihood band(s), ${rangeCount} salary range(s), ${roleCount} role(s)`);
 
     // Verify the ROLE partition (the only one the model owns) covers every job
@@ -2782,7 +2880,8 @@ RULES:
     // counts are deterministic — placed by THE SAME normalizeBands/placeBand the
     // renderer uses (buildJobTree.js), so this funnel can never silently report
     // different band counts than the canvas shows.
-    const bands = normalizeBands(result?.likelihoodBands);
+    const bands = normalizeBands(result.likelihoodBands);
+    const { real: realRanges, unspecified } = normalizeRanges(result.salaryRanges);
     const bandCounts = new Map();
     if (bands.length) for (const j of jobs) {
       const lbl = placeBand(j.matchScore, bands)?.label || 'Match';
@@ -2799,6 +2898,34 @@ RULES:
       };
     }).sort((a, b) => b.count - a.count);
     if (missing > 0) roleSummary.push({ name: 'Other (swept)', count: missing, sampleTitles: missingIndices.slice(0, 3).map(i => jobs[i]?.title).filter(Boolean) });
+    const roleByIndex = new Map();
+    for (const role of result.roles) for (const index of role.jobIndices) {
+      if (!roleByIndex.has(index)) roleByIndex.set(index, role.name);
+    }
+    // This bounded, source-to-bucket trace makes salary/range defects debuggable
+    // from a FULL report without reopening a local scrape snapshot.
+    const taxonomyAudit = jobs.slice(0, 50).map((job, index) => {
+      const annualSalary = parseSalaryToNumeric(job.salary);
+      const band = placeBand(job.matchScore, bands);
+      const range = placeRange(annualSalary, realRanges, unspecified);
+      return {
+        index,
+        title: String(job.title || '').slice(0, 120),
+        source: String(job.source || '').slice(0, 40),
+        rawSalary: String(job.salary || '').slice(0, 160),
+        annualSalary,
+        // Where in the description that salary text came from. A raw value can be
+        // perfectly well-formed and still be the WRONG NUMBER — one run recorded
+        // "$346,104.00 per year" for a support role because that was an equity
+        // grant ceiling, and the audit had no way to show it: the raw text alone
+        // looked like a clean parse. The surrounding prose is what makes that
+        // falsifiable without reopening the local scrape snapshot.
+        salaryContext: salaryContextFor(job),
+        likelihood: band?.label || 'Match',
+        salaryRange: range?.label || 'Unspecified',
+        role: roleByIndex.get(index) || 'Other',
+      };
+    });
 
     jobsTelemetry.bucketing = {
       ts: Date.now(),
@@ -2811,6 +2938,9 @@ RULES:
       bandSummary,
       salaryRangeLabels,
       roleSummary,
+      taxonomyAudit,
+      taxonomyAuditOmitted: Math.max(0, jobs.length - taxonomyAudit.length),
+      taxonomyRepairs: sanitized.repairs,
       model: bucketMeta.model || null,
       error: null,
     };

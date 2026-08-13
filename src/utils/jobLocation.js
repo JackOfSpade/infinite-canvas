@@ -267,6 +267,22 @@ function buildCountryRegex(country) {
   return new RegExp(`(?:${parts.join('|')})`, 'i');
 }
 
+// Every country we can enumerate subdivisions for, EXCEPT the target — used to
+// tell "this listing is provably somewhere else" apart from "this listing just
+// doesn't say". See summarizeLocationAdherence for why absence isn't evidence.
+function buildForeignRegexes(targetCountry) {
+  const out = [];
+  for (const [country, subs] of Object.entries(COUNTRY_SUBDIVISIONS)) {
+    if (country === targetCountry) continue;
+    const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const parts = [`\\b${esc(country.toLowerCase())}\\b`];
+    for (const code of Object.keys(subs)) parts.push(`\\b${esc(code)}\\b`);
+    for (const name of Object.values(subs)) parts.push(`\\b${esc(name)}\\b`);
+    out.push({ country, re: new RegExp(`(?:${parts.join('|')})`, 'i') });
+  }
+  return out;
+}
+
 /**
  * Audit how many KEPT jobs sit in the target location so a leak (a Denver search
  * surfacing a Miami role) is visible in the bug report instead of hidden.
@@ -307,8 +323,9 @@ export function summarizeLocationAdherence(jobs, canonical) {
   // would mis-flag every Canadian city as off-target on a "Canada" search.
   const countryOnly = !!countryTarget && !subCode && segments.length === 1;
   const countryRe = countryOnly ? buildCountryRegex(countryTarget) : null;
+  const foreignRes = countryOnly ? buildForeignRegexes(countryTarget) : [];
   const stateRe = subCode ? buildStateRegex(subCode) : null;
-  const counts = { target: loc, country: countryOnly ? countryTarget : null, total: 0, matched: 0, remote: 0, offTarget: 0, unknown: 0, offSamples: [], offBySource: {} };
+  const counts = { target: loc, country: countryOnly ? countryTarget : null, total: 0, matched: 0, remote: 0, offTarget: 0, unclear: 0, unknown: 0, offSamples: [], unclearSamples: [], offBySource: {}, unclearBySource: {} };
   for (const j of (Array.isArray(jobs) ? jobs : [])) {
     counts.total++;
     const src = j?.source || '?';
@@ -317,19 +334,39 @@ export function summarizeLocationAdherence(jobs, canonical) {
     const jl = String(j?.location || '').trim().toLowerCase();
     if (!jl) { counts.unknown++; continue; }
     if (/\b(remote|anywhere|work from home|wfh|distributed)\b/.test(jl)) { counts.remote++; continue; }
-    let hit;
+    const sample = `${String(j?.title || '?').slice(0, 48)} — ${String(j?.location || '').slice(0, 40)} [${src}]`;
     if (countryRe) {
-      hit = countryRe.test(jl);
-    } else {
-      const cityHit  = cityToken.length >= 3 && jl.includes(cityToken);
-      const stateHit = stateRe && stateRe.test(jl);
-      hit = cityHit || stateHit;
+      // A COUNTRY target can only be judged on POSITIVE evidence, in both
+      // directions. We can enumerate a country's subdivisions but not its cities,
+      // so a bare "Newmarket" / "Nanaimo" / "Greater Montreal Metropolitan Area"
+      // carries no country token at all — and the old absence-of-evidence rule
+      // called every one of them a cross-border leak. A live Canada search
+      // reported "8 OUTSIDE Canada" when only the 3 US ones were real, which is
+      // exactly the wrong thing for a diagnostic to be confidently wrong about.
+      // So: in-country token ⇒ in-area; a token from a DIFFERENT country we can
+      // enumerate ⇒ off-target; neither ⇒ `unclear`, counted and reported as its
+      // own bucket rather than folded into a leak figure.
+      if (countryRe.test(jl)) { counts.matched++; continue; }
+      const foreign = foreignRes.find(f => f.re.test(jl));
+      if (foreign) {
+        counts.offTarget++;
+        counts.offBySource[src] = (counts.offBySource[src] || 0) + 1;
+        if (counts.offSamples.length < 6) counts.offSamples.push(`${sample} → ${foreign.country}`);
+      } else {
+        counts.unclear++;
+        counts.unclearBySource[src] = (counts.unclearBySource[src] || 0) + 1;
+        if (counts.unclearSamples.length < 6) counts.unclearSamples.push(sample);
+      }
+      continue;
     }
-    if (hit) counts.matched++;
+    // City / subdivision target: the token IS enumerable, so absence is evidence.
+    const cityHit  = cityToken.length >= 3 && jl.includes(cityToken);
+    const stateHit = stateRe && stateRe.test(jl);
+    if (cityHit || stateHit) counts.matched++;
     else {
       counts.offTarget++;
       counts.offBySource[src] = (counts.offBySource[src] || 0) + 1;
-      if (counts.offSamples.length < 6) counts.offSamples.push(`${String(j?.title || '?').slice(0, 48)} — ${String(j?.location || '').slice(0, 40)} [${src}]`);
+      if (counts.offSamples.length < 6) counts.offSamples.push(sample);
     }
   }
   return counts;

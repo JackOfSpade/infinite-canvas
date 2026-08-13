@@ -797,6 +797,16 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
 // Open JSON endpoint: remoteok.com/api — no auth, no browser, no WAF.
 // Returns a raw JSON array of job objects with salary, tags, and company.
 
+// Pseudo-employers RemoteOK uses for paid ad slots in the /api feed. There is no
+// `sponsored` flag on the row to key off — the company name IS the marker — so
+// this is a deliberate, narrow platform-specific rule rather than a heuristic
+// that could suppress a real employer. Compared lowercased.
+const SPONSORED_EMPLOYERS = new Set(['ai supermarket']);
+
+export function isRemoteOkSponsoredPlacement(job) {
+  return SPONSORED_EMPLOYERS.has(String(job?.company || '').trim().toLowerCase());
+}
+
 /**
  * Fetch jobs from RemoteOK's open JSON API (bypasses Puppeteer entirely).
  */
@@ -819,12 +829,28 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
   // First element is metadata, rest are jobs
   const jobs = Array.isArray(data) ? data.slice(1) : [];
 
-  // Filter: job matches if relevant to ANY query (OR logic across all queries).
+  // Filter: job matches if relevant to ANY query (OR logic across all queries),
+  // after dropping RemoteOK's sponsored placements. Those are product ads sold
+  // into the same /api feed, not postings: `company` is the literal pseudo-
+  // employer "AI Supermarket", `position` holds a PRODUCT name, and the
+  // description is ~14k chars of boilerplate ad copy repeated verbatim across
+  // every placement. They carry a 25-tag scattershot tag list that matches
+  // almost any query, so they sail through relevance — a live run surfaced six
+  // of them ("Apify", "Beehiiv", "Meshy"…) as 6 of RemoteOK's 10 results, all
+  // scored and shown to the user as if they were jobs.
   const qs = Array.isArray(queries) ? queries : [queries];
+  const sponsored = [];
   const matched = jobs.filter(job => {
+    if (isRemoteOkSponsoredPlacement(job)) {
+      sponsored.push(String(job.position || '?'));
+      return false;
+    }
     const roleText = `${job.position || ''} ${job.company || ''} ${(job.tags || []).join(' ')}`;
     return qs.some(q => jobRelevanceMatch(roleText, q, geoTerms));
   });
+  if (sponsored.length > 0) {
+    logger.info(`[RemoteOK API] dropped ${sponsored.length} sponsored ad placement(s): ${sponsored.slice(0, 6).join(', ')}`);
+  }
 
   const items = matched.slice(0, JOB_RESULT_CAP).map(job => {
     // RemoteOK's API returns description as raw HTML — strip tags to plain text.
@@ -867,16 +893,38 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
 // signal — or (b) anchored to a salary keyword within ~40 chars. Requiring comma-
 // grouped thousands ($80,000, not $80) avoids matching funding/revenue figures like
 // "$100M in bookings". Returns '' when no confident salary is present.
+// Money figures that are NOT the role's pay. A JD routinely quotes equity grants,
+// signing bonuses, referral awards and company revenue in the same prose, and the
+// unit-anchored pattern below is otherwise happy to take the first one it sees.
+// Live example: a "Customer Advocate Lead" whose real range was
+// "$106,912.00 - $132,675.40" was recorded as "$346,104.00 per year" — the
+// ceiling of a *Performance Share Unit* grant, which happened to be the only
+// figure in that JD carrying an explicit cadence. Checked against the ~70 chars
+// on either side of a candidate match.
+const NON_PAY_CONTEXT = /\b(?:equity|share unit|psus?|rsus?|stock|option|grant|token|vest|bonus|signing|referral|revenue|funding|raised|valuation|budget of|arr|mrr)\b/i;
+
 function extractSalaryFromText(text) {
   if (!text) return '';
   const s = String(text).replace(/\s+/g, ' ');
-  const UNIT = /\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?\s?(?:\/\s?(?:yr|year|hr|hour)|per (?:year|hour|annum)|annually|a year|an hour)/i;
-  const KEYWORD = /\b(?:salary|salaries|compensation|base pay|pay range|pay rate|pay)\b[^$]{0,40}(\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?)/i;
-  const m1 = s.match(UNIT);
-  if (m1) return m1[0].trim();
+  const AMOUNT = String.raw`\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?`;
+  const UNIT = new RegExp(`${AMOUNT}\\s?(?:\\/\\s?(?:yr|year|hr|hour)|per (?:year|hour|annum)|annually|a year|an hour)`, 'gi');
+  // "budget for this role" is how remote-first JDs (Hospitable, GitLab…) phrase
+  // the pay band; a BARE "budget" is not on this list on purpose — that matches
+  // marketing/infra spend far more often than compensation.
+  const KEYWORD = /\b(?:salary|salaries|compensation|base pay|pay range|pay rate|pay|budget for this (?:role|position)|total budget for this (?:role|position))\b[^$]{0,40}(\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?)/i;
+  // Pay-anchored wins over free-floating: a figure the JD itself labels as pay is
+  // better evidence than one that merely carries a cadence somewhere in the body.
   const m2 = s.match(KEYWORD);
-  if (m2) return m2[1].trim();
+  if (m2 && !NON_PAY_CONTEXT.test(contextAround(s, m2.index, m2[0].length))) return m2[1].trim();
+  for (const m of s.matchAll(UNIT)) {
+    if (!NON_PAY_CONTEXT.test(contextAround(s, m.index, m[0].length))) return m[0].trim();
+  }
   return '';
+}
+
+// The ±70 chars surrounding a match, for the non-pay context test above.
+function contextAround(s, index, length, pad = 70) {
+  return s.slice(Math.max(0, index - pad), Math.min(s.length, index + length + pad));
 }
 
 /**

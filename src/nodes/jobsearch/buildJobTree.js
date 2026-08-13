@@ -62,6 +62,16 @@ function formatSalaryShort(value) {
   return `$${n.toLocaleString('en-US')}`;
 }
 
+/** A salary-band label is data derived from its bounds, never model-authored prose. */
+export function canonicalSalaryRangeLabel(minSalary, maxSalary) {
+  const min = Math.max(0, Math.round(Number(minSalary) || 0));
+  const max = Math.max(0, Math.round(Number(maxSalary) || 0));
+  if (min === 0 && max === 0) return 'Unspecified';
+  if (max === 0) return `${formatSalaryShort(min)}+/yr`;
+  if (min <= 1) return `Under ${formatSalaryShort(max)}/yr`;
+  return `${formatSalaryShort(min)}–${formatSalaryShort(max)}/yr`;
+}
+
 /**
  * Salary text → approximate annual USD. Takes the first number in a range and
  * annualizes hourly/daily rates. Used by buildJobTreeNodes (and the re-layout in
@@ -70,50 +80,198 @@ function formatSalaryShort(value) {
  */
 export function parseSalaryToNumeric(salaryStr) {
   if (!salaryStr) return 0;
-  const clean = String(salaryStr).toLowerCase().replace(/[$,]/g, '');
-  const m = clean.match(/(\d+)\s*(k)?/);
+  const raw = String(salaryStr);
+  const clean = raw.toLowerCase().replace(/[$,]/g, '');
+  // A benefits blurb such as "401k matching" is common in descriptions and is
+  // never pay. Keep legitimate bare "$95k" / "95k" salary values intact.
+  if (!/\$/.test(raw) && /\b401\s*k\b/i.test(raw)) return 0;
+  const m = clean.match(/(\d+(?:\.\d+)?)\s*(k)?/);
   if (!m) return 0;
   let val = parseFloat(m[1]);
   if (m[2] === 'k') val *= 1000;
-  if (val < 1000) {
-    if (clean.includes('hour') || clean.includes('hr')) val = val * 40 * 52;
-    else if (clean.includes('day')) val = val * 5 * 52;
-  }
-  return val;
+  // SUB-ANNUAL cadences — the ones that drive a multiplier below. Word forms
+  // ("$19 Hourly", "$1.6K Weekly") are as common on a pay chip as slash forms,
+  // and `\bhour\b` does not match "hourly", so both spellings are listed.
+  const hasCadence = /\b(?:bi[-\s]?weekly|week|wk|weekly|month|mo|monthly|day|daily|hour|hr|hourly)s?\b|\/\s*(?:bi[-\s]?wk|wk|mo|day|hr)\b/.test(clean);
+  // An ANNUAL cadence needs no multiplier, but it does prove the number is pay —
+  // so it lifts the implausible-magnitude guard for a genuinely low annual figure
+  // ("$8,000 a year" on a part-time req). Gated on a currency marker so the bare
+  // word in prose ("3 years experience") stays an incidental number, not a salary.
+  const hasAnnualCadence = /[$€£]/.test(raw) && /\b(?:year|yr|yearly|annual|annually|annum)s?\b|\/\s*yr\b/.test(clean);
+  const hasRange = /\d+(?:\.\d+)?\s*(?:k)?\s*(?:[-–—]|to)\s*\$?\s*\d+/i.test(raw);
+  const hasPayContext = /\b(?:salary|pay|compensation|wage|rate)\b/i.test(raw);
+  // Do not turn incidental small numbers in a loosely extracted salary field
+  // ("3 shifts", "2 days", etc.) into annual compensation. Large bare values
+  // and `95k` remain accepted for sources that omit currency formatting.
+  //
+  // A currency symbol is NOT evidence of an annual figure and never was: the
+  // guard used to exempt anything with a `$`, so a ZipRecruiter chip whose "/hr"
+  // the extractor had dropped ("$19", "$20", "$18.15") was annualized verbatim
+  // into a nineteen-dollar-a-year salary and bucketed as real pay. An amount this
+  // small with no cadence, no range and no pay context is a cadence we LOST, not
+  // an annual salary — and guessing "it must be hourly" would invent a number the
+  // listing never stated, so it goes to Unspecified and the raw text still shows
+  // on the card. The extractor-side fixes (MONEY_SRC word forms,
+  // formatJsonLdSalary's unit guard) are what recover the real value.
+  if (val < 10000 && !hasCadence && !hasAnnualCadence && !hasRange && !hasPayContext) return 0;
+  // Cadence wins over magnitude: "$1.6K/wk" is $83,200/year, while
+  // "$22/hour" is $45,760/year. Match biweekly before weekly.
+  if (/\bbi[-\s]?weekly\b|\bbiweekly\b|\/\s*bi[-\s]?wk\b/.test(clean)) val *= 26;
+  else if (/\b(?:week|wk|weekly)s?\b|\/\s*wk\b/.test(clean)) val *= 52;
+  else if (/\b(?:month|mo|monthly)s?\b|\/\s*mo\b/.test(clean)) val *= 12;
+  else if (/\b(?:day|daily)\b|\/\s*day\b/.test(clean)) val *= 5 * 52;
+  else if (/\b(?:hour|hr|hourly)s?\b|\/\s*hr\b/.test(clean)) val *= 40 * 52;
+  return Number.isFinite(val) && val > 0 ? Math.round(val) : 0;
 }
 
 // ── Deterministic placement ────────────────────────────────────────────────
 
 /** Normalize + sort AI bands high→low; guarantee coverage down to 0. */
+function clampScore(value) {
+  return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+}
+
+function bandLabel(label, minScore, maxScore) {
+  const raw = String(label || 'Match').trim();
+  const expected = `${minScore}–${maxScore}%`;
+  if (raw && raw.includes(expected)) return raw;
+  const base = raw.replace(/\s*\([^)]*\)\s*$/, '').trim() || 'Match';
+  return `${base} (${expected})`;
+}
+
+export function normalizeBandsWithRepairs(bands) {
+  const repairs = [];
+  const input = Array.isArray(bands) ? bands : [];
+  const byMin = new Map();
+  for (const raw of input) {
+    const minScore = clampScore(raw?.minScore);
+    if (!Number.isFinite(Number(raw?.minScore)) || Number(raw?.minScore) !== minScore) repairs.push('clamped invalid likelihood bound');
+    if (!byMin.has(minScore)) byMin.set(minScore, raw || {});
+    else repairs.push(`dropped duplicate likelihood lower bound ${minScore}`);
+  }
+  if (!byMin.size) {
+    repairs.push('used default likelihood bands');
+    DEFAULT_BANDS.forEach(b => byMin.set(b.minScore, b));
+  }
+  if (!byMin.has(0)) {
+    byMin.set(0, { label: 'Match', minScore: 0 });
+    repairs.push('added 0% likelihood catch-all');
+  }
+  const ascending = [...byMin.entries()].sort((a, b) => a[0] - b[0]);
+  const normalized = ascending.map(([minScore, raw], i) => {
+    const maxScore = i + 1 < ascending.length ? ascending[i + 1][0] - 1 : 100;
+    const label = bandLabel(raw?.label, minScore, maxScore);
+    if (String(raw?.label || '').trim() !== label) repairs.push(`canonicalized likelihood label "${String(raw?.label || '').trim() || 'Match'}"`);
+    return { label, minScore, maxScore };
+  });
+  return { bands: normalized.reverse(), repairs };
+}
+
 export function normalizeBands(bands) {
-  const src = Array.isArray(bands) && bands.length ? bands : DEFAULT_BANDS;
-  return [...src]
-    .map(b => ({ label: b.label || 'Match', minScore: Number(b.minScore) || 0, maxScore: Number(b.maxScore) || 100 }))
-    .sort((a, b) => b.minScore - a.minScore);
+  return normalizeBandsWithRepairs(bands).bands;
 }
 
 /** Split AI salary ranges into ordered (high→low) real ranges + an Unspecified. */
-export function normalizeRanges(ranges) {
-  const src = Array.isArray(ranges) && ranges.length ? ranges : DEFAULT_RANGES;
-  const mapped = src.map(r => ({
-    label: r.label || 'Unspecified',
-    minSalary: Number(r.minSalary) || 0,
-    maxSalary: Number(r.maxSalary) || 0,
-  }));
-  let unspecified = mapped.find(r => r.minSalary === 0 && r.maxSalary === 0);
-  const real = mapped.filter(r => r !== unspecified).sort((a, b) => b.minSalary - a.minSalary);
-  if (!unspecified) unspecified = { label: 'Unspecified', minSalary: 0, maxSalary: 0 };
+export function normalizeRangesWithRepairs(ranges) {
+  const repairs = [];
+  const input = Array.isArray(ranges) ? ranges : [];
+  const byMin = new Map();
+  let sawUnspecified = false;
+  for (const raw of input) {
+    let minSalary = Math.max(0, Math.round(Number(raw?.minSalary) || 0));
+    let maxSalary = Math.max(0, Math.round(Number(raw?.maxSalary) || 0));
+    if (!Number.isFinite(Number(raw?.minSalary)) || !Number.isFinite(Number(raw?.maxSalary))) repairs.push('repaired non-numeric salary bound');
+    if (minSalary === 0 && maxSalary === 0) {
+      if (sawUnspecified) repairs.push('dropped duplicate Unspecified salary range');
+      sawUnspecified = true;
+      continue;
+    }
+    if (minSalary === 0) {
+      minSalary = 1;
+      repairs.push('repaired zero lower bound on salary range');
+    }
+    if (maxSalary > 0 && maxSalary <= minSalary) {
+      maxSalary = 0;
+      repairs.push(`made invalid salary range at ${formatSalaryShort(minSalary)} open-ended`);
+    }
+    const existing = byMin.get(minSalary);
+    if (!existing) byMin.set(minSalary, { minSalary, maxSalary, rawLabel: String(raw?.label || '').trim() });
+    else repairs.push(`dropped duplicate salary lower bound ${formatSalaryShort(minSalary)}`);
+  }
+  const real = [...byMin.values()].sort((a, b) => b.minSalary - a.minSalary);
+  let unspecified = { label: 'Unspecified', minSalary: 0, maxSalary: 0 };
+  if (!sawUnspecified) repairs.push('added missing Unspecified salary range');
   const lowest = real[real.length - 1];
   if (lowest && lowest.minSalary > 1) {
     // Keep parseable low salaries out of the "Unspecified" bucket when the AI
     // forgets to include a bottom catch-all range.
     real.push({
-      label: `Below ${formatSalaryShort(lowest.minSalary)}`,
       minSalary: 1,
       maxSalary: lowest.minSalary,
     });
+    repairs.push(`added low-salary catch-all below ${formatSalaryShort(lowest.minSalary)}`);
   }
+  // Ranges are threshold buckets in placeRange, so derive every upper bound
+  // from the next higher threshold. This makes their labels truthful and the
+  // bands contiguous even if the model supplied overlapping/gapped maxima.
+  real.forEach((range, index) => {
+    const expectedMax = index === 0 ? 0 : real[index - 1].minSalary;
+    if (range.maxSalary !== expectedMax) repairs.push(`normalized salary upper bound for ${formatSalaryShort(range.minSalary)}`);
+    range.maxSalary = expectedMax;
+    range.label = canonicalSalaryRangeLabel(range.minSalary, range.maxSalary);
+    if (range.rawLabel !== range.label) repairs.push(`canonicalized salary label "${range.rawLabel || '(blank)'}"`);
+    delete range.rawLabel;
+  });
+  return { real, unspecified, repairs };
+}
+
+export function normalizeRanges(ranges) {
+  const { real, unspecified } = normalizeRangesWithRepairs(ranges);
   return { real, unspecified };
+}
+
+/**
+ * Canonicalize model taxonomy before it becomes persisted UI state. Roles remain
+ * model-created, but invalid/out-of-range/duplicate membership cannot distort
+ * the deterministic tree (first valid role assignment wins, as on the renderer).
+ */
+export function sanitizeJobTaxonomy(tree, jobCount = 0, salaries = []) {
+  const { bands, repairs: bandRepairs } = normalizeBandsWithRepairs(tree?.likelihoodBands);
+  const { real, unspecified, repairs: rangeRepairs } = normalizeRangesWithRepairs(tree?.salaryRanges);
+  const repairs = [...bandRepairs, ...rangeRepairs];
+  const parseableSalary = (salaries || []).some(s => parseSalaryToNumeric(s) > 0);
+  if (real.length === 0 && parseableSalary) {
+    const fallback = normalizeRangesWithRepairs(DEFAULT_RANGES);
+    real.push(...fallback.real);
+    repairs.push('used default salary ranges because model returned no real range for parseable pay');
+  }
+
+  const usedIndices = new Set();
+  const roleMap = new Map();
+  for (const raw of Array.isArray(tree?.roles) ? tree.roles : []) {
+    const name = String(raw?.name || '').trim().slice(0, 120) || 'Other';
+    if (name !== raw?.name) repairs.push('canonicalized blank or oversized role name');
+    const valid = [];
+    for (const index of Array.isArray(raw?.jobIndices) ? raw.jobIndices : []) {
+      if (!Number.isInteger(index) || index < 0 || index >= jobCount) {
+        repairs.push('dropped invalid role job index');
+      } else if (usedIndices.has(index)) {
+        repairs.push(`dropped duplicate role assignment for job ${index}`);
+      } else {
+        usedIndices.add(index);
+        valid.push(index);
+      }
+    }
+    if (!roleMap.has(name)) roleMap.set(name, []);
+    roleMap.get(name).push(...valid);
+  }
+  if (usedIndices.size < jobCount) repairs.push(`${jobCount - usedIndices.size} job(s) omitted from roles; renderer will use Other`);
+  return {
+    likelihoodBands: bands,
+    salaryRanges: [...real, unspecified],
+    roles: [...roleMap.entries()].map(([name, jobIndices]) => ({ name, jobIndices })),
+    repairs: [...new Set(repairs)],
+  };
 }
 
 /** Band a score lands in (first whose minScore it meets, in high→low order).

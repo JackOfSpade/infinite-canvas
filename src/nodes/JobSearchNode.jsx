@@ -746,7 +746,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // needed here.)
   const finishScoringAndSpawn = useCallback(async ({
     scoredJobs, gatheredCount, scrapedCount, scrapeWarnings = [],
-    testMode = false, hiddenApplied = 0, cancelled = () => false,
+    aiSkipped = false, collectionOnly = false, testMode = false, hiddenApplied = 0, cancelled = () => false,
   }) => {
     if (cancelled()) return;
     const displayed = Array.isArray(scoredJobs) ? scoredJobs : [];
@@ -762,8 +762,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const historyRows = displayed.map(j => ({
         source: j.source, company: j.company, title: j.title, location: j.location, url: j.url,
       }));
-      window.electronAPI.appendJobsHistory({ canvasFilePath, jobs: historyRows })
-        .catch(err => EventLogger.error('[JobSearch] History append failed:', err));
+      // Search-jobs has already awaited the authoritative pre-scoring write.
+      // This serialized follow-up is needed only for jobs that arrived later
+      // through a captcha/paste resolve while scoring was pending; existing rows
+      // dedupe to a no-op. Awaiting removes the old fire-and-forget race and
+      // records this outcome in the FULL diagnostics snapshot.
+      const historyResult = await window.electronAPI.appendJobsHistory({
+        canvasFilePath, jobs: historyRows, nodeId: id, historyStage: 'postScoring',
+      });
+      if (!historyResult?.success || historyResult?.error) {
+        EventLogger.error('[JobSearch] Post-scoring history append failed:', historyResult?.error || 'unknown error');
+      }
     }
 
     updateGlobal(id, {
@@ -773,6 +782,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       totalScoredCount: displayed.length,
       scrapedCount: scrapedCount ?? displayed.length,
       gatheredCount: gatheredCount ?? scrapedCount ?? displayed.length,
+      // Explicit semantics: FAST/FULL test breadth still produces scored jobs.
+      // Keep testMode as a legacy alias for old saved canvases only.
+      aiSkipped: !!aiSkipped,
+      collectionOnly: !!collectionOnly,
       testMode: !!testMode,
       hiddenApplied,
       finalSourceCounts,
@@ -843,7 +856,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       scrapeWarnings,
       activeTargetRole,
       originalPos,
-      testMode: scoreResult.testMode,
+      aiSkipped: !!scoreResult.aiSkipped,
+      collectionOnly: !!scoreResult.collectionOnly,
+      testMode: !!scoreResult.testMode,
       hiddenApplied,
       cancelled,
     });
@@ -1259,12 +1274,30 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           EventLogger.error(`[JobSearch][${currentId}] Failed to save test-mode prompt snapshot:`, err);
         }
         EventLogger.log(`[JobSearch][${currentId}] SKIP_AI_FOR_TESTING — ${foundJobs.length} jobs collected, stopping before AI scoring`);
+        // search-jobs already awaited its authoritative pre-scoring history
+        // write. `foundJobs` may additionally contain jobs merged from a
+        // captcha/paste resolve while the search was running, however; this
+        // collection-only branch bypasses finishScoringAndSpawn, so reconcile
+        // those late arrivals here through the same serialized IPC write.
+        if (canvasFilePath && foundJobs.length > 0) {
+          const historyRows = foundJobs.map(j => ({
+            source: j.source, company: j.company, title: j.title, location: j.location, url: j.url,
+          }));
+          const historyResult = await window.electronAPI.appendJobsHistory({
+            canvasFilePath, jobs: historyRows, nodeId: currentId, historyStage: 'postScoring',
+          });
+          if (!historyResult?.success || historyResult?.error) {
+            EventLogger.error('[JobSearch] Collection-only history reconciliation failed:', historyResult?.error || 'unknown error');
+          }
+        }
         updateGlobal(currentId, {
           hubState: 'done',
           resultCount: 0,
           scrapedCount: foundJobs.length,
           gatheredCount: rawGatheredCount,
           testMode: true,
+          aiSkipped: true,
+          collectionOnly: true,
           totalScoredCount: 0,
           scoreRangeMin: 0,
           scoreRangeMax: 100,
@@ -2279,6 +2312,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               gatheredCount={data.gatheredCount}
               queryModel={data.queryModel || null}
               testMode={!!data.testMode}
+              aiSkipped={!!data.aiSkipped}
+              collectionOnly={!!data.collectionOnly}
               resumeSummary={data.resumeSummary}
               locked={!!data.locked}
               onRerun={handleRerun}

@@ -40,6 +40,14 @@ export function historyPathForCanvas(canvasFilePath) {
   return path.join(dir, `${base}${SUFFIX}`);
 }
 
+// Query params that carry the LISTING IDENTITY on the sources whose URL PATH is
+// shared across every listing (see normUrl): `jk` = Indeed, `htidocid` = Google
+// for Jobs. Deliberately NOT a list of every source's job-id param — ZipRecruiter
+// (`jid`) and Glassdoor (`jl`) already have per-listing paths, and pinning their
+// key to a query param that can churn between scrapes would re-show jobs the user
+// has already seen. Order is the tie-break if a URL carries more than one.
+const IDENTITY_PARAMS = ['jk', 'htidocid'];
+
 function normUrl(url) {
   if (!url || typeof url !== 'string') return '';
   try {
@@ -60,8 +68,14 @@ function normUrl(url) {
     //   - `jk` present → keep it as the stable identity (path?jk=…)
     //   - redirect stub with no `jk` → '' so dedup falls back to title+company
     //   - everything else → path as before (identity is in the path)
-    const jk = u.searchParams.get('jk');
-    if (jk) return `https://${host}${path}?jk=${jk.toLowerCase()}`;
+    // Google for Jobs inverts it the same way Indeed does, but worse: EVERY card
+    // shares the path `/search` and the listing identity is the `htidocid` query
+    // param. Confirmed from a live run — all 10 Google jobs normalized to
+    // `https://google.com/search`, so 9 of them were silently dropped from the
+    // history write AND every future Google job on that canvas would then match
+    // that one poisoned key and be suppressed as "already seen".
+    const identity = IDENTITY_PARAMS.find(p => u.searchParams.get(p));
+    if (identity) return `https://${host}${path}?${identity}=${u.searchParams.get(identity).toLowerCase()}`;
     if (/\/(?:rc|pagead)\/clk$/.test(path)) return '';
     return `https://${host}${path}`;
   } catch {
@@ -102,9 +116,18 @@ export function dedupKeysFor(item) {
   return keys;
 }
 
+// One record per LINE is a hard invariant here: loadJobsHistory splits the file
+// on newlines before it parses fields, so a quoted multi-line value it wrote is
+// a value it can never read back. That is not hypothetical — Glassdoor's card
+// extractor handed us `company = "Marshalls\n3.4"` (employer name + star rating),
+// every such row split into two <5-column fragments on the next read, got dropped
+// as unparseable, and was re-appended as "new" on every single run: the CSV grew
+// without bound while those jobs were never actually suppressed as seen. The
+// extractor bug is fixed at source too, but the format must not be one stray
+// newline away from silent data loss — so collapse vertical whitespace on write.
 function csvEscape(v) {
-  const s = String(v ?? '').replace(/"/g, '""');
-  return /[,"\n\r]/.test(s) ? `"${s}"` : s;
+  const s = String(v ?? '').replace(/[\r\n]+/g, ' ').replace(/"/g, '""');
+  return /[,"]/.test(s) ? `"${s}"` : s;
 }
 
 function parseCsvLine(line) {
@@ -134,7 +157,13 @@ function isWithinAge(seenDate, maxAgeDays = MAX_AGE_DAYS) {
   return (Date.now() - d.getTime()) / 86400000 <= maxAgeDays;
 }
 
-export async function loadJobsHistory(canvasFilePath) {
+/**
+ * Read the seen-jobs CSV. `stats`, when passed, is filled in with
+ * `{ records, parsed, unreadable }` — `unreadable` being physical records the
+ * parser had to discard (a legacy row written before csvEscape collapsed
+ * newlines split into <5-column fragments). Callers that don't care omit it.
+ */
+export async function loadJobsHistory(canvasFilePath, stats = null) {
   const filePath = historyPathForCanvas(canvasFilePath);
   if (!filePath) return [];
   let content;
@@ -164,6 +193,14 @@ export async function loadJobsHistory(canvasFilePath) {
     } else {
       out.push({ seen_date: cols[0], source: cols[1], company: cols[2], title: cols[3], location: cols[4], url: cols[5] });
     }
+  }
+  if (stats) {
+    const records = lines.length - start;
+    Object.assign(stats, {
+      records,
+      parsed: out.length,
+      unreadable: Math.max(0, records - out.length),
+    });
   }
   return out;
 }
@@ -196,7 +233,8 @@ export async function appendJobsHistory(canvasFilePath, jobs) {
 
 async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
   try {
-    const existing = await loadJobsHistory(canvasFilePath);
+    const readStats = {};
+    const existing = await loadJobsHistory(canvasFilePath, readStats);
     const fresh = existing.filter(r => isWithinAge(r.seen_date));
 
     const seen = new Set();
@@ -206,10 +244,27 @@ async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
 
     const today = new Date().toISOString().slice(0, 10);
     const newRows = [];
+    // WHY a job didn't produce a row, per source and per key kind. A bare
+    // "59 jobs → 50 rows" told us nothing: the 9 missing rows turned out to be
+    // every Google job colliding on one normalized URL, which took a run of the
+    // real data to discover. `url` vs `title+company+location` separates a
+    // genuine repost from a normalizer that can't tell two listings apart, and
+    // `inBatch` (collided with an EARLIER job in this same write, i.e. not with
+    // pre-existing history) is the specific shape that means over-collapsing.
+    const skips = { noKey: 0, url: 0, titleCompany: 0, inBatch: 0, bySource: {} };
+    const batchKeys = new Set();
+    const noteSkip = (job, kind, fromBatch) => {
+      skips[kind]++;
+      if (fromBatch) skips.inBatch++;
+      const s = String(job?.source || '?');
+      skips.bySource[s] = (skips.bySource[s] || 0) + 1;
+    };
     for (const job of jobs) {
       const keys = dedupKeysFor(job);
-      if (keys.length === 0) continue;
-      if (keys.some(k => seen.has(k))) continue;
+      if (keys.length === 0) { noteSkip(job, 'noKey', false); continue; }
+      const hit = keys.find(k => seen.has(k));
+      if (hit) { noteSkip(job, hit.startsWith('u:') ? 'url' : 'titleCompany', batchKeys.has(hit)); continue; }
+      keys.forEach(k => batchKeys.add(k));
       keys.forEach(k => seen.add(k));
       newRows.push({
         seen_date: today,
@@ -222,7 +277,12 @@ async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
     }
 
     const pruned = existing.length - fresh.length;
-    if (newRows.length === 0 && pruned === 0) return { written: 0, pruned: 0 };
+    // `unreadable` catches the other half of the same failure: rows physically in
+    // the file that loadJobsHistory could not parse back (a legacy pre-csvEscape
+    // multi-line row). They are invisible to dedup AND get dropped by the rewrite
+    // below, so the count has to be reported rather than silently absorbed.
+    const unreadable = readStats.unreadable || 0;
+    if (newRows.length === 0 && pruned === 0 && unreadable === 0) return { written: 0, pruned: 0, skips };
 
     const all = [...fresh, ...newRows];
     const body = all
@@ -234,7 +294,7 @@ async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
     await fs.promises.writeFile(tmp, content, 'utf8');
     await fs.promises.rename(tmp, filePath);
 
-    return { written: newRows.length, pruned };
+    return { written: newRows.length, pruned, unreadable, skips };
   } catch (err) {
     logger.warn('[JobsHistory] Append failed:', err?.message || String(err));
     return { written: 0, pruned: 0, error: err?.message || String(err) };

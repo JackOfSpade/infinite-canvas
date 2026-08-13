@@ -102,6 +102,30 @@ function clearManualScraperTelemetry(status = 'idle') {
     : null;
 }
 
+// Keep terminal causes separate from the generic "completed" outcome.  In
+// particular, FAST mode can intentionally stop a source after its aggregate
+// result cap; reporting that as a normal completion makes a breadth-limited
+// search indistinguishable from an exhausted one.
+export function resolveManualSourceStopReason({
+  earlyExit = false,
+  aborted = false,
+  sourceSkipped = false,
+  hitPerSourceCap = false,
+  hitPageCap = false,
+  hitEmptyPage = false,
+} = {}) {
+  if (sourceSkipped) return 'blocked';
+  if (aborted) return 'aborted';
+  // `earlyExit` has historically meant a user-done / source-local stop, not
+  // necessarily an AbortSignal. Keep that public result enum stable; callers
+  // pass `aborted` only for an actual cancelled signal.
+  if (earlyExit) return 'user-done';
+  if (hitPerSourceCap) return 'per-source-cap';
+  if (hitPageCap) return 'page-cap';
+  if (hitEmptyPage) return 'empty-page';
+  return 'completed';
+}
+
 export function getManualScraperTelemetry() {
   return {
     active: manualScraperTelemetry.active ? { ...manualScraperTelemetry.active } : null,
@@ -284,7 +308,7 @@ const DESC_CONFIGS = {
 // ("$80,000 - $120,000/yr", "$55/hr"). Returns '' for anything unrecognizable so a
 // malformed block never poisons the salary field. Shared by the enrichment path
 // (ZipRecruiter/Glassdoor) — backfills salary the list extractor couldn't get.
-function formatJsonLdSalary(bs) {
+export function formatJsonLdSalary(bs) {
   if (!bs || typeof bs !== 'object') return '';
   const cur = String(bs.currency || bs.salaryCurrency || '').toUpperCase();
   const sym = (cur === 'USD' || cur === 'CAD' || cur === 'AUD' || cur === '') ? '$' : `${cur} `;
@@ -293,6 +317,17 @@ function formatJsonLdSalary(bs) {
   const unit = unitMap[String(v.unitText || '').toUpperCase()] || '';
   const num = (x) => (x == null || isNaN(Number(x))) ? null : Number(x).toLocaleString('en-US');
   const min = num(v.minValue), max = num(v.maxValue), val = num(v.value);
+  // With no recognized unitText we cannot tell an hourly rate from an annual
+  // salary, and emitting the bare number anyway is worse than emitting nothing:
+  // it is truthy, so the caller's DOM-chip fallback (which DOES carry a visible
+  // cadence) never runs, and the wrong figure gets locked in. Keep the value only
+  // when its magnitude can't be anything but annual.
+  const annualOnly = (x) => Number(x) >= 10000;
+  if (!unit) {
+    if (v.minValue != null && v.maxValue != null && annualOnly(v.minValue)) return `${sym}${min} - ${sym}${max}`;
+    if (v.value != null && annualOnly(v.value)) return `${sym}${val}`;
+    return '';
+  }
   if (min != null && max != null) return `${sym}${min} - ${sym}${max}${unit}`;
   if (val != null) return `${sym}${val}${unit}`;
   return '';
@@ -1001,16 +1036,27 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           // the chip hydrates (the common case, since ZR estimates ~every job); only
           // a genuinely pay-less page pays the full timeout.
           if (cfg.salaryFromDom && !jsonLdSalary) {
-            const MONEY_SRC = String.raw`\$\s?\d[\d.,]*\s?[KkMm]?(?:\s?(?:[-–—]|to)\s?\$?\s?\d[\d.,]*\s?[KkMm]?)?(?:\s?\/\s?(?:yr|year|hr|hour|mo|month|wk|week))?`;
+            // The cadence must be captured, not just tolerated: ZipRecruiter's chip
+            // renders it as a WORD ("$19 Hourly", "$71K Annually") at least as often
+            // as a slash ("$36.29/hr"), and the old pattern only listed the slash
+            // forms — so a live run recorded four ZR jobs as a bare "$19"/"$20"/
+            // "$18.15"/"$1.0K" with no unit, which downstream reads as an annual
+            // salary of nineteen dollars. Word forms are alternated in here; the
+            // suffix stays optional so a genuinely unit-less chip still yields the
+            // amount (parseSalaryToNumeric then refuses to annualize it).
+            const MONEY_SRC = String.raw`\$\s?\d[\d.,]*\s?[KkMm]?(?:\s?(?:[-–—]|to)\s?\$?\s?\d[\d.,]*\s?[KkMm]?)?(?:\s?(?:\/\s?(?:yr|year|hr|hour|mo|month|wk|week)|(?:hour|year|month|week|annual|bi[-\s]?week)ly|an hour|a year|a month|a week|per (?:hour|year|month|week)))?`;
             await fetchPage.waitForFunction((src) => {
-              const re = new RegExp(src);
+              const re = new RegExp(src, 'i');
               return [...document.querySelectorAll('p')].some(p => re.test(p.textContent || ''));
             }, { timeout: 1500 }, MONEY_SRC).catch(() => {});
             jsonLdSalary = await fetchPage.evaluate((src) => {
-              const re = new RegExp(src);
+              const re = new RegExp(src, 'i');
               for (const p of document.querySelectorAll('p')) {
                 const t = (p.textContent || '').trim();
-                if (t.length <= 40 && re.test(t)) { const m = t.match(re); return (m && m[0].trim()) || ''; }
+                // Bound generous enough for "$17.60 - $22.00 Per hour" now that
+                // word-form cadences are matched, still tight enough that a whole
+                // paragraph mentioning a dollar figure can't qualify as the chip.
+                if (t.length <= 60 && re.test(t)) { const m = t.match(re); return (m && m[0].trim()) || ''; }
               }
               return '';
             }, MONEY_SRC).catch(() => '');
@@ -1714,6 +1760,9 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       let sourceSiteChangedWarning = null;
       let sourcePagesWalked        = 0;
       let sourceSkipped            = false; // set true when challenge times out — skips remaining queries for this source
+      let hitPerSourceCap          = false;
+      let hitPageCap               = false;
+      let hitEmptyPage             = false;
 
       // Fresh, fully-isolated Chrome for THIS platform (torn down before the next).
       platform = await launchScrapePlatformBrowser({
@@ -1855,6 +1904,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // content or a stale pager could loop unbounded. JOB_MAX_PAGES bounds it.
           if (pageNum > JOB_MAX_PAGES) {
             logger.info(`[BrowserScraper] ${srcName} q${qi + 1} hit JOB_MAX_PAGES (${JOB_MAX_PAGES}) — stopping pagination`);
+            hitPageCap = true;
             break;
           }
 
@@ -1958,7 +2008,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           siteChangedStreak = 0;
 
           // No jobs on this page despite a clean extraction → end of results
-          if (extracted.length === 0) break;
+          if (extracted.length === 0) {
+            hitEmptyPage = true;
+            break;
+          }
 
           // Deduplicate and accumulate page results
           const newJobs = [];
@@ -2013,6 +2066,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
 
           if (allJobs.length >= JOB_PER_SOURCE_CAP) {
             logger.info(`[BrowserScraper] ${srcName} hit JOB_PER_SOURCE_CAP (${JOB_PER_SOURCE_CAP}) — stopping source`);
+            hitPerSourceCap = true;
             break;
           }
 
@@ -2061,22 +2115,49 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           sourceSiteChangedWarning = siteChangedWarning;
         }
         sourcePagesWalked = Math.max(sourcePagesWalked, pageNum);
-        if (allJobs.length >= JOB_PER_SOURCE_CAP) break;
+        if (allJobs.length >= JOB_PER_SOURCE_CAP) {
+          hitPerSourceCap = true;
+          break;
+        }
       }
 
+      const stopReason = resolveManualSourceStopReason({
+        earlyExit,
+        aborted: !!signal?.aborted,
+        sourceSkipped,
+        hitPerSourceCap,
+        hitPageCap,
+        hitEmptyPage,
+      });
       const result = {
         id:          `${sourceId}-0`,
         sourceId,
         success:     true,
         data:        allJobs,
         pagesWalked: sourcePagesWalked,
-        stopReason:  earlyExit ? 'user-done' : 'completed',
+        stopReason,
         warning:     sourceSiteChangedWarning || null,
       };
       results.push(result);
       onResult?.(result);
 
-      logger.info(`[BrowserScraper] ${srcName} done: ${allJobs.length} jobs`);
+      // This terminal event deliberately clears query/page fields inherited by
+      // the merge-style telemetry recorder. Without it, a finished run reports
+      // the pre-extraction count from its final page (often 0) as if it were
+      // current, even when the source returned jobs.
+      recordManualScraperTelemetry({
+        phase: 'source-finished',
+        sourceId,
+        srcName,
+        queryIndex: null,
+        queryTotal: null,
+        pageNum: null,
+        count: allJobs.length,
+        stopReason,
+        url: page.url(),
+      });
+
+      logger.info(`[BrowserScraper] ${srcName} done: ${allJobs.length} jobs (${stopReason})`);
 
       // Close this platform's browser completely before the next launches, so each
       // platform starts from a fresh process with no carried-over session signal.

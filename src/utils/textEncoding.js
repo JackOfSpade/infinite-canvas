@@ -83,3 +83,92 @@ export function repairJobsMojibake(jobs) {
   if (Array.isArray(jobs)) for (const j of jobs) repairJobMojibake(j);
   return jobs;
 }
+
+// ── HTML markup normalization ────────────────────────────────────────────────
+//
+// Sources that hand us text through a DOM (`innerText`/`textContent`) arrive
+// already-decoded. The ones that DON'T — WeWorkRemotely (regex over raw RSS
+// XML) and LinkedIn (raw `description` HTML) — leak markup and entities all the
+// way into the scoring prompt, the card, and the résumé generator: confirmed in
+// a live run as titles reading "Customer Support &amp; Product Demo Specialist"
+// and descriptions opening with "<p> <strong>Headquarters:</strong> …". Raw tags
+// are pure token waste on a paid scoring call and dilute the text the model
+// reasons over, so both are normalized once at the pipeline chokepoint next to
+// repairJobsMojibake rather than per-extractor (a new source gets the fix free).
+
+// Only the entities that actually appear in scraped listing text. A general
+// named-entity table would be dead weight; numeric refs cover the long tail.
+const NAMED_ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+  ndash: '–', mdash: '—', hellip: '…', rsquo: '’', lsquo: '‘',
+  rdquo: '”', ldquo: '“', bull: '•', middot: '·', trade: '™',
+  reg: '®', copy: '©', deg: '°', eacute: 'é', euro: '€', pound: '£', cent: '¢',
+};
+
+/**
+ * Decode the HTML entities a non-DOM extraction path leaves behind. Handles
+ * named refs (table above), decimal (`&#39;`) and hex (`&#x27;`) numeric refs.
+ * Unknown entities are left verbatim — never guessed at, so a literal "&foo;"
+ * in a job description survives intact. Pure + testable.
+ */
+export function decodeHtmlEntities(s) {
+  if (typeof s !== 'string' || !s || !s.includes('&')) return s;
+  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi, (whole, body) => {
+    const b = body.toLowerCase();
+    if (b[0] === '#') {
+      const cp = b[1] === 'x' ? parseInt(b.slice(2), 16) : parseInt(b.slice(1), 10);
+      // Reject non-characters/surrogates rather than emitting a replacement char.
+      if (!Number.isFinite(cp) || cp <= 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return whole;
+      return String.fromCodePoint(cp);
+    }
+    return Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, b) ? NAMED_ENTITIES[b] : whole;
+  });
+}
+
+/**
+ * Strip HTML markup from a description body, preserving its BLOCK structure as
+ * newlines so the model still sees paragraph/list boundaries (a naive tag strip
+ * runs every bullet into one wall of prose). Entities are decoded AFTER the
+ * strip, so an escaped "&lt;script&gt;" in the copy stays inert text.
+ */
+export function stripHtmlToText(s) {
+  if (typeof s !== 'string' || !s) return s;
+  if (!/<[a-z!/]/i.test(s)) return decodeHtmlEntities(s);
+  const withBreaks = s
+    .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<\s*(?:br|hr)\s*\/?\s*>/gi, '\n')
+    .replace(/<\s*\/\s*(?:p|div|li|tr|h[1-6]|ul|ol|table|section|article|blockquote)\s*>/gi, '\n')
+    .replace(/<\s*li\b[^>]*>/gi, '\n• ')
+    .replace(/<[^>]+>/g, ' ');
+  return decodeHtmlEntities(withBreaks)
+    .replace(/[ \t\u00a0]+/g, ' ')
+    .replace(/ *\n[ \t]*/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// Short fields must never contain markup at all; long ones keep block structure.
+const JOB_ENTITY_FIELDS = ['title', 'company', 'location', 'salary'];
+const JOB_MARKUP_FIELDS = ['snippet', 'description'];
+
+/**
+ * Normalize a job's scraped text IN PLACE: entities decoded everywhere, markup
+ * stripped from the description bodies. Returns the job. Idempotent and a no-op
+ * on text that is already clean.
+ */
+export function normalizeJobMarkup(job) {
+  if (!job || typeof job !== 'object') return job;
+  for (const f of JOB_ENTITY_FIELDS) {
+    if (typeof job[f] === 'string' && job[f]) job[f] = decodeHtmlEntities(job[f]);
+  }
+  for (const f of JOB_MARKUP_FIELDS) {
+    if (typeof job[f] === 'string' && job[f]) job[f] = stripHtmlToText(job[f]);
+  }
+  return job;
+}
+
+export function normalizeJobsMarkup(jobs) {
+  if (Array.isArray(jobs)) for (const j of jobs) normalizeJobMarkup(j);
+  return jobs;
+}

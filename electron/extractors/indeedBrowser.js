@@ -20,6 +20,41 @@ import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from '../ipc/browser/scraperOverlay.js';
 import { humanCooldown } from '../utils/humanDelay.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
+import { normalizeCountry } from '../../src/utils/jobLocation.js';
+
+// Indeed runs a SEPARATE site per country and each one only returns that
+// country's postings — `l=` is a place filter WITHIN a site, not a country
+// switch. So the target country picks the host. Keyed by the canonical country
+// name normalizeCountry() produces; anything unmapped (including the US and any
+// country we don't list) stays on www, which is Indeed's global default and the
+// previous behavior. Exported for the unit test.
+const INDEED_COUNTRY_HOSTS = {
+  'Canada': 'ca.indeed.com',
+  'United Kingdom': 'uk.indeed.com',
+  'Australia': 'au.indeed.com',
+  'New Zealand': 'nz.indeed.com',
+  'Ireland': 'ie.indeed.com',
+  'Germany': 'de.indeed.com',
+  'France': 'fr.indeed.com',
+  'India': 'in.indeed.com',
+  'Singapore': 'sg.indeed.com',
+};
+
+/**
+ * Host to run an Indeed search on, from the board-ready location string
+ * ("Whitby, Ontario, Canada" / "Canada" / "Denver, CO"). deriveLocationParam
+ * appends the country for every NON-US place, so the country is the last
+ * comma-segment when there is one; a bare "Denver, CO" has no country segment
+ * and correctly falls through to www. Pure + testable.
+ */
+export function indeedHostForLocation(location) {
+  const segs = String(location || '').split(',').map(s => s.trim()).filter(Boolean);
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const host = INDEED_COUNTRY_HOSTS[normalizeCountry(segs[i])];
+    if (host) return host;
+  }
+  return 'www.indeed.com';
+}
 
 // Display-only overlay — no pause button or exposeFunction CDP bindings (Cloudflare fingerprint risk).
 const OVERLAY_SCRIPT = buildOverlayScript({ withPause: false });
@@ -247,6 +282,11 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
   // Board-ready target location → Indeed's `&l=` filter. Empty → omitted
   // (nationwide). Without this a location-free query searched the whole US.
   const locParam     = String(location || '').trim() ? `&l=${encodeURIComponent(String(location).trim())}` : '';
+  // …and `l=` alone is NOT enough. Indeed runs one site per country and each only
+  // searches its own: a Canada search on www.indeed.com came back with jobs in
+  // Haysi VA, Honaker VA and Williamson WV — all 3 of the run's Indeed results
+  // were US, because `l=Canada` on the US site is just an unmatched place name.
+  const host         = indeedHostForLocation(location);
   const resultCap    = Number.isFinite(JOB_RESULT_CAP) ? JOB_RESULT_CAP : Infinity;
   const maxPages     = JOB_MAX_PAGES;
 
@@ -296,12 +336,12 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     await page.evaluateOnNewDocument(OVERLAY_SCRIPT);
 
     // Verify auth state before running any queries.
-    await page.goto('https://www.indeed.com', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+    await page.goto(`https://${host}`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
     const landedUrl = page.url();
     await injectOverlay(page);
     await updateOverlay(page, { srcName: 'Indeed', srcLabel: 'Checking session…', count: 0, status: 'Verifying login…' });
     await new Promise(r => setTimeout(r, 1200 + Math.round(Math.random() * 600)));
-    const cookies = await page.cookies('https://www.indeed.com', 'https://secure.indeed.com').catch(() => []);
+    const cookies = await page.cookies(`https://${host}`, 'https://www.indeed.com', 'https://secure.indeed.com').catch(() => []);
     const hasPPID        = cookies.some(c => c.name === 'PPID' && c.domain?.includes('indeed.com'));
     const hasCfClearance = cookies.some(c => c.name === 'cf_clearance');
     const hasCfBm        = cookies.some(c => c.name === '__cf_bm');
@@ -494,7 +534,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         if (allJobs.length >= resultCap) break outer;
 
         const start = p * 10;
-        const url   = `https://www.indeed.com/jobs?q=${encodeURIComponent(q)}${locParam}&fromage=${days}${start > 0 ? `&start=${start}` : ''}`;
+        const url   = `https://${host}/jobs?q=${encodeURIComponent(q)}${locParam}&fromage=${days}${start > 0 ? `&start=${start}` : ''}`;
 
         try {
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -728,7 +768,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       for (let ri = 0; ri < missingDescJobs.length; ri++) {
         if (signal?.aborted) break;
         const job = missingDescJobs[ri];
-        const jobUrl = job.url || (job.jobkey ? `https://www.indeed.com/viewjob?jk=${job.jobkey}` : null);
+        const jobUrl = job.url || (job.jobkey ? `https://${host}/viewjob?jk=${job.jobkey}` : null);
         if (!jobUrl) continue;
         try {
           await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });

@@ -143,10 +143,21 @@ export const GLASSDOOR_EXTRACTOR = `
         const href = linkEl?.getAttribute('href') || (jobId ? '/partner/jobListing.htm?jl=' + jobId : '');
         const url = href.startsWith('http') ? href : (href ? 'https://www.glassdoor.com' + href : '');
 
+        // Employer NAME only. The name-specific selectors come first because
+        // [data-test="detailRecruiter"] is the wrapper that also holds the star
+        // rating, and innerText on it yields "Marshalls\\n3.4" — a company name
+        // no downstream consumer can use (it reached the scoring prompt, the
+        // card, and broke the seen-history CSV, whose reader is line-based).
+        // Belt-and-braces: keep only the first line and drop a trailing rating.
         const companyEl = card.querySelector(
-          '[data-test="detailRecruiter"], [data-test="employer-name"], [class*="EmployerProfile_employerName"], [class*="employer-name"]'
+          '[data-test="employer-name"], [class*="EmployerProfile_employerName"], [class*="employer-name"], [data-test="detailRecruiter"]'
         );
-        const company = companyEl?.innerText?.trim() || '';
+        // A rating is always one decimal place ("3.4", "4.0"), so requiring the
+        // decimal keeps a real company name like "Studio 5" intact.
+        const company = (companyEl?.innerText || '')
+          .split('\\n')[0]
+          .replace(/\\s+[0-5]\\.\\d\\s*$/, '')
+          .trim();
 
         const locationEl = card.querySelector('[data-test="location"], [data-test="emp-location"]');
         const location = locationEl?.innerText?.trim() || '';

@@ -231,7 +231,7 @@ export const JOB_BUCKETING_SCHEMA = {
         type: 'object',
         required: ['label', 'minSalary', 'maxSalary'],
         properties: {
-          label:     { type: 'string',  description: 'Display label, e.g. "$120k+", "$80-120k", "Unspecified"' },
+          label:     { type: 'string',  description: 'Annual display label, e.g. "$120k+/yr", "$80k–$120k/yr", "Unspecified". The server canonicalizes it from the numeric bounds.' },
           minSalary: { type: 'integer', description: 'Lower bound USD/yr; 0 for the Unspecified range' },
           maxSalary: { type: 'integer', description: 'Upper bound USD/yr; 0 if open-ended ("$200k+") or Unspecified' },
         },

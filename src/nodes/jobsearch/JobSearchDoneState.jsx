@@ -19,6 +19,8 @@ export function JobSearchDoneState({
   scrapedCount,
   gatheredCount,
   queryModel = null,
+  aiSkipped = false,
+  collectionOnly = false,
   testMode = false,
   resumeSummary,
   locked = false,
@@ -43,14 +45,17 @@ export function JobSearchDoneState({
   hiddenApplied = 0,
 }) {
   const { addToast } = useToast();
-  const count = testMode ? (scrapedCount ?? 0) : (resultCount || 0);
+  // `testMode` is retained only for old persisted hubs. New runs record the
+  // actual behavior, so FAST/FULL breadth-limited runs still say "jobs scored".
+  const skippedAi = aiSkipped || collectionOnly || testMode;
+  const count = skippedAi ? (scrapedCount ?? 0) : (resultCount || 0);
 
   return (
     <div className="flex flex-col items-center py-5 px-3 w-full gap-1">
 
       {/* Result count */}
       <div className="text-emerald-400 text-2xl font-bold">{count}</div>
-      <p className="text-white/40 text-xs">{testMode ? 'jobs collected' : 'jobs scored'}</p>
+      <p className="text-white/40 text-xs">{skippedAi ? 'jobs collected' : 'jobs scored'}</p>
 
       {/* Scraped → kept funnel */}
       {(gatheredCount > 0 || scrapedCount > 0) && (
