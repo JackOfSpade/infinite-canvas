@@ -83,15 +83,8 @@ export const CLAUDE_MODEL_REGISTRY = Object.freeze([
   },
 ]);
 
-const MODEL_BY_ID = new Map(CLAUDE_MODEL_REGISTRY.map((entry) => [entry.id, entry]));
-
 /** Every Claude model id this app uses, in registry order. */
 export const CLAUDE_MODEL_IDS = Object.freeze(CLAUDE_MODEL_REGISTRY.map(({ id }) => id));
-
-/** Resolve a model id to its registry entry, or null if unrecognized. */
-export function getClaudeModelInfo(model) {
-  return MODEL_BY_ID.get(model) || null;
-}
 
 // Claude 4.6+ (including the current Claude 5 family) supports adaptive
 // thinking.  `output_config.effort` is the documented control for its depth;

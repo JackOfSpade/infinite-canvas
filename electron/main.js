@@ -169,6 +169,15 @@ function getMarketplacePreviewCache(key) {
 }
 
 function setMarketplacePreviewCache(key, buffer) {
+  // Two protocol requests for the same source can finish their preview work at
+  // nearly the same time. Replacing an existing entry must first remove its
+  // prior byte count; otherwise one Map entry is charged twice and the LRU
+  // budget eventually evicts healthy, unrelated previews too early.
+  const previous = marketplacePreviewCache.get(key);
+  if (previous) {
+    marketplacePreviewCache.delete(key);
+    marketplacePreviewCacheBytes -= previous.bytes || 0;
+  }
   marketplacePreviewCache.set(key, { buffer, bytes: buffer.length });
   marketplacePreviewCacheBytes += buffer.length;
 

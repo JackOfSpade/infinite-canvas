@@ -781,17 +781,26 @@ export function registerAccountsHandlers() {
         const result = await openLoginWindow(platformId, _event.sender);
         return await completeLoginWindowVerification(platformId, result);
       } catch (error) {
-        // Catch path: openLoginWindow itself blew up (Chrome failed to launch,
-        // platform unknown, etc.). Persist the failure into the cache and
-        // return a structured verdict so the renderer's toast surfaces the
-        // real error instead of the generic "closed without sign-in" fallback.
-        // verifySellMonitorLogin is now defensive enough that we shouldn't
-        // land here for verify-side issues — only loginBrowser launch issues.
+        // Catch path: openLoginWindow itself blew up BEFORE any verification ran
+        // (Chrome failed to launch, profile-lock contention, unknown platform,
+        // etc.) — a tooling/launch failure, not evidence that the user's EXISTING
+        // session is invalid. This handler intentionally opens the window even
+        // when the cache already says connected (see the comment above — it's
+        // how a user forces a fresh login), so unconditionally caching
+        // connected:false here used to flip an already-logged-in platform to
+        // "needs login" purely because Chrome hiccuped on THIS attempt — which
+        // then trips the hard login preflight and blocks price checks on every
+        // in-scope marketplace, not just this one. Mirror the file's own
+        // inconclusive-preserve rule (see verifyAllPlatforms' browser-teardown
+        // handling): keep the prior cached connected value, only refreshing the
+        // diagnostic trace, and report the verdict as inconclusive so the
+        // renderer's toast still surfaces the real error.
         const msg = error?.message || String(error);
         logger.error(`[Accounts] Login window failed for ${platformId}:`, msg);
         const trace = { error: msg, stack: error?.stack?.slice(0, 600), stage: 'openLoginWindow' };
-        await writeStatusCache(platformId, false, { lastReason: msg, lastTrace: trace });
-        return { connected: false, reason: msg, error: msg };
+        const prior = _statusCache[platformId]?.connected ?? false;
+        await writeStatusCache(platformId, prior, { lastReason: msg, lastTrace: trace });
+        return { connected: prior, reason: msg, error: msg, inconclusive: true };
       }
     })();
 

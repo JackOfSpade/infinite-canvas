@@ -1,7 +1,7 @@
 /**
  * Jobs IPC handlers — resume parsing, multi-source job search, AI scoring.
  * 9 Sources: Google, Indeed, LinkedIn, RemoteOK, WeWorkRemotely,
- *            ZipRecruiter, Glassdoor, Dice, Wellfound, USAJobs
+ *            ZipRecruiter, Glassdoor, Dice, USAJobs
  */
 import fs from 'fs';
 import path from 'path';
@@ -191,20 +191,49 @@ async function readJobBatchMap(canvasFilePath) {
   if (!p) return {};
   try {
     const obj = JSON.parse(await fs.promises.readFile(p, 'utf8'));
-    if (!obj || typeof obj !== 'object') return {};
+    // An array is JSON-object-like but cannot hold node-id properties when
+    // stringified, so treating a malformed array as the sidecar map would make
+    // a successful write silently disappear.
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return {};
     // Legacy single-entry sidecar → present it as a one-key map.
     if (typeof obj.batchId === 'string') return { [obj.nodeId || '__legacy__']: obj };
     return obj;
   } catch { return {}; }
 }
+// Per-sidecar-path FIFO mutex. writeJobBatchSidecar/deleteJobBatchSidecar are
+// each a whole-FILE read-modify-write of the nodeId-keyed map; without
+// serialization, two Job Search Modules on the SAME canvas submitting/
+// reconciling batch scoring around the same time both read the same stale map
+// and the last rename wins — silently dropping the other hub's pending-batch
+// record (exactly the failure the nodeId-keying above exists to prevent).
+// Keyed by path so different canvases never block one another. Same
+// dependency-free pattern as jobRunStaging.js's manifest lock / jobsHistory.js's
+// history lock.
+const _jobBatchTails = new Map();
+function withJobBatchLock(filePath, fn) {
+  const prev = _jobBatchTails.get(filePath) || Promise.resolve();
+  const result = prev.then(fn, fn); // run regardless of the prior op's outcome
+  // Keep a fulfilled tail so a rejected write does not poison the next
+  // operation, then remove it when it is still the latest tail for this path.
+  // The identity check matters: a later operation may already be queued while
+  // this one settles, and must retain its own lock entry.
+  const tail = result.then(() => {}, () => {});
+  _jobBatchTails.set(filePath, tail);
+  void tail.finally(() => {
+    if (_jobBatchTails.get(filePath) === tail) _jobBatchTails.delete(filePath);
+  });
+  return result;
+}
 async function writeJobBatchSidecar(canvasFilePath, nodeId, entry) {
   const p = jobBatchPath(canvasFilePath);
   if (!p) return;
-  const map = await readJobBatchMap(canvasFilePath);
-  map[nodeId || '__default__'] = { ...entry, nodeId: nodeId || null };
-  const tmp = `${p}.__ic_${Date.now()}.tmp`;
-  await fs.promises.writeFile(tmp, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
-  await fs.promises.rename(tmp, p);
+  return withJobBatchLock(p, async () => {
+    const map = await readJobBatchMap(canvasFilePath);
+    map[nodeId || '__default__'] = { ...entry, nodeId: nodeId || null };
+    const tmp = `${p}.__ic_${Date.now()}.tmp`;
+    await fs.promises.writeFile(tmp, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
+    await fs.promises.rename(tmp, p);
+  });
 }
 async function readJobBatchSidecar(canvasFilePath, nodeId) {
   const map = await readJobBatchMap(canvasFilePath);
@@ -213,14 +242,16 @@ async function readJobBatchSidecar(canvasFilePath, nodeId) {
 async function deleteJobBatchSidecar(canvasFilePath, nodeId) {
   const p = jobBatchPath(canvasFilePath);
   if (!p) return;
-  const map = await readJobBatchMap(canvasFilePath);
-  delete map[nodeId || '__default__'];
-  delete map.__legacy__; // clear any legacy straggler on a keyed delete
-  const remaining = Object.keys(map);
-  if (remaining.length === 0) { await fs.promises.rm(p, { force: true }).catch(() => {}); return; }
-  const tmp = `${p}.__ic_${Date.now()}.tmp`;
-  await fs.promises.writeFile(tmp, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
-  await fs.promises.rename(tmp, p);
+  return withJobBatchLock(p, async () => {
+    const map = await readJobBatchMap(canvasFilePath);
+    delete map[nodeId || '__default__'];
+    delete map.__legacy__; // clear any legacy straggler on a keyed delete
+    const remaining = Object.keys(map);
+    if (remaining.length === 0) { await fs.promises.rm(p, { force: true }).catch(() => {}); return; }
+    const tmp = `${p}.__ic_${Date.now()}.tmp`;
+    await fs.promises.writeFile(tmp, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
+    await fs.promises.rename(tmp, p);
+  });
 }
 
 async function loadJobAnalysisSnapshot(canvasFilePath) {

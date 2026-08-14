@@ -6,8 +6,7 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
   globalIgnores([
-    'dist', 'dist-electron', 'scripts', 'test-*.js', 'fix-posh-url.js', 'scratch',
-    'electron/extractors/_archive',
+    'dist', 'dist-electron',
     'release',                            // electron-builder output (gitignored) — never lint built app copies
     'resume_design_system/build/vendor',  // third-party (pdf-lib.min.js)
     'resume_design_system/_ds_bundle.js', // generated dual-mode bundle (see its @ds-bundle header) — not app-consumed, never hand-edited
@@ -35,7 +34,7 @@ export default defineConfig([
     },
   },
   {
-    files: ['electron/**/*.{js,mjs,cjs}', 'vite.config.js', 'eslint.config.js'],
+    files: ['electron/**/*.{js,mjs,cjs}', 'scripts/**/*.{js,mjs,cjs}', 'vite.config.js', 'eslint.config.js'],
     languageOptions: {
       globals: {
         ...globals.node,

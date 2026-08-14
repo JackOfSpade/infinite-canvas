@@ -1,5 +1,6 @@
 /**
- * API-Based Job Extractors — Indeed/Scrapfly, LinkedIn, Greenhouse, Lever, USAJobs.
+ * API-Based Job Extractors — LinkedIn, USAJobs, RemoteOK, WeWorkRemotely, Dice,
+ * plus the Indeed HTML-extraction helper shared with the browser-based scraper.
  *
  * These bypass Puppeteer entirely, using plain HTTP fetch() against
  * publicly accessible JSON APIs or hidden HTML endpoints.
@@ -30,8 +31,6 @@ import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js'
 // magic literals and leaves a single hook to switch on learning later.
 const API_TIMEOUT_SEEDS = {
   'linkedin-api':   10000,
-  'greenhouse-api':  8000,
-  'lever-api':       8000,
   'usajobs-api':    10000,
   'remoteok-api':   10000,
   'wwr-api':        10000,
@@ -39,7 +38,6 @@ const API_TIMEOUT_SEEDS = {
   'pricecharting-api': 10000,
   'aptdeco-api':    10000,
   'dice-api':       10000,
-  'scrapfly-api':  160000, // Scrapfly default read timeout is 155s; leave client overhead.
 };
 
 /** Resolve an API fetch timeout from its seed via the shared budget store. */
@@ -1150,27 +1148,34 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
 // on either side of a candidate match.
 const NON_PAY_CONTEXT = /\b(?:equity|share unit|psus?|rsus?|stock|option|grant|token|vest|bonus|signing|referral|revenue|funding|raised|valuation|budget of|arr|mrr)\b/i;
 
+// Hoisted to module scope (not rebuilt per call): extractSalaryFromText runs once
+// per RSS item in fetchWeWorkRemotelyJobs' item loop, so re-constructing these two
+// RegExp objects (each built from a string-concatenated pattern) on every posting
+// was pure per-item waste. UNIT is global (used via matchAll, which clones its own
+// iteration state, so sharing it across calls is safe); KEYWORD is non-global and
+// used only via .match(), so it carries no lastIndex state either.
+const SALARY_AMOUNT_RE = String.raw`\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?`;
+// Keep a currency code and cadence with the amount. Returning only "$2,500"
+// from "$2,500 USD per month" loses the signal required to annualize the pay.
+const SALARY_CADENCE_RE = String.raw`(?:\/\s?(?:yr|year|hr|hour|mo|month|wk|week|day)|per\s+(?:year|hour|month|week|day|annum)|a\s+(?:year|hour|month|week|day)|(?:annually|annual|yearly|monthly|weekly|daily|hourly))`;
+const SALARY_CURRENCY_AND_CADENCE_RE = String.raw`(?:\s*(?:USD|CAD|AUD|EUR|GBP)\b)?\s*${SALARY_CADENCE_RE}`;
+const SALARY_UNIT_RE = new RegExp(`${SALARY_AMOUNT_RE}${SALARY_CURRENCY_AND_CADENCE_RE}`, 'gi');
+// "budget for this role" is how remote-first JDs (Hospitable, GitLab…) phrase
+// the pay band; a BARE "budget" is not on this list on purpose — that matches
+// marketing/infra spend far more often than compensation.
+const SALARY_KEYWORD_RE = new RegExp(
+  String.raw`\b(?:salary|salaries|compensation|base pay|pay range|pay rate|pay|budget for this (?:role|position)|total budget for this (?:role|position))\b[^$]{0,40}(${SALARY_AMOUNT_RE})(${SALARY_CURRENCY_AND_CADENCE_RE})?`,
+  'i',
+);
+
 export function extractSalaryFromText(text) {
   if (!text) return '';
   const s = String(text).replace(/\s+/g, ' ');
-  const AMOUNT = String.raw`\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s?(?:[-–—]|to)\s?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?)?`;
-  // Keep a currency code and cadence with the amount. Returning only "$2,500"
-  // from "$2,500 USD per month" loses the signal required to annualize the pay.
-  const CADENCE = String.raw`(?:\/\s?(?:yr|year|hr|hour|mo|month|wk|week|day)|per\s+(?:year|hour|month|week|day|annum)|a\s+(?:year|hour|month|week|day)|(?:annually|annual|yearly|monthly|weekly|daily|hourly))`;
-  const CURRENCY_AND_CADENCE = String.raw`(?:\s*(?:USD|CAD|AUD|EUR|GBP)\b)?\s*${CADENCE}`;
-  const UNIT = new RegExp(`${AMOUNT}${CURRENCY_AND_CADENCE}`, 'gi');
-  // "budget for this role" is how remote-first JDs (Hospitable, GitLab…) phrase
-  // the pay band; a BARE "budget" is not on this list on purpose — that matches
-  // marketing/infra spend far more often than compensation.
-  const KEYWORD = new RegExp(
-    String.raw`\b(?:salary|salaries|compensation|base pay|pay range|pay rate|pay|budget for this (?:role|position)|total budget for this (?:role|position))\b[^$]{0,40}(${AMOUNT})(${CURRENCY_AND_CADENCE})?`,
-    'i',
-  );
   // Pay-anchored wins over free-floating: a figure the JD itself labels as pay is
   // better evidence than one that merely carries a cadence somewhere in the body.
-  const m2 = s.match(KEYWORD);
+  const m2 = s.match(SALARY_KEYWORD_RE);
   if (m2 && !NON_PAY_CONTEXT.test(contextAround(s, m2.index, m2[0].length))) return `${m2[1]}${m2[2] || ''}`.trim();
-  for (const m of s.matchAll(UNIT)) {
+  for (const m of s.matchAll(SALARY_UNIT_RE)) {
     if (!NON_PAY_CONTEXT.test(contextAround(s, m.index, m[0].length))) return m[0].trim();
   }
   return '';

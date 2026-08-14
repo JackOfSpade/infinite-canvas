@@ -10,10 +10,26 @@
 // PR description for the full trace. This stub is wired in via
 // scripts/test-stubs/register.mjs (a Node loader hook), not by editing
 // application source.
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const userDataDir = path.join(os.tmpdir(), 'infinite-canvas-test-stub');
+// Each test process needs its own durable-looking userData directory: several
+// application modules exercise real file persistence through app.getPath(). A
+// fixed temp path lets concurrent `npm test` invocations overwrite each other.
+const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'infinite-canvas-test-stub-'));
+
+// The app writes nested state below this directory during tests. Remove the
+// whole process-private root synchronously once Node has completed the suite;
+// failure here is harmless because the OS temp-directory policy remains a
+// fallback and cleanup must never hide a test result.
+process.once('exit', () => {
+  try {
+    fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 2 });
+  } catch {
+    // Best-effort cleanup only.
+  }
+});
 
 export const app = {
   isPackaged: false,

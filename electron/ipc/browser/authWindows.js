@@ -1053,6 +1053,14 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
     child.once('error', (error) => {
       if (settled) return;
       settled = true;
+      // Mirror settle()'s cleanup — poll is assigned further below but, since
+      // spawn() already ran synchronously before this executor returns, a
+      // 'error' event (always emitted async) fires after `poll` is set. Without
+      // clearing it here, a failed launch (missing binary, permission denial)
+      // leaves the native-tab poll running forever, calling getNativeChromeTabs()
+      // (an osascript spawn) every LOGIN_POLL_INTERVAL_MS*2 with nothing to do.
+      if (poll) { clearInterval(poll); poll = null; }
+      if (closeAfterSuccessTimer) clearTimeout(closeAfterSuccessTimer);
       if (timeout) clearTimeout(timeout);
       if (sender) sender.removeListener('destroyed', onSenderDestroyed);
       finishAuthWindowDiagnostic(platformId, { result: 'launch-error', error: error?.message || String(error) });

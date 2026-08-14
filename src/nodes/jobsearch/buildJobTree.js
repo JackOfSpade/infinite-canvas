@@ -45,7 +45,9 @@ export const ROLE_VISIBLE_DEFAULT = 10;
 // One scoring rubric, shared by every run and every saved taxonomy. Allowing the
 // bucketing model to move these thresholds made a score of 55 "Good fit" even
 // though the scorer explicitly defines 40–64 as a stretch/possible outcome.
-export const FIXED_LIKELIHOOD_BANDS = Object.freeze([
+// Not imported elsewhere — normalizeBandsWithRepairs is the sole enforcement
+// point, so this stays module-private.
+const FIXED_LIKELIHOOD_BANDS = Object.freeze([
   Object.freeze({ label: 'Excellent fit (85–100%)', minScore: 85, maxScore: 100 }),
   Object.freeze({ label: 'Good fit (65–84%)',       minScore: 65, maxScore: 84 }),
   Object.freeze({ label: 'Possible (40–64%)',       minScore: 40, maxScore: 64 }),

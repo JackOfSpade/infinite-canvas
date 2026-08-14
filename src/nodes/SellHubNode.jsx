@@ -520,7 +520,15 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       getNodes, getEdges, deleteElements, hubId: id,
       childTypes: ['compsourcecard'],
     });
-  }, [id, getNodes, getEdges, deleteElements]);
+    // A pending grace-dismiss timer from the PREVIOUS batch (see
+    // scheduleCleanCompCardDismiss) is idempotent — it won't rearm for a new
+    // batch while the old one is still ticking. Cards this call just deleted
+    // can't be dismissed by it anyway, so cancel it here so a fresh batch
+    // spawned moments later (e.g. Cancel from comps-ready, then immediately
+    // Confirm & Research again) gets its own full 10s grace instead of
+    // inheriting whatever was left on the old run's clock.
+    cancelCleanCompCardDismiss();
+  }, [id, getNodes, getEdges, deleteElements, cancelCleanCompCardDismiss]);
 
   // On hub DELETE, reap EVERYTHING that belongs to it — the ephemeral comp-source
   // cards AND the marketplacecard platform cards spawned after pricing (the
@@ -540,6 +548,11 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   useUnmountEffect(() => {
     moduleRunQueue.cancelQueuedRunsForNode(id);
   });
+  // The clean-card dismissal grace timer (see scheduleCleanCompCardDismiss)
+  // otherwise outlives the component: if the hub unmounts while a batch of
+  // clean comp cards is mid-grace, the pending setTimeout fires ~10s later
+  // into a torn-down node with nothing listening for its event.
+  useUnmountEffect(cancelCleanCompCardDismiss);
 
   const spawnCompSourceCards = useCallback(() => {
     // Defensive: clear any leftovers from a previous (interrupted) run.

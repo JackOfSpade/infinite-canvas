@@ -6,7 +6,7 @@ import os from 'os';
 
 import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
 import { getAISettings, resolveServiceAccountPath } from './settings.js';
-import { getSellMonitorPlatforms, getJobLoginPlatforms, getStealthBrowserInfo } from './stealthBrowser.js';
+import { getSellMonitorPlatforms, getJobLoginPlatforms, getSharedProfileReservationInfo, getStealthBrowserInfo } from './stealthBrowser.js';
 import { getLaunchCollisions } from './browserLaunchTelemetry.js';
 import { getStatusCacheSync, getVerifyTimingSummary } from './accounts.js';
 import { getRecentLogs } from '../logger.js';
@@ -41,6 +41,19 @@ import {
 // keep running the old code, producing the maddening "I changed it, why isn't
 // it doing the new thing?" failure mode.
 const PROCESS_START_MS = Date.now();
+
+// A report is collected precisely when app state may be malformed. Keep one
+// broken diagnostic section from suppressing the rest, but make that omission
+// explicit (and bounded) so it cannot be mistaken for an observed empty state.
+function diagnosticRenderFailureMarkdown(section, err) {
+  const detail = String(err?.message || err || 'unknown error')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/`/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 240) || 'unknown error';
+  return `\n## ${section}\n_(section failed to render: \`${detail}\`)_\n`;
+}
 
 
 /**
@@ -511,6 +524,11 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   });
 
   let nodeDiagMarkdown = '';
+  // Wrapped: this section walks arbitrary/possibly-corrupted node `data` payloads
+  // (the exact kind of state a bug report is filed about), so it must never take
+  // down every other section if one node's shape throws (e.g. a non-numeric
+  // position/size field hitting `.toFixed`).
+  try {
   if (sectionOmitted('nodeInternals')) {
     // XNODES / LEAN / MARKET / JOBS / AUTH drop the heavy per-node payload. Render
     // an explicit marker (like Nodes/Edges/Drawings above) so the absence reads as
@@ -821,9 +839,11 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
 ${rows}
 ${(cardOmitted > 0 || groupOmitted > 0) ? `\n_+ ${[cardOmitted > 0 ? `${cardOmitted} routine jobcard` : null, groupOmitted > 0 ? `${groupOmitted} routine jobgroup` : null].filter(Boolean).join(' and ')} row(s) omitted to preserve the clipboard budget — collapsed-cascade nodes (hidden by default) with no anomaly. The hubs, board (merge stats), and a sample are shown; the full score/taxonomy breakdown is in the Job Search Pipeline section. Anomalous nodes (selected/editing/resizing/error) are always shown._\n` : ''}`;
   }
+  } catch (err) { nodeDiagMarkdown = diagnosticRenderFailureMarkdown('Node Diagnostics', err); }
 
   // ── Media player state section ────────────────────────────────────────────
   let mediaMarkdown = '';
+  try {
   if (mediaState && mediaState.length > 0) {
     const READY_STATE = ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'];
     const NET_STATE = ['EMPTY', 'IDLE', 'LOADING', 'NO_SOURCE'];
@@ -857,12 +877,14 @@ ${(cardOmitted > 0 || groupOmitted > 0) ? `\n_+ ${[cardOmitted > 0 ? `${cardOmit
 ${rows}
 `;
   }
+  } catch (err) { mediaMarkdown = diagnosticRenderFailureMarkdown('Media Player State', err); }
 
   // ── Image element state section ───────────────────────────────────────────
   // Captures <img> load state at report time. `broken: true` (complete=true,
   // naturalWidth=0) means the protocol returned an error or an undisplayable
   // payload — the primary signature of HEIC / unsupported-format failures.
   let imageMarkdown = '';
+  try {
   if (imageState && imageState.length > 0) {
     const rows = imageState.map((img, i) => {
       const srcShort = img.src ? img.src.replace(/^local-file:\/\//, '').slice(-60) : '(none)';
@@ -882,12 +904,14 @@ ${rows}
 ${rows}
 `;
   }
+  } catch (err) { imageMarkdown = diagnosticRenderFailureMarkdown('Image Element State', err); }
 
   // ── Active editable section ────────────────────────────────────────────────
   // Captures the divergence between the focused contenteditable's live DOM
   // text and the saved data.text on its node. A `divergent: true` here is the
   // signature of a "saved while editing — lost my edit" report.
   let activeEditableMarkdown = '';
+  try {
   if (activeEditableText) {
     const a = activeEditableText;
     activeEditableMarkdown = `
@@ -898,12 +922,14 @@ ${rows}
 - Saved data.text: \`${(a.savedText || '').replace(/`/g, '\\`')}\`
 `;
   }
+  } catch (err) { activeEditableMarkdown = diagnosticRenderFailureMarkdown('Active Editable At Report Time', err); }
 
   // ── Last save error section ────────────────────────────────────────────────
   // Save errors used to be lost: the toast was shown, the user dismissed it,
   // and the bug report had no record of *why* the save failed. Surfacing this
   // up front means a "Save Failed" report is actionable instead of a guess.
   let lastSaveErrorMarkdown = '';
+  try {
   if (lastSaveError) {
     lastSaveErrorMarkdown = `
 ## Last Save Error
@@ -912,6 +938,7 @@ ${rows}
 - When: ${lastSaveError.timestamp || 'unknown'}
 `;
   }
+  } catch (err) { lastSaveErrorMarkdown = diagnosticRenderFailureMarkdown('Last Save Error', err); }
 
   // ── Active IPC tasks ──────────────────────────────────────────────────────
   // Catches the "I clicked Cancel/X but the pipeline kept running" failure
@@ -1185,11 +1212,12 @@ ${rows}
   // Include whenever there are automation nodes, or always under FULL.
   if (wantsAuthDiagnostics || isFullReport || hasSellNodes || hasJobNodes) try {
     const diag = getAuthWindowDiagnostics?.();
+    const profileReservation = getSharedProfileReservationInfo?.();
     const entries = [
       ...(Array.isArray(diag?.active) ? diag.active.map(d => ({ ...d, state: 'active' })) : []),
       diag?.last ? { ...diag.last, state: 'last' } : null,
     ].filter(Boolean);
-    if (entries.length > 0) {
+    if (entries.length > 0 || profileReservation) {
       const rows = entries.map(d => {
         const age = d.updatedAt ? `${Math.round((Date.now() - new Date(d.updatedAt).getTime()) / 1000)}s ago` : '—';
         return `| ${d.state} | \`${d.platformId || '—'}\` | ${d.mode || '—'} | \`${String(d.currentUrl || d.loginUrl || '—').replace(/`/g, "'").slice(0, 180)}\` | ${String(d.title || '—').replace(/\|/g, '\\|').slice(0, 80)} | ${d.result || '—'} | ${age} |`;
@@ -1255,6 +1283,17 @@ ${rows}
         const sbAge = sb.launchedAt ? `${Math.round((Date.now() - sb.launchedAt) / 1000)}s ago` : '—';
         stealthLine = `\n- Scrape/stealth browser: ${sb.connected ? `🟢 alive (generation #${sb.generation}, launched ${sbAge}) — holds the shared userDataDir; a window stuck \`launching\` above points at a profile-lock conflict` : '⚪ not running (profile lock free)'}\n`;
       } catch { /* ignore */ }
+      // A visible login/captcha window may reserve the profile before Chrome is
+      // launched. That reservation blocks a concurrent headless scrape even
+      // while the liveness line above correctly says no scrape browser exists.
+      let profileReservationLine = '';
+      if (profileReservation) {
+        const age = Number.isFinite(profileReservation.since)
+          ? `${Math.max(0, Math.round((Date.now() - profileReservation.since) / 1000))}s ago`
+          : 'at an unknown time';
+        const reason = String(profileReservation.reason || 'visible window').replace(/`/g, "'").slice(0, 180);
+        profileReservationLine = `\n- ⚠️ Shared profile reservation: \`${reason}\` (${age}) — a headless scrape must wait until that visible browser closes.\n`;
+      }
       // Shared-profile launch collisions — PERSISTED across the log ring buffer.
       // A collision = a Chrome launch that failed because another window/scrape
       // already held the shared userDataDir lock (captcha-resolve window racing a
@@ -1304,9 +1343,9 @@ ${nativePathLine}
 | State | Platform | Mode | Current/Login URL | Title | Result | Updated |
 |---|---|---|---|---|---|---|
 ${rows}
-${stealthLine}${launchCollisionLine}${argsSection}${resolveDiagSection}${historySection}`;
+${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${resolveDiagSection}${historySection}`;
     }
-  } catch { /* never break the report on diagnostic failure */ }
+  } catch (err) { authWindowMarkdown = diagnosticRenderFailureMarkdown('Auth Window Diagnostics', err); }
 
   // ── Recent main-process logs ──────────────────────────────────────────────
   // Last ~50 main-process log lines, captured by the in-memory ring buffer
@@ -1343,7 +1382,6 @@ ${stealthLine}${launchCollisionLine}${argsSection}${resolveDiagSection}${history
   // ── AI configuration snapshot ─────────────────────────────────────────────
   // Surfaces missing keys / wrong provider — the most common cause of
   // "I clicked the AI button and nothing happened" reports.
-  const aiConfig = buildAIConfigSnapshot();
   // Learned token budgets — observed output (visible+thinking) tokens per task,
   // which drive the self-calibrating max_tokens cap (effectiveCap). A p95 near
   // the 24576 hard cap means a task is truncating and the cap has grown to match.
@@ -1392,7 +1430,14 @@ ${stealthLine}${launchCollisionLine}${argsSection}${resolveDiagSection}${history
 ${tokenBudgetLines.join('\n')}`
     : '';
 
-  const aiConfigMarkdown = `
+  // aiConfig pulls live provider/telemetry state (getGeminiTelemetry et al.) and
+  // is rendered unconditionally on every report — unlike almost every other
+  // section here, it was never guarded, so a throw anywhere in that chain took
+  // down the entire report instead of just this section.
+  let aiConfigMarkdown = '';
+  try {
+  const aiConfig = buildAIConfigSnapshot();
+  aiConfigMarkdown = `
 ## AI Configuration
 - Active provider: \`${aiConfig.provider}\`
 - **Active endpoint**: \`${aiConfig.activeEndpoint}\`
@@ -1428,8 +1473,10 @@ ${(aiConfig.geminiWarnings || []).length > 0
     : '- Model warnings: *(none)*'}
 ` : ''}${tokenBudgetMarkdown}
 `;
+  } catch (err) { aiConfigMarkdown = diagnosticRenderFailureMarkdown('AI Configuration', err); }
 
-  const jobsConfigMarkdown = hasJobNodes ? (() => {
+  let jobsConfigMarkdown = '';
+  if (hasJobNodes) try {
     const jobsConfig = buildJobsConfigSnapshot();
     const tm = jobsConfig.testMode;
     const aiSkipped = (tm && (tm.mode === 'medium' || tm.skipAI));
@@ -1442,7 +1489,7 @@ ${(aiConfig.geminiWarnings || []).length > 0
     const testModeLines = tm
       ? `\n### Job Search Test Mode\n- Mode: **${tm.mode}**${aiSkipped ? ` (${tm.jobPerPageCap} jobs/page, AI skipped)` : ` (${tm.jobPerPageCap} jobs/page, full AI)`}\n- Enabled: ${tm.enabled ? '✅' : '❌'}\n- Scoped source: ${tm.sourceId ? `\`${tm.sourceId}\`` : '*(all sources)*'}\n- Extractor result cap: ${tm.jobResultCap === Infinity ? 'unlimited' : tm.jobResultCap}${fastLine || `\n- Per-page cap: ${tm.jobPerPageCap}`}`
       : '';
-    return `
+    jobsConfigMarkdown = `
 ## Job Search API Configuration
 - USAJobs API key set: ${jobsConfig.hasUsajobsKey ? '✅' : '❌'}
 - USAJobs Email set: ${jobsConfig.hasUsajobsEmail ? '✅' : '❌'}
@@ -1450,7 +1497,7 @@ ${(aiConfig.geminiWarnings || []).length > 0
 - Scrapfly API key set: ${jobsConfig.hasScrapflyKey ? '✅' : '❌'}
 - Scrapfly key prefix: \`${jobsConfig.scrapflyKeyPrefix}\`${testModeLines}
 `;
-  })() : '';
+  } catch (err) { jobsConfigMarkdown = diagnosticRenderFailureMarkdown('Job Search API Configuration', err); }
 
   // The node ids in THIS report's canvas — lets the pipeline snapshots flag a
   // funnel whose originating node isn't here (the main-process telemetry is

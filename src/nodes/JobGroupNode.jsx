@@ -3,7 +3,7 @@ import { useReactFlow, useStore } from '@xyflow/react';
 import { ChevronRight, ChevronDown, Plus } from 'lucide-react';
 import { NodeHandles } from './_shared/NodeHandles';
 import { EventLogger } from '../utils/EventLogger';
-import { computeJobTreeView, countMatchingDescendantCards } from './jobsearch/buildJobTree';
+import { computeJobTreeView, countMatchingDescendantCards, ROLE_VISIBLE_DEFAULT } from './jobsearch/buildJobTree';
 
 /**
  * JobGroupNode — collapsible header that owns a slice of the job-tree.
@@ -68,7 +68,7 @@ export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
   );
 
   const visibleCount = isLeaf
-    ? Math.min(data.visibleCount ?? 10, liveCount)
+    ? Math.min(data.visibleCount ?? ROLE_VISIBLE_DEFAULT, liveCount)
     : liveCount;
   const hasMore = isLeaf && visibleCount < liveCount;
   const remaining = liveCount - visibleCount;
@@ -116,7 +116,7 @@ export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
             data: {
               ...n.data,
               expanded: willExpand,
-              ...(isLeaf && !willExpand ? { visibleCount: Math.min(10, childIds.length) } : {}),
+              ...(isLeaf && !willExpand ? { visibleCount: Math.min(ROLE_VISIBLE_DEFAULT, childIds.length) } : {}),
             },
           };
         }
@@ -126,7 +126,7 @@ export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
             data: {
               ...n.data,
               expanded: false,
-              ...(n.data?.kind === 'role' ? { visibleCount: Math.min(10, (n.data?.childIds || []).length) } : {}),
+              ...(n.data?.kind === 'role' ? { visibleCount: Math.min(ROLE_VISIBLE_DEFAULT, (n.data?.childIds || []).length) } : {}),
             },
           };
         }
@@ -140,7 +140,7 @@ export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
   const showMore = (e) => {
     e.stopPropagation();
     if (!isLeaf || !hasMore || hubLocked) return;
-    const nextCount = Math.min(visibleCount + 10, liveCount);
+    const nextCount = Math.min(visibleCount + ROLE_VISIBLE_DEFAULT, liveCount);
     const filter = hubFilter();
     setNodes(nodes =>
       computeJobTreeView(
@@ -181,10 +181,10 @@ export const JobGroupNode = React.memo(function JobGroupNode({ id, data }) {
           onClick={showMore}
           onPointerDown={(e) => e.stopPropagation()}
           className="nodrag w-full flex items-center justify-center gap-1 px-2 py-1.5 bg-white/[0.03] hover:bg-white/10 text-white/50 hover:text-white/80 text-[10px] border-t border-white/5 transition-colors"
-          title={`Show next ${Math.min(10, remaining)} of ${remaining} remaining`}
+          title={`Show next ${Math.min(ROLE_VISIBLE_DEFAULT, remaining)} of ${remaining} remaining`}
         >
           <Plus size={10} />
-          Show {Math.min(10, remaining)} more · {remaining} left
+          Show {Math.min(ROLE_VISIBLE_DEFAULT, remaining)} more · {remaining} left
         </button>
       )}
     </div>

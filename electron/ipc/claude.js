@@ -495,6 +495,13 @@ export async function cancelClaudeBatch(apiKey, batchId) {
  * Download batch results → { [custom_id]: { ok, text|null, error|null } }.
  * For tool-use responses, `text` is JSON.stringify(tool_use.input) — the same
  * string shape callClaudeText returns, so the caller parses it identically.
+ *
+ * A batch item can be `result.type === 'succeeded'` (the request itself
+ * completed) while still having hit its per-item max_tokens cap mid-response —
+ * the live path (createMessage above) treats that stop_reason as fatal and
+ * throws rather than returning a partial tool_use.input/text; this path must
+ * match, or a truncated score/ledger/etc. silently reconciles as a complete
+ * result instead of the caller's null/placeholder fallback.
  */
 export async function getClaudeBatchResults(apiKey, batchId) {
   const anthropic = getAnthropicClient(apiKey);
@@ -508,6 +515,13 @@ export async function getClaudeBatchResults(apiKey, batchId) {
       continue;
     }
     const msg = result.message;
+    // Same two stop reasons createMessage() treats as fatal on the live path
+    // (see its comments above) — a batched item can "succeed" at the
+    // batch-request level while its own generation was cut short.
+    if (msg?.stop_reason === 'max_tokens' || msg?.stop_reason === 'model_context_window_exceeded') {
+      out[customId] = { ok: false, text: null, error: `${msg.stop_reason} (truncated)` };
+      continue;
+    }
     const toolBlock = msg?.content?.find(b => b.type === 'tool_use');
     if (toolBlock) {
       out[customId] = { ok: true, text: JSON.stringify(toolBlock.input), error: null };
