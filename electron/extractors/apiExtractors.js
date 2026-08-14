@@ -667,7 +667,41 @@ const JOB_ROLE_CONCEPT_ALIASES = new Map([
   ['customer', [['client']]],
   ['service', [['services'], ['support'], ['success'], ['advocate'], ['care']]],
   ['administrative', [['admin'], ['back', 'office']]],
-  ['assistant', [['support'], ['coordinator']]],
+  ['assistant', [['support'], ['coordinator'], ['helper']]],
+  // Common title abbreviations/near-equivalents. These remain safe because a
+  // multi-concept query still needs local corroboration: "Maintenance Tech" and
+  // "Maintenance Worker" match Maintenance Technician, while "Field Service
+  // Technician" still lacks the maintenance concept and is rejected.
+  ['technician', [['tech'], ['worker']]],
+]);
+
+// A small number of job-title words have established meanings in unrelated
+// fields. The broad-board matcher intentionally permits a single meaningful
+// word for a query such as "Lead Server" (the modifier `lead` is generic), but
+// that previously made hospitality searches admit every IT role containing
+// "server". Do not turn this into a broad industry classifier: only reject a
+// title when an unambiguous technical companion word establishes that *this*
+// use of `server` is computing-related. A query that includes one of those
+// companion words is explicitly a technical-server search and remains valid.
+const AMBIGUOUS_ROLE_DOMAIN_GUARDS = new Map([
+  ['server', new Set([
+    'software', 'engineering', 'engineer', 'systems', 'system', 'sql', 'dba',
+    'database', 'storage', 'infrastructure', 'cloud', 'devops', 'vmware',
+    'virtualization', 'linux', 'windows', 'ibm', 'iseries', 'java', 'python',
+    'technical', 'technology', 'digital', 'architect', 'developer', 'programmer',
+  ])],
+  // "Production" is a valid broad match for factory roles such as Production
+  // Operator, but it is also routinely used as an environment qualifier in
+  // technical titles (Production Engineer, Production SQL Server DBA,
+  // Production Scientist). A search for "Production Associate" used to admit
+  // those rows because "associate" is intentionally a generic modifier. Keep
+  // the broad factory-role behavior, while requiring an explicit technical
+  // term in the query before that use of production can count as evidence.
+  ['production', new Set([
+    'engineering', 'engineer', 'scientist', 'science', 'sql', 'dba', 'database',
+    'software', 'developer', 'programmer', 'technical', 'technology', 'data',
+    'cloud', 'devops', 'infrastructure', 'systems', 'system', 'architect',
+  ])],
 ]);
 
 const EMPTY_GEO = new Set();
@@ -728,17 +762,35 @@ export function jobRelevanceEvidence(roleText, query, geoTerms = EMPTY_GEO) {
   // unrelated company name "Professional Services". Tokenizing also makes
   // punctuation variants such as "Customer-Service Coordinator" equivalent
   // to the query's separate words.
-  const roleTokens = new Set(text.match(/[a-z0-9]+/g) || []);
+  const roleTokenList = text.match(/[a-z0-9]+/g) || [];
+  const roleTokens = new Set(roleTokenList);
+  const queryTokens = new Set(terms.map(norm).filter(Boolean));
   const matchConcept = (term) => {
-    if (roleTokens.has(term)) return { queryTerm: term, matched: term, kind: 'exact' };
+    if (roleTokens.has(term)) return {
+      queryTerm: term, matched: term, matchedTokens: [term], kind: 'exact',
+    };
     for (const alias of JOB_ROLE_CONCEPT_ALIASES.get(term) || []) {
       if (alias.every(token => roleTokens.has(token))) {
-        return { queryTerm: term, matched: alias.join(' '), kind: 'synonym' };
+        return {
+          queryTerm: term, matched: alias.join(' '), matchedTokens: alias, kind: 'synonym',
+        };
       }
     }
     return null;
   };
   const matchedConcepts = [...new Set(useTerms.map(norm))].map(matchConcept).filter(Boolean);
+  // Keep the guard after exact/synonym matching so it only applies when the
+  // ambiguous word is actual match evidence, not merely incidental text.
+  // E.g. "Lead Server Systems Debug Engineer" is a technical server role for
+  // a hospitality "Lead Server" query, while "Lead SQL Server DBA" remains a
+  // legitimate result for the technical query "SQL Server DBA".
+  const hasConflictingAmbiguousDomain = matchedConcepts.some(({ queryTerm }) => {
+    const technicalTerms = AMBIGUOUS_ROLE_DOMAIN_GUARDS.get(queryTerm);
+    return technicalTerms
+      && ![...technicalTerms].some(term => queryTokens.has(term))
+      && [...technicalTerms].some(term => roleTokens.has(term));
+  });
+  if (hasConflictingAmbiguousDomain) return null;
   // A query with two or more actual role/skill nouns has enough signal to
   // require corroboration. Two-of-three intentionally keeps close variants
   // such as "Customer Service Representative" for a "Customer Service
@@ -747,13 +799,44 @@ export function jobRelevanceEvidence(roleText, query, geoTerms = EMPTY_GEO) {
   // the all-generic fallback; those have no second role signal to require.
   const minMatches = meaningful.length >= 2 ? 2 : 1;
   if (matchedConcepts.length < minMatches) return null;
+  // Matching two disconnected words is not corroboration. In particular,
+  // USAJobs' broad Keyword endpoint returned "TRANSPORTATION ASSISTANT
+  // (PERSONAL PROPERTY)" for "Property Management Assistant": `assistant`
+  // and `property` satisfied the old two-of-three rule despite describing an
+  // unrelated transportation job. Require a multi-concept match to occur as
+  // one local title phrase. This retains genuine word-order variants such as
+  // "Assistant Property Manager" (assistant/property are adjacent) and
+  // "Housing Management Assistant" (management/assistant are adjacent), but
+  // does not allow distant ambient terms to assemble a false role match.
+  const spansFor = (phrase) => {
+    const words = Array.isArray(phrase) ? phrase : [];
+    const spans = [];
+    for (let start = 0; start <= roleTokenList.length - words.length; start++) {
+      if (words.every((word, offset) => roleTokenList[start + offset] === word)) {
+        spans.push({ start, end: start + words.length - 1 });
+      }
+    }
+    return spans;
+  };
+  if (minMatches > 1) {
+    const locallyCorroborated = matchedConcepts.some((left, i) =>
+      matchedConcepts.slice(i + 1).some(right =>
+        spansFor(left.matchedTokens).some(a => spansFor(right.matchedTokens).some(b =>
+          a.start <= b.end + 1 && b.start <= a.end + 1,
+        )),
+      ),
+    );
+    if (!locallyCorroborated) return null;
+  }
   return {
     query: String(query || '').slice(0, 120),
     terms: useTerms.map(norm).slice(0, 12),
     // `matchedTerms` is kept for compact/backward-compatible report output;
     // `matchedConcepts` records exact versus synonym evidence for diagnosis.
     matchedTerms: matchedConcepts.map(match => match.queryTerm).slice(0, 12),
-    matchedConcepts: matchedConcepts.slice(0, 12),
+    matchedConcepts: matchedConcepts.map(match => ({
+      queryTerm: match.queryTerm, matched: match.matched, kind: match.kind,
+    })).slice(0, 12),
     requiredMatches: minMatches,
     fallbackTerms: meaningful.length === 0,
   };
@@ -913,12 +996,28 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
   // without issuing a second request or silently inventing phrase syntax.
   const relevant = filterUSAJobsByTitleRelevance(mapped, query);
   const items = relevant.slice(0, JOB_RESULT_CAP);
+  // A bounded sample of what the gate THREW AWAY. The count alone ("rejected 53
+  // rows") can't distinguish a gate doing its job from one that over-rejects and
+  // silently starves the source — the titles are the only way to tell, and they
+  // are unrecoverable after this function returns. Kept tiny and title-only so it
+  // can never pollute cards, scoring prompts, snapshots or history rows.
+  // `filterUSAJobsByTitleRelevance` returns the original mapped objects, so
+  // identity is the exact kept/rejected discriminator. URL membership is not:
+  // a malformed row can have no URL, and duplicate URLs would make an unrelated
+  // row look kept merely because another row with that URL passed the gate.
+  const relevantRows = new Set(relevant);
+  const relevanceRejected = mapped
+    .filter(job => !relevantRows.has(job))
+    .map(job => job.title)
+    .filter(Boolean)
+    .slice(0, 8);
   return {
     items,
     warning: r.warning,
     gathered: relevant.length,
     providerGathered: resultItems.length,
     relevanceDropped: resultItems.length - relevant.length,
+    relevanceRejected,
   }; // gathered: relevant pre-cap matches (see fetchLinkedInJobs)
 }
 
@@ -1977,8 +2076,40 @@ export async function fetchDiceListings(query, location = '', signal = null, max
   // global pass applies, so this is a no-op there, not a second policy). `gathered`
   // = in-window matches before the cap, so the funnel flags when there were more.
   const inWindow = maxAgeDays ? filterJobsByAge(mapped, maxAgeDays) : mapped;
-  const items = inWindow.slice(0, JOB_RESULT_CAP);
-  return { items, warning: r.warning, gathered: inWindow.length };
+  // Dice's search endpoint is deliberately broad: a query for "Housekeeping
+  // Supervisor" can return generic Maintenance/Production/Shift Supervisor
+  // roles. Score relevance on the position title before result caps so those
+  // rows do not consume the source budget or AI scoring slots. Keep both sides
+  // of the decision in bounded diagnostics; queryFanOut merges this telemetry.
+  const admitted = [];
+  const relevanceRejected = [];
+  const relevanceTrace = [];
+  for (const job of inWindow) {
+    const evidence = jobRelevanceEvidence(job.title, query);
+    if (!evidence) {
+      if (relevanceRejected.length < 8) relevanceRejected.push(job.title);
+      continue;
+    }
+    admitted.push(job);
+    if (relevanceTrace.length < 20) {
+      relevanceTrace.push({
+        url: job.url,
+        title: job.title,
+        company: job.company,
+        matched: [evidence],
+      });
+    }
+  }
+  const items = admitted.slice(0, JOB_RESULT_CAP);
+  return {
+    items,
+    warning: r.warning,
+    gathered: admitted.length,
+    providerGathered: inWindow.length,
+    relevanceDropped: inWindow.length - admitted.length,
+    relevanceRejected,
+    relevanceTrace,
+  };
 }
 
 /**
@@ -2112,6 +2243,41 @@ export function formatDiceBaseSalary(baseSalary) {
 }
 
 /**
+ * Dice's job-detail page renders the posting's OWN pay as a short badge right
+ * next to its <h1> title — e.g. "$16 - $16/hr" — even when the very same
+ * page's JSON-LD baseSalary carries no unitText to say so. Checked live
+ * against 9 real job-detail pages (CONTRACTOR and FULL_TIME, ranged and
+ * single-value): baseSalary was always a bare `{currency, minValue,
+ * maxValue}` / `{currency, value}` MonetaryAmount with no cadence field
+ * anywhere — formatDiceBaseSalary's unitText branch is not wrong, Dice just
+ * never populates it, so that path alone recovers zero Dice salaries in
+ * practice. The badge is the same real cadence a human visitor sees, not a
+ * guess.
+ *
+ * The same page also lists OTHER jobs' salaries further down (a "Related
+ * jobs" rail, worded "$X.XX - $Y.YY per hour"), which must never be
+ * attributed to this job. Rather than scan the whole page, the search is
+ * bounded to a window right after the FIRST <h1> — the primary job's own
+ * title, always followed immediately by its info-badge row and always far
+ * ahead of any other job's content (verified against live pages: the
+ * primary badge sits ~1.2–1.6k chars after <h1>; the nearest unrelated
+ * salary is 20k+ chars further on).
+ *
+ * Returns '' when no badge is present in that window (e.g. "Depends on
+ * Experience" has no cadence to show) — never guesses. Exported for unit
+ * testing.
+ * @param {string} html — raw detail-page HTML
+ * @returns {string} — e.g. "$16 - $16/hr", or ''
+ */
+export function extractDiceSalaryBadge(html) {
+  const h1 = /<h1[^>]*>/i.exec(html || '');
+  if (!h1) return '';
+  const window = html.slice(h1.index, h1.index + 4000);
+  const m = /\$\s*[\d,.]+(?:\s*-\s*\$?\s*[\d,.]+)?\s*\/\s*(?:hr|hour|yr|year|mo|month|wk|week|day)\b/i.exec(window);
+  return m ? m[0].replace(/\s+/g, ' ').trim() : '';
+}
+
+/**
  * Second-pass enrichment: fetch full job descriptions for each job in the
  * already-deduped Dice list.
  *
@@ -2142,7 +2308,9 @@ export async function enrichDiceDescriptions(jobs, signal) {
   let lengthened = 0;
   // Telemetry: how many salaries were upgraded from cadence-less Dice text
   // (e.g. "25", "$20 - $24" — see cleanDiceSalary above) to a real cadenced
-  // value recovered from the detail page's JSON-LD baseSalary.
+  // value recovered from the detail page (JSON-LD baseSalary, or — the path
+  // that actually fires for Dice — the page's own salary badge; see
+  // extractDiceSalaryBadge).
   let salaryUpgraded = 0;
   const fallbackReasons = {}; // reason -> count
   let sampleFail = '';
@@ -2174,13 +2342,18 @@ export async function enrichDiceDescriptions(jobs, signal) {
         // Salary cadence recovery: Dice's free-text `salary` field sometimes
         // loses its cadence in cleanup ("25", "$20 - $24") and annualizes to
         // 0/Unspecified even though the job has real pay. Reuse the SAME
-        // page HTML already fetched above (no extra request) and pull the
-        // cadence from its JSON-LD baseSalary — but only to UPGRADE a salary
-        // the shared annualizer can't already read; Dice's own text stays
-        // authoritative whenever it already parses to a real number.
+        // page HTML already fetched above (no extra request) and try two
+        // structured sources, in order: the JSON-LD baseSalary's unitText
+        // (schema.org-correct; kept in case Dice ever populates it — see
+        // formatDiceBaseSalary), then the page's own salary badge next to
+        // the job title, which is what Dice's real markup actually carries
+        // the cadence in (see extractDiceSalaryBadge). Either way this only
+        // UPGRADES a salary the shared annualizer can't already read; Dice's
+        // own text stays authoritative whenever it already parses to a real
+        // number.
         let salaryPatch = null;
         if (parseSalaryToNumeric(job.salary) === 0) {
-          const formatted = formatDiceBaseSalary(extractJobPostingBaseSalary(html));
+          const formatted = formatDiceBaseSalary(extractJobPostingBaseSalary(html)) || extractDiceSalaryBadge(html);
           if (formatted) { salaryPatch = formatted; salaryUpgraded += 1; }
         }
         const descHtml = extractJobPostingDescription(html);
@@ -2222,6 +2395,6 @@ export async function enrichDiceDescriptions(jobs, signal) {
 
   const reasonStr = Object.entries(fallbackReasons).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(', ');
   const fellBack = cleaned.length - lengthened;
-  logger.info(`[Dice API] Enriched ${cleaned.length} jobs — ${lengthened} genuinely lengthened from detail endpoint, ${salaryUpgraded} salaries cadence-upgraded from JSON-LD${fellBack > 0 ? `; ${fellBack} kept list summary [${reasonStr}${sampleFail ? ` — e.g. ${sampleFail}` : ''}]` : ''}`);
+  logger.info(`[Dice API] Enriched ${cleaned.length} jobs — ${lengthened} genuinely lengthened from detail endpoint, ${salaryUpgraded} salaries cadence-upgraded from the detail page${fellBack > 0 ? `; ${fellBack} kept list summary [${reasonStr}${sampleFail ? ` — e.g. ${sampleFail}` : ''}]` : ''}`);
   return cleaned;
 }

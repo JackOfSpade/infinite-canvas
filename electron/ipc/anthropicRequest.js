@@ -12,6 +12,8 @@
  * Unit-tested in scripts/test-runner.js.
  */
 
+import { claudeReasoningMaxTokens, getClaudeDefaultReasoningConfig } from './claudeModels.js';
+
 /**
  * Build the `user` turn content. With a cachedPrefix, split it into an ephemeral
  * cache-marked text block + the dynamic content — Anthropic gives ~90% off the
@@ -33,7 +35,7 @@ export function buildCachedUserContent(userContent, cachedPrefix) {
 
 /**
  * Build the base Messages request params shared by the live + batch paths:
- * `{ model, max_tokens, messages }`, plus the tool-use envelope when a
+ * `{ model, max_tokens, messages }`, the model's shared reasoning policy, plus the tool-use envelope when a
  * responseSchema is given (force the `submit_response` tool so the model returns
  * structured JSON with the right top-level keys). Grounding / web-search is
  * live-only (streamed) and is intentionally NOT handled here — createMessage
@@ -66,12 +68,15 @@ export function buildCachedUserContent(userContent, cachedPrefix) {
  *
  * @param {string|Array|*} userContent
  * @param {{model:string, maxTokens:number, responseSchema?:object|null, cachedPrefix?:string|null, expectJson?:boolean}} opts
- * @returns {{model:string, max_tokens:number, messages:object[], tools?:object[], tool_choice?:object}}
+ * @returns {{model:string, max_tokens:number, messages:object[], thinking?:object, output_config?:object, tools?:object[], tool_choice?:object}}
  */
 export function buildAnthropicMessageParams(userContent, { model, maxTokens, responseSchema = null, cachedPrefix = null, expectJson = false }) {
   void expectJson;  // retained in the signature; no longer shapes the request (see doc above)
   const messages = [{ role: 'user', content: buildCachedUserContent(userContent, cachedPrefix) }];
-  const params = { model, max_tokens: maxTokens, messages };
+  const reasoning = getClaudeDefaultReasoningConfig(model);
+  const params = { model, max_tokens: claudeReasoningMaxTokens(model, maxTokens), messages };
+  if (reasoning.thinking) params.thinking = reasoning.thinking;
+  if (reasoning.outputConfig) params.output_config = reasoning.outputConfig;
   if (responseSchema) {
     params.tools = [{ name: 'submit_response', description: 'Submit the structured response.', input_schema: responseSchema }];
     params.tool_choice = { type: 'tool', name: 'submit_response' };

@@ -21,6 +21,7 @@ import { EventLogger } from '../utils/EventLogger';
 import { useToast } from '../components/ToastProvider';
 import { getHubDropLockReason } from '../utils/hubDropEligibility';
 import { filesToDropPayloads, summarizeFileExtensions } from '../utils/fileDropUtils';
+import { filterHandledJobSourceWarnings, isJobSourceWarningGating } from '../utils/jobSourceWarningPolicy';
 
 import { JobSearchProcessingState } from './jobsearch/JobSearchProcessingState';
 import { JobSearchDoneState } from './jobsearch/JobSearchDoneState';
@@ -50,9 +51,6 @@ const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled
 // we hold scoring rather than burn AI tokens on description-less LinkedIn jobs;
 // the user can still Skip to score with what we have. Everything else (info,
 // transient throttles on other sources) flows straight through to scoring.
-const isGatingWarning = (w) =>
-  w?.severity === 'block' || w?.severity === 'paste' || w?.code === 'linkedin-rate-limited';
-
 // Job freshness window (days). Default mirrors electron DEFAULT_MAX_AGE_DAYS;
 // the cap bounds the user-set slider. NOTE: auto-widening this on thin results
 // would need a search refetch (filterJobsByAge runs post-fetch, so date-param
@@ -149,10 +147,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // the floor. Read synchronously (like pendingJobsRef) by resumeScoring, which
   // can fire before the next render lands.
   const hiddenAppliedRef = useRef(data.hiddenApplied || 0);
-  // Sources resolved via paste/captcha WHILE the search was running (cleared at
-  // each run start). The backend doesn't know about these; we use this to skip
-  // re-blocking them when the search result comes back with stale warnings.
-  const resolvedDuringSearchRef = useRef(new Set());
+  // Sources resolved or explicitly skipped/dismissed WHILE the search was
+  // running (cleared at each run start). The backend doesn't know about these;
+  // use this to avoid restoring stale warnings when its final result arrives.
+  const handledDuringSearchRef = useRef(new Set());
   const resumeScoringRef = useRef(null);
   const isMountedRef = useIsMountedRef();
   const settingsDebounceTimerRef = useRef(null);
@@ -387,7 +385,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           scrapeWarnings: filteredWarnings,
         });
 
-        const remainingBlocks = filteredWarnings.filter(isGatingWarning);
+        const remainingBlocks = filteredWarnings.filter(isJobSourceWarningGating);
         if (remainingBlocks.length === 0 && mergedPending.length > 0) {
           EventLogger.log(`[JobSearch][${id}] Auto-resuming scoring from sources-ready state.`);
           processingRef.current = false;
@@ -696,7 +694,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // the reason + Solve target must come from persisted state). A blocked source
   // that still HAS its card already carries the live warning — leave it.
   const ensureBlockedSourceCards = useCallback((blockingWarnings) => {
-    const blocks = (blockingWarnings || []).filter(w => isGatingWarning(w) && w.sourceId);
+    const blocks = (blockingWarnings || []).filter(w => isJobSourceWarningGating(w) && w.sourceId);
     if (blocks.length === 0) return;
     const allowedSourceIds = new Set(ACTIVE_JOB_SOURCES);
     const existingSourceIds = new Set(
@@ -1178,7 +1176,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         || activePreferredLocation;
 
       // Step 3: Search
-      resolvedDuringSearchRef.current.clear();
+      handledDuringSearchRef.current.clear();
       updateGlobal(currentId, {
         hubState: 'searching',
         queryCount: allQueries.length,
@@ -1221,15 +1219,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         );
       }
       const searchWarnings = Array.isArray(searchResult.scrapeWarnings) ? searchResult.scrapeWarnings : [];
-      // Filter out warnings for sources the user already resolved via captcha
-      // during the search — the backend doesn't know about those mid-run resolves
-      // and will always report them as failures. Without this filter the hub
-      // re-blocks on an already-resolved source and spawns a duplicate card.
-      const alreadyResolved = resolvedDuringSearchRef.current;
-      const effectiveWarnings = alreadyResolved.size > 0
-        ? searchWarnings.filter(w => !alreadyResolved.has(w?.sourceId))
-        : searchWarnings;
-      const blockingWarnings = effectiveWarnings.filter(isGatingWarning);
+      // Filter warnings for sources the user already handled during the search.
+      // The backend doesn't know about those mid-run resolves/dismissals and
+      // returns its original warning list. Restoring that stale entry would undo
+      // the user's decision and can re-block a source they already skipped.
+      const alreadyHandled = handledDuringSearchRef.current;
+      const effectiveWarnings = filterHandledJobSourceWarnings(searchWarnings, alreadyHandled);
+      const blockingWarnings = effectiveWarnings.filter(isJobSourceWarningGating);
 
       // Merge backend's foundJobs with any jobs already resolved via paste during
       // the search — they're in pendingJobsRef but absent from the backend result.
@@ -1240,9 +1236,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       let foundJobs = (searchResult.success && Array.isArray(searchResult.jobs)) ? searchResult.jobs : [];
       const rawGatheredCount = searchResult.rawCount ?? foundJobs.length;
       const hiddenApplied = searchResult.hiddenApplied || 0;
-      if (alreadyResolved.size > 0) {
+      if (alreadyHandled.size > 0) {
         const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
-        const resolvedItems = prevPending.filter(j => alreadyResolved.has(j?.source));
+        const resolvedItems = prevPending.filter(j => alreadyHandled.has(j?.source));
         if (resolvedItems.length > 0) {
           foundJobs = dedupJobsAcrossSources([...resolvedItems, ...foundJobs]);
         }
@@ -1546,7 +1542,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (cancelled()) return;
       const foundJobs = (searchResult?.success && Array.isArray(searchResult.jobs)) ? searchResult.jobs : [];
       const warnings = Array.isArray(searchResult?.scrapeWarnings) ? searchResult.scrapeWarnings : [];
-      const blockingWarnings = warnings.filter(isGatingWarning);
+      const blockingWarnings = warnings.filter(isJobSourceWarningGating);
       const hiddenApplied = searchResult?.hiddenApplied || 0;
       // Same post-search disposition as runPipeline (block-gate pause / empty terminal).
       const shouldScore = handlePostSearchResult({
@@ -1583,15 +1579,27 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (e.detail?.hubId !== id) return;
       const skippedSourceId = e.detail?.sourceId;
       if (!skippedSourceId) return;
+      const warningAction = e.detail?.action === 'dismiss' ? 'dismiss' : 'skip';
+      if (hubStateRef.current === 'searching') {
+        // A decision made while the other sources are still running must survive
+        // the backend's stale final warning list. Otherwise an early Skip can
+        // reappear at search completion and pause the pipeline a second time.
+        handledDuringSearchRef.current.add(skippedSourceId);
+      }
       const remaining = (scrapeWarningsRef.current || []).filter(w => w.sourceId !== skippedSourceId);
       scrapeWarningsRef.current = remaining;
       updateGlobal(id, { scrapeWarnings: remaining });
+      EventLogger.log(
+        `[JobSearch][${id}] User ${warningAction === 'dismiss' ? 'dismissed non-blocking warning' : 'skipped blocked source'} ${skippedSourceId}`
+        + ` code=${e.detail?.warningCode || 'unknown'} severity=${e.detail?.warningSeverity || 'unknown'}`
+        + ` hubState=${hubStateRef.current || 'unknown'} pendingJobs=${Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current.length : 0}`,
+      );
       // Resume once no GATING warning remains (captcha/login walls + the LinkedIn
-      // rate-limit; see isGatingWarning). info-severity warnings (e.g. USAJobs
+      // rate-limit; see isJobSourceWarningGating). info-severity warnings (e.g. USAJobs
       // config-missing, shown so the user knows why that source returned 0 but
       // not requiring action) and non-LinkedIn throttles should NOT keep the
       // resume from firing — the user already addressed every actionable block.
-      const remainingBlocks = remaining.filter(isGatingWarning);
+      const remainingBlocks = remaining.filter(isJobSourceWarningGating);
       if (
         remainingBlocks.length === 0 &&
         hubStateRef.current === 'sources-ready' &&
@@ -1624,7 +1632,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // search-completion handler can skip re-blocking them with the stale
       // backend warnings.
       if (hubStateRef.current === 'searching') {
-        resolvedDuringSearchRef.current.add(resolvedSourceId);
+        handledDuringSearchRef.current.add(resolvedSourceId);
       }
       // Merge new items into pendingJobs. LinkedIn re-fetch returns the full
       // source set and requests replacement; captcha/Continue flows return
@@ -1667,7 +1675,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         hiddenApplied: nextHiddenApplied,
       });
       // Auto-resume on no remaining GATING warnings (info / non-LinkedIn throttle stays).
-      const remainingBlocks = remaining.filter(isGatingWarning);
+      const remainingBlocks = remaining.filter(isJobSourceWarningGating);
       // Report the actual merge outcome back to the main process so the bug
       // report can show "net pendingJobs change" rather than just the IPC-side
       // "kept" count. The IPC side doesn't know the renderer dropped same-source
@@ -1711,7 +1719,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       if (!sid) return;
       const current = scrapeWarningsRef.current || [];
       const w = current.find(x => x.sourceId === sid);
-      if (!w || isGatingWarning(w)) return;
+      if (!w || isJobSourceWarningGating(w)) return;
       const remaining = current.filter(x => x.sourceId !== sid);
       scrapeWarningsRef.current = remaining;
       updateGlobal(id, { scrapeWarnings: remaining });
@@ -2288,7 +2296,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               // source — so counting warnings made it say "2 sources blocked"
               // with only one Indeed card visible. Skip/resolve already filters
               // warnings by sourceId, so distinct-source count is the truth.
-              blockedCount={new Set((data.scrapeWarnings || []).filter(isGatingWarning).map(w => w.sourceId)).size}
+              blockedCount={new Set((data.scrapeWarnings || []).filter(isJobSourceWarningGating).map(w => w.sourceId)).size}
               jobsAvailable={Array.isArray(data.pendingJobs) ? data.pendingJobs.length : (data.jobCount || 0)}
               resumeSummary={data.resumeSummary}
               locked={!!data.locked}

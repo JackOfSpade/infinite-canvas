@@ -27,12 +27,15 @@
  *     own equivalent) — same title at Google NYC vs Google SF are separate
  *     opportunities.
  *
- *   sourceJobKey (native id → url → title|company|location)
+ *   sourceJobKey (native id → source-stable URL id → url → title|company|location)
  *     WITHIN-SOURCE dedup of one source's own multi-page / multi-query gather
- *     (the Indeed extractors). Prefers the source's stable native id (Indeed's
- *     `jobkey`), then the canonical url, then the location-aware composed key —
- *     so a nationwide search's genuinely distinct same-title/same-company reqs
- *     in different cities stay separate when no native id is present.
+ *     (the Indeed extractors and manual browser scraper). Prefers the source's
+ *     stable native id (Indeed's `jobkey`); when the raw URL embeds a stable
+ *     listing id, preserves that instead of query-specific URL noise (Google
+ *     for Jobs' `htidocid`); then uses the raw URL and finally the
+ *     location-aware composed key — so a nationwide search's genuinely distinct
+ *     same-title/same-company reqs in different cities stay separate when no
+ *     native id is present.
  */
 function keyPart(value) {
   return String(value || '').toLowerCase().trim();
@@ -56,8 +59,30 @@ export function jobTitleCompanyLocationKey(job) {
  * browser path previously fell back to title|company and could over-collapse a
  * nationwide search's distinct-location reqs that share a title and company.
  */
+function sourceStableUrlKey(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    // Google For Jobs' cards all use the shared `/search` path. Their opaque
+    // htidocid is the per-listing identity, while q/shmd/hash are specific to
+    // the query that happened to surface the card. Keep the opaque id's case:
+    // it is not ordinary display text and lowercasing it could merge two ids.
+    if ((host === 'google.com' || host.endsWith('.google.com'))) {
+      const htidocid = parsed.searchParams.get('htidocid');
+      if (htidocid) return `google-htidocid:${htidocid}`;
+    }
+  } catch {
+    // The raw URL is still a useful exact-match key below.
+  }
+  return raw;
+}
+
 export function sourceJobKey(job) {
-  return job?.jobkey || job?.url || jobTitleCompanyLocationKey(job);
+  return job?.jobkey
+    || sourceStableUrlKey(job?.url)
+    || jobTitleCompanyLocationKey(job);
 }
 
 export function dedupeJobsByKey(jobs, keyFn) {

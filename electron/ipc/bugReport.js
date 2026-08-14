@@ -20,7 +20,7 @@ import { getTokenBudgetSnapshot, TOKEN_HARD_CAP } from './tokenBudget.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
 import { shortId, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildFencedTextBlock, buildMainProcessLogsMarkdown, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
-import { buildFilterSummaryMarkdown } from './bugReport/filterSummary.js';
+import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { buildJobsConfigSnapshot, buildJobsPipelineSnapshot } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
@@ -477,7 +477,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // login window) doesn't match the auth keywords above, so without this the
   // Auth Window Diagnostics section was dropped even under FULL.
   const reportCode = String(payload.filterCode || '').trim().toUpperCase();
-  const isFullReport = !reportCode || reportCode.includes('FULL');
+  const isFullReport = !reportCode || codeIncludesFull(reportCode);
 
   const systemInfo = {
     platform: process.platform,

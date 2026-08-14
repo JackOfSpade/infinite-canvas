@@ -32,6 +32,11 @@ import { logger } from '../logger.js';
 const MAX_AGE_DAYS = 60;
 const SUFFIX = '.jobs-history.csv';
 const HEADER = 'seen_date,source,company,title,location,url';
+// A count says that a history collision occurred, but not whether it was an
+// expected duplicate surfaced by two overlapping queries or a genuinely
+// different listing lost to a bad identity key. Keep a small trail for the bug
+// report; never retain an unbounded copy of every job in this return value.
+const MAX_COLLISION_SAMPLES = 5;
 
 export function historyPathForCanvas(canvasFilePath) {
   if (!canvasFilePath || typeof canvasFilePath !== 'string') return null;
@@ -88,6 +93,30 @@ function normUrl(url) {
 
 function normText(s) {
   return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function diagnosticText(value, max = 180) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function collisionJobDiagnostic(job) {
+  return {
+    source: diagnosticText(job?.source, 50) || '?',
+    title: diagnosticText(job?.title) || '(untitled)',
+    company: diagnosticText(job?.company) || '(unknown company)',
+    location: diagnosticText(job?.location) || '(no location)',
+    url: diagnosticText(job?.url, 500) || '(no URL)',
+  };
+}
+
+function appearsToBeSameListing(first, duplicate) {
+  // The shared history key already matches. Matching source and the visible
+  // listing fields too is strong evidence that two query paths surfaced the
+  // same card, rather than evidence that the history key is too coarse.
+  return ['source', 'title', 'company', 'location'].every(
+    field => normText(first?.[field]) === normText(duplicate?.[field]),
+  );
 }
 
 /**
@@ -252,20 +281,33 @@ async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
     // genuine repost from a normalizer that can't tell two listings apart, and
     // `inBatch` (collided with an EARLIER job in this same write, i.e. not with
     // pre-existing history) is the specific shape that means over-collapsing.
-    const skips = { noKey: 0, url: 0, titleCompany: 0, inBatch: 0, bySource: {} };
+    const skips = { noKey: 0, url: 0, titleCompany: 0, inBatch: 0, bySource: {}, collisionSamples: [] };
     const batchKeys = new Set();
-    const noteSkip = (job, kind, fromBatch) => {
+    const batchKeyOwners = new Map();
+    const noteSkip = (job, kind, fromBatch, hit = null) => {
       skips[kind]++;
       if (fromBatch) skips.inBatch++;
       const s = String(job?.source || '?');
       skips.bySource[s] = (skips.bySource[s] || 0) + 1;
+      const first = fromBatch && hit ? batchKeyOwners.get(hit) : null;
+      if (first && skips.collisionSamples.length < MAX_COLLISION_SAMPLES) {
+        skips.collisionSamples.push({
+          key: diagnosticText(hit, 300),
+          first: collisionJobDiagnostic(first),
+          duplicate: collisionJobDiagnostic(job),
+          sameListing: appearsToBeSameListing(first, job),
+        });
+      }
     };
     for (const job of jobs) {
       const keys = dedupKeysFor(job);
       if (keys.length === 0) { noteSkip(job, 'noKey', false); continue; }
       const hit = keys.find(k => seen.has(k));
-      if (hit) { noteSkip(job, hit.startsWith('u:') ? 'url' : 'titleCompany', batchKeys.has(hit)); continue; }
-      keys.forEach(k => batchKeys.add(k));
+      if (hit) { noteSkip(job, hit.startsWith('u:') ? 'url' : 'titleCompany', batchKeys.has(hit), hit); continue; }
+      keys.forEach(k => {
+        batchKeys.add(k);
+        batchKeyOwners.set(k, job);
+      });
       keys.forEach(k => seen.add(k));
       newRows.push({
         seen_date: today,

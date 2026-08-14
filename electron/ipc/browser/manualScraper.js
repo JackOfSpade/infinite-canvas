@@ -27,6 +27,8 @@ import { buildOverlayScript, updateOverlay } from './scraperOverlay.js';
 import { humanDelay } from '../../utils/humanDelay.js';
 import { getGlassdoorLocId, saveGlassdoorLocId } from '../settings.js';
 import { pickGlassdoorLocation } from '../../../src/utils/jobLocation.js';
+import { sourceJobKey } from '../../../src/utils/jobIdentity.js';
+import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
 import { markManualSolveRequired } from '../scrapeVerification.js';
 
 // ── Timing ────────────────────────────────────────────────────────────────────
@@ -60,7 +62,7 @@ function countDistinctJobs(jobs) {
   const seen = new Set();
   let count = 0;
   for (const job of jobs) {
-    const key = `${job?.title || ''}|${job?.company || ''}|${job?.url || ''}`;
+    const key = sourceJobKey(job);
     if (seen.has(key)) continue;
     seen.add(key);
     count++;
@@ -78,18 +80,83 @@ const SOURCE_LABELS = {
 const manualScraperTelemetry = {
   active: null,
   events: [],
+  // Field-quality failures need a retention guarantee independent of normal
+  // scrape progress. A busy later source can otherwise evict an early detail
+  // miss from the 30-event phase ring before the user opens a FULL report.
+  fieldAnomalies: [],
   paused: false,  // survives page navigations — source of truth is Node.js, not the page
   consoleLogs: [],   // last 60 browser-side console errors/warnings from the stealth page
   networkErrors: [], // last 30 network failures / 4xx-5xx responses from the stealth page
 };
 
-function recordManualScraperTelemetry(event) {
+// Browser job boards routinely emit failed ad/analytics requests and CSP/ORB
+// console errors that have no bearing on whether the listing scraper worked.
+// These buffers are deliberately small, so allowing a burst of that traffic to
+// consume them can evict the first-party failure that actually explains a bad
+// scrape. Keep the allowlist URL-shaped and narrow: unfamiliar third parties and
+// every ordinary first-party URL remain reportable.
+function isKnownTelemetryNoiseUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  try {
+    const parsed = new URL(rawUrl.replace(/[),.;:'"]+$/g, ''));
+    const host = parsed.hostname.toLowerCase();
+    const pathname = parsed.pathname.toLowerCase();
+    const hostIs = domain => host === domain || host.endsWith(`.${domain}`);
+
+    if (hostIs('siteintercept.qualtrics.com')) return true;
+    if (hostIs('impactradius-event.com')) return true;
+    if (hostIs('doubleclick.net')) return true;
+    if (hostIs('googleadservices.com') || hostIs('googlesyndication.com')) return true;
+    if (host === 'www.google.com' && pathname.startsWith('/rmkt/')) return true;
+    if (host === 'csp.withgoogle.com' && pathname === '/csp/identityrotatecookieshttp') return true;
+
+    // Preserve the pre-existing low-value telemetry exclusions in one shared
+    // predicate so request failures and HTTP failures cannot drift apart.
+    if (host === 't.indeed.com' && pathname.startsWith('/signals')) return true;
+    if (hostIs('googletagmanager.com') || hostIs('google-analytics.com') || host.includes('.analytics.')) return true;
+    if (hostIs('sift.com') || hostIs('intercom.io') || hostIs('clarity.ms')) return true;
+    if (hostIs('bat.bing.com') || hostIs('munchkin.marketo.net') || hostIs('cdn.branch.io')) return true;
+    if (hostIs('cloudflareinsights.com') && pathname.startsWith('/cdn-cgi/rum')) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True only when a browser console/network diagnostic targets a known
+ * non-functional ad/tracker endpoint. Console CSP messages often originate in
+ * a first-party bundle (`url`) while naming the blocked request in `text`, so we
+ * inspect the first embedded URL as the target. We intentionally do not scan
+ * every URL in the message: CSP directive text may list tracker domains after a
+ * genuine first-party failure, and that failure must stay visible.
+ *
+ * Exported for deterministic regression tests.
+ */
+export function isIgnorableManualBrowserTelemetry({ url = '', text = '' } = {}) {
+  if (isKnownTelemetryNoiseUrl(url)) return true;
+  const target = String(text || '').match(/https?:\/\/[^\s'"<>]+/i)?.[0] || '';
+  return isKnownTelemetryNoiseUrl(target);
+}
+
+// `updateActive: false` records an event into the trail WITHOUT advancing the
+// "current phase". Per-job anomalies (desc-miss / date-miss) are not scrape
+// phases: `active` is a merge that never deletes fields, so folding one in
+// would leave its `key` pinned to every later render — reporting one job's
+// miss as though it belonged to whatever the scraper is doing at report time.
+// Exported for unit testing.
+export function recordManualScraperTelemetry(event, { updateActive = true } = {}) {
   const entry = {
     ts: Date.now(),
     ...event,
   };
   manualScraperTelemetry.events.push(entry);
   if (manualScraperTelemetry.events.length > 30) manualScraperTelemetry.events.shift();
+  if (['desc-miss', 'date-miss'].includes(entry.phase)) {
+    manualScraperTelemetry.fieldAnomalies.push(entry);
+    if (manualScraperTelemetry.fieldAnomalies.length > 20) manualScraperTelemetry.fieldAnomalies.shift();
+  }
+  if (!updateActive) return;
   manualScraperTelemetry.active = {
     ...(manualScraperTelemetry.active || {}),
     ...entry,
@@ -130,6 +197,7 @@ export function getManualScraperTelemetry() {
   return {
     active: manualScraperTelemetry.active ? { ...manualScraperTelemetry.active } : null,
     events: manualScraperTelemetry.events.map(e => ({ ...e })),
+    fieldAnomalies: manualScraperTelemetry.fieldAnomalies.map(e => ({ ...e })),
     consoleLogs: manualScraperTelemetry.consoleLogs.map(e => ({ ...e })),
     networkErrors: manualScraperTelemetry.networkErrors.map(e => ({ ...e })),
   };
@@ -363,6 +431,30 @@ export function reconcileZipRecruiterDomSalary(rawSalary, description) {
     'i',
   ).exec(String(description || '').replace(/\s+/g, ' '));
   return explicitPay?.[1]?.trim() || '';
+}
+
+// Keep every list-card field when detail enrichment is partial. In particular,
+// a description miss must not discard a date recovered from the same detail
+// page: ZipRecruiter can expose datePosted even when its description is absent.
+// This is deliberately field-by-field so existing list data remains authoritative.
+export function mergeExpandedJobDetail(job, {
+  text = '',
+  jsonLdDate = '',
+  jsonLdSalary = '',
+  salaryChanged = false,
+  reconciledSalary,
+} = {}) {
+  const existingSalaryUsable = parseSalaryToNumeric(job?.salary) > 0;
+  return {
+    ...job,
+    ...(text ? { snippet: text } : {}),
+    ...(jsonLdDate && !job.posted ? { posted: jsonLdDate } : {}),
+    ...(salaryChanged ? { salary: reconciledSalary } : {}),
+    // Structured detail pay includes schema.org unitText. Let it repair a
+    // present-but-unusable list chip (e.g. Glassdoor "US$19 - US$20 (Employer
+    // provided)"), while leaving every already-parseable list salary untouched.
+    ...(jsonLdSalary && !existingSalaryUsable && !salaryChanged ? { salary: jsonLdSalary } : {}),
+  };
 }
 
 // ── Challenge detection ───────────────────────────────────────────────────────
@@ -792,13 +884,13 @@ async function runExtractor(page, extractorJS) {
 // Clicks each job card and captures the full description from the side panel.
 // Only runs when DESC_CONFIGS[sourceId] is defined.
 //
-// Returns { jobs, descError } where descError is non-null when card or panel
+// Returns { jobs, descError, descWarning } where descError is non-null when card or panel
 // selectors appear stale (≥ DESC_STALE_THRESHOLD consecutive failures of the same
 // type). A non-null descError is an abort signal — the caller must set earlyExit
 // and surface the error just like a SITE_CHANGED extraction failure.
 async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar, signal = null) {
   const cfg = DESC_CONFIGS[sourceId];
-  if (!cfg || jobs.length === 0) return { jobs, descError: null };
+  if (!cfg || jobs.length === 0) return { jobs, descError: null, descWarning: null };
 
   const enhanced  = [...jobs];
   // Jobs collected before this batch starts — used to increment the overlay counter
@@ -842,6 +934,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     // had no evidence for WHY. Latches so we log one rich sample per batch.
     let descMissDiagDone = false;
     let dateMissDiagDone = false;
+    let descWarning = null;
     try {
       for (let i = 0; i < enhanced.length; i++) {
         const job = enhanced[i];
@@ -890,7 +983,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           // would delay indefinitely.
           await fetchPage.goto(viewUrl, { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {});
 
-          const isChallenge = await detectChallengePage(fetchPage);
+          const challengeSignals = await getChallengeSignals(fetchPage);
+          const isChallenge = !!challengeSignals?.isChallenge;
           // Detect expired listings separately from challenge redirects.
           const pageInfo = await fetchPage.evaluate(() => {
             const bodyText = (document.body?.innerText || '').toLowerCase();
@@ -906,10 +1000,27 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
 
           if (isChallenge) {
             if (detailPage) {
-              // Challenge appeared on the background tab — the user can't see it
-              // to solve it, so drop this job's description and keep moving.
-              enhanced[i] = null;
-              continue;
+              // A background tab cannot be solved by the user. Keep the relevant
+              // list row (rather than silently dropping it), stop the remaining
+              // detail requests so we do not intensify a session-level block, and
+              // attach a source warning that makes the partial scoring input clear.
+              const evidence = formatChallengeEvidence(challengeSignals, job.title || job.url);
+              logger.warn(`[BrowserScraper] ${overlayBase.srcName}: detail enrichment challenged; retaining list rows and stopping detail pass (${evidence})`);
+              recordManualScraperTelemetry({
+                phase: 'detail-challenge', srcName: overlayBase.srcName,
+                key: (job.title || job.url || '?').slice(0, 80),
+                reason: challengeSignals?.reason, title: challengeSignals?.title,
+              }, { updateActive: false });
+              recordManualScraperTelemetry({
+                phase: 'desc-miss', srcName: overlayBase.srcName,
+                key: `${(job.title || job.url || '?').slice(0, 65)} | detail challenge`,
+              }, { updateActive: false });
+              descWarning ||= {
+                code: 'description-detail-challenge', severity: 'warn',
+                evidence: `${overlayBase.srcName} challenged the background detail fetch at "${job.title || 'an untitled listing'}". Relevant listing rows were retained, but this and later rows may lack full descriptions.`,
+                suggestion: `Open ${overlayBase.srcName} in a normal Chrome tab, complete any verification, then run the search again for full descriptions.`,
+              };
+              break;
             }
             // Fallback path: main page is being used, challenge is visible.
             await updateOverlay(page, {
@@ -1061,6 +1172,24 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               return '';
             }).catch(() => '');
           }
+          if (!text) {
+            // Some detail pages hydrate their visible description shortly after
+            // DOMContentLoaded. Give that one small, bounded recovery window before
+            // classifying the row as partial; never spin/reload a potentially
+            // rate-limited board page.
+            await fetchPage.waitForFunction(sel => {
+              const panel = document.querySelector(sel);
+              return (panel?.innerText || '').trim().length > 0;
+            }, { timeout: 1200 }, cfg.panelSelector).catch(() => {});
+            text = await fetchPage.evaluate(sel => {
+              const panel = document.querySelector(sel);
+              if (panel?.innerText?.trim()) return panel.innerText.trim();
+              for (const h of document.querySelectorAll('h2, h3')) {
+                if (h.textContent?.trim() === 'Job description') return h.nextElementSibling?.innerText?.trim() || '';
+              }
+              return '';
+            }, cfg.panelSelector).catch(() => '');
+          }
           // DOM salary fallback (ZipRecruiter): pay is rendered CLIENT-SIDE as an
           // "Estimated pay" chip — not in JSON-LD, not in the search ItemList — so it
           // can only be read from the live DOM. Match by money TEXT pattern (robust
@@ -1093,6 +1222,16 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               return '';
             }, MONEY_SRC).catch(() => '');
           }
+          // Record every partial row in the dedicated anomaly ring. The rich page
+          // context below remains first-only so one degraded batch cannot crowd out
+          // all other telemetry, but this lightweight row preserves exact affected
+          // titles even when later source phases push old events out of the tail.
+          if (!text) {
+            recordManualScraperTelemetry({
+              phase: 'desc-miss', srcName: overlayBase.srcName,
+              key: `${(job.title || job.url || '?').slice(0, 65)} | empty JD`,
+            }, { updateActive: false });
+          }
           // Diagnostic: first miss per batch — log page context for next bug report.
           if (!text && !descMissDiagDone) {
             descMissDiagDone = true;
@@ -1119,6 +1258,16 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               logger.info(`[BrowserScraper] ${overlayBase.srcName} desc-miss diag (job ${i + 1}/${enhanced.length}): url="${diag.url}" title="${diag.title}" ldTypes=[${diag.ldTypes.join(',')}] nextData=${diag.hasNextData} ndKeys="${diag.ndPagePropKeys}" body="${diag.bodyHead}"`);
             }
           }
+          if (!text && !descWarning) {
+            // The listing remains useful/relevant, but the scoring input is
+            // incomplete. Report this explicitly instead of treating the source as
+            // clean merely because list extraction succeeded.
+            descWarning = {
+              code: 'description-detail-miss', severity: 'warn',
+              evidence: `${overlayBase.srcName} could not recover a full description for "${job.title || 'an untitled listing'}" after its bounded detail-page wait. The listing was retained with its available list fields.`,
+              suggestion: `Retry ${overlayBase.srcName} later or open the listing directly; the board may have delayed or restricted the detail page.`,
+            };
+          }
           // A ZipRecruiter estimated-pay chip can be internally contradictory
           // ("$65K/hr") even when the detail JD states the actual annual base
           // salary. Reconcile that at the source boundary, before the raw value
@@ -1129,20 +1278,16 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             ? reconcileZipRecruiterDomSalary(sourceSalary, text)
             : sourceSalary;
           const salaryChanged = cfg.salaryFromDom && reconciledSalary !== sourceSalary;
-          if (text || jsonLdSalary || salaryChanged) {
-            // Backfill description, posted date, and salary — each only when the list
-            // extractor didn't already capture it (don't clobber a good relative date
-            // like "3 days ago" with an ISO timestamp, or a stated salary with an
-            // estimate). Salary alone is enough to write the job (a pay-less list row
-            // that gained an estimate still wins), so the guard is `text || salary`.
-            enhanced[i] = {
-              ...job,
-              ...(text ? { snippet: text } : {}),
-              ...(jsonLdDate && !job.posted ? { posted: jsonLdDate } : {}),
-              ...(salaryChanged ? { salary: reconciledSalary } : {}),
-              ...(jsonLdSalary && !job.salary && !salaryChanged ? { salary: jsonLdSalary } : {}),
-            };
-          }
+          // Detail fields are independent. Always merge them so a description miss
+          // cannot suppress a recovered posted date (the prior `text || salary`
+          // guard caused exactly that ZipRecruiter loss).
+          enhanced[i] = mergeExpandedJobDetail(job, {
+            text,
+            jsonLdDate,
+            jsonLdSalary,
+            salaryChanged,
+            reconciledSalary,
+          });
           // Date-miss diagnostic (once per batch): a description was recovered but
           // NO posted date — not from the list extractor, the JobPosting JSON-LD,
           // OR the visible "Posted X ago" DOM fallback. Capture the JSON-LD @types
@@ -1172,6 +1317,13 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             }).catch(() => null);
             if (dateDiag) {
               logger.info(`[BrowserScraper] ${overlayBase.srcName} date-miss diag: ldTypes=[${dateDiag.ldTypes.join(',')}] dateFields=[${dateDiag.dateFields.join(', ')}]`);
+              // See the matching desc-miss comment above — structural record so this
+              // survives the ring buffer, not just the console.
+              recordManualScraperTelemetry({
+                phase:   'date-miss',
+                srcName: overlayBase.srcName,
+                key:     `${(job.title || job.url || '?').slice(0, 50)} | ld=${dateDiag.ldTypes.length}`,
+              }, { updateActive: false });
             }
           }
         } catch {
@@ -1195,7 +1347,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     try { await injectOverlay(page); } catch {
       // Overlay reinjection is best-effort after detail navigation.
     }
-    return { jobs: enhanced.filter(Boolean), descError: null };
+    return { jobs: enhanced.filter(Boolean), descError: null, descWarning };
   }
 
   // Start from empty so the first card's already-visible description is captured
@@ -1654,6 +1806,7 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
     const type = msg.type();
     if (type !== 'error' && type !== 'warning') return;
     const loc = msg.location();
+    if (isIgnorableManualBrowserTelemetry({ url: loc?.url || '', text: msg.text() })) return;
     manualScraperTelemetry.consoleLogs.push({
       ts: Date.now(),
       type,
@@ -1667,7 +1820,7 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
   // Capture hard network failures (DNS, TCP, TLS, COEP, etc.)
   page.on('requestfailed', req => {
     const url = req.url();
-    if (/t\.indeed\.com\/signals|googletagmanager|\.analytics\.|sift\.com|intercom\.io|clarity\.ms|bat\.bing|munchkin\.marketo|cdn\.branch\.io|cloudflareinsights\.com\/cdn-cgi\/rum/.test(url)) return;
+    if (isIgnorableManualBrowserTelemetry({ url })) return;
     manualScraperTelemetry.networkErrors.push({
       ts: Date.now(),
       method: req.method(),
@@ -1690,7 +1843,7 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
     } catch { /* frame may be detached on rapid navigations — skip */ }
     if (status < 400) return;
     const url = res.url();
-    if (/t\.indeed\.com\/signals|googletagmanager|\.analytics\.|sift\.com|intercom\.io|clarity\.ms|bat\.bing|munchkin\.marketo|cdn\.branch\.io/.test(url)) return;
+    if (isIgnorableManualBrowserTelemetry({ url })) return;
     manualScraperTelemetry.networkErrors.push({
       ts: Date.now(),
       method: res.request().method(),
@@ -1742,6 +1895,7 @@ async function launchScrapePlatformBrowser({ userDataDir, executablePath, sandbo
 export function resetManualScraperDiagnostics() {
   manualScraperTelemetry.consoleLogs = [];
   manualScraperTelemetry.networkErrors = [];
+  manualScraperTelemetry.fieldAnomalies = [];
 }
 
 // `opts`: { resetDiagnostics=true, sourceIndexBase=0, sourceTotal=null } — for
@@ -2059,7 +2213,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // Deduplicate and accumulate page results
           const newJobs = [];
           for (const job of extracted) {
-            const key = `${job.title}|${job.company}|${job.url || ''}`;
+            // One listing can surface in two role queries. Google embeds that
+            // query in `q`/the fragment, so raw URL equality misses an exact
+            // duplicate; sourceJobKey preserves its stable htidocid instead.
+            const key = sourceJobKey(job);
             if (!seen.has(key)) { seen.add(key); newJobs.push(job); }
           }
 
@@ -2070,7 +2227,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             ? Math.max(0, JOB_PER_SOURCE_CAP - allJobs.length)
             : Infinity;
           const jobsToExpand = newJobs.slice(0, Math.min(JOB_PER_PAGE_CAP, remainingSourceSlots));
-          const { jobs: enhanced, descError } = await expandDescriptions(page, jobsToExpand, sourceId, overlayBase, allJobs.length + newJobs.length, signal);
+          const { jobs: enhanced, descError, descWarning } = await expandDescriptions(page, jobsToExpand, sourceId, overlayBase, allJobs.length + newJobs.length, signal);
 
           const withSnippet = enhanced.filter(j => j.snippet?.length > 0).length;
           const descCfg = DESC_CONFIGS[sourceId];
@@ -2098,6 +2255,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             earlyExit = true;
             break;
           }
+          // A partial detail page is actionable but does not invalidate a relevant
+          // list row. Preserve the row, continue the source, and surface this as a
+          // warning in the result rather than converting it into a clean finish.
+          if (descWarning && !sourceSiteChangedWarning) sourceSiteChangedWarning = descWarning;
 
           await updateOverlay(page, {
             ...overlayBase,

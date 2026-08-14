@@ -31,7 +31,7 @@ export function looksLikeMoney(s) {
   // Without this exclusion, "401k matching" would read as money and
   // classifyUnparseableSalary would wrongly call it a cadence-lost extractor
   // bug instead of prose with nothing to extract.
-  return /\$|\b(?!401\s*k\b)\d+\s*k\b|\d{1,3}(?:,\d{3})+|per (?:hour|year|week|month)|\/h(?:r|our)|\/yr|\/year|hourly|annually|\ba year\b|\ban hour\b/i.test(s);
+  return /\$|\b(?:USD|CAD|AUD|EUR|GBP)\s*\d|\b(?!401\s*k\b)\d+\s*k\b|\d{1,3}(?:,\d{3})+|per (?:hour|year|week|month)|\/h(?:r|our)|\/yr|\/year|hourly|annually|\ba year\b|\ban hour\b/i.test(s);
 }
 
 /**
@@ -45,9 +45,9 @@ export function looksLikeMoney(s) {
  *
  *   'lost-cadence' — still looks like an attempt at money (per looksLikeMoney)
  *                    but the annualizer couldn't recover a cadence from it
- *                    (e.g. "$20 - $24", "$22.31 - $22.31 / PH"). OUR bug — the
- *                    extractor captured a rate but dropped or never carried its
- *                    per-hour/per-year unit — and it's fixable.
+ *                    (e.g. "$20 - $24", "$22.31 - $22.31 / PH"). The extractor
+ *                    could not recover a real unit; callers must report that
+ *                    observation without claiming the source exposed one.
  *   'prose'        — never looked like money at all (e.g. "Competitive",
  *                    "401k matching"). Nothing to extract; not our bug.
  *
@@ -55,6 +55,17 @@ export function looksLikeMoney(s) {
  * this function only decides WHY a salary was unparseable, not WHETHER it was.
  */
 export function classifyUnparseableSalary(s) {
+  // A tiny amount carrying an explicit annual unit is neither prose nor a lost
+  // cadence. It is internally contradictory source data (commonly an hourly
+  // range mislabeled "a year") that the annualizer deliberately refuses rather
+  // than silently inventing the intended unit.
+  const raw = String(s || '');
+  const first = Number(raw.replace(/,/g, '').match(/\d+(?:\.\d+)?/)?.[0]);
+  if (Number.isFinite(first) && first < 1000
+      && /[$€£]/.test(raw)
+      && /\b(?:year|yr|yearly|annual|annually|annum)s?\b|\/\s*yr\b/i.test(raw)) {
+    return 'implausible-annual';
+  }
   return looksLikeMoney(s) ? 'lost-cadence' : 'prose';
 }
 

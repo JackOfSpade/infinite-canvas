@@ -92,3 +92,49 @@ export const CLAUDE_MODEL_IDS = Object.freeze(CLAUDE_MODEL_REGISTRY.map(({ id })
 export function getClaudeModelInfo(model) {
   return MODEL_BY_ID.get(model) || null;
 }
+
+// Claude 4.6+ (including the current Claude 5 family) supports adaptive
+// thinking.  `output_config.effort` is the documented control for its depth;
+// medium is the app-wide policy.  Haiku 4.5 predates that control, so it needs
+// extended thinking's numeric budget instead.  4,096 is our stable
+// medium-equivalent allocation: enough room to reason, while leaving output
+// headroom under the 5,120-token minimum enforced below.
+export const CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET = 4096;
+const ADAPTIVE_THINKING_MODEL = /^claude-(?:opus|sonnet|haiku|fable|mythos)-(?:4-(?:[6-9]|\d\d)|[5-9]|\d\d)(?:-|$)/i;
+
+/**
+ * The default reasoning controls for a Claude model.
+ *
+ * Modern models receive explicit adaptive thinking and medium effort.  Older
+ * Claude models that remain in use (currently Haiku 4.5) do not accept the
+ * effort field, so enable their manual extended-thinking mode at the closest
+ * consistent budget instead.  Unknown non-Claude ids deliberately receive no
+ * provider options; that keeps this pure request helper safe in generic tests.
+ */
+export function getClaudeDefaultReasoningConfig(model) {
+  const id = String(model || '');
+  if (!/^claude-/i.test(id)) return {};
+  if (ADAPTIVE_THINKING_MODEL.test(id)) {
+    return {
+      thinking: { type: 'adaptive' },
+      outputConfig: { effort: 'medium' },
+    };
+  }
+  return {
+    thinking: { type: 'enabled', budget_tokens: CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET },
+  };
+}
+
+/**
+ * Manual extended thinking requires `budget_tokens < max_tokens`.  Raise only
+ * legacy/manual-model requests to preserve the requested medium thinking
+ * budget plus a modest visible-answer allowance.  Modern adaptive-thinking
+ * models retain each task's calibrated cap unchanged.
+ */
+export function claudeReasoningMaxTokens(model, maxTokens) {
+  const requested = Math.max(1, Number(maxTokens) || 0);
+  const { thinking } = getClaudeDefaultReasoningConfig(model);
+  return thinking?.type === 'enabled'
+    ? Math.max(requested, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET + 1024)
+    : requested;
+}

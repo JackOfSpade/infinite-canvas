@@ -25,6 +25,13 @@ import { detectAll } from 'tinyld';
 // Latin letters + the diacritics our fallback recognizes.
 const TOKEN_RE = /[a-zà-öø-ÿ]+/g;
 
+// The short-text heuristic is only for sparse Latin-script titles. A genuine
+// listing in one of the non-Latin scripts we support must reach tinyld even
+// when TOKEN_RE finds no words; otherwise, for example, a Greek or Arabic JD
+// would always fall through to the English default before scriptConsistent()
+// could validate its result.
+const NON_LATIN_JOB_SCRIPT_RE = /[\p{Script=Arabic}\p{Script=Greek}\p{Script=Hebrew}\p{Script=Devanagari}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}\p{Script=Hangul}\p{Script=Cyrillic}]/u;
+
 // Job boards in this app target English-speaking North American users. Keep a
 // conservative set of languages plausibly encountered in localized listings;
 // sparse profiles such as Berber/Klingon/Volapük otherwise win telegraphic
@@ -78,7 +85,7 @@ export function detectLanguage(text) {
 
   // Too little text for the n-gram model → diacritic hint only (the authwalled
   // title-only case). tinyld returns garbage below ~6 words, so don't trust it.
-  if (tokens.length < 6) return diacriticGuess(lower) || 'en';
+  if (tokens.length < 6 && !NON_LATIN_JOB_SCRIPT_RE.test(raw)) return diacriticGuess(lower) || 'en';
 
   const ranked = detectAll(raw.slice(0, 2000), { only: JOB_LANGUAGE_CANDIDATES }); // first ~2k chars is plenty + cheap
   const top = ranked[0];

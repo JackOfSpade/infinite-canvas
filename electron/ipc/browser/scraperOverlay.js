@@ -23,12 +23,6 @@ export function buildOverlayScript({ withPause = true, cdpBridge = true } = {}) 
 
   const statusMargin = withPause ? '14' : '4';
 
-  const buttonHTML = withPause
-    ? `'<button id="ic-pause" style="width:100%;padding:7px 10px;background:rgba(255,255,255,.06);',
-      'color:#64748b;border:1px solid rgba(255,255,255,.09);border-radius:7px;',
-      'cursor:pointer;font:500 12px system-ui;transition:filter .15s">⏸ Pause</button>',`
-    : '';
-
   // CDP-bridge restore: only emitted when cdpBridge is on. It reads the Node-side
   // flag back into the page after a navigation via the exposed __icGetPaused. With
   // cdpBridge off there's no exposed function (it would be an automation
@@ -76,12 +70,13 @@ ${restoreLogic}` : '';
   // the overlay from appearing inside reCAPTCHA iframes (/recaptcha/enterprise/bframe),
   // the CAPTCHA gate page (/sorry), or any other google.com URL that isn't job results.
   if(location.hostname==='www.google.com' && !location.pathname.startsWith('/search')) return;
-  // Trusted Types probe — must run before any side effects (window writes, DOM inserts).
-  // Cloudflare challenge pages enforce require-trusted-types-for 'script', which blocks
-  // el.innerHTML assignments. Detect this early so we leave the challenge page's DOM and
-  // window completely untouched (style injection would otherwise contaminate the Turnstile
-  // iframe and disrupt bot-detection fingerprinting).
-  try { var _tt=document.createElement('div'); _tt.innerHTML=''; } catch(e) { return; }
+  // Remain completely inert on challenge documents. This is deliberately before
+  // style injection and any window writes: a Cloudflare/Turnstile page is part of
+  // the verification flow, not scrape content to decorate. The normal title and
+  // DOM markers are available without assigning HTML to a sink.
+  const _icTitle = (document.title || '').toLowerCase();
+  if(_icTitle.startsWith('just a moment') ||
+     document.querySelector('#challenge-form, #cf-challenge-running, [id*="cf-chl-widget"], .cf-turnstile, iframe[src*="challenges.cloudflare.com"]')) return;
   const sty = document.createElement('style');
   sty.textContent = [
     '@keyframes ic-blink{0%,100%{opacity:1}50%{opacity:.35}}',
@@ -102,26 +97,30 @@ ${restoreLogic}` : '';
     'pointer-events:auto',
   ].join(';');
 
-  try { el.innerHTML = [
-    '<div style="display:flex;align-items:center;gap:7px;margin-bottom:9px">',
-      '<div id="ic-dot" style="width:9px;height:9px;border-radius:50%;background:#4ade80;',
-        'animation:ic-blink 1.4s ease-in-out infinite;flex-shrink:0"></div>',
-      '<b style="font-size:13px;letter-spacing:-.2px">Job Collector</b>',
-    '</div>',
-    '<div id="ic-src-label" style="font-size:11px;color:#475569;margin-bottom:1px"></div>',
-    '<div id="ic-src-name" style="font-weight:700;font-size:16px;margin-bottom:3px;',
-      'white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>',
-    '<div id="ic-q-label" style="font-size:11px;color:#64748b;margin-bottom:2px"></div>',
-    '<div id="ic-q-text" style="font-size:12px;color:#94a3b8;white-space:nowrap;overflow:hidden;',
-      'text-overflow:ellipsis;margin-bottom:11px"></div>',
-    '<div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px">',
-      '<span id="ic-count" style="font-size:32px;font-weight:800;line-height:1;color:#f8fafc">0</span>',
-      '<span id="ic-count-meta" style="font-size:12px;color:#64748b">jobs collected</span>',
-    '</div>',
-    '<div id="ic-status" style="font-size:11px;color:#64748b;margin-bottom:${statusMargin}px;min-height:16px;',
-      'line-height:1.55"></div>',
-    ${buttonHTML}
-  ].join(''); } catch(e) { return; }
+  // Construct the panel node-by-node rather than through an HTML sink. This
+  // works on Trusted Types-enforced search documents; the old probe itself
+  // emitted the TrustedHTML console error recorded in bug reports once per query.
+  const make = (tag, id, value, style) => {
+    const node = document.createElement(tag);
+    if (id) node.id = id;
+    if (value != null) node.textContent = value;
+    if (style) node.style.cssText = style;
+    return node;
+  };
+  const header = make('div', '', null, 'display:flex;align-items:center;gap:7px;margin-bottom:9px');
+  header.appendChild(make('div', 'ic-dot', '', 'width:9px;height:9px;border-radius:50%;background:#4ade80;animation:ic-blink 1.4s ease-in-out infinite;flex-shrink:0'));
+  header.appendChild(make('b', '', 'Job Collector', 'font-size:13px;letter-spacing:-.2px'));
+  el.appendChild(header);
+  el.appendChild(make('div', 'ic-src-label', '', 'font-size:11px;color:#475569;margin-bottom:1px'));
+  el.appendChild(make('div', 'ic-src-name', '', 'font-weight:700;font-size:16px;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'));
+  el.appendChild(make('div', 'ic-q-label', '', 'font-size:11px;color:#64748b;margin-bottom:2px'));
+  el.appendChild(make('div', 'ic-q-text', '', 'font-size:12px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:11px'));
+  const countRow = make('div', '', null, 'display:flex;align-items:baseline;gap:6px;margin-bottom:4px');
+  countRow.appendChild(make('span', 'ic-count', '0', 'font-size:32px;font-weight:800;line-height:1;color:#f8fafc'));
+  countRow.appendChild(make('span', 'ic-count-meta', 'jobs collected', 'font-size:12px;color:#64748b'));
+  el.appendChild(countRow);
+  el.appendChild(make('div', 'ic-status', '', 'font-size:11px;color:#64748b;margin-bottom:${statusMargin}px;min-height:16px;line-height:1.55'));
+  ${withPause ? "const pauseButton = make('button', 'ic-pause', '⏸ Pause', 'width:100%;padding:7px 10px;background:rgba(255,255,255,.06);color:#64748b;border:1px solid rgba(255,255,255,.09);border-radius:7px;cursor:pointer;font:500 12px system-ui;transition:filter .15s'); el.appendChild(pauseButton);" : ''}
   ${pauseLogic}
   const attach = () => {
     if(typeof window.INDEED_CLOUDFLARE_STATIC_PAGE !== 'undefined') return;

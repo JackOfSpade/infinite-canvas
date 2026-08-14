@@ -102,7 +102,7 @@ export const shortId = (id) => {
 // the run (the telemetry deliberately outlives the hub — that's its whole point).
 // So node presence only refines the wording for same-window runs; windowId
 // decides inclusion. Unknown ids (older telemetry / no sender) → treat as local.
-export const pipelineScope = (nodeId, windowId, currentNodeIds, reportWindowId) => {
+export const pipelineScope = (nodeId, windowId, currentNodeIds, reportWindowId, options = {}) => {
   if (windowId != null && reportWindowId != null && windowId !== reportWindowId) {
     return {
       foreign: true,
@@ -112,9 +112,11 @@ export const pipelineScope = (nodeId, windowId, currentNodeIds, reportWindowId) 
   if (!nodeId) return { foreign: false, note: '' };
   const short = shortId(nodeId);
   const deleted = currentNodeIds && currentNodeIds.size > 0 && !currentNodeIds.has(nodeId);
+  const label = options.label || 'Source node';
+  const deletedNoun = options.deletedNoun || 'hub';
   return {
     foreign: false,
-    note: `> Source node: \`${short}\`${deleted ? ' (hub since deleted from this canvas — telemetry retained so the run still reports)' : ''}.\n`,
+    note: `> ${label}: \`${short}\`${deleted ? ` (${deletedNoun} since deleted from this canvas — telemetry retained so the run still reports)` : ''}.\n`,
   };
 };
 

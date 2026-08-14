@@ -14,7 +14,7 @@ import {
   priceChartingQuery,
 } from '../electron/extractors/marketplace.js';
 import { GOOGLE_JOBS_EXTRACTOR } from '../electron/extractors/jobs.js';
-import { buildJobTasks, getJobsTelemetry, glassdoorPostedBucket, linkedInBrowserUnavailableWarning, refreshManualSourceUrlIndex } from '../electron/ipc/jobs.js';
+import { applyFinalJobTitleRelevanceGate, buildJobTasks, chunkScoringBatches, getJobsTelemetry, glassdoorPostedBucket, linkedInBrowserUnavailableWarning, recordJobsBoardScope, recordJobsSourceScope, refreshManualSourceUrlIndex } from '../electron/ipc/jobs.js';
 import {
   getJobSearchTransientKeysForSave,
   SELLHUB_TRANSIENT_KEYS,
@@ -31,8 +31,14 @@ import {
   uniqueJobsAcrossSources,
 } from '../src/utils/jobIdentity.js';
 import { mergeSourceProgress } from '../src/utils/sourceProgress.js';
+import {
+  filterHandledJobSourceWarnings,
+  isJobSourceWarningGating,
+  jobSourceWarningAction,
+} from '../src/utils/jobSourceWarningPolicy.js';
 import { isJobCardVisible } from '../src/utils/jobCardFilters.js';
 import { reconcileBatchScores, buildScoredJob } from '../electron/ipc/jobBatchReconcile.js';
+import { buildScoringAudit, scoringAuditRowsFromBatches } from '../electron/ipc/scoringAudit.js';
 import { buildCachedUserContent, buildAnthropicMessageParams, buildAnthropicTokenCountParams } from '../electron/ipc/anthropicRequest.js';
 import {
   isProfileLockCollision,
@@ -74,7 +80,7 @@ import {
   sanitizeJobTaxonomy,
 } from '../src/nodes/jobsearch/buildJobTree.js';
 import { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature, deriveBoardCardStats } from '../src/nodes/jobboard/mergeJobs.js';
-import { buildGeoTermSet, extractIndeedJobsFromHtml, extractSalaryFromText, filterUSAJobsByTitleRelevance, jobRelevanceMatch, jobRelevanceEvidence, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, extractJobPostingBaseSalary, formatDiceBaseSalary, formatUSAJobsSalary, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult, isRemoteOkSponsoredPlacement } from '../electron/extractors/apiExtractors.js';
+import { buildGeoTermSet, extractIndeedJobsFromHtml, extractSalaryFromText, filterUSAJobsByTitleRelevance, jobRelevanceMatch, jobRelevanceEvidence, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, extractJobPostingBaseSalary, formatDiceBaseSalary, extractDiceSalaryBadge, formatUSAJobsSalary, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult, isRemoteOkSponsoredPlacement } from '../electron/extractors/apiExtractors.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
 import { targetPageCountForJob, decideFitStep } from '../electron/ipc/jobApplication.js';
@@ -166,6 +172,7 @@ import {
 import { modelMeta, contextWindowForModel, maxOutputForModel, estimateTokensFromChars, assessPromptFit, planSplits, LOCAL_CHARS_PER_TOKEN } from '../electron/ipc/tokenWindow.js';
 import {
   GEMINI_MODEL_FALLBACKS,
+  GEMINI_MAX_OUTPUT_TOKENS,
   GEMINI_TIER_LADDER,
   GEMINI_ALL_MODEL_IDS,
   geminiModelsInTier,
@@ -189,14 +196,6 @@ import {
   resetEntitlement,
   entitlementSnapshot,
 } from '../electron/ipc/geminiEntitlement.js';
-import {
-  ANTIGRAVITY_AGENT_ID,
-  antigravityPartsSupported,
-  buildAntigravityRequest,
-  callAntigravityAgent,
-  canUseAntigravityFallback,
-  extractAntigravityOutputText,
-} from '../electron/ipc/geminiAgent.js';
 import { callGeminiTextRaw } from '../electron/ipc/gemini.js';
 import { parseAiJson } from '../electron/ipc/jsonRepair.js';
 import { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
@@ -226,7 +225,8 @@ import { modelTag, overPricedSoldFlag, renderSessionTraceBlocks, visitCanvasNode
 import { looksLikeMoney, classifyUnparseableSalary, mojibakeExcerpt } from '../electron/ipc/bugReport/jobQualityChecks.js';
 import { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
 import { buildJobsPipelineSnapshot } from '../electron/ipc/bugReport/jobsSnapshot.js';
-import { formatJsonLdSalary, reconcileZipRecruiterDomSalary, resolveManualSourceStopReason } from '../electron/ipc/browser/manualScraper.js';
+import { formatJsonLdSalary, reconcileZipRecruiterDomSalary, mergeExpandedJobDetail, resolveManualSourceStopReason, recordManualScraperTelemetry, getManualScraperTelemetry, isIgnorableManualBrowserTelemetry } from '../electron/ipc/browser/manualScraper.js';
+import { buildOverlayScript } from '../electron/ipc/browser/scraperOverlay.js';
 import { indeedHostForLocation } from '../electron/extractors/indeedBrowser.js';
 import { classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
 import { deriveHubScanStatus, resolveAttentionSourceUrls, scanSellerHubPages, annotateReadState, summarizeReadState, stripHtmlForAnalysis, stripReadStateTokens, READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN } from '../electron/ipc/listingStatusCheck.js';
@@ -256,7 +256,7 @@ import { foldVerificationSample, orderByVerification, verificationScore } from '
 import { canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, getHubDropRejectLabel, getHubFileDropMode } from '../src/utils/hubDropEligibility.js';
 import { applyBugReportCode, previewBugReportCode } from '../src/utils/bugReportCodes.js';
 import { enforceClipboardMarkdownCap } from '../electron/ipc/bugReport/clipboardCap.js';
-import { buildFilterSummaryMarkdown } from '../electron/ipc/bugReport/filterSummary.js';
+import { buildFilterSummaryMarkdown, codeIncludesFull } from '../electron/ipc/bugReport/filterSummary.js';
 import { buildSellHubPriceDropRollup } from '../electron/ipc/bugReport/sellHubPriceDropRollup.js';
 import { buildSellHubResolveRollup, buildSellHubResolveSnapshot } from '../src/utils/sellHubResolveSnapshot.js';
 import { createJobSearchTestMode, parseJobSearchEnvBoolean } from '../src/utils/jobSourceScope.js';
@@ -305,7 +305,7 @@ import { CODE_EXT_RE, PRODUCT_IMAGE_EXT_RE } from '../src/utils/fileExtensions.j
 import { cancelNodeTasksRecursively } from '../src/utils/canvasInteractions.js';
 import { getKnownTaskIds, modelForTask, providerForTask, taskModelRoutingSnapshot } from '../electron/ipc/llm.js';
 import { claudeModelsInUse, webSearchToolType } from '../electron/ipc/claude.js';
-import { MODEL_FLOOR } from '../electron/ipc/claudeModels.js';
+import { CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, claudeReasoningMaxTokens, getClaudeDefaultReasoningConfig, MODEL_FLOOR } from '../electron/ipc/claudeModels.js';
 import { deriveTimeoutBudget } from '../electron/ipc/scrapeBudget.js';
 import { FINGERPRINT_PROFILES, getSessionProfile, getRandomUA } from '../electron/ipc/browser/antiDetectProfiles.js';
 import { isWithinDirectory, isExistingFile, isSensitivePath } from '../electron/utils/pathSafety.js';
@@ -800,23 +800,25 @@ const tests = [
   {
     name: 'Gemini registry: supports every compatible current model with safe routing metadata',
     run: () => {
-      // 7 ungated ids: the 3 non-gated tiers (flash x4, lite x3) — Pro is
-      // listed in the registry but carries requiresEntitlement:true, so it is
-      // filtered out of GEMINI_MODEL_FALLBACKS by construction (see next assert).
-      assert(GEMINI_MODEL_FALLBACKS.length === 7, `expected 7 ungated Gemini fallback models, got ${GEMINI_MODEL_FALLBACKS.length}`);
+      // 10 ungated ids: Flash, upgrade aliases, Lite, and the two final Gemma
+      // rescue models. Pro remains gated by a credential-specific probe.
+      assert(GEMINI_MODEL_FALLBACKS.length === 10, `expected 10 ungated Gemini fallback models, got ${GEMINI_MODEL_FALLBACKS.length}`);
       for (const model of [
+        'gemini-3.7-flash',
         'gemini-3.6-flash',
         'gemini-3.5-flash',
         'gemini-3-flash-preview',
-        'gemini-2.5-flash',
+        'gemini-flash-latest',
         'gemini-3.5-flash-lite',
         'gemini-3.1-flash-lite',
-        'gemini-2.5-flash-lite',
+        'gemini-flash-lite-latest',
+        'gemma-4-31b-it',
+        'gemma-4-26b-a4b-it',
       ]) {
         assert(GEMINI_MODEL_FALLBACKS.includes(model), `compatible model missing from registry: ${model}`);
       }
-      assert(!GEMINI_MODEL_FALLBACKS.some(model => /image|tts|live|embedding|robotics|gemma/i.test(model)),
-        'special-purpose Gemini/Gemma models must not enter the universal generateContent fallback chain');
+      assert(!GEMINI_MODEL_FALLBACKS.some(model => /image|tts|live|embedding|robotics/i.test(model)),
+        'special-purpose models must not enter the universal generateContent fallback chain');
       // Pro is gated on a PROVEN entitlement, not permanently banned — an
       // unentitled credential 429s ("limit: 0") on every Pro call, so it must
       // stay out of the ungated chain every caller relies on by default.
@@ -826,169 +828,81 @@ const tests = [
       assert(!GEMINI_MODEL_FALLBACKS.some(model => /\bpro\b/i.test(model)),
         'entitlement-gated Pro models must stay out of the ungated fallback chain until a probe proves the credential can call them');
 
-      assert(getGeminiDefaultThinkingConfig('gemini-2.5-flash').thinkingBudget === 0,
-        '2.5 Flash disables thinking for short structured workflows');
-      assert(getGeminiDefaultThinkingConfig('gemini-3.6-flash').thinkingLevel === 'minimal',
-        'the current Flash generation (3.6) uses the thinkingLevel control, not the retired thinkingBudget one');
-      assert(getGeminiDefaultThinkingConfig('gemini-3.5-flash-lite').thinkingLevel === 'minimal',
-        'the current Lite generation (3.5) uses the thinkingLevel control too');
+      for (const model of GEMINI_ALL_MODEL_IDS) {
+        const thinking = getGeminiDefaultThinkingConfig(model);
+        if (/^gemma-/i.test(model)) {
+          assert(thinking.thinkingLevel === 'minimal', `${model} keeps minimal thinking for its TPM-limited rescue role`);
+        } else {
+          assert(thinking.thinkingLevel === 'high', `${model} uses high thinking`);
+        }
+      }
+      assert(getGeminiDefaultThinkingConfig('gemini-3.99-future').thinkingLevel === 'high',
+        'an unlisted Gemini fallback retains high thinking');
+      assert(GEMINI_MAX_OUTPUT_TOKENS === 16384, 'high thinking has the shared 16,384-token output floor');
 
-      const preferredFlash = orderGeminiModels('gemini-3.6-flash');
-      assert(preferredFlash[0] === 'gemini-3.6-flash' && preferredFlash[1] === 'gemini-3.5-flash',
-        'quality tasks start with the current Flash generation, not a stale/no-quota model');
+      const preferredFlash = orderGeminiModels('gemini-3.7-flash');
+      assert(preferredFlash[0] === 'gemini-3.7-flash' && preferredFlash[1] === 'gemini-3.6-flash',
+        'quality tasks start with the current Flash generation and retain 3.6 as their immediate fallback');
       const preferredLite = orderGeminiModels('gemini-3.5-flash-lite');
-      assert(preferredLite[0] === 'gemini-3.5-flash-lite' && preferredLite[1] === 'gemini-3.1-flash-lite',
-        'lightweight tasks exhaust Lite models before stronger/costlier fallbacks');
-      assert(preferredLite.includes('gemini-3.6-flash') && !preferredLite.some(model => /\bpro\b/i.test(model)),
-        'lightweight tasks include Flash fallback but never Pro (ungated by default)');
+      assert(preferredLite[0] === 'gemini-3.7-flash' && preferredLite[1] === 'gemini-3.6-flash',
+        'the portable cascade stays global rather than varying per task preference');
       const now = Date.now();
-      const deferred = orderGeminiModels('gemini-3.6-flash', new Map([['gemini-3.6-flash', now + 1000]]), now);
-      assert(deferred[0] === 'gemini-3.5-flash' && deferred.at(-1) === 'gemini-3.6-flash',
+      const deferred = orderGeminiModels('gemini-3.7-flash', new Map([['gemini-3.7-flash', now + 1000]]), now);
+      assert(deferred[0] === 'gemini-3.6-flash' && deferred.at(-1) === 'gemini-3.7-flash',
         'known-suppressed preferred model moves to the tail without being removed');
       return { models: GEMINI_MODEL_FALLBACKS.length };
     },
   },
   {
-    name: 'Antigravity API: separate managed-agent bucket stays a guarded final raw fallback',
-    run: async () => {
-      const textParts = [{ text: 'Write a concise summary.' }];
-      const imageParts = [
-        ...textParts,
-        { inlineData: { mimeType: 'image/jpeg', data: 'aW1hZ2U=' } },
-      ];
-      assert(antigravityPartsSupported(textParts), 'plain text is supported');
-      assert(antigravityPartsSupported(imageParts), 'inline images are supported');
-      assert(!antigravityPartsSupported([{ inlineData: { mimeType: 'application/pdf', data: 'cGRm' } }]),
-        'documents stay out of the preview agent fallback');
-      assert(canUseAntigravityFallback(textParts, 'key', { responseMimeType: 'text/plain' }),
-        'AI Studio raw-text calls are eligible');
-      assert(!canUseAntigravityFallback(textParts, '', { responseMimeType: 'text/plain' }),
-        'Vertex/no-key calls do not pretend the Gemini API agent endpoint is available');
-      assert(!canUseAntigravityFallback(textParts, 'key', { responseMimeType: 'application/json' }),
-        'JSON generation stays on transports that support structured output');
-      assert(!canUseAntigravityFallback(textParts, 'key', { responseMimeType: 'text/plain', responseSchema: { type: 'object' } }),
-        'a response schema always excludes the agent fallback');
-
-      const request = buildAntigravityRequest(textParts, 'gemini-3.6-flash', {
-        maxOutputTokens: 2_000,
-        grounding: false,
-      });
-      assert(request.agent === ANTIGRAVITY_AGENT_ID, 'request uses the documented managed-agent id');
-      assert(request.environment === 'remote', 'request provisions the documented remote agent environment');
-      assert(request.store === false && request.background === false,
-        'stateless fallback does not retain prompts/responses or leave background work running');
-      assert(request.agent_config.model === 'gemini-3.6-flash', 'quality work keeps the current Flash backing model');
-      assert(request.agent_config.max_total_tokens >= 8_192 && request.agent_config.max_total_tokens <= 90_000,
-        'agent uses a bounded total-token budget, not unsupported max_output_tokens');
-      assert(!('max_output_tokens' in request.agent_config), 'unsupported generation option never leaks into agent_config');
-      assert(Array.isArray(request.tools) && request.tools.length === 0,
-        'ordinary fallback disables autonomous tools');
-      const grounded = buildAntigravityRequest(textParts, 'gemini-3.5-flash-lite', { grounding: true });
-      assert(grounded.agent_config.model === 'gemini-3.5-flash-lite', 'light work maps to the supported Lite backing model');
-      assert(grounded.tools.map((tool) => tool.type).join(',') === 'google_search,url_context',
-        'grounded raw research opts into web-read tools only');
-
-      const originalFetch = globalThis.fetch;
-      let observed = null;
-      globalThis.fetch = async (url, init) => {
-        observed = { url, init, body: JSON.parse(init.body) };
-        return new Response(JSON.stringify({
-          status: 'completed',
-          model: 'gemini-3.6-flash',
-          steps: [{
-            type: 'model_output',
-            status: 'done',
-            content: [{ type: 'text', text: 'fallback ' }, { type: 'text', text: 'result' }],
-          }],
-          usage: { total_output_tokens: 42 },
-        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-      };
-      try {
-        const result = await callAntigravityAgent(textParts, 'test-key', 'gemini-3.6-flash', {
-          responseMimeType: 'text/plain',
-        });
-        assert(result.text === 'fallback result' && result.usage.total_output_tokens === 42,
-          'completed raw REST interaction joins model-output text and returns usage');
-        assert(observed.url.endsWith('/v1beta/interactions'), 'uses the official Interactions API endpoint');
-        assert(observed.init.headers['x-goog-api-key'] === 'test-key', 'authenticates with the AI Studio key header');
-        assert(!observed.url.includes('test-key'), 'API key is never placed in the Interactions URL');
-      } finally {
-        globalThis.fetch = originalFetch;
-      }
-      assert(extractAntigravityOutputText({
-        steps: [
-          { type: 'model_output', content: [{ type: 'text', text: 'old' }] },
-          { type: 'model_output', content: [{ type: 'text', text: 'latest' }] },
-        ],
-      }) === 'latest', 'only the last model-output step is the current interaction answer');
-      assert(extractAntigravityOutputText({ status: 'completed', steps: [] }) === '',
-        'a completed REST interaction without a model-output step cannot masquerade as a result');
-      return { ok: true };
-    },
-  },
-  {
-    name: 'Gemini cascade: direct-model quota exhaustion reaches Antigravity exactly as the final transport',
+    name: 'Gemini cascade: quota exhaustion stops after direct structured-capable models',
     run: async () => {
       const originalFetch = globalThis.fetch;
       let directCalls = 0;
-      let agentCalls = 0;
-      globalThis.fetch = async (url, init) => {
+      let interactionsCalls = 0;
+      globalThis.fetch = async (url) => {
         const target = String(url);
         if (target.endsWith('/v1beta/interactions')) {
-          agentCalls++;
-          return new Response(JSON.stringify({
-            status: 'completed',
-            model: 'gemini-3.6-flash',
-            steps: [{ type: 'model_output', content: [{ type: 'text', text: 'managed capacity' }] }],
-            usage: { total_output_tokens: 2 },
-          }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+          interactionsCalls++;
+          throw new Error('Antigravity must not be used by the Gemini cascade.');
         }
         if (target.includes(':generateContent')) {
           directCalls++;
           return new Response(JSON.stringify({
-            error: {
-              code: 429,
-              message: 'Quota exceeded for generate_requests_per_model_per_day, limit: 20',
-            },
+            error: { code: 429, message: 'Quota exceeded for generate_requests_per_model_per_day, limit: 20' },
           }), { status: 429, headers: { 'Content-Type': 'application/json' } });
         }
         throw new Error(`Unexpected Gemini cascade test URL: ${target}`);
       };
       try {
-        const meta = {};
-        const text = await callGeminiTextRaw(
-          'Use the separate managed-agent capacity.',
-          'cascade-antigravity-test-key',
-          'gemini-3.6-flash',
-          null,
-          { meta, maxOutputTokens: 128 },
-        );
-        assert(text === 'managed capacity', 'managed-agent text is returned after direct quota exhaustion');
+        let failure = null;
+        try {
+          await callGeminiTextRaw('Keep structured-output guarantees.', 'cascade-direct-only-test-key', 'gemini-3.7-flash', null, { maxOutputTokens: 128 });
+        } catch (err) {
+          failure = err;
+        }
+        assert(/All Gemini models failed/.test(failure?.message || ''),
+          'exhausted direct models surface their aggregate failure instead of switching transports');
         assert(directCalls >= GEMINI_MODEL_FALLBACKS.length,
-          'every eligible direct model is attempted before the managed agent');
-        assert(agentCalls === 1 && meta.model === ANTIGRAVITY_AGENT_ID && meta.agentModel === 'gemini-3.6-flash',
-          'the cascade makes one final Interactions call and records both the agent and its backing model');
+          'every eligible direct Gemini model is tried before the aggregate failure');
+        assert(interactionsCalls === 0,
+          'the Gemini cascade never calls the schema-incompatible Interactions/Antigravity endpoint');
       } finally {
         await settleEntitlementProbes();
         globalThis.fetch = originalFetch;
       }
-      return { directCalls, agentCalls };
+      return { directCalls, interactionsCalls };
     },
   },
   {
     name: 'Gemini registry: lifecycle and live-failure warnings stay distinct',
     run: () => {
-      const beforeShutdown = Date.parse('2026-06-13T00:00:00Z');
-      const afterShutdown = Date.parse('2026-10-17T00:00:00Z');
-      const scheduled = getGeminiLifecycleWarning('gemini-2.5-flash', beforeShutdown);
-      // Replacement bumped from gemini-3.5-flash to gemini-3.6-flash — the
-      // registry's replacement field, not a hand-copied literal, is what this
-      // guards, so the NEXT bump only needs the registry edited, not this test.
-      assert(/October 16, 2026/.test(scheduled) && /gemini-3.6-flash/.test(scheduled),
-        `2.5 Flash warning includes shutdown and replacement -> ${scheduled}`);
-      assert(/may no longer be reachable/.test(getGeminiLifecycleWarning('gemini-2.5-flash', afterShutdown)),
-        'a passed shutdown date warns that the endpoint may be unreachable');
-      assert(getGeminiLifecycleWarning('gemini-3.6-flash', beforeShutdown) === null,
+      const now = Date.parse('2026-08-14T00:00:00Z');
+      assert(getGeminiLifecycleWarning('gemini-3.1-flash-lite', now) === null,
+        'the active Lite endpoint has no invented shutdown warning');
+      assert(getGeminiLifecycleWarning('gemini-flash-latest', now) === null
+        && getGeminiLifecycleWarning('gemini-flash-lite-latest', now) === null,
+      'upgrade aliases carry no fabricated lifecycle warning');
+      assert(getGeminiLifecycleWarning('gemini-3.7-flash', now) === null,
         'models without an announced shutdown do not get fabricated lifecycle warnings');
 
       assert(classifyGeminiFailure(404, 'model not found') === 'unavailable', '404 model endpoint is unavailable');
@@ -1017,6 +931,8 @@ const tests = [
       assert(classifyGeminiFailure(null, 'invalid api key') === 'auth', 'a message-only bad-key failure is auth');
       assert(classifyGeminiFailure(503, 'overloaded') === 'server', 'provider overload is server failure');
       assert(classifyGeminiFailure(null, 'AI response was truncated') === 'truncation', 'output-cap failure is truncation');
+      assert(classifyGeminiFailure(400, 'invalid thinkingConfig.thinkingLevel value') === 'thinking-config',
+        'a per-model thinking configuration rejection is suppressed and falls through');
       assert(isGeminiProviderAvailable([{ ok: false }, { ok: true }]), 'one working model makes Gemini usable');
       assert(!isGeminiProviderAvailable([{ ok: false }, { ok: false }]), 'no working model makes Gemini unavailable');
 
@@ -1038,38 +954,40 @@ const tests = [
     },
   },
   {
-    name: 'Gemini registry: capability ladder walks pro -> flash -> lite, gated on opts.entitledTiers',
+    name: 'Gemini registry: shared Flash -> Pro -> aliases -> Lite -> Gemma cascade is capability-gated',
     run: () => {
-      assert(GEMINI_TIER_LADDER.join(',') === 'pro,flash,lite', 'the capability ladder is most-to-least capable, unconditionally');
+      assert(GEMINI_TIER_LADDER.join(',') === 'flash,pro,flash-alias,lite,lite-alias,gemma', 'the portable cascade order is stable');
       assert(GEMINI_ALL_MODEL_IDS.includes('gemini-3.1-pro-preview'), 'GEMINI_ALL_MODEL_IDS includes gated ids too (metadata lookups need Pro\'s token window)');
-      assert(geminiModelsInTier('pro').join(',') === 'gemini-3.1-pro-preview', 'pro tier holds exactly the one gated model');
-      assert(geminiModelsInTier('flash').length === 4 && geminiModelsInTier('lite').length === 3,
-        'flash/lite tier membership matches the registry (4 flash-generation ids, 3 lite-generation ids)');
+      assert(geminiModelsInTier('pro').length === 3, 'the source configuration contributes all three gated Pro endpoints');
+      assert(geminiModelsInTier('flash').length === 4 && geminiModelsInTier('lite').length === 2,
+        'pinned Flash/Lite endpoints are kept ahead of their aliases');
 
       const now = Date.now();
       // Default (no entitledTiers) — Pro must NEVER appear. An unentitled Pro
       // 429s ("limit: 0") on every single call, so silently trying it would
       // burn a guaranteed-wasted round-trip on every LLM call forever.
-      const ungated = orderGeminiModels('gemini-3.6-flash', new Map(), now);
+      const ungated = orderGeminiModels('gemini-3.7-flash', new Map(), now);
       assert(!ungated.includes('gemini-3.1-pro-preview'), 'no entitledTiers -> Pro never enters the chain');
 
-      // Entitled: Pro leads a QUALITY task's chain ahead of even the task's
-      // OWN preferred model — "most advanced to least", per the module doc.
-      const entitledSet = orderGeminiModels('gemini-3.6-flash', new Map(), now, { entitledTiers: new Set(['pro']) });
-      assert(entitledSet[0] === 'gemini-3.1-pro-preview', `entitled Pro heads a quality-task chain (got ${entitledSet[0]})`);
-      assert(entitledSet.indexOf('gemini-3.1-pro-preview') < entitledSet.indexOf('gemini-3.6-flash'),
-        'entitled Pro is ordered strictly ahead of the preferred Flash model, not merely present somewhere');
+      // Entitled: Pro joins after the Flash pool, matching the portable source
+      // ordering and avoiding an otherwise wasted free-tier hop.
+      const entitledSet = orderGeminiModels('gemini-3.7-flash', new Map(), now, { entitledTiers: new Set(['pro']) });
+      assert(entitledSet[0] === 'gemini-3.7-flash', `Flash heads the shared chain (got ${entitledSet[0]})`);
+      assert(entitledSet.indexOf('gemini-3.1-pro-preview') > entitledSet.indexOf('gemini-3-flash-preview'),
+        'entitled Pro follows the pinned Flash models');
 
       // opts.entitledTiers is documented as Set|Array — both must behave identically.
-      const entitledArray = orderGeminiModels('gemini-3.6-flash', new Map(), now, { entitledTiers: ['pro'] });
-      assert(entitledArray[0] === 'gemini-3.1-pro-preview', 'entitledTiers accepts a plain Array, not only a Set');
+      const entitledArray = orderGeminiModels('gemini-3.7-flash', new Map(), now, { entitledTiers: ['pro'] });
+      assert(entitledArray.includes('gemini-3.1-pro-preview'), 'entitledTiers accepts a plain Array, not only a Set');
 
-      // Lite-preferred (cost-conscious) tasks deliberately never climb to Pro,
-      // even when the credential IS entitled — the task author chose the cheap
-      // tier on purpose, and entitlement must not silently override that intent.
+      // The source cascade is task-independent once a model is entitled.
       const litePreferredEntitled = orderGeminiModels('gemini-3.5-flash-lite', new Map(), now, { entitledTiers: new Set(['pro']) });
-      assert(!litePreferredEntitled.includes('gemini-3.1-pro-preview'),
-        'a Lite-preferred task stays Pro-free even when the credential is entitled (cost intent preserved)');
+      assert(litePreferredEntitled.includes('gemini-3.1-pro-preview'),
+        'a Lite-preferred task receives every entitled independent quota pool too');
+
+      const structured = orderGeminiModels('gemini-3.7-flash', new Map(), now, { responseSchema: true });
+      assert(!structured.some((id) => /^gemma-/i.test(id)),
+        'Gemma is excluded from schema-constrained workflows');
 
       // A stale/removed id lingering in TASK_MODELS must be DROPPED, not
       // hoisted to the front as a guaranteed-404 first attempt.
@@ -1078,7 +996,7 @@ const tests = [
       assert(retired.length > 0, 'the chain is still non-empty after dropping an unrecognized preferred model');
 
       // The per-tier hoist-to-front logic must never emit a duplicate id.
-      for (const chain of [ungated, entitledSet, entitledArray, litePreferredEntitled, retired]) {
+      for (const chain of [ungated, entitledSet, entitledArray, litePreferredEntitled, structured, retired]) {
         assert(new Set(chain).size === chain.length, `orderGeminiModels chain has no duplicate ids (got ${chain.join(',')})`);
       }
       return { ok: true };
@@ -1177,11 +1095,28 @@ const tests = [
         assert(providerForTask(task, geminiSettings) === 'gemini', `'${task}' follows the Gemini Settings pick (no more Claude pin)`);
         assert(providerForTask(task, claudeSettings) === 'claude', `'${task}' follows the Claude Settings pick`);
       }
+      const geminiQualityTasks = [
+        'vision-product-analysis', 'price-synthesis', 'bundle-price-synthesis',
+        'resume-parse', 'career-file-extract', 'job-query-generation',
+        'job-scoring', 'job-bucketing', 'company-research',
+        'application-resume', 'application-cover-letter',
+        'career-achievement-mining', 'default',
+      ];
+      for (const task of geminiQualityTasks) {
+        assert(modelForTask(task, geminiSettings) === 'gemini-3.7-flash',
+          `'${task}' uses Gemini 3.7 Flash as its quality-tier primary`);
+      }
+      for (const task of ['platform-fit-assessment', 'page-status-classify', 'marketplace-hub-scan', 'text-polish']) {
+        assert(modelForTask(task, geminiSettings) === 'gemini-3.5-flash-lite',
+          `'${task}' remains on the deliberate lightweight Gemini tier`);
+      }
+      assert(modelForTask('career-achievement-refute', geminiSettings) === 'gemini-3.5-flash',
+        'the Gemini achievement refuter remains independent from the 3.7 miner');
       // Callers that pass an explicit malformed/missing settings snapshot must
       // fail safely to the default provider instead of crashing on
       // `settings.provider` while handling a real task.
       assert(providerForTask('application-resume', null) === 'gemini', 'an explicit null settings snapshot safely falls back to Gemini');
-      assert(modelForTask('application-resume', null) === 'gemini-3.6-flash', 'model routing remains usable with an explicit null settings snapshot');
+      assert(modelForTask('application-resume', null) === 'gemini-3.7-flash', 'model routing remains usable with an explicit null settings snapshot');
       return { ok: true };
     },
   },
@@ -1488,6 +1423,8 @@ const tests = [
       assert(contextWindowForModel(MODEL_FLOOR.SONNET) === 1000000, 'Sonnet floor window should be 1M');
       assert(contextWindowForModel(MODEL_FLOOR.OPUS) === 1000000, 'Opus floor window should be 1M');
       assert(contextWindowForModel(MODEL_FLOOR.HAIKU) === 200000, 'Haiku floor window should be 200K');
+      assert(contextWindowForModel('gemini-3.7-flash') === 1048576, 'Gemini 3.7 Flash window should be 1,048,576');
+      assert(maxOutputForModel('gemini-3.7-flash') === 65536, 'Gemini 3.7 Flash max output should be 65,536');
       assert(contextWindowForModel('gemini-3.5-flash') === 1048576, 'Gemini 3.5 flash window should be 1,048,576');
       assert(contextWindowForModel('gemini-3-flash-preview') === 1048576, 'Gemini 3 Flash Preview window should be 1,048,576');
       assert(maxOutputForModel(MODEL_FLOOR.OPUS) === 128000, 'Opus floor max output should be 128K');
@@ -1687,6 +1624,51 @@ const tests = [
       const noBaseSalaryHtml = mk({ '@type': 'JobPosting', description: 'JD' });
       assert(formatDiceBaseSalary(extractJobPostingBaseSalary(noBaseSalaryHtml)) === '',
         'Dice salary upgrade: absent baseSalary in JSON-LD → no upgrade, salary text is left untouched by the caller');
+      return { ok: true };
+    },
+  },
+  {
+    name: "Dice salary cadence recovery: extractDiceSalaryBadge reads the detail page's own badge",
+    run: () => {
+      // Checked live against 9 real Dice job-detail pages: baseSalary in the
+      // JSON-LD never carries unitText (see the JSON-LD test above — that
+      // path is schema.org-correct but dead for Dice in practice). The page
+      // itself renders the real cadence as a short badge right next to its
+      // <h1> title, e.g. "$16 - $16/hr" — that's what actually recovers
+      // Dice salaries. The same page also lists OTHER jobs' salaries much
+      // further down (a "Related jobs" rail, worded "$X.XX - $Y.YY per
+      // hour"), which must never be attributed to this job.
+      const pad = (n) => 'x'.repeat(n);
+      const withBadge = (salaryText, gap = 1400) =>
+        `<html><body><h1 class="job-title">Customer Service Rep I</h1>${pad(gap)}<div class="SeuiInfoBadge"><div>${salaryText}</div></div>${pad(30000)}<div>USD 19.81 - 28.30 per hour</div></body></html>`;
+      assert(extractDiceSalaryBadge(withBadge('$16 - $16/hr')) === '$16 - $16/hr',
+        'reads the ranged $X - $Y/hr badge next to the title');
+      assert(extractDiceSalaryBadge(withBadge('$24/hr')) === '$24/hr',
+        'reads a single-value $X/hr badge');
+      assert(parseSalaryToNumeric(extractDiceSalaryBadge(withBadge('$16 - $16/hr'))) === 16 * 40 * 52,
+        'the recovered badge text annualizes through the shared parser (low end × 2080)');
+
+      // The unrelated "Related jobs" salary sits far past the search window —
+      // must never be picked up when THIS job has no badge of its own.
+      const noBadgeButLaterJob = `<html><body><h1>Front Desk Receptionist</h1>${pad(500)}<div>Depends on Experience</div>${pad(30000)}<div>USD 19.81 - 28.30 per hour</div></body></html>`;
+      assert(extractDiceSalaryBadge(noBadgeButLaterJob) === '',
+        "a later/unrelated job's salary far down the page is never attributed to this job");
+
+      assert(extractDiceSalaryBadge('<html><body>no h1 here</body></html>') === '', 'no <h1> on the page → empty, no throw');
+      assert(extractDiceSalaryBadge('') === '', 'empty input → empty, no throw');
+      assert(extractDiceSalaryBadge(null) === '', 'null input → empty, no throw');
+
+      // enrichDiceDescriptions' actual fallback order: try the JSON-LD
+      // unitText path first, then the badge — mirroring Dice's real shape,
+      // where baseSalary has real min/maxValue but no unitText at all.
+      const diceRealShape = `<html><body><h1>Patient Account Representative</h1>${pad(1200)}<div>$21 - $24/hr</div></body>` +
+        `<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting', baseSalary: { '@type': 'MonetaryAmount', currency: 'USD', minValue: 21, maxValue: 24 } })}</script></html>`;
+      const jsonLdFirst = formatDiceBaseSalary(extractJobPostingBaseSalary(diceRealShape));
+      assert(jsonLdFirst === '', 'Dice-shaped baseSalary (real min/maxValue, no unitText) still yields nothing from the JSON-LD path alone');
+      const fallback = jsonLdFirst || extractDiceSalaryBadge(diceRealShape);
+      assert(fallback === '$21 - $24/hr', 'falls back to the page badge when JSON-LD has no cadence, matching real Dice pages');
+      assert(parseSalaryToNumeric(fallback) === 21 * 40 * 52,
+        'the fallback-recovered text annualizes end-to-end instead of staying 0');
       return { ok: true };
     },
   },
@@ -3113,6 +3095,14 @@ const tests = [
         'Job board relevance filtering: back-office support is an adjacent administrative-assistant role',
       );
       assert(
+        jobRelevanceMatch('Delivery Helper - CDL Trainee', 'Route Delivery Assistant', new Set()),
+        'Job board relevance filtering: delivery helper is an adjacent delivery-assistant role',
+      );
+      assert(
+        !jobRelevanceMatch('Mover/Helper', 'Route Delivery Assistant', new Set()),
+        'Job board relevance filtering: helper alone cannot satisfy a multi-concept delivery-assistant query',
+      );
+      assert(
         !jobRelevanceMatch('Part-Time Brand & Outreach Assistant - B2B SaaS VC', 'Administrative Assistant', new Set()),
         'Job board relevance filtering: an assistant title without an administrative concept stays rejected',
       );
@@ -3120,6 +3110,42 @@ const tests = [
         !jobRelevanceMatch('Area Vice President - Financial Services', 'Customer Service Coordinator', new Set()),
         'Job board relevance filtering: financial-services executive title stays rejected',
       );
+      for (const unrelated of ['Maintenance Supervisor', 'Production Supervisor', 'Mechanic Supervisor', 'Shift Supervisor']) {
+        assert(!jobRelevanceMatch(unrelated, 'Housekeeping Supervisor', new Set())
+          && !jobRelevanceMatch(unrelated, 'Lead Room Attendant', new Set()),
+        `Dice relevance regression: ${unrelated} must not enter housekeeping scoring`);
+      }
+      assert(jobRelevanceMatch('Housekeeping Supervisor', 'Housekeeping Supervisor', new Set())
+        && jobRelevanceMatch('Lead Room Attendant', 'Lead Room Attendant', new Set()),
+      'Dice relevance regression: exact housekeeping roles remain eligible');
+      const technicalServerTitles = [
+        'Software Engineering Technical Lead, Server Energy Services',
+        'Lead Server Systems Debug Engineer',
+        'Lead SQL Server DBA',
+        'Server Engineer Lead (IBM iSeries)',
+        'Server Engineering Lead',
+        'Server & Storage Engineering Lead, Digital & Technology Services',
+        'Server Engineer Lead (VMWare)',
+      ];
+      assert(technicalServerTitles.every(title => !jobRelevanceMatch(title, 'Lead Server', new Set())),
+        'Dice relevance regression: a hospitality Lead Server query must reject technical server roles');
+      assert(jobRelevanceMatch('Lead Server/Shift Manager', 'Lead Server', new Set())
+        && jobRelevanceMatch('Server - Senior Living', 'Lead Server', new Set()),
+      'Dice relevance regression: hospitality server roles remain eligible');
+      assert(jobRelevanceMatch('Lead SQL Server DBA', 'SQL Server DBA', new Set()),
+        'technical server searches remain eligible when their query carries technical context');
+      const offTargetProductionTitles = [
+        'Associate Production SQL Server DBA with Secret Clearance',
+        'Engineer I - Production Engineering (Assembly)',
+        'Associate Production Scientist - 12 Hour Night Shift',
+      ];
+      assert(offTargetProductionTitles.every(title => !jobRelevanceMatch(title, 'Production Associate', new Set())),
+        'Dice relevance regression: a production-associate query must reject technical production titles');
+      assert(jobRelevanceMatch('Production Machine Operator', 'Production Associate', new Set())
+        && jobRelevanceMatch('Production Assembler', 'Production Associate', new Set()),
+      'Dice relevance regression: genuine factory-production roles remain eligible');
+      assert(jobRelevanceMatch('Production Engineer', 'Production Engineer', new Set()),
+        'technical production searches remain eligible when their query carries technical context');
       const remoteOkJunk = [
         'Coffee Roaster Campos Coffee', 'Ganger', 'Artificial Intelligence Specialist',
         'Loss Prevention Specialist', 'Maintenance Technician', 'barber',
@@ -3153,7 +3179,72 @@ const tests = [
       const usaJobsRelevant = filterUSAJobsByTitleRelevance(usaJobsRows, 'Shipping and Receiving Assistant');
       assert(usaJobsRelevant.length === 1 && usaJobsRelevant[0].title === 'Shipping and Receiving Assistant',
         'USAJobs: broad Keyword matches are narrowed to position-title relevance before they enter the cascade');
-      return { geoTerms: [...geoTerms].sort(), fallback: true };
+      const propertyManagementRows = [
+        { title: 'Assistant Property Manager' },
+        { title: 'Housing Management Assistant' },
+        { title: 'TRANSPORTATION ASSISTANT (PERSONAL PROPERTY)' },
+      ];
+      const propertyManagementRelevant = filterUSAJobsByTitleRelevance(propertyManagementRows, 'Property Management Assistant');
+      assert(propertyManagementRelevant.map(row => row.title).join('|') === 'Assistant Property Manager|Housing Management Assistant',
+        'USAJobs: adjacent domain-role evidence keeps genuine property/housing-management variants but rejects disconnected “personal property” + “assistant” terms');
+      // A run rejected 53 of 58 USAJobs rows and the report showed only that count,
+      // so there was no way to tell a healthy gate from one starving the source.
+      // The rejected TITLES are the only signal, and they die with the fetcher —
+      // so sample them there. Mirrors fetchUSAJobs' object-identity diff exactly;
+      // URL membership would misclassify missing or duplicate URLs.
+      const sampleRows = [
+        { title: 'Patient Representative', url: 'u1' },
+        { title: 'Supervisory Wildlife Biologist', url: 'u2' },
+        { title: 'Motor Vehicle Operator', url: 'u3' },
+      ];
+      const sampleKept = filterUSAJobsByTitleRelevance(sampleRows, 'Patient Services Representative');
+      const keptRows = new Set(sampleKept);
+      const rejectedTitles = sampleRows.filter(j => !keptRows.has(j)).map(j => j.title).slice(0, 8);
+      assert(rejectedTitles.length === 2 && !rejectedTitles.includes('Patient Representative'),
+        `rejected sample carries only the discarded titles, got ${JSON.stringify(rejectedTitles)}`);
+      assert(rejectedTitles.includes('Supervisory Wildlife Biologist'),
+        'an off-target federal title must appear in the rejected sample so an over-strict gate is visible');
+      const urlEdgeRows = [
+        { title: 'Patient Representative', url: '' },
+        { title: 'Wildlife Biologist', url: '' },
+        { title: 'Patient Services Representative', url: 'shared' },
+        { title: 'Motor Vehicle Operator', url: 'shared' },
+      ];
+      const urlEdgeKept = new Set(filterUSAJobsByTitleRelevance(urlEdgeRows, 'Patient Services Representative'));
+      const urlEdgeRejected = urlEdgeRows.filter(j => !urlEdgeKept.has(j)).map(j => j.title);
+      assert(urlEdgeRejected.join('|') === 'Wildlife Biologist|Motor Vehicle Operator',
+        `missing/duplicate URLs cannot corrupt the rejected-title sample, got ${JSON.stringify(urlEdgeRejected)}`);
+      assert(jobRelevanceMatch('Maintenance Tech', 'Maintenance Technician', new Set())
+        && jobRelevanceMatch('Building Maintenance Tech I or II', 'Maintenance Technician', new Set())
+        && jobRelevanceMatch('General Trades Maintenance Worker', 'Maintenance Technician', new Set())
+        && !jobRelevanceMatch('Field Service Technician - Sign On Bonus!', 'Maintenance Technician', new Set()),
+      'maintenance title aliases keep real maintenance roles without admitting unrelated field-service technicians');
+      const finalGateSources = {
+        indeed: { jobs: [], errors: 0, warnings: [] },
+        linkedin: { jobs: [], errors: 0, warnings: [] },
+      };
+      const finalGateJobs = [
+        { source: 'indeed', title: 'Maintenance Tech', url: 'keep-1' },
+        { source: 'indeed', title: 'Field Service Technician - Sign On Bonus!', url: 'drop-1' },
+        { source: 'linkedin', title: 'Building Maintenance Tech I or II', url: 'keep-2' },
+        { source: 'dice', title: 'Lead Server Systems Debug Engineer', url: 'drop-2' },
+      ];
+      finalGateSources.indeed.jobs = finalGateJobs.filter(j => j.source === 'indeed');
+      finalGateSources.linkedin.jobs = finalGateJobs.filter(j => j.source === 'linkedin');
+      finalGateSources.dice = { jobs: finalGateJobs.filter(j => j.source === 'dice'), errors: 0, warnings: [] };
+      const finalAdmitted = applyFinalJobTitleRelevanceGate(
+        finalGateJobs,
+        ['Maintenance Technician', 'Facilities Maintenance Technician', 'Lead Server'],
+        finalGateSources,
+      );
+      assert(finalAdmitted.map(j => j.url).join('|') === 'keep-1|keep-2'
+        && finalGateSources.indeed.jobs.length === 1
+        && finalGateSources.indeed.relevanceDropped === 1
+        && finalGateSources.indeed.relevanceRejected.includes('Field Service Technician - Sign On Bonus!')
+        && finalGateSources.dice.jobs.length === 0
+        && finalGateSources.dice.relevanceRejected.includes('Lead Server Systems Debug Engineer'),
+      'shared final gate removes browser-ranked title leaks and technical-server false positives before history/scoring');
+      return { geoTerms: [...geoTerms].sort(), fallback: true, rejectedTitles };
     },
   },
   {
@@ -3297,6 +3388,10 @@ const tests = [
       ];
       const full = applyBugReportCode(logs, {}, 'FULL');
       assert(full.filteredLogs === logs && full.matchedCodes.includes('FULL'), 'Bug report code filtering: FULL should keep original logs');
+      assert(codeIncludesFull('NOTFULL') === false && codeIncludesFull('FULLISH') === false,
+        'Bug report FULL detection: substrings are not FULL tokens');
+      assert(codeIncludesFull('FULL') === true && codeIncludesFull('FULL+XNODES') === true && codeIncludesFull('ERR, FULL XSESS') === true,
+        'Bug report FULL detection: exact and composed FULL tokens are recognized across supported separators');
       const filtered = applyBugReportCode(logs, {}, 'ERR+QUICK');
       assert(filtered.filteredLogs.length <= logs.length && filtered.matchedCodes.includes('ERR'), 'Bug report code filtering: ERR+QUICK should match ERR');
       const text = applyBugReportCode([...logs, '[TextEdit] input field=hub:primary type=historyUndo len=4 selection=2-2'], {}, 'TEXT');
@@ -3317,6 +3412,14 @@ const tests = [
         'Bug report code filtering: TAXONOMY should retain taxonomy validation diagnostics');
       assert(taxonomy.sectionExclusions.has('nodes') && taxonomy.sectionExclusions.has('nodeInternals'),
         'Bug report code filtering: TAXONOMY should keep the compact pipeline while omitting heavy canvas payloads');
+      const relevance = applyBugReportCode([...logs, '[Dice API] relevance rejected Maintenance Supervisor'], {}, 'RELEVANCE');
+      assert(relevance.filteredLogs.some(line => line.includes('relevance rejected')) && relevance.matchedCodes.includes('RELEVANCE'),
+        'Bug report code filtering: RELEVANCE should retain all-source title-gate diagnostics');
+      const quality = applyBugReportCode([...logs, '[LinkedIn] description short: 98 chars'], {}, 'QUALITY');
+      assert(quality.filteredLogs.some(line => line.includes('description short'))
+        && quality.matchedCodes.includes('QUALITY')
+        && quality.sectionExclusions.has('nodeInternals'),
+      'Bug report code filtering: QUALITY keeps listing-field diagnostics and omits heavy canvas dumps');
       const sell = applyBugReportCode([...logs, '[SellHub][8e27f3ce] Price-drop plan updated: target=$0'], {}, 'SELL');
       assert(sell.filteredLogs.some(line => line.includes('target=$0')) && sell.matchedCodes.includes('SELL'),
         'Bug report code filtering: SELL should retain SellHub price-drop commits');
@@ -3423,6 +3526,28 @@ const tests = [
       assert(phase2.markdown.includes(`retained ${events.length - phase2.trimmedEventCount} of ${events.length} most-recent event line(s)`)
         && phase2.markdown.includes(`${logs.length - phase2.trimmedLogCount} of ${logs.length} most-recent main-process log line(s)`),
       'Clipboard cap: hard-cap banner quantifies retained event and log lines');
+      assert(phase2.markdown.includes('static report content')
+        && phase2.markdown.includes('oldest event history line(s)')
+        && phase2.markdown.includes('oldest main-process log line(s)')
+        && phase2.markdown.includes('Report content after this point was omitted by the clipboard cap')
+        && !phase2.markdown.includes('older timeline entries')
+        && !phase2.markdown.includes('static node/session tail'),
+      'Clipboard cap: hard-cap copy names only the static/event/log content actually omitted');
+
+      // A hard cap can truncate the large static base while preserving EVERY
+      // event. Its banner must not claim that older event/timeline entries were
+      // lost merely because other content was cut (the real FULL-report case).
+      const shortEvents = Array.from({ length: 8 }, (_, i) => `SHORT EVT ${i}`);
+      const longLogs = Array.from({ length: 60 }, (_, i) => `[Main] LONG LOG ${i} ${'detail '.repeat(12)}`);
+      const staticAndLogsOnly = enforceClipboardMarkdownCap(giantBase, shortEvents, longLogs, cap);
+      assert(staticAndLogsOnly.hardTruncated && staticAndLogsOnly.trimmedEventCount === 0
+        && staticAndLogsOnly.trimmedLogCount > 0,
+      'Clipboard cap: fixture hard-truncates static/log content while retaining the full event history');
+      assert(staticAndLogsOnly.markdown.includes(`retained ${shortEvents.length} of ${shortEvents.length} most-recent event line(s)`)
+        && !staticAndLogsOnly.markdown.includes('oldest event history line(s)')
+        && !staticAndLogsOnly.markdown.includes('older timeline entries')
+        && staticAndLogsOnly.markdown.includes('oldest main-process log line(s)'),
+      'Clipboard cap: hard-cap banner does not claim event loss when every event was retained');
       return { phase1Len: phase1.markdown.length, phase2Len: phase2.markdown.length, phase1Trimmed: phase1.trimmedEventCount };
     },
   },
@@ -3488,6 +3613,46 @@ const tests = [
     },
   },
   {
+    name: 'job pipeline report: saved LinkedIn short-description input overrides stale clean telemetry',
+    run: () => {
+      const dir = path.join(os.tmpdir(), 'infinite-canvas-test-stub', 'userData', 'job-search');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'job-search-last-scrape.json'), JSON.stringify({ jobs: [{
+        source: 'linkedin', title: 'Maintenance Technician II', company: 'Acme',
+        url: 'https://linkedin.example/jobs/short', snippet: 'Short listing-card excerpt only. '.repeat(3),
+        salary: '', posted: '2026-08-01',
+      }] }), 'utf8');
+
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        linkedinEnrich: telemetry.linkedinEnrich, linkedinCooldown: telemetry.linkedinCooldown,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'linkedin-short-snapshot', windowId: null,
+        search: { ts: Date.now(), queries: 1, raw: 1, deduped: 1, ageDropped: 0, historyDropped: 0, kept: 1 },
+        linkedinEnrich: [{
+          ts: Date.now(), startedAt: Date.now() - 1000, kind: 'search', browserGen: 1,
+          walled: false, enriched: 1, stillEmpty: 0, noDesc: 0, noDescSoftBlock: 0, noDescGenuine: 0,
+        }],
+        linkedinCooldown: null,
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['linkedin-short-snapshot']), null, null);
+        assert(report.includes('Completion telemetry disagrees with the saved scoring snapshot')
+          && report.includes('Maintenance Technician II')
+          && report.includes('https://linkedin.example/jobs/short')
+          && report.includes('do not treat this as a clean full-description finish'),
+        'saved scoring input is authoritative and the report includes bounded title/URL evidence for the short row');
+        assert(!report.includes('Residual: 0 below enrichment threshold'),
+          'stale process telemetry cannot bless a saved sub-threshold description as complete');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
     name: 'job pipeline report: manually closed Glassdoor Solve retains final page identity',
     run: () => {
       const telemetry = getJobsTelemetry();
@@ -3533,6 +3698,74 @@ const tests = [
     },
   },
   {
+    name: 'job pipeline attribution: board bucketing preserves source hub and direct re-score clears the old board',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        boardNodeId: telemetry.boardNodeId,
+        windowId: telemetry.windowId,
+        search: telemetry.search,
+        resolves: telemetry.resolves,
+        scoring: telemetry.scoring,
+        bucketing: telemetry.bucketing,
+        history: telemetry.history,
+      };
+      Object.assign(telemetry, {
+        nodeId: null,
+        boardNodeId: null,
+        windowId: null,
+        search: {
+          ts: Date.now(), queries: 1, raw: 1, deduped: 1,
+          ageDropped: 0, historyDropped: 0, kept: 1,
+        },
+        resolves: {},
+        scoring: { ts: Date.now(), input: 1, selectedForScoring: 1, cappedForBudget: 0, scored: 1, placeholders: 0, unscored: 0, batches: 1, failedBatches: 0 },
+        bucketing: { ts: Date.now(), input: 1, roleCount: 1, placed: 1, missing: 0, duplicated: 0, bandSummary: [], salaryRangeLabels: [], roleSummary: [], taxonomyAudit: [], error: null },
+        history: null,
+      });
+      try {
+        recordJobsSourceScope('source-jobhub-12345678', 42);
+        recordJobsBoardScope('results-board-87654321', 42);
+
+        assert(telemetry.nodeId === 'source-jobhub-12345678',
+          'bucket scope must not overwrite the originating jobhub id');
+        assert(telemetry.boardNodeId === 'results-board-87654321',
+          'bucket scope records the Job Board separately');
+        let report = buildJobsPipelineSnapshot(
+          new Set(['source-jobhub-12345678', 'results-board-87654321']),
+          42,
+          null,
+        );
+        assert(report.includes('Source hub: `…12345678`'),
+          'report attributes search/scoring to the originating Job Search hub');
+        assert(report.includes('Job Board node: `…87654321`'),
+          'report names the board that performed bucketing separately');
+        assert(!report.includes('Source hub: `…87654321`'),
+          'board node must never be rendered as the source hub');
+
+        // A direct re-score is a new source-owned pipeline even when no fresh
+        // search call precedes it. It must clear the old board attribution so a
+        // previous Combine cannot be presented as part of the new score run.
+        recordJobsSourceScope('direct-rescore-hub-abcdef12', 77);
+        assert(telemetry.nodeId === 'direct-rescore-hub-abcdef12',
+          'direct re-score replaces the source scope with its own jobhub');
+        assert(telemetry.boardNodeId === null,
+          'direct re-score clears stale board attribution');
+        assert(telemetry.bucketing === null,
+          'direct re-score clears the previous board-owned bucketing result');
+        assert(telemetry.windowId === 77,
+          'direct re-score scopes telemetry to its own sender window');
+        report = buildJobsPipelineSnapshot(new Set(['direct-rescore-hub-abcdef12']), 77, null);
+        assert(report.includes('Source hub: `…abcdef12`') && !report.includes('Job Board node:'),
+          'direct re-score report shows only its source hub until a new board combines it');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
     name: 'job pipeline report: distinguishes raw role queries from Google-expanded keywords',
     run: () => {
       const telemetry = getJobsTelemetry();
@@ -3547,7 +3780,8 @@ const tests = [
         windowId: null,
         resolves: {},
         search: {
-          ts: Date.now(), queries: 2, raw: 0, deduped: 0, ageDropped: 0, historyDropped: 0, kept: 0,
+          ts: Date.now(), queries: 2, raw: 3, relevanceDropped: 1, deduped: 2, ageDropped: 0, historyDropped: 0, kept: 2,
+          bySource: { google: { count: 2, providerGathered: 3, relevanceDropped: 1 } },
           location: { rawInput: 'Toronto, ON', canonical: 'Toronto, ON', perSource: { google: 'keyword-only: canonical location appended to the query (no location param available)' } },
           queryStrings: ['Camera Operator', 'Film Editor Toronto'],
           googleQueryStrings: ['Camera Operator Toronto, ON jobs', 'Film Editor Toronto jobs'],
@@ -3557,10 +3791,13 @@ const tests = [
         const report = buildJobsPipelineSnapshot(new Set(['google-query-diagnostics']), null, null);
         assert(report.includes('Raw role queries (shared across sources):') && report.includes('`Camera Operator`'),
           'report labels shared role queries as raw input, not exact per-source request strings');
-        assert(report.includes('Google keyword queries sent (canonical location appended when absent):')
+      assert(report.includes('Google keyword queries sent (canonical location appended when absent):')
           && report.includes('`Camera Operator Toronto, ON jobs`')
           && report.includes('`Film Editor Toronto jobs`'),
         'report renders the actual Google keyword queries, including the deduplicated canonical-location expansion');
+        assert(report.includes('Per source (title-relevant gathered): google=2')
+          && !report.includes('Per source (raw gathered)'),
+        'per-source counts are labeled as post-relevance so they reconcile with the aggregate funnel');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -3593,7 +3830,7 @@ const tests = [
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['remote-relevance-diagnostics']), null, null);
-        assert(report.includes('Remote-feed relevance trace')
+        assert(report.includes('All-source role relevance audit')
           && report.includes('`Customer Service Coordinator` → [customer, service→support]/2 required')
           && report.includes('tags: customer-service, support'),
         'report records exact and synonym title evidence separately from RemoteOK tags');
@@ -3622,14 +3859,27 @@ const tests = [
         resolves: {},
         scoring: null,
         history: {
-          preScoring: { ts: Date.now(), input: 5, written: 5, pruned: 2, skipped: null, error: null },
+          preScoring: {
+            ts: Date.now(), input: 5, written: 4, pruned: 2, skipped: null, error: null,
+            skips: {
+              url: 1, titleCompany: 0, noKey: 0, inBatch: 1, bySource: { google: 1 },
+              collisionSamples: [{
+                key: 'u:https://google.com/search?htidocid=repeat', sameListing: true,
+                first: { source: 'google', title: 'Assistant Property Manager', company: 'Acme', location: 'Florida', url: 'https://google.com/search?htidocid=repeat&query=one' },
+                duplicate: { source: 'google', title: 'Assistant Property Manager', company: 'Acme', location: 'Florida', url: 'https://google.com/search?htidocid=repeat&query=two' },
+              }],
+            },
+          },
           postScoring: { ts: Date.now(), input: 6, written: 1, pruned: 0, skipped: null, error: null },
         },
       });
       try {
         let report = buildJobsPipelineSnapshot(new Set(['history-diagnostics']), null, null);
-        assert(report.includes('Seen-history persistence') && report.includes('Authoritative search write') && report.includes('5 new history row(s), 2 expired row(s) pruned'),
+        assert(report.includes('Seen-history persistence') && report.includes('Authoritative search write') && report.includes('4 new history row(s), 2 expired row(s) pruned'),
           'report renders the authoritative pre-scoring durable-write outcome');
+        assert(report.includes('likely the same listing surfaced twice') && report.includes('htidocid=repeat')
+          && report.includes('kept:') && report.includes('skipped:'),
+        'report exposes collision identity and correctly distinguishes a duplicate query result from a bad history key');
         assert(report.includes('Post-scoring resolve reconciliation') && report.includes('1 new history row(s)'),
           'report renders the awaited late-resolve reconciliation outcome');
 
@@ -3659,14 +3909,61 @@ const tests = [
           roleSummary: [{ name: 'Creative', count: 1, sampleTitles: ['Weekly role'] }],
           taxonomyRepairs: ['canonicalized salary label "$120k process/yr"'],
           taxonomyAudit: [{ index: 0, title: 'Weekly role', source: 'dice', rawSalary: '$1.6K - $2.0K/wk', annualSalary: 83200, likelihood: 'Low fit (0–79%)', salaryRange: '$80k–$120k/yr', role: 'Creative' }],
-          taxonomyAuditOmitted: 0, error: null,
+          taxonomyAuditOmitted: 0, model: 'gemini-2.5-flash',
+          fallback: { preferredModel: 'gemini-3.7-flash', attempts: 1, reason: 'server', counts: { server: 1 } },
+          error: null,
         },
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['taxonomy-audit-diagnostics']), null, null);
         assert(report.includes('Taxonomy validation repaired: canonicalized salary label "$120k process/yr"')
-          && report.includes('"$1.6K - $2.0K/wk" → $83,200/yr → **$80k–$120k/yr**'),
-        'job pipeline report makes raw salary, annualization, deterministic range, and repair evidence visible');
+          && report.includes('"$1.6K - $2.0K/wk" → $83,200/yr → **$80k–$120k/yr**')
+          && report.includes('model: `gemini-2.5-flash` ↪ fell back (server: 1 earlier model(s) failed)'),
+        'job pipeline report makes salary placement, repair evidence, and taxonomy fallback cause visible');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: 'job pipeline report: scoring audit exposes cross-batch calibration drift',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        resolves: telemetry.resolves, scoring: telemetry.scoring, bucketing: telemetry.bucketing,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'scoring-audit-diagnostics', windowId: null, search: null, resolves: {}, bucketing: null,
+        scoring: {
+          ts: Date.now(), input: 2, selectedForScoring: 2, cappedForBudget: 0, scored: 2,
+          placeholders: 0, batches: 2, failedBatches: 0, unscored: 0, models: ['gemini-test'],
+          fallbacks: [{
+            servedModel: 'gemini-2.5-flash', preferredModel: 'gemini-3.7-flash',
+            attempts: 1, reason: 'server', counts: { server: 1 },
+          }],
+          audit: {
+            rows: [
+              { batch: 1, title: 'Bank Equipment Technician', company: 'Cennox', location: 'Madison, AL', source: 'dice', url: 'https://jobs/1', score: 55, direction: 'Field Services', reason: 'Transferable background.', descriptionFingerprint: 'deadbeef' },
+              { batch: 2, title: 'Bank Equipment Technician', company: 'Cennox', location: 'Phoenix, AZ', source: 'dice', url: 'https://jobs/2', score: 35, direction: 'Field Operations', reason: 'Large fit gaps.', descriptionFingerprint: 'deadbeef' },
+            ],
+            omitted: 0,
+            anomalies: [{ delta: 20, first: { index: 0, batch: 1, score: 55 }, second: { index: 1, batch: 2, score: 35 }, title: 'Bank Equipment Technician', company: 'Cennox', descriptionFingerprint: 'deadbeef' }],
+          },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['scoring-audit-diagnostics']), null, null);
+        assert(report.includes('20-point cross-batch drift') && report.includes('Madison, AL')
+          && report.includes('Phoenix, AZ') && report.includes('https://jobs/1')
+          && report.includes('Transferable background.'),
+        'FULL/JOBS scoring section contains enough bounded evidence to diagnose score drift');
+        assert(report.includes('Model fallback routes')
+          && report.includes('preferred `gemini-3.7-flash`')
+          && report.includes('served `gemini-2.5-flash`')
+          && report.includes('server: 1 earlier model(s) failed'),
+        'FULL/JOBS scoring section preserves fallback cause after the main-process log rolls over');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -3717,7 +4014,11 @@ const tests = [
         title: 'Engineer', company: 'Acme', location: 'Remote', source: 'dice-regression-test',
         salary: '38000 - 40000', posted: '2026-08-01', url: 'https://example.com/dice/1', snippet: longSnippet,
       }];
-      fs.writeFileSync(filePath, JSON.stringify({ jobs: [...usajobsJobs, ...diceJobs] }), 'utf8');
+      const indeedJobs = [{
+        title: 'Locker Room Attendant', company: 'Acme', location: 'Austin, TX', source: 'indeed-regression-test',
+        salary: '$18.75 - $19.70 a year', posted: '2026-08-01', url: 'https://example.com/indeed/1', snippet: longSnippet,
+      }];
+      fs.writeFileSync(filePath, JSON.stringify({ jobs: [...usajobsJobs, ...diceJobs, ...indeedJobs] }), 'utf8');
 
       const telemetry = getJobsTelemetry();
       const saved = {
@@ -3741,10 +4042,13 @@ const tests = [
           'salary coverage line reports the annualizer-measured unparseable count instead of "all monetary ✅"');
         assert(report.includes('salary unparseable: 4/10 (40%)'),
           'field-quality warning reports the annualizer-measured unparseable count/pct, not a looksLikeMoney count');
-        assert(report.includes("4 money-shaped but cadence-lost (our extractor's bug, fixable)"),
-          'field-quality warning labels money-shaped-but-unparseable salaries as our fixable bug, distinct from prose');
+        assert(report.includes('4 money-shaped but cadence missing — extractor could not recover a unit, so these remain Unspecified rather than guessing'),
+          'field-quality warning reports the missing unit without claiming a recoverable source cadence');
         assert(lostCadenceSamples.some(s => report.includes(`"${s}"`)),
           'field-quality warning includes a real offending sample value, as the old garbage warning did');
+        assert(report.includes('1 implausibly tiny explicit annual amount')
+          && report.includes('"$18.75 - $19.70 a year"'),
+        'field-quality warning identifies corrupt tiny annual pay separately from a missing cadence');
 
         // (1) A bare numeric range the real annualizer parses fine must never be
         // flagged, and its source must be reported healthy.
@@ -3824,6 +4128,24 @@ const tests = [
         'sourceJobKey: native jobkey wins over url/composed');
       assert(sourceJobKey({ url: 'https://x/job', title: 't', company: 'co' }) === 'https://x/job',
         'sourceJobKey: url wins when no native id');
+      const googleFirstQuery = {
+        source: 'google', title: 'Assistant Property Manager, Multifamily', company: 'Cushman & Wakefield', location: 'Florida, United States',
+        url: 'https://www.google.com/search?ibp=htl;jobs&q=Leasing+Assistant+United+States+jobs&htidocid=u59K_-BxO-_w8CI0AAAAAA%3D%3D&shmd=first#htiq=Leasing+Assistant+United+States+jobs',
+      };
+      const googleSecondQuery = {
+        ...googleFirstQuery,
+        url: 'https://www.google.com/search?ibp=htl;jobs&q=Property+Management+Assistant+United+States+jobs&htidocid=u59K_-BxO-_w8CI0AAAAAA%3D%3D&shmd=second#htiq=Property+Management+Assistant+United+States+jobs',
+      };
+      const differentGoogleListing = {
+        ...googleFirstQuery,
+        url: 'https://www.google.com/search?ibp=htl;jobs&q=Leasing+Assistant+United+States+jobs&htidocid=DifferentGoogleListingAAAAAA%3D%3D',
+      };
+      assert(sourceJobKey(googleFirstQuery) === sourceJobKey(googleSecondQuery),
+        'sourceJobKey: the same Google htidocid dedupes across distinct query URLs');
+      assert(sourceJobKey(googleFirstQuery) !== sourceJobKey(differentGoogleListing),
+        'sourceJobKey: distinct Google htidocid values remain separate');
+      assert(dedupeJobsByKey([googleFirstQuery, googleSecondQuery, differentGoogleListing], sourceJobKey).length === 2,
+        'sourceJobKey: duplicate Google cards from two queries collapse before scoring/history');
       const sf = { title: 'SWE', company: 'Google', location: 'San Francisco, CA' };
       const nyc = { title: 'SWE', company: 'Google', location: 'New York, NY' };
       assert(sourceJobKey(sf) !== sourceJobKey(nyc),
@@ -3958,6 +4280,31 @@ const tests = [
     },
   },
   {
+    name: 'Job source warning policy: partial ZipRecruiter warning does not wait for Skip',
+    run: () => {
+      const zipPartial = { sourceId: 'ziprecruiter', code: 'description-detail-miss', severity: 'warn' };
+      const zipBlocked = { sourceId: 'ziprecruiter', code: 'cloudflare-hard-block', severity: 'block' };
+      const linkedinLimited = { sourceId: 'linkedin', code: 'linkedin-rate-limited', severity: 'throttle' };
+      const ordinaryThrottle = { sourceId: 'indeed', code: 'temporary-throttle', severity: 'throttle' };
+
+      assert(!isJobSourceWarningGating(zipPartial), 'a partial ZipRecruiter description warning must not delay scoring');
+      assert(jobSourceWarningAction(zipPartial) === 'dismiss', 'a non-gating warning action is Dismiss, not Skip');
+      assert(isJobSourceWarningGating(zipBlocked), 'a hard ZipRecruiter block must pause for Resolve/Skip');
+      assert(jobSourceWarningAction(zipBlocked) === 'skip', 'a gating source action remains Skip');
+      assert(isJobSourceWarningGating(linkedinLimited), 'LinkedIn guest rate-limit remains the explicit throttle exception');
+      assert(!isJobSourceWarningGating(ordinaryThrottle), 'ordinary source throttles must not delay scoring');
+
+      const finalWarnings = filterHandledJobSourceWarnings(
+        [zipBlocked, ordinaryThrottle],
+        new Set(['ziprecruiter']),
+      );
+      assert(finalWarnings.length === 1 && finalWarnings[0].sourceId === 'indeed',
+        'a source skipped during an in-flight search must not be re-blocked by the backend final warning list');
+
+      return { zipAction: jobSourceWarningAction(zipPartial), remaining: finalWarnings.map(w => w.sourceId) };
+    },
+  },
+  {
     name: 'Job card filters',
     run: () => {
       const job = { source: 'indeed', matchScore: 72 };
@@ -3992,6 +4339,8 @@ const tests = [
       // responseSchema → forced submit_response tool, no JSON prefill.
       const p1 = buildAnthropicMessageParams('JOBS', { ...base, responseSchema: schema });
       assert(p1.model === 'claude-sonnet-4-6' && p1.max_tokens === 8000, 'carries model + max_tokens');
+      assert(p1.thinking?.type === 'adaptive', 'modern Claude requests explicitly enable adaptive thinking');
+      assert(p1.output_config?.effort === 'medium', 'modern Claude requests explicitly use medium effort');
       assert(p1.tools?.[0]?.name === 'submit_response' && p1.tools[0].input_schema === schema, 'responseSchema → submit_response tool');
       assert(p1.tool_choice?.type === 'tool' && p1.tool_choice?.name === 'submit_response', 'responseSchema → forced tool_choice');
       assert(p1.messages.length === 1, 'tool-use mode adds no assistant prefill');
@@ -4014,6 +4363,12 @@ const tests = [
       // plain → single user turn, no envelope.
       const p3 = buildAnthropicMessageParams('X', { model: 'm', maxTokens: 100 });
       assert(!p3.tools && !p3.tool_choice && p3.messages.length === 1, 'plain → single user message, no envelope');
+      const haiku = getClaudeDefaultReasoningConfig(MODEL_FLOOR.HAIKU);
+      assert(haiku.thinking?.type === 'enabled' && haiku.thinking.budget_tokens === CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET,
+        'Haiku receives explicit manual thinking at the shared medium-equivalent budget');
+      assert(!haiku.outputConfig, 'Haiku omits unsupported output_config.effort');
+      assert(claudeReasoningMaxTokens(MODEL_FLOOR.HAIKU, 512) === CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET + 1024,
+        'manual-thinking models reserve room for both the medium reasoning budget and a visible answer');
       return { ok: true };
     },
   },
@@ -4141,6 +4496,48 @@ const tests = [
     },
   },
   {
+    name: 'Scoring audit: retains batch evidence and flags identical cross-batch JD drift',
+    run: () => {
+      const jd = 'Perform scheduled cleanings, update signage, inspect electrical components, and maintain automated teller machines. '.repeat(6);
+      const batches = [
+        [{ title: 'Bank Equipment Technician', company: 'Cennox', location: 'Madison, AL', url: 'https://jobs/1', source: 'dice', snippet: jd }],
+        [{ title: 'Bank Equipment Technician', company: 'Cennox', location: 'Phoenix, AZ', url: 'https://jobs/2', source: 'dice', snippet: jd }],
+      ];
+      const scored = [
+        { ...batches[1][0], matchScore: 35, careerDirection: 'Field Operations', reasoning: 'Large fit gaps.' },
+        { ...batches[0][0], matchScore: 55, careerDirection: 'Field Services', reasoning: 'Transferable service background.' },
+      ];
+      const audit = buildScoringAudit(scoringAuditRowsFromBatches(batches, scored));
+      assert(audit.rows.length === 2 && audit.rows[0].batch === 1 && audit.rows[0].score === 55,
+        'audit restores original batch attribution after scored jobs are sorted');
+      assert(audit.anomalies.length === 1 && audit.anomalies[0].delta === 20,
+        `identical cross-batch postings with a 20-point delta are flagged, got ${JSON.stringify(audit.anomalies)}`);
+      assert(audit.rows.every(row => row.url && row.reason && row.descriptionFingerprint),
+        'bounded rows retain the evidence needed to diagnose drift from a report');
+      return { ok: true, anomalies: audit.anomalies.length };
+    },
+  },
+  {
+    name: 'Scoring batches: identical postings stay together for one-pass calibration',
+    run: () => {
+      const jd = 'Maintain automated teller machines, inspect electrical components, update signage, and perform preventative maintenance. '.repeat(5);
+      const jobs = [
+        { title: 'Unique A', company: 'Acme', snippet: 'short a' },
+        { title: 'Bank Equipment Technician', company: 'Cennox', location: 'Madison, AL', snippet: jd, url: 'https://jobs/1' },
+        { title: 'Unique B', company: 'Beta', snippet: 'short b' },
+        { title: 'Unique C', company: 'Gamma', snippet: 'short c' },
+        { title: 'Bank Equipment Technician', company: 'Cennox', location: 'Phoenix, AZ', snippet: jd, url: 'https://jobs/2' },
+      ];
+      const batches = chunkScoringBatches(jobs, 3);
+      const firstBatch = batches.findIndex(batch => batch.some(job => job.url === 'https://jobs/1'));
+      const secondBatch = batches.findIndex(batch => batch.some(job => job.url === 'https://jobs/2'));
+      assert(firstBatch >= 0 && firstBatch === secondBatch,
+        `same title/company/JD postings should share a scoring prompt, got batches ${firstBatch}/${secondBatch}`);
+      assert(batches.every(batch => batch.length <= 3), 'similarity packing still honors the model-aware item cap');
+      return { ok: true, batchCount: batches.length };
+    },
+  },
+  {
     name: 'Job source resolve merge',
     run: () => {
       const existing = [
@@ -4264,7 +4661,7 @@ const tests = [
         matchScore: score, reasoning: 'r', careerDirection: 'x',
         source: 'lever', url, posted: 'today',
       });
-      // idx0 strong+highpay+Brand, idx1 strong+lowpay+Growth, idx2 weak+nopay+Brand
+      // idx0/idx1 excellent+pay, idx2 long-shot+nopay.
       const displayedJobs = [
         { ...mk('Brand Lead', 92, '$150,000 a year', 'https://jobs/0'), originHubId: 'search-A' },
         mk('Growth Mgr', 88, '$70,000 a year', 'https://jobs/1'),
@@ -4296,22 +4693,22 @@ const tests = [
       const salary = byKind('salary');
       const roles = byKind('role');
       assert(cards.length === 3, `hierarchy: expected 3 cards, got ${cards.length}`);
-      // Two bands present (Strong has 2 jobs, Long shot has 1).
+      // Two fixed-rubric bands present (Excellent has 2 jobs, Long shot has 1).
       assert(bands.length === 2, `hierarchy: expected 2 likelihood bands, got ${bands.length}`);
-      const strong = bands.find(b => b.data.label.startsWith('Strong'));
+      const excellent = bands.find(b => b.data.label.startsWith('Excellent'));
       const longshot = bands.find(b => b.data.label.startsWith('Long shot'));
-      assert(strong.data.count === 2 && longshot.data.count === 1, `hierarchy: band counts wrong (${strong.data.count}/${longshot.data.count})`);
+      assert(excellent.data.count === 2 && longshot.data.count === 1, `hierarchy: band counts wrong (${excellent.data.count}/${longshot.data.count})`);
       // Bands are roots (children of hub, not of any group) and ordered best-first.
-      assert(strong.position.y < longshot.position.y, 'hierarchy: Strong band should sit above Long shot');
-      // Strong band → two salary ranges ($100k+ for idx0, $50-100k for idx1).
-      const strongRanges = salary.filter(s => (strong.data.childIds || []).includes(s.id));
-      assert(strongRanges.length === 2, `hierarchy: Strong band should have 2 salary ranges, got ${strongRanges.length}`);
+      assert(excellent.position.y < longshot.position.y, 'hierarchy: Excellent band should sit above Long shot');
+      // Excellent band → two salary ranges ($100k+ for idx0, $50-100k for idx1).
+      const excellentRanges = salary.filter(s => (excellent.data.childIds || []).includes(s.id));
+      assert(excellentRanges.length === 2, `hierarchy: Excellent band should have 2 salary ranges, got ${excellentRanges.length}`);
       // Highest salary range ordered first WITHIN the band — checked via
       // childIds order, since nothing auto-expands at analysis end so the salary
       // nodes (hidden under the collapsed band) have no laid-out position.
-      const hi = strongRanges.find(s => s.data.label === '$100k+/yr');
-      const lo = strongRanges.find(s => s.data.label === '$50k–$100k/yr');
-      assert(strong.data.childIds[0] === hi.id && strong.data.childIds[1] === lo.id, 'hierarchy: higher salary range should be ordered first within the band');
+      const hi = excellentRanges.find(s => s.data.label === '$100k+/yr');
+      const lo = excellentRanges.find(s => s.data.label === '$50k–$100k/yr');
+      assert(excellent.data.childIds[0] === hi.id && excellent.data.childIds[1] === lo.id, 'hierarchy: higher salary range should be ordered first within the band');
       // idx2 (no salary, weak) lands in the Long shot band's Unspecified range.
       const lsRange = salary.find(s => (longshot.data.childIds || []).includes(s.id));
       assert(lsRange.data.label === 'Unspecified', 'hierarchy: no-salary job should land in Unspecified');
@@ -4546,9 +4943,20 @@ const tests = [
         'salary ranges: labels and maxima canonicalize from contiguous thresholds');
       assert(ranges.repairs.some(repair => repair.includes('canonicalized salary label "$120k process/yr"')),
         'salary ranges: malformed model labels are preserved in validation repairs');
+      const lowCatchAllRepair = normalizeRangesWithRepairs([
+        { label: '$120k+/yr', minSalary: 120000, maxSalary: 0 },
+        { label: 'Under $120k/yr', minSalary: 1, maxSalary: 80000 },
+        { label: 'Unspecified', minSalary: 0, maxSalary: 0 },
+      ]);
+      assert(lowCatchAllRepair.repairs.includes('normalized salary upper bound for the low-salary catch-all')
+        && !lowCatchAllRepair.repairs.some(repair => /for \$1$/.test(repair)),
+      'salary ranges: synthetic low-salary catch-all repair is not misreported as a literal $1 salary');
       const bands = normalizeBandsWithRepairs([{ label: 'Strong fit', minScore: 80, maxScore: 99 }]);
-      assert(bands.bands.map(b => `${b.minScore}-${b.maxScore}`).join('|') === '80-100|0-79',
-        'likelihood bands: malformed gaps normalize to contiguous 0-100 coverage');
+      assert(bands.bands.map(b => `${b.label}:${b.minScore}-${b.maxScore}`).join('|')
+        === 'Excellent fit (85–100%):85-100|Good fit (65–84%):65-84|Possible (40–64%):40-64|Long shot (0–39%):0-39',
+      'likelihood bands: model-authored thresholds/labels are replaced by the fixed scoring rubric');
+      assert(bands.repairs.includes('replaced likelihood bands with fixed scoring rubric'),
+        'likelihood bands: replacing legacy/model thresholds is visible in repair telemetry');
       const taxonomy = sanitizeJobTaxonomy({
         likelihoodBands: [{ label: 'Strong', minScore: 80, maxScore: 100 }],
         salaryRanges: [
@@ -4559,6 +4967,8 @@ const tests = [
       }, 2, ['$123K - $130K/yr', '$1.6K - $2.0K/wk']);
       assert(taxonomy.salaryRanges.some(r => r.label === '$80k–$120k/yr'),
         'taxonomy sanitization: adds a low-end range for parseable weekly salary');
+      assert(taxonomy.likelihoodBands.map(b => b.minScore).join(',') === '85,65,40,0',
+        'taxonomy sanitization: likelihood thresholds stay aligned with the scoring rubric');
       assert(taxonomy.roles[0].jobIndices.join(',') === '0', 'taxonomy sanitization: drops duplicate/out-of-range role indexes');
 
       const result = buildJobTreeNodes({
@@ -4568,6 +4978,31 @@ const tests = [
       });
       assert(result.newNodes.some(n => n.data?.kind === 'salary' && n.data.label === '$80k–$120k/yr' && n.data.count === 1),
         'tree placement: decimal weekly salary lands in its annualized range');
+
+      const boundaryScores = [100, 85, 84, 65, 64, 40, 39, 0];
+      const boundaryTree = buildJobTreeNodes({
+        displayedJobs: boundaryScores.map((matchScore, index) => ({
+          title: `Boundary ${matchScore}`, company: 'Acme', location: 'Remote',
+          salary: '', snippet: '', matchScore, source: 'indeed', url: `https://jobs/boundary-${index}`,
+        })),
+        bucketTree: {
+          // Deliberately contradictory legacy/model taxonomy: renderer must
+          // ignore it and use the scorer's fixed boundaries.
+          likelihoodBands: [{ label: 'Everything is good (0–100%)', minScore: 0, maxScore: 100 }],
+          salaryRanges: [{ label: 'Unspecified', minSalary: 0, maxSalary: 0 }],
+          roles: [{ name: 'Boundary roles', jobIndices: boundaryScores.map((_, index) => index) }],
+        },
+        originalPos: { x: 0, y: 0 }, hubId: 'hub-boundaries', baseNodeId: 'job-boundaries',
+      });
+      const boundaryBands = boundaryTree.newNodes
+        .filter(n => n.data?.kind === 'likelihood')
+        .map(n => [n.data.label, n.data.count]);
+      assert(JSON.stringify(boundaryBands) === JSON.stringify([
+        ['Excellent fit (85–100%)', 2],
+        ['Good fit (65–84%)', 2],
+        ['Possible (40–64%)', 2],
+        ['Long shot (0–39%)', 2],
+      ]), `tree placement: rubric boundary scores map to fixed bands, got ${JSON.stringify(boundaryBands)}`);
       return { repairs: taxonomy.repairs.length };
     },
   },
@@ -4592,6 +5027,8 @@ const tests = [
         'salary parser: unitless low dollar values are not invented as annual salary');
       assert(parseSalaryToNumeric('$8,000 a year') === 8000,
         'salary parser: explicit annual cadence permits legitimate low annual pay');
+      assert(parseSalaryToNumeric('$18.75 - $19.70 a year') === 0,
+        'salary parser: implausibly tiny explicit annual ranges stay Unspecified instead of becoming $19/year');
       assert(isRemoteOkSponsoredPlacement({ company: ' AI Supermarket ' }),
         'RemoteOK: exact sponsored pseudo-employer is excluded');
       assert(!isRemoteOkSponsoredPlacement({ company: 'A Supermarket' }),
@@ -4604,6 +5041,182 @@ const tests = [
       assert(eligible.length === 1 && eligible[0].company === 'Acme',
         'RemoteOK: sponsored rows are excluded by the predicate before any relevance matching; ordinary rows survive');
       return { jsonLd: 'cadence-preserved', remoteok: 'sponsored-filtered' };
+    },
+  },
+  {
+    name: 'manualScraper telemetry: known ad/tracker CSP and network noise cannot evict genuine failures',
+    run: () => {
+      const ignoredUrls = [
+        'https://znboux7hrdwpqwmoe-ziprecruiter.siteintercept.qualtrics.com/SIE/?Q_ZID=abc',
+        'https://d.impactradius-event.com/A1957846/example.js',
+        'https://googleads.g.doubleclick.net/pagead/viewthroughconversion/995393872/',
+        'https://ad.doubleclick.net/ccm/s/collect?fmt=8',
+        'https://www.google.com/rmkt/collect/995393872/?fmt=8',
+        'https://csp.withgoogle.com/csp/IdentityRotateCookiesHttp',
+      ];
+      for (const url of ignoredUrls) {
+        assert(isIgnorableManualBrowserTelemetry({ url }), `known telemetry noise should be ignored: ${url}`);
+      }
+
+      // Console CSP failures are reported at the first-party bundle that made
+      // the request; the actual blocked tracker URL appears in the message.
+      assert(isIgnorableManualBrowserTelemetry({
+        url: 'https://www.ziprecruiter.com/_next/static/chunks/app.js',
+        text: "Loading the script 'https://d.impactradius-event.com/tracker.js' violates the following Content Security Policy directive",
+      }), 'known tracker URL embedded in a first-party CSP message is ignored');
+      assert(isIgnorableManualBrowserTelemetry({
+        url: 'https://www.google.com/search?q=jobs',
+        text: 'Fetch API cannot load https://csp.withgoogle.com/csp/IdentityRotateCookiesHttp. Refused to connect.',
+      }), 'Google cookie-rotation ORB/CSP noise embedded in console text is ignored');
+
+      // The classifier is intentionally not a blanket third-party/CSP filter.
+      // Unknown dependencies and first-party job-page failures are precisely
+      // the evidence these bounded buffers exist to retain.
+      assert(!isIgnorableManualBrowserTelemetry({
+        url: 'https://www.ziprecruiter.com/jobs-search',
+        text: 'Failed to load resource: net::ERR_CONNECTION_RESET',
+      }), 'first-party request failures remain visible');
+      assert(!isIgnorableManualBrowserTelemetry({
+        url: 'https://cdn.unfamiliar-vendor.example/widget.js',
+        text: 'Failed to load resource: the server responded with a status of 503',
+      }), 'unknown third-party failures remain visible');
+      assert(!isIgnorableManualBrowserTelemetry({ url: 'https://doubleclick.net.attacker.example/api' }),
+        'lookalike hostnames do not inherit a known tracker exclusion');
+      assert(!isIgnorableManualBrowserTelemetry({ url: 'https://www.google.com/search?q=rmkt+jobs' }),
+        'ordinary first-party Google requests are retained; only the exact /rmkt/ endpoint is noise');
+      assert(!isIgnorableManualBrowserTelemetry({
+        url: 'https://www.ziprecruiter.com/app.js',
+        text: "Connecting to 'https://api.ziprecruiter.com/jobs' violates CSP; connect-src also allows https://googleads.g.doubleclick.net",
+      }), 'a genuine first target is retained even when later CSP directive text names an ignored domain');
+      assert(!isIgnorableManualBrowserTelemetry({ text: 'This document requires TrustedHTML assignment. The action has been blocked.' }),
+        'unknown console failures without a target URL remain visible');
+      return { ignored: ignoredUrls.length, genuinePreserved: 6 };
+    },
+  },
+  {
+    name: 'scraper overlay: Trusted Types-safe construction remains inert on challenge documents',
+    run: () => {
+      const script = buildOverlayScript({ withPause: true, cdpBridge: false });
+      assert(!script.includes('innerHTML'),
+        'overlay script never assigns or probes an HTML sink, so it cannot emit TrustedHTML errors');
+      assert(script.includes("_icTitle.startsWith('just a moment')")
+        && script.includes('#cf-challenge-running')
+        && script.includes('challenges.cloudflare.com'),
+      'overlay script exits before style/DOM work on known Cloudflare challenge documents');
+      assert(script.includes("make('button', 'ic-pause'") && script.includes('appendChild'),
+        'overlay still builds the pause control through DOM nodes');
+      return { trustedTypesSafe: true };
+    },
+  },
+  {
+    name: 'manualScraper telemetry: per-job anomalies join the trail without hijacking the current phase',
+    run: () => {
+      // `active` is a MERGE that never deletes fields, so a desc-miss/date-miss
+      // recorded as a normal phase would pin its `key` onto every later render —
+      // the bug report would then attribute one job's miss to whatever phase the
+      // scraper happened to be in at report time. Anomalies must reach the event
+      // trail (that visibility is the whole point) but leave `active` alone.
+      recordManualScraperTelemetry({ phase: 'page-extract', srcName: 'ZipRecruiter', pageNum: 1 });
+      recordManualScraperTelemetry(
+        { phase: 'desc-miss', srcName: 'ZipRecruiter', key: 'Patient Representative II | ld=0 nd=0' },
+        { updateActive: false },
+      );
+      const afterMiss = getManualScraperTelemetry();
+      assert(afterMiss.active.phase === 'page-extract',
+        `anomaly must not become the current phase, got ${afterMiss.active.phase}`);
+      assert(afterMiss.active.key === undefined,
+        `anomaly key must never leak into active, got ${JSON.stringify(afterMiss.active.key)}`);
+      assert(afterMiss.events.some(e => e.phase === 'desc-miss' && /Patient Representative II/.test(e.key || '')),
+        'the desc-miss must still be recorded in the event trail');
+      assert(afterMiss.fieldAnomalies?.some(e => e.phase === 'desc-miss' && /Patient Representative II/.test(e.key || '')),
+        'the desc-miss is also retained in the dedicated field-quality trail');
+
+      // A real phase transition still advances `active` — the opt-out is per-call,
+      // not a behaviour change for the ordinary path.
+      recordManualScraperTelemetry({ phase: 'source-finished', srcName: 'ZipRecruiter' });
+      const afterPhase = getManualScraperTelemetry();
+      assert(afterPhase.active.phase === 'source-finished',
+        `ordinary phases still advance active, got ${afterPhase.active.phase}`);
+      assert(afterPhase.active.key === undefined,
+        'a stale anomaly key must not resurface on a later phase');
+      return { ok: true, activePhase: afterPhase.active.phase };
+    },
+  },
+  {
+    name: 'job pipeline report: field-quality scraper anomalies survive later source phases',
+    run: () => {
+      // Fill the capped telemetry ring exactly as a multi-source run does: two
+      // ZipRecruiter description misses followed by enough Google phases to
+      // displace them from the ordinary trailing-eight progress display.
+      recordManualScraperTelemetry(
+        { phase: 'desc-miss', srcName: 'ZipRecruiter', key: 'First missing JD | ld=0 nd=0' },
+        { updateActive: false },
+      );
+      recordManualScraperTelemetry(
+        { phase: 'desc-miss', srcName: 'ZipRecruiter', key: 'Second missing JD | ld=0 nd=0' },
+        { updateActive: false },
+      );
+      for (let i = 0; i < 40; i++) {
+        recordManualScraperTelemetry({ phase: 'page-extract', srcName: 'Google for Jobs', pageNum: i + 1 });
+      }
+      const scrapeTelemetry = getManualScraperTelemetry();
+      assert(!scrapeTelemetry.events.some(e => /First missing JD/.test(e.key || ''))
+        && scrapeTelemetry.fieldAnomalies?.some(e => /First missing JD/.test(e.key || '')),
+      'dedicated anomaly retention survives after ordinary phases evict the shared 30-event trail');
+      const telemetry = getJobsTelemetry();
+      const report = buildJobsPipelineSnapshot(
+        telemetry?.nodeId ? new Set([telemetry.nodeId]) : new Set(),
+        telemetry?.windowId ?? null,
+        null,
+      );
+      assert(report.includes('Field-quality scraper anomalies (retained independently of recent phases)')
+        && report.includes('First missing JD') && report.includes('Second missing JD'),
+      'FULL pipeline diagnostics retain early per-job description misses after later sources advance the phase trail');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'ZipRecruiter detail merge: a description miss still retains the detail-page posted date',
+    run: () => {
+      // ZR's live trigger is still telemetry-led, but the mechanism is known:
+      // description failure and date recovery are independent. Do not require a
+      // description/salary before writing the recovered date back to the card.
+      const listCard = {
+        title: 'Patient Representative II',
+        company: 'Acme Health',
+        location: 'Toronto, ON',
+        url: 'https://www.ziprecruiter.com/jobs/example',
+        salary: '$29/hr',
+        snippet: 'Search-result summary survives a detail description miss.',
+        posted: '',
+      };
+      const merged = mergeExpandedJobDetail(listCard, {
+        text: '',
+        jsonLdDate: '2026-08-10',
+        jsonLdSalary: '',
+        salaryChanged: false,
+      });
+      assert(merged.posted === '2026-08-10',
+        'a recovered date must be written even when description and salary both miss');
+      assert(merged.snippet === listCard.snippet && merged.title === listCard.title && merged.salary === listCard.salary,
+        'a partial detail update preserves list-card snippet and all unrelated fields');
+
+      const existingDate = mergeExpandedJobDetail({ ...listCard, posted: '3 days ago' }, {
+        text: '', jsonLdDate: '2026-08-10', jsonLdSalary: '', salaryChanged: false,
+      });
+      assert(existingDate.posted === '3 days ago',
+        'detail ISO dates do not clobber an existing list-card relative date');
+      const repairedSalary = mergeExpandedJobDetail({ ...listCard, salary: 'US$19 - US$20 (Employer provided)' }, {
+        jsonLdSalary: '$19/hr', salaryChanged: false,
+      });
+      assert(repairedSalary.salary === '$19/hr',
+        'authoritative structured detail pay repairs a present but unparseable list salary');
+      const healthySalary = mergeExpandedJobDetail({ ...listCard, salary: '$29/hr' }, {
+        jsonLdSalary: '$19/hr', salaryChanged: false,
+      });
+      assert(healthySalary.salary === '$29/hr',
+        'structured detail pay does not clobber an already-parseable list salary');
+      return { posted: merged.posted, preserved: true };
     },
   },
   {
@@ -4631,7 +5244,7 @@ const tests = [
       const bands = result.newNodes.filter(n => n.data?.kind === 'likelihood');
       const nonBandGroups = result.newNodes.filter(n => n.type === 'jobgroup' && n.data?.kind !== 'likelihood');
       const cards = result.newNodes.filter(n => n.type === 'jobcard');
-      const strong = bands.find(b => b.data.label.startsWith('Strong'));
+      const excellent = bands.find(b => b.data.label.startsWith('Excellent'));
       const possible = bands.find(b => b.data.label.startsWith('Possible'));
       // Nothing is expanded — the whole tree is closed when analysis ends.
       assert(result.newNodes.every(n => !n.data?.expanded), 'collapsed: no node should be expanded');
@@ -4640,7 +5253,7 @@ const tests = [
       assert(nonBandGroups.every(g => g.hidden === true), 'collapsed: salary/role groups should be hidden');
       assert(cards.every(c => c.hidden === true), 'collapsed: all cards should be hidden');
       // Bands still ordered best-first and stacked (layout pass runs regardless).
-      assert(strong.position.y < possible.position.y, 'collapsed: Strong band should still sit above Possible');
+      assert(excellent.position.y < possible.position.y, 'collapsed: Excellent band should still sit above Possible');
       return { ok: true };
     },
   },
@@ -6444,6 +7057,30 @@ const tests = [
     },
   },
   {
+    name: 'summarizeLocationAdherence: US territories (GU/PR/VI/AS/MP) count in-area on a "United States" target',
+    run: () => {
+      // Regression guard: a live run reported "Tamuning, GU" (Guam) as `unclear`
+      // on a "United States" search — GU is Guam's USPS code, a US territory, and
+      // US_STATES (which feeds buildCountryRegex's "United States" subdivision
+      // list) didn't carry it or its sibling territories.
+      const jobs = [
+        { title: 'Patient Services Associate', location: 'Tamuning, GU', source: 'glassdoor' },
+        { title: 'Front Desk', location: 'San Juan, Puerto Rico', source: 'indeed' },
+        { title: 'Analyst', location: 'San Juan, PR', source: 'indeed' },
+        { title: 'Tech', location: 'Charlotte Amalie, VI', source: 'indeed' },
+        { title: 'Clerk', location: 'Pago Pago, AS', source: 'indeed' },
+        { title: 'Nurse', location: 'Saipan, MP', source: 'indeed' },
+        { title: 'Canada leak', location: 'Toronto, ON', source: 'indeed' }, // still off-target
+      ];
+      const a = summarizeLocationAdherence(jobs, 'United States');
+      assert(a.matched === 6, `all 6 territory postings are in-area, got ${a.matched}`);
+      assert(a.unclear === 0, `no territory should fall into unclear, got ${a.unclear}`);
+      assert(a.offTarget === 1 && /Toronto/.test(a.offSamples[0] || ''),
+        `only the Canadian leak stays off-target, got ${a.offTarget}`);
+      return { ok: true, adherence: a };
+    },
+  },
+  {
     name: 'detectLanguage: Portuguese JD body (English title) → pt; near-tie garbage stays en',
     run: () => {
       // Real shape from a WeWorkRemotely listing: English title, Portuguese body.
@@ -6570,10 +7207,14 @@ const tests = [
       assert(detectLanguage(en) === 'en', `English JD should be en, got ${detectLanguage(en)}`);
       const sparseWarehouse = 'WAREHOUSE ASSOCIATE 3rd Shift - $3 Shift Differential!!! Responsibilities: · Contribute to facility operations · Unload and load trailers · Verify product stacking · Follow safety standards';
       assert(detectLanguage(sparseWarehouse) === 'en',
-        'sparse bulleted English with middle-dot separators is not mislabeled as Greek or Berber');
-      const telegraphic = 'Build pipelines. Own dashboards. Partner with sales. Ship reliable data. Improve quality.';
+        'U+00B7 bullet-heavy English is not mislabeled Greek when it has no Greek letters');
+      // Verified against tinyld 1.3.4 without `only`: this plain telegraphic
+      // English line ranks `ber` first at 1.0. With the job-language whitelist,
+      // its top result is `en` at 1.0. Keep the assertion on our public helper
+      // so the regression remains about app behavior, not tinyld internals.
+      const telegraphic = 'Human-scale log-normal pause before each subsequent page.';
       assert(detectLanguage(telegraphic) === 'en',
-        'short telegraphic English stays inside the job-market language whitelist');
+        'telegraphic English stays English rather than an unsupported Berber profile');
       // A single accented loanword in an otherwise-English title must NOT flip it.
       assert(detectLanguage('Café Operations Manager') === 'en', 'one accent (café) is not a language signal');
       assert(detectLanguage('') === 'en' && detectLanguage(null) === 'en', 'empty/null default to en');
@@ -6586,9 +7227,13 @@ const tests = [
       const fr = "Développeur Full Stack. Nous recherchons un développeur pour rejoindre notre équipe. Vous travaillerez sur des applications web et serez responsable du développement. Profil: 5 ans d'expérience avec le poste, les compétences et une bonne maîtrise du travail en équipe.";
       const es = 'Ingeniero de Software. Buscamos un ingeniero para unirse a nuestro equipo. Trabajarás con nuestra empresa en el desarrollo de aplicaciones. Requisitos: experiencia con los conocimientos y responsabilidades del puesto.';
       const de = 'Softwareentwickler. Wir suchen einen Mitarbeiter für unser Unternehmen. Sie werden mit dem Team an der Arbeit und den Aufgaben arbeiten. Erfahrung und Kenntnisse für die Stelle sind erforderlich.';
+      const el = 'Μηχανικός Λογισμικού. Αναζητούμε έναν έμπειρο μηχανικό για να ενταχθεί στην ομάδα μας και να αναπτύξει σύγχρονες εφαρμογές. Απαιτείται γνώση προγραμματισμού, συνεργασία με την ομάδα και εμπειρία σε συστήματα λογισμικού.';
+      const ar = 'مهندس برمجيات. نبحث عن مهندس ذي خبرة للانضمام إلى فريقنا وتطوير تطبيقات حديثة. تتطلب الوظيفة معرفة بالبرمجة والتعاون مع الفريق وخبرة في أنظمة البرمجيات.';
       assert(detectLanguage(fr) === 'fr', `French JD → fr, got ${detectLanguage(fr)}`);
       assert(detectLanguage(es) === 'es', `Spanish JD → es, got ${detectLanguage(es)}`);
       assert(detectLanguage(de) === 'de', `German JD → de, got ${detectLanguage(de)}`);
+      assert(detectLanguage(el) === 'el', `Greek-script JD → el, got ${detectLanguage(el)}`);
+      assert(detectLanguage(ar) === 'ar', `Arabic-script JD → ar, got ${detectLanguage(ar)}`);
       // Title-only French (the authwalled fr.glassdoor.ca case) leans on diacritics.
       assert(detectLanguage('Développeur Logiciel Sénior') === 'fr', 'title-only French via diacritic fallback');
       return { ok: true };
@@ -7198,6 +7843,7 @@ const tests = [
     name: 'jobQualityChecks: looksLikeMoney/hasMojibake/mojibakeExcerpt — previously only reachable via a full bug-report payload',
     run: () => {
       assert(looksLikeMoney('$50,000'), 'looksLikeMoney: dollar sign');
+      assert(looksLikeMoney('USD55 - USD65'), 'looksLikeMoney: compact ISO currency prefix from live Dice data');
       assert(looksLikeMoney('70,000 - 95,000'), 'looksLikeMoney: comma-grouped thousands range, no currency symbol');
       assert(looksLikeMoney('$45/hr'), 'looksLikeMoney: hourly rate');
       assert(looksLikeMoney('120k'), 'looksLikeMoney: k-suffix');
@@ -7226,7 +7872,7 @@ const tests = [
     // couldn't turn into a usable figure — callers gate on `=== 0` first, exactly
     // like the field-quality loop in jobsSnapshot.js does — so every fixture here
     // is checked against parseSalaryToNumeric directly rather than assumed.
-    name: 'jobQualityChecks: classifyUnparseableSalary splits unparseable salaries into prose vs money-with-lost-cadence',
+    name: 'jobQualityChecks: classifyUnparseableSalary splits unparseable salary causes',
     run: () => {
       // Prose: nothing resembling pay, present but genuinely nothing to extract —
       // not our bug. "401k matching" is the case looksLikeMoney used to get wrong
@@ -7248,11 +7894,15 @@ const tests = [
       // Deliberately NOT the two exact strings ('$22.31 - $22.31 / PH', '$20 - $24')
       // another agent is concurrently making parseable at the extractor level —
       // different digits, same shape, so this test doesn't rot when that lands.
-      for (const s of ['$18 - $19', '$24.10 - $24.10 / PH']) {
+      for (const s of ['$18 - $19', '$24.10 - $24.10 / PH', 'USD55 - USD65']) {
         assert(parseSalaryToNumeric(s) === 0, `precondition: "${s}" must be unparseable for this to be a meaningful lost-cadence case`);
         assert(looksLikeMoney(s), `precondition: "${s}" must still look monetary for this to land in the lost-cadence bucket`);
         assert(classifyUnparseableSalary(s) === 'lost-cadence', `classifyUnparseableSalary: "${s}" → lost-cadence (money-shaped, our extractor's bug, fixable)`);
       }
+      assert(parseSalaryToNumeric('$18.75 - $19.70 a year') === 0,
+        'precondition: implausibly tiny explicit annual pay is rejected by the annualizer');
+      assert(classifyUnparseableSalary('$18.75 - $19.70 a year') === 'implausible-annual',
+        'implausibly tiny explicit annual pay is distinguished from a missing cadence');
 
       // Comma-grouped bare numbers ("70,000 - 95,000") and large bare ranges
       // ("38000 - 40000", the real Dice false-alarm) both annualize successfully —
@@ -8227,6 +8877,11 @@ const tests = [
         assert(result.written === 1, `only the first URL-colliding job writes, got ${result.written}`);
         assert(result.skips?.url === 1 && result.skips?.inBatch === 1 && result.skips?.bySource?.google === 1,
           `skip diagnostics classify and attribute the collision, got ${JSON.stringify(result.skips)}`);
+        assert(result.skips?.collisionSamples?.length === 1
+          && result.skips.collisionSamples[0].sameListing === false
+          && result.skips.collisionSamples[0].first.title === 'First role'
+          && result.skips.collisionSamples[0].duplicate.title === 'Second role',
+        `collision diagnostics retain the bounded conflicting pair, got ${JSON.stringify(result.skips?.collisionSamples)}`);
         return { ok: true, skips: result.skips };
       } finally {
         await fs.promises.rm(base, { recursive: true, force: true });

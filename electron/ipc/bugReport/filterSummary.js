@@ -1,4 +1,4 @@
-function codeIncludesFull(filterCode) {
+export function codeIncludesFull(filterCode) {
   return String(filterCode || '')
     .trim()
     .toUpperCase()

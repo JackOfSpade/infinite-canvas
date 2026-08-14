@@ -189,11 +189,14 @@ export function pickGlassdoorLocation(results, canonical) {
   return { locId, locT: pick.locationType || 'C' };
 }
 
-// US state code ↔ full name. The adherence check derives a state token from the
-// canonical ("Denver, CO" → "co"), but job boards spell the state out far more
-// often than they use the 2-letter code ("Golden, Colorado, USA") — so we resolve
-// the token to its code and match BOTH spellings, else an in-state suburb reads as
-// out-of-area. Keys are codes; values keep their spaces for the word-boundary regex.
+// US state code ↔ full name (plus DC and the USPS-recognized territories — same
+// postal-code shape, and a job legitimately posted in one is a US job by any
+// reasonable reading of a "United States" search). The adherence check derives
+// a state token from the canonical ("Denver, CO" → "co"), but job boards spell
+// the state out far more often than they use the 2-letter code ("Golden,
+// Colorado, USA") — so we resolve the token to its code and match BOTH
+// spellings, else an in-state suburb reads as out-of-area. Keys are codes;
+// values keep their spaces for the word-boundary regex.
 // Exported so src/utils/locationIdentity.js can fold state/province names <->
 // codes for applied-job identity matching without duplicating this table —
 // see that module for why a second copy would be a correctness hazard (two
@@ -210,6 +213,13 @@ export const US_STATES = {
   sd: 'south dakota', tn: 'tennessee', tx: 'texas', ut: 'utah', vt: 'vermont',
   va: 'virginia', wa: 'washington', wv: 'west virginia', wi: 'wisconsin', wy: 'wyoming',
   dc: 'district of columbia',
+  // USPS territories — without these a territory posting ("Tamuning, GU") had
+  // no United-States token to match on the country-membership path
+  // (buildCountryRegex draws its subdivision list straight from this table via
+  // COUNTRY_SUBDIVISIONS), so it fell through to `unclear` on a "United States"
+  // search instead of counting in-area.
+  as: 'american samoa', gu: 'guam', mp: 'northern mariana islands',
+  pr: 'puerto rico', vi: 'virgin islands',
 };
 
 // Canadian provinces/territories — same code↔name shape as US_STATES, so a search

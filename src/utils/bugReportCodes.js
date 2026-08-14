@@ -145,6 +145,30 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  SCORE: {
+    label: 'Job Scoring Consistency',
+    description: 'Job-scoring audit — batch outcomes plus bounded per-job score/direction/reason evidence and cross-batch drift flags for effectively identical postings. Use when similar jobs received inconsistent scores. Included automatically in FULL; keeps the compact Job Search Pipeline section while dropping heavy canvas/media dumps.',
+    logFilter: line =>
+      /scor(?:e|ed|ing)|batch|job|gemini|claude|taxonomy|bucket/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  RELEVANCE: {
+    label: 'Job Role Relevance',
+    description: 'All-source role relevance diagnostics — exact title-match evidence where available, post-hoc title audits for board-ranked sources, and bounded rejected-title samples. Use when unrelated jobs appear or expected roles are missing. Included automatically in FULL.',
+    logFilter: line =>
+      /relevance|rejected|query|job|dice|usajobs|remoteok|weworkremotely|glassdoor|ziprecruiter|indeed|linkedin|google/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  QUALITY: {
+    label: 'Job Listing Field Quality',
+    description: 'Per-source listing quality diagnostics — missing/short descriptions with bounded title/URL samples, salary/date/URL selector health, encoding issues, and LinkedIn telemetry-vs-snapshot completion checks. Use when jobs were scored with incomplete or malformed source data. Included automatically in FULL.',
+    logFilter: line =>
+      /field.?quality|description|snippet|salary|posted|selector|mojibake|enrich|linkedin|job/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   // ── Exclusion Modifiers ───────────────────────────────────────────────────
   // Prefix with X to mean "exclude these from the log"
 

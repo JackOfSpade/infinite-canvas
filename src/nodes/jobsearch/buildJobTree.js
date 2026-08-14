@@ -2,7 +2,7 @@ import { structuralEdge } from '../_shared/edgeHelpers.js';
 import { isJobCardVisible } from '../../utils/jobCardFilters.js';
 
 /**
- * Pure helpers for turning scored jobs + an AI-created taxonomy into the React
+ * Pure helpers for turning scored jobs + taxonomy metadata into the React
  * Flow node/edge graph the Job Search Module spawns. Lives outside the component so the
  * algorithm is unit-testable without a ReactFlow runtime — JobSearchNode.jsx wires
  * up the IPC plumbing and passes the results to ReactFlow.
@@ -13,13 +13,13 @@ import { isJobCardVisible } from '../../utils/jobCardFilters.js';
  *   3. Job role        — ordered A→Z.
  * …then the job cards (ordered by score desc).
  *
- * The AI (bucketing pass) CREATES every band / range / role label — nothing is
- * hardcoded. It returns the band + range definitions and a role partition; the
- * renderer places each job into its band (by its own matchScore) and its salary
- * range (by parsed salary) DETERMINISTICALLY, so a weak model can't drop or
- * duplicate jobs across the three nested levels. Only the role grouping (the
- * creative consolidation) comes from the AI's partition; jobs the AI leaves out
- * fall into a swept "Other" role.
+ * Likelihood bands are fixed to the scoring rubric (85+ excellent, 65–84 good,
+ * 40–64 possible/stretch, below 40 long shot). The AI bucketing pass creates the
+ * salary ranges and role partition; the renderer places each job into its band
+ * (by matchScore) and salary range (by parsed salary) DETERMINISTICALLY, so a
+ * weak model can't drop or duplicate jobs across the three nested levels. Only
+ * the role grouping (the creative consolidation) comes from the AI's partition;
+ * jobs the AI leaves out fall into a swept "Other" role.
  *
  * Exports:
  *  - parseSalaryToNumeric     → salary text → annual USD
@@ -42,12 +42,17 @@ const JOB_V_GAP = 40;
 // Leaf (role) groups paginate their cards; reveal the first N on expand.
 export const ROLE_VISIBLE_DEFAULT = 10;
 
-// Fallbacks ONLY when the AI omits bands/ranges (normal path is AI-defined).
-const DEFAULT_BANDS = [
-  { label: 'Strong match (65–100%)', minScore: 65, maxScore: 100 },
-  { label: 'Possible (40–64%)',      minScore: 40, maxScore: 64 },
-  { label: 'Long shot (0–39%)',      minScore: 0,  maxScore: 39 },
-];
+// One scoring rubric, shared by every run and every saved taxonomy. Allowing the
+// bucketing model to move these thresholds made a score of 55 "Good fit" even
+// though the scorer explicitly defines 40–64 as a stretch/possible outcome.
+export const FIXED_LIKELIHOOD_BANDS = Object.freeze([
+  Object.freeze({ label: 'Excellent fit (85–100%)', minScore: 85, maxScore: 100 }),
+  Object.freeze({ label: 'Good fit (65–84%)',       minScore: 65, maxScore: 84 }),
+  Object.freeze({ label: 'Possible (40–64%)',       minScore: 40, maxScore: 64 }),
+  Object.freeze({ label: 'Long shot (0–39%)',       minScore: 0,  maxScore: 39 }),
+]);
+
+// Fallbacks only when the AI omits salary ranges (likelihood is fixed above).
 const DEFAULT_RANGES = [
   { label: '$150k+',     minSalary: 150000, maxSalary: 0 },
   { label: '$100–150k',  minSalary: 100000, maxSalary: 150000 },
@@ -115,6 +120,14 @@ export function parseSalaryToNumeric(salaryStr) {
   // on the card. The extractor-side fixes (MONEY_SRC word forms,
   // formatJsonLdSalary's unit guard) are what recover the real value.
   const MIN_CREDIBLE_ANNUAL_SALARY = 10000;
+  // A source occasionally emits an hourly-looking decimal range with an annual
+  // suffix (observed from Indeed: "$18.75 - $19.70 a year"). The explicit
+  // suffix used to exempt it from every magnitude guard, producing a literal
+  // $19/year salary and a false Under-$30k placement. Preserve genuinely small
+  // annual amounts such as "$8,000 a year", but reject values below even a
+  // plausible stipend. Never guess that the source meant hourly.
+  const MIN_PLAUSIBLE_EXPLICIT_ANNUAL_SALARY = 1000;
+  if (hasAnnualCadence && val < MIN_PLAUSIBLE_EXPLICIT_ANNUAL_SALARY) return 0;
   if (val < MIN_CREDIBLE_ANNUAL_SALARY && !hasCadence && !hasAnnualCadence && !hasRange && !hasPayContext) return 0;
   // Cadence wins over magnitude: "$1.6K/wk" is $83,200/year, while
   // "$22/hour" is $45,760/year. Match biweekly before weekly.
@@ -192,45 +205,24 @@ export function salaryRangeAnomaly(salaryStr) {
 
 // ── Deterministic placement ────────────────────────────────────────────────
 
-/** Normalize + sort AI bands high→low; guarantee coverage down to 0. */
-function clampScore(value) {
-  return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
-}
-
-function bandLabel(label, minScore, maxScore) {
-  const raw = String(label || 'Match').trim();
-  const expected = `${minScore}–${maxScore}%`;
-  if (raw && raw.includes(expected)) return raw;
-  const base = raw.replace(/\s*\([^)]*\)\s*$/, '').trim() || 'Match';
-  return `${base} (${expected})`;
-}
-
+/** Return the fixed scoring-rubric bands; legacy/model-authored bands are ignored. */
 export function normalizeBandsWithRepairs(bands) {
   const repairs = [];
   const input = Array.isArray(bands) ? bands : [];
-  const byMin = new Map();
-  for (const raw of input) {
-    const minScore = clampScore(raw?.minScore);
-    if (!Number.isFinite(Number(raw?.minScore)) || Number(raw?.minScore) !== minScore) repairs.push('clamped invalid likelihood bound');
-    if (!byMin.has(minScore)) byMin.set(minScore, raw || {});
-    else repairs.push(`dropped duplicate likelihood lower bound ${minScore}`);
+  const isCanonical = input.length === FIXED_LIKELIHOOD_BANDS.length
+    && input.every((band, index) => {
+      const fixed = FIXED_LIKELIHOOD_BANDS[index];
+      return band?.label === fixed.label
+        && Number(band?.minScore) === fixed.minScore
+        && Number(band?.maxScore) === fixed.maxScore;
+    });
+  if (input.length > 0 && !isCanonical) {
+    repairs.push('replaced likelihood bands with fixed scoring rubric');
   }
-  if (!byMin.size) {
-    repairs.push('used default likelihood bands');
-    DEFAULT_BANDS.forEach(b => byMin.set(b.minScore, b));
-  }
-  if (!byMin.has(0)) {
-    byMin.set(0, { label: 'Match', minScore: 0 });
-    repairs.push('added 0% likelihood catch-all');
-  }
-  const ascending = [...byMin.entries()].sort((a, b) => a[0] - b[0]);
-  const normalized = ascending.map(([minScore, raw], i) => {
-    const maxScore = i + 1 < ascending.length ? ascending[i + 1][0] - 1 : 100;
-    const label = bandLabel(raw?.label, minScore, maxScore);
-    if (String(raw?.label || '').trim() !== label) repairs.push(`canonicalized likelihood label "${String(raw?.label || '').trim() || 'Match'}"`);
-    return { label, minScore, maxScore };
-  });
-  return { bands: normalized.reverse(), repairs };
+  return {
+    bands: FIXED_LIKELIHOOD_BANDS.map(band => ({ ...band })),
+    repairs,
+  };
 }
 
 export function normalizeBands(bands) {
@@ -282,7 +274,15 @@ export function normalizeRangesWithRepairs(ranges) {
   // bands contiguous even if the model supplied overlapping/gapped maxima.
   real.forEach((range, index) => {
     const expectedMax = index === 0 ? 0 : real[index - 1].minSalary;
-    if (range.maxSalary !== expectedMax) repairs.push(`normalized salary upper bound for ${formatSalaryShort(range.minSalary)}`);
+    if (range.maxSalary !== expectedMax) {
+      // `minSalary: 1` is the synthetic low-salary catch-all sentinel, not a
+      // literal $1 salary threshold. Naming it as "$1" in diagnostics made a
+      // successful taxonomy repair look like corrupt user pay data.
+      const rangeName = range.minSalary <= 1
+        ? 'the low-salary catch-all'
+        : formatSalaryShort(range.minSalary);
+      repairs.push(`normalized salary upper bound for ${rangeName}`);
+    }
     range.maxSalary = expectedMax;
     range.label = canonicalSalaryRangeLabel(range.minSalary, range.maxSalary);
     if (range.rawLabel !== range.label) repairs.push(`canonicalized salary label "${range.rawLabel || '(blank)'}"`);

@@ -14,6 +14,7 @@ import { IMAGE_MIME_MAP, DOCUMENT_MIME_MAP } from '../utils/mimeTypes.js';
 import {
   GEMINI_MODEL_FALLBACKS,
   GEMINI_MODEL_REGISTRY,
+  GEMINI_MAX_OUTPUT_TOKENS,
   classifyGeminiFailure,
   describeGeminiFailure,
   getGeminiDefaultThinkingConfig,
@@ -31,11 +32,6 @@ import {
 } from './geminiEntitlement.js';
 import { isSensitivePath } from '../utils/pathSafety.js';
 import { parseAiJson } from './jsonRepair.js';
-import {
-  ANTIGRAVITY_AGENT_ID,
-  callAntigravityAgent,
-  canUseAntigravityFallback,
-} from './geminiAgent.js';
 
 export { GEMINI_MODEL_FALLBACKS } from './geminiModels.js';
 
@@ -100,18 +96,15 @@ const TRANSIENT_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
 // Retry-After header when present (derive from observed provider behavior),
 // falling back to bounded exponential backoff. MAX_ATTEMPTS is the hard ceiling.
 const RETRY = {
-  MAX_ATTEMPTS:   3,      // hard ceiling on same-endpoint retries
+  MAX_ATTEMPTS:   5,      // shared cascade policy; never exceed this request budget
   BASE_DELAY_MS:  600,    // first backoff step
   BACKOFF_FACTOR: 3,      // exponential growth per attempt
   MAX_BACKOFF_MS: 30000,  // cap any single wait, incl. an honored Retry-After
 };
 
-// Per-request timeout scales with payload: a multimodal call with several images
-// legitimately takes longer than a short text call, so give it more headroom
-// (bounded) instead of timing out a valid slow vision request at a flat 60s.
-const REQUEST_TIMEOUT_BASE_MS      = 60000;
-const REQUEST_TIMEOUT_PER_IMAGE_MS = 8000;
-const REQUEST_TIMEOUT_MAX_MS       = 120000;
+// Shared cascade policy: high thinking is normally ~12s but 90s leaves enough
+// headroom for a cold/loaded endpoint without tying up a node indefinitely.
+const REQUEST_TIMEOUT_MS = 90_000;
 
 /**
  * Parse an HTTP Retry-After header (delta-seconds or HTTP-date) to ms, or null.
@@ -289,7 +282,7 @@ function scopedKey(scope, model) {
 /** Build a model→suppressedUntil view for the given scope (only cooling entries). */
 function suppressionMapForScope(scope, now) {
   const m = new Map();
-  for (const id of [...GEMINI_MODEL_REGISTRY.map((entry) => entry.id), ANTIGRAVITY_AGENT_ID]) {
+  for (const { id } of GEMINI_MODEL_REGISTRY) {
     const until = modelSuppressedUntil.get(scopedKey(scope, id)) || 0;
     if (until > now) m.set(id, until);
   }
@@ -332,14 +325,6 @@ function geminiWarnings(scope = lastActiveScope) {
     }
     warnings.push({ model: id, type: runtime.classification, message: runtime.message });
   }
-  if (scope) {
-    const runtime = modelRuntimeState.get(scopedKey(scope, ANTIGRAVITY_AGENT_ID));
-    if (runtime?.warnUntil && runtime.warnUntil <= now) {
-      modelRuntimeState.delete(scopedKey(scope, ANTIGRAVITY_AGENT_ID));
-    } else if (runtime) {
-      warnings.push({ model: ANTIGRAVITY_AGENT_ID, type: runtime.classification, message: runtime.message });
-    }
-  }
   return warnings;
 }
 
@@ -347,6 +332,7 @@ function suppressionUntilForFailure(classification, retryAfterMs = null) {
   if (
     classification === 'unavailable'
     || classification === 'model-access'
+    || classification === 'thinking-config'
     || classification === 'no-quota'
     || classification === 'daily-quota'
   ) {
@@ -379,11 +365,6 @@ export function getGeminiTelemetry() {
     lastSuccessfulModel,
     lastAttemptedError,
     compatibleModels: [...GEMINI_MODEL_FALLBACKS],
-    compatibleAgents: [{
-      id: ANTIGRAVITY_AGENT_ID,
-      underlyingModel: 'gemini-3.6-flash',
-      position: 'final-compatible-raw-fallback',
-    }],
     // Why the chain starts where it does. Without this a report showing
     // "started at Flash" is indistinguishable from "Pro was skipped due to a
     // bug" — the entitlement verdict is the difference.
@@ -444,7 +425,7 @@ function geminiProbeBody(model) {
   return JSON.stringify({
     contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
     generationConfig: {
-      maxOutputTokens: 8,
+      maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
       responseMimeType: 'text/plain',
       thinkingConfig: getGeminiDefaultThinkingConfig(model),
     },
@@ -823,18 +804,10 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
   const generationConfig = {
     temperature: GEMINI_TEMPERATURE,
     responseMimeType: 'application/json',
-    maxOutputTokens: 2048,   // default; callers pass task-specific caps via opts
-    // Disable model "thinking" by default. Every task on this path is
-    // schema-constrained JSON (scoring / bucketing / extraction / classification):
-    // the visible answer is a few hundred tokens, but the 2.5-flash / 3-flash
-    // models were spending 9k–12k tokens THINKING per call, which (a) blew the
-    // output cap → MAX_TOKENS truncation → forced fallback to the WEAKEST model,
-    // and (b) ran long enough to trip the 60s request timeout. Net effect: thinking
-    // was knocking out the strong models and DEGRADING quality, not improving it.
-    // Thinking controls differ by model family: Gemini 3 uses thinkingLevel,
-    // while 2.5 uses thinkingBudget and 2.5 Pro cannot disable thinking. The
-    // registry supplies the lowest documented setting each model accepts. A
-    // task that genuinely benefits from reasoning can still override it.
+    maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+    // High thinking for Gemini; Gemma is the TPM-limited exception and its
+    // registry entry deliberately uses minimal. The central registry keeps
+    // callers, fallbacks, probes, and direct requests on this same policy.
     thinkingConfig: getGeminiDefaultThinkingConfig(model),
     ...restGenConfig,
   };
@@ -856,12 +829,7 @@ async function callGeminiSingle(parts, apiKey, model, genConfig = {}) {
     payload.tools = [{ google_search: {} }];
   }
 
-  // Scale the timeout to the payload: multimodal calls with several images
-  // legitimately take longer, so a flat 60s would falsely abort a valid slow
-  // vision request. Bounded by REQUEST_TIMEOUT_MAX_MS.
-  const imageParts = parts.reduce((n, p) => n + (p.inlineData ? 1 : 0), 0);
-  const timeoutMs = Math.min(REQUEST_TIMEOUT_MAX_MS, REQUEST_TIMEOUT_BASE_MS + imageParts * REQUEST_TIMEOUT_PER_IMAGE_MS);
-  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const endpointName = apiKey ? 'Gemini API (AI Studio)' : 'Vertex AI';
 
@@ -995,7 +963,11 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     _now,
   );
   const scopeSuppression = suppressionMapForScope(scope, _now);
-  const modelOrder = orderGeminiModels(model, scopeSuppression, _now, { entitledTiers });
+  const modelOrder = orderGeminiModels(model, scopeSuppression, _now, {
+    entitledTiers,
+    responseSchema: !!genConfig.responseSchema,
+    grounding: grounded,
+  });
   const _cooling = modelOrder.filter(m => scopeSuppression.has(m));
   if (_cooling.length > 0 && _cooling.length < modelOrder.length) {
     logger.info(`[Gemini] Deferring ${_cooling.length} suppressed model(s): ${_cooling.join(', ')}`);
@@ -1071,7 +1043,7 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
         logger.warn(`[Gemini] Falling back to the next best model...`);
         continue;
       }
-      if (classification === 'unavailable' || classification === 'model-access') {
+      if (classification === 'unavailable' || classification === 'model-access' || classification === 'thinking-config') {
         // A grounded request's unavailable/access failure may be feature-specific
         // (the model is fine for normal JSON calls), so don't persist suppression —
         // just cascade for THIS call (Finding 2). Non-grounded failures suppress.
@@ -1088,75 +1060,9 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     }
   }
 
-  // The Interactions API exposes a separate Antigravity-agent quota bucket for
-  // AI Studio keys. It is powered by Gemini 3.6 Flash, but it is NOT another
-  // generateContent model: it cannot enforce responseSchema and supports only
-  // text/images. Use it strictly as the final fallback for compatible raw-text
-  // work, after every direct model pool has failed. That adds real capacity
-  // without weakening structured JSON/document contracts or spending the much
-  // heavier agent quota while any ordinary model still works.
-  const agentSuppressedUntil = modelSuppressedUntil.get(scopedKey(scope, ANTIGRAVITY_AGENT_ID)) || 0;
-  const agentEligibleFailures = new Set([
-    'rate-limit', 'no-quota', 'daily-quota', 'unavailable', 'model-access', 'server',
-  ]);
-  const exhaustedByCapacity = attemptedErrors.length > 0
-    && attemptedErrors.every((attempt) => agentEligibleFailures.has(attempt.classification));
-  if (
-    canUseAntigravityFallback(parts, apiKey, genConfig)
-    && exhaustedByCapacity
-    && agentSuppressedUntil <= Date.now()
-    && !genConfig.signal?.aborted
-  ) {
-    try {
-      logger.info(`[Gemini] Direct model ladder exhausted; attempting managed-agent fallback: ${ANTIGRAVITY_AGENT_ID}`);
-      lastAttemptedModel = ANTIGRAVITY_AGENT_ID;
-      const result = await callAntigravityAgent(parts, apiKey, model, genConfig);
-      lastSuccessfulModel = ANTIGRAVITY_AGENT_ID;
-      lastAttemptedError = '(none)';
-      clearGeminiModelFailure(scope, ANTIGRAVITY_AGENT_ID);
-      const outputTokens = Number(
-        result.usage?.total_output_tokens
-        ?? result.usage?.totalOutputTokens
-        ?? result.usage?.output_tokens
-        ?? result.usage?.outputTokens
-        ?? 0,
-      );
-      // An agent interaction can include multiple internal model/tool turns, so
-      // its total is not an output-cap sample for a single generateContent call.
-      // Keep it in logs/meta without teaching the direct-model cap learner from
-      // an incomparable measurement.
-      logger.info(`[Gemini] Managed-agent usage output:${outputTokens || '?'} model:${result.model || '?'}`);
-      if (genConfig.meta && typeof genConfig.meta === 'object') {
-        genConfig.meta.model = ANTIGRAVITY_AGENT_ID;
-        genConfig.meta.agentModel = result.model;
-        genConfig.meta.agentUsage = result.usage;
-        genConfig.meta.fallback = {
-          attempts: attemptedErrors.length,
-          reason: 'direct-models-exhausted',
-          preferredModel: model,
-        };
-      }
-      return result.text;
-    } catch (err) {
-      if (genConfig.signal?.aborted) throw err;
-      const errMsg = err?.message || String(err);
-      const failureText = err.details ? `${errMsg}\n${err.details}` : errMsg;
-      const classification = classifyGeminiFailure(err.status, failureText);
-      lastAttemptedError = `${ANTIGRAVITY_AGENT_ID}: ${errMsg}`;
-      attemptedErrors.push({ model: ANTIGRAVITY_AGENT_ID, error: errMsg, classification });
-      rememberGeminiModelFailure(
-        scope,
-        ANTIGRAVITY_AGENT_ID,
-        classification,
-        errMsg,
-        suppressionUntilForFailure(classification, err.retryAfterMs),
-      );
-      logger.warn(`[Gemini] Managed-agent fallback failed: ${errMsg}`);
-    }
-  }
-
-  // If we reach here, all compatible direct models (and the agent fallback,
-  // when eligible) have failed.
+  // If we reach here, all compatible direct models have failed. Managed-agent
+  // endpoints are intentionally excluded: they cannot honor response schemas,
+  // so they must not be used as a transparent Gemini fallback.
   const errorDetails = attemptedErrors.map(e => `* ${e.model}: ${e.error}`).join('\n');
   const noQuotaCount = attemptedErrors.filter((e) => e.classification === 'no-quota').length;
   const dailyQuotaCount = attemptedErrors.filter((e) => e.classification === 'daily-quota').length;

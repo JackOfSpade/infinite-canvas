@@ -5,6 +5,7 @@ import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
 import { SourceWarningPanel } from './_shared/SourceWarningPanel';
 import { mergeSourceProgress } from '../utils/sourceProgress';
+import { isJobSourceWarningGating, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 
 /**
@@ -297,6 +298,8 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   }
 
   const warning = liveProgress?.warning;
+  const warningAction = jobSourceWarningAction(warning);
+  const warningBlocksScoring = isJobSourceWarningGating(warning);
   const isSearching = status === 'searching';
   const isDone      = status === 'done';
   const isError     = status === 'error';
@@ -415,7 +418,12 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       </div>
       {/* Embedded warning text — selectable so the user can copy/paste the
           full evidence + suggestion back into a bug report or chat. */}
-      {!dismissed && <SourceWarningPanel warning={warning} hasBlock={hasBlock} stopClick />}
+      {!dismissed && <SourceWarningPanel
+        warning={warning}
+        hasBlock={hasBlock}
+        stopClick
+        note={!warningBlocksScoring ? 'Scoring continues automatically; dismissing only hides this warning.' : null}
+      />}
       {/* Solve / Skip row — Solve appears when we have a failed URL to open.
           For config-missing (USAJobs no API key) the suggestion text above
           already directs the user to set the env var — no Solve button. */}
@@ -444,7 +452,11 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               setDismissed(true);
               setProgress(prev => prev ? {
                 ...prev,
-                status: 'skipped',
+                status: warningBlocksScoring
+                  ? 'skipped'
+                  : (prev.status === 'done' || prev.status === 'skipped'
+                    ? prev.status
+                    : ((prev.count || 0) > 0 ? 'done' : 'skipped')),
                 warning: null,
               } : { status: 'skipped', count: 0, warning: null });
               // Notify the owning hub so it can drop this source's warning
@@ -453,16 +465,32 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               // auto-resumes scoring. Identified-by hubId so multi-hub
               // canvases don't cross-trigger.
               document.dispatchEvent(new CustomEvent('job-source-skip', {
-                detail: { hubId: data.hubId, sourceId: data.sourceId },
+                detail: {
+                  hubId: data.hubId,
+                  sourceId: data.sourceId,
+                  action: warningAction,
+                  warningCode: warning?.code || null,
+                  warningSeverity: warning?.severity || null,
+                },
               }));
+              // A non-gating warning never held the hub open, so there may be no
+              // later all-sources dismissal event to remove this acknowledged
+              // card. The user explicitly dismissed it; remove it now.
+              if (!warningBlocksScoring) {
+                deleteElements({ nodes: [{ id }] });
+              }
             }}
             onPointerDown={(e) => e.stopPropagation()}
             disabled={hubLocked}
             className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/60 hover:text-white bg-white/[0.03] hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default"
-            title={hubLocked ? 'Hub is locked' : "Skip this source — drops the warning. The hub resumes scoring once every blocked source is resolved or skipped."}
+            title={hubLocked
+              ? 'Hub is locked'
+              : warningBlocksScoring
+                ? 'Skip the unresolved remainder of this source and continue once every blocked source is resolved or skipped.'
+                : 'Dismiss this warning. It did not pause scoring and does not remove jobs already collected from this source.'}
           >
             <SkipForward size={9} />
-            Skip
+            {warningBlocksScoring ? 'Skip' : 'Dismiss'}
           </button>
         </div>
       )}

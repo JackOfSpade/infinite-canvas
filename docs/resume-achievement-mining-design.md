@@ -157,7 +157,7 @@ Register in `electron/ipc/llm.js` — **both** `TASK_MODELS` (`:45-77`) and `TAS
 
 | task | claude | gemini | pin | max tokens | rationale |
 |---|---|---|---|---|---|
-| `career-achievement-mining` | `OPUS` | `gemini-3.6-flash` | `claude` | 24576 | highest-leverage reasoning in the pipeline; runs **once per hub**, not per application |
+| `career-achievement-mining` | `OPUS` | `gemini-3.7-flash` | `claude` | 24576 | highest-leverage reasoning in the pipeline; runs **once per hub**, not per application |
 | `career-achievement-refute` | `SONNET` | `gemini-3.5-flash` | `claude` | 8192 | a *different* model from the miner buys real independence, and is cheaper |
 
 `OPUS` / `SONNET` are **family tokens**, not literal IDs — see §8, Model selection. Add a
@@ -180,7 +180,7 @@ picks as the out-of-the-box default only. `career-achievement-mining` and
 independence this section originally bought with a Claude-only pin + two different literal
 ids is now bought with a `step: 1` offset on the refute task — one family rung down
 `CLAUDE_FAMILY_LADDER` from whatever the user picked for `generation` — on the Claude path,
-and by keeping two different literal Gemini ids (`gemini-3.6-flash` miner /
+and by keeping two different literal Gemini ids (`gemini-3.7-flash` miner /
 `gemini-3.5-flash` refuter, unchanged from the table above) on the Gemini path, where `step`
 has no effect. See the "Task groups" doc-comment above `TASK_GROUPS` in `llm.js` for the
 full mechanism, including the warning it logs if a step ever lands flat (same family as its

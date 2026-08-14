@@ -1,6 +1,6 @@
 import { getAISettings } from './settings.js';
 import { callGeminiText, callGeminiTextRaw, callGeminiVision, callGeminiDocument, countGeminiInputTokens } from './gemini.js';
-import { GEMINI_ALL_MODEL_IDS } from './geminiModels.js';
+import { GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS } from './geminiModels.js';
 import { callClaudeText, callClaudeVision, callClaudeDocument, createClaudeBatch, getClaudeBatch, getClaudeBatchResults, cancelClaudeBatch, countClaudeInputTokens } from './claude.js';
 import { parseAiJson } from './jsonRepair.js';
 import { isWordDoc, extractWordText } from './docUtils.js';
@@ -9,6 +9,7 @@ import { effectiveCap } from './tokenBudget.js';
 import path from 'path';
 import { priceSynthesisMaxTokens } from './resultCaps.js';
 import { modelMeta, maxOutputForModel, assessPromptFit, estimateTokensFromChars } from './tokenWindow.js';
+import { claudeReasoningMaxTokens } from './claudeModels.js';
 import { CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, isClaudeFamilyToken, claudeModelFor, resolvedClaudeModels, primeClaudeModels } from './modelResolver.js';
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
@@ -31,7 +32,7 @@ import { logger } from '../logger.js';
  * expose a picker for the way Claude has one resolved id per family.
  *
  * Gemini choices, in short:
- *   - Gemini 3.6 Flash: preferred for Sonnet/Opus-quality tasks on the API-key
+ *   - Gemini 3.7 Flash: preferred for Sonnet/Opus-quality tasks on the API-key
  *     path — the newest Flash generation. It is the HEAD of a cascade, not the
  *     only model: callGemini walks the capability ladder (pro → flash → lite)
  *     from here, and whether the Pro tier is available is decided by a live
@@ -44,28 +45,28 @@ import { logger } from '../logger.js';
  *     the author chose the cheap tier on purpose.
  */
 const TASK_MODELS = {
-  'vision-product-analysis':   { gemini: 'gemini-3.6-flash' },
-  'price-synthesis':           { gemini: 'gemini-3.6-flash' },
+  'vision-product-analysis':   { gemini: 'gemini-3.7-flash' },
+  'price-synthesis':           { gemini: 'gemini-3.7-flash' },
   // Bundle pricing is a pricing JUDGMENT (synergy reasoning across items), so it
   // gets the same tier as price-synthesis — not the cheaper `light` tier used
   // for mechanical classification (per the quality-over-cost preference on
   // pricing).
-  'bundle-price-synthesis':    { gemini: 'gemini-3.6-flash' },
+  'bundle-price-synthesis':    { gemini: 'gemini-3.7-flash' },
   'platform-fit-assessment':   { gemini: 'gemini-3.5-flash-lite' },
   'page-status-classify':      { gemini: 'gemini-3.5-flash-lite' },
   // Marketplace Status Module hub scan — mechanical extraction of action items
   // from a seller dashboard / notification feed, same tier as page-status-classify
   // (scanning, not pricing judgment, so `light` per the quality-over-cost split).
   'marketplace-hub-scan':      { gemini: 'gemini-3.5-flash-lite' },
-  'resume-parse':              { gemini: 'gemini-3.6-flash' },
-  'career-file-extract':       { gemini: 'gemini-3.6-flash' },
-  'job-query-generation':      { gemini: 'gemini-3.6-flash' },
-  'job-scoring':                { gemini: 'gemini-3.6-flash' },
-  'job-bucketing':              { gemini: 'gemini-3.6-flash' },
+  'resume-parse':              { gemini: 'gemini-3.7-flash' },
+  'career-file-extract':       { gemini: 'gemini-3.7-flash' },
+  'job-query-generation':      { gemini: 'gemini-3.7-flash' },
+  'job-scoring':                { gemini: 'gemini-3.7-flash' },
+  'job-bucketing':              { gemini: 'gemini-3.7-flash' },
   // Research: grounded summarization that FEEDS application generation, not
   // the employer-facing artifact itself (see the `generation` group doc below
   // for why it steps down a tier on the Claude path).
-  'company-research':          { gemini: 'gemini-3.6-flash' },
+  'company-research':          { gemini: 'gemini-3.7-flash' },
   // Application generation (résumé + cover letter from the design system).
   // Quality compounds here — the output is a polished document a human sends
   // to a recruiter, where writing nuance + judgment convert to interviews.
@@ -74,8 +75,8 @@ const TASK_MODELS = {
   // provider+model routing as every other task (providerForTask below), and
   // Gemini is a fully valid choice here, served by its own capability-ladder
   // cascade exactly like any other Gemini task.
-  'application-resume':        { gemini: 'gemini-3.6-flash' },
-  'application-cover-letter':  { gemini: 'gemini-3.6-flash' },
+  'application-resume':        { gemini: 'gemini-3.7-flash' },
+  'application-cover-letter':  { gemini: 'gemini-3.7-flash' },
   // Achievement mining (résumé design doc §3.1) derives accomplishments by
   // JOINING facts scattered across the corpus — e.g. two balance sheets + a
   // tenure date → "cut debt 74%" — which no other task attempts. It's the
@@ -83,7 +84,7 @@ const TASK_MODELS = {
   // PER HUB (cached on the jobhub node, reused by every application generated
   // from it), not per application — so a premium tier's cost is amortized
   // rather than paid on every Generate click the way application-resume pays it.
-  'career-achievement-mining': { gemini: 'gemini-3.6-flash' },
+  'career-achievement-mining': { gemini: 'gemini-3.7-flash' },
   // The refute pass MUST resolve to a DIFFERENT model from the miner — see
   // the `generation` group's `step` doc below, which is where that
   // independence guarantee now lives (it used to be "pin both to Claude";
@@ -93,7 +94,7 @@ const TASK_MODELS = {
   // gets miner/refuter independence from the `step: 1` offset (see TASK_GROUPS
   // below), but `step` is a Claude-family ladder walk and does nothing on the
   // Gemini side: both tasks would otherwise resolve to the identical
-  // gemini-3.6-flash and the "independent" refutation would be the same model
+  // gemini-3.7-flash and the "independent" refutation would be the same model
   // grading its own homework, which is the one thing the refute pass exists to
   // avoid. Keeping it in the Flash tier (rather than stepping down to Lite)
   // means the check stays strong enough to actually overturn a bad claim.
@@ -101,7 +102,7 @@ const TASK_MODELS = {
   'text-polish':               { gemini: 'gemini-3.5-flash-lite' },
   // Default — used when a caller forgets to pass `task`. Logged as a warning
   // below so we notice unmapped sites; tuned to a safe-middle.
-  'default':                   { gemini: 'gemini-3.6-flash' },
+  'default':                   { gemini: 'gemini-3.7-flash' },
 };
 
 /**
@@ -129,7 +130,7 @@ const TASK_MODELS = {
  *     and don't let it default to step 0.
  *     NOTE `step` is a CLAUDE-family ladder walk and does nothing on the
  *     Gemini path — the same independence is bought there by giving the two
- *     tasks different literal ids in TASK_MODELS above (3.6-flash miner /
+ *     tasks different literal ids in TASK_MODELS above (3.7-flash miner /
  *     3.5-flash refuter). Change one and change the other, or one provider
  *     silently loses the property.
  *   - `company-research` (step 1) — grounded summarization that FEEDS
@@ -323,7 +324,7 @@ const TASK_MAX_TOKENS = {
 
 function resolveTask(task) {
   if (!task || !TASK_MODELS[task]) {
-    logger.warn(`[LLM] Unmapped task='${task}', using 'default' (analysis group / Gemini 3.6 Flash, 2048 max_tokens). Add it to TASK_MODELS and TASK_GROUPS.`);
+    logger.warn(`[LLM] Unmapped task='${task}', using 'default' (analysis group / Gemini 3.7 Flash, 2048 max_tokens). Add it to TASK_MODELS and TASK_GROUPS.`);
     return 'default';
   }
   return task;
@@ -434,14 +435,24 @@ export function taskModelRoutingSnapshot(settings = getAISettings()) {
   return { provider, groups, tasks };
 }
 
-function pickMaxTokens(task, hints = {}) {
+function pickMaxTokens(task, hints = {}, provider = null, model = null) {
   const t = resolveTask(task);
   const entry = TASK_MAX_TOKENS[t] ?? TASK_MAX_TOKENS['default'];
   const seed = typeof entry === 'function' ? entry(hints) : entry;
   // The TASK_MAX_TOKENS value above is the calibrated seed/floor. effectiveCap
   // raises it toward observed p95 usage if a model has churned to use more than
   // the formula assumed (never below the seed; never above the 24576 hard cap).
-  return { cap: effectiveCap(t, seed), seed };
+  const learnedCap = effectiveCap(t, seed);
+  // Legacy Claude models use a fixed extended-thinking budget rather than
+  // adaptive effort. Reserve its required reasoning + answer headroom before
+  // every caller and every preflight, so the request shape and context math
+  // cannot disagree. Modern Claude and Gemini retain their calibrated caps.
+  const cap = provider === 'claude' && model
+    ? claudeReasoningMaxTokens(model, learnedCap)
+    : provider === 'gemini'
+      ? Math.max(learnedCap, GEMINI_MAX_OUTPUT_TOKENS)
+      : learnedCap;
+  return { cap, seed };
 }
 
 // ── Context-window preflight ──────────────────────────────────────────────────
@@ -467,7 +478,7 @@ export async function checkPromptFits(prompt, opts = {}) {
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
   const model = pickModel(provider, task, settings);
-  const { cap: requestedOutput } = pickMaxTokens(task, hints);
+  const { cap: requestedOutput } = pickMaxTokens(task, hints, provider, model);
 
   // Budget against the model that serves — for Gemini, the smallest window the
   // cascade could fall to (homogeneous today, but min keeps this correct if a
@@ -584,7 +595,7 @@ export async function callLLMText(prompt, opts = {}) {
   const provider = providerForTask(task, settings);
   const model    = pickModel(provider, task, settings);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
-  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: fullLen, ...hints });
+  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: fullLen, ...hints }, provider, model);
   // Context-window preflight (free token count, mostly a local estimate): fail
   // loud BEFORE sending if the prompt + reserved output won't fit the serving
   // model. List-payload callers (job scoring) pre-split via checkPromptFits, so
@@ -621,7 +632,7 @@ export async function submitLLMTextBatch(items, { task, responseSchema, cachedPr
   const model = pickModel('claude', task, settings);
   const requests = (items || []).map((it) => {
     const fullLen = (it.prompt?.length || 0) + (cachedPrefix?.length || 0);
-    const { cap: maxTokens } = pickMaxTokens(task, { promptLength: fullLen, ...(it.hints || {}) });
+    const { cap: maxTokens } = pickMaxTokens(task, { promptLength: fullLen, ...(it.hints || {}) }, 'claude', model);
     return { customId: it.customId, userContent: it.prompt, model, maxTokens, responseSchema, cachedPrefix, expectJson: !responseSchema };
   });
   const res = await createClaudeBatch(settings.anthropicApiKey, requests);
@@ -672,7 +683,7 @@ export async function callLLMRaw(prompt, opts = {}) {
   const provider = providerForTask(task, settings);
   const model    = pickModel(provider, task, settings);
   const fullLen  = (prompt?.length || 0) + (cachedPrefix?.length || 0);
-  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: fullLen, ...hints });
+  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: fullLen, ...hints }, provider, model);
   // Same context-window preflight as callLLMText (this free-text path can carry
   // large research/synthesis prompts). Grounding adds server-side search tokens
   // we can't predict, but the prompt itself is what we guard here.
@@ -701,7 +712,7 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   // photoCount feeds the dynamic sizing function for tasks like
   // vision-product-analysis. Caller-supplied hints win on conflict so a future
   // call site can override when it knows better than the default heuristic.
-  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { photoCount: imagePaths?.length || 0, promptLength: prompt?.length || 0, ...hints });
+  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { photoCount: imagePaths?.length || 0, promptLength: prompt?.length || 0, ...hints }, provider, model);
   // Preflight the text prompt + a per-image allowance (image tokens themselves
   // are the provider's authority). Fails loud before sending if clearly over.
   await assertAttachmentPromptFits(prompt, { task, hints, signal, attachmentCount: imagePaths?.length || 0 });
@@ -740,7 +751,7 @@ export async function callLLMDocument(filePath, prompt, opts = {}) {
   const settings = getAISettings();
   const provider = providerForTask(task, settings);
   const model    = pickModel(provider, task, settings);
-  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: prompt?.length || 0, ...hints });
+  const { cap: maxTok, seed: formulaSeed } = pickMaxTokens(task, { promptLength: prompt?.length || 0, ...hints }, provider, model);
   // Preflight the text prompt + one document allowance (the file's own tokens —
   // PDF pages, etc. — remain the provider's authority). A pathologically large
   // career-file/résumé fails loud here instead of mid-extraction truncation.

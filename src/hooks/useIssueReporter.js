@@ -252,11 +252,18 @@ export function useIssueReporter({
         if (res.success) {
           try {
             await navigator.clipboard.writeText(res.markdown);
+            const hardCapOmissions = [
+              'some static report content',
+              res.trimmedEventCount > 0 ? `${res.trimmedEventCount} older event line(s)` : null,
+              res.trimmedLogCount > 0 ? `${res.trimmedLogCount} older main-process log line(s)` : null,
+            ].filter(Boolean).join(', ');
             addToast({
               title: 'Bug Report Copied',
-              description: res.truncated
-                ? 'Report copied to clipboard. Oldest event recordings were trimmed to fit the clipboard size cap.'
-                : 'Report copied to clipboard.',
+              description: res.hardTruncated
+                ? `Report copied with ${hardCapOmissions} omitted. Save to file for the full report.`
+                : res.truncated
+                  ? 'Report copied with the oldest timeline entries omitted to fit the clipboard cap. Save to file for the full report.'
+                  : 'Report copied to clipboard.',
               type: "success",
             });
           } catch (clipErr) {

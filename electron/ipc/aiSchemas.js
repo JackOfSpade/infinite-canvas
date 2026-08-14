@@ -197,34 +197,19 @@ export const MARKETPLACE_HUB_SCAN_SCHEMA = {
   },
 };
 
-// ── Job bucketing: scored jobs → the AI-created results taxonomy ────────────
-// Runs after job-scoring. The model returns the LABELS for the three-level
-// results hierarchy — nothing is hardcoded:
-//   1. likelihoodBands — interview-likelihood (matchScore) bands fitted to the
-//      run's score distribution. Definitions only: the renderer places each job
-//      into its band by the job's own score (deterministic, no dropped jobs).
-//   2. salaryRanges    — salary bands fitted to the distribution; renderer
+// ── Job bucketing: scored jobs → results taxonomy metadata ──────────────────
+// Runs after job-scoring. Likelihood bands are fixed to the scorer's rubric;
+// the model creates only the remaining taxonomy metadata:
+//   1. salaryRanges    — salary bands fitted to the distribution; renderer
 //      places jobs by parsed salary. Always include an "Unspecified" range.
-//   3. roles           — the creative consolidation: the model groups the jobs
+//   2. roles           — the creative consolidation: the model groups the jobs
 //      into clean role/job-family names (merging the scorer's per-job
 //      careerDirection guesses). This is the ONLY partition the model owns;
 //      jobs it omits are swept into "Other".
 export const JOB_BUCKETING_SCHEMA = {
   type: 'object',
-  required: ['likelihoodBands', 'salaryRanges', 'roles'],
+  required: ['salaryRanges', 'roles'],
   properties: {
-    likelihoodBands: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['label', 'minScore', 'maxScore'],
-        properties: {
-          label:    { type: 'string',  description: 'Human label including the % range, e.g. "Excellent fit (90–100%)"' },
-          minScore: { type: 'integer', description: '0-100 lower bound, inclusive' },
-          maxScore: { type: 'integer', description: '0-100 upper bound, inclusive' },
-        },
-      },
-    },
     salaryRanges: {
       type: 'array',
       items: {

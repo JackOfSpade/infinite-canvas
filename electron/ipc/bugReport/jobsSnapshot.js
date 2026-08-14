@@ -93,8 +93,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   const hasAppliedJobs = !!(appliedSnap && appliedSnap.count > 0);
   if (!t || (!t.search && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.bucketing && !t.history && !hasBrowserScrape && !appGen && !hasModelRes && !hasAppliedJobs)) return '';
 
-  const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId);
+  const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId, {
+    label: 'Source hub',
+    deletedNoun: 'hub',
+  });
   if (scope.foreign) return `\n## Job Search Pipeline\n${scope.note}`;
+  const boardScope = pipelineScope(t.boardNodeId, t.windowId, currentNodeIds, reportWindowId, {
+    label: 'Job Board node',
+    deletedNoun: 'board',
+  });
+  const attributionNote = `${scope.note}${boardScope.note}`;
 
   // Read session cache once — used to annotate pagination warnings with login status.
   let sessionCache = {};
@@ -104,16 +112,24 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   } catch { /* cache absent is fine — treat all platforms as unconfirmed */ }
 
   const lines = [];
+  // Populated by the saved-snapshot quality pass and reused by the LinkedIn
+  // residual verdict. Keeping both checks on the same normalized strings avoids
+  // declaring completion from process telemetry while the actual scoring input
+  // still contains an empty/short description.
+  let savedSnapshotJobs = [];
 
   if (t.search) {
     const s = t.search;
     lines.push(`### Search${ago(s.ts)}`);
     lines.push(`- Queries: ${s.queries}`);
+    const relevanceStage = s.relevanceDropped > 0
+      ? ` → title-relevance-dropped ${s.relevanceDropped}`
+      : '';
     lines.push(
-      `- Found (raw): ${s.raw} → deduped ${s.deduped} → age-dropped ${s.ageDropped} → ` +
+      `- Found (raw): ${s.raw}${relevanceStage} → deduped ${s.deduped} → age-dropped ${s.ageDropped} → ` +
       `already-seen/history ${s.historyDropped} → **new: ${s.kept}**`,
     );
-    lines.push('- _(dedup / age / history drops are by-design — not jobs we failed to analyze)_');
+    lines.push('- _(title-relevance / dedup / age / history drops are by-design — not jobs we failed to analyze)_');
     const dedup = s.dedupProvenance;
     if (dedup?.total > 0) {
       const summary = Object.entries(dedup.counts || {}).map(([reason, count]) => `${reason}=${count}`).join(', ');
@@ -237,13 +253,18 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         for (const q of s.googleQueryStrings) lines.push(`  - \`${q}\``);
       }
     }
-    // RemoteOK and WWR are whole-feed sources with no server-side role query.
-    // Show the exact title role concepts that admitted each surviving remote row, plus
-    // RemoteOK's non-authoritative tags, so a report can distinguish a matcher
-    // defect from a confusing board metadata field without dumping the whole feed.
-    if (s.remoteRelevance && Object.keys(s.remoteRelevance).length > 0) {
-      lines.push('- Remote-feed relevance trace (surviving jobs only; title matching — `service→support` denotes an adjacent role synonym, and RemoteOK tags are context, not match evidence):');
-      for (const [sourceId, rows] of Object.entries(s.remoteRelevance)) {
+    // Exact admission evidence where available, plus a bounded retrospective
+    // title audit for sources that trust a board's own relevance ranking. This
+    // exposes source-consistency leaks without embedding the full scored-job
+    // payload (which is far too large for clipboard reports).
+    const relevanceAudit = s.relevanceAudit || (s.remoteRelevance
+      ? Object.fromEntries(Object.entries(s.remoteRelevance).map(([sourceId, rows]) => [sourceId, { mode: 'admission', rows }]))
+      : null);
+    if (relevanceAudit && Object.keys(relevanceAudit).length > 0) {
+      lines.push('- All-source role relevance audit (surviving jobs; `service→support` denotes an adjacent role synonym):');
+      for (const [sourceId, audit] of Object.entries(relevanceAudit)) {
+        const rows = Array.isArray(audit) ? audit : audit?.rows;
+        if (!Array.isArray(rows)) continue;
         for (const row of rows) {
           const title = row?.title ? `"${row.title}"` : '(untitled)';
           const company = row?.company ? ` — ${row.company}` : '';
@@ -256,7 +277,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             return `\`${m?.query || '?'}\` → [${terms}]${required}`;
           }).join('; ') || '(no match evidence recorded)';
           const tags = Array.isArray(row?.tags) && row.tags.length ? ` · tags: ${row.tags.join(', ')}` : '';
-          lines.push(`  - [${sourceId}] ${title}${company}: ${why}${tags}`);
+          const mode = audit?.mode === 'post-hoc-title-audit' ? ' · post-hoc title audit' : ' · admission evidence';
+          const bypass = row?.bypassedTitleGate ? ' ⚠️ no query-title match; source bypassed an app-side title gate' : '';
+          lines.push(`  - [${sourceId}] ${title}${company}: ${why}${tags}${mode}${bypass}`);
         }
       }
     }
@@ -296,14 +319,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`- Browser scrape order (manual-verification-first): ${annotated.join(' → ')}`);
     }
 
-    // Per-source raw counts — the "was this source silently not gathered?" line.
+    // Per-source title-relevant counts — the "was this source silently not
+    // gathered?" line. The final relevance gate mutates sourceResults.jobs, so
+    // these counts reconcile to the funnel's post-relevance total, not `s.raw`.
     // A 0 WITH a warning is a real miss to chase; a clean 0 is genuinely-empty or
     // off-category (e.g. a cinematographer on USAJobs/Dice). Without this you only
     // saw the aggregate raw count and couldn't tell which sources contributed.
     if (s.bySource && Object.keys(s.bySource).length > 0) {
       const entries = Object.entries(s.bySource);
       const got = entries.filter(([, v]) => v.count > 0).map(([k, v]) => `${k}=${v.count}`);
-      lines.push(`- Per source (raw gathered): ${got.length ? got.join(', ') : '(none)'}`);
+      lines.push(`- Per source (title-relevant gathered): ${got.length ? got.join(', ') : '(none)'}`);
       // Date-bounded deep pagination: how deep each paginating source walked and
       // why it stopped. `empty-page` = the source ran out of results. `blocked`
       // = an anti-bot wall cut it short. `page-cap` = hit JOB_MAX_PAGES with jobs
@@ -360,6 +385,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const relevanceFiltered = entries.filter(([, v]) => v.relevanceDropped > 0);
       for (const [k, v] of relevanceFiltered) {
         lines.push(`  - \`${k}\`: provider returned ${v.providerGathered ?? v.count}; app rejected ${v.relevanceDropped} title-irrelevant row(s) before the result cap.`);
+        // The count alone can't separate a gate doing its job from one that is
+        // over-rejecting and starving the source — and a high reject ratio is
+        // normal for keyword APIs that search the whole announcement (USAJobs),
+        // so the ratio isn't the tell either. Only the discarded titles are.
+        if (Array.isArray(v.relevanceRejected) && v.relevanceRejected.length > 0) {
+          const sample = v.relevanceRejected.map(t => `"${String(t).slice(0, 60)}"`).join(', ');
+          lines.push(`    - rejected sample: ${sample} — if these read as ON-target for the search, the relevance gate is too strict.`);
+        }
       }
       const zeroWarn = entries
         .filter(([, v]) => v.count === 0 && v.warning)
@@ -413,6 +446,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : path.join(app.getPath('userData'), 'job-search', 'job-search-last-scrape.json');
       const snapData = JSON.parse(fs.readFileSync(snapPath, 'utf8'));
       const snapJobs = Array.isArray(snapData?.jobs) ? snapData.jobs : [];
+      savedSnapshotJobs = snapJobs;
       if (snapJobs.length > 0) {
         const bySource = {};
         for (const j of snapJobs) {
@@ -488,12 +522,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             salaryPresent: 0,
             salaryUnparseable: 0,
             salaryLostCadence: 0, salaryLostCadenceEx: [],
+            salaryImplausibleAnnual: 0, salaryImplausibleAnnualEx: [],
             salaryProse: 0, salaryProseEx: [],
             postedEmpty: 0,
             urlMissing: 0,
             companyEmpty: 0,
             titleEmpty: 0,
-            descEmpty: 0, descShort: 0, descShortLens: [],
+            descEmpty: 0, descShort: 0, descShortLens: [], descShortEx: [],
             mojibake: 0, mojibakeEx: [],
           });
           q.total++;
@@ -514,7 +549,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             // the field-quality comment block above for the USAJobs example).
             if (parseSalaryToNumeric(sal) === 0) {
               q.salaryUnparseable++;
-              if (classifyUnparseableSalary(sal) === 'lost-cadence') {
+              const salaryClass = classifyUnparseableSalary(sal);
+              if (salaryClass === 'implausible-annual') {
+                q.salaryImplausibleAnnual++;
+                if (q.salaryImplausibleAnnualEx.length < 3) q.salaryImplausibleAnnualEx.push(`"${sal.slice(0, 50)}"`);
+              } else if (salaryClass === 'lost-cadence') {
                 q.salaryLostCadence++;
                 if (q.salaryLostCadenceEx.length < 3) q.salaryLostCadenceEx.push(`"${sal.slice(0, 50)}"`);
               } else {
@@ -539,6 +578,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           } else if (desc.length < SHORT_DESC_THRESHOLD) {
             q.descShort++;
             if (q.descShortLens.length < 3) q.descShortLens.push(desc.length);
+            if (q.descShortEx.length < 3) q.descShortEx.push({
+              title: String(j.title || '(untitled)').replace(/\s+/g, ' ').slice(0, 100),
+              url: String(j.url || '(no URL)').slice(0, 240),
+              length: desc.length,
+            });
           }
         }
 
@@ -549,9 +593,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           // unparseable is the alarming signal; 158/686 of total dilutes it. A
           // source where salary is legitimately rare (e.g. LinkedIn API) lights
           // up correctly only when the values it DOES carry fail to annualize.
-          // Split into the two remedies (see jobQualityChecks.js): cadence-lost
-          // values are OUR bug (extractor dropped the rate's unit, fixable);
-          // prose values mean there was never anything to extract. A source can
+          // Split the two observed shapes (see jobQualityChecks.js): cadence-lost
+          // values are money-shaped but lack a recoverable unit; prose values
+          // mean there was never anything to extract. A source can
           // have both at once, so both counts + samples are always shown when
           // present rather than collapsing into one bucket.
           if (q.salaryUnparseable > 0) {
@@ -559,7 +603,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             const sev = pct >= 80 ? '🔥' : '⚠';
             const breakdown = [];
             if (q.salaryLostCadence > 0) {
-              breakdown.push(`${q.salaryLostCadence} money-shaped but cadence-lost (our extractor's bug, fixable) — e.g. ${q.salaryLostCadenceEx.join(', ')}`);
+              // A money-shaped value without a unit is observable; its cause and
+              // recoverability are not. Dice exposes a cadence on some detail
+              // pages and omits it on others, so never promise an extractor fix
+              // or imply a cadence that the source did not actually provide.
+              breakdown.push(`${q.salaryLostCadence} money-shaped but cadence missing — extractor could not recover a unit, so these remain Unspecified rather than guessing — e.g. ${q.salaryLostCadenceEx.join(', ')}`);
+            }
+            if (q.salaryImplausibleAnnual > 0) {
+              breakdown.push(`${q.salaryImplausibleAnnual} implausibly tiny explicit annual amount — rejected rather than interpreting a likely mislabeled hourly rate — e.g. ${q.salaryImplausibleAnnualEx.join(', ')}`);
             }
             if (q.salaryProse > 0) {
               breakdown.push(`${q.salaryProse} pure prose, nothing to extract (not our bug) — e.g. ${q.salaryProseEx.join(', ')}`);
@@ -608,7 +659,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           }
           if (q.descShort > 0) {
             const lensStr = q.descShortLens.join(', ');
-            issues.push(`⚠ description short (<${SHORT_DESC_THRESHOLD} chars): ${q.descShort}/${q.total} — likely got the listing snippet instead of the full JD (sample lengths: ${lensStr})`);
+            const samples = q.descShortEx.map(ex => `"${ex.title}" (${ex.length} chars) [${ex.url}]`).join('; ');
+            issues.push(`⚠ description short (<${SHORT_DESC_THRESHOLD} chars): ${q.descShort}/${q.total} — likely got the listing snippet instead of the full JD (sample lengths: ${lensStr})${samples ? ` · samples: ${samples}` : ''}`);
           }
           // Encoding corruption — UTF-8 read as Latin-1 ("'"→"â€™", em-dash→"â€"",
           // 𝗯𝗼𝗹𝗱-Unicode). Corrupts the text fed to scoring AND the generated
@@ -658,12 +710,18 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           let note;
           if (q.salaryPresent === 0) {
             note = SALARY_NEVER.has(src)
-              // NOT "the source has no salary" — these sites DO show pay; our
-              // extractor just doesn't capture it (ZR: ItemList JSON-LD is name+url
-              // only, enrichment pulls description not baseSalary; WWR: RSS has no
-              // salary field; Google: panel salary chip unread). A known extraction
-              // gap, not a regression — and a backlog item, not a clean ✅.
-              ? 'none carried — our extractor doesn’t capture pay for this source yet (known gap, not a regression)'
+              // Say only what's known. This used to assert the cause was ours
+              // ("our extractor doesn't capture pay for this source yet"), naming
+              // ZR/WWR/Google — sources since REMOVED from SALARY_NEVER once they
+              // gained extraction, so the explanation outlived the set it explained.
+              // Worse, it was wrong for the one source that matters here: LinkedIn
+              // guest job pages were checked live across 10 real postings and carry
+              // no baseSalary in their JSON-LD at all, and the only pay elements on
+              // the page belong to the "Similar jobs" rail — i.e. ANOTHER posting's
+              // pay, which we must never attribute to this one. So 0% here is not a
+              // proven extractor gap, and stating it as one sends a reader hunting a
+              // bug that may not exist. Report the observation, not a root cause.
+              ? 'none carried — pay is not exposed to the scraper on this source (not a regression; see SALARY_NEVER)'
               : 'none carried — no salary values to validate';
           }
           else if (q.salaryUnparseable === 0) note = 'all annualized ✅';
@@ -726,7 +784,20 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     } else {
       lines.push('- Current: (no active scrape)');
     }
-    const recent = (browserScrape.events || []).slice(-8);
+    const allScrapeEvents = browserScrape.events || [];
+    // Per-listing extraction misses are the actionable selector evidence, not
+    // ordinary progress. A multi-source run easily pushes an early ZipRecruiter
+    // miss out of the trailing phase slice with later Google events, which made
+    // a FULL report less useful than the telemetry it already retained. Render
+    // these separately so the compact progress trail can stay bounded without
+    // discarding field-quality evidence.
+    // New telemetry keeps these in a dedicated ring. Fall back to the legacy
+    // phase ring for reports generated by an already-running older process.
+    const fieldAnomalies = Array.isArray(browserScrape.fieldAnomalies)
+      ? browserScrape.fieldAnomalies
+      : allScrapeEvents.filter(e => ['desc-miss', 'date-miss'].includes(e?.phase));
+    const anomalySet = new Set(fieldAnomalies);
+    const recent = allScrapeEvents.filter(e => !anomalySet.has(e)).slice(-8);
     if (recent.length > 0) {
       lines.push('- Recent browser-scrape phases:');
       for (const e of recent) {
@@ -753,6 +824,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push(`  - ${label}`);
       }
     }
+    if (fieldAnomalies.length > 0) {
+      const shown = fieldAnomalies.slice(-12);
+      lines.push('- Field-quality scraper anomalies (retained independently of recent phases):');
+      for (const e of shown) {
+        const ageMs = Date.now() - (e.ts || Date.now());
+        const label = [
+          e.phase,
+          e.srcName || e.sourceId || null,
+          e.key ? `key=${e.key}` : null,
+          `-${Math.max(0, Math.round(ageMs / 1000))}s`,
+        ].filter(Boolean).join(' ');
+        lines.push(`  - ⚠️ ${label}`);
+      }
+      if (fieldAnomalies.length > shown.length) {
+        lines.push(`  - _${fieldAnomalies.length - shown.length} earlier field-quality anomaly event(s) omitted from the bounded trail._`);
+      }
+    }
   }
 
   // Browser-side console errors / network failures captured by the Puppeteer
@@ -774,7 +862,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push('**Console:**');
       for (const e of consoleLogs.slice(-40)) {
         const ageS = Math.max(0, Math.round((Date.now() - e.ts) / 1000));
-        const src = e.url ? ` (${e.url.split('/').pop().slice(0, 60)}${e.line != null ? `:${e.line}` : ''})` : '';
+        // Mark a clipped URL tail. Without the ellipsis a truncated value reads as
+        // a COMPLETE one: a ZipRecruiter search URL cut at exactly 60 chars ended
+        // on "…&location=" and looked like the app had sent an empty location
+        // param — a bug that was never there, chased on a real report.
+        const tail = e.url ? e.url.split('/').pop() : '';
+        const src = e.url ? ` (${tail.slice(0, 60)}${tail.length > 60 ? '…' : ''}${e.line != null ? `:${e.line}` : ''})` : '';
         lines.push(`- [-${ageS}s] [${e.type}] ${e.text}${src}`);
       }
     }
@@ -1027,9 +1120,22 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     } else {
       const lastReal = [...enrichTrail].reverse().find(e => e.browserGen != null);
       if (lastReal && lastReal.stillEmpty != null) {
-      const empty = lastReal.stillEmpty;
+      const snapshotLinkedInIncomplete = savedSnapshotJobs.filter(job =>
+        job?.source === 'linkedin' && String(job?.snippet || '').trim().length < 100,
+      );
+      const telemetryEmpty = Number(lastReal.stillEmpty) || 0;
+      const hasSavedLinkedIn = savedSnapshotJobs.some(job => job?.source === 'linkedin');
+      const empty = hasSavedLinkedIn
+        ? Math.max(telemetryEmpty, snapshotLinkedInIncomplete.length)
+        : telemetryEmpty;
+      if (hasSavedLinkedIn && snapshotLinkedInIncomplete.length !== telemetryEmpty) {
+        const samples = snapshotLinkedInIncomplete.slice(0, 3).map(job =>
+          `"${String(job.title || '(untitled)').replace(/\s+/g, ' ').slice(0, 100)}" (${String(job.snippet || '').trim().length} chars)${job?.url ? ` — ${String(job.url).slice(0, 240)}` : ''}`,
+        ).join('; ');
+        lines.push(`- ⚠️ **Completion telemetry disagrees with the saved scoring snapshot:** final pass recorded ${telemetryEmpty} below-threshold description(s), but the snapshot contains ${snapshotLinkedInIncomplete.length}${samples ? ` — ${samples}` : ''}. The snapshot is authoritative for what was scored; do not treat this as a clean full-description finish.`);
+      }
       if (empty === 0) {
-        lines.push('- ✅ **Residual: 0 still empty** — every job that has a description got one.');
+        lines.push('- ✅ **Residual: 0 below enrichment threshold** — every LinkedIn scoring input has at least 100 non-whitespace description characters.');
       } else if (lastReal.noDescSoftBlock != null) {
         const soft = lastReal.noDescSoftBlock || 0;
         const genuine = lastReal.noDescGenuine || 0;
@@ -1089,6 +1195,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`  - _(${sessionGathered} gathered this session; the other **${carried}** were carried over from a prior run — already on the canvas, re-scored here. Not gathered this session, so their scrape funnel isn't above — and not silently added.)_`);
     }
     lines.push(`- Batches: ${s.batches} (${s.failedBatches} failed)${modelTag(s.models?.length ? s.models.join(', ') : null)}`);
+    if (Array.isArray(s.fallbacks) && s.fallbacks.length > 0) {
+      lines.push('- Model fallback routes (successful scoring calls):');
+      for (const [index, fallback] of s.fallbacks.entries()) {
+        const servedTag = modelTag(fallback.servedModel, fallback).replace(/^ · model: /, '');
+        lines.push(`  - call ${index + 1}: preferred \`${fallback.preferredModel || '?'}\` → served ${servedTag}`);
+      }
+      if (s.fallbackOmitted > 0) lines.push(`  - _${s.fallbackOmitted} additional fallback call(s) omitted from the bounded trail._`);
+    }
     if (s.failureReason) {
       // Persisted from the scoring loop so the cause survives even after the raw
       // log line scrolls out of the main-process ring buffer.
@@ -1099,6 +1213,24 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
     if (s.unscored > 0) {
       lines.push(`- ⚠️ **${s.unscored} job(s) never scored** — the abort signal cut the batch loop short before they were sent to the scorer.`);
+    }
+    const audit = s.audit;
+    if (audit && Array.isArray(audit.rows) && audit.rows.length > 0) {
+      const anomalies = Array.isArray(audit.anomalies) ? audit.anomalies : [];
+      lines.push('- Scoring consistency audit (bounded; original batch retained before score sorting):');
+      if (anomalies.length === 0) {
+        lines.push('  - ✅ No cross-batch score delta ≥15 among same-title/company jobs with effectively identical descriptions.');
+      } else {
+        for (const anomaly of anomalies) {
+          const a = audit.rows[anomaly.first?.index];
+          const b = audit.rows[anomaly.second?.index];
+          if (!a || !b) continue;
+          lines.push(`  - ⚠️ **${anomaly.delta}-point cross-batch drift** for "${anomaly.title}" — ${anomaly.company}: batch ${a.batch} scored ${a.score} (${a.location || 'location ?'}; ${a.direction || 'direction ?'}) vs batch ${b.batch} scored ${b.score} (${b.location || 'location ?'}; ${b.direction || 'direction ?'}); identical JD fingerprint \`${anomaly.descriptionFingerprint}\`.`);
+          lines.push(`    - first: ${a.url || '(no URL)'} · reason: "${a.reason || '(none)'}"`);
+          lines.push(`    - second: ${b.url || '(no URL)'} · reason: "${b.reason || '(none)'}"`);
+        }
+      }
+      if (audit.omitted > 0) lines.push(`  - _${audit.omitted} additional scored job(s) omitted from the bounded audit._`);
     }
   } else {
     lines.push('\n### Scoring\n- (no scoring recorded this session)');
@@ -1136,7 +1268,19 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const total = (sk.url || 0) + (sk.titleCompany || 0) + (sk.noKey || 0);
           lines.push(`  - ${total} job(s) wrote no row: ${parts.join(', ')}${bySrc ? ` · by source: ${bySrc}` : ''}`);
           if (sk.inBatch > 0) {
-            lines.push(`    - ⚠️ ${sk.inBatch} of those collided with ANOTHER JOB IN THIS SAME WRITE, not with prior history — that is a dedup key too coarse to separate two distinct listings, and those jobs will also be wrongly suppressed as "already seen" on the next run.`);
+            lines.push(`    - ⚠️ ${sk.inBatch} of those collided with an earlier job in THIS SAME WRITE, not with prior history. See the bounded collision samples below to distinguish an expected duplicate from an identity-key defect.`);
+            for (const sample of Array.isArray(sk.collisionSamples) ? sk.collisionSamples : []) {
+              const first = sample?.first || {};
+              const duplicate = sample?.duplicate || {};
+              const esc = value => String(value ?? '').replace(/`/g, '\\`').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+              const describe = job => `\`${esc(job.source || '?')}\` "${esc(job.title || '(untitled)')}" — ${esc(job.company || '(unknown company)')} · ${esc(job.location || '(no location)')} [${esc(job.url || '(no URL)')}]`;
+              const verdict = sample.sameListing
+                ? '✅ likely the same listing surfaced twice (same source/title/company/location)'
+                : '🔥 conflicting listings share one history key — inspect the normalizer';
+              lines.push(`      - ${verdict} · key \`${esc(sample.key || '?')}\``);
+              lines.push(`        - kept: ${describe(first)}`);
+              lines.push(`        - skipped: ${describe(duplicate)}`);
+            }
           }
         }
         if (h.unreadable > 0) {
@@ -1157,11 +1301,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // The bucket call threw (Claude "streaming required", truncation, or
       // fallback-chain exhaustion). The renderer flat-spawned the jobs. Surface
       // it so this is never mistaken for a clean run OR the "never ran" null slot.
-      lines.push(`- ❌ **Taxonomy FAILED** on ${b.input} scored job(s)${modelTag(b.model)} — jobs were spawned as a FLAT, score-ordered list (none dropped, but the likelihood/salary/role tree is lost).`);
+      lines.push(`- ❌ **Taxonomy FAILED** on ${b.input} scored job(s)${modelTag(b.model, b.fallback)} — jobs were spawned as a FLAT, score-ordered list (none dropped, but the likelihood/salary/role tree is lost).`);
       lines.push(`  - Error: ${b.error}`);
     } else {
       const clean = b.missing === 0 && b.duplicated === 0;
-      lines.push(`- Input: ${b.input} → ${b.roleCount} role(s), ${Array.isArray(b.bandSummary) ? b.bandSummary.length : 0} likelihood band(s), ${Array.isArray(b.salaryRangeLabels) ? b.salaryRangeLabels.length : 0} salary range(s)${clean ? ' · ✅ every job placed in a role' : ''}${modelTag(b.model)}`);
+      lines.push(`- Input: ${b.input} → ${b.roleCount} role(s), ${Array.isArray(b.bandSummary) ? b.bandSummary.length : 0} likelihood band(s), ${Array.isArray(b.salaryRangeLabels) ? b.salaryRangeLabels.length : 0} salary range(s)${clean ? ' · ✅ every job placed in a role' : ''}${modelTag(b.model, b.fallback)}`);
       const dirs = t.scoring?.directions;
       if (typeof dirs === 'number' && dirs > 0 && b.roleCount > 0) {
         const note = dirs > b.roleCount
@@ -1336,7 +1480,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
 
   return `
 ## Job Search Pipeline
-${scope.note}> Last run's funnel, captured in the main process so it survives hub deletion
+${attributionNote}> Last run's funnel, captured in the main process so it survives hub deletion
 > and log-buffer scroll. The "found → analyzed" gap answers "did we analyze all
 > the jobs?": dedup / age / already-seen drops are expected; placeholder or
 > unscored jobs are not. Each stage stamps independently — a captcha-resolve

@@ -11,7 +11,7 @@ import React from 'react';
  * warning doesn't also fire that handler. Comp cards have no wrapper onClick, so
  * they leave it off to preserve their existing behavior.
  */
-export function SourceWarningPanel({ warning, hasBlock, stopClick = false }) {
+export function SourceWarningPanel({ warning, hasBlock, stopClick = false, note = null }) {
   if (!warning) return null;
   return (
     <div
@@ -23,6 +23,7 @@ export function SourceWarningPanel({ warning, hasBlock, stopClick = false }) {
     >
       {warning.evidence && <div className="font-mono break-words">{warning.evidence}</div>}
       {warning.suggestion && <div className="mt-0.5 opacity-80 break-words">{warning.suggestion}</div>}
+      {note && <div className="mt-1 font-medium opacity-90 break-words">{note}</div>}
     </div>
   );
 }
