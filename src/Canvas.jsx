@@ -290,11 +290,20 @@ export function Canvas() {
     saveStateRef,
   });
 
+  // Queued work may outlive an individual card view (for example while a job
+  // branch is collapsed). Expose a stable accessor so that work resumes beside
+  // the canvas's *current* file after Save As, rather than a stale closure.
+  const currentFileRef = useRef(currentFile);
+  React.useLayoutEffect(() => {
+    currentFileRef.current = currentFile;
+  }, [currentFile]);
+  const getCurrentFile = useCallback(() => currentFileRef.current, []);
+
   // Exposes currentFile to descendants (e.g. JobSearchNode) alongside the
   // navigation helpers via the same context, avoiding a second provider.
   const navContextValue = React.useMemo(
-    () => ({ ...navigation, currentFile }),
-    [navigation, currentFile]
+    () => ({ ...navigation, currentFile, getCurrentFile }),
+    [navigation, currentFile, getCurrentFile]
   );
 
   // ── Initial canvas population on mount ──────────────────────────────────

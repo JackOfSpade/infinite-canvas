@@ -100,9 +100,13 @@ function withTimeout(promise, ms, label, signal) {
  * @param {string} html
  * @param {object} [opts]
  * @param {AbortSignal} [opts.signal]
+ * @param {'resume'|'cover'} [opts.document] Which panel to print from a
+ * combined application workspace. The generated tabs are switched inside the
+ * isolated render window before font readiness/printing is measured. Omit for
+ * a standalone résumé or cover-letter document.
  * @returns {Promise<{bytes: Uint8Array, pageCount: number}>}
  */
-export async function renderPdf(html, { signal } = {}) {
+export async function renderPdf(html, { signal, document = null } = {}) {
   throwIfAborted(signal);
 
   let tempDir = null;
@@ -149,6 +153,22 @@ export async function renderPdf(html, { signal } = {}) {
       win.loadFile(tempPath).catch(reject);
     }), RENDER_TIMEOUT_MS, 'renderPdf: did-finish-load', signal);
     throwIfAborted(signal);
+
+    if (document === 'cover' || document === 'resume') {
+      // Application.html keeps both documents in one self-contained editor.
+      // Its tab script is synchronous, so selecting cover before the font
+      // check guarantees printToPDF sees the cover panel rather than hidden
+      // résumé content. No caller-controlled JavaScript is interpolated here.
+      const tabId = document === 'cover' ? 'ic-cover-tab' : 'ic-resume-tab';
+      const label = document === 'cover' ? 'cover letter' : 'résumé';
+      await withTimeout(
+        wc.executeJavaScript(`(function () { var tab = document.getElementById(${JSON.stringify(tabId)}); if (!tab) throw new Error(${JSON.stringify(`${label} panel is unavailable.`)}); tab.click(); })()`),
+        RENDER_TIMEOUT_MS,
+        `renderPdf: select ${label}`,
+        signal,
+      );
+      throwIfAborted(signal);
+    }
 
     // `document.fonts.ready` is NOT a success signal — per spec it resolves
     // when font loading FINISHES, including when every @font-face failed. The

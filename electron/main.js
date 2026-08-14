@@ -9,6 +9,7 @@ import { isExistingFile, isSensitivePath } from './utils/pathSafety.js';
 import { logger } from './logger.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
+import { startApplicationSyncServer, stopApplicationSyncServer } from './ipc/applicationSync.js';
 import { registerAppliedJobsHandlers } from './ipc/appliedJobs.js';
 import { primeClaudeModels } from './ipc/modelResolver.js';
 import { assertDesignSystemIntact } from './ipc/resumeHtml.js';
@@ -801,6 +802,7 @@ if (!gotTheLock) {
     registerFilesystemHandlers();
     registerJobsHandlers();
     registerJobApplicationHandlers();
+    startApplicationSyncServer().catch((err) => logger.warn(`[main] Application sync service failed to start: ${err?.message || err}`));
     registerAppliedJobsHandlers();
     registerMarketplaceHandlers();
     registerAccountsHandlers();
@@ -907,7 +909,8 @@ app.on('before-quit', async (event) => {
       await Promise.allSettled([
         closeAllMonitors(),
         closeAllPages(),
-        closeStealthBrowser(true)
+        closeStealthBrowser(true),
+        stopApplicationSyncServer(),
       ]);
     };
     

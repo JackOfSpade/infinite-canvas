@@ -63,7 +63,7 @@ const LOCATION = 'us-central1';
  * unsupported keywords (anyOf/oneOf/$ref/additionalProperties) that Gemini's
  * schema validator rejects — keep schemas simple to avoid surprises.
  */
-function toGeminiSchema(schema) {
+export function toGeminiSchema(schema) {
   if (!schema || typeof schema !== 'object') return schema;
   const TYPE_MAP = {
     string: 'STRING', number: 'NUMBER', integer: 'INTEGER',
@@ -72,7 +72,15 @@ function toGeminiSchema(schema) {
   const out = {};
   if (schema.type) out.type = TYPE_MAP[schema.type] || schema.type;
   if (schema.description) out.description = schema.description;
-  if (schema.enum) out.enum = schema.enum;
+  // Google rejects an empty string inside an enum (even though JSON Schema and
+  // Claude accept it). Some contracts intentionally use "" for an honest
+  // "not applicable" value; sending that enum rejects the entire request
+  // before the model sees the prompt. Keep the source schema intact for
+  // Claude, but omit that enum on Gemini rather than narrowing the field.
+  if (Array.isArray(schema.enum) && schema.enum.length > 0
+    && !schema.enum.some(value => typeof value === 'string' && value.length === 0)) {
+    out.enum = schema.enum;
+  }
   if (schema.nullable) out.nullable = schema.nullable;
   if (schema.required) out.required = schema.required;
   if (schema.properties) {

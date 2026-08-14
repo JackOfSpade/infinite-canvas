@@ -518,12 +518,11 @@ function jsStringLiteral(s) {
   return JSON.stringify(String(s ?? '')).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
 }
 
-// A résumé HTML file is intentionally standalone: people routinely move it out
-// of the application folder, edit it in a browser, then return to it weeks
-// later. Keep the re-download payload in that file too, rather than making the
-// toolbar depend on Electron IPC or a network-hosted zip library. The company
-// segment must be safe for both a ZIP entry and the downloaded filename; this
-// is display data from a job board, never a path supplied by the user.
+// A résumé HTML file is intentionally standalone: people routinely open it
+// directly from its application folder. A browser cannot write that file, so
+// Sync uses a narrowly-scoped localhost capability created by the Electron
+// main process. The company segment is display data from a job board, never a
+// path supplied by the user.
 export function normaliseResumeDownloadBundle(raw = {}) {
   const safePart = (value, fallback) => {
     const cleaned = String(value ?? '')
@@ -541,9 +540,8 @@ export function normaliseResumeDownloadBundle(raw = {}) {
   };
   const validPdfBase64 = (value) => {
     const pdfBase64 = String(value || '').replace(/\s/g, '');
-    // A malformed value is never carried into a permanent HTML artifact. The
-    // browser validates again before decoding, but omitting it here avoids a
-    // corrupt PDF turning a later re-download into a broken ZIP.
+    // Legacy saved workspaces may still contain embedded PDF bytes. Keep only
+    // valid values while migrating them; new workspaces store PDFs as siblings.
     return pdfBase64.startsWith('JVBERi0') && /^[A-Za-z0-9+/]*={0,2}$/.test(pdfBase64)
       && pdfBase64.length % 4 === 0 ? pdfBase64 : '';
   };
@@ -552,13 +550,39 @@ export function normaliseResumeDownloadBundle(raw = {}) {
   // the résumé PDF, never the cover letter.
   const resumePdfBase64 = validPdfBase64(raw.resumePdfBase64 || raw.pdfBase64);
   const coverLetterPdfBase64 = validPdfBase64(raw.coverLetterPdfBase64);
+  const syncEndpoint = String(raw.sync?.endpoint || '');
+  const syncToken = String(raw.sync?.token || '');
+  const sync = /^http:\/\/127\.0\.0\.1:43192\/application-sync$/.test(syncEndpoint)
+    && /^[a-f0-9]{64}$/i.test(syncToken)
+    ? { endpoint: syncEndpoint, token: syncToken, version: 1 }
+    : { endpoint: '', token: '', version: 1 };
   return {
     company: safePart(raw.company, 'Company'),
     candidateName: safePart(raw.candidateName, 'Application'),
     jobMarkdown: String(raw.jobMarkdown || '').replace(/\r\n/g, '\n'),
     resumePdfBase64,
     coverLetterPdfBase64,
+    sync,
   };
+}
+
+/**
+ * Add the Electron sync capability after the generated HTML has been assigned
+ * its final on-disk workspace. Generation happens before the renderer knows
+ * that folder, so this deliberately updates only the inert JSON data node;
+ * it never regexes executable script text or accepts a client-selected path.
+ */
+export function embedApplicationSyncConfig(applicationHtml, sync) {
+  const source = String(applicationHtml || '');
+  const match = /(<script\s+id="ic-application-bundle-data"\s+type="application\/json">)([\s\S]*?)(<\/script>)/i.exec(source);
+  if (!match) throw new Error('Generated application HTML is missing its sync configuration node.');
+  let data;
+  try { data = JSON.parse(match[2]); } catch { throw new Error('Generated application HTML has invalid sync configuration data.'); }
+  const normalized = normaliseResumeDownloadBundle({ sync });
+  if (!normalized.sync.endpoint || !normalized.sync.token) throw new Error('Application sync configuration is invalid.');
+  data = { ...(data && typeof data === 'object' ? data : {}), sync: normalized.sync };
+  const encoded = JSON.stringify(data).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+  return `${source.slice(0, match.index)}${match[1]}${encoded}${match[3]}${source.slice(match.index + match[0].length)}`;
 }
 
 // Skill-review inputs are model-produced advice, so normalize them into a
@@ -719,8 +743,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
   <div class="ic-toolbar" role="toolbar" aria-label="Document controls">
     <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
     <button type="button" id="ic-export-btn" class="ic-btn ic-btn-primary">Export (Print / Save as PDF)</button>
-    <button type="button" id="ic-download-btn" class="ic-btn">Download application bundle</button>
-    <label class="ic-pdf-attachment"><span id="ic-pdf-attachment-label">Attach current résumé PDF</span><input type="file" id="ic-pdf-attachment" accept="application/pdf,.pdf"></label>
+    <button type="button" id="ic-sync-btn" class="ic-btn">Sync résumé</button>
     <span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span>
     <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
     <span class="ic-hint">Printing? The page preview is the only thing that prints.</span>
@@ -779,8 +802,8 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
   const chromeMarkup = workspace ? '' : `<div class="ic-toolbar" role="toolbar" aria-label="Document controls">
   <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
   <button type="button" id="ic-export-btn" class="ic-btn ic-btn-primary">Export (Print / Save as PDF)</button>
-  <button type="button" id="ic-download-btn" class="ic-btn">${isResumeBundle ? 'Download application bundle' : 'Download edited copy'}</button>
-  ${isResumeBundle ? '<label class="ic-pdf-attachment"><span id="ic-pdf-attachment-label">Attach current résumé PDF</span><input type="file" id="ic-pdf-attachment" accept="application/pdf,.pdf"></label><span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span>' : ''}
+  <button type="button" id="ic-sync-btn" class="ic-btn">${isResumeBundle ? 'Sync résumé' : 'Sync edited copy'}</button>
+  ${isResumeBundle ? '<span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span>' : ''}
   <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
   <span class="ic-hint">${escapeHtml(printHint)}</span>
 </div>
@@ -801,9 +824,7 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
   var documentTabs = Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-tab]'));
   var editBtn = document.getElementById('ic-edit-toggle');
   var exportBtn = document.getElementById('ic-export-btn');
-  var downloadBtn = document.getElementById('ic-download-btn');
-  var pdfAttachment = document.getElementById('ic-pdf-attachment');
-  var pdfAttachmentLabel = document.getElementById('ic-pdf-attachment-label');
+  var syncBtn = document.getElementById('ic-sync-btn');
   var pdfBundleNote = document.getElementById('ic-pdf-bundle-note');
   var restoreNote = document.getElementById('ic-restore-note');
   var fontWarning = document.getElementById('ic-font-warning');
@@ -814,54 +835,35 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
   // Each document has its own exported companion. A résumé edit must never
   // invalidate a still-current cover-letter PDF (and vice versa).
   var pdfStale = { resume: false, cover: false };
+  var syncMessage = '';
   var initialResumeMarkup = resumeMain ? resumeMain.innerHTML : '';
 
   function persistBundleData() {
     if (bundleDataElement) bundleDataElement.textContent = JSON.stringify(BUNDLE_DATA).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
   }
-  function safeBundlePart(value, fallback) {
-    var cleaned = String(value || '')
-      .replace(/[/\\\\:*?"<>|]+/g, ' ')
-      .replace(/[\\s\\S]/g, function (char) { var code = char.charCodeAt(0); return code < 32 || code === 127 ? ' ' : char; })
-      .replace(/\\s+/g, ' ')
-      .replace(/^[. ]+|[. ]+$/g, '')
-      .trim();
-    var capped = Array.prototype.slice.call(cleaned).slice(0, 100).join('').replace(/[. ]+$/g, '').trim();
-    return !capped || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\\.|$)/i.test(capped) ? fallback : capped;
-  }
   function documentLabel(kind) {
     return kind === 'cover' ? 'cover letter' : 'résumé';
-  }
-  function pdfField(kind) {
-    return kind === 'cover' ? 'coverLetterPdfBase64' : 'resumePdfBase64';
   }
   function markPdfStale(kind) {
     if (HAS_APPLICATION_BUNDLE) {
       pdfStale[kind === 'cover' ? 'cover' : 'resume'] = true;
-      updateBundleDownload();
+      updateSync();
     }
   }
-  function updateBundleDownload() {
-    if (!downloadBtn || !HAS_APPLICATION_BUNDLE) return;
+  function updateSync() {
+    if (!syncBtn || !HAS_APPLICATION_BUNDLE) return;
     var reviewBlocked = skillCards.some(function (card) { return !skillDecisions[card.getAttribute('data-ic-insight')]; });
-    var resumeReady = !!BUNDLE_DATA.resumePdfBase64 && !pdfStale.resume;
-    var coverReady = !!BUNDLE_DATA.coverLetterPdfBase64 && !pdfStale.cover;
-    var ready = resumeReady && coverReady;
-    downloadBtn.disabled = reviewBlocked || !ready;
-    downloadBtn.setAttribute('aria-disabled', String(reviewBlocked || !ready));
-    downloadBtn.title = reviewBlocked ? 'Resolve every skill check before downloading the bundle.'
-      : (!ready ? 'Attach current résumé and cover-letter PDFs before downloading.' : '');
-    if (pdfAttachmentLabel) pdfAttachmentLabel.textContent = 'Attach current ' + documentLabel(activeDocument) + ' PDF';
+    var configured = !!(BUNDLE_DATA.sync && BUNDLE_DATA.sync.endpoint && BUNDLE_DATA.sync.token);
+    var blocked = activeDocument === 'resume' && reviewBlocked;
+    syncBtn.disabled = blocked || !configured;
+    syncBtn.setAttribute('aria-disabled', String(blocked || !configured));
+    syncBtn.textContent = 'Sync ' + documentLabel(activeDocument);
+    syncBtn.title = blocked ? 'Resolve every high-impact skill check before syncing the résumé.'
+      : (!configured ? 'This copy has not been saved by Infinite Canvas yet.' : 'Render and replace the current ' + documentLabel(activeDocument) + ' PDF in this application folder.');
     if (pdfBundleNote) {
-      if (reviewBlocked) pdfBundleNote.textContent = 'Resolve skill checks before exporting the bundle.';
-      else if (ready) pdfBundleNote.textContent = 'Current résumé and cover-letter PDFs attached.';
-      else if (!resumeReady && !coverReady) pdfBundleNote.textContent = 'Attach current PDFs for both documents; use the tabs to choose which PDF to attach.';
-      else if (!resumeReady) pdfBundleNote.textContent = activeDocument === 'resume'
-        ? 'Export/print the résumé, then attach its current PDF.'
-        : 'The résumé PDF needs updating; select Résumé to attach it.';
-      else pdfBundleNote.textContent = activeDocument === 'cover'
-        ? 'Export/print the cover letter, then attach its current PDF.'
-        : 'The cover-letter PDF needs updating; select Cover letter to attach it.';
+      if (blocked) { syncMessage = ''; pdfBundleNote.textContent = 'Resolve skill checks before syncing the résumé.'; }
+      else if (!configured) { syncMessage = ''; pdfBundleNote.textContent = 'Save this application from Infinite Canvas before Sync is available.'; }
+      else pdfBundleNote.textContent = syncMessage || ('Sync renders a fresh ' + documentLabel(activeDocument) + ' PDF and replaces it in this folder.');
     }
   }
 
@@ -879,7 +881,7 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
     });
     if (editBtn) editBtn.textContent = 'Edit ' + (kind === 'cover' ? 'cover letter' : 'résumé');
     if (exportBtn) exportBtn.textContent = 'Print / Save ' + (kind === 'cover' ? 'cover letter' : 'résumé') + ' PDF';
-    updateBundleDownload();
+    updateSync();
     updateSkillReviewStatus();
   }
   documentTabs.forEach(function (tab) {
@@ -964,14 +966,14 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
     var status = document.getElementById('ic-review-status');
     if (progress) progress.textContent = total ? resolved + ' / ' + total + ' resolved' : '';
     if (status) status.textContent = !total ? '' : (resolved < total
-      ? 'Résumé export and bundle download unlock after every high-impact claim is marked Verified or Not mine.'
+      ? 'Résumé export and Sync unlock after every high-impact claim is marked Verified or Not mine.'
       : (verified ? verified + ' verified skill' + (verified === 1 ? '' : 's') + ' included in this résumé.' : 'No inferred skills will be added to this résumé.'));
     if (exportBtn) {
       var blocked = activeDocument === 'resume' && total > 0 && resolved < total;
       exportBtn.disabled = blocked;
       exportBtn.setAttribute('aria-disabled', String(blocked));
       exportBtn.title = blocked ? 'Resolve every high-impact skill check before exporting.' : '';
-      updateBundleDownload();
+      updateSync();
     }
   }
   skillCards.forEach(function (card) {
@@ -1064,146 +1066,37 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
     });
   }
 
-  if (pdfAttachment) {
-    pdfAttachment.addEventListener('change', function () {
-      var file = pdfAttachment.files && pdfAttachment.files[0];
-      var targetDocument = activeDocument === 'cover' ? 'cover' : 'resume';
-      var targetLabel = documentLabel(targetDocument);
-      if (!file) return;
-      if ((file.type && file.type !== 'application/pdf') || (!file.type && !/[.]pdf$/i.test(file.name || ''))) {
-        if (pdfBundleNote) pdfBundleNote.textContent = 'Please attach the current ' + targetLabel + ' PDF.';
-        pdfAttachment.value = '';
-        return;
-      }
-      if (file.size > 100 * 1024 * 1024) {
-        if (pdfBundleNote) pdfBundleNote.textContent = 'That PDF is over 100 MB; choose the ' + targetLabel + ' PDF exported from this workspace.';
-        pdfAttachment.value = '';
-        return;
-      }
-      var reader = new FileReader();
-      reader.onerror = function () { if (pdfBundleNote) pdfBundleNote.textContent = 'Could not read that PDF.'; };
-      reader.onload = function () {
-        var bytes = new Uint8Array(reader.result);
-        if (bytes.length < 5 || String.fromCharCode.apply(null, bytes.subarray(0, 5)) !== '%PDF-') {
-          if (pdfBundleNote) pdfBundleNote.textContent = 'That file is not a valid PDF.';
-          pdfAttachment.value = '';
-          return;
-        }
-        var binary = '', chunk = 0x8000;
-        for (var offset = 0; offset < bytes.length; offset += chunk) binary += String.fromCharCode.apply(null, bytes.subarray(offset, Math.min(offset + chunk, bytes.length)));
-        BUNDLE_DATA[pdfField(targetDocument)] = btoa(binary);
-        pdfStale[targetDocument] = false;
-        persistBundleData();
-        updateBundleDownload();
-      };
-      reader.readAsArrayBuffer(file);
-    });
-  }
-
-  if (downloadBtn) {
-    downloadBtn.addEventListener('click', function () {
-      if (downloadBtn.disabled) return;
-      if (!HAS_APPLICATION_BUNDLE) {
-        var htmlBlob = new Blob(['<!doctype html>\\n' + document.documentElement.outerHTML], { type: 'text/html' });
-        var htmlUrl = URL.createObjectURL(htmlBlob);
-        var htmlLink = document.createElement('a');
-        htmlLink.href = htmlUrl;
-        htmlLink.download = DOC_ID + ' (edited).html';
-        document.body.appendChild(htmlLink);
-        htmlLink.click();
-        htmlLink.remove();
-        setTimeout(function () { URL.revokeObjectURL(htmlUrl); }, 1000);
-        return;
-      }
+  if (syncBtn) {
+    syncBtn.addEventListener('click', function () {
+      if (syncBtn.disabled || !HAS_APPLICATION_BUNDLE) return;
+      var sync = BUNDLE_DATA.sync || {};
+      if (!sync.endpoint || !sync.token) { updateSync(); return; }
       stopEditing();
       persistBundleData();
-      var company = safeBundlePart(BUNDLE_DATA.company, 'Company');
-      BUNDLE_DATA.company = company;
-      var folder = company + '/';
+      var documentToSync = activeDocument === 'cover' ? 'cover' : 'resume';
+      syncMessage = '';
       var currentHtml = '<!doctype html>\\n' + document.documentElement.outerHTML;
-      var files = [
-        { name: folder + 'Application.html', bytes: utf8(currentHtml) },
-        { name: folder + 'Resume.pdf', bytes: base64Bytes(BUNDLE_DATA.resumePdfBase64) },
-        { name: folder + 'Cover Letter.pdf', bytes: base64Bytes(BUNDLE_DATA.coverLetterPdfBase64) },
-        { name: folder + 'Original Job Listing.md', bytes: utf8(String(BUNDLE_DATA.jobMarkdown || '# Original job listing\\n\\nNo scraped listing was embedded in this document.\\n')) }
-      ];
-      var blob = new Blob([storedZip(files)], { type: 'application/zip' });
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = url;
-      a.download = company + '.zip';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      syncBtn.disabled = true;
+      syncBtn.textContent = 'Syncing…';
+      if (pdfBundleNote) pdfBundleNote.textContent = 'Rendering a fresh ' + documentLabel(documentToSync) + ' PDF…';
+      fetch(sync.endpoint, {
+        method: 'POST', mode: 'cors', credentials: 'omit',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: sync.token, document: documentToSync, html: currentHtml })
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          if (!response.ok || !body.success) throw new Error(body.error || 'Infinite Canvas could not sync this application.');
+          pdfStale[documentToSync] = false;
+          syncMessage = 'Synced ' + documentLabel(documentToSync) + ' and replaced its PDF in this folder.';
+          if (pdfBundleNote) pdfBundleNote.textContent = syncMessage;
+        });
+      }).catch(function (error) {
+        var message = error && error.message ? error.message : '';
+        if (!message || /fetch|network|load failed/i.test(message)) message = 'Infinite Canvas is not running or its Sync service is unavailable. Launch it, then try Sync again.';
+        syncMessage = message;
+        if (pdfBundleNote) pdfBundleNote.textContent = syncMessage;
+      }).finally(function () { updateSync(); });
     });
-  }
-
-  // ---- Offline ZIP writer -------------------------------------------------
-  // Deliberately use the widely-supported "store" ZIP method (no compression)
-  // instead of a CDN/library. It keeps the saved HTML portable and has four
-  // bounded entries. UTF-8 names are flagged explicitly for company
-  // names with non-ASCII characters.
-  function utf8(value) {
-    if (window.TextEncoder) return new TextEncoder().encode(String(value));
-    var encoded = unescape(encodeURIComponent(String(value)));
-    var out = new Uint8Array(encoded.length);
-    for (var i = 0; i < encoded.length; i++) out[i] = encoded.charCodeAt(i);
-    return out;
-  }
-  function base64Bytes(value) {
-    var binary = atob(String(value));
-    var out = new Uint8Array(binary.length);
-    for (var i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-    return out;
-  }
-  function crc32(bytes) {
-    var crc = 0xffffffff;
-    for (var i = 0; i < bytes.length; i++) {
-      crc ^= bytes[i];
-      for (var bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
-    }
-    return (crc ^ 0xffffffff) >>> 0;
-  }
-  function u16(out, offset, value) {
-    out[offset] = value & 255; out[offset + 1] = (value >>> 8) & 255;
-  }
-  function u32(out, offset, value) {
-    out[offset] = value & 255; out[offset + 1] = (value >>> 8) & 255;
-    out[offset + 2] = (value >>> 16) & 255; out[offset + 3] = (value >>> 24) & 255;
-  }
-  function concat(parts, length) {
-    var out = new Uint8Array(length), cursor = 0;
-    parts.forEach(function (part) { out.set(part, cursor); cursor += part.length; });
-    return out;
-  }
-  function dosTime(now) {
-    return ((now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2)) & 0xffff;
-  }
-  function dosDate(now) {
-    return (((Math.max(1980, now.getFullYear()) - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xffff;
-  }
-  function storedZip(files) {
-    var now = new Date(), time = dosTime(now), date = dosDate(now), offset = 0, locals = [], central = [];
-    files.forEach(function (file) {
-      var name = utf8(file.name), bytes = file.bytes, size = bytes.length, crc = crc32(bytes);
-      if (size > 0xffffffff || offset > 0xffffffff) throw new Error('Application bundle is too large to download.');
-      var local = new Uint8Array(30 + name.length + size);
-      u32(local, 0, 0x04034b50); u16(local, 4, 20); u16(local, 6, 0x0800); u16(local, 8, 0);
-      u16(local, 10, time); u16(local, 12, date); u32(local, 14, crc); u32(local, 18, size); u32(local, 22, size);
-      u16(local, 26, name.length); u16(local, 28, 0); local.set(name, 30); local.set(bytes, 30 + name.length);
-      locals.push(local);
-      var record = new Uint8Array(46 + name.length);
-      u32(record, 0, 0x02014b50); u16(record, 4, 20); u16(record, 6, 20); u16(record, 8, 0x0800); u16(record, 10, 0);
-      u16(record, 12, time); u16(record, 14, date); u32(record, 16, crc); u32(record, 20, size); u32(record, 24, size);
-      u16(record, 28, name.length); u16(record, 30, 0); u16(record, 32, 0); u16(record, 34, 0); u16(record, 36, 0); u32(record, 38, 0); u32(record, 42, offset);
-      record.set(name, 46); central.push(record); offset += local.length;
-    });
-    var centralSize = central.reduce(function (sum, record) { return sum + record.length; }, 0);
-    var end = new Uint8Array(22);
-    u32(end, 0, 0x06054b50); u16(end, 4, 0); u16(end, 6, 0); u16(end, 8, files.length); u16(end, 10, files.length);
-    u32(end, 12, centralSize); u32(end, 16, offset); u16(end, 20, 0);
-    return concat(locals.concat(central).concat([end]), offset + centralSize + end.length);
   }
 
   // ---- Font detection, never vendoring (§5.3) ----
@@ -1264,12 +1157,10 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
  * @param {Array|object} [args.skillHistogram] Persistent, AI-canonicalised
  *   demand observations grouped by role. The browser performs a defensive
  *   spelling merge before rendering its horizontal bars.
- * @param {object} [args.downloadBundle] Portable application-bundle inputs:
- *   `{ company, candidateName, jobMarkdown, resumePdfBase64,
- *   coverLetterPdfBase64 }`. A legacy `pdfBase64` is accepted as the résumé
- *   PDF when reopening an older single-PDF workspace. Both PDFs are embedded
- *   in the saved HTML so a later browser edit can re-download the same
- *   offline ZIP.
+ * @param {object} [args.downloadBundle] Application-workspace metadata and
+ *   Sync capability. The historical name remains for compatibility with
+ *   already-saved HTML and tests; new workspaces keep PDFs as sibling files.
+ *   A legacy `pdfBase64` is still accepted as résumé migration data.
  * @param {object} [args.coverLetter] Structured generated cover-letter fields.
  *   The cover is rendered into a second editable panel in this same HTML.
  * @param {boolean} [args.showAllVerifySkills] Internal page-fit mode: reveal

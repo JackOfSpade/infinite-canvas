@@ -1,6 +1,56 @@
-import { CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, assert, assessPromptFit, buildCoverLetterDocument, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiModelsInTier, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, orderGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, webSearchToolType } from '../test-dependencies.js';
+import { CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, assert, assessPromptFit, buildCoverLetterDocument, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiModelsInTier, getCompanyResearchContext, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, orderGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, webSearchToolType } from '../test-dependencies.js';
 
 export default [
+{
+    name: 'application generation: Gemini schema adapter preserves honest empty values without invalid enums',
+    run: () => {
+      const source = {
+        type: 'object',
+        properties: {
+          unit: { type: 'string', enum: ['USD', '%', ''] },
+          direction: { type: 'string', enum: ['increase', 'decrease'] },
+          unconstrained: { type: 'string', enum: [] },
+        },
+      };
+      const gemini = toGeminiSchema(source);
+      assert(!('enum' in gemini.properties.unit),
+        'Gemini must not receive an enum containing its invalid empty-string value');
+      assert(JSON.stringify(gemini.properties.direction.enum) === JSON.stringify(['increase', 'decrease']),
+        'valid Gemini enums must remain structured-output constraints');
+      assert(!('enum' in gemini.properties.unconstrained),
+        'an empty enum must not be sent as an invalid response schema');
+      assert(JSON.stringify(source.properties.unit.enum) === JSON.stringify(['USD', '%', '']),
+        'the provider adapter must not mutate the cross-provider source schema');
+      return { preservedValidEnum: true };
+    },
+  },
+{
+    name: 'application generation: research quota failure degrades to scraped-job-only context',
+    run: async () => {
+      const quotaError = new Error('All Gemini models failed. 8 model(s) exhausted their daily quota.');
+      const fallback = await getCompanyResearchContext(
+        { company: 'Acme', title: 'Engineer' },
+        null,
+        async () => { throw quotaError; },
+      );
+      assert(fallback.available === false, 'a research quota failure must be non-fatal and marked unavailable');
+      assert(fallback.error.includes('daily quota'), 'the diagnostic should retain the provider failure reason');
+      assert(fallback.text.includes('Do not invent or imply company facts'),
+        'the fallback context must explicitly prevent fabricated company research');
+      let abortPassedThrough = false;
+      try {
+        await getCompanyResearchContext({}, null, async () => {
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          throw error;
+        });
+      } catch (error) {
+        abortPassedThrough = error?.name === 'AbortError';
+      }
+      assert(abortPassedThrough, 'a user cancellation must not be converted into a no-research generation');
+      return { degradedSafely: true };
+    },
+  },
 {
     name: 'Gemini registry: supports every compatible current model with safe routing metadata',
     run: () => {

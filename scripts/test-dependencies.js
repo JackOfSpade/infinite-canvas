@@ -34,9 +34,10 @@ export { buildJobTreeNodes, computeLayoutPositions, computeJobTreeView, countMat
 export { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature, deriveBoardCardStats } from '../src/nodes/jobboard/mergeJobs.js';
 export { buildGeoTermSet, extractIndeedJobsFromHtml, extractSalaryFromText, filterUSAJobsByTitleRelevance, jobRelevanceMatch, jobRelevanceEvidence, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, extractJobPostingBaseSalary, formatDiceBaseSalary, extractDiceSalaryBadge, formatUSAJobsSalary, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult, isRemoteOkSponsoredPlacement } from '../electron/extractors/apiExtractors.js';
 export { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
-export { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes, normaliseResumeDownloadBundle } from '../electron/ipc/resumeHtml.js';
+export { buildResumeDocument, buildCoverLetterDocument, embedApplicationSyncConfig, extractVariantAttrs, isDualMode, decodeTextEscapes, normaliseResumeDownloadBundle } from '../electron/ipc/resumeHtml.js';
+export { APPLICATION_SYNC_PATH, APPLICATION_SYNC_PORT, __normaliseApplicationSyncWorkspaceForTests, applicationSyncConfig } from '../electron/ipc/applicationSync.js';
 export { createApplicationBundle, createZipBuffer, formatOriginalJobListingMarkdown, sanitizeApplicationBundlePart } from '../electron/ipc/applicationBundle.js';
-export { targetPageCountForJob, decideFitStep } from '../electron/ipc/jobApplication.js';
+export { getApplicationTelemetry, recordApplicationTelemetry, resolvePendingApplicationWorkspaceForOwner, targetPageCountForJob, decideFitStep, getCompanyResearchContext } from '../electron/ipc/jobApplication.js';
 export { filterOutApplied, markJobApplied } from '../electron/ipc/appliedJobs.js';
 export { LEDGER_CAP, MINING_TARGET, splitCareerDataByFile, normalizeQuoteText, computeLedger, applyRefuteVerdicts, ledgerById, derivationTooltip, serializeLedgerForPrompt } from '../src/utils/achievementLedger.js';
 export { SKILL_OPPORTUNITY_HISTOGRAM_VERSION, createEmptySkillOpportunityHistogram, normalizeOpportunityName, stableOpportunityId, assertValidSkillOpportunityHistogram, normalizeSkillOpportunityAnalysis, mergeSkillOpportunityAnalysis } from '../src/utils/skillOpportunityHistogram.js';
@@ -58,7 +59,7 @@ export { compsForPricing, priceSynthesisMaxTokens, jobScoringBatchSize, FAST_TES
 export { modelMeta, contextWindowForModel, maxOutputForModel, estimateTokensFromChars, assessPromptFit, planSplits, LOCAL_CHARS_PER_TOKEN } from '../electron/ipc/tokenWindow.js';
 export { GEMINI_MODEL_FALLBACKS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_TIER_LADDER, GEMINI_ALL_MODEL_IDS, geminiModelsInTier, classifyGeminiFailure, describeGeminiFailure, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroQuota, isGeminiZeroOrDailyQuota, orderGeminiModels } from '../electron/ipc/geminiModels.js';
 export { entitledTiersFor, recordEntitlement, gatedTiers, probeModelForTier, refreshEntitlementInBackground, settleEntitlementProbes, resetEntitlement, entitlementSnapshot } from '../electron/ipc/geminiEntitlement.js';
-export { callGeminiTextRaw } from '../electron/ipc/gemini.js';
+export { callGeminiTextRaw, toGeminiSchema } from '../electron/ipc/gemini.js';
 export { parseAiJson } from '../electron/ipc/jsonRepair.js';
 export { withSharedProfileLock } from '../electron/ipc/sharedProfileLock.js';
 export { withStatusCheckLock, getStatusCheckQueueDepth } from '../electron/ipc/statusCheckLock.js';

@@ -7,6 +7,7 @@ import { EventLogger } from '../utils/EventLogger';
 import { languageLabel } from '../utils/jobLanguageLabels';
 import { NodeHandles } from './_shared/NodeHandles';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
+import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { computeJobTreeView } from './jobsearch/buildJobTree';
 import { deriveBoardCardStats } from './jobboard/mergeJobs';
 
@@ -47,9 +48,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const nav = useContext(CanvasNavigationContext);
   const updateGlobal = nav?.updateNodeDataGlobally || updateNodeData;
   const { addToast } = useToast();
+  const { acquireModuleRun, cancelQueuedRunsForNode, snapshot: moduleRunSnapshot } = useModuleRunQueue();
 
   const [showFullReasoning, setShowFullReasoning] = useState(false);
-  const [generatingApp, setGeneratingApp] = useState(false);
+  const [applicationRun, setApplicationRun] = useState({ state: 'idle', position: null });
   const [applied, setApplied] = useState(false);
   const [markingApplied, setMarkingApplied] = useState(false);
   const pendingReasoningReflowRef = useRef(false);
@@ -96,6 +98,19 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // "generation ≠ applied" split: nothing here implies an application exists
   // until the user explicitly marks it.
   const lastSavedFolderRef = useRef(null);
+  // React state does not disable a button until the next render. Keep a
+  // synchronous latch too, so two click events in the same render frame cannot
+  // enqueue duplicate applications for this one card.
+  const applicationSubmissionRef = useRef(false);
+  // Local state is only the fast feedback for this mounted view. The global
+  // snapshot is authoritative across a hidden-card unmount/remount, preventing
+  // a remounted card from accidentally enqueueing a second application.
+  const queuedApplicationRun = moduleRunSnapshot.queued.find((entry) => entry.nodeId === id && entry.kind === 'application');
+  const activeApplicationRun = moduleRunSnapshot.active?.nodeId === id && moduleRunSnapshot.active?.kind === 'application';
+  const displayedApplicationRun = queuedApplicationRun
+    ? { state: 'queued', position: queuedApplicationRun.position }
+    : activeApplicationRun ? { state: 'generating', position: null } : applicationRun;
+  const hasApplicationRun = displayedApplicationRun.state !== 'idle';
 
   const score = data.matchScore || 0;
   const accentColor = scoreColor(score);
@@ -141,6 +156,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // render-time read would go stale on already-mounted cards.
   const dismissCard = useCallback(async () => {
     if (data.locked || getNode(data.hubId)?.data?.locked) return;
+    // A hidden/collapsed card may unmount while it remains a canvas node, so
+    // unmount is not cancellation. Explicit dismissal is: remove only this
+    // card's waiting lease; an already-running IPC operation is left intact.
+    cancelQueuedRunsForNode(id, 'Job card dismissed before generation started');
     await deleteElements({ nodes: [{ id }] });
     const hubData = getNode(data.hubId)?.data || {};
     const filter = { scoreThreshold: hubData.scoreThreshold ?? 0, sourceFilter: hubData.sourceFilter ?? null };
@@ -148,7 +167,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     const stats = deriveBoardCardStats(getNodes().filter((node) => node.id !== id), data.hubId, hubData);
     updateGlobal(data.hubId, stats);
     EventLogger.log(`[JobCard] dismissed id=${id} board=${data.hubId} remaining=${stats.resultCount}`);
-  }, [id, data.locked, data.hubId, deleteElements, getNode, getNodes, setNodes, updateGlobal]);
+  }, [id, data.locked, data.hubId, deleteElements, getNode, getNodes, setNodes, updateGlobal, cancelQueuedRunsForNode]);
 
   // ── Full application (tailored résumé + cover letter HTML) ─────────────────
   // Reads the merged career data from the ORIGIN Job Search Module — the
@@ -162,15 +181,17 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // path because same title + same company + different city is a DIFFERENT job
   // — see src/utils/locationIdentity.js.)
   const generateApplication = useCallback(async () => {
-    if (!window.electronAPI?.generateApplication) return;
+    if (!window.electronAPI?.generateApplication || applicationSubmissionRef.current || hasApplicationRun) return;
     if (getNode(data.hubId)?.data?.locked) return; // board lock freezes cards too
     const originHubId = data.originHubId || data.hubId;
-    const originHub = getNode(originHubId);
-    const careerData = originHub?.data?.careerData;
-    if (!careerData) {
+    // Fast, non-queued validation prevents a known-invalid card from taking a
+    // queue turn. This is intentionally re-read after the lease as well: the
+    // preflight is only user feedback, never the data used for generation.
+    const preflightOriginHub = getNode(originHubId);
+    if (!preflightOriginHub?.data?.careerData) {
       addToast({
         title: 'No Career Data',
-        description: data.originHubId && !originHub
+        description: data.originHubId && !preflightOriginHub
           ? 'The Job Search Module this card came from was deleted, so its career files are gone. Re-run a search and re-combine the board.'
           : 'The origin Job Search Module has no stored career data. Drop your career files on it, re-run the search, then re-combine the board.',
         type: 'error',
@@ -179,8 +200,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
     // Applications are written relative to the saved canvas file, so it must be
     // saved first. Fail loudly rather than dropping the documents somewhere arbitrary.
-    const canvasFilePath = nav?.currentFile || null;
-    if (!canvasFilePath) {
+    if (!(nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile)) {
       addToast({
         title: 'Save Your Canvas First',
         description: 'Applications are saved next to your canvas in an "Applied Jobs" folder. Save the canvas to a file, then try again.',
@@ -188,35 +208,83 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       });
       return;
     }
-    // Achievement ledger pass-through (design doc §3.6). Mining is job-independent
-    // and cached on the ORIGIN hub, not per-card, so the same derived figures
-    // ("cut debt 74%") are reused by every application generated from this hub
-    // instead of being re-derived — and potentially re-derived DIFFERENTLY —
-    // each time. If two cards from the same hub hit Generate around the same
-    // moment, both would otherwise see no cached ledger, both mine, and the hub
-    // would keep whichever write lands last: the two applications would then
-    // carry independently-derived numbers for the same underlying fact, which
-    // is exactly the failure hub-caching exists to prevent. The in-flight
-    // marker (data.achievementsMining, a ms timestamp) makes the second card
-    // see mining already underway and skip it, falling back to careerData alone
-    // for that one application rather than racing. A marker older than
-    // MINING_MARKER_STALE_MS is ignored so a crashed run can't wedge the hub.
-    const cachedAchievements = originHub?.data?.achievements || null;
-    const miningMarkerAt = originHub?.data?.achievementsMining;
-    const markerFresh = typeof miningMarkerAt === 'number' && (Date.now() - miningMarkerAt) < MINING_MARKER_STALE_MS;
-    const mineAllowed = !cachedAchievements && !markerFresh;
-    // Fencing token, not a boolean: the exact timestamp THIS call writes.
-    // Compared against the hub's CURRENT marker at clear-time (below) so a
-    // call only ever removes the marker it itself owns — see the finally
-    // block's comment for the concurrent-mine window this closes.
+    applicationSubmissionRef.current = true;
+    let lease = null;
     let myMarker = null;
-    if (mineAllowed) {
-      myMarker = Date.now();
-      updateGlobal(originHubId, { achievementsMining: myMarker });
-    }
+    let cancelledBeforeStart = false;
 
-    setGeneratingApp(true);
+    setApplicationRun({ state: 'generating', position: null });
     try {
+      // Application generation uses the same app-wide capacity-one queue as
+      // searches and marketplace runs. LLM quota, Chromium/PDF rendering, and
+      // the shared achievement cache make parallel bundles unsafe. Crucially,
+      // every mutable input below is read only *after* the lease starts: a
+      // card which waited behind another application sees that application's
+      // newly cached achievement ledger instead of re-mining it.
+      lease = await acquireModuleRun({
+        nodeId: id,
+        kind: 'application',
+        label: `Application: ${data.company || data.title || 'job'}`,
+        onQueued: ({ position }) => {
+          if (isMountedRef.current) setApplicationRun({ state: 'queued', position });
+        },
+        onQueueUpdate: ({ position }) => {
+          if (isMountedRef.current) setApplicationRun({ state: 'queued', position });
+        },
+        onStart: () => {
+          // Hidden card views can unmount while their node remains valid. Only
+          // cancellation/deletion of the actual canvas node skips the work.
+          if (!getNode(idRef.current)) {
+            cancelledBeforeStart = true;
+            throw new Error('Job card was removed before application generation started');
+          }
+          if (isMountedRef.current) setApplicationRun({ state: 'generating', position: null });
+        },
+        onCancel: () => {
+          cancelledBeforeStart = true;
+          if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
+        },
+      });
+
+      // The user could have used Save As while this card was waiting. Re-read
+      // only after it owns the lease, then keep this path for the whole save.
+      const canvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;
+      if (!canvasFilePath) {
+        if (isMountedRef.current) {
+          addToast({
+            title: 'Save Your Canvas First',
+            description: 'Applications are saved next to your canvas in an "Applied Jobs" folder. Save the canvas to a file, then try again.',
+            type: 'error',
+          });
+        }
+        return;
+      }
+
+      const originHub = getNode(originHubId);
+      const careerData = originHub?.data?.careerData;
+      if (!careerData) {
+        addToast({
+          title: 'No Career Data',
+          description: data.originHubId && !originHub
+            ? 'The Job Search Module this card came from was deleted while this application was waiting, so its career files are gone. Re-run a search and re-combine the board.'
+            : 'The origin Job Search Module has no stored career data. Drop your career files on it, re-run the search, then re-combine the board.',
+          type: 'error',
+        });
+        return;
+      }
+
+      // Achievement ledger pass-through (design doc §3.6). The read and the
+      // fencing marker belong inside the lease so the next FIFO card reuses a
+      // ledger produced by the previous one rather than racing it.
+      const cachedAchievements = originHub.data?.achievements || null;
+      const miningMarkerAt = originHub.data?.achievementsMining;
+      const markerFresh = typeof miningMarkerAt === 'number' && (Date.now() - miningMarkerAt) < MINING_MARKER_STALE_MS;
+      const mineAllowed = !cachedAchievements && !markerFresh;
+      if (mineAllowed) {
+        myMarker = Date.now();
+        updateGlobal(originHubId, { achievementsMining: myMarker });
+      }
+
       addToast({
         title: 'Generating Application',
         description: `Researching ${data.company} and writing your résumé + cover letter…`,
@@ -233,22 +301,38 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         achievements: cachedAchievements,
         mineAllowed,
       });
-      if (!isMountedRef.current) return;
       if (!result.success) {
-        addToast({ title: 'Generation Failed', description: result.error, type: 'error' });
+        if (isMountedRef.current) {
+          addToast({ title: 'Generation Failed', description: result.error, type: 'error' });
+        }
         return;
       }
       // A freshly mined ledger comes back on the result — cache it on the
       // origin hub so every later application from this hub reuses it instead
       // of re-mining (§2/§3.6).
-      if (result.achievements) {
+      if (result.achievements && getNode(originHubId)) {
         updateGlobal(originHubId, { achievements: result.achievements });
+      }
+      // A view can unmount simply because its branch was hidden; that must not
+      // abandon a valid queued application. Only actual card deletion stops
+      // post-generation work (the active IPC is independently cancelled by
+      // the canvas task cleanup).
+      if (!getNode(idRef.current)) {
+        // Generation registered this exact workDir with the main process.
+        // Dispose it through the sender-bound IPC instead of leaving a temp
+        // workspace/pending-artifact entry behind; the renderer cannot pass a
+        // raw deletion path to the filesystem.
+        try {
+          await window.electronAPI.discardApplication?.({ workDir: result.workDir });
+        } catch (error) {
+          EventLogger.error('Could not discard application workspace after card deletion:', error);
+        }
+        return;
       }
       // Write the generated documents into ./Applied Jobs/<company>/<location>/<job>/
       // next to the canvas, then reveal that folder in Finder. No picker.
-      // The two PDF paths are generated from the same combined workspace.
-      // saveApplication requires both for the normal four-file ZIP, with the
-      // editable HTML/listing retained as recovery files if rendering failed.
+      // The workspace is written as normal sibling files (not a ZIP), so the
+      // generated HTML can later Sync a selected edit back into this folder.
       const saved = await window.electronAPI.saveApplication({
         resumeHtmlPath: result.resumeHtmlPath,
         resumePdfPath: result.resumePdfPath,
@@ -261,34 +345,37 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         location: data.location,
         canvasFilePath,
       });
-      if (!isMountedRef.current) return;
       if (saved?.success && saved.saved) {
         // Remembered so "Mark applied" can record where the artifacts went —
         // see lastSavedFolderRef's doc-comment.
-        lastSavedFolderRef.current = saved.dir || null;
+        if (isMountedRef.current) lastSavedFolderRef.current = saved.dir || null;
         const analysisNote = result.skillOpportunityError
           ? ' The skill-demand analysis was unavailable; the résumé workspace includes the error so this generation is not silently counted.'
           : '';
-        if (saved.bundlePath) {
+        if (isMountedRef.current && !saved.bundleError) {
           addToast({
-            title: 'Application Bundle Saved',
-            description: `Company ZIP saved to ${saved.bundlePath} — opening its folder.${analysisNote}`,
+            title: 'Application Workspace Saved',
+            description: `Saved editable HTML, résumé, cover letter, and listing to ${saved.dir} — opening its folder.${analysisNote}`,
             type: 'success',
           });
-        } else {
+        } else if (isMountedRef.current) {
           addToast({
-            title: 'Bundle Incomplete',
-            description: `${saved.bundleError || 'The complete ZIP could not be created.'} Recovery HTML${saved.jobListingFile ? ' and the job listing were' : ' was'} saved to ${saved.dir}.${analysisNote}`,
+            title: 'Application Workspace Incomplete',
+            description: `${saved.bundleError} The editable HTML was saved to ${saved.dir}.${analysisNote}`,
             type: 'error',
           });
         }
-      } else if (saved?.success === false) {
+      } else if (saved?.success === false && isMountedRef.current) {
         addToast({ title: 'Save Error', description: saved.error || 'Could not save files', type: 'error' });
       }
     } catch (e) {
-      if (!isMountedRef.current) return;
+      // Explicit dismissal/cancellation is normal control flow, not an error
+      // toast. It must also never touch a different card's mining marker.
+      if (cancelledBeforeStart) return;
       EventLogger.error('Application generation failed:', e);
-      addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
+      if (isMountedRef.current) {
+        addToast({ title: 'Generation Error', description: e?.message || String(e), type: 'error' });
+      }
     } finally {
       // Compare-and-clear, not an unconditional clear: only remove the marker
       // if the hub's CURRENT marker still equals the one this call wrote. A
@@ -303,9 +390,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       if (myMarker != null && getNode(originHubId)?.data?.achievementsMining === myMarker) {
         updateGlobal(originHubId, { achievementsMining: null });
       }
-      if (isMountedRef.current) setGeneratingApp(false);
+      // Release only after both LLM generation and artifact save settle, so a
+      // FIFO successor cannot collide with the shared render/save resources.
+      lease?.release();
+      applicationSubmissionRef.current = false;
+      if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, getNode, nav, updateGlobal, addToast, isMountedRef]);
+  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, id, getNode, nav, updateGlobal, addToast, isMountedRef, acquireModuleRun, hasApplicationRun]);
 
   // ── Mark applied (design doc §6.2) ──────────────────────────────────────
   // Generate NEVER auto-marks: generating a résumé is not the same as
@@ -458,16 +549,20 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       <div className="px-3 py-2 border-t border-white/5 flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
         <button
           onClick={data.locked ? undefined : (e) => { e.stopPropagation(); generateApplication(); }}
-          disabled={generatingApp || !!data.locked}
+          disabled={hasApplicationRun || !!data.locked}
           className={`flex-1 min-w-0 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
             data.locked
               ? 'bg-white/5 text-white/20 cursor-default'
               : 'bg-gradient-to-r from-emerald-500/15 to-blue-500/15 text-emerald-300 hover:from-emerald-500/25 hover:to-blue-500/25 hover:text-emerald-200 disabled:opacity-50'
           }`}
-          title="AI researches the company, then writes a tailored résumé + cover letter and saves both to your Applied Jobs folder"
+          title={displayedApplicationRun.state === 'queued'
+            ? `Queued at position ${displayedApplicationRun.position} — application generation runs one at a time to protect model quota and document rendering.`
+            : 'AI researches the company, then writes a tailored résumé + cover letter and saves both to your Applied Jobs folder'}
         >
-          <Sparkles size={13} className={generatingApp ? 'animate-pulse' : ''} />
-          {generatingApp ? 'Generating…' : 'Generate'}
+          <Sparkles size={13} className={hasApplicationRun ? 'animate-pulse' : ''} />
+          {displayedApplicationRun.state === 'queued'
+            ? `Queued · #${displayedApplicationRun.position}`
+            : displayedApplicationRun.state === 'generating' ? 'Generating…' : 'Generate'}
         </button>
 
         {/* "Applied ✓ · undo" IS the undo affordance — it must stay visible

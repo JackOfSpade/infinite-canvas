@@ -242,6 +242,14 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  APPLICATION: {
+    label: 'Application Generation',
+    description: 'Tailored résumé/cover-letter generation audit — the last application attempt’s lifecycle, per-task provider/model route, terminal stage/error, PDF render outcome, and application-save events. Use when Generate fails, hangs, produces no document/PDF, or cannot save its artifacts. Included automatically in FULL.',
+    logFilter: line =>
+      /JobApplication|generate-application|save-application|ApplicationSync|application-(?:resume|cover-letter|skill-opportunity)|company.?research|achievement (?:ledger|mining)|résumé|resume|cover.?letter|PDF|render.?fit/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   AUTH: {
     label: 'Login/Auth Windows',
     description: 'Login/session diagnostics — auth-window launch mode, current login URL/title, session verifier traces, and account-related main-process logs. Use for Google/Indeed/marketplace login loops or “browser may not be secure” errors.',

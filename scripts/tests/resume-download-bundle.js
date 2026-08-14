@@ -1,6 +1,8 @@
 import {
   assert,
+  __normaliseApplicationSyncWorkspaceForTests,
   buildResumeDocument,
+  embedApplicationSyncConfig,
   createApplicationBundle,
   createZipBuffer,
   formatOriginalJobListingMarkdown,
@@ -34,32 +36,6 @@ function readZipEntries(input) {
   assert(entries.size > 0, 'ZIP must contain local file records');
   assert(bytes.includes(Buffer.from([0x50, 0x4b, 0x05, 0x06])), 'ZIP must contain an end-of-central-directory record');
   return entries;
-}
-
-function readBrowserBlob(window, blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new window.FileReader();
-    reader.onerror = () => reject(reader.error || new Error('Could not read browser Blob'));
-    reader.onload = () => resolve(Buffer.from(reader.result));
-    reader.readAsArrayBuffer(blob);
-  });
-}
-
-async function attachPdf(dom, bytes, filename) {
-  const attachment = dom.window.document.getElementById('ic-pdf-attachment');
-  const file = new dom.window.File([bytes], filename, { type: 'application/pdf' });
-  Object.defineProperty(attachment, 'files', { configurable: true, value: [file] });
-  attachment.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-  await new Promise(resolve => dom.window.setTimeout(resolve, 20));
-}
-
-function captureBundleDownload(dom) {
-  let downloadedBlob = null;
-  dom.window.URL.createObjectURL = (blob) => { downloadedBlob = blob; return 'blob:application-bundle'; };
-  dom.window.URL.revokeObjectURL = () => {};
-  dom.window.HTMLAnchorElement.prototype.click = function () {};
-  dom.window.document.getElementById('ic-download-btn').click();
-  return downloadedBlob;
 }
 
 export default [
@@ -119,90 +95,42 @@ export default [
     },
   },
   {
-    name: 'application workspace: one HTML independently refreshes résumé and cover PDFs, then rebundles offline',
+    name: 'application workspace: Sync replaces download and submits only the selected document to its saved bridge',
     run: async () => {
-      const initialResumePdf = Buffer.from('%PDF-1.4\ninitial-resume');
-      const initialCoverPdf = Buffer.from('%PDF-1.4\ninitial-cover');
-      const bundle = normaliseResumeDownloadBundle({
-        company: '../Acme: Canada/', candidateName: 'Maya Chen',
-        jobMarkdown: '# Platform Engineer\n\nOriginal listing.',
-        resumePdfBase64: initialResumePdf.toString('base64'),
-        coverLetterPdfBase64: initialCoverPdf.toString('base64'),
-      });
-      const doc = buildResumeDocument({
-        docId: 'bundle-interaction-test',
+      let doc = buildResumeDocument({
+        docId: 'sync-interaction-test',
         resumeMainHtml: '<main class="page"><h1 class="name">Maya Chen</h1><p id="resume-copy">Original résumé</p></main>',
-        coverLetter: {
-          name: 'Maya Chen', tagline: 'Platform engineer', date: 'August 14, 2026',
-          recipient: 'Hiring Team\nAcme Canada', salutation: 'Dear Hiring Team,',
-          paragraphs: ['Original cover letter.'], closing: 'Sincerely,', signatureTitle: 'Platform Engineer · candidate', contact: [],
-        },
-        downloadBundle: bundle,
+        coverLetter: { name: 'Maya Chen', paragraphs: ['Original cover letter.'] },
+        downloadBundle: { company: 'Acme', candidateName: 'Maya Chen', jobMarkdown: '# Role' },
       });
-      assert(doc.includes('Download application bundle') && doc.includes('Cover letter'), 'combined workspace controls must be present');
-
-      const dom = new JSDOM(doc, { runScripts: 'dangerously', url: 'https://application.local/' });
+      doc = embedApplicationSyncConfig(doc, { endpoint: 'http://127.0.0.1:43192/application-sync', token: 'a'.repeat(64) });
+      assert(!doc.includes('Download application bundle') && !doc.includes('storedZip'), 'saved workspace must not ship a browser ZIP downloader');
+      const dom = new JSDOM(doc, { runScripts: 'dangerously', url: 'file:///tmp/Acme/Application.html' });
       const { document } = dom.window;
-      const download = document.getElementById('ic-download-btn');
-      const edit = document.getElementById('ic-edit-toggle');
-      const resumePanel = document.getElementById('ic-resume-panel');
-      const coverPanel = document.getElementById('ic-cover-panel');
-      assert(!download.disabled, 'fresh embedded PDFs for both documents should enable a no-review bundle');
-
+      const sync = document.getElementById('ic-sync-btn');
+      const calls = [];
+      dom.window.fetch = async (endpoint, options) => {
+        calls.push({ endpoint, payload: JSON.parse(options.body) });
+        return { ok: true, json: async () => ({ success: true }) };
+      };
+      assert(!sync.disabled && sync.textContent.includes('résumé'), 'a configured saved HTML enables Sync without manually attaching a PDF');
       document.getElementById('ic-cover-tab').click();
-      assert(resumePanel.hidden && !coverPanel.hidden, 'cover tab must show only the cover letter');
-      edit.click();
-      const coverMain = coverPanel.querySelector('main');
-      assert(coverMain.getAttribute('contenteditable') === 'true', 'Edit must target the selected cover letter');
-      coverMain.querySelector('.letter-body p').textContent = 'Edited cover letter.';
-      coverMain.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-      assert(download.disabled, 'cover-only edits must stale Cover Letter.pdf and block the complete bundle');
-
-      const currentCoverPdf = Buffer.from('%PDF-1.7\ncurrent-edited-cover');
-      await attachPdf(dom, currentCoverPdf, 'Maya Chen - Cover Letter.pdf');
-      assert(!download.disabled, 'attaching only the refreshed cover PDF must preserve the current résumé PDF and re-enable the bundle');
-
-      document.getElementById('ic-resume-tab').click();
-      edit.click();
-      const resumeMain = resumePanel.querySelector('main');
-      resumeMain.querySelector('#resume-copy').textContent = 'Edited résumé';
-      resumeMain.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-      assert(download.disabled, 'résumé edits must stale only Resume.pdf and block the complete bundle');
-
-      const currentResumePdf = Buffer.from('%PDF-1.7\ncurrent-edited-resume');
-      await attachPdf(dom, currentResumePdf, 'Maya Chen - Resume.pdf');
-      assert(!download.disabled, 'attaching the current résumé PDF must re-enable the bundle without replacing Cover Letter.pdf');
-
-      const downloadedBlob = captureBundleDownload(dom);
-      assert(downloadedBlob, 'bundle click must create a ZIP Blob');
-      const entries = readZipEntries(await readBrowserBlob(dom.window, downloadedBlob));
-      const expectedNames = [
-        'Acme Canada/Application.html',
-        'Acme Canada/Resume.pdf',
-        'Acme Canada/Cover Letter.pdf',
-        'Acme Canada/Original Job Listing.md',
-      ];
-      assert(JSON.stringify([...entries.keys()]) === JSON.stringify(expectedNames), 'browser bundle must have exactly one HTML and both PDFs');
-      const appHtml = entries.get('Acme Canada/Application.html')?.toString('utf8') || '';
-      assert(appHtml.includes('Edited résumé') && appHtml.includes('Edited cover letter.'), 'downloaded single HTML must contain both current edits');
-      assert(entries.get('Acme Canada/Resume.pdf')?.equals(currentResumePdf), 'downloaded bundle must use the attached current résumé PDF');
-      assert(entries.get('Acme Canada/Cover Letter.pdf')?.equals(currentCoverPdf), 'downloaded bundle must use the attached current cover-letter PDF');
-      assert(appHtml.includes(currentResumePdf.toString('base64')) && appHtml.includes(currentCoverPdf.toString('base64')), 'both refreshed PDFs must persist inside HTML for a future offline rebundle');
-      assert(entries.get('Acme Canada/Original Job Listing.md')?.toString('utf8').includes('Original listing.'), 'job listing must survive browser rebundle');
-
-      const reopened = new JSDOM(appHtml, { runScripts: 'dangerously', url: 'https://application-reopened.local/' });
-      assert(!reopened.window.document.getElementById('ic-download-btn').disabled, 'reopened downloaded HTML must retain both current PDF attachments');
-      const redownloadedBlob = captureBundleDownload(reopened);
-      const redownloaded = readZipEntries(await readBrowserBlob(reopened.window, redownloadedBlob));
-      assert(redownloaded.get('Acme Canada/Resume.pdf')?.equals(currentResumePdf), 'reopened HTML must re-download the persisted résumé PDF');
-      assert(redownloaded.get('Acme Canada/Cover Letter.pdf')?.equals(currentCoverPdf), 'reopened HTML must re-download the persisted cover-letter PDF');
-      reopened.window.close();
+      document.getElementById('ic-edit-toggle').click();
+      const cover = document.getElementById('ic-cover-panel').querySelector('main');
+      cover.querySelector('.letter-body p').textContent = 'Edited cover letter.';
+      cover.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      sync.click();
+      await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+      assert(calls.length === 1 && calls[0].endpoint === 'http://127.0.0.1:43192/application-sync', 'Sync must use the fixed local bridge endpoint');
+      assert(calls[0].payload.token === 'a'.repeat(64) && calls[0].payload.document === 'cover', 'Sync must use its capability and selected document only');
+      assert(calls[0].payload.html.includes('Edited cover letter.'), 'Sync must send the current editable HTML to Electron for rendering');
+      assert(document.getElementById('ic-pdf-bundle-note').textContent.includes('Synced cover letter'), 'success should confirm the replaced sibling document');
       dom.window.close();
-      return { entries: entries.size, oneHtml: true };
+      return { selectedDocument: 'cover', capabilityScoped: true };
     },
   },
   {
-    name: 'application workspace: review gates résumé/bundle but not cover printing, and only résumé-changing decisions stale PDF',
+    name: 'application workspace: review gates résumé Sync but not cover printing or Sync',
     run: () => {
       const doc = buildResumeDocument({
         docId: 'bundle-review-test',
@@ -213,27 +141,27 @@ export default [
         },
         downloadBundle: {
           company: 'Acme', candidateName: 'Maya', jobMarkdown: '# Role',
-          resumePdfBase64: Buffer.from('%PDF-1.4\nresume-baseline').toString('base64'),
-          coverLetterPdfBase64: Buffer.from('%PDF-1.4\ncover-baseline').toString('base64'),
+          sync: { endpoint: 'http://127.0.0.1:43192/application-sync', token: 'b'.repeat(64) },
         },
       });
       const dom = new JSDOM(doc, { runScripts: 'dangerously', url: 'https://application-review.local/' });
       const { document } = dom.window;
       const print = document.getElementById('ic-export-btn');
-      const download = document.getElementById('ic-download-btn');
-      assert(print.disabled && download.disabled, 'unresolved résumé claim must gate résumé print and bundle');
+      const sync = document.getElementById('ic-sync-btn');
+      assert(print.disabled && sync.disabled, 'unresolved résumé claim must gate résumé print and Sync');
       document.getElementById('ic-cover-tab').click();
-      assert(!print.disabled && download.disabled, 'cover-letter printing must stay available while bundle review is unresolved');
+      assert(!print.disabled && !sync.disabled, 'cover-letter printing and Sync stay available while résumé review is unresolved');
       document.querySelector('[data-ic-skill-action="not_mine"]').click();
-      assert(!download.disabled, 'Not mine from the untouched baseline must not stale the résumé PDF');
+      document.getElementById('ic-resume-tab').click();
+      assert(!sync.disabled, 'Not mine allows résumé Sync without a manually attached PDF');
       document.querySelector('[data-ic-skill-action="verified"]').click();
-      assert(download.disabled, 'adding a verified skill to the résumé must require a current PDF attachment');
+      assert(!sync.disabled, 'adding a verified skill is rendered fresh by Electron during Sync');
       dom.window.close();
-      return { coverIndependent: true, staleOnlyOnResumeChange: true };
+      return { coverIndependent: true, renderOnSync: true };
     },
   },
   {
-    name: 'application workspace: legacy single PDF payload migrates to résumé only and requires a cover PDF',
+    name: 'application workspace: unsaved or legacy HTML clearly disables Sync',
     run: () => {
       const legacyResumePdf = Buffer.from('%PDF-1.4\nlegacy-resume');
       const migrated = normaliseResumeDownloadBundle({
@@ -248,12 +176,26 @@ export default [
         downloadBundle: migrated,
       });
       const dom = new JSDOM(doc, { runScripts: 'dangerously', url: 'https://application-legacy.local/' });
-      const download = dom.window.document.getElementById('ic-download-btn');
+      const sync = dom.window.document.getElementById('ic-sync-btn');
       const note = dom.window.document.getElementById('ic-pdf-bundle-note');
-      assert(download.disabled, 'legacy HTML must block the four-file ZIP until a real Cover Letter.pdf is attached');
-      assert(note.textContent.includes('cover-letter') || note.textContent.includes('both documents'), 'legacy HTML must explain that the cover PDF is missing');
+      assert(sync.disabled, 'legacy HTML without an Electron capability must not claim it can overwrite files');
+      assert(note.textContent.includes('Save this application from Infinite Canvas'), 'legacy HTML must explain how to make Sync available');
       dom.window.close();
-      return { legacyResumeRetained: true, coverRequired: true };
+      return { legacyResumeRetained: true, syncRequiresSave: true };
+    },
+  },
+  {
+    name: 'application Sync capabilities reconstruct only canonical sibling paths',
+    run: () => {
+      const workspace = __normaliseApplicationSyncWorkspaceForTests({
+        token: 'c'.repeat(64), workspaceDir: '/tmp/company/application',
+        applicationPath: '/tmp/attacker.html', resumePdfPath: '/tmp/attacker.pdf',
+      });
+      assert(workspace?.applicationPath === '/tmp/company/application/Application.html', 'persisted state must never select a caller-provided HTML path');
+      assert(workspace?.resumePdfPath === '/tmp/company/application/Resume.pdf', 'resume destination must be a canonical sibling');
+      assert(workspace?.coverLetterPdfPath === '/tmp/company/application/Cover Letter.pdf', 'cover destination must be a canonical sibling');
+      assert(__normaliseApplicationSyncWorkspaceForTests({ token: 'not-a-token', workspaceDir: '/tmp/company/application' }) === null, 'invalid capabilities must be discarded before serving sync');
+      return { fixedWorkspacePaths: true };
     },
   },
 ];

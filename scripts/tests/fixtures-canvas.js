@@ -1,4 +1,4 @@
-import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FAST_TEST, FILE_CATEGORIES, FULL_TEST, GOOGLE_JOBS_EXTRACTOR, JOB_API_PER_SOURCE_CAP, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_MAX_PAGES, JOB_PER_PAGE_CAP, JOB_PER_SOURCE_CAP, JOB_TEST_QUERY_CAP, JSDOM, MEDIUM_TEST, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterUSAJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, jobRelevanceEvidence, jobRelevanceMatch, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, nodeSupportsCustomization, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint } from '../test-dependencies.js';
+import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FAST_TEST, FILE_CATEGORIES, FULL_TEST, GOOGLE_JOBS_EXTRACTOR, JOB_API_PER_SOURCE_CAP, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_MAX_PAGES, JOB_PER_PAGE_CAP, JOB_PER_SOURCE_CAP, JOB_TEST_QUERY_CAP, JSDOM, MEDIUM_TEST, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterUSAJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, jobRelevanceEvidence, jobRelevanceMatch, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, nodeSupportsCustomization, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint } from '../test-dependencies.js';
 
 export default [
 {
@@ -304,6 +304,172 @@ export default [
       d.release();
       assert(queue.getSnapshot().active === null && queue.getSnapshot().queued.length === 0, 'queue drains after all releases');
       return { starts, queued: positionEvents.length };
+  },
+},
+{
+    // Application generation uses the same renderer-side queue as the other
+    // expensive AI workflows.  Keep this test application-shaped rather than
+    // merely testing queue length: each card owns its own marker, a deleted
+    // waiting card clears only itself, and a failed active run releases the
+    // next card.  That is the contract the JobCard callbacks rely on.
+    name: 'Application generation queue is FIFO, cancellation-safe, failure-safe, and keeps card markers isolated',
+    run: async () => {
+      const queue = createModuleRunQueue();
+      const markers = new Map();
+      const starts = [];
+      const callbacksFor = (nodeId) => ({
+        onQueued: ({ position }) => markers.set(nodeId, `Queued · #${position}`),
+        onQueueUpdate: ({ position }) => markers.set(nodeId, `Queued · #${position}`),
+        onStart: () => {
+          starts.push(nodeId);
+          markers.set(nodeId, 'Generating…');
+        },
+        onFinish: () => markers.set(nodeId, null),
+        onCancel: () => markers.set(nodeId, null),
+      });
+
+      const a = await queue.acquireModuleRun({
+        nodeId: 'application-card-a', kind: 'application', label: 'Application: A', ...callbacksFor('application-card-a'),
+      });
+      const bPromise = queue.acquireModuleRun({
+        nodeId: 'application-card-b', kind: 'application', label: 'Application: B', ...callbacksFor('application-card-b'),
+      });
+      const cPromise = queue.acquireModuleRun({
+        nodeId: 'application-card-c', kind: 'application', label: 'Application: C', ...callbacksFor('application-card-c'),
+      });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      assert(queue.getSnapshot().active?.nodeId === 'application-card-a', 'first application starts immediately');
+      assert(queue.getSnapshot().queued.map(entry => entry.nodeId).join(',') === 'application-card-b,application-card-c', 'later applications wait in click order');
+      assert(markers.get('application-card-a') === 'Generating…', 'active card has only its active marker');
+      assert(markers.get('application-card-b') === 'Queued · #1' && markers.get('application-card-c') === 'Queued · #2', 'each waiting card receives its own queue position');
+
+      const cancelled = queue.cancelQueuedRunsForNode('application-card-b', 'Card deleted');
+      const cancelError = await bPromise.catch(error => error?.message || String(error));
+      assert(cancelled === 1 && cancelError === 'Card deleted', 'deleting one queued card cancels only that application');
+      assert(markers.get('application-card-b') === null, 'cancelled card marker is cleared');
+      assert(markers.get('application-card-c') === 'Queued · #1', 'remaining card marker is renumbered without being cleared by another card');
+
+      a.release();
+      const c = await cPromise;
+      assert(starts.join(',') === 'application-card-a,application-card-c', `remaining application starts after active release (${starts.join(',')})`);
+      assert(markers.get('application-card-a') === null && markers.get('application-card-c') === 'Generating…', 'finishing one card never corrupts another card marker');
+      c.release();
+      assert(markers.get('application-card-c') === null && queue.getSnapshot().active === null, 'last application releases its marker and drains the queue');
+
+      const rejected = queue.runExclusive({
+        nodeId: 'application-card-fail', kind: 'application', label: 'Application: failure', ...callbacksFor('application-card-fail'),
+      }, async () => {
+        throw new Error('generation failed');
+      });
+      const recovered = queue.runExclusive({
+        nodeId: 'application-card-after-fail', kind: 'application', label: 'Application: recovered', ...callbacksFor('application-card-after-fail'),
+      }, async () => 'generated');
+      const failure = await rejected.catch(error => error?.message || String(error));
+      assert(failure === 'generation failed' && await recovered === 'generated', 'a rejected generation releases the next queued application');
+      assert(markers.get('application-card-fail') === null && markers.get('application-card-after-fail') === null, 'rejection path leaves no stale card marker');
+
+      // The lease must cover the durable save too.  If it were released after
+      // the model call but before saveApplication, the next card could start
+      // and race the first card's output/folder work.
+      const lifecycle = [];
+      let finishFirstSave;
+      const firstSaveGate = new Promise(resolve => { finishFirstSave = resolve; });
+      const first = queue.runExclusive({ nodeId: 'application-card-save-a', kind: 'application', label: 'Application: save A' }, async () => {
+        lifecycle.push('A-generate');
+        await firstSaveGate;
+        lifecycle.push('A-save');
+      });
+      const second = queue.runExclusive({ nodeId: 'application-card-save-b', kind: 'application', label: 'Application: save B' }, async () => {
+        lifecycle.push('B-generate');
+        lifecycle.push('B-save');
+      });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      assert(lifecycle.join(',') === 'A-generate', `second application must not begin before the first save settles (${lifecycle.join(',')})`);
+      finishFirstSave();
+      await Promise.all([first, second]);
+      assert(lifecycle.join(',') === 'A-generate,A-save,B-generate,B-save', `application lease spans generation plus save (${lifecycle.join(',')})`);
+      return { starts: starts.length, cancellationSafe: true, rejectionSafe: true };
+  },
+},
+{
+    name: 'Application workspace discard capability requires the exact registered path and sender',
+    run: () => {
+      const workDir = path.resolve('/tmp', 'jobapp-discard-capability-fixture');
+      const pending = { senderId: 41, resumeHtmlPath: path.join(workDir, 'application.html') };
+      const records = new Map([[workDir, pending]]);
+
+      const owned = resolvePendingApplicationWorkspaceForOwner(workDir, records, 41);
+      assert(owned.resolvedWorkDir === workDir && owned.pending === pending, 'exact owner resolves its registered workspace');
+
+      let foreignError = '';
+      try { resolvePendingApplicationWorkspaceForOwner(workDir, records, 42); }
+      catch (error) { foreignError = error?.message || String(error); }
+      assert(foreignError.includes('different window') && records.get(workDir) === pending,
+        'a different renderer cannot resolve or remove another sender\'s workspace');
+
+      let arbitraryError = '';
+      try { resolvePendingApplicationWorkspaceForOwner('/tmp/not-a-registered-application', records, 41); }
+      catch (error) { arbitraryError = error?.message || String(error); }
+      assert(arbitraryError.includes('no longer available') && records.size === 1,
+        'an arbitrary client path cannot become a cleanup target');
+      return { senderBound: true, exactRegistrationRequired: true };
+    },
+},
+{
+    // This project deliberately keeps node components free of a heavyweight
+    // DOM test harness.  Lock the integration seams down here instead: these
+    // are the ordering and guard invariants that cannot be established by the
+    // generic queue unit test alone.
+    name: 'Job Card application integration acquires before mutable reads, releases after save, and guards duplicate/deleted calls',
+    run: () => {
+      const source = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
+      const indexOf = (needle) => source.indexOf(needle);
+      const latchGuard = indexOf('applicationSubmissionRef.current || hasApplicationRun) return;');
+      const latchSet = indexOf('applicationSubmissionRef.current = true;');
+      const acquire = indexOf('lease = await acquireModuleRun({');
+      const currentCanvasRead = indexOf('const canvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;');
+      const originRead = indexOf('const originHub = getNode(originHubId);');
+      const generateIpc = indexOf('await window.electronAPI.generateApplication({');
+      const saveIpc = indexOf('await window.electronAPI.saveApplication({');
+      const release = indexOf('lease?.release();');
+      const generationScope = source.slice(indexOf('const generateApplication = useCallback'), indexOf('// ── Mark applied'));
+      const canvasSource = fs.readFileSync(path.resolve('src/Canvas.jsx'), 'utf8');
+      const applicationIpcSource = fs.readFileSync(path.resolve('electron/ipc/jobApplication.js'), 'utf8');
+      const preloadSource = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
+
+      assert(latchGuard >= 0 && latchSet > latchGuard && acquire > latchSet,
+        'a synchronous per-card latch must reject duplicate clicks before a queue lease is requested');
+      assert(acquire >= 0 && currentCanvasRead > acquire && originRead > currentCanvasRead,
+        'queued cards must re-read the current canvas path, career data, and achievement cache after owning their FIFO lease');
+      assert(source.includes('nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile'),
+        'a null latest canvas path must not fall back to a stale closure-captured path while queued');
+      assert(generateIpc > originRead && saveIpc > generateIpc && release > saveIpc,
+        'the lease must cover generation and save, then release only in the terminal cleanup path');
+      assert(source.includes("kind: 'application'") && source.includes('onQueued: ({ position })')
+        && source.includes('onQueueUpdate: ({ position })') && source.includes('Queued · #${displayedApplicationRun.position}'),
+      'queued applications must have an application identity and an isolated visible queue position');
+      assert(source.includes('snapshot: moduleRunSnapshot') && source.includes('const displayedApplicationRun = queuedApplicationRun')
+        && source.includes('const hasApplicationRun = displayedApplicationRun.state !== \'idle\';')
+        && source.includes('applicationSubmissionRef.current || hasApplicationRun')
+        && source.includes('disabled={hasApplicationRun || !!data.locked}'),
+      'the global queue snapshot must keep a remounted card visibly disabled and synchronously reject a duplicate enqueue');
+      assert(canvasSource.includes('const getCurrentFile = useCallback(() => currentFileRef.current, []);')
+        && canvasSource.includes('currentFile, getCurrentFile'),
+      'Canvas navigation must expose a stable latest-file accessor for queued Save As operations');
+      assert(!generationScope.includes('if (!isMountedRef.current) return;')
+        && generationScope.includes('if (!getNode(idRef.current)) {'),
+      'a hidden-but-extant card must finish caching and saving; only actual deletion stops post-generation work');
+      assert(source.includes("cancelQueuedRunsForNode(id, 'Job card dismissed before generation started')")
+        && source.includes('if (!getNode(idRef.current))') && source.includes('cancelledBeforeStart = true;'),
+      'a removed queued card must be cancelled or rejected at turn start before it can invoke generation IPC');
+      assert(source.includes('discardApplication?.({ workDir: result.workDir })')
+        && preloadSource.includes("discardApplication: (args) => ipcRenderer.invoke('discard-application', args)")
+        && applicationIpcSource.includes("handleSafe('discard-application'")
+        && applicationIpcSource.includes('pendingApplicationArtifacts.get(resolvedWorkDir) !== pending')
+        && applicationIpcSource.includes("discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'terminal save failure')"),
+      'a deleted post-generation card must discard only its registered, sender-owned workspace, including terminal save failures');
+      return { lifecycleOrdered: true, remountSafe: true, currentCanvasAtLease: true, hiddenCardContinues: true, deletedCardGuard: true };
     },
   },
 {

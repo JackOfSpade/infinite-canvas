@@ -1,4 +1,4 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, extractSalaryFromText, extractVariantAttrs, filterHandledJobSourceWarnings,  formatJsonLdSalary, formatUSAJobsSalary, fs, generateMarkdown, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordJobsBoardScope, recordJobsSourceScope, recordManualScraperTelemetry, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, extractSalaryFromText, extractVariantAttrs, filterHandledJobSourceWarnings,  formatJsonLdSalary, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobsBoardScope, recordJobsSourceScope, recordManualScraperTelemetry, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn } from '../test-dependencies.js';
 
 export default [
 {
@@ -77,6 +77,75 @@ export default [
         && staticAndLogsOnly.markdown.includes('oldest main-process log line(s)'),
       'Clipboard cap: hard-cap banner does not claim event loss when every event was retained');
       return { phase1Len: phase1.markdown.length, phase2Len: phase2.markdown.length, phase1Trimmed: phase1.trimmedEventCount };
+    },
+  },
+{
+    name: 'Application failure telemetry and APPLICATION filter remain diagnosable',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        recordApplicationTelemetry({
+          attemptId: 'application-failure-report-test',
+          nodeId: 'application-failure-card',
+          jobTitle: 'Senior Example Engineer',
+          company: 'Example Co',
+          status: 'failed',
+          stage: 'résumé generation',
+          failedStage: 'résumé generation',
+          error: 'Gemini quota exhausted after all compatible fallbacks.',
+          companyResearch: { available: false, error: 'Research quota exhausted first.' },
+          taskRoutes: [
+            { task: 'company-research', provider: 'gemini', model: 'gemini-3.7-flash' },
+            { task: 'application-resume', provider: 'gemini', model: 'gemini-3.7-flash' },
+          ],
+          stages: [
+            { stage: 'model resolution', ts: Date.now() - 50 },
+            { stage: 'company and role research', ts: Date.now() - 20 },
+            { stage: 'résumé generation', ts: Date.now() - 1 },
+            { stage: 'failed', ts: Date.now() },
+          ],
+        });
+        const report = generateMarkdown({
+          description: 'Generate failed.',
+          nodes: [{ id: 'application-failure-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }).markdown;
+        assert(report.includes('### Application Generation (last)')
+          && report.includes('Outcome: **⚠️ failed** · current/final stage: résumé generation')
+          && report.includes('Gemini quota exhausted after all compatible fallbacks.')
+          && report.includes('Company/role research unavailable — generation used only the scraped job description')
+          && report.includes('application-resume → gemini / `gemini-3.7-flash`'),
+        'FULL report must retain the failed application attempt, its exact stage/error, research fallback, and task route');
+
+        recordApplicationTelemetry({
+          attemptId: 'application-research-degraded-report-test',
+          nodeId: 'application-failure-card', jobTitle: 'Senior Example Engineer', company: 'Example Co',
+          status: 'completed', stage: 'completed', companyResearch: {
+            available: false, error: 'Gemini quota exhausted while searching.',
+          },
+        });
+        const degradedReport = generateMarkdown({
+          description: 'Generate completed without research.',
+          nodes: [{ id: 'application-failure-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }).markdown;
+        assert(degradedReport.includes('Company/role research unavailable — generation used only the scraped job description')
+          && degradedReport.includes('Gemini quota exhausted while searching.'),
+        'Application report must state when a completed document safely degraded to scraped-job-only context');
+
+        const filtered = applyBugReportCode([
+          '[JobApplication] Generating application',
+          '[generate-application] failed: quota exhausted',
+          '[Canvas] node moved',
+        ], {}, 'APPLICATION');
+        assert(filtered.filteredLogs.some(line => /JobApplication/.test(line))
+          && filtered.filteredLogs.some(line => /generate-application/.test(line))
+          && filtered.sectionExclusions.has('nodeInternals'),
+        'APPLICATION filter selects application lifecycle logs (with causal context) while omitting heavy canvas diagnostics');
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { status: 'failed', stage: 'résumé generation' };
     },
   },
 {

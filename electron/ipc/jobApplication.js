@@ -46,14 +46,14 @@ import path from 'path';
 import crypto from 'crypto';
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
-import { callLLMRaw, callLLMText } from './llm.js';
+import { callLLMRaw, callLLMText, modelForTask, providerForTask } from './llm.js';
 import {
   APPLICATION_COVER_LETTER_SCHEMA,
   APPLICATION_SKILL_OPPORTUNITY_SCHEMA,
   ACHIEVEMENT_LEDGER_SCHEMA,
   ACHIEVEMENT_REFUTE_SCHEMA,
 } from './aiSchemas.js';
-import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, getDesignSystemDir } from './resumeHtml.js';
+import { buildResumeDocument, buildCoverLetterDocument, embedApplicationSyncConfig, extractVariantAttrs, isDualMode, getDesignSystemDir } from './resumeHtml.js';
 import { renderPdf, applyDualPdf } from './resumeRender.js';
 import { primeClaudeModels } from './modelResolver.js';
 import {
@@ -67,11 +67,8 @@ import {
   recordSkillOpportunityAnalysis,
 } from './skillOpportunityStore.js';
 import { mergeSkillOpportunityAnalysis } from '../../src/utils/skillOpportunityHistogram.js';
-import {
-  createApplicationBundle,
-  formatOriginalJobListingMarkdown,
-  sanitizeApplicationBundlePart,
-} from './applicationBundle.js';
+import { formatOriginalJobListingMarkdown, sanitizeApplicationBundlePart } from './applicationBundle.js';
+import { registerApplicationSyncWorkspace } from './applicationSync.js';
 
 const { shell } = electronPkg;
 
@@ -79,6 +76,36 @@ const { shell } = electronPkg;
 // save-application. Generation registers the exact temp artifacts here; save
 // consumes only that record and removes it after a durable bundle/recovery save.
 const pendingApplicationArtifacts = new Map();
+
+// Resolve a generated workspace only when the caller names an exact record
+// owned by its sender. Exported to keep the capability boundary directly
+// testable without exposing the production Map itself.
+export function resolvePendingApplicationWorkspaceForOwner(workDir, pendingArtifacts, senderId) {
+  const resolvedWorkDir = typeof workDir === 'string' ? path.resolve(workDir) : '';
+  const pending = pendingArtifacts.get(resolvedWorkDir);
+  if (!pending) {
+    throw new Error('Generated application session is no longer available — please regenerate.');
+  }
+  if (pending.senderId !== senderId) {
+    throw new Error('Generated application session belongs to a different window — please regenerate.');
+  }
+  return { resolvedWorkDir, pending };
+}
+
+// Remove only a workspace that this process previously registered.  The
+// renderer never gets arbitrary temp-directory deletion: callers must first
+// prove ownership with the exact Map entry (and, at the IPC boundary, sender
+// identity) before this helper is reached.
+async function discardPendingApplicationArtifacts(resolvedWorkDir, pending, reason = 'discarded') {
+  if (pendingApplicationArtifacts.get(resolvedWorkDir) !== pending) return false;
+  pendingApplicationArtifacts.delete(resolvedWorkDir);
+  try {
+    await fs.promises.rm(resolvedWorkDir, { recursive: true, force: true });
+  } catch (error) {
+    logger.warn(`[JobApplication] Could not clean temporary application workspace after ${reason}: ${error?.message || error}`);
+  }
+  return true;
+}
 
 // Serialize histogram-backed taxonomy reads/AI canonicalization and the later
 // completed-artifact record operations. The two phases are deliberately
@@ -275,6 +302,26 @@ ${wrapUntrustedText('job-description', job.snippet)}
 Prefer concrete, recent, verifiable facts with rough dates. If you cannot find reliable information about the specific company or role, say so explicitly rather than inventing. Output plain prose only — no headers, no bullet markdown.`;
 
   return await callLLMRaw(prompt, { signal, task: 'company-research', grounding: true });
+}
+
+/**
+ * Research improves tailoring but is not required for a truthful application:
+ * the scraped job description remains a valid source. A provider quota or web
+ * search capability failure therefore degrades to an explicit no-research
+ * context instead of cancelling the whole generation.
+ */
+export async function getCompanyResearchContext(job, signal, researchFn = researchCompanyAndRole) {
+  try {
+    return { text: await researchFn(job, signal), available: true, error: null };
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error;
+    const message = String(error?.message || error).replace(/\s+/g, ' ').trim().slice(0, 300);
+    return {
+      text: 'Live company and role research was unavailable for this application. Do not invent or imply company facts, values, products, news, or role requirements that are not present in the scraped target job description.',
+      available: false,
+      error: message || 'Unknown research failure',
+    };
+  }
 }
 
 /**
@@ -523,7 +570,7 @@ RULES:
 }
 
 /** Fill the design system's résumé markup, tailored to the job + research. */
-async function generateResumeMain({ careerData, job, research, ledger, skillInsights }, signal) {
+async function generateResumeMain({ careerData, job, research, researchAvailable = true, ledger, skillInsights }, signal) {
   const cachedPrefix = buildResumeCachedPrefix({ careerData, ledger });
   const excludedSkills = (Array.isArray(skillInsights?.items) ? skillInsights.items : [])
     .map(item => String(item?.canonicalSkillName || '').trim())
@@ -534,7 +581,7 @@ async function generateResumeMain({ careerData, job, research, ledger, skillInsi
   const prompt = `TARGET JOB (the "Description" is what we scraped — it may be full, partial, or empty):
 ${jobBlock(job)}
 
-COMPANY & ROLE CONTEXT (live web research — always covers the company, and the role too when the scraped Description was thin). Combine it with the scraped Description above for the full picture, and tailor emphasis, ordering, and keywords to it:
+COMPANY & ROLE CONTEXT (${researchAvailable ? 'live web research — combine it with the scraped Description above for the full picture' : 'live research unavailable — use only the scraped Description for company and role facts'}):
 """
 ${research}
 """${exclusionBlock}
@@ -711,7 +758,7 @@ async function renderResumeWithFit({ careerData, ledger, resumeMainHtml, docId, 
 }
 
 /** Structured cover letter the renderer lays out on the design-system letterhead. */
-async function generateCoverLetterFields({ careerData, job, research, ledger, skillInsights }, signal) {
+async function generateCoverLetterFields({ careerData, job, research, researchAvailable = true, ledger, skillInsights }, signal) {
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
   // Same ledger serialization as the résumé (byte-stable — see that function's
@@ -736,6 +783,9 @@ ${rubricText}
   // Static, job-independent block → CACHED PREFIX (careerData + writing rules are
   // byte-identical across every application this session; only the job, research,
   // and date vary). Keep byte-stable so cover-letter call 2..N hit the cache.
+  const researchRule = researchAvailable
+    ? 'Each ties SPECIFIC career-data evidence to SPECIFIC job requirements, and references a genuine detail from the research (a product, a value, or a recent development).'
+    : 'Each ties SPECIFIC career-data evidence to SPECIFIC requirements in the scraped target job. Live company research is unavailable, so do not mention or imply unverified company facts, values, products, news, or role requirements.';
   const cachedPrefix = `Write a tailored cover letter for a candidate applying to a job. Return JSON matching the provided schema, grounded in the CAREER DATA below and the target job + research provided at the end.
 
 CAREER DATA (use ONLY facts found here for the candidate's name, contact, and evidence):
@@ -744,7 +794,7 @@ ${careerData}
 """
 
 WRITING RULES:
-- 3-4 body paragraphs. Each ties SPECIFIC career-data evidence to SPECIFIC job requirements, and references a genuine detail from the research (a product, a value, or a recent development).
+- 3-4 body paragraphs. ${researchRule}
 - Authentic, specific, and concise — not a generic template. Ground every claim in the career data: never invent employers, titles, dates, skills, proficiency, or numbers — with ONE exception: a figure drawn from the ACHIEVEMENT LEDGER below is already verified and computed by code FROM the candidate's own career data, not invented. You may state only capabilities directly entailed by concrete demonstrated work and may frame genuine accomplishments in the job's language. Technical proximity alone is not evidence of experience.
 - NO RECEIPTS here — unlike the résumé, this document's paragraphs are plain prose with nowhere to hang a machine-readable attribute, so any ledger figure you use is stated as unadorned text.
 - A ledger item with attribution 'context' describes something that happened during the candidate's tenure, not necessarily because of them — phrase it as context, never as a personal win.
@@ -760,7 +810,7 @@ WRITING RULES:
   const prompt = `TARGET JOB (the "Description" is what we scraped — it may be full, partial, or empty):
 ${jobBlock(job)}
 
-COMPANY & ROLE CONTEXT (live web research — always covers the company, and the role too when the scraped Description was thin). Combine it with the scraped Description above for the full picture:
+COMPANY & ROLE CONTEXT (${researchAvailable ? 'live web research — combine it with the scraped Description above for the full picture' : 'live research unavailable — use only the scraped Description for company and role facts'}):
 """
 ${research}
 """${exclusionBlock}
@@ -775,69 +825,18 @@ function sanitizeFilePart(s, fallback) {
   return sanitizeApplicationBundlePart(s, fallback);
 }
 
-/** Copy `src` to `dir/desired`, avoiding collision by appending " (n)". */
-async function copyUnique(src, dir, desired) {
-  const ext = path.extname(desired);
-  const base = desired.slice(0, desired.length - ext.length);
-  for (let n = 0; n < 10_000; n += 1) {
-    const target = path.join(dir, n ? `${base} (${n})${ext}` : desired);
-    try {
-      await fs.promises.copyFile(src, target, fs.constants.COPYFILE_EXCL);
-      return target;
-    } catch (e) {
-      if (e?.code !== 'EEXIST') throw e;
-    }
+async function replaceFileAtomically(destination, data) {
+  const temporary = path.join(path.dirname(destination), `.${path.basename(destination)}.${crypto.randomUUID()}.tmp`);
+  try {
+    await fs.promises.writeFile(temporary, data);
+    await fs.promises.rename(temporary, destination);
+  } finally {
+    await fs.promises.unlink(temporary).catch(() => {});
   }
-  throw new Error(`Could not allocate a unique filename for ${desired}.`);
 }
 
-/** Write bytes into `dir/desired`, preserving an older bundle on collision. */
-async function writeUnique(dir, desired, data) {
-  const ext = path.extname(desired);
-  const base = desired.slice(0, desired.length - ext.length);
-  for (let n = 0; n < 10_000; n += 1) {
-    const target = path.join(dir, n ? `${base} (${n})${ext}` : desired);
-    try {
-      await fs.promises.writeFile(target, data, { flag: 'wx' });
-      return target;
-    } catch (e) {
-      if (e?.code !== 'EEXIST') throw e;
-    }
-  }
-  throw new Error(`Could not allocate a unique filename for ${desired}.`);
-}
-
-/**
- * Read the generated artifacts and write a portable four-file ZIP bundle.
- * `applicationHtml` and `jobListingMarkdown` let a future edited-HTML flow supply
- * its current document state without first writing a second loose file.
- */
-export async function writeApplicationBundle({
-  destinationDir,
-  company,
-  applicationHtmlPath,
-  applicationHtml,
-  resumePdfPath,
-  coverLetterPdfPath,
-  jobListingPath,
-  jobListingMarkdown,
-}) {
-  if (!destinationDir || typeof destinationDir !== 'string') throw new Error('A destination directory is required for the application bundle.');
-  const html = applicationHtml != null
-    ? String(applicationHtml)
-    : await fs.promises.readFile(applicationHtmlPath, 'utf8');
-  const pdf = await fs.promises.readFile(resumePdfPath);
-  const coverPdf = await fs.promises.readFile(coverLetterPdfPath);
-  const listing = jobListingMarkdown != null
-    ? String(jobListingMarkdown)
-    : await fs.promises.readFile(jobListingPath, 'utf8');
-  const bundle = createApplicationBundle({
-    company, applicationHtml: html, resumePdf: pdf,
-    coverLetterPdf: coverPdf, jobListingMarkdown: listing,
-  });
-  await fs.promises.mkdir(destinationDir, { recursive: true });
-  const bundlePath = await writeUnique(destinationDir, bundle.fileName, bundle.buffer);
-  return { ...bundle, bundlePath };
+async function copyFileAtomically(source, destination) {
+  await replaceFileAtomically(destination, await fs.promises.readFile(source));
 }
 
 // Last application generation — captured so the bug reporter can SEE the model's
@@ -851,7 +850,14 @@ let lastApplication = null;
 export function getApplicationTelemetry() {
   return lastApplication;
 }
-function recordApplicationTelemetry(data) {
+// Exported for the deterministic bug-report fixtures. Production callers keep
+// this private to the generation lifecycle below; tests use it to assert the
+// report renders failed attempts just as faithfully as completed ones.
+export function recordApplicationTelemetry(data) {
+  if (data == null) {
+    lastApplication = null;
+    return;
+  }
   lastApplication = { ts: Date.now(), ...data };
 }
 
@@ -860,7 +866,52 @@ export function registerJobApplicationHandlers() {
   // paths; save-application then copies them to a user-chosen folder.
   handleSafe('generate-application', async (event, { job, careerData, nodeId, achievements, mineAllowed, targetPageCount: targetPageCountOverride }, signal) => {
     const company = job?.company || 'this company';
+    // A previous implementation only recorded telemetry after every model,
+    // render, and artifact-write step had succeeded. That made the most useful
+    // report case — an early generation failure — look as if Generate was never
+    // clicked. Keep one bounded, in-memory lifecycle record from the first
+    // instruction through terminal outcome. It is diagnostics only: it changes
+    // neither the generated content nor error/cancellation behavior.
+    const attemptId = crypto.randomUUID();
+    const applicationAttempt = {
+      attemptId,
+      nodeId: nodeId || null,
+      jobTitle: job?.title || '',
+      company: job?.company || '',
+      startedAt: Date.now(),
+      status: 'running',
+      stage: 'starting',
+      stages: [],
+      taskRoutes: ['company-research', 'application-skill-opportunity', 'application-resume', 'application-cover-letter']
+        .map(task => ({ task, provider: providerForTask(task), model: modelForTask(task) })),
+    };
+    const updateAttempt = (changes = {}) => {
+      // Concurrent Generate clicks are possible on different cards. Do not let
+      // an older attempt that settles late replace the newer one in the
+      // last-attempt diagnostic slot.
+      if (lastApplication && lastApplication.attemptId !== attemptId) return;
+      recordApplicationTelemetry({ ...applicationAttempt, ...lastApplication, ...changes });
+    };
+    const markStage = (stage) => {
+      applicationAttempt.stage = stage;
+      applicationAttempt.stages = [...applicationAttempt.stages, { stage, ts: Date.now() }];
+      updateAttempt({
+        status: 'running',
+        stage,
+        stages: applicationAttempt.stages,
+      });
+    };
+    const diagnosticError = (error) => String(error?.message || error || 'Unknown generation failure')
+      .replace(/[\r\n\t]+/g, ' ')
+      .slice(0, 800);
+    // Claim the last-attempt slot before the fencing guard in updateAttempt is
+    // used. Without this, a previously running attempt would prevent the new
+    // attempt from ever becoming visible in diagnostics.
+    recordApplicationTelemetry(applicationAttempt);
+    markStage('model resolution');
     logger.info(`[JobApplication][${nodeId || '?'}] Generating application for ${job?.title} @ ${company}`);
+
+    try {
 
     // Resolve Claude family tokens ONCE for this whole run (résumé design doc
     // §8.3 guard 2 / §3.6): prompt caches are model-scoped, so flipping the
@@ -875,6 +926,7 @@ export function registerJobApplicationHandlers() {
       throw new Error('No career data available for this hub. Drop your career files onto the job hub first.');
     }
 
+    markStage('achievement ledger');
     // 0. Achievement ledger (résumé design doc §3.6/§3.7). Reuse a passed-in
     //    ledger when present (hub-cached, so every application from this hub
     //    carries the SAME derived figures); mine only when absent AND the
@@ -906,15 +958,19 @@ export function registerJobApplicationHandlers() {
     }
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
 
-    // 1. Live company + role research (grounded) — the PRIMARY job-context
-    //    source; the scraped posting is supplementary. Surfaced as a clear error
-    //    if the provider/tier can't do web search — we do NOT silently fall back
-    //    to training-knowledge guesses.
-    let research;
-    try {
-      research = await researchCompanyAndRole(job, signal);
-    } catch (e) {
-      throw new Error(`Company/role research (web search) failed: ${e?.message || e}. The résumé/cover letter need live research — check that the AI provider supports web search.`);
+    // 1. Live company + role research (grounded). It improves tailoring, but
+    //    quota/capability failures degrade safely to the scraped description.
+    markStage('company and role research');
+    const companyResearch = await getCompanyResearchContext(job, signal);
+    const research = companyResearch.text;
+    // Persist this as soon as research settles, not only with the final
+    // artifact snapshot: the subsequent résumé/cover-letter call can still
+    // fail, and that failure report must say whether it had live context.
+    updateAttempt({
+      companyResearch: { available: companyResearch.available, error: companyResearch.error },
+    });
+    if (!companyResearch.available) {
+      logger.warn(`[JobApplication][${nodeId || '?'}] Company/role research unavailable — continuing with scraped job description only: ${companyResearch.error}`);
     }
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
 
@@ -924,6 +980,7 @@ export function registerJobApplicationHandlers() {
     //    AI owns semantic aliasing across role/skill names; deterministic code
     //    owns one-count-per-generation persistence. A failure is visible in the
     //    workspace but does not cost the user the rest of the application.
+    markStage('skill-opportunity analysis');
     let skillInsights = { role: { canonicalName: String(job?.title || 'Other'), matchedRoleId: '', sourceTitle: String(job?.title || '') }, items: [] };
     let skillHistogram = { version: 1, roles: [] };
     let skillOpportunityError = null;
@@ -947,10 +1004,12 @@ export function registerJobApplicationHandlers() {
       logger.warn(`[JobApplication][${nodeId || '?'}] Skill-opportunity analysis unavailable — continuing with a visible workspace warning: ${skillOpportunityError}`);
     }
 
+    markStage('résumé generation');
     // 3. Résumé HTML (design-system markup) + 4. structured cover letter.
-    const resumeMainHtml = await generateResumeMain({ careerData, job, research, ledger: ledgerForPrompt, skillInsights }, signal);
+    const resumeMainHtml = await generateResumeMain({ careerData, job, research, researchAvailable: companyResearch.available, ledger: ledgerForPrompt, skillInsights }, signal);
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
-    const coverLetter = await generateCoverLetterFields({ careerData, job, research, ledger: ledgerForPrompt, skillInsights }, signal);
+    markStage('cover-letter generation');
+    const coverLetter = await generateCoverLetterFields({ careerData, job, research, researchAvailable: companyResearch.available, ledger: ledgerForPrompt, skillInsights }, signal);
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
 
     // 5. Local render → page-count → fit loop (SKILL.md §5). Runs on the
@@ -967,6 +1026,7 @@ export function registerJobApplicationHandlers() {
       ? targetPageCountOverride
       : targetPageCountForJob(job?.title);
 
+    markStage('résumé render and fit');
     let fitResult = null;
     try {
       fitResult = await renderResumeWithFit({
@@ -1004,13 +1064,14 @@ export function registerJobApplicationHandlers() {
     let coverLetterPdfError = null;
     let coverLetterFontsLoaded = null;
 
+    markStage('baseline PDF render');
     // 6. Build ONE self-contained application workspace. The design-system
     // builder owns the resume/cover tabs; the PDF below is deliberately the
     // résumé-only printable baseline. The same workspace is what a user can
-    // reopen later to edit either document and re-download the bundle.
+    // reopen later to edit either document and Sync it back to this folder.
     const candidateName = coverLetter?.name || '';
     const jobMarkdown = formatOriginalJobListingMarkdown(job);
-    const buildApplicationDocument = (resumePdfBase64 = '', coverLetterPdfBase64 = '') => buildResumeDocument({
+    const buildApplicationDocument = () => buildResumeDocument({
       resumeMainHtml: finalMainHtml,
       variantAttrs,
       ledger: ledgerForPrompt?.ledger || null,
@@ -1024,8 +1085,6 @@ export function registerJobApplicationHandlers() {
         company: job?.company || '',
         candidateName,
         jobMarkdown,
-        resumePdfBase64,
-        coverLetterPdfBase64,
       },
     });
 
@@ -1077,16 +1136,20 @@ export function registerJobApplicationHandlers() {
         logger.warn(`[JobApplication][${nodeId || '?'}] Cover-letter OCG dual-mode post-process failed — shipping the plain cover-letter PDF instead: ${e?.message || e}`);
       }
     }
-    const resumePdfBase64 = resumePdfBytes ? Buffer.from(resumePdfBytes).toString('base64') : '';
-    const coverLetterPdfBase64 = coverLetterPdfBytes ? Buffer.from(coverLetterPdfBytes).toString('base64') : '';
-    const resumeDoc = buildApplicationDocument(resumePdfBase64, coverLetterPdfBase64);
+    // PDFs live as normal sibling files in the saved workspace. Keeping them
+    // out of Application.html avoids duplicating large binaries and lets Sync
+    // render only the document the user changed.
+    const resumeDoc = buildApplicationDocument();
 
     // Capture raw output and both render phases for the bug reporter. The fit
-    // loop is a layout measurement; `baselinePdfProduced` is the only PDF that
-    // can enter the user-facing application bundle.
+    // loop is a layout measurement; `baselinePdfProduced` is the résumé PDF
+    // written beside the editable application workspace.
     const ledgerStats = freshlyMined?.stats || achievements?.stats || null;
     const minedBy = freshlyMined?.minedBy || achievements?.minedBy || null;
-    recordApplicationTelemetry({
+    updateAttempt({
+      status: 'running',
+      stage: 'writing application artifacts',
+      stages: [...applicationAttempt.stages, { stage: 'writing application artifacts', ts: Date.now() }],
       nodeId: nodeId || null,
       jobTitle: job?.title || '',
       company: job?.company || '',
@@ -1099,6 +1162,7 @@ export function registerJobApplicationHandlers() {
       resumeHtmlSample: String(finalMainHtml || '').slice(0, 1500),
       resumeHtmlLen: String(finalMainHtml || '').length,
       achievements: { source: ledgerSource, skipped: achievementsSkipped, kept: ledgerForPrompt?.ledger?.length || 0, stats: ledgerStats, minedBy },
+      companyResearch: { available: companyResearch.available, error: companyResearch.error },
       skillOpportunities: {
         itemCount: Array.isArray(skillInsights?.items) ? skillInsights.items.length : 0,
         verifyCount: Array.isArray(skillInsights?.items) ? skillInsights.items.filter(item => item?.kind === 'verify').length : 0,
@@ -1120,6 +1184,8 @@ export function registerJobApplicationHandlers() {
       },
     });
 
+    applicationAttempt.stage = 'writing application artifacts';
+    applicationAttempt.stages = [...applicationAttempt.stages, { stage: 'writing application artifacts', ts: Date.now() }];
     const outDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jobapp-out-'));
     const resumeHtmlPath = path.join(outDir, `application-${resumeDocId}.html`);
     // Keep the exact source-side job data alongside the editable résumé. The
@@ -1159,6 +1225,7 @@ export function registerJobApplicationHandlers() {
     // The previous placement persisted immediately after the analysis call, so
     // a later résumé/cover/render/write failure inflated the histogram with an
     // application the user never received.
+    markStage('recording skill-demand analysis');
     if (skillAnalysisReady) {
       try {
         skillHistogram = await withSkillOpportunityLock(
@@ -1171,16 +1238,15 @@ export function registerJobApplicationHandlers() {
         logger.warn(`[JobApplication][${nodeId || '?'}] Application built, but skill-opportunity demand could not be recorded: ${skillOpportunityError}`);
       }
     }
-    if (lastApplication?.nodeId === (nodeId || null) && lastApplication.skillOpportunities) {
-      lastApplication = {
-        ...lastApplication,
+    if (lastApplication?.attemptId === attemptId && lastApplication.skillOpportunities) {
+      updateAttempt({
         skillOpportunities: {
           ...lastApplication.skillOpportunities,
           histogramRoleCount: Array.isArray(skillHistogram?.roles) ? skillHistogram.roles.length : 0,
           error: skillOpportunityError,
           recordedAfterArtifacts: skillAnalysisReady && !skillOpportunityError,
         },
-      };
+      });
     }
 
     pendingApplicationArtifacts.set(path.resolve(outDir), {
@@ -1193,6 +1259,12 @@ export function registerJobApplicationHandlers() {
       jobListingPath: path.resolve(jobListingPath),
     });
     logger.info(`[JobApplication][${nodeId || '?'}] Built application HTML for ${company}${resumePdfPath && coverLetterPdfPath ? ' (+ résumé and cover-letter PDFs)' : ' (one or more PDFs unavailable — see log above)'}`);
+    updateAttempt({
+      status: 'completed',
+      stage: 'completed',
+      stages: [...applicationAttempt.stages, { stage: 'completed', ts: Date.now() }],
+      finishedAt: Date.now(),
+    });
     return {
       resumeHtmlPath,
       resumePdfPath,
@@ -1206,6 +1278,30 @@ export function registerJobApplicationHandlers() {
       resumeRequiresReview,
       skillOpportunityError,
     };
+    } catch (error) {
+      const cancelled = signal?.aborted || error?.name === 'AbortError';
+      updateAttempt({
+        status: cancelled ? 'cancelled' : 'failed',
+        stage: applicationAttempt.stage,
+        failedStage: applicationAttempt.stage,
+        stages: [...applicationAttempt.stages, { stage: cancelled ? 'cancelled' : 'failed', ts: Date.now() }],
+        error: diagnosticError(error),
+        finishedAt: Date.now(),
+      });
+      throw error;
+    }
+  });
+
+  // A card may be deleted after generation has produced a registered temp
+  // workspace but before the renderer can save it.  Dispose of that exact
+  // sender-owned workspace without accepting arbitrary filesystem paths.
+  handleSafe('discard-application', async (event, { workDir } = {}) => {
+    const { resolvedWorkDir, pending } = resolvePendingApplicationWorkspaceForOwner(
+      workDir, pendingApplicationArtifacts, event.sender.id,
+    );
+    await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'renderer discard');
+    logger.info('[JobApplication] Discarded generated application workspace before save');
+    return { discarded: true };
   });
 
   // Write the generated documents into
@@ -1214,14 +1310,9 @@ export function registerJobApplicationHandlers() {
   // so the user's applications stay organized with the project. Cleans up the
   // temp working directory afterward.
   handleSafe('save-application', async (event, { resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, workDir, jobTitle, location, canvasFilePath }) => {
-    const resolvedWorkDir = typeof workDir === 'string' ? path.resolve(workDir) : '';
-    const pending = pendingApplicationArtifacts.get(resolvedWorkDir);
-    if (!pending) {
-      throw new Error('Generated application session is no longer available — please regenerate.');
-    }
-    if (pending.senderId !== event.sender.id) {
-      throw new Error('Generated application session belongs to a different window — please regenerate.');
-    }
+    const { resolvedWorkDir, pending } = resolvePendingApplicationWorkspaceForOwner(
+      workDir, pendingApplicationArtifacts, event.sender.id,
+    );
     const matchesPending = path.resolve(String(resumeHtmlPath || '')) === pending.resumeHtmlPath
       && path.resolve(String(jobListingPath || '')) === pending.jobListingPath
       && (resumePdfPath ? path.resolve(resumePdfPath) : null) === pending.resumePdfPath
@@ -1234,7 +1325,7 @@ export function registerJobApplicationHandlers() {
     coverLetterPdfPath = pending.coverLetterPdfPath;
     jobListingPath = pending.jobListingPath;
     const company = pending.company;
-    const candidateName = pending.candidateName;
+    try {
     if (!fs.existsSync(resumeHtmlPath)) {
       throw new Error('Generated application files are no longer available — please regenerate.');
     }
@@ -1257,56 +1348,53 @@ export function registerJobApplicationHandlers() {
     }
     await fs.promises.mkdir(dir, { recursive: true });
 
-    const who = sanitizeFilePart(candidateName, 'Application');
     const listingSource = jobListingPath || (workDir ? path.join(workDir, 'original-job-listing.md') : '');
-    let bundlePath = null;
-    let bundleError = null;
-    let applicationFile = null;
-    let jobListingFile = null;
     const hasPdf = !!resumePdfPath && fs.existsSync(resumePdfPath);
     const hasCoverLetterPdf = !!coverLetterPdfPath && fs.existsSync(coverLetterPdfPath);
     const hasListing = !!listingSource && fs.existsSync(listingSource);
-    if (hasPdf && hasCoverLetterPdf && hasListing) {
-      try {
-        const bundle = await writeApplicationBundle({
-          destinationDir: dir,
-          company: where,
-          applicationHtmlPath: resumeHtmlPath,
-          resumePdfPath,
-          coverLetterPdfPath,
-          jobListingPath: listingSource,
-        });
-        bundlePath = bundle.bundlePath;
-      } catch (e) {
-        bundleError = String(e?.message || e);
-      }
-    } else {
-      bundleError = !hasPdf
-        ? 'The résumé PDF was unavailable.'
-        : !hasCoverLetterPdf
-          ? 'The cover-letter PDF was unavailable.'
-          : 'The original job-listing Markdown was unavailable.';
-    }
+    const sync = await registerApplicationSyncWorkspace(dir);
+    const applicationFile = path.join(dir, 'Application.html');
+    const resumeFile = path.join(dir, 'Resume.pdf');
+    const coverLetterFile = path.join(dir, 'Cover Letter.pdf');
+    const jobListingFile = path.join(dir, 'Original Job Listing.md');
+    const generatedHtml = embedApplicationSyncConfig(await fs.promises.readFile(resumeHtmlPath, 'utf8'), sync);
 
-    // A complete bundle is the only normal saved artifact. Preserve recovery
-    // inputs only when rendering or archive creation genuinely failed.
-    if (!bundlePath) {
-      applicationFile = await copyUnique(resumeHtmlPath, dir, `${who} - Application.html`);
-      if (hasListing) jobListingFile = await copyUnique(listingSource, dir, `${where} - Original Job Listing.md`);
-      logger.warn(`[JobApplication] Complete ZIP unavailable; saved recovery HTML${jobListingFile ? ' + listing' : ''}: ${bundleError || 'unknown bundle error'}`);
-    }
+    // The workspace is deliberately unzipped and predictable. Every file gets
+    // an atomic same-directory replacement, so a failed write never leaves a
+    // truncated HTML/PDF/listing artifact in the company folder.
+    await replaceFileAtomically(applicationFile, generatedHtml);
+    if (hasPdf) await copyFileAtomically(resumePdfPath, resumeFile);
+    if (hasCoverLetterPdf) await copyFileAtomically(coverLetterPdfPath, coverLetterFile);
+    if (hasListing) await copyFileAtomically(listingSource, jobListingFile);
+    const missingFiles = [!hasPdf && 'résumé PDF', !hasCoverLetterPdf && 'cover-letter PDF', !hasListing && 'original job listing'].filter(Boolean);
+    const bundleError = missingFiles.length ? `Saved the editable workspace, but the ${missingFiles.join(', ')} was unavailable.` : null;
+    if (bundleError) logger.warn(`[JobApplication] ${bundleError}`);
 
     // Clean up the temp output dir now that the files are safely copied out.
-    if (workDir) {
-      await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {});
-    }
-    pendingApplicationArtifacts.delete(resolvedWorkDir);
+    await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'successful save');
 
     // Open the destination folder in a Finder/Explorer window.
     const openErr = await shell.openPath(dir);
     if (openErr) logger.warn(`[JobApplication] Could not open ${dir}: ${openErr}`);
 
-    logger.info(`[JobApplication] Saved application to ${dir}${bundlePath ? ' (+ bundle)' : ' (recovery files only)'}`);
-    return { saved: true, dir, bundlePath, bundleError, applicationFile, jobListingFile };
+    logger.info(`[JobApplication] Saved unzipped application workspace to ${dir}`);
+    return {
+      saved: true,
+      dir,
+      applicationFile,
+      resumeFile: hasPdf ? resumeFile : null,
+      coverLetterFile: hasCoverLetterPdf ? coverLetterFile : null,
+      jobListingFile: hasListing ? jobListingFile : null,
+      bundleError,
+    };
+    } catch (error) {
+      // There is no retry UI for a failed save.  Once the trusted source files
+      // cannot be saved, remove their registered temp workspace rather than
+      // retaining it indefinitely.  Validation failures above this try block
+      // deliberately do not discard anything, so a malformed IPC request can
+      // never erase a valid session it does not own.
+      await discardPendingApplicationArtifacts(resolvedWorkDir, pending, 'terminal save failure');
+      throw error;
+    }
   });
 }

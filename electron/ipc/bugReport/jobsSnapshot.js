@@ -1429,6 +1429,36 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const escScan = (s) => /\\[a-z]/.test(String(s ?? '')) ? ' ⚠️ literal backslash-escape present' : '';
     lines.push(`\n### Application Generation (last)${ago(a.ts)}`);
     lines.push(`- Job: ${a.jobTitle || '(untitled)'} @ ${a.company || '(no company)'}${a.nodeId ? ` · node ${a.nodeId}` : ''}`);
+    // A generation failure commonly happens before any document markup exists
+    // (for example, a provider quota error during company research). Render the
+    // lifecycle first so FULL reports name the exact attempted job/task/stage
+    // instead of reducing that case to the provider's app-global last error.
+    if (a.status) {
+      const outcome = {
+        running: 'in progress', completed: 'completed', failed: '⚠️ failed', cancelled: 'cancelled',
+      }[a.status] || a.status;
+      lines.push(`- Outcome: **${outcome}**${a.stage ? ` · current/final stage: ${a.stage}` : ''}`);
+      if (Array.isArray(a.taskRoutes) && a.taskRoutes.length > 0) {
+        lines.push(`- Intended task route: ${a.taskRoutes.map(route => `${route.task || '?'} → ${route.provider || '?'} / \`${route.model || '?'}\``).join('; ')}`);
+      }
+      if (Array.isArray(a.stages) && a.stages.length > 0) {
+        lines.push(`- Lifecycle: ${a.stages.map(item => item?.stage).filter(Boolean).join(' → ')}`);
+      }
+      if (a.status === 'failed' || a.status === 'cancelled') {
+        if (a.error) lines.push(`- ${a.status === 'failed' ? 'Error' : 'Cancellation'}: \`${String(a.error).replace(/`/g, "'").slice(0, 800)}\``);
+        // There is intentionally no fake blank résumé/cover-letter snapshot
+        // here: those artifacts were never generated. The lifecycle, model
+        // route, and terminal error are the actionable diagnostics.
+      }
+    }
+    if (a.companyResearch) {
+      if (a.companyResearch.available === false) {
+        lines.push(`- ⚠️ Company/role research unavailable — generation used only the scraped job description${a.companyResearch.error ? `: \`${String(a.companyResearch.error).replace(/`/g, "'").slice(0, 300)}\`` : ''}`);
+      } else if (a.companyResearch.available === true) {
+        lines.push('- Company/role research: live web context available.');
+      }
+    }
+    if (a.status !== 'failed' && a.status !== 'cancelled') {
     // Achievement ledger (résumé design §3.6) — reused-vs-mined tells apart the
     // amortized-cost case from the pay-once-per-hub case; the stats line is the
     // only place a silent refute-drop or evidence-miss is visible at all.
@@ -1493,6 +1523,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push('```html');
       lines.push(a.resumeHtmlSample);
       lines.push('```');
+    }
     }
   }
 
