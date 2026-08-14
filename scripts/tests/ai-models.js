@@ -1,4 +1,9 @@
 import { CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER, GEMINI_ALL_MODEL_IDS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_MODEL_FALLBACKS, GEMINI_TIER_LADDER, LOCAL_CHARS_PER_TOKEN, MODEL_FLOOR, POSTED_DATE_PATTERN, assert, assessPromptFit, buildCoverLetterDocument, buildResumeDocument, callGeminiTextRaw, classifyGeminiFailure, claudeModelFor, claudeModelMetaFor, contextWindowForModel, decodeTextEscapes, describeGeminiFailure, dicePostedBucket, entitledTiersFor, entitlementSnapshot, estimateTokensFromChars, extractDiceSalaryBadge, extractJobPostingBaseSalary, extractJobPostingDescription, filterJobsByAge, formatDiceBaseSalary, gatedTiers, geminiModelsInTier, getCompanyResearchContext, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, getKnownTaskIds, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroOrDailyQuota, isGeminiZeroQuota, maxOutputForModel, modelForTask, modelMeta, modelResolutionSnapshot, orderGeminiModels, parsePostedDate, parseSalaryToNumeric, pickFamilyModel, planSplits, primeClaudeModels, probeModelForTier, providerForTask, reconcileBatchScores, recordEntitlement, refreshEntitlementInBackground, resetEntitlement, resolvedClaudeModels, settleEntitlementProbes, taskModelRoutingSnapshot, toGeminiSchema, webSearchToolType } from '../test-dependencies.js';
+// __setGeminiLadderRetryWaitForTests is a test-only seam (Finding 7,
+// electron/ipc/gemini.js) that isn't part of the shared test-dependencies.js
+// barrel — imported directly from the source module so the ladder-exhaustion
+// retry-pass tests below never sleep for real (see its doc comment).
+import { __setGeminiLadderRetryWaitForTests } from '../../electron/ipc/gemini.js';
 
 export default [
 {
@@ -145,6 +150,179 @@ export default [
         globalThis.fetch = originalFetch;
       }
       return { directCalls, interactionsCalls };
+    },
+  },
+{
+    // Finding 7 (gemini.js): a real run burned the entire ladder in ~850ms —
+    // every model 429'd on a recoverable per-minute quota — then threw and the
+    // caller silently degraded, even though the SAME model succeeded 4 seconds
+    // later. These four tests cover the fix: the ladder-exhaustion retry pass.
+    name: 'Gemini cascade: ladder-exhaustion retry pass succeeds once every model 429s on a recoverable rate limit',
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const N = GEMINI_MODEL_FALLBACKS.length;
+      let fallbackCalls = 0;
+      let waitHookCalls = 0;
+      globalThis.fetch = async (url) => {
+        const target = String(url);
+        const calledModel = /models\/([^:]+):generateContent/.exec(target)?.[1] || null;
+        if (!calledModel || !GEMINI_MODEL_FALLBACKS.includes(calledModel)) {
+          // Ancillary call (the background Pro-entitlement probe) — outside the
+          // ladder's own bookkeeping, must not affect fallbackCalls below.
+          return new Response(JSON.stringify({ error: { code: 429, message: 'ignore' } }),
+            { status: 429, headers: { 'Content-Type': 'application/json' } });
+        }
+        fallbackCalls++;
+        if (fallbackCalls <= N) {
+          return new Response(JSON.stringify({
+            error: { code: 429, message: 'Resource exhausted. Please retry in 0.05s.', status: 'RESOURCE_EXHAUSTED' },
+          }), { status: 429, headers: { 'Content-Type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({
+          candidates: [{ content: { parts: [{ text: 'recovered after the quota window reopened' }] }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 6, thoughtsTokenCount: 0 },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      };
+      __setGeminiLadderRetryWaitForTests(async () => { waitHookCalls++; });
+      try {
+        const text = await callGeminiTextRaw('Research this company.', 'retry-pass-success-test-key', 'gemini-3.7-flash', null, {});
+        assert(text === 'recovered after the quota window reopened', 'callGemini resolves with the retry pass\'s successful text');
+        assert(fallbackCalls === N + 1, `the retry pass needed exactly one more attempt after the exhausted ladder (got ${fallbackCalls}, expected ${N + 1})`);
+        assert(waitHookCalls === 1, `exactly one retry pass runs, never a loop (wait hook invoked ${waitHookCalls} times)`);
+      } finally {
+        __setGeminiLadderRetryWaitForTests(null);
+        await settleEntitlementProbes();
+        globalThis.fetch = originalFetch;
+      }
+      return { fallbackCalls, waitHookCalls };
+    },
+  },
+{
+    name: 'Gemini cascade: a hard failure mixed into an exhausted ladder throws immediately with no retry wait',
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const N = GEMINI_MODEL_FALLBACKS.length;
+      let fallbackCalls = 0;
+      let waitHookCalls = 0;
+      globalThis.fetch = async (url) => {
+        const target = String(url);
+        const calledModel = /models\/([^:]+):generateContent/.exec(target)?.[1] || null;
+        if (!calledModel || !GEMINI_MODEL_FALLBACKS.includes(calledModel)) {
+          return new Response(JSON.stringify({ error: { code: 429, message: 'ignore' } }),
+            { status: 429, headers: { 'Content-Type': 'application/json' } });
+        }
+        fallbackCalls++;
+        // Every model rate-limits EXCEPT one, which is denied outright
+        // (model-access) — a failure no short quota-reset timer can fix.
+        if (calledModel === 'gemini-3.5-flash-lite') {
+          return new Response(JSON.stringify({
+            error: { code: 403, message: 'Permission denied on resource model gemini-3.5-flash-lite', status: 'PERMISSION_DENIED' },
+          }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({
+          error: { code: 429, message: 'Resource exhausted. Please retry in 0.05s.', status: 'RESOURCE_EXHAUSTED' },
+        }), { status: 429, headers: { 'Content-Type': 'application/json' } });
+      };
+      __setGeminiLadderRetryWaitForTests(async () => { waitHookCalls++; });
+      try {
+        let failure = null;
+        try {
+          await callGeminiTextRaw('Research this company.', 'retry-pass-hard-failure-test-key', 'gemini-3.7-flash', null, {});
+        } catch (err) {
+          failure = err;
+        }
+        assert(/All Gemini models failed/.test(failure?.message || ''), 'a mixed hard failure still surfaces the aggregate failure');
+        assert(fallbackCalls === N, `every model is attempted exactly once — a mixed hard classification skips the retry pass entirely (got ${fallbackCalls}, expected ${N})`);
+        assert(waitHookCalls === 0, 'a non-rate-limit failure anywhere in the pass must skip the wait entirely — a short timer cannot fix it');
+      } finally {
+        __setGeminiLadderRetryWaitForTests(null);
+        await settleEntitlementProbes();
+        globalThis.fetch = originalFetch;
+      }
+      return { fallbackCalls, waitHookCalls };
+    },
+  },
+{
+    name: 'Gemini cascade: a retry pass that ALSO exhausts throws the identical aggregate-failure error, only once',
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const N = GEMINI_MODEL_FALLBACKS.length;
+      let fallbackCalls = 0;
+      let waitHookCalls = 0;
+      globalThis.fetch = async (url) => {
+        const target = String(url);
+        const calledModel = /models\/([^:]+):generateContent/.exec(target)?.[1] || null;
+        if (!calledModel || !GEMINI_MODEL_FALLBACKS.includes(calledModel)) {
+          return new Response(JSON.stringify({ error: { code: 429, message: 'ignore' } }),
+            { status: 429, headers: { 'Content-Type': 'application/json' } });
+        }
+        fallbackCalls++;
+        return new Response(JSON.stringify({
+          error: { code: 429, message: 'Resource exhausted. Please retry in 0.05s.', status: 'RESOURCE_EXHAUSTED' },
+        }), { status: 429, headers: { 'Content-Type': 'application/json' } });
+      };
+      __setGeminiLadderRetryWaitForTests(async () => { waitHookCalls++; });
+      try {
+        let failure = null;
+        try {
+          await callGeminiTextRaw('Research this company.', 'retry-pass-double-429-test-key', 'gemini-3.7-flash', null, {});
+        } catch (err) {
+          failure = err;
+        }
+        assert(/All Gemini models failed/.test(failure?.message || ''), 'a doubly-exhausted ladder still throws the SAME unchanged aggregate error');
+        assert(failure?.isRateLimit === true && failure?.provider === 'gemini', 'the final error keeps its existing rate-limit tagging (error shape unchanged)');
+        assert(fallbackCalls === N * 2, `both the original pass and the single retry pass attempt every model (got ${fallbackCalls}, expected ${N * 2})`);
+        assert(waitHookCalls === 1, `only ONE retry pass ever runs, even when it also exhausts (wait hook invoked ${waitHookCalls} times)`);
+      } finally {
+        __setGeminiLadderRetryWaitForTests(null);
+        await settleEntitlementProbes();
+        globalThis.fetch = originalFetch;
+      }
+      return { fallbackCalls, waitHookCalls };
+    },
+  },
+{
+    name: 'Gemini cascade: an abort during the ladder-exhaustion retry wait propagates as an AbortError',
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const N = GEMINI_MODEL_FALLBACKS.length;
+      let fallbackCalls = 0;
+      let waitHookCalls = 0;
+      const controller = new AbortController();
+      globalThis.fetch = async (url) => {
+        const target = String(url);
+        const calledModel = /models\/([^:]+):generateContent/.exec(target)?.[1] || null;
+        if (!calledModel || !GEMINI_MODEL_FALLBACKS.includes(calledModel)) {
+          return new Response(JSON.stringify({ error: { code: 429, message: 'ignore' } }),
+            { status: 429, headers: { 'Content-Type': 'application/json' } });
+        }
+        fallbackCalls++;
+        return new Response(JSON.stringify({
+          error: { code: 429, message: 'Resource exhausted. Please retry in 0.05s.', status: 'RESOURCE_EXHAUSTED' },
+        }), { status: 429, headers: { 'Content-Type': 'application/json' } });
+      };
+      // Simulates the user/timeout cancelling exactly while the ladder is
+      // waiting out the quota window — the wait hook itself triggers the abort.
+      __setGeminiLadderRetryWaitForTests(async () => {
+        waitHookCalls++;
+        controller.abort();
+      });
+      try {
+        let failure = null;
+        try {
+          await callGeminiTextRaw('Research this company.', 'retry-pass-abort-test-key', 'gemini-3.7-flash', controller.signal, {});
+        } catch (err) {
+          failure = err;
+        }
+        assert(failure?.name === 'AbortError', `an abort during the retry wait must surface as an AbortError, not the aggregate failure (got ${failure?.name}: ${failure?.message})`);
+        assert(fallbackCalls === N, `the abort is caught right after the wait, before any second-pass attempt (got ${fallbackCalls}, expected ${N})`);
+        assert(waitHookCalls === 1, 'the wait is attempted exactly once before the abort short-circuits it');
+      } finally {
+        __setGeminiLadderRetryWaitForTests(null);
+        await settleEntitlementProbes();
+        globalThis.fetch = originalFetch;
+      }
+      return { fallbackCalls, waitHookCalls };
     },
   },
 {

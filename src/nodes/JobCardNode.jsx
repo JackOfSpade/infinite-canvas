@@ -416,7 +416,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // deliberate throw on a corrupt hand-edited store) into a RESOLVED
       // `{ success: false, error }` — it never rejects the promise. Awaiting
       // without checking `result.success` used to fall straight through to
-      // setApplied(true) on every failure: the button would read "Applied ✓"
+      // setApplied(true) on every failure: the button would read "Applied"
       // while the on-disk record was never written, so the job would keep
       // resurfacing in future searches despite the UI's explicit claim that
       // it never would again.
@@ -565,11 +565,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             : displayedApplicationRun.state === 'generating' ? 'Generating…' : 'Generate'}
         </button>
 
-        {/* "Applied ✓ · undo" IS the undo affordance — it must stay visible
-            after marking, not collapse to a plain checkmark, because this store
-            is permanent and global: one misclick makes a posting invisible
-            across every canvas forever with no way to reach it once the card
-            is gone (design doc §6.2). */}
+        {/* The trailing "Undo" IS the undo affordance — it must stay visible
+            after marking, not collapse to a plain checkmark and not hide behind
+            hover, because this store is permanent and global: one misclick
+            makes a posting invisible across every canvas forever with no way to
+            reach it once the card is gone (design doc §6.2). State and action
+            are split by a hairline rule and carried by ONE glyph (the Check
+            icon) — the label says what is true, the rule says the rest of the
+            button is a second thing you can do to it, and the red hover says
+            which direction that goes. */}
         <button
           onClick={data.locked ? undefined : (e) => { e.stopPropagation(); applied ? unmarkApplied() : markApplied(); }}
           disabled={markingApplied || !!data.locked}
@@ -584,7 +588,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             ? 'Marked applied — this is remembered permanently across every canvas so this posting never resurfaces in a future search. Click to undo.'
             : 'Record that you actually submitted this application (separate from generating it) — remembered permanently so it never resurfaces in a future search'}
         >
-          {applied ? <><Check size={12} /> Applied ✓ · undo</> : 'Mark applied'}
+          {applied ? (
+            <>
+              <Check size={12} className="shrink-0" />
+              Applied
+              <span className="shrink-0 w-px h-3 bg-current opacity-25" aria-hidden="true" />
+              <span className="opacity-70">Undo</span>
+            </>
+          ) : 'Mark applied'}
         </button>
       </div>
     </div>

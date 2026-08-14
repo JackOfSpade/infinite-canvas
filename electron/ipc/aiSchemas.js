@@ -308,6 +308,8 @@ export const JOB_QUERY_GENERATION_SCHEMA = {
 // candidate's confirmation, while `learn` items are worthwhile gaps that must
 // stay out of the résumé. The caller supplies existing histogram role/skill ids
 // so semantically equivalent names can be consolidated across applications.
+// `resumeCategory` is what lets a verified skill land in the right Skills
+// group deterministically, with no extra model call.
 export const APPLICATION_SKILL_OPPORTUNITY_SCHEMA = {
   type: 'object',
   required: ['role', 'items'],
@@ -326,7 +328,7 @@ export const APPLICATION_SKILL_OPPORTUNITY_SCHEMA = {
       description: 'Only opportunities where possessing the skill would significantly increase this candidate\'s odds for THIS job. Return [] when none qualify. Never use this list to claim, invent, or exaggerate experience or proficiency.',
       items: {
         type: 'object',
-        required: ['id', 'canonicalSkillName', 'matchedSkillId', 'kind', 'jobImportance', 'jobEvidence', 'candidateEvidence', 'adjacencyReason', 'suggestedResumeText', 'verificationQuestion', 'learningAction'],
+        required: ['id', 'canonicalSkillName', 'matchedSkillId', 'kind', 'jobImportance', 'jobEvidence', 'candidateEvidence', 'adjacencyReason', 'suggestedResumeText', 'resumeCategory', 'verificationQuestion', 'learningAction'],
         properties: {
           id: { type: 'string', description: 'Stable item id within this response, e.g. "skill-1".' },
           canonicalSkillName: { type: 'string', description: 'One normalized, canonical skill name. Deduplicate aliases/spelling variants; do not return separate entries for equivalent skills.' },
@@ -337,6 +339,7 @@ export const APPLICATION_SKILL_OPPORTUNITY_SCHEMA = {
           candidateEvidence: { type: 'string', description: 'Specific evidence from the candidate data. For learn, state the nearest demonstrated foundation and make clear it does not establish the missing skill. Never invent experience.' },
           adjacencyReason: { type: 'string', description: 'Why this is a small inference (verify) or a reasonably learnable next step (learn), including the boundary that prevents overstating the candidate.' },
           suggestedResumeText: { type: 'string', description: 'For verify only: the concise skill label/phrase that may be added to the Skills section ONLY after the candidate confirms it; never write an experience bullet or imply unsupported proficiency, years, projects, or outcomes. For learn, return an empty string because learn items must never go on the résumé.' },
+          resumeCategory: { type: 'string', description: 'For verify only: the Skills-section heading this skill would be filed under on the candidate\'s own résumé, phrased in the candidate\'s professional domain vocabulary — the same kind of label a human would write for a skills group (e.g. "Safety & Response", "Certifications", "Infrastructure", "Clinical Skills"). 1-3 words, Title Case, a noun phrase naming the skill\'s domain. Never describe provenance, verification, fit, or the tool itself — never "Verified", "Role-fit", "Additional Skills", "Other", "Suggested". Prefer the broadest natural grouping the candidate\'s résumé would plausibly already contain, since an exact match to an existing heading lets the skill merge in rather than start a new row. For learn, return an empty string.' },
           verificationQuestion: { type: 'string', description: 'For verify only: one precise yes/no or short-answer question that can confirm the skill before any résumé use. For learn, return an empty string.' },
           learningAction: { type: 'string', description: 'A concrete, bounded first learning action tied to this job-relevant skill. For learn, this is the primary recommendation. For verify, this is the fallback shown only if the candidate says the plausible skill is not actually theirs.' },
         },

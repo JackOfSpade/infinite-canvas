@@ -13,15 +13,12 @@
  *
  * Why `webContents.printToPDF` and not puppeteer-core/playwright (both are
  * already an `npm i` away in this repo's package.json): Electron ships its
- * own Chromium, so a hidden BrowserWindow gets print-to-PDF for free, using
- * the SAME rendering engine the user's own "Export (Print / Save as PDF)"
- * toolbar button (resumeHtml.js's injected chrome, `window.print()`) drives —
- * the page count this module measures is therefore the page count the user
- * would get by hand, not a second engine's opinion of the same CSS.
- * puppeteer-core/playwright would mean downloading/managing a SEPARATE
- * Chromium (or pointing at system Chrome — exactly the CDP-fingerprint
- * problem the marketplace scrapers fight elsewhere in this app) for a
- * fully offline, self-authored, trusted HTML document. Not worth it here.
+ * own Chromium, so a hidden BrowserWindow gets print-to-PDF for free without
+ * managing a separate Chromium — puppeteer-core/playwright would mean
+ * downloading/managing a SEPARATE Chromium (or pointing at system Chrome —
+ * exactly the CDP-fingerprint problem the marketplace scrapers fight
+ * elsewhere in this app) for a fully offline, self-authored, trusted HTML
+ * document. Not worth it here.
  */
 import fs from 'fs';
 import os from 'os';

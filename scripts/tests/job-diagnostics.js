@@ -149,6 +149,97 @@ export default [
     },
   },
 {
+    name: 'Application report renders skill-opportunity detail, honest fit-loop labeling, and the Skills-block sample',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        // A completed generation whose verify-item sample was capped (25
+        // analyzed, only 20 kept) — the report must show the kept items AND
+        // say plainly how many were left out, per the clipboard-cap
+        // truncation-marking convention used everywhere else in this section.
+        const verifySample = Array.from({ length: 20 }, (_, i) => ({
+          canonicalSkillName: `Skill ${i}`,
+          resumeCategory: i === 0 ? 'Infrastructure' : 'Certifications',
+        }));
+        recordApplicationTelemetry({
+          attemptId: 'application-skillops-report-test',
+          nodeId: 'application-skillops-card',
+          jobTitle: 'Platform Engineer',
+          company: 'Example Co',
+          status: 'completed',
+          stage: 'completed',
+          companyResearch: { available: true, error: null },
+          variantAttrs: 'data-print="ink-only" data-mono',
+          resumeHtmlSample: '<main class="page" data-print="ink-only" data-mono><section class="section"><h1>Jordan Rivera</h1></section>',
+          resumeSkillsDlSample: {
+            found: true,
+            sample: '<dl class="skills">\n  <dt>Infrastructure</dt>\n  <dd>Kubernetes<span class="sep" data-ic-inferred-separator="join" hidden>·</span><span class="ic-inferred-skill" data-ic-inferred-skill="skill-1" hidden>Terraform</span></dd>\n</dl>',
+            truncated: false,
+          },
+          skillOpportunities: {
+            itemCount: 25, verifyCount: 25, learnCount: 0, histogramRoleCount: 3,
+            error: null, recordedAfterArtifacts: true,
+            verifyItems: { sample: verifySample, total: 25, truncated: true },
+          },
+          render: {
+            targetPageCount: 1, attempts: [{ attempt: 1, density: null, pageCount: 2, fontsLoaded: true }],
+            initialPageCount: 2, finalPageCount: 2, compactApplied: true, revisionApplied: true,
+            pdfProduced: true, baselinePdfProduced: true,
+            baselinePageCount: 1, baselinePdfError: null, baselineFontsLoaded: true,
+            coverLetterPdfProduced: true, coverLetterPdfError: null, coverLetterFontsLoaded: true,
+            resumeRequiresReview: true, error: null, fontsLoaded: true,
+          },
+        });
+        const report = generateMarkdown({
+          description: 'Generate completed with skill-opportunity detail.',
+          nodes: [{ id: 'application-skillops-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }).markdown;
+
+        assert(report.includes('Skill-opportunity analysis: 25 item(s) — 25 verify, 0 learn · histogram 3 role(s) · demand recorded after artifacts'),
+          'Report must render the skill-opportunity counts and recordedAfterArtifacts flag');
+        assert(report.includes('"Skill 0" → "Infrastructure"') && report.includes('"Skill 19" → "Certifications"'),
+          'Report must render per-item canonical skill name → résumé category pairs');
+        assert(report.includes('_5 additional verify item(s) omitted from this bounded sample._'),
+          'Report must mark the verify-item sample as truncated with an exact count, not emit silently');
+        assert(report.includes('Résumé variant: `data-print="ink-only" data-mono`'),
+          'Report must render the captured variantAttrs as a structured field');
+        // The fit-loop measures the worst case (all candidate skills shown);
+        // the shipped baseline is a separate, honestly-labeled number that
+        // must never be conflated with it (this report's whole reason for
+        // existing — see Defect 2).
+        assert(report.includes('Résumé fit-loop (worst case, ALL candidate skills shown — NOT the shipped page count): target 1p · 2→2p · compact applied · 1 length-revision call')
+          && !report.includes('Résumé render/fit:'),
+          'Fit-loop line must be relabeled as the worst-case measurement, not implied to be the delivered document');
+        assert(report.includes('Résumé shipped baseline: 1p · PDF produced'),
+          'Report must record the shipped baseline page count separately, obtained free from the baseline PDF render');
+        assert(report.includes('<dl class="skills">') && report.includes('Terraform'),
+          'Report must include the résumé\'s Skills <dl> block, where skill-opportunity injection actually lands');
+
+        // A second generation whose résumé genuinely had no Skills section —
+        // the report must say so explicitly rather than rendering nothing.
+        recordApplicationTelemetry({
+          attemptId: 'application-skillops-no-skills-report-test',
+          nodeId: 'application-skillops-card', jobTitle: 'Platform Engineer', company: 'Example Co',
+          status: 'completed', stage: 'completed',
+          resumeHtmlSample: '<main class="page"><section class="section"><h1>Jordan Rivera</h1></section>',
+          resumeSkillsDlSample: { found: false, sample: '', truncated: false },
+          skillOpportunities: { itemCount: 0, verifyCount: 0, learnCount: 0, histogramRoleCount: 3, error: null },
+        });
+        const noSkillsReport = generateMarkdown({
+          description: 'Generate completed with no Skills block.',
+          nodes: [{ id: 'application-skillops-card', type: 'jobcard', data: {} }],
+          edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [],
+        }).markdown;
+        assert(noSkillsReport.includes('⚠️ Résumé Skills block (`<dl class="skills">`) was not found in the final document.'),
+          'Report must state explicitly when the Skills block is absent, not emit nothing (Defect 3\'s own diagnostics principle)');
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+      return { verifyItemsSampled: 20, verifyItemsTotal: 25 };
+    },
+  },
+{
     name: 'Bug report preserves failed diagnostic sections and profile reservations',
     run: () => {
       const releaseReservation = reserveSharedProfile('captcha-resolve:bug-report-test');
@@ -2280,6 +2371,58 @@ export default [
       // isDualMode gates the OCG cream post-process.
       assert(isDualMode('data-print="dual-pdf"') === true, 'isDualMode: dual-pdf → true');
       assert(isDualMode('data-print="ink-only" data-mono') === false, 'isDualMode: ink-only → false');
+      return { ok: true };
+    },
+  },
+{
+    // A BUILT document carries its variant on <html> and has it stripped off
+    // <main> (stripMainVariantAttrs), so nothing usable is left on the tag the
+    // model originally wrote it to. Worse, the design-system CSS this builder
+    // inlines documents its own variants with literal `<main class="page"
+    // data-print="…">` examples inside CSS COMMENTS — so a scan for the first
+    // `<main …>` in a built document lands on a decoy from a stylesheet
+    // comment, not on the résumé at all. applicationSync.js re-reads exactly
+    // such a document to decide whether to apply the OCG cream layer; reading
+    // anything but the root resolved every saved application to the dual-pdf
+    // default and stacked cream behind an ink-only page's own opaque white
+    // fill, shipping a résumé that matched neither variant.
+    name: 'Application: variant attrs are read from a built document’s <html> root, not a <main> decoy',
+    run: () => {
+      const builtDoc = (attrs) => buildResumeDocument({
+        resumeMainHtml: `<main class="page" ${attrs}><h1 class="name">Jane</h1></main>`,
+        docId: 'variant-roundtrip',
+      });
+      const resumePanelMain = (doc) => /<section[^>]*data-ic-document-panel="resume"[^>]*>\s*(<main\b[^>]*>)/i.exec(doc)?.[1] || '';
+
+      for (const [attrs, expected] of [
+        ['data-print="ink-only"', 'data-print="ink-only"'],
+        ['data-print="ink-only" data-mono data-page="a4"', 'data-print="ink-only" data-mono data-page="a4"'],
+        ['data-print="dual-pdf" data-density="compact"', 'data-print="dual-pdf" data-density="compact"'],
+        ['', 'data-print="dual-pdf"'],
+      ]) {
+        const doc = builtDoc(attrs);
+        assert(doc.includes(`<html lang="en" ${expected}>`), `built document must hoist "${expected}" onto <html>`);
+        const panelMain = resumePanelMain(doc);
+        assert(panelMain && !/\sdata-(?:print|mono|page|density)/i.test(panelMain), `built document must strip variant attrs off the résumé <main> (got ${panelMain})`);
+        // The round trip: what the builder wrote is what a re-read resolves.
+        assert(extractVariantAttrs(doc) === expected, `re-reading a built document must yield "${expected}", not the dual-pdf default`);
+      }
+      // The decoy is real, not hypothetical: the first <main …> in a built
+      // document is a stylesheet-comment example, never the résumé's own tag.
+      const inkDoc = builtDoc('data-print="ink-only"');
+      assert(/<main\b[^>]*>/i.exec(inkDoc)?.[0] !== resumePanelMain(inkDoc), 'the first <main> in a built document is expected to be a stylesheet-comment decoy');
+
+      // The OCG gate — the actual consumer, and the thing that was inverted.
+      assert(isDualMode(extractVariantAttrs(builtDoc('data-print="ink-only"'))) === false, 'a saved ink-only application must NOT be re-read as dual (no OCG cream layer)');
+      assert(isDualMode(extractVariantAttrs(builtDoc('data-print="dual-pdf"'))) === true, 'a saved dual-pdf application must still be re-read as dual');
+
+      // The cover letter is a separate built document on the same rule.
+      const coverDoc = buildCoverLetterDocument({ letter: { salutation: 'Dear team,', paragraphs: ['Hi.'] }, variantAttrs: 'data-print="ink-only" data-mono', docId: 'variant-cover' });
+      assert(extractVariantAttrs(coverDoc) === 'data-print="ink-only" data-mono', 'cover letter: re-reading a built document must yield its own variant');
+
+      // A bare <main> block (the résumé model's raw output) still wins when no
+      // root carries a variant — the generate path must be unaffected.
+      assert(extractVariantAttrs('<html lang="en"><body><main class="page" data-print="ink-only"></main></body></html>') === 'data-print="ink-only"', 'a variant-less <html> must fall through to <main>');
       return { ok: true };
     },
   },

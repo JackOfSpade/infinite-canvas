@@ -148,6 +148,12 @@ async function syncWorkspace(payload) {
     );
   }
   let pdf = rendered.bytes;
+  // Read the variant back out of the very document we just rendered, so the
+  // OCG decision is made from the same attributes the CSS itself cascaded from
+  // (the root `<html>` element — see extractVariantAttrs). A synced PDF must be
+  // indistinguishable from the one the generate path wrote beside it; applying
+  // the cream layer to a variant that already paints its own opaque background
+  // produces a page that is neither.
   if (isDualMode(extractVariantAttrs(html))) pdf = await applyDualPdf(pdf);
   const pdfPath = documentKind === 'cover' ? workspace.coverLetterPdfPath : workspace.resumePdfPath;
   await fs.promises.mkdir(workspace.workspaceDir, { recursive: true });

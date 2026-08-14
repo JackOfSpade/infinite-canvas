@@ -5,7 +5,9 @@ import {
   embedApplicationSyncConfig,
   createApplicationBundle,
   createZipBuffer,
+  extractVariantAttrs,
   formatOriginalJobListingMarkdown,
+  isDualMode,
   JSDOM,
   normaliseResumeDownloadBundle,
   sanitizeApplicationBundlePart,
@@ -130,7 +132,7 @@ export default [
     },
   },
   {
-    name: 'application workspace: review gates résumé Sync but not cover printing or Sync',
+    name: 'application workspace: review gates résumé Sync but not cover Sync',
     run: () => {
       const doc = buildResumeDocument({
         docId: 'bundle-review-test',
@@ -144,13 +146,14 @@ export default [
           sync: { endpoint: 'http://127.0.0.1:43192/application-sync', token: 'b'.repeat(64) },
         },
       });
+      assert(!doc.includes('id="ic-export-btn"'), 'the removed print/export button must not be present in generated markup');
       const dom = new JSDOM(doc, { runScripts: 'dangerously', url: 'https://application-review.local/' });
       const { document } = dom.window;
-      const print = document.getElementById('ic-export-btn');
+      assert(!document.getElementById('ic-export-btn'), 'the removed print/export button must not be present in the rendered DOM');
       const sync = document.getElementById('ic-sync-btn');
-      assert(print.disabled && sync.disabled, 'unresolved résumé claim must gate résumé print and Sync');
+      assert(sync.disabled, 'unresolved résumé claim must gate résumé Sync');
       document.getElementById('ic-cover-tab').click();
-      assert(!print.disabled && !sync.disabled, 'cover-letter printing and Sync stay available while résumé review is unresolved');
+      assert(!sync.disabled, 'cover-letter Sync stays available while résumé review is unresolved');
       document.querySelector('[data-ic-skill-action="not_mine"]').click();
       document.getElementById('ic-resume-tab').click();
       assert(!sync.disabled, 'Not mine allows résumé Sync without a manually attached PDF');
@@ -158,6 +161,49 @@ export default [
       assert(!sync.disabled, 'adding a verified skill is rendered fresh by Electron during Sync');
       dom.window.close();
       return { coverIndependent: true, renderOnSync: true };
+    },
+  },
+  {
+    // The AI-selected variant is intentionally not user-editable, but it must
+    // not be invisible: a deliberate ink-only PDF otherwise looks like a
+    // broken dual-mode render. The workspace explains both the visible result
+    // and the recipient-profile rationale while leaving the canonical root
+    // attribute untouched for Sync.
+    name: 'application workspace: explains the read-only AI paper decision without changing the OCG gate',
+    run: () => {
+      const doc = buildResumeDocument({
+        docId: 'bundle-variant-test',
+        resumeMainHtml: '<main class="page" data-print="ink-only"><h1 class="name">Maya</h1></main>',
+        coverLetter: { name: 'Maya', paragraphs: ['Cover copy.'] },
+        downloadBundle: {
+          company: 'Acme', candidateName: 'Maya', jobMarkdown: '# Role',
+          sync: { endpoint: 'http://127.0.0.1:43192/application-sync', token: 'c'.repeat(64) },
+        },
+      });
+      assert(isDualMode(extractVariantAttrs(doc)) === false, 'an ink-only application must not be re-read as dual');
+      const dom = new JSDOM(doc, { runScripts: 'dangerously', url: 'https://application-variant.local/' });
+      const { document } = dom.window;
+      assert(!document.getElementById('ic-print-variant'), 'the manual paper selector must not be present');
+      const note = document.getElementById('ic-print-variant-note');
+      assert(note && note.textContent.includes('AI paper decision: Flat white PDF'), 'ink-only must be named as the AI-selected flat-white PDF mode');
+      assert(note.textContent.includes('white in viewers and print'), 'ink-only must make both resulting PDF states explicit');
+      assert(note.textContent.includes('ATS-heavy, enterprise, regulated, or otherwise conservative'), 'ink-only must explain the inferred recipient-profile rationale');
+      assert(document.documentElement.getAttribute('data-print') === 'ink-only', 'the read-only explanation must not rewrite the selected root variant');
+      assert(isDualMode(extractVariantAttrs('<!doctype html>\n' + document.documentElement.outerHTML)) === false, 'the explained ink-only choice must still gate the OCG cream layer OFF');
+      dom.window.close();
+
+      const dualDoc = buildResumeDocument({
+        docId: 'bundle-variant-dual-test',
+        resumeMainHtml: '<main class="page" data-print="dual-pdf"><h1 class="name">Maya</h1></main>',
+        coverLetter: { name: 'Maya', paragraphs: ['Cover copy.'] },
+      });
+      const dualDom = new JSDOM(dualDoc, { runScripts: 'dangerously', url: 'https://application-variant-dual.local/' });
+      const dualNote = dualDom.window.document.getElementById('ic-print-variant-note');
+      assert(dualNote && dualNote.textContent.includes('Dual-mode PDF — cream in viewers, white in print'), 'dual-pdf must explain its two visible states');
+      assert(dualNote.textContent.includes('design-conscious, startup-oriented, or craft-focused'), 'dual-pdf must explain the inferred recipient-profile rationale');
+      assert(isDualMode(extractVariantAttrs(dualDoc)) === true, 'the explained dual-pdf choice must still gate the OCG cream layer ON');
+      dualDom.window.close();
+      return { variantsExplained: 2, manualOverride: false };
     },
   },
   {

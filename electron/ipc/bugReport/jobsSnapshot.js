@@ -1483,18 +1483,32 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const attemptsStr = (Array.isArray(r.attempts) ? r.attempts : [])
         .map((att) => `#${att.attempt}${att.density ? `[${att.density}]` : ''}=${att.error ? `error(${att.error})` : `${att.pageCount}p${att.fontsLoaded === false ? '[fonts-unloaded]' : ''}`}`)
         .join(', ');
-      lines.push(`- Résumé render/fit: target ${r.targetPageCount ?? '?'}p · ${r.initialPageCount ?? '?'}→${r.finalPageCount ?? '?'}p${r.compactApplied ? ' · compact applied' : ''}${r.revisionApplied ? ' · 1 length-revision call' : ''} · ${r.pdfProduced ? 'PDF produced' : '⚠️ no PDF (HTML-only)'}`);
+      // renderResumeWithFit (jobApplication.js) deliberately measures the
+      // WORST CASE — every candidate skill visible, so a later all-verified
+      // export still fits — never what actually ships. Label it as such: the
+      // shipped baseline (candidates start hidden) can legitimately be fewer
+      // pages, since a hidden skill takes zero layout space.
+      lines.push(`- Résumé fit-loop (worst case, ALL candidate skills shown — NOT the shipped page count): target ${r.targetPageCount ?? '?'}p · ${r.initialPageCount ?? '?'}→${r.finalPageCount ?? '?'}p${r.compactApplied ? ' · compact applied' : ''}${r.revisionApplied ? ' · 1 length-revision call' : ''}`);
       if (attemptsStr) lines.push(`  - attempts: ${attemptsStr}`);
-      if (!r.pdfProduced && r.error) lines.push(`  - ⚠️ ${r.error}`);
+      if (r.error) lines.push(`  - ⚠️ ${r.error}`);
       // The single most important line in this section: without it, "no PDF
       // because fonts never loaded" renders identically to "no PDF because
-      // rendering broke" (both show pdfProduced:false, error:null) — a reader
+      // rendering broke" (both show fontsLoaded:false, error:null) — a reader
       // would go hunting for a render bug that doesn't exist instead of
       // recognizing a network condition that resolves itself the next time
       // the machine has a clean path to fonts.googleapis.com.
       if (r.fontsLoaded === false) {
         lines.push('  - ⚠️ Web fonts failed to load (fonts.googleapis.com unreachable) — likely offline, a corporate proxy, or an ad-blocker blocking Google Fonts. Any PDF from this run was discarded (fallback-typeface PDFs never ship) and the fit loop skipped straight to ship (a page count measured in fallback fonts is meaningless). This is a network condition, not a render bug.');
       }
+      // The shipped baseline is a SEPARATE render (candidates start hidden,
+      // buildApplicationDocument() below) — its page count comes free from
+      // that render (renderPdf always returns pageCount alongside the bytes),
+      // so it is recorded here rather than adding a second render pass just
+      // for this diagnostic. `not measured` means the baseline render itself
+      // never completed (see the error line below), not that the number was
+      // skipped to save time.
+      lines.push(`- Résumé shipped baseline: ${r.baselinePageCount != null ? `${r.baselinePageCount}p` : 'not measured'}${r.baselinePdfProduced ? ' · PDF produced' : ' · ⚠️ no PDF (HTML-only)'}${r.baselineFontsLoaded === false ? ' · fonts failed to load (page count measured against fallback typefaces — unreliable)' : ''}`);
+      if (!r.baselinePdfProduced && r.baselinePdfError) lines.push(`  - ⚠️ ${String(r.baselinePdfError).replace(/`/g, "'").slice(0, 300)}`);
     }
     if (ach.stats) {
       const s = ach.stats;
@@ -1509,6 +1523,29 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`  - claim-figure-leaks ${s.claimFigureLeaks ?? 0}, date-misses ${s.dateMisses ?? 0}, direction-misses ${s.directionMisses ?? 0}`);
     }
     if (ach.skipped) lines.push(`  - ⚠️ ${ach.skipped}`);
+    // Skill-opportunity analysis (jobApplication.js's analyzeSkillOpportunities
+    // → resumeHtml.js's injectInferredSkills) — the one place a "why did this
+    // verified skill file under the wrong Skills heading" question is
+    // answerable at all. canonicalSkillName/resumeCategory are model-supplied
+    // (APPLICATION_SKILL_OPPORTUNITY_SCHEMA), so verifyItems is bounded and
+    // shown as plain quoted text, not interpolated into anything structural —
+    // same treatment as every other model string in this report.
+    if (a.skillOpportunities) {
+      const so = a.skillOpportunities;
+      lines.push(`- Skill-opportunity analysis: ${so.itemCount ?? 0} item(s) — ${so.verifyCount ?? 0} verify, ${so.learnCount ?? 0} learn · histogram ${so.histogramRoleCount ?? 0} role(s)${so.recordedAfterArtifacts != null ? ` · demand ${so.recordedAfterArtifacts ? 'recorded' : 'NOT recorded'} after artifacts` : ''}`);
+      if (so.error) lines.push(`  - ⚠️ ${String(so.error).replace(/`/g, "'").slice(0, 300)}`);
+      const vi = so.verifyItems;
+      if (vi && Array.isArray(vi.sample) && vi.sample.length) {
+        lines.push('  - verify items (canonical skill → résumé category, model-supplied, shown verbatim):');
+        for (const item of vi.sample) {
+          lines.push(`    - "${item.canonicalSkillName || '(empty)'}" → "${item.resumeCategory || '(empty)'}"`);
+        }
+        if (vi.truncated) lines.push(`    - _${vi.total - vi.sample.length} additional verify item(s) omitted from this bounded sample._`);
+      } else if ((so.verifyCount ?? 0) > 0) {
+        lines.push('  - ⚠️ verify items counted but no per-item detail was captured this run.');
+      }
+    }
+    if (a.variantAttrs) lines.push(`- Résumé variant: \`${String(a.variantAttrs).slice(0, 200)}\``);
     lines.push(`- Résumé markup: ${a.resumeHtmlLen || 0} chars${escScan(a.resumeHtmlSample)}`);
     lines.push('- Cover-letter fields (JSON.stringify — whitespace/escapes shown literally):');
     lines.push(`  - salutation: ${JSON.stringify(cl.salutation || '')}`);
@@ -1519,10 +1556,26 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     lines.push(`  - closing: ${JSON.stringify(cl.closing || '')}`);
     if (cl.signatureTitle) lines.push(`  - signatureTitle: ${JSON.stringify(cl.signatureTitle)}`);
     if (a.resumeHtmlSample) {
-      lines.push('- Résumé markup sample (first 1500 chars):');
+      lines.push('- Résumé markup sample (first 1500 chars — head only; covers the <main> tag + variant attrs and part of Experience, but never reaches Skills):');
       lines.push('```html');
       lines.push(a.resumeHtmlSample);
       lines.push('```');
+    }
+    // The Skills `<dl>` is where skill-opportunity injection actually lands
+    // (resumeHtml.js's injectInferredSkills) — captured separately from the
+    // head-slice sample above because that slice never reaches it. Pulled
+    // from the FINAL document, so a merge/create decision that filed a
+    // verified skill under an unexpected heading is visible here.
+    if (a.resumeSkillsDlSample) {
+      if (a.resumeSkillsDlSample.found) {
+        lines.push(`- Résumé Skills block (\`<dl class="skills">\`, from the final document)${a.resumeSkillsDlSample.truncated ? ' — truncated' : ''}:`);
+        lines.push('```html');
+        lines.push(a.resumeSkillsDlSample.sample);
+        lines.push('```');
+        if (a.resumeSkillsDlSample.truncated) lines.push('  - _Sample truncated at the bound above; full markup exists on disk in the saved workspace._');
+      } else {
+        lines.push('- ⚠️ Résumé Skills block (`<dl class="skills">`) was not found in the final document.');
+      }
     }
     }
   }

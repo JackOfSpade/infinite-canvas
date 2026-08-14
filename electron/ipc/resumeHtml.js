@@ -5,9 +5,12 @@
  * HTML-FIRST, NOT PDF-ONLY (§5.1). The browser tab is still the primary,
  * editable screen artifact — the design system's own `@media print` rule
  * (resume_design_system/colors_and_type.css ~:394-409) already flips `--bg`
- * to transparent on print, for free, and the user can always open the file
- * this module returns directly in Chrome and export via `window.print()`
- * (see the injected chrome below).
+ * to transparent on print, for free, but Sync (electron/ipc/applicationSync.js,
+ * driven from the injected chrome below), not a browser's own print dialog,
+ * is the only supported way to turn this HTML into a PDF: it re-renders
+ * through Electron's own pipeline (resumeRender.js), the same pipeline that
+ * applies the dual-mode OCG cream layer, so the artifact that reaches an
+ * employer portal is never a browser's own opinion of the same CSS.
  *
  * UPDATE — PDF generation is back, but NOT as a revival of the old
  * `resumePdf.js` (that file launched puppeteer-core against system Chrome;
@@ -72,40 +75,66 @@ export function decodeTextEscapes(s) {
 }
 
 /**
- * Resolve the canonical variant attributes from the résumé model's output (it
- * sets them on its `<main class="page" …>`), so BOTH documents share one print
- * variant / paper / mono treatment.
+ * Resolve the canonical variant attributes for a document, so BOTH the résumé
+ * and the cover letter share one print variant / paper / mono treatment.
  *
- * Print mode follows the design system: the default is `dual-pdf` (warm cream on
- * screen, background transparent on print via the design system's own
- * `@media print` rule — no post-processing needed now that the artifact IS the
- * screen view). Only an explicit `ink-only` opts out (flat white for ATS
- * pipelines). The attributes are placed on `<html>` (the design system's
- * canonical placement) by the document builders below. Logic unchanged from
- * the PDF-era version (design doc §5.1: "extractVariantAttrs is unchanged") —
- * only this doc comment was updated to drop the stale OCG reference.
+ * Accepts either shape the variant can arrive in, because both are real inputs
+ * on different paths:
+ *
+ *   • the résumé model's raw output — a bare `<main class="page" …>` block,
+ *     which is where the model writes its choice (jobApplication.js's generate
+ *     path, and buildResumeDocument's own fallback);
+ *   • a BUILT document — where the builders below hoist the resolved variant
+ *     onto `<html>` and `stripMainVariantAttrs` deliberately erases the copy on
+ *     `<main>`, so that a stale local attribute from a length revision can
+ *     never override the root.
+ *
+ * The root must therefore be read FIRST, and not only because of that strip.
+ * A built document INLINES the design-system stylesheets, and those document
+ * their own variants with literal `<main class="page" data-print="…">` example
+ * markup inside CSS COMMENTS — eight of them, ahead of the real résumé. So a
+ * scan for the first `<main …>` in a built document does not merely find a
+ * stripped tag, it finds a DECOY out of a stylesheet comment and reads that
+ * comment's variant. Either way the answer collapses to the `dual-pdf`
+ * default, which is how an `ink-only` application, re-read from its own saved
+ * Application.html by applicationSync.js, came back as "dual" and had an OCG
+ * cream layer prepended behind a page whose CSS had already painted it opaque
+ * white: white body copy inside cream page margins, matching neither variant.
+ *
+ * Whichever tag actually CARRIES a variant is the authority, and `<html>` wins
+ * when both do. Do not relax this back to "first `<main>`" — the decoys are
+ * design-system-owned text that this module cannot control.
+ *
+ * Print mode follows the design system: the default is `dual-pdf` (warm cream
+ * on screen, background transparent on print, cream restored as a view-only
+ * OCG layer by resumeRender.js's applyDualPdf). Only an explicit `ink-only`
+ * opts out (flat white for ATS pipelines).
  */
 /**
- * @param {string} resumeMainHtml
+ * @param {string} sourceHtml  a bare `<main …>` block or a whole document
  * @param {object} [opts]
  * @param {'compact'|null} [opts.density]  Force `data-density="compact"` on
  *   (or, when explicitly `null`, force it OFF) regardless of what the
  *   model's markup contains. Omit to fall through to whatever the model
  *   wrote (see the data-density block below).
  */
-export function extractVariantAttrs(resumeMainHtml, { density } = {}) {
-  const html = String(resumeMainHtml || '');
-  // Only read the opening <main> tag. Searching body copy can accidentally
-  // select a variant, and HTML permits single-quoted or unquoted attributes
-  // just as much as the double-quoted examples in the design system.
-  const mainTag = /<main\b[^>]*>/i.exec(html)?.[0] || html;
+export function extractVariantAttrs(sourceHtml, { density } = {}) {
+  const html = String(sourceHtml || '');
+  // Only read ONE opening tag. Searching body copy can accidentally select a
+  // variant, and HTML permits single-quoted or unquoted attributes just as
+  // much as the double-quoted examples in the design system.
+  const tagFor = (name) => new RegExp(`<${name}\\b[^>]*>`, 'i').exec(html)?.[0] || '';
+  const carriesVariant = (tag) => /\sdata-(?:print|mono|page|density)(?:\s|=|>|\/)/i.test(tag);
+  const rootTag = tagFor('html');
+  const mainTag = tagFor('main');
+  const sourceTag = carriesVariant(rootTag) ? rootTag : (carriesVariant(mainTag) ? mainTag : (mainTag || rootTag || html));
   const attrValue = (name) => {
-    const match = new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>"'=]+))`, 'i').exec(mainTag);
+    const match = new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>"'=]+))`, 'i').exec(sourceTag);
     return match ? (match[1] ?? match[2] ?? match[3] ?? '') : null;
   };
   const mode = String(attrValue('data-print') || '').toLowerCase() === 'ink-only' ? 'ink-only' : 'dual-pdf';
   const out = [`data-print="${mode}"`];
-  if (/(?:\s|<)data-mono(?:\s|=|>|\/)/i.test(mainTag)) out.push('data-mono');
+  if (/(?:\s|<)data-mono(?:\s|=|>|\/)/i.test(sourceTag)) out.push('data-mono');
   if (String(attrValue('data-page') || '').toLowerCase() === 'a4') out.push('data-page="a4"');
 
   // data-density — the design system's ONE deterministic page-fit lever
@@ -342,6 +371,14 @@ function injectReceipts(mainHtml, ledger) {
 // employer portals (§5.2's single most important constraint).
 // ---------------------------------------------------------------------------
 
+// The résumé model picks the print variant per employer (jobApplication.js's
+// prompt: dual-pdf for craft-oriented companies, ink-only for enterprise/ATS
+// pipelines). Keep that decision read-only — it is part of the tailoring — but
+// never invisible: the two variants produce visibly different PDFs, and an
+// unexplained white one looks like a failed dual-mode render. The injected
+// script fills this note from the canonical root `data-print` attribute.
+const PRINT_VARIANT_INDICATOR = '<span id="ic-print-variant-note" class="ic-print-variant-note" role="note"></span>';
+
 const INJECTED_CHROME_CSS = `
 /* ==========================================================
    Injected chrome (electron/ipc/resumeHtml.js) — NOT part of
@@ -376,6 +413,7 @@ const INJECTED_CHROME_CSS = `
 .ic-toolbar .ic-btn-primary:hover { background: #8F2534; }
 .ic-toolbar .ic-hint { margin-left: auto; opacity: 0.8; font-size: 12px; }
 .ic-toolbar .ic-restore-note { opacity: 0.8; font-size: 12px; }
+.ic-print-variant-note { max-width: 340px; font-size: 11px; line-height: 1.35; opacity: 0.85; }
 .ic-banner {
   padding: 8px 20px;
   font: 13px/1.4 -apple-system, "Helvetica Neue", Arial, sans-serif;
@@ -615,6 +653,7 @@ function normaliseSkillInsights(raw) {
       kind,
       skill,
       resumeText: String(value.suggestedResumeText || skill).trim(),
+      category: String(value.resumeCategory || value.category || '').trim(),
       role: role || 'This role',
       evidence: String(value.candidateEvidence || value.evidence || value.reason || value.rationale || value.why || '').trim(),
       impact: String(value.jobEvidence || value.impact || value.jobImpact || value.relevance || '').trim(),
@@ -667,26 +706,173 @@ function normaliseSkillHistogram(raw) {
   })).sort((a, b) => a.role.localeCompare(b.role));
 }
 
+// Normalize a chunk of (possibly tagged) HTML into a bare lowercase
+// letters+digits key: strip tags, decode the handful of entities the model
+// or the design system might use for a label ("Safety &amp; Response" /
+// "Safety &#39;n&#39; Response" etc.), lowercase, collapse whitespace, then
+// drop everything that isn't alphanumeric. Used BOTH to key a group's display
+// label for de-duplication and to read an existing `<dt>`'s inner HTML for
+// merge matching, so "Safety &amp; Response" (model-escaped) and "Safety &
+// Response" (already-decoded résumé markup) resolve to the identical key
+// regardless of case, punctuation, or nested tags.
+function skillLabelKey(raw) {
+  return String(raw || '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&#x27;/gi, "'")
+    .replace(/&nbsp;/gi, ' ')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
 // The model never gets to write this HTML. Every proposed inferred skill is
 // structurally present but hidden, and only the local review decision can
 // reveal it. Keeping it in the actual .skills surface means a verified choice
 // participates in screen preview, print and edited-HTML downloads alike.
+//
+// Verify insights are grouped by `category` (a model-supplied 1-3 word Title
+// Case domain label, e.g. "Safety & Response"; empty -> "Additional") so a
+// verified skill files under a DOMAIN, not under "how it was found" — the
+// old hardcoded "Role-fit (verified)" row this replaced was tooling
+// vocabulary leaking into a recruiter-facing résumé. Each group is placed
+// against the résumé's OWN `<dl class="skills">`, in first-seen order:
+//   - MERGE into an existing `<dt>` whose skillLabelKey() matches the
+//     group's — the group's skills are appended to the END of that `<dt>`'s
+//     `<dd>`, each preceded by its own separator span. No new `<dt>` is
+//     created and no marker attribute goes on that `<dd>`: the row is
+//     already visible because it holds real corpus-backed skills. UNLESS the
+//     matched `<dd>` is degenerate (blank once tags are stripped — nothing
+//     for a leading separator to join to), in which case the appended run
+//     uses CREATED-style markup instead (see below) so no stray leading `·`
+//     renders; it still appends into that same `<dd>`, no second row.
+//   - Otherwise CREATE a new `<dt data-ic-inferred-label>` / `<dd
+//     data-ic-inferred-group>` pair before `</dl>` (first skill has no
+//     leading separator; the rest do).
+// With no `<dl class="skills">` to merge into (or no closing `</dl>`), every
+// group falls back to a CREATED pair inside a synthesized section, since
+// there is nothing to merge into.
+//
+// Every `data-ic-inferred-separator` is written with a VALUE that states its
+// own visibility rule, rather than making the browser infer one from DOM
+// shape — the injector is the only place that reliably knows whether real
+// (always-visible) corpus content precedes a given separator:
+//   - `="join"`  (non-degenerate merge): real content precedes the WHOLE
+//     appended run, so the separator is visible iff its own next inferred
+//     skill is visible. No backward walk needed or performed.
+//   - `="between"` (created `<dd>`, and degenerate-merge appends): only a
+//     previously-verified inferred skill can precede it, so the separator is
+//     visible iff its next inferred skill is visible AND at least one
+//     earlier `[data-ic-inferred-skill]` in the same parent is visible.
+// (A real design-system `<dd>` is BARE TEXT with `<span class="sep">`
+// elements between items — e.g. `<dd>Go<span class="sep">·</span>Rust</dd>` —
+// so a single real skill leaves NO element before an appended separator.
+// Encoding "join" at injection time means the runtime never has to walk
+// `previousElementSibling` hunting for that invisible text.)
+//
+// `category` is therefore only ever used two ways: as an escaped display
+// label (through escapeHtml, exactly like every other model string here) and
+// as a normalized MATCH KEY against existing `<dt>` text. It is never trusted
+// as markup and never interpolated unescaped, and — like every inferred
+// skill/separator/created label/group — everything it produces still carries
+// ` hidden` unless `showAllVerifySkills` is true.
 function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
   const verify = insights.filter(item => item.kind === 'verify');
   if (!verify.length) return mainHtml;
-  const inlineSkills = verify.map((item, index) =>
-    `${index ? `<span class="sep" data-ic-inferred-separator${showAllVerifySkills ? '' : ' hidden'} aria-hidden="true">·</span>` : ''}` +
-    `<span class="ic-inferred-skill" data-ic-inferred-skill="${escapeHtml(item.id)}"${showAllVerifySkills ? '' : ' hidden'}>${escapeHtml(item.resumeText || item.skill)}</span>`
-  ).join('');
-  const hidden = showAllVerifySkills ? '' : ' hidden';
-  const entries = `<dt data-ic-inferred-label${hidden}>Role-fit (verified)</dt>\n` +
-    `  <dd data-ic-inferred-group${hidden}>${inlineSkills}</dd>`;
-  const skillsOpen = /<dl\b[^>]*\bclass\s*=\s*(?:"[^"]*\bskills\b[^"]*"|'[^']*\bskills\b[^']*'|skills)(?:\s|>|\/)[^>]*>/i.exec(mainHtml);
-  if (skillsOpen) {
-    const closeAt = mainHtml.indexOf('</dl>', skillsOpen.index + skillsOpen[0].length);
-    if (closeAt >= 0) return `${mainHtml.slice(0, closeAt)}\n  ${entries}\n${mainHtml.slice(closeAt)}`;
+  const hiddenAttr = showAllVerifySkills ? '' : ' hidden';
+
+  const sepSpan = (rule) => `<span class="sep" data-ic-inferred-separator="${rule}"${hiddenAttr} aria-hidden="true">·</span>`;
+  const skillSpan = (item) => `<span class="ic-inferred-skill" data-ic-inferred-skill="${escapeHtml(item.id)}"${hiddenAttr}>${escapeHtml(item.resumeText || item.skill)}</span>`;
+  // Freshly CREATED <dd> (or a degenerate merge target treated the same way):
+  // nothing precedes the first skill; every later one is a "between" join.
+  const createdSkillsMarkup = (items) => items.map((item, index) => `${index ? sepSpan('between') : ''}${skillSpan(item)}`).join('');
+  // Appending to a NON-degenerate EXISTING <dd>: real corpus skills always
+  // precede the first appended item, so every appended skill is a "join".
+  const appendedSkillsMarkup = (items) => items.map(item => `${sepSpan('join')}${skillSpan(item)}`).join('');
+
+  // Group by category, case/punctuation-insensitive, preserving the
+  // first-seen original spelling as the display label. Empty -> "Additional".
+  const groups = [];
+  const groupByKey = new Map();
+  for (const item of verify) {
+    const label = item.category || 'Additional';
+    const key = skillLabelKey(label);
+    let group = groupByKey.get(key);
+    if (!group) {
+      group = { key, label, items: [] };
+      groupByKey.set(key, group);
+      groups.push(group);
+    }
+    group.items.push(item);
   }
-  const fallback = `\n<section class="section ic-inferred-skills-section" data-ic-inferred-section${hidden}>\n  <div class="section-head"><h2>Skills</h2><span class="rule" aria-hidden="true"></span></div>\n  <dl class="skills">\n  ${entries}\n  </dl>\n</section>\n`;
+
+  const createdEntry = (group) =>
+    `<dt data-ic-inferred-label${hiddenAttr}>${escapeHtml(group.label)}</dt>\n  <dd data-ic-inferred-group${hiddenAttr}>${createdSkillsMarkup(group.items)}</dd>`;
+
+  // NOTE: the boundary check after the bare (unquoted) `skills` alternative is
+  // a LOOKAHEAD, not a consuming match. A consuming `(?:\s|>|\/)` here (as
+  // this line originally read) treats the tag's own closing `>` as that
+  // required character, then lets the following `[^>]*>` overshoot into the
+  // NEXT tag hunting for another `>` — so `<dl class="skills">` (nothing
+  // after the class attribute) would over-match into `<dt>`. That was inert
+  // in the old caller here (it only used this match's length as a
+  // `.indexOf('</dl>', …)` search-start, never sliced on it), but this
+  // function now slices `mainHtml` at exactly that offset to parse the
+  // existing `<dt>/<dd>` pairs, so the overshoot must not happen.
+  const skillsOpen = /<dl\b[^>]*\bclass\s*=\s*(?:"[^"]*\bskills\b[^"]*"|'[^']*\bskills\b[^']*'|skills(?=\s|>|\/))[^>]*>/i.exec(mainHtml);
+  const closeAt = skillsOpen ? mainHtml.indexOf('</dl>', skillsOpen.index + skillsOpen[0].length) : -1;
+
+  if (skillsOpen && closeAt >= 0) {
+    const innerStart = skillsOpen.index + skillsOpen[0].length;
+    let inner = mainHtml.slice(innerStart, closeAt);
+
+    // Find every <dt>/<dd> pair INSIDE this one <dl> slice only, so a merge
+    // target can never resolve against markup outside the skills list. A
+    // <dt> with nested markup is handled by skillLabelKey() stripping tags.
+    // `blank` flags a <dd> that is whitespace-only once ITS OWN tags are
+    // stripped (e.g. a placeholder <dd></dd>) — nothing for a "join"
+    // separator to join to, so such a target gets created-style markup.
+    const pairRe = /<dt\b[^>]*>([\s\S]*?)<\/dt>\s*<dd\b[^>]*>([\s\S]*?)<\/dd>/gi;
+    const pairs = [];
+    let pairMatch;
+    while ((pairMatch = pairRe.exec(inner))) {
+      pairs.push({
+        key: skillLabelKey(pairMatch[1]),
+        ddCloseIndex: pairMatch.index + pairMatch[0].length - '</dd>'.length,
+        blank: /^\s*$/.test(pairMatch[2].replace(/<[^>]*>/g, '')),
+      });
+    }
+
+    const createGroups = [];
+    const merges = [];
+    for (const group of groups) {
+      const pair = pairs.find(p => p.key === group.key);
+      if (pair) merges.push({ ddCloseIndex: pair.ddCloseIndex, group, blank: pair.blank });
+      else createGroups.push(group);
+    }
+
+    // Insert from the last position backward so an earlier insertion's
+    // offset shift never invalidates a later (already-computed) index.
+    merges.sort((a, b) => b.ddCloseIndex - a.ddCloseIndex);
+    for (const { ddCloseIndex, group, blank } of merges) {
+      const markup = blank ? createdSkillsMarkup(group.items) : appendedSkillsMarkup(group.items);
+      inner = inner.slice(0, ddCloseIndex) + markup + inner.slice(ddCloseIndex);
+    }
+
+    const created = createGroups.map(createdEntry).join('\n  ');
+    if (created) inner = `${inner}\n  ${created}\n`;
+
+    return `${mainHtml.slice(0, innerStart)}${inner}${mainHtml.slice(closeAt)}`;
+  }
+
+  // Fallback: no <dl class="skills"> to merge into — every group becomes a
+  // created <dt>/<dd> pair inside a synthesized section.
+  const allCreated = groups.map(createdEntry).join('\n  ');
+  const fallback = `\n<section class="section ic-inferred-skills-section" data-ic-inferred-section${hiddenAttr}>\n  <div class="section-head"><h2>Skills</h2><span class="rule" aria-hidden="true"></span></div>\n  <dl class="skills">\n  ${allCreated}\n  </dl>\n</section>\n`;
   return mainHtml.replace(/<\/main>\s*$/i, `${fallback}</main>`);
 }
 
@@ -742,13 +928,13 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
   <div id="ic-skill-workspace-data" data-ic-workspace="${escapeHtml(json)}" hidden></div>
   <div class="ic-toolbar" role="toolbar" aria-label="Document controls">
     <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
-    <button type="button" id="ic-export-btn" class="ic-btn ic-btn-primary">Export (Print / Save as PDF)</button>
-    <button type="button" id="ic-sync-btn" class="ic-btn">Sync résumé</button>
+    <button type="button" id="ic-sync-btn" class="ic-btn ic-btn-primary">Sync résumé</button>
+    ${PRINT_VARIANT_INDICATOR}
     <span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span>
     <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
-    <span class="ic-hint">Printing? The page preview is the only thing that prints.</span>
+    <span class="ic-hint">Sync re-renders the PDF with the same engine that produced the originals — use it instead of your browser’s print dialog.</span>
   </div>
-  <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Fonts didn’t load (offline?). This will print with fallback typefaces — reconnect and reload.</div>
+  <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Fonts didn’t load (offline?). Reconnect and reload before syncing — Sync refuses to replace a PDF with fallback typography.</div>
   <section class="ic-panel" aria-labelledby="ic-check-title">
     <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-check-title">Needs your check</h2><span id="ic-review-progress" class="ic-panel-note"></span></div>
     <span id="ic-review-status" class="ic-review-status" role="status"></span>
@@ -790,24 +976,22 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
  * than vendoring the families (which would go silently wrong the moment the
  * design system is replaced with different ones — see §5.3's rationale).
  */
-function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBundle }) {
+function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle }) {
   const safeDocId = docId ? String(docId) : `${kind}-untitled`;
   const bundle = normaliseResumeDownloadBundle(downloadBundle);
   const bundleJson = JSON.stringify(bundle).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
   const isResumeBundle = kind === 'resume';
-  const printHint = dual
-    ? 'Printing? The warm background disappears automatically — no settings needed for that. In the print dialog, uncheck \u201cHeaders and footers\u201d and set Margins \u2192 Default so the page-number footer isn\u2019t covered.'
-    : 'Printing? In the print dialog, uncheck \u201cHeaders and footers\u201d and set Margins \u2192 Default so the page-number footer isn\u2019t covered.';
+  const syncHint = 'Sync re-renders the PDF with the same engine that produced the originals \u2014 use it instead of your browser\u2019s print dialog.';
 
   const chromeMarkup = workspace ? '' : `<div class="ic-toolbar" role="toolbar" aria-label="Document controls">
   <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
-  <button type="button" id="ic-export-btn" class="ic-btn ic-btn-primary">Export (Print / Save as PDF)</button>
-  <button type="button" id="ic-sync-btn" class="ic-btn">${isResumeBundle ? 'Sync résumé' : 'Sync edited copy'}</button>
+  <button type="button" id="ic-sync-btn" class="ic-btn ic-btn-primary">${isResumeBundle ? 'Sync résumé' : 'Sync edited copy'}</button>
+  ${PRINT_VARIANT_INDICATOR}
   ${isResumeBundle ? '<span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span>' : ''}
   <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
-  <span class="ic-hint">${escapeHtml(printHint)}</span>
+  <span class="ic-hint">${escapeHtml(syncHint)}</span>
 </div>
-<div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Fonts didn\u2019t load (offline?). This will print with fallback typefaces \u2014 reconnect and reload.</div>
+<div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Fonts didn\u2019t load (offline?). Reconnect and reload before syncing \u2014 Sync refuses to replace a PDF with fallback typography.</div>
 `;
   const html = `${chromeMarkup}<script id="ic-application-bundle-data" type="application/json">${bundleJson}</script><script>
 (function () {
@@ -823,8 +1007,8 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
   var activeDocument = 'resume';
   var documentTabs = Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-tab]'));
   var editBtn = document.getElementById('ic-edit-toggle');
-  var exportBtn = document.getElementById('ic-export-btn');
   var syncBtn = document.getElementById('ic-sync-btn');
+  var printVariantNote = document.getElementById('ic-print-variant-note');
   var pdfBundleNote = document.getElementById('ic-pdf-bundle-note');
   var restoreNote = document.getElementById('ic-restore-note');
   var fontWarning = document.getElementById('ic-font-warning');
@@ -863,8 +1047,24 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
     if (pdfBundleNote) {
       if (blocked) { syncMessage = ''; pdfBundleNote.textContent = 'Resolve skill checks before syncing the résumé.'; }
       else if (!configured) { syncMessage = ''; pdfBundleNote.textContent = 'Save this application from Infinite Canvas before Sync is available.'; }
+      // pdfStale is per-document on purpose: a résumé edit must not imply the
+      // still-current cover-letter PDF is out of date. Saying which one drifted
+      // is the whole point of tracking it — a stale PDF beside a fresh HTML is
+      // the one failure mode of this workspace a user cannot see for themselves.
+      else if (pdfStale[activeDocument]) pdfBundleNote.textContent = syncMessage || ('This ' + documentLabel(activeDocument) + ' has changed since its PDF was written — Sync to replace it.');
       else pdfBundleNote.textContent = syncMessage || ('Sync renders a fresh ' + documentLabel(activeDocument) + ' PDF and replaces it in this folder.');
     }
+  }
+
+  // This is deliberately an explanation, not an override. The model selected
+  // the shared résumé/cover-letter paper profile from the employer and job
+  // context; Sync must preserve that tailored decision. Name both the visible
+  // result and the selection rationale so a white PDF cannot be mistaken for a
+  // broken dual-mode render.
+  if (printVariantNote) {
+    printVariantNote.textContent = document.documentElement.getAttribute('data-print') === 'ink-only'
+      ? 'AI paper decision: Flat white PDF — white in viewers and print; the company or role appears ATS-heavy, enterprise, regulated, or otherwise conservative.'
+      : 'AI paper decision: Dual-mode PDF — cream in viewers, white in print; the company or role appears design-conscious, startup-oriented, or craft-focused.';
   }
 
   function selectDocument(kind) {
@@ -880,7 +1080,6 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
       tab.setAttribute('tabindex', tab.getAttribute('data-ic-document-tab') === kind ? '0' : '-1');
     });
     if (editBtn) editBtn.textContent = 'Edit ' + (kind === 'cover' ? 'cover letter' : 'résumé');
-    if (exportBtn) exportBtn.textContent = 'Print / Save ' + (kind === 'cover' ? 'cover letter' : 'résumé') + ' PDF';
     updateSync();
     updateSkillReviewStatus();
   }
@@ -935,23 +1134,48 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
       });
     });
     inferredNodes(id, 'data-ic-inferred-skill').forEach(function (node) { node.hidden = resolved !== 'verified'; });
-    var visibleSkills = Array.prototype.slice.call(document.querySelectorAll('[data-ic-inferred-skill]')).filter(function (node) { return !node.hidden; });
-    Array.prototype.slice.call(document.querySelectorAll('[data-ic-inferred-label], [data-ic-inferred-group]')).forEach(function (node) { node.hidden = visibleSkills.length === 0; });
-    var seenVisible = false;
-    Array.prototype.slice.call(document.querySelectorAll('[data-ic-inferred-group] > *')).forEach(function (node) {
-      if (node.hasAttribute('data-ic-inferred-skill') && !node.hidden) seenVisible = true;
-      if (node.hasAttribute('data-ic-inferred-separator')) {
-        var laterVisible = false;
-        var cursor = node.nextElementSibling;
-        while (cursor) {
-          if (cursor.hasAttribute('data-ic-inferred-skill') && !cursor.hidden) { laterVisible = true; break; }
-          cursor = cursor.nextElementSibling;
-        }
-        node.hidden = !(seenVisible && laterVisible);
+    // Created groups only (a merged skill lives in an untagged <dd> that's
+    // already visible — real corpus content — and needs no row toggling).
+    Array.prototype.slice.call(document.querySelectorAll('[data-ic-inferred-group]')).forEach(function (group) {
+      var groupVisible = Array.prototype.slice.call(group.querySelectorAll('[data-ic-inferred-skill]')).some(function (node) { return !node.hidden; });
+      group.hidden = !groupVisible;
+      var label = group.previousElementSibling;
+      if (label && label.hasAttribute('data-ic-inferred-label')) label.hidden = !groupVisible;
+    });
+    // Each separator's data-ic-inferred-separator VALUE states its own
+    // visibility rule (set once at injection time, when the real content
+    // that precedes it is known for certain — see injectInferredSkills'
+    // block comment). The runtime just applies whichever rule it's told:
+    //   "join"    (real corpus content precedes the whole run) — visible iff
+    //             its own next inferred skill is visible. No backward walk:
+    //             a real <dd> is bare text between <span class="sep"> nodes,
+    //             so a single real skill leaves no element to walk back to.
+    //   "between" (only inferred skills can precede it — a created <dd>, or
+    //             a degenerate merge target) — visible iff its next inferred
+    //             skill is visible AND an earlier [data-ic-inferred-skill]
+    //             sibling in the same parent is visible.
+    Array.prototype.slice.call(document.querySelectorAll('[data-ic-inferred-separator]')).forEach(function (sep) {
+      var rule = sep.getAttribute('data-ic-inferred-separator');
+      var next = sep.nextElementSibling;
+      var nextVisible = false;
+      while (next) {
+        if (next.hasAttribute('data-ic-inferred-skill')) { nextVisible = !next.hidden; break; }
+        next = next.nextElementSibling;
       }
+      if (rule === 'join') {
+        sep.hidden = !nextVisible;
+        return;
+      }
+      var earlierVisible = false;
+      var prev = sep.previousElementSibling;
+      while (prev) {
+        if (prev.hasAttribute('data-ic-inferred-skill') && !prev.hidden) { earlierVisible = true; break; }
+        prev = prev.previousElementSibling;
+      }
+      sep.hidden = !(nextVisible && earlierVisible);
     });
     var fallback = document.querySelector('[data-ic-inferred-section]');
-    if (fallback) fallback.hidden = !Object.keys(skillDecisions).some(function (key) { return skillDecisions[key] === 'verified'; });
+    if (fallback) fallback.hidden = !Array.prototype.slice.call(fallback.querySelectorAll('[data-ic-inferred-skill]')).some(function (node) { return !node.hidden; });
     if (persist) {
       try { localStorage.setItem(skillStorageKey, JSON.stringify(skillDecisions)); } catch (e) {}
       if (resumeMain && resumeMain.innerHTML !== resumeBefore) markPdfStale('resume');
@@ -966,15 +1190,9 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
     var status = document.getElementById('ic-review-status');
     if (progress) progress.textContent = total ? resolved + ' / ' + total + ' resolved' : '';
     if (status) status.textContent = !total ? '' : (resolved < total
-      ? 'Résumé export and Sync unlock after every high-impact claim is marked Verified or Not mine.'
+      ? 'Sync unlocks after every high-impact claim is marked Verified or Not mine.'
       : (verified ? verified + ' verified skill' + (verified === 1 ? '' : 's') + ' included in this résumé.' : 'No inferred skills will be added to this résumé.'));
-    if (exportBtn) {
-      var blocked = activeDocument === 'resume' && total > 0 && resolved < total;
-      exportBtn.disabled = blocked;
-      exportBtn.setAttribute('aria-disabled', String(blocked));
-      exportBtn.title = blocked ? 'Resolve every high-impact skill check before exporting.' : '';
-      updateSync();
-    }
+    updateSync();
   }
   skillCards.forEach(function (card) {
     var id = card.getAttribute('data-ic-insight');
@@ -1052,17 +1270,6 @@ function buildInjectedChrome({ docId, kind, dual, workspace = false, downloadBun
         main.focus();
         editBtn.textContent = 'Done editing';
       }
-    });
-  }
-
-  if (exportBtn) {
-    exportBtn.addEventListener('click', function () {
-      if (exportBtn.disabled) return;
-      // Commit any in-progress edit before printing so no editing chrome
-      // (the dashed outline, an active caret) can appear in the printed
-      // output — the printed artifact must match the design system exactly.
-      stopEditing();
-      window.print();
     });
   }
 
@@ -1200,7 +1407,7 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
     ? suppliedCoverText.slice(coverStart, coverEnd + '</main>'.length)
     : '<main class="page" role="document"><p>Cover letter was unavailable when this application was generated.</p></main>';
   const css = inlineStylesheets(CSS_FILES);
-  const chrome = buildInjectedChrome({ docId, kind: 'resume', dual: isDualMode(attrs), workspace: true, downloadBundle });
+  const chrome = buildInjectedChrome({ docId, kind: 'resume', workspace: true, downloadBundle });
 
   return `<!doctype html>
 <html lang="en" ${attrs}>
@@ -1287,7 +1494,7 @@ export function buildCoverLetterDocument({ letter = {}, variantAttrs = '', docId
   const signatureTitle = escapeHtml(decodeTextEscapes(letter.signatureTitle || ''));
 
   const css = inlineStylesheets(CSS_FILES);
-  const chrome = buildInjectedChrome({ docId, kind: 'cover-letter', dual: isDualMode(variantAttrs) });
+  const chrome = buildInjectedChrome({ docId, kind: 'cover-letter' });
 
   return `<!doctype html>
 <html lang="en" ${variantAttrs}>

@@ -381,7 +381,7 @@ ${wrapUntrustedText('company-role-research', research)}
 CANDIDATE CAREER DATA:
 ${wrapUntrustedText('candidate-career-data', careerData)}
 
-Return only high-impact missing skills. suggestedResumeText must be only the concise skill label/phrase that could be added after verification — never a fabricated experience bullet. For learn items, suggestedResumeText and verificationQuestion should be empty strings. Supply learningAction for BOTH kinds: for a verify item it is the bounded fallback the user can follow if they answer "not mine."`;
+Return only high-impact missing skills. suggestedResumeText must be only the concise skill label/phrase that could be added after verification — never a fabricated experience bullet. For verify items, resumeCategory names the résumé Skills-section group the label belongs under, in the candidate's own domain vocabulary — 1-3 words, Title Case, a domain name like "Certifications" or "Infrastructure", never a provenance/verification word like "Verified" or "Role-fit". Choose the natural grouping the candidate's résumé would already use, so the skill merges into an existing heading instead of starting a new one. For learn items, suggestedResumeText, resumeCategory, and verificationQuestion should be empty strings. Supply learningAction for BOTH kinds: for a verify item it is the bounded fallback the user can follow if they answer "not mine."`;
 
   return await callLLMText(prompt, {
     signal,
@@ -575,8 +575,17 @@ async function generateResumeMain({ careerData, job, research, researchAvailable
   const excludedSkills = (Array.isArray(skillInsights?.items) ? skillInsights.items : [])
     .map(item => String(item?.canonicalSkillName || '').trim())
     .filter(Boolean);
+  const verifiedCategories = [...new Set(
+    (Array.isArray(skillInsights?.items) ? skillInsights.items : [])
+      .filter(item => item?.kind === 'verify')
+      .map(item => String(item?.resumeCategory || '').trim())
+      .filter(Boolean)
+  )];
+  const categoryPreference = verifiedCategories.length
+    ? ` NAMING PREFERENCE: if a Skills group you would naturally create from genuine, corpus-backed skills covers one of these areas — ${verifiedCategories.join(', ')} — use that exact label for its <dt>. This is a naming preference only for a group your own real skill data already justifies: never create, pad, or retain a group solely to host one of these labels, and an area with no genuine corpus-backed skills gets no group at all. The exclusion above still applies — populate any such group only from real career data, never from this list.`
+    : '';
   const exclusionBlock = excludedSkills.length
-    ? `\n\nPRIVATE MISSING-SKILL ANALYSIS — EXCLUSION LIST:\n${excludedSkills.map(name => `- ${name}`).join('\n')}\nThese skills were classified as plausible-but-unverified or learn-first gaps. Do NOT put them anywhere in the résumé draft, do NOT imply the candidate used them, and do NOT substitute an alias. The self-contained HTML workspace will let the candidate verify eligible near-adjacent items and will insert only the confirmed skill labels deterministically.`
+    ? `\n\nPRIVATE MISSING-SKILL ANALYSIS — EXCLUSION LIST:\n${excludedSkills.map(name => `- ${name}`).join('\n')}\nThese skills were classified as plausible-but-unverified or learn-first gaps. Do NOT put them anywhere in the résumé draft, do NOT imply the candidate used them, and do NOT substitute an alias. The self-contained HTML workspace will let the candidate verify eligible near-adjacent items and will insert only the confirmed skill labels deterministically.${categoryPreference}`
     : '';
   const prompt = `TARGET JOB (the "Description" is what we scraped — it may be full, partial, or empty):
 ${jobBlock(job)}
@@ -839,6 +848,53 @@ async function copyFileAtomically(source, destination) {
   await replaceFileAtomically(destination, await fs.promises.readFile(source));
 }
 
+// Bug-report only: how many verify items to keep full detail for. The
+// analysis prompt already gates hard on "significantly improve this
+// candidate's odds" (§ analyzeSkillOpportunities), so a real response is
+// small — this cap exists only so a pathological response can't blow the
+// clipboard budget, not because the ordinary case needs trimming.
+const SKILL_OPPORTUNITY_VERIFY_SAMPLE_CAP = 20;
+
+// Bounded, sanitized per-verify-item detail for the bug reporter — the whole
+// point of a skill-opportunity report line is answering "which Skills-section
+// category would this verified skill file under," and the aggregate counts
+// alone can't answer that. canonicalSkillName/resumeCategory are model-
+// supplied strings (see APPLICATION_SKILL_OPPORTUNITY_SCHEMA), so they're
+// collapsed/capped the same way every other model string reaching a report
+// is (compare companyResearch.error handling above) rather than trusted
+// verbatim.
+function sanitizeSkillOpportunityVerifyItems(items) {
+  const verify = (Array.isArray(items) ? items : []).filter(item => item?.kind === 'verify');
+  const clean = (value, maxLen) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, maxLen);
+  const sample = verify.slice(0, SKILL_OPPORTUNITY_VERIFY_SAMPLE_CAP).map(item => ({
+    canonicalSkillName: clean(item?.canonicalSkillName, 80),
+    resumeCategory: clean(item?.resumeCategory, 60),
+  }));
+  return { sample, total: verify.length, truncated: sample.length < verify.length };
+}
+
+// Bug-report only: pull the résumé's own `<dl class="skills">…</dl>` block out
+// of the FINAL rendered document — the one place a skill-opportunity /
+// résumé-injection bug actually shows, and the section the plain head-slice
+// sample (resumeHtmlSample below) is too short to ever reach. Mirrors
+// resumeHtml.js's injectInferredSkills open-tag regex EXACTLY — see that
+// function's own doc-comment for why the boundary check after the bare
+// (unquoted) `skills` class value must be a LOOKAHEAD, not a consuming match:
+// a consuming version eats the tag's own `>`, then lets `[^>]*>` overshoot
+// hunting for the NEXT `>`, so a bare `<dl class="skills">` (nothing else in
+// the attribute) mismatches. Do not replace this with a fresh regex that
+// reintroduces that bug.
+const SKILLS_DL_OPEN_RE = /<dl\b[^>]*\bclass\s*=\s*(?:"[^"]*\bskills\b[^"]*"|'[^']*\bskills\b[^']*'|skills(?=\s|>|\/))[^>]*>/i;
+function extractSkillsDlSample(html, maxLen = 2500) {
+  const text = String(html || '');
+  const open = SKILLS_DL_OPEN_RE.exec(text);
+  if (!open) return { found: false, sample: '', truncated: false };
+  const closeAt = text.indexOf('</dl>', open.index + open[0].length);
+  if (closeAt < 0) return { found: false, sample: '', truncated: false };
+  const block = text.slice(open.index, closeAt + '</dl>'.length);
+  return { found: true, sample: block.slice(0, maxLen), truncated: block.length > maxLen };
+}
+
 // Last application generation — captured so the bug reporter can SEE the model's
 // actual résumé markup + cover-letter fields. That's the ONE place an application
 // rendering bug shows (a stray mid-sentence newline, a literal "\n"/"\t", broken
@@ -1060,6 +1116,7 @@ export function registerJobApplicationHandlers() {
     let resumePdfBytes = null;
     let baselinePdfError = null;
     let baselineFontsLoaded = null;
+    let baselinePageCount = null;
     let coverLetterPdfBytes = null;
     let coverLetterPdfError = null;
     let coverLetterFontsLoaded = null;
@@ -1096,6 +1153,13 @@ export function registerJobApplicationHandlers() {
     try {
       const rendered = await renderPdf(baselineDocument, { signal });
       baselineFontsLoaded = rendered.fontsLoaded !== false;
+      // Free — renderPdf already measures this to produce the PDF below, so
+      // recording it costs nothing extra. This is the ONE place the real,
+      // shipped page count is ever known: renderResumeWithFit above
+      // deliberately measures a worst-case (all-candidate-skills-visible)
+      // document that is never shipped (see its own comment), so its page
+      // counts must never be reported as what the user actually receives.
+      baselinePageCount = Number.isFinite(rendered.pageCount) ? rendered.pageCount : null;
       if (baselineFontsLoaded) resumePdfBytes = rendered.bytes;
       else baselinePdfError = 'Web fonts were unavailable while rendering the baseline résumé PDF.';
     } catch (e) {
@@ -1143,7 +1207,10 @@ export function registerJobApplicationHandlers() {
 
     // Capture raw output and both render phases for the bug reporter. The fit
     // loop is a layout measurement; `baselinePdfProduced` is the résumé PDF
-    // written beside the editable application workspace.
+    // written beside the editable application workspace. resumeSkillsDlSample
+    // is pulled from `resumeDoc` (the FINAL document, already built above) so
+    // it reflects the markup AFTER skill-opportunity injection ran, not the
+    // model's pre-injection draft the head-slice sample below shows.
     const ledgerStats = freshlyMined?.stats || achievements?.stats || null;
     const minedBy = freshlyMined?.minedBy || achievements?.minedBy || null;
     updateAttempt({
@@ -1161,6 +1228,8 @@ export function registerJobApplicationHandlers() {
       },
       resumeHtmlSample: String(finalMainHtml || '').slice(0, 1500),
       resumeHtmlLen: String(finalMainHtml || '').length,
+      resumeSkillsDlSample: extractSkillsDlSample(resumeDoc),
+      variantAttrs,
       achievements: { source: ledgerSource, skipped: achievementsSkipped, kept: ledgerForPrompt?.ledger?.length || 0, stats: ledgerStats, minedBy },
       companyResearch: { available: companyResearch.available, error: companyResearch.error },
       skillOpportunities: {
@@ -1169,6 +1238,7 @@ export function registerJobApplicationHandlers() {
         learnCount: Array.isArray(skillInsights?.items) ? skillInsights.items.filter(item => item?.kind === 'learn').length : 0,
         histogramRoleCount: Array.isArray(skillHistogram?.roles) ? skillHistogram.roles.length : 0,
         error: skillOpportunityError,
+        verifyItems: sanitizeSkillOpportunityVerifyItems(skillInsights?.items),
       },
       render: {
         targetPageCount, attempts: fitResult?.attempts || [],
@@ -1176,7 +1246,7 @@ export function registerJobApplicationHandlers() {
         finalPageCount: fitResult?.pageCount ?? null,
         compactApplied: !!fitResult?.compactApplied, revisionApplied: !!fitResult?.revisionApplied,
         pdfProduced: !!resumePdfBytes, baselinePdfProduced: !!resumePdfBytes,
-        baselinePdfError, baselineFontsLoaded,
+        baselinePageCount, baselinePdfError, baselineFontsLoaded,
         coverLetterPdfProduced: !!coverLetterPdfBytes, coverLetterPdfError, coverLetterFontsLoaded,
         resumeRequiresReview,
         error: fitResult ? (fitResult.renderError || null) : 'render/fit loop threw before producing any attempts',

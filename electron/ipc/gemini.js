@@ -94,8 +94,15 @@ export function toGeminiSchema(schema) {
 }
 
 // Transient HTTP errors worth retrying. 503/500/502/504 are server-side
-// hiccups; 429 is rate limit (provider tells us to back off). Everything
-// else is a config/auth/quota/payload issue that won't improve on retry.
+// hiccups worth a same-model backoff-and-retry (see fetchWithRetry below).
+// 429 is a per-minute/per-day QUOTA signal, not a hiccup — the code below
+// deliberately does NOT back off and retry the same model on a 429; it
+// returns immediately so the outer model-fallback cascade in callGemini can
+// move to the next model/independent quota pool right away, rather than
+// stalling a user-facing call on a multi-second same-model wait. Only when
+// the ENTIRE ladder has 429'd in one pass — every model, all recoverable
+// rate-limit failures — does callGemini honor the provider's retry-delay,
+// as a single bounded wait-and-retry pass after ladder exhaustion (Finding 7).
 const TRANSIENT_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
 
 // ── Retry / backoff policy ────────────────────────────────────────────────────
@@ -136,6 +143,18 @@ function abortableSleep(ms, signal) {
     const t = setTimeout(() => { signal?.removeEventListener?.('abort', onAbort); resolve(); }, ms);
     signal?.addEventListener?.('abort', onAbort, { once: true });
   });
+}
+
+// The Finding 7 ladder-exhaustion retry wait (callGemini, below) normally
+// sleeps for real via abortableSleep — anywhere from ~1s to 60s depending on
+// the provider's own retry hint. The deterministic test suite has no seam to
+// fake timers globally, so it substitutes a near-instant stand-in through
+// __setGeminiLadderRetryWaitForTests rather than sitting through a real wait
+// on every retry-pass test. Production code never touches this — it always
+// resolves to the real abortableSleep.
+let _ladderRetryWait = abortableSleep;
+export function __setGeminiLadderRetryWaitForTests(fn) {
+  _ladderRetryWait = typeof fn === 'function' ? fn : abortableSleep;
 }
 
 /**
@@ -981,96 +1000,185 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
     logger.info(`[Gemini] Deferring ${_cooling.length} suppressed model(s): ${_cooling.join(', ')}`);
   }
 
-  for (const currentModel of modelOrder) {
-    // Bail immediately if the caller cancelled (node deleted / Reset). Without
-    // this, an aborted request walks the entire fallback chain — each attempt
-    // throws on the already-aborted signal — and surfaces a misleading "all
-    // models failed" instead of a clean cancellation. `genConfig.signal` is the
-    // user signal specifically (the per-call timeout is a separate signal), so
-    // a single model timing out still correctly falls through to the next.
+  // One pass over a fallback chain: try every model in `order` in turn.
+  // Failures are folded into the shared `attemptedErrors` (the running
+  // diagnostic used for the final aggregate error, across BOTH passes when a
+  // retry pass runs) and also appended to the caller-supplied `passErrors`
+  // array, which is scoped to only THIS pass — that's what lets the Finding 7
+  // retry decision below ask "was every failure in the pass that just
+  // exhausted a recoverable rate-limit?" without being polluted by a prior
+  // pass's classifications. Returns the winning text on success; returns
+  // undefined if every model in `order` failed (a clean cancellation or an
+  // `auth` failure still throws directly, same as always).
+  async function runFallbackPass(order, passErrors) {
+    for (const currentModel of order) {
+      // Bail immediately if the caller cancelled (node deleted / Reset). Without
+      // this, an aborted request walks the entire fallback chain — each attempt
+      // throws on the already-aborted signal — and surfaces a misleading "all
+      // models failed" instead of a clean cancellation. `genConfig.signal` is the
+      // user signal specifically (the per-call timeout is a separate signal), so
+      // a single model timing out still correctly falls through to the next.
+      if (genConfig.signal?.aborted) {
+        const abortErr = new Error('Gemini request aborted');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
+      try {
+        logger.info(`[Gemini] Attempting call with model: ${currentModel}`);
+        lastAttemptedModel = currentModel;
+
+        const result = await callGeminiSingle(parts, apiKey, currentModel, genConfig);
+
+        lastSuccessfulModel = currentModel;
+        clearGeminiModelFailure(scope, currentModel);
+        // Clear the per-attempt error on success. Otherwise it stays pinned to the
+        // last failed hop — on the FREE tier the small "20 RPD" pools exhaust fast,
+        // so a healthy call that simply fell through to a later model would forever
+        // surface a scary "Last error: …429" in Settings and bug reports even though
+        // it succeeded. The expected fall-through is still captured per-stage in
+        // genConfig.meta.fallback.
+        lastAttemptedError = '(none)';
+        // Report the model that actually served this call back to the caller (by
+        // reference) so per-stage telemetry can record WHICH model produced each
+        // result — e.g. a price synthesized by a weaker fallback after the
+        // preferred models 429'd looks identical in the output otherwise.
+        if (genConfig.meta && typeof genConfig.meta === 'object') {
+          genConfig.meta.model = currentModel;
+          // When earlier models were skipped to land here, record WHY — quota/
+          // rate-limit (external: wait or upgrade tier) vs token-cap truncation
+          // (our cap is too low: raise it in llm.js TASK_MAX_TOKENS) vs server
+          // (overload). The bug-report funnel otherwise only knows "weak fallback"
+          // from the model NAME; the per-attempt reason lives solely in the
+          // scrolling log buffer, and each cause needs a different fix.
+          if (attemptedErrors.length > 0) {
+            const counts = {};
+            for (const e of attemptedErrors) {
+              const k = e.classification || 'other';
+              counts[k] = (counts[k] || 0) + 1;
+            }
+            const reason = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+            genConfig.meta.fallback = { attempts: attemptedErrors.length, reason, counts, preferredModel: model };
+          }
+        }
+        return result;
+      } catch (err) {
+        const errMsg = err.message || String(err);
+        const failureText = err.details ? `${errMsg}\n${err.details}` : errMsg;
+        const classification = classifyGeminiFailure(err.status, failureText);
+        logger.warn(`[Gemini] Model ${currentModel} failed: ${errMsg}`);
+
+        lastAttemptedError = `${currentModel}: ${errMsg}`;
+        attemptedErrors.push({ model: currentModel, error: errMsg, classification });
+        passErrors.push(classification);
+
+        // Only a CREDENTIAL-level auth failure aborts the whole chain — every model
+        // would fail identically. A per-model 403 (model-access) does NOT: it
+        // suppresses just that model and cascades to the next (Finding 1).
+        if (genConfig.signal?.aborted || classification === 'auth') throw err;
+
+        if (classification === 'rate-limit' || classification === 'no-quota' || classification === 'daily-quota') {
+          const retryMs = err.retryAfterMs ?? parseRetryMsFromError(errMsg);
+          rememberGeminiModelFailure(scope, currentModel, classification, errMsg, suppressionUntilForFailure(classification, retryMs));
+          logger.warn(`[Gemini] Falling back to the next best model...`);
+          continue;
+        }
+        if (classification === 'unavailable' || classification === 'model-access' || classification === 'thinking-config') {
+          // A grounded request's unavailable/access failure may be feature-specific
+          // (the model is fine for normal JSON calls), so don't persist suppression —
+          // just cascade for THIS call (Finding 2). Non-grounded failures suppress.
+          const suppressedUntil = grounded ? null : suppressionUntilForFailure(classification);
+          rememberGeminiModelFailure(scope, currentModel, classification, errMsg, suppressedUntil);
+          logger.warn(`[Gemini] Falling back to the next best model...`);
+          continue;
+        }
+
+        // Request-specific failure (truncation/server/timeout/malformed): record an
+        // EXPIRING warning, never a permanent suppression (Finding 6).
+        rememberGeminiModelFailure(scope, currentModel, classification, errMsg);
+        logger.warn(`[Gemini] Proceeding to fallback after non-transient failure: ${errMsg}`);
+      }
+    }
+    return undefined;
+  }
+
+  const firstPassErrors = [];
+  const firstResult = await runFallbackPass(modelOrder, firstPassErrors);
+  if (firstResult !== undefined) return firstResult;
+
+  // Finding 7: a real run showed the ENTIRE ladder 429 in well under a second —
+  // every independent free-tier per-minute quota pool this credential can
+  // reach happened to be exhausted at the same moment — and the caller
+  // silently degraded (a job application generated with NO company research)
+  // instead of finding out the quota was about to reopen. `parseGeminiRetryMs`
+  // / `parseRetryMsFromError` already parse the provider's own retry hint on
+  // every 429; until now that value only set a suppression expiry that the
+  // NEXT unrelated call would benefit from — nothing made THIS call wait for
+  // it. Retry the whole ladder ONCE, and only when every failure this pass
+  // was the recoverable `rate-limit` classification: a no-quota/daily-quota/
+  // model-access/unavailable/auth/thinking-config/server/other failure means
+  // at least one model will not work again on any short timer, so waiting
+  // buys nothing and only delays the identical failure the caller would get
+  // anyway — that case still throws immediately, exactly as before this fix.
+  const allRateLimited = firstPassErrors.length > 0 && firstPassErrors.every((c) => c === 'rate-limit');
+  if (allRateLimited) {
+    const waitNow = Date.now();
+    // Earliest suppression expiry across the models THIS pass attempted, via
+    // the same scoped-key accessor every other suppression read/write in this
+    // module uses (never a hand-built `${scope}\x00${model}` string). Every
+    // model here failed rate-limit, and suppressionUntilForFailure('rate-limit',
+    // …) always sets a suppression timestamp, so this is normally always found —
+    // the fallback constant below only matters if a concurrent call raced and
+    // cleared an entry in the shared module-level Map before we could read it.
+    let earliestExpiry = null;
+    for (const m of modelOrder) {
+      const until = modelSuppressedUntil.get(scopedKey(scope, m));
+      if (until && (earliestExpiry === null || until < earliestExpiry)) earliestExpiry = until;
+    }
+    const MIN_LADDER_RETRY_WAIT_MS = 1000;    // never a busy-loop retry
+    const MAX_LADDER_RETRY_WAIT_MS = 60_000;  // never stall a user-facing call a full minute+
+    const FALLBACK_LADDER_RETRY_WAIT_MS = 5000; // only if no suppression entry parsed at all
+    const waitMs = earliestExpiry != null
+      ? Math.min(MAX_LADDER_RETRY_WAIT_MS, Math.max(MIN_LADDER_RETRY_WAIT_MS, earliestExpiry - waitNow))
+      : FALLBACK_LADDER_RETRY_WAIT_MS;
+
+    logger.info(`[Gemini] All ${modelOrder.length} models rate-limited (free-tier per-minute quota) — waiting ${waitMs}ms for the earliest quota reset, then retrying the ladder once before giving up.`);
+    await _ladderRetryWait(waitMs, genConfig.signal);
+    // Same abort shape as every other cancellation point in this file — a
+    // cancellation during the wait must surface as a clean AbortError, not get
+    // swallowed into a misleading "all models failed".
     if (genConfig.signal?.aborted) {
       const abortErr = new Error('Gemini request aborted');
       abortErr.name = 'AbortError';
       throw abortErr;
     }
-    try {
-      logger.info(`[Gemini] Attempting call with model: ${currentModel}`);
-      lastAttemptedModel = currentModel;
 
-      const result = await callGeminiSingle(parts, apiKey, currentModel, genConfig);
-
-      lastSuccessfulModel = currentModel;
-      clearGeminiModelFailure(scope, currentModel);
-      // Clear the per-attempt error on success. Otherwise it stays pinned to the
-      // last failed hop — on the FREE tier the small "20 RPD" pools exhaust fast,
-      // so a healthy call that simply fell through to a later model would forever
-      // surface a scary "Last error: …429" in Settings and bug reports even though
-      // it succeeded. The expected fall-through is still captured per-stage in
-      // genConfig.meta.fallback.
-      lastAttemptedError = '(none)';
-      // Report the model that actually served this call back to the caller (by
-      // reference) so per-stage telemetry can record WHICH model produced each
-      // result — e.g. a price synthesized by a weaker fallback after the
-      // preferred models 429'd looks identical in the output otherwise.
-      if (genConfig.meta && typeof genConfig.meta === 'object') {
-        genConfig.meta.model = currentModel;
-        // When earlier models were skipped to land here, record WHY — quota/
-        // rate-limit (external: wait or upgrade tier) vs token-cap truncation
-        // (our cap is too low: raise it in llm.js TASK_MAX_TOKENS) vs server
-        // (overload). The bug-report funnel otherwise only knows "weak fallback"
-        // from the model NAME; the per-attempt reason lives solely in the
-        // scrolling log buffer, and each cause needs a different fix.
-        if (attemptedErrors.length > 0) {
-          const counts = {};
-          for (const e of attemptedErrors) {
-            const k = e.classification || 'other';
-            counts[k] = (counts[k] || 0) + 1;
-          }
-          const reason = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
-          genConfig.meta.fallback = { attempts: attemptedErrors.length, reason, counts, preferredModel: model };
-        }
-      }
-      return result;
-    } catch (err) {
-      const errMsg = err.message || String(err);
-      const failureText = err.details ? `${errMsg}\n${err.details}` : errMsg;
-      const classification = classifyGeminiFailure(err.status, failureText);
-      logger.warn(`[Gemini] Model ${currentModel} failed: ${errMsg}`);
-      
-      lastAttemptedError = `${currentModel}: ${errMsg}`;
-      attemptedErrors.push({ model: currentModel, error: errMsg, classification });
-
-      // Only a CREDENTIAL-level auth failure aborts the whole chain — every model
-      // would fail identically. A per-model 403 (model-access) does NOT: it
-      // suppresses just that model and cascades to the next (Finding 1).
-      if (genConfig.signal?.aborted || classification === 'auth') throw err;
-
-      if (classification === 'rate-limit' || classification === 'no-quota' || classification === 'daily-quota') {
-        const retryMs = err.retryAfterMs ?? parseRetryMsFromError(errMsg);
-        rememberGeminiModelFailure(scope, currentModel, classification, errMsg, suppressionUntilForFailure(classification, retryMs));
-        logger.warn(`[Gemini] Falling back to the next best model...`);
-        continue;
-      }
-      if (classification === 'unavailable' || classification === 'model-access' || classification === 'thinking-config') {
-        // A grounded request's unavailable/access failure may be feature-specific
-        // (the model is fine for normal JSON calls), so don't persist suppression —
-        // just cascade for THIS call (Finding 2). Non-grounded failures suppress.
-        const suppressedUntil = grounded ? null : suppressionUntilForFailure(classification);
-        rememberGeminiModelFailure(scope, currentModel, classification, errMsg, suppressedUntil);
-        logger.warn(`[Gemini] Falling back to the next best model...`);
-        continue;
-      }
-
-      // Request-specific failure (truncation/server/timeout/malformed): record an
-      // EXPIRING warning, never a permanent suppression (Finding 6).
-      rememberGeminiModelFailure(scope, currentModel, classification, errMsg);
-      logger.warn(`[Gemini] Proceeding to fallback after non-transient failure: ${errMsg}`);
+    // Recompute fresh — suppressions may have expired during the wait, and a
+    // stale `modelOrder` would just re-run the same (still-cooling) ordering.
+    const now2 = Date.now();
+    const entitledTiers2 = entitledTiersFor(scope, now2);
+    const scopeSuppression2 = suppressionMapForScope(scope, now2);
+    const modelOrder2 = orderGeminiModels(model, scopeSuppression2, now2, {
+      entitledTiers: entitledTiers2,
+      responseSchema: !!genConfig.responseSchema,
+      grounding: grounded,
+    });
+    const _cooling2 = modelOrder2.filter(m => scopeSuppression2.has(m));
+    if (_cooling2.length > 0 && _cooling2.length < modelOrder2.length) {
+      logger.info(`[Gemini] Retry pass: deferring ${_cooling2.length} still-suppressed model(s): ${_cooling2.join(', ')}`);
     }
+
+    const secondPassErrors = [];
+    const secondResult = await runFallbackPass(modelOrder2, secondPassErrors);
+    if (secondResult !== undefined) return secondResult;
+    // Both passes exhausted — fall through to the unchanged aggregate error
+    // below, guarded so this retry only ever happens once per call (never a loop).
   }
 
-  // If we reach here, all compatible direct models have failed. Managed-agent
-  // endpoints are intentionally excluded: they cannot honor response schemas,
-  // so they must not be used as a transparent Gemini fallback.
+  // If we reach here, all compatible direct models have failed (across both
+  // the initial pass and, when eligible, the single Finding 7 retry pass
+  // above). Managed-agent endpoints are intentionally excluded: they cannot
+  // honor response schemas, so they must not be used as a transparent Gemini
+  // fallback.
   const errorDetails = attemptedErrors.map(e => `* ${e.model}: ${e.error}`).join('\n');
   const noQuotaCount = attemptedErrors.filter((e) => e.classification === 'no-quota').length;
   const dailyQuotaCount = attemptedErrors.filter((e) => e.classification === 'daily-quota').length;

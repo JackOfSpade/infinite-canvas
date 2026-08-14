@@ -57,61 +57,85 @@ function diagnosticRenderFailureMarkdown(section, err) {
 
 
 /**
- * Returns the mtime (ms) of the newest main-process code file the running build
- * depends on, or null if nothing could be scanned. Comparing it to
- * PROCESS_START_MS tells us whether any code changed since the process booted —
- * the stale-build signal we want.
+ * Returns `{ src, srcDirFound, bundle, bundleDirFound }` describing the newest
+ * main-process code file the running build depends on. Comparing `src`/`bundle`
+ * to PROCESS_START_MS tells us whether any code changed since the process
+ * booted — the stale-build signal we want.
  *
  * It scans BOTH the source tree (`electron/`) and the bundle (`dist-electron/`),
  * under whichever of app.getAppPath()/process.cwd() they live:
  *   • `electron/` source catches "edited a file but didn't rebuild" (dev).
  *   • `dist-electron/` bundle is the artifact actually running — and in a
  *     PACKAGED app the `electron/` source isn't shipped at all (only the bundle
- *     is inside app.asar), so source-only scanning returned null → the false
- *     "(unknown)" the report kept showing. The bundle is .cjs/.mjs, not .js, so
- *     the old `.js`-only filter missed it even when the dir was present.
+ *     is inside app.asar). The bundle is .cjs/.mjs, not .js, so the old
+ *     `.js`-only filter missed it even when the dir was present.
+ *
+ * The two trees are returned SEPARATELY (not merged into one max, as this used
+ * to do) because a packaged app can only ever see `dist-electron/` — `electron/`
+ * genuinely does not exist on disk there. A merged number silently degraded to
+ * "whatever the bundle says" in that case while the report kept printing a
+ * source-freshness verdict it had no basis for. `srcDirFound`/`bundleDirFound`
+ * let the caller tell "this tree was scanned and is empty/unchanged" apart from
+ * "this tree was never found at all" — the difference between an observation
+ * and its absence, which the verdict text must not blur.
  */
-function getNewestMainProcessSourceMtime() {
+function getNewestMainProcessMtimes() {
   const CODE_EXT = /\.(c|m)?js$/; // .js, .cjs, .mjs
   const roots = [];
   try { if (app?.getAppPath) roots.push(app.getAppPath()); } catch { /* ignore */ }
   try { roots.push(process.cwd()); } catch { /* ignore */ }
 
-  const candidates = [];
-  for (const root of roots) {
-    if (!root) continue;
-    candidates.push(path.join(root, 'electron'), path.join(root, 'dist-electron'));
-  }
+  // Scans every `<root>/<subdir>` tree and reports both the newest matching
+  // mtime AND whether the top-level `<root>/<subdir>` directory itself was
+  // ever readable (as opposed to a nested dir found mid-walk) — that's the
+  // "was this tree even here to look at" signal callers need.
+  const scanSubdir = (subdir) => {
+    let newest = 0;
+    let dirFound = false;
+    const seen = new Set();
+    const walk = (dir, isCandidateRoot) => {
+      const resolved = path.resolve(dir);
+      if (seen.has(resolved)) return;
+      seen.add(resolved);
 
-  let newest = 0;
-  const seen = new Set();
-  const walk = (dir) => {
-    const resolved = path.resolve(dir);
-    if (seen.has(resolved)) return;
-    seen.add(resolved);
-
-    let entries = [];
-    try { entries = fs.readdirSync(resolved, { withFileTypes: true }); } catch { return; }
-    for (const entry of entries) {
-      // Defensive: these dirs shouldn't contain node_modules, but never recurse
-      // into it (or dotfiles) if a candidate root ever broadens.
-      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
-      const fullPath = path.join(resolved, entry.name);
-      if (entry.isDirectory()) { walk(fullPath); continue; }
-      if (!entry.isFile() || !CODE_EXT.test(entry.name)) continue;
+      let entries = [];
       try {
-        const stat = fs.statSync(fullPath);
-        if (stat.mtimeMs > newest) newest = stat.mtimeMs;
-      } catch { /* skip */ }
+        entries = fs.readdirSync(resolved, { withFileTypes: true });
+        if (isCandidateRoot) dirFound = true;
+      } catch { return; }
+      for (const entry of entries) {
+        // Defensive: these dirs shouldn't contain node_modules, but never recurse
+        // into it (or dotfiles) if a candidate root ever broadens.
+        if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+        const fullPath = path.join(resolved, entry.name);
+        if (entry.isDirectory()) { walk(fullPath, false); continue; }
+        if (!entry.isFile() || !CODE_EXT.test(entry.name)) continue;
+        try {
+          const stat = fs.statSync(fullPath);
+          if (stat.mtimeMs > newest) newest = stat.mtimeMs;
+        } catch { /* skip */ }
+      }
+    };
+
+    for (const root of roots) {
+      if (!root) continue;
+      walk(path.join(root, subdir), true);
     }
+    return { newest: newest || null, dirFound };
   };
 
-  for (const dir of candidates) walk(dir);
-  return newest || null;
+  const src = scanSubdir('electron');
+  const bundle = scanSubdir('dist-electron');
+  return {
+    src: src.newest,
+    srcDirFound: src.dirFound,
+    bundle: bundle.newest,
+    bundleDirFound: bundle.dirFound,
+  };
 }
 
 /**
- * Renderer (React/Vite) freshness. getNewestMainProcessSourceMtime above scans
+ * Renderer (React/Vite) freshness. getNewestMainProcessMtimes above scans
  * only electron/ + dist-electron/ — but the renderer (`src/`) is where the
  * Job Search Module pipeline, the AI-scoring/test-mode gate, and most UI logic live. When
  * the app loads the BUILT bundle (main.js does loadFile('../dist/index.html')
@@ -1029,16 +1053,39 @@ ${statusQueueLine}
   // files (preload, IPC handlers, settings store) only reload on a full restart.
   // If any tracked source is newer than the process start, the running build is
   // stale — flag it loudly so the report doesn't waste time chasing a phantom.
-  const newestSrcMs = getNewestMainProcessSourceMtime();
+  const { src: mainSrcMs, srcDirFound: mainSrcDirFound, bundle: mainBundleMs } = getNewestMainProcessMtimes();
   const uptimeMs = Math.round(process.uptime() * 1000);
   const startedAt = new Date(PROCESS_START_MS).toISOString();
-  const newestSrcStr = newestSrcMs ? new Date(newestSrcMs).toISOString() : '(unknown)';
-  const isStale = !!(newestSrcMs && newestSrcMs > PROCESS_START_MS);
-  const stalenessLine = !newestSrcMs
-    ? '⚠️ **Cannot determine build freshness** — unable to read main-process source file mtimes. If you have edited any Electron main-process files since starting the app, restart before treating this report as authoritative.'
-    : isStale
-      ? `⚠️ **STALE BUILD**: a tracked main-process source file was modified ${Math.round((newestSrcMs - PROCESS_START_MS) / 1000)}s after the process started. The running app is NOT executing the current source on disk — fully restart Electron (not just Vite) before treating this report as authoritative.`
-      : '✅ Up to date — no tracked main-process source has been modified since the process started.';
+  // A packaged app ships only dist-electron/ inside app.asar — `electron/`
+  // source genuinely isn't there, so mainSrcDirFound === false is EXPECTED
+  // (not a read failure). Say so explicitly instead of a bare "(unknown)"
+  // that reads like a failed lookup rather than "nothing to look at".
+  const mainSrcStr = mainSrcMs
+    ? new Date(mainSrcMs).toISOString()
+    : (mainSrcDirFound ? '(electron/ present but no matching source files)' : '(not on disk — packaged build, electron/ source not shipped)');
+  const mainBundleStr = mainBundleMs ? new Date(mainBundleMs).toISOString() : '(no dist-electron/ bundle found)';
+  const mainSrcStale = !!(mainSrcMs && mainSrcMs > PROCESS_START_MS);
+  const mainBundleAfterStart = !!(mainBundleMs && mainBundleMs > PROCESS_START_MS);
+  let stalenessLine;
+  if (mainSrcDirFound) {
+    // Dev run: the electron/ source tree is actually on disk and was scanned,
+    // so a verdict about SOURCE freshness is something this run can back up.
+    stalenessLine = !mainSrcMs
+      ? '⚠️ **Cannot determine build freshness** — electron/ was found but no source files matched inside it. If you have edited any Electron main-process files since starting the app, restart before treating this report as authoritative.'
+      : mainSrcStale
+        ? `⚠️ **STALE BUILD**: a tracked main-process source file was modified ${Math.round((mainSrcMs - PROCESS_START_MS) / 1000)}s after the process started. The running app is NOT executing the current source on disk — fully restart Electron (not just Vite) before treating this report as authoritative.`
+        : '✅ Up to date — no tracked main-process source has been modified since the process started.';
+  } else {
+    // Packaged build: electron/ source is not shipped, so this run NEVER
+    // looked at a single source file — only the baked-in dist-electron/
+    // bundle exists to compare. State that plainly instead of asserting
+    // anything about source freshness this run has no way to verify.
+    stalenessLine = !mainBundleMs
+      ? '⚠️ **Cannot determine build freshness** — packaged build, electron/ source not shipped, and no dist-electron/ bundle mtime could be read either.'
+      : mainBundleAfterStart
+        ? `⚠️ **BUNDLE NEWER THAN PROCESS START**: the packaged dist-electron/ bundle has an mtime ${Math.round((mainBundleMs - PROCESS_START_MS) / 1000)}s after the process started, which is unexpected for an installed build. (Packaged build — the electron/ dev source tree was not scanned, so a source edit could not have been detected either way; this is a bundle-vs-process-start comparison only.)`
+        : 'ℹ️ Packaged build — the electron/ dev source tree was not scanned (not shipped inside app.asar), so a local source edit could not have been detected. The only known fact: the running dist-electron/ bundle predates process start.';
+  }
 
   // Renderer freshness — the main-process check above never covers src/, but a
   // stale renderer (edited src/ that wasn't re-bundled into dist/) silently runs
@@ -1076,7 +1123,8 @@ ${statusQueueLine}
   const buildFreshnessMarkdown = `
 ## Build Freshness
 - Main process started: \`${startedAt}\` (uptime ${Math.round(uptimeMs / 1000)}s)
-- Newest main-process code mtime (electron/ source + dist-electron/ bundle): \`${newestSrcStr}\`
+- Newest main-process source mtime (electron/): \`${mainSrcStr}\`
+- Main-process bundle built (dist-electron/ — what a packaged app actually runs): \`${mainBundleStr}\`
 - ${stalenessLine}
 - Newest renderer source mtime (src/): \`${rSrcStr}\`
 - Renderer bundle built (dist/ — what loadFile actually serves): \`${rBundleStr}\`
