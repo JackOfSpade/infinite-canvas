@@ -1456,16 +1456,22 @@ export default [
       const finalGateSources = {
         indeed: { jobs: [], errors: 0, warnings: [] },
         linkedin: { jobs: [], errors: 0, warnings: [] },
+        glassdoor: { jobs: [], errors: 0, warnings: [] },
       };
       const finalGateJobs = [
         { source: 'indeed', title: 'Maintenance Tech', url: 'keep-1' },
         { source: 'indeed', title: 'Field Service Technician - Sign On Bonus!', url: 'drop-1' },
         { source: 'linkedin', title: 'Building Maintenance Tech I or II', url: 'keep-2' },
         { source: 'dice', title: 'Lead Server Systems Debug Engineer', url: 'drop-2' },
+        // Resolver pages can include recommended cards unrelated to the active
+        // role. These must receive the same final title gate as a normal scrape.
+        { source: 'glassdoor', title: 'Loss Prevention Specialist', url: 'drop-3' },
+        { source: 'glassdoor', title: 'Armed Driver', url: 'drop-4' },
       ];
       finalGateSources.indeed.jobs = finalGateJobs.filter(j => j.source === 'indeed');
       finalGateSources.linkedin.jobs = finalGateJobs.filter(j => j.source === 'linkedin');
       finalGateSources.dice = { jobs: finalGateJobs.filter(j => j.source === 'dice'), errors: 0, warnings: [] };
+      finalGateSources.glassdoor.jobs = finalGateJobs.filter(j => j.source === 'glassdoor');
       const finalAdmitted = applyFinalJobTitleRelevanceGate(
         finalGateJobs,
         ['Maintenance Technician', 'Facilities Maintenance Technician', 'Lead Server'],
@@ -1476,7 +1482,11 @@ export default [
         && finalGateSources.indeed.relevanceDropped === 1
         && finalGateSources.indeed.relevanceRejected.includes('Field Service Technician - Sign On Bonus!')
         && finalGateSources.dice.jobs.length === 0
-        && finalGateSources.dice.relevanceRejected.includes('Lead Server Systems Debug Engineer'),
+        && finalGateSources.dice.relevanceRejected.includes('Lead Server Systems Debug Engineer')
+        && finalGateSources.glassdoor.jobs.length === 0
+        && finalGateSources.glassdoor.relevanceDropped === 2
+        && finalGateSources.glassdoor.relevanceRejected.includes('Loss Prevention Specialist')
+        && finalGateSources.glassdoor.relevanceRejected.includes('Armed Driver'),
       'shared final gate removes browser-ranked title leaks and technical-server false positives before history/scoring');
       return { geoTerms: [...geoTerms].sort(), fallback: true, rejectedTitles };
     },

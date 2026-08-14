@@ -2,12 +2,13 @@
 // individual area files declare only the bindings their tests actually exercise.
 export { default as fs } from 'node:fs';
 export { default as path } from 'node:path';
+export { default as zlib } from 'node:zlib';
 export { JSDOM } from 'jsdom';
 export * as PDFLib from 'pdf-lib';
 export { PDFDocument } from 'pdf-lib';
 export { EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, MERCARI_SOLD_EXTRACTOR, POSHMARK_SOLD_EXTRACTOR, SWAPPA_SOLD_EXTRACTOR, priceChartingQuery } from '../electron/extractors/marketplace.js';
 export { GOOGLE_JOBS_EXTRACTOR } from '../electron/extractors/jobs.js';
-export { applyFinalJobTitleRelevanceGate, buildJobTasks, chunkScoringBatches, getJobsTelemetry, glassdoorPostedBucket, linkedInBrowserUnavailableWarning, recordJobsBoardScope, recordJobsSourceScope, refreshManualSourceUrlIndex, summarizeScoringInputQuality } from '../electron/ipc/jobs.js';
+export { applyFinalJobTitleRelevanceGate, buildJobTasks, chunkScoringBatches, getJobsTelemetry, glassdoorPostedBucket, hasResolvedJobDescription, linkedInBrowserUnavailableWarning, recordJobsBoardScope, recordJobsSourceScope, refreshManualSourceUrlIndex, summarizeScoringInputQuality } from '../electron/ipc/jobs.js';
 export { getJobSearchTransientKeysForSave, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES } from '../src/utils/persistenceTransientState.js';
 export { jobTitleCompanyKey, jobTitleCompanyUrlKey, jobTitleCompanyLocationKey, sourceJobKey, dedupeJobsByKey, uniqueJobsNotIn, dedupJobsAcrossSources, uniqueJobsAcrossSources } from '../src/utils/jobIdentity.js';
 export { mergeSourceProgress } from '../src/utils/sourceProgress.js';
@@ -33,7 +34,8 @@ export { buildJobTreeNodes, computeLayoutPositions, computeJobTreeView, countMat
 export { unionScoredJobs, moduleFingerprint, combineSignature, staleReason, isLegacyCombineSignature, deriveBoardCardStats } from '../src/nodes/jobboard/mergeJobs.js';
 export { buildGeoTermSet, extractIndeedJobsFromHtml, extractSalaryFromText, filterUSAJobsByTitleRelevance, jobRelevanceMatch, jobRelevanceEvidence, reverbListingsToComps, parsePriceChartingHtml, filterPriceChartingByRelevance, dicePostedBucket, extractJobPostingDescription, extractJobPostingBaseSalary, formatDiceBaseSalary, extractDiceSalaryBadge, formatUSAJobsSalary, parseAptDecoComps, extractAlgoliaHits, linkedInBrowserUnavailableResult, isRemoteOkSponsoredPlacement } from '../electron/extractors/apiExtractors.js';
 export { isPriceChartingApplicable, isAptDecoApplicable } from '../src/utils/compSourceScope.js';
-export { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes } from '../electron/ipc/resumeHtml.js';
+export { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, decodeTextEscapes, normaliseResumeDownloadBundle } from '../electron/ipc/resumeHtml.js';
+export { createApplicationBundle, createZipBuffer, formatOriginalJobListingMarkdown, sanitizeApplicationBundlePart } from '../electron/ipc/applicationBundle.js';
 export { targetPageCountForJob, decideFitStep } from '../electron/ipc/jobApplication.js';
 export { filterOutApplied, markJobApplied } from '../electron/ipc/appliedJobs.js';
 export { LEDGER_CAP, MINING_TARGET, splitCareerDataByFile, normalizeQuoteText, computeLedger, applyRefuteVerdicts, ledgerById, derivationTooltip, serializeLedgerForPrompt } from '../src/utils/achievementLedger.js';

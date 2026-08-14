@@ -1181,6 +1181,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         hubState: 'searching',
         queryCount: allQueries.length,
         queries: queriesResult.queries,
+        // Keep the exact flattened role set that this run gave to search-jobs.
+        // Source-card Solve can fire much later (or after a hot reload), when it
+        // must apply the same final title-relevance policy to recovered rows.
+        activeSearchQueries: allQueries,
         queryModel,
         queryCacheKey,
         canonicalLocation,

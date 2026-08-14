@@ -640,6 +640,15 @@ export function applyFinalJobTitleRelevanceGate(jobs, queries, sourceResults = {
   return admitted;
 }
 
+// Resolve windows can extract list cards from a page whose detail panel is
+// unavailable (Glassdoor's DOM fallback deliberately emits blank snippets).
+// A non-empty title/company is not evidence the scorer received a JD. Keep the
+// threshold modest so compact but genuine listings survive, while a list-card
+// stub or "Job description" label remains retryable instead of being scored.
+export function hasResolvedJobDescription(job, minChars = 120) {
+  return String(job?.snippet || job?.description || '').replace(/\s+/g, ' ').trim().length >= minChars;
+}
+
 /**
  * Summarize the evidence quality the scorer actually received. A successful LLM
  * response proves that a row was scored, not that it carried a full job
@@ -3226,9 +3235,20 @@ RULES:
     for (const role of result.roles) for (const index of role.jobIndices) {
       if (!roleByIndex.has(index)) roleByIndex.set(index, role.name);
     }
-    // This bounded, source-to-bucket trace makes salary/range defects debuggable
-    // from a FULL report without reopening a local scrape snapshot.
-    const taxonomyAudit = jobs.slice(0, 50).map((job, index) => {
+    // Keep this trace compact enough that a FULL clipboard report still reaches
+    // the sections after taxonomy. Reserve space for anomalous salary rows even
+    // when they occur late, then fill the remaining slots in original order.
+    const taxonomyAuditLimit = 20;
+    const anomalyIndices = jobs
+      .map((job, index) => salaryRangeAnomaly(job.salary) ? index : -1)
+      .filter(index => index >= 0)
+      .slice(0, 8);
+    const taxonomyAuditIndices = new Set(anomalyIndices);
+    for (let index = 0; index < jobs.length && taxonomyAuditIndices.size < taxonomyAuditLimit; index += 1) {
+      taxonomyAuditIndices.add(index);
+    }
+    const taxonomyAudit = [...taxonomyAuditIndices].sort((a, b) => a - b).map((index) => {
+      const job = jobs[index];
       const annualSalary = parseSalaryToNumeric(job.salary);
       const salaryAnomaly = salaryRangeAnomaly(job.salary);
       const band = placeBand(job.matchScore, bands);
@@ -3527,9 +3547,19 @@ RULES:
     // were scored and persisted. Enrich only rows that can survive relevance,
     // age, history, and applied-job filters, while the unlocked visible browser
     // still owns the authenticated profile.
-    const inlineItemsPostprocessor = sourceId === 'glassdoor'
+    // Run source detail expansion while this browser still owns the freshly
+    // cleared session. This is intentionally source-generic: Glassdoor is the
+    // urgent case because its DOM-card fallback has blank snippets, but any
+    // resolver source with a configured detail expander must not bypass the
+    // normal search's description-first pipeline.
+    const inlineItemsPostprocessor = ['glassdoor', 'ziprecruiter'].includes(sourceId)
       ? async ({ page, items: rawItems }) => {
           const tagged = (Array.isArray(rawItems) ? rawItems : []).map(j => ({ ...j, source: sourceId }));
+          // The normal search repairs text before its final title gate. Do it
+          // here too, before relevance consumes resolver-card titles, so entity
+          // markup/mojibake cannot change a recovered row's admission outcome.
+          repairJobsMojibake(tagged);
+          normalizeJobsMarkup(tagged);
           const localSourceResults = {
             [sourceId]: { jobs: tagged, errors: 0, warnings: [] },
           };
@@ -3544,37 +3574,54 @@ RULES:
 
           if (candidates.length === 0) {
             return {
-              items: rawItems,
+              // Never hand rejected/old/already-applied raw cards back to the
+              // generic resolver. It would otherwise filter them a second time
+              // and conceal the first gate's telemetry, or merge a stale row.
+              items: [],
               meta: {
-                attempted: 0, enriched: 0, empty: 0, relevanceDropped,
+                attempted: 0, enriched: 0, succeeded: 0, empty: 0, relevanceDropped,
                 relevanceRejected: localSourceResults[sourceId]?.relevanceRejected || [],
               },
             };
           }
 
           const expanded = await enrichResolvedJobDescriptions(page, candidates, sourceId, signal);
-          const enhanced = Array.isArray(expanded?.jobs) ? expanded.jobs : candidates;
-          const emptyRows = enhanced.filter(job => !String(job?.snippet || '').trim());
+          const enhanced = Array.isArray(expanded?.jobs) ? expanded.jobs : [];
           const byKey = new Map(enhanced.map(job => [job.url || jobTitleCompanyKey(job), job]));
-          const merged = tagged.map(job => byKey.get(job.url || jobTitleCompanyKey(job)) || job);
+          // Account against the candidate list, rather than only `enhanced`:
+          // the expander may omit an expired/null row altogether, and that must
+          // be visible as an incomplete description rather than disappearing
+          // from the attempt/success/empty reconciliation.
+          const completeRows = [];
+          const emptyRows = [];
+          for (const candidate of candidates) {
+            const row = byKey.get(candidate.url || jobTitleCompanyKey(candidate));
+            if (hasResolvedJobDescription(row)) completeRows.push({ ...candidate, ...row, source: sourceId });
+            else emptyRows.push(candidate);
+          }
 
           let warning = expanded?.descError || expanded?.descWarning || null;
           if (emptyRows.length > 0) {
+            const sourceLabel = sourceId === 'ziprecruiter' ? 'ZipRecruiter' : 'Glassdoor';
             const samples = emptyRows.slice(0, 3).map(job => `"${job.title || 'Untitled'}"`).join(', ');
             warning = {
               code: 'resolve-description-incomplete',
               severity: 'block',
-              evidence: `Glassdoor Resolve recovered ${enhanced.length} relevant new listing(s), but ${emptyRows.length} still lack a full description${samples ? ` (${samples})` : ''}. Scoring is paused so list-card-only rows are not treated as fully analyzed.`,
-              suggestion: 'Click Solve again to retry the unlocked detail pages. Choose Skip only if you intentionally want to continue scoring the recovered rows with partial evidence.',
+              evidence: `${sourceLabel} Resolve recovered ${completeRows.length} description-complete listing(s), but ${emptyRows.length} still lack a full description${samples ? ` (${samples})` : ''}. Scoring is paused so list-card-only rows are not treated as fully analyzed.`,
+              suggestion: 'Click Solve again to retry the unlocked detail pages. Choose Skip only if you intentionally want to continue without the incomplete listings.',
             };
           }
 
           return {
-            items: merged,
+            // Crucial: do not merge the original list card when detail expansion
+            // failed. The warning below keeps the source retryable; only full JD
+            // rows may cross the resolver boundary into pendingJobs/scoring.
+            items: completeRows,
             warning,
             meta: {
-              attempted: enhanced.length,
-              enriched: enhanced.length - emptyRows.length,
+              attempted: candidates.length,
+              enriched: completeRows.length,
+              succeeded: completeRows.length,
               empty: emptyRows.length,
               relevanceDropped,
               relevanceRejected: localSourceResults[sourceId]?.relevanceRejected || [],
@@ -3592,12 +3639,34 @@ RULES:
       secondTabUrl || null,
       inlineItemsPostprocessor,
     );
-    const extractedRaw = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
+    const resolverNeedsDescriptions = ['glassdoor', 'ziprecruiter'].includes(sourceId);
+    const postprocessOutcome = result?.diag?.postprocessOutcome || null;
+    const rawResolvedItems = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
+    // authWindows intentionally preserves raw rows when the source-specific
+    // postprocessor throws so the caller can report an actionable failure. Do
+    // not let that recovery convenience cross the scoring boundary with blank
+    // DOM list cards: only already-description-complete rows may survive it.
+    const extractedRaw = resolverNeedsDescriptions && postprocessOutcome === 'failed'
+      ? rawResolvedItems.filter(hasResolvedJobDescription)
+      : rawResolvedItems;
+    // Match normal-search admission order for every resolver source, including
+    // ones without a detail expander: clean title text BEFORE title relevance.
+    repairJobsMojibake(extractedRaw);
+    normalizeJobsMarkup(extractedRaw);
     const resolveSourceResults = {
       [sourceId]: { jobs: extractedRaw, errors: 0, warnings: [] },
     };
     const extracted = applyFinalJobTitleRelevanceGate(extractedRaw, resolveQueries, resolveSourceResults);
-    const relevanceDropped = extractedRaw.length - extracted.length;
+    // The detail postprocessor applies the gate before enrichment so irrelevant
+    // cards never consume detail-page budget. Its rows are deliberately absent
+    // from extractedRaw, so fold its bounded accounting into the generic resolve
+    // telemetry rather than reporting a misleading zero final-gate drop.
+    const enrichmentMeta = result?.diag?.postprocessMeta || null;
+    const relevanceDropped = (extractedRaw.length - extracted.length) + Number(enrichmentMeta?.relevanceDropped || 0);
+    const relevanceRejected = [...new Set([
+      ...(resolveSourceResults[sourceId]?.relevanceRejected || []),
+      ...(enrichmentMeta?.relevanceRejected || []),
+    ])].slice(0, 8);
 
     // Run the SAME age + history dedup the headless search path applies.
     // Without it, this path returned raw items, so every job the user already
@@ -3629,7 +3698,8 @@ RULES:
 
     logger.info(
       `[Jobs][${nodeId}] Resolve window closed for ${sourceId}; auto-detected=${result.resolved}; ` +
-      `inline-extracted=${extractedRaw.length}, relevanceDropped=${relevanceDropped}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, hiddenApplied=${hiddenApplied}, new=${items.length}`
+      `inline-extracted=${extractedRaw.length}, relevanceDropped=${relevanceDropped}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, hiddenApplied=${hiddenApplied}, new=${items.length}` +
+      `${enrichmentMeta ? `, detail attempted=${enrichmentMeta.attempted || 0}, enriched=${enrichmentMeta.enriched || 0}, empty=${enrichmentMeta.empty || 0}` : ''}`
     );
     // Keyed by sourceId so a multi-source recovery keeps every resolve;
     // re-resolving the same source replaces its entry (latest wins).
@@ -3637,7 +3707,7 @@ RULES:
       ts: Date.now(),
       extracted: extractedRaw.length,
       relevanceDropped,
-      relevanceRejected: resolveSourceResults[sourceId]?.relevanceRejected || [],
+      relevanceRejected,
       ageDropped,
       historyDropped,
       hiddenApplied,
@@ -3646,7 +3716,7 @@ RULES:
       // and the page state — so "inline-extracted 0 → new 0" stops being an
       // unexplained dead end in the bug report (see openCaptchaResolveWindow).
       diag: result.diag || null,
-      enrichment: result?.diag?.postprocessMeta || null,
+      enrichment: enrichmentMeta,
     };
     // Multi-query sequential solve: if this source had more than one blocked query,
     // pop the just-resolved URL and return the next one so the frontend can re-raise

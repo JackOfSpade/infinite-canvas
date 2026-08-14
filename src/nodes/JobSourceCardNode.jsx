@@ -148,16 +148,19 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           resumeState,
         });
       } else {
-        const hubQueries = getNode(data.hubId)?.data?.queries || {};
+        const hubData = getNode(data.hubId)?.data || {};
+        const hubQueries = hubData.queries || {};
         // Keep Resolve on the exact same admission policy as the originating
         // search. Without these role queries, newly unlocked list rows bypassed
         // the final title-relevance gate and off-topic Glassdoor recommendations
         // were scored/persisted as if they matched the user's search.
-        const resolveQueries = [
-          ...(hubQueries.targetRoleQueries || []),
-          ...(hubQueries.titleQueries || []),
-          ...(hubQueries.suggestedRoleQueries || []),
-        ];
+        const resolveQueries = Array.isArray(hubData.activeSearchQueries)
+          ? hubData.activeSearchQueries
+          : [
+              ...(hubQueries.targetRoleQueries || []),
+              ...(hubQueries.titleQueries || []),
+              ...(hubQueries.suggestedRoleQueries || []),
+            ];
         result = await window.electronAPI.resolveJobSource({
           url: progress.url,
           sourceId: data.sourceId,

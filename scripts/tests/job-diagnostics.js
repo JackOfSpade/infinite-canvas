@@ -571,13 +571,18 @@ export default [
     name: 'job pipeline report: real model scores do not hide incomplete descriptions',
     run: () => {
       const inputs = [
-        { source: 'glassdoor', title: 'Security Officer', url: 'https://jobs/empty', snippet: '' },
+        ...Array.from({ length: 6 }, (_, index) => ({
+          source: 'glassdoor', title: `Security Officer ${index + 1}`,
+          url: `https://jobs/glassdoor-empty-${index + 1}`, snippet: '',
+        })),
+        { source: 'indeed', title: 'Security Officer — Indeed', url: 'https://jobs/indeed-empty', snippet: '' },
         { source: 'linkedin', title: 'Security Guard', url: 'https://jobs/short', snippet: 'Short listing excerpt.' },
         { source: 'indeed', title: 'Full JD', url: 'https://jobs/full', snippet: 'Complete description. '.repeat(40) },
       ];
       const quality = summarizeScoringInputQuality(inputs);
-      assert(quality.empty === 1 && quality.short === 1
-        && quality.bySource.glassdoor.empty === 1
+      assert(quality.empty === 7 && quality.short === 1
+        && quality.bySource.glassdoor.empty === 6
+        && quality.bySource.indeed.empty === 1
         && quality.bySource.linkedin.short === 1,
       'scoring input quality classifies empty and short evidence per source');
 
@@ -589,20 +594,26 @@ export default [
       Object.assign(telemetry, {
         nodeId: 'scoring-input-quality', windowId: null, search: null, resolves: {}, bucketing: null,
         scoring: {
-          ts: Date.now(), input: 3, selectedForScoring: 3, cappedForBudget: 0, scored: 3,
+          ts: Date.now(), input: inputs.length, selectedForScoring: inputs.length, cappedForBudget: 0, scored: inputs.length,
           placeholders: 0, batches: 1, failedBatches: 0, unscored: 0,
           models: ['gemini-test'], inputQuality: quality,
         },
       });
       try {
         const report = buildJobsPipelineSnapshot(new Set(['scoring-input-quality']), null, null);
-        assert(report.includes('all received real model scores')
+        assert(report.includes('scored but low-evidence')
           && report.includes('Low-evidence scoring inputs')
-          && report.includes('1 empty description(s), 1 short')
-          && report.includes('Security Officer')
-          && report.includes('https://jobs/empty'),
-        'report separates successful model responses from full-description evidence');
-        assert(!report.includes('all genuinely analyzed')
+          && report.includes('7 empty description(s), 1 short')
+          && report.includes('glassdoor=6 empty/0 short')
+          && report.includes('indeed=1 empty/0 short')
+          && report.includes('linkedin=0 empty/1 short')
+          && report.includes('Security Officer 1')
+          && report.includes('https://jobs/glassdoor-empty-1')
+          && report.includes('https://jobs/indeed-empty')
+          && report.includes('https://jobs/short'),
+        'report separates successful model responses from full-description evidence with bounded per-source samples');
+        assert(!report.includes('all received real model scores')
+          && !report.includes('all genuinely analyzed')
           && !report.includes('all analyzed with full descriptions'),
         'incomplete descriptions can never receive the green full-evidence verdict');
       } finally {
@@ -2173,7 +2184,8 @@ export default [
       const renderedMain = doc.split('</style>').pop().match(/<main\b[^>]*>/i)?.[0] || '';
       assert(!/\sdata-(?:print|mono|page|density)\b/i.test(renderedMain), 'resume doc: root variants must not be shadowed by model-level main attributes');
       // A model that mistakenly returns a full fenced document is normalized to
-      // exactly one <main> inside our scaffold. Counted only AFTER the inlined
+      // one résumé <main> plus the application workspace's cover-letter panel.
+      // Counted only AFTER the inlined
       // <style> block — colors_and_type.css's own comments literally contain
       // the text "<main class=\"page\" …>" as documentation of where a variant
       // attribute may be placed, which would otherwise inflate this count now
@@ -2182,7 +2194,7 @@ export default [
       const fenced = buildResumeDocument({ resumeMainHtml: '```html\n<html><body><main class="page">X</main></body></html>\n```' });
       const fencedBody = fenced.split('</style>').pop();
       const mainCount = (fencedBody.match(/<main/gi) || []).length;
-      assert(mainCount === 1 && fencedBody.includes('>X</main>'), 'resume doc: should extract a single <main> from a fenced full doc');
+      assert(mainCount === 2 && fencedBody.includes('>X</main>'), 'resume doc: should extract one résumé main from a fenced full doc and add one cover panel');
       return { ok: true };
     },
   },

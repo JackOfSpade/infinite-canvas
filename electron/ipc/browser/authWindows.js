@@ -1564,9 +1564,25 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
               logger.info(`[StealthBrowser] Inline item postprocess on ${currentHost} → ${extractedItems?.length ?? 0} item(s)`);
             } catch (err) {
               // Preserve the extracted list rows, but make the failure explicit to
-              // the caller. A detail-enrichment failure must never erase otherwise
-              // recoverable listings or masquerade as a clean resolve.
+              // the caller. The jobs IPC will retain only rows that already carry
+              // a usable description; blank list cards stay blocked/retryable.
+              // Keep a bounded accounting record here because a throw otherwise
+              // bypasses the postprocessor's normal enrichment telemetry.
               postprocessOutcome = 'failed';
+              const rawRows = Array.isArray(extractedItems) ? extractedItems : [];
+              const emptyRows = rawRows.filter(row => String(row?.snippet || row?.description || '').trim().length < 120);
+              postprocessMeta = {
+                attempted: rawRows.length,
+                // Some sources include a real body in the list extractor. It is
+                // safe to retain those rows even though detail expansion itself
+                // threw; make the funnel reconcile (attempted = usable + empty)
+                // and carry `failed` so this is never presented as a clean pass.
+                enriched: rawRows.length - emptyRows.length,
+                succeeded: rawRows.length - emptyRows.length,
+                empty: emptyRows.length,
+                failed: true,
+                emptySamples: emptyRows.slice(0, 5).map(row => ({ title: row?.title, url: row?.url })),
+              };
               postprocessWarning = {
                 code: 'resolve-detail-enrichment-failed',
                 severity: 'block',

@@ -227,6 +227,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         job: {
           title: data.title, company: data.company, snippet: data.snippet,
           location: data.location, salary: data.salary, url: data.url,
+          source: data.source, posted: data.posted, language: data.language,
         },
         careerData,
         achievements: cachedAchievements,
@@ -245,14 +246,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       }
       // Write the generated documents into ./Applied Jobs/<company>/<location>/<job>/
       // next to the canvas, then reveal that folder in Finder. No picker.
-      // resumePdfPath is the local render/fit-loop's PDF companion
-      // (electron/ipc/resumeRender.js + jobApplication.js) — optional, null
-      // when rendering failed for any reason; saveApplication already treats
-      // a missing PDF as fine (HTML is still the artifact that matters).
+      // The two PDF paths are generated from the same combined workspace.
+      // saveApplication requires both for the normal four-file ZIP, with the
+      // editable HTML/listing retained as recovery files if rendering failed.
       const saved = await window.electronAPI.saveApplication({
         resumeHtmlPath: result.resumeHtmlPath,
-        coverHtmlPath: result.coverHtmlPath,
         resumePdfPath: result.resumePdfPath,
+        coverLetterPdfPath: result.coverLetterPdfPath,
+        jobListingPath: result.jobListingPath,
         workDir: result.workDir,
         company: result.company,
         candidateName: result.candidateName,
@@ -265,23 +266,22 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         // Remembered so "Mark applied" can record where the artifacts went —
         // see lastSavedFolderRef's doc-comment.
         lastSavedFolderRef.current = saved.dir || null;
-        // resumePdfFile is null whenever the render/fit loop shipped no PDF
-        // (jobApplication.js / resumeRender.js) — most often because the
-        // design system's Google Fonts CDN import was unreachable (offline, a
-        // corporate proxy, or an ad-blocker) and a fallback-typeface PDF is
-        // deliberately discarded rather than sent to an employer. Still a
-        // SUCCESS toast, not an error: the HTML is the primary artifact and
-        // prints fine on its own — but staying silent here would leave the
-        // user assuming a PDF landed in "Applied Jobs" when it didn't.
-        const pdfNote = saved.resumePdfFile
-          ? ''
-          : result.resumeRequiresReview
-            ? ' PDF intentionally withheld: open the résumé workspace, review the high-impact adjacent skills, then export the verified final résumé.'
-            : ' PDF skipped (HTML-only) — likely fonts.googleapis.com was unreachable (offline, a corporate proxy, or an ad-blocker); the HTML still opens and prints fine from a browser.';
         const analysisNote = result.skillOpportunityError
           ? ' The skill-demand analysis was unavailable; the résumé workspace includes the error so this generation is not silently counted.'
           : '';
-        addToast({ title: 'Application Saved', description: `Résumé workspace + cover letter saved to ${saved.dir} — opening in Finder.${pdfNote}${analysisNote}`, type: 'success' });
+        if (saved.bundlePath) {
+          addToast({
+            title: 'Application Bundle Saved',
+            description: `Company ZIP saved to ${saved.bundlePath} — opening its folder.${analysisNote}`,
+            type: 'success',
+          });
+        } else {
+          addToast({
+            title: 'Bundle Incomplete',
+            description: `${saved.bundleError || 'The complete ZIP could not be created.'} Recovery HTML${saved.jobListingFile ? ' and the job listing were' : ' was'} saved to ${saved.dir}.${analysisNote}`,
+            type: 'error',
+          });
+        }
       } else if (saved?.success === false) {
         addToast({ title: 'Save Error', description: saved.error || 'Could not save files', type: 'error' });
       }
@@ -305,7 +305,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       }
       if (isMountedRef.current) setGeneratingApp(false);
     }
-  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, getNode, nav, updateGlobal, addToast, isMountedRef]);
+  }, [data.hubId, data.originHubId, data.title, data.company, data.snippet, data.location, data.salary, data.url, data.source, data.posted, data.language, getNode, nav, updateGlobal, addToast, isMountedRef]);
 
   // ── Mark applied (design doc §6.2) ──────────────────────────────────────
   // Generate NEVER auto-marks: generating a résumé is not the same as

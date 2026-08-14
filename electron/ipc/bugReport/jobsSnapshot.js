@@ -926,7 +926,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (r.enrichment) {
         const e = r.enrichment;
         const verdict = (e.empty || 0) === 0 ? '✅' : '⚠️';
-        lines.push(`  - Resolve detail enrichment: attempted ${e.attempted || 0} → full descriptions ${e.enriched || 0} → empty ${e.empty || 0} ${verdict}`);
+        const failureNote = e.failed ? ' (detail pass failed; only already-description-complete rows were retained)' : '';
+        lines.push(`  - Resolve detail enrichment: attempted ${e.attempted || 0} → full descriptions ${e.succeeded ?? e.enriched ?? 0} → empty ${e.empty || 0} ${verdict}${failureNote}`);
         for (const sample of Array.isArray(e.emptySamples) ? e.emptySamples : []) {
           lines.push(`    - missing: "${sample?.title || '(untitled)'}"${sample?.url ? ` · ${sample.url}` : ''}`);
         }
@@ -1180,6 +1181,23 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const inputQuality = s.inputQuality || null;
     const incompleteDescriptions = (inputQuality?.empty || 0) + (inputQuality?.short || 0);
     const fullEvidence = clean && !!inputQuality && incompleteDescriptions === 0;
+    // A model can successfully return a score for an empty listing-card row.
+    // Keep that transport success distinct from the quality of the evidence it
+    // received; otherwise the green score count reads as a clean analysis.
+    const scoreVerdict = fullEvidence
+      ? '✅ all analyzed with full descriptions'
+      : clean && incompleteDescriptions > 0
+        ? '⚠️ scored but low-evidence'
+        : clean
+          ? '✅ all received real model scores'
+          : '';
+    const selectedScoreVerdict = fullEvidence
+      ? '✅ all selected jobs analyzed with full descriptions'
+      : clean && incompleteDescriptions > 0
+        ? '⚠️ scored but low-evidence'
+        : clean
+          ? '✅ all selected jobs received real model scores'
+          : '';
     const selected = s.selectedForScoring ?? s.input; // back-compat with pre-cap telemetry
     lines.push(`\n### Scoring${ago(s.ts)}`);
     if (s.cappedForBudget > 0) {
@@ -1187,9 +1205,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // a wider gather means the kept jobs are the best slice across sources,
       // not all of them. Widening the scrape improves WHICH jobs make this cut.
       lines.push(`- Gathered: ${s.input} → pre-ranked to top **${selected}** across sources for scoring (${s.cappedForBudget} lower-priority overflow not scored — by-design budget cap to bound LLM cost, not a failure).`);
-      lines.push(`- Scored: ${s.scored}/${selected} ${fullEvidence ? '✅ all selected jobs analyzed with full descriptions' : clean ? '✅ all selected jobs received real model scores' : ''}`);
+      lines.push(`- Scored: ${s.scored}/${selected} ${selectedScoreVerdict}`);
     } else {
-      lines.push(`- Input: ${s.input} → scored: ${s.scored} ${fullEvidence ? '✅ all analyzed with full descriptions' : clean ? '✅ all received real model scores' : ''}`);
+      lines.push(`- Input: ${s.input} → scored: ${s.scored} ${scoreVerdict}`);
     }
     // Reconcile the scorer's input against what was actually gathered THIS session
     // (search + paste + captcha-resolves). When input exceeds that, the surplus was

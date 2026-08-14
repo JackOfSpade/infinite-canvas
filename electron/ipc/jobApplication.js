@@ -19,8 +19,8 @@
  *      using the ledger (when available) as a floor of pre-derived, code-
  *      verified accomplishments.
  *   3. cover letter       — structured fields the renderer lays out on-brand.
- *   4. document build     — buildResumeDocument / buildCoverLetterDocument
- *      (resumeHtml.js) turn those into two self-contained HTML files.
+ *   4. document build     — buildResumeDocument (resumeHtml.js) turns the
+ *      résumé and structured cover letter into one self-contained workspace.
  *      HTML-first output (design §5) — the HTML is still the primary,
  *      editable artifact.
  *   5. render → fit loop  — a LOCAL render → page-count → fit loop
@@ -33,10 +33,10 @@
  *      can never block generation — any render failure degrades to
  *      HTML-only, logged, never thrown (see renderResumeWithFit below).
  *
- * generate-application returns the temp HTML paths as resumeHtmlPath /
- * coverHtmlPath, plus resumePdfPath (the fit-loop's PDF companion — null
+ * generate-application returns the temp combined workspace as resumeHtmlPath,
+ * plus resumePdfPath (the safe baseline PDF companion — null
  * when rendering failed for any reason). save-application then writes those
- * files into an
+ * bundle into an
  * "Applied Jobs/<company>/<location>/<job>" folder next to the saved canvas
  * and opens that folder in Finder — no picker.
  */
@@ -67,8 +67,18 @@ import {
   recordSkillOpportunityAnalysis,
 } from './skillOpportunityStore.js';
 import { mergeSkillOpportunityAnalysis } from '../../src/utils/skillOpportunityHistogram.js';
+import {
+  createApplicationBundle,
+  formatOriginalJobListingMarkdown,
+  sanitizeApplicationBundlePart,
+} from './applicationBundle.js';
 
 const { shell } = electronPkg;
+
+// A renderer must not be able to substitute arbitrary filesystem paths into
+// save-application. Generation registers the exact temp artifacts here; save
+// consumes only that record and removes it after a durable bundle/recovery save.
+const pendingApplicationArtifacts = new Map();
 
 // Serialize histogram-backed taxonomy reads/AI canonicalization and the later
 // completed-artifact record operations. The two phases are deliberately
@@ -762,22 +772,72 @@ FILL THESE FIELDS for THIS job (per the CAREER DATA and writing rules above):
 }
 
 function sanitizeFilePart(s, fallback) {
-  const cleaned = String(s || '').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return cleaned || fallback;
+  return sanitizeApplicationBundlePart(s, fallback);
 }
 
 /** Copy `src` to `dir/desired`, avoiding collision by appending " (n)". */
 async function copyUnique(src, dir, desired) {
   const ext = path.extname(desired);
   const base = desired.slice(0, desired.length - ext.length);
-  let target = path.join(dir, desired);
-  let n = 1;
-  while (fs.existsSync(target)) {
-    target = path.join(dir, `${base} (${n})${ext}`);
-    n += 1;
+  for (let n = 0; n < 10_000; n += 1) {
+    const target = path.join(dir, n ? `${base} (${n})${ext}` : desired);
+    try {
+      await fs.promises.copyFile(src, target, fs.constants.COPYFILE_EXCL);
+      return target;
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e;
+    }
   }
-  await fs.promises.copyFile(src, target);
-  return target;
+  throw new Error(`Could not allocate a unique filename for ${desired}.`);
+}
+
+/** Write bytes into `dir/desired`, preserving an older bundle on collision. */
+async function writeUnique(dir, desired, data) {
+  const ext = path.extname(desired);
+  const base = desired.slice(0, desired.length - ext.length);
+  for (let n = 0; n < 10_000; n += 1) {
+    const target = path.join(dir, n ? `${base} (${n})${ext}` : desired);
+    try {
+      await fs.promises.writeFile(target, data, { flag: 'wx' });
+      return target;
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e;
+    }
+  }
+  throw new Error(`Could not allocate a unique filename for ${desired}.`);
+}
+
+/**
+ * Read the generated artifacts and write a portable four-file ZIP bundle.
+ * `applicationHtml` and `jobListingMarkdown` let a future edited-HTML flow supply
+ * its current document state without first writing a second loose file.
+ */
+export async function writeApplicationBundle({
+  destinationDir,
+  company,
+  applicationHtmlPath,
+  applicationHtml,
+  resumePdfPath,
+  coverLetterPdfPath,
+  jobListingPath,
+  jobListingMarkdown,
+}) {
+  if (!destinationDir || typeof destinationDir !== 'string') throw new Error('A destination directory is required for the application bundle.');
+  const html = applicationHtml != null
+    ? String(applicationHtml)
+    : await fs.promises.readFile(applicationHtmlPath, 'utf8');
+  const pdf = await fs.promises.readFile(resumePdfPath);
+  const coverPdf = await fs.promises.readFile(coverLetterPdfPath);
+  const listing = jobListingMarkdown != null
+    ? String(jobListingMarkdown)
+    : await fs.promises.readFile(jobListingPath, 'utf8');
+  const bundle = createApplicationBundle({
+    company, applicationHtml: html, resumePdf: pdf,
+    coverLetterPdf: coverPdf, jobListingMarkdown: listing,
+  });
+  await fs.promises.mkdir(destinationDir, { recursive: true });
+  const bundlePath = await writeUnique(destinationDir, bundle.fileName, bundle.buffer);
+  return { ...bundle, bundlePath };
 }
 
 // Last application generation — captured so the bug reporter can SEE the model's
@@ -903,7 +963,6 @@ export function registerJobApplicationHandlers() {
     //    outer safety net for anything unexpected in the loop's own
     //    orchestration (a bug here must still ship the HTML the model wrote).
     const resumeDocId = crypto.randomUUID();
-    const coverDocId = crypto.randomUUID();
     const targetPageCount = Number.isFinite(targetPageCountOverride) && targetPageCountOverride > 0
       ? targetPageCountOverride
       : targetPageCountForJob(job?.title);
@@ -932,91 +991,26 @@ export function registerJobApplicationHandlers() {
     const finalMainHtml = fitResult?.mainHtml || resumeMainHtml;
     const variantAttrs = fitResult?.variantAttrs || extractVariantAttrs(resumeMainHtml);
 
-    // 5. Dual-mode OCG post-process (SKILL.md §5 step 6) — ONLY for the
-    //    dual-pdf variant, and only when a PDF actually rendered. A failure
-    //    here degrades to shipping the PLAIN rendered PDF (no cream layer,
-    //    same as the ink-only variant's output) rather than no PDF at all —
-    //    the cosmetic dual-state layer is not worth losing the whole PDF over.
     const resumeRequiresReview = (Array.isArray(skillInsights?.items) ? skillInsights.items : [])
       .some(item => item?.kind === 'verify');
-    // A PDF is definitionally final-looking and cannot carry the workspace's
-    // verification controls. Withhold the automatic companion whenever a
-    // near-adjacent skill still needs a decision; the HTML export button stays
-    // gated until the user resolves every item, then prints the verified state.
-    let resumePdfBytes = resumeRequiresReview ? null : (fitResult?.pdfBytes || null);
-    if (resumePdfBytes && isDualMode(variantAttrs)) {
-      try {
-        resumePdfBytes = await applyDualPdf(resumePdfBytes);
-      } catch (e) {
-        logger.warn(`[JobApplication][${nodeId || '?'}] OCG dual-mode post-process failed — shipping the plain (non-dual) PDF instead: ${e?.message || e}`);
-      }
-    }
+    // The fit loop intentionally measures a worst-case document with every
+    // candidate skill revealed. Those bytes must never be delivered: an
+    // unverified skill in a PDF is an employer-facing claim. We render a
+    // second, baseline document below with every inferred skill hidden.
+    let resumePdfBytes = null;
+    let baselinePdfError = null;
+    let baselineFontsLoaded = null;
+    let coverLetterPdfBytes = null;
+    let coverLetterPdfError = null;
+    let coverLetterFontsLoaded = null;
 
-    // Capture the raw model output + render telemetry BEFORE building the
-    // documents, so a build failure still leaves them visible in a bug report
-    // (the prose is where newline/escape bugs live; the render attempts are
-    // where page-fit bugs live). Stored verbatim — the reporter stringifies
-    // for inspection. Ledger stats are recorded regardless of outcome
-    // (reused/mined/unavailable) so a report shows whether the feature ran at all.
-    const ledgerStats = freshlyMined?.stats || achievements?.stats || null;
-    const minedBy = freshlyMined?.minedBy || achievements?.minedBy || null;
-    recordApplicationTelemetry({
-      nodeId: nodeId || null,
-      jobTitle: job?.title || '',
-      company: job?.company || '',
-      coverLetter: {
-        salutation:     coverLetter?.salutation || '',
-        recipient:      coverLetter?.recipient || '',
-        paragraphs:     Array.isArray(coverLetter?.paragraphs) ? coverLetter.paragraphs : [],
-        closing:        coverLetter?.closing || '',
-        signatureTitle: coverLetter?.signatureTitle || '',
-        contact:        Array.isArray(coverLetter?.contact) ? coverLetter.contact : [],
-      },
-      resumeHtmlSample: String(finalMainHtml || '').slice(0, 1500),
-      resumeHtmlLen:    String(finalMainHtml || '').length,
-      achievements: {
-        source: ledgerSource,
-        skipped: achievementsSkipped,
-        kept: ledgerForPrompt?.ledger?.length || 0,
-        stats: ledgerStats,
-        minedBy,
-      },
-      skillOpportunities: {
-        itemCount: Array.isArray(skillInsights?.items) ? skillInsights.items.length : 0,
-        verifyCount: Array.isArray(skillInsights?.items) ? skillInsights.items.filter(item => item?.kind === 'verify').length : 0,
-        learnCount: Array.isArray(skillInsights?.items) ? skillInsights.items.filter(item => item?.kind === 'learn').length : 0,
-        histogramRoleCount: Array.isArray(skillHistogram?.roles) ? skillHistogram.roles.length : 0,
-        error: skillOpportunityError,
-      },
-      render: {
-        targetPageCount,
-        attempts: fitResult?.attempts || [],
-        initialPageCount: fitResult?.attempts?.[0]?.pageCount ?? null,
-        finalPageCount: fitResult?.pageCount ?? null,
-        compactApplied: !!fitResult?.compactApplied,
-        revisionApplied: !!fitResult?.revisionApplied,
-        pdfProduced: !!resumePdfBytes,
-        pdfWithheldForSkillReview: resumeRequiresReview,
-        error: fitResult ? (fitResult.renderError || null) : 'render/fit loop threw before producing any attempts',
-        // Distinguishes "no PDF because rendering broke" from "no PDF because
-        // the design system's Google Fonts CDN import was unreachable" — the
-        // two share the same pdfProduced:false/error:null shape otherwise, so
-        // without this a bug report can't tell a render bug from a network
-        // condition (offline/proxy/ad-blocker) that resolved on its own.
-        fontsLoaded: fitResult ? fitResult.fontsLoaded !== false : null,
-      },
-    });
-
-    // 6. Build the two self-contained HTML documents. HTML-first output
-    //    (design §5) — buildResumeDocument / buildCoverLetterDocument
-    //    (resumeHtml.js) own the scaffold, inlined CSS, and injected chrome.
-    //    `ledger` is passed to the résumé builder so its post-process can
-    //    resolve each `data-achievement-id` receipt against the SAME ledger
-    //    the model was shown (§4.3) — the cover letter carries no ledger
-    //    since it emits no receipts (§4.4). `docId` keys the contenteditable
-    //    autosave (§5.5) — the SAME id used in the render loop above, so the
-    //    shipped HTML and the measured PDF are the same document.
-    const resumeDoc = buildResumeDocument({
+    // 6. Build ONE self-contained application workspace. The design-system
+    // builder owns the resume/cover tabs; the PDF below is deliberately the
+    // résumé-only printable baseline. The same workspace is what a user can
+    // reopen later to edit either document and re-download the bundle.
+    const candidateName = coverLetter?.name || '';
+    const jobMarkdown = formatOriginalJobListingMarkdown(job);
+    const buildApplicationDocument = (resumePdfBase64 = '', coverLetterPdfBase64 = '') => buildResumeDocument({
       resumeMainHtml: finalMainHtml,
       variantAttrs,
       ledger: ledgerForPrompt?.ledger || null,
@@ -1025,14 +1019,115 @@ export function registerJobApplicationHandlers() {
       skillHistogram,
       skillOpportunityError,
       jobContext: { title: job?.title || '', company: job?.company || '' },
+      coverLetter,
+      downloadBundle: {
+        company: job?.company || '',
+        candidateName,
+        jobMarkdown,
+        resumePdfBase64,
+        coverLetterPdfBase64,
+      },
     });
-    const coverDoc = buildCoverLetterDocument({ letter: coverLetter, variantAttrs, docId: coverDocId });
+
+    // `renderResumeWithFit` measures all verified candidates to reserve page
+    // room, so its PDF is intentionally never shipped. Render the normal
+    // workspace state separately: candidates stay hidden until the person
+    // explicitly verifies them, making this a safe baseline attachment.
+    const baselineDocument = buildApplicationDocument();
+    try {
+      const rendered = await renderPdf(baselineDocument, { signal });
+      baselineFontsLoaded = rendered.fontsLoaded !== false;
+      if (baselineFontsLoaded) resumePdfBytes = rendered.bytes;
+      else baselinePdfError = 'Web fonts were unavailable while rendering the baseline résumé PDF.';
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+      baselinePdfError = e?.message || String(e);
+      logger.warn(`[JobApplication][${nodeId || '?'}] Safe baseline résumé PDF render failed — shipping recoverable HTML + listing only: ${baselinePdfError}`);
+    }
+    if (resumePdfBytes && isDualMode(variantAttrs)) {
+      try {
+        resumePdfBytes = await applyDualPdf(resumePdfBytes);
+      } catch (e) {
+        logger.warn(`[JobApplication][${nodeId || '?'}] OCG dual-mode post-process failed — shipping the plain baseline PDF instead: ${e?.message || e}`);
+      }
+    }
+    // This render-only document uses the cover builder's native page surface.
+    // It is never written or bundled as HTML: Application.html remains the
+    // sole editable source, while this avoids tab/default-panel state leaking
+    // into Chromium's print pipeline.
+    try {
+      const coverDocument = buildCoverLetterDocument({
+        letter: coverLetter,
+        variantAttrs,
+        docId: `${resumeDocId}-cover-pdf`,
+      });
+      const rendered = await renderPdf(coverDocument, { signal });
+      coverLetterFontsLoaded = rendered.fontsLoaded !== false;
+      if (coverLetterFontsLoaded) coverLetterPdfBytes = rendered.bytes;
+      else coverLetterPdfError = 'Web fonts were unavailable while rendering the cover-letter PDF.';
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+      coverLetterPdfError = e?.message || String(e);
+      logger.warn(`[JobApplication][${nodeId || '?'}] Cover-letter PDF render failed — shipping recoverable HTML + listing only: ${coverLetterPdfError}`);
+    }
+    if (coverLetterPdfBytes && isDualMode(variantAttrs)) {
+      try {
+        coverLetterPdfBytes = await applyDualPdf(coverLetterPdfBytes);
+      } catch (e) {
+        logger.warn(`[JobApplication][${nodeId || '?'}] Cover-letter OCG dual-mode post-process failed — shipping the plain cover-letter PDF instead: ${e?.message || e}`);
+      }
+    }
+    const resumePdfBase64 = resumePdfBytes ? Buffer.from(resumePdfBytes).toString('base64') : '';
+    const coverLetterPdfBase64 = coverLetterPdfBytes ? Buffer.from(coverLetterPdfBytes).toString('base64') : '';
+    const resumeDoc = buildApplicationDocument(resumePdfBase64, coverLetterPdfBase64);
+
+    // Capture raw output and both render phases for the bug reporter. The fit
+    // loop is a layout measurement; `baselinePdfProduced` is the only PDF that
+    // can enter the user-facing application bundle.
+    const ledgerStats = freshlyMined?.stats || achievements?.stats || null;
+    const minedBy = freshlyMined?.minedBy || achievements?.minedBy || null;
+    recordApplicationTelemetry({
+      nodeId: nodeId || null,
+      jobTitle: job?.title || '',
+      company: job?.company || '',
+      coverLetter: {
+        salutation: coverLetter?.salutation || '', recipient: coverLetter?.recipient || '',
+        paragraphs: Array.isArray(coverLetter?.paragraphs) ? coverLetter.paragraphs : [],
+        closing: coverLetter?.closing || '', signatureTitle: coverLetter?.signatureTitle || '',
+        contact: Array.isArray(coverLetter?.contact) ? coverLetter.contact : [],
+      },
+      resumeHtmlSample: String(finalMainHtml || '').slice(0, 1500),
+      resumeHtmlLen: String(finalMainHtml || '').length,
+      achievements: { source: ledgerSource, skipped: achievementsSkipped, kept: ledgerForPrompt?.ledger?.length || 0, stats: ledgerStats, minedBy },
+      skillOpportunities: {
+        itemCount: Array.isArray(skillInsights?.items) ? skillInsights.items.length : 0,
+        verifyCount: Array.isArray(skillInsights?.items) ? skillInsights.items.filter(item => item?.kind === 'verify').length : 0,
+        learnCount: Array.isArray(skillInsights?.items) ? skillInsights.items.filter(item => item?.kind === 'learn').length : 0,
+        histogramRoleCount: Array.isArray(skillHistogram?.roles) ? skillHistogram.roles.length : 0,
+        error: skillOpportunityError,
+      },
+      render: {
+        targetPageCount, attempts: fitResult?.attempts || [],
+        initialPageCount: fitResult?.attempts?.[0]?.pageCount ?? null,
+        finalPageCount: fitResult?.pageCount ?? null,
+        compactApplied: !!fitResult?.compactApplied, revisionApplied: !!fitResult?.revisionApplied,
+        pdfProduced: !!resumePdfBytes, baselinePdfProduced: !!resumePdfBytes,
+        baselinePdfError, baselineFontsLoaded,
+        coverLetterPdfProduced: !!coverLetterPdfBytes, coverLetterPdfError, coverLetterFontsLoaded,
+        resumeRequiresReview,
+        error: fitResult ? (fitResult.renderError || null) : 'render/fit loop threw before producing any attempts',
+        fontsLoaded: fitResult ? fitResult.fontsLoaded !== false : null,
+      },
+    });
 
     const outDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jobapp-out-'));
-    const resumeHtmlPath = path.join(outDir, `resume-${resumeDocId}.html`);
-    const coverHtmlPath = path.join(outDir, `cover-${coverDocId}.html`);
+    const resumeHtmlPath = path.join(outDir, `application-${resumeDocId}.html`);
+    // Keep the exact source-side job data alongside the editable résumé. The
+    // stable filename lets save-application discover it even if an older
+    // renderer has not yet been updated to pass jobListingPath explicitly.
+    const jobListingPath = path.join(outDir, 'original-job-listing.md');
     await fs.promises.writeFile(resumeHtmlPath, resumeDoc, 'utf8');
-    await fs.promises.writeFile(coverHtmlPath, coverDoc, 'utf8');
+    await fs.promises.writeFile(jobListingPath, jobMarkdown, 'utf8');
 
     // PDF companion — written next to the HTML, never in place of it (§5.1
     // still stands: HTML is the primary, editable artifact). null when
@@ -1047,6 +1142,16 @@ export function registerJobApplicationHandlers() {
         resumePdfPath = candidatePath;
       } catch (e) {
         logger.warn(`[JobApplication][${nodeId || '?'}] Could not write résumé PDF to disk — continuing with HTML only: ${e?.message || e}`);
+      }
+    }
+    let coverLetterPdfPath = null;
+    if (coverLetterPdfBytes) {
+      const candidatePath = path.join(outDir, `cover-letter-${resumeDocId}.pdf`);
+      try {
+        await fs.promises.writeFile(candidatePath, coverLetterPdfBytes);
+        coverLetterPdfPath = candidatePath;
+      } catch (e) {
+        logger.warn(`[JobApplication][${nodeId || '?'}] Could not write cover-letter PDF to disk — continuing with HTML only: ${e?.message || e}`);
       }
     }
 
@@ -1078,12 +1183,21 @@ export function registerJobApplicationHandlers() {
       };
     }
 
-    const candidateName = coverLetter?.name || '';
-    logger.info(`[JobApplication][${nodeId || '?'}] Built application HTML for ${company}${resumePdfPath ? ' (+ PDF)' : ' (PDF unavailable — see log above)'}`);
+    pendingApplicationArtifacts.set(path.resolve(outDir), {
+      senderId: event.sender.id,
+      company: job?.company || '',
+      candidateName,
+      resumeHtmlPath: path.resolve(resumeHtmlPath),
+      resumePdfPath: resumePdfPath ? path.resolve(resumePdfPath) : null,
+      coverLetterPdfPath: coverLetterPdfPath ? path.resolve(coverLetterPdfPath) : null,
+      jobListingPath: path.resolve(jobListingPath),
+    });
+    logger.info(`[JobApplication][${nodeId || '?'}] Built application HTML for ${company}${resumePdfPath && coverLetterPdfPath ? ' (+ résumé and cover-letter PDFs)' : ' (one or more PDFs unavailable — see log above)'}`);
     return {
       resumeHtmlPath,
-      coverHtmlPath,
       resumePdfPath,
+      coverLetterPdfPath,
+      jobListingPath,
       workDir: outDir,
       company: job?.company || '',
       candidateName,
@@ -1099,9 +1213,29 @@ export function registerJobApplicationHandlers() {
   // then open that folder in Finder. No picker — the location is deterministic
   // so the user's applications stay organized with the project. Cleans up the
   // temp working directory afterward.
-  handleSafe('save-application', async (event, { resumeHtmlPath, coverHtmlPath, resumePdfPath, workDir, company, candidateName, jobTitle, location, canvasFilePath }) => {
-    if (!resumeHtmlPath || !coverHtmlPath) throw new Error('Missing generated application file paths.');
-    if (!fs.existsSync(resumeHtmlPath) || !fs.existsSync(coverHtmlPath)) {
+  handleSafe('save-application', async (event, { resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, workDir, jobTitle, location, canvasFilePath }) => {
+    const resolvedWorkDir = typeof workDir === 'string' ? path.resolve(workDir) : '';
+    const pending = pendingApplicationArtifacts.get(resolvedWorkDir);
+    if (!pending) {
+      throw new Error('Generated application session is no longer available — please regenerate.');
+    }
+    if (pending.senderId !== event.sender.id) {
+      throw new Error('Generated application session belongs to a different window — please regenerate.');
+    }
+    const matchesPending = path.resolve(String(resumeHtmlPath || '')) === pending.resumeHtmlPath
+      && path.resolve(String(jobListingPath || '')) === pending.jobListingPath
+      && (resumePdfPath ? path.resolve(resumePdfPath) : null) === pending.resumePdfPath
+      && (coverLetterPdfPath ? path.resolve(coverLetterPdfPath) : null) === pending.coverLetterPdfPath;
+    if (!matchesPending) {
+      throw new Error('Generated application paths did not match this generation session — please regenerate.');
+    }
+    resumeHtmlPath = pending.resumeHtmlPath;
+    resumePdfPath = pending.resumePdfPath;
+    coverLetterPdfPath = pending.coverLetterPdfPath;
+    jobListingPath = pending.jobListingPath;
+    const company = pending.company;
+    const candidateName = pending.candidateName;
+    if (!fs.existsSync(resumeHtmlPath)) {
       throw new Error('Generated application files are no longer available — please regenerate.');
     }
     // The destination is relative to the canvas JSON, so it must be saved first.
@@ -1115,38 +1249,64 @@ export function registerJobApplicationHandlers() {
     // rather than collapsing the path (e.g. "Company//Role" if left empty).
     const whereLocation = sanitizeFilePart(location, 'Unknown Location');
     const role = sanitizeFilePart(jobTitle, 'Role');
-    const dir = path.join(path.dirname(canvasFilePath), 'Applied Jobs', where, whereLocation, role);
+    const appliedJobsDir = path.resolve(path.dirname(canvasFilePath), 'Applied Jobs');
+    const dir = path.resolve(appliedJobsDir, where, whereLocation, role);
+    const relativeDir = path.relative(appliedJobsDir, dir);
+    if (relativeDir.startsWith('..') || path.isAbsolute(relativeDir)) {
+      throw new Error('Application destination escaped the Applied Jobs directory.');
+    }
     await fs.promises.mkdir(dir, { recursive: true });
 
-    // Folder already encodes company + location + role, so the files only carry
-    // the candidate's name (useful once a recruiter detaches them from the folder).
     const who = sanitizeFilePart(candidateName, 'Application');
-    const resumeFile = await copyUnique(resumeHtmlPath, dir, `${who} - Resume.html`);
-    const coverFile  = await copyUnique(coverHtmlPath, dir, `${who} - Cover Letter.html`);
+    const listingSource = jobListingPath || (workDir ? path.join(workDir, 'original-job-listing.md') : '');
+    let bundlePath = null;
+    let bundleError = null;
+    let applicationFile = null;
+    let jobListingFile = null;
+    const hasPdf = !!resumePdfPath && fs.existsSync(resumePdfPath);
+    const hasCoverLetterPdf = !!coverLetterPdfPath && fs.existsSync(coverLetterPdfPath);
+    const hasListing = !!listingSource && fs.existsSync(listingSource);
+    if (hasPdf && hasCoverLetterPdf && hasListing) {
+      try {
+        const bundle = await writeApplicationBundle({
+          destinationDir: dir,
+          company: where,
+          applicationHtmlPath: resumeHtmlPath,
+          resumePdfPath,
+          coverLetterPdfPath,
+          jobListingPath: listingSource,
+        });
+        bundlePath = bundle.bundlePath;
+      } catch (e) {
+        bundleError = String(e?.message || e);
+      }
+    } else {
+      bundleError = !hasPdf
+        ? 'The résumé PDF was unavailable.'
+        : !hasCoverLetterPdf
+          ? 'The cover-letter PDF was unavailable.'
+          : 'The original job-listing Markdown was unavailable.';
+    }
 
-    // The PDF companion (electron/ipc/resumeRender.js + jobApplication.js's
-    // render/fit loop) is OPTIONAL — rendering can fail for reasons that never
-    // touch the HTML (no display, printToPDF throwing, pdf-lib rejecting), and
-    // per that loop's robustness rule a missing PDF must never block saving
-    // the HTML the user actually needs. fs.existsSync also guards the rarer
-    // case of workDir having been cleaned up by something else between
-    // generate and save (save-application is a separate IPC call — nothing
-    // enforces it runs before another cleanup path could touch the same dir).
-    let resumePdfFile = null;
-    if (resumePdfPath && fs.existsSync(resumePdfPath)) {
-      resumePdfFile = await copyUnique(resumePdfPath, dir, `${who} - Resume.pdf`);
+    // A complete bundle is the only normal saved artifact. Preserve recovery
+    // inputs only when rendering or archive creation genuinely failed.
+    if (!bundlePath) {
+      applicationFile = await copyUnique(resumeHtmlPath, dir, `${who} - Application.html`);
+      if (hasListing) jobListingFile = await copyUnique(listingSource, dir, `${where} - Original Job Listing.md`);
+      logger.warn(`[JobApplication] Complete ZIP unavailable; saved recovery HTML${jobListingFile ? ' + listing' : ''}: ${bundleError || 'unknown bundle error'}`);
     }
 
     // Clean up the temp output dir now that the files are safely copied out.
     if (workDir) {
       await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {});
     }
+    pendingApplicationArtifacts.delete(resolvedWorkDir);
 
     // Open the destination folder in a Finder/Explorer window.
     const openErr = await shell.openPath(dir);
     if (openErr) logger.warn(`[JobApplication] Could not open ${dir}: ${openErr}`);
 
-    logger.info(`[JobApplication] Saved application to ${dir}${resumePdfFile ? ' (+ PDF)' : ''}`);
-    return { saved: true, dir, resumeFile, coverFile, resumePdfFile };
+    logger.info(`[JobApplication] Saved application to ${dir}${bundlePath ? ' (+ bundle)' : ' (recovery files only)'}`);
+    return { saved: true, dir, bundlePath, bundleError, applicationFile, jobListingFile };
   });
 }

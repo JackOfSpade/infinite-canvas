@@ -7,6 +7,7 @@ import jobs_location_language from './tests/jobs-location-language.js';
 import marketplace_diagnostics_locks from './tests/marketplace-diagnostics-locks.js';
 import platform_utils from './tests/platform-utils.js';
 import skill_opportunities from './tests/skill-opportunities.js';
+import resume_download_bundle from './tests/resume-download-bundle.js';
 
 const tests = [
   ...marketplace_monitor,
@@ -18,6 +19,7 @@ const tests = [
   ...marketplace_diagnostics_locks,
   ...platform_utils,
   ...skill_opportunities,
+  ...resume_download_bundle,
 ];
 
 async function run() {
