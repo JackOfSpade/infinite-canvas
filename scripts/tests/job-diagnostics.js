@@ -1,4 +1,4 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, extractSalaryFromText, extractVariantAttrs, filterHandledJobSourceWarnings,  formatJsonLdSalary, formatUSAJobsSalary, fs, generateMarkdown, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordJobsBoardScope, recordJobsSourceScope, recordManualScraperTelemetry, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, sourceJobKey, staleReason, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, extractSalaryFromText, extractVariantAttrs, filterHandledJobSourceWarnings,  formatJsonLdSalary, formatUSAJobsSalary, fs, generateMarkdown, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordJobsBoardScope, recordJobsSourceScope, recordManualScraperTelemetry, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, sourceJobKey, staleReason, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn } from '../test-dependencies.js';
 
 export default [
 {
@@ -248,6 +248,46 @@ export default [
           'job pipeline report identifies whether Solve reached the expected Glassdoor results URL');
         assert(report.includes('final title: "Jobs in United States | Glassdoor"'),
           'job pipeline report retains the final page title to distinguish a results page from login/challenge pages');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+{
+    name: 'job pipeline report: resolved rows expose relevance and description recovery',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId,
+        resolves: telemetry.resolves, search: telemetry.search,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'resolved-quality-diagnostics', windowId: null, search: null,
+        resolves: {
+          glassdoor: {
+            ts: Date.now(), extracted: 6, relevanceDropped: 2,
+            relevanceRejected: ['Loss Prevention Associate', 'Armed Driver/Messenger'],
+            ageDropped: 0, historyDropped: 0, hiddenApplied: 0, kept: 4,
+            enrichment: {
+              attempted: 4, enriched: 3, empty: 1,
+              emptySamples: [{ title: 'Security Officer', url: 'https://jobs/missing-jd' }],
+            },
+            diag: {
+              closeReason: 'settled', extractOutcome: 'matched 6',
+              postprocessOutcome: 'completed 6', textLen: 5000,
+            },
+          },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['resolved-quality-diagnostics']), null, null);
+        assert(report.includes('title-relevance-dropped 2')
+          && report.includes('Loss Prevention Associate')
+          && report.includes('Resolve detail enrichment: attempted 4 → full descriptions 3 → empty 1')
+          && report.includes('https://jobs/missing-jd')
+          && report.includes('detail postprocess: completed 6'),
+        'resolved-source diagnostics retain admission and detail-enrichment provenance');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -521,6 +561,50 @@ export default [
           && report.includes('served `gemini-2.5-flash`')
           && report.includes('server: 1 earlier model(s) failed'),
         'FULL/JOBS scoring section preserves fallback cause after the main-process log rolls over');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+{
+    name: 'job pipeline report: real model scores do not hide incomplete descriptions',
+    run: () => {
+      const inputs = [
+        { source: 'glassdoor', title: 'Security Officer', url: 'https://jobs/empty', snippet: '' },
+        { source: 'linkedin', title: 'Security Guard', url: 'https://jobs/short', snippet: 'Short listing excerpt.' },
+        { source: 'indeed', title: 'Full JD', url: 'https://jobs/full', snippet: 'Complete description. '.repeat(40) },
+      ];
+      const quality = summarizeScoringInputQuality(inputs);
+      assert(quality.empty === 1 && quality.short === 1
+        && quality.bySource.glassdoor.empty === 1
+        && quality.bySource.linkedin.short === 1,
+      'scoring input quality classifies empty and short evidence per source');
+
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
+        resolves: telemetry.resolves, scoring: telemetry.scoring, bucketing: telemetry.bucketing,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'scoring-input-quality', windowId: null, search: null, resolves: {}, bucketing: null,
+        scoring: {
+          ts: Date.now(), input: 3, selectedForScoring: 3, cappedForBudget: 0, scored: 3,
+          placeholders: 0, batches: 1, failedBatches: 0, unscored: 0,
+          models: ['gemini-test'], inputQuality: quality,
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['scoring-input-quality']), null, null);
+        assert(report.includes('all received real model scores')
+          && report.includes('Low-evidence scoring inputs')
+          && report.includes('1 empty description(s), 1 short')
+          && report.includes('Security Officer')
+          && report.includes('https://jobs/empty'),
+        'report separates successful model responses from full-description evidence');
+        assert(!report.includes('all genuinely analyzed')
+          && !report.includes('all analyzed with full descriptions'),
+        'incomplete descriptions can never receive the green full-evidence verdict');
       } finally {
         Object.assign(telemetry, saved);
       }

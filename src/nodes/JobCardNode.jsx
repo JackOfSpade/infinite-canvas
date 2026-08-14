@@ -275,8 +275,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         // user assuming a PDF landed in "Applied Jobs" when it didn't.
         const pdfNote = saved.resumePdfFile
           ? ''
-          : ' PDF skipped (HTML-only) — likely fonts.googleapis.com was unreachable (offline, a corporate proxy, or an ad-blocker); the HTML still opens and prints fine from a browser.';
-        addToast({ title: 'Application Saved', description: `Résumé + cover letter saved to ${saved.dir} — opening in Finder.${pdfNote}`, type: 'success' });
+          : result.resumeRequiresReview
+            ? ' PDF intentionally withheld: open the résumé workspace, review the high-impact adjacent skills, then export the verified final résumé.'
+            : ' PDF skipped (HTML-only) — likely fonts.googleapis.com was unreachable (offline, a corporate proxy, or an ad-blocker); the HTML still opens and prints fine from a browser.';
+        const analysisNote = result.skillOpportunityError
+          ? ' The skill-demand analysis was unavailable; the résumé workspace includes the error so this generation is not silently counted.'
+          : '';
+        addToast({ title: 'Application Saved', description: `Résumé workspace + cover letter saved to ${saved.dir} — opening in Finder.${pdfNote}${analysisNote}`, type: 'success' });
       } else if (saved?.success === false) {
         addToast({ title: 'Save Error', description: saved.error || 'Could not save files', type: 'error' });
       }

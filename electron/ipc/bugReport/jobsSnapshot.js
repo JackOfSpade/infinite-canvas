@@ -916,9 +916,21 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         mergeNote = ` → **new (to history): ${r.kept}**`;
       }
       lines.push(
-        `- \`${sourceId}\`${ago(r.ts)}: inline-extracted ${r.extracted} → age-dropped ${r.ageDropped} → ` +
+        `- \`${sourceId}\`${ago(r.ts)}: inline-extracted ${r.extracted}${r.relevanceDropped > 0 ? ` → title-relevance-dropped ${r.relevanceDropped}` : ''} → age-dropped ${r.ageDropped} → ` +
         `already-seen/history ${r.historyDropped}${mergeNote}`,
       );
+      if (r.relevanceDropped > 0) {
+        const samples = (Array.isArray(r.relevanceRejected) ? r.relevanceRejected : []).slice(0, 8);
+        lines.push(`  - Rejected resolved recommendation(s) before history/scoring${samples.length ? `: ${samples.map(title => `"${title}"`).join(', ')}` : '.'}`);
+      }
+      if (r.enrichment) {
+        const e = r.enrichment;
+        const verdict = (e.empty || 0) === 0 ? '✅' : '⚠️';
+        lines.push(`  - Resolve detail enrichment: attempted ${e.attempted || 0} → full descriptions ${e.enriched || 0} → empty ${e.empty || 0} ${verdict}`);
+        for (const sample of Array.isArray(e.emptySamples) ? e.emptySamples : []) {
+          lines.push(`    - missing: "${sample?.title || '(untitled)'}"${sample?.url ? ` · ${sample.url}` : ''}`);
+        }
+      }
       if (r.extracted > 0 && r.kept === 0) {
         lines.push('  - _(every extracted job was already shown on a prior run — correctly suppressed, not re-analyzed)_');
       }
@@ -934,6 +946,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const d = r.diag;
       if (d) {
         const bits = [`closed: ${d.closeReason}`, `extractor: ${d.extractOutcome}`];
+        if (d.postprocessOutcome) bits.push(`detail postprocess: ${d.postprocessOutcome}`);
         if (d.textLen != null) bits.push(`page textLen ${d.textLen}`);
         if (d.sawChallenge) bits.push('challenge seen');
         if (d.sawConsent) bits.push('consent wall seen');
@@ -1164,6 +1177,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   if (t.scoring) {
     const s = t.scoring;
     const clean = s.placeholders === 0 && s.unscored === 0;
+    const inputQuality = s.inputQuality || null;
+    const incompleteDescriptions = (inputQuality?.empty || 0) + (inputQuality?.short || 0);
+    const fullEvidence = clean && !!inputQuality && incompleteDescriptions === 0;
     const selected = s.selectedForScoring ?? s.input; // back-compat with pre-cap telemetry
     lines.push(`\n### Scoring${ago(s.ts)}`);
     if (s.cappedForBudget > 0) {
@@ -1171,9 +1187,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // a wider gather means the kept jobs are the best slice across sources,
       // not all of them. Widening the scrape improves WHICH jobs make this cut.
       lines.push(`- Gathered: ${s.input} → pre-ranked to top **${selected}** across sources for scoring (${s.cappedForBudget} lower-priority overflow not scored — by-design budget cap to bound LLM cost, not a failure).`);
-      lines.push(`- Scored: ${s.scored}/${selected} ${clean ? '✅ all selected jobs genuinely analyzed' : ''}`);
+      lines.push(`- Scored: ${s.scored}/${selected} ${fullEvidence ? '✅ all selected jobs analyzed with full descriptions' : clean ? '✅ all selected jobs received real model scores' : ''}`);
     } else {
-      lines.push(`- Input: ${s.input} → scored: ${s.scored} ${clean ? '✅ all genuinely analyzed' : ''}`);
+      lines.push(`- Input: ${s.input} → scored: ${s.scored} ${fullEvidence ? '✅ all analyzed with full descriptions' : clean ? '✅ all received real model scores' : ''}`);
     }
     // Reconcile the scorer's input against what was actually gathered THIS session
     // (search + paste + captcha-resolves). When input exceeds that, the surplus was
@@ -1195,6 +1211,15 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`  - _(${sessionGathered} gathered this session; the other **${carried}** were carried over from a prior run — already on the canvas, re-scored here. Not gathered this session, so their scrape funnel isn't above — and not silently added.)_`);
     }
     lines.push(`- Batches: ${s.batches} (${s.failedBatches} failed)${modelTag(s.models?.length ? s.models.join(', ') : null)}`);
+    if (inputQuality && incompleteDescriptions > 0) {
+      const bySource = Object.entries(inputQuality.bySource || {})
+        .map(([source, q]) => `${source}=${q.empty || 0} empty/${q.short || 0} short`)
+        .join(', ');
+      lines.push(`- ⚠️ **Low-evidence scoring inputs:** ${inputQuality.empty || 0} empty description(s), ${inputQuality.short || 0} short (<400 chars). These rows received real model responses, but were NOT fully evidenced by a complete JD${bySource ? ` · by source: ${bySource}` : ''}.`);
+      for (const sample of Array.isArray(inputQuality.samples) ? inputQuality.samples : []) {
+        lines.push(`  - [${sample.source || '?'}] "${sample.title || '(untitled)'}" — ${sample.length || 0} chars${sample.url ? ` · ${sample.url}` : ''}`);
+      }
+    }
     if (Array.isArray(s.fallbacks) && s.fallbacks.length > 0) {
       lines.push('- Model fallback routes (successful scoring calls):');
       for (const [index, fallback] of s.fallbacks.entries()) {

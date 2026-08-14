@@ -148,6 +148,16 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           resumeState,
         });
       } else {
+        const hubQueries = getNode(data.hubId)?.data?.queries || {};
+        // Keep Resolve on the exact same admission policy as the originating
+        // search. Without these role queries, newly unlocked list rows bypassed
+        // the final title-relevance gate and off-topic Glassdoor recommendations
+        // were scored/persisted as if they matched the user's search.
+        const resolveQueries = [
+          ...(hubQueries.targetRoleQueries || []),
+          ...(hubQueries.titleQueries || []),
+          ...(hubQueries.suggestedRoleQueries || []),
+        ];
         result = await window.electronAPI.resolveJobSource({
           url: progress.url,
           sourceId: data.sourceId,
@@ -155,6 +165,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           canvasFilePath: nav?.currentFile || null,
           maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
           secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
+          queries: resolveQueries,
         });
       }
       // When the captcha-resolve window auto-detects the challenge as

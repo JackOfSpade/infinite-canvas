@@ -1579,6 +1579,29 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   return { jobs: enhanced, descError };
 }
 
+/**
+ * Enrich jobs extracted inside a visible captcha-resolve window before that
+ * browser is closed. The ordinary scrape path calls expandDescriptions after
+ * every list-page extraction; resolve-job-source must do the same or a
+ * Glassdoor DOM-list fallback (whose snippets are intentionally empty) reaches
+ * scoring without any job descriptions.
+ *
+ * The resolve window already owns/pauses the shared browser pool. This helper
+ * works directly with its Puppeteer page and therefore must not try to acquire
+ * another browser or shared-profile lease.
+ */
+export async function enrichResolvedJobDescriptions(page, jobs, sourceId, signal = null) {
+  const list = Array.isArray(jobs) ? jobs : [];
+  const srcName = SOURCE_LABELS[sourceId] || sourceId || 'Job source';
+  const overlayBase = {
+    srcLabel: 'Resolved source',
+    srcName,
+    qLabel: 'Recovered results',
+    qText: '',
+  };
+  return expandDescriptions(page, list, sourceId, overlayBase, list.length, signal);
+}
+
 // ── Next-page clicker ─────────────────────────────────────────────────────────
 // Returns true if next page was clicked and navigation started, false otherwise.
 async function clickNextPage(page, sourceId) {

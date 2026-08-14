@@ -1196,7 +1196,7 @@ async function launchVisibleWindow(label, url, launchOpts) {
  * window manually. The caller is expected to retry the original scrape; this
  * function does not retry on its own.
  */
-export async function openCaptchaResolveWindow(url, sender = null, signal = null, inlineExtractorJS = null, secondTabUrl = null) {
+export async function openCaptchaResolveWindow(url, sender = null, signal = null, inlineExtractorJS = null, secondTabUrl = null, inlineItemsPostprocessor = null) {
   if (!url) throw new Error('openCaptchaResolveWindow requires a url');
 
   const executablePath = process.env.CHROME_PATH || await findChromePath();
@@ -1359,6 +1359,9 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     let lastUrl = null;           // actual page URL before close (incl. regional redirects)
     let lastTitle = '';           // actual page title before close
     let extractOutcome = null;    // inline-extract result: 'matched N' / 'matched 0' / 'threw' / 'non-array' / 'no-extractor'
+    let postprocessOutcome = null; // optional caller-owned detail enrichment outcome
+    let postprocessWarning = null; // actionable partial-enrichment warning, if any
+    let postprocessMeta = null;    // bounded source-specific counts for diagnostics
     let autoCloseReason = null;   // why finishCleared fired (set at each call site)
     let siteChangedError = null;  // non-null when inline extract threw SITE_CHANGED (code fix needed, not captcha)
     let siteChangedHandled = false; // de-dupe guard for the SITE_CHANGED branch — must NOT be `isTerminated`, see below
@@ -1535,10 +1538,46 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
             logger.info(`[StealthBrowser] Inline extract on ${currentHost} → ${items.length} item(s) (skipping headless rescrape)`);
           }
           autoCloseReason = reason || 'cleared';
-          logger.info(`[StealthBrowser] Captcha auto-detected as cleared on ${currentHost} (no visible challenge widgets, textLen=${probe.textLength}, reason=${autoCloseReason}) — closing window`);
+          // Latch before the optional async postprocessor so overlapping interval
+          // ticks cannot start a second detail-enrichment pass while the first is
+          // opening/navigating background tabs.
           resolved = true;
           if (autoClosePoll) { clearInterval(autoClosePoll); autoClosePoll = null; }
           if (autoCloseTimeout) { clearTimeout(autoCloseTimeout); autoCloseTimeout = null; }
+
+          if (items && typeof inlineItemsPostprocessor === 'function') {
+            try {
+              const processed = await inlineItemsPostprocessor({
+                browser: captchaBrowser,
+                page,
+                items,
+                signal,
+              });
+              if (Array.isArray(processed)) {
+                extractedItems = processed;
+              } else if (processed && typeof processed === 'object') {
+                if (Array.isArray(processed.items)) extractedItems = processed.items;
+                postprocessWarning = processed.warning || null;
+                postprocessMeta = processed.meta || null;
+              }
+              postprocessOutcome = `completed ${extractedItems?.length ?? 0}`;
+              logger.info(`[StealthBrowser] Inline item postprocess on ${currentHost} → ${extractedItems?.length ?? 0} item(s)`);
+            } catch (err) {
+              // Preserve the extracted list rows, but make the failure explicit to
+              // the caller. A detail-enrichment failure must never erase otherwise
+              // recoverable listings or masquerade as a clean resolve.
+              postprocessOutcome = 'failed';
+              postprocessWarning = {
+                code: 'resolve-detail-enrichment-failed',
+                severity: 'block',
+                evidence: `Resolved-source detail enrichment failed: ${String(err?.message || err).slice(0, 240)}`,
+                suggestion: 'Click Solve again to retry description enrichment before these jobs are scored.',
+              };
+              logger.warn(`[StealthBrowser] Inline item postprocess failed on ${currentHost}: ${err?.message || err}`);
+            }
+          }
+
+          logger.info(`[StealthBrowser] Captcha auto-detected as cleared on ${currentHost} (no visible challenge widgets, textLen=${probe.textLength}, reason=${autoCloseReason}) — closing window`);
           await requestCaptchaBrowserClose();
         };
 
@@ -1753,6 +1792,8 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
         sawConsent: everSawConsent,
         textLen: lastTextLen,
         siteChangedError: siteChangedError || null,
+        postprocessOutcome,
+        postprocessMeta,
       };
       // Persist the diag ONTO the auth-window record (not just the resolve return
       // value). The bug report renders these fields, so a hung/odd resolve is
@@ -1777,6 +1818,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       // (which would re-trigger the same bot wall).
       resolve({
         success: true, resolved, items: extractedItems,
+        warning: postprocessWarning,
         siteChangedError: siteChangedError || null,
         closedByApp: sender?.isDestroyed?.(),
         diag,

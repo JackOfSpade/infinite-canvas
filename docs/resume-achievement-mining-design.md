@@ -78,15 +78,29 @@ exact `<main class="page">` markup with specific class names. Four observations:
 
 ### Design decisions taken during discussion
 
-- **Inference should be generous, not strict.** "Worked on a Django web app" → may claim ORM /
-  migrations / admin familiarity. Costs are asymmetric: over-claiming is visible on review,
-  under-claiming is invisible. Optimizing only against the visible failure produces a truthful,
-  forgettable résumé.
+- **Inference is now split by evidence, not handled as one generous résumé-writing rule.**
+  Capabilities directly entailed by concrete work may be stated. A close but unverified skill
+  (for example Django ORM when the corpus shows substantial database-backed Django work) enters a
+  candidate review queue only when it is a high-impact requirement for the target job. A more
+  distant high-impact skill enters a private learning queue. Neither enters employer-facing copy
+  without verification.
 - **Human review is a light wording glance, not an audit.** Assume it catches only outrageous
   errors. A deep manual check "is tiring to do and invalidates the whole point of this system."
   Therefore machine-side rigor carries the weight, and receipts must cost the reader ~nothing.
 - **Nothing gates.** Failed checks demote and annotate; they never block generation.
 - **Attribution is best-effort reasoning**, not a conservatism ratchet.
+
+### 2026-08-14 skill-demand extension
+
+Every application generation now runs a separate structured skill-opportunity analysis after role
+research. It emits only missing skills whose possession would materially change the outcome for
+that job, split into `verify` (nearby but unverified) and `learn` (too distant to claim). The AI maps
+role-title and skill-name aliases to the existing app-global taxonomy; deterministic code records
+one demand occurrence per canonical skill per generated application in
+`skill-opportunity-histogram.json`. The self-contained résumé HTML is a two-pane workspace with the
+review queue, private learning queue, and a role-selectable horizontal demand histogram. Export is
+gated until every `verify` item is resolved; only user-confirmed labels are inserted into the
+printed résumé. `learn` items never enter the résumé.
 
 ---
 
@@ -277,8 +291,9 @@ job-independent, so the whole prompt is effectively the prefix. Instruct it to:
 - Sweep for facts that only become accomplishments **when joined**: time-series deltas across
   documents, before/after around a tenure boundary, scale implied by scope, firsts, survived
   crises, things corroborated across a brag doc and a review.
-- Be **generous with fair inference** (the Django→ORM standard) and generous about what counts as
-  an accomplishment; be **strict only about the join being real**.
+- Search generously for what counts as an accomplishment, but keep the claim and its join
+  evidence-bound. Do not use achievement mining to infer unverified tool or subsystem experience;
+  that now belongs to the separate skill-opportunity review flow described above.
 - Rank by strength and emit at most **~40**. Weak joins are dropped at mining time. The ~30 figure
   is the *post-refute* target — mining above it leaves room for the refute pass (§3.5) to drop
   items without thinning the ledger below what a tailored résumé can draw on.
@@ -420,8 +435,9 @@ Prefix growth is ~8–12k tokens, billed at ~0.1× after the first call per hub.
 - **TRUTHFULNESS block**: amend so that "never invent metrics/numbers" explicitly **excludes
   verified ledger figures**. Without this edit a conservative model ignores the ledger and the whole
   feature is wasted.
-- **Inference license**: broaden past the current skill-inference examples to match the agreed
-  generous standard.
+- **Inference boundary**: state only capabilities directly entailed by demonstrated work. Feed
+  job-significant but unverified adjacent skills to the private review/learning workflow instead of
+  employer-facing prose.
 - **Ledger is a floor, not a ceiling**: the model still receives full `careerData` and is told to
   dig further for anything the JD emphasizes that the ledger missed.
 - **Attribution phrasing**: `context` items must be phrased as context, never as personal wins.

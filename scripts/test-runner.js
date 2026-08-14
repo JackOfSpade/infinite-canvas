@@ -6,6 +6,7 @@ import marketplace_extractors_auth from './tests/marketplace-extractors-auth.js'
 import jobs_location_language from './tests/jobs-location-language.js';
 import marketplace_diagnostics_locks from './tests/marketplace-diagnostics-locks.js';
 import platform_utils from './tests/platform-utils.js';
+import skill_opportunities from './tests/skill-opportunities.js';
 
 const tests = [
   ...marketplace_monitor,
@@ -16,6 +17,7 @@ const tests = [
   ...jobs_location_language,
   ...marketplace_diagnostics_locks,
   ...platform_utils,
+  ...skill_opportunities,
 ];
 
 async function run() {

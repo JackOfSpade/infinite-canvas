@@ -77,6 +77,10 @@ const TASK_MODELS = {
   // cascade exactly like any other Gemini task.
   'application-resume':        { gemini: 'gemini-3.7-flash' },
   'application-cover-letter':  { gemini: 'gemini-3.7-flash' },
+  // Evidence-bound analysis of job-significant, adjacent skills. This runs
+  // before the employer-facing artefact and feeds the candidate-only review /
+  // learning surfaces, so it belongs on the same capable Flash tier.
+  'application-skill-opportunity': { gemini: 'gemini-3.7-flash' },
   // Achievement mining (résumé design doc §3.1) derives accomplishments by
   // JOINING facts scattered across the corpus — e.g. two balance sheets + a
   // tenure date → "cut debt 74%" — which no other task attempts. It's the
@@ -160,6 +164,7 @@ const TASK_GROUPS = {
   // writing nuance + judgment convert to interviews.
   'application-resume':        { group: 'generation' },
   'application-cover-letter':  { group: 'generation' },
+  'application-skill-opportunity': { group: 'generation' },
   'career-achievement-mining': { group: 'generation' },
   'career-achievement-refute': { group: 'generation', step: 1 }, // independence — see doc above, load-bearing
   'company-research':          { group: 'generation', step: 1 }, // feeds generation, isn't the artifact
@@ -307,6 +312,10 @@ const TASK_MAX_TOKENS = {
   // 2-page senior résumé. Unused cap is free (billed on actual output).
   'application-resume':        12288,
   'application-cover-letter':  3072,  // structured letterhead + 3-4 paragraphs
+  // Short structured analysis: one role plus only job-significant verify/learn
+  // candidates, with evidence and safe follow-up text. Sized for several
+  // detailed items without the resume-sized budget.
+  'application-skill-opportunity': 6144,
   // A ledger of ~40 items, each carrying a verbatim evidence quote AND a
   // human-readable derivation string, is a larger output than a single file's
   // transcription — deliberately set above career-file-extract's 16384 for

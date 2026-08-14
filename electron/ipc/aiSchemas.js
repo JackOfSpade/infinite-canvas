@@ -302,6 +302,49 @@ export const JOB_QUERY_GENERATION_SCHEMA = {
   },
 };
 
+// ── Application skill opportunities: honest adjacent-skill analysis ────────
+// Runs before application generation. This is deliberately NOT résumé content:
+// `verify` items are small, evidence-adjacent inferences that need the
+// candidate's confirmation, while `learn` items are worthwhile gaps that must
+// stay out of the résumé. The caller supplies existing histogram role/skill ids
+// so semantically equivalent names can be consolidated across applications.
+export const APPLICATION_SKILL_OPPORTUNITY_SCHEMA = {
+  type: 'object',
+  required: ['role', 'items'],
+  properties: {
+    role: {
+      type: 'object',
+      required: ['canonicalName', 'matchedRoleId', 'sourceTitle'],
+      properties: {
+        canonicalName: { type: 'string', description: 'A concise canonical role/category name for this job. Deduplicate title variants into the same semantic role (for example, "Backend Engineer" rather than separate names for each seniority/company variation).' },
+        matchedRoleId: { type: 'string', description: 'Reuse an existing role id supplied by the caller ONLY when it is a true semantic equivalent of canonicalName; otherwise return an empty string.' },
+        sourceTitle: { type: 'string', description: 'The job title as supplied for this particular application.' },
+      },
+    },
+    items: {
+      type: 'array',
+      description: 'Only opportunities where possessing the skill would significantly increase this candidate\'s odds for THIS job. Return [] when none qualify. Never use this list to claim, invent, or exaggerate experience or proficiency.',
+      items: {
+        type: 'object',
+        required: ['id', 'canonicalSkillName', 'matchedSkillId', 'kind', 'jobImportance', 'jobEvidence', 'candidateEvidence', 'adjacencyReason', 'suggestedResumeText', 'verificationQuestion', 'learningAction'],
+        properties: {
+          id: { type: 'string', description: 'Stable item id within this response, e.g. "skill-1".' },
+          canonicalSkillName: { type: 'string', description: 'One normalized, canonical skill name. Deduplicate aliases/spelling variants; do not return separate entries for equivalent skills.' },
+          matchedSkillId: { type: 'string', description: 'Reuse an existing skill id supplied by the caller ONLY when it is a true semantic equivalent of canonicalSkillName; otherwise return an empty string.' },
+          kind: { type: 'string', enum: ['verify', 'learn'], description: 'verify = a small, plausible inference from concrete candidate evidence but still unverified; learn = too distant to claim today, yet reasonably actionable and high-value. Neither kind is proof of proficiency.' },
+          jobImportance: { type: 'string', enum: ['critical', 'high'], description: 'Importance to THIS job only. Include no medium/low-value skills; a verified possession must significantly improve the candidate\'s odds.' },
+          jobEvidence: { type: 'string', description: 'Specific requirement, responsibility, or repeated signal from this job description that makes this skill materially important.' },
+          candidateEvidence: { type: 'string', description: 'Specific evidence from the candidate data. For learn, state the nearest demonstrated foundation and make clear it does not establish the missing skill. Never invent experience.' },
+          adjacencyReason: { type: 'string', description: 'Why this is a small inference (verify) or a reasonably learnable next step (learn), including the boundary that prevents overstating the candidate.' },
+          suggestedResumeText: { type: 'string', description: 'For verify only: the concise skill label/phrase that may be added to the Skills section ONLY after the candidate confirms it; never write an experience bullet or imply unsupported proficiency, years, projects, or outcomes. For learn, return an empty string because learn items must never go on the résumé.' },
+          verificationQuestion: { type: 'string', description: 'For verify only: one precise yes/no or short-answer question that can confirm the skill before any résumé use. For learn, return an empty string.' },
+          learningAction: { type: 'string', description: 'A concrete, bounded first learning action tied to this job-relevant skill. For learn, this is the primary recommendation. For verify, this is the fallback shown only if the candidate says the plausible skill is not actually theirs.' },
+        },
+      },
+    },
+  },
+};
+
 // ── Application cover letter: structured letterhead + body ─────────────────
 // Used by generate-application. The résumé is filled as raw design-system HTML
 // by the model; the cover letter is structured so the builder maps the fields

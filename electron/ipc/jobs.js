@@ -15,7 +15,7 @@ import { JOB_SCORING_SCHEMA, JOB_BUCKETING_SCHEMA, RESUME_PARSE_SCHEMA, CAREER_F
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { clearBrowserSession } from './stealthBrowser.js';
-import { scrapeManualSources, resetManualScraperDiagnostics } from './browser/manualScraper.js';
+import { scrapeManualSources, resetManualScraperDiagnostics, enrichResolvedJobDescriptions } from './browser/manualScraper.js';
 import { orderBrowserSources, resetManualSolveTracking, recordVerificationOutcome, wasManualSolveRequired, getVerificationSnapshot } from './scrapeVerification.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
 import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_RESULT_CAP, JOB_MAX_PAGES, JOB_PER_PAGE_CAP, JOB_PER_SOURCE_CAP, MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from './resultCaps.js';
@@ -638,6 +638,35 @@ export function applyFinalJobTitleRelevanceGate(jobs, queries, sourceResults = {
     ])].slice(0, 8);
   }
   return admitted;
+}
+
+/**
+ * Summarize the evidence quality the scorer actually received. A successful LLM
+ * response proves that a row was scored, not that it carried a full job
+ * description. Keeping this separate from placeholder/unscored counts prevents
+ * diagnostics from calling empty-list-card inputs "genuinely analyzed."
+ */
+export function summarizeScoringInputQuality(jobs, shortThreshold = 400) {
+  const rows = Array.isArray(jobs) ? jobs : [];
+  const summary = { total: rows.length, empty: 0, short: 0, bySource: {}, samples: [] };
+  for (const job of rows) {
+    const source = job?.source || '?';
+    const length = String(job?.snippet || '').trim().length;
+    const bucket = length === 0 ? 'empty' : length < shortThreshold ? 'short' : null;
+    if (!bucket) continue;
+    summary[bucket]++;
+    const src = summary.bySource[source] || (summary.bySource[source] = { empty: 0, short: 0 });
+    src[bucket]++;
+    if (summary.samples.length < 8) {
+      summary.samples.push({
+        source,
+        title: String(job?.title || '(untitled)').slice(0, 140),
+        url: String(job?.url || '').slice(0, 500),
+        length,
+      });
+    }
+  }
+  return summary;
 }
 
 function linkedInShortDescriptionWarning(jobs) {
@@ -2777,6 +2806,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     await primeClaudeModels({ signal });
     const { role, gathered, toScore, cappedForBudget, scoringBatches, slimBatch, cachedPrefix, snapshot } =
       buildJobAnalysisSnapshot({ jobs, profile, nodeId, targetRole, snapshotContext });
+    const inputQuality = summarizeScoringInputQuality(toScore);
     logger.info(`[Jobs][${nodeId}] Scoring`, gathered.length, 'jobs', role ? `(target: ${role})` : '');
     // A direct re-score can enter without a fresh search-jobs call. Do not let
     // another hub's durable-history outcome ride along with that new telemetry.
@@ -2838,7 +2868,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
         });
         await writeJobBatchSidecar(canvasFilePath, nodeId, {
           batchId, model, createdAt: Date.now(), targetRole: role,
-          input: gathered.length, selectedForScoring: toScore.length, cappedForBudget,
+          input: gathered.length, selectedForScoring: toScore.length, cappedForBudget, inputQuality,
           // Full job groupings (objects) so completion reconciles + spawns with no re-search.
           batches: fitBatches,
         });
@@ -2846,7 +2876,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
         jobsTelemetry.scoring = {
           ts: Date.now(), input: gathered.length, selectedForScoring: toScore.length, cappedForBudget,
           scored: 0, placeholders: 0, batches: fitBatches.length, failedBatches: 0,
-          failureReason: null, unscored: toScore.length, directions: 0, models: [model], batchPending: true, batchId,
+          failureReason: null, unscored: toScore.length, inputQuality,
+          directions: 0, models: [model], batchPending: true, batchId,
         };
         return { batchPending: true, batchId, batchCount: fitBatches.length, selectedForScoring: toScore.length };
       } catch (err) {
@@ -2988,6 +3019,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       // were never sent to the scorer (distinct from cappedForBudget, which were
       // intentionally not selected, and placeholders, which were sent but unusable).
       unscored: toScore.length - scoredJobs.length,
+      inputQuality,
       // Distinct free-form careerDirection labels the scorer emitted across all
       // batches. The scorer invents these per-batch (no shared vocabulary), so a
       // high count vs. the bucketer's final category count = fragmentation the
@@ -3039,7 +3071,8 @@ Be creative with suggestedRoleQueries — think about what career directions the
       ts: Date.now(), input: sidecar.input, selectedForScoring: sidecar.selectedForScoring,
       cappedForBudget: sidecar.cappedForBudget, scored: scoredJobs.length, placeholders: placeholderCount,
       batches: Array.isArray(sidecar.batches) ? sidecar.batches.length : 0, failedBatches,
-      failureReason: null, unscored: 0, directions, models: sidecar.model ? [sidecar.model] : [], batched: true,
+      failureReason: null, unscored: 0, inputQuality: sidecar.inputQuality || null,
+      directions, models: sidecar.model ? [sidecar.model] : [], batched: true,
       audit: buildScoringAudit(scoringAuditRowsFromBatches(sidecar.batches, scoredJobs)),
     };
     logger.info(`[Jobs] Batch ${sidecar.batchId} ended → reconciled ${scoredJobs.length} scored (${placeholderCount} placeholder, ${failedBatches} failed batch)`);
@@ -3258,7 +3291,7 @@ RULES:
   // pendingJobs and drop the warning. items is [] when no extractor is
   // available for the source (API sources can't be inline-extracted; their
   // Solve button doesn't render).
-  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, canvasFilePath, maxAgeDays, secondTabUrl } = {}, signal) => {
+  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, canvasFilePath, maxAgeDays, secondTabUrl, queries } = {}, signal) => {
     if (!url) throw new Error('resolve-job-source requires a url');
     logger.info(`[Jobs][${nodeId}] User opening resolve window for ${sourceId}: ${url}${secondTabUrl ? ' (2-tab)' : ''}`);
 
@@ -3475,15 +3508,102 @@ RULES:
       glassdoor:    GLASSDOOR_EXTRACTOR,
     };
     const inlineExtractorJS = SOURCE_EXTRACTORS[sourceId] || null;
-    const result = await openCaptchaResolveWindow(url, event.sender, signal, inlineExtractorJS, secondTabUrl || null);
-    const extracted = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
+    const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+    // Recover the role-query admission policy for this exact source run. Scope
+    // process telemetry to this hub so a stale card cannot borrow another run's
+    // queries; the renderer payload is the restart/hot-reload fallback.
+    const explicitQueries = Array.isArray(queries) ? queries.filter(Boolean) : [];
+    const telemetryQueries = jobsTelemetry.nodeId === nodeId && Array.isArray(jobsTelemetry.search?.queryStrings)
+      ? jobsTelemetry.search.queryStrings.filter(Boolean)
+      : [];
+    // Telemetry is the exact post-test-cap set that actually ran. The renderer
+    // carries the generated set as a restart/hot-reload fallback, which may be
+    // broader in FAST mode.
+    const resolveQueries = telemetryQueries.length > 0 ? telemetryQueries : explicitQueries;
+
+    // The normal manual-scrape path expands Glassdoor list rows into full detail
+    // descriptions before returning them. A captcha/review-gate resolve used to
+    // skip that step, so the DOM fallback's intentionally-empty `snippet` fields
+    // were scored and persisted. Enrich only rows that can survive relevance,
+    // age, history, and applied-job filters, while the unlocked visible browser
+    // still owns the authenticated profile.
+    const inlineItemsPostprocessor = sourceId === 'glassdoor'
+      ? async ({ page, items: rawItems }) => {
+          const tagged = (Array.isArray(rawItems) ? rawItems : []).map(j => ({ ...j, source: sourceId }));
+          const localSourceResults = {
+            [sourceId]: { jobs: tagged, errors: 0, warnings: [] },
+          };
+          let candidates = applyFinalJobTitleRelevanceGate(tagged, resolveQueries, localSourceResults);
+          const relevanceDropped = tagged.length - candidates.length;
+          candidates = filterJobsByAge(candidates, ageDays);
+          if (canvasFilePath && candidates.length > 0) {
+            const history = await loadJobsHistory(canvasFilePath);
+            candidates = dedupAgainstHistory(candidates, history).kept;
+          }
+          candidates = filterOutApplied(candidates).jobs;
+
+          if (candidates.length === 0) {
+            return {
+              items: rawItems,
+              meta: {
+                attempted: 0, enriched: 0, empty: 0, relevanceDropped,
+                relevanceRejected: localSourceResults[sourceId]?.relevanceRejected || [],
+              },
+            };
+          }
+
+          const expanded = await enrichResolvedJobDescriptions(page, candidates, sourceId, signal);
+          const enhanced = Array.isArray(expanded?.jobs) ? expanded.jobs : candidates;
+          const emptyRows = enhanced.filter(job => !String(job?.snippet || '').trim());
+          const byKey = new Map(enhanced.map(job => [job.url || jobTitleCompanyKey(job), job]));
+          const merged = tagged.map(job => byKey.get(job.url || jobTitleCompanyKey(job)) || job);
+
+          let warning = expanded?.descError || expanded?.descWarning || null;
+          if (emptyRows.length > 0) {
+            const samples = emptyRows.slice(0, 3).map(job => `"${job.title || 'Untitled'}"`).join(', ');
+            warning = {
+              code: 'resolve-description-incomplete',
+              severity: 'block',
+              evidence: `Glassdoor Resolve recovered ${enhanced.length} relevant new listing(s), but ${emptyRows.length} still lack a full description${samples ? ` (${samples})` : ''}. Scoring is paused so list-card-only rows are not treated as fully analyzed.`,
+              suggestion: 'Click Solve again to retry the unlocked detail pages. Choose Skip only if you intentionally want to continue scoring the recovered rows with partial evidence.',
+            };
+          }
+
+          return {
+            items: merged,
+            warning,
+            meta: {
+              attempted: enhanced.length,
+              enriched: enhanced.length - emptyRows.length,
+              empty: emptyRows.length,
+              relevanceDropped,
+              relevanceRejected: localSourceResults[sourceId]?.relevanceRejected || [],
+              emptySamples: emptyRows.slice(0, 5).map(job => ({ title: job.title, url: job.url })),
+            },
+          };
+        }
+      : null;
+
+    const result = await openCaptchaResolveWindow(
+      url,
+      event.sender,
+      signal,
+      inlineExtractorJS,
+      secondTabUrl || null,
+      inlineItemsPostprocessor,
+    );
+    const extractedRaw = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
+    const resolveSourceResults = {
+      [sourceId]: { jobs: extractedRaw, errors: 0, warnings: [] },
+    };
+    const extracted = applyFinalJobTitleRelevanceGate(extractedRaw, resolveQueries, resolveSourceResults);
+    const relevanceDropped = extractedRaw.length - extracted.length;
 
     // Run the SAME age + history dedup the headless search path applies.
     // Without it, this path returned raw items, so every job the user already
     // saw on a prior run re-appeared (and got re-scored) each time they
     // re-solved a source's captcha. This path now only applies to browser-backed
     // sources; Indeed runs through Scrapfly and does not use resolve windows.
-    const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     const ageFiltered = filterJobsByAge(extracted, ageDays);
     const ageDropped = extracted.length - ageFiltered.length;
     let items = ageFiltered;
@@ -3499,16 +3619,25 @@ RULES:
     const { jobs: appliedFiltered, hiddenApplied, error: appliedStoreError } = filterOutApplied(items);
     items = appliedFiltered;
     const appliedStoreWarning = appliedStoreError ? appliedStoreErrorWarning(appliedStoreError) : null;
+    // Mirror the main search's final text/language cleanup. Resolve rows otherwise
+    // bypassed the single normalization chokepoint and could carry raw markup or
+    // mojibake into scoring, cards, history, and generated application documents.
+    repairJobsMojibake(items);
+    normalizeJobsMarkup(items);
+    tagJobLanguages(items);
+    const resolveWarning = result?.warning || appliedStoreWarning;
 
     logger.info(
       `[Jobs][${nodeId}] Resolve window closed for ${sourceId}; auto-detected=${result.resolved}; ` +
-      `inline-extracted=${extracted.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, hiddenApplied=${hiddenApplied}, new=${items.length}`
+      `inline-extracted=${extractedRaw.length}, relevanceDropped=${relevanceDropped}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, hiddenApplied=${hiddenApplied}, new=${items.length}`
     );
     // Keyed by sourceId so a multi-source recovery keeps every resolve;
     // re-resolving the same source replaces its entry (latest wins).
     jobsTelemetry.resolves[sourceId] = {
       ts: Date.now(),
-      extracted: extracted.length,
+      extracted: extractedRaw.length,
+      relevanceDropped,
+      relevanceRejected: resolveSourceResults[sourceId]?.relevanceRejected || [],
       ageDropped,
       historyDropped,
       hiddenApplied,
@@ -3517,6 +3646,7 @@ RULES:
       // and the page state — so "inline-extracted 0 → new 0" stops being an
       // unexplained dead end in the bug report (see openCaptchaResolveWindow).
       diag: result.diag || null,
+      enrichment: result?.diag?.postprocessMeta || null,
     };
     // Multi-query sequential solve: if this source had more than one blocked query,
     // pop the just-resolved URL and return the next one so the frontend can re-raise
@@ -3525,11 +3655,10 @@ RULES:
     if (jobsTelemetry.sourceBlockedUrls) jobsTelemetry.sourceBlockedUrls[sourceId] = remaining;
     const nextBlockedUrl = remaining[0] || null;
     if (nextBlockedUrl) logger.info(`[Jobs][${nodeId}] Next blocked URL for ${sourceId}: ${nextBlockedUrl}`);
-    // appliedStoreWarning only fires when the store itself was unreadable;
     // JobSourceCardNode's onResolved handler already reads `warning` off this
-    // return to re-derive the hub's ScrapeWarningsPanel (see its own comment),
-    // so this reuses that exact channel instead of adding a new one.
-    return { resolved: !!result.resolved, items, hiddenApplied, warning: appliedStoreWarning, nextBlockedUrl };
+    // return to re-derive the hub's ScrapeWarningsPanel. Reuse that channel for
+    // both applied-store failures and incomplete resolve enrichment.
+    return { resolved: !!result.resolved, items, hiddenApplied, warning: resolveWarning, nextBlockedUrl };
   });
 
   // Resume an Indeed scrape that was interrupted by a login-wall mid-pagination.

@@ -303,7 +303,7 @@ export default [
         'vision-product-analysis', 'price-synthesis', 'bundle-price-synthesis',
         'resume-parse', 'career-file-extract', 'job-query-generation',
         'job-scoring', 'job-bucketing', 'company-research',
-        'application-resume', 'application-cover-letter',
+        'application-resume', 'application-cover-letter', 'application-skill-opportunity',
         'career-achievement-mining', 'default',
       ];
       for (const task of geminiQualityTasks) {
@@ -338,6 +338,7 @@ export default [
       const expected = {
         'application-resume':        OPUS,
         'application-cover-letter':  OPUS,
+        'application-skill-opportunity': OPUS,
         'career-achievement-mining': OPUS,
         'career-achievement-refute': SONNET, // generation stepped down 1 (independence — load-bearing)
         'company-research':          SONNET, // generation stepped down 1 (feeds generation, isn't the artifact)

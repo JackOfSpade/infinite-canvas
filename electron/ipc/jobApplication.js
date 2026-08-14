@@ -47,7 +47,12 @@ import crypto from 'crypto';
 import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { callLLMRaw, callLLMText } from './llm.js';
-import { APPLICATION_COVER_LETTER_SCHEMA, ACHIEVEMENT_LEDGER_SCHEMA, ACHIEVEMENT_REFUTE_SCHEMA } from './aiSchemas.js';
+import {
+  APPLICATION_COVER_LETTER_SCHEMA,
+  APPLICATION_SKILL_OPPORTUNITY_SCHEMA,
+  ACHIEVEMENT_LEDGER_SCHEMA,
+  ACHIEVEMENT_REFUTE_SCHEMA,
+} from './aiSchemas.js';
 import { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isDualMode, getDesignSystemDir } from './resumeHtml.js';
 import { renderPdf, applyDualPdf } from './resumeRender.js';
 import { primeClaudeModels } from './modelResolver.js';
@@ -56,8 +61,23 @@ import {
 } from '../../src/utils/achievementLedger.js';
 import { logger } from '../logger.js';
 import { wrapUntrustedText } from './promptSafety.js';
+import { createFifoLock } from './asyncMutex.js';
+import {
+  loadSkillOpportunityHistogram,
+  recordSkillOpportunityAnalysis,
+} from './skillOpportunityStore.js';
+import { mergeSkillOpportunityAnalysis } from '../../src/utils/skillOpportunityHistogram.js';
 
 const { shell } = electronPkg;
+
+// Serialize histogram-backed taxonomy reads/AI canonicalization and the later
+// completed-artifact record operations. The two phases are deliberately
+// separate: demand is not persisted until the application files exist, while
+// each individual read/analyse or merge/write remains race-free.
+const { withLock: withSkillOpportunityLock } = createFifoLock({
+  name: 'skillOpportunityAnalysis',
+  supportsAbort: true,
+});
 
 // The résumé markup the model mirrors — the design system's own sample <main>
 // block, read once and cached so it stays the single source of truth for the
@@ -248,6 +268,72 @@ Prefer concrete, recent, verifiable facts with rough dates. If you cannot find r
 }
 
 /**
+ * Build the persistent "what should I learn next?" signal for one application.
+ * This is deliberately a separate call from résumé writing: asking the résumé
+ * writer to both maximize fit and police unsupported adjacent skills makes the
+ * truthfulness boundary compete with the writing objective. Here the model has
+ * one job — identify only missing skills that materially change this job's
+ * outcome, classify their distance from demonstrated work, and map aliases to
+ * the app-global role/skill taxonomy. Deterministic code owns the counters.
+ */
+async function analyzeSkillOpportunities({ careerData, job, research, histogram }, signal) {
+  const roles = Array.isArray(histogram?.roles) ? histogram.roles : [];
+  const taxonomy = roles.map((role) => ({
+    id: role.id,
+    name: role.name,
+    aliases: Array.isArray(role.aliases) ? role.aliases : [],
+    skills: (Array.isArray(role.skills) ? role.skills : []).map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      aliases: Array.isArray(skill.aliases) ? skill.aliases : [],
+    })),
+  }));
+
+  const prompt = `You are the evidence-and-demand analyst in a truthful résumé system. Analyze ONE target job against the candidate's career data. Return JSON matching the schema.
+
+Your output drives two things:
+1. A review queue for a small, plausible but UNVERIFIED adjacent skill. It may enter the final résumé only after the user explicitly verifies it.
+2. A private learning queue for a more distant skill that must NEVER enter the résumé yet.
+Both kinds are counted in a persistent histogram so repeated demand across jobs reveals which skill is most worth learning for each role family.
+
+SELECTION GATE — the most important rule:
+- Emit a skill only if possessing it would SIGNIFICANTLY improve this candidate's odds for THIS job: it is explicitly required, repeated, central to core responsibilities, or a likely hard screen. A generic nice-to-have, fashionable adjacent tool, or minor keyword is not enough.
+- Empty items is a correct and preferred result when no missing skill clears that bar. Do not manufacture a queue just to be helpful.
+- Emit each semantic skill once. Count demand, not wording variants.
+
+TRUTHFUL DISTANCE:
+- First exclude skills already directly supported by the career data; those belong in the résumé normally and are not missing-skill demand.
+- kind="verify": a very small inference from concrete demonstrated work that could plausibly already be true, but the data does not establish it. Example: substantial Django database-backed CRUD/models work can make Django ORM plausible; the word "Django" alone does not. Supply the exact evidence and one plain verification question. Never say the candidate is proficient.
+- kind="learn": too distant to claim now, but realistically learnable to an interview-usable level through a bounded near-term course/project given the candidate's foundation. Keep it private and supply a concrete first learning action. Exclude gaps that would require months/years or prerequisites the candidate lacks. Python/C++ does not imply Ruby; Ruby may be a learn item only when it clears both the significant-impact and reasonable-learning-horizon gates.
+- Never invent usage, proficiency, duration, projects, credentials, metrics, or accomplishments.
+
+CANONICALIZATION:
+- Map the current title to an existing role id only when it is the same durable role family despite wording/seniority variants (for example Backend Developer and Backend Engineer). Keep meaningfully different functions separate.
+- Map a skill to an existing skill id only for a true semantic alias (Postgres/PostgreSQL; Django models/Django ORM), not merely related technologies (Django ORM/SQLAlchemy).
+- If there is no equivalent, return an empty matched id and a clean canonical name. Preserve the scraped title in sourceTitle.
+
+EXISTING ROLE/SKILL TAXONOMY (app data; ids may be reused under the rules above):
+${wrapUntrustedText('existing-skill-taxonomy', JSON.stringify(taxonomy))}
+
+TARGET JOB:
+${jobBlock(job)}
+
+LIVE COMPANY/ROLE CONTEXT (supporting context; if it describes a comparable role rather than this exact posting, do not treat a speculative tool as a hard requirement):
+${wrapUntrustedText('company-role-research', research)}
+
+CANDIDATE CAREER DATA:
+${wrapUntrustedText('candidate-career-data', careerData)}
+
+Return only high-impact missing skills. suggestedResumeText must be only the concise skill label/phrase that could be added after verification — never a fabricated experience bullet. For learn items, suggestedResumeText and verificationQuestion should be empty strings. Supply learningAction for BOTH kinds: for a verify item it is the bounded fallback the user can follow if they answer "not mine."`;
+
+  return await callLLMText(prompt, {
+    signal,
+    task: 'application-skill-opportunity',
+    responseSchema: APPLICATION_SKILL_OPPORTUNITY_SCHEMA,
+  });
+}
+
+/**
  * Mine the achievement ledger (Opus, job-independent — design §3.3), run the
  * deterministic checks (arithmetic/evidence/dates — achievementLedger.js), then
  * refute with a DIFFERENT model (Sonnet — design §3.5) and apply its verdicts.
@@ -272,10 +358,10 @@ WHAT TO LOOK FOR — facts that only become an accomplishment WHEN JOINED:
 - Survived crises: a downturn, an outage, a reorg the candidate's role persisted through or was central to.
 - Corroboration across documents: the same fact appearing in, say, a brag doc AND a performance review — the corroboration itself is evidence worth citing.
 
-STANDARD — be GENEROUS, not strict, except on one thing:
-- Be generous with fair inference: "worked on a Django web app" may fairly claim ORM / migrations / admin-panel familiarity even though the corpus never uses those words. Extend the same generosity to what COUNTS as an accomplishment — a real but modest join is still worth surfacing, not just the dramatic ones.
-- Be STRICT only about the join itself being real: every endpoint must trace to an actual quote in the CAREER DATA, and the reasoning connecting the facts must hold up. Never invent an endpoint, a date, or a connection that isn't actually there.
-- The costs are asymmetric: an over-claimed line is visible and gets caught on a human's review pass; an accomplishment you failed to mine is invisible and simply never happens for this candidate. Optimize against the visible failure, not the invisible one.
+STANDARD — search broadly, but keep every claim evidence-bound:
+- Be generous about what COUNTS as an accomplishment: a real but modest join is still worth surfacing, not just dramatic ones.
+- Do not derive tool usage or proficiency from technical proximity. This ledger mines accomplishments, not unverified skills; adjacent-skill discovery happens in a separate candidate-review workflow.
+- Be strict about the join itself being real: every endpoint must trace to an actual quote in the CAREER DATA, and the reasoning connecting the facts must hold up. Never invent an endpoint, a date, a skill, or a connection that isn't actually there.
 
 OUTPUT:
 - Rank by strength and return at most ~${MINING_TARGET} achievements. This is deliberately ABOVE the ~30-item ledger a résumé actually draws from — an independent adversarial pass runs next and drops items that don't hold up, so mining generously here leaves that pass room to cut without thinning the ledger below what a tailored résumé needs.
@@ -405,7 +491,7 @@ ${getResumeSampleMain()}
 
 TRUTHFULNESS & FRAMING (read carefully — this is the core constraint):
 - Ground every claim in the CAREER DATA. NEVER invent employers, job titles, employment dates, degrees, certifications, or specific metrics/numbers the data doesn't support — with ONE exception: a figure that appears in the ACHIEVEMENT LEDGER above is already verified and computed by code FROM the candidate's own career data, not invented by you, and you SHOULD use it per the RECEIPTS rule below. A recruiter must be able to verify everything against the candidate's real history.
-- You MAY make FAIR INFERENCES, and be GENEROUS about it: surface any skill, capability, or accomplishment a reasonable recruiter would confidently read from demonstrated experience — not just adjacent tools (shipped production REST APIs → comfortable with HTTP/JSON and API design; led a 5-person team → people management; heavy PostgreSQL use → SQL generally), but also scope, scale, and outcomes a reasonable reader would infer from the work described. Costs here are asymmetric: an inference that reads as slightly generous gets caught on a quick review and costs nothing; an accomplishment you under-claimed is invisible and simply never happened for this application. The inference must still be a defensible read of real work, never a brand-new tool, credential, employer, or FIGURE the data can't back up (figures come only from the CAREER DATA or the ACHIEVEMENT LEDGER — never invented).
+- You MAY state a capability that is directly entailed by concrete demonstrated work (shipped production REST APIs → HTTP/JSON and API design; led a 5-person team → team leadership; substantial PostgreSQL work → SQL). Do NOT turn mere technical proximity into experience or proficiency. A named framework alone does not prove use of every subsystem inside it. Any plausible-but-unverified adjacent skill is handled by a separate private review workflow and is expressly excluded from this draft until the candidate verifies it.
 - The ACHIEVEMENT LEDGER, when present, is a FLOOR, not a ceiling. Draw on its strongest items where they fit this job, but you still have the full CAREER DATA above — dig into it yourself for anything the target job emphasizes that the ledger didn't surface.
 - ATTRIBUTION: a ledger item with \`attribution=context\` means the change happened during the candidate's tenure but their personal causal role is uncertain — phrase it AS CONTEXT ("during a period when revenue grew 40%...", "amid a company-wide replatforming that cut latency 60%..."), never as a personal win ("I grew revenue 40%"). \`sole\`/\`led\`/\`contributed\` items may be phrased as a personal accomplishment, scaled to that word.
 - RECEIPTS: when a bullet uses a figure sourced from the ACHIEVEMENT LEDGER (not one quoted verbatim from the CAREER DATA), wrap ONLY the figure in \`<strong data-achievement-id="ID">figure</strong>\` using that item's \`[id]\` from the ledger above, e.g. \`<strong data-achievement-id="a3">74%</strong>\`. Emit ONLY the bare id — never the derivation text, never your own paraphrase of it. Do NOT use this attribute on a figure quoted directly from the CAREER DATA (not derived) — if every number carries the attribute, it stops meaning anything.
@@ -427,15 +513,21 @@ RULES:
 }
 
 /** Fill the design system's résumé markup, tailored to the job + research. */
-async function generateResumeMain({ careerData, job, research, ledger }, signal) {
+async function generateResumeMain({ careerData, job, research, ledger, skillInsights }, signal) {
   const cachedPrefix = buildResumeCachedPrefix({ careerData, ledger });
+  const excludedSkills = (Array.isArray(skillInsights?.items) ? skillInsights.items : [])
+    .map(item => String(item?.canonicalSkillName || '').trim())
+    .filter(Boolean);
+  const exclusionBlock = excludedSkills.length
+    ? `\n\nPRIVATE MISSING-SKILL ANALYSIS — EXCLUSION LIST:\n${excludedSkills.map(name => `- ${name}`).join('\n')}\nThese skills were classified as plausible-but-unverified or learn-first gaps. Do NOT put them anywhere in the résumé draft, do NOT imply the candidate used them, and do NOT substitute an alias. The self-contained HTML workspace will let the candidate verify eligible near-adjacent items and will insert only the confirmed skill labels deterministically.`
+    : '';
   const prompt = `TARGET JOB (the "Description" is what we scraped — it may be full, partial, or empty):
 ${jobBlock(job)}
 
 COMPANY & ROLE CONTEXT (live web research — always covers the company, and the role too when the scraped Description was thin). Combine it with the scraped Description above for the full picture, and tailor emphasis, ordering, and keywords to it:
 """
 ${research}
-"""
+"""${exclusionBlock}
 
 Now produce the single \`<main class="page">…</main>\` block for THIS job, grounded in the CAREER DATA and following the markup + rules above.`;
   return await callLLMRaw(prompt, { signal, task: 'application-resume', cachedPrefix });
@@ -517,7 +609,7 @@ function throwIfAbortedApp(signal) {
  *   compactApplied: boolean, revisionApplied: boolean, renderError: string|null,
  * }>}
  */
-async function renderResumeWithFit({ careerData, ledger, resumeMainHtml, docId, targetPageCount }, signal) {
+async function renderResumeWithFit({ careerData, ledger, resumeMainHtml, docId, targetPageCount, skillInsights }, signal) {
   const attempts = [];
   let mainHtml = resumeMainHtml;
   // The length-revision model may cut copy but must not silently change the
@@ -540,7 +632,18 @@ async function renderResumeWithFit({ careerData, ledger, resumeMainHtml, docId, 
   for (let attempt = 1; attempt <= MAX_RENDER_ATTEMPTS; attempt++) {
     throwIfAbortedApp(signal);
     const variantAttrs = variantAttrsForDensity(density);
-    const doc = buildResumeDocument({ resumeMainHtml: mainHtml, variantAttrs, ledger: ledgerArray, docId });
+    // Measure the largest possible reviewed state: every near-adjacent skill is
+    // visible. The shipped interactive HTML still starts with all candidates
+    // hidden and requires explicit verification; this render exists only to
+    // keep a later all-verified export within the same page target.
+    const doc = buildResumeDocument({
+      resumeMainHtml: mainHtml,
+      variantAttrs,
+      ledger: ledgerArray,
+      docId,
+      skillInsights,
+      showAllVerifySkills: true,
+    });
 
     try {
       const rendered = await renderPdf(doc, { signal });
@@ -598,7 +701,7 @@ async function renderResumeWithFit({ careerData, ledger, resumeMainHtml, docId, 
 }
 
 /** Structured cover letter the renderer lays out on the design-system letterhead. */
-async function generateCoverLetterFields({ careerData, job, research, ledger }, signal) {
+async function generateCoverLetterFields({ careerData, job, research, ledger, skillInsights }, signal) {
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
   // Same ledger serialization as the résumé (byte-stable — see that function's
@@ -632,10 +735,17 @@ ${careerData}
 
 WRITING RULES:
 - 3-4 body paragraphs. Each ties SPECIFIC career-data evidence to SPECIFIC job requirements, and references a genuine detail from the research (a product, a value, or a recent development).
-- Authentic, specific, and concise — not a generic template. Ground every claim in the career data: never invent employers, titles, dates, or numbers — with ONE exception: a figure drawn from the ACHIEVEMENT LEDGER below is already verified and computed by code FROM the candidate's own career data, not invented. You MAY make fair inferences, generously, from demonstrated experience (a capability or accomplishment a recruiter would confidently read from real work, not a new credential or an invented figure) and frame the candidate's genuine accomplishments in the job's language to connect the dots for the reader.
+- Authentic, specific, and concise — not a generic template. Ground every claim in the career data: never invent employers, titles, dates, skills, proficiency, or numbers — with ONE exception: a figure drawn from the ACHIEVEMENT LEDGER below is already verified and computed by code FROM the candidate's own career data, not invented. You may state only capabilities directly entailed by concrete demonstrated work and may frame genuine accomplishments in the job's language. Technical proximity alone is not evidence of experience.
 - NO RECEIPTS here — unlike the résumé, this document's paragraphs are plain prose with nowhere to hang a machine-readable attribute, so any ledger figure you use is stated as unadorned text.
 - A ledger item with attribution 'context' describes something that happened during the candidate's tenure, not necessarily because of them — phrase it as context, never as a personal win.
 - Pull "name", "tagline", and "contact" (location, email, phone, one URL) from the career data; omit any contact item not present.${ledgerSection}${rubricSection}`;
+
+  const excludedSkills = (Array.isArray(skillInsights?.items) ? skillInsights.items : [])
+    .map(item => String(item?.canonicalSkillName || '').trim())
+    .filter(Boolean);
+  const exclusionBlock = excludedSkills.length
+    ? `\n\nPRIVATE MISSING-SKILL EXCLUSION LIST:\n${excludedSkills.map(name => `- ${name}`).join('\n')}\nDo not mention or imply these skills in the cover letter. Near-adjacent items still require candidate verification; learn items are not current skills.`
+    : '';
 
   const prompt = `TARGET JOB (the "Description" is what we scraped — it may be full, partial, or empty):
 ${jobBlock(job)}
@@ -643,7 +753,7 @@ ${jobBlock(job)}
 COMPANY & ROLE CONTEXT (live web research — always covers the company, and the role too when the scraped Description was thin). Combine it with the scraped Description above for the full picture:
 """
 ${research}
-"""
+"""${exclusionBlock}
 
 FILL THESE FIELDS for THIS job (per the CAREER DATA and writing rules above):
 - "date" = "${today}". "recipient" = the addressee block, one item per line separated by a literal \\n: first line the addressee, then the company, e.g. "Hiring Team\\n${job.company || 'the company'}" (optionally add a third line for the team/department if the research makes it clear). "salutation" like "Dear ${job.company || 'Hiring'} Team,". "closing" like "Sincerely,". "signatureTitle" = the TARGET role being applied to + " · candidate", i.e. "${job.title || 'the role'} · candidate".`;
@@ -748,13 +858,42 @@ export function registerJobApplicationHandlers() {
     }
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
 
-    // 2. Résumé HTML (design-system markup) + 3. structured cover letter.
-    const resumeMainHtml = await generateResumeMain({ careerData, job, research, ledger: ledgerForPrompt }, signal);
+    // 2. High-impact missing-skill analysis + persistent demand histogram.
+    //    This is separate from the résumé call so the optimization target
+    //    (find consequential gaps) never competes with employer-facing prose.
+    //    AI owns semantic aliasing across role/skill names; deterministic code
+    //    owns one-count-per-generation persistence. A failure is visible in the
+    //    workspace but does not cost the user the rest of the application.
+    let skillInsights = { role: { canonicalName: String(job?.title || 'Other'), matchedRoleId: '', sourceTitle: String(job?.title || '') }, items: [] };
+    let skillHistogram = { version: 1, roles: [] };
+    let skillOpportunityError = null;
+    let skillAnalysisReady = false;
+    try {
+      const recorded = await withSkillOpportunityLock(async () => {
+        const histogramBefore = loadSkillOpportunityHistogram();
+        const analysis = await analyzeSkillOpportunities({ careerData, job, research, histogram: histogramBefore }, signal);
+        if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+        // Project the workspace bars without mutating durable demand yet. The
+        // actual increment happens only after every application artifact has
+        // been written successfully below.
+        return { analysis, histogram: mergeSkillOpportunityAnalysis(histogramBefore, analysis) };
+      }, signal);
+      skillInsights = recorded.analysis;
+      skillHistogram = recorded.histogram;
+      skillAnalysisReady = true;
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+      skillOpportunityError = String(e?.message || e).slice(0, 300);
+      logger.warn(`[JobApplication][${nodeId || '?'}] Skill-opportunity analysis unavailable — continuing with a visible workspace warning: ${skillOpportunityError}`);
+    }
+
+    // 3. Résumé HTML (design-system markup) + 4. structured cover letter.
+    const resumeMainHtml = await generateResumeMain({ careerData, job, research, ledger: ledgerForPrompt, skillInsights }, signal);
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
-    const coverLetter = await generateCoverLetterFields({ careerData, job, research, ledger: ledgerForPrompt }, signal);
+    const coverLetter = await generateCoverLetterFields({ careerData, job, research, ledger: ledgerForPrompt, skillInsights }, signal);
     if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
 
-    // 4. Local render → page-count → fit loop (SKILL.md §5). Runs on the
+    // 5. Local render → page-count → fit loop (SKILL.md §5). Runs on the
     //    RAW model markup — docId is generated now (not after the loop) since
     //    it's baked into the rendered document at every attempt (keys the
     //    contenteditable autosave, §5.5) and must stay the same across
@@ -776,7 +915,7 @@ export function registerJobApplicationHandlers() {
         // was called with — NOT the bare array (see renderResumeWithFit's
         // @param note: it needs the wrapped shape to reproduce the
         // byte-identical cached prefix on a length-revision call).
-        careerData, ledger: ledgerForPrompt, resumeMainHtml,
+        careerData, ledger: ledgerForPrompt, resumeMainHtml, skillInsights,
         docId: resumeDocId, targetPageCount,
       }, signal);
     } catch (e) {
@@ -798,7 +937,13 @@ export function registerJobApplicationHandlers() {
     //    here degrades to shipping the PLAIN rendered PDF (no cream layer,
     //    same as the ink-only variant's output) rather than no PDF at all —
     //    the cosmetic dual-state layer is not worth losing the whole PDF over.
-    let resumePdfBytes = fitResult?.pdfBytes || null;
+    const resumeRequiresReview = (Array.isArray(skillInsights?.items) ? skillInsights.items : [])
+      .some(item => item?.kind === 'verify');
+    // A PDF is definitionally final-looking and cannot carry the workspace's
+    // verification controls. Withhold the automatic companion whenever a
+    // near-adjacent skill still needs a decision; the HTML export button stays
+    // gated until the user resolves every item, then prints the verified state.
+    let resumePdfBytes = resumeRequiresReview ? null : (fitResult?.pdfBytes || null);
     if (resumePdfBytes && isDualMode(variantAttrs)) {
       try {
         resumePdfBytes = await applyDualPdf(resumePdfBytes);
@@ -836,6 +981,13 @@ export function registerJobApplicationHandlers() {
         stats: ledgerStats,
         minedBy,
       },
+      skillOpportunities: {
+        itemCount: Array.isArray(skillInsights?.items) ? skillInsights.items.length : 0,
+        verifyCount: Array.isArray(skillInsights?.items) ? skillInsights.items.filter(item => item?.kind === 'verify').length : 0,
+        learnCount: Array.isArray(skillInsights?.items) ? skillInsights.items.filter(item => item?.kind === 'learn').length : 0,
+        histogramRoleCount: Array.isArray(skillHistogram?.roles) ? skillHistogram.roles.length : 0,
+        error: skillOpportunityError,
+      },
       render: {
         targetPageCount,
         attempts: fitResult?.attempts || [],
@@ -844,6 +996,7 @@ export function registerJobApplicationHandlers() {
         compactApplied: !!fitResult?.compactApplied,
         revisionApplied: !!fitResult?.revisionApplied,
         pdfProduced: !!resumePdfBytes,
+        pdfWithheldForSkillReview: resumeRequiresReview,
         error: fitResult ? (fitResult.renderError || null) : 'render/fit loop threw before producing any attempts',
         // Distinguishes "no PDF because rendering broke" from "no PDF because
         // the design system's Google Fonts CDN import was unreachable" — the
@@ -863,7 +1016,16 @@ export function registerJobApplicationHandlers() {
     //    since it emits no receipts (§4.4). `docId` keys the contenteditable
     //    autosave (§5.5) — the SAME id used in the render loop above, so the
     //    shipped HTML and the measured PDF are the same document.
-    const resumeDoc = buildResumeDocument({ resumeMainHtml: finalMainHtml, variantAttrs, ledger: ledgerForPrompt?.ledger || null, docId: resumeDocId });
+    const resumeDoc = buildResumeDocument({
+      resumeMainHtml: finalMainHtml,
+      variantAttrs,
+      ledger: ledgerForPrompt?.ledger || null,
+      docId: resumeDocId,
+      skillInsights,
+      skillHistogram,
+      skillOpportunityError,
+      jobContext: { title: job?.title || '', company: job?.company || '' },
+    });
     const coverDoc = buildCoverLetterDocument({ letter: coverLetter, variantAttrs, docId: coverDocId });
 
     const outDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'jobapp-out-'));
@@ -888,6 +1050,34 @@ export function registerJobApplicationHandlers() {
       }
     }
 
+    // Count demand only after the application has real, readable artifacts.
+    // The previous placement persisted immediately after the analysis call, so
+    // a later résumé/cover/render/write failure inflated the histogram with an
+    // application the user never received.
+    if (skillAnalysisReady) {
+      try {
+        skillHistogram = await withSkillOpportunityLock(
+          async () => recordSkillOpportunityAnalysis(skillInsights),
+          signal,
+        );
+      } catch (e) {
+        if (e?.name === 'AbortError') throw e;
+        skillOpportunityError = String(e?.message || e).slice(0, 300);
+        logger.warn(`[JobApplication][${nodeId || '?'}] Application built, but skill-opportunity demand could not be recorded: ${skillOpportunityError}`);
+      }
+    }
+    if (lastApplication?.nodeId === (nodeId || null) && lastApplication.skillOpportunities) {
+      lastApplication = {
+        ...lastApplication,
+        skillOpportunities: {
+          ...lastApplication.skillOpportunities,
+          histogramRoleCount: Array.isArray(skillHistogram?.roles) ? skillHistogram.roles.length : 0,
+          error: skillOpportunityError,
+          recordedAfterArtifacts: skillAnalysisReady && !skillOpportunityError,
+        },
+      };
+    }
+
     const candidateName = coverLetter?.name || '';
     logger.info(`[JobApplication][${nodeId || '?'}] Built application HTML for ${company}${resumePdfPath ? ' (+ PDF)' : ' (PDF unavailable — see log above)'}`);
     return {
@@ -899,6 +1089,8 @@ export function registerJobApplicationHandlers() {
       candidateName,
       achievements: freshlyMined, // a NEWLY mined ledger for the renderer to cache on the hub, or null
       achievementsSkipped,
+      resumeRequiresReview,
+      skillOpportunityError,
     };
   });
 

@@ -370,6 +370,7 @@ const INJECTED_CHROME_CSS = `
   cursor: pointer;
 }
 .ic-toolbar .ic-btn:hover { background: rgba(247, 244, 237, 0.12); }
+.ic-toolbar .ic-btn:disabled { opacity: .42; cursor: not-allowed; background: transparent; }
 .ic-toolbar .ic-btn-primary { background: #7A1F2B; border-color: #7A1F2B; }
 .ic-toolbar .ic-btn-primary:hover { background: #8F2534; }
 .ic-toolbar .ic-hint { margin-left: auto; opacity: 0.8; font-size: 12px; }
@@ -379,8 +380,83 @@ const INJECTED_CHROME_CSS = `
   font: 13px/1.4 -apple-system, "Helvetica Neue", Arial, sans-serif;
 }
 .ic-font-warning { background: #FCEFC7; color: #6B4E00; border-bottom: 1px solid #E8CE84; }
+
+/* ---- résumé workspace --------------------------------------------------
+   This is deliberately an application shell around (not in) .page.  The
+   page remains the sole printed artifact; see the print reset below. */
+.ic-resume-workspace {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  align-items: stretch;
+  background: #e7e0d1;
+  font: 13px/1.45 -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+.ic-workspace-sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100vh;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 22px 18px 30px;
+  background: #241f19;
+  color: #f7f1e6;
+}
+.ic-workspace-kicker { margin: 0 0 5px; color: #d6a86c; font-size: 10px; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; }
+.ic-workspace-title { margin: 0; color: inherit; font: 600 24px/1.1 Georgia, "Times New Roman", serif; }
+.ic-workspace-context { margin: 8px 0 18px; color: #cfc2b0; font-size: 12px; }
+.ic-workspace-sidebar .ic-toolbar { position: static; display: grid; grid-template-columns: 1fr; gap: 8px; padding: 0; background: transparent; }
+.ic-workspace-sidebar .ic-toolbar .ic-btn { min-height: 34px; text-align: left; }
+.ic-workspace-sidebar .ic-toolbar .ic-hint { margin: 5px 0 0; color: #cfc2b0; font-size: 11px; }
+.ic-workspace-sidebar .ic-banner { margin: 12px -18px 0; padding: 9px 18px; }
+.ic-panel { margin-top: 22px; padding-top: 16px; border-top: 1px solid rgba(247, 241, 230, .18); }
+.ic-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 0 0 10px; }
+.ic-panel-title { margin: 0; color: inherit; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+.ic-panel-note, .ic-review-status { color: #cfc2b0; font-size: 11px; }
+.ic-review-status { display: block; margin: 0 0 10px; }
+.ic-insight-card { padding: 12px; margin: 8px 0; border: 1px solid rgba(247, 241, 230, .2); background: #302921; }
+.ic-insight-card[data-ic-decision="verified"] { border-color: #8eb49b; }
+.ic-insight-card[data-ic-decision="not_mine"] { opacity: .62; }
+.ic-insight-skill { margin: 0 0 5px; color: #fffaf0; font-size: 14px; font-weight: 700; }
+.ic-insight-meta { margin: 0 0 7px; color: #d6a86c; font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.ic-insight-copy { margin: 0; color: #d8cdbc; font-size: 12px; }
+.ic-insight-copy + .ic-insight-copy { margin-top: 6px; }
+.ic-insight-label { color: #fffaf0; font-weight: 700; }
+.ic-insight-prompt { margin: 9px 0 0; padding: 8px; border-left: 2px solid #d6a86c; background: rgba(0,0,0,.14); color: #f2e7d6; font-size: 11px; }
+.ic-insight-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
+.ic-insight-actions button { padding: 5px 8px; border: 1px solid rgba(247,241,230,.35); background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.ic-insight-actions button[aria-pressed="true"] { background: #d6a86c; border-color: #d6a86c; color: #241f19; font-weight: 700; }
+.ic-learn-card { padding: 10px 0; border-top: 1px solid rgba(247, 241, 230, .12); }
+.ic-learn-card:first-of-type { border-top: 0; }
+.ic-hist-role { width: 100%; margin: 0 0 10px; padding: 7px 8px; border: 1px solid rgba(247,241,230,.35); background: #302921; color: #fffaf0; font: inherit; }
+.ic-hist-panel[hidden] { display: none; }
+.ic-hist-row { display: grid; grid-template-columns: minmax(88px, 38%) minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 8px 0; }
+.ic-hist-label { overflow-wrap: anywhere; color: #f7f1e6; font-size: 11px; line-height: 1.2; }
+.ic-hist-bar { display: flex; height: 9px; overflow: hidden; background: #4b4035; }
+.ic-hist-bar > span { display: block; height: 100%; }
+.ic-hist-verify { width: var(--ic-verify, 0%); background: #8eb49b; }
+.ic-hist-learn { width: var(--ic-learn, 0%); background: #d6a86c; }
+.ic-hist-count { color: #fffaf0; font-size: 11px; font-variant-numeric: tabular-nums; }
+.ic-hist-breakdown { grid-column: 2 / 4; margin-top: -5px; color: #cfc2b0; font-size: 10px; }
+.ic-hist-legend { display: flex; gap: 12px; margin: 7px 0 12px; color: #cfc2b0; font-size: 10px; }
+.ic-hist-key::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 5px; background: #d6a86c; }
+.ic-hist-key-verify::before { background: #8eb49b; }
+.ic-preview-area { min-width: 0; padding: 34px 24px 70px; background: #e7e0d1; }
+.ic-preview-area .page { margin: 0 auto; }
+.ic-inferred-skill { white-space: normal; }
+@media screen {
+  body { padding: 0; background: #e7e0d1; }
+}
+@media (max-width: 860px) {
+  .ic-resume-workspace { display: block; }
+  .ic-workspace-sidebar { position: static; max-height: none; }
+  .ic-preview-area { padding: 22px 12px 48px; overflow-x: auto; }
+}
 @media print {
   .ic-toolbar, .ic-banner { display: none !important; }
+  .ic-workspace-sidebar { display: none !important; }
+  .ic-resume-workspace, .ic-preview-area { display: contents !important; }
 }
 
 /* ---- receipts (design doc §4.3) ----
@@ -435,6 +511,189 @@ function jsStringLiteral(s) {
   return JSON.stringify(String(s ?? '')).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
 }
 
+// Skill-review inputs are model-produced advice, so normalize them into a
+// deliberately small, display-only contract before they get anywhere near the
+// document. The browser code uses the stable ids below; labels are always
+// escaped when inserted into HTML. Callers may use either the compact array
+// form or { insights: [...] } while the generation pipeline settles on its
+// final response schema.
+function normaliseSkillInsights(raw) {
+  const source = Array.isArray(raw) ? raw : (Array.isArray(raw?.items) ? raw.items : (Array.isArray(raw?.insights) ? raw.insights : []));
+  const rawRole = raw?.role;
+  const analysisRole = typeof rawRole === 'object'
+    ? String(rawRole?.canonicalName || rawRole?.sourceTitle || '').trim()
+    : String(rawRole || '').trim();
+  const used = new Set();
+  return source.map((item, index) => {
+    const value = item && typeof item === 'object' ? item : {};
+    const kind = String(value.kind || value.type || '').toLowerCase() === 'learn' ? 'learn' : 'verify';
+    const skill = String(value.canonicalSkillName || value.skill || value.skillName || value.name || value.canonicalSkill || '').trim();
+    if (!skill) return null;
+    const role = String(value.role || value.roleName || value.roleCategory || value.jobRole || analysisRole).trim();
+    const base = String(value.id || `${kind}:${role.toLowerCase()}:${skill.toLowerCase()}`)
+      .toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || `skill-${index + 1}`;
+    let id = base;
+    let suffix = 2;
+    while (used.has(id)) id = `${base}-${suffix++}`;
+    used.add(id);
+    return {
+      id,
+      kind,
+      skill,
+      resumeText: String(value.suggestedResumeText || skill).trim(),
+      role: role || 'This role',
+      evidence: String(value.candidateEvidence || value.evidence || value.reason || value.rationale || value.why || '').trim(),
+      impact: String(value.jobEvidence || value.impact || value.jobImpact || value.relevance || '').trim(),
+      adjacency: String(value.adjacencyReason || '').trim(),
+      importance: String(value.jobImportance || '').trim(),
+      question: String(value.verificationQuestion || '').trim(),
+      learningAction: String(value.learningAction || '').trim(),
+    };
+  }).filter(Boolean);
+}
+
+// The histogram is intentionally kept generic: generation can return an
+// array of role buckets, a { roles } object, or a flat list. We merge role and
+// skill spelling variants here as a defensive last mile; the AI should still
+// canonicalise these upstream so counts mean the same thing across runs.
+function normaliseSkillHistogram(raw) {
+  const root = Array.isArray(raw) ? raw : (raw?.roles || raw?.histogram || raw?.items || []);
+  const buckets = Array.isArray(root) ? root : [];
+  const roles = new Map();
+  for (const bucket of buckets) {
+    if (!bucket || typeof bucket !== 'object') continue;
+    const roleName = String(bucket.role || bucket.roleName || bucket.name || bucket.category || '').trim();
+    if (!roleName) continue;
+    const roleKey = roleName.toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!roles.has(roleKey)) roles.set(roleKey, {
+      id: String(bucket.id || '').trim(),
+      role: roleName,
+      generationCount: Math.max(0, Number(bucket.generationCount || 0) || 0),
+      skills: new Map(),
+    });
+    const target = roles.get(roleKey);
+    const entries = Array.isArray(bucket.skills) ? bucket.skills : (Array.isArray(bucket.items) ? bucket.items : []);
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') continue;
+      const skill = String(entry.skill || entry.skillName || entry.name || '').trim();
+      if (!skill) continue;
+      const skillKey = skill.toLowerCase().replace(/\s+/g, ' ').trim();
+      const current = target.skills.get(skillKey) || { skill, demandCount: 0, verifyCount: 0, learnCount: 0 };
+      current.demandCount += Math.max(0, Number(entry.demandCount ?? entry.count ?? entry.demand ?? 0) || 0);
+      current.verifyCount += Math.max(0, Number(entry.verifyCount ?? entry.verify ?? 0) || 0);
+      current.learnCount += Math.max(0, Number(entry.learnCount ?? entry.learn ?? 0) || 0);
+      target.skills.set(skillKey, current);
+    }
+  }
+  return [...roles.values()].map(bucket => ({
+    id: bucket.id,
+    role: bucket.role,
+    generationCount: bucket.generationCount,
+    skills: [...bucket.skills.values()].sort((a, b) => b.demandCount - a.demandCount || a.skill.localeCompare(b.skill)),
+  })).sort((a, b) => a.role.localeCompare(b.role));
+}
+
+// The model never gets to write this HTML. Every proposed inferred skill is
+// structurally present but hidden, and only the local review decision can
+// reveal it. Keeping it in the actual .skills surface means a verified choice
+// participates in screen preview, print and edited-HTML downloads alike.
+function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
+  const verify = insights.filter(item => item.kind === 'verify');
+  if (!verify.length) return mainHtml;
+  const inlineSkills = verify.map((item, index) =>
+    `${index ? `<span class="sep" data-ic-inferred-separator${showAllVerifySkills ? '' : ' hidden'} aria-hidden="true">·</span>` : ''}` +
+    `<span class="ic-inferred-skill" data-ic-inferred-skill="${escapeHtml(item.id)}"${showAllVerifySkills ? '' : ' hidden'}>${escapeHtml(item.resumeText || item.skill)}</span>`
+  ).join('');
+  const hidden = showAllVerifySkills ? '' : ' hidden';
+  const entries = `<dt data-ic-inferred-label${hidden}>Role-fit (verified)</dt>\n` +
+    `  <dd data-ic-inferred-group${hidden}>${inlineSkills}</dd>`;
+  const skillsOpen = /<dl\b[^>]*\bclass\s*=\s*(?:"[^"]*\bskills\b[^"]*"|'[^']*\bskills\b[^']*'|skills)(?:\s|>|\/)[^>]*>/i.exec(mainHtml);
+  if (skillsOpen) {
+    const closeAt = mainHtml.indexOf('</dl>', skillsOpen.index + skillsOpen[0].length);
+    if (closeAt >= 0) return `${mainHtml.slice(0, closeAt)}\n  ${entries}\n${mainHtml.slice(closeAt)}`;
+  }
+  const fallback = `\n<section class="section ic-inferred-skills-section" data-ic-inferred-section${hidden}>\n  <div class="section-head"><h2>Skills</h2><span class="rule" aria-hidden="true"></span></div>\n  <dl class="skills">\n  ${entries}\n  </dl>\n</section>\n`;
+  return mainHtml.replace(/<\/main>\s*$/i, `${fallback}</main>`);
+}
+
+function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError }) {
+  const insights = normaliseSkillInsights(skillInsights);
+  const rawRole = skillInsights?.role && typeof skillInsights.role === 'object' ? skillInsights.role : {};
+  const matchedRoleId = String(rawRole.matchedRoleId || '').trim();
+  const canonicalRole = String(rawRole.canonicalName || rawRole.sourceTitle || '').trim().toLowerCase();
+  const histogram = normaliseSkillHistogram(skillHistogram).sort((a, b) => {
+    const aCurrent = (matchedRoleId && a.id === matchedRoleId) || a.role.toLowerCase() === canonicalRole;
+    const bCurrent = (matchedRoleId && b.id === matchedRoleId) || b.role.toLowerCase() === canonicalRole;
+    return Number(bCurrent) - Number(aCurrent) || a.role.localeCompare(b.role);
+  });
+  const verify = insights.filter(item => item.kind === 'verify');
+  const learn = insights.filter(item => item.kind === 'learn');
+  const contextRoles = [...new Set(insights.map(item => item.role).filter(Boolean))];
+  const title = String(jobContext?.title || jobContext?.jobTitle || '').trim();
+  const company = String(jobContext?.company || '').trim();
+  const context = [title, company].filter(Boolean).join(' · ')
+    || (contextRoles.length ? `Tailored for ${contextRoles.join(' · ')}` : 'Review high-value adjacent skills before export.');
+  const card = (item) => `<article class="ic-insight-card${item.kind === 'learn' ? ' ic-learn-card' : ''}" data-ic-insight="${escapeHtml(item.id)}" data-ic-kind="${item.kind}">
+  <p class="ic-insight-skill">${escapeHtml(item.skill)}</p>
+  <p class="ic-insight-meta">${escapeHtml(item.importance || 'high')} impact · ${item.kind === 'verify' ? 'nearby — verify first' : 'learn first'}</p>
+  ${item.impact ? `<p class="ic-insight-copy"><span class="ic-insight-label">Why it matters:</span> ${escapeHtml(item.impact)}</p>` : ''}
+  ${item.evidence ? `<p class="ic-insight-copy"><span class="ic-insight-label">Your foundation:</span> ${escapeHtml(item.evidence)}</p>` : ''}
+  ${item.adjacency ? `<p class="ic-insight-copy"><span class="ic-insight-label">Distance:</span> ${escapeHtml(item.adjacency)}</p>` : ''}
+  ${item.kind === 'verify' && item.question ? `<p class="ic-insight-prompt"><span class="ic-insight-label">Check:</span> ${escapeHtml(item.question)}</p>` : ''}
+  ${item.kind === 'verify' && item.learningAction ? `<p class="ic-insight-prompt" data-ic-not-mine-plan hidden><span class="ic-insight-label">Fastest gap close:</span> ${escapeHtml(item.learningAction)}</p>` : ''}
+  ${item.kind === 'learn' && item.learningAction ? `<p class="ic-insight-prompt"><span class="ic-insight-label">Start here:</span> ${escapeHtml(item.learningAction)}</p>` : ''}
+  ${item.kind === 'verify' ? `<div class="ic-insight-actions" aria-label="Confirm ${escapeHtml(item.skill)}">
+    <button type="button" data-ic-skill-action="verified" data-ic-skill-id="${escapeHtml(item.id)}" aria-pressed="false">Verified</button>
+    <button type="button" data-ic-skill-action="not_mine" data-ic-skill-id="${escapeHtml(item.id)}" aria-pressed="false">Not mine</button>
+  </div>` : ''}
+</article>`;
+  const maxDemand = Math.max(1, ...histogram.flatMap(role => role.skills.map(skill => skill.demandCount)));
+  const histPanels = histogram.map((role, index) => `<div class="ic-hist-panel" data-ic-hist-panel="${escapeHtml(role.role)}"${index ? ' hidden' : ''}>
+    <p class="ic-panel-note">${escapeHtml(role.generationCount)} application${role.generationCount === 1 ? '' : 's'} analyzed</p>
+    ${role.skills.length ? role.skills.map(skill => `<div class="ic-hist-row">
+      <span class="ic-hist-label">${escapeHtml(skill.skill)}</span>
+      <span class="ic-hist-bar" aria-hidden="true"><span class="ic-hist-verify" style="--ic-verify:${Math.round((skill.verifyCount / maxDemand) * 100)}%"></span><span class="ic-hist-learn" style="--ic-learn:${Math.round((skill.learnCount / maxDemand) * 100)}%"></span></span>
+      <span class="ic-hist-count">${escapeHtml(skill.demandCount)}</span>
+      <span class="ic-hist-breakdown">${escapeHtml(skill.verifyCount)} to verify · ${escapeHtml(skill.learnCount)} to learn</span>
+    </div>`).join('') : '<p class="ic-panel-note">No recurring skill signals yet.</p>'}
+  </div>`).join('');
+  const histControl = histogram.length > 1 ? `<label class="ic-panel-note" for="ic-hist-role">Role category</label><select id="ic-hist-role" class="ic-hist-role">${histogram.map(role => `<option value="${escapeHtml(role.role)}">${escapeHtml(role.role)}</option>`).join('')}</select>` : '';
+  const json = JSON.stringify({ insights, histogram });
+  return {
+    insights,
+    markup: `<aside class="ic-workspace-sidebar" aria-label="Résumé tailoring workspace">
+  <p class="ic-workspace-kicker">Application workspace</p>
+  <h1 class="ic-workspace-title">Resume, with receipts.</h1>
+  <p class="ic-workspace-context">${escapeHtml(context)}</p>
+  <div id="ic-skill-workspace-data" data-ic-workspace="${escapeHtml(json)}" hidden></div>
+  <div class="ic-toolbar" role="toolbar" aria-label="Document controls">
+    <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
+    <button type="button" id="ic-export-btn" class="ic-btn ic-btn-primary">Export (Print / Save as PDF)</button>
+    <button type="button" id="ic-download-btn" class="ic-btn" hidden>Download edited copy</button>
+    <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
+    <span class="ic-hint">Printing? The page preview is the only thing that prints.</span>
+  </div>
+  <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Fonts didn’t load (offline?). This will print with fallback typefaces — reconnect and reload.</div>
+  <section class="ic-panel" aria-labelledby="ic-check-title">
+    <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-check-title">Needs your check</h2><span id="ic-review-progress" class="ic-panel-note"></span></div>
+    <span id="ic-review-status" class="ic-review-status" role="status"></span>
+    ${verify.length ? verify.map(card).join('') : '<p class="ic-panel-note">No high-impact claims need confirmation.</p>'}
+  </section>
+  <section class="ic-panel" aria-labelledby="ic-learn-title">
+    <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-learn-title">Skills to learn</h2><span class="ic-panel-note">Never added to résumé</span></div>
+    ${learn.length ? learn.map(card).join('') : '<p class="ic-panel-note">No adjacent learning gaps surfaced for this role.</p>'}
+  </section>
+  <section class="ic-panel" aria-labelledby="ic-demand-title">
+    <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-demand-title">Demand over time</h2><span class="ic-panel-note">Across applications</span></div>
+    <div class="ic-hist-legend"><span class="ic-hist-key ic-hist-key-verify">nearby / verify</span><span class="ic-hist-key">learn</span></div>
+    ${histControl}
+    <div id="ic-histograms">${histPanels || '<p class="ic-panel-note">Signals will accumulate as you tailor more applications.</p>'}</div>
+  </section>
+  ${skillOpportunityError ? `<p class="ic-panel-note" role="status">Demand analysis was unavailable for this application; no new signal was recorded.</p>` : ''}
+</aside>`,
+  };
+}
+
 /**
  * Build the toolbar/banner markup + behavior script injected into `<body>`.
  *
@@ -456,13 +715,13 @@ function jsStringLiteral(s) {
  * than vendoring the families (which would go silently wrong the moment the
  * design system is replaced with different ones — see §5.3's rationale).
  */
-function buildInjectedChrome({ docId, kind, dual }) {
+function buildInjectedChrome({ docId, kind, dual, workspace = false }) {
   const safeDocId = docId ? String(docId) : `${kind}-untitled`;
   const printHint = dual
     ? 'Printing? The warm background disappears automatically — no settings needed for that. In the print dialog, uncheck \u201cHeaders and footers\u201d and set Margins \u2192 Default so the page-number footer isn\u2019t covered.'
     : 'Printing? In the print dialog, uncheck \u201cHeaders and footers\u201d and set Margins \u2192 Default so the page-number footer isn\u2019t covered.';
 
-  const html = `<div class="ic-toolbar" role="toolbar" aria-label="Document controls">
+  const chromeMarkup = workspace ? '' : `<div class="ic-toolbar" role="toolbar" aria-label="Document controls">
   <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
   <button type="button" id="ic-export-btn" class="ic-btn ic-btn-primary">Export (Print / Save as PDF)</button>
   <button type="button" id="ic-download-btn" class="ic-btn" hidden>Download edited copy</button>
@@ -470,7 +729,8 @@ function buildInjectedChrome({ docId, kind, dual }) {
   <span class="ic-hint">${escapeHtml(printHint)}</span>
 </div>
 <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Fonts didn\u2019t load (offline?). This will print with fallback typefaces \u2014 reconnect and reload.</div>
-<script>
+`;
+  const html = `${chromeMarkup}<script>
 (function () {
   var DOC_ID = ${jsStringLiteral(safeDocId)};
   var STORAGE_KEY = 'ic-edit:' + DOC_ID;
@@ -481,6 +741,107 @@ function buildInjectedChrome({ docId, kind, dual }) {
   var restoreNote = document.getElementById('ic-restore-note');
   var fontWarning = document.getElementById('ic-font-warning');
   var saveTimer = null;
+  var skillStorageKey = 'ic-skill-review:' + DOC_ID;
+  var skillCards = Array.prototype.slice.call(document.querySelectorAll('[data-ic-insight][data-ic-kind="verify"]'));
+  var skillDecisions = {};
+
+  // ---- High-impact inferred skills --------------------------------------
+  // A candidate may be close enough to be worth checking, but it is never a
+  // résumé claim until the person explicitly marks it verified. Decisions are
+  // stored separately from editable HTML; data attributes also preserve the
+  // current state in a downloaded edited copy when file:// storage is blocked.
+  skillCards.forEach(function (card) {
+    var existing = card.getAttribute('data-ic-decision');
+    if (existing === 'verified' || existing === 'not_mine') skillDecisions[card.getAttribute('data-ic-insight')] = existing;
+  });
+  try {
+    var savedSkillDecisions = JSON.parse(localStorage.getItem(skillStorageKey) || '{}');
+    if (savedSkillDecisions && typeof savedSkillDecisions === 'object') {
+      Object.keys(savedSkillDecisions).forEach(function (id) {
+        if (savedSkillDecisions[id] === 'verified' || savedSkillDecisions[id] === 'not_mine') skillDecisions[id] = savedSkillDecisions[id];
+      });
+    }
+  } catch (e) {}
+
+  function inferredNodes(id, attribute) {
+    return Array.prototype.slice.call(document.querySelectorAll('[' + attribute + ']')).filter(function (node) {
+      return node.getAttribute(attribute) === id;
+    });
+  }
+  function applySkillDecision(id, decision, persist) {
+    if (decision === 'verified' || decision === 'not_mine') skillDecisions[id] = decision;
+    else delete skillDecisions[id];
+    var resolved = skillDecisions[id];
+    skillCards.filter(function (card) { return card.getAttribute('data-ic-insight') === id; }).forEach(function (card) {
+      if (resolved) card.setAttribute('data-ic-decision', resolved);
+      else card.removeAttribute('data-ic-decision');
+      Array.prototype.slice.call(card.querySelectorAll('[data-ic-skill-action]')).forEach(function (button) {
+        button.setAttribute('aria-pressed', String(button.getAttribute('data-ic-skill-action') === resolved));
+      });
+      Array.prototype.slice.call(card.querySelectorAll('[data-ic-not-mine-plan]')).forEach(function (plan) {
+        plan.hidden = resolved !== 'not_mine';
+      });
+    });
+    inferredNodes(id, 'data-ic-inferred-skill').forEach(function (node) { node.hidden = resolved !== 'verified'; });
+    var visibleSkills = Array.prototype.slice.call(document.querySelectorAll('[data-ic-inferred-skill]')).filter(function (node) { return !node.hidden; });
+    Array.prototype.slice.call(document.querySelectorAll('[data-ic-inferred-label], [data-ic-inferred-group]')).forEach(function (node) { node.hidden = visibleSkills.length === 0; });
+    var seenVisible = false;
+    Array.prototype.slice.call(document.querySelectorAll('[data-ic-inferred-group] > *')).forEach(function (node) {
+      if (node.hasAttribute('data-ic-inferred-skill') && !node.hidden) seenVisible = true;
+      if (node.hasAttribute('data-ic-inferred-separator')) {
+        var laterVisible = false;
+        var cursor = node.nextElementSibling;
+        while (cursor) {
+          if (cursor.hasAttribute('data-ic-inferred-skill') && !cursor.hidden) { laterVisible = true; break; }
+          cursor = cursor.nextElementSibling;
+        }
+        node.hidden = !(seenVisible && laterVisible);
+      }
+    });
+    var fallback = document.querySelector('[data-ic-inferred-section]');
+    if (fallback) fallback.hidden = !Object.keys(skillDecisions).some(function (key) { return skillDecisions[key] === 'verified'; });
+    if (persist) {
+      try { localStorage.setItem(skillStorageKey, JSON.stringify(skillDecisions)); } catch (e) {}
+    }
+    updateSkillReviewStatus();
+  }
+  function updateSkillReviewStatus() {
+    var total = skillCards.length;
+    var resolved = skillCards.filter(function (card) { return !!skillDecisions[card.getAttribute('data-ic-insight')]; }).length;
+    var verified = skillCards.filter(function (card) { return skillDecisions[card.getAttribute('data-ic-insight')] === 'verified'; }).length;
+    var progress = document.getElementById('ic-review-progress');
+    var status = document.getElementById('ic-review-status');
+    if (progress) progress.textContent = total ? resolved + ' / ' + total + ' resolved' : '';
+    if (status) status.textContent = !total ? '' : (resolved < total
+      ? 'Export unlocks after every high-impact claim is marked Verified or Not mine.'
+      : (verified ? verified + ' verified skill' + (verified === 1 ? '' : 's') + ' included in this résumé.' : 'No inferred skills will be added to this résumé.'));
+    if (exportBtn) {
+      var blocked = total > 0 && resolved < total;
+      exportBtn.disabled = blocked;
+      exportBtn.setAttribute('aria-disabled', String(blocked));
+      exportBtn.title = blocked ? 'Resolve every high-impact skill check before exporting.' : '';
+      if (downloadBtn) {
+        downloadBtn.disabled = blocked;
+        downloadBtn.setAttribute('aria-disabled', String(blocked));
+        downloadBtn.title = blocked ? 'Resolve every high-impact skill check before downloading a final copy.' : '';
+      }
+    }
+  }
+  skillCards.forEach(function (card) {
+    var id = card.getAttribute('data-ic-insight');
+    applySkillDecision(id, skillDecisions[id], false);
+    Array.prototype.slice.call(card.querySelectorAll('[data-ic-skill-action]')).forEach(function (button) {
+      button.addEventListener('click', function () { applySkillDecision(id, button.getAttribute('data-ic-skill-action'), true); });
+    });
+  });
+  updateSkillReviewStatus();
+
+  var histogramSelector = document.getElementById('ic-hist-role');
+  if (histogramSelector) histogramSelector.addEventListener('change', function () {
+    Array.prototype.slice.call(document.querySelectorAll('[data-ic-hist-panel]')).forEach(function (panel) {
+      panel.hidden = panel.getAttribute('data-ic-hist-panel') !== histogramSelector.value;
+    });
+  });
 
   // ---- Edit mode + localStorage autosave (§5.5). contenteditable edits
   // vanish on reload without this; keyed by docId so different documents
@@ -526,6 +887,7 @@ function buildInjectedChrome({ docId, kind, dual }) {
 
   if (exportBtn) {
     exportBtn.addEventListener('click', function () {
+      if (exportBtn.disabled) return;
       // Commit any in-progress edit before printing so no editing chrome
       // (the dashed outline, an active caret) can appear in the printed
       // output — the printed artifact must match the design system exactly.
@@ -536,6 +898,7 @@ function buildInjectedChrome({ docId, kind, dual }) {
 
   if (downloadBtn) {
     downloadBtn.addEventListener('click', function () {
+      if (downloadBtn.disabled) return;
       var blob = new Blob(['<!doctype html>\\n' + document.documentElement.outerHTML], { type: 'text/html' });
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
@@ -600,9 +963,18 @@ function buildInjectedChrome({ docId, kind, dual }) {
  * @param {string} [args.variantAttrs]  override for the resolved data-print/data-mono/data-page attrs
  * @param {Array}  [args.ledger]        the hub's achievement ledger (or null — receipts degrade to stripped ids)
  * @param {string} [args.docId]         stable id for this document, namespaces localStorage autosave (§5.5)
+ * @param {Array|object} [args.skillInsights] High-impact `verify` / `learn`
+ *   candidates generated for this job. Verify candidates require a user
+ *   decision; learn candidates are workspace-only and never enter `.page`.
+ * @param {Array|object} [args.skillHistogram] Persistent, AI-canonicalised
+ *   demand observations grouped by role. The browser performs a defensive
+ *   spelling merge before rendering its horizontal bars.
+ * @param {boolean} [args.showAllVerifySkills] Internal page-fit mode: reveal
+ *   every verify candidate to measure the largest user-approved print state.
+ *   Final interactive documents leave this false and require explicit review.
  * @returns {string}
  */
-export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId } = {}) {
+export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, showAllVerifySkills = false } = {}) {
   let main = String(resumeMainHtml || '').trim();
   // Defensive: if the model wrapped its answer in a full document or fences,
   // extract just the <main> block.
@@ -616,10 +988,12 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   main = stripMainVariantAttrs(main);
   // Resolve/strip receipts BEFORE anything else touches the markup (§4.3 step 3).
   main = injectReceipts(main, ledger);
+  const workspace = buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillOpportunityError });
+  main = injectInferredSkills(main, workspace.insights, showAllVerifySkills);
 
   const attrs = variantAttrs != null ? variantAttrs : extractVariantAttrs(resumeMainHtml);
   const css = inlineStylesheets(RESUME_CSS_FILES);
-  const chrome = buildInjectedChrome({ docId, kind: 'resume', dual: isDualMode(attrs) });
+  const chrome = buildInjectedChrome({ docId, kind: 'resume', dual: isDualMode(attrs), workspace: true });
 
   return `<!doctype html>
 <html lang="en" ${attrs}>
@@ -634,8 +1008,13 @@ ${INJECTED_CHROME_CSS}
 </style>
 </head>
 <body>
-${chrome}
+<div class="ic-resume-workspace">
+${workspace.markup}
+  <div class="ic-preview-area">
 ${main}
+${chrome}
+  </div>
+</div>
 </body>
 </html>`;
 }

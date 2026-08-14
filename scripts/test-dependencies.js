@@ -7,7 +7,7 @@ export * as PDFLib from 'pdf-lib';
 export { PDFDocument } from 'pdf-lib';
 export { EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, MERCARI_SOLD_EXTRACTOR, POSHMARK_SOLD_EXTRACTOR, SWAPPA_SOLD_EXTRACTOR, priceChartingQuery } from '../electron/extractors/marketplace.js';
 export { GOOGLE_JOBS_EXTRACTOR } from '../electron/extractors/jobs.js';
-export { applyFinalJobTitleRelevanceGate, buildJobTasks, chunkScoringBatches, getJobsTelemetry, glassdoorPostedBucket, linkedInBrowserUnavailableWarning, recordJobsBoardScope, recordJobsSourceScope, refreshManualSourceUrlIndex } from '../electron/ipc/jobs.js';
+export { applyFinalJobTitleRelevanceGate, buildJobTasks, chunkScoringBatches, getJobsTelemetry, glassdoorPostedBucket, linkedInBrowserUnavailableWarning, recordJobsBoardScope, recordJobsSourceScope, refreshManualSourceUrlIndex, summarizeScoringInputQuality } from '../electron/ipc/jobs.js';
 export { getJobSearchTransientKeysForSave, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES } from '../src/utils/persistenceTransientState.js';
 export { jobTitleCompanyKey, jobTitleCompanyUrlKey, jobTitleCompanyLocationKey, sourceJobKey, dedupeJobsByKey, uniqueJobsNotIn, dedupJobsAcrossSources, uniqueJobsAcrossSources } from '../src/utils/jobIdentity.js';
 export { mergeSourceProgress } from '../src/utils/sourceProgress.js';
@@ -37,6 +37,8 @@ export { buildResumeDocument, buildCoverLetterDocument, extractVariantAttrs, isD
 export { targetPageCountForJob, decideFitStep } from '../electron/ipc/jobApplication.js';
 export { filterOutApplied, markJobApplied } from '../electron/ipc/appliedJobs.js';
 export { LEDGER_CAP, MINING_TARGET, splitCareerDataByFile, normalizeQuoteText, computeLedger, applyRefuteVerdicts, ledgerById, derivationTooltip, serializeLedgerForPrompt } from '../src/utils/achievementLedger.js';
+export { SKILL_OPPORTUNITY_HISTOGRAM_VERSION, createEmptySkillOpportunityHistogram, normalizeOpportunityName, stableOpportunityId, assertValidSkillOpportunityHistogram, normalizeSkillOpportunityAnalysis, mergeSkillOpportunityAnalysis } from '../src/utils/skillOpportunityHistogram.js';
+export { skillOpportunityHistogramFilePath, loadSkillOpportunityHistogram, recordSkillOpportunityAnalysis, __resetSkillOpportunityHistogramCacheForTests } from '../electron/ipc/skillOpportunityStore.js';
 export { canonicalizeLocation, canonicalizeTitle, canonicalizeCompany, canonicalizeJobUrl, appliedKeysFor, appliedRecordMatches } from '../src/utils/locationIdentity.js';
 export { pickFamilyModel, claudeModelFor, claudeModelMetaFor, modelResolutionSnapshot, primeClaudeModels, resolvedClaudeModels, CLAUDE_FAMILY, CLAUDE_FAMILY_LADDER } from '../electron/ipc/modelResolver.js';
 export { fingerprint, migrateGroupNodes, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, runNodeMigrations, CURRENT_SCHEMA_VERSION, sanitizeEdgesForSave, sanitizeNodesForSave } from '../src/utils/serializationUtils.js';
