@@ -1110,6 +1110,20 @@ async function callGemini(parts, apiKey, model, genConfig = {}) {
         const failureText = err.details ? `${errMsg}\n${err.details}` : errMsg;
         const classification = classifyGeminiFailure(err.status, failureText);
         logger.warn(`[Gemini] Model ${currentModel} failed: ${errMsg}`);
+        // `classification` is decided from failureText, which folds in err.details (the
+        // structured google.rpc QuotaFailure/RetryInfo blocks) — but only errMsg above
+        // ever reached the log. A verdict like `daily-quota` can be driven entirely by
+        // those details even when errMsg itself has no per-day/daily/RPD token in it
+        // (e.g. a free-tier RPM message), which made the verdict unauditable: nobody
+        // reading the log/bug report afterwards could tell a genuine per-day quotaId
+        // from a spurious one, or see that a short provider retry hint was parsed and
+        // then discarded rather than honored. Log those inputs now; the suppression
+        // decision itself (below) is unchanged.
+        const parsedRetryAfterMs = err.retryAfterMs ?? parseRetryMsFromError(errMsg);
+        const detailsExcerpt = err.details
+          ? (err.details.length > 300 ? `${err.details.slice(0, 300)}…` : err.details)
+          : '(none)';
+        logger.info(`[Gemini] ${currentModel} classification=${classification} retryAfterMs=${parsedRetryAfterMs ?? 'n/a'} details=${detailsExcerpt}`);
 
         lastAttemptedError = `${currentModel}: ${errMsg}`;
         attemptedErrors.push({ model: currentModel, error: errMsg, classification });

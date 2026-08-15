@@ -180,8 +180,10 @@ export function Canvas() {
         // pixel we set via setNodes — one "node resized" line per frame. That was
         // 50% of the entire log buffer and pure noise (the signal is canvas-node
         // resize start/end + moves count). Only log outside of active resize sessions.
+        // Content-driven auto-height still arrives one frame at a time outside any
+        // resize session, so the logger collapses a consecutive run per node.
         if (ResizeCorrection.size === 0) {
-          EventLogger.log(`node resized id=${ch.id} w=${ch.dimensions?.width} h=${ch.dimensions?.height}`);
+          EventLogger.logNodeResize(ch.id, ch.dimensions?.width, ch.dimensions?.height);
         }
       }
     });

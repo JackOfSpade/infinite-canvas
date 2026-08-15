@@ -37,7 +37,8 @@
  *
  * The résumé is filled by the model as a `<main class="page">` block (the
  * design system is "agent fills the markup"); we own the document scaffold,
- * the inlined design-system CSS, the injected `ic-` chrome, and the receipt
+ * the inlined design-system CSS (including bundled font data), the injected
+ * `ic-` chrome, and the receipt
  * post-process. The cover letter is built deterministically from structured
  * fields so its layout is always on-brand.
  */
@@ -196,6 +197,72 @@ export function isDualMode(variantAttrs) {
   return /data-print="dual-pdf"/.test(String(variantAttrs || ''));
 }
 
+/**
+ * Return the browser-side font-readiness predicate shared by the editable
+ * workspace and Electron's hidden PDF renderer.
+ *
+ * `document.fonts.ready` means loading has *finished*, not that every face
+ * succeeded. Checking only Source Serif's display weight let a document-panel
+ * shell override (or a partial font failure) pass the fit loop while Inter
+ * (or a visible mono metric/code run) still fell back and changed pagination.
+ * Keep this as a DOM expression rather than a Node helper: FontFaceSet only
+ * knows the renderer document's actual loaded faces.
+ *
+ * The exact set comes from nonempty text nodes inside every document panel
+ * (including the hidden cover panel in Application.html). A document without
+ * a 500-weight Inter element, for example, must not fail just because that
+ * face exists in the stylesheet but Chromium never fetched it. IBM Plex Mono
+ * follows the same rule: no code/metrics text means no mono probe.
+ */
+export function webFontFacesReadyExpression({ details = false } = {}) {
+  const result = details
+    ? "{ loaded: missingFaces.length === 0, missingFaces: missingFaces.map(function (face) { return (face.unexpected ? 'unexpected ' : '') + face.family + ' ' + face.weight; }) }"
+    : 'missingFaces.length === 0';
+  return String.raw`(function () {
+    try {
+      if (!document.fonts || !document.fonts.check) return ${details ? '{ loaded: true, missingFaces: [] }' : 'true'};
+
+      var rootStyle = getComputedStyle(document.documentElement);
+      var familyFor = function (property) {
+        return (rootStyle.getPropertyValue(property).split(',')[0] || '').trim().replace(/^["']|["']$/g, '');
+      };
+      var normalizedFamily = function (value) {
+        return (String(value || '').split(',')[0] || '').trim().replace(/^["']|["']$/g, '').toLowerCase();
+      };
+      var knownFamilies = [familyFor('--ff-display'), familyFor('--ff-body'), familyFor('--ff-mono')]
+        .filter(Boolean);
+      var requiredByKey = {};
+      var surfaces = Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-panel], main.page'));
+      var isDocumentText = function (node) {
+        if (!String(node.nodeValue || '').trim()) return false;
+        var parent = node.parentElement;
+        return !!parent && surfaces.some(function (surface) { return surface.contains(parent); });
+      };
+      var walker = document.createTreeWalker(document, NodeFilter.SHOW_TEXT);
+      var node;
+      while ((node = walker.nextNode())) {
+        if (!isDocumentText(node)) continue;
+        var style = getComputedStyle(node.parentElement);
+        var family = normalizedFamily(style.fontFamily);
+        var rawWeight = String(style.fontWeight || '400').trim().toLowerCase();
+        var weight = rawWeight === 'normal' ? '400' : rawWeight === 'bold' ? '700' : rawWeight;
+        var knownFamily = knownFamilies.find(function (candidate) { return family === candidate.toLowerCase(); });
+        if (knownFamily) {
+          requiredByKey[knownFamily + '\u0000' + weight] = { family: knownFamily, weight: weight };
+        } else {
+          requiredByKey['unexpected\u0000' + family + '\u0000' + weight] = { family: family || '(none)', weight: weight, unexpected: true };
+        }
+      }
+      var required = Object.keys(requiredByKey).map(function (key) { return requiredByKey[key]; });
+
+      var missingFaces = required.filter(function (face) {
+        return face.unexpected || !document.fonts.check(face.weight + ' 12px "' + face.family + '"');
+      });
+      return ${result};
+    } catch (e) { return ${details ? '{ loaded: true, missingFaces: [] }' : 'true'}; }
+  })()`;
+}
+
 // ---------------------------------------------------------------------------
 // Design-system coupling surface (migrated from resumePdf.js when the PDF
 // path retired — design doc §9 reconnect-checklist rows 1-2). Read-only
@@ -242,6 +309,64 @@ export function getDesignSystemDir() {
 // mid-reconnect), not keep throwing from a stale cache entry that was never
 // populated in the first place.
 const _cssCache = new Map();
+const _assetDataUrlCache = new Map();
+
+const FONT_ASSETS = [
+  'fonts/SourceSerif4-Regular.ttf',
+  'fonts/SourceSerif4-SemiBold.ttf',
+  'fonts/IBMPlexMono-Regular.ttf',
+  'fonts/IBMPlexMono-Medium.ttf',
+  'fonts/Inter-Regular.woff2',
+  'fonts/Inter-Medium.woff2',
+  'fonts/Inter-SemiBold.woff2',
+];
+
+const FONT_LICENSES = [
+  'fonts/licenses/SourceSerif4-OFL.txt',
+  'fonts/licenses/Inter-OFL.txt',
+  'fonts/licenses/IBMPlexMono-OFL.txt',
+];
+
+const FONT_MIME_TYPES = new Map([
+  ['.woff2', 'font/woff2'],
+  ['.woff', 'font/woff'],
+  ['.ttf', 'font/ttf'],
+  ['.otf', 'font/otf'],
+]);
+
+/**
+ * Convert safe design-system-relative font references into data URLs so the
+ * generated HTML remains portable and has no render-time network dependency.
+ * External/data/fragment URLs are deliberately left alone; only local font
+ * assets are accepted, and a replacement design system cannot escape its own
+ * directory through a crafted `url(..)` reference.
+ */
+export function inlineDesignCssUrls(cssText, stylesheetPath, designDir = getDesignSystemDir()) {
+  const stylesheet = path.resolve(stylesheetPath);
+  const root = path.resolve(designDir);
+  return String(cssText || '').replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (whole, _quote, rawUrl) => {
+    const assetUrl = String(rawUrl || '').trim();
+    if (!assetUrl || /^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(assetUrl)) return whole;
+    if (assetUrl.includes('?') || assetUrl.includes('#')) {
+      throw new Error(`Unsupported local CSS asset URL in ${stylesheetPath}: ${assetUrl}`);
+    }
+
+    const assetPath = path.resolve(path.dirname(stylesheet), assetUrl);
+    const relative = path.relative(root, assetPath);
+    if (!relative || relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) {
+      throw new Error(`CSS asset escapes résumé design system: ${assetUrl}`);
+    }
+    const mime = FONT_MIME_TYPES.get(path.extname(assetPath).toLowerCase());
+    if (!mime) throw new Error(`Unsupported local CSS asset type in ${stylesheetPath}: ${assetUrl}`);
+    if (!fs.existsSync(assetPath)) throw new Error(`Missing local CSS asset in ${stylesheetPath}: ${assetUrl}`);
+
+    if (!_assetDataUrlCache.has(assetPath)) {
+      _assetDataUrlCache.set(assetPath, `data:${mime};base64,${fs.readFileSync(assetPath).toString('base64')}`);
+    }
+    return `url("${_assetDataUrlCache.get(assetPath)}")`;
+  });
+}
+
 function readDesignCss(fileName) {
   if (_cssCache.has(fileName)) return _cssCache.get(fileName);
   // Deliberately NOT try/caught: a missing CSS file is a STRUCTURAL failure
@@ -249,7 +374,9 @@ function readDesignCss(fileName) {
   // the opposite of the rubric-injection asymmetry in jobApplication.js
   // (design doc §4.1 / §9's startup-assertion comment restates this same
   // asymmetry for the two checks below).
-  const text = fs.readFileSync(path.join(getDesignSystemDir(), fileName), 'utf8');
+  const designDir = getDesignSystemDir();
+  const cssPath = path.join(designDir, fileName);
+  const text = inlineDesignCssUrls(fs.readFileSync(cssPath, 'utf8'), cssPath, designDir);
   _cssCache.set(fileName, text);
   return text;
 }
@@ -429,7 +556,6 @@ const INJECTED_CHROME_CSS = `
   grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
   align-items: stretch;
   background: #e7e0d1;
-  font: 13px/1.45 -apple-system, "Helvetica Neue", Arial, sans-serif;
 }
 .ic-workspace-sidebar {
   position: sticky;
@@ -441,6 +567,7 @@ const INJECTED_CHROME_CSS = `
   padding: 22px 18px 30px;
   background: #241f19;
   color: #f7f1e6;
+  font: 13px/1.45 -apple-system, "Helvetica Neue", Arial, sans-serif;
 }
 .ic-workspace-kicker { margin: 0 0 5px; color: #d6a86c; font-size: 10px; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; }
 .ic-workspace-title { margin: 0; color: inherit; font: 600 24px/1.1 Georgia, "Times New Roman", serif; }
@@ -1000,7 +1127,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
     <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
     <span class="ic-hint">Sync re-renders the PDF with the same engine that produced the originals — use it instead of your browser’s print dialog.</span>
   </div>
-  <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Fonts didn’t load (offline?). Reconnect and reload before syncing — Sync refuses to replace a PDF with fallback typography.</div>
+  <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Bundled fonts didn’t load. The application package may be damaged — reopen from Infinite Canvas before syncing. Sync refuses to replace a PDF with fallback typography.</div>
   <section class="ic-panel" aria-labelledby="ic-check-title">
     <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-check-title">Needs your check</h2><span id="ic-review-progress" class="ic-panel-note"></span></div>
     <span id="ic-review-status" class="ic-review-status" role="status"></span>
@@ -1037,10 +1164,10 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
  * "fix" this editor away to match the design doc's stated intent; it is a
  * deliberate, discussed divergence (design doc §5.5).
  *
- * Fonts (§5.3): checks `document.fonts.check()` against the computed
- * `--ff-display` family and shows a print-hidden banner on failure, rather
- * than vendoring the families (which would go silently wrong the moment the
- * design system is replaced with different ones — see §5.3's rationale).
+ * Fonts (§5.3): uses the same DOM-side face matrix as the hidden PDF renderer
+ * and shows a print-hidden banner when any required face failed. Fonts are
+ * bundled into generated HTML, so a failure indicates a damaged package or a
+ * browser font-loading problem rather than an offline CDN dependency.
  */
 function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle }) {
   const safeDocId = docId ? String(docId) : `${kind}-untitled`;
@@ -1057,7 +1184,7 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
   <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
   <span class="ic-hint">${escapeHtml(syncHint)}</span>
 </div>
-<div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Fonts didn\u2019t load (offline?). Reconnect and reload before syncing \u2014 Sync refuses to replace a PDF with fallback typography.</div>
+<div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Bundled fonts didn\u2019t load. The application package may be damaged \u2014 reopen from Infinite Canvas before syncing. Sync refuses to replace a PDF with fallback typography.</div>
 `;
   const html = `${chromeMarkup}<script id="ic-application-bundle-data" type="application/json">${bundleJson}</script><script>
 (function () {
@@ -1395,32 +1522,13 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
     });
   }
 
-  // ---- Font detection, never vendoring (§5.3) ----
+  // ---- Bundled-font integrity detection (§5.3) ----
   try {
-    var ffDisplay = getComputedStyle(document.documentElement).getPropertyValue('--ff-display');
-    var firstFamily = (ffDisplay.split(',')[0] || '').trim().replace(/^["']|["']$/g, '');
-    if (firstFamily && window.document.fonts && document.fonts.check) {
-      var check = function () {
-        try {
-          // document.fonts.check()'s shorthand defaults to font-weight 400
-          // ("normal") when no weight is given. resume.css's .name sets
-          // Source Serif 4 at font-weight 600 (--fw-semibold) and NEVER
-          // renders it at 400 anywhere in the résumé; browsers only fetch the
-          // specific weight actually used, so the check queried a weight that
-          // legitimately never loaded and always returned false — firing this
-          // banner on every résumé export, online or offline. Read the ACTUAL
-          // computed weight off a real on-page element that uses --ff-display
-          // (résumé: .name at 600; cover letter: .letter-body at 400) instead
-          // of assuming one — self-corrects for either document and for any
-          // future design-system weight change with no matching JS edit here.
-          var ffEl = document.querySelector('.name') || document.querySelector('.letter-body') || document.documentElement;
-          var ffWeight = (getComputedStyle(ffEl).fontWeight || '400').trim() || '400';
-          if (!document.fonts.check(ffWeight + ' 12px "' + firstFamily + '"') && fontWarning) fontWarning.hidden = false;
-        } catch (e) {}
-      };
-      if (document.fonts.ready && document.fonts.ready.then) document.fonts.ready.then(check).catch(check);
-      else check();
-    }
+    var check = function () {
+      if (!(${webFontFacesReadyExpression()}) && fontWarning) fontWarning.hidden = false;
+    };
+    if (window.document.fonts && document.fonts.ready && document.fonts.ready.then) document.fonts.ready.then(check).catch(check);
+    else check();
   } catch (e) { /* font-loading API unsupported — this is an enhancement, degrade quietly */ }
 })();
 </script>`;
@@ -1663,7 +1771,7 @@ export function assertDesignSystemIntact() {
   const result = { ok: true, checked: [], missing: [], mainExtractionOk: false, error: null };
   try {
     const dir = getDesignSystemDir();
-    for (const file of CSS_FILES) {
+    for (const file of [...CSS_FILES, ...FONT_ASSETS, ...FONT_LICENSES]) {
       result.checked.push(file);
       if (!fs.existsSync(path.join(dir, file))) {
         result.missing.push(file);
@@ -1687,7 +1795,7 @@ export function assertDesignSystemIntact() {
   }
 
   if (result.ok) {
-    logger.info('[resumeHtml] design-system startup assertion passed (CSS files + <main> sample intact)');
+    logger.info('[resumeHtml] design-system startup assertion passed (CSS, bundled fonts/licenses + <main> sample intact)');
   } else {
     logger.warn(`[resumeHtml] DESIGN-SYSTEM RECONNECT NEEDED — startup assertion failed: ${JSON.stringify(result)}. Résumé/cover-letter generation will run against a stale or broken contract until this is addressed (see docs/resume-achievement-mining-design.md §9 reconnect checklist).`);
   }

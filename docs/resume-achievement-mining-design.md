@@ -546,8 +546,9 @@ exactly as the design system defines it; `extractVariantAttrs` (`resumeHtml.js:4
 today emit `<link rel="stylesheet" href="…">` pointing at CSS files copied next to the HTML in a
 temp dir. For a standalone file:
 
-- **Inline the stylesheets** — read the CSS text at build time, emit one `<style>`. Read-only access
-  to `resume_design_system/`; nothing in that folder is modified.
+- **Inline the stylesheets and local font assets** — read the CSS text at build time, resolve
+  design-system-relative font URLs to data URLs, and emit one self-contained `<style>`. Read-only
+  access to `resume_design_system/`; nothing in that folder is modified.
 - **Append an injected chrome block** *after* the design-system CSS, namespaced `ic-` so a wholesale
   design replacement can never collide:
   - derivation tooltip styling (faint dotted underline, hover panel)
@@ -557,24 +558,27 @@ temp dir. For a standalone file:
 - **Everything injected is `@media print { display: none }`.** The printed artifact must be
   byte-identical in appearance to what the design system produces today.
 
-### 5.3 Fonts — detect, do not vendor
+### 5.3 Fonts — bundle, inline, and verify
 
-`resume_design_system/colors_and_type.css:17-23` `@import`s Source Serif 4 / Inter / IBM Plex Mono
-from the Google Fonts CDN. There are **zero font files in the repo** — the design system removed
-them deliberately (`readme.md:53-56`, `:76`). Today headless Chrome waits on `document.fonts.ready`
-(`resumePdf.js:122`) before snapshotting; opened offline, an HTML file silently falls back to
-Georgia and system sans.
+`resume_design_system/fonts/` contains the seven pinned faces used by
+`colors_and_type.css`: Source Serif 4 400/600, Inter 400/500/600, and IBM
+Plex Mono 400/500. Their OFL licenses live beside them in `fonts/licenses/`.
+The builder resolves only safe design-system-relative font URLs, embeds them as
+data URLs in generated HTML, and rejects traversal, missing, or unsupported
+assets. Application.html is consequently portable and has no font CDN
+dependency.
 
-Under a light wording review, that failure is invisible — and the user prints from that page.
+`document.fonts.ready` still means loading *finished*, not that each embedded
+face succeeded. The injected script and hidden PDF renderer therefore derive
+the exact faces used in document text and check each one with
+`document.fonts.check()`. A failure is now a package-corruption or browser
+font-load signal; it shows a print-hidden warning, prevents fallback PDFs from
+shipping, and records missing faces for diagnosis.
 
-**Do not vendor the families.** Vendored fonts become silently wrong the moment the design system is
-replaced with different families, and they are one more thing to re-verify on every reconnect.
-Instead: a few lines in the injected script run `document.fonts.check()` against the computed
-`--ff-display` family and, on failure, show a print-hidden banner —
-*"Fonts didn't load (offline?). This will print with fallback typefaces — reconnect and reload."*
-
-Zero reconnect burden, survives any replacement, and converts a silent degradation into a visible
-one. Vendoring remains available later as offline hardening, with the staleness coupling understood.
+Bundling introduces an explicit reconnect obligation: if a replacement design
+system changes typography, update its `@font-face` declarations, pinned assets,
+licenses, and the startup assertion together. That deliberate coupling buys
+offline, reproducible exports and avoids silent fallback typography.
 
 ### 5.4 Print fidelity
 

@@ -36,16 +36,25 @@ const EVENT_HISTORY_HEADING = '## Event History\n';
 
 // A hard clipboard cap may land inside ANY large static section (the job
 // pipeline's relevance/taxonomy audits can be larger than Node Diagnostics).
-// Do not claim a particular section was removed, and do not leave a Markdown
-// list/table/code block looking complete when it was sliced mid-item. Prefer a
-// nearby paragraph/line boundary, then append an explicit continuation note.
+// Scans the top-level (## ) headings BEFORE slicing and reports back which
+// ones were dropped whole vs. the single one the cut landed inside, so the
+// caller can name the real omission instead of presenting a mid-cut section
+// as intact. Still prefers a nearby paragraph/line boundary, then appends an
+// explicit continuation note, when choosing where to cut.
 function truncateBaseForClipboard(baseMarkdown, room) {
-  if (room <= 0) return '';
-  if (baseMarkdown.length <= room) return baseMarkdown;
+  if (room <= 0) return { text: '', droppedSections: [], partialSection: null };
+  if (baseMarkdown.length <= room) return { text: baseMarkdown, droppedSections: [], partialSection: null };
+
+  // Collect every top-level heading (with its pre-cut position) before any
+  // slicing happens, so the dropped/partial analysis below reflects the
+  // original structure, not the truncated candidate.
+  const headings = [...baseMarkdown.matchAll(/^## (.+)$/gm)].map((m) => ({ text: m[1], index: m.index }));
 
   const note = '\n\n> ⚠️ Report content after this point was omitted by the clipboard cap. The recent logs and event timeline continue below; use "Save to file" for every uncapped section.\n';
   const contentRoom = Math.max(0, room - note.length);
-  if (contentRoom === 0) return note.slice(0, room);
+  if (contentRoom === 0) {
+    return { text: note.slice(0, room), droppedSections: headings.map((h) => h.text), partialSection: null };
+  }
 
   const candidate = baseMarkdown.slice(0, contentRoom);
   // Prefer a blank-line boundary close to the cap. Falling back to a newline
@@ -54,7 +63,21 @@ function truncateBaseForClipboard(baseMarkdown, room) {
   const line = candidate.lastIndexOf('\n');
   const minimumUsefulCut = Math.floor(contentRoom * 0.8);
   const cut = paragraph >= minimumUsefulCut ? paragraph : (line >= 0 ? line : contentRoom);
-  return candidate.slice(0, cut).trimEnd() + note;
+
+  // A heading at/after the cut was removed in full. The heading immediately
+  // before the cut is "partial" only when the cut lands strictly inside its
+  // body — not when it lines up exactly with the next heading's start (i.e.
+  // the cut landed on a boundary, so nothing was cut mid-section).
+  const droppedSections = headings.filter((h) => h.index >= cut).map((h) => h.text);
+  let partialSection = null;
+  for (let i = headings.length - 1; i >= 0; i--) {
+    if (headings[i].index >= cut) continue;
+    const sectionEnd = i + 1 < headings.length ? headings[i + 1].index : baseMarkdown.length;
+    if (cut < sectionEnd) partialSection = headings[i].text;
+    break;
+  }
+
+  return { text: candidate.slice(0, cut).trimEnd() + note, droppedSections, partialSection };
 }
 
 // The filter summary is assembled before the clipboard cap runs. When a FULL
@@ -78,8 +101,38 @@ function clipboardRetentionDetail(retainedEvents, totalEvents, retainedLogs, tot
     `${retainedLogs} of ${totalLogs} most-recent main-process log line(s)`;
 }
 
-function hardCapOmissionDetail(trimmedEventCount, trimmedLogCount) {
-  const parts = ['static report content'];
+const MAX_NAMED_DROPPED_SECTIONS = 6;
+const MAX_NAMED_SECTION_CHARS = 120;
+
+function displaySectionName(name) {
+  const text = String(name || '').trim();
+  return text.length > MAX_NAMED_SECTION_CHARS
+    ? `${text.slice(0, MAX_NAMED_SECTION_CHARS - 1)}…`
+    : text;
+}
+
+// Bounded so naming the omission can never itself eat meaningful budget: at
+// most MAX_NAMED_DROPPED_SECTIONS short section names, then a "+N more" tally.
+// Null when truncateBaseForClipboard found nothing to name (no heading was
+// dropped or cut mid-section).
+function formatSectionOmissionDetail(droppedSections, partialSection) {
+  if (droppedSections.length === 0 && !partialSection) return null;
+  const parts = [];
+  if (droppedSections.length > 0) {
+    const shown = droppedSections
+      .slice(0, MAX_NAMED_DROPPED_SECTIONS)
+      .map(displaySectionName);
+    const extra = droppedSections.length - shown.length;
+    const names = extra > 0 ? `${shown.join(', ')}, +${extra} more` : shown.join(', ');
+    parts.push(`${droppedSections.length} section(s) dropped: ${names}`);
+  }
+  if (partialSection) parts.push(`"${displaySectionName(partialSection)}" cut mid-section`);
+  return parts.join('; ');
+}
+
+function hardCapOmissionDetail(trimmedEventCount, trimmedLogCount, droppedSections = [], partialSection = null) {
+  const sectionDetail = formatSectionOmissionDetail(droppedSections, partialSection);
+  const parts = [sectionDetail ? `static report content (${sectionDetail})` : 'static report content'];
   if (trimmedEventCount > 0) parts.push(`${trimmedEventCount} oldest event history line(s)`);
   if (trimmedLogCount > 0) parts.push(`${trimmedLogCount} oldest main-process log line(s)`);
   if (parts.length === 1) return parts[0];
@@ -100,6 +153,32 @@ function reserveFloorTail(allLogs, allEvents, floorChars) {
   const eventBudget = Math.max(0, floorChars - buildMainProcessLogsMarkdown(logs).length - EVENT_HISTORY_HEADING.length);
   while (events.length > 0 && buildFencedTextBlock(events, '*(No events recorded)*').length > eventBudget) events.shift();
   return { logs, events };
+}
+
+// The static-section detail expands the banner, which in turn shrinks the
+// room available for the static base. Recalculate until the omission described
+// in the banner is the omission made by that final, smaller room. This is used
+// by both cap paths so their diagnostics cannot name a stale first-pass cut.
+function buildNamedStaticTruncation(baseMarkdown, tailMarkdown, maxChars, buildBanner) {
+  let droppedSections = [];
+  let partialSection = null;
+  let priorKey = null;
+
+  for (let pass = 0; pass < 24; pass++) {
+    const banner = buildBanner(droppedSections, partialSection);
+    const room = maxChars - banner.length - tailMarkdown.length;
+    const next = truncateBaseForClipboard(baseMarkdown, room);
+    const nextKey = JSON.stringify([next.droppedSections, next.partialSection]);
+    if (nextKey === priorKey) return { banner, cutBase: next.text };
+    ({ droppedSections, partialSection } = next);
+    priorKey = nextKey;
+  }
+
+  // Section names are bounded above, so this is only a defensive escape hatch
+  // for adversarially-shaped Markdown; it still uses the latest true cut.
+  const banner = buildBanner(droppedSections, partialSection);
+  const room = maxChars - banner.length - tailMarkdown.length;
+  return { banner, cutBase: truncateBaseForClipboard(baseMarkdown, room).text };
 }
 
 export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProcessLogLines, maxChars) {
@@ -150,8 +229,10 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
       cappedBase = clarifyCappedFilterSummary(baseMarkdown, events.length, allEvents.length);
     }
 
-    const buildNotice = () => {
+    const buildNotice = (droppedSections = [], partialSection = null) => {
       const parts = [];
+      const sectionDetail = formatSectionOmissionDetail(droppedSections, partialSection);
+      if (sectionDetail) parts.push(`static report content (${sectionDetail})`);
       if (trimmedEventCount > 0) parts.push(`${trimmedEventCount} oldest event history line(s)`);
       if (trimmedLogCount > 0) parts.push(`${trimmedLogCount} oldest main-process log line(s)`);
       return `> Clipboard export truncated to ${maxChars} chars: ${clipboardRetentionDetail(events.length, allEvents.length, logs.length, allLogs.length)}; dropped ${parts.join(' and ')}. Use "Save to file" for the full uncapped report.\n\n`;
@@ -172,9 +253,14 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
     if (out.length > maxChars) {
       // The explanatory banner itself can be larger than the slack above the
       // tail floor. Preserve its exact retention counts by shedding the same
-      // low-value static tail used by the hard-cap path, never the banner.
-      const room = maxChars - notice.length - tailOf(logs, events).length;
-      const cutBase = truncateBaseForClipboard(cappedBase, room);
+      // low-value static tail used by the hard-cap path, never the banner —
+      // except to additionally name whichever section(s) that shed actually
+      // removed. The helper stabilizes the mutually-dependent notice and cut
+      // so a section exposed only by the smaller named-banner room is not
+      // silently missing from the final notice.
+      const namedCut = buildNamedStaticTruncation(cappedBase, tailOf(logs, events), maxChars, buildNotice);
+      notice = namedCut.banner;
+      const cutBase = namedCut.cutBase;
       out = notice + cutBase + tailOf(logs, events);
       return { markdown: out, truncated: true, trimmedEventCount, trimmedLogCount, hardTruncated: true };
     }
@@ -184,17 +270,19 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
   // The static base ALONE (plus even the floor tail) blows the budget. Reserve
   // the floor tail and truncate the end of the base. This is often caused by
   // Node Diagnostics/session dumps, but a large pipeline audit can reach the
-  // boundary first, so the user-facing notice deliberately makes no claim about
-  // which section was cut. Save-to-file remains the complete artifact.
-  // Save-to-file (export-bug-report handler) stays uncapped.
+  // boundary first, so the banner names the actual dropped/partial section(s)
+  // from truncateBaseForClipboard's heading scan rather than staying silent
+  // about which one was cut. Save-to-file (export-bug-report handler) remains
+  // the complete, uncapped artifact.
   const tailMd = tailOf(floor.logs, floor.events);
   const trimmedEventCount = allEvents.length - floor.events.length;
   const trimmedLogCount = allLogs.length - floor.logs.length;
   const omissionVerb = trimmedEventCount > 0 || trimmedLogCount > 0 ? 'were' : 'was';
-  const banner = `> Clipboard export hit the ${maxChars}-char cap; ${hardCapOmissionDetail(trimmedEventCount, trimmedLogCount)} ${omissionVerb} omitted to preserve the most recent diagnostics (${clipboardRetentionDetail(floor.events.length, allEvents.length, floor.logs.length, allLogs.length)}). Use "Save to file" for the full uncapped report.\n\n`;
-  const room = maxChars - banner.length - tailMd.length;
   const cappedBase = clarifyCappedFilterSummary(baseMarkdown, floor.events.length, allEvents.length);
-  const cutBase = truncateBaseForClipboard(cappedBase, room);
+  const buildBanner = (droppedSections = [], partialSection = null) =>
+    `> Clipboard export hit the ${maxChars}-char cap; ${hardCapOmissionDetail(trimmedEventCount, trimmedLogCount, droppedSections, partialSection)} ${omissionVerb} omitted to preserve the most recent diagnostics (${clipboardRetentionDetail(floor.events.length, allEvents.length, floor.logs.length, allLogs.length)}). Use "Save to file" for the full uncapped report.\n\n`;
+
+  const { banner, cutBase } = buildNamedStaticTruncation(cappedBase, tailMd, maxChars, buildBanner);
   let out = banner + cutBase + tailMd;
   if (out.length > maxChars) out = out.slice(0, maxChars); // absolute backstop if the floor tail itself overran
   return { markdown: out, truncated: true, trimmedEventCount, trimmedLogCount, hardTruncated: true };

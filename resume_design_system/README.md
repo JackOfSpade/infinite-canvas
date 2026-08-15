@@ -43,21 +43,19 @@ attached design assets. The references named in the brief are
   reference only)
 - Matthew Butterick, *Practical Typography* (practicaltypography.com)
 
-All three families load from the **Google Fonts CDN** (CSS2 API),
-pinned to the exact weights the system uses:
+All three families ship as **pinned local assets**, at the exact weights the
+system uses:
 
 - `Source Serif 4` — 400, 600
 - `Inter` — 400, 500, 600 *(no Bold by design)*
 - `IBM Plex Mono` — 400, 500
 
-Loaded via a single `@import` at the top of `colors_and_type.css`. **No
-longer self-contained** — typography has a render-time dependency on the
-Google Fonts CDN; ensure it's reachable from the render environment, or
-re-vendor the families locally for an air-gapped build. All three embed
-cleanly in Chrome-rendered PDFs and match the documented aesthetic. Swap
-families
-by editing the `--ff-*` variables in `colors_and_type.css`; the system
-is family-agnostic.
+`colors_and_type.css` declares local `@font-face` rules. The application
+builder resolves them to data URLs when emitting HTML, so Application.html and
+PDF rendering are self-contained and work offline. The included OFL licenses
+live in `fonts/licenses/`. All three embed cleanly in Chrome-rendered PDFs and
+match the documented aesthetic. Swap families by updating the face files and
+declarations together with the `--ff-*` variables; the system is family-agnostic.
 
 ---
 
@@ -73,7 +71,7 @@ is family-agnostic.
 | `resume.html`                     | The template + a fully-populated sample (open this).      |
 | `build/dual-mode-pdf.js`          | Pure module exporting `addOcgBackground(bytes) → bytes`. UMD; loads in Node or browser. |
 | `build/vendor/`                   | *(removed — pdf-lib is now loaded from CDN in the browser and the `pdf-lib` npm package in Node).* |
-| `fonts/` (removed)                | Families now load from the Google Fonts CDN — no longer bundled. |
+| `fonts/`                          | Pinned font assets and OFL licenses, inlined into generated standalone HTML. |
 | `preview/`                        | Design-system reference cards (type, color, spacing, components, variants, anti-patterns). Not used at generation time. |
 
 The system covers exactly one surface — the printable résumé. No

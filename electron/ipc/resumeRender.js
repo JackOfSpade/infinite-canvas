@@ -31,7 +31,7 @@ import electronPkg from 'electron';
 import * as PDFLib from 'pdf-lib';
 import { PDFDocument } from 'pdf-lib';
 import { logger } from '../logger.js';
-import { getDesignSystemDir } from './resumeHtml.js';
+import { getDesignSystemDir, webFontFacesReadyExpression } from './resumeHtml.js';
 
 const { BrowserWindow } = electronPkg;
 
@@ -41,8 +41,8 @@ const { BrowserWindow } = electronPkg;
 // extension, the user's Generate click indefinitely. Same failure shape
 // REFRESH_TIMEOUT_MS guards against in browserViewMonitor.js; not imported
 // from there — that timeout is tuned for a LIVE network page reload, this one
-// for an offline, self-authored document with no network dependency besides
-// the design system's Google Fonts @import, so the values (and what a
+// for an offline, self-authored document with local bundled fonts, so the
+// values (and what a
 // timeout here actually diagnoses) don't share enough to be worth coupling.
 const RENDER_TIMEOUT_MS = 20_000;
 
@@ -169,35 +169,45 @@ export async function renderPdf(html, { signal, document = null } = {}) {
 
     // `document.fonts.ready` is NOT a success signal — per spec it resolves
     // when font loading FINISHES, including when every @font-face failed. The
-    // design system pulls Source Serif 4 / Inter / IBM Plex Mono from the
-    // Google Fonts CDN (`@import url(https://fonts.googleapis.com/...)` in
-    // colors_and_type.css), so an offline machine, a blocked CDN, or a captive
-    // portal resolves `ready` against SYSTEM FALLBACK metrics. Page count
+    // design system bundles Source Serif 4 / Inter / IBM Plex Mono into the
+    // generated HTML. `ready` can still settle with a damaged embedded asset
+    // or browser font-load failure, leaving SYSTEM FALLBACK metrics. Page count
     // measured there is measured against the wrong typography — which would
     // drive the compact-density decision (and potentially an LLM revision that
     // cuts real content) off a number the user will never see.
     //
-    // So: after `ready`, actually verify the display family loaded, using the
-    // SAME check as the document's own `ic-font-warning` banner
-    // (resumeHtml.js §5.3) — read the computed weight off a real on-page
-    // element rather than letting the shorthand default to 400, because
-    // resume.css renders .name at 600 and browsers only fetch the weights
-    // actually used. Report it; the caller decides what a false means.
-    const fontsLoaded = await withTimeout(
-      wc.executeJavaScript(`document.fonts.ready.then(function () {
-        try {
-          var ffDisplay = getComputedStyle(document.documentElement).getPropertyValue('--ff-display');
-          var firstFamily = (ffDisplay.split(',')[0] || '').trim().replace(/^["']|["']$/g, '');
-          if (!firstFamily || !document.fonts || !document.fonts.check) return true;
-          var ffEl = document.querySelector('.name') || document.querySelector('.letter-body') || document.documentElement;
-          var ffWeight = (getComputedStyle(ffEl).fontWeight || '400').trim() || '400';
-          return document.fonts.check(ffWeight + ' 12px "' + firstFamily + '"');
-        } catch (e) { return true; }
-      })`),
+    // So: force the design system's complete, pinned face set to load before
+    // `ready`, then walk actual document text and verify its exact
+    // display/body/mono face+weight set. Application.html keeps the cover
+    // panel hidden while the résumé is printed; `document.fonts.ready` does
+    // not necessarily fetch a face used exclusively in display:none content.
+    // Without these explicit loads, the shared all-panel predicate could
+    // report a valid hidden cover face as missing and incorrectly withhold a
+    // perfectly valid baseline résumé PDF. Loading all seven bundled faces is
+    // small, deterministic, and also ensures a later Sync cannot inherit an
+    // unchecked fallback. The detailed predicate remains the single source of
+    // truth for which faces the emitted document actually requires.
+    const fontReadiness = await withTimeout(
+      wc.executeJavaScript(`(async function () {
+        var faceDescriptors = [
+          '400 12px "Source Serif 4"', '600 12px "Source Serif 4"',
+          '400 12px "Inter"', '500 12px "Inter"', '600 12px "Inter"',
+          '400 12px "IBM Plex Mono"', '500 12px "IBM Plex Mono"'
+        ];
+        await Promise.all(faceDescriptors.map(function (descriptor) {
+          return document.fonts.load(descriptor, 'A').catch(function () { return []; });
+        }));
+        await document.fonts.ready;
+        return ${webFontFacesReadyExpression({ details: true })};
+      })()`),
       RENDER_TIMEOUT_MS,
       'renderPdf: document.fonts.ready',
       signal,
     );
+    const fontsLoaded = fontReadiness?.loaded !== false;
+    const missingFontFaces = Array.isArray(fontReadiness?.missingFaces)
+      ? fontReadiness.missingFaces.filter(Boolean).slice(0, 12)
+      : [];
     throwIfAborted(signal);
 
     // printBackground + preferCSSPageSize are both REQUIRED (SKILL.md §5,
@@ -221,7 +231,8 @@ export async function renderPdf(html, { signal, document = null } = {}) {
     const pageCount = pdfDoc.getPageCount();
     if (!fontsLoaded) {
       logger.warn(
-        '[ResumeRender] Web fonts did not load in the render window (offline, or fonts.googleapis.com unreachable). '
+        '[ResumeRender] Bundled fonts did not load in the render window (package corruption or browser font-load failure). '
+        + `Missing face(s): ${missingFontFaces.join(', ') || 'unavailable face detail'}. `
         + `Page count ${pageCount} was measured against fallback typefaces and does NOT reflect the real document — the fit loop will not act on it.`,
       );
     }

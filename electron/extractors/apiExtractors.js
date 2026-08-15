@@ -704,6 +704,25 @@ const AMBIGUOUS_ROLE_DOMAIN_GUARDS = new Map([
 
 const EMPTY_GEO = new Set();
 
+// Punctuation that starts a new clause in a job title. Two role concepts sitting
+// on opposite sides of one of these are describing different things ("… ASSISTANT
+// (PERSONAL PROPERTY)"), so they do not corroborate each other. A spaced dash
+// counts; an intra-word hyphen ("Customer-Service", "Part-Time") does not.
+const PHRASE_BREAK_BETWEEN = /[,;:()[\]{}|/•·]|\s[-–—]\s/;
+
+/**
+ * Fold a simple English plural so a pluralized title token answers a singular
+ * query token ("Officers" → "officer"). Intentionally minimal: a real stemmer
+ * conflates unrelated roles. Words ending in "ss" (business, access) are never
+ * plurals, and short words are left alone so "gas"/"bus" survive intact.
+ */
+function singularizeRoleToken(word) {
+  const w = String(word || '');
+  if (w.length > 4 && /(?:ch|sh|s|x|z)es$/.test(w)) return w.slice(0, -2);
+  if (w.length > 3 && /[^s]s$/.test(w)) return w.slice(0, -1);
+  return w;
+}
+
 /**
  * Tokenize the candidate's locations (resume profile.locations, e.g.
  * "Denver, CO") into a set of geo tokens to EXCLUDE from role matching.
@@ -721,10 +740,13 @@ export function buildGeoTermSet(locations = []) {
 }
 
 /**
- * Compact evidence for a keyword-less remote-feed match. This is kept out of
- * the job object itself: it is report telemetry, not prompt/card payload.
+ * Shared decision logic for keyword-less relevance matching. jobRelevanceEvidence
+ * (evidence for an ADMITTED title) and jobRelevanceRejection (why a REJECTED
+ * title failed, used by the bug report) both call this and walk the exact same
+ * checks in the exact same order, so the two views of the gate can never drift
+ * apart from each other.
  */
-export function jobRelevanceEvidence(roleText, query, geoTerms = EMPTY_GEO) {
+function computeJobRelevanceDecision(roleText, query, geoTerms = EMPTY_GEO) {
   const text = String(roleText || '').toLowerCase();
   const terms = String(query || '').toLowerCase().split(/\s+/).filter(t => t.length >= 2);
   // Meaningful = role/skill nouns. Three filters, each dropping a class of token
@@ -755,22 +777,60 @@ export function jobRelevanceEvidence(roleText, query, geoTerms = EMPTY_GEO) {
   const useTerms = meaningful.length > 0
     ? meaningful
     : terms.filter(t => norm(t).length >= 3 && !geoTerms.has(norm(t)));
-  if (useTerms.length === 0) return null;
+  // Computed up front (not just at the corroboration check below) so a
+  // no-usable-terms rejection can still report the threshold that would have
+  // applied, and so every return path shares one source of truth for it.
+  const minMatches = meaningful.length >= 2 ? 2 : 1;
+  const fallbackTerms = meaningful.length === 0;
+  if (useTerms.length === 0) {
+    return {
+      ok: false, reason: 'no-usable-query-terms', matchedConcepts: [],
+      useTermsNorm: [], requiredMatches: minMatches, fallbackTerms,
+    };
+  }
+  const useTermsNorm = useTerms.map(norm).slice(0, 12);
   // Match whole words, never substrings: "service" must not match the
   // unrelated company name "Professional Services". Tokenizing also makes
   // punctuation variants such as "Customer-Service Coordinator" equivalent
   // to the query's separate words.
-  const roleTokenList = text.match(/[a-z0-9]+/g) || [];
+  const roleTokenMatches = [...text.matchAll(/[a-z0-9]+/g)];
+  const roleTokenList = roleTokenMatches.map(m => m[0]);
+  const roleTokenStarts = roleTokenMatches.map(m => m.index);
+  const roleTokenEnds = roleTokenMatches.map(m => m.index + m[0].length);
   const roleTokens = new Set(roleTokenList);
+  // Boards pluralize the same role at will ("Security Officers - 2nd Shift",
+  // "POSITIONS FOR Armed Security Officers"). Comparing raw tokens dropped those
+  // rows because the query said "Officer", leaving only ONE matched concept —
+  // below the two-concept floor. Fold a simple English plural on both sides so a
+  // pluralized title is the same concept, not a different one. Deliberately not
+  // a stemmer: a real stemmer conflates unrelated roles (operations/operator).
+  const roleTokenSingulars = roleTokenList.map(singularizeRoleToken);
   const queryTokens = new Set(terms.map(norm).filter(Boolean));
+  const tokenEq = (roleIdx, queryWord) => roleTokenList[roleIdx] === queryWord
+    || roleTokenSingulars[roleIdx] === singularizeRoleToken(queryWord);
+  const spansFor = (phrase) => {
+    const words = Array.isArray(phrase) ? phrase : [];
+    const spans = [];
+    for (let start = 0; start <= roleTokenList.length - words.length; start++) {
+      if (words.every((word, offset) => tokenEq(start + offset, word))) {
+        spans.push({ start, end: start + words.length - 1 });
+      }
+    }
+    return spans;
+  };
+  // Report the role tokens actually present, so evidence reads "officers"
+  // when the query said "officer" instead of echoing the query back.
+  const matchedText = (span) => roleTokenList.slice(span.start, span.end + 1).join(' ');
   const matchConcept = (term) => {
-    if (roleTokens.has(term)) return {
-      queryTerm: term, matched: term, matchedTokens: [term], kind: 'exact',
+    const exact = spansFor([term]);
+    if (exact.length > 0) return {
+      queryTerm: term, matched: matchedText(exact[0]), matchedTokens: [term], kind: 'exact',
     };
     for (const alias of JOB_ROLE_CONCEPT_ALIASES.get(term) || []) {
-      if (alias.every(token => roleTokens.has(token))) {
+      const aliasSpans = spansFor(alias);
+      if (aliasSpans.length > 0) {
         return {
-          queryTerm: term, matched: alias.join(' '), matchedTokens: alias, kind: 'synonym',
+          queryTerm: term, matched: matchedText(aliasSpans[0]), matchedTokens: alias, kind: 'synonym',
         };
       }
     }
@@ -788,15 +848,24 @@ export function jobRelevanceEvidence(roleText, query, geoTerms = EMPTY_GEO) {
       && ![...technicalTerms].some(term => queryTokens.has(term))
       && [...technicalTerms].some(term => roleTokens.has(term));
   });
-  if (hasConflictingAmbiguousDomain) return null;
+  if (hasConflictingAmbiguousDomain) {
+    return {
+      ok: false, reason: 'ambiguous-domain-conflict', matchedConcepts,
+      useTermsNorm, requiredMatches: minMatches, fallbackTerms,
+    };
+  }
   // A query with two or more actual role/skill nouns has enough signal to
   // require corroboration. Two-of-three intentionally keeps close variants
   // such as "Customer Service Representative" for a "Customer Service
   // Coordinator" search, while excluding a job that only happens to mention
   // "customer" or "service" in a tag. Do not tighten a single-noun query or
   // the all-generic fallback; those have no second role signal to require.
-  const minMatches = meaningful.length >= 2 ? 2 : 1;
-  if (matchedConcepts.length < minMatches) return null;
+  if (matchedConcepts.length < minMatches) {
+    return {
+      ok: false, reason: 'too-few-matched-concepts', matchedConcepts,
+      useTermsNorm, requiredMatches: minMatches, fallbackTerms,
+    };
+  }
   // Matching two disconnected words is not corroboration. In particular,
   // USAJobs' broad Keyword endpoint returned "TRANSPORTATION ASSISTANT
   // (PERSONAL PROPERTY)" for "Property Management Assistant": `assistant`
@@ -806,37 +875,77 @@ export function jobRelevanceEvidence(roleText, query, geoTerms = EMPTY_GEO) {
   // "Assistant Property Manager" (assistant/property are adjacent) and
   // "Housing Management Assistant" (management/assistant are adjacent), but
   // does not allow distant ambient terms to assemble a false role match.
-  const spansFor = (phrase) => {
-    const words = Array.isArray(phrase) ? phrase : [];
-    const spans = [];
-    for (let start = 0; start <= roleTokenList.length - words.length; start++) {
-      if (words.every((word, offset) => roleTokenList[start + offset] === word)) {
-        spans.push({ start, end: start + words.length - 1 });
-      }
-    }
-    return spans;
+  // "One local title phrase" is not the same as "touching". Requiring zero gap
+  // rejected "Security patrol officer" and "Security Officer, Overnight" — one
+  // ordinary modifier between two role nouns is still a single phrase. Allow at
+  // most ONE intervening word, and only when no punctuation between the two
+  // concepts opens a new clause. The parenthesis in "TRANSPORTATION ASSISTANT
+  // (PERSONAL PROPERTY)" is exactly such a break, so the false USAJobs match
+  // this rule was written for stays rejected on the punctuation, not the gap.
+  const samePhrase = (a, b) => {
+    const [first, second] = a.end <= b.end ? [a, b] : [b, a];
+    const gap = second.start - first.end - 1;
+    if (gap < 0) return true;
+    if (gap > 1) return false;
+    return !PHRASE_BREAK_BETWEEN.test(text.slice(roleTokenEnds[first.end], roleTokenStarts[second.start]));
   };
   if (minMatches > 1) {
     const locallyCorroborated = matchedConcepts.some((left, i) =>
       matchedConcepts.slice(i + 1).some(right =>
-        spansFor(left.matchedTokens).some(a => spansFor(right.matchedTokens).some(b =>
-          a.start <= b.end + 1 && b.start <= a.end + 1,
-        )),
+        spansFor(left.matchedTokens).some(a => spansFor(right.matchedTokens).some(b => samePhrase(a, b))),
       ),
     );
-    if (!locallyCorroborated) return null;
+    if (!locallyCorroborated) {
+      return {
+        ok: false, reason: 'not-one-title-phrase', matchedConcepts,
+        useTermsNorm, requiredMatches: minMatches, fallbackTerms,
+      };
+    }
   }
   return {
+    ok: true, reason: null, matchedConcepts,
+    useTermsNorm, requiredMatches: minMatches, fallbackTerms,
+  };
+}
+
+/**
+ * Compact evidence for a keyword-less remote-feed match. This is kept out of
+ * the job object itself: it is report telemetry, not prompt/card payload.
+ */
+export function jobRelevanceEvidence(roleText, query, geoTerms = EMPTY_GEO) {
+  const decision = computeJobRelevanceDecision(roleText, query, geoTerms);
+  if (!decision.ok) return null;
+  return {
     query: String(query || '').slice(0, 120),
-    terms: useTerms.map(norm).slice(0, 12),
+    terms: decision.useTermsNorm,
     // `matchedTerms` is kept for compact/backward-compatible report output;
     // `matchedConcepts` records exact versus synonym evidence for diagnosis.
-    matchedTerms: matchedConcepts.map(match => match.queryTerm).slice(0, 12),
-    matchedConcepts: matchedConcepts.map(match => ({
+    matchedTerms: decision.matchedConcepts.map(match => match.queryTerm).slice(0, 12),
+    matchedConcepts: decision.matchedConcepts.map(match => ({
       queryTerm: match.queryTerm, matched: match.matched, kind: match.kind,
     })).slice(0, 12),
-    requiredMatches: minMatches,
-    fallbackTerms: meaningful.length === 0,
+    requiredMatches: decision.requiredMatches,
+    fallbackTerms: decision.fallbackTerms,
+  };
+}
+
+/**
+ * The rejection-side twin of jobRelevanceEvidence: same decision (via
+ * computeJobRelevanceDecision), but for a title that FAILED the gate it
+ * returns why instead of returning null. Built so the bug report can explain
+ * a rejected title instead of only printing it — a bare title gave no way to
+ * tell a correct rejection from an over-strict one. Returns null when the
+ * title IS relevant (nothing to explain). `reason` is one of:
+ * 'no-usable-query-terms', 'too-few-matched-concepts',
+ * 'not-one-title-phrase', 'ambiguous-domain-conflict'.
+ */
+export function jobRelevanceRejection(roleText, query, geoTerms = EMPTY_GEO) {
+  const decision = computeJobRelevanceDecision(roleText, query, geoTerms);
+  if (decision.ok) return null;
+  return {
+    reason: decision.reason,
+    matched: decision.matchedConcepts.map(match => match.queryTerm),
+    required: decision.requiredMatches,
   };
 }
 

@@ -77,6 +77,34 @@ export default [
         && !staticAndLogsOnly.markdown.includes('older timeline entries')
         && staticAndLogsOnly.markdown.includes('oldest main-process log line(s)'),
       'Clipboard cap: hard-cap banner does not claim event loss when every event was retained');
+
+      // Name both kinds of static loss. The exact cap assertion is especially
+      // important here because adding the names makes the banner longer and
+      // therefore leaves less room for the base than the initial generic pass.
+      const namedHardBase = '# Bug Report\n## Kept Summary\n' + 'A'.repeat(5_000)
+        + '\n## Partial Audit\n' + 'B'.repeat(5_000)
+        + '\n## Dropped Diagnostics\nbody\n## Also Dropped\nbody\n';
+      const namedHard = enforceClipboardMarkdownCap(namedHardBase, events, logs, cap);
+      assert(namedHard.hardTruncated && namedHard.markdown.length <= cap,
+        `Clipboard cap: named hard-cap output respects the exact cap (${namedHard.markdown.length} <= ${cap})`);
+      assert(namedHard.markdown.includes('3 section(s) dropped: Partial Audit, Dropped Diagnostics, Also Dropped')
+        && namedHard.markdown.includes('"Kept Summary" cut mid-section'),
+      'Clipboard cap: hard-cap banner names whole dropped sections and the section cut in progress');
+
+      // This begins on the soft path (the base plus reserved tail fits), then
+      // the event/log notice tips it into its secondary static hard-cap path.
+      // It must use the same final-cut section diagnostics as the direct hard
+      // path rather than reporting the stale generic or first-pass omission.
+      const secondaryCap = 2_000;
+      const secondarySections = Array.from({ length: 12 }, (_, i) => `## S${i}\n${String(i).repeat(84)}\n`).join('');
+      const secondaryEvents = Array.from({ length: 100 }, (_, i) => `EVENT ${i} ${'x'.repeat(18)}`);
+      const secondaryLogs = Array.from({ length: 60 }, (_, i) => `LOG ${i} ${'x'.repeat(18)}`);
+      const secondaryHard = enforceClipboardMarkdownCap(secondarySections, secondaryEvents, secondaryLogs, secondaryCap);
+      assert(secondaryHard.hardTruncated && secondaryHard.markdown.length <= secondaryCap,
+        `Clipboard cap: secondary hard-cap output respects the exact cap (${secondaryHard.markdown.length} <= ${secondaryCap})`);
+      assert(secondaryHard.markdown.includes('2 section(s) dropped: S10, S11')
+        && secondaryHard.markdown.includes('"S9" cut mid-section'),
+      'Clipboard cap: secondary hard-cap banner names the final dropped and partial sections');
       return { phase1Len: phase1.markdown.length, phase2Len: phase2.markdown.length, phase1Trimmed: phase1.trimmedEventCount };
     },
   },
@@ -1020,6 +1048,44 @@ export default [
         assert(report.includes('Per source (title-relevant gathered): google=2')
           && !report.includes('Per source (raw gathered)'),
         'per-source counts are labeled as post-relevance so they reconcile with the aggregate funnel');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { ok: true };
+    },
+  },
+{
+    name: 'job pipeline report: rejected title samples state their nearest gate evidence',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = {
+        nodeId: telemetry.nodeId,
+        windowId: telemetry.windowId,
+        search: telemetry.search,
+        resolves: telemetry.resolves,
+      };
+      Object.assign(telemetry, {
+        nodeId: 'relevance-rejection-diagnostics', windowId: null, resolves: {},
+        search: {
+          ts: Date.now(), queries: 2, raw: 2, relevanceDropped: 2, deduped: 0,
+          ageDropped: 0, historyDropped: 0, kept: 0,
+          queryStrings: ['Corporate Security Officer', 'Property Management Assistant'],
+          bySource: {
+            usajobs: {
+              count: 0, providerGathered: 2, relevanceDropped: 2,
+              relevanceRejected: [
+                'Public Safety Officer',
+                'TRANSPORTATION ASSISTANT (PERSONAL PROPERTY)',
+              ],
+            },
+          },
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set(['relevance-rejection-diagnostics']), null, null);
+        assert(report.includes('"Public Safety Officer" [matched officer — 1/2 required]')
+          && report.includes('"TRANSPORTATION ASSISTANT (PERSONAL PROPERTY)" [matched property+assistant, but not within one title phrase]'),
+        'rejected-title samples show the closest query’s observed failed gate check');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -2500,6 +2566,21 @@ export default [
       });
       assert(healthySalary.salary === '$29/hr',
         'structured detail pay does not clobber an already-parseable list salary');
+      const filledCompany = mergeExpandedJobDetail({ ...listCard, company: '   ' }, {
+        jsonLdCompany: '  Detail-page employer  ',
+      });
+      assert(filledCompany.company === 'Detail-page employer',
+        'structured detail company fills a blank list-card company and is normalized');
+      const preservedCompany = mergeExpandedJobDetail(listCard, {
+        jsonLdCompany: 'Different detail-page employer',
+      });
+      assert(preservedCompany.company === 'Acme Health',
+        'structured detail company does not clobber a usable list-card company');
+      const blankDetailCompany = mergeExpandedJobDetail({ ...listCard, company: '   ' }, {
+        jsonLdCompany: '   ',
+      });
+      assert(blankDetailCompany.company === '   ',
+        'blank structured company data does not replace an equally blank list-card field');
       return { posted: merged.posted, preserved: true };
     },
   },

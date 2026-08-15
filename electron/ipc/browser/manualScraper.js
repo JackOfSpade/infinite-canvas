@@ -443,8 +443,11 @@ export function mergeExpandedJobDetail(job, {
   jsonLdSalary = '',
   salaryChanged = false,
   reconciledSalary,
+  jsonLdCompany = '',
 } = {}) {
   const existingSalaryUsable = parseSalaryToNumeric(job?.salary) > 0;
+  const existingCompanyUsable = !!String(job?.company || '').trim();
+  const usableJsonLdCompany = String(jsonLdCompany || '').trim();
   return {
     ...job,
     ...(text ? { snippet: text } : {}),
@@ -454,6 +457,13 @@ export function mergeExpandedJobDetail(job, {
     // present-but-unusable list chip (e.g. Glassdoor "US$19 - US$20 (Employer
     // provided)"), while leaving every already-parseable list salary untouched.
     ...(jsonLdSalary && !existingSalaryUsable && !salaryChanged ? { salary: jsonLdSalary } : {}),
+    // ZipRecruiter's ItemList regex derives company from the listing URL
+    // (/c/{Company}/Job/), which never matches externally-hosted postings
+    // (ziprecruiter.com/job-redirect?match_token=…) — leaving company
+    // permanently blank from list extraction alone. Backfill from the detail
+    // page's own JobPosting.hiringOrganization, but only when the list
+    // extractor found nothing; never clobber a company it already resolved.
+    ...(usableJsonLdCompany && !existingCompanyUsable ? { company: usableJsonLdCompany } : {}),
   };
 }
 
@@ -1020,6 +1030,22 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                 evidence: `${overlayBase.srcName} challenged the background detail fetch at "${job.title || 'an untitled listing'}". Relevant listing rows were retained, but this and later rows may lack full descriptions.`,
                 suggestion: `Open ${overlayBase.srcName} in a normal Chrome tab, complete any verification, then run the search again for full descriptions.`,
               };
+              // The break below is deliberate (see comment above) — it must stay so
+              // we don't intensify a session-level block. But it is otherwise SILENT
+              // about its blast radius: every job after this one keeps its list-time
+              // empty snippet with no telemetry of its own, so a later empty-
+              // description row at scoring time is unattributable to this abort. Log
+              // the remaining count (from this loop's own position — not re-derived)
+              // plus a few sample titles so that row can be traced back here.
+              const unexpandedCount = enhanced.length - (i + 1);
+              const unexpandedSample = enhanced
+                .slice(i + 1, i + 1 + 3)
+                .map(j => (j?.title || j?.url || '?').slice(0, 65))
+                .join(', ');
+              recordManualScraperTelemetry({
+                phase: 'desc-miss', srcName: overlayBase.srcName,
+                key: `${unexpandedCount} unexpanded after abort | ${unexpandedSample || 'none'}`,
+              }, { updateActive: false });
               break;
             }
             // Fallback path: main page is being used, challenge is visible.
@@ -1068,11 +1094,13 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           let text = '';
           let jsonLdDate = '';
           let jsonLdSalary = ''; // formatted pay from JobPosting.baseSalary (if present)
+          let jsonLdCompany = ''; // hiringOrganization.name backfill (if present)
           if (cfg.jsonLdType) {
             const ld = await fetchPage.evaluate((type, field, datePattern) => {
               let desc = '';
               let datePosted = '';
               let baseSalary = null; // schema.org JobPosting.baseSalary (employer-stated pay)
+              let company = ''; // schema.org JobPosting.hiringOrganization (Organization or bare Text)
               // Robust JSON-LD harvest: a block may be a single object, an ARRAY of
               // objects, or wrap nodes in an `@graph`; and `@type` may be a string
               // OR an array (["JobPosting"]). The old strict `d['@type'] !== type`
@@ -1112,6 +1140,13 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                 if (!baseSalary && d.baseSalary && typeof d.baseSalary === 'object') {
                   baseSalary = d.baseSalary;
                 }
+                // hiringOrganization is typed Organization|Text — some feeds emit the
+                // bare company name as a string, most nest it under `.name`.
+                if (!company && d.hiringOrganization) {
+                  const org = d.hiringOrganization;
+                  const name = typeof org === 'string' ? org : (org && typeof org === 'object' ? org.name : '');
+                  if (name && String(name).trim()) company = String(name).trim();
+                }
               }
               // DOM fallback for the date: some detail pages carry NO structured
               // date at all — verified on ZipRecruiter's new /jobs/{co}/{slug}
@@ -1131,11 +1166,12 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                   if (m) { datePosted = m[0]; break; }
                 }
               }
-              return { desc, datePosted, baseSalary };
-            }, cfg.jsonLdType, cfg.jsonLdField, POSTED_DATE_PATTERN).catch(() => ({ desc: '', datePosted: '', baseSalary: null }));
+              return { desc, datePosted, baseSalary, company };
+            }, cfg.jsonLdType, cfg.jsonLdField, POSTED_DATE_PATTERN).catch(() => ({ desc: '', datePosted: '', baseSalary: null, company: '' }));
             text = ld.desc;
             jsonLdDate = ld.datePosted;
             jsonLdSalary = formatJsonLdSalary(ld.baseSalary);
+            jsonLdCompany = ld.company;
           }
           // __NEXT_DATA__ fallback: walk a dot-separated field path into pageProps.
           if (!text && cfg.nextDataField) {
@@ -1287,6 +1323,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             jsonLdSalary,
             salaryChanged,
             reconciledSalary,
+            jsonLdCompany,
           });
           // Date-miss diagnostic (once per batch): a description was recovered but
           // NO posted date — not from the list extractor, the JobPosting JSON-LD,

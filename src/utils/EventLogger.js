@@ -45,6 +45,7 @@ class EventLoggerSingleton {
     this.bootTimestamp = new Date().toISOString();
     this._lastMsg   = null;
     this._lastCount = 0;
+    this._resizeRun = null;
     this._nodeStates = new Map();
     this._lastSaveError = null;
     this._installErrorCapture();
@@ -79,6 +80,9 @@ class EventLoggerSingleton {
     const ms  = String(now.getMilliseconds()).padStart(3, '0');
     const timestamp = `${hms}.${ms}`;
 
+    // Any other event ends an in-progress resize run (see logNodeResize).
+    this._resizeRun = null;
+
     // Deduplicate consecutive identical messages (e.g. ResizeObserver floods).
     // Instead of 40 identical lines, emit one line + a "(×N)" suffix when it stops.
     if (this._lastMsg === message) {
@@ -86,10 +90,7 @@ class EventLoggerSingleton {
       // Replace the last entry in the ring with the updated count.
       if (this.logs.length > 0) {
         const prev = this.logs[this.logs.length - 1];
-        const updated = prev.replace(/ \(×\d+\)$/, '') + ` (×${this._lastCount})`;
-        this.currentBytes -= prev.length;
-        this.logs[this.logs.length - 1] = updated;
-        this.currentBytes += updated.length;
+        this._replaceLastEntry(prev.replace(/ \(×\d+\)$/, '') + ` (×${this._lastCount})`);
       }
       return;
     }
@@ -105,6 +106,68 @@ class EventLoggerSingleton {
     while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
       this.currentBytes -= this.logs.shift().length;
     }
+  }
+
+  /** Overwrite the newest ring entry, keeping the byte accounting honest. */
+  _replaceLastEntry(line) {
+    const prev = this.logs[this.logs.length - 1];
+    this.currentBytes -= prev.length;
+    this.logs[this.logs.length - 1] = line;
+    this.currentBytes += line.length;
+
+    // A coalesced resize line grows as its frame count/span is updated. Keep
+    // replacement writes subject to the same ring limit as appended entries.
+    while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
+      this.currentBytes -= this.logs.shift().length;
+    }
+  }
+
+  /**
+   * Record a node dimension change, collapsing a consecutive run of frames for
+   * the SAME node into one line.
+   *
+   * React Flow's ResizeObserver reports content-driven auto-height one frame at
+   * a time, so a single hub node settling from 139px to 100px wrote ~40 lines,
+   * each differing by a pixel or two. The generic (×N) dedup above can't touch
+   * those — every message is unique — so they filled over half of a bug report's
+   * retained event budget and pushed 104 genuinely useful older events out of
+   * the clipboard export. The diagnostic signal is the SPAN ("it shrank 139→100
+   * over 22 frames"), never the intermediate pixels.
+   *
+   * The line keeps the run's FIRST timestamp so it stays ordered against its
+   * neighbours, matching how (×N) dedup behaves.
+   */
+  logNodeResize(id, width, height) {
+    const dim = v => (Number.isFinite(v) ? Math.round(v) : v);
+    const w = dim(width);
+    const h = dim(height);
+    const run = this._resizeRun;
+
+    if (run && run.id === id && this.logs[this.logs.length - 1] === run.line) {
+      run.count++;
+      run.w = w;
+      run.h = h;
+      this._replaceLastEntry(this._formatResizeRun(run));
+      run.line = this.logs[this.logs.length - 1];
+      return;
+    }
+
+    this.log(`node resized id=${id} w=${w} h=${h}`);
+    const line = this.logs[this.logs.length - 1];
+    this._resizeRun = {
+      id, count: 1, fromW: w, fromH: h, w, h, line,
+      prefix: (line.match(/^\[[^\]]*\]\s/) || [''])[0],
+    };
+    // The run owns this line now — keep (×N) dedup from rewriting it too.
+    this._lastMsg = null;
+  }
+
+  _formatResizeRun(run) {
+    const spans = [];
+    if (run.fromW !== run.w) spans.push(`w ${run.fromW}→${run.w}`);
+    if (run.fromH !== run.h) spans.push(`h ${run.fromH}→${run.h}`);
+    const detail = spans.length ? `, ${spans.join(', ')}` : '';
+    return `${run.prefix}node resized id=${run.id} w=${run.w} h=${run.h} (×${run.count}${detail})`;
   }
 
   /** Returns all recorded events (chronological order, oldest first). */

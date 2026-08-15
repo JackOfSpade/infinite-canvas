@@ -20,6 +20,11 @@ import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQu
 // import into electron/ from src/ is an established pattern (electron/ipc/
 // jobs.js line ~50 already does the same for this exact module).
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
+// The exact relevance gate the pipeline ran (electron/extractors/apiExtractors.js)
+// — imported so a rejected-title sample can explain WHY the gate rejected it
+// instead of only printing the bare title. See its usage below for why
+// recomputing it here, at report time, is an exact replay rather than a guess.
+import { jobRelevanceRejection } from '../../extractors/apiExtractors.js';
 
 export function buildJobsConfigSnapshot() {
   let jobs = {};
@@ -416,14 +421,40 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push(`  - \`${k}\`: surfaced ${v.count} of ${v.gathered} in-window matches ⚠️ (${fastCap ? 'fast aggregate cap' : 'result cap'}${capLabel} — ${overflow} more matched but not gathered; ${nextStep})`);
       }
       const relevanceFiltered = entries.filter(([, v]) => v.relevanceDropped > 0);
+      // jobRelevanceRejection is a pure function of (title, query): same inputs,
+      // same output every time. So replaying it here against the run's own role
+      // queries (the same ones printed above as "Raw role queries") is an EXACT
+      // recomputation of what the gate did, not a guess — no new data channel
+      // needed from the pipeline. A title is only rejected when every query
+      // rejects it, so report the query that came closest to admitting it (the
+      // one with the most matched concepts) as the representative reason.
+      const roleQueries = Array.isArray(s.queryStrings) ? s.queryStrings : [];
+      const explainRejection = (title) => {
+        let closest = null;
+        for (const q of roleQueries) {
+          const rejection = jobRelevanceRejection(title, q);
+          if (!rejection) continue; // an admitting query would contradict "every query rejects" — skip rather than assert one
+          if (!closest || rejection.matched.length > closest.matched.length) closest = rejection;
+        }
+        if (!closest) return '';
+        const matched = closest.matched.length ? closest.matched.join('+') : '(none)';
+        switch (closest.reason) {
+          case 'no-usable-query-terms': return ' [query had no usable terms]';
+          case 'ambiguous-domain-conflict': return ` [matched ${matched}, but an ambiguous-domain guard term was present]`;
+          case 'too-few-matched-concepts': return ` [matched ${matched} — ${closest.matched.length}/${closest.required} required]`;
+          case 'not-one-title-phrase': return ` [matched ${matched}, but not within one title phrase]`;
+          default: return ` [${closest.reason}]`;
+        }
+      };
       for (const [k, v] of relevanceFiltered) {
         lines.push(`  - \`${k}\`: provider returned ${v.providerGathered ?? v.count}; app rejected ${v.relevanceDropped} title-irrelevant row(s) before the result cap.`);
         // The count alone can't separate a gate doing its job from one that is
         // over-rejecting and starving the source — and a high reject ratio is
         // normal for keyword APIs that search the whole announcement (USAJobs),
-        // so the ratio isn't the tell either. Only the discarded titles are.
+        // so the ratio isn't the tell either. The discarded titles, now each with
+        // WHY the gate rejected it, are.
         if (Array.isArray(v.relevanceRejected) && v.relevanceRejected.length > 0) {
-          const sample = v.relevanceRejected.map(t => `"${String(t).slice(0, 60)}"`).join(', ');
+          const sample = v.relevanceRejected.map(t => `"${String(t).slice(0, 60)}"${explainRejection(t)}`).join(', ');
           lines.push(`    - rejected sample: ${sample} — if these read as ON-target for the search, the relevance gate is too strict.`);
         }
       }
@@ -1567,10 +1598,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // because fonts never loaded" renders identically to "no PDF because
       // rendering broke" (both show fontsLoaded:false, error:null) — a reader
       // would go hunting for a render bug that doesn't exist instead of
-      // recognizing a network condition that resolves itself the next time
-      // the machine has a clean path to fonts.googleapis.com.
+      // recognizing a bundled-font/package problem rather than a generic
+      // renderer failure.
       if (r.fontsLoaded === false) {
-        lines.push('  - ⚠️ Web fonts failed to load (fonts.googleapis.com unreachable) — likely offline, a corporate proxy, or an ad-blocker blocking Google Fonts. Any PDF from this run was discarded (fallback-typeface PDFs never ship) and the fit loop skipped straight to ship (a page count measured in fallback fonts is meaningless). This is a network condition, not a render bug.');
+        lines.push('  - ⚠️ Bundled fonts failed to load — likely a damaged application package or browser font-load failure. Any PDF from this run was discarded (fallback-typeface PDFs never ship) and the fit loop skipped straight to ship (a page count measured in fallback fonts is meaningless). Inspect the missing-face detail in ResumeRender logs and repair/reinstall the application package.');
       }
       // The shipped baseline is a SEPARATE render (candidates start hidden,
       // buildApplicationDocument() below) — its page count comes free from
@@ -1579,7 +1610,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // for this diagnostic. `not measured` means the baseline render itself
       // never completed (see the error line below), not that the number was
       // skipped to save time.
-      lines.push(`- Résumé shipped baseline: ${r.baselinePageCount != null ? `${r.baselinePageCount}p` : 'not measured'}${r.baselinePdfProduced ? ' · PDF produced' : ' · ⚠️ no PDF (HTML-only)'}${r.baselineFontsLoaded === false ? ' · fonts failed to load (page count measured against fallback typefaces — unreliable)' : ''}`);
+      lines.push(`- Résumé shipped baseline: ${r.baselinePageCount != null ? `${r.baselinePageCount}p` : 'not measured'}${r.baselinePdfProduced ? ' · PDF produced' : ' · ⚠️ no PDF (HTML-only)'}${r.baselineFontsLoaded === false ? ' · bundled fonts failed to load (page count measured against fallback typefaces — unreliable)' : ''}`);
       if (r.locationReviewRequired) {
         lines.push(`  - ⚠️ Work-location confirmation required before Sync: candidate \`${String(r.candidateLocation || 'unknown').replace(/`/g, "'")}\` → job \`${String(r.jobLocation || 'unknown').replace(/`/g, "'")}\``);
       }

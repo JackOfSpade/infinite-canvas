@@ -1676,7 +1676,7 @@ export default [
     // HTML self-containment (design doc §5, §4.3) — the artifact must be
     // double-click-openable with zero sibling files, and receipts must be a
     // trust boundary the model cannot author its own way past.
-    name: 'Résumé/cover-letter HTML self-containment: no external refs besides the design system\'s own font @import; injected chrome is print-hidden; receipts resolve from the ledger or strip cleanly',
+    name: 'Résumé/cover-letter HTML self-containment: bundled fonts are data URLs; injected chrome is print-hidden; receipts resolve from the ledger or strip cleanly',
     run: () => {
       const ledger = [
         {
@@ -1688,15 +1688,32 @@ export default [
       const mainHtml = '<main class="page"><p>Cut debt <strong data-achievement-id="a1">74%</strong> and grew <strong data-achievement-id="ghost-id">40%</strong> revenue.</p></main>';
       const doc = buildResumeDocument({ resumeMainHtml: mainHtml, ledger });
 
-      // Self-containment: the ONLY external reference anywhere in the document
-      // is the design system's own Google Fonts @import — no <link>, no
-      // <script src>, no remote <img>.
+      // Self-containment: fonts are bundled as data URLs too — no <link>, no
+      // <script src>, remote image, or external font request.
       assert(!/<link[^>]/i.test(doc), 'no <link> tags — the CSS is inlined, not referenced');
       assert(!/<script[^>]+\ssrc=/i.test(doc), 'no external <script src="…"> — the toolbar behavior is inlined');
       assert(!/<img[^>]+src=["']https?:/i.test(doc), 'no remote <img src="http…"> anywhere in the document');
       const externalUrlRefs = [...doc.matchAll(/url\(\s*["']?(https?:[^"')]+)/gi)].map((m) => m[1]);
-      assert(externalUrlRefs.length === 1 && externalUrlRefs[0].startsWith('https://fonts.googleapis.com/'),
-        `the only external url() reference is the design system's own Google Fonts @import, got: ${JSON.stringify(externalUrlRefs)}`);
+      assert(externalUrlRefs.length === 0,
+        `no external url() references remain in standalone HTML, got: ${JSON.stringify(externalUrlRefs)}`);
+      const expectedFaces = [
+        ['Source Serif 4', '400', 'font/ttf'], ['Source Serif 4', '600', 'font/ttf'],
+        ['IBM Plex Mono', '400', 'font/ttf'], ['IBM Plex Mono', '500', 'font/ttf'],
+        ['Inter', '400', 'font/woff2'], ['Inter', '500', 'font/woff2'], ['Inter', '600', 'font/woff2'],
+      ];
+      assert((doc.match(/@font-face\s*\{/g) || []).length === expectedFaces.length,
+        'exactly the seven pinned design-system faces are emitted');
+      for (const [family, weight, mime] of expectedFaces) {
+        const facePattern = new RegExp(`@font-face\\s*\\{[^}]*font-family:\\s*"${family}"[^}]*src:\\s*url\\("data:${mime};base64,[^)]+\\)\\s*format[^}]*font-weight:\\s*${weight}`, 's');
+        assert(facePattern.test(doc), `${family} ${weight} is emitted as a ${mime} data URL`);
+      }
+      assert(!/fonts\/(?:SourceSerif4|IBMPlexMono|Inter)-/i.test(doc), 'no local font path remains for a recipient to resolve');
+      const workspaceRule = doc.match(/\.ic-resume-workspace\s*\{[^}]*\}/)?.[0] || '';
+      const sidebarRule = doc.match(/\.ic-workspace-sidebar\s*\{[^}]*\}/)?.[0] || '';
+      assert(workspaceRule && !/\bfont(?:-family)?\s*:/.test(workspaceRule),
+        'workspace shell does not set an inheritable font that can override document panels');
+      assert(/font:\s*13px\/1\.45\s+-apple-system/.test(sidebarRule),
+        'system UI typography is scoped to the workspace sidebar, outside document panels');
 
       // Injected chrome is print-hidden — the printed artifact (still what
       // gets uploaded to employer portals, §5.4) must be byte-identical in
@@ -1715,25 +1732,116 @@ export default [
       assert(doc.includes('<strong >40%</strong>') || doc.includes('<strong>40%</strong>'), 'the figure text itself survives even when its receipt is stripped — only the attribute (and its underline) is removed, not the number');
       return { ok: true };
     },
+},
+{
+    name: 'Bundled résumé fonts: assets/licenses are structural and CSS inliner preserves only safe URL forms',
+    run: async () => {
+      const { assertDesignSystemIntact, getDesignSystemDir, inlineDesignCssUrls } = await import('../../electron/ipc/resumeHtml.js');
+      const result = assertDesignSystemIntact();
+      const required = [
+        'fonts/SourceSerif4-Regular.ttf', 'fonts/SourceSerif4-SemiBold.ttf',
+        'fonts/IBMPlexMono-Regular.ttf', 'fonts/IBMPlexMono-Medium.ttf',
+        'fonts/Inter-Regular.woff2', 'fonts/Inter-Medium.woff2', 'fonts/Inter-SemiBold.woff2',
+        'fonts/licenses/SourceSerif4-OFL.txt', 'fonts/licenses/Inter-OFL.txt', 'fonts/licenses/IBMPlexMono-OFL.txt',
+      ];
+      assert(result.ok && required.every(file => result.checked.includes(file)),
+        `startup assertion treats every bundled font/license as structural: ${JSON.stringify(result)}`);
+      const dir = getDesignSystemDir();
+      const cssPath = path.join(dir, 'colors_and_type.css');
+      const safe = inlineDesignCssUrls('a{src:url("fonts/Inter-Regular.woff2")}b{src:url(https://example.test/a)}c{src:url(#fragment)}', cssPath, dir);
+      assert(/data:font\/woff2;base64,/.test(safe) && safe.includes('https://example.test/a') && safe.includes('#fragment'),
+        'inliner embeds approved local fonts but preserves http/data/fragment URLs');
+      const errorFor = (css) => {
+        try { inlineDesignCssUrls(css, cssPath, dir); } catch (error) { return String(error?.message || error); }
+        return '';
+      };
+      assert(/escapes résumé design system/.test(errorFor('a{src:url("../package.json")}')),
+        'inliner rejects path traversal');
+      assert(/Missing local CSS asset/.test(errorFor('a{src:url("fonts/missing.woff2")}')),
+        'inliner rejects a missing local asset');
+      assert(/Unsupported local CSS asset type/.test(errorFor('a{src:url("resume.css")}')),
+        'inliner rejects unsupported local asset types');
+      return { ok: true };
+    },
   },
 {
-    // Font-load check (design doc §5.3) — resume.css only ever renders
-    // Source Serif 4 (--ff-display) at font-weight 600 (.name), never at the
-    // implicit 400 document.fonts.check()'s shorthand defaults to. An
-    // unweighted check always returns false for the résumé regardless of
-    // network conditions, firing the "fonts didn't load" banner on every
-    // single export. The fix reads the ACTUAL computed weight off a real
-    // on-page element instead of assuming one.
-    name: 'Font-load check derives its weight from a real --ff-display element\'s computed style, not an implicit/hardcoded 400',
-    run: () => {
+    // A single display-face probe can pass while an actual document face is
+    // missing or a shell cascade overrides Inter/mono with a system fallback.
+    // Conversely, Chromium does not fetch faces unused by this document, so
+    // checking a stylesheet-wide matrix would recreate the original false
+    // negative. The workspace and hidden renderer must share the exact
+    // DOM-driven face set.
+    name: 'Font-load check derives exactly used text faces (including hidden application panels) and reports missing descriptors',
+    run: async () => {
       const resumeDoc = buildResumeDocument({ resumeMainHtml: '<main class="page"><h1 class="name">Jane Doe</h1></main>' });
       const coverDoc = buildCoverLetterDocument({ letter: { name: 'Jane Doe', paragraphs: ['Hello.'] } });
       for (const [label, doc] of [['résumé', resumeDoc], ['cover letter', coverDoc]]) {
-        assert(!/document\.fonts\.check\('12px "'/.test(doc), `${label}: no hardcoded-400 (unweighted) document.fonts.check() call survives`);
-        assert(/getComputedStyle\(ffEl\)\.fontWeight/.test(doc), `${label}: the injected check reads the computed font-weight off a real element`);
-        assert(/document\.querySelector\('\.name'\) \|\| document\.querySelector\('\.letter-body'\)/.test(doc), `${label}: falls back from .name (résumé, weight 600) to .letter-body (cover letter, weight 400)`);
-        assert(/document\.fonts\.check\(ffWeight \+ ' 12px "' \+ firstFamily \+ '"'\)/.test(doc), `${label}: the actual check call is weight-qualified`);
+        assert(doc.includes('document.createTreeWalker(document, NodeFilter.SHOW_TEXT)')
+          && doc.includes("document.querySelectorAll('[data-ic-document-panel], main.page')"),
+        `${label}: checks nonempty text inside every document panel, including a hidden sibling panel`);
+        assert(doc.includes('requiredByKey') && doc.includes('document.fonts.check(face.weight'),
+          `${label}: deduplicates and checks the actual computed family/weight set`);
       }
+
+      const [{ webFontFacesReadyExpression }, { JSDOM }] = await Promise.all([
+        import('../../electron/ipc/resumeHtml.js'),
+        import('jsdom'),
+      ]);
+      const probe = (html, unavailable = []) => {
+        const dom = new JSDOM(html);
+        const { document, NodeFilter } = dom.window;
+        const checked = [];
+        Object.defineProperty(document, 'fonts', {
+          value: {
+            check: (descriptor) => {
+              checked.push(descriptor);
+              return !unavailable.includes(descriptor);
+            },
+          },
+        });
+        const computed = (element) => {
+          if (element === document.documentElement) {
+            return {
+              getPropertyValue: (property) => ({
+                '--ff-display': '"Source Serif 4", Georgia',
+                '--ff-body': 'Inter, Arial',
+                '--ff-mono': '"IBM Plex Mono", monospace',
+              })[property] || '',
+              fontFamily: 'Inter, Arial', fontWeight: '400',
+            };
+          }
+          return {
+            fontFamily: element.getAttribute('data-family') || 'Inter, Arial',
+            fontWeight: element.getAttribute('data-weight') || '400',
+            getPropertyValue: () => '',
+          };
+        };
+        const result = new Function('document', 'getComputedStyle', 'NodeFilter', `return ${webFontFacesReadyExpression({ details: true })};`)(document, computed, NodeFilter);
+        dom.window.close();
+        return { checked, result };
+      };
+      const html = `<section data-ic-document-panel="resume"><main class="page"><h1 data-family="Source Serif 4, Georgia" data-weight="600">Jane</h1><p data-family="Inter, Arial" data-weight="400">Body</p></main></section><section data-ic-document-panel="cover" hidden><main class="page"><p data-family="Inter, Arial" data-weight="600">Hidden cover text</p><code data-family="IBM Plex Mono, monospace" data-weight="500">metric</code></main></section>`;
+      const expected = ['600 12px "Source Serif 4"', '400 12px "Inter"', '600 12px "Inter"', '500 12px "IBM Plex Mono"'];
+      const full = probe(html);
+      assert(full.result.loaded === true && full.result.missingFaces.length === 0,
+        `all loaded faces pass the DOM-driven predicate: ${JSON.stringify(full.result)}`);
+      assert(JSON.stringify(full.checked.sort()) === JSON.stringify(expected.sort()),
+        `only exact used faces are probed, including hidden cover text: ${JSON.stringify(full.checked)}`);
+      assert(!full.checked.includes('400 12px "Source Serif 4"') && !full.checked.includes('500 12px "Inter"') && !full.checked.includes('400 12px "IBM Plex Mono"'),
+        'unused display 400, body 500, and mono 400 are not false-negative probes');
+      const failed = probe(html, ['600 12px "Inter"']);
+      assert(failed.result.loaded === false && JSON.stringify(failed.result.missingFaces) === JSON.stringify(['Inter 600']),
+        `a missing used Inter face fails and reports its exact descriptor: ${JSON.stringify(failed.result)}`);
+      const unexpected = probe('<section data-ic-document-panel="resume"><main class="page"><p data-family="-apple-system, Helvetica Neue, Arial, sans-serif" data-weight="400">Body</p></main></section>');
+      assert(unexpected.result.loaded === false && JSON.stringify(unexpected.result.missingFaces) === JSON.stringify(['unexpected -apple-system 400']),
+        `a shell/system-font cascade inside a document panel fails with an exact unexpected-face descriptor: ${JSON.stringify(unexpected.result)}`);
+      const renderSource = fs.readFileSync(path.resolve('electron/ipc/resumeRender.js'), 'utf8');
+      assert(renderSource.includes('webFontFacesReadyExpression({ details: true })')
+        && renderSource.includes('Missing face(s): ${missingFontFaces.join'),
+      'hidden Electron renderer uses the shared detailed predicate and logs the exact failed face descriptors');
+      assert(renderSource.includes('document.fonts.load(descriptor, \'A\')')
+        && renderSource.includes('display:none content'),
+      'hidden Electron renderer explicitly loads bundled faces before all-panel readiness validation');
       return { ok: true };
     },
   },

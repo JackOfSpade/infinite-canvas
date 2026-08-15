@@ -41,11 +41,11 @@ ignore it: it is solving a different problem.
 | Role     | Family                | Reason                                              |
 |----------|-----------------------|-----------------------------------------------------|
 | Display  | **Source Serif 4**    | Editorial gravitas; one moment of warmth (the name).|
-| Body     | **Inter**             | Brand-supplied body family (Google Fonts CDN, weights 400/500/600). Neutral, modern, and the industry-standard digital text face — pairs cleanly with Source Serif 4 on the name. |
+| Body     | **Inter**             | Pinned bundled body family (weights 400/500/600). Neutral, modern, and the industry-standard digital text face — pairs cleanly with Source Serif 4 on the name. |
 | Mono     | **IBM Plex Mono**     | Inline code-like terms (`v8::SnapshotCreator`, `mmap`); reads as *terms*, not prose. Used only for `<code>`/`<kbd>`/`<samp>` and the project-metrics line. |
 
-All three families load from the **Google Fonts CDN** (CSS2 API),
-pinned to the exact weights the system uses:
+All three families ship as **pinned local assets**, at the exact weights the
+system uses:
 
 - `Source Serif 4` — 400, 600
 - `Inter` — 400, 500, 600 — **no Bold (700)**. The
@@ -53,13 +53,13 @@ pinned to the exact weights the system uses:
   the voice quietly confident, not loud.
 - `IBM Plex Mono` — 400, 500
 
-Loaded via a single `@import` at the top of `colors_and_type.css`.
-**Typography now has a render-time network dependency on the Google
-Fonts CDN** — ensure the CDN is reachable from the render environment
-(headless Chrome / serverless), or re-vendor the families locally if
-you need an air-gapped build. All three families embed in PDFs produced by
-Chrome/Chromium's print engine; the candidate-text-extraction
-round-trip (Ctrl+A → paste-into-text) has been verified.
+`colors_and_type.css` declares local `@font-face` rules, and the application
+builder inlines those assets as data URLs in generated HTML. **Typography has
+no render-time network dependency.** The font files and their OFL licenses
+are part of `fonts/`; replacement design systems must update both the face
+declarations and pinned assets. All three families embed in PDFs produced by
+Chrome/Chromium's print engine; the candidate-text-extraction round-trip
+(Ctrl+A → paste-into-text) has been verified.
 
 A **single-family fallback** is `IBM Plex Serif + Sans + Mono`. Switch
 by changing `--ff-display` to `"IBM Plex Serif"`. Use this when the
