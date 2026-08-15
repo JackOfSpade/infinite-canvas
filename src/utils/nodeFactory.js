@@ -5,6 +5,7 @@
 
 import { generateId } from './idGenerator.js';
 import { safeClone } from './navigationUtils.js';
+import { JOB_COLLECTION_LIMITS_DEFAULT } from './jobCollectionLimits.js';
 
 /**
  * Read the user's last-applied text/link customization from settings so that
@@ -60,7 +61,7 @@ function createGroupNode(position) {
 function createJobSearchNode(position, extra = {}) {
   return {
     id: generateId(), type: 'jobhub', position,
-    data: { hubState: 'empty', ...extra },
+    data: { hubState: 'empty', collectionLimits: { ...JOB_COLLECTION_LIMITS_DEFAULT }, ...extra },
   };
 }
 

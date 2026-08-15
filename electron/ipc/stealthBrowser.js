@@ -702,8 +702,39 @@ let _diceRefreshInFlight = null;
 //   App Router / NEXT_PUBLIC env: NEXT_PUBLIC_JOB_SEARCH_API_KEY:"<key>"
 const DICE_API_KEY_RE = /(?:['"]x-api-key['"]\s*[,:{]\s*['"]|NEXT_PUBLIC_JOB_SEARCH_API_KEY['":\s,{]+)([A-Za-z0-9]{25,80})/i;
 
-export async function refreshDiceApiKey() {
-  if (_diceRefreshInFlight) return _diceRefreshInFlight;
+function awaitPromiseOrAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Aborted'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason instanceof Error ? signal.reason : new Error('Aborted'));
+    };
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      value => { cleanup(); resolve(value); },
+      error => { cleanup(); reject(error); },
+    );
+  });
+}
+
+async function settleWithin(promise, timeoutMs, label) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export async function refreshDiceApiKey(signal = null) {
+  if (_diceRefreshInFlight) return awaitPromiseOrAbort(_diceRefreshInFlight, signal);
 
   _diceRefreshInFlight = (async () => {
     logger.info('[Dice API] HTTP 500 detected — attempting key extraction');
@@ -722,7 +753,7 @@ export async function refreshDiceApiKey() {
     }
   })();
 
-  return _diceRefreshInFlight;
+  return awaitPromiseOrAbort(_diceRefreshInFlight, signal);
 }
 
 async function _fetchDiceKeyFromBundle() {
@@ -886,11 +917,11 @@ async function _browserRefreshDiceApiKey() {
     // If Dice inlines everything server-side, there may be no client XHR at
     // all. Scan the final HTML once too so the browser fallback can still win.
     try {
-      const html = await page.content();
+      const html = await settleWithin(page.content(), 5000, 'Dice key-refresh page.content');
       const match = html.match(DICE_API_KEY_RE);
       if (match?.[1]) resolveIfKey(match[1]);
-    } catch {
-      // Best-effort only.
+    } catch (error) {
+      logger.warn(`[Dice API] Browser HTML scan skipped: ${error?.message || error}`);
     }
 
     const newKey = await Promise.race([
@@ -908,7 +939,14 @@ async function _browserRefreshDiceApiKey() {
 
     return newKey;
   } finally {
-    if (browser) await browser.close().catch(() => {});
+    if (browser) {
+      try {
+        await settleWithin(browser.close(), 5000, 'Dice key-refresh browser.close');
+      } catch (error) {
+        logger.warn(`[Dice API] Browser close did not settle cleanly: ${error?.message || error}`);
+        try { browser.process()?.kill?.('SIGKILL'); } catch { /* process already exited */ }
+      }
+    }
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort temp cleanup */ }
   }
 }

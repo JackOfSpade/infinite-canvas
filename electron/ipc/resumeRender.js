@@ -17,8 +17,8 @@
  * managing a separate Chromium — puppeteer-core/playwright would mean
  * downloading/managing a SEPARATE Chromium (or pointing at system Chrome —
  * exactly the CDP-fingerprint problem the marketplace scrapers fight
- * elsewhere in this app) for a fully offline, self-authored, trusted HTML
- * document. Not worth it here.
+ * elsewhere in this app) for a trusted, app-authored HTML document. Not worth
+ * it here.
  */
 import fs from 'fs';
 import os from 'os';
@@ -41,8 +41,8 @@ const { BrowserWindow } = electronPkg;
 // extension, the user's Generate click indefinitely. Same failure shape
 // REFRESH_TIMEOUT_MS guards against in browserViewMonitor.js; not imported
 // from there — that timeout is tuned for a LIVE network page reload, this one
-// for an offline, self-authored document with local bundled fonts, so the
-// values (and what a
+// for a local document with a bounded web-font dependency, so the values (and
+// what a
 // timeout here actually diagnoses) don't share enough to be worth coupling.
 const RENDER_TIMEOUT_MS = 20_000;
 
@@ -82,7 +82,8 @@ function withTimeout(promise, ms, label, signal) {
 }
 
 /**
- * Render one self-contained HTML document to PDF bytes + page count.
+ * Render one single-file HTML document to PDF bytes + page count. Its CSS and
+ * scripts are inline, while its typefaces load from Google Fonts.
  *
  * Loads from a TEMP FILE, not a `data:` URL. The résumé/cover-letter HTML
  * already inlines the whole design-system CSS (colors_and_type.css +
@@ -152,7 +153,7 @@ export async function renderPdf(html, { signal, document = null } = {}) {
     throwIfAborted(signal);
 
     if (document === 'cover' || document === 'resume') {
-      // Application.html keeps both documents in one self-contained editor.
+      // Application.html keeps both documents in one single-file editor.
       // Its tab script is synchronous, so selecting cover before the font
       // check guarantees printToPDF sees the cover panel rather than hidden
       // résumé content. No caller-controlled JavaScript is interpolated here.
@@ -169,9 +170,9 @@ export async function renderPdf(html, { signal, document = null } = {}) {
 
     // `document.fonts.ready` is NOT a success signal — per spec it resolves
     // when font loading FINISHES, including when every @font-face failed. The
-    // design system bundles Source Serif 4 / Inter / IBM Plex Mono into the
-    // generated HTML. `ready` can still settle with a damaged embedded asset
-    // or browser font-load failure, leaving SYSTEM FALLBACK metrics. Page count
+    // design system requests Source Serif 4 / Inter / IBM Plex Mono from the
+    // Google Fonts CDN. `ready` can still settle after a CDN/content-blocker
+    // failure, leaving SYSTEM FALLBACK metrics. Page count
     // measured there is measured against the wrong typography — which would
     // drive the compact-density decision (and potentially an LLM revision that
     // cuts real content) off a number the user will never see.
@@ -183,8 +184,8 @@ export async function renderPdf(html, { signal, document = null } = {}) {
     // not necessarily fetch a face used exclusively in display:none content.
     // Without these explicit loads, the shared all-panel predicate could
     // report a valid hidden cover face as missing and incorrectly withhold a
-    // perfectly valid baseline résumé PDF. Loading all seven bundled faces is
-    // small, deterministic, and also ensures a later Sync cannot inherit an
+    // perfectly valid baseline résumé PDF. Loading all seven requested faces
+    // up front also ensures a later Sync cannot inherit an
     // unchecked fallback. The detailed predicate remains the single source of
     // truth for which faces the emitted document actually requires.
     const fontReadiness = await withTimeout(
@@ -231,7 +232,7 @@ export async function renderPdf(html, { signal, document = null } = {}) {
     const pageCount = pdfDoc.getPageCount();
     if (!fontsLoaded) {
       logger.warn(
-        '[ResumeRender] Bundled fonts did not load in the render window (package corruption or browser font-load failure). '
+        '[ResumeRender] Web fonts did not load in the render window (Google Fonts unavailable, blocked, or browser font-load failure). '
         + `Missing face(s): ${missingFontFaces.join(', ') || 'unavailable face detail'}. `
         + `Page count ${pageCount} was measured against fallback typefaces and does NOT reflect the real document — the fit loop will not act on it.`,
       );

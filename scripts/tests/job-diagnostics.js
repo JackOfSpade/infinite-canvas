@@ -1,4 +1,4 @@
-import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, extractSalaryFromText, extractVariantAttrs, filterHandledJobSourceWarnings,  formatJsonLdSalary, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobsBoardScope, recordJobsSourceScope, recordManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, CLAUDE_MEDIUM_MANUAL_THINKING_BUDGET, COL_X, MODEL_FLOOR, assert, applyBugReportCode, buildAnthropicMessageParams, buildAnthropicTokenCountParams, buildCachedUserContent, buildCoverLetterDocument, buildFilterSummaryMarkdown, buildJobTreeNodes, buildJobsPipelineSnapshot, buildOverlayScript, buildResumeDocument, buildResumeLengthRevisionPrompt, buildScoringAudit, canonicalSalaryRangeLabel, chunkScoringBatches, claudeReasoningMaxTokens, combineSignature, computeJobTreeView, computeLayoutPositions, countMatchingDescendantCards, decideFitStep, dedupJobsAcrossSources, dedupeJobsByKey, deriveBoardCardStats, electronPkg, enforceClipboardMarkdownCap, enforceOnePageRevisionStructure, extractSalaryFromText, extractVariantAttrs, filterHandledJobSourceWarnings,  formatJsonLdSalary, formatUSAJobsSalary, fs, generateMarkdown, getApplicationTelemetry, getClaudeDefaultReasoningConfig, getJobsTelemetry, getManualScraperTelemetry, getStats, getStatsSignature, isDualMode, isIgnorableManualBrowserTelemetry, isJobCardVisible, isJobSourceWarningGating, isLegacyCombineSignature, isRemoteOkSponsoredPlacement, jobSourceWarningAction, jobTitleCompanyKey, jobTitleCompanyLocationKey, jobTitleCompanyUrlKey, linkedInBrowserUnavailableResult, linkedInBrowserUnavailableWarning, looksLikeMoney, mergeExpandedJobDetail, mergeResolvedSourceItems, mergeSourceProgress, moduleFingerprint, normalizeBandsWithRepairs, normalizeCompWarnings, normalizeDetailNavigationUrl, normalizeRangesWithRepairs, parseSalaryToNumeric, path, reconcileBatchScores, reconcileZipRecruiterDomSalary, recordApplicationTelemetry, recordJobsBoardScope, recordJobsSourceScope, recordManualScraperTelemetry, replaceApplicationBundleAtomically, reserveSharedProfile, resolveNodePresence, salaryRangeAnomaly, sanitizeJobTaxonomy, scoringAuditRowsFromBatches, sourceJobKey, staleReason, summarizeResumeMarkup, summarizeScoringInputQuality, targetPageCountForJob, unionScoredJobs, uniqueJobsAcrossSources, uniqueJobsNotIn } from '../test-dependencies.js';
 import { PDFLib, getApplicationSyncTelemetry, inspectApplicationExport, mergeSelectedApplicationPanel, recordApplicationSyncTelemetry } from '../test-dependencies.js';
 
 export default [
@@ -1407,7 +1407,7 @@ export default [
     },
   },
 {
-    name: 'job pipeline report: names fast aggregate caps instead of recommending an infinite result cap',
+    name: 'job pipeline report: names card-owned collection limits and their widening action',
     run: () => {
       const telemetry = getJobsTelemetry();
       const saved = {
@@ -1417,31 +1417,44 @@ export default [
         resolves: telemetry.resolves,
       };
       Object.assign(telemetry, {
-        nodeId: 'fast-cap-diagnostics',
+        nodeId: 'collection-limit-diagnostics',
         windowId: null,
         resolves: {},
         search: {
           ts: Date.now(), queries: 2, raw: 28, deduped: 28, ageDropped: 0, historyDropped: 0, kept: 20,
+          collectionLimits: { jobsPerPlatform: 10, pagesPerPlatform: 2 },
           bySource: {
             indeed: {
               count: 10, unique: 10, gathered: 18,
-              cap: { type: 'fast-aggregate', limit: 10 },
+              capOverflow: 8,
+              cap: { type: 'per-platform', limit: 10 },
+            },
+            glassdoor: {
+              count: 0, unique: 0, gathered: 5, providerGathered: 5,
+              relevanceDropped: 5, finalRelevanceDropped: 5,
+              relevanceRejected: ['Junior Project Buyer'],
             },
             ziprecruiter: {
               count: 10, unique: 10, pagesWalked: 2, stopReason: 'per-source-cap',
-              cap: { type: 'per-source', limit: 10 },
+              cap: { type: 'per-platform', limit: 10 },
             },
           },
         },
       });
       try {
-        const report = buildJobsPipelineSnapshot(new Set(['fast-cap-diagnostics']), null, null);
-        assert(report.includes('fast aggregate cap (10)') && report.includes('disable fast mode to widen'),
-          'fast API overflow must name the fast aggregate cap and its real widening action');
-        assert(report.includes('stopped: per-source-cap') && report.includes('stopped by the per-source cap (10)'),
-          'browser source cap must remain a terminal cap rather than look completed');
-        assert(!report.includes('raise JOB_RESULT_CAP to widen'),
-          'a fast aggregate cap must never recommend changing JOB_RESULT_CAP');
+        const report = buildJobsPipelineSnapshot(new Set(['collection-limit-diagnostics']), null, null);
+        assert(report.includes('Collection limits: 10 job(s)/platform; 2 browser page(s)/search'),
+          'the report must retain the exact card-owned collection limits used by the run');
+        assert(report.includes('per-platform job limit (10)') && report.includes('increase or clear the Jobs per platform setting'),
+          'API and browser truncation must point back to the editable card setting');
+        assert(report.includes('stopped: per-source-cap'),
+          'browser source-limit stops must remain visible rather than looking completed');
+        assert(!report.includes('`glassdoor`: collected 0 of 5')
+          && report.includes('0 retained after the final title audit: glassdoor (5 gathered, then title-filtered)')
+          && !report.includes('genuinely empty / off-category): glassdoor'),
+        'final title rejections must not be mislabeled as cap truncation or a genuinely empty source');
+        assert(!report.includes('disable fast mode') && !report.includes('JOB_RESULT_CAP'),
+          'collection-limit diagnostics must not send users toward removed code-only cap controls');
       } finally {
         Object.assign(telemetry, saved);
       }
@@ -2371,6 +2384,12 @@ export default [
         'ZipRecruiter: malformed abbreviated hourly chip is blanked when the JD cannot correct it');
       assert(reconcileZipRecruiterDomSalary('$29/hr', 'Base Salary: Starting at $65,000 annually') === '$29/hr',
         'ZipRecruiter: plausible hourly chips remain authoritative over a separate annual JD figure');
+      const tranePay = 'Annual Base Salary Range or Hourly Base Pay Range: $111308,33 - $155435,00 Compensation Type: Salary';
+      const recoveredTranePay = reconcileZipRecruiterDomSalary('$22', tranePay);
+      assert(recoveredTranePay === '$111,308.33 - $155,435/yr',
+        `ZipRecruiter: decimal-comma JD salary repairs a cadence-less chip (got "${recoveredTranePay}")`);
+      assert(parseSalaryToNumeric(recoveredTranePay) === 111308,
+        'ZipRecruiter: recovered locale salary annualizes instead of landing in Unspecified');
       assert(parseSalaryToNumeric('$19 Hourly') === 39520,
         'salary parser: capitalized word-form hourly cadence annualizes');
       assert(parseSalaryToNumeric('$19') === 0,
@@ -2526,6 +2545,61 @@ export default [
     },
   },
 {
+    name: 'Live job-search pipeline telemetry names pending sources before search completion',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const priorPipeline = telemetry.pipeline;
+      const priorSourceEvents = telemetry.sourceEvents;
+      try {
+        telemetry.pipeline = {
+          phase: 'gathering-sources',
+          startedAt: Date.now() - 241_000,
+          ts: Date.now() - 2_000,
+          active: true,
+          pendingSources: ['dice'],
+          lastSource: 'ziprecruiter',
+        };
+        telemetry.sourceEvents = {
+          dice: [{ t: 0, status: 'searching', code: null }],
+          ziprecruiter: [
+            { t: 0, status: 'searching', code: null },
+            { t: 60_000, status: 'done', code: 'description-detail-miss' },
+          ],
+        };
+        const report = buildJobsPipelineSnapshot(
+          telemetry?.nodeId ? new Set([telemetry.nodeId]) : new Set(),
+          telemetry?.windowId ?? null,
+          null,
+        );
+        assert(report.includes('Live Search Stage') && report.includes('gathering-sources')
+          && report.includes('Pending source(s): `dice`') && report.includes('last progress from `ziprecruiter`'),
+        'FULL/JOBS telemetry identifies the live gather stage and the exact source still pending');
+        assert(report.includes('`dice`: searching@+0s'),
+          'an active searching-only source is retained in the progress trail instead of being filtered as uninteresting');
+        return { ok: true };
+      } finally {
+        telemetry.pipeline = priorPipeline;
+        telemetry.sourceEvents = priorSourceEvents;
+      }
+    },
+  },
+{
+    name: 'ZipRecruiter Trakstar detail navigation leaves application mode before extraction',
+    run: () => {
+      const applyUrl = 'https://xideral.hire.trakstar.com/jobs/fk0zdvb/?apply=true&utm_source=ziprecruiter';
+      const normalized = normalizeDetailNavigationUrl(applyUrl);
+      const parsed = new URL(normalized);
+      assert(!parsed.searchParams.has('apply') && parsed.searchParams.get('utm_source') === 'ziprecruiter',
+        'Trakstar application mode is removed while unrelated source attribution remains intact');
+      assert(normalizeDetailNavigationUrl('https://boards.greenhouse.io/acme/jobs/123?apply=true')
+        === 'https://boards.greenhouse.io/acme/jobs/123?apply=true',
+      'application-mode normalization is host-specific and cannot alter another ATS');
+      assert(normalizeDetailNavigationUrl('/jobs/fk0zdvb/?apply=true') === '/jobs/fk0zdvb/?apply=true',
+        'relative or malformed source URLs remain unchanged for the normal navigation error path');
+      return { normalized };
+    },
+  },
+{
     name: 'ZipRecruiter detail merge: a description miss still retains the detail-page posted date',
     run: () => {
       // ZR's live trigger is still telemetry-led, but the mechanism is known:
@@ -2550,6 +2624,17 @@ export default [
         'a recovered date must be written even when description and salary both miss');
       assert(merged.snippet === listCard.snippet && merged.title === listCard.title && merged.salary === listCard.salary,
         'a partial detail update preserves list-card snippet and all unrelated fields');
+
+      const emptyListDescription = mergeExpandedJobDetail(
+        { ...listCard, snippet: '', posted: '' },
+        { text: '', jsonLdDate: '2026-08-10', jsonLdSalary: '', salaryChanged: false },
+      );
+      assert(Object.hasOwn(emptyListDescription, 'snippet') && emptyListDescription.snippet === '',
+        'a bounded detail-description miss retains a listing with an explicitly empty description');
+      assert(emptyListDescription.url === listCard.url && emptyListDescription.title === listCard.title,
+        'an empty detail description cannot discard or mutate the ZipRecruiter list row');
+      assert(emptyListDescription.posted === '2026-08-10',
+        'an empty description still permits independent detail fields such as datePosted');
 
       const existingDate = mergeExpandedJobDetail({ ...listCard, posted: '3 days ago' }, {
         text: '', jsonLdDate: '2026-08-10', jsonLdSalary: '', salaryChanged: false,
@@ -2879,7 +2964,7 @@ export default [
       // zero sibling assets.
       const doc = buildResumeDocument({ resumeMainHtml: '<main class="page" data-print="ink-only" data-mono data-page="a4" data-density="compact"><h1 class="name">Jane</h1></main>' });
       assert(/^<!doctype html>/i.test(doc.trim()), 'resume doc: missing doctype');
-      assert(!doc.includes('<link rel="stylesheet"'), 'resume doc: must not link external stylesheets (HTML-first is self-contained)');
+      assert(!doc.includes('<link rel="stylesheet"'), 'resume doc: design CSS must stay inline in the single-file workspace');
       assert((doc.match(/<style>/g) || []).length === 1, 'resume doc: exactly one inlined <style> block');
       // Content proof the two design-system files were actually inlined, not
       // just an empty <style> tag — .resume-header/.name come from resume.css,
@@ -3077,7 +3162,7 @@ export default [
       });
       // Uses the design system's NATIVE cover-letter surface, inlined — all
       // three stylesheets' content present in one <style> block, not a <link>
-      // pointing at sibling files (HTML-first is self-contained, §5.2).
+      // pointing at sibling files (HTML-first single-file workspace, §5.2).
       assert(!html.includes('<link rel="stylesheet"'), 'cover: must not link external stylesheets');
       assert((html.match(/<style>/g) || []).length === 1, 'cover: exactly one inlined <style> block');
       assert(html.includes('.letter-body') && html.includes('.resume-header') && html.includes('--ff-display'),

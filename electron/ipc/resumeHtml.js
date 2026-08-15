@@ -37,7 +37,8 @@
  *
  * The résumé is filled by the model as a `<main class="page">` block (the
  * design system is "agent fills the markup"); we own the document scaffold,
- * the inlined design-system CSS (including bundled font data), the injected
+ * the inlined design-system CSS (whose typefaces load from the design-owned
+ * Google Fonts import), the injected
  * `ic-` chrome, and the receipt
  * post-process. The cover letter is built deterministically from structured
  * fields so its layout is always on-brand.
@@ -311,20 +312,12 @@ export function getDesignSystemDir() {
 const _cssCache = new Map();
 const _assetDataUrlCache = new Map();
 
-const FONT_ASSETS = [
-  'fonts/SourceSerif4-Regular.ttf',
-  'fonts/SourceSerif4-SemiBold.ttf',
-  'fonts/IBMPlexMono-Regular.ttf',
-  'fonts/IBMPlexMono-Medium.ttf',
-  'fonts/Inter-Regular.woff2',
-  'fonts/Inter-Medium.woff2',
-  'fonts/Inter-SemiBold.woff2',
-];
-
-const FONT_LICENSES = [
-  'fonts/licenses/SourceSerif4-OFL.txt',
-  'fonts/licenses/Inter-OFL.txt',
-  'fonts/licenses/IBMPlexMono-OFL.txt',
+const RUNTIME_DESIGN_FILES = [...CSS_FILES, 'build/dual-mode-pdf.js'];
+const GOOGLE_FONTS_IMPORT_RE = /@import\s+url\(\s*["']?(https:\/\/fonts\.googleapis\.com\/css2\?[^"')\s]+)["']?\s*\)\s*;/gi;
+const REQUIRED_FONT_IMPORT_PARTS = [
+  'family=IBM+Plex+Mono:wght@400;500',
+  'family=Inter:wght@400;500;600',
+  'family=Source+Serif+4:opsz,wght@8..60,400;8..60,600',
 ];
 
 const FONT_MIME_TYPES = new Map([
@@ -335,11 +328,10 @@ const FONT_MIME_TYPES = new Map([
 ]);
 
 /**
- * Convert safe design-system-relative font references into data URLs so the
- * generated HTML remains portable and has no render-time network dependency.
- * External/data/fragment URLs are deliberately left alone; only local font
- * assets are accepted, and a replacement design system cannot escape its own
- * directory through a crafted `url(..)` reference.
+ * Convert any safe design-system-relative font references into data URLs.
+ * The current contract uses one Google Fonts import, which is preserved
+ * verbatim. Local URL support keeps a future re-vendoring change compatible,
+ * while the path checks prevent the design system escaping its own directory.
  */
 export function inlineDesignCssUrls(cssText, stylesheetPath, designDir = getDesignSystemDir()) {
   const stylesheet = path.resolve(stylesheetPath);
@@ -1127,7 +1119,7 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
     <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
     <span class="ic-hint">Sync re-renders the PDF with the same engine that produced the originals — use it instead of your browser’s print dialog.</span>
   </div>
-  <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Bundled fonts didn’t load. The application package may be damaged — reopen from Infinite Canvas before syncing. Sync refuses to replace a PDF with fallback typography.</div>
+  <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Web fonts didn’t load. Check your internet connection or content blocker, then reopen this application before syncing. Sync refuses to replace a PDF with fallback typography.</div>
   <section class="ic-panel" aria-labelledby="ic-check-title">
     <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-check-title">Needs your check</h2><span id="ic-review-progress" class="ic-panel-note"></span></div>
     <span id="ic-review-status" class="ic-review-status" role="status"></span>
@@ -1165,9 +1157,9 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, skillO
  * deliberate, discussed divergence (design doc §5.5).
  *
  * Fonts (§5.3): uses the same DOM-side face matrix as the hidden PDF renderer
- * and shows a print-hidden banner when any required face failed. Fonts are
- * bundled into generated HTML, so a failure indicates a damaged package or a
- * browser font-loading problem rather than an offline CDN dependency.
+ * and shows a print-hidden banner when any required web face failed. The
+ * design system loads these faces from Google Fonts, so the message directs
+ * the user to connectivity/content blocking rather than package repair.
  */
 function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle }) {
   const safeDocId = docId ? String(docId) : `${kind}-untitled`;
@@ -1184,7 +1176,7 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
   <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
   <span class="ic-hint">${escapeHtml(syncHint)}</span>
 </div>
-<div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Bundled fonts didn\u2019t load. The application package may be damaged \u2014 reopen from Infinite Canvas before syncing. Sync refuses to replace a PDF with fallback typography.</div>
+<div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Web fonts didn\u2019t load. Check your internet connection or content blocker, then reopen this application before syncing. Sync refuses to replace a PDF with fallback typography.</div>
 `;
   const html = `${chromeMarkup}<script id="ic-application-bundle-data" type="application/json">${bundleJson}</script><script>
 (function () {
@@ -1522,7 +1514,7 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
     });
   }
 
-  // ---- Bundled-font integrity detection (§5.3) ----
+  // ---- Web-font availability detection (§5.3) ----
   try {
     var check = function () {
       if (!(${webFontFacesReadyExpression()}) && fontWarning) fontWarning.hidden = false;
@@ -1541,10 +1533,11 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle })
 // ---------------------------------------------------------------------------
 
 /**
- * Normalize the résumé model's output into a full, self-contained HTML
+ * Normalize the résumé model's output into a complete, single-file HTML
  * document: charset, ONE inlined `<style>` carrying the design-system CSS
  * followed by the injected `ic-` chrome (§5.2 — never a `<link>`, so the file
- * is double-click-openable with no sibling assets), the resolved receipts
+ * is double-click-openable with no sibling assets; fonts retain the design
+ * system's documented CDN dependency), the resolved receipts
  * (§4.3), and the injected toolbar/edit-mode/font-warning chrome (§5.2-§5.5).
  * The model returns just the `<main class="page" …>…</main>` block; we own
  * everything around it so the styling can never break regardless of what
@@ -1765,28 +1758,54 @@ ${paragraphs}
  * every failure mode here is caught internally and folded into the returned
  * result instead. Must not block anything either — purely diagnostic.
  *
- * @returns {{ok: boolean, checked: string[], missing: string[], mainExtractionOk: boolean, error: string|null}}
+ * @returns {{ok: boolean, checked: string[], missing: string[], mainExtractionOk: boolean, coverMainExtractionOk: boolean, fontContractOk: boolean, fontDelivery: string|null, error: string|null}}
  */
 export function assertDesignSystemIntact() {
-  const result = { ok: true, checked: [], missing: [], mainExtractionOk: false, error: null };
+  const result = {
+    ok: true,
+    checked: [],
+    missing: [],
+    mainExtractionOk: false,
+    coverMainExtractionOk: false,
+    fontContractOk: false,
+    fontDelivery: null,
+    error: null,
+  };
   try {
     const dir = getDesignSystemDir();
-    for (const file of [...CSS_FILES, ...FONT_ASSETS, ...FONT_LICENSES]) {
+    for (const file of RUNTIME_DESIGN_FILES) {
       result.checked.push(file);
       if (!fs.existsSync(path.join(dir, file))) {
         result.missing.push(file);
         result.ok = false;
       }
     }
-    const htmlPath = path.join(dir, 'resume.html');
-    if (fs.existsSync(htmlPath)) {
-      const html = fs.readFileSync(htmlPath, 'utf8');
-      result.mainExtractionOk = /<main[\s\S]*<\/main>/i.test(html);
-      if (!result.mainExtractionOk) result.ok = false;
-    } else {
-      result.missing.push('resume.html');
-      result.ok = false;
+
+    for (const [file, key] of [['resume.html', 'mainExtractionOk'], ['cover-letter.html', 'coverMainExtractionOk']]) {
+      result.checked.push(file);
+      const htmlPath = path.join(dir, file);
+      if (!fs.existsSync(htmlPath)) {
+        result.missing.push(file);
+        result.ok = false;
+        continue;
+      }
+      result[key] = /<main[\s\S]*<\/main>/i.test(fs.readFileSync(htmlPath, 'utf8'));
+      if (!result[key]) result.ok = false;
     }
+
+    const tokenCss = fs.readFileSync(path.join(dir, 'colors_and_type.css'), 'utf8');
+    const imports = [...tokenCss.matchAll(GOOGLE_FONTS_IMPORT_RE)].map(match => match[1]);
+    const importUrl = imports[0] || '';
+    const expectedTokensPresent = [
+      /--ff-display\s*:\s*["']Source Serif 4["']/,
+      /--ff-body\s*:\s*["']Inter["']/,
+      /--ff-mono\s*:\s*["']IBM Plex Mono["']/,
+    ].every(pattern => pattern.test(tokenCss));
+    result.fontDelivery = imports.length ? 'google-fonts' : null;
+    result.fontContractOk = imports.length === 1
+      && REQUIRED_FONT_IMPORT_PARTS.every(part => importUrl.includes(part))
+      && expectedTokensPresent;
+    if (!result.fontContractOk) result.ok = false;
   } catch (err) {
     // getDesignSystemDir() throwing (the whole folder is gone) lands here —
     // still never propagates past this function.
@@ -1795,7 +1814,7 @@ export function assertDesignSystemIntact() {
   }
 
   if (result.ok) {
-    logger.info('[resumeHtml] design-system startup assertion passed (CSS, bundled fonts/licenses + <main> sample intact)');
+    logger.info('[resumeHtml] design-system startup assertion passed (runtime files, templates, and Google Fonts contract intact)');
   } else {
     logger.warn(`[resumeHtml] DESIGN-SYSTEM RECONNECT NEEDED — startup assertion failed: ${JSON.stringify(result)}. Résumé/cover-letter generation will run against a stale or broken contract until this is addressed (see docs/resume-achievement-mining-design.md §9 reconnect checklist).`);
   }

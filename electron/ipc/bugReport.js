@@ -1527,15 +1527,8 @@ ${(aiConfig.geminiWarnings || []).length > 0
   if (hasJobNodes) try {
     const jobsConfig = buildJobsConfigSnapshot();
     const tm = jobsConfig.testMode;
-    const aiSkipped = (tm && (tm.mode === 'medium' || tm.skipAI));
-    // FAST mode is breadth-bounded (queries × pages × jobs-per-page, API per-source)
-    // rather than just per-page — spell those bounds out so a tiny count reads as
-    // "fast cap", not a scrape miss.
-    const fastLine = (tm && tm.mode === 'fast')
-      ? `\n- Fast bounds: ${tm.queryCap === Infinity ? '∞' : tm.queryCap} queries; ≤${tm.jobPerSourceCap === Infinity ? '∞' : tm.jobPerSourceCap}/source browser aggregate (within ${tm.jobMaxPages} pages × ${tm.jobPerPageCap} jobs); ≤${tm.apiPerSourceCap === Infinity ? '∞' : tm.apiPerSourceCap}/source API aggregate. Disable fast mode to remove these aggregate caps.`
-      : '';
     const testModeLines = tm
-      ? `\n### Job Search Test Mode\n- Mode: **${tm.mode}**${aiSkipped ? ` (${tm.jobPerPageCap} jobs/page, AI skipped)` : ` (${tm.jobPerPageCap} jobs/page, full AI)`}\n- Enabled: ${tm.enabled ? '✅' : '❌'}\n- Scoped source: ${tm.sourceId ? `\`${tm.sourceId}\`` : '*(all sources)*'}\n- Extractor result cap: ${tm.jobResultCap === Infinity ? 'unlimited' : tm.jobResultCap}${fastLine || `\n- Per-page cap: ${tm.jobPerPageCap}`}`
+      ? `\n### Job Search Test Scope\n- Enabled: ${tm.enabled ? '✅' : '❌'}\n- Scoped source: ${tm.sourceId ? `\`${tm.sourceId}\`` : '*(all sources)*'}\n- AI scoring: ${tm.skipAI ? 'skipped' : 'enabled'}\n- Collection depth: configured on each Job Search card and recorded with that run (not hidden test-mode settings).`
       : '';
     jobsConfigMarkdown = `
 ## Job Search API Configuration

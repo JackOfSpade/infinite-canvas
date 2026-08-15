@@ -16,7 +16,8 @@
  *     {
  *       version, runId, startedAt, lastUpdated,
  *       stage: 'searching' | 'gathered',
- *       inputs: { queries, profileFingerprint, targetRole, maxAgeDays, nodeId },
+ *       inputs: { queries, profileFingerprint, targetRole, canonicalLocation,
+ *                 maxAgeDays, nodeId },
  *       sources: { [sourceId]: { status: 'pending'|'done'|'blocked',
  *                                queries: { [query]: { lastPage } } } }
  *     }
@@ -99,7 +100,7 @@ async function readManifest(canvasFilePath) {
  * staging file. `runId`/`startedAt` are passed in (callers stamp time, since the
  * test runner forbids Date.now()). Returns the manifest, or null if no canvas.
  */
-export async function startRun(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, targetRole = null, maxAgeDays = null, nodeId = null, sourceIds = [] }) {
+export async function startRun(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, targetRole = null, canonicalLocation = '', maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [] }) {
   const files = runFilesForCanvas(canvasFilePath);
   if (!files) return null;
   const sources = {};
@@ -108,7 +109,7 @@ export async function startRun(canvasFilePath, { runId, startedAt, queries = [],
     version: MANIFEST_VERSION,
     runId, startedAt, lastUpdated: startedAt,
     stage: 'searching',
-    inputs: { queries, profileFingerprint, targetRole, maxAgeDays, nodeId },
+    inputs: { queries, profileFingerprint, targetRole, canonicalLocation, maxAgeDays, collectionLimits, nodeId },
     sources,
   };
   const ok = await withManifestLock(files.manifest, async () => {
@@ -251,22 +252,32 @@ export function computeResumeStartPage(sourceLedger, totalQueryCount) {
  *   function is INJECTED, not imported, so this module stays electron-free and
  *   unit-testable in the plain-node runner.
  */
-export async function clearRun(canvasFilePath, { trashItem = null } = {}) {
+export async function clearRun(canvasFilePath, { trashItem = null, expectedRunId = null } = {}) {
   const files = runFilesForCanvas(canvasFilePath);
-  if (!files) return;
-  for (const p of [files.staging, files.manifest]) {
-    // Skip a sidecar that isn't there (a run may have only one, or it was
-    // already cleared) so trashItem doesn't error on a missing path.
-    try { await fs.promises.access(p); } catch { continue; }
-    if (trashItem) {
-      try { await trashItem(p); continue; }
-      catch (err) {
-        // trashItem can fail on volumes without a Trash (network / exFAT). Fall
-        // back to a hard delete so "Start fresh" still clears the run rather
-        // than leaving a stale resumable manifest behind.
-        logger.warn(`[JobRunStaging] trashItem failed for ${p} (${err?.message || err}); hard-deleting instead`);
-      }
+  if (!files) return false;
+  return withManifestLock(files.manifest, async () => {
+    // Completion is renderer-driven and may arrive after the user has already
+    // started another search on this canvas. Compare under the same manifest
+    // lock as startRun so an old completion can never delete a newer run.
+    if (expectedRunId != null) {
+      const manifest = await readManifest(canvasFilePath);
+      if (!manifest || manifest.runId !== expectedRunId) return false;
     }
-    try { await fs.promises.unlink(p); } catch { /* already gone (race) */ }
-  }
+    for (const p of [files.staging, files.manifest]) {
+      // Skip a sidecar that isn't there (a run may have only one, or it was
+      // already cleared) so trashItem doesn't error on a missing path.
+      try { await fs.promises.access(p); } catch { continue; }
+      if (trashItem) {
+        try { await trashItem(p); continue; }
+        catch (err) {
+          // trashItem can fail on volumes without a Trash (network / exFAT). Fall
+          // back to a hard delete so "Start fresh" still clears the run rather
+          // than leaving a stale resumable manifest behind.
+          logger.warn(`[JobRunStaging] trashItem failed for ${p} (${err?.message || err}); hard-deleting instead`);
+        }
+      }
+      try { await fs.promises.unlink(p); } catch { /* already gone (race) */ }
+    }
+    return true;
+  });
 }

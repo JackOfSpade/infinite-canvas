@@ -72,19 +72,6 @@
   }
 }
 @page letter:first { @bottom-right { content: none; } }
-@page letter-compact {
-  size: Letter;
-  margin: 0.6in 0;
-  @bottom-right {
-    content: counter(page) " / " counter(pages);
-    font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
-    font-size: 8.5pt;
-    color: #8C857A;
-    margin: 0 0.78in 0.32in 0;
-    letter-spacing: -0.005em;
-  }
-}
-@page letter-compact:first { @bottom-right { content: none; } }
 @page a4 {
   size: A4;
   margin: 18mm 0;
@@ -98,15 +85,33 @@
   }
 }
 @page a4:first { @bottom-right { content: none; } }
-@page a4-compact {
-  size: A4;
-  margin: 15.24mm 0; /* 0.6in, matching compact Letter */
+/* -------- compact density: tightened printed vertical margins --------
+   Compact shrinks head/foot from 0.72in → 0.6in (Letter) and
+   18mm → 15.24mm (A4), matching the --margin-top/--margin-bot
+   overrides in the [data-density="compact"] block. Named pages are
+   required because @page margins cannot read custom properties. */
+@page letter-compact {
+  size: Letter;
+  margin: 0.6in 0;
   @bottom-right {
     content: counter(page) " / " counter(pages);
     font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
     font-size: 8.5pt;
-    color: #8C857A;
-    margin: 0 16mm 8mm 0;
+    color: #8C857A;       /* --ink-quiet */
+    margin: 0 0.78in 0.4in 0;
+    letter-spacing: -0.005em;
+  }
+}
+@page letter-compact:first { @bottom-right { content: none; } }
+@page a4-compact {
+  size: A4;
+  margin: 15.24mm 0;
+  @bottom-right {
+    content: counter(page) " / " counter(pages);
+    font-family: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 8.5pt;
+    color: #8C857A;       /* --ink-quiet */
+    margin: 0 16mm 10mm 0;
     letter-spacing: -0.005em;
   }
 }
@@ -124,15 +129,17 @@
    already covers the :root case, so no separate :root rule is needed. */
 .page[data-page="a4"],
 [data-page="a4"] .page { page: a4; }
-/* Density changes must reach @page itself: print .page intentionally has no
-   vertical padding, so changing --margin-top/--margin-bot alone only affected
-   the screen preview and left compact PDFs at the full 0.72in margins. */
+/* Compact density selects the tightened named pages. Both variants may
+   sit on <html> or on .page itself, so every placement combination is
+   enumerated. Declared after the plain letter/a4 rules so compact wins. */
 .page[data-density="compact"],
 [data-density="compact"] .page { page: letter-compact; }
 .page[data-page="a4"][data-density="compact"],
-[data-page="a4"][data-density="compact"] .page,
 [data-page="a4"] .page[data-density="compact"],
-[data-density="compact"] .page[data-page="a4"] { page: a4-compact; }
+[data-density="compact"] .page[data-page="a4"],
+[data-page="a4"][data-density="compact"] .page,
+[data-page="a4"] [data-density="compact"] .page,
+[data-density="compact"] [data-page="a4"] .page { page: a4-compact; }
 @media print {
   html, body { background: var(--bg); }
   body { padding: 0; }
@@ -274,11 +281,12 @@
   column-gap: var(--col-gap);
   align-items: baseline;
 }
-/* A row left holding one cell — e.g. a .role-meta whose scope summary the
-   one-page revision cut — must still reach the content edge. Without this the
-   lone child lands in the 1fr column and its text-align: right stops one
-   --col-gap short of the margin, visibly out of line with the dates above. */
-.meta-row > :only-child { grid-column: 1 / -1; }
+/* A one-cell row spans the full grid. Without this a lone right-aligned
+   child (e.g. a location with no summary) stops one --col-gap short of
+   the content edge instead of aligning flush right. */
+.meta-row > :only-child {
+  grid-column: 1 / -1;
+}
 
 /* =========================================================
    Inline separator (·) used between sibling inline items.

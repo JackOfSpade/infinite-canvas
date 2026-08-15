@@ -9,8 +9,6 @@
 // Opt in with env vars instead of editing source:
 // - JOB_SEARCH_TEST_ENABLED=true
 // - JOB_SEARCH_TEST_SOURCE=linkedin
-// - JOB_SEARCH_TEST_FULL_RUN=true
-// - JOB_SEARCH_TEST_FAST=true
 // - JOB_SEARCH_TEST_SKIP_AI=true
 //
 // Renderer builds may use the matching VITE_ prefix for the same keys.
@@ -37,19 +35,8 @@ export function createJobSearchTestMode(env = getRuntimeEnv()) {
   return {
     enabled,
     sourceId: enabled ? (sourceId || null) : null,
-    // Run tier - only meaningful when enabled:true.
-    // fullRun:false -> medium (5 jobs/page, AI skipped - quick smoke test)
-    // fullRun:true  -> full   (150 jobs/page, AI per skipAI flag below)
-    fullRun: parseJobSearchEnvBoolean(getEnvValue(env, 'JOB_SEARCH_TEST_FULL_RUN'), false),
-    // fast: tiny end-to-end run that takes PRECEDENCE over fullRun/medium (see
-    // resultCaps.js FAST_TEST). 2 queries; browser sources do 2 pages × 5 jobs
-    // (= 10), API sources are capped to 10 per source (~2 queries × 5); AI scoring
-    // RUNS (like full) unless skipAI. The point is a fast scrape→score smoke that
-    // doesn't hammer the rate-limited free Gemini tier with 150-job pages.
-    fast: parseJobSearchEnvBoolean(getEnvValue(env, 'JOB_SEARCH_TEST_FAST'), false),
-    // skipAI: override AI scoring independently of fullRun.
-    // true  -> AI skipped regardless of fullRun (collect jobs, stop before scoring)
-    // false -> AI runs when fullRun:true; still skipped when fullRun:false
+    // Test mode may still skip AI explicitly. Collection breadth is deliberately
+    // not a hidden test-mode setting; it is stored on the Job Search card.
     skipAI: parseJobSearchEnvBoolean(getEnvValue(env, 'JOB_SEARCH_TEST_SKIP_AI'), false),
     // Cooldown probe (diagnostic): when true, a LinkedIn Solve turns into an
     // automated wait-and-probe loop that waits escalating idle intervals on the

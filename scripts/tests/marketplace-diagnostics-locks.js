@@ -1432,7 +1432,7 @@ export default [
       const canvas = path.join(dir, 'test-canvas.json');
       const T0 = 1_000_000;   // fixed clock (test runner forbids Date.now())
       try {
-        await startRun(canvas, { runId: 'r1', startedAt: T0, queries: ['swe'], sourceIds: ['indeed', 'google'] });
+        await startRun(canvas, { runId: 'r1', startedAt: T0, queries: ['swe'], canonicalLocation: 'Toronto, Ontario, Canada', sourceIds: ['indeed', 'google'] });
         await recordSourcePage(canvas, { sourceId: 'indeed', query: 'swe', page: 0, jobs: [{ title: 'A' }, { title: 'B' }], now: T0 + 1 });
         await recordSourcePage(canvas, { sourceId: 'indeed', query: 'swe', page: 1, jobs: [{ title: 'C' }], now: T0 + 2 });
         await markSourceStatus(canvas, 'indeed', 'done', T0 + 3);
@@ -1445,6 +1445,7 @@ export default [
         assert(st && st.incomplete && st.resumable, 'recent incomplete run is resumable');
         assert(st.manifest.sources.indeed.status === 'done', 'indeed marked done');
         assert(st.manifest.sources.indeed.queries.swe.lastPage === 1, 'indeed lastPage ledger = 1');
+        assert(st.manifest.inputs.canonicalLocation === 'Toronto, Ontario, Canada', 'resume manifest binds staged jobs to the exact canonical location');
         assert(st.stagedJobs.length === 3, 'run state carries staged jobs');
 
         // older than the 24h window → still incomplete but NOT auto-resumable
@@ -1461,6 +1462,29 @@ export default [
         assert((await readRunState(canvas, T0 + 400)) === null, 'cleared run → null state (the completion signal)');
 
         return { ok: true, staged: staged.length };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+{
+    name: 'job run staging: stale completion cannot clear a newer run',
+    run: async () => {
+      const dir = path.join(os.tmpdir(), `ic-jobstaging-cas-${process.pid}`);
+      fs.mkdirSync(dir, { recursive: true });
+      const canvas = path.join(dir, 'test-canvas.json');
+      const T0 = 1_500_000;
+      try {
+        await startRun(canvas, { runId: 'old', startedAt: T0, queries: ['old'], sourceIds: ['indeed'] });
+        await startRun(canvas, { runId: 'new', startedAt: T0 + 1, queries: ['new'], sourceIds: ['indeed'] });
+        const staleCleared = await clearRun(canvas, { expectedRunId: 'old' });
+        const afterStale = await readRunState(canvas, T0 + 2);
+        assert(staleCleared === false && afterStale?.manifest?.runId === 'new',
+          'a late completion from an older run preserves the newer manifest and staging');
+        const currentCleared = await clearRun(canvas, { expectedRunId: 'new' });
+        assert(currentCleared === true && await readRunState(canvas, T0 + 3) === null,
+          'the matching run token clears its own sidecars');
+        return { ok: true };
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }

@@ -34,7 +34,7 @@ Six changes, in dependency order:
    resolved against the Models API. Smallest change here, immediate payoff.
 1. **Applied-jobs store** — an explicit "Mark applied" action with app-global, never-expiring
    memory; applied jobs never resurface in future searches. Independent of everything else.
-2. **HTML-first output** — stop generating PDFs *the old way*. Ship self-contained HTML the user
+2. **HTML-first output** — stop generating PDFs *the old way*. Ship a single-file HTML workspace the user
    opens in Chrome, edits in place, and can export to PDF via the browser. (As built, a PDF
    companion later came back as an automated, in-app render — see the note under §5.1 — but the
    HTML stays primary and editable exactly as designed here.)
@@ -97,7 +97,7 @@ research. It emits only missing skills whose possession would materially change 
 that job, split into `verify` (nearby but unverified) and `learn` (too distant to claim). The AI maps
 role-title and skill-name aliases to the existing app-global taxonomy; deterministic code records
 one demand occurrence per canonical skill per generated application in
-`skill-opportunity-histogram.json`. The self-contained résumé HTML is a two-pane workspace with the
+`skill-opportunity-histogram.json`. The single-file résumé HTML is a two-pane workspace with the
 review queue, private learning queue, and a role-selectable horizontal demand histogram. Export is
 gated until every `verify` item is resolved; only user-confirmed labels are inserted into the
 printed résumé. `learn` items never enter the résumé.
@@ -132,7 +132,7 @@ application-resume                   application-cover-letter
 (ledger + careerData + JD + research + rubric)
    │
    ▼
-buildResumeDocument → self-contained HTML (inlined CSS, injected chrome, receipts)
+buildResumeDocument → single-file HTML (inlined CSS, CDN fonts, injected chrome, receipts)
 ```
 
 ### Why job-independent mining, triggered at generation time
@@ -508,7 +508,7 @@ described just below) was indeed deleted, and stayed deleted. But a PDF companio
 back via a different route — `electron/ipc/resumeRender.js` — driven by
 `jobApplication.js`'s render → page-count → fit loop (SKILL.md §5's "compact-density
 algorithm"). It renders through Electron's OWN `webContents.printToPDF` (no puppeteer, no
-extra Chromium download) against the exact same self-contained HTML `resumeHtml.js` builds,
+extra Chromium download) against the exact same single-file HTML `resumeHtml.js` builds,
 then — for the `dual-pdf` variant — still runs the bytes through `build/dual-mode-pdf.js`'s
 `addOcgBackground`, exactly as described below, just loaded differently: not a CJS
 `Function(...)` eval of the Node branch (confirmed broken in a packaged build — `pdf-lib`
@@ -546,9 +546,10 @@ exactly as the design system defines it; `extractVariantAttrs` (`resumeHtml.js:4
 today emit `<link rel="stylesheet" href="…">` pointing at CSS files copied next to the HTML in a
 temp dir. For a standalone file:
 
-- **Inline the stylesheets and local font assets** — read the CSS text at build time, resolve
-  design-system-relative font URLs to data URLs, and emit one self-contained `<style>`. Read-only
-  access to `resume_design_system/`; nothing in that folder is modified.
+- **Inline the stylesheets** — read the CSS text at build time and emit one `<style>`. The current
+  design contract preserves its Google Fonts `@import`; safe local font URLs remain supported for
+  a future re-vendoring change. Read-only access to `resume_design_system/`; nothing in that folder
+  is modified.
 - **Append an injected chrome block** *after* the design-system CSS, namespaced `ic-` so a wholesale
   design replacement can never collide:
   - derivation tooltip styling (faint dotted underline, hover panel)
@@ -558,27 +559,22 @@ temp dir. For a standalone file:
 - **Everything injected is `@media print { display: none }`.** The printed artifact must be
   byte-identical in appearance to what the design system produces today.
 
-### 5.3 Fonts — bundle, inline, and verify
+### 5.3 Fonts — load and verify
 
-`resume_design_system/fonts/` contains the seven pinned faces used by
-`colors_and_type.css`: Source Serif 4 400/600, Inter 400/500/600, and IBM
-Plex Mono 400/500. Their OFL licenses live beside them in `fonts/licenses/`.
-The builder resolves only safe design-system-relative font URLs, embeds them as
-data URLs in generated HTML, and rejects traversal, missing, or unsupported
-assets. Application.html is consequently portable and has no font CDN
-dependency.
+`colors_and_type.css` requests the seven pinned faces from Google Fonts:
+Source Serif 4 400/600, Inter 400/500/600, and IBM Plex Mono 400/500. The
+generated HTML therefore has no sibling asset dependency, but it does require
+access to `fonts.googleapis.com` and `fonts.gstatic.com` when opened or rendered.
 
-`document.fonts.ready` still means loading *finished*, not that each embedded
-face succeeded. The injected script and hidden PDF renderer therefore derive
-the exact faces used in document text and check each one with
-`document.fonts.check()`. A failure is now a package-corruption or browser
-font-load signal; it shows a print-hidden warning, prevents fallback PDFs from
-shipping, and records missing faces for diagnosis.
+`document.fonts.ready` still means loading *finished*, not that each web face
+succeeded. The injected script and hidden PDF renderer therefore derive the
+exact faces used in document text and check each one with
+`document.fonts.check()`. A CDN, content-blocker, or browser font-load failure
+shows a print-hidden warning, prevents fallback PDFs from shipping, and records
+missing faces for diagnosis.
 
-Bundling introduces an explicit reconnect obligation: if a replacement design
-system changes typography, update its `@font-face` declarations, pinned assets,
-licenses, and the startup assertion together. That deliberate coupling buys
-offline, reproducible exports and avoids silent fallback typography.
+If a replacement design system changes typography, update its import, font
+tokens, renderer preload descriptors, and startup assertion together.
 
 ### 5.4 Print fidelity
 

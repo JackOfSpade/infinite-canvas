@@ -15,7 +15,7 @@ import electronPkg from 'electron';
 import { logger } from '../logger.js';
 import { findChromePath, findSystemChromePath, getUserDataDir } from '../ipc/stealthBrowser.js';
 import { extractIndeedJobsFromHtml } from './apiExtractors.js';
-import { JOB_MAX_PAGES, JOB_RESULT_CAP, JOB_PER_PAGE_CAP } from '../ipc/resultCaps.js';
+import { normalizeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { buildOverlayScript, updateOverlay } from '../ipc/browser/scraperOverlay.js';
 import { humanCooldown } from '../utils/humanDelay.js';
@@ -275,7 +275,7 @@ async function getChallengeSignals(page) {
  * @param {string} [profileDir] — override for the Puppeteer userDataDir
  * @returns {Promise<{ items: object[], warning: object|null, gathered: number }>}
  */
-export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '') {
+export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeDays = null, profileDir = null, onProgress = null, startPage = 0, onPageJobs = null, location = '', collectionLimits = null) {
   const userDataDir  = profileDir || await getUserDataDir().catch(() => getProfileDir());
   const queryList    = Array.isArray(queries) ? queries.filter(Boolean) : [queries].filter(Boolean);
   const days         = maxAgeDays ? Math.max(1, Math.floor(maxAgeDays)) : 21;
@@ -287,8 +287,9 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
   // Haysi VA, Honaker VA and Williamson WV — all 3 of the run's Indeed results
   // were US, because `l=Canada` on the US site is just an unmatched place name.
   const host         = indeedHostForLocation(location);
-  const resultCap    = Number.isFinite(JOB_RESULT_CAP) ? JOB_RESULT_CAP : Infinity;
-  const maxPages     = JOB_MAX_PAGES;
+  const limits       = normalizeJobCollectionLimits(collectionLimits);
+  const resultCap    = limits.jobsPerPlatform == null ? Infinity : limits.jobsPerPlatform;
+  const maxPages     = limits.pagesPerPlatform;
 
   let executablePath;
   try { executablePath = await findSystemChromePath() || await findChromePath(); } catch (e) {
@@ -642,7 +643,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           } catch { return null; }
         }).catch(() => null);
         const rawPageJobs = extractIndeedJobsFromHtml(html, windowMosaicResults);
-        const pageJobs   = rawPageJobs.slice(0, JOB_PER_PAGE_CAP);
+        const pageJobs   = rawPageJobs.slice(0, Math.max(0, resultCap - allJobs.length));
 
         // Soft block: Indeed returns a tiny near-empty page instead of a hard challenge.
         // Normal search pages are ~1500KB; anything under 150KB with 0 jobs is suspect.

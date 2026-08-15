@@ -18,7 +18,7 @@ import { clearBrowserSession } from './stealthBrowser.js';
 import { scrapeManualSources, resetManualScraperDiagnostics, enrichResolvedJobDescriptions } from './browser/manualScraper.js';
 import { orderBrowserSources, resetManualSolveTracking, recordVerificationOutcome, wasManualSolveRequired, getVerificationSnapshot } from './scrapeVerification.js';
 import { openCaptchaResolveWindow } from './browser/authWindows.js';
-import { jobScoringBatchSize, JOB_SCORE_CAP, JOB_RESULT_CAP, JOB_MAX_PAGES, JOB_PER_PAGE_CAP, JOB_PER_SOURCE_CAP, MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from './resultCaps.js';
+import { jobScoringBatchSize, JOB_SCORE_CAP } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
   ZIPRECRUITER_EXTRACTOR, ZIPRECRUITER_CONFIG,
@@ -50,9 +50,11 @@ import { readStatusCache } from './accounts.js';
 import { getScopedJobSourceIds, JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
 import { jobTitleCompanyKey, dedupJobsAcrossSources } from '../../src/utils/jobIdentity.js';
 import { normalizeBands, normalizeRanges, parseSalaryToNumeric, salaryRangeAnomaly, placeBand, placeRange, sanitizeJobTaxonomy } from '../../src/nodes/jobsearch/buildJobTree.js';
-import { deriveLocationParam, summarizeLocationAdherence, LOCATION_TREATMENT } from '../../src/utils/jobLocation.js';
+import { deriveLocationParam, normalizeLocationInput, summarizeLocationAdherence, LOCATION_TREATMENT } from '../../src/utils/jobLocation.js';
+import { getJobSourceCountryPolicy, summarizeJobSourceCountryPolicies } from '../../src/utils/jobSourceCountryScope.js';
 import { tagJobLanguages, summarizeJobLanguages } from '../../src/utils/jobLanguage.js';
 import { repairJobsMojibake, normalizeJobsMarkup } from '../../src/utils/textEncoding.js';
+import { normalizeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
 
 const { ipcMain, app, shell } = electronPkg;
 const DEFAULT_MAX_AGE_DAYS = 21;
@@ -510,6 +512,10 @@ const jobsTelemetry = {
   // 'done' that auto-dismissed it. { [sourceId]: [{ t, status, code, severity }] }
   sourceEvents:     {},
   sourceEventsT0:   0, // search-start epoch; event `t` is relative ms from here
+  // Live search-jobs heartbeat. Unlike `search` (written only at the successful
+  // end), this survives while the IPC task is awaiting sources/enrichment and
+  // lets FULL/JOBS reports name the current stage and pending source(s).
+  pipeline:         null, // { phase, startedAt, ts, active, pendingSources, lastSource }
   // LinkedIn anonymous-enrichment pass trail: the initial search's enrichment
   // pass plus every Solve re-fetch, newest-last, capped. The guest description
   // limit is per-IP, so "switch your VPN and Solve again" only helps if the
@@ -631,6 +637,7 @@ export function applyFinalJobTitleRelevanceGate(jobs, queries, sourceResults = {
     data.jobs = before.filter(job => !rejectedSet.has(job));
     data.providerGathered = Number(data.providerGathered ?? before.length);
     data.gathered = Number(data.gathered ?? before.length);
+    data.finalRelevanceDropped = Number(data.finalRelevanceDropped || 0) + rejected.length;
     data.relevanceDropped = Number(data.relevanceDropped || 0) + rejected.length;
     data.relevanceRejected = [...new Set([
       ...(data.relevanceRejected || []),
@@ -877,7 +884,7 @@ function getCompletedQueriesFromDetail(detail, total) {
 
 // Human "reading" pause between page turns within a paginating source's
 // session (min/max ms, jittered in the browser pool). Speed is intentionally
-// sacrificed for a natural cadence — see JOB_MAX_PAGES.
+// sacrificed for a natural cadence during a hub-configured page walk.
 const PAGE_DELAY_MS = [6000, 14000];
 
 // Synthesize a visible warning from a raw scrape error so a failed source can
@@ -925,7 +932,7 @@ function getEffectiveSourceWarning(warning, jobCount) {
 }
 
 // Per-source pagination stop callback for executeScrapePaginated. We walk the
-// FULL page ceiling (JOB_MAX_PAGES) on every source — the only early stop is a
+// hub-configured page ceiling on every source — the only early stop is a
 // genuinely EMPTY page, which is terminal and lossless (no results exist past an
 // empty offset, so paging further can only add empty requests). The old
 // date-cutoff and duplicate-page (seen-set) stops were removed deliberately: the
@@ -1007,8 +1014,9 @@ export function glassdoorPostedBucket(days) {
 // page counter + the staging ledger continue from there. Sources whose URL doesn't vary
 // by page (Glassdoor infinite-scroll, single-page Google) ignore startPage and re-scrape
 // from page 1 (the cross-source dedup absorbs the re-yielded earlier pages).
-export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
+export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', collectionLimits = null) {
   const { onlySources = null, startPageBySource = null } = opts;
+  const limits = normalizeJobCollectionLimits(collectionLimits);
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
   const glassdoorDays = glassdoorPostedBucket(days);
   // Board-ready location filter (already flattened from the structured canonical
@@ -1017,6 +1025,9 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
   // the correct default for a remote / no-location search). Google for Jobs has no
   // clean location param, so we append the canonical place to its keyword query.
   const loc = String(location || '').trim();
+  const glassdoorHost = normalizeLocationInput(loc).countryCode === 'CA'
+    ? 'www.glassdoor.ca'
+    : 'www.glassdoor.com';
   const locParam = (name) => loc ? `&${name}=${encodeURIComponent(loc)}` : '';
   // Browser pool extractors — only platforms that REQUIRE local browser rendering.
   // Indeed runs as a browser source in the search-jobs driver (not here); RemoteOK
@@ -1040,18 +1051,18 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
   // the manual trio runs ZipRecruiter → Glassdoor → Google (Indeed runs first, but
   // it's a separate launcher handled in the search-jobs browser driver, not here).
   const extractors = {
-    ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, maxPages: JOB_MAX_PAGES,
+    ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, maxPages: limits.pagesPerPlatform,
                        urlPaginated: true, // first URL can jump to an arbitrary page → supports per-page resume
                        urlFn: (q, page) => `https://www.ziprecruiter.com/jobs-search${page > 0 ? `/${page + 1}` : ''}?search=${encodeURIComponent(q)}${locParam('location')}&days=${days}` },
     // Glassdoor migrated to Next.js with infinite-scroll "Show more" pagination —
     // the old ?p=N URL param is silently ignored (every "page" returns page 1).
-    // One URL load + JOB_MAX_PAGES-1 button clicks replaces the old N-page walk.
-    glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,    config: GLASSDOOR_CONFIG,    maxPages: JOB_MAX_PAGES,
+    // One URL load + the configured page count minus one button clicks replaces the old N-page walk.
+    glassdoor:       { extractor: GLASSDOOR_EXTRACTOR,    config: GLASSDOOR_CONFIG,    maxPages: limits.pagesPerPlatform,
                        // Glassdoor accepts only its UI buckets. Round UP so the
                        // source never under-fetches the requested window; the
                        // global client filter trims the extra tail. Above its
                        // largest bucket, omit fromAge and rely on the client.
-                       urlFn: (q) => `https://www.glassdoor.com/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}${locParam('locKeyword')}${glassdoorDays ? `&fromAge=${glassdoorDays}` : ''}`,
+                       urlFn: (q) => `https://${glassdoorHost}/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}${locParam('locKeyword')}${glassdoorDays ? `&fromAge=${glassdoorDays}` : ''}`,
                        loadMoreSelector: '[data-test="load-more"]' },
     // Google Jobs: single-page scroll-loaded panel (ibp=htl;jobs). No pagination —
     // scroll logic is handled by SCROLL_SOURCES in manualScraper.js. Does not throw
@@ -1088,6 +1099,7 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
           ...config,
           paginate: true,
           maxPages,
+          collectionLimits: limits,
           startPageNum: startPage,
           nextUrl: (page) => urlFn(q, page),
           onPageScraped: makeEmptyPageStop(),
@@ -1095,7 +1107,9 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '') {
           ...(loadMoreSelector ? { loadMoreSelector } : {}),
         };
       } else {
-        base.options = config;
+        // Google has one result view, but its scroll/preload loop treats the
+        // configured page count as its maximum reveal iterations.
+        base.options = { ...config, maxPages: limits.pagesPerPlatform, collectionLimits: limits };
       }
       tasks.push(base);
     }
@@ -1245,7 +1259,7 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
   return { items, warning, gathered, providerGathered, relevanceDropped, relevanceRejected, relevanceTrace };
 }
 
-async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], preferredLocation = '', onlySources = null, emit = null, stageSource = null) {
+async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, profileLocations = [], preferredLocation = '', onlySources = null, emit = null, stageSource = null, collectionLimits = null) {
   // Route progress through the caller's recorder (emitProgress) so the five
   // pure-HTTP sources appear in jobsTelemetry.sourceEvents — without this they
   // bypassed the trail and were invisible in bug reports (exactly the sources
@@ -1257,6 +1271,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
   // on the old .env config.
   const { usajobsApiKey: apiKey, usajobsEmail: email } = getJobsSettings();
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+  const limits = normalizeJobCollectionLimits(collectionLimits);
   const location = String(preferredLocation || '').trim();
   const queryTotal = getQueryProgressTotal(queries);
 
@@ -1287,7 +1302,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // keeping each request well within the per-key burst window.
       // Enrichment (detail fetch) is deferred to after history dedup so we
       // only fetch descriptions for jobs that will actually be scored/shown.
-      await warmDiceApiKey();
+      await warmDiceApiKey(s);
       logger.info(`[Dice API] Fan-out starting: ${queries.length} queries, 350ms interval`);
       return queryFanOut(queries, (q, sig) => fetchDiceListings(q, location, sig, days), s, 4, 350, 'Dice API');
     }},
@@ -1311,10 +1326,8 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // Keep it separate from jobs so it cannot pollute cards, scoring prompts,
       // saved snapshots, or history rows.
       const allRelevanceTrace = Array.isArray(result) ? [] : (result?.relevanceTrace || []);
-      // Pre-cap match count: when it exceeds `jobs.length` the fetcher's
-      // JOB_RESULT_CAP slice (or the FAST cap below) dropped in-window jobs —
-      // surfaced in the funnel so an over-the-cap API source isn't a silent miss
-      // (mirrors the browser ceiling).
+      // Preserve the pre-limit count for diagnostics before applying the hub's
+      // persisted aggregate per-platform job limit.
       const gathered = Array.isArray(result) ? rawJobs.length : (result?.gathered ?? rawJobs.length);
       const providerGathered = Array.isArray(result) ? rawJobs.length : (result?.providerGathered ?? gathered);
       const relevanceDropped = Array.isArray(result) ? 0 : (result?.relevanceDropped ?? 0);
@@ -1322,12 +1335,9 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // never merged into jobs. See fetchUSAJobs for why the count alone is not
       // enough to tell a healthy gate from one that is starving the source.
       const relevanceRejected = Array.isArray(result) ? [] : (result?.relevanceRejected || []);
-      // FAST test mode: trim each source to a small per-source aggregate
-      // (FAST_QUERY_CAP × FAST_API_PER_QUERY ≈ 2 queries × 5). Enforced here — one
-      // slice per source — because the fetchers apply JOB_RESULT_CAP inconsistently
-      // (per-query vs whole-feed). No-op (Infinity) outside fast mode; `gathered`
-      // keeps the true pre-cap count.
-      const jobs = Number.isFinite(JOB_API_PER_SOURCE_CAP) ? rawJobs.slice(0, JOB_API_PER_SOURCE_CAP) : rawJobs;
+      const jobs = limits.jobsPerPlatform == null
+        ? rawJobs
+        : rawJobs.slice(0, limits.jobsPerPlatform);
       const returnedUrls = new Set(jobs.map(job => job?.url).filter(Boolean));
       const relevanceTrace = allRelevanceTrace.filter(row => returnedUrls.has(row?.url));
       // Emit live completion so the source card updates as soon as this source
@@ -1459,7 +1469,7 @@ This is the top priority — bias query construction toward this role even if th
 PREFERRED SEARCH LOCATION (free-form user input): ${location}
 Interpret it naturally — it may be a city, state, region, "remote", "hybrid in Chicago", "Midwest", or a typo ("denvr"). Two SEPARATE jobs:
   (1) QUERY TEXT: only fold a location phrase into a query when it genuinely sharpens it. Do NOT force it into every query; skillsOnlyQueries must stay location-free. (Role/keyword text is free-form — boards don't enforce a structure there.)
-  (2) STRUCTURED "canonicalLocation": ALWAYS return the structured object (see schema). Parse + typo-correct the input into discrete fields. For a US place put the 2-letter code in stateCode ("CO"); for a NON-US place put the full province/region NAME in stateCode ("Ontario") — and ALWAYS set country. The clean "display" string is passed VERBATIM to a board's location filter: "City, ST" for US (e.g. "Denver, CO" from "denvr"), "City, Province, Country" for non-US (e.g. "Whitby, Ontario, Canada" from "whitby ontario"). Keep "display" strictly a place, never a sentence; "" for remote-only.` : `
+  (2) STRUCTURED "canonicalLocation": ALWAYS return the structured object (see schema). Parse + typo-correct the input into discrete fields. Treat US / USA / U.S. as United States. For a US place put the 2-letter code in stateCode ("CO"); for a NON-US place put the full province/region NAME in stateCode ("Ontario") — and ALWAYS set country. A bare state/province goes in region with city empty. Required examples: "Canada" → country Canada; "USA" → country United States; "Ontario, Canada" → region Ontario + country Canada; "Colorado, USA" → region Colorado + country United States; "Toronto, Ontario, Canada" → city Toronto + stateCode Ontario + country Canada; "Denver, Colorado, USA" → city Denver + stateCode CO + country United States. The clean "display" string is passed VERBATIM to a board's location filter: "City, ST" for US (e.g. "Denver, CO" from "denvr"), "City, Province, Country" for non-US (e.g. "Whitby, Ontario, Canada" from "whitby ontario"). Keep "display" strictly a place, never a sentence; "" for remote-only.` : `
 No preferred search location was provided. Keep QUERIES location-free (do NOT add location terms — they stay broad). BUT scope the board location FILTER to the candidate's COUNTRY, inferred from their CAREER DATA: their most recent / dominant work location, any stated location, schools attended, etc. Return canonicalLocation with ONLY "country" populated (city = stateCode = region = "", isRemote = false, display = "", country = the inferred nation, e.g. "United States" / "Canada" / "United Kingdom"). This pins the otherwise IP-dependent "nationwide" default to the right country. If the country genuinely cannot be inferred from the profile, return the all-empty object (no filter).`;
     const targetQueryInstruction = role
       ? `"targetRoleQueries": ["3-5 queries that hunt specifically for '${role}' postings. Include seniority + remoteness variants (e.g. '${role} senior', '${role} remote', '${role} junior'). If a preferred search location was provided, you may include it in 1-2 entries where it improves precision. These are the highest-priority queries."]`
@@ -1496,7 +1506,17 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Dice location, Indeed l=, ZipRecruiter location=, Glassdoor locKeyword=,
     // LinkedIn location=, and the geoTerms strip.
     const struct = (result && typeof result.canonicalLocation === 'object' && result.canonicalLocation) || {};
-    const canonicalLocation = deriveLocationParam(struct, location);
+    const normalizedInput = normalizeLocationInput(location);
+    if (normalizedInput.countryConflict) {
+      throw new Error(`Preferred location "${location}" combines a Canadian province/territory with the United States, or a U.S. state with Canada. Correct the country and try again.`);
+    }
+    // Known CA/US country, province/state, and city forms are deterministic and
+    // must not depend on the model returning the same spelling. The model remains
+    // useful for typos, free-form regions, and countries outside this explicit
+    // source policy.
+    const canonicalLocation = location && normalizedInput.countryCode
+      ? normalizedInput.boardReady
+      : deriveLocationParam(struct, location);
     return { queries: result, queryModel: queryMeta.model || null, canonicalLocation };
   });
 
@@ -1550,7 +1570,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, profileLocations, preferredLocation, rawLocation, resume = false }, signal) => {
+  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, maxAgeDays, canvasFilePath, profileLocations, preferredLocation, rawLocation, collectionLimits, resume = false }, signal) => {
     // Resolve Claude family tokens ONCE at the start of this hub run (design
     // doc §8.3 guard 2 / modelResolver.js's own doc-comment) — jobs.js was the
     // one place a hub run begins that never called this, relying entirely on
@@ -1566,30 +1586,27 @@ Be creative with suggestedRoleQueries — think about what career directions the
       return { success: false, error: 'No active job sources configured for job search test mode.' };
     }
 
-    // FAST test mode keeps only the first N queries (no-op cap = Infinity otherwise).
-    // Applied HERE so the single slice bounds both the browser scrape tasks
-    // (buildJobTasks) and the HTTP fan-out (fetchHttpSources) from one place.
-    const queries = (FAST_TEST && Array.isArray(rawQueries))
-      ? rawQueries.slice(0, JOB_TEST_QUERY_CAP)
-      : rawQueries;
-    if (FAST_TEST && Array.isArray(rawQueries) && rawQueries.length > queries.length) {
-      logger.info(`[Jobs][${nodeId}] FAST test mode: capped ${rawQueries.length} → ${queries.length} queries`);
-    }
+    const queries = Array.isArray(rawQueries) ? rawQueries : [];
+    const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+    let normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
+    const location = String(preferredLocation || '').trim();
+    const sourceCountryPolicies = summarizeJobSourceCountryPolicies(ACTIVE_SOURCE_IDS, location);
+    const sourceCountryPolicyById = Object.fromEntries(sourceCountryPolicies.map(policy => [policy.sourceId, policy]));
+    const countryApplicableSourceIds = new Set(sourceCountryPolicies.filter(policy => policy.include).map(policy => policy.sourceId));
 
     // Gate: require verified login for all browser-scraped job platforms.
-    const BROWSER_JOB_PLATFORMS = getScopedJobSourceIds(['indeed', 'glassdoor', 'ziprecruiter']);
+    const BROWSER_JOB_PLATFORMS = getScopedJobSourceIds(['indeed', 'glassdoor', 'ziprecruiter'])
+      .filter(sourceId => countryApplicableSourceIds.has(sourceId));
     const cache = await readStatusCache();
     const notLoggedIn = BROWSER_JOB_PLATFORMS.filter(id => !cache[id]?.connected);
     if (notLoggedIn.length > 0) {
       return { success: false, notLoggedIn, error: `Not logged in to: ${notLoggedIn.join(', ')}. Open Settings → Job Platforms to connect.` };
     }
 
-    const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     // Board-ready location filter (already flattened from the structured canonical
     // by the renderer via deriveLocationParam). Threaded into the browser tasks
     // (buildJobTasks) and the Indeed driver as a REAL per-board location param.
-    const location = String(preferredLocation || '').trim();
-    logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across ${ACTIVE_SOURCE_IDS.length} source(s) (maxAge=${ageDays}d, location=${location || 'none'})`);
+    logger.info(`[Jobs][${nodeId}] Searching with`, queries.length, `queries across ${ACTIVE_SOURCE_IDS.length} source(s) (maxAge=${ageDays}d, jobs/platform=${normalizedCollectionLimits.jobsPerPlatform ?? 'all'}, browser pages/query=${normalizedCollectionLimits.pagesPerPlatform}, location=${location || 'none'})`);
     recordJobsSourceScope(nodeId, event.sender?.id ?? null);
     // Reset per-run state at search START, not at search end — a paste or captcha
     // resolve can arrive mid-run (before the search result returns), and resetting
@@ -1599,6 +1616,14 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // Fresh per-source event trail for this run (survives source-card deletion).
     jobsTelemetry.sourceEvents = {};
     jobsTelemetry.sourceEventsT0 = Date.now();
+    jobsTelemetry.pipeline = {
+      phase: 'preparing-sources',
+      startedAt: jobsTelemetry.sourceEventsT0,
+      ts: jobsTelemetry.sourceEventsT0,
+      active: true,
+      pendingSources: [],
+      lastSource: null,
+    };
     jobsTelemetry.linkedinEnrich = []; // fresh egress-IP trail per run (see definition)
     jobsTelemetry.linkedinCooldown = null; // fresh cooldown-probe result per run
     jobsTelemetry.history = null;
@@ -1618,6 +1643,16 @@ Be creative with suggestedRoleQueries — think about what career directions the
         severity: payload.warning?.severity || null,
       });
       if (arr.length > 10) arr.shift();
+      const pendingSources = Object.entries(jobsTelemetry.sourceEvents)
+        .filter(([, events]) => events?.at(-1)?.status === 'searching')
+        .map(([sourceId]) => sourceId);
+      jobsTelemetry.pipeline = {
+        ...(jobsTelemetry.pipeline || {}),
+        ts: Date.now(),
+        active: true,
+        pendingSources,
+        lastSource: sid || null,
+      };
       event.sender.send('job-source-progress', payload);
     };
 
@@ -1632,10 +1667,31 @@ Be creative with suggestedRoleQueries — think about what career directions the
     let resumeStartPages = null;  // { [sourceId]: 1-based next page }
     let recoveredStaged = [];     // jobs recovered from the prior (crashed) run's staging
     let priorRunStartedAt = null; // crashed run's start — scopes the history exemption below
+    let activeRunId = null;       // compare-and-clear token returned to the renderer
     if (resume) {
       const prior = await readRunState(canvasFilePath, Date.now());
       if (prior?.incomplete) {
+        const priorInputs = prior.manifest?.inputs || {};
+        const hasRecordedLocation = Object.hasOwn(priorInputs, 'canonicalLocation');
+        const priorLocation = normalizeLocationInput(priorInputs.canonicalLocation).boardReady;
+        const currentLocation = normalizeLocationInput(location).boardReady;
+        if (!hasRecordedLocation || priorLocation !== currentLocation) {
+          return {
+            success: false,
+            resumeLocationMismatch: true,
+            error: hasRecordedLocation
+              ? `This unfinished search targeted "${priorLocation || 'no location'}", but the hub now targets "${currentLocation || 'no location'}". Start fresh so staged jobs and queries cannot cross locations.`
+              : 'This unfinished search predates location-safe resume metadata. Start fresh so staged jobs cannot be mixed into the current location.',
+          };
+        }
+        // A resume must repeat the breadth the interrupted run used. Current
+        // renderers always send it, while this manifest fallback preserves that
+        // invariant for an in-flight run after an app update/reload.
+        if (collectionLimits == null && prior.manifest?.inputs?.collectionLimits) {
+          normalizedCollectionLimits = normalizeJobCollectionLimits(prior.manifest.inputs.collectionLimits);
+        }
         recoveredStaged = prior.stagedJobs.map(s => ({ ...s.job, source: s.sourceId }));
+        activeRunId = prior.manifest.runId || null;
         priorRunStartedAt = prior.manifest.startedAt ?? null;
         const priorSources = prior.manifest.sources || {};
         resumeScope = new Set();
@@ -1656,9 +1712,17 @@ Be creative with suggestedRoleQueries — think about what career directions the
       }
     }
 
-    const tasks = buildJobTasks(queries, ageDays, resumeScope
-      ? { onlySources: resumeScope, startPageBySource: resumeStartPages }
-      : {}, location);
+    // Country applicability is enforced before any source request. On resume,
+    // intersect it with the unfinished-source scope so an older staged run cannot
+    // reintroduce a now-inapplicable source (for example Dice on a Canada hub).
+    const requestedSourceScope = resumeScope || new Set(ACTIVE_SOURCE_IDS);
+    const runnableSourceScope = new Set(
+      [...requestedSourceScope].filter(sourceId => countryApplicableSourceIds.has(sourceId)),
+    );
+    const tasks = buildJobTasks(queries, ageDays, {
+      onlySources: runnableSourceScope,
+      ...(resumeStartPages ? { startPageBySource: resumeStartPages } : {}),
+    }, location, normalizedCollectionLimits);
 
     // Group tasks by source for per-source progress tracking
     const sourceTaskIds = {};
@@ -1692,6 +1756,19 @@ Be creative with suggestedRoleQueries — think about what career directions the
 
     const allJobs = [];
     const sourceResults = {};
+    for (const policy of sourceCountryPolicies) {
+      if (policy.include) continue;
+      sourceResults[policy.sourceId] = {
+        jobs: [],
+        errors: 0,
+        warnings: [{
+          code: 'country-source-skipped',
+          severity: 'info',
+          evidence: policy.reason,
+          suggestion: `This source is intentionally not queried for ${policy.location.boardReady || policy.location.country || 'this target'}. Run a separate United States hub to include U.S.-only sources.`,
+        }],
+      };
+    }
 
     // Resume: seed the gathered set with jobs recovered from the prior run's
     // staging so 'done' sources aren't re-scraped and incomplete sources keep the
@@ -1702,6 +1779,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // worth recovering. First-seen order is preserved (Map insertion semantics).
     const recoveredByKey = new Map();
     for (const j of recoveredStaged) {
+      if (!countryApplicableSourceIds.has(j.source)) continue;
       recoveredByKey.set(`${j.source || '?'}|${j.url || jobTitleCompanyKey(j)}`, j);
     }
     for (const j of recoveredByKey.values()) {
@@ -1720,14 +1798,18 @@ Be creative with suggestedRoleQueries — think about what career directions the
     if (resumeScope) {
       await setJobRunStage(canvasFilePath, 'searching', runStartedAt);
     } else {
-      await startJobRun(canvasFilePath, {
-        runId: `${nodeId || 'job'}-${runStartedAt}`,
+      activeRunId = `${nodeId || 'job'}-${runStartedAt}`;
+      const startedManifest = await startJobRun(canvasFilePath, {
+        runId: activeRunId,
         startedAt: runStartedAt,
         queries,
         maxAgeDays: ageDays,
+        canonicalLocation: location,
+        collectionLimits: normalizedCollectionLimits,
         nodeId,
         sourceIds: ACTIVE_SOURCE_IDS,
       });
+      if (!startedManifest) activeRunId = null;
     }
     const stageOnPage = ({ sourceId, query, page, jobs }) =>
       recordSourcePage(canvasFilePath, { sourceId, query, page, jobs, now: Date.now() });
@@ -1758,7 +1840,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // unless its history says otherwise; Google/Glassdoor, which DO wait via
     // waitForReady, rise. First run / clean history = the default order.
     const activeBrowserSources = BROWSER_SCRAPE_ORDER.filter(
-      sid => ACTIVE_SOURCE_ID_SET.has(sid) && (!resumeScope || resumeScope.has(sid)),
+      sid => ACTIVE_SOURCE_ID_SET.has(sid) && runnableSourceScope.has(sid),
     );
     const browserOrder = orderBrowserSources(activeBrowserSources);
     if (browserOrder.length) {
@@ -1776,10 +1858,12 @@ Be creative with suggestedRoleQueries — think about what career directions the
       try {
         const r = await fetchIndeedListingsBrowser(queries, combinedSignal, ageDays, null, (detail) => {
           emitProgress({ nodeId, sourceId: 'indeed', status: 'searching', count: 0, detail, completed: getCompletedQueriesFromDetail(detail, queryTotal), total: queryTotal });
-        }, indeedStartPage, stageOnPage, location);
+        }, indeedStartPage, stageOnPage, location, normalizedCollectionLimits);
         const rawJobs = Array.isArray(r?.items) ? r.items : [];
         const gathered = r?.gathered ?? rawJobs.length;
-        const jobs = Number.isFinite(JOB_API_PER_SOURCE_CAP) ? rawJobs.slice(0, JOB_API_PER_SOURCE_CAP) : rawJobs;
+        const jobs = normalizedCollectionLimits.jobsPerPlatform == null
+          ? rawJobs
+          : rawJobs.slice(0, normalizedCollectionLimits.jobsPerPlatform);
         indeedResult = { sourceId: 'indeed', jobs, warning: r?.warning || null, gathered };
       } catch (error) {
         indeedResult = { sourceId: 'indeed', jobs: [], error: error?.message || String(error) };
@@ -1858,10 +1942,38 @@ Be creative with suggestedRoleQueries — think about what career directions the
     const stageHttpSource = ({ sourceId, jobs }) =>
       recordSourcePage(canvasFilePath, { sourceId, query: '', page: 0, jobs, now: Date.now() });
 
-    const [browserOut, httpResults] = await Promise.all([
-      withSharedProfileLock(runBrowserSourcesInOrder),
-      fetchHttpSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, preferredLocation, resumeScope, emitProgress, stageHttpSource),
-    ]);
+    jobsTelemetry.pipeline = {
+      ...(jobsTelemetry.pipeline || {}),
+      phase: 'gathering-sources',
+      ts: Date.now(),
+      active: true,
+      pendingSources: [...runnableSourceScope],
+    };
+    let browserOut;
+    let httpResults;
+    try {
+      [browserOut, httpResults] = await Promise.all([
+        withSharedProfileLock(runBrowserSourcesInOrder),
+        fetchHttpSources(queries, event.sender, combinedSignal, nodeId, ageDays, profileLocations, location, runnableSourceScope, emitProgress, stageHttpSource, normalizedCollectionLimits),
+      ]);
+    } catch (error) {
+      jobsTelemetry.pipeline = {
+        ...(jobsTelemetry.pipeline || {}),
+        phase: combinedSignal.aborted ? 'aborted' : 'source-gather-failed',
+        ts: Date.now(),
+        active: false,
+        pendingSources: [],
+        error: String(error?.message || error).slice(0, 240),
+      };
+      throw error;
+    }
+    jobsTelemetry.pipeline = {
+      ...(jobsTelemetry.pipeline || {}),
+      phase: 'processing-source-results',
+      ts: Date.now(),
+      active: true,
+      pendingSources: [],
+    };
     const results = browserOut.manualResults;
     // Indeed (browser) is appended to the API-shaped results so all downstream
     // processing (per-source funnel, gathered/warning handling) stays unchanged.
@@ -1908,26 +2020,20 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // opens the two-tab resolve window, submits a review/salary in Tab 2, then
     // Tab 1 auto-extracts the full ungated result set.
     //
-    // CAP-AWARE: the raw count is only a gate signal when it falls SHORT of what we
-    // asked for. In FAST/MEDIUM test mode the per-page cap (JOB_PER_PAGE_CAP = 5 / 5)
-    // deliberately limits Glassdoor to ~10 jobs, so "≤10" was ALWAYS true and the gate
-    // FALSE-fired on every test run — the user then opens the Solve window, Glassdoor
-    // serves the full ungated page to the visible (non-CDP) Chrome session, and it
-    // extracts + insta-closes with nothing to solve. Require the count to be below a
-    // full capped page across the queries we ran (queries.length × JOB_PER_PAGE_CAP)
-    // so a cap-limited-but-healthy scrape isn't mislabeled. In production (cap 150)
-    // that product dwarfs the 10 threshold, so this clause is a no-op there and a
-    // genuine gate (Glassdoor truncating to ~5 despite a deep page budget) still fires.
+    // Limit-aware: a deliberately small per-platform job allowance must not look
+    // like Glassdoor's contribution gate. A finite allowance of ten or fewer
+    // can legitimately produce this small result; otherwise it is suspicious.
     const gdData = sourceResults.glassdoor;
-    const gdFullPageYield = (queries.length || 1) * JOB_PER_PAGE_CAP;
+    const gdLimitCanExplainResult = normalizedCollectionLimits.jobsPerPlatform != null
+      && normalizedCollectionLimits.jobsPerPlatform <= 10;
     if (gdData && gdData.jobs.length > 0 && gdData.jobs.length <= 10 &&
-        gdData.jobs.length < gdFullPageYield &&
+        !gdLimitCanExplainResult &&
         gdData.pagesWalked <= 1 &&
         !gdData.warnings.some(w => w?.severity === 'block')) {
       gdData.warnings.push({
         code: 'glassdoor-review-gate',
         severity: 'block',
-        evidence: `Glassdoor returned only ${gdData.jobs.length} job(s) (< a full ${gdFullPageYield}-job page across ${queries.length} quer${queries.length === 1 ? 'y' : 'ies'}) before hitting an empty page — consistent with the contribution gate.`,
+        evidence: `Glassdoor returned only ${gdData.jobs.length} job(s) before its first reveal/page ended — consistent with the contribution gate.`,
         openSecondTab: true,
         suggestion: 'Glassdoor limited the automated fetch. Click Solve — a browser opens on the Glassdoor results and USUALLY loads the full list on its own, then closes; you don\'t need to do anything. ONLY if you see a "write a review / add a salary to continue" wall, use Tab 2 to satisfy it, then switch to Tab 1 and refresh.',
       });
@@ -1940,10 +2046,11 @@ Be creative with suggestedRoleQueries — think about what career directions the
     for (const res of apiResults) {
       if (!sourceResults[res.sourceId]) sourceResults[res.sourceId] = { jobs: [], errors: 0, warnings: [] };
       // Pre-cap match count (one fetch per API source). > jobs gathered = the
-      // JOB_RESULT_CAP slice dropped in-window jobs the funnel should flag.
+      // The collected/source result is already bounded by the persisted limit.
       if (res.gathered != null) sourceResults[res.sourceId].gathered = res.gathered;
       if (res.providerGathered != null) sourceResults[res.sourceId].providerGathered = res.providerGathered;
       if (res.relevanceDropped != null) sourceResults[res.sourceId].relevanceDropped = res.relevanceDropped;
+      if (res.relevanceDropped != null) sourceResults[res.sourceId].admissionRelevanceDropped = res.relevanceDropped;
       if (Array.isArray(res.relevanceRejected) && res.relevanceRejected.length > 0) {
         sourceResults[res.sourceId].relevanceRejected = res.relevanceRejected;
       }
@@ -2145,6 +2252,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // before search-jobs returns; the renderer's post-score write below is a
     // serialized follow-up for late Solve/paste additions, not a racing peer.
     if (canvasFilePath) {
+      jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'writing-history', ts: Date.now(), active: true };
       const historyResult = await appendJobsHistory(canvasFilePath, kept);
       recordHistoryWrite('preScoring', kept, historyResult);
       if (historyResult?.error) logger.warn(`[Jobs][${nodeId}] History: pre-scoring append failed: ${historyResult.error}`);
@@ -2158,6 +2266,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // only fetch detail pages for jobs that will actually be scored/shown.
     const diceKept = kept.filter(j => j.source === 'dice');
     if (diceKept.length > 0) {
+      jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'enriching-dice', ts: Date.now(), active: true, pendingSources: ['dice'] };
       const enriched = await enrichDiceDescriptions(diceKept, combinedSignal);
       const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
       kept = kept.map(j => j.source === 'dice' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
@@ -2169,6 +2278,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // job URL sequentially, then closed. Stops early on a login wall.
     const linkedinKept = kept.filter(j => j.source === 'linkedin');
     if (linkedinKept.length > 0) {
+      jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'enriching-linkedin', ts: Date.now(), active: true, pendingSources: ['linkedin'] };
       // Re-enter 'searching' before browser enrichment so the source card stays
       // visible and its dismiss timer is cancelled. Without this, the card gets
       // its 'done' event when the API fetch finishes (10+ min ago), then the
@@ -2467,24 +2577,26 @@ Be creative with suggestedRoleQueries — think about what career directions the
           // Browser sources cannot know how many additional matches exist without
           // issuing more pages. Preserve the actual enforced aggregate cap so the
           // report never calls this a clean/exhausted search.
-          bySource[sid].cap = { type: 'per-source', limit: JOB_PER_SOURCE_CAP };
+          bySource[sid].cap = { type: 'per-platform', limit: normalizedCollectionLimits.jobsPerPlatform };
         }
       }
-      // Pre-cap match count for API sources — the funnel flags when it exceeds
-      // `count` (the JOB_RESULT_CAP slice silently dropped in-window jobs).
+      // Pre-limit match count for API sources — surface an explicit user-set
+      // platform limit rather than silently hiding extra in-window matches.
       if (data.gathered != null) {
         bySource[sid].gathered = data.gathered;
-        if (data.gathered > data.jobs.length) {
-          // In FAST mode the aggregate source slice is the limiting operation;
-          // JOB_RESULT_CAP is intentionally Infinity. Outside FAST, the extractor
-          // result cap is the only source-wide slice represented by this telemetry.
-          bySource[sid].cap = FAST_TEST
-            ? { type: 'fast-aggregate', limit: JOB_API_PER_SOURCE_CAP }
-            : { type: 'result', limit: JOB_RESULT_CAP };
+        const finalRejected = Number(data.finalRelevanceDropped || 0);
+        const capOverflow = Math.max(0, Number(data.gathered) - data.jobs.length - finalRejected);
+        bySource[sid].capOverflow = capOverflow;
+        if (capOverflow > 0) {
+          bySource[sid].cap = normalizedCollectionLimits.jobsPerPlatform == null
+            ? null
+            : { type: 'per-platform', limit: normalizedCollectionLimits.jobsPerPlatform };
         }
       }
       if (data.providerGathered != null) bySource[sid].providerGathered = data.providerGathered;
       if (data.relevanceDropped > 0) bySource[sid].relevanceDropped = data.relevanceDropped;
+      if (data.admissionRelevanceDropped > 0) bySource[sid].admissionRelevanceDropped = data.admissionRelevanceDropped;
+      if (data.finalRelevanceDropped > 0) bySource[sid].finalRelevanceDropped = data.finalRelevanceDropped;
       if (Array.isArray(data.relevanceRejected) && data.relevanceRejected.length > 0) {
         bySource[sid].relevanceRejected = data.relevanceRejected;
       }
@@ -2518,7 +2630,17 @@ Be creative with suggestedRoleQueries — think about what career directions the
       rawInput: String(rawLocation || '').trim() || null,
       canonical: location || null,
       corrected: !!(rawLocation && location && String(rawLocation).trim().toLowerCase() !== location.toLowerCase()),
-      perSource: Object.fromEntries(ACTIVE_SOURCE_IDS.map(id => [id, LOCATION_TREATMENT[id] || 'unknown'])),
+      inferredFromCareerData: !String(rawLocation || '').trim() && !!location,
+      target: normalizeLocationInput(location),
+      perSource: Object.fromEntries(ACTIVE_SOURCE_IDS.map((id) => {
+        const policy = sourceCountryPolicyById[id] || getJobSourceCountryPolicy(id, location);
+        if (!policy.include) return [id, `Skipped — ${policy.reason}`];
+        const mechanism = LOCATION_TREATMENT[id] || 'unknown';
+        if (policy.filterStrength === 'global-remote') return [id, `${policy.label} — no country filter; eligibility remains listing-specific`];
+        if (policy.filterStrength === 'best-effort') return [id, `${policy.label} — ${mechanism}`];
+        if (policy.requiresResolvedLocation) return [id, `${policy.label} — ${mechanism}; skipped unless exact resolution succeeds`];
+        return [id, `${policy.label} — ${mechanism}`];
+      })),
       adherence: summarizeLocationAdherence(kept, location),
     };
     // Listing-language tally over the kept jobs — answers "did any non-English
@@ -2559,6 +2681,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
         }),
       };
     }
+    jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'finalizing-search', ts: Date.now(), active: true, pendingSources: [] };
     jobsTelemetry.search = {
       ts: Date.now(),
       queries: queries.length,
@@ -2579,6 +2702,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
       deduped: deduped.length,
       dedupProvenance,
       maxAgeDays: ageDays, // the configured look-back window this run actually used
+      collectionLimits: normalizedCollectionLimits,
       ageDropped,
       ageBySource, // per-source: { dropped, kept, oldestKeptDays, oldestKeptRaw, unparseableKept }
       dateBounds,
@@ -2598,11 +2722,12 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // RENDERER-driven scoring/bucketing that follows resumes from scoring (the
     // gathered jobs are recovered from staging) rather than re-scraping.
     await setJobRunStage(canvasFilePath, 'gathered', Date.now());
+    jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'completed', ts: Date.now(), active: false, pendingSources: [] };
 
     // hiddenApplied travels on the top-level result (not just jobsTelemetry.search)
     // because the renderer's funnel line reads the search-jobs return value directly
     // — see JobSearchNode.jsx's use of searchResult.rawCount for the same reason.
-    return { jobs: kept, rawCount: allJobs.length, hiddenApplied, sourceResults, scrapeWarnings };
+    return { jobs: kept, rawCount: allJobs.length, hiddenApplied, sourceResults, scrapeWarnings, runId: activeRunId };
   });
 
   // ── Resume-from-incomplete-run IPC ──────────────────────────────────────────
@@ -2633,16 +2758,25 @@ Be creative with suggestedRoleQueries — think about what career directions the
       sourceSummary,
       queries: state.manifest.inputs?.queries || [],
       targetRole: state.manifest.inputs?.targetRole || null,
+      canonicalLocation: state.manifest.inputs?.canonicalLocation || '',
+      locationRecorded: Object.hasOwn(state.manifest.inputs || {}, 'canonicalLocation'),
     };
   });
 
-  handleSafe('complete-job-run', async (event, { canvasFilePath } = {}) => {
+  handleSafe('complete-job-run', async (event, { canvasFilePath, runId = null } = {}) => {
     // Clean finish (including a successful resume-on-crash that runs to
     // completion): the staged jobs + run manifest have served their purpose, so
     // move them to the OS Trash as recoverable cleanup. clearRun falls back to a
     // hard delete if the volume has no Trash, so the run is always cleared.
-    await clearRun(canvasFilePath, { trashItem: (p) => shell.trashItem(p) });
-    return { ok: true };
+    // No token means there is no safely attributable sidecar to clear (unsaved
+    // canvases and legacy/snapshot-only scoring land here). Never turn an
+    // unscoped completion into an unconditional delete of another hub's run.
+    if (!runId) return { ok: true, cleared: false };
+    const cleared = await clearRun(canvasFilePath, {
+      trashItem: (p) => shell.trashItem(p),
+      expectedRunId: runId,
+    });
+    return { ok: true, cleared };
   });
 
   handleSafe('discard-job-run', async (event, { canvasFilePath } = {}) => {
@@ -2653,7 +2787,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     return { ok: true };
   });
 
-  handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId, preferredLocation }, signal) => {
+  handleSafe('search-jobs-single-source', async (event, { query, sourceId, maxAgeDays, canvasFilePath, nodeId, preferredLocation, collectionLimits }, signal) => {
     logger.info(`[Jobs] Background single-source search for ${sourceId} with query "${query}"`);
     if (!ACTIVE_SOURCE_ID_SET.has(sourceId)) {
       return {
@@ -2664,7 +2798,30 @@ Be creative with suggestedRoleQueries — think about what career directions the
     }
 
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+    const normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
     const location = String(preferredLocation || '').trim();
+    const sourceCountryPolicy = getJobSourceCountryPolicy(sourceId, location);
+
+    if (!sourceCountryPolicy.include) {
+      const locationWarning = {
+        code: 'country-source-skipped',
+        severity: 'info',
+        evidence: sourceCountryPolicy.reason,
+        suggestion: `This source is intentionally not queried for ${sourceCountryPolicy.location.boardReady || sourceCountryPolicy.location.country || 'this target'}. Run a separate United States hub to use U.S.-only sources.`,
+      };
+      if (nodeId && !event.sender.isDestroyed()) {
+        event.sender.send('job-source-progress', {
+          nodeId,
+          sourceId,
+          status: 'skipped',
+          count: 0,
+          warning: locationWarning,
+          completed: 1,
+          total: 1,
+        });
+      }
+      return { success: true, jobs: [], hiddenApplied: 0, warning: locationWarning };
+    }
 
     let jobs = [];
     let warning = null;
@@ -2740,9 +2897,9 @@ Be creative with suggestedRoleQueries — think about what career directions the
       return { success: false, error: `Unsupported single source: ${sourceId}` };
     }
 
-    // Keep background re-fetches inside the same aggregate FAST-mode ceiling as
-    // the main multi-source pipeline.
-    if (Number.isFinite(JOB_API_PER_SOURCE_CAP)) jobs = jobs.slice(0, JOB_API_PER_SOURCE_CAP);
+    if (normalizedCollectionLimits.jobsPerPlatform != null) {
+      jobs = jobs.slice(0, normalizedCollectionLimits.jobsPerPlatform);
+    }
     const tagged = jobs.map(j => ({ ...j, source: sourceId }));
     const deduped = dedupByTitleCompany(tagged);
 
@@ -2856,7 +3013,7 @@ Be creative with suggestedRoleQueries — think about what career directions the
     // survives an app restart). Anything else falls through to the real-time
     // path below unchanged — batch mode is strictly additive.
     const canvasFilePath = snapshotContext?.canvasFilePath || null;
-    const isTestMode = MEDIUM_TEST || FULL_TEST || FAST_TEST;
+    const isTestMode = JOB_SEARCH_TEST_MODE.enabled;
     if (batchScoring && getAISettings().provider === 'claude' && !isTestMode && canvasFilePath && toScore.length > 0) {
       try {
         // Proactive window preflight — split any over-window group BEFORE the
@@ -3311,8 +3468,9 @@ RULES:
   // pendingJobs and drop the warning. items is [] when no extractor is
   // available for the source (API sources can't be inline-extracted; their
   // Solve button doesn't render).
-  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, canvasFilePath, maxAgeDays, secondTabUrl, queries } = {}, signal) => {
+  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, canvasFilePath, maxAgeDays, secondTabUrl, queries, collectionLimits } = {}, signal) => {
     if (!url) throw new Error('resolve-job-source requires a url');
+    const normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
     logger.info(`[Jobs][${nodeId}] User opening resolve window for ${sourceId}: ${url}${secondTabUrl ? ' (2-tab)' : ''}`);
 
     // LinkedIn "Solve" = re-fetch descriptions, NOT log in. Descriptions come
@@ -3348,9 +3506,12 @@ RULES:
         // Guard against a snapshot from a different hub (e.g. user ran hub B
         // after hub A's rate-limit card was left open).
         const snapshotIsThisHub = !snapshot.sourceHubId || snapshot.sourceHubId === nodeId;
-        const allLinkedIn = snapshotIsThisHub
+        const allLinkedInRaw = snapshotIsThisHub
           ? (snapshot?.jobs || []).filter(j => j.source === 'linkedin')
           : [];
+        const allLinkedIn = normalizedCollectionLimits.jobsPerPlatform == null
+          ? allLinkedInRaw
+          : allLinkedInRaw.slice(0, normalizedCollectionLimits.jobsPerPlatform);
         const needEnrich = allLinkedIn.filter(j => !j.snippet || j.snippet.length < 100);
 
         if (needEnrich.length > 0) {
@@ -3564,6 +3725,9 @@ RULES:
             [sourceId]: { jobs: tagged, errors: 0, warnings: [] },
           };
           let candidates = applyFinalJobTitleRelevanceGate(tagged, resolveQueries, localSourceResults);
+          if (normalizedCollectionLimits.jobsPerPlatform != null) {
+            candidates = candidates.slice(0, normalizedCollectionLimits.jobsPerPlatform);
+          }
           const relevanceDropped = tagged.length - candidates.length;
           candidates = filterJobsByAge(candidates, ageDays);
           if (canvasFilePath && candidates.length > 0) {
@@ -3686,7 +3850,9 @@ RULES:
     // Same permanent applied-store filter the headless search path applies —
     // a re-solved captcha must not resurrect a job the user already applied to.
     const { jobs: appliedFiltered, hiddenApplied, error: appliedStoreError } = filterOutApplied(items);
-    items = appliedFiltered;
+    items = normalizedCollectionLimits.jobsPerPlatform == null
+      ? appliedFiltered
+      : appliedFiltered.slice(0, normalizedCollectionLimits.jobsPerPlatform);
     const appliedStoreWarning = appliedStoreError ? appliedStoreErrorWarning(appliedStoreError) : null;
     // Mirror the main search's final text/language cleanup. Resolve rows otherwise
     // bypassed the single normalization chokepoint and could carry raw markup or
@@ -3735,17 +3901,18 @@ RULES:
   // The user re-authenticates via Settings, then clicks Continue on the source
   // card. Runs only the remaining queries starting from the challenged page so
   // we don't repeat work already captured in pendingJobs.
-  handleSafe('resume-job-source', async (event, { sourceId, nodeId, canvasFilePath, maxAgeDays, preferredLocation, resumeState } = {}, signal) => {
+  handleSafe('resume-job-source', async (event, { sourceId, nodeId, canvasFilePath, maxAgeDays, preferredLocation, resumeState, collectionLimits } = {}, signal) => {
     if (sourceId !== 'indeed') throw new Error('resume-job-source only supports indeed');
     const { remainingQueries, startPage = 0 } = resumeState || {};
     if (!Array.isArray(remainingQueries) || remainingQueries.length === 0) {
       return { resolved: false, items: [] };
     }
     const location = String(preferredLocation || '').trim();
+    const normalizedCollectionLimits = normalizeJobCollectionLimits(collectionLimits);
     logger.info(`[Jobs][${nodeId}] Resuming Indeed: ${remainingQueries.length} remaining queries from page ${startPage + 1} (location=${location || 'none'})`);
     // Same shared-profile lock — a "Continue" click could land while a full
     // search is still scraping; serialize this Indeed browser against them.
-    const result = await withSharedProfileLock(() => fetchIndeedListingsBrowser(remainingQueries, signal, maxAgeDays || DEFAULT_MAX_AGE_DAYS, null, null, startPage, null, location));
+    const result = await withSharedProfileLock(() => fetchIndeedListingsBrowser(remainingQueries, signal, maxAgeDays || DEFAULT_MAX_AGE_DAYS, null, null, startPage, null, location, normalizedCollectionLimits));
     const extracted = Array.isArray(result?.items) ? result.items.map(j => ({ ...j, source: sourceId })) : [];
     const ageDays = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
     const ageFiltered = filterJobsByAge(extracted, ageDays);
@@ -3761,7 +3928,9 @@ RULES:
     // Same permanent applied-store filter the headless search path applies —
     // a resumed Indeed walk must not resurrect a job the user already applied to.
     const { jobs: appliedFiltered, hiddenApplied, error: appliedStoreError } = filterOutApplied(items);
-    items = appliedFiltered;
+    items = normalizedCollectionLimits.jobsPerPlatform == null
+      ? appliedFiltered
+      : appliedFiltered.slice(0, normalizedCollectionLimits.jobsPerPlatform);
     logger.info(`[Jobs][${nodeId}] Indeed resume complete: extracted=${extracted.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, hiddenApplied=${hiddenApplied}, new=${items.length}`);
     const resolved = items.length > 0 || !result?.warning;
     // Prefer a real scrape-level warning (result.warning) when both are

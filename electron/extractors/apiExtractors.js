@@ -17,7 +17,6 @@ import { htmlToText } from 'html-to-text';
 import { JSDOM } from 'jsdom';
 import { resolveBudget } from '../ipc/scrapeBudget.js';
 import { safeApiFetch } from '../ipc/antiBotDetector.js';
-import { JOB_RESULT_CAP } from '../ipc/resultCaps.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../../src/utils/compSourceScope.js';
@@ -216,10 +215,9 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     }
   }
 
-  // `gathered` = pre-cap match count. When it exceeds the surfaced item count the
-  // slice silently dropped in-window jobs (the API analogue of the browser walk's
-  // `ceiling` stop); the bug-report funnel flags that so it isn't a silent miss.
-  return { items: allJobs.slice(0, JOB_RESULT_CAP), warning, gathered: allJobs.length };
+  // `gathered` is the pre-user-limit match count. jobs.js applies the persisted
+  // per-platform allowance centrally so every source shares the same semantics.
+  return { items: allJobs, warning, gathered: allJobs.length };
 }
 
 /**
@@ -666,6 +664,12 @@ const JOB_ROLE_CONCEPT_ALIASES = new Map([
   ['service', [['services'], ['support'], ['success'], ['advocate'], ['care']]],
   ['administrative', [['admin'], ['back', 'office']]],
   ['assistant', [['support'], ['coordinator'], ['helper']]],
+  // Job boards freely alternate engineer/developer for the same software role
+  // (and sometimes list both slash-separated aliases in one title). The second
+  // role concept still has to corroborate locally, so a generic "Engineer"
+  // cannot satisfy "Backend Developer" without the backend concept beside it.
+  ['engineer', [['developer']]],
+  ['developer', [['engineer']]],
   // Common title abbreviations/near-equivalents. These remain safe because a
   // multi-concept query still needs local corroboration: "Maintenance Tech" and
   // "Maintenance Worker" match Maintenance Technician, while "Field Service
@@ -890,9 +894,17 @@ function computeJobRelevanceDecision(roleText, query, geoTerms = EMPTY_GEO) {
     return !PHRASE_BREAK_BETWEEN.test(text.slice(roleTokenEnds[first.end], roleTokenStarts[second.start]));
   };
   if (minMatches > 1) {
+    // A title can contain both an exact term and a closer synonym in separate
+    // slash aliases ("Backend Engineer / Software Developer"). Locality must
+    // consider every valid realization of the concept, not only the first exact
+    // occurrence chosen above for compact telemetry.
+    const conceptSpans = (concept) => [
+      spansFor([concept.queryTerm]),
+      ...(JOB_ROLE_CONCEPT_ALIASES.get(concept.queryTerm) || []).map(spansFor),
+    ].flat();
     const locallyCorroborated = matchedConcepts.some((left, i) =>
       matchedConcepts.slice(i + 1).some(right =>
-        spansFor(left.matchedTokens).some(a => spansFor(right.matchedTokens).some(b => samePhrase(a, b))),
+        conceptSpans(left).some(a => conceptSpans(right).some(b => samePhrase(a, b))),
       ),
     );
     if (!locallyCorroborated) {
@@ -1102,7 +1114,7 @@ export async function fetchUSAJobs(query, apiKey, email, signal = null, maxAgeDa
   // remote feeds. This mirrors USAJobs' documented PositionTitle semantics
   // without issuing a second request or silently inventing phrase syntax.
   const relevant = filterUSAJobsByTitleRelevance(mapped, query);
-  const items = relevant.slice(0, JOB_RESULT_CAP);
+  const items = relevant;
   // A bounded sample of what the gate THREW AWAY. The count alone ("rejected 53
   // rows") can't distinguish a gate doing its job from one that over-rejects and
   // silently starves the source — the titles are the only way to tell, and they
@@ -1196,7 +1208,7 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
   }
 
   const relevanceTrace = [];
-  const items = matched.slice(0, JOB_RESULT_CAP).map(({ job, evidence }) => {
+  const items = matched.map(({ job, evidence }) => {
     // RemoteOK's API returns description as raw HTML — strip tags to plain text.
     const descText = job.description ? job.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
     const tags = (job.tags || []).join(', ');
@@ -1374,7 +1386,7 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
   const withDesc = jobs.filter(j => j.description).length;
   logger.info(`[WWR RSS] ${jobs.length} jobs matched, ${withDesc}/${jobs.length} have descriptions`);
 
-  const items = jobs.slice(0, JOB_RESULT_CAP);
+  const items = jobs;
   const returnedUrls = new Set(items.map(job => job.url));
   return { items, warning: r.warning, gathered: jobs.length, relevanceTrace: relevanceTrace.filter(row => returnedUrls.has(row.url)) }; // gathered: pre-cap matches (see fetchLinkedInJobs)
 }
@@ -2099,7 +2111,7 @@ export async function fetchDiceListings(query, location = '', signal = null, max
       } else {
         // First time (or key genuinely rotated): do the full bundle scan.
         const oldKey = getDiceApiKey();
-        retryKey = await refreshDiceApiKey();
+        retryKey = await refreshDiceApiKey(signal);
         if (retryKey) {
           if (retryKey === oldKey) {
             _diceKeyIsStable = true;
@@ -2185,10 +2197,9 @@ export async function fetchDiceListings(query, location = '', signal = null, max
   });
   const withDesc = mapped.filter(j => j.description).length;
   logger.info(`[Dice API] ${mapped.length} jobs for "${query}", ${withDesc}/${mapped.length} have descriptions (pre-enrichment)`);
-  // Date-filter the wide relevance pull, THEN cap — so the kept JOB_RESULT_CAP are
-  // the most-relevant IN-WINDOW jobs (reuses the shared age filter; same cutoff the
-  // global pass applies, so this is a no-op there, not a second policy). `gathered`
-  // = in-window matches before the cap, so the funnel flags when there were more.
+  // Date-filter the wide relevance pull before central collection limiting so
+  // the returned rows are the most-relevant in-window jobs. The global pass is
+  // a no-op here, not a second policy; `gathered` remains the pre-limit count.
   const inWindow = maxAgeDays ? filterJobsByAge(mapped, maxAgeDays) : mapped;
   // Dice's search endpoint is deliberately broad: a query for "Housekeeping
   // Supervisor" can return generic Maintenance/Production/Shift Supervisor
@@ -2214,7 +2225,7 @@ export async function fetchDiceListings(query, location = '', signal = null, max
       });
     }
   }
-  const items = admitted.slice(0, JOB_RESULT_CAP);
+  const items = admitted;
   return {
     items,
     warning: r.warning,
@@ -2231,15 +2242,16 @@ export async function fetchDiceListings(query, location = '', signal = null, max
  * is fresh for all queries and we don't hit 500 → retry → refresh mid-run.
  * Fails silently — the reactive 500-triggered refresh is still the fallback.
  */
-export async function warmDiceApiKey() {
+export async function warmDiceApiKey(signal = null) {
   try {
-    const key = await refreshDiceApiKey();
+    const key = await refreshDiceApiKey(signal);
     if (key) {
       logger.info('[Dice API] API key pre-warmed successfully');
     } else {
       logger.warn('[Dice API] API key pre-warm failed — will fall back to reactive refresh on 500');
     }
   } catch (err) {
+    if (signal?.aborted) throw err;
     logger.warn('[Dice API] API key pre-warm error:', err?.message || String(err));
   }
 }

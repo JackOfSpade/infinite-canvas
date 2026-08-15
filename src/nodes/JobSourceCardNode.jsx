@@ -7,6 +7,7 @@ import { SourceWarningPanel } from './_shared/SourceWarningPanel';
 import { mergeSourceProgress } from '../utils/sourceProgress';
 import { isJobSourceWarningGating, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
+import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
 
 /**
  * JobSourceCardNode — persistent canvas node representing one job source
@@ -138,17 +139,20 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
     }));
     try {
       let result;
+      const hubData = getNode(data.hubId)?.data || {};
+      const jobRunId = hubData.jobRunId || null;
+      const collectionLimits = normalizeJobCollectionLimits(hubData.collectionLimits);
       if (resumeState) {
         result = await window.electronAPI.resumeJobSource?.({
           sourceId: data.sourceId,
           nodeId: data.hubId,
           canvasFilePath: nav?.currentFile || null,
           maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
+          collectionLimits,
           preferredLocation: getNode(data.hubId)?.data?.canonicalLocation || '',
           resumeState,
         });
       } else {
-        const hubData = getNode(data.hubId)?.data || {};
         const hubQueries = hubData.queries || {};
         // Keep Resolve on the exact same admission policy as the originating
         // search. Without these role queries, newly unlocked list rows bypassed
@@ -167,6 +171,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           nodeId: data.hubId,
           canvasFilePath: nav?.currentFile || null,
           maxAgeDays: getNode(data.hubId)?.data?.maxAgeDays || 21,
+          collectionLimits,
           secondTabUrl: progress?.warning?.openSecondTab ? progress.url : null,
           queries: resolveQueries,
         });
@@ -198,6 +203,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           detail: {
             hubId: data.hubId, sourceId: data.sourceId, items, replaceSourceItems,
             warning: result.warning || null, hiddenApplied: result.hiddenApplied || 0,
+            jobRunId,
           },
         }));
         if (result.nextBlockedUrl) {

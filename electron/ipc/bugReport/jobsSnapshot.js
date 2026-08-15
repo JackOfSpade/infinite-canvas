@@ -10,7 +10,6 @@ import { getJobsSettings } from '../settings.js';
 import { modelResolutionSnapshot } from '../modelResolver.js';
 import { appliedJobsSnapshot, isJobApplied } from '../appliedJobs.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
-import { MEDIUM_TEST, FULL_TEST, FAST_TEST, JOB_RESULT_CAP, JOB_PER_PAGE_CAP, JOB_PER_SOURCE_CAP, JOB_MAX_PAGES, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from '../resultCaps.js';
 import { ago, modelTag, pipelineScope, formatAge } from './helpers.js';
 import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQualityChecks.js';
 // The real annualizer the app buckets jobs with (JobSearchNode's Job Tree +
@@ -43,18 +42,9 @@ export function buildJobsConfigSnapshot() {
     hasScrapflyKey: !!scrapflyKey,
     scrapflyKeyPrefix,
     testMode: {
-      mode: FAST_TEST ? 'fast' : MEDIUM_TEST ? 'medium' : FULL_TEST ? 'full' : 'production',
       enabled: JOB_SEARCH_TEST_MODE.enabled,
       sourceId: JOB_SEARCH_TEST_MODE.sourceId || null,
       skipAI: JOB_SEARCH_TEST_MODE.skipAI || false,
-      jobResultCap: JOB_RESULT_CAP,
-      jobPerPageCap: JOB_PER_PAGE_CAP,
-      jobPerSourceCap: JOB_PER_SOURCE_CAP,
-      // FAST-mode breadth knobs (Infinity in other modes) so the report shows the
-      // exact bound a fast run scraped under.
-      jobMaxPages: JOB_MAX_PAGES,
-      queryCap: JOB_TEST_QUERY_CAP,
-      apiPerSourceCap: JOB_API_PER_SOURCE_CAP,
     },
   };
 }
@@ -119,7 +109,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   try { appliedSnap = appliedJobsSnapshot(); } catch { /* store may not be loaded */ }
   const hasModelRes = !!(modelRes && (modelRes.fetchedAt > 0 || (modelRes.skipped || []).length > 0));
   const hasAppliedJobs = !!(appliedSnap && appliedSnap.count > 0);
-  if (!t || (!t.search && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.bucketing && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !hasModelRes && !hasAppliedJobs)) return '';
+  if (!t || (!t.search && !t.pipeline && !hasResolves && !hasLinkedInEnrich && !t.scoring && !t.bucketing && !t.history && !hasBrowserScrape && !scopedApplication && !applicationSync && !hasModelRes && !hasAppliedJobs)) return '';
 
   const scope = pipelineScope(t.nodeId, t.windowId, currentNodeIds, reportWindowId, {
     label: 'Source hub',
@@ -156,6 +146,33 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   // still contains an empty/short description.
   let savedSnapshotJobs = [];
 
+  if (t.pipeline) {
+    const p = t.pipeline;
+    const stageAge = p.ts ? Math.max(0, Date.now() - p.ts) : null;
+    const runAge = p.startedAt ? Math.max(0, Date.now() - p.startedAt) : null;
+    const elapsedLabel = runAge == null
+      ? null
+      : runAge < 60_000 ? `${Math.round(runAge / 1000)}s`
+        : `${Math.floor(runAge / 60_000)}m${Math.round((runAge % 60_000) / 1000)}s`;
+    const state = p.active ? '🔄 active' : '✅ complete';
+    lines.push(`### Live Search Stage`);
+    lines.push(`- ${state} · phase: **${p.phase || 'unknown'}**${elapsedLabel == null ? '' : ` · run age ${elapsedLabel}`}${stageAge == null ? '' : ` · last heartbeat ${Math.round(stageAge / 1000)}s ago`}`);
+    if (p.error) lines.push(`- Last stage error: \`${String(p.error).replace(/`/g, "'").slice(0, 300)}\``);
+    if (Array.isArray(p.pendingSources) && p.pendingSources.length > 0) {
+      lines.push(`- Pending source(s): ${p.pendingSources.map(sourceId => `\`${sourceId}\``).join(', ')}${p.lastSource ? ` · last progress from \`${p.lastSource}\`` : ''}`);
+      lines.push('- Active source progress (status@+s from search start):');
+      for (const sourceId of p.pendingSources) {
+        const events = t.sourceEvents?.[sourceId] || [];
+        const trail = events.length > 0
+          ? events.map(event => `${event.status || 'unknown'}${event.code ? `⚠${event.code}` : ''}@+${Math.round((event.t || 0) / 1000)}s`).join(' → ')
+          : '(no progress event retained)';
+        lines.push(`  - \`${sourceId}\`: ${trail}`);
+      }
+    } else if (p.active) {
+      lines.push(`- Pending source(s): none reported${p.lastSource ? ` · last progress from \`${p.lastSource}\`` : ''}`);
+    }
+  }
+
   if (t.search) {
     const s = t.search;
     lines.push(`### Search${ago(s.ts)}`);
@@ -191,6 +208,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     if (s.maxAgeDays != null) {
       lines.push(`- **Look-back window: ${s.maxAgeDays} day(s)** — enforced server-side where the source takes a date param, and re-applied as a global client-side filter (the client filter can only bound a source that carries a parseable \`posted\` date).`);
     }
+    const collectionLimits = s.collectionLimits;
+    if (collectionLimits && typeof collectionLimits === 'object') {
+      const jobs = Number.isFinite(collectionLimits.jobsPerPlatform) && collectionLimits.jobsPerPlatform > 0
+        ? `${Math.floor(collectionLimits.jobsPerPlatform)} job(s)/platform`
+        : 'unlimited jobs/platform';
+      const pages = Number.isFinite(collectionLimits.pagesPerPlatform) && collectionLimits.pagesPerPlatform > 0
+        ? `${Math.floor(collectionLimits.pagesPerPlatform)} browser page(s)/search`
+        : 'the default page depth';
+      lines.push(`- **Collection limits: ${jobs}; ${pages}** — set on this Job Search card for the run. The job limit is applied per platform; page depth applies to each generated search on browser platforms (API/feed platforms do not paginate).`);
+    }
     if (s.ageBySource && Object.keys(s.ageBySource).length > 0) {
       lines.push(`- Per-source age outcome (dropped → kept · oldest surviving posting):`);
       for (const [k, a] of Object.entries(s.ageBySource)) {
@@ -225,7 +252,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (loc.rawInput && loc.canonical && loc.rawInput.toLowerCase() !== loc.canonical.toLowerCase()) {
         lines.push(`- **Target location: "${loc.rawInput}" → "${loc.canonical}"** ${loc.corrected ? '(typo-corrected ✅)' : ''}`);
       } else {
-        lines.push(`- **Target location: ${loc.canonical || loc.rawInput || '(none)'}**${loc.rawInput && !loc.canonical ? ' ⚠️ raw input did not resolve to a canonical place' : ''}`);
+        const inferred = loc.inferredFromCareerData
+          ? ' (inferred from career data because Preferred location was blank)'
+          : '';
+        lines.push(`- **Target location: ${loc.canonical || loc.rawInput || '(none)'}**${inferred}${loc.rawInput && !loc.canonical ? ' ⚠️ raw input did not resolve to a canonical place' : ''}`);
       }
       if (loc.perSource && Object.keys(loc.perSource).length > 0) {
         lines.push('- Per-source location treatment (how each platform received the target):');
@@ -249,7 +279,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             // no country signal at all land in `unclear` below instead.
             offFlag = ` — ⚠️ ${ad.offTarget} provably OUTSIDE ${ad.country} (cross-border leak; check the samples below)`;
           } else {
-            const isSoft = (id) => /keyword-only|remote board/.test(loc.perSource?.[id] || '');
+            const isSoft = (id) => /keyword-only|best-effort|remote board|global remote/i.test(loc.perSource?.[id] || '');
             const hard = Object.keys(ad.offBySource || {}).filter(id => !isSoft(id));
             offFlag = hard.length > 0
               ? ` — ⚠️ ${ad.offTarget} OUT-OF-AREA, incl. from real-param source(s) [${hard.join(', ')}] — likely that source's own search radius (e.g. Dice +30mi → nearby metro suburbs) or a genuine leak; check the samples below`
@@ -369,10 +399,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push(`- Per source (title-relevant gathered): ${got.length ? got.join(', ') : '(none)'}`);
       // Date-bounded deep pagination: how deep each paginating source walked and
       // why it stopped. `empty-page` = the source ran out of results. `blocked`
-      // = an anti-bot wall cut it short. `page-cap` = hit JOB_MAX_PAGES with jobs
-      // still coming. `per-source-cap` = an intentional aggregate result ceiling
-      // (not an exhausted source). One-shot/API sources have no walk and don't
-      // appear here.
+      // = an anti-bot wall cut it short. `page-cap` = hit this card's requested
+      // page depth with jobs still coming. `per-source-cap` = its intentional
+      // per-platform job limit (not an exhausted source). One-shot/API sources
+      // have no walk and don't appear here.
       const walked = entries.filter(([, v]) => v.pagesWalked > 0);
       for (const [k, v] of walked) {
         let flag = '';
@@ -381,7 +411,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         } else if (v.stopReason === 'per-source-cap') {
           const limit = v.cap?.limit;
           const capLabel = Number.isFinite(limit) ? ` (${limit})` : '';
-          flag = ` ⚠️ (stopped by the per-source cap${capLabel} — this source may have additional in-window jobs; ${v.cap?.type === 'per-source' ? 'disable fast mode to widen' : 'raise the configured source cap to widen'}.)`;
+          flag = ` ⚠️ (stopped by this card's per-platform job limit${capLabel} — this source may have additional in-window jobs; increase or clear the Jobs per platform setting on the Job Search card to widen.)`;
         } else if (v.stopReason === 'page-cap') {
           // A page-ceiling where most rows deduped away means the page param
           // re-served the same page (clamping) — NOT genuine depth, so "may be
@@ -405,20 +435,19 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         }
         lines.push(`  - \`${k}\`: walked ${v.pagesWalked} page${v.pagesWalked === 1 ? '' : 's'}${v.stopReason ? ` → stopped: ${v.stopReason}` : ''}${flag}`);
       }
-      // API/feed sources don't paginate. When a source MATCHED more than it
-      // surfaced, that overflow was never gathered: in FAST mode it is the
-      // aggregate per-source cap; otherwise it is the extractor result cap.
-      // gathered is set only for API sources; > count = truncated.
-      const apiCapped = entries.filter(([, v]) => v.gathered != null && v.gathered > v.count);
+      // API/feed sources don't paginate. If a source matched more than it
+      // surfaced, its per-platform Jobs setting truncated that run. `gathered`
+      // is set only for API sources; > count = truncated.
+      const capOverflowFor = (v) => Number.isFinite(v.capOverflow)
+        ? Math.max(0, v.capOverflow)
+        : Math.max(0, Number(v.gathered || 0) - Number(v.count || 0) - Number(v.finalRelevanceDropped || 0));
+      const apiCapped = entries.filter(([, v]) => v.gathered != null && capOverflowFor(v) > 0);
       for (const [k, v] of apiCapped) {
-        const overflow = v.gathered - v.count;
-        const fastCap = v.cap?.type === 'fast-aggregate';
+        const overflow = capOverflowFor(v);
+        const collectedBeforeFinalAudit = Number(v.count || 0) + Number(v.finalRelevanceDropped || 0);
         const limit = v.cap?.limit;
         const capLabel = Number.isFinite(limit) ? ` (${limit})` : '';
-        const nextStep = fastCap
-          ? 'disable fast mode to widen'
-          : 'raise JOB_RESULT_CAP to widen';
-        lines.push(`  - \`${k}\`: surfaced ${v.count} of ${v.gathered} in-window matches ⚠️ (${fastCap ? 'fast aggregate cap' : 'result cap'}${capLabel} — ${overflow} more matched but not gathered; ${nextStep})`);
+        lines.push(`  - \`${k}\`: collected ${collectedBeforeFinalAudit} of ${v.gathered} in-window candidate(s) before the final title audit ⚠️ (per-platform job limit${capLabel} — ${overflow} more were not gathered; increase or clear the Jobs per platform setting on the Job Search card to widen.)`);
       }
       const relevanceFiltered = entries.filter(([, v]) => v.relevanceDropped > 0);
       // jobRelevanceRejection is a pure function of (title, query): same inputs,
@@ -447,7 +476,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         }
       };
       for (const [k, v] of relevanceFiltered) {
-        lines.push(`  - \`${k}\`: provider returned ${v.providerGathered ?? v.count}; app rejected ${v.relevanceDropped} title-irrelevant row(s) before the result cap.`);
+        const early = Number(v.admissionRelevanceDropped || 0);
+        const final = Number(v.finalRelevanceDropped || 0);
+        const phase = early && final
+          ? ` (${early} during source admission; ${final} after collection)`
+          : final ? ' after collection' : ' during source admission';
+        lines.push(`  - \`${k}\`: provider returned ${v.providerGathered ?? v.count}; app rejected ${v.relevanceDropped} title-irrelevant row(s)${phase}.`);
         // The count alone can't separate a gate doing its job from one that is
         // over-rejecting and starving the source — and a high reject ratio is
         // normal for keyword APIs that search the whole announcement (USAJobs),
@@ -464,9 +498,17 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           const evidence = v.warning?.evidence ? ` — ${String(v.warning.evidence).slice(0, 220)}` : '';
           return `${k} (${v.warning.code})${evidence}`;
         });
-      const zeroClean = entries.filter(([, v]) => v.count === 0 && !v.warning).map(([k]) => k);
+      const zeroTitleFiltered = entries
+        .filter(([, v]) => v.count === 0 && !v.warning && Number(v.finalRelevanceDropped || 0) > 0)
+        .map(([k, v]) => `${k} (${v.finalRelevanceDropped} gathered, then title-filtered)`);
+      const zeroClean = entries
+        .filter(([, v]) => v.count === 0 && !v.warning && Number(v.relevanceDropped || 0) === 0)
+        .map(([k]) => k);
       if (zeroWarn.length) {
         lines.push(`  - ⚠️ 0 results + flagged (real miss to investigate): ${zeroWarn.join(', ')}`);
+      }
+      if (zeroTitleFiltered.length) {
+        lines.push(`  - 0 retained after the final title audit: ${zeroTitleFiltered.join(', ')}`);
       }
       if (zeroClean.length) {
         lines.push(`  - 0 results, no warning (genuinely empty / off-category): ${zeroClean.join(', ')}`);
@@ -484,7 +526,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const interesting = Object.entries(t.sourceEvents).filter(([, evs]) => {
         const statuses = new Set((evs || []).map(e => e.status));
         const lastStatus = evs?.[evs.length - 1]?.status;
-        return lastStatus === 'error' || lastStatus === 'skipped' ||
+        return (t.pipeline?.active && lastStatus === 'searching') ||
+          lastStatus === 'error' || lastStatus === 'skipped' ||
           (statuses.has('done') && (statuses.has('error') || statuses.has('skipped')));
       });
       if (interesting.length > 0) {
@@ -875,7 +918,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           e.srcName || e.sourceId || null,
           e.queryIndex && e.queryTotal ? `q${e.queryIndex}/${e.queryTotal}` : null,
           e.pageNum ? `p${e.pageNum}` : null,
+          e.itemIndex && e.itemTotal ? `detail${e.itemIndex}/${e.itemTotal}` : null,
           e.key ? `key=${e.key}` : null,
+          e.descriptionSource ? `via=${e.descriptionSource}` : null,
           isChromephase && e.pid != null    ? `pid=${e.pid}`                                    : null,
           isChromephase && e.outcome        ? `outcome=${e.outcome}`                             : null,
           isChromephase && e.alive != null  ? `alive=${e.alive}`                                 : null,
@@ -897,6 +942,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           e.phase,
           e.srcName || e.sourceId || null,
           e.key ? `key=${e.key}` : null,
+          e.reason ? `reason=${e.reason}` : null,
+          e.status != null ? `HTTP=${e.status}` : null,
+          e.finalUrl ? `url=${String(e.finalUrl).slice(0, 140)}` : null,
+          e.error ? `err=${String(e.error).slice(0, 160)}` : null,
           `-${Math.max(0, Math.round(ageMs / 1000))}s`,
         ].filter(Boolean).join(' ');
         lines.push(`  - ⚠️ ${label}`);
@@ -1598,10 +1647,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // because fonts never loaded" renders identically to "no PDF because
       // rendering broke" (both show fontsLoaded:false, error:null) — a reader
       // would go hunting for a render bug that doesn't exist instead of
-      // recognizing a bundled-font/package problem rather than a generic
-      // renderer failure.
+      // recognizing a web-font connectivity/content-blocking problem rather
+      // than a generic renderer failure.
       if (r.fontsLoaded === false) {
-        lines.push('  - ⚠️ Bundled fonts failed to load — likely a damaged application package or browser font-load failure. Any PDF from this run was discarded (fallback-typeface PDFs never ship) and the fit loop skipped straight to ship (a page count measured in fallback fonts is meaningless). Inspect the missing-face detail in ResumeRender logs and repair/reinstall the application package.');
+        lines.push('  - ⚠️ Google-hosted web fonts failed to load — likely unavailable network access, content blocking, or a browser font-load failure. Any PDF from this run was discarded (fallback-typeface PDFs never ship) and the fit loop skipped straight to ship (a page count measured in fallback fonts is meaningless). Inspect the missing-face detail in ResumeRender logs, restore access to fonts.googleapis.com/fonts.gstatic.com, and retry.');
       }
       // The shipped baseline is a SEPARATE render (candidates start hidden,
       // buildApplicationDocument() below) — its page count comes free from
@@ -1610,7 +1659,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // for this diagnostic. `not measured` means the baseline render itself
       // never completed (see the error line below), not that the number was
       // skipped to save time.
-      lines.push(`- Résumé shipped baseline: ${r.baselinePageCount != null ? `${r.baselinePageCount}p` : 'not measured'}${r.baselinePdfProduced ? ' · PDF produced' : ' · ⚠️ no PDF (HTML-only)'}${r.baselineFontsLoaded === false ? ' · bundled fonts failed to load (page count measured against fallback typefaces — unreliable)' : ''}`);
+      lines.push(`- Résumé shipped baseline: ${r.baselinePageCount != null ? `${r.baselinePageCount}p` : 'not measured'}${r.baselinePdfProduced ? ' · PDF produced' : ' · ⚠️ no PDF (HTML-only)'}${r.baselineFontsLoaded === false ? ' · web fonts failed to load (page count measured against fallback typefaces — unreliable)' : ''}`);
       if (r.locationReviewRequired) {
         lines.push(`  - ⚠️ Work-location confirmation required before Sync: candidate \`${String(r.candidateLocation || 'unknown').replace(/`/g, "'")}\` → job \`${String(r.jobLocation || 'unknown').replace(/`/g, "'")}\``);
       }

@@ -2,7 +2,7 @@
  * Job-application generator IPCs.
  *
  * From a scored job card the user can generate a tailored résumé + cover letter
- * as self-contained HTML documents, built on the editorial design system in
+ * as single-file HTML documents, built on the editorial design system in
  * `resume_design_system/`. Flow (generate-application):
  *
  *   0. achievement ledger — a job-independent mining pass (Opus) + deterministic
@@ -20,7 +20,7 @@
  *      verified accomplishments.
  *   3. cover letter       — structured fields the renderer lays out on-brand.
  *   4. document build     — buildResumeDocument (resumeHtml.js) turns the
- *      résumé and structured cover letter into one self-contained workspace.
+ *      résumé and structured cover letter into one single-file workspace.
  *      HTML-first output (design §5) — the HTML is still the primary,
  *      editable artifact.
  *   5. render → fit loop  — a LOCAL render → page-count → fit loop
@@ -604,7 +604,7 @@ async function generateResumeMain({ careerData, job, research, researchAvailable
     ? ` NAMING PREFERENCE: if a Skills group you would naturally create from genuine, corpus-backed skills covers one of these areas — ${verifiedCategories.join(', ')} — use that exact label for its <dt>. This is a naming preference only for a group your own real skill data already justifies: never create, pad, or retain a group solely to host one of these labels, and an area with no genuine corpus-backed skills gets no group at all. The exclusion above still applies — populate any such group only from real career data, never from this list.`
     : '';
   const exclusionBlock = excludedSkills.length
-    ? `\n\nPRIVATE MISSING-SKILL ANALYSIS — EXCLUSION LIST:\n${excludedSkills.map(name => `- ${name}`).join('\n')}\nThese skills were classified as plausible-but-unverified or learn-first gaps. Do NOT put them anywhere in the résumé draft, do NOT imply the candidate used them, and do NOT substitute an alias. The self-contained HTML workspace will let the candidate verify eligible near-adjacent items and will insert only the confirmed skill labels deterministically.${categoryPreference}`
+    ? `\n\nPRIVATE MISSING-SKILL ANALYSIS — EXCLUSION LIST:\n${excludedSkills.map(name => `- ${name}`).join('\n')}\nThese skills were classified as plausible-but-unverified or learn-first gaps. Do NOT put them anywhere in the résumé draft, do NOT imply the candidate used them, and do NOT substitute an alias. The application HTML workspace will let the candidate verify eligible near-adjacent items and will insert only the confirmed skill labels deterministically.${categoryPreference}`
     : '';
   const prompt = `TARGET JOB (the "Description" is what we scraped — it may be full, partial, or empty):
 ${jobBlock(job)}
@@ -1944,7 +1944,7 @@ export function registerJobApplicationHandlers() {
     let coverLetterPageCount = null;
 
     markStage('cover-letter PDF render');
-    // 6. Build ONE self-contained application workspace. The design-system
+    // 6. Build ONE single-file application workspace. The design-system
     // builder owns the resume/cover tabs; the PDF below is deliberately the
     // résumé-only printable baseline. The same workspace is what a user can
     // reopen later to edit either document and Sync it back to this folder.

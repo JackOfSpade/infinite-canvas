@@ -64,18 +64,24 @@ function detectCountryTarget(seg) {
  * appended ("Whitby, Ontario, Canada") so an international city isn't ambiguous;
  * US places omit it ("Denver, CO"). Returns "" for remote-only / unresolvable so
  * no geo param is sent (nationwide, which already includes remote). Country is the
- * coarsest structured scope — passed best-effort; a US-only board (USAJobs) or a
- * radius board (Dice) may just return zero for it, which is acceptable (we never
- * exclude a platform for an out-of-scope location).
+ * coarsest structured scope. Source-country applicability is enforced separately
+ * by jobSourceCountryScope.js before a request is made (for example, Canada hubs
+ * do not query USAJobs or the U.S.-verified Dice integration).
  */
 export function deriveLocationParam(struct, rawFallback = '') {
-  if (!struct || typeof struct !== 'object') return String(rawFallback || '').trim();
+  if (!struct || typeof struct !== 'object') return normalizeLocationInput(rawFallback).boardReady;
   const city    = String(struct.city || '').trim();
   const state   = String(struct.stateCode || '').trim();   // US 2-letter code OR non-US province/region name
   const region  = String(struct.region || '').trim();
   const country = normalizeCountry(struct.country);          // canonical name ('' if none)
   const display = String(struct.display || '').trim();
   const isUS    = country === 'United States';
+
+  // A model can legitimately return a full US state name despite the schema's
+  // `stateCode` instruction. Fold it here, at the boundary where a board-ready
+  // parameter is built, so "Denver, Colorado, USA" cannot become an ambiguous
+  // mixed-format location on one source and a correct one on another.
+  const normalizedState = normalizeSubdivision(state || region, country);
 
   // Append the country for a NON-US place so an international city isn't ambiguous
   // on a board (bare "Whitby" could be Whitby, England → "Whitby, Ontario, Canada"
@@ -87,10 +93,15 @@ export function deriveLocationParam(struct, rawFallback = '') {
     // Subdivision: US state code or a non-US province/region. city+sub+(country)
     // yields "Denver, CO" (US) or "Whitby, Ontario, Canada" (non-US). Without a
     // sub we still append the country for non-US → "Whitby, Canada".
-    const sub = state || region;
+    const sub = normalizedState.label || state || region;
     return withCountry(sub ? `${city}, ${sub}` : city);
   }
-  if (region) return withCountry(region);
+  if (region || (state && normalizedState.code)) {
+    if (normalizedState.country === 'United States') {
+      return `${normalizedState.fullName}, United States`;
+    }
+    return withCountry(normalizedState.fullName || normalizedState.label || region || state);
+  }
   // Remote-only → no geo param (nationwide already includes remote). Checked
   // BEFORE the display fallback AND before country: a remote-in-country search
   // often arrives as {isRemote: true, display: "Remote, United States"} — that
@@ -112,12 +123,12 @@ export function deriveLocationParam(struct, rawFallback = '') {
     && !/[.;:!?]/.test(display)
     && (display.match(/\s/g) || []).length <= 5
     && !/\b(in|of|the|or|near|around|somewhere|anywhere|ideally|preferably|maybe|remote|hybrid)\b/i.test(display);
-  if (placeShaped) return display;
+  if (placeShaped) return normalizeLocationInput(display).boardReady;
   // Country-only scope (nothing finer resolved) — emitted from the structured
   // field (already normalized above) so a genuine country search ("Canada") and
   // the career-data no-location default reach every board's filter.
   if (country) return country;
-  return String(rawFallback || '').trim();
+  return normalizeLocationInput(rawFallback).boardReady;
 }
 
 /**
@@ -127,7 +138,7 @@ export function deriveLocationParam(struct, rawFallback = '') {
  */
 export const LOCATION_TREATMENT = {
   usajobs:        'param: LocationName=',
-  dice:           'param: location= (+30mi radius)',
+  dice:           'hidden-API params: location= + countryCode2=US + radius=30mi (U.S.-only integration)',
   indeed:         'param: l=',
   ziprecruiter:   'param: location=',
   glassdoor:      'param: locId= (resolved in-browser from the location; locKeyword text alone is ignored by Glassdoor)',
@@ -171,12 +182,19 @@ const PLACELESS_LOCATION_RE = /negotiable after selection|(?:multiple|various)\s
 export function pickGlassdoorLocation(results, canonical) {
   if (!Array.isArray(results) || results.length === 0) return null;
   const loc = String(canonical || '').trim();
-  const city  = (loc.split(',')[0] || '').trim().toLowerCase();
-  const state = (loc.split(',')[1] || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+  const normalized = normalizeLocationInput(loc);
+  const city = String(normalized.city || (normalized.scope === 'unknown' ? (loc.split(',')[0] || '') : '')).trim().toLowerCase();
+  const stateCode = String(normalized.subdivisionCode || '').trim().toLowerCase();
+  const stateName = String(normalized.subdivision || '').trim().toLowerCase();
   const text = r => `${String(r?.longName || '')} ${String(r?.label || '')}`.toLowerCase();
   let pick = null;
-  if (state) {
-    const stateRe = new RegExp(`,\\s*${state}\\b`, 'i');
+  if (normalized.scope === 'country' && normalized.country) {
+    const country = normalized.country.toLowerCase();
+    pick = results.find(r => String(r?.locationType || '').toUpperCase() === 'N' && text(r).includes(country));
+  }
+  if (!pick && (stateCode || stateName)) {
+    const esc = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const stateRe = new RegExp(`(?:\\b${esc(stateName)}\\b|(?:^|[,(/])\\s*${esc(stateCode)}(?=$|[, )]))`, 'i');
     pick = results.find(r => stateRe.test(text(r)) && (!city || text(r).includes(city)))
         || results.find(r => stateRe.test(text(r)));
   }
@@ -234,6 +252,169 @@ export const CA_PROVINCES = {
 
 // Combined subdivision lookup (US states + Canadian provinces); codes don't collide.
 const SUBDIVISIONS = { ...US_STATES, ...CA_PROVINCES };
+
+const SUBDIVISION_COUNTRY = Object.fromEntries([
+  ...Object.keys(US_STATES).map(code => [code, 'United States']),
+  ...Object.keys(CA_PROVINCES).map(code => [code, 'Canada']),
+]);
+
+function normalizedLocationKey(raw) {
+  return String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\./g, '')
+    .replace(/\s+/g, ' ');
+}
+
+/**
+ * Normalize a US state or Canadian province/territory into the representation
+ * that job boards handle consistently: US subdivisions use USPS codes; Canadian
+ * ones use their full names. Returns empty fields for an unknown region so
+ * arbitrary regions ("Bay Area", "Greater Toronto Area") retain their text.
+ */
+function normalizeSubdivision(raw, country = '') {
+  const key = normalizedLocationKey(raw).replace(/[^a-z]/g, '');
+  if (!key) return { code: '', label: '', country: '' };
+  let code = SUBDIVISIONS[key] ? key : '';
+  if (!code) {
+    for (const [candidate, name] of Object.entries(SUBDIVISIONS)) {
+      if (name.replace(/\s/g, '') === key) { code = candidate; break; }
+    }
+  }
+  if (!code) return { code: '', label: '', country: '' };
+  const subdivisionCountry = SUBDIVISION_COUNTRY[code];
+  const canonicalCountry = normalizeCountry(country);
+  // Do not turn an invalid mixture such as "Ontario, USA" into a quietly
+  // plausible target. The explicit country remains authoritative; callers can
+  // expose the mismatch using `countryConflict` from normalizeLocationInput.
+  if (canonicalCountry && subdivisionCountry !== canonicalCountry) {
+    return { code: '', label: '', country: '' };
+  }
+  return {
+    code,
+    label: subdivisionCountry === 'United States' ? code.toUpperCase() : SUBDIVISIONS[code].replace(/\b\w/g, c => c.toUpperCase()),
+    fullName: SUBDIVISIONS[code].replace(/\b\w/g, c => c.toUpperCase()),
+    country: subdivisionCountry,
+  };
+}
+
+/**
+ * Deterministically classify a human-entered or board-ready location. This is
+ * deliberately geography-light: it recognizes countries plus the US/Canadian
+ * subdivisions we can safely normalize, without guessing a country for a bare
+ * city. `boardReady` is the canonical filter text:
+ *
+ *   Canada                         → Canada
+ *   USA                            → United States
+ *   Ontario, Canada                → Ontario, Canada
+ *   Colorado, USA                  → Colorado, United States
+ *   Toronto, Ontario, Canada       → Toronto, Ontario, Canada
+ *   Denver, Colorado, USA          → Denver, CO
+ *
+ * `scope` makes source policy straightforward: country, subdivision, city, or
+ * unknown. `countryCode` is intentionally limited to the two jurisdictions
+ * whose source behavior is explicitly supported by this product (CA / US).
+ * Other recognized countries retain their canonical country name but return a
+ * null code rather than receiving a fabricated ISO code.
+ */
+export function normalizeLocationInput(raw) {
+  const input = String(raw || '').trim();
+  const empty = {
+    input,
+    boardReady: '',
+    country: '',
+    countryCode: null,
+    countryExplicit: false,
+    countryConflict: false,
+    subdivision: '',
+    subdivisionCode: '',
+    city: '',
+    scope: 'unknown',
+  };
+  if (!input) return empty;
+
+  const segments = input.split(',').map(part => part.trim()).filter(Boolean);
+  if (!segments.length) return empty;
+
+  // Recognized country aliases may occur in any comma-separated slot. In normal
+  // inputs it is last; accepting "USA, Denver, Colorado" makes normalization
+  // resilient to a board's reordered display without changing its meaning.
+  let country = '';
+  let countryIndex = -1;
+  for (let i = 0; i < segments.length; i++) {
+    const detected = detectCountryTarget(segments[i]);
+    if (detected) { country = detected; countryIndex = i; break; }
+  }
+  const placeSegments = segments.filter((_, index) => index !== countryIndex);
+
+  // Prefer a non-first subdivision ("Denver, Colorado"), preserving the
+  // existing Washington, DC rule: a first segment is a subdivision only when
+  // it is the entire remaining location ("Colorado, USA").
+  let subdivisionIndex = -1;
+  let subdivision = { code: '', label: '', country: '' };
+  for (let i = 1; i < placeSegments.length; i++) {
+    const candidate = normalizeSubdivision(placeSegments[i], country);
+    if (candidate.code) { subdivisionIndex = i; subdivision = candidate; break; }
+  }
+  if (!subdivision.code && placeSegments.length === 1) {
+    const candidate = normalizeSubdivision(placeSegments[0], country);
+    if (candidate.code) { subdivisionIndex = 0; subdivision = candidate; }
+  }
+
+  const inferredCountry = subdivision.country;
+  const countryConflict = !!country && !!inferredCountry && country !== inferredCountry;
+  // normalizeSubdivision intentionally refuses a known subdivision that
+  // contradicts an explicit country. Detect the contradiction independently so
+  // users of this helper can reject it instead of accidentally searching it.
+  let conflictingSubdivision = null;
+  if (country && !subdivision.code) {
+    for (const segment of placeSegments) {
+      const candidate = normalizeSubdivision(segment);
+      if (candidate.code && candidate.country !== country) { conflictingSubdivision = candidate; break; }
+    }
+  }
+  const hasConflict = countryConflict || !!conflictingSubdivision;
+  if (!country && inferredCountry) country = inferredCountry;
+
+  const citySegments = subdivisionIndex > 0 ? placeSegments.slice(0, subdivisionIndex) : (subdivisionIndex === -1 ? placeSegments : []);
+  const city = citySegments.join(', ');
+  const countryCode = country === 'United States' ? 'US' : country === 'Canada' ? 'CA' : null;
+  const scope = city ? 'city' : subdivision.code ? 'subdivision' : country ? 'country' : placeSegments.length ? 'city' : 'unknown';
+
+  let boardReady = '';
+  if (!hasConflict) {
+    if (city) {
+      boardReady = subdivision.label ? `${city}, ${subdivision.label}` : city;
+      if (country && country !== 'United States') boardReady += `, ${country}`;
+    } else if (subdivision.label) {
+      // A bare "CO" is ambiguous as free text (especially in Google queries)
+      // and loses the country boundary the user explicitly requested. State-only
+      // scopes stay human-readable; city scopes above retain compact "Denver, CO".
+      boardReady = country === 'United States'
+        ? `${subdivision.fullName}, United States`
+        : `${subdivision.fullName}, ${country || subdivision.country}`;
+    } else if (country) {
+      boardReady = country;
+    } else {
+      // Preserve an unknown but place-shaped city/region verbatim. This is an
+      // explicit non-guess: no country code/scope is inferred from it.
+      boardReady = placeSegments.join(', ');
+    }
+  }
+
+  return {
+    input,
+    boardReady,
+    country,
+    countryCode,
+    countryExplicit: countryIndex !== -1,
+    countryConflict: hasConflict,
+    subdivision: subdivision.fullName || subdivision.label,
+    subdivisionCode: subdivision.code ? subdivision.code.toUpperCase() : '',
+    city,
+    scope: hasConflict ? 'unknown' : scope,
+  };
+}
 
 // Build a regex that matches the target state by EITHER its 2-letter code or its
 // full name. `stateToken` arrives alpha-only (spaces already stripped: "new york"

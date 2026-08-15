@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useContext, useState } from 'react';
+import React, { useRef, useEffect, useCallback, useContext, useMemo, useState } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
@@ -33,15 +33,13 @@ import { useSourceProgress } from '../hooks/useSourceProgress';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { pickEdgeHandles, structuralEdge } from './_shared/edgeHelpers';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
+import { JobCollectionLimitsControl } from '../components/JobCollectionLimitsControl';
+import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
+import { normalizeLocationInput } from '../utils/jobLocation';
 
-// ─── TESTING: skip AI scoring after collection ───────────────────────────────
-// Set to false (or remove the block below) to re-enable the full pipeline.
-// Mirrors the backend's JOB_SCORE_CAP gate (resultCaps.js): ONLY medium mode
-// (enabled, not fast, not full) skips AI — FAST and FULL both score unless skipAI
-// is set explicitly. Without the !fast guard, fast mode silently stopped before
-// scoring even though the backend was ready to score.
-const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled
-  && ((!JOB_SEARCH_TEST_MODE.fast && !JOB_SEARCH_TEST_MODE.fullRun) || JOB_SEARCH_TEST_MODE.skipAI);
+// ─── TESTING: optionally skip AI scoring after collection ────────────────────
+// Collection limits are always user-controlled; this switch affects scoring only.
+const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled && JOB_SEARCH_TEST_MODE.skipAI;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // A scrape warning "gates" the pipeline — pauses it in 'sources-ready' until the
@@ -139,6 +137,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const scrapeWarningsRef = useRef(data.scrapeWarnings);
   const hubStateRef = useRef(data.hubState);
   const pendingJobsRef = useRef(data.pendingJobs);
+  const jobRunIdRef = useRef(data.jobRunId || null);
   // Running total of applied-jobs suppressed for this hub's current run.
   // Captured once at initial search completion (search-jobs/resume-job-search),
   // then ADDED to by each job-source-resolved event (resolve/resume-job-source
@@ -159,6 +158,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const { addToast } = useToast();
   const [savedAnalysisMeta, setSavedAnalysisMeta] = useState(null);
   const [savedAnalysisLoading, setSavedAnalysisLoading] = useState(false);
+  // Normalize before any renderer-to-main call. Existing canvases may not have
+  // this newer node field, but the backend still needs explicit production
+  // defaults for reproducible collection telemetry.
+  const jobsPerPlatform = data.collectionLimits?.jobsPerPlatform;
+  const pagesPerPlatform = data.collectionLimits?.pagesPerPlatform;
+  const collectionLimits = useMemo(
+    () => normalizeJobCollectionLimits({ jobsPerPlatform, pagesPerPlatform }),
+    [jobsPerPlatform, pagesPerPlatform],
+  );
+  const setCollectionLimits = useCallback((limits) => {
+    updateGlobal(id, { collectionLimits: normalizeJobCollectionLimits(limits) });
+  }, [id, updateGlobal]);
   useEffect(() => {
     return () => {
       if (settingsDebounceTimerRef.current) {
@@ -207,7 +218,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     hubStateRef.current = data.hubState;
     pendingJobsRef.current = data.pendingJobs;
     hiddenAppliedRef.current = data.hiddenApplied || 0;
-  }, [data.scrapeWarnings, data.hubState, data.pendingJobs, data.hiddenApplied]);
+    jobRunIdRef.current = data.jobRunId || null;
+  }, [data.scrapeWarnings, data.hubState, data.pendingJobs, data.hiddenApplied, data.jobRunId]);
 
   // Per-source progress state populated by backend `job-source-progress`
   // events. Reset via `resetSourceProgress` before each fresh run so stale
@@ -347,6 +359,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // this callback's deps) would hit the temporal dead zone on every render
         // and crash the node. Mirrors runPipeline's `data.maxAgeDays || 21`.
         maxAgeDays: data.maxAgeDays || 21,
+        collectionLimits,
         canvasFilePath,
         nodeId: currentId,
         // Prefer the query-gen-normalized location (typo-safe) over the raw input
@@ -450,7 +463,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         pendingUSAJobsRefreshRef.current = false;
       }
     }
-  }, [id, data.maxAgeDays, data.preferredLocation, data.canonicalLocation, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas, isMountedRef]);
+  }, [id, data.maxAgeDays, collectionLimits, data.preferredLocation, data.canonicalLocation, canvasFilePath, getPrimaryQuery, epoch, updateGlobal, addToast, data.resumeProfile, data.targetRole, appendJobsToDoneCanvas, isMountedRef]);
 
   const handleJobsSettingsChange = useCallback(async () => {
     if (settingsDebounceTimerRef.current) {
@@ -548,7 +561,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const setPreferredLocation = useCallback((val) => {
     const v = typeof val === 'string' ? val : '';
     setLocationDraft(v);
-    updateGlobal(id, { preferredLocation: v });
+    // The canonical value belongs to the previous input. Clear it immediately so
+    // a Continue/background-source action cannot reuse Canada after the user has
+    // edited the field to USA (or vice versa) before the next full rerun.
+    updateGlobal(id, { preferredLocation: v, canonicalLocation: null });
   }, [id, updateGlobal]);
   // Opt-in "economy" scoring via the provider Batch API: ~50% cheaper but async
   // (results within 24h, not instant). Chosen before the run; only takes effect
@@ -744,7 +760,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // needed here.)
   const finishScoringAndSpawn = useCallback(async ({
     scoredJobs, gatheredCount, scrapedCount, scrapeWarnings = [],
-    aiSkipped = false, collectionOnly = false, testMode = false, hiddenApplied = 0, cancelled = () => false,
+    aiSkipped = false, collectionOnly = false, testMode = false, hiddenApplied = 0,
+    jobRunId = null, cancelled = () => false,
   }) => {
     if (cancelled()) return;
     const displayed = Array.isArray(scoredJobs) ? scoredJobs : [];
@@ -780,7 +797,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       totalScoredCount: displayed.length,
       scrapedCount: scrapedCount ?? displayed.length,
       gatheredCount: gatheredCount ?? scrapedCount ?? displayed.length,
-      // Explicit semantics: FAST/FULL test breadth still produces scored jobs.
       // Keep testMode as a legacy alias for old saved canvases only.
       aiSkipped: !!aiSkipped,
       collectionOnly: !!collectionOnly,
@@ -794,11 +810,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       scrapeWarnings: Array.isArray(scrapeWarnings) ? scrapeWarnings : [],
     });
 
-    window.electronAPI?.completeJobRun?.({ canvasFilePath }).catch(() => {});
+    window.electronAPI?.completeJobRun?.({ canvasFilePath, runId: jobRunId }).catch(() => {});
   }, [id, updateGlobal, canvasFilePath]);
 
   const runScoringAndSpawn = useCallback(async ({
-    profile, jobs, gatheredCount, scrapeWarnings, activeTargetRole, originalPos, hiddenApplied = 0, cancelled,
+    profile, jobs, gatheredCount, scrapeWarnings, activeTargetRole, originalPos,
+    hiddenApplied = 0, jobRunId = null, cancelled,
   }) => {
     const currentId = id;
 
@@ -837,6 +854,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           startedAt: Date.now(),
           count: scoreResult.batchCount,
           selectedForScoring: scoreResult.selectedForScoring,
+          jobRunId,
           // Carried through the async park so pollBatchOnce can still surface
           // it once results land — hiddenApplied is known at search time, long
           // before the batch resolves, and would otherwise be lost.
@@ -858,6 +876,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       collectionOnly: !!scoreResult.collectionOnly,
       testMode: !!scoreResult.testMode,
       hiddenApplied,
+      jobRunId,
       cancelled,
     });
   }, [id, updateGlobal, canvasFilePath, finishScoringAndSpawn, data.batchScoring]);
@@ -888,8 +907,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // terminal rather than spin forever (the poll effect tears down on null).
       const live = getNode(id)?.data?.hubState;
       updateGlobal(id, live === 'scoring-batch'
-        ? { pendingBatch: null, hubState: 'done', resultCount: 0, totalScoredCount: 0, scoreThreshold: 0 }
+        ? {
+            pendingBatch: null, pendingJobs: null, hubState: 'done',
+            scoredJobs: [], finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0,
+            scrapedCount: 0, gatheredCount: 0, scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0,
+          }
         : { pendingBatch: null });
+      if (live === 'scoring-batch') {
+        window.electronAPI?.completeJobRun?.({ canvasFilePath, runId: data.pendingBatch?.jobRunId || data.jobRunId || null }).catch(() => {});
+      }
       return;
     }
     // Defense-in-depth: never apply a batch that belongs to a different hub. The
@@ -912,13 +938,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           // Carried on pendingBatch since search time (runScoringAndSpawn) —
           // the batch result itself has no notion of applied-jobs filtering.
           hiddenApplied: data.pendingBatch?.hiddenApplied || 0,
+          jobRunId: data.pendingBatch?.jobRunId || data.jobRunId || null,
           cancelled,
         });
       } finally {
         batchCompletingRef.current = false;
       }
     }
-  }, [id, canvasFilePath, updateGlobal, finishScoringAndSpawn, getNode, data.resumeProfile, data.scrapeWarnings, data.targetRole, data.pendingBatch, epoch]);
+  }, [id, canvasFilePath, updateGlobal, finishScoringAndSpawn, getNode, data.resumeProfile, data.scrapeWarnings, data.targetRole, data.pendingBatch, data.jobRunId, epoch]);
 
   useEffect(() => {
     if (hubState !== 'scoring-batch' || !data.pendingBatch?.batchId) return undefined;
@@ -952,7 +979,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
    */
   const handlePostSearchResult = useCallback(({
     currentId, foundJobs, warnings, blockingWarnings, profile, activeTargetRole, canvasFilePath: cfp,
-    hiddenApplied = 0,
+    hiddenApplied = 0, jobRunId = null,
   }) => {
     // Persisted here (not just at the final 'done' write in finishScoringAndSpawn)
     // because a run that pauses on a blocking warning goes through THIS branch
@@ -961,7 +988,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // and resumeScoring's own hidden-applied reads (hiddenAppliedRef, synced
     // from data.hiddenApplied) would start from a false 0 instead of N.
     hiddenAppliedRef.current = hiddenApplied;
+    jobRunIdRef.current = jobRunId;
     if (blockingWarnings.length > 0 && !SKIP_AI_FOR_TESTING) {
+      // These refs are the synchronous source of truth for an immediate
+      // Resolve/Skip click before React commits the update below.
+      pendingJobsRef.current = foundJobs;
+      scrapeWarningsRef.current = warnings;
+      hubStateRef.current = 'sources-ready';
       updateGlobal(currentId, {
         hubState: 'sources-ready',
         pendingJobs: foundJobs,
@@ -969,6 +1002,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         jobCount: foundJobs.length,
         scrapeWarnings: warnings,
         hiddenApplied,
+        jobRunId,
       });
       // Guarantee a Solve/Skip card for every blocked source — a card can be lost
       // during the long run, stranding the user with "blocked but nothing to resolve".
@@ -993,15 +1027,25 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // Reset slider range + counts so the done-state UI doesn't show stale values.
       updateGlobal(currentId, {
         hubState: 'done',
+        scoredJobs: [],
+        finalSourceCounts: {},
         resultCount: 0,
         totalScoredCount: 0,
+        scrapedCount: 0,
+        gatheredCount: 0,
         scoreRangeMin: 0,
         scoreRangeMax: 100,
         scoreThreshold: 0,
         scrapeWarnings: warnings,
         hiddenApplied,
+        pendingJobs: null,
+        pendingBatch: null,
+        jobRunId,
       });
-      window.electronAPI?.completeJobRun?.({ canvasFilePath: cfp }).catch(() => {});
+      pendingJobsRef.current = null;
+      scrapeWarningsRef.current = warnings;
+      hubStateRef.current = 'done';
+      window.electronAPI?.completeJobRun?.({ canvasFilePath: cfp, runId: jobRunId }).catch(() => {});
       return false;
     }
 
@@ -1194,6 +1238,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         queries: allQueries,
         nodeId: currentId,
         maxAgeDays: data.maxAgeDays || 21,
+        collectionLimits,
         canvasFilePath,
         preferredLocation: canonicalLocation,
         // The user's ORIGINAL free-form input (e.g. "denvr") — telemetry only, so
@@ -1254,6 +1299,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const shouldScore = handlePostSearchResult({
         currentId, foundJobs, warnings: effectiveWarnings, blockingWarnings,
         profile, activeTargetRole, canvasFilePath, hiddenApplied,
+        jobRunId: searchResult.runId || null,
       });
       if (!shouldScore) return;
 
@@ -1292,6 +1338,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }
         updateGlobal(currentId, {
           hubState: 'done',
+          scoredJobs: [],
+          finalSourceCounts: {},
           resultCount: 0,
           scrapedCount: foundJobs.length,
           gatheredCount: rawGatheredCount,
@@ -1304,9 +1352,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           scoreThreshold: 0,
           scrapeWarnings: effectiveWarnings,
           hiddenApplied,
+          pendingJobs: null,
+          pendingBatch: null,
+          jobRunId: searchResult.runId || null,
           testModeNote: `[Test mode] ${foundJobs.length} jobs collected — AI scoring disabled`,
         });
-        window.electronAPI?.completeJobRun?.({ canvasFilePath }).catch(() => {});
+        window.electronAPI?.completeJobRun?.({ canvasFilePath, runId: searchResult.runId || null }).catch(() => {});
         return;
       }
 
@@ -1318,6 +1369,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         activeTargetRole,
         originalPos,
         hiddenApplied,
+        jobRunId: searchResult.runId || null,
         cancelled,
       });
     } catch (error) {
@@ -1354,7 +1406,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }
       }
     }
-  }, [id, updateGlobal, getNode, canvasFilePath, data.maxAgeDays, data.targetRole, data.preferredLocation, data.canonicalLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue, isMountedRef]);
+  }, [id, updateGlobal, getNode, canvasFilePath, data.maxAgeDays, collectionLimits, data.targetRole, data.preferredLocation, data.canonicalLocation, data.resumeFingerprint, data.queries, data.queryCacheKey, data.queryModel, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue, isMountedRef]);
 
   const startProcessing = useCallback((fileOrFiles, { frameSourceCards = true } = {}) => {
     const filePaths = Array.isArray(fileOrFiles) ? fileOrFiles : (fileOrFiles ? [fileOrFiles] : []);
@@ -1392,7 +1444,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // now that a 0-jobs-but-blocked run pauses in 'sources-ready' with an
       // empty pendingJobs (see the block gate in runPipeline).
       updateGlobal(id, {
-        hubState: 'done', resultCount: 0, totalScoredCount: 0,
+        hubState: 'done', scoredJobs: [], finalSourceCounts: {},
+        resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0,
         scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0,
         pendingJobs: null,
         scrapeWarnings: Array.isArray(scrapeWarningsRef.current) ? scrapeWarningsRef.current : [],
@@ -1402,6 +1455,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // explanation (design §6.2: filtering must never be silent).
         hiddenApplied: hiddenAppliedRef.current || 0,
       });
+      window.electronAPI?.completeJobRun?.({ canvasFilePath, runId: data.jobRunId || null }).catch(() => {});
       return;
     }
     if (!profile) return;
@@ -1443,6 +1497,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // hiddenApplied:0 at the final 'done' write — runScoringAndSpawn
         // defaults it to 0 when omitted, which this call was doing until now.
         hiddenApplied: hiddenAppliedRef.current || 0,
+        jobRunId: data.jobRunId || null,
         cancelled,
       });
     } catch (error) {
@@ -1467,7 +1522,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }
       }
     }
-  }, [id, data.resumeProfile, data.pendingTargetRole, data.targetRole, epoch, getNode, runScoringAndSpawn, updateGlobal, triggerUSAJobsBackgroundSearch, moduleRunQueue, isMountedRef]);
+  }, [id, data.resumeProfile, data.pendingTargetRole, data.targetRole, data.jobRunId, canvasFilePath, epoch, getNode, runScoringAndSpawn, updateGlobal, triggerUSAJobsBackgroundSearch, moduleRunQueue, isMountedRef]);
 
   useEffect(() => {
     resumeScoringRef.current = resumeScoring;
@@ -1479,6 +1534,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // a non-blocking banner; Resume recovers the staged jobs and continues scoring,
   // Dismiss clears the sidecars. See electron/ipc/jobRunStaging.js.
   const [resumeOffer, setResumeOffer] = useState(null);
+  const activeResumeLocation = normalizeLocationInput(data.canonicalLocation || data.preferredLocation || '').boardReady;
+  const offeredResumeLocation = normalizeLocationInput(resumeOffer?.canonicalLocation || '').boardReady;
+  const canResumeOffer = !!resumeOffer?.locationRecorded && activeResumeLocation === offeredResumeLocation;
   useEffect(() => {
     if (!canvasFilePath || !window.electronAPI?.peekJobRun) return undefined;
     let cancelled = false;
@@ -1496,6 +1554,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const offer = resumeOffer;
     setResumeOffer(null);
     if (processingRef.current || !offer) return;
+    if (!canResumeOffer) {
+      updateGlobal(id, {
+        errorMessage: offer.locationRecorded
+          ? `The unfinished run targeted ${offeredResumeLocation || 'no location'}, while this hub now targets ${activeResumeLocation || 'no location'}. Start fresh to keep locations separate.`
+          : 'This unfinished run is missing location-safe resume metadata. Start fresh to keep locations separate.',
+      });
+      return;
+    }
     const profile = data.resumeProfile;
     const queries = Array.isArray(offer.queries) ? offer.queries : [];
     // Need a profile (persists in node data across restarts) + the run's queries.
@@ -1538,8 +1604,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         queries,
         nodeId: currentId,
         maxAgeDays: data.maxAgeDays || 21,
+        collectionLimits,
         canvasFilePath: cfp,
         preferredLocation: data.canonicalLocation || data.preferredLocation || '',
+        rawLocation: data.preferredLocation || '',
         profileLocations: profile?.locations || [],
         resume: true,
       });
@@ -1552,12 +1620,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       const shouldScore = handlePostSearchResult({
         currentId, foundJobs, warnings, blockingWarnings,
         profile, activeTargetRole, canvasFilePath: cfp, hiddenApplied,
+        jobRunId: searchResult?.runId || null,
       });
       if (!shouldScore) return;
       await runScoringAndSpawn({
         profile, jobs: foundJobs, gatheredCount: searchResult.rawCount ?? foundJobs.length,
         scrapeWarnings: warnings, activeTargetRole, originalPos,
-        hiddenApplied, cancelled,
+        hiddenApplied, jobRunId: searchResult?.runId || null, cancelled,
       });
     } catch (error) {
       if (cancelled() || isNodeDeletedAbort(error)) return;
@@ -1567,7 +1636,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       lease?.release();
       if (isMountedRef.current) processingRef.current = false;
     }
-  }, [canvasFilePath, resumeOffer, id, data.resumeProfile, data.targetRole, data.maxAgeDays, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef]);
+  }, [canvasFilePath, resumeOffer, canResumeOffer, offeredResumeLocation, activeResumeLocation, id, data.resumeProfile, data.targetRole, data.maxAgeDays, collectionLimits, data.preferredLocation, data.canonicalLocation, epoch, getNode, updateGlobal, runScoringAndSpawn, handlePostSearchResult, moduleRunQueue, isMountedRef]);
 
   const handleDiscardResume = useCallback(async () => {
     setResumeOffer(null);
@@ -1629,6 +1698,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   useEffect(() => {
     const onResolved = (e) => {
       if (e.detail?.hubId !== id) return;
+      // A Solve can outlive its originating paused run. Re-run clears the
+      // renderer token synchronously, and a fresh search installs a new token;
+      // either way, a late result from the old run is ignored.
+      if ((e.detail?.jobRunId || null) !== (jobRunIdRef.current || null)) {
+        EventLogger.log(`[JobSearch][${id}] Ignored stale source resolve for ${e.detail?.sourceId || 'unknown source'}`);
+        return;
+      }
       const resolvedSourceId = e.detail?.sourceId;
       if (!resolvedSourceId) return;
       const items = Array.isArray(e.detail?.items) ? e.detail.items : [];
@@ -1860,8 +1936,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // hub is locked to its initial résumé — see project memory).
     updateGlobal(id, {
       hubState: 'empty', queuedModuleRun: null, filePath: null, errorMessage: null, isRateLimit: false, testModeNote: null, pendingBatch: null,
-      scoredJobs: null, resultCount: 0, totalScoredCount: 0, scoreThreshold: 0,
+      scoredJobs: null, resultCount: 0, totalScoredCount: 0, scoreThreshold: 0, jobRunId: null,
     });
+    jobRunIdRef.current = null;
     cancelCleanSourceCardDismiss();
     resetSourceProgress();
     cleanupAllJobChildren();
@@ -1889,7 +1966,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // errors out before its completion handler can overwrite them with the new
     // run's outcome.
     scrapeWarningsRef.current = [];
-    updateGlobal(id, { pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [] });
+    pendingJobsRef.current = null;
+    jobRunIdRef.current = null;
+    updateGlobal(id, { pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [], jobRunId: null });
     cancelCleanSourceCardDismiss();
     resetSourceProgress();
     // Reset the persisting source cards the instant Re-run is clicked, before the
@@ -2113,14 +2192,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     <div className="m-2 p-2 rounded-md bg-amber-500/10 border border-amber-500/30" onPointerDown={(e) => e.stopPropagation()}>
       <div className="text-amber-200/90 text-[11px] font-medium leading-snug">Unfinished job search found</div>
       <div className="text-amber-200/60 text-[10px] leading-snug mt-0.5">
-        {resumeOffer.gatheredCount} job(s) gathered from {resumeOffer.doneSources}/{resumeOffer.totalSources} source(s){resumeOffer.stage ? ` · stopped at ${resumeOffer.stage}` : ''}. Resume to score them, or start fresh.
+        {resumeOffer.gatheredCount} job(s) gathered from {resumeOffer.doneSources}/{resumeOffer.totalSources} source(s){resumeOffer.stage ? ` · stopped at ${resumeOffer.stage}` : ''}.
+        {canResumeOffer
+          ? ' Resume to continue it, or start fresh.'
+          : ` Start fresh — this run targeted ${resumeOffer.locationRecorded ? (offeredResumeLocation || 'no location') : 'an unrecorded legacy location'}, not the current ${activeResumeLocation || 'no location'}.`}
       </div>
       <div className="flex gap-1.5 mt-1.5">
-        <button
+        {canResumeOffer && <button
           className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/80 text-black hover:bg-amber-400"
           onPointerDown={(e) => e.stopPropagation()}
           onClick={handleResumeRun}
-        >Resume</button>
+        >Resume</button>}
         <button
           className="px-2 py-0.5 rounded text-[10px] font-medium bg-white/5 text-white/60 hover:bg-white/10"
           onPointerDown={(e) => e.stopPropagation()}
@@ -2197,7 +2279,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                   data-native-undo="true"
                   value={preferredLocation}
                   onChange={(e) => setPreferredLocation(e.target.value)}
-                  placeholder="Preferred location (optional) — e.g. Chicago, hybrid, remote"
+                  placeholder="One search area — e.g. Canada or Denver, Colorado, USA"
                   className="w-full px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25"
                 />
                 <div className="flex items-center justify-center gap-1.5">
@@ -2213,6 +2295,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                   />
                   <span>days</span>
                 </div>
+                {!data.locked && (
+                  <JobCollectionLimitsControl
+                    collectionLimits={collectionLimits}
+                    setCollectionLimits={setCollectionLimits}
+                  />
+                )}
                 <label
                   className="flex items-center justify-between gap-2 mt-0.5 cursor-pointer select-none"
                   title="Economy scoring: score this run with the Batch API (~50% cheaper) instead of in real time. Results arrive within 24 hours rather than instantly, and the hub keeps the run alive (even across restarts) until they're ready. Only applies on paid Claude — ignored on the free Gemini tier and in test mode. Choose this before dropping your files."
@@ -2331,6 +2419,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               onRerun={handleRerun}
               maxAgeDays={maxAgeDays}
               setMaxAgeDays={setMaxAgeDays}
+              collectionLimits={collectionLimits}
+              setCollectionLimits={setCollectionLimits}
               preferredLocation={preferredLocation}
               setPreferredLocation={setPreferredLocation}
               targetRole={targetRole}

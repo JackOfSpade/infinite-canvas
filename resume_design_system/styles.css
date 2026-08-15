@@ -4,8 +4,14 @@
    ------------------------------------------------------------
    Consumers link THIS one file. It re-exports the design-token
    closure (colour, typography, spacing, page geometry, all
-   variants) and the three locally-bundled @font-face families
-   (Source Serif 4 · Inter · IBM Plex Mono).
+   variants).
+
+   Typography is delivered from the Google Fonts CDN (CSS2 API)
+   via a single pinned @import in colors_and_type.css:
+     Source Serif 4 (400, 600) · Inter (400, 500, 600) ·
+     IBM Plex Mono (400, 500)
+   The families are NOT bundled locally, so rendering requires the
+   CDN to be reachable; re-vendor them for an air-gapped build.
 
    Component / surface stylesheets are loaded per-document, not
    globally, to preserve the system's original behaviour:

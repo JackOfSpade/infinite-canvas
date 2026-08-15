@@ -4,6 +4,7 @@ import fixtures_canvas from './tests/fixtures-canvas.js';
 import job_diagnostics from './tests/job-diagnostics.js';
 import marketplace_extractors_auth from './tests/marketplace-extractors-auth.js';
 import jobs_location_language from './tests/jobs-location-language.js';
+import job_source_country_scope from './tests/job-source-country-scope.js';
 import marketplace_diagnostics_locks from './tests/marketplace-diagnostics-locks.js';
 import platform_utils from './tests/platform-utils.js';
 import skill_opportunities from './tests/skill-opportunities.js';
@@ -17,6 +18,7 @@ const tests = [
   ...job_diagnostics,
   ...marketplace_extractors_auth,
   ...jobs_location_language,
+  ...job_source_country_scope,
   ...marketplace_diagnostics_locks,
   ...platform_utils,
   ...skill_opportunities,

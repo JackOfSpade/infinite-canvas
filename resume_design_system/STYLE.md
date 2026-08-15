@@ -41,11 +41,11 @@ ignore it: it is solving a different problem.
 | Role     | Family                | Reason                                              |
 |----------|-----------------------|-----------------------------------------------------|
 | Display  | **Source Serif 4**    | Editorial gravitas; one moment of warmth (the name).|
-| Body     | **Inter**             | Pinned bundled body family (weights 400/500/600). Neutral, modern, and the industry-standard digital text face — pairs cleanly with Source Serif 4 on the name. |
+| Body     | **Inter**             | Brand-supplied body family (Google Fonts CDN, weights 400/500/600). Neutral, modern, and the industry-standard digital text face — pairs cleanly with Source Serif 4 on the name. |
 | Mono     | **IBM Plex Mono**     | Inline code-like terms (`v8::SnapshotCreator`, `mmap`); reads as *terms*, not prose. Used only for `<code>`/`<kbd>`/`<samp>` and the project-metrics line. |
 
-All three families ship as **pinned local assets**, at the exact weights the
-system uses:
+All three families load from the **Google Fonts CDN** (CSS2 API),
+pinned to the exact weights the system uses:
 
 - `Source Serif 4` — 400, 600
 - `Inter` — 400, 500, 600 — **no Bold (700)**. The
@@ -53,13 +53,13 @@ system uses:
   the voice quietly confident, not loud.
 - `IBM Plex Mono` — 400, 500
 
-`colors_and_type.css` declares local `@font-face` rules, and the application
-builder inlines those assets as data URLs in generated HTML. **Typography has
-no render-time network dependency.** The font files and their OFL licenses
-are part of `fonts/`; replacement design systems must update both the face
-declarations and pinned assets. All three families embed in PDFs produced by
-Chrome/Chromium's print engine; the candidate-text-extraction round-trip
-(Ctrl+A → paste-into-text) has been verified.
+Loaded via a single `@import` at the top of `colors_and_type.css`.
+**Typography now has a render-time network dependency on the Google
+Fonts CDN** — ensure the CDN is reachable from the render environment
+(headless Chrome / serverless), or re-vendor the families locally if
+you need an air-gapped build. All three families embed in PDFs produced by
+Chrome/Chromium's print engine; the candidate-text-extraction
+round-trip (Ctrl+A → paste-into-text) has been verified.
 
 A **single-family fallback** is `IBM Plex Serif + Sans + Mono`. Switch
 by changing `--ff-display` to `"IBM Plex Serif"`. Use this when the
@@ -442,8 +442,8 @@ prefix per JSON Resume convention.
 |------------------------------------------|------------------------------------------|
 | `basics.name`                            | `.name`                                  |
 | `basics.label`                           | `.tagline`                               |
-| `basics.location.{city,region}`          | `.contact > [itemprop=address]`          |
 | `basics.email`                           | `.contact a[itemprop=email]`             |
+| `basics.location.{city,region}`          | `.contact [itemprop=addressLocality]`    |
 | `basics.profiles[].url`                  | `.contact a[itemprop=sameAs]` (visible label = host + path, e.g. `github.com/acastellanos`; the `.network` field is metadata only and not rendered) |
 | `basics.url`                             | `.contact a[itemprop=url]`               |
 | `work[].position`                        | `.role-title-line .title`                |
@@ -691,10 +691,12 @@ vertical margin also gives the running-footer margin box (§10.6) a real
 band to render in.
 
 Caveat: `@page` rules can't read CSS custom properties, so the values
-are literal (`0.72in`, `18mm`). `data-density="compact"` therefore does
-*not* shrink the head/foot margin on multi-page output the way it shrinks
-side margins — a ~0.12in difference, accepted in exchange for consistent
-pagination. Side margins (the measure) still respond to every variant.
+are literal. Compact density is therefore handled with dedicated named
+pages — `letter-compact` (`0.6in 0`) and `a4-compact` (`15.24mm 0`) —
+which mirror the `--margin-top` / `--margin-bot` overrides in the
+`[data-density="compact"]` block. Compact **does** shrink printed
+head/foot margins, matching §10.5. Side margins (the measure) stay on
+`.page` padding and respond to every variant through tokens.
 
 ---
 

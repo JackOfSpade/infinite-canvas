@@ -2,6 +2,7 @@ import React from 'react';
 import { RefreshCw, Target, MapPin, Bot, LayoutGrid } from 'lucide-react';
 import { useToast } from '../../components/ToastProvider';
 import { ScrapeWarningsPanel } from '../../components/ScrapeWarningsPanel';
+import { JobCollectionLimitsControl } from '../../components/JobCollectionLimitsControl';
 
 // e.g. "claude-opus-4-8" → "Opus 4.8", "claude-haiku-4-5-20251001" → "Haiku 4.5"
 function formatModelName(model) {
@@ -29,6 +30,8 @@ export function JobSearchDoneState({
   // Search controls (passed back to the hub for next run)
   maxAgeDays = 21,
   setMaxAgeDays,
+  collectionLimits,
+  setCollectionLimits,
   preferredLocation = '',
   setPreferredLocation,
   // Target/pivot role input — surfaces on the done state so the user can
@@ -46,7 +49,7 @@ export function JobSearchDoneState({
 }) {
   const { addToast } = useToast();
   // `testMode` is retained only for old persisted hubs. New runs record the
-  // actual behavior, so FAST/FULL breadth-limited runs still say "jobs scored".
+  // actual scoring behavior through `aiSkipped` / `collectionOnly`.
   const skippedAi = aiSkipped || collectionOnly || testMode;
   const count = skippedAi ? (scrapedCount ?? 0) : (resultCount || 0);
 
@@ -142,9 +145,9 @@ export function JobSearchDoneState({
               data-native-undo="true"
               value={preferredLocation}
               onChange={(e) => setPreferredLocation?.(e.target.value)}
-              placeholder="Preferred location (optional)"
+              placeholder="One area — e.g. Canada or Toronto, Ontario, Canada"
               className="flex-1 min-w-0 px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-0.5 focus:outline-none focus:border-blue-400/50 placeholder:text-white/25"
-              title="Free-text location preference for the next search, e.g. Chicago, remote, Midwest, hybrid in Denver."
+              title="Use one area per run. Country, province/state, and city scopes are supported; use separate modules for Canada and the United States."
             />
           </div>
           <div
@@ -163,6 +166,10 @@ export function JobSearchDoneState({
             />
             <span>days</span>
           </div>
+          <JobCollectionLimitsControl
+            collectionLimits={collectionLimits}
+            setCollectionLimits={setCollectionLimits}
+          />
         </div>
       )}
     </div>

@@ -1,4 +1,5 @@
-import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, decodeHtmlEntities, deriveLocationParam, detectLanguage, foldVerificationSample, getSellMonitorConfig, hasMojibake, indeedHostForLocation, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeLocationAdherence, verificationScore } from '../test-dependencies.js';
+import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, decodeHtmlEntities, deriveLocationParam, detectLanguage, foldVerificationSample, getSellMonitorConfig, glassdoorRequestedCountry, glassdoorUrlHasLocationId, hasMojibake, indeedHostForLocation, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeLocationAdherence, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
+import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
 export default [
 {
@@ -12,6 +13,55 @@ export default [
       return { ok: true, reverb, verifyUrl: config.verifyUrl };
     },
   },
+  {
+    name: 'Glassdoor strict location validation: exact country and subdivision evidence is required',
+    run: () => {
+      const canada = { locationId: 3, locationType: 'N', countryId: 3, country2LetterIso: 'CA', longName: 'Canada' };
+      const usa = { locationId: 1, locationType: 'N', countryId: 1, country2LetterIso: 'US', longName: 'United States' };
+      const toronto = { locationId: 1001, locationType: 'C', countryId: 3, country2LetterIso: 'CA', longName: 'Toronto, Ontario, Canada' };
+      const denver = { locationId: 1002, locationType: 'C', countryId: 1, country2LetterIso: 'US', longName: 'Denver, Colorado, United States' };
+
+      assert(glassdoorRequestedCountry('Canada')?.iso === 'CA', 'Canada resolves to CA');
+      assert(glassdoorRequestedCountry('Denver, CO')?.iso === 'US', 'US country is inferred from a state code');
+      assert(validateGlassdoorLocationPick({ locId: '3', locT: 'N' }, [canada], 'Canada') === null, 'Canada country object is accepted');
+      assert(validateGlassdoorLocationPick({ locId: '1', locT: 'N' }, [usa], 'USA') === null, 'US country object is accepted');
+      assert(validateGlassdoorLocationPick({ locId: '1001', locT: 'C' }, [toronto], 'Toronto, Ontario, Canada') === null, 'Toronto/Canada exact city result is accepted');
+      assert(validateGlassdoorLocationPick({ locId: '1002', locT: 'C' }, [denver], 'Denver, CO') === null, 'Denver/CO accepts a result spelling Colorado in full');
+      assert(!!validateGlassdoorLocationPick({ locId: '1', locT: 'N' }, [usa], 'Canada'), 'a US result is rejected for Canada');
+      assert(!!validateGlassdoorLocationPick({ locId: '1001', locT: 'C' }, [toronto], 'Canada'), 'country-only target rejects a city result');
+      assert(glassdoorUrlHasLocationId('https://www.glassdoor.ca/Job/canada-jobs-SRCH_IL.0,6_IN3_KO7,24.htm', '3'), 'matching IN3 canonical route is accepted');
+      assert(glassdoorUrlHasLocationId('https://www.glassdoor.ca/Job/united-states-jobs-SRCH_IL.0,13_IN1_KO14,31.htm', '1'), 'matching IN1 canonical route is accepted');
+      assert(!glassdoorUrlHasLocationId('https://www.glassdoor.ca/Job/jobs.htm?locId=3&locT=N', '3'), 'query-only locId is not proof that Glassdoor applied the location');
+      assert(!glassdoorUrlHasLocationId('https://www.glassdoor.ca/Job/canada-jobs-SRCH_IL.0,6_IN3_KO7,24.htm', '1'), 'mismatched canonical route is rejected');
+      return { ok: true };
+    },
+  },
+{
+    name: 'normalizeLocationInput: country, province/state, and city scopes remain board-ready',
+    run: () => {
+      const cases = [
+        ['Canada', { boardReady: 'Canada', country: 'Canada', countryCode: 'CA', scope: 'country', city: '', subdivisionCode: '' }],
+        ['USA', { boardReady: 'United States', country: 'United States', countryCode: 'US', scope: 'country', city: '', subdivisionCode: '' }],
+        ['Ontario, Canada', { boardReady: 'Ontario, Canada', country: 'Canada', countryCode: 'CA', scope: 'subdivision', city: '', subdivisionCode: 'ON' }],
+        ['Colorado, USA', { boardReady: 'Colorado, United States', country: 'United States', countryCode: 'US', scope: 'subdivision', city: '', subdivisionCode: 'CO' }],
+        ['Toronto, Ontario, Canada', { boardReady: 'Toronto, Ontario, Canada', country: 'Canada', countryCode: 'CA', scope: 'city', city: 'Toronto', subdivisionCode: 'ON' }],
+        ['Denver, Colorado, USA', { boardReady: 'Denver, CO', country: 'United States', countryCode: 'US', scope: 'city', city: 'Denver', subdivisionCode: 'CO' }],
+      ];
+      for (const [raw, expected] of cases) {
+        const actual = normalizeLocationInput(raw);
+        for (const [key, value] of Object.entries(expected)) {
+          assert(actual[key] === value, `${raw}: ${key} expected ${JSON.stringify(value)}, got ${JSON.stringify(actual[key])}`);
+        }
+      }
+      // Existing board-ready formats and country aliases are idempotent.
+      assert(normalizeLocationInput('Denver, CO').boardReady === 'Denver, CO', 'US postal-code format stays board-ready');
+      assert(normalizeLocationInput('Toronto, ON, Canada').boardReady === 'Toronto, Ontario, Canada', 'Canadian province code expands to an unambiguous board-ready name');
+      assert(normalizeLocationInput('United States of America').boardReady === 'United States', 'US country alias normalizes');
+      const conflict = normalizeLocationInput('Ontario, USA');
+      assert(conflict.countryConflict && conflict.boardReady === '' && conflict.scope === 'unknown', 'conflicting country/subdivision is rejected rather than silently mis-scoped');
+      return { ok: true, cases: cases.length };
+    },
+  },
 {
     // The query LLM now returns a STRUCTURED location object so a board's location
     // FILTER never receives prose. deriveLocationParam flattens it deterministically
@@ -20,6 +70,9 @@ export default [
     run: () => {
       // "denvr" → corrected structured object → clean "Denver, CO".
       assert(deriveLocationParam({ city: 'Denver', stateCode: 'CO', region: '', country: 'United States', isRemote: false, display: 'Denver, CO' }) === 'Denver, CO', 'city+state → "City, ST"');
+      assert(deriveLocationParam({ city: 'Denver', stateCode: 'Colorado', country: 'USA' }) === 'Denver, CO', 'full US state + country alias → USPS board-ready format');
+      assert(deriveLocationParam({ region: 'Colorado', country: 'USA' }) === 'Colorado, United States', 'state-only scope stays human-readable and country-qualified');
+      assert(deriveLocationParam({ city: 'Toronto', stateCode: 'ON', country: 'Canada' }) === 'Toronto, Ontario, Canada', 'Canadian province code expands with country');
       // city+state is built deterministically, NOT trusted from a possibly-prose display.
       assert(deriveLocationParam({ city: 'Denver', stateCode: 'CO', display: 'around the Denver metro area' }) === 'Denver, CO', 'city+state wins over prose display');
       assert(deriveLocationParam({ city: 'Austin', stateCode: '', region: '', display: 'Austin' }) === 'Austin', 'city-only falls through to city');

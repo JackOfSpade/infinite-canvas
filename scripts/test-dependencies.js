@@ -56,7 +56,8 @@ export { computeTidiedNodes, findNonOverlappingPlacement } from '../src/utils/la
 export { FILE_CATEGORIES, getFileCategoryInfo, toLocalFileUrl } from '../src/utils/fileDisplayUtils.js';
 export { isProductImageExtension } from '../src/utils/fileExtensions.js';
 export { parsePostedDate, filterJobsByAge, POSTED_DATE_PATTERN } from '../electron/ipc/jobDateFilter.js';
-export { compsForPricing, priceSynthesisMaxTokens, jobScoringBatchSize, FAST_TEST, MEDIUM_TEST, FULL_TEST, JOB_MAX_PAGES, JOB_PER_PAGE_CAP, JOB_PER_SOURCE_CAP, JOB_TEST_QUERY_CAP, JOB_API_PER_SOURCE_CAP } from '../electron/ipc/resultCaps.js';
+export { compsForPricing, priceSynthesisMaxTokens, jobScoringBatchSize } from '../electron/ipc/resultCaps.js';
+export { JOB_COLLECTION_LIMITS_DEFAULT, normalizeJobCollectionLimits } from '../src/utils/jobCollectionLimits.js';
 export { modelMeta, contextWindowForModel, maxOutputForModel, estimateTokensFromChars, assessPromptFit, planSplits, LOCAL_CHARS_PER_TOKEN } from '../electron/ipc/tokenWindow.js';
 export { GEMINI_MODEL_FALLBACKS, GEMINI_MAX_OUTPUT_TOKENS, GEMINI_TIER_LADDER, GEMINI_ALL_MODEL_IDS, VERTEX_GEMINI_MODEL_FALLBACKS, geminiModelsInTier, classifyGeminiFailure, describeGeminiFailure, getGeminiDefaultThinkingConfig, getGeminiLifecycleWarning, isGeminiDailyQuota, isGeminiProviderAvailable, isGeminiZeroQuota, isGeminiZeroOrDailyQuota, orderGeminiModels, orderVertexGeminiModels } from '../electron/ipc/geminiModels.js';
 export { entitledTiersFor, recordEntitlement, gatedTiers, probeModelForTier, refreshEntitlementInBackground, settleEntitlementProbes, resetEntitlement, entitlementSnapshot } from '../electron/ipc/geminiEntitlement.js';
@@ -82,7 +83,7 @@ export { looksLikeMoney, classifyUnparseableSalary, mojibakeExcerpt } from '../e
 export { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
 export { buildJobsPipelineSnapshot } from '../electron/ipc/bugReport/jobsSnapshot.js';
 export { generateMarkdown } from '../electron/ipc/bugReport.js';
-export { formatJsonLdSalary, reconcileZipRecruiterDomSalary, mergeExpandedJobDetail, resolveManualSourceStopReason, recordManualScraperTelemetry, getManualScraperTelemetry, isIgnorableManualBrowserTelemetry } from '../electron/ipc/browser/manualScraper.js';
+export { formatJsonLdSalary, glassdoorRequestedCountry, glassdoorUrlHasLocationId, validateGlassdoorLocationPick, reconcileZipRecruiterDomSalary, mergeExpandedJobDetail, normalizeDetailNavigationUrl, resolveManualSourceStopReason, recordManualScraperTelemetry, getManualScraperTelemetry, isIgnorableManualBrowserTelemetry } from '../electron/ipc/browser/manualScraper.js';
 export { buildOverlayScript } from '../electron/ipc/browser/scraperOverlay.js';
 export { indeedHostForLocation } from '../electron/extractors/indeedBrowser.js';
 export { classifyCompScrapeFailure, computeMissingLogins, filterGrosslyOffTargetSources, formatPricingNotesForPrompt, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';

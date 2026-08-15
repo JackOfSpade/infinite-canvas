@@ -1673,10 +1673,9 @@ export default [
     },
   },
 {
-    // HTML self-containment (design doc §5, §4.3) — the artifact must be
-    // double-click-openable with zero sibling files, and receipts must be a
-    // trust boundary the model cannot author its own way past.
-    name: 'Résumé/cover-letter HTML self-containment: bundled fonts are data URLs; injected chrome is print-hidden; receipts resolve from the ledger or strip cleanly',
+    // The workspace carries all app-authored CSS/JS in one file. The sole
+    // network exception is the design system's declared Google Fonts import.
+    name: 'Résumé/cover-letter single-file contract: only Google Fonts is remote; injected chrome is print-hidden; receipts resolve or strip cleanly',
     run: () => {
       const ledger = [
         {
@@ -1688,26 +1687,19 @@ export default [
       const mainHtml = '<main class="page"><p>Cut debt <strong data-achievement-id="a1">74%</strong> and grew <strong data-achievement-id="ghost-id">40%</strong> revenue.</p></main>';
       const doc = buildResumeDocument({ resumeMainHtml: mainHtml, ledger });
 
-      // Self-containment: fonts are bundled as data URLs too — no <link>, no
-      // <script src>, remote image, or external font request.
+      // CSS and behavior stay inline; typography retains the design-owned CDN
+      // dependency and no other remote resource is allowed.
       assert(!/<link[^>]/i.test(doc), 'no <link> tags — the CSS is inlined, not referenced');
       assert(!/<script[^>]+\ssrc=/i.test(doc), 'no external <script src="…"> — the toolbar behavior is inlined');
       assert(!/<img[^>]+src=["']https?:/i.test(doc), 'no remote <img src="http…"> anywhere in the document');
       const externalUrlRefs = [...doc.matchAll(/url\(\s*["']?(https?:[^"')]+)/gi)].map((m) => m[1]);
-      assert(externalUrlRefs.length === 0,
-        `no external url() references remain in standalone HTML, got: ${JSON.stringify(externalUrlRefs)}`);
-      const expectedFaces = [
-        ['Source Serif 4', '400', 'font/ttf'], ['Source Serif 4', '600', 'font/ttf'],
-        ['IBM Plex Mono', '400', 'font/ttf'], ['IBM Plex Mono', '500', 'font/ttf'],
-        ['Inter', '400', 'font/woff2'], ['Inter', '500', 'font/woff2'], ['Inter', '600', 'font/woff2'],
-      ];
-      assert((doc.match(/@font-face\s*\{/g) || []).length === expectedFaces.length,
-        'exactly the seven pinned design-system faces are emitted');
-      for (const [family, weight, mime] of expectedFaces) {
-        const facePattern = new RegExp(`@font-face\\s*\\{[^}]*font-family:\\s*"${family}"[^}]*src:\\s*url\\("data:${mime};base64,[^)]+\\)\\s*format[^}]*font-weight:\\s*${weight}`, 's');
-        assert(facePattern.test(doc), `${family} ${weight} is emitted as a ${mime} data URL`);
-      }
-      assert(!/fonts\/(?:SourceSerif4|IBMPlexMono|Inter)-/i.test(doc), 'no local font path remains for a recipient to resolve');
+      assert(externalUrlRefs.length === 1 && externalUrlRefs[0].startsWith('https://fonts.googleapis.com/css2?')
+        && externalUrlRefs[0].includes('IBM+Plex+Mono:wght@400;500')
+        && externalUrlRefs[0].includes('Inter:wght@400;500;600')
+        && externalUrlRefs[0].includes('Source+Serif+4:opsz,wght@8..60,400;8..60,600'),
+      `only the exact pinned Google Fonts stylesheet may remain remote, got: ${JSON.stringify(externalUrlRefs)}`);
+      assert(!/@font-face\s*\{/.test(doc) && !/fonts\/(?:SourceSerif4|IBMPlexMono|Inter)-/i.test(doc),
+        'the retired local font bundle is not emitted or referenced');
       const workspaceRule = doc.match(/\.ic-resume-workspace\s*\{[^}]*\}/)?.[0] || '';
       const sidebarRule = doc.match(/\.ic-workspace-sidebar\s*\{[^}]*\}/)?.[0] || '';
       assert(workspaceRule && !/\bfont(?:-family)?\s*:/.test(workspaceRule),
@@ -1734,23 +1726,24 @@ export default [
     },
 },
 {
-    name: 'Bundled résumé fonts: assets/licenses are structural and CSS inliner preserves only safe URL forms',
+    name: 'Résumé design reconnect: runtime files, templates, Google Fonts contract, packaging, and safe local URL fallback',
     run: async () => {
       const { assertDesignSystemIntact, getDesignSystemDir, inlineDesignCssUrls } = await import('../../electron/ipc/resumeHtml.js');
       const result = assertDesignSystemIntact();
-      const required = [
-        'fonts/SourceSerif4-Regular.ttf', 'fonts/SourceSerif4-SemiBold.ttf',
-        'fonts/IBMPlexMono-Regular.ttf', 'fonts/IBMPlexMono-Medium.ttf',
-        'fonts/Inter-Regular.woff2', 'fonts/Inter-Medium.woff2', 'fonts/Inter-SemiBold.woff2',
-        'fonts/licenses/SourceSerif4-OFL.txt', 'fonts/licenses/Inter-OFL.txt', 'fonts/licenses/IBMPlexMono-OFL.txt',
-      ];
-      assert(result.ok && required.every(file => result.checked.includes(file)),
-        `startup assertion treats every bundled font/license as structural: ${JSON.stringify(result)}`);
+      const required = ['colors_and_type.css', 'resume.css', 'cover-letter.css', 'resume.html', 'cover-letter.html', 'build/dual-mode-pdf.js'];
+      assert(result.ok && result.fontDelivery === 'google-fonts' && result.fontContractOk
+        && result.mainExtractionOk && result.coverMainExtractionOk
+        && required.every(file => result.checked.includes(file)),
+      `startup assertion covers every runtime file, template, and pinned web-font contract: ${JSON.stringify(result)}`);
       const dir = getDesignSystemDir();
       const cssPath = path.join(dir, 'colors_and_type.css');
-      const safe = inlineDesignCssUrls('a{src:url("fonts/Inter-Regular.woff2")}b{src:url(https://example.test/a)}c{src:url(#fragment)}', cssPath, dir);
-      assert(/data:font\/woff2;base64,/.test(safe) && safe.includes('https://example.test/a') && safe.includes('#fragment'),
-        'inliner embeds approved local fonts but preserves http/data/fragment URLs');
+      const safe = inlineDesignCssUrls('b{src:url(https://example.test/a)}c{src:url(#fragment)}', cssPath, dir);
+      assert(safe.includes('https://example.test/a') && safe.includes('#fragment'),
+        'inliner preserves external and fragment URLs');
+      const packageConfig = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8'));
+      const resource = packageConfig?.build?.extraResources?.find(entry => entry?.from === 'resume_design_system');
+      assert(resource?.to === 'resume_design_system',
+        'electron-builder copies the design system to the runtime resource path getDesignSystemDir resolves');
       const errorFor = (css) => {
         try { inlineDesignCssUrls(css, cssPath, dir); } catch (error) { return String(error?.message || error); }
         return '';

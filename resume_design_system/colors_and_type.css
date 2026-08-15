@@ -3,8 +3,8 @@
    Editorial Resume Design System — design tokens
    ----------------------------------------------------------
    Type:    Source Serif 4 (display)  ·  Inter (body)  ·  IBM Plex
-            Mono (technologies). All three ship as local, pinned assets
-            and are embedded into generated Application.html files.
+            Mono (technologies). All three load from the Google Fonts
+            CDN (CSS2 API) — see the @import below.
    Color:   Warm off-white ground · deep warm ink · one oxblood
             accent, used sparingly (default: candidate name only)
    Units:   Print-first. Sizes given in pt so they survive PDF
@@ -14,65 +14,15 @@
             change --fs-body without disturbing the spacing scale.
    ============================================================ */
 
-/* All three families ship locally. Weights are pinned to exactly what the
-   system uses:
+/* All three families load from the Google Fonts CDN (CSS2 API).
+   Weights are pinned to exactly what the system uses:
      Source Serif 4 — 400, 600
      Inter          — 400, 500, 600   (NO 700 by design — see note below)
      IBM Plex Mono  — 400, 500
-   `resumeHtml.js` resolves these local references to data URLs when it emits
-   standalone HTML, so no renderer or recipient needs network access. Swap
-   families by updating these faces AND the --ff-* tokens below. */
-@font-face {
-  font-family: "Source Serif 4";
-  src: url("fonts/SourceSerif4-Regular.ttf") format("truetype");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Source Serif 4";
-  src: url("fonts/SourceSerif4-SemiBold.ttf") format("truetype");
-  font-weight: 600;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "IBM Plex Mono";
-  src: url("fonts/IBMPlexMono-Regular.ttf") format("truetype");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "IBM Plex Mono";
-  src: url("fonts/IBMPlexMono-Medium.ttf") format("truetype");
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Inter";
-  src: url("fonts/Inter-Regular.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Inter";
-  src: url("fonts/Inter-Medium.woff2") format("woff2");
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Inter";
-  src: url("fonts/Inter-SemiBold.woff2") format("woff2");
-  font-weight: 600;
-  font-style: normal;
-  font-display: swap;
-}
+   Swap families by editing this @import AND the --ff-* tokens below. */
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap");
 
-/* Inter Bold (700) is intentionally NOT bundled. The system uses
+/* Inter Bold (700) is intentionally NOT requested. The system uses
    SemiBold (600) for every "bold" affordance — body <strong>, role
    titles, project names, candidate name. Pulling 700 invites drift
    toward a heavier, less editorial voice. If a future variant truly
@@ -457,5 +407,3 @@ ul { margin: 0; padding: 0; list-style: none; }
   html[data-print="dual-pdf"],
   html[data-print="dual-pdf"] body { background: transparent; }
 }
-
-

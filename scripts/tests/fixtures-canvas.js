@@ -1,4 +1,4 @@
-import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FAST_TEST, FILE_CATEGORIES, FULL_TEST, GOOGLE_JOBS_EXTRACTOR, JOB_API_PER_SOURCE_CAP, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_MAX_PAGES, JOB_PER_PAGE_CAP, JOB_PER_SOURCE_CAP, JOB_TEST_QUERY_CAP, JSDOM, MEDIUM_TEST, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterUSAJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, nodeSupportsCustomization, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint } from '../test-dependencies.js';
+import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterUSAJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, isCompSourceEnabledInScope, isPriceDropReminderDue, isProductImageExtension, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateLegacyJobHubResults, migrateMarketplaceCardCreatedAt, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint } from '../test-dependencies.js';
 
 export default [
 {
@@ -1340,20 +1340,20 @@ export default [
     },
   },
 {
-    name: 'Job date and cap helpers',
+    name: 'Job date and collection-limit helpers',
     run: () => {
       const twoDaysAgo = parsePostedDate('2 days ago');
       const twoMonthsAgo = parsePostedDate('2mo ago');
       const minutesAgo = parsePostedDate('5m ago');
-      assert(twoDaysAgo && Date.now() - twoDaysAgo.getTime() >= 1.5 * 86400000, 'Job date and cap helpers: days parsing mismatch');
-      assert(twoMonthsAgo && Date.now() - twoMonthsAgo.getTime() >= 50 * 86400000, 'Job date and cap helpers: months parsing mismatch');
-      assert(minutesAgo && Date.now() - minutesAgo.getTime() < 86400000, 'Job date and cap helpers: minutes should be today');
+      assert(twoDaysAgo && Date.now() - twoDaysAgo.getTime() >= 1.5 * 86400000, 'Job date and collection-limit helpers: days parsing mismatch');
+      assert(twoMonthsAgo && Date.now() - twoMonthsAgo.getTime() >= 50 * 86400000, 'Job date and collection-limit helpers: months parsing mismatch');
+      assert(minutesAgo && Date.now() - minutesAgo.getTime() < 86400000, 'Job date and collection-limit helpers: minutes should be today');
       const filtered = filterJobsByAge([
         { title: 'keep', posted: 'today' },
         { title: 'drop', posted: '90 days ago' },
         { title: 'unknown', posted: 'some weird source text' },
       ], 30);
-      assert(filtered.map(j => j.title).join(',') === 'keep,unknown', 'Job date and cap helpers: age filter should keep recent and unknown dates');
+      assert(filtered.map(j => j.title).join(',') === 'keep,unknown', 'Job date and collection-limit helpers: age filter should keep recent and unknown dates');
       const fixedNow = new Date('2026-08-13T12:00:00Z');
       assert(parsePostedDate('Aug 12', fixedNow)?.getFullYear() === 2026,
         'Job date parser: yearless past month-day resolves in the current year, not V8\'s 2001 default');
@@ -1362,6 +1362,20 @@ export default [
       assert(filterJobsByAge([{ title: 'recent-yearless', posted: 'Aug 12' }, { title: 'old-yearless', posted: 'May 29' }], 21, fixedNow)
         .map(job => job.title).join(',') === 'recent-yearless',
       'Job date filter: yearless dates honor the injected look-back clock');
+      // The card-owned collection settings preserve the current production
+      // breadth: unlimited jobs per platform (null) and 10 browser pages.
+      assert(JSON.stringify(JOB_COLLECTION_LIMITS_DEFAULT) === JSON.stringify({ jobsPerPlatform: null, pagesPerPlatform: 10 }),
+        'Job collection limits: defaults must preserve unlimited jobs and the 10-page production depth');
+      assert(JSON.stringify(normalizeJobCollectionLimits()) === JSON.stringify(JOB_COLLECTION_LIMITS_DEFAULT),
+        'Job collection limits: missing persisted settings must normalize to production defaults');
+      assert(JSON.stringify(normalizeJobCollectionLimits({ jobsPerPlatform: '17.9', pagesPerPlatform: '3.8' })) === JSON.stringify({ jobsPerPlatform: 17, pagesPerPlatform: 3 }),
+        'Job collection limits: positive numeric user input must normalize to whole collector units');
+      assert(JSON.stringify(normalizeJobCollectionLimits({ jobsPerPlatform: null, pagesPerPlatform: 1 })) === JSON.stringify({ jobsPerPlatform: null, pagesPerPlatform: 1 }),
+        'Job collection limits: null jobs must explicitly remain unlimited while a one-page test is allowed');
+      assert(JSON.stringify(normalizeJobCollectionLimits({ jobsPerPlatform: 0, pagesPerPlatform: -4 })) === JSON.stringify(JOB_COLLECTION_LIMITS_DEFAULT),
+        'Job collection limits: zero and negative values must fall back safely instead of silently disabling collection');
+      assert(JSON.stringify(normalizeJobCollectionLimits({ jobsPerPlatform: Infinity, pagesPerPlatform: NaN })) === JSON.stringify(JOB_COLLECTION_LIMITS_DEFAULT),
+        'Job collection limits: non-finite inputs must fall back to stable defaults');
       // compsForPricing is unbounded — a small set passes through in full...
       const cSmall = compsForPricing(8, 4);
       assert(cSmall.sold === 8 && cSmall.active === 4, 'Job date and cap helpers: small comp set should pass through unbounded');
@@ -1371,25 +1385,8 @@ export default [
       const cBig = compsForPricing(1000, 1000);
       assert(cBig.sold === cBig.active && cBig.sold > 15, 'Job date and cap helpers: large comp set should scale proportionally above the old caps');
       assert(priceSynthesisMaxTokens(cBig.sold + cBig.active) < 24576, 'Job date and cap helpers: fed comp count must fit the synthesis token budget (no clamp/truncate)');
-      assert(jobScoringBatchSize() >= 5 && jobScoringBatchSize() <= 15, 'Job date and cap helpers: scoring batch out of bounds');
-      // This runner is also executed by act, which can forward the developer's
-      // VITE_JOB_SEARCH_TEST_* settings into the container. Do not hard-code
-      // production's 10-page cap here: assert the internally coherent cap set
-      // selected by the active mode instead.
-      const activeModes = [FAST_TEST, MEDIUM_TEST, FULL_TEST].filter(Boolean).length;
-      assert(activeModes <= 1, `Job date and cap helpers: mode flags must be mutually exclusive (got ${activeModes})`);
-      if (FAST_TEST) {
-        assert(JOB_MAX_PAGES === 2 && JOB_PER_PAGE_CAP === 5,
-          `Job date and cap helpers: fast browser bounds should be 2 pages × 5 jobs (got ${JOB_MAX_PAGES} × ${JOB_PER_PAGE_CAP})`);
-        assert(JOB_PER_SOURCE_CAP === 10 && JOB_TEST_QUERY_CAP === 2 && JOB_API_PER_SOURCE_CAP === 10,
-          'Job date and cap helpers: fast aggregate source/API/query bounds should remain 10/2/10');
-      } else {
-        assert(JOB_MAX_PAGES === 10 && JOB_PER_PAGE_CAP > 0,
-          `Job date and cap helpers: non-fast browser bounds should retain the 10-page ceiling (got ${JOB_MAX_PAGES} pages)`);
-        assert(JOB_PER_SOURCE_CAP === Infinity && JOB_TEST_QUERY_CAP === Infinity && JOB_API_PER_SOURCE_CAP === Infinity,
-          'Job date and cap helpers: non-fast mode must not apply FAST aggregate caps');
-      }
-      return { filtered: filtered.length, scoringBatch: jobScoringBatchSize(), fast: FAST_TEST };
+      assert(jobScoringBatchSize() >= 5 && jobScoringBatchSize() <= 15, 'Job date and collection-limit helpers: scoring batch out of bounds');
+      return { filtered: filtered.length, scoringBatch: jobScoringBatchSize(), defaultPages: JOB_COLLECTION_LIMITS_DEFAULT.pagesPerPlatform };
     },
   },
 {
@@ -1546,6 +1543,11 @@ export default [
       'Dice relevance regression: genuine factory-production roles remain eligible');
       assert(jobRelevanceMatch('Production Engineer', 'Production Engineer', new Set()),
         'technical production searches remain eligible when their query carries technical context');
+      assert(jobRelevanceMatch('Java Backend Engineer / Software developer / Java Developer', 'Backend Developer', new Set())
+        && jobRelevanceMatch('Java Backend Engineer / Software developer / Java Developer', 'Software Engineer', new Set()),
+      'Dice relevance regression: engineer/developer title aliases retain an explicitly backend/software role');
+      assert(!jobRelevanceMatch('Platform Engineer', 'Backend Developer', new Set()),
+        'engineer/developer alias still requires the query\'s second local role concept');
       const remoteOkJunk = [
         'Coffee Roaster Campos Coffee', 'Ganger', 'Artificial Intelligence Specialist',
         'Loss Prevention Specialist', 'Maintenance Technician', 'barber',
@@ -1678,32 +1680,19 @@ export default [
       assert(off.enabled === false && off.sourceId === null, 'Job source test-mode env parsing: default should be production/all-source mode');
       const disabledWithSource = createJobSearchTestMode({ JOB_SEARCH_TEST_SOURCE: 'linkedin' });
       assert(disabledWithSource.sourceId === null, 'Job source test-mode env parsing: source should be ignored unless enabled');
-      const full = createJobSearchTestMode({
+      const scoped = createJobSearchTestMode({
         JOB_SEARCH_TEST_ENABLED: 'true',
         JOB_SEARCH_TEST_SOURCE: 'linkedin',
-        JOB_SEARCH_TEST_FULL_RUN: '1',
         JOB_SEARCH_TEST_SKIP_AI: 'yes',
       });
-      assert(full.enabled && full.sourceId === 'linkedin' && full.fullRun && full.skipAI, 'Job source test-mode env parsing: plain env values not parsed');
-      assert(full.fast === false, 'Job source test-mode env parsing: fast should default false');
+      assert(scoped.enabled && scoped.sourceId === 'linkedin' && scoped.skipAI, 'Job source test-mode env parsing: plain env values not parsed');
       const vite = createJobSearchTestMode({
         VITE_JOB_SEARCH_TEST_ENABLED: 'on',
         VITE_JOB_SEARCH_TEST_SOURCE: 'indeed',
-        VITE_JOB_SEARCH_TEST_FULL_RUN: '0',
       });
-      assert(vite.enabled && vite.sourceId === 'indeed' && !vite.fullRun, 'Job source test-mode env parsing: VITE env values not parsed');
+      assert(vite.enabled && vite.sourceId === 'indeed', 'Job source test-mode env parsing: VITE env values not parsed');
       assert(parseJobSearchEnvBoolean('not-a-bool', true) === true, 'Job source test-mode env parsing: invalid bool should use fallback');
-      // FAST mode: parsed from its own flag, independent of fullRun. Precedence
-      // (fast wins over medium/full) lives in resultCaps.js, not this parser.
-      const fast = createJobSearchTestMode({
-        JOB_SEARCH_TEST_ENABLED: 'true',
-        JOB_SEARCH_TEST_SOURCE: 'glassdoor',
-        JOB_SEARCH_TEST_FAST: 'true',
-      });
-      assert(fast.enabled && fast.fast === true && fast.sourceId === 'glassdoor' && !fast.fullRun, 'Job source test-mode env parsing: FAST flag not parsed');
-      const viteFast = createJobSearchTestMode({ VITE_JOB_SEARCH_TEST_ENABLED: '1', VITE_JOB_SEARCH_TEST_FAST: 'on' });
-      assert(viteFast.fast === true, 'Job source test-mode env parsing: VITE FAST flag not parsed');
-      return { defaultEnabled: off.enabled, fullSource: full.sourceId, viteSource: vite.sourceId, fast: fast.fast };
+      return { defaultEnabled: off.enabled, scopedSource: scoped.sourceId, viteSource: vite.sourceId };
     },
   },
 {
@@ -1757,6 +1746,29 @@ export default [
       assert(googleTask('Camera Operator', '') === 'Camera Operator jobs',
         'location-free searches preserve the existing Google keyword query');
       return { ok: true };
+  },
+},
+{
+    name: 'buildJobTasks: card collection limits reach every browser task',
+    run: () => {
+      const requested = { jobsPerPlatform: 12, pagesPerPlatform: 3 };
+      const tasks = buildJobTasks(['Systems Architect'], 21, {}, '', requested);
+      const zip = tasks.find((task) => task.sourceId === 'ziprecruiter');
+      const glassdoor = tasks.find((task) => task.sourceId === 'glassdoor');
+      const google = tasks.find((task) => task.sourceId === 'google');
+      assert(zip?.options?.maxPages === 3 && glassdoor?.options?.maxPages === 3,
+        'card browser-pages-per-search setting must override the paginated browser depth');
+      assert(google?.options?.maxPages === 3,
+        'card browser-pages-per-search setting must also bound Google’s reveal iterations');
+      for (const task of [zip, glassdoor, google]) {
+        assert(JSON.stringify(task?.options?.collectionLimits) === JSON.stringify(requested),
+          'every browser task must carry the exact normalized per-platform job limit');
+      }
+      const defaultZip = buildJobTasks(['Systems Architect'], 21, { onlySources: new Set(['ziprecruiter']) })[0];
+      assert(defaultZip?.options?.maxPages === 10
+        && defaultZip.options.collectionLimits.jobsPerPlatform === null,
+      'legacy/missing card settings must preserve unlimited jobs and the production 10-page depth');
+      return { browserTasks: tasks.length, pages: requested.pagesPerPlatform, jobs: requested.jobsPerPlatform };
     },
   },
 {

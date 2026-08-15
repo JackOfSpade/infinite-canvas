@@ -174,8 +174,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // module whose search produced this job (cards are spawned by the Job Board,
   // which merges several modules and holds no career data itself; data.hubId
   // is the board). Not stored per-card, to avoid bloating the canvas file.
-  // The backend researches the company, fills the design system, builds both
-  // self-contained HTML documents, then writes them straight into
+  // The backend researches the company, fills the design system, builds the
+  // single-file HTML workspace, then writes it straight into
   //   <canvas dir>/Applied Jobs/<company>/<location>/<job title>/
   // and opens that folder in Finder — no save dialog. (Location is part of the
   // path because same title + same company + different city is a DIFFERENT job

@@ -22,7 +22,7 @@ post-processes it into the right print variant for the recipient.
 | `resume.html`                 | The template + a fully-populated realistic sample. Adapt this per candidate.       |
 | `build/dual-mode-pdf.js`      | Pure module exporting `addOcgBackground(bytes) → bytes`. UMD; loads in Node or browser. |
 | `build/vendor/` (removed)     | pdf-lib 1.17.1 now loads from CDN (browser) / the `pdf-lib` npm package (Node) — no longer vendored. |
-| `fonts/`                      | Pinned Source Serif 4, Inter, and IBM Plex Mono faces plus their OFL licenses; embedded as data URLs in generated HTML. |
+| `fonts/` (removed)            | Source Serif 4, Inter, IBM Plex Mono now load from the Google Fonts CDN — no longer bundled. |
 | `preview/`                    | Standalone preview cards for each design subsystem. Reference material only.       |
 
 ## The pipeline

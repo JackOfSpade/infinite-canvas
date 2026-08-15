@@ -1,4 +1,4 @@
-/* @ds-bundle: {"format":3,"namespace":"EditorialResumeDesignSystem_895a4b","components":[],"sourceHashes":{"build/dual-mode-pdf.js":"1d2037abaecf","build/test.js":"2b66303e0b81"},"inlinedExternals":[],"unexposedExports":[]} */
+/* @ds-bundle: {"format":4,"namespace":"EditorialResumeDesignSystem_895a4b","components":[],"sourceHashes":{"build/dual-mode-pdf.js":"1d2037abaecf","build/test.js":"706e82230b48"},"inlinedExternals":[],"unexposedExports":[]} */
 
 (() => {
 
@@ -595,7 +595,7 @@ async function run() {
   try {
     await addOcgBackground(customOut);
     passedThrough = true;
-  } catch (e) {/* ignore */}
+  } catch {/* ignore */}
   assert(passedThrough, 'PDF with unrelated OCGs (different layer name) does NOT trigger the guard');
   header('Custom cream colour');
   var pinkRaw = latin1(await addOcgBackground(base1, {
